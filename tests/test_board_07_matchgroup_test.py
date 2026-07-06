@@ -451,6 +451,128 @@ class TestMatchGroupTrackerQueryable:
 
 
 # =============================================================================
+# Issue #3915: ADDR_BUS via-inclusive skew must be non-zero on the routed board
+# =============================================================================
+
+
+class TestAddrBusViaInclusiveSkew:
+    """Pin the via-blind regression fixed by Issue #3915.
+
+    ``derive_group_skew_data`` accepts ``board_thickness_mm`` /
+    ``num_copper_layers`` so vias contribute their drilled length to a
+    member's routed length.  The ``DRCChecker`` callsite previously
+    omitted both, so on the 4-layer board 07 the ADDR_BUS group -- whose
+    A4/A6 members traverse extra vias relative to A0 -- reported a
+    via-blind skew of < 0.005 mm and silently passed the 0.5 mm
+    tolerance.
+
+    These tests exercise the committed routed artifact + its
+    ``net_class_map.json`` sidecar directly, so they fire if a future
+    change re-drops the via-length contribution at the producer seam.
+    """
+
+    @pytest.fixture
+    def routed_pcb(self):
+        from kicad_tools.schema.pcb import PCB
+
+        routed = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+        assert routed.exists(), (
+            f"Routed PCB artifact missing: {routed}.\n"
+            "Re-run: python boards/07-matchgroup-test/generate_design.py"
+        )
+        return PCB.load(str(routed))
+
+    @pytest.fixture
+    def net_class_map_from_sidecar(self):
+        from kicad_tools.router.rules import NetClassRouting
+
+        sidecar = OUTPUT_DIR / "net_class_map.json"
+        if not sidecar.exists():
+            pytest.skip("net_class_map.json sidecar not present")
+        data = json.loads(sidecar.read_text())
+        return {net: NetClassRouting(**entry) for net, entry in data.items()}
+
+    def test_addr_bus_via_inclusive_skew_exceeds_tolerance(
+        self, routed_pcb, net_class_map_from_sidecar
+    ) -> None:
+        """AC1/AC2: 4-layer via-inclusive skew for ADDR_BUS is > 1.5 mm.
+
+        With the correct board_thickness_mm / num_copper_layers threaded
+        through, the extra ADDR via traversal adds a full-stack drilled
+        length (~1.6 mm) that is invisible in the via-blind path.
+        """
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        skew_seen, _, _ = derive_group_skew_data(
+            routed_pcb,
+            net_class_map_from_sidecar,
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+        )
+
+        assert "ADDR_BUS" in skew_seen, (
+            "ADDR_BUS group should be measured on the fully-routed board 07 artifact"
+        )
+        assert skew_seen["ADDR_BUS"] > 1.5, (
+            f"Issue #3915: ADDR_BUS via-inclusive skew {skew_seen['ADDR_BUS']:.4f} mm "
+            "must exceed 1.5 mm (A4/A6 carry extra vias vs A0).  If this dropped to "
+            "~0.0 mm, the board_thickness_mm/num_copper_layers wiring regressed."
+        )
+
+    def test_addr_bus_via_blind_skew_is_near_zero(
+        self, routed_pcb, net_class_map_from_sidecar
+    ) -> None:
+        """Guard: the pre-fix (via-blind) path reports < 0.005 mm for ADDR_BUS.
+
+        Documents the exact regression Issue #3915 closes -- without
+        ``board_thickness_mm`` the extra ADDR vias contribute 0.0 mm and
+        the group's copper-only skew is sub-tolerance.
+        """
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        skew_blind, _, _ = derive_group_skew_data(routed_pcb, net_class_map_from_sidecar)
+
+        assert "ADDR_BUS" in skew_blind
+        assert skew_blind["ADDR_BUS"] < 0.005, (
+            f"Via-blind ADDR_BUS skew {skew_blind['ADDR_BUS']:.4f} mm should be "
+            "sub-tolerance (copper-only); this is the state the fix corrects."
+        )
+
+    def test_checker_reports_addr_bus_violation_on_four_layer_board(
+        self, routed_pcb, net_class_map_from_sidecar
+    ) -> None:
+        """AC2/AC3: DRCChecker(layers=4) raises the ADDR_BUS via-skew violation.
+
+        End-to-end through the fixed callsite: the checker threads its
+        4-layer / 1.6 mm design rules into the producer, so the group's
+        via-inclusive skew fires the 0.5 mm tolerance rule.
+        """
+        from kicad_tools.validate.checker import DRCChecker
+
+        checker = DRCChecker(
+            routed_pcb,
+            manufacturer="jlcpcb",
+            layers=4,
+            net_class_map=net_class_map_from_sidecar,
+        )
+        assert checker.design_rules.board_thickness_mm == 1.6
+
+        results = checker.check_match_group_length_skew()
+
+        addr_violations = [v for v in results.violations if "ADDR_BUS" in v.message]
+        assert addr_violations, (
+            "Issue #3915: DRCChecker(layers=4) must report an ADDR_BUS "
+            "match-group length-skew violation once via lengths are threaded "
+            "through.  Before the fix this passed silently."
+        )
+        v = addr_violations[0]
+        assert v.rule_id == "match_group_length_skew"
+        assert "mm" in v.message
+        assert v.actual_value > 1.5
+        assert v.required_value == 0.5
+
+
+# =============================================================================
 # Sanity: net-count budget and diff-pair partner consistency
 # =============================================================================
 

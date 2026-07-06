@@ -652,6 +652,197 @@ class TestGroupSkewDataMatchesRouter:
 
 
 # ---------------------------------------------------------------------------
+# Via-inclusive skew: board_thickness_mm must be threaded through (Issue #3915)
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveGroupSkewViaContribution:
+    """A member carrying an extra via must add its drilled length to the skew.
+
+    Regression for Issue #3915: when ``board_thickness_mm`` is ``None``
+    (the pre-fix DRCChecker callsite default), each via contributes
+    ``0.0 mm`` and the skew is via-blind.  When the value is threaded in,
+    the extra via's drilled length appears in the skew.
+    """
+
+    def _pcb_with_extra_via(self) -> _StubPCB:
+        """4-trace group, equal copper length, one member with an extra via.
+
+        DQ0/DQ1/DQ2/DQ3 all have a 10mm F.Cu segment; DQ0 additionally
+        carries one F.Cu->B.Cu via.  With via length counted, DQ0 is the
+        longest member and the group skew equals the per-via drilled
+        length.
+        """
+        nets: dict[int, _StubNet] = {0: _StubNet(0, "")}
+        names = {10: "DQ0", 11: "DQ1", 12: "DQ2", 13: "DQ3"}
+        for nid, name in names.items():
+            nets[nid] = _StubNet(nid, name)
+
+        segs = [
+            _StubSegment(
+                start=(0.0, float(nid)),
+                end=(10.0, float(nid)),
+                net_number=nid,
+                net_name=names[nid],
+            )
+            for nid in names
+        ]
+        vias = [_StubVia(layers=["F.Cu", "B.Cu"], net_number=10, net_name="DQ0")]
+        return _StubPCB(_nets=nets, _segments=segs, _vias=vias)
+
+    def test_via_length_included_when_thickness_supplied(self):
+        """With ``board_thickness_mm=1.6``, the extra via adds ~1.6mm skew."""
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        nc = NetClassRouting(name="DDR", length_match_group="DDR_DATA")
+        net_class_map = {"DQ0": nc, "DQ1": nc, "DQ2": nc, "DQ3": nc}
+
+        pcb = self._pcb_with_extra_via()
+        skew_data, _, _ = derive_group_skew_data(
+            pcb,
+            net_class_map,
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+        )
+
+        # The extra F.Cu->B.Cu via on a 1.6mm / 4L stack adds the full
+        # stack thickness (top-to-bottom drilled span) to DQ0.  Every
+        # other member is 10.0mm, so the skew is exactly that via length.
+        assert "DDR_DATA" in skew_data
+        assert skew_data["DDR_DATA"] > 1.5, (
+            "via-inclusive skew regression (Issue #3915): a member with an "
+            "extra full-stack via must contribute its drilled length to the skew"
+        )
+        assert abs(skew_data["DDR_DATA"] - 1.6) < 1e-9
+
+    def test_via_length_ignored_when_thickness_none(self):
+        """Pre-fix behaviour: ``board_thickness_mm=None`` -> via contributes 0.0."""
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        nc = NetClassRouting(name="DDR", length_match_group="DDR_DATA")
+        net_class_map = {"DQ0": nc, "DQ1": nc, "DQ2": nc, "DQ3": nc}
+
+        pcb = self._pcb_with_extra_via()
+        # board_thickness_mm defaults to None -> via-blind.
+        skew_data, _, _ = derive_group_skew_data(pcb, net_class_map)
+
+        assert "DDR_DATA" in skew_data
+        # All copper lengths equal; via is invisible without thickness.
+        assert skew_data["DDR_DATA"] == 0.0
+
+
+class TestCheckerThreadsBoardThickness:
+    """DRCChecker must thread ``board_thickness_mm`` + ``layers`` into the producer.
+
+    Integration regression for Issue #3915: the DRCChecker callsite
+    previously omitted both, so via lengths were dropped and an
+    over-tolerance via-skew silently passed.
+    """
+
+    def _pcb_with_extra_via(self) -> _StubPCB:
+        nets: dict[int, _StubNet] = {0: _StubNet(0, "")}
+        names = {10: "DQ0", 11: "DQ1", 12: "DQ2", 13: "DQ3"}
+        for nid, name in names.items():
+            nets[nid] = _StubNet(nid, name)
+        segs = [
+            _StubSegment(
+                start=(0.0, float(nid)),
+                end=(10.0, float(nid)),
+                net_number=nid,
+                net_name=names[nid],
+            )
+            for nid in names
+        ]
+        # DQ0 and DQ2 each carry one extra full-stack via.
+        vias = [
+            _StubVia(layers=["F.Cu", "B.Cu"], net_number=10, net_name="DQ0"),
+            _StubVia(layers=["F.Cu", "B.Cu"], net_number=12, net_name="DQ2"),
+        ]
+        return _StubPCB(_nets=nets, _segments=segs, _vias=vias)
+
+    def test_via_skew_fires_on_four_layer_board(self):
+        """layers=4 board: extra vias push skew over tolerance -> violation."""
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.checker import DRCChecker
+
+        pcb = self._pcb_with_extra_via()
+        nc = NetClassRouting(name="DDR", length_match_group="DDR_DATA")
+        net_class_map = {"DQ0": nc, "DQ1": nc, "DQ2": nc, "DQ3": nc}
+
+        checker = DRCChecker(
+            pcb,
+            manufacturer="jlcpcb",
+            layers=4,
+            net_class_map=net_class_map,
+        )
+        # jlcpcb 4L default board_thickness_mm is 1.6.
+        assert checker.design_rules.board_thickness_mm == 1.6
+
+        results = checker.check_match_group_length_skew()
+
+        assert results.rules_checked == 1
+        assert len(results.violations) == 1
+        v = results.violations[0]
+        assert v.rule_id == "match_group_length_skew"
+        assert "DDR_DATA" in v.message
+        assert "mm" in v.message
+        # Via-inclusive skew must exceed the default 0.5mm tolerance.
+        assert v.actual_value > 1.5
+        assert v.required_value == 0.5
+
+    def test_via_skew_invisible_without_fix(self):
+        """Guard: the same board must be silently via-blind if thickness=None.
+
+        Directly calls the producer with the pre-fix arguments to pin the
+        exact regression the DRCChecker fix closes.
+        """
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        pcb = self._pcb_with_extra_via()
+        nc = NetClassRouting(name="DDR", length_match_group="DDR_DATA")
+        net_class_map = {"DQ0": nc, "DQ1": nc, "DQ2": nc, "DQ3": nc}
+
+        # Pre-fix callsite: no board_thickness_mm, no num_copper_layers.
+        skew_blind, _, _ = derive_group_skew_data(pcb, net_class_map)
+        # Post-fix callsite: threaded through.
+        skew_seen, _, _ = derive_group_skew_data(
+            pcb, net_class_map, board_thickness_mm=1.6, num_copper_layers=4
+        )
+
+        assert skew_blind["DDR_DATA"] == 0.0
+        assert skew_seen["DDR_DATA"] > 1.5
+
+
+class TestTwoLayerViaFreeUnaffected:
+    """AC5: a 2L via-free group reports 0.0mm skew with or without params."""
+
+    def test_via_free_group_identical_with_explicit_params(self):
+        """Passing ``board_thickness_mm=1.6, num_copper_layers=2`` changes nothing.
+
+        A via-free group has no via-length terms, so threading the
+        thickness through is a no-op for its skew.
+        """
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        nc = NetClassRouting(name="DDR", length_match_group="DDR_DATA")
+        net_class_map = {"DQ0": nc, "DQ1": nc, "DQ2": nc, "DQ3": nc}
+
+        pcb = _make_ddr_pcb(net_lengths_mm={10: 10.0, 11: 10.0, 12: 10.0, 13: 10.0})
+
+        default_skew, _, _ = derive_group_skew_data(pcb, net_class_map)
+        explicit_skew, _, _ = derive_group_skew_data(
+            pcb, net_class_map, board_thickness_mm=1.6, num_copper_layers=2
+        )
+
+        assert default_skew == explicit_skew
+        assert explicit_skew["DDR_DATA"] == 0.0
+
+
+# ---------------------------------------------------------------------------
 # Constants drift-prevention (mirrors test_validate_diffpair_skew.py)
 # ---------------------------------------------------------------------------
 
