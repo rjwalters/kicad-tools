@@ -519,10 +519,12 @@ class TestClearanceAwareMemoryBump:
 
         Construct a very large board where 0.075mm grid would need
         > 4M cells: area > 4_000_000 * 0.075^2 = 22,500 mm^2, e.g.
-        200mm x 200mm.
+        200mm x 200mm.  The pads are fine-pitch (0.5mm) so this is a genuine
+        #3911 gate scenario (see ``memory_forced_unsafe_grid`` below).
         """
         pads = [
             PadPosition(x=10.0, y=10.0),
+            PadPosition(x=10.5, y=10.0),  # 0.5mm pitch -> fine-pitch board
             PadPosition(x=20.0, y=10.0),
         ]
         with warnings.catch_warnings(record=True) as caught:
@@ -605,10 +607,14 @@ class TestMemoryForcedUnsafeGrid:
     """
 
     def test_flag_true_when_budget_forces_coarse_grid(self):
-        """Large board + tight clearance -> even the 4M-cell bump can't reach
-        clearance/2, so the flag fires."""
+        """Large FINE-PITCH board + tight clearance -> even the 4M-cell bump
+        can't reach clearance/2, so the flag fires.  The 0.5mm pad pitch is
+        what makes the coarse grid a genuine short hazard (issue #3911): a
+        sparse board with the same grid/budget does NOT set the flag (see
+        ``test_flag_false_for_coarse_pitch_memory_forced_grid``)."""
         pads = [
             PadPosition(x=10.0, y=10.0),
+            PadPosition(x=10.5, y=10.0),  # 0.5mm pitch -> fine-pitch board
             PadPosition(x=20.0, y=10.0),
         ]
         with warnings.catch_warnings():
@@ -659,6 +665,36 @@ class TestMemoryForcedUnsafeGrid:
         assert result.clearance_compliant_at_clearance_over_2 is False
         # Not memory capped -> deliberate #2387 relaxation, not coercion.
         assert result.memory_capped is False
+        assert result.memory_forced_unsafe_grid is False
+
+    def test_flag_false_for_coarse_pitch_memory_forced_grid(self):
+        """Issue #3911 over-fire guard: a SPARSE (coarse-pitch) board whose
+        memory budget genuinely forces a grid > clearance/2 must NOT set the
+        flag -- a wide inter-pad channel routes cleanly on the coarse grid, so
+        refusing it would reject boards that never short (the board 01 / board
+        07 regression the judge flagged).  Same board size, clearance, and
+        budget as ``test_flag_true_when_budget_forces_coarse_grid`` -- ONLY the
+        pad pitch differs (10mm here vs 0.5mm there), isolating fine-pitch as
+        the discriminator."""
+        pads = [
+            PadPosition(x=10.0, y=10.0),
+            PadPosition(x=20.0, y=10.0),  # 10mm pitch -> NOT fine-pitch
+            PadPosition(x=30.0, y=10.0),
+        ]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = auto_select_grid_resolution(
+                pads,
+                clearance=0.15,
+                board_width=200.0,
+                board_height=200.0,
+                max_cells=500_000,
+            )
+        # The memory cap still coerced a grid > clearance/2 ...
+        assert result.memory_capped is True
+        assert result.resolution > 0.075
+        assert result.clearance_compliant_at_clearance_over_2 is False
+        # ... but the board is coarse-pitch, so the gate must NOT fire.
         assert result.memory_forced_unsafe_grid is False
 
 
@@ -757,8 +793,13 @@ class TestLatticeRescue:
         off-grid, the rescue must NOT burn a 4x memory bump; the original
         memory-cap warning fires instead."""
         # Pads on a 0.127mm lattice (imperial): the unlocked 0.1mm
-        # candidate does not help them at all.
+        # candidate does not help them at all.  A single 0.5mm-pitch pad pair
+        # is appended so the board reads as fine-pitch (issue #3911) without
+        # forming a dominant lattice (2 of 22 pads -> no rescue), exercising
+        # the combined "memory-forced + fine-pitch + no rescue -> gate fires"
+        # path.
         pads = [PadPosition(x=10.0 + i * 1.27 + 0.0635, y=20.0) for i in range(20)]
+        pads += [PadPosition(x=50.0, y=60.0), PadPosition(x=50.5, y=60.0)]
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             result = auto_select_grid_resolution(
