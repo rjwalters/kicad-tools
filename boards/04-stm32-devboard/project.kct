@@ -175,12 +175,12 @@ progress:
         - "[x] Crystal oscillator block"
         - "[x] Debug header"
         - "[x] User LED"
-        - "[ ] Add MCU symbol (manual step)"
-        - "[ ] Connect MCU to peripherals"
+        - "[x] Add MCU symbol"
+        - "[x] Connect MCU to peripherals"
     layout:
-      status: pending
+      status: completed
       checklist:
-        - "[ ] Component placement"
-        - "[ ] Power routing"
-        - "[ ] Signal routing"
-        - "[ ] DRC clean"
+        - "[x] Component placement"
+        - "[x] Power routing"
+        - "[x] Signal routing"
+        - "[x] DRC clean (kicad-cli 0 violations, 2026-07-05)"
