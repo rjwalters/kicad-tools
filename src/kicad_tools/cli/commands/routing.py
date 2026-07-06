@@ -253,6 +253,8 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--layers", args.layers])
     if getattr(args, "force", False):
         sub_argv.append("--force")
+    if getattr(args, "allow_unsafe_grid", False):
+        sub_argv.append("--allow-unsafe-grid")
     if getattr(args, "no_optimize", False):
         sub_argv.append("--no-optimize")
     # Issue #2388: --auto-layers is now enabled by default.  Forward only

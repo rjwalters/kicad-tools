@@ -548,6 +548,10 @@ class TestClearanceAwareMemoryBump:
         assert result.memory_capped is True
         assert result.resolution > 0.075
         assert result.clearance_compliant_at_clearance_over_2 is False
+        # Issue #3911: this is exactly the memory-coerced unsafe grid the
+        # downstream router gate must refuse (not a #3441 lattice rescue).
+        assert result.memory_forced_unsafe_grid is True
+        assert result.lattice_rescued is False
 
     def test_no_capping_no_bump_no_warning(self):
         """When memory is not the binding constraint, the existing
@@ -585,6 +589,77 @@ class TestClearanceAwareMemoryBump:
         # 0.3mm clearance / 2 = 0.15mm.  Default candidates include 0.1
         # which is <= 0.15.
         assert result.clearance_compliant_at_clearance_over_2 is True
+        # Issue #3911: no memory coercion on a compliant, uncapped selection.
+        assert result.memory_forced_unsafe_grid is False
+
+
+class TestMemoryForcedUnsafeGrid:
+    """Issue #3911: the ``memory_forced_unsafe_grid`` gate signal.
+
+    ``auto_select_grid_resolution`` must set ``memory_forced_unsafe_grid``
+    True *only* when the memory budget cap coerced the selector onto a grid
+    coarser than ``clearance / 2`` while a finer clearance-safe candidate
+    existed AND the selection was not the deliberate #3441 lattice rescue.
+    The flag is the precise downstream gate: routing on such a grid produces
+    the DRC shorts the memory-cap warning predicts.
+    """
+
+    def test_flag_true_when_budget_forces_coarse_grid(self):
+        """Large board + tight clearance -> even the 4M-cell bump can't reach
+        clearance/2, so the flag fires."""
+        pads = [
+            PadPosition(x=10.0, y=10.0),
+            PadPosition(x=20.0, y=10.0),
+        ]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = auto_select_grid_resolution(
+                pads,
+                clearance=0.15,
+                board_width=200.0,
+                board_height=200.0,
+                max_cells=500_000,
+            )
+        assert result.memory_forced_unsafe_grid is True
+        # The flag is strictly a superset-distinct signal from the plain
+        # clearance/2 non-compliance -- it additionally names the memory cap.
+        assert result.clearance_compliant_at_clearance_over_2 is False
+        assert result.memory_capped is True
+        assert result.lattice_rescued is False
+
+    def test_flag_false_for_compliant_uncapped_grid(self):
+        """A comfortably-sized board that reaches clearance/2 is not coerced."""
+        pads = [PadPosition(x=0.0, y=0.0), PadPosition(x=2.54, y=0.0)]
+        result = auto_select_grid_resolution(
+            pads,
+            clearance=0.3,
+            board_width=10.0,
+            board_height=10.0,
+        )
+        assert result.clearance_compliant_at_clearance_over_2 is True
+        assert result.memory_forced_unsafe_grid is False
+
+    def test_flag_false_for_2387_relaxation(self):
+        """Issue #2387: at loose clearance the selector deliberately keeps a
+        coarser-but-pad-aligned grid (> clearance/2) with NO memory pressure.
+        That is an intentional trade-off, not memory coercion -- the #3911
+        gate must NOT fire on it."""
+        pads = [
+            PadPosition(x=2.0, y=2.0),
+            PadPosition(x=2.5, y=2.0),
+            PadPosition(x=3.0, y=2.0),
+        ]
+        result = auto_select_grid_resolution(
+            pads,
+            clearance=0.30,
+            board_width=20.0,
+            board_height=20.0,
+        )
+        # 0.25mm selected (pad-aligned, <= clearance) but > clearance/2=0.15mm.
+        assert result.clearance_compliant_at_clearance_over_2 is False
+        # Not memory capped -> deliberate #2387 relaxation, not coercion.
+        assert result.memory_capped is False
+        assert result.memory_forced_unsafe_grid is False
 
 
 class TestLatticeRescue:
@@ -656,6 +731,9 @@ class TestLatticeRescue:
         assert result.memory_budget_used == 2_000_000
         # Only the genuinely off-lattice BGA cluster remains off-grid.
         assert result.off_grid_pads == 6
+        # Issue #3911: a lattice rescue is a deliberate pad-alignment choice,
+        # NOT memory coercion -- the downstream router gate must NOT refuse it.
+        assert result.memory_forced_unsafe_grid is False
 
         # INFO log names the rescue
         rescue_logs = [r for r in caplog.records if "lattice rescue" in r.message.lower()]
@@ -698,6 +776,8 @@ class TestLatticeRescue:
         assert any("memory budget cap forces" in t for t in warning_texts), (
             f"Expected original memory-cap warning, got: {warning_texts}"
         )
+        # Issue #3911: the memory-cap-forced grid (no rescue) trips the gate.
+        assert result.memory_forced_unsafe_grid is True
 
     def test_clearance_safe_bump_takes_priority_over_rescue(self, caplog):
         """When the #3239 bump can reach a clearance/2 grid, it runs first

@@ -105,6 +105,62 @@ class GridResolutionError(ValueError):
         super().__init__(message)
 
 
+class GridSafetyError(ValueError):
+    """Raised when auto-grid selection would route on a DRC-unsafe grid.
+
+    Issue #3911: :func:`auto_select_grid_resolution` computes a
+    ``memory_forced_unsafe_grid`` flag on :class:`GridAutoSelection` whenever
+    the memory-budget cap forces the routing grid coarser than
+    ``clearance / 2`` even though a finer, clearance-safe candidate existed.
+    The router's own A* pathfinder documents ``min_res = clearance / 2`` as a
+    hard DRC-safety floor, so routing on such a grid reliably produces
+    cross-net clearance shorts (e.g. board 05: NRST<->OSC_IN, PWM_AH<->OSC_OUT
+    vias at -0.188 / -0.100mm).
+
+    Callers gate on the flag and raise this error rather than route silently
+    into shorts.  Shorts are strictly worse than unrouted nets: an open is
+    caught by LVS, but a short can propagate power faults and damage hardware.
+    Pass an explicit opt-in (``allow_unsafe_grid=True`` / ``--allow-unsafe-grid``
+    / ``--force``) to override when the risk is understood and accepted.
+
+    Attributes:
+        grid_resolution: The unsafe (memory-forced) grid resolution in mm
+        clearance: The required clearance in mm
+        recommended: The clearance/2 safety floor in mm
+        memory_budget_used: The effective ``max_cells`` budget the selector hit
+    """
+
+    def __init__(
+        self,
+        grid_resolution: float,
+        clearance: float,
+        memory_budget_used: int | None = None,
+        message: str | None = None,
+    ):
+        self.grid_resolution = grid_resolution
+        self.clearance = clearance
+        self.recommended = clearance / 2
+        self.memory_budget_used = memory_budget_used
+
+        if message is None:
+            budget = (
+                f" even at max_cells={memory_budget_used:,}"
+                if memory_budget_used is not None
+                else ""
+            )
+            message = (
+                f"Auto-grid selected {grid_resolution}mm > clearance/2 "
+                f"({self.recommended}mm) because the memory budget cap forced a "
+                f"coarser grid{budget}. The router's own safety rule rejects this "
+                f"grid; routing would produce clearance-violating vias/segments "
+                f"(DRC shorts). Options: enlarge/split the board, loosen the "
+                f"manufacturer clearance, add layers, or pass "
+                f"allow_unsafe_grid=True (CLI: --allow-unsafe-grid or --force) to "
+                f"route anyway and accept the DRC risk."
+            )
+        super().__init__(message)
+
+
 @dataclass
 class GridAdjustment:
     """Result of automatic grid resolution adjustment.
@@ -623,6 +679,20 @@ class GridAutoSelection:
         lattice_rescued: True if the issue #3441 lattice rescue bumped the
             memory budget to admit a candidate that aligns the board's
             dominant pad lattice (<= clearance but > clearance/2).
+        memory_forced_unsafe_grid: True only when the memory budget cap forced
+            the selector onto a grid coarser than ``clearance / 2`` *even
+            though* a finer clearance-safe candidate existed before the memory
+            filter, AND that selection was NOT the deliberate #3441 lattice
+            rescue.  This is the precise signal for issue #3911: the router's
+            own safety rule (``min_res = clearance / 2``) rejects such a grid,
+            so proceeding risks the exact clearance-violating vias/segments the
+            warning predicts.  Callers MUST gate on this flag (refuse / require
+            explicit opt-in) rather than route silently into DRC shorts.  It is
+            deliberately distinct from ``clearance_compliant_at_clearance_over_2
+            is False``: a plain #2387 relaxation (0.1mm at clearance 0.15mm with
+            no memory pressure) and a #3441 lattice rescue are *also* not
+            compliant-at-clearance/2, but those are intentional pad-alignment
+            trade-offs, not memory-cap coercion, so they do NOT set this flag.
     """
 
     resolution: float
@@ -636,6 +706,7 @@ class GridAutoSelection:
     clearance_compliant_at_clearance_over_2: bool = False
     memory_budget_used: int = 0
     lattice_rescued: bool = False
+    memory_forced_unsafe_grid: bool = False
 
     def summary(self) -> str:
         """Human-readable summary of the selection."""
@@ -1273,11 +1344,17 @@ def auto_select_grid_resolution(
     # generic "may cause clearance violations" warning from
     # validate_grid_resolution -- it tells the user that the memory budget,
     # not the candidate list, is the binding constraint.
-    if (
+    grid_unsafe_by_memory_cap = (
         memory_capped
         and best_resolution > recommended_max
         and any(c <= recommended_max for c in pre_memory_candidates)
-    ):
+    )
+    # Issue #3911: distinguish the memory-cap coercion from the deliberate
+    # #3441 lattice rescue.  Only the former (a grid > clearance/2 forced by
+    # the budget while a finer safe candidate existed) is an unsafe routing
+    # decision that downstream callers must gate on.
+    memory_forced_unsafe_grid = grid_unsafe_by_memory_cap and not lattice_rescued
+    if grid_unsafe_by_memory_cap:
         if lattice_rescued:
             # Issue #3441: the lattice rescue *chose* this grid because it
             # aligns the board's dominant pad lattice; it is <= clearance
@@ -1317,6 +1394,7 @@ def auto_select_grid_resolution(
         clearance_compliant_at_clearance_over_2=best_resolution <= recommended_max,
         memory_budget_used=effective_max_cells,
         lattice_rescued=lattice_rescued,
+        memory_forced_unsafe_grid=memory_forced_unsafe_grid,
     )
 
 
