@@ -481,6 +481,13 @@ class ManufacturingPackage:
         """
         preflight_cfg = self.config.preflight
         if preflight_cfg is not None and preflight_cfg.skip_drc_floor:
+            msg = (
+                "DRC connectivity safety floor DISABLED via --skip-drc-floor; "
+                "export will proceed even if the board has net shorts. "
+                "This is unsafe unless you have independently verified the board."
+            )
+            logger.warning(msg)
+            result.warnings.append(msg)
             return
 
         # Resolve the report path: explicit config path wins, else look for a
@@ -500,6 +507,19 @@ class ManufacturingPackage:
 
         if report_path is None:
             return
+
+        # Surface a stale-report note: if the resolved DRC report predates the
+        # PCB, its verdict may not reflect the current board. The floor still
+        # blocks on a stale FAIL (staleness in the blocking direction is the
+        # safe side); this warning just explains a potentially spurious block.
+        try:
+            if report_path.stat().st_mtime < self.pcb_path.stat().st_mtime:
+                logger.warning(
+                    f"DRC report {report_path.name} is older than the PCB; "
+                    "safety-floor verdict may be stale."
+                )
+        except OSError:
+            pass
 
         try:
             from ..drc.report import DRCReport

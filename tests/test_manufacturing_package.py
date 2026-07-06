@@ -1,6 +1,7 @@
 """Tests for the manufacturing package generator."""
 
 import json
+import logging
 import zipfile
 from pathlib import Path
 
@@ -1396,8 +1397,8 @@ class TestDRCSafetyFloor:
         assert not result.success
         assert any("short" in e.lower() for e in result.errors), result.errors
 
-    def test_skip_drc_floor_overrides_safety_floor(self, tmp_path, monkeypatch):
-        """The explicit --skip-drc-floor escape hatch bypasses the floor."""
+    def test_skip_drc_floor_overrides_safety_floor(self, tmp_path, monkeypatch, caplog):
+        """The explicit --skip-drc-floor escape hatch bypasses the floor -- loudly."""
         project_dir = tmp_path / "project"
         project_dir.mkdir()
         pcb = project_dir / "board.kicad_pcb"
@@ -1415,11 +1416,62 @@ class TestDRCSafetyFloor:
             preflight=PreflightConfig(skip_all=True, skip_drc_floor=True),
         )
         pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
-        result = pkg.export(tmp_path / "out")
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.export.manufacturing"):
+            result = pkg.export(tmp_path / "out")
 
         # With the escape hatch, the floor does not fire and assembly runs.
         assert assembly_called["value"], "Assembly should run when floor is skipped"
         assert result.success, f"Unexpected errors: {result.errors}"
+
+        # Bypassing the floor must leave a loud audit trail: both a logged
+        # warning and a result.warnings entry (surfaced in export output).
+        assert any(
+            "--skip-drc-floor" in rec.getMessage() and rec.levelno == logging.WARNING
+            for rec in caplog.records
+        ), "Expected a logger.warning when the floor is bypassed"
+        assert any("--skip-drc-floor" in w for w in result.warnings), (
+            f"Expected a result.warnings entry; got {result.warnings}"
+        )
+
+    def test_stale_drc_report_emits_warning(self, tmp_path, monkeypatch, caplog):
+        """A DRC report older than the PCB emits a one-line stale-mtime warning.
+
+        The floor still blocks on the stale FAIL (staleness in the blocking
+        direction is the safe side); the warning just explains the block.
+        """
+        import os
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        report = project_dir / "drc_report.json"
+        self._write_shorting_drc_report(report)
+
+        # Make the report older than the PCB.
+        pcb_mtime = pcb.stat().st_mtime
+        os.utime(report, (pcb_mtime - 100, pcb_mtime - 100))
+
+        self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.export.manufacturing"):
+            result = pkg.export(tmp_path / "out")
+
+        # Still blocks (stale FAIL is the safe side).
+        assert not result.success
+        # And warns that the verdict may be stale.
+        assert any("older than the PCB" in rec.getMessage() for rec in caplog.records), (
+            "Expected a stale-mtime warning when the report predates the PCB"
+        )
 
     def test_clean_drc_report_does_not_block(self, tmp_path, monkeypatch):
         """A clean pre-existing DRC report must not block export (no regression)."""
