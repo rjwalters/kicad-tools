@@ -120,6 +120,23 @@ MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 # error.  Dropping this baseline back to strict 0 requires a via-balanced
 # re-route (or an artifact refresh), which is blocked on the artifact-churn
 # problem tracked in #3925.  See #3931 for the resolution plan.
+#
+# Issue #3916 (pair-only groups now length-checked) -- the producer used to
+# skip any match group whose members were exclusively differential pairs
+# (``net_ids=[]`` after ``_extract_pair_ids``), so board 07's MIPI_CSI_LANES
+# and HDMI_TMDS_LANES were never skew-checked.  ``derive_group_skew_data`` now
+# measures diff-pair members via the pair-average ``(L_P + L_N) / 2``
+# contribution, making both groups checkable.  On the COMMITTED board 07
+# artifact this baseline stays at 1: MIPI/HDMI each still have at least one
+# unrouted diff-pair leg (e.g. MIPI_CLK_N, MIPI_DAT0_N, TMDS_D0_*, TMDS_D1_*
+# carry zero geometry) and DDR_DATA_BYTE_0 has an unrouted DQ3, so all three
+# are correctly gated out by the existing partial-routing rule -- only the
+# fully-routed ADDR_BUS group produces a violation.  Once board 07 routes
+# those lanes end-to-end (blocked on the same artifact-churn work as #3931 /
+# #3925), MIPI (measured ~23mm skew vs 0.05mm) and HDMI (~8.7mm vs 0.075mm)
+# will each add a genuine ``match_group_length_skew`` error and this baseline
+# must be raised to 3 with a reroute of the committed artifact.  Composition
+# today: 1 = ADDR_BUS via-imbalance (#3931).
 MATCHGROUP_VIOLATION_BASELINE: dict[str, int] = {
     "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb": 1,
 }
