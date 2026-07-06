@@ -59,3 +59,4 @@ boards/*/*/output/board.json
 .loom/state.json
 .loom/*.log
 .loom/*.sock
+.loom/sweep-checkpoint/
