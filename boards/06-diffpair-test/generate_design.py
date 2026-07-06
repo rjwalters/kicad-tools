@@ -1244,6 +1244,102 @@ def create_pcb(output_dir: Path) -> Path:
     return output_path
 
 
+class PostQuantizeClearanceError(RuntimeError):
+    """Raised when the step-12d gate finds NEW post-quantize grazes.
+
+    A dedicated type so the step-12 ``except Exception`` graceful-degrade
+    handler (which downgrades quantizer/re-fill hiccups to a WARNING) can
+    re-raise this hard clearance failure instead of swallowing it -- a
+    clearance short must abort the build, not print a warning (#3913).
+    """
+
+
+def _clearance_signature(pcb_path: Path) -> set[tuple[str, ...]]:
+    """Return the set of clearance-violation identities on ``pcb_path``.
+
+    Issue #3913: used to diff the clearance state across the step-12
+    quantize mutation so the post-quantize gate fires only on NEW
+    violations, not the board's allowlisted marginal-clearance baseline.
+
+    Each violation is reduced to a coarse, order-independent identity
+    ``(rule_id, layer, sorted-items, rounded-location)`` so a segment
+    endpoint that shifts by a dogleg's sub-mm bulge still matches its
+    pre-quantize twin (the location is rounded to 0.1 mm buckets).  A
+    genuinely new graze at a different via/segment pair produces a new
+    identity that is absent from the pre-quantize set.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+
+    pcb = PCB.load(pcb_path)
+    checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4)
+    results = checker.check_clearances()
+    signature: set[tuple[str, ...]] = set()
+    for v in results.violations:
+        if not v.is_error:
+            continue
+        loc = ""
+        if v.location is not None:
+            loc = f"{round(v.location[0], 1):.1f},{round(v.location[1], 1):.1f}"
+        identity = (
+            v.rule_id,
+            v.layer or "",
+            "|".join(sorted(v.items)),
+            loc,
+        )
+        signature.add(identity)
+    return signature
+
+
+def _check_post_quantize_clearances(pcb_path: Path, baseline: set[tuple[str, ...]]) -> bool:
+    """Re-verify clearances after the step-12 quantize + re-fill.
+
+    Issue #3913: ``kicad_tools.router.quantize`` mutates committed copper
+    (each off-angle chord becomes a two-leg dogleg), and its own
+    ``dogleg_points()`` docstring obliges callers to re-verify clearances
+    afterward -- the dogleg's perpendicular bulge can graze a foreign via
+    barrel (the #3855 mode) yet still preserve endpoints, so pour audits
+    and endpoint-preserving checks miss it.  The board-06 pipeline
+    previously returned from step 12 with no clearance gate, certifying a
+    -0.337 mm segment-to-via short that ``kicad-cli`` flagged.
+
+    Returns ``True`` when no NEW clearance violation was introduced by the
+    quantize step (violations already present in ``baseline`` -- the
+    board's allowlisted marginal-clearance floor -- are tolerated).
+    Returns ``False`` and prints the offending violations otherwise.
+    """
+    post = _clearance_signature(pcb_path)
+    new_ids = post - baseline
+    if not new_ids:
+        n_carried = len(post & baseline)
+        print(
+            f"   POST-QUANTIZE CLEARANCE: PASS "
+            f"(0 new violations; {n_carried} pre-existing baseline "
+            f"violation(s) unchanged)"
+        )
+        return True
+
+    # Re-run the check to recover full messages for the new identities.
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+
+    pcb = PCB.load(pcb_path)
+    checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4)
+    results = checker.check_clearances()
+    print(f"   POST-QUANTIZE CLEARANCE: FAIL ({len(new_ids)} NEW violation(s)):")
+    for v in results.violations:
+        if not v.is_error:
+            continue
+        loc = ""
+        if v.location is not None:
+            loc = f"{round(v.location[0], 1):.1f},{round(v.location[1], 1):.1f}"
+        identity = (v.rule_id, v.layer or "", "|".join(sorted(v.items)), loc)
+        if identity in new_ids:
+            where = f" @ ({v.location[0]:.3f}, {v.location[1]:.3f})" if v.location else ""
+            print(f"     [{v.rule_id}] {v.message}{where}")
+    return False
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB with per-protocol net-class engagement.
 
@@ -2136,6 +2232,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     try:
         from kicad_tools.router.quantize import quantize_pcb_file
 
+        # Issue #3913: snapshot the clearance-violation signature BEFORE the
+        # quantizer mutates committed copper.  The board ships a documented,
+        # allowlisted marginal-clearance baseline (the pinned 24-error strict
+        # gate); the post-quantize gate below must fire ONLY on violations the
+        # dogleg mutation NEWLY introduces (the #3855 "dogleg bulge grazes a
+        # foreign via barrel" mode), not re-flag pre-existing baseline copper.
+        pre_quantize_clearances = _clearance_signature(output_path)
         quantized = quantize_pcb_file(output_path, skip_uuids=QUANTIZE_SKIP_UUIDS)
         if quantized:
             print(f"   Quantized {len(quantized)} off-angle segment(s)")
@@ -2148,6 +2251,16 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
                     "   POUR CONNECTIVITY (post-quantize): "
                     + ("PASS" if pour_ok else "FAIL (see above)")
                 )
+                print("12d. Post-quantize clearance re-validation (#3913)...")
+                if not _check_post_quantize_clearances(output_path, pre_quantize_clearances):
+                    raise PostQuantizeClearanceError(
+                        "Post-quantize clearance violation(s) detected -- "
+                        "aborting build. The 45-degree quantizer's dogleg "
+                        "bulge grazed foreign copper (the #3855 mode). See the "
+                        "clearance report above; either re-route the offending "
+                        "segment or add its uuid to QUANTIZE_SKIP_UUIDS with a "
+                        "documented justification."
+                    )
             else:
                 print(
                     f"   Zone re-fill after quantization failed "
@@ -2156,6 +2269,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
                 )
         else:
             print("   No off-angle segments: routed copper already 45-aligned")
+    except PostQuantizeClearanceError:
+        # A NEW post-quantize graze is a hard build failure -- re-raise past
+        # the graceful-degrade handler below so it is NOT downgraded to a
+        # warning (#3913).
+        raise
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   WARNING: 45-degree quantization step skipped: {exc}")
 
