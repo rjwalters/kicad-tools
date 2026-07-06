@@ -59,6 +59,14 @@ class PreflightConfig:
     skip_drc: bool = False
     skip_erc: bool = False
 
+    # When True, disables the connectivity safety floor -- the hard abort on
+    # net shorts / connectivity errors read from a pre-existing DRC report
+    # that fires even when ``skip_all`` is set.  This is an explicit escape
+    # hatch for extraordinary, known-safe workarounds; it should almost never
+    # be used because shipping a shorted board is not safe.  See
+    # ``ManufacturingPackage._check_drc_safety_floor``.
+    skip_drc_floor: bool = False
+
     # Paths to pre-existing report files (avoids re-running kicad-cli)
     drc_report_path: str | Path | None = None
     erc_report_path: str | Path | None = None

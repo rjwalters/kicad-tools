@@ -7031,7 +7031,20 @@ def _add_export_parser(subparsers) -> None:
         "--skip-preflight",
         dest="export_skip_preflight",
         action="store_true",
-        help="Skip all pre-flight validation checks",
+        help=(
+            "Skip BOM/ERC/LCSC/cosmetic pre-flight validation checks. Does NOT "
+            "suppress the hard connectivity safety floor (net shorts). Use "
+            "--skip-drc-floor to override that too."
+        ),
+    )
+    export_parser.add_argument(
+        "--skip-drc-floor",
+        dest="export_skip_drc_floor",
+        action="store_true",
+        help=(
+            "Disable the connectivity safety floor that blocks export on net "
+            "shorts in a pre-existing DRC report. Only for known-safe workarounds."
+        ),
     )
     export_parser.add_argument(
         "--strict-preflight",

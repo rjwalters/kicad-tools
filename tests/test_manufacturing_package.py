@@ -1,6 +1,7 @@
 """Tests for the manufacturing package generator."""
 
 import json
+import logging
 import zipfile
 from pathlib import Path
 
@@ -1293,3 +1294,229 @@ class TestTHTHandSolderDocumentation:
             assembly_result=AssemblyPackageResult(output_dir=tmp_path),
         )
         assert ManufacturingPackage._tht_component_groups(empty) == []
+
+
+class TestDRCSafetyFloor:
+    """Tests for the connectivity safety floor (#3912).
+
+    Shipping a shorted board is never safe, so a pre-existing DRC report
+    containing SHORTING_ITEMS (or other connectivity errors) must block
+    export even when preflight is fully skipped (``skip_all=True``).
+    """
+
+    @staticmethod
+    def _write_shorting_drc_report(path: Path) -> None:
+        """Write a kct-check-format DRC report with one net short."""
+        report = {
+            "file": "board.kicad_pcb",
+            "manufacturer": "jlcpcb",
+            "summary": {"errors": 1, "warnings": 0, "passed": False},
+            "violations": [
+                {
+                    "rule_id": "shorting_items",
+                    "severity": "error",
+                    "message": "Two items share a net (net GND / net PHASE_A)",
+                    "items": ["Track [GND]", "Track [PHASE_A]"],
+                }
+            ],
+        }
+        path.write_text(json.dumps(report))
+
+    @staticmethod
+    def _write_clean_drc_report(path: Path) -> None:
+        """Write a kct-check-format DRC report with no errors."""
+        report = {
+            "file": "board.kicad_pcb",
+            "manufacturer": "jlcpcb",
+            "summary": {"errors": 0, "warnings": 0, "passed": True},
+            "violations": [],
+        }
+        path.write_text(json.dumps(report))
+
+    def _patch_assembly(self, monkeypatch):
+        from kicad_tools.export import assembly
+
+        called = {"value": False}
+
+        def fake_assembly_export(self, output_dir=None):
+            called["value"] = True
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            bom_path = od / "bom_jlcpcb.csv"
+            bom_path.write_text("Comment,Designator,Footprint,LCSC Part #\n")
+            return assembly.AssemblyPackageResult(output_dir=od, bom_path=bom_path)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+        return called
+
+    def test_skip_preflight_does_not_suppress_shorts(self, tmp_path, monkeypatch):
+        """skip_all=True must NOT suppress the safety floor on net shorts."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        # Pre-existing DRC report next to the PCB, containing a short.
+        self._write_shorting_drc_report(project_dir / "drc_report.json")
+
+        assembly_called = self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(tmp_path / "out")
+
+        # Export must fail and must not have written any assembly artifacts.
+        assert not result.success, "Safety floor should block export on shorts"
+        assert any("short" in e.lower() for e in result.errors), result.errors
+        assert not assembly_called["value"], "Assembly must not run when floor blocks"
+
+    def test_safety_floor_reads_explicit_report_path(self, tmp_path, monkeypatch):
+        """An explicit drc_report_path with shorts also blocks export."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        report_path = tmp_path / "custom_drc.json"
+        self._write_shorting_drc_report(report_path)
+
+        self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            preflight=PreflightConfig(skip_all=True, drc_report_path=str(report_path)),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(tmp_path / "out")
+
+        assert not result.success
+        assert any("short" in e.lower() for e in result.errors), result.errors
+
+    def test_skip_drc_floor_overrides_safety_floor(self, tmp_path, monkeypatch, caplog):
+        """The explicit --skip-drc-floor escape hatch bypasses the floor -- loudly."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        self._write_shorting_drc_report(project_dir / "drc_report.json")
+
+        assembly_called = self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            preflight=PreflightConfig(skip_all=True, skip_drc_floor=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.export.manufacturing"):
+            result = pkg.export(tmp_path / "out")
+
+        # With the escape hatch, the floor does not fire and assembly runs.
+        assert assembly_called["value"], "Assembly should run when floor is skipped"
+        assert result.success, f"Unexpected errors: {result.errors}"
+
+        # Bypassing the floor must leave a loud audit trail: both a logged
+        # warning and a result.warnings entry (surfaced in export output).
+        assert any(
+            "--skip-drc-floor" in rec.getMessage() and rec.levelno == logging.WARNING
+            for rec in caplog.records
+        ), "Expected a logger.warning when the floor is bypassed"
+        assert any("--skip-drc-floor" in w for w in result.warnings), (
+            f"Expected a result.warnings entry; got {result.warnings}"
+        )
+
+    def test_stale_drc_report_emits_warning(self, tmp_path, monkeypatch, caplog):
+        """A DRC report older than the PCB emits a one-line stale-mtime warning.
+
+        The floor still blocks on the stale FAIL (staleness in the blocking
+        direction is the safe side); the warning just explains the block.
+        """
+        import os
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        report = project_dir / "drc_report.json"
+        self._write_shorting_drc_report(report)
+
+        # Make the report older than the PCB.
+        pcb_mtime = pcb.stat().st_mtime
+        os.utime(report, (pcb_mtime - 100, pcb_mtime - 100))
+
+        self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.export.manufacturing"):
+            result = pkg.export(tmp_path / "out")
+
+        # Still blocks (stale FAIL is the safe side).
+        assert not result.success
+        # And warns that the verdict may be stale.
+        assert any("older than the PCB" in rec.getMessage() for rec in caplog.records), (
+            "Expected a stale-mtime warning when the report predates the PCB"
+        )
+
+    def test_clean_drc_report_does_not_block(self, tmp_path, monkeypatch):
+        """A clean pre-existing DRC report must not block export (no regression)."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        self._write_clean_drc_report(project_dir / "drc_report.json")
+
+        assembly_called = self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(tmp_path / "out")
+
+        assert assembly_called["value"]
+        assert result.success, f"Unexpected errors: {result.errors}"
+
+    def test_no_drc_report_does_not_block(self, tmp_path, monkeypatch):
+        """With no DRC report on disk, the floor is a no-op (no false-positive)."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        # No drc_report.json written.
+
+        assembly_called = self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(tmp_path / "out")
+
+        assert assembly_called["value"]
+        assert result.success, f"Unexpected errors: {result.errors}"

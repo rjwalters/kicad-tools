@@ -340,6 +340,17 @@ class ManufacturingPackage:
         if dry_run:
             return self._dry_run(out_dir, result)
 
+        # Step 0-floor: Connectivity safety floor.  Read any pre-existing DRC
+        # report for hard shorts / connectivity errors *regardless* of
+        # skip_preflight (skip_all).  Shipping a shorted board is never safe,
+        # so this hard gate fires even when the rest of preflight is skipped
+        # -- and it runs before any output files are written.  It performs no
+        # kicad-cli invocation (it only parses a report already on disk), so
+        # it adds no dependency and cannot slow a clean board's export.
+        self._check_drc_safety_floor(result)
+        if not result.success:
+            return result
+
         # Pre-construct the assembly package so we surface fatal input
         # errors (e.g. a schematic-sourced BOM with no discoverable
         # .kicad_sch) *before* preflight runs or we create any output
@@ -447,6 +458,97 @@ class ManufacturingPackage:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _check_drc_safety_floor(self, result: ManufacturingResult) -> None:
+        """Hard-abort export on net shorts / connectivity errors.
+
+        Reads any pre-existing DRC report next to the source PCB (or the
+        explicit ``drc_report_path`` from the preflight config) and appends
+        an error to ``result`` when it contains SHORTING_ITEMS or other
+        connectivity-error violations.  Because ``ManufacturingResult.success``
+        is ``len(errors) == 0``, appending an error causes ``export()`` to
+        return a non-success result and skip writing output files.
+
+        This gate runs even when ``preflight.skip_all`` (``--skip-preflight``)
+        is True -- that flag skips BOM/ERC/LCSC/cosmetic checks but must not
+        suppress the hard safety floor.  The only way to bypass it is the
+        explicit ``skip_drc_floor`` escape hatch (``--skip-drc-floor``), for
+        known-safe workarounds.
+
+        No kicad-cli is invoked; if no report exists, or it cannot be parsed,
+        the floor does nothing (prefer a false-negative over breaking boards
+        that never ran kicad-cli DRC).
+        """
+        preflight_cfg = self.config.preflight
+        if preflight_cfg is not None and preflight_cfg.skip_drc_floor:
+            msg = (
+                "DRC connectivity safety floor DISABLED via --skip-drc-floor; "
+                "export will proceed even if the board has net shorts. "
+                "This is unsafe unless you have independently verified the board."
+            )
+            logger.warning(msg)
+            result.warnings.append(msg)
+            return
+
+        # Resolve the report path: explicit config path wins, else look for a
+        # report sitting next to the source PCB (JSON preferred over text).
+        report_path: Path | None = None
+        explicit = preflight_cfg.drc_report_path if preflight_cfg else None
+        if explicit is not None:
+            candidate = Path(explicit)
+            if candidate.exists():
+                report_path = candidate
+        else:
+            for name in ("drc_report.json", "drc_report.txt"):
+                candidate = self.pcb_path.parent / name
+                if candidate.exists():
+                    report_path = candidate
+                    break
+
+        if report_path is None:
+            return
+
+        # Surface a stale-report note: if the resolved DRC report predates the
+        # PCB, its verdict may not reflect the current board. The floor still
+        # blocks on a stale FAIL (staleness in the blocking direction is the
+        # safe side); this warning just explains a potentially spurious block.
+        try:
+            if report_path.stat().st_mtime < self.pcb_path.stat().st_mtime:
+                logger.warning(
+                    f"DRC report {report_path.name} is older than the PCB; "
+                    "safety-floor verdict may be stale."
+                )
+        except OSError:
+            pass
+
+        try:
+            from ..drc.report import DRCReport
+            from ..drc.violation import ViolationType
+
+            report = DRCReport.load(report_path)
+            connectivity_errors = [
+                v
+                for v in report.errors
+                if v.type in (ViolationType.SHORTING_ITEMS, ViolationType.UNCONNECTED_ITEMS)
+            ]
+        except Exception as e:
+            # If we can't read the report, don't block -- prefer a
+            # false-negative over breaking boards that never ran DRC.
+            logger.warning(f"DRC safety floor could not read {report_path}: {e}")
+            return
+
+        if connectivity_errors:
+            short_count = sum(
+                1 for v in connectivity_errors if v.type == ViolationType.SHORTING_ITEMS
+            )
+            msg = (
+                f"Safety floor: {len(connectivity_errors)} connectivity error(s) "
+                f"({short_count} net short(s)) in DRC report ({report_path.name}); "
+                "export blocked. Fix the shorts, or pass --skip-drc-floor to "
+                "override (only for known-safe workarounds)."
+            )
+            result.errors.append(msg)
+            logger.error(msg)
 
     def _run_preflight(self) -> list[PreflightResult]:
         """Run pre-flight validation checks."""
