@@ -202,3 +202,153 @@ def test_run_geometric_drc_end_to_end_on_committed_board():
     assert isinstance(result, GeometricDRCResult)
     assert result.ran is True
     assert result.error_count >= 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #3919: run_post_route_drc emits .kicad_pro / .kicad_dru constraint
+# sidecars next to the routed PCB *before* the kicad-cli geometric cross-check,
+# so kicad-cli judges against the manufacturer profile's capability floors
+# instead of KiCad's stricter built-in defaults (which produce false
+# track_width / clearance / via violations on finer traces).
+# ---------------------------------------------------------------------------
+
+
+class TestSidecarEmittedBeforeGeometricDRC:
+    """The constraint sidecars must exist by the time kicad-cli DRC runs."""
+
+    def test_kicad_pro_and_dru_written_next_to_output(self, monkeypatch, tmp_path):
+        """Both sidecars land next to the routed PCB after run_post_route_drc."""
+        _patch_internal(monkeypatch, _FakeResults())
+        _patch_geometric(monkeypatch, GeometricDRCResult(ran=True, error_count=0))
+
+        out = tmp_path / "board.kicad_pcb"
+        route_cmd.run_post_route_drc(output_path=out, manufacturer="jlcpcb-tier1", layers=4)
+
+        assert (tmp_path / "board.kicad_pro").exists()
+        assert (tmp_path / "board.kicad_dru").exists()
+
+    def test_sidecars_present_when_geometric_drc_is_invoked(self, monkeypatch, tmp_path):
+        """The .kicad_pro/.kicad_dru exist at the moment run_geometric_drc runs.
+
+        This is the ordering acceptance criterion: kicad-cli must be able to
+        auto-load the relaxed rules on the same invocation, so the write has
+        to precede run_geometric_drc, not merely happen somewhere in the call.
+        """
+        _patch_internal(monkeypatch, _FakeResults())
+
+        seen: dict[str, bool] = {}
+
+        import kicad_tools.drc as drc_mod
+
+        def _capture(output_path, *a, **k):
+            pro = output_path.parent / "board.kicad_pro"
+            dru = output_path.parent / "board.kicad_dru"
+            seen["pro"] = pro.exists()
+            seen["dru"] = dru.exists()
+            return GeometricDRCResult(ran=True, error_count=0)
+
+        monkeypatch.setattr(drc_mod, "run_geometric_drc", _capture)
+
+        out = tmp_path / "board.kicad_pcb"
+        route_cmd.run_post_route_drc(output_path=out, manufacturer="jlcpcb-tier1", layers=4)
+
+        assert seen.get("pro") is True, "kicad_pro must exist before geometric DRC"
+        assert seen.get("dru") is True, "kicad_dru must exist before geometric DRC"
+
+    def test_kicad_pro_reflects_profile_min_clearance(self, monkeypatch, tmp_path):
+        """Emitted .kicad_pro carries the manufacturer profile's floors."""
+        import json
+
+        from kicad_tools.manufacturers import get_profile
+
+        _patch_internal(monkeypatch, _FakeResults())
+        _patch_geometric(monkeypatch, GeometricDRCResult(ran=True, error_count=0))
+
+        profile = get_profile("jlcpcb-tier1")
+        rules = profile.get_design_rules(layers=4, copper_oz=1.0)
+
+        out = tmp_path / "board.kicad_pcb"
+        route_cmd.run_post_route_drc(output_path=out, manufacturer="jlcpcb-tier1", layers=4)
+
+        data = json.loads((tmp_path / "board.kicad_pro").read_text())
+        design_settings = data["board"]["design_settings"]
+        # min_clearance / min track width flow into the applied defaults so
+        # kicad-cli's clearance/track_width tests use the profile floors.
+        assert design_settings["defaults"]["clearance_min"] == rules.min_clearance_mm
+        assert design_settings["defaults"]["track_min_width"] == rules.min_trace_width_mm
+
+    def test_dru_contains_profile_clearance(self, monkeypatch, tmp_path):
+        """The .kicad_dru custom-rule text references the profile clearance."""
+        from kicad_tools.manufacturers import get_profile
+
+        _patch_internal(monkeypatch, _FakeResults())
+        _patch_geometric(monkeypatch, GeometricDRCResult(ran=True, error_count=0))
+
+        profile = get_profile("jlcpcb-tier1")
+        rules = profile.get_design_rules(layers=4, copper_oz=1.0)
+
+        out = tmp_path / "board.kicad_pcb"
+        route_cmd.run_post_route_drc(output_path=out, manufacturer="jlcpcb-tier1", layers=4)
+
+        dru_text = (tmp_path / "board.kicad_dru").read_text()
+        # The clearance floor (e.g. 0.1) must appear in the generated rules.
+        assert f"{rules.min_clearance_mm}" in dru_text
+
+    def test_unknown_manufacturer_degrades_gracefully(self, monkeypatch, tmp_path, capsys):
+        """An unrecognized manufacturer warns and continues (no sidecar, no raise)."""
+        _patch_internal(monkeypatch, _FakeResults())
+        _patch_geometric(monkeypatch, GeometricDRCResult(ran=True, error_count=0))
+
+        out = tmp_path / "board.kicad_pcb"
+        # Must not raise even though the profile lookup fails.
+        errors, _ = route_cmd.run_post_route_drc(
+            output_path=out, manufacturer="definitely-not-a-fab", layers=4
+        )
+
+        # No sidecar is written for an unknown profile.
+        assert not (tmp_path / "board.kicad_pro").exists()
+        captured = capsys.readouterr().out
+        assert "could not write DRC-constraint sidecars" in captured
+
+    def test_readonly_output_dir_is_non_fatal(self, monkeypatch, tmp_path, capsys):
+        """A read-only output directory warns and continues (route never fails)."""
+        import os
+        import stat
+
+        _patch_internal(monkeypatch, _FakeResults())
+        _patch_geometric(monkeypatch, GeometricDRCResult(ran=True, error_count=0))
+
+        ro_dir = tmp_path / "ro"
+        ro_dir.mkdir()
+        os.chmod(ro_dir, stat.S_IRUSR | stat.S_IXUSR)
+        try:
+            out = ro_dir / "board.kicad_pcb"
+            # Must not raise despite the write being blocked.
+            errors, _ = route_cmd.run_post_route_drc(
+                output_path=out, manufacturer="jlcpcb-tier1", layers=4
+            )
+            assert errors == 0
+        finally:
+            os.chmod(ro_dir, stat.S_IRWXU)
+
+        captured = capsys.readouterr().out
+        assert "could not write DRC-constraint sidecars" in captured
+
+    def test_existing_kicad_pro_is_preserved_and_merged(self, monkeypatch, tmp_path):
+        """A pre-existing .kicad_pro keeps unrelated keys; only rules overwritten."""
+        import json
+
+        _patch_internal(monkeypatch, _FakeResults())
+        _patch_geometric(monkeypatch, GeometricDRCResult(ran=True, error_count=0))
+
+        pro = tmp_path / "board.kicad_pro"
+        pro.write_text(json.dumps({"sentinel": {"keep": True}, "board": {}}))
+
+        out = tmp_path / "board.kicad_pcb"
+        route_cmd.run_post_route_drc(output_path=out, manufacturer="jlcpcb-tier1", layers=4)
+
+        data = json.loads(pro.read_text())
+        # Unrelated top-level key survives the merge.
+        assert data["sentinel"] == {"keep": True}
+        # Constraint block was populated.
+        assert "rules" in data["board"]["design_settings"]
