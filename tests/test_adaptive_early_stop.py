@@ -28,6 +28,10 @@ def _make_fake_router(nets_routed: int, nets_total: int = 20, segments: int = 0,
     router.grid = MagicMock(width=50, height=50)
     router.routes = []
     router._pour_nets_without_zones = set()
+    # Issue #3942 (Bug B): _routable_multi_pad_nets calls _is_pour_net to
+    # drop pour-served nets from the denominator.  A bare MagicMock returns
+    # truthy, zeroing nets_to_route; these mocks model no-pour boards.
+    router._is_pour_net.return_value = False
     router.get_statistics.return_value = {
         "nets_routed": nets_routed,
         "segments": segments,
