@@ -57,15 +57,16 @@ _SRC_ROOT = _REPO_ROOT / "src" / "kicad_tools"
 
 # Format: {relative_path: {line_number: reason}}
 _ALLOWLIST: dict[str, dict[int, str]] = {
-    # Router core: default-constructed router (line ~400 is the
-    # ``rules_dict``-spread default in _route_with_seed; line ~817 is
+    # Router core: default-constructed router (line ~433 is the
+    # ``rules_dict``-spread default in _route_with_seed; line ~850 is
     # the constructor default).  Reaching either means the caller did
     # not pass rules.  (Line numbers refreshed for issue #3464, the
-    # #3663 ruff lint burn-down, and again for #3881 which added the
-    # _per_net_iterations field/param shifting both sites.)
+    # #3663 ruff lint burn-down, #3881 which added the
+    # _per_net_iterations field/param, and #3942 which added the
+    # success-output oscillation diagnostics — each shifting both sites.)
     "router/core.py": {
-        400: "worker-process rules_dict-spread default (both calls on this line)",
-        817: "Autorouter.__init__ rules-arg default fallback",
+        433: "worker-process rules_dict-spread default (both calls on this line)",
+        850: "Autorouter.__init__ rules-arg default fallback",
     },
     # AdaptiveRouter default fallback — same pattern as Autorouter.
     "router/adaptive.py": {
