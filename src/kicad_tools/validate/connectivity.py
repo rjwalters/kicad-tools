@@ -1198,6 +1198,42 @@ class ConnectivityValidator:
             return None
         return poly
 
+    def _synthetic_via_radii(self, synthetic_nodes: set[str]) -> dict[str, float]:
+        """Map each ``__via{index}`` node to its copper radius (``size / 2``).
+
+        The synthetic via node ids created in :meth:`extract_pad_partition`
+        (step 1b) are ``f"__via{index}"`` in board via order, so we recover the
+        copper radius by re-enumerating ``self.pcb.vias``.  Only nodes present
+        in ``synthetic_nodes`` are returned.
+        """
+        radii: dict[str, float] = {}
+        for via_index, via in enumerate(self.pcb.vias):
+            node_id = f"__via{via_index}"
+            if node_id in synthetic_nodes:
+                radii[node_id] = max(getattr(via, "size", 0.0) or 0.0, 0.0) / 2.0
+        return radii
+
+    def _via_copper_geom(self, pos: tuple[float, float], radius: float) -> Any:
+        """Build a shapely geometry approximating a via's copper (issue #3909).
+
+        Returns the via's copper *circle* (a disk of ``radius`` about ``pos``,
+        eroded inward by :data:`POUR_PAD_ERODE` to match the pad-box treatment)
+        so a via whose copper ring overlaps a foreign pour's solid region bonds
+        into that island and surfaces the short.  Falls back to a bare
+        ``Point`` when the via has no positive size (degenerate) so the legacy
+        centre-in-solid bond (issue #3794) still fires.
+        """
+        if radius <= 0:
+            return _ShapelyPoint(pos)
+        circle = _ShapelyPoint(pos).buffer(radius)
+        if self.POUR_PAD_ERODE > 0:
+            eroded = circle.buffer(-self.POUR_PAD_ERODE)
+            # Erosion can empty a very small via; keep the full circle so the
+            # via is still testable rather than silently dropped.
+            if not eroded.is_empty:
+                return eroded
+        return circle
+
     def _connect_via_in_pad(
         self,
         pad_positions: dict[str, tuple[float, float]],
@@ -1270,14 +1306,28 @@ class ConnectivityValidator:
         foreign-net pad whose copper bonds to the pour is fused into it.
 
         Synthetic via nodes (issue #3794, listed in ``synthetic_nodes``) are
-        bonded the same way, but tested as a *point* at the via position
-        rather than a size box — a via that lands inside the pour's solid
-        region on a layer the via spans is unioned into the island, so a pad
-        reaching that via through a trace (on the via's *other* layer) inherits
-        the pour bond.  This is what closes the ``pad -> trace -> stitch via
-        -> opposite-layer pour`` path that pad-box-only testing misses; it adds
-        only real copper (a via tying a trace to a pour) and re-uses the same
-        eroded-solid-region guard, so it cannot fabricate a false short.
+        bonded the same way, but tested as the via's *copper circle* (radius
+        ``size / 2``, eroded by :data:`POUR_PAD_ERODE`) rather than a size box.
+        A via that lands inside the pour's solid region on a layer the via
+        spans is unioned into the island, so a pad reaching that via through a
+        trace (on the via's *other* layer) inherits the pour bond.  This is
+        what closes the ``pad -> trace -> stitch via -> opposite-layer pour``
+        path that pad-box-only testing misses; it adds only real copper (a via
+        tying a trace to a pour) and re-uses the same eroded-solid-region
+        guard, so it cannot fabricate a false short.
+
+        Testing the via *circle* (not a bare centre point) is also what lets
+        this method surface a **via-to-foreign-pour short** (issue #3909).
+        KiCad carves an antipad clearance hole centred on every foreign-net
+        via, so the via *centre* always sits inside that hole and a bare-point
+        test can never see the short.  When the antipad is marginal or absent
+        (the Python-fill-vs-kicad-cli-refill discrepancy), the via's copper
+        annular ring pokes past the too-small hole into the foreign fill's
+        solid region — the circle test catches that overlap and fuses the via
+        into the foreign island, so :func:`compare_partitions` reports the
+        short.  On a DRC-clean board the antipad hole is wider than the via
+        copper, so the eroded circle stays clear of the foreign solid region
+        and no false short is introduced (verified against boards 00-04).
 
         Pads are approximated by their size box (:meth:`_pad_copper_polygon`)
         rather than a bare center point: a thermally-relieved pad's center
@@ -1303,10 +1353,13 @@ class ConnectivityValidator:
         # Board-frame pad copper polygons, keyed by pad id.  Built once here
         # so each fill island can be tested against every candidate pad.
         # Synthetic via nodes (issue #3794) have no footprint pad, so they are
-        # represented by a bare point at the via position: a via that lands in
-        # the solid pour region penetrates the copper there, and a point test
-        # is the conservative analogue of the eroded pad box (the via must be
-        # inside the solid region, past any clearance moat, to bond).
+        # represented by their copper *circle* (radius ``size / 2``, eroded by
+        # ``POUR_PAD_ERODE`` like a pad box): a via whose copper penetrates the
+        # solid pour region there is bonded.  The circle — not a bare centre
+        # point — is what surfaces a via-to-foreign-pour short (issue #3909):
+        # the foreign pour's antipad hole is centred on the via, so the centre
+        # is always moated out, but the copper ring pokes past a marginal hole
+        # into the foreign fill.
         pad_polygons: dict[str, Any] = {}
         for fp in self.pcb.footprints:
             if not fp.reference or fp.reference.startswith("#"):
@@ -1317,10 +1370,12 @@ class ConnectivityValidator:
                 poly = self._pad_copper_polygon(fp, pad)
                 if poly is not None:
                     pad_polygons[f"{fp.reference}.{pad.number}"] = poly
+        via_radius = self._synthetic_via_radii(synthetic_nodes)
         for node_id in synthetic_nodes:
             pos = pad_positions.get(node_id)
-            if pos is not None:
-                pad_polygons[node_id] = _ShapelyPoint(pos)
+            if pos is None:
+                continue
+            pad_polygons[node_id] = self._via_copper_geom(pos, via_radius.get(node_id, 0.0))
 
         for zone in self.pcb.zones:
             if not zone.filled_polygons:

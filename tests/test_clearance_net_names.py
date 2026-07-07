@@ -359,6 +359,108 @@ class TestClearanceRuleNetNames:
 
 
 # ---------------------------------------------------------------------------
+# Negative clearance (physical overlap) is reported as a named SHORT (#3909)
+# ---------------------------------------------------------------------------
+
+
+class TestNegativeClearanceShortMessage:
+    """A negative clearance (copper overlap) yields a net-named SHORT message.
+
+    kicad-cli names both nets in its ``shorting_items`` error; ``kct check``
+    must match that signal at *default* verbosity rather than emitting a
+    net-anonymous ``"Segment to via clearance -0.188mm < minimum ..."`` line
+    that only surfaced the nets under ``--verbose``.
+    """
+
+    def _pcb(self, via_y: float) -> str:
+        return f"""\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3V3")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1 "GND") (uuid "seg-gnd1"))
+  (via (at 100 {via_y}) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2 "+3V3") (uuid "via-3v3"))
+)
+"""
+
+    def _violations(self, tmp_path: Path, via_y: float):
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb_path = tmp_path / "t.kicad_pcb"
+        pcb_path.write_text(self._pcb(via_y))
+        pcb = PCB.load(pcb_path)
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2, copper_oz=1.0)
+        return checker.check_clearances().violations
+
+    def test_negative_clearance_message_names_both_nets(self, tmp_path: Path):
+        """A via overlapping a foreign segment (actual < 0) -> named SHORT msg."""
+        # via at y=100.25 vs segment at y=100: copper overlaps by ~0.175mm.
+        violations = self._violations(tmp_path, 100.25)
+        assert violations, "expected an overlap clearance violation"
+        v = violations[0]
+        assert v.actual_value < 0, f"fixture must produce a copper overlap; got {v.actual_value}"
+        # Default-verbosity message must be actionable: SHORT + both net names.
+        assert v.message.startswith("SHORT:"), v.message
+        assert "GND" in v.message and "+3V3" in v.message, v.message
+        assert "overlaps by" in v.message, v.message
+        # nets tuple still carries both names (unchanged behaviour).
+        assert set(v.nets) == {"GND", "+3V3"}
+
+    def test_positive_clearance_keeps_plain_message(self, tmp_path: Path):
+        """A tight-but-legal gap (actual > 0) keeps the plain clearance msg.
+
+        Only a genuine physical overlap is promoted to a SHORT; a via that is
+        merely closer than the minimum must NOT be mislabelled as shorted.
+        """
+        # via at y=100.45: a +0.025mm gap -> a clearance miss, not a short.
+        violations = self._violations(tmp_path, 100.45)
+        assert violations, "expected a tight-clearance violation"
+        v = violations[0]
+        assert v.actual_value > 0, f"fixture must produce a positive gap; got {v.actual_value}"
+        assert not v.message.startswith("SHORT:"), v.message
+        assert "< minimum" in v.message, v.message
+
+    def test_negative_clearance_same_net_not_a_short(self, tmp_path: Path):
+        """A negative clearance between copper on the SAME net is not a SHORT.
+
+        Same-net overlap is normal (a via landing on its own trace); the
+        net-named SHORT promotion requires two *distinct* named nets.
+        """
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        # Both the segment and the via are GND (net 1); they overlap.
+        src = self._pcb(100.25).replace(
+            '(via (at 100 100.25) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2 "+3V3") (uuid "via-3v3"))',
+            '(via (at 100 100.25) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1 "GND") (uuid "via-gnd2"))',
+        )
+        pcb_path = tmp_path / "t.kicad_pcb"
+        pcb_path.write_text(src)
+        pcb = PCB.load(pcb_path)
+        violations = (
+            DRCChecker(pcb, manufacturer="jlcpcb", layers=2, copper_oz=1.0)
+            .check_clearances()
+            .violations
+        )
+        # Same-net copper may or may not be flagged by the clearance rule, but
+        # if it is, it must not masquerade as a cross-net SHORT.
+        for v in violations:
+            assert not v.message.startswith("SHORT:"), v.message
+
+
+# ---------------------------------------------------------------------------
 # Reverse net name resolution: (net N) without inline name
 # ---------------------------------------------------------------------------
 
