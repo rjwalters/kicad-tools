@@ -38,6 +38,20 @@ from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
 # so callers can compare against the literal.
 SubCheckStatus = Literal["PASSED", "FAILED", "NOT RUN"]
 
+# Issue #3924 AC1: the sidecar-gated length-skew / continuity rules that
+# carry a measured ``actual_value`` (skew mm or coupled fraction) on every
+# finding -- both passing (``info``) and failing (``error``).  ``output_table``
+# collects these into a dedicated MEASUREMENT SUMMARY table so users see the
+# measured values on the default (non-``--verbose``) path, distinct from the
+# violation listing.
+_MEASUREMENT_RULE_IDS: frozenset[str] = frozenset(
+    {
+        "match_group_length_skew",
+        "diffpair_length_skew",
+        "diffpair_routing_continuity",
+    }
+)
+
 
 @dataclass
 class SubCheckResult:
@@ -871,6 +885,12 @@ def main(argv: list[str] | None = None) -> int:
             # avoid duplicating it (Issue #3917 Defect 3).
             warn_on_inactive_skew_rules=False,
             verbose=args.verbose,
+            # Always collect the per-pair / per-group measured skew info
+            # findings so ``output_table`` can render the measurement
+            # summary at default verbosity (Issue #3924 AC1).  With no
+            # sidecar the skew rules produce no info findings, so this is a
+            # graceful no-op (AC5).
+            emit_measurements=True,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1052,6 +1072,70 @@ def run_selected_checks(
     return results
 
 
+def _print_measurement_summary(violations: list[DRCViolation]) -> None:
+    """Print a per-group / per-pair length-measurement summary table.
+
+    Issue #3924 AC1.  The sidecar-gated length-skew and routing-continuity
+    rules (:data:`_MEASUREMENT_RULE_IDS`) attach the measured value
+    (``actual_value``) and its tolerance (``required_value``) to every
+    finding they emit -- passing findings are ``info`` severity (only
+    produced when the checker was built with ``emit_measurements=True`` or
+    ``verbose=True``) and failing findings are ``error`` severity.  This
+    renders both into one compact table so a user running plain
+    ``kct check`` (no ``--verbose``) can read the achieved skew / continuity
+    values without wading through the info stream.
+
+    The table is only printed when at least one measurement finding is
+    present.  With no net-class-map sidecar the skew rules produce no
+    findings, so this is a graceful no-op (Issue #3924 AC5).
+    """
+    measurements = [v for v in violations if v.rule_id in _MEASUREMENT_RULE_IDS]
+    # Only rows that actually carry a measured value are renderable.
+    measurements = [v for v in measurements if v.actual_value is not None]
+    if not measurements:
+        return
+
+    def _subject(v: DRCViolation) -> str:
+        # Match groups carry the group name in ``items``; diff pairs carry
+        # their two net names in ``nets``.
+        if v.items:
+            return v.items[0]
+        if v.nets:
+            return "/".join(n for n in v.nets if n)
+        return v.rule_id
+
+    def _metric(rule_id: str) -> str:
+        # diffpair_routing_continuity measures a coupled *fraction*, not a
+        # length skew -- label the column accordingly.
+        if rule_id == "diffpair_routing_continuity":
+            return "continuity"
+        return "skew"
+
+    rows: list[tuple[str, str, str, str, str]] = []
+    for v in sorted(measurements, key=lambda x: (x.rule_id, _subject(x))):
+        subject = _subject(v)
+        metric = _metric(v.rule_id)
+        measured = f"{v.actual_value:.3f}" if v.actual_value is not None else "-"
+        tol = f"{v.required_value:.3f}" if v.required_value is not None else "-"
+        status = "FAIL" if v.is_error else "pass"
+        rows.append((subject, metric, measured, tol, status))
+
+    subject_w = max(len("Group/Pair"), *(len(r[0]) for r in rows))
+    metric_w = max(len("Metric"), *(len(r[1]) for r in rows))
+
+    print(f"\n{'-' * 60}")
+    print("MEASUREMENT SUMMARY (length-match / continuity):")
+    header = (
+        f"  {'Group/Pair':<{subject_w}}  {'Metric':<{metric_w}}  "
+        f"{'Measured':>10}  {'Tolerance':>10}  Status"
+    )
+    print(header)
+    for subject, metric, measured, tol, status in rows:
+        print(
+            f"  {subject:<{subject_w}}  {metric:<{metric_w}}  {measured:>10}  {tol:>10}  {status}"
+        )
+
+
 def output_table(
     violations: list[DRCViolation],
     results: DRCResults,
@@ -1086,9 +1170,28 @@ def output_table(
         print("DRC PASSED - No violations found")
         return
 
-    # Group by rule_id summary
+    # Issue #3924 AC1: render the length-match / continuity measurement
+    # table before the violation listing so the measured values are visible
+    # even on the default (non-``--verbose``) path.  No-op when the board
+    # has no measurement findings (e.g. no net-class-map sidecar -- AC5).
+    _print_measurement_summary(violations)
+
+    # Group by rule_id summary.
+    #
+    # Issue #3924: the length-match / continuity measurement findings are
+    # info-severity rows surfaced by the dedicated MEASUREMENT SUMMARY table
+    # above.  On the default (non-``--verbose``) path we exclude them from the
+    # BY RULE breakdown -- mirroring the INFOS-listing suppression below -- so
+    # that default output stays backward-compatible for consumers that grep
+    # ``BY RULE:`` severity-agnostically (e.g. the board03 baseline test).
+    # Under ``--verbose`` they remain visible in BY RULE alongside INFOS.
+    by_rule_source = (
+        violations
+        if verbose
+        else [v for v in violations if not (v.is_info and v.rule_id in _MEASUREMENT_RULE_IDS)]
+    )
     by_rule: dict[str, dict[str, int]] = {}
-    for v in violations:
+    for v in by_rule_source:
         if v.rule_id not in by_rule:
             by_rule[v.rule_id] = {"errors": 0, "warnings": 0, "infos": 0}
         if v.is_error:
@@ -1098,8 +1201,12 @@ def output_table(
         else:
             by_rule[v.rule_id]["warnings"] += 1
 
-    print(f"\n{'-' * 60}")
-    print("BY RULE:")
+    # ``by_rule`` can be empty when the only findings are measurement info
+    # rows suppressed above (already surfaced in MEASUREMENT SUMMARY); skip the
+    # empty BY RULE header in that case.
+    if by_rule:
+        print(f"\n{'-' * 60}")
+        print("BY RULE:")
     for rule_id, counts in sorted(
         by_rule.items(),
         key=lambda x: -(x[1]["errors"] + x[1]["warnings"] + x[1]["infos"]),
@@ -1133,14 +1240,23 @@ def output_table(
         if len(warnings) > 10 and not verbose:
             print(f"\n  ... and {len(warnings) - 10} more warnings (use --verbose)")
 
-    if infos:
+    # Issue #3924 AC1/AC4: the per-pair / per-group measurement info findings
+    # are shown in the dedicated MEASUREMENT SUMMARY table above at every
+    # verbosity.  In the generic INFOS listing we keep them only under
+    # ``--verbose`` (preserving PR #3948's advisory-line behaviour) and
+    # suppress them on the default path to avoid duplicating the summary
+    # and flooding plain output.
+    display_infos_source = (
+        infos if verbose else [v for v in infos if v.rule_id not in _MEASUREMENT_RULE_IDS]
+    )
+    if display_infos_source:
         print(f"\n{'-' * 60}")
         print("INFOS (advisory only):")
-        display_infos = infos if verbose else infos[:10]
+        display_infos = display_infos_source if verbose else display_infos_source[:10]
         for v in display_infos:
             _print_violation(v, verbose)
-        if len(infos) > 10 and not verbose:
-            print(f"\n  ... and {len(infos) - 10} more infos (use --verbose)")
+        if len(display_infos_source) > 10 and not verbose:
+            print(f"\n  ... and {len(display_infos_source) - 10} more infos (use --verbose)")
 
     print(f"\n{'=' * 60}")
     if errors:

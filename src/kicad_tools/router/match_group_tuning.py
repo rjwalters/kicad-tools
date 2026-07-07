@@ -356,6 +356,45 @@ def format_reason_counts(reasons: Iterable[str]) -> str:
     return ", ".join(parts)
 
 
+def group_skew_before_after(
+    lengths: Iterable[tuple[float, float]],
+) -> tuple[float, float] | None:
+    """Compute a group's length-skew before and after tuning.
+
+    Issue #3924 AC2.  A match group's skew is the ``max(L) - min(L)`` spread
+    across its members' routed lengths.  Given each member's
+    ``(length_before_mm, length_after_mm)`` (from :attr:`TuneResult`), this
+    returns ``(skew_before_mm, skew_after_mm)`` so the tuner's verbose
+    summary can report the achieved improvement per group.
+
+    Members whose *before* and *after* lengths are both ``0.0`` (unrouted
+    placeholders) are excluded from the spread -- an unrouted member has no
+    measured length and would otherwise drag the min to 0 and inflate the
+    reported skew.
+
+    Args:
+        lengths: Iterable of ``(before_mm, after_mm)`` pairs, one per group
+            member.
+
+    Returns:
+        ``(skew_before_mm, skew_after_mm)`` rounded to 4 decimals, or
+        ``None`` when fewer than two members carry a measured length (skew
+        is undefined for a single trace).
+    """
+    befores: list[float] = []
+    afters: list[float] = []
+    for before, after in lengths:
+        if before == 0.0 and after == 0.0:
+            continue
+        befores.append(before)
+        afters.append(after)
+    if len(befores) < 2:
+        return None
+    skew_before = max(befores) - min(befores)
+    skew_after = max(afters) - min(afters)
+    return round(skew_before, 4), round(skew_after, 4)
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
