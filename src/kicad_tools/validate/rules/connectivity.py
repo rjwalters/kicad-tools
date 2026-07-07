@@ -108,6 +108,24 @@ class ConnectivityRule(DRCRule):
             if net_status.status == "complete":
                 continue
 
+            # Pour/plane nets whose incomplete status is a stitching residual
+            # (a thermal-relief cutout or a discontinuous fill island) are
+            # advisory, not a missing-trace defect (Issue #3914).  The false
+            # positive this fixes: a GND pour net that owns filled copper
+            # zones, reported "partially routed" here even though kicad-cli
+            # reports 0 unconnected on the same file (boards 03/04/06).
+            #
+            # The suppression is gated on ``has_filled_zone`` (the net owns a
+            # zone that produced REAL fill copper), NOT on the name-based
+            # ``net_type`` heuristic: a pour-NAMED net with no zone -- or a
+            # zone with fill disabled / zero filled polygons -- is genuinely
+            # disconnected and still fires (``test_pour_named_net_without_zone_fires``
+            # and the zero-fill edge case).  ``is_advisory_incomplete`` already
+            # requires ``status == "incomplete"``, so a pour net that is fully
+            # ``unrouted`` (no copper at all) is not suppressed either.
+            if net_status.has_filled_zone and net_status.is_advisory_incomplete:
+                continue
+
             # Choose a representative location: the first unconnected
             # pad (sorted alphabetically by REF.PAD inside
             # NetStatusAnalyzer) gives a stable, reproducible coordinate

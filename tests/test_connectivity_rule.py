@@ -194,6 +194,51 @@ def _three_pad_pour_with_zone_pcb() -> str:
     )
 
 
+def _discontinuous_pour_pcb() -> str:
+    """A GND pour whose fill reaches only one of its two pads.
+
+    The zone boundary (95..125, 95..105) contains both GND pads, but the
+    single filled polygon covers only the left island (95..105): R1.1 at
+    (99, 100) lands on real fill copper while R2.1 at (119, 100) sits in the
+    boundary-only gap with no copper reaching it.  Under the island-aware
+    connectivity model (#3914) this net is genuinely ``incomplete`` -- R2.1 is
+    stranded on the manufactured board.  Because the net owns real filled pour
+    copper, the residual is advisory (a stitching gap, not a missing signal
+    trace), so ``ConnectivityRule`` must NOT fire a hard error.  This is the
+    boards 03/04/06 "GND N of M pads stranded" false positive.
+    """
+    return (
+        _PCB_HEADER
+        + """
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0805" (layer "F.Cu")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -2 0) (layer "F.SilkS") (uuid "00000000-0000-0000-0000-000000000001"))
+    (property "Value" "10k" (at 0 2 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-000000000002"))
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND") (uuid "00000000-0000-0000-0000-000000000003"))
+  )
+  (footprint "Resistor_SMD:R_0805" (layer "F.Cu")
+    (at 120 100)
+    (property "Reference" "R2" (at 0 -2 0) (layer "F.SilkS") (uuid "00000000-0000-0000-0000-000000000004"))
+    (property "Value" "10k" (at 0 2 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-000000000005"))
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND") (uuid "00000000-0000-0000-0000-000000000006"))
+  )
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "00000000-0000-0000-0000-00000000000a") (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.25)
+    (filled_areas_thickness no)
+    (polygon (pts (xy 95 95) (xy 125 95) (xy 125 105) (xy 95 105)))
+    (filled_polygon
+      (layer "F.Cu")
+      (pts (xy 95 95) (xy 105 95) (xy 105 105) (xy 95 105))
+    )
+  )
+)
+"""
+    )
+
+
 def _three_pad_pour_no_zone_pcb() -> str:
     """Three GND pads, no copper zone, no traces -- still an error.
 
@@ -319,6 +364,39 @@ class TestConnectivityRuleUnit:
         # All three GND pads are inside the same-net filled polygon, so
         # NetStatusAnalyzer reports status="complete" and the rule
         # produces zero violations.
+        assert results.error_count == 0
+
+    def test_discontinuous_pour_does_not_fire(self, tmp_path: Path) -> None:
+        """A pour net with real fill but a stitching residual is advisory (#3914).
+
+        GND owns a filled F.Cu zone, but the fill reaches only R1.1; R2.1 is
+        stranded in the boundary-only gap.  ``NetStatusAnalyzer`` correctly
+        reports the net ``incomplete`` (R2.1 is genuinely off-copper), but
+        because the net owns real filled pour copper the incompleteness is a
+        stitching residual -- advisory, not a missing-trace defect -- so the
+        rule must produce zero errors.  This is the false positive removed by
+        the ``has_filled_zone`` guard.
+        """
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.connectivity import ConnectivityRule
+
+        pcb_path = tmp_path / "discontinuous_pour.kicad_pcb"
+        pcb_path.write_text(_discontinuous_pour_pcb())
+        pcb = PCB.load(pcb_path)
+        rules = get_profile("jlcpcb").get_design_rules(2, 1.0)
+
+        # Precondition: the net really is incomplete-but-advisory, so the
+        # zero-error result below exercises the suppression path (not the
+        # "complete" fast path).
+        gnd = NetStatusAnalyzer(pcb).analyze().get_net("GND")
+        assert gnd is not None
+        assert gnd.status == "incomplete"
+        assert gnd.has_filled_zone is True
+        assert gnd.is_advisory_incomplete is True
+
+        results = ConnectivityRule().check(pcb, rules)
         assert results.error_count == 0
 
     def test_pour_named_net_without_zone_fires(self, tmp_path: Path) -> None:
