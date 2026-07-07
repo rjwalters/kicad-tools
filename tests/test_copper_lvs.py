@@ -89,6 +89,54 @@ def test_open_detected_when_same_net_splits_across_islands() -> None:
     assert {open_rec.pad_a, open_rec.pad_b} == {"R1.1", "R2.1"}
 
 
+def test_pour_opens_suppressed() -> None:
+    """Advisory pour nets suppress opens; signal nets still report them (#3914).
+
+    A pour-routed net (GND) whose fill has not yet been stitched leaves its
+    pads in separate copper islands.  Reporting one advisory "open" per
+    stranded pad drowns real signal opens in noise (88-105 of them on board
+    05), so opens are suppressed for nets in ``advisory_net_names``.  A signal
+    net split across two islands is a genuine open and is still reported, and
+    a pour net copper-fused to a *foreign* net is still a short.
+    """
+    sch = {
+        ("U1", "1"): "GND",
+        ("U2", "1"): "GND",
+        ("R1", "1"): "SIG",
+        ("R2", "1"): "SIG",
+    }
+    # GND split across two islands (unstitched pour); SIG split across two
+    # islands (genuine signal open).
+    partition = [
+        frozenset({"U1.1"}),
+        frozenset({"U2.1"}),
+        frozenset({"R1.1"}),
+        frozenset({"R2.1"}),
+    ]
+
+    # Without the advisory filter both nets report an open.
+    strict = compare_partitions(sch, partition)
+    assert {o.net_a for o in strict.opens} == {"GND", "SIG"}
+
+    # With GND marked advisory, only the SIG open survives.
+    filtered = compare_partitions(sch, partition, advisory_net_names=frozenset({"GND"}))
+    assert [o.net_a for o in filtered.opens] == ["SIG"]
+    assert filtered.shorts == ()
+
+
+def test_pour_advisory_filter_does_not_suppress_shorts() -> None:
+    """Opens are suppressed for advisory nets, but shorts never are (#3914)."""
+    sch = {
+        ("U1", "1"): "GND",
+        ("R1", "1"): "SIG",
+    }
+    # GND and SIG copper-fused into one island -> a real short.
+    partition = [frozenset({"U1.1", "R1.1"})]
+    result = compare_partitions(sch, partition, advisory_net_names=frozenset({"GND"}))
+    assert len(result.shorts) == 1
+    assert {result.shorts[0].net_a, result.shorts[0].net_b} == {"GND", "SIG"}
+
+
 def test_floating_schematic_pin_excluded_from_diff() -> None:
     """A pin with no schematic net (None) is ignored, not flagged."""
     sch = {
@@ -825,6 +873,192 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
     result = compare_copper_netlist(sch, pcb)
     assert isinstance(result, CopperLVSResult)
     assert result.clean, f"pour-heavy board 07 copper LVS unexpectedly dirty: {result.mismatches}"
+
+
+# ---------------------------------------------------------------------------
+# Via-to-foreign-pour short detection (issue #3909)
+# ---------------------------------------------------------------------------
+#
+# A stitch/connectivity via whose *copper ring* overlaps a foreign-net pour is
+# a real electrical short that kicad-cli's ``--refill-zones`` DRC flags but the
+# Python-fill-based copper-LVS historically missed: KiCad carves an antipad
+# clearance hole centred on every foreign via, so the via *centre* always sits
+# in that hole.  The pre-#3909 extractor tested each via as a bare centre POINT
+# against the pour solid region, so a via whose ring poked past a marginal /
+# too-small antipad into the solid pour was never bonded and the short was
+# invisible.  Representing the via as its copper CIRCLE catches the overlap.
+
+# Solid GND pour on F.Cu over x=8..20, y=0..20, with a SMALL antipad hole
+# (0.4 x 0.4, centred on the via at (10, 10)) carved out the way KiCad
+# flattens a hole: one ring whose boundary dips into the cutout through a
+# narrow slit.  ``_fill_solid_region`` (shapely buffer(0)) re-derives the hole.
+# The via centre lands INSIDE this hole (a bare-point test bonds nothing), but
+# the via's copper ring (size 1.0 -> radius 0.5, eroded to 0.4) reaches 0.2 mm
+# past the hole edge (at 0.2 mm) into the solid pour -> a real short.
+_VIA_POUR_FILL_RING = (
+    "(xy 8 0) (xy 9.98 0) (xy 9.98 9.8) "
+    "(xy 9.8 9.8) (xy 9.8 10.2) (xy 10.2 10.2) (xy 10.2 9.8) "
+    "(xy 10.02 9.8) (xy 10.02 0) "
+    "(xy 20 0) (xy 20 20) (xy 8 20) (xy 8 0)"
+)
+
+
+def _pcb_via_grazes_foreign_pour() -> str:
+    """A SIG via whose copper ring pokes into a GND pour past a marginal antipad.
+
+    * ``R2`` pad "1" at board (5, 10): declared **SIG**, sits OUTSIDE the pour
+      (pour starts at x=8) so it is not bonded to GND by its own copper.
+    * A track segment ties R2.1 to a via at (10, 10) (also SIG copper).
+    * The via at (10, 10) sits in the GND pour's antipad hole, but its copper
+      ring pokes past the too-small hole into the solid GND pour.
+    * ``R3`` pad "1" at board (15, 10): declared **GND**, copper in the solid
+      pour -> bonded, the GND anchor the via shorts against.
+
+    Result: R2.1 --seg--> via --(ring overlap)--> GND pour --> R3.1, fusing SIG
+    and GND into one copper island (a short) that a bare-centre-point via test
+    would miss (the via centre is moated out by the antipad hole).
+    """
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000c1")
+    (at 5 10)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-c1-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-c1-val"))
+    (pad "1" smd roundrect (at 0 0) (size 1.5 1.5) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 2 "SIG"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000c3")
+    (at 15 10)
+    (property "Reference" "R3" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-c3-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-c3-val"))
+    (pad "1" smd roundrect (at 0 0) (size 1.5 1.5) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (segment (start 5 10) (end 10 10) (width 0.25) (layer "F.Cu") (net 2))
+  (via (at 10 10) (size 1.0) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2 "SIG"))
+  (zone
+    (net 1 "GND")
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000z3")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 8 0) (xy 20 0) (xy 20 20) (xy 8 20)))
+    (filled_polygon (layer "F.Cu") (pts {_VIA_POUR_FILL_RING}))
+  )
+)
+"""
+
+
+_VIA_POUR_SCHEMATIC: dict[tuple[str, str], str | None] = {
+    ("R2", "1"): "SIG",
+    ("R3", "1"): "GND",
+}
+
+
+def _point_via_partition(pcb_path: Path) -> list[frozenset[str]]:
+    """Extract the partition under the LEGACY bare-centre-point via model.
+
+    Patches :meth:`ConnectivityValidator._via_copper_geom` to return a bare
+    ``Point`` (the pre-#3909 behaviour) so the very same fixture can be run
+    through the old via-vs-pour test on which the short was invisible.
+    """
+    from unittest import mock
+
+    from shapely.geometry import Point as _P  # type: ignore[import-untyped]
+
+    def _point_only(self: ConnectivityValidator, pos, radius):  # noqa: ANN001, ARG001
+        return _P(pos)
+
+    with mock.patch.object(ConnectivityValidator, "_via_copper_geom", _point_only):
+        return ConnectivityValidator(pcb_path).extract_pad_partition()
+
+
+@requires_shapely
+def test_via_grazing_foreign_pour_is_a_short(tmp_path: Path) -> None:
+    """Crux (#3909): same fixture, POINT via model masks, CIRCLE model catches.
+
+    A SIG via's copper ring overlaps a GND pour (its antipad hole is marginal /
+    too small).  The via centre is moated out, so the old bare-point test never
+    bonds it and copper-LVS reports CLEAN — the exact blind spot that let a
+    board ship ``lvs_clean: true`` while kicad-cli reported ``shorting_items``.
+    The copper-circle test bonds the ring into the pour, surfacing the short.
+    """
+    pcb_path = _write(tmp_path, "via_pour.kicad_pcb", _pcb_via_grazes_foreign_pour())
+
+    # --- OLD bare-point via model: masks the short (clean) ---
+    old_partition = _point_via_partition(pcb_path)
+    old_result = compare_partitions(_VIA_POUR_SCHEMATIC, old_partition)
+    assert old_result.clean, (
+        "the legacy bare-centre-point via test should MASK this via-to-foreign-"
+        f"pour short (the via centre is moated out); got {old_result.mismatches}"
+    )
+
+    # --- NEW copper-circle via model: catches the short (dirty) ---
+    new_partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    new_result = compare_partitions(_VIA_POUR_SCHEMATIC, new_partition)
+    assert not new_result.clean, (
+        "the via copper-circle test must FLAG the via-to-foreign-pour short; "
+        f"partition={new_partition}"
+    )
+    short_pairs = {frozenset({m.net_a, m.net_b}) for m in new_result.shorts}
+    assert frozenset({"GND", "SIG"}) in short_pairs, (
+        f"expected a GND/SIG short named on both nets; shorts={new_result.shorts}"
+    )
+    # R2.1 (SIG) and R3.1 (GND) are fused into one copper island by the via.
+    fused = next(c for c in new_partition if "R2.1" in c)
+    assert {"R2.1", "R3.1"} <= fused, (
+        f"the via must fuse the SIG pad and the GND pour anchor; got {fused}"
+    )
+
+
+@requires_shapely
+def test_via_on_net0_adjacent_to_pour_is_not_a_false_short(tmp_path: Path) -> None:
+    """Edge case (#3909): a net-0 via with a proper antipad raises no false SHORT.
+
+    Relabel the via to net 0 (unconnected) and widen the antipad hole so the
+    via copper stays clear of the solid pour (a DRC-clean placement).  The
+    copper-circle test must NOT fabricate a short: with a proper clearance moat
+    the eroded ring never reaches the solid pour, and a net-0 via carries no
+    schematic net to short in any case.
+    """
+    # Wider antipad hole (1.2 x 1.2 around the via) so the eroded via ring
+    # (radius 0.4) stays inside the hole -> no bond to the solid pour.
+    wide_hole_ring = (
+        "(xy 8 0) (xy 9.98 0) (xy 9.98 9.4) "
+        "(xy 9.4 9.4) (xy 9.4 10.6) (xy 10.6 10.6) (xy 10.6 9.4) "
+        "(xy 10.02 9.4) (xy 10.02 0) "
+        "(xy 20 0) (xy 20 20) (xy 8 20) (xy 8 0)"
+    )
+    src = (
+        _pcb_via_grazes_foreign_pour()
+        .replace(
+            '(via (at 10 10) (size 1.0) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2 "SIG"))',
+            '(via (at 10 10) (size 1.0) (drill 0.4) (layers "F.Cu" "B.Cu") (net 0 ""))',
+        )
+        .replace(_VIA_POUR_FILL_RING, wide_hole_ring)
+    )
+    pcb_path = _write(tmp_path, "via_pour_clean.kicad_pcb", src)
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    result = compare_partitions(_VIA_POUR_SCHEMATIC, partition)
+    assert result.clean, (
+        "a net-0 via with a proper antipad clearance moat must not be reported "
+        f"as a short; mismatches={result.mismatches}"
+    )
 
 
 # ---------------------------------------------------------------------------

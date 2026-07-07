@@ -830,10 +830,16 @@ class TestBoard06StrictGateGuard:
     # Net: 18 diff-pair + 1 drill + 5 clearance/via = 24.  When #3540-#3544
     # drive the diff-pair errors down, tighten this AND the tolerance entry.
     EXPECTED_STRICT_GATE_ERRORS = 24
-    # Advisory ``connectivity`` dropped 2 -> 1 on the fresh re-route (one
-    # fewer NetStatusAnalyzer false positive); the copper-union audit still
-    # PASSES (see ``TestPourCopperUnionAudit``).
-    EXPECTED_ADVISORY_CONNECTIVITY = 1
+    # Advisory ``connectivity`` is now 0 (Issue #3914).  The residual entries
+    # were ``NetStatusAnalyzer`` false positives on GND / +1V2 pour nets: the
+    # pre-#3914 per-net model bulk-connected every pad inside a zone boundary
+    # and then flagged a stitching residual as "partially routed" even though
+    # the net owns filled pour copper and kicad-cli reports it clean.  The
+    # ``ConnectivityRule`` now defers to the pour classification (``has_filled_zone``
+    # + ``is_advisory_incomplete``) and emits nothing for these nets, so the
+    # advisory count drops to 0.  The copper-union audit still PASSES (see
+    # ``TestPourCopperUnionAudit``).
+    EXPECTED_ADVISORY_CONNECTIVITY = 0
 
     @pytest.fixture(scope="class")
     def routed_pcb(self) -> Path:
@@ -995,18 +1001,22 @@ class TestBoard06StrictGateGuard:
         )
 
     def test_advisory_connectivity_pinned(self, strict_gate_result: dict) -> None:
-        """Advisory ``connectivity`` count pinned at 2 (GND + +1V2).
+        """Advisory ``connectivity`` count pinned at 0 (Issue #3914).
 
         Issue #3413 phases 4-6: all 21 signal nets are routed (the
         historical USB3_TX1+/USB3_TX1-/MIPI_RST incompletes are gone)
         and every pour net is GENUINELY one copper component per the
-        copper-union audit (``TestPourCopperUnionAudit``).  The 2
-        remaining advisory entries are ``NetStatusAnalyzer`` false
-        positives: its per-net model cannot follow the
-        pad -> stub -> via -> plane-fill chain the phase-4 stitching
-        uses (the inverse face of the #3482 analyzer gap).  A drift in
-        this count means the stitch/repair pipeline gained or lost
-        coverage -- investigate with the copper-union audit before
+        copper-union audit (``TestPourCopperUnionAudit``).  The formerly
+        pinned advisory entries were ``NetStatusAnalyzer`` false positives
+        on the GND / +1V2 pour nets -- its per-net model bulk-connected
+        every pad inside a zone boundary and then reported a stitching
+        residual as "partially routed", even though the net owns filled
+        pour copper and kicad-cli reports it clean.  Issue #3914 taught
+        ``ConnectivityRule`` to defer to the pour classification
+        (``has_filled_zone`` + ``is_advisory_incomplete``), so no
+        connectivity violation is emitted for these nets and the advisory
+        count is now 0.  A drift ABOVE 0 means a genuinely-unrouted net
+        regressed -- investigate with the copper-union audit before
         updating the pin.
         """
         violations = strict_gate_result.get("violations", [])
@@ -1016,7 +1026,7 @@ class TestBoard06StrictGateGuard:
         assert connectivity == self.EXPECTED_ADVISORY_CONNECTIVITY, (
             f"Advisory connectivity count on the committed routed PCB is "
             f"{connectivity}; expected {self.EXPECTED_ADVISORY_CONNECTIVITY} "
-            f"(GND + +1V2 analyzer false positives; see #3482).  A change "
+            f"(GND + +1V2 pour false positives removed by #3914).  A change "
             f"here indicates the stitch/repair pipeline gained or lost "
             f"coverage -- investigate before updating the pin."
         )
@@ -1070,3 +1080,95 @@ class TestPourCopperUnionAudit:
             + "\nRe-run: PYTHONHASHSEED=42 python "
             "boards/06-diffpair-test/generate_design.py --step route --seed 42"
         )
+
+
+# =============================================================================
+# Issue #3913: post-quantize clearance re-validation gate (step 12d)
+# =============================================================================
+
+
+_GATE_HEADER_4L = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (4 "In1.Cu" signal)
+    (6 "In2.Cu" signal)
+    (2 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG1")
+  (net 2 "SIG2")
+"""
+
+
+def _gate_pcb(seg_x: float) -> str:
+    """4-layer board: net-1 through-via at (100,100), net-2 In1.Cu segment.
+
+    Edge-to-edge clearance is ``|seg_x - 100| - 0.4`` (via radius 0.3 +
+    trace half-width 0.1).  ``seg_x=100.3`` -> -0.1 mm (hard graze, a
+    clearance violation); ``seg_x=101`` -> +0.6 mm (clean).
+    """
+    return (
+        _GATE_HEADER_4L
+        + "  (via (at 100 100) (size 0.6) (drill 0.3)"
+        + ' (layers "F.Cu" "B.Cu") (net 1 "SIG1") (uuid "via-1"))\n'
+        + f"  (segment (start {seg_x} 99) (end {seg_x} 101) (width 0.2)"
+        + ' (layer "In1.Cu") (net 2 "SIG2") (uuid "seg-1"))\n'
+        + ")\n"
+    )
+
+
+class TestPostQuantizeClearanceGate:
+    """The step-12d gate flags dogleg-introduced grazes (issue #3913).
+
+    ``quantize.py``'s ``dogleg_points()`` docstring obliges callers that
+    mutate committed copper to re-verify clearances afterward.  Board 06's
+    pipeline previously returned from step 12 with no clearance gate,
+    certifying a segment-to-via short that ``kicad-cli`` flagged.  These
+    tests exercise the two helper functions the gate is built from.
+    """
+
+    def test_new_graze_vs_empty_baseline_fails(self, generate_design_mod, tmp_path: Path):
+        """A grazing segment absent from the baseline aborts the build."""
+        pcb_path = tmp_path / "grazed.kicad_pcb"
+        pcb_path.write_text(_gate_pcb(seg_x=100.3))  # -0.1 mm clearance
+        # Empty baseline => the graze is a NEW violation => gate returns False.
+        ok = generate_design_mod._check_post_quantize_clearances(pcb_path, set())
+        assert ok is False, (
+            "A segment grazing a foreign via barrel (-0.1 mm clearance) that "
+            "is absent from the pre-quantize baseline must fail the step-12d "
+            "gate (issue #3913)."
+        )
+
+    def test_baseline_violation_is_tolerated(self, generate_design_mod, tmp_path: Path):
+        """A violation already in the baseline does NOT re-trigger the gate.
+
+        The board ships a documented, allowlisted marginal-clearance
+        baseline; the gate must fire only on NEW violations the quantize
+        mutation introduces, not re-flag pre-existing copper.
+        """
+        pcb_path = tmp_path / "grazed.kicad_pcb"
+        pcb_path.write_text(_gate_pcb(seg_x=100.3))
+        baseline = generate_design_mod._clearance_signature(pcb_path)
+        assert baseline, "fixture must have at least one baseline violation"
+        # Same file => post == baseline => no NEW violation => gate passes.
+        ok = generate_design_mod._check_post_quantize_clearances(pcb_path, baseline)
+        assert ok is True, (
+            "A clearance violation present in the pre-quantize baseline must "
+            "be tolerated by the gate (only NEW grazes abort). "
+        )
+
+    def test_clean_board_passes(self, generate_design_mod, tmp_path: Path):
+        """No violations anywhere => gate passes with an empty baseline."""
+        pcb_path = tmp_path / "clean.kicad_pcb"
+        pcb_path.write_text(_gate_pcb(seg_x=101.0))  # +0.6 mm clearance
+        assert generate_design_mod._clearance_signature(pcb_path) == set()
+        ok = generate_design_mod._check_post_quantize_clearances(pcb_path, set())
+        assert ok is True

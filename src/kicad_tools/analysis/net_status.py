@@ -21,7 +21,7 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
 
@@ -74,6 +74,7 @@ class NetStatus:
     plane_layers: list[str] = field(default_factory=list)
     has_routing: bool = False
     has_vias: bool = False
+    has_filled_zone: bool = False  # A zone on this net produced fill copper
 
     @property
     def connected_count(self) -> int:
@@ -183,6 +184,7 @@ class NetStatus:
             "unconnected_count": self.unconnected_count,
             "connection_percentage": round(self.connection_percentage, 1),
             "is_plane_net": self.is_plane_net,
+            "has_filled_zone": self.has_filled_zone,
             "is_advisory_incomplete": self.is_advisory_incomplete,
             "plane_layer": self.plane_layer,
             "plane_layers": list(self.plane_layers),
@@ -473,6 +475,13 @@ class NetStatusAnalyzer:
             status.is_plane_net = True
             status.plane_layers = zone_nets[net_number]
             status.plane_layer = zone_nets[net_number][0]
+            # A zone that produced no filled copper (fill disabled, or fully
+            # carved away) provides no connectivity (Issue #3482) and is NOT a
+            # basis for suppressing a connectivity error (Issue #3914): only a
+            # zone with real fill copper makes an incomplete pour net advisory.
+            status.has_filled_zone = any(
+                zone.net_number == net_number and zone.filled_polygons for zone in self.pcb.zones
+            )
 
         # Check for routing
         segments = list(self.pcb.segments_in_net(net_number))
@@ -696,107 +705,30 @@ class NetStatusAnalyzer:
                             graph[pad].add(other)
                             graph[other].add(pad)
 
-        # Build bounding-box indices for zone polygons to avoid O(n*v) point-in-polygon
-        # checks for zones whose bounding box doesn't contain the query point.
-        boundary_bboxes = [
-            (layer, boundary, self._polygon_bbox(boundary)) for layer, boundary in zone_boundaries
-        ]
-        filled_bboxes = [
-            (layer, polys, [self._polygon_bbox(p) for p in polys]) for layer, polys in net_zones
-        ]
-
-        # Find zone connection points (via positions that touch zones)
-        # Check BOTH filled polygons AND zone boundaries because:
-        # - Filled polygons have thermal clearance cutouts around pads
-        # - Stitching vias are placed at pad positions (inside those cutouts)
-        # - But they ARE still within the zone boundary and thus connected
-        zone_connection_points: set[tuple[float, float]] = set()
-
-        # Check vias against zone boundaries (Issue #479 fix)
-        # This catches vias in thermal clearance cutouts that are still in the zone.
-        # Use _via_spans_layer to handle through-vias whose layer list is
-        # ["F.Cu", "B.Cu"] but which electrically connect all intermediate layers.
-        for zone_layer, boundary, bbox in boundary_bboxes:
-            for via in vias:
-                if not self._via_spans_layer(via.layers, zone_layer):
-                    continue
-                if not self._point_in_bbox(via.position, bbox):
-                    continue
-                if self._point_in_polygon(via.position, boundary):
-                    zone_connection_points.add(via.position)
-
-        # Also check vias against filled polygons (original behavior)
-        for zone_layer, filled_polys, poly_bboxes in filled_bboxes:
-            for via in vias:
-                if not self._via_spans_layer(via.layers, zone_layer):
-                    continue
-                for poly, bbox in zip(filled_polys, poly_bboxes, strict=False):
-                    if not self._point_in_bbox(via.position, bbox):
-                        continue
-                    if self._point_in_polygon(via.position, poly):
-                        zone_connection_points.add(via.position)
-                        break
-
-        # Connect pads through via-to-zone connectivity
-        # A pad is zone-connected if:
-        # 1. It's directly at a zone connection point, OR
-        # 2. It's in a segment chain that touches a zone connection point
-        zone_connected_pads: set[str] = set()
-
-        # Pads directly at zone connection points
-        for zcp in zone_connection_points:
-            zone_connected_pads.update(self._find_pads_at_point(zcp, pad_positions))
-
-        # Pads that directly overlap with zone boundaries or filled polygons (Issue #441, #479)
-        # This handles through-hole pads that connect to inner layer zones
-        # Check boundaries first (catches pads in thermal clearance cutouts)
-        for pad_id, pad_pos in pad_positions.items():
-            layers = pad_layers.get(pad_id, [])
-            # Check zone boundaries (Issue #479 fix)
-            for zone_layer, boundary, bbox in boundary_bboxes:
-                if not self._pad_layer_matches_zone(layers, zone_layer):
-                    continue
-                if not self._point_in_bbox(pad_pos, bbox):
-                    continue
-                if self._point_in_polygon(pad_pos, boundary):
-                    zone_connected_pads.add(pad_id)
-                    break
-            # Also check filled polygons (original behavior)
-            for zone_layer, filled_polys, poly_bboxes in filled_bboxes:
-                if not self._pad_layer_matches_zone(layers, zone_layer):
-                    continue
-                for poly, bbox in zip(filled_polys, poly_bboxes, strict=False):
-                    if not self._point_in_bbox(pad_pos, bbox):
-                        continue
-                    if self._point_in_polygon(pad_pos, poly):
-                        zone_connected_pads.add(pad_id)
-                        break
-
-        # Pads connected via segment chains that touch zone connection points
-        for component in segment_components:
-            touches_zone = False
-            for seg_idx in component:
-                seg = segments[seg_idx]
-                for zcp in zone_connection_points:
-                    if self._points_close(seg.start, zcp) or self._points_close(seg.end, zcp):
-                        touches_zone = True
-                        break
-                if touches_zone:
-                    break
-
-            if touches_zone:
-                # All pads in this segment chain are connected to the zone
-                for seg_idx in component:
-                    seg = segments[seg_idx]
-                    zone_connected_pads.update(self._find_pads_at_point(seg.start, pad_positions))
-                    zone_connected_pads.update(self._find_pads_at_point(seg.end, pad_positions))
-
-        # Connect all zone-connected pads to each other
-        zone_pad_list = list(zone_connected_pads)
-        for i, pad in enumerate(zone_pad_list):
-            for other in zone_pad_list[i + 1 :]:
-                graph[pad].add(other)
-                graph[other].add(pad)
+        # --- Zone / pour connectivity via per-fill-island grouping (#3914) ---
+        # The previous model added every pad inside a zone *boundary* polygon
+        # to one global ``zone_connected_pads`` set and connected them all to
+        # each other, treating the whole zone outline as a single copper
+        # component.  A pour whose fill has a discontinuity (two isolated copper
+        # islands) therefore still reported every boundary-interior pad as
+        # mutually connected -> a false ``complete`` even when kicad-cli
+        # reported unconnected items.  We now group pads by the poured copper
+        # *island* their copper actually overlaps (hole-aware solid region,
+        # matching ``ConnectivityValidator.extract_pad_partition``), so a pad
+        # reachable only through island A is not fused with a pad on a separate
+        # island B, and a pad sitting in the zone outline but not on any real
+        # fill copper is not spuriously connected at all.
+        self._apply_zone_connectivity(
+            net_number,
+            graph,
+            pad_positions,
+            pad_layers,
+            vias,
+            segments,
+            segment_components,
+            net_zones,
+            zone_boundaries,
+        )
 
         # Connect pads at same copper positions (segments and vias only).
         # Zone polygon vertices are NOT sampled here because the pad-to-zone
@@ -817,6 +749,278 @@ class NetStatusAnalyzer:
                             graph[other_id].add(pad_id)
 
         return graph
+
+    def _connectivity_geometry(self) -> Any:
+        """Return a cached :class:`ConnectivityValidator` for geometry reuse.
+
+        ``NetStatusAnalyzer`` reuses the validator's hole-aware pour geometry
+        (``_pad_copper_polygon`` / ``_fill_solid_region`` / ``_via_copper_geom``)
+        so the zone-connectivity model here stays byte-for-byte consistent with
+        the reference partition extractor (Issue #3914).  The validator is
+        constructed from the already-loaded PCB object (no re-parse) and cached
+        for the lifetime of this analyzer.
+        """
+        cv = getattr(self, "_cv_geometry", None)
+        if cv is None:
+            from kicad_tools.validate.connectivity import ConnectivityValidator
+
+            cv = ConnectivityValidator(self.pcb)
+            self._cv_geometry = cv
+        return cv
+
+    def _apply_zone_connectivity(
+        self,
+        net_number: int,
+        graph: dict[str, set[str]],
+        pad_positions: dict[str, tuple[float, float]],
+        pad_layers: dict[str, list[str]],
+        vias: list,
+        segments: list,
+        segment_components: list[set[int]],
+        net_zones: list[tuple[str, list[list[tuple[float, float]]]]],
+        zone_boundaries: list[tuple[str, list[tuple[float, float]]]],
+    ) -> None:
+        """Wire zone/pour copper into the graph, one group per fill island.
+
+        Computes per-fill-island pad groups (Issue #3914) and unions each
+        group into ``graph``.  Pads on separate poured copper islands are NOT
+        connected, so a discontinuous fill reports ``incomplete`` instead of a
+        false ``complete``.  When ``shapely`` is unavailable the hole-aware
+        island geometry cannot be computed, so we fall back to the legacy
+        boundary-polygon bulk-connect (one global zone component) to preserve
+        pre-#3914 behaviour on core-only installs.
+        """
+        groups = self._build_fill_island_groups(
+            net_number, pad_positions, pad_layers, vias, segments, segment_components
+        )
+        if groups is None:
+            legacy = self._legacy_zone_connected_pads(
+                pad_positions,
+                pad_layers,
+                vias,
+                segments,
+                segment_components,
+                net_zones,
+                zone_boundaries,
+            )
+            groups = [legacy] if legacy else []
+
+        for group in groups:
+            members = list(group)
+            for i, pad in enumerate(members):
+                for other in members[i + 1 :]:
+                    graph[pad].add(other)
+                    graph[other].add(pad)
+
+    def _build_fill_island_groups(
+        self,
+        net_number: int,
+        pad_positions: dict[str, tuple[float, float]],
+        pad_layers: dict[str, list[str]],
+        vias: list,
+        segments: list,
+        segment_components: list[set[int]],
+    ) -> list[set[str]] | None:
+        """Group this net's pads by the poured copper island they overlap.
+
+        Each ``filled_polygon`` is a poured copper island.  A pad is bonded to
+        a zone's fill iff its copper box overlaps the island's hole-aware solid
+        region (:meth:`ConnectivityValidator._fill_solid_region`) on a matching
+        copper layer -- clearance moats / thermal antipads carved out of the
+        pour are real holes the pad must not be tied across.  The pad *box*
+        (not its bare centre) is tested so a thermally-relieved pad, whose
+        centre sits in the antipad moat but whose copper edge reaches the
+        thermal spokes, still bonds.
+
+        A zone's fill fragments are unioned into a single group: KiCad
+        fragments one pour into many ``filled_polygon`` entries around thermal
+        reliefs, and all fragments of one ``zone`` object are the same net and
+        DRC-bonded (this avoids a false ``open`` for a pad alone in its own
+        thermal fragment).  Crucially the union is **per zone object**, not
+        global across all zones, so two pads covered by genuinely separate
+        pours (or separate zones) are only connected when a via / trace bridges
+        them.
+
+        Vias whose copper penetrates a fill island bond the pads reached
+        through them (directly, or via a segment chain ending at the via) into
+        that island, closing the ``pad -> trace -> stitch via -> pour`` path.
+
+        Returns ``None`` when ``shapely`` is unavailable (the caller then uses
+        the legacy boundary-based fallback); otherwise a list of pad-id groups,
+        one per bonded fill island.
+        """
+        from kicad_tools._shapely import has_shapely
+
+        if not has_shapely():
+            return None
+
+        cv = self._connectivity_geometry()
+
+        # Board-frame eroded copper box per pad on this net.  Reuse the
+        # reference validator's geometry so the model matches
+        # ``extract_pad_partition`` exactly.
+        pad_polys: dict[str, Any] = {}
+        for fp in self.pcb.footprints:
+            if not fp.reference or fp.reference.startswith("#"):
+                continue
+            for pad in fp.pads:
+                if pad.net_number != net_number:
+                    continue
+                if pad.number is None or pad.number == "":
+                    continue
+                pad_id = f"{fp.reference}.{pad.number}"
+                if pad_id not in pad_positions:
+                    continue
+                poly = cv._pad_copper_polygon(fp, pad)
+                if poly is not None:
+                    pad_polys[pad_id] = poly
+
+        # Copper-circle geometry per via (radius = size / 2, eroded like a pad
+        # box).  A via whose copper penetrates a pour's solid region ties any
+        # pad reachable through it into that island.
+        via_geoms = [
+            (
+                via,
+                cv._via_copper_geom(via.position, max(getattr(via, "size", 0.0) or 0.0, 0.0) / 2.0),
+            )
+            for via in vias
+        ]
+
+        groups: list[set[str]] = []
+        for zone in self.pcb.zones:
+            if zone.net_number != net_number or not zone.filled_polygons:
+                continue
+            bonded: set[str] = set()
+            for i, fill_pts in enumerate(zone.filled_polygons):
+                region = cv._fill_solid_region(fill_pts)
+                if region is None:
+                    continue
+                fill_layer = zone.filled_polygon_layer(i)
+
+                # Direct pad bonds: pad copper box overlaps the solid fill.
+                for pad_id, pad_geom in pad_polys.items():
+                    if not self._pad_layer_matches_zone(pad_layers.get(pad_id, []), fill_layer):
+                        continue
+                    if region.intersects(pad_geom):
+                        bonded.add(pad_id)
+
+                # Via bonds: a via whose copper penetrates this fill island ties
+                # the pads reached through it (directly or via a segment chain
+                # ending at the via) into the same island.
+                for via, via_geom in via_geoms:
+                    if not self._via_spans_layer(via.layers, fill_layer):
+                        continue
+                    if not region.intersects(via_geom):
+                        continue
+                    bonded.update(self._find_pads_at_point(via.position, pad_positions))
+                    for component in segment_components:
+                        touches = any(
+                            self._points_close(segments[s].start, via.position)
+                            or self._points_close(segments[s].end, via.position)
+                            for s in component
+                        )
+                        if not touches:
+                            continue
+                        for s in component:
+                            bonded.update(
+                                self._find_pads_at_point(segments[s].start, pad_positions)
+                            )
+                            bonded.update(self._find_pads_at_point(segments[s].end, pad_positions))
+
+            if bonded:
+                groups.append(bonded)
+        return groups
+
+    def _legacy_zone_connected_pads(
+        self,
+        pad_positions: dict[str, tuple[float, float]],
+        pad_layers: dict[str, list[str]],
+        vias: list,
+        segments: list,
+        segment_components: list[set[int]],
+        net_zones: list[tuple[str, list[list[tuple[float, float]]]]],
+        zone_boundaries: list[tuple[str, list[tuple[float, float]]]],
+    ) -> set[str]:
+        """Legacy boundary-based zone connectivity (shapely-absent fallback).
+
+        Reproduces the pre-#3914 behaviour: every pad inside a zone boundary or
+        filled polygon (plus pads reached through vias / segment chains that
+        touch a zone) is collected into one global set that is then fully
+        interconnected.  This is only used when ``shapely`` is unavailable and
+        the hole-aware per-island model cannot run.
+        """
+        boundary_bboxes = [
+            (layer, boundary, self._polygon_bbox(boundary)) for layer, boundary in zone_boundaries
+        ]
+        filled_bboxes = [
+            (layer, polys, [self._polygon_bbox(p) for p in polys]) for layer, polys in net_zones
+        ]
+
+        zone_connection_points: set[tuple[float, float]] = set()
+
+        for zone_layer, boundary, bbox in boundary_bboxes:
+            for via in vias:
+                if not self._via_spans_layer(via.layers, zone_layer):
+                    continue
+                if not self._point_in_bbox(via.position, bbox):
+                    continue
+                if self._point_in_polygon(via.position, boundary):
+                    zone_connection_points.add(via.position)
+
+        for zone_layer, filled_polys, poly_bboxes in filled_bboxes:
+            for via in vias:
+                if not self._via_spans_layer(via.layers, zone_layer):
+                    continue
+                for poly, bbox in zip(filled_polys, poly_bboxes, strict=False):
+                    if not self._point_in_bbox(via.position, bbox):
+                        continue
+                    if self._point_in_polygon(via.position, poly):
+                        zone_connection_points.add(via.position)
+                        break
+
+        zone_connected_pads: set[str] = set()
+
+        for zcp in zone_connection_points:
+            zone_connected_pads.update(self._find_pads_at_point(zcp, pad_positions))
+
+        for pad_id, pad_pos in pad_positions.items():
+            layers = pad_layers.get(pad_id, [])
+            for zone_layer, boundary, bbox in boundary_bboxes:
+                if not self._pad_layer_matches_zone(layers, zone_layer):
+                    continue
+                if not self._point_in_bbox(pad_pos, bbox):
+                    continue
+                if self._point_in_polygon(pad_pos, boundary):
+                    zone_connected_pads.add(pad_id)
+                    break
+            for zone_layer, filled_polys, poly_bboxes in filled_bboxes:
+                if not self._pad_layer_matches_zone(layers, zone_layer):
+                    continue
+                for poly, bbox in zip(filled_polys, poly_bboxes, strict=False):
+                    if not self._point_in_bbox(pad_pos, bbox):
+                        continue
+                    if self._point_in_polygon(pad_pos, poly):
+                        zone_connected_pads.add(pad_id)
+                        break
+
+        for component in segment_components:
+            touches_zone = False
+            for seg_idx in component:
+                seg = segments[seg_idx]
+                for zcp in zone_connection_points:
+                    if self._points_close(seg.start, zcp) or self._points_close(seg.end, zcp):
+                        touches_zone = True
+                        break
+                if touches_zone:
+                    break
+
+            if touches_zone:
+                for seg_idx in component:
+                    seg = segments[seg_idx]
+                    zone_connected_pads.update(self._find_pads_at_point(seg.start, pad_positions))
+                    zone_connected_pads.update(self._find_pads_at_point(seg.end, pad_positions))
+
+        return zone_connected_pads
 
     def _build_segment_components(self, segments: list) -> list[set[int]]:
         """Build connected components of segments.

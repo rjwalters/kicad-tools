@@ -1654,7 +1654,27 @@ tolerances:
   # Exit clause: a via-balanced re-route (or artifact refresh, blocked on the
   # artifact-churn problem #3925) drops the skew error, at which point restore
   # 29 -> 28 and the MATCHGROUP baseline back to strict 0.  See #3931.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 29
+  #
+  # !!! 29 -> 35 (Issue #3913, DRC_TOLERANCE 0.005 -> 1e-4 mm) !!!
+  # ----------------------------------------------------------------------
+  # PR for #3913 tightens the DRC clearance guard band from 0.005 mm (5 um)
+  # to 1e-4 mm (0.1 um) in ``validate/rules/base.py``.  The old 5 um dead
+  # band silently PASSED clearance shortfalls up to 5 um below the floor --
+  # the exact marginal class this issue is about (e.g. 0.1000 mm actual vs a
+  # 0.1016 mm / 4 mil floor is a 1.6 um gap).  Removing that dead band
+  # unmasks 6 pre-existing TRUE-POSITIVE marginal ``clearance_*`` violations
+  # on board 07's committed artifact (the copper was always this close to
+  # the floor; the checker was just refusing to report it).  COMMITTED-
+  # artifact count (check_routed_drc.py AND the error-count arm of
+  # check_matchgroup_coverage.py, both on the fixed file, advisory
+  # connectivity=7 filtered) moves 29 -> 35, machine-deterministic (no
+  # re-route).  This +6 is checker-fidelity, not route variance, so it is
+  # reconciled here to the exact measured count (zero slack) rather than
+  # dismissed.  The from-scratch re-route arm of the match-group gate is
+  # unaffected (clearance tolerance does not change routing).  Exit clause:
+  # re-route board 07 so the six marginal pairs clear the floor by > 0.1 um,
+  # then ratchet 35 back down to the new committed count.  See #3913.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 35
 
   # Board 05 (BLDC motor controller).  Issue #3470 (2026-06-10) removed
   # this board's tolerances entry -- the committed artifact reached a

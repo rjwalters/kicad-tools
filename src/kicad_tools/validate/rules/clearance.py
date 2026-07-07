@@ -1089,24 +1089,50 @@ class ClearanceRule(DRCRule):
         loc_x: float,
         loc_y: float,
     ) -> DRCViolation:
-        """Create a DRC violation for a clearance issue."""
+        """Create a DRC violation for a clearance issue.
+
+        A *negative* ``actual`` means the two copper geometries physically
+        overlap — that is an electrical short, not a borderline clearance
+        violation.  In that case the message is promoted to a net-named
+        ``SHORT: ...`` string at default verbosity (issue #3909) so an
+        operator sees the same actionable signal ``kicad-cli`` emits
+        ("Items shorting two nets (A and B)"), instead of a net-anonymous
+        "Segment to via clearance -0.188mm < minimum ..." line that only
+        surfaces the nets under ``--verbose``.
+        """
         # Determine rule ID suffix based on element types
         types = sorted([elem1.element_type, elem2.element_type])
         rule_suffix = f"{types[0]}_{types[1]}"
 
+        net_a = elem1.net_name
+        net_b = elem2.net_name
+        if actual < 0 and net_a and net_b and net_a != net_b:
+            # Physical copper overlap between two distinct named nets: this is
+            # an electrical short, not a borderline clearance miss.  Promote
+            # the message to a net-named ``SHORT: ...`` line so it is visible
+            # at default verbosity (issue #3909).  ``rule_id`` is kept as the
+            # plain ``clearance_<suffix>`` so existing exact-rule_id filters
+            # and the ``ViolationType.from_string`` alias table stay stable.
+            message = (
+                f"SHORT: '{net_a}' and '{net_b}' copper overlaps by "
+                f"{-actual:.3f}mm ({elem1.element_type} to {elem2.element_type})"
+            )
+        else:
+            message = (
+                f"{elem1.element_type.title()} to {elem2.element_type} clearance "
+                f"{actual:.3f}mm < minimum {required:.3f}mm"
+            )
+
         return DRCViolation(
             rule_id=f"clearance_{rule_suffix}",
             severity="error",
-            message=(
-                f"{elem1.element_type.title()} to {elem2.element_type} clearance "
-                f"{actual:.3f}mm < minimum {required:.3f}mm"
-            ),
+            message=message,
             location=(round(loc_x, 3), round(loc_y, 3)),
             layer=layer,
             actual_value=round(actual, 4),
             required_value=required,
             items=(elem1.reference, elem2.reference),
-            nets=(elem1.net_name, elem2.net_name),
+            nets=(net_a, net_b),
         )
 
 

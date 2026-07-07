@@ -1183,6 +1183,25 @@ def _generate_large_zone_pcb(num_filled_polygons: int = 500) -> str:
     )"""
         )
 
+    # Fill fragments covering the two stitching vias at (50, 52) and (150, 52).
+    # The pads reach the In1.Cu pour through F.Cu->B.Cu through-vias, so the
+    # island-aware connectivity model (#3914) requires each via's copper to
+    # actually land on filled pour copper (not merely inside the zone
+    # boundary).  These fragments belong to the same zone object as every tile,
+    # so the per-zone union still ties both pads into one GND island.
+    for vx in (50, 150):
+        filled_parts.append(
+            f"""    (filled_polygon
+      (layer "In1.Cu")
+      (pts
+        (xy {vx - 1} 51)
+        (xy {vx + 1} 51)
+        (xy {vx + 1} 53)
+        (xy {vx - 1} 53)
+      )
+    )"""
+        )
+
     footer = """  )
 )
 """
@@ -1670,6 +1689,37 @@ PARTIAL_FILL_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
 """,
 )
 
+# Zone with a DISCONTINUOUS fill: two separate copper islands, only one of
+# which reaches a pad (#3914).  Island A (10..18) covers C1.2 (15, 15.25);
+# island B (26..30) is a detached fragment that touches no pad.  C2.2
+# (25, 15.25) sits in the boundary gap between the islands with no copper.
+# The pre-#3914 boundary heuristic added every boundary-interior pad to one
+# global zone component and reported the net ``complete`` -- the false
+# negative this fixture pins.  The island-aware model must report it
+# ``incomplete``.
+DISCONTINUOUS_FILL_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fill_clause="(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))",
+    filled_polygons="""    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 10 10)
+        (xy 18 10)
+        (xy 18 20)
+        (xy 10 20)
+      )
+    )
+    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 26 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 26 20)
+      )
+    )
+""",
+)
+
 
 class TestZeroFillZoneConnectivity:
     """Regression tests for Issue #3482.
@@ -1698,6 +1748,12 @@ class TestZeroFillZoneConnectivity:
     def partial_fill_pcb(self, tmp_path: Path) -> Path:
         pcb_file = tmp_path / "partial_fill.kicad_pcb"
         pcb_file.write_text(PARTIAL_FILL_ZONE_PCB)
+        return pcb_file
+
+    @pytest.fixture
+    def discontinuous_fill_pcb(self, tmp_path: Path) -> Path:
+        pcb_file = tmp_path / "discontinuous_fill.kicad_pcb"
+        pcb_file.write_text(DISCONTINUOUS_FILL_ZONE_PCB)
         return pcb_file
 
     def test_zero_fill_zone_is_not_connectivity(self, zero_fill_pcb: Path):
@@ -1746,21 +1802,55 @@ class TestZeroFillZoneConnectivity:
         assert gnd.is_plane_net is True
         assert gnd.plane_layer == "F.Cu"
 
-    def test_partial_fill_zone_provides_connectivity(self, partial_fill_pcb: Path):
-        """A zone with at least one filled polygon retains the Issue #479
-        boundary heuristic: pads inside the outline (including thermal-relief
-        cutouts) are zone-connected.
+    def test_partial_fill_zone_only_connects_pads_on_copper(self, partial_fill_pcb: Path):
+        """A pad inside the zone outline but NOT on real fill copper is open.
+
+        Issue #3914 supersedes the over-eager Issue #479 boundary heuristic:
+        connectivity now follows the *filled copper island* a pad's copper
+        actually overlaps, not the zone outline.  In this fixture the fill
+        covers x in [10, 22]: C1.2 (15, 15.25) lands on filled copper and
+        bonds to the pour, but C2.2 (25, 15.25) sits in the boundary-only
+        gap with no copper reaching it.  Reporting this net ``complete`` was
+        the false-negative documented in #3914 (a boundary-interior pad with
+        no fill wrongly counted as connected), so the net must now read
+        ``incomplete`` -- C2.2 is genuinely stranded on the manufactured
+        board.
         """
         analyzer = NetStatusAnalyzer(partial_fill_pcb)
         result = analyzer.analyze()
 
         gnd = result.get_net("GND")
         assert gnd is not None
-        assert gnd.status == "complete", (
-            f"Partially filled zone should connect pads inside its boundary; "
-            f"got status={gnd.status}, "
-            f"unconnected: {[p.full_name for p in gnd.unconnected_pads]}"
+        assert gnd.status != "complete", (
+            f"A pad in the zone boundary but off real fill copper must not be "
+            f"reported connected; got status={gnd.status}"
         )
+        # Only C1.2 sits on filled copper; C2.2 is stranded off the fill.
+        assert gnd.connected_count == 1
+        assert gnd.unconnected_count == 1
+        assert gnd.unconnected_pads[0].full_name == "C2.2"
+
+    def test_discontinuous_fill_not_complete(self, discontinuous_fill_pcb: Path):
+        """A discontinuous fill must not report a pour net ``complete`` (#3914).
+
+        Two GND pads sit inside the zone outline, but the fill is split into
+        two detached copper islands and only the left island reaches C1.2;
+        C2.2 is stranded in the gap.  The old boundary heuristic fused every
+        boundary-interior pad into one component and reported ``complete`` --
+        the false negative.  The island-aware model must report the net
+        ``incomplete`` with C2.2 unconnected.
+        """
+        analyzer = NetStatusAnalyzer(discontinuous_fill_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status != "complete", (
+            f"Discontinuous fill must not read complete; got status={gnd.status}"
+        )
+        assert gnd.connected_count == 1
+        assert gnd.unconnected_count == 1
+        assert gnd.unconnected_pads[0].full_name == "C2.2"
 
     def test_fully_filled_zone_regression(self, tmp_path: Path):
         """Fully filled zone behavior (Issue #479) must not regress."""
