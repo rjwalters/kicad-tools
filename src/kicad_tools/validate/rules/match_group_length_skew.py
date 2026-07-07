@@ -164,6 +164,7 @@ class MatchGroupLengthSkewRule(DRCRule):
         tracker_match_groups: list[MatchGroup] | None = None,
         threshold_map: dict[str, float] | None = None,
         default_tolerance_mm: float = DEFAULT_MATCH_GROUP_TOLERANCE_MM,
+        emit_info: bool = False,
     ) -> None:
         """Initialize the rule.
 
@@ -184,6 +185,11 @@ class MatchGroupLengthSkewRule(DRCRule):
             default_tolerance_mm: Fallback when no per-group tolerance
                 is set.  Defaults to
                 :data:`DEFAULT_MATCH_GROUP_TOLERANCE_MM` (0.5).
+            emit_info: When True, emit an advisory ``info``-severity
+                :class:`DRCViolation` for each declared group that *passes*
+                its tolerance, carrying the measured skew.  Lets ``kct
+                check --verbose`` surface per-group measurements even on a
+                clean board (Issue #3917 AC5).  Defaults to False.
         """
         self._group_skew_data: dict[str, float] = dict(group_skew_data) if group_skew_data else {}
 
@@ -197,6 +203,7 @@ class MatchGroupLengthSkewRule(DRCRule):
 
         self._threshold_map: dict[str, float] = dict(threshold_map) if threshold_map else {}
         self._default_tolerance_mm = default_tolerance_mm
+        self._emit_info = emit_info
 
     def check(
         self,
@@ -264,8 +271,43 @@ class MatchGroupLengthSkewRule(DRCRule):
                         tolerance_mm=tolerance_mm,
                     )
                 )
+            elif self._emit_info:
+                # Passing group -- surface the measured skew as an advisory
+                # ``info`` finding so ``kct check --verbose`` reports the
+                # per-group measurement even on a clean board (Issue #3917).
+                results.add(
+                    self._make_info(
+                        group=grp,
+                        skew_mm=skew_mm,
+                        tolerance_mm=tolerance_mm,
+                    )
+                )
 
         return results
+
+    def _make_info(
+        self,
+        group: MatchGroup,
+        skew_mm: float,
+        tolerance_mm: float,
+    ) -> DRCViolation:
+        """Build an ``info`` DRCViolation for a passing match group."""
+        member_count = len(group.net_ids) + 2 * len(group.pair_ids)
+        return DRCViolation(
+            rule_id=self.rule_id,
+            severity="info",
+            message=(
+                f"Match group {group.name!r} ({member_count} member"
+                f"{'s' if member_count != 1 else ''}) length-skew "
+                f"{skew_mm:.3f} mm within tolerance {tolerance_mm:.3f} mm"
+            ),
+            location=None,
+            layer=None,
+            actual_value=round(skew_mm, 4),
+            required_value=round(tolerance_mm, 4),
+            items=(group.name,),
+            nets=(),
+        )
 
     def _make_violation(
         self,

@@ -241,6 +241,7 @@ class DiffPairRoutingContinuityRule(DRCRule):
         coupling_window_mm: float = DEFAULT_COUPLING_WINDOW_MM,
         parallel_tolerance_deg: float = DEFAULT_PARALLEL_TOLERANCE_DEG,
         default_threshold: float = DEFAULT_COUPLED_CONTINUITY_THRESHOLD,
+        emit_info: bool = False,
     ) -> None:
         """Initialize the rule.
 
@@ -262,6 +263,12 @@ class DiffPairRoutingContinuityRule(DRCRule):
             default_threshold: Fallback when no per-pair threshold is
                 set.  Defaults to
                 :data:`DEFAULT_COUPLED_CONTINUITY_THRESHOLD` (0.7).
+            emit_info: When True, emit an advisory ``info``-severity
+                :class:`DRCViolation` for each engaged pair that *passes*
+                its continuity threshold, carrying the measured coupled
+                fraction.  Lets ``kct check --verbose`` surface per-pair
+                measurements even on a clean board (Issue #3917 AC5).
+                Defaults to False.
         """
         # Normalize key ordering so callers don't have to.
         self._engaged: set[tuple[int, int]] = set()
@@ -278,6 +285,7 @@ class DiffPairRoutingContinuityRule(DRCRule):
         self._coupling_window_mm = coupling_window_mm
         self._parallel_tolerance_deg = parallel_tolerance_deg
         self._default_threshold = default_threshold
+        self._emit_info = emit_info
 
     def check(
         self,
@@ -360,8 +368,46 @@ class DiffPairRoutingContinuityRule(DRCRule):
                         threshold=threshold,
                     )
                 )
+            elif self._emit_info:
+                # Passing pair -- surface the measured coupled fraction as
+                # an advisory ``info`` finding so ``kct check --verbose``
+                # reports the per-pair measurement even on a clean board
+                # (Issue #3917 AC5).
+                results.add(
+                    self._make_info(
+                        name_a=net_names.get(net_a, ""),
+                        name_b=net_names.get(net_b, ""),
+                        coupled_fraction=coupled_fraction,
+                        threshold=threshold,
+                    )
+                )
 
         return results
+
+    def _make_info(
+        self,
+        name_a: str,
+        name_b: str,
+        coupled_fraction: float,
+        threshold: float,
+    ) -> DRCViolation:
+        """Build an ``info`` DRCViolation for a passing engaged pair."""
+        first, second = sorted([name_a, name_b])
+        return DRCViolation(
+            rule_id=self.rule_id,
+            severity="info",
+            message=(
+                f"Engaged differential pair {first}/{second} coupled "
+                f"{coupled_fraction * 100:.1f}% of its length "
+                f"(>= {threshold * 100:.1f}% required)"
+            ),
+            location=None,
+            layer=None,
+            actual_value=round(coupled_fraction, 4),
+            required_value=round(threshold, 4),
+            items=(),
+            nets=(first, second),
+        )
 
     def _coupled_length(
         self,

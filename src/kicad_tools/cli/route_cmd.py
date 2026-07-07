@@ -1538,6 +1538,52 @@ def show_preview(
         return "n"
 
 
+def _write_net_class_map_sidecar(
+    output_path: Path,
+    net_class_map: dict | None,
+    quiet: bool = False,
+) -> None:
+    """Serialize the router's net-class map to a sidecar next to the PCB.
+
+    Issue #3917 Defect 1: ``net_class_map_to_dict()`` existed and was
+    round-trip tested but was never called from the route step, so the
+    ``output/net_class_map.json`` sidecar that every user-facing hint (and
+    ``kct check`` auto-discovery) points at was never actually written.
+
+    Writes ``<output_dir>/net_class_map.json`` adjacent to the routed PCB
+    so ``kct check`` can auto-load it and fire the sidecar-gated skew /
+    continuity rules.  A blocked write (read-only output dir) is a
+    non-fatal warning, never a route failure.
+
+    Args:
+        output_path: Path to the routed PCB file.  The sidecar is written
+            to the same directory.
+        net_class_map: The autorouter's ``{net_name: NetClassRouting}``
+            map.  Skipped when ``None`` or empty (an empty map would write
+            a misleading sidecar that the check-side probe would treat as
+            present).
+        quiet: If True, suppress the confirmation line.
+    """
+    if not net_class_map:
+        return
+    import json
+
+    from kicad_tools.router.rules import net_class_map_to_dict
+
+    sidecar_path = output_path.parent / "net_class_map.json"
+    try:
+        payload = net_class_map_to_dict(net_class_map)
+        sidecar_path.write_text(json.dumps(payload, indent=2))
+    except (OSError, TypeError, ValueError) as e:
+        # Non-fatal: a blocked / read-only output directory (or an
+        # unexpectedly non-serializable map) must not fail the route.
+        if not quiet:
+            print(f"  Warning: could not write net-class-map sidecar: {e}")
+        return
+    if not quiet:
+        print(f"  Net-class-map sidecar: {sidecar_path}")
+
+
 def run_post_route_drc(
     output_path: Path,
     manufacturer: str,
@@ -1564,6 +1610,14 @@ def run_post_route_drc(
     """
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate import DRCChecker
+
+    # Issue #3917 Defect 1: persist the net-class map as a sidecar next to
+    # the routed PCB so ``kct check`` (and re-runs of this DRC) can
+    # auto-load it and fire the sidecar-gated skew / continuity rules.
+    # This is the shared post-route DRC entry for all three route flows
+    # (default multi-layer, rule-relaxation, and single-layer), so writing
+    # here covers every callsite in one place.
+    _write_net_class_map_sidecar(output_path, net_class_map, quiet=quiet)
 
     try:
         # Load the routed PCB

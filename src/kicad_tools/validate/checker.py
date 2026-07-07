@@ -6,6 +6,7 @@ Checks on PCB designs without requiring kicad-cli.
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 from kicad_tools.manufacturers import DesignRules, get_profile
@@ -66,6 +67,8 @@ class DRCChecker:
         copper_oz: float = 1.0,
         suppress_library: bool = False,
         net_class_map: dict[str, NetClassRouting] | None = None,
+        warn_on_inactive_skew_rules: bool = True,
+        verbose: bool = False,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -84,6 +87,22 @@ class DRCChecker:
                 ``engaged_pairs`` set + per-pair threshold map.  When
                 omitted, the rule degrades to a no-op (graceful
                 standalone-``kct check`` behaviour).
+            warn_on_inactive_skew_rules: When True (default), the three
+                sidecar-gated skew rules
+                (``match_group_length_skew``, ``diffpair_length_skew``,
+                ``diffpair_routing_continuity``) emit a one-time stderr
+                warning when they degrade to a no-op because
+                ``net_class_map`` is ``None``.  This makes the "silently
+                passes without a sidecar" failure mode visible on *every*
+                invocation surface -- not just the ``kct check`` CLI
+                entry point, which prints its own up-front warning
+                (Issue #3917 Defect 3).  The CLI passes ``False`` here to
+                avoid duplicating its own warning.
+            verbose: When True, the sidecar-gated skew / continuity rules
+                emit advisory ``info``-severity findings that carry the
+                measured per-pair / per-group values even when the pair /
+                group passes, so ``kct check --verbose`` surfaces the
+                measurements on a clean board (Issue #3917 AC5).
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -94,6 +113,11 @@ class DRCChecker:
         self.copper_oz = copper_oz
         self.suppress_library = suppress_library
         self.net_class_map = net_class_map
+        self.warn_on_inactive_skew_rules = warn_on_inactive_skew_rules
+        self.verbose = verbose
+        # Dedup guard so the per-rule INACTIVE warning fires at most once
+        # per rule per checker instance (Issue #3917).
+        self._inactive_skew_warned: set[str] = set()
 
         # Load manufacturer profile and design rules
         profile = get_profile(manufacturer)
@@ -340,6 +364,33 @@ class DRCChecker:
         rule = DiffPairClearanceIntraRule()
         return rule.check(self.pcb, self.design_rules)
 
+    def _warn_inactive_skew_rule(self, rule_name: str) -> None:
+        """Emit a one-time stderr warning that a skew rule is inactive.
+
+        Issue #3917 Defect 3: the three sidecar-gated rules
+        (``match_group_length_skew``, ``diffpair_length_skew``,
+        ``diffpair_routing_continuity``) degrade to silent no-ops when the
+        checker was built without a ``net_class_map``.  The ``kct check``
+        CLI prints an up-front warning, but *direct* ``DRCChecker``
+        instantiations (the build pipeline, embedded post-route checks)
+        bypass it entirely.  Emitting the warning here makes the
+        degradation visible on every invocation surface.
+
+        Guarded by ``warn_on_inactive_skew_rules`` (the CLI disables it to
+        avoid double-warning) and deduplicated per rule per instance.
+        """
+        if not self.warn_on_inactive_skew_rules:
+            return
+        if rule_name in self._inactive_skew_warned:
+            return
+        self._inactive_skew_warned.add(rule_name)
+        print(
+            f"WARNING: rule {rule_name!r} is INACTIVE without a net-class-map "
+            "sidecar and will silently pass; pass the routed board's sidecar "
+            "(e.g. output/net_class_map.json) to validate length-match skew.",
+            file=sys.stderr,
+        )
+
     def check_diffpair_length_skew(self) -> DRCResults:
         """Check routed-length skew for engaged differential pairs.
 
@@ -385,12 +436,16 @@ class DRCChecker:
         from kicad_tools.validate.diffpair_engagement import derive_engagement_state
         from kicad_tools.validate.diffpair_skew import derive_skew_data
 
+        if self.net_class_map is None:
+            self._warn_inactive_skew_rule("diffpair_length_skew")
+
         skew_data, skew_threshold_map = derive_skew_data(self.pcb, self.net_class_map)
         engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
         rule = DiffPairLengthSkewRule(
             skew_data=skew_data,
             engaged_pairs=engaged_pairs,
             threshold_map=skew_threshold_map,
+            emit_info=self.verbose,
         )
         return rule.check(self.pcb, self.design_rules)
 
@@ -427,10 +482,14 @@ class DRCChecker:
         """
         from kicad_tools.validate.diffpair_engagement import derive_engagement_state
 
+        if self.net_class_map is None:
+            self._warn_inactive_skew_rule("diffpair_routing_continuity")
+
         engaged_pairs, threshold_map = derive_engagement_state(self.pcb, self.net_class_map)
         rule = DiffPairRoutingContinuityRule(
             engaged_pairs=engaged_pairs,
             threshold_map=threshold_map,
+            emit_info=self.verbose,
         )
         return rule.check(self.pcb, self.design_rules)
 
@@ -573,6 +632,7 @@ class DRCChecker:
         if self.net_class_map is None:
             # Graceful-no-op: no router context -> no skew data to
             # validate.  Matches the standalone-``kct check`` contract.
+            self._warn_inactive_skew_rule("match_group_length_skew")
             rule = MatchGroupLengthSkewRule()
         else:
             from kicad_tools.validate.match_group_skew import derive_group_skew_data
@@ -587,6 +647,7 @@ class DRCChecker:
                 group_skew_data=group_skew_data,
                 tracker_match_groups=tracker_match_groups,
                 threshold_map=threshold_map,
+                emit_info=self.verbose,
             )
         return rule.check(self.pcb, self.design_rules)
 
