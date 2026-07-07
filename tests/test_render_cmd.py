@@ -158,6 +158,68 @@ class TestOutputPathContract:
 
 
 # --------------------------------------------------------------------------
+# Help text accuracy (regression guard for #3937)
+# --------------------------------------------------------------------------
+
+
+class TestHelpText:
+    """Pin the `--help` text so it matches the real output contract.
+
+    The 2D layer plots are written as ``.svg`` via ``kicad-cli pcb export svg``
+    and only the 3D renders are ``.png`` (via ``kicad-cli pcb render``). The
+    help text used to promise ``.png`` for the 2D plots and named the stale
+    ``pcb export png`` subcommand; these assertions catch that regression.
+    """
+
+    def _render_subaction(self):
+        """Return the argparse action for the ``render`` subcommand.
+
+        We inspect the parser structure directly rather than the rendered
+        ``--help`` text because argparse line-wraps the description, which would
+        split the filename globs (e.g. ``{pcb-\\nfront,pcb-back}.svg``) and make
+        substring assertions brittle.
+        """
+        from argparse import _SubParsersAction
+
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        for action in parser._actions:
+            if isinstance(action, _SubParsersAction):
+                return action.choices["render"], action._choices_actions
+        raise AssertionError("no subparsers action found")
+
+    def test_standalone_help_mentions_svg_for_2d(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            render_main(["--help"])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "SVG" in out
+        # The standalone description must not call the 2D plots plain "PNGs".
+        assert "2D layer plots (SVGs)" in out
+
+    def test_subparser_description_names_export_svg_not_png(self):
+        render_parser, _ = self._render_subaction()
+        desc = render_parser.description
+        assert "kicad-cli pcb export svg" in desc
+        assert "kicad-cli pcb export png" not in desc
+
+    def test_subparser_description_2d_outputs_are_svg(self):
+        render_parser, _ = self._render_subaction()
+        desc = render_parser.description
+        assert "{pcb-front,pcb-back}.svg" in desc
+        assert "{3d-front,3d-back}.png" in desc
+        # The old glob promised .png for the 2D plots — must be gone.
+        assert "{pcb-front,pcb-back,3d-front,3d-back}.png" not in desc
+
+    def test_subparser_help_line_mentions_svg_not_png(self):
+        _, choices_actions = self._render_subaction()
+        render_help = next(a.help for a in choices_actions if a.dest == "render")
+        assert "SVG" in render_help
+        assert "3D PNGs" in render_help
+
+
+# --------------------------------------------------------------------------
 # Routed PCB preference / fallback
 # --------------------------------------------------------------------------
 
