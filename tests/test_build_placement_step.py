@@ -85,7 +85,7 @@ class TestRunStepPlacement:
         ctx = self._make_ctx(tmp_path, optimize_placement=True, pcb_file=pcb, quiet=True)
         console = Console(quiet=True)
 
-        with patch("kicad_tools.cli.build_cmd.subprocess.run") as mock_run:
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
             mock_run.return_value.returncode = 0
             result = _run_step_placement(ctx, console)
 
@@ -104,7 +104,7 @@ class TestRunStepPlacement:
         ctx = self._make_ctx(tmp_path, optimize_placement=True, pcb_file=pcb, quiet=True)
         console = Console(quiet=True)
 
-        with patch("kicad_tools.cli.build_cmd.subprocess.run") as mock_run:
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
             mock_run.return_value.returncode = 1
             mock_run.return_value.stderr = "optimization error"
             result = _run_step_placement(ctx, console)

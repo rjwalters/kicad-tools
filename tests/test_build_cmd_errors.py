@@ -314,7 +314,7 @@ class TestBuildRouteExitCode2:
 
         console = Console()
 
-        with patch("subprocess.run") as mock_run:
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
             mock_run.return_value = MagicMock(returncode=2, stderr="", stdout="")
             result = _run_step_route(ctx, console)
 
@@ -347,7 +347,7 @@ class TestBuildRouteExitCode2:
 
         console = Console()
 
-        with patch("subprocess.run") as mock_run:
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
             result = _run_step_route(ctx, console)
 
@@ -377,7 +377,7 @@ class TestBuildRouteExitCode2:
 
         console = Console()
 
-        with patch("subprocess.run") as mock_run:
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stderr="routing failed", stdout="")
             result = _run_step_route(ctx, console)
 
@@ -413,7 +413,7 @@ class TestBuildRouteExitCode2:
 
         console = Console()
 
-        with patch("subprocess.run") as mock_run:
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
             mock_run.return_value = MagicMock(returncode=3, stderr="DRC violations", stdout="")
             result = _run_step_route(ctx, console)
 
