@@ -123,6 +123,31 @@ def enrich_bom_lcsc(
 
     Items that already have an ``lcsc`` value are left untouched.
 
+    Degraded-mode determinism contract (issue #3935)
+    ------------------------------------------------
+    When the JLCPCB API is unavailable it responds with 403 Forbidden.
+    On the first such response this function trips a circuit breaker
+    (``api_forbidden``) and resolves every remaining group from the
+    enrichment cache via :func:`_try_cache_fallback`.  This degraded path
+    is **deterministic for a fixed input and a fixed cache state**: two
+    successive calls with the same ``items`` and the same enrichment
+    cache produce byte-identical :class:`EnrichmentReport` outputs (same
+    entries, sources, ``lcsc_part`` values, and order).  This holds
+    because the fallback only performs pure SQLite reads
+    (``get_enrichment_match(..., ignore_expiry=True)``) and never mutates
+    the cache in the API-forbidden path.
+
+    The *observed* nondeterminism reported in issue #3935 (match counts
+    drifting 8 -> 9 -> 10 across "identical" runs) is not a property of a
+    single call: it arises because the cache **accumulates** matches
+    across runs when the live API is sporadically reachable.  A run that
+    reaches the API writes new ``enrichment_matches`` rows
+    (``source="auto"``); a later API-forbidden run then serves those rows
+    as ``source="cache"``.  The determinism guaranteed here is therefore
+    conditional on the cache state being held constant -- pin the LCSC
+    mapping in the project spec (or a committed lockfile) if you need
+    reproducibility that is independent of local cache warmth.
+
     Args:
         items: List of BOM items to enrich (modified in place).
         prefer_basic: Prefer JLCPCB Basic parts (no extra assembly fee).

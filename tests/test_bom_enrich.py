@@ -553,6 +553,191 @@ class TestEnrichBomLcscCacheFallback:
             assert report.cache_matched == 0
 
 
+class TestEnrichBomLcscDeterminism:
+    """Regression tests for degraded-mode (API-forbidden) determinism.
+
+    Issue #3935: BOM enrichment was observed to drift across "identical"
+    runs (8 -> 9 -> 10 matches) when the JLCPCB API was intermittently
+    available. The drift comes from the enrichment cache *accumulating*
+    matches across runs -- not from any nondeterminism within a single
+    call. These tests pin the contract: for a fixed cache state and fixed
+    input, two API-forbidden runs produce byte-identical reports.
+    """
+
+    def _seed_cache(self, cache: PartsCache) -> None:
+        """Populate the enrichment cache with a known set of matches."""
+        cache.put_enrichment_match(
+            "10k",
+            "Resistor_SMD:R_0402_1005Metric",
+            "C25744",
+            confidence=0.85,
+            part_type="Basic",
+        )
+        cache.put_enrichment_match(
+            "100nF",
+            "Capacitor_SMD:C_0402_1005Metric",
+            "C1525",
+            confidence=0.9,
+            part_type="Basic",
+        )
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_two_offline_runs_produce_identical_reports(self, MockSuggester):
+        """AC5: two 403-forbidden runs with the same cache are byte-identical.
+
+        This is the direct regression guard for the sweep-observed drift:
+        with a frozen cache state and frozen inputs, the degraded-mode
+        output must not change between runs.
+        """
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = PartsCache(db_path=Path(tmp) / "test.db")
+            self._seed_cache(cache)
+
+            def _run() -> EnrichmentReport:
+                mock_instance = MagicMock()
+                _make_suggester_mock(mock_instance)
+                mock_instance._get_client.return_value.cache = cache
+                mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
+                    "403 Forbidden"
+                )
+                MockSuggester.return_value = mock_instance
+                # One cache hit ("10k"), one cache miss ("47uF" -> unmatched),
+                # exercising both the cache and unmatched degraded branches.
+                items = [
+                    _make_item("R1", "10k", "Resistor_SMD:R_0402_1005Metric"),
+                    _make_item("C1", "100nF", "Capacitor_SMD:C_0402_1005Metric"),
+                    _make_item("C2", "47uF", "Capacitor_SMD:C_0805_2012Metric"),
+                ]
+                return enrich_bom_lcsc(items)
+
+            report1 = _run()
+            report2 = _run()
+
+            # @dataclass generates field-by-field __eq__, so this asserts
+            # same entries, sources, lcsc_part values, confidences, order.
+            assert report1.entries == report2.entries
+            assert report1 == report2
+
+            # Sanity: the cache state was not mutated between runs, so the
+            # bucket counts are stable and reflect the seeded state.
+            assert report1.cache_matched == 2
+            assert report1.unmatched == 1
+            assert report2.cache_matched == 2
+            assert report2.unmatched == 1
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_offline_run_does_not_mutate_cache(self, MockSuggester):
+        """The API-forbidden path performs pure reads (no cache writes).
+
+        If a degraded run wrote to the cache, the second run could observe
+        a different state -- the exact mechanism behind the reported drift.
+        """
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = PartsCache(db_path=Path(tmp) / "test.db")
+            self._seed_cache(cache)
+
+            mock_instance = MagicMock()
+            _make_suggester_mock(mock_instance)
+            mock_instance._get_client.return_value.cache = cache
+            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError("403 Forbidden")
+            MockSuggester.return_value = mock_instance
+
+            items = [
+                _make_item("R1", "10k", "Resistor_SMD:R_0402_1005Metric"),
+                # A brand-new (value, footprint) that is NOT in the cache:
+                # a degraded run must not write it back.
+                _make_item("C2", "47uF", "Capacitor_SMD:C_0805_2012Metric"),
+            ]
+
+            enrich_bom_lcsc(items)
+
+            # The uncached group must remain absent -- no write-back occurred.
+            assert (
+                cache.get_enrichment_match(
+                    "47uF", "Capacitor_SMD:C_0805_2012Metric", ignore_expiry=True
+                )
+                is None
+            )
+            # The seeded entries are untouched.
+            match = cache.get_enrichment_match(
+                "10k", "Resistor_SMD:R_0402_1005Metric", ignore_expiry=True
+            )
+            assert match is not None
+            assert match["lcsc_part"] == "C25744"
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_offline_run_emits_warning_not_debug(self, MockSuggester, caplog):
+        """AC2: degraded mode surfaces a WARNING-level message to callers.
+
+        The 403 circuit breaker and each stale cache fallback must log at
+        WARNING (not be silenced to DEBUG), so an operator reviewing logs
+        can tell a connected run from an offline one.
+        """
+        import logging
+
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = PartsCache(db_path=Path(tmp) / "test.db")
+            self._seed_cache(cache)
+
+            mock_instance = MagicMock()
+            _make_suggester_mock(mock_instance)
+            mock_instance._get_client.return_value.cache = cache
+            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError("403 Forbidden")
+            MockSuggester.return_value = mock_instance
+
+            items = [
+                _make_item("R1", "10k", "Resistor_SMD:R_0402_1005Metric"),
+            ]
+
+            with caplog.at_level(logging.WARNING, logger="kicad_tools.export.bom_enrich"):
+                enrich_bom_lcsc(items)
+
+            warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+            # The 403 circuit-breaker warning must be present.
+            assert any("403 Forbidden" in r.getMessage() for r in warnings)
+            # The stale cache fallback must also warn (degraded, verify-before-fab).
+            assert any("Cache fallback" in r.getMessage() for r in warnings)
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_cache_bucket_surfaced_distinct_from_auto(self, MockSuggester):
+        """AC3: the summary distinguishes cache-sourced entries from auto.
+
+        A degraded run's ``cache`` count must be a distinct bucket in the
+        summary so two exports can be compared without reading raw logs.
+        """
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = PartsCache(db_path=Path(tmp) / "test.db")
+            self._seed_cache(cache)
+
+            mock_instance = MagicMock()
+            _make_suggester_mock(mock_instance)
+            mock_instance._get_client.return_value.cache = cache
+            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError("403 Forbidden")
+            MockSuggester.return_value = mock_instance
+
+            items = [
+                _make_item("R1", "10k", "Resistor_SMD:R_0402_1005Metric"),
+                _make_item("C1", "100nF", "Capacitor_SMD:C_0402_1005Metric"),
+            ]
+
+            report = enrich_bom_lcsc(items)
+            summary = report.summary_lines()[0]
+
+            # "cache" is a distinct bucket, and none were auto-matched.
+            assert "2 from cache" in summary
+            assert "0 auto-matched" in summary
+            assert report.cache_matched == 2
+            assert report.auto_matched == 0
+
+
 class TestEnrichmentReport:
     """Tests for the EnrichmentReport dataclass."""
 
