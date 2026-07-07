@@ -139,12 +139,18 @@ def unrouted_pcb_path() -> Path:
 
 @pytest.fixture(scope="module")
 def routed_board_03(unrouted_pcb_path: Path):
-    """Load board 03 and route it with the canonical recipe.
+    """Load board 03 and route it with the in-process ``route_all`` path.
 
-    Issue #3308: mirrors ``generate_design.py:route_pcb()`` (the
-    canonical recipe ``route_demo.py`` now delegates to) so a regression
-    here is a regression in both the demo's behavior AND the build
-    recipe.
+    Issue #3308: this fixture WAS introduced as a mirror of
+    ``generate_design.py:route_pcb()``.  It no longer mirrors that recipe
+    -- it intentionally exercises the per-net ``route_all`` path with
+    in-pad escape rescues as a standalone ROUTER-CAPABILITY regression net
+    for the #2760 USB_D+ stub failure mode.  (Issue #3922 restored
+    ``--differential-pairs`` to the CLI recipe, but on board 03 that flag
+    is inert at routing time -- the escape-routing dispatch never reaches
+    the CoupledPathfinder pre-pass, tracked in #3952.)  The end-to-end CLI
+    recipe reach is pinned separately by
+    ``tests/router/test_board03_routing_baseline.py``.
 
     Key differences from the legacy pre-#3308 fixture:
 
@@ -159,11 +165,13 @@ def routed_board_03(unrouted_pcb_path: Path):
       * ``intra_pair_clearance=0.15mm`` on USB_D+/USB_D-.
       * ``random.seed(42)`` for determinism (#3065 plumbing).
       * Uses ``route_all`` with ``enable_in_pad_escape_rescues=True``
-        and explicit rescue pins (U1 12-15, 26-27) -- the canonical
-        recipe DISABLES ``CoupledPathfinder`` because the pre-pass
-        packs USB_D+/D- into adjacent 0.05mm grid cells producing
-        intra-clearance violations (#3095).  The per-net A* route_all
-        handles the diff pair with lateral offset.
+        and explicit rescue pins (U1 12-15, 26-27).  This fixture
+        deliberately exercises the per-net A* path (with 0.15mm
+        intra_pair_clearance widening + lateral offset) as a capability
+        net.  The CLI recipe requests ``--differential-pairs`` (#3922) but
+        the CoupledPathfinder is currently gated behind route_cmd's
+        escape-routing dispatch on this board (#3952); the recipe reach is
+        validated end-to-end by ``test_board03_routing_baseline.py``.
 
     Returns the populated ``Autorouter`` instance plus the net_map dict.
     """
@@ -242,15 +250,15 @@ def test_usb_diff_pair_routes_via_coupled_pathfinder(routed_board_03) -> None:
     a 2-of-3-pads stub (J1.A6 -> J1.B6 only) because the USB_D- via near
     U1.29 blocked the only remaining pad-access corridor.
 
-    Issue #3095 / #3308 (June 2026): the canonical recipe in
-    ``generate_design.py:route_pcb()`` (which ``route_demo.py`` now
-    delegates to) DISABLES ``CoupledPathfinder`` because the pre-pass
-    packs USB_D+/D- into adjacent 0.05mm grid cells producing 19
-    ``diffpair_clearance_intra`` violations.  USB_D+ now routes via
-    per-net A* with explicit ``intra_pair_clearance=0.15mm`` widening
-    and in-pad escape rescues on U1.  USB_D- may currently be partial
-    under the router state pinned by ``test_board03_routing_baseline.py``
-    -- that's tracked under #3308 AC #2/#3 as a separate router regression.
+    Issue #3095 / #3308 (June 2026): this in-process fixture uses the
+    per-net ``route_all`` path (NOT the CLI recipe -- see the fixture
+    docstring).  USB_D+ routes via per-net A* with explicit
+    ``intra_pair_clearance=0.15mm`` widening and in-pad escape rescues on
+    U1.  USB_D- may be partial under this per-net path -- that is a
+    property of this capability fixture, not the CLI recipe.  The CLI
+    recipe requests ``--differential-pairs`` (#3922) though the coupled
+    pre-pass is currently gated on board 03 (#3952); its reach is pinned
+    by ``test_board03_routing_baseline.py``.
 
     This test asserts the minimum viable success criterion (the original
     #2760 floor): USB_D+ has > 0 routed segments AND is not in

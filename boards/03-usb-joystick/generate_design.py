@@ -581,10 +581,39 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # wall-clock cutoff and pins a fixed node-expansion backstop, so
         # the seed-42 re-route is byte-identical (UUID-normalized) across
         # machines.  --timeout 600 below is then a SAFETY backstop only.
-        # KEEP IN SYNC with tests/router/test_board03_routing_baseline.py.
+        # KEEP IN SYNC with tests/router/test_board03_routing_baseline.py --
+        # this includes --differential-pairs and --net-class-map below.
         "--deterministic-budget",
         "--timeout",
         "600",
+        # Issue #3922 REGRESSION FIX: the #3308/#3410 recipe consolidation
+        # silently dropped ``--differential-pairs``, so the recipe no longer
+        # even *requested* diff-pair routing and the boards/README claim went
+        # false.  Restore the flag (and forward the sidecar via
+        # ``--net-class-map`` so the USB D+/D- ``diffpair_partner`` /
+        # ``intra_pair_clearance`` (0.15mm, #3095) metadata engages the
+        # validate-side diff-pair DRC rules).  The sidecar is written above.
+        #
+        # IMPORTANT (scope note for #3922): on THIS board the flag is
+        # currently inert at routing time.  Board 03 has dense fine-pitch
+        # packages (U1 QFP-32, J1 USB-C), so the CLI takes the escape-routing
+        # dispatch, and route_cmd's escape / auto-layers-escalation paths do
+        # not consult ``args.differential_pairs`` -- the CoupledPathfinder
+        # pre-pass is only wired into the (escape-less) adaptive path.  So we
+        # deliberately keep ``--auto-layers`` (the default): it preserves the
+        # escape pre-phase that board 03 needs for 13/13 + 0 native-DRC.
+        # Forcing the diff-pair path via ``--no-auto-layers`` DOES invoke
+        # Phase A, but loses escape routing and reintroduces a native
+        # ``kicad-cli`` clearance violation -- unacceptable for a
+        # manufacturing-clean board.  Making Phase A run WITH escape routing
+        # is a route_cmd dispatch fix tracked in #3952 (adjacent to the
+        # CoupledPathfinder convergence work in #3921); once it lands, the
+        # xfail in tests/router/test_board03_routing_baseline.py
+        # (test_coupled_pathfinder_phase_a_invoked) will flip to XPASS.
+        # KEEP IN SYNC with tests/router/test_board03_routing_baseline.py.
+        "--differential-pairs",
+        "--net-class-map",
+        str(sidecar_path),
         # Issues #3507/#3454: ``--raw`` (skip TraceOptimizer) was
         # LOAD-BEARING for the 0-DRC acceptance until the grid-staleness
         # fix.  The optimize pass used to replace Route objects without
