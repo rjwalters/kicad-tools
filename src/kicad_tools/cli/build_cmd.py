@@ -102,6 +102,42 @@ class BuildContext:
         return script.resolve() in self._executed_scripts
 
 
+def _resolve_effective_mfr(
+    cli_mfr: str | None,
+    spec: ProjectSpec | None,
+    default: str = "jlcpcb",
+) -> str:
+    """Resolve the single manufacturer profile the whole build judges against.
+
+    Precedence (highest first):
+
+    1. ``cli_mfr`` -- an explicit ``--mfr`` flag. ``None`` means the flag was
+       not supplied (the argparse default is ``None``), so it does not win.
+    2. ``spec.requirements.manufacturing.target_fab`` -- the project's
+       declared fab tier.
+    3. ``default`` -- the historical ``"jlcpcb"`` fallback.
+
+    This is the fix for the issue #3920 "split-brain": previously only the
+    export step consulted ``target_fab`` while route/verify/stitch used the
+    CLI default ``"jlcpcb"``, so a board whose recipe routed at (e.g.)
+    ``jlcpcb-tier1`` was verified at the base tier and reported spurious
+    ``via_in_pad`` errors. Resolving once here and threading the result
+    through ``BuildContext.mfr`` makes every stage agree.
+    """
+    if cli_mfr is not None:
+        return cli_mfr
+
+    if (
+        spec is not None
+        and spec.requirements is not None
+        and spec.requirements.manufacturing is not None
+        and spec.requirements.manufacturing.target_fab
+    ):
+        return spec.requirements.manufacturing.target_fab
+
+    return default
+
+
 def _find_spec_file(directory: Path) -> Path | None:
     """Find a .kct file in the given directory."""
     kct_files = list(directory.glob("*.kct"))
@@ -2390,15 +2426,13 @@ def _run_step_export(ctx: BuildContext, console: Console) -> BuildResult:
             message="No PCB file found to export",
         )
 
-    # Determine manufacturer: prefer target_fab from spec, fall back to ctx.mfr
+    # Use the single resolved profile. ctx.mfr was resolved once in main()
+    # from (in precedence order) an explicit --mfr flag, the spec's
+    # manufacturing.target_fab, or the "jlcpcb" default -- so every pipeline
+    # step judges against the same manufacturer (issue #3920). Re-reading
+    # target_fab here would silently override an explicit --mfr and re-open
+    # the split-brain, so we deliberately do not.
     mfr = ctx.mfr
-    if (
-        ctx.spec
-        and ctx.spec.requirements
-        and ctx.spec.requirements.manufacturing
-        and ctx.spec.requirements.manufacturing.target_fab
-    ):
-        mfr = ctx.spec.requirements.manufacturing.target_fab
 
     # Determine output directory
     if ctx.output_dir:
@@ -2636,8 +2670,13 @@ Examples:
         "--mfr",
         "-m",
         choices=get_all_manufacturer_names(),
-        default="jlcpcb",
-        help="Target manufacturer for verification (default: jlcpcb)",
+        default=None,
+        help=(
+            "Target manufacturer for verification. When omitted, the "
+            "manufacturing.target_fab from the project spec is used "
+            "(default: jlcpcb if neither is set). An explicit --mfr "
+            "always overrides the spec."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -2738,6 +2777,12 @@ def main(argv: list[str] | None = None) -> int:
                 e,
             )
 
+    # Resolve the effective manufacturer profile once, so every pipeline
+    # step (route, stitch, verify, export) judges against a single source
+    # of truth (issue #3920). Precedence: an explicit --mfr flag wins,
+    # otherwise the spec's manufacturing.target_fab, otherwise "jlcpcb".
+    effective_mfr = _resolve_effective_mfr(args.mfr, spec)
+
     # Resolve output directory if provided
     output_dir: Path | None = None
     if args.output:
@@ -2759,7 +2804,7 @@ def main(argv: list[str] | None = None) -> int:
         schematic_file=schematic,
         pcb_file=pcb,
         output_dir=output_dir,
-        mfr=args.mfr,
+        mfr=effective_mfr,
         verbose=args.verbose,
         dry_run=args.dry_run,
         quiet=args.quiet,
@@ -2776,7 +2821,7 @@ def main(argv: list[str] | None = None) -> int:
         header_lines = (
             f"[bold]Building:[/bold] {project_name}\n"
             f"[dim]Directory:[/dim] {project_dir}\n"
-            f"[dim]Manufacturer:[/dim] {args.mfr}"
+            f"[dim]Manufacturer:[/dim] {effective_mfr}"
         )
         if output_dir:
             header_lines += f"\n[dim]Output:[/dim] {output_dir}"

@@ -6106,8 +6106,12 @@ def _add_build_parser(subparsers) -> None:
         "-m",
         dest="build_mfr",
         choices=get_all_manufacturer_names(),
-        default="jlcpcb",
-        help="Target manufacturer for verification (default: jlcpcb)",
+        default=None,
+        help=(
+            "Target manufacturer for verification. When omitted, the "
+            "project spec's manufacturing.target_fab is used (falling back "
+            "to jlcpcb). An explicit --mfr always overrides the spec."
+        ),
     )
     build_parser.add_argument(
         "--dry-run",
