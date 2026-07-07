@@ -1897,3 +1897,122 @@ class TestExtractPcbNamedNets:
 
         result = _extract_pcb_named_nets(tmp_path / "nonexistent.kicad_pcb")
         assert result is None
+
+
+class TestSingleBoardDirDiscovery:
+    """Auto-detection of single-board-dir vs parent-dir invocations (#3938)."""
+
+    _PATTERN = "*_routed.kicad_pcb"
+
+    def test_is_single_board_dir_output_child(self, tmp_path: Path):
+        from kicad_tools.cli.fleet_cmd import _is_single_board_dir
+
+        board_dir = tmp_path / "04-stm32-devboard"
+        (board_dir / "output").mkdir(parents=True)
+        assert _is_single_board_dir(board_dir) is True
+
+    def test_is_single_board_dir_project_kct(self, tmp_path: Path):
+        from kicad_tools.cli.fleet_cmd import _is_single_board_dir
+
+        board_dir = tmp_path / "04-stm32-devboard"
+        board_dir.mkdir()
+        (board_dir / "project.kct").write_text("{}")
+        assert _is_single_board_dir(board_dir) is True
+
+    def test_is_single_board_dir_parent_is_false(self, tmp_path: Path):
+        from kicad_tools.cli.fleet_cmd import _is_single_board_dir
+
+        parent = tmp_path / "boards"
+        make_fake_board(parent, "a-board", routed_complete=True)
+        # A parent-of-boards directory has neither output/ nor project.kct.
+        assert _is_single_board_dir(parent) is False
+
+    def test_discover_boards_single_board_dir(self, tmp_path: Path):
+        """--boards-dir pointing at a board itself returns exactly one row."""
+        from kicad_tools.cli.fleet_cmd import _discover_boards
+
+        boards = tmp_path / "boards"
+        make_fake_board(boards, "04-stm32-devboard", routed_complete=True)
+        board_dir = boards / "04-stm32-devboard"
+
+        results = _discover_boards(board_dir, self._PATTERN)
+        assert len(results) == 1
+        assert results[0].name == "04-stm32-devboard"
+
+    def test_discover_boards_parent_dir_unchanged(self, tmp_path: Path):
+        """Parent-dir invocation still enumerates every board subdirectory."""
+        from kicad_tools.cli.fleet_cmd import _discover_boards
+
+        boards = tmp_path / "boards"
+        make_fake_board(boards, "a-board", routed_complete=True)
+        make_fake_board(boards, "b-board", routed_complete=True)
+
+        results = _discover_boards(boards, self._PATTERN)
+        assert {b.name for b in results} == {"a-board", "b-board"}
+
+    def test_discover_boards_single_board_dir_no_routed_pcb(self, tmp_path: Path):
+        """A board dir with output/ but no routed PCB returns an empty list."""
+        from kicad_tools.cli.fleet_cmd import _discover_boards
+
+        board_dir = tmp_path / "04-stm32-devboard"
+        (board_dir / "output").mkdir(parents=True)
+        # project.kct present so it is recognised as a board dir, but no PCB.
+        (board_dir / "project.kct").write_text("{}")
+
+        assert _discover_boards(board_dir, self._PATTERN) == []
+
+    def test_discover_boards_missing_dir(self, tmp_path: Path):
+        """Nonexistent --boards-dir still returns an empty list (no regression)."""
+        from kicad_tools.cli.fleet_cmd import _discover_boards
+
+        assert _discover_boards(tmp_path / "nope", self._PATTERN) == []
+
+    def test_discover_ship_ready_single_board_dir(self, tmp_path: Path):
+        """Ship-ready discovery also auto-detects a single-board-dir path."""
+        from kicad_tools.cli.fleet_cmd import _discover_ship_ready
+
+        boards = tmp_path / "boards"
+        make_fake_board(
+            boards,
+            "04-stm32-devboard",
+            routed_complete=True,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+        board_dir = boards / "04-stm32-devboard"
+
+        results = _discover_ship_ready(board_dir, self._PATTERN)
+        assert len(results) == 1
+        assert results[0].board.name == "04-stm32-devboard"
+
+    def test_discover_ship_ready_parent_dir_unchanged(self, tmp_path: Path):
+        from kicad_tools.cli.fleet_cmd import _discover_ship_ready
+
+        boards = tmp_path / "boards"
+        make_fake_board(boards, "a-board", routed_complete=True)
+        make_fake_board(boards, "b-board", routed_complete=True)
+
+        results = _discover_ship_ready(boards, self._PATTERN)
+        assert {s.board.name for s in results} == {"a-board", "b-board"}
+
+    def test_status_cli_single_board_dir(self, tmp_path: Path, capsys):
+        """End-to-end: `status --boards-dir <board>` prints one board row."""
+        boards = tmp_path / "boards"
+        make_fake_board(
+            boards,
+            "04-stm32-devboard",
+            routed_complete=True,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+        board_dir = boards / "04-stm32-devboard"
+
+        result = main(["status", "--boards-dir", str(board_dir), "--format", "json"])
+        assert result == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["summary"]["total"] == 1
+        assert data["boards"][0]["name"] == "04-stm32-devboard"
