@@ -538,6 +538,20 @@ def evaluate_placement(
     This is a pure function with no side effects, safe to call from
     multiple threads for parallel evaluation.
 
+    .. note::
+        This is the **optimizer objective**. Overlap is measured as raw
+        axis-aligned bounding-box overlap *area* (mm^2, see
+        :func:`compute_overlap`) and DRC as a bbox-clearance *count* (see
+        :func:`compute_drc_violations`) -- with **no courtyard margin** and
+        **no KiCad-layer awareness**. This intentionally differs from
+        ``kct placement check``
+        (:class:`kicad_tools.placement.analyzer.PlacementAnalyzer`), which
+        expands each footprint by a ``courtyard_margin`` and reports real
+        KiCad DRC violations. The two metrics serve different audiences
+        (optimizer search vs. user-facing diagnostics) and can disagree by
+        the courtyard margin for touching footprints. See
+        ``docs/placement-scoring.md`` for the full comparison (issue #3940).
+
     Args:
         placements: Current component positions.
         nets: Net connectivity information for wirelength estimation.

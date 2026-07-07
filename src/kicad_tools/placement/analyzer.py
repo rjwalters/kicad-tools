@@ -50,6 +50,19 @@ class PlacementAnalyzer:
         # Or with custom rules:
         rules = DesignRules(min_pad_clearance=0.15)
         conflicts = analyzer.find_conflicts("board.kicad_pcb", rules=rules)
+
+    .. note::
+        This analyzer powers ``kct placement check``. Its overlap metric
+        expands each footprint's pad bounding box by ``courtyard_margin``
+        (default 0.25 mm) and yields per-violation, human-readable
+        diagnostics. It is a **different metric** from the optimizer
+        objective in :func:`kicad_tools.placement.cost.evaluate_placement`,
+        which uses raw axis-aligned bounding-box overlap area with no
+        courtyard margin. The courtyard expansion means this check can flag
+        a "touching" pair that the optimizer objective scores as zero
+        overlap. Keeping the two separate is intentional (actionable
+        diagnostics vs. a smooth optimizer search space); see
+        ``docs/placement-scoring.md`` for the full comparison (issue #3940).
     """
 
     def __init__(self, verbose: bool = False):

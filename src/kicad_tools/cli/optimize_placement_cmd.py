@@ -241,6 +241,64 @@ def _create_strategy(strategy_name: str) -> PlacementStrategy:
         raise ValueError(f"Unknown strategy: {strategy_name!r}. Available: cmaes")
 
 
+def _read_current_vector(
+    pcb_path: str,
+    components: Sequence[ComponentDef],
+) -> PlacementVector:
+    """Encode the current on-disk footprint placement as a PlacementVector.
+
+    Unlike :func:`_generate_seed`, this reads the actual footprint positions
+    from the ``.kicad_pcb`` file so that ``--dry-run`` scores the *layout as
+    placed* rather than a freshly generated seed (issue #3940).
+
+    Positions are read via ``PCB.load``, which converts footprint coordinates
+    to board-relative space (offset by the detected board origin) -- the same
+    coordinate space :func:`evaluate_placement` and the writer operate in.
+    Rotation is snapped to the nearest 90-degree step and ``side`` is derived
+    from the footprint layer (``B.Cu`` -> back).
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb`` file.
+        components: Component definitions in the order produced by
+            :func:`_read_board_data`. The returned vector uses this same
+            order so ``decode(vector, components)`` round-trips correctly.
+
+    Returns:
+        A :class:`PlacementVector` encoding the current placement, aligned to
+        ``components`` order. Components absent from the PCB (should not happen
+        for vectors derived from the same file) default to the origin.
+    """
+    from kicad_tools.placement.vector import PlacedComponent, encode
+    from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+    pcb = SchemaPCB.load(pcb_path)
+
+    # Map reference -> (x, y, rotation, side) from the current placement.
+    current: dict[str, tuple[float, float, float, int]] = {}
+    for fp in pcb.footprints:
+        ref = fp.reference
+        if not ref:
+            continue
+        x, y = fp.position
+        side = 1 if fp.layer == "B.Cu" else 0
+        current[ref] = (x, y, fp.rotation, side)
+
+    placed: list[PlacedComponent] = []
+    for comp in components:
+        x, y, rot, side = current.get(comp.reference, (0.0, 0.0, 0.0, 0))
+        placed.append(
+            PlacedComponent(
+                reference=comp.reference,
+                x=x,
+                y=y,
+                rotation=rot,
+                side=side,
+            )
+        )
+
+    return encode(placed)
+
+
 def _generate_seed(
     seed_method: str,
     components: Sequence[ComponentDef],
@@ -629,16 +687,18 @@ def run_optimize_placement(
     # Compute bounds
     placement_bounds = bounds(board_outline, components)
 
-    # --dry-run: just evaluate the current placement
+    # --dry-run: evaluate the CURRENT on-disk placement (issue #3940).
+    # Previously this generated a fresh force-directed seed and scored that,
+    # so the reported ovl/drc reflected a randomized layout rather than the
+    # footprints as placed -- making the check meaningless. We now encode the
+    # actual positions read from the .kicad_pcb file.
     if dry_run:
         if not quiet:
             print("\n[dry-run] Evaluating current placement...")
 
-        # Generate a seed to evaluate (since we don't have current positions
-        # encoded as a vector, use force-directed as a proxy)
-        seed_vector = _generate_seed(seed_method, components, nets, board_outline)
+        current_vector = _read_current_vector(pcb_path, components)
         score = _evaluate(
-            seed_vector,
+            current_vector,
             components,
             nets,
             rules,
@@ -650,6 +710,17 @@ def run_optimize_placement(
             _print_score("Current", score)
             print(f"\n  Feasible: {score.is_feasible}")
             print(f"  Total score: {score.total:.4f}")
+            # The optimizer objective (bounding-box overlap area in mm^2 and a
+            # bbox-clearance DRC count) is a distinct metric from
+            # `kct placement check`, which uses courtyard-expanded polygons and
+            # real KiCad DRC. The two surfaces can disagree by the courtyard
+            # margin for touching footprints; this is intentional. See
+            # docs/placement-scoring.md for the full comparison.
+            print(
+                "\n  Note: this is the optimizer objective (bbox overlap area / "
+                "bbox-clearance DRC), NOT the `kct placement check` metric "
+                "(courtyard polygons / KiCad DRC). See docs/placement-scoring.md."
+            )
         return 0
 
     # Create strategy
