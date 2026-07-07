@@ -89,6 +89,54 @@ def test_open_detected_when_same_net_splits_across_islands() -> None:
     assert {open_rec.pad_a, open_rec.pad_b} == {"R1.1", "R2.1"}
 
 
+def test_pour_opens_suppressed() -> None:
+    """Advisory pour nets suppress opens; signal nets still report them (#3914).
+
+    A pour-routed net (GND) whose fill has not yet been stitched leaves its
+    pads in separate copper islands.  Reporting one advisory "open" per
+    stranded pad drowns real signal opens in noise (88-105 of them on board
+    05), so opens are suppressed for nets in ``advisory_net_names``.  A signal
+    net split across two islands is a genuine open and is still reported, and
+    a pour net copper-fused to a *foreign* net is still a short.
+    """
+    sch = {
+        ("U1", "1"): "GND",
+        ("U2", "1"): "GND",
+        ("R1", "1"): "SIG",
+        ("R2", "1"): "SIG",
+    }
+    # GND split across two islands (unstitched pour); SIG split across two
+    # islands (genuine signal open).
+    partition = [
+        frozenset({"U1.1"}),
+        frozenset({"U2.1"}),
+        frozenset({"R1.1"}),
+        frozenset({"R2.1"}),
+    ]
+
+    # Without the advisory filter both nets report an open.
+    strict = compare_partitions(sch, partition)
+    assert {o.net_a for o in strict.opens} == {"GND", "SIG"}
+
+    # With GND marked advisory, only the SIG open survives.
+    filtered = compare_partitions(sch, partition, advisory_net_names=frozenset({"GND"}))
+    assert [o.net_a for o in filtered.opens] == ["SIG"]
+    assert filtered.shorts == ()
+
+
+def test_pour_advisory_filter_does_not_suppress_shorts() -> None:
+    """Opens are suppressed for advisory nets, but shorts never are (#3914)."""
+    sch = {
+        ("U1", "1"): "GND",
+        ("R1", "1"): "SIG",
+    }
+    # GND and SIG copper-fused into one island -> a real short.
+    partition = [frozenset({"U1.1", "R1.1"})]
+    result = compare_partitions(sch, partition, advisory_net_names=frozenset({"GND"}))
+    assert len(result.shorts) == 1
+    assert {result.shorts[0].net_a, result.shorts[0].net_b} == {"GND", "SIG"}
+
+
 def test_floating_schematic_pin_excluded_from_diff() -> None:
     """A pin with no schematic net (None) is ignored, not flagged."""
     sch = {

@@ -830,10 +830,16 @@ class TestBoard06StrictGateGuard:
     # Net: 18 diff-pair + 1 drill + 5 clearance/via = 24.  When #3540-#3544
     # drive the diff-pair errors down, tighten this AND the tolerance entry.
     EXPECTED_STRICT_GATE_ERRORS = 24
-    # Advisory ``connectivity`` dropped 2 -> 1 on the fresh re-route (one
-    # fewer NetStatusAnalyzer false positive); the copper-union audit still
-    # PASSES (see ``TestPourCopperUnionAudit``).
-    EXPECTED_ADVISORY_CONNECTIVITY = 1
+    # Advisory ``connectivity`` is now 0 (Issue #3914).  The residual entries
+    # were ``NetStatusAnalyzer`` false positives on GND / +1V2 pour nets: the
+    # pre-#3914 per-net model bulk-connected every pad inside a zone boundary
+    # and then flagged a stitching residual as "partially routed" even though
+    # the net owns filled pour copper and kicad-cli reports it clean.  The
+    # ``ConnectivityRule`` now defers to the pour classification (``has_filled_zone``
+    # + ``is_advisory_incomplete``) and emits nothing for these nets, so the
+    # advisory count drops to 0.  The copper-union audit still PASSES (see
+    # ``TestPourCopperUnionAudit``).
+    EXPECTED_ADVISORY_CONNECTIVITY = 0
 
     @pytest.fixture(scope="class")
     def routed_pcb(self) -> Path:
@@ -995,18 +1001,22 @@ class TestBoard06StrictGateGuard:
         )
 
     def test_advisory_connectivity_pinned(self, strict_gate_result: dict) -> None:
-        """Advisory ``connectivity`` count pinned at 2 (GND + +1V2).
+        """Advisory ``connectivity`` count pinned at 0 (Issue #3914).
 
         Issue #3413 phases 4-6: all 21 signal nets are routed (the
         historical USB3_TX1+/USB3_TX1-/MIPI_RST incompletes are gone)
         and every pour net is GENUINELY one copper component per the
-        copper-union audit (``TestPourCopperUnionAudit``).  The 2
-        remaining advisory entries are ``NetStatusAnalyzer`` false
-        positives: its per-net model cannot follow the
-        pad -> stub -> via -> plane-fill chain the phase-4 stitching
-        uses (the inverse face of the #3482 analyzer gap).  A drift in
-        this count means the stitch/repair pipeline gained or lost
-        coverage -- investigate with the copper-union audit before
+        copper-union audit (``TestPourCopperUnionAudit``).  The formerly
+        pinned advisory entries were ``NetStatusAnalyzer`` false positives
+        on the GND / +1V2 pour nets -- its per-net model bulk-connected
+        every pad inside a zone boundary and then reported a stitching
+        residual as "partially routed", even though the net owns filled
+        pour copper and kicad-cli reports it clean.  Issue #3914 taught
+        ``ConnectivityRule`` to defer to the pour classification
+        (``has_filled_zone`` + ``is_advisory_incomplete``), so no
+        connectivity violation is emitted for these nets and the advisory
+        count is now 0.  A drift ABOVE 0 means a genuinely-unrouted net
+        regressed -- investigate with the copper-union audit before
         updating the pin.
         """
         violations = strict_gate_result.get("violations", [])
@@ -1016,7 +1026,7 @@ class TestBoard06StrictGateGuard:
         assert connectivity == self.EXPECTED_ADVISORY_CONNECTIVITY, (
             f"Advisory connectivity count on the committed routed PCB is "
             f"{connectivity}; expected {self.EXPECTED_ADVISORY_CONNECTIVITY} "
-            f"(GND + +1V2 analyzer false positives; see #3482).  A change "
+            f"(GND + +1V2 pour false positives removed by #3914).  A change "
             f"here indicates the stitch/repair pipeline gained or lost "
             f"coverage -- investigate before updating the pin."
         )

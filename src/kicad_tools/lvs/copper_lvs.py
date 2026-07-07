@@ -77,6 +77,7 @@ class CopperLVSResult:
 def compare_partitions(
     schematic_net_of_pad: dict[tuple[str, str], str | None],
     copper_partition: list[frozenset[str]],
+    advisory_net_names: frozenset[str] = frozenset(),
 ) -> CopperLVSResult:
     """Diff a physical copper partition against a schematic netlist.
 
@@ -89,11 +90,22 @@ def compare_partitions(
             pin is floating in the schematic and is excluded from the diff.
         copper_partition: list of ``frozenset`` pad-id groups (``"REF.PAD"``
             form) from :meth:`ConnectivityValidator.extract_pad_partition`.
+        advisory_net_names: nets whose completeness is satisfied by copper
+            pours rather than traces (Issue #3914).  Pour-routed power/ground
+            nets are stitched incrementally: pads not yet touched by a
+            stitching via or segment each land in their own copper island, so
+            a strict opens diff reports one advisory "open" per stranded pad
+            (88-105 of them on board 05), drowning any real signal opens in
+            noise.  ``open`` reporting is suppressed for these nets; ``short``
+            reporting is NOT (a pour net copper-fused to a foreign net is
+            still a hard defect).  Callers pass the set of nets that own a
+            copper zone (see :func:`compare_copper_netlist`).
 
     Returns:
         :class:`CopperLVSResult`.  A short is reported once per offending
         net pair (the lexicographically smallest pad witnesses are used);
-        an open is reported once per pair of same-net copper islands.
+        an open is reported once per pair of same-net copper islands, except
+        for nets in ``advisory_net_names`` (opens suppressed).
     """
     # Build {pad_id -> schematic_net} restricted to pads that (a) have a
     # real schematic net and (b) actually appear on the board, so the diff
@@ -157,6 +169,12 @@ def compare_partitions(
     for net, pads in sorted(net_to_pads.items()):
         if len(pads) < 2:
             continue
+        # Pour-routed nets (own a copper zone) are stitched incrementally;
+        # pads not yet bonded to the pour form advisory singleton islands that
+        # are not real opens (Issue #3914).  Suppress opens for these nets so
+        # genuine signal-net opens stay visible.  Shorts are still reported.
+        if net in advisory_net_names:
+            continue
         # Group these pads by copper component.
         comps: dict[int, list[str]] = {}
         for pad_id in sorted(pads):
@@ -200,14 +218,30 @@ def compare_copper_netlist(sch_path: str | Path, pcb_path: str | Path) -> Copper
     """
     # Import lazily: ConnectivityValidator pulls in the PCB schema stack and
     # we want ``import kicad_tools.lvs`` to stay cheap.
+    from kicad_tools.analysis.net_status import build_zone_net_map
     from kicad_tools.validate.connectivity import ConnectivityValidator
 
     sch_path = Path(sch_path)
     pcb_path = Path(pcb_path)
 
     schematic_net_of_pad = _schematic_pin_to_net(sch_path)
-    copper_partition = ConnectivityValidator(pcb_path).extract_pad_partition()
-    return compare_partitions(schematic_net_of_pad, copper_partition)
+    validator = ConnectivityValidator(pcb_path)
+    copper_partition = validator.extract_pad_partition()
+
+    # Nets that own a copper zone are pour-routed: their completeness comes
+    # from fill copper, not traces, so stitching residuals must not be
+    # reported as opens (Issue #3914).  ``build_zone_net_map`` returns the
+    # net numbers with zones; resolve them to names for the advisory filter.
+    pcb = validator.pcb
+    zone_net_numbers = build_zone_net_map(pcb)
+    advisory_net_names = frozenset(
+        pcb.nets[net_number].name
+        for net_number in zone_net_numbers
+        if net_number in pcb.nets and pcb.nets[net_number].name
+    )
+    return compare_partitions(
+        schematic_net_of_pad, copper_partition, advisory_net_names=advisory_net_names
+    )
 
 
 def result_to_json(result: CopperLVSResult) -> dict:
