@@ -1176,9 +1176,22 @@ def output_table(
     # has no measurement findings (e.g. no net-class-map sidecar -- AC5).
     _print_measurement_summary(violations)
 
-    # Group by rule_id summary
+    # Group by rule_id summary.
+    #
+    # Issue #3924: the length-match / continuity measurement findings are
+    # info-severity rows surfaced by the dedicated MEASUREMENT SUMMARY table
+    # above.  On the default (non-``--verbose``) path we exclude them from the
+    # BY RULE breakdown -- mirroring the INFOS-listing suppression below -- so
+    # that default output stays backward-compatible for consumers that grep
+    # ``BY RULE:`` severity-agnostically (e.g. the board03 baseline test).
+    # Under ``--verbose`` they remain visible in BY RULE alongside INFOS.
+    by_rule_source = (
+        violations
+        if verbose
+        else [v for v in violations if not (v.is_info and v.rule_id in _MEASUREMENT_RULE_IDS)]
+    )
     by_rule: dict[str, dict[str, int]] = {}
-    for v in violations:
+    for v in by_rule_source:
         if v.rule_id not in by_rule:
             by_rule[v.rule_id] = {"errors": 0, "warnings": 0, "infos": 0}
         if v.is_error:
@@ -1188,8 +1201,12 @@ def output_table(
         else:
             by_rule[v.rule_id]["warnings"] += 1
 
-    print(f"\n{'-' * 60}")
-    print("BY RULE:")
+    # ``by_rule`` can be empty when the only findings are measurement info
+    # rows suppressed above (already surfaced in MEASUREMENT SUMMARY); skip the
+    # empty BY RULE header in that case.
+    if by_rule:
+        print(f"\n{'-' * 60}")
+        print("BY RULE:")
     for rule_id, counts in sorted(
         by_rule.items(),
         key=lambda x: -(x[1]["errors"] + x[1]["warnings"] + x[1]["infos"]),
