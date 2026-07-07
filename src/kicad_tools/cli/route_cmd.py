@@ -3110,6 +3110,46 @@ def _interleave_fine_pitch_fallback_attempts(
     return interleaved
 
 
+def _rung_dedup_fingerprint(
+    layer_count: int,
+    layer_stack_id: str,
+    via_in_pad_fallback: bool,
+    skip_nets: "list[str] | tuple[str, ...]",
+) -> tuple[int, str, bool, tuple[str, ...]]:
+    """Compute the pre-rung deduplication fingerprint for issue #3923.
+
+    A layer-escalation rung's result is fully determined by its
+    ``(layer_count, layer_stack, via_in_pad_fallback, skip_nets)`` inputs: the
+    per-attempt ``Autorouter`` is constructed fresh from ``pcb_path`` + these
+    inputs inside ``load_pcb_for_routing`` (no routed copper is carried across
+    rungs), so two rungs sharing this fingerprint provably produce the same
+    nets-routed / overflow result.
+
+    ``layer_stack_id`` is the stack's identity (its ``name``) -- CRUCIAL so that
+    genuinely-different stacks at the SAME layer count are NOT collapsed.  The
+    default ladder contains two distinct 4-layer stacks (``4-Layer
+    SIG-GND-PWR-SIG`` vs ``4-Layer ALL-SIG``) that must both run; only a rung
+    that repeats the *same* stack with the *same* fallback + skip_nets is a true
+    duplicate (e.g. the fine-pitch via-in-pad interleave or a
+    ``_filter_layer_configs_for_pcb`` reordering that re-emits an identical
+    entry -- the ``[4L, 4L]`` pattern the sweep observed on board-05).
+
+    ``skip_nets`` is normalized to a *sorted* tuple so set-iteration order
+    cannot defeat the dedup, and ``via_in_pad_fallback`` is coerced to ``bool``
+    so a truthy non-bool cannot slip a duplicate through.
+
+    The existing stagnation / zero-overflow early-stops only fire AFTER a rung
+    has already spent its full routing budget, so they cannot prevent the
+    re-run; this fingerprint skips it before any wall time is spent.
+    """
+    return (
+        int(layer_count),
+        str(layer_stack_id),
+        bool(via_in_pad_fallback),
+        tuple(sorted(skip_nets)),
+    )
+
+
 def route_with_layer_escalation(
     pcb_path: Path,
     output_path: Path,
@@ -3322,6 +3362,21 @@ def route_with_layer_escalation(
         preserved_sexp=_preserved_sexp,
     )
 
+    # Issue #3923: pre-rung deduplication.  The escalation ladder built by
+    # ``_build_layer_configs_for_escalation`` + the fine-pitch interleave can
+    # contain entries with an identical ``(layer_count, via_in_pad_fallback)``
+    # tuple (most visibly the ``[4L, 4L]`` pattern on board-05).  When the
+    # board state feeding a rung is also identical -- same skip_nets, no
+    # per-attempt state carried between them -- the rung re-executes a full
+    # routing budget only to produce the same result (same nets routed, same
+    # overflow).  The existing stagnation / zero-overflow early-stops only
+    # fire AFTER a rung has spent its budget (and both carve out the
+    # same-layer via-in-pad fallback), so they cannot prevent the re-run.
+    # Fingerprint each attempted config and skip a rung whose fingerprint was
+    # already attempted -- each unique ``(layer_count, via_in_pad_fallback,
+    # skip_nets)`` config runs at most once per invocation.
+    _attempted_rung_fingerprints: set[tuple[int, str, bool, tuple[str, ...]]] = set()
+
     for attempt_num, (layer_count, layer_stack, via_in_pad_fallback) in enumerate(layer_configs, 1):
         # Issue #3371 / P_FP5: stamp / clear the via-in-pad fallback env var
         # *around* this attempt so the lazily-constructed EscapeRouter
@@ -3371,6 +3426,33 @@ def route_with_layer_escalation(
                         f"  Auto-skipping {', '.join(auto_plane_skip)} "
                         "(connected via dedicated plane(s) in this stack)"
                     )
+
+        # Issue #3923: skip a rung whose (layer_count, via_in_pad_fallback,
+        # skip_nets) fingerprint was already attempted this invocation.  The
+        # board state that feeds a rung is fully determined by these three
+        # inputs (the per-attempt Autorouter is constructed fresh from
+        # ``pcb_path`` + ``attempt_skip_nets`` inside ``load_pcb_for_routing``
+        # below -- no routed copper is carried across rungs), so an identical
+        # fingerprint provably reproduces the previous rung's result.  Running
+        # it again only burns a full ``route_all_negotiated`` budget (60s+ per
+        # affected board) for +0 routed nets.  ``attempt_skip_nets`` is sorted
+        # so set-order jitter cannot defeat the dedup.
+        _rung_fingerprint = _rung_dedup_fingerprint(
+            layer_count,
+            getattr(layer_stack, "name", str(layer_count)),
+            via_in_pad_fallback,
+            attempt_skip_nets,
+        )
+        if _rung_fingerprint in _attempted_rung_fingerprints:
+            if not quiet:
+                _fallback_suffix = " + via-in-pad fallback" if via_in_pad_fallback else ""
+                flush_print(
+                    f"  Skipping attempt {attempt_num}: {layer_count} layers"
+                    f"{_fallback_suffix} -- identical config already attempted "
+                    "(issue #3923 rung dedup)"
+                )
+            continue
+        _attempted_rung_fingerprints.add(_rung_fingerprint)
 
         if not quiet:
             flush_print("=" * 60)

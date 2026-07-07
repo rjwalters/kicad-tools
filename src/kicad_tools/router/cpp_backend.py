@@ -2313,6 +2313,71 @@ class CppPathfinder:
             )
             return None
 
+        # Issue #3923: resume-exhaustion cascade.  The C++ resumable
+        # pathfinder runs a post-route clearance-validation loop: after each A*
+        # result it checks the path for clearance violations, boosts avoidance
+        # cost at the violation site, and resumes the search.  Two dead-end
+        # outcomes hand the net to this fallback (see ``route()``):
+        #
+        #   1. "post-route clearance validation failed; exhausted 5 resume
+        #      attempts" -- 5 boosted resumes each produced a geometrically
+        #      valid path that still violated clearance.  Paths EXIST; the
+        #      obstruction is clearance the avoidance boosting could not
+        #      steer around.
+        #   2. "resume after rejected goal cell failed: no path (...)" -- a
+        #      resumed search exhausted its (already avoidance-boosted) open
+        #      set with FAILURE_NO_PATH.
+        #
+        # In both cases the pure-Python A* is a dead loss: it shares the SAME
+        # _py_grid, the SAME clearance model, and (for case 1) offers no better
+        # clearance handling than the C++ validator -- its value-add is a
+        # different neighbor expansion for FINDING a path, but here either a
+        # path already exists (case 1) or the open set is truly empty (case 2).
+        # It therefore reproduces the failure 10-100x more slowly (60-200s per
+        # net -- board-07 spent 933/1052 pipeline seconds this way in the
+        # 2026-07-05 sweep, with 22 of 30 fallbacks in case 1).  Short-circuit
+        # BEFORE constructing the Python ``Router``.
+        #
+        # The guard keys on the resume-loop reason markers, NOT on
+        # FAILURE_NO_PATH alone, so it never fires for the INITIAL-search
+        # failure ("no path (C++ A* open set exhausted)", no "resume"/"resume
+        # attempts" phrasing) -- single-corridor geometries the Python
+        # 45-degree/waypoint expansion legitimately rescues still fall back.
+        # It also excludes FAILURE_VIA_VIA_BLOCKED (all via candidates refused
+        # by stored-via geometry -- a distinct obstruction the negotiated
+        # strategy targets with rip-up, and one where the Python router's via
+        # placement can differ) and FAILURE_TIMEOUT (already short-circuited
+        # above -- a wall-clock artifact, not a geometric dead-end).  Opt out
+        # with KICAD_ROUTER_SKIP_RESUME_FALLBACK=0 to restore the pre-#3923
+        # grind.
+        _resume_exhausted = ("resume attempts" in reason) or (
+            reason.startswith("resume after rejected goal cell failed")
+        )
+        _excluded_code = (
+            cpp_failure_reason is not None
+            and router_cpp is not None
+            and (
+                int(cpp_failure_reason)
+                in (
+                    int(router_cpp.FAILURE_TIMEOUT),
+                    int(router_cpp.FAILURE_VIA_VIA_BLOCKED),
+                )
+            )
+        )
+        if (
+            _resume_exhausted
+            and not _excluded_code
+            and os.environ.get("KICAD_ROUTER_SKIP_RESUME_FALLBACK", "1").strip() != "0"
+        ):
+            logger.debug(
+                "Net %s: C++ resumable search exhausted its clearance-validation "
+                "resume attempts (reason=%r); skipping Python fallback -- the same "
+                "grid + clearance model will also fail, 10-100x slower (issue #3923)",
+                net_name,
+                reason,
+            )
+            return None
+
         # Issue #3456: the silent C++ -> Python downgrade is the bug.
         # A net grinding 3-7 minutes in the pure-Python A* is otherwise
         # indistinguishable from "router is slow" at default verbosity.
