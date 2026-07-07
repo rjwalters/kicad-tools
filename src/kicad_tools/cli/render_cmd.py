@@ -261,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="kct render",
         description=(
-            "Render per-board 2D layer plots and 3D ray-traced PNGs into "
+            "Render per-board 2D layer plots (SVGs) and 3D ray-traced PNGs into "
             "boards/<id>/output/renders/."
         ),
     )

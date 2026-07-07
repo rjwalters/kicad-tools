@@ -21,7 +21,7 @@ directory — `kct board-metrics` never recomputes anything from KiCad.
 | `nets_routed_pct`       | `report.md` → `\| Signal Net Completion \|` row | float percent |
 | `drc_violations`        | `report.md` → `## DRC Status` → `\| Errors \|` row | integer |
 | `cost`                  | `report.md` → `## Cost Estimate` block | omitted if section absent |
-| `renders`               | `output/renders/*.png` (from `kct render`, #3675) | only existing files |
+| `renders`               | `output/renders/*.{svg,png}` (2D plots are `.svg`, 3D renders are `.png`; from `kct render`, #3675) | only existing files |
 | `manufacturing_package` | `output/manufacturing/kicad_project.zip` | omitted if absent |
 | `manifest_generated_at` | `manifest.json` → `generated_at`      | ISO-8601 string |
 | `lvs_clean`             | `output/lvs.json` → `clean`           | omitted when `lvs.json` is absent (#3748, #3749) |
@@ -44,8 +44,8 @@ directory — `kct board-metrics` never recomputes anything from KiCad.
   "drc_violations": 14,
   "cost": { "per_board_usd": 9.16, "batch_qty": 5, "batch_total_usd": 45.78 },
   "renders": {
-    "pcb_front": "renders/pcb-front.png",
-    "pcb_back": "renders/pcb-back.png",
+    "pcb_front": "renders/pcb-front.svg",
+    "pcb_back": "renders/pcb-back.svg",
     "3d_front": "renders/3d-front.png",
     "3d_back": "renders/3d-back.png"
   },
@@ -83,8 +83,8 @@ directory — `kct board-metrics` never recomputes anything from KiCad.
 ### Paths are relative to `board.json`
 
 `renders` values and `manufacturing_package` are relative to the `board.json`
-file location (`boards/<id>/output/`). For example `renders/pcb-front.png`
-resolves to `boards/<id>/output/renders/pcb-front.png`.
+file location (`boards/<id>/output/`). For example `renders/pcb-front.svg`
+resolves to `boards/<id>/output/renders/pcb-front.svg`.
 
 ### `status` values
 
