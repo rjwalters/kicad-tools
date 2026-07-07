@@ -731,3 +731,54 @@ class TestLocalRerouterSameNetObstacle:
 
         # Should succeed (path may go straight through since obstacle not blocked)
         assert result.success is True
+
+
+class TestMakeSegmentNodeCanonicalUuid:
+    """Issue #3925: DRC-rerouted segments honor the deterministic UUID toggle.
+
+    ``_make_segment_node`` used to mint a bare ``uuid.uuid4()`` regardless
+    of ``enable_deterministic_uuids()``, so a DRC-triggered local re-route
+    broke fresh-vs-fresh byte identity even when the board was otherwise
+    deterministically seeded.  It also emitted ``net`` before ``uuid``,
+    diverging from KiCad's canonical field order and churning on round-trip.
+    """
+
+    def test_segment_node_uuid_before_net(self):
+        """Emitted segment child order is ... uuid net (KiCad canonical)."""
+        doc = _parse_pcb(PCB_WITH_REROUTABLE_SEGMENT)
+        nets = _build_nets(doc)
+        rerouter = LocalRerouter(doc, nets)
+        seg = rerouter._make_segment_node(0.0, 0.0, 1.0, 0.0, 0.25, "F.Cu", 1)
+        child_names = [c.name for c in seg.children]
+        assert child_names.index("uuid") < child_names.index("net"), (
+            f"Segment must emit uuid before net (KiCad canonical), got {child_names}"
+        )
+
+    def test_segment_node_honors_deterministic_toggle(self):
+        """Same seed => byte-identical UUID; toggle off => random uuid4."""
+        import random
+
+        from kicad_tools.router.primitives import (
+            enable_deterministic_uuids,
+            reset_deterministic_uuids,
+        )
+
+        doc = _parse_pcb(PCB_WITH_REROUTABLE_SEGMENT)
+        nets = _build_nets(doc)
+        rerouter = LocalRerouter(doc, nets)
+
+        def _uuid_at_seed(seed: int) -> str:
+            random.seed(seed)
+            enable_deterministic_uuids(True)
+            try:
+                seg = rerouter._make_segment_node(0.0, 0.0, 1.0, 0.0, 0.25, "F.Cu", 1)
+                return str(seg.find("uuid").get_first_atom())
+            finally:
+                reset_deterministic_uuids()
+
+        assert _uuid_at_seed(7) == _uuid_at_seed(7), (
+            "DRC-rerouted segment UUID must be stable fresh-vs-fresh under a seed."
+        )
+        assert _uuid_at_seed(7) != _uuid_at_seed(8), (
+            "Different seeds must yield different DRC-rerouted segment UUIDs."
+        )
