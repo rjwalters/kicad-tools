@@ -135,6 +135,42 @@ def _find_pcb_file(directory: Path) -> Path | None:
     return None
 
 
+def _discover_net_class_map_sidecar(pcb_path: Path) -> Path | None:
+    """Probe conventional locations for a ``net_class_map.json`` sidecar.
+
+    Issue #3917 Defect 2: ``kct route`` writes a ``net_class_map.json``
+    sidecar next to the routed PCB (in the output directory).  ``kct
+    check`` should auto-load it so the sidecar-gated skew / continuity
+    rules fire without the user having to pass ``--net-class-map`` by
+    hand -- mirroring the existing schematic auto-discovery.
+
+    Candidate locations, in priority order, relative to the resolved
+    PCB path:
+
+    - ``<pcb_dir>/net_class_map.json`` (sidecar written alongside a
+      routed board that lives in its own output directory)
+    - ``<pcb_dir>/output/net_class_map.json`` (board dir with an
+      ``output/`` subtree)
+    - ``<pcb_dir>/../output/net_class_map.json`` (routed PCB inside
+      ``output/`` with the sidecar as a sibling -- redundant with the
+      first candidate but kept for the ``<board>/output/<pcb>`` layout)
+
+    Returns:
+        The first existing candidate path, or ``None`` when no sidecar
+        is found.
+    """
+    pcb_dir = pcb_path.parent
+    candidates = [
+        pcb_dir / "net_class_map.json",
+        pcb_dir / "output" / "net_class_map.json",
+        pcb_dir.parent / "output" / "net_class_map.json",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _emit_drift_banner(pcb_path: Path, schematic: str | None) -> None:
     """Print the advisory schematic/PCB drift banner (non-blocking).
 
@@ -743,23 +779,55 @@ def main(argv: list[str] | None = None) -> int:
     # engagement / skew state from the routed PCB and fire.  When omitted,
     # the rules degrade to no-ops (AC #3: graceful-degradation contract).
     net_class_map = None
-    if args.net_class_map is not None:
+    # Issue #3917 Defect 2: when the user did not pass --net-class-map,
+    # auto-discover the conventional sidecar written by ``kct route`` next
+    # to the routed PCB.  An explicit flag always wins and short-circuits
+    # the probe (AC3: no double-load).
+    ncm_explicit = args.net_class_map is not None
+    if ncm_explicit:
+        ncm_path: Path | None = Path(args.net_class_map).resolve()
+    else:
+        ncm_path = _discover_net_class_map_sidecar(pcb_path)
+
+    if ncm_path is not None:
         from kicad_tools.router.rules import net_class_map_from_dict
 
-        ncm_path = Path(args.net_class_map).resolve()
         if not ncm_path.exists():
+            # Only reachable via an explicit flag (the auto-probe returns
+            # existing files only).
             print(f"Error: net-class-map file not found: {ncm_path}", file=sys.stderr)
             return 1
+        ncm_load_error: str | None = None
+        net_class_map = None
         try:
             ncm_data = json.loads(ncm_path.read_text())
-        except json.JSONDecodeError as e:
-            print(f"Error parsing net-class-map JSON: {e}", file=sys.stderr)
-            return 1
-        try:
             net_class_map = net_class_map_from_dict(ncm_data)
+        except json.JSONDecodeError as e:
+            ncm_load_error = f"parsing net-class-map JSON: {e}"
         except (TypeError, ValueError) as e:
-            print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
-            return 1
+            ncm_load_error = f"invalid net-class-map structure: {e}"
+
+        if ncm_load_error is not None:
+            if ncm_explicit:
+                # An explicit path that fails to load is a hard error --
+                # the user asked for it specifically.
+                print(f"Error: {ncm_load_error}", file=sys.stderr)
+                return 1
+            # An auto-discovered sidecar that fails to load degrades
+            # gracefully: warn and fall back to no-sidecar behaviour
+            # rather than crashing the whole check (Issue #3917 edge case).
+            print(
+                f"WARNING: ignoring malformed net-class-map sidecar {ncm_path}: {ncm_load_error}",
+                file=sys.stderr,
+            )
+            net_class_map = None
+        elif not ncm_explicit:
+            # Auto-loaded successfully: tell the user which file engaged
+            # the sidecar-gated rules (AC2).
+            print(
+                f"[INFO] auto-loaded net-class-map sidecar: {ncm_path}",
+                file=sys.stderr,
+            )
 
     # Issue #3440: the skew rules (match_group_length_skew,
     # diffpair_length_skew, diffpair_routing_continuity) degrade to
@@ -798,6 +866,11 @@ def main(argv: list[str] | None = None) -> int:
             copper_oz=args.copper,
             suppress_library=args.suppress_library,
             net_class_map=net_class_map,
+            # The CLI already prints its own up-front INACTIVE warning
+            # below, so suppress the per-rule checker-level warning here to
+            # avoid duplicating it (Issue #3917 Defect 3).
+            warn_on_inactive_skew_rules=False,
+            verbose=args.verbose,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
