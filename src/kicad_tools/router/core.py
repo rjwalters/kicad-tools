@@ -12437,12 +12437,25 @@ class Autorouter:
                 # silently dropped ``reference`` / ``longer_than_reference``
                 # / ``unrouted`` members, producing an all-zeros summary
                 # while 15.4mm of skew went untouched on board 07.
-                from .match_group_tuning import format_reason_counts
+                from .match_group_tuning import (
+                    format_reason_counts,
+                    group_skew_before_after,
+                )
 
                 print(
                     f"  {group.name}: {len(group_results)} members "
                     f"({format_reason_counts(res.reason for (_r, res) in group_results.values())})"
                 )
+                # Issue #3924 AC2: report the achieved group skew before and
+                # after tuning so the reason buckets are anchored to a
+                # concrete measured improvement (e.g. 15.4mm -> 0.002mm).
+                _skew = group_skew_before_after(
+                    (res.length_before_mm, res.length_after_mm)
+                    for (_r, res) in group_results.values()
+                )
+                if _skew is not None:
+                    _skew_before, _skew_after = _skew
+                    print(f"    skew: {_skew_before:.3f}mm -> {_skew_after:.3f}mm")
                 # Issue #3440 addendum: rollbacks / budget exhaustion /
                 # missing segments must say WHY (which DRC rule the
                 # candidate meander violated, requested-vs-achieved mm)

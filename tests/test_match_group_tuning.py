@@ -40,6 +40,7 @@ from kicad_tools.router.match_group_tuning import (
     _post_insertion_clearance_detail_group,
     _post_insertion_clearance_ok_group,
     format_reason_counts,
+    group_skew_before_after,
     tune_match_group_v2,
 )
 from kicad_tools.router.optimizer.serpentine import (
@@ -2659,6 +2660,39 @@ class TestFormatReasonCounts:
         out = format_reason_counts(["reference"] + ["longer_than_reference"] * 7)
         assert "1 reference" in out
         assert "7 longer-than-ref" in out
+
+
+class TestGroupSkewBeforeAfter:
+    """Issue #3924 AC2: the tuner's verbose summary reports achieved group
+    skew before and after tuning, derived from per-member
+    ``(length_before_mm, length_after_mm)``."""
+
+    def test_converged_group_reports_shrinking_skew(self):
+        # Reference held at 20mm; two shorter members grown toward it.
+        lengths = [(20.0, 20.0), (4.6, 19.998), (10.0, 20.001)]
+        result = group_skew_before_after(lengths)
+        assert result is not None
+        skew_before, skew_after = result
+        # Before: max 20 - min 4.6 = 15.4mm.  After: ~0.003mm.
+        assert skew_before == pytest.approx(15.4, abs=1e-6)
+        assert skew_after < 0.01
+
+    def test_single_member_returns_none(self):
+        # Skew is undefined for a single trace.
+        assert group_skew_before_after([(10.0, 10.0)]) is None
+
+    def test_empty_returns_none(self):
+        assert group_skew_before_after([]) is None
+
+    def test_unrouted_placeholders_excluded(self):
+        # An unrouted member (0.0, 0.0) must not drag min to zero and
+        # inflate the reported skew.  Only the two real members count.
+        lengths = [(10.0, 10.0), (10.5, 10.5), (0.0, 0.0)]
+        result = group_skew_before_after(lengths)
+        assert result is not None
+        skew_before, skew_after = result
+        assert skew_before == pytest.approx(0.5, abs=1e-6)
+        assert skew_after == pytest.approx(0.5, abs=1e-6)
 
 
 # =============================================================================
