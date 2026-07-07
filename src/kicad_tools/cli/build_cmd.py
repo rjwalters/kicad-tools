@@ -18,6 +18,8 @@ import logging
 import re
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -26,6 +28,7 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 logger = logging.getLogger(__name__)
+from rich.markup import escape as markup_escape
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
@@ -385,6 +388,101 @@ def _run_python_script(
 
     except Exception as e:
         return False, f"Failed to run {script_path.name}: {e}"
+
+
+# Interval (seconds) between "still running" heartbeats emitted while a
+# long subprocess step is alive.  Chosen well under the 60s ceiling in
+# issue #3944's acceptance criteria so users can distinguish "still
+# working" from "hung" without waiting a full minute.
+_HEARTBEAT_INTERVAL_S = 30.0
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Format an elapsed duration for ledger / summary lines.
+
+    Sub-minute durations render as fractional seconds (``24.3s``);
+    longer durations render as ``4m32s`` so multi-minute steps read
+    cleanly.  All timing is fed from ``time.monotonic()`` deltas so it
+    is insensitive to wall-clock adjustments (issue #3944).
+    """
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    rem = int(round(seconds - minutes * 60))
+    if rem == 60:  # rounding pushed us to the next minute
+        minutes += 1
+        rem = 0
+    return f"{minutes}m{rem:02d}s"
+
+
+def _run_subprocess_with_heartbeat(
+    cmd: list[str],
+    *,
+    cwd: str,
+    console: Console,
+    label: str,
+    quiet: bool,
+    heartbeat_interval: float = _HEARTBEAT_INTERVAL_S,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``cmd`` while emitting periodic "still running" heartbeats.
+
+    Issue #3944: several ``kct build`` sub-steps (placement, route
+    fallback, verify DRC/sync, export) shelled out with
+    ``subprocess.run(capture_output=...)`` and went completely silent for
+    minutes at a time -- indistinguishable from a hang.  This helper
+    captures the child's stdout/stderr (so callers keep the same
+    ``CompletedProcess`` contract they had with ``subprocess.run``) but
+    spawns a daemon thread that prints ``[label]: still running, Xs
+    elapsed`` every ``heartbeat_interval`` seconds until the process
+    exits.
+
+    ``quiet`` suppresses the heartbeat entirely (the existing ``--quiet``
+    contract).  The returned object matches ``subprocess.run(...,
+    capture_output=True, text=True)`` so callers can inspect
+    ``returncode``, ``stdout``, and ``stderr`` unchanged.
+    """
+    start = time.monotonic()
+    process = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    stop = threading.Event()
+
+    # Escape the label so Rich renders the surrounding brackets as
+    # literal ``[label]`` text instead of interpreting them as console
+    # markup (which would otherwise silently strip the label).
+    safe_label = markup_escape(label)
+
+    def _heartbeat() -> None:
+        # Wait in interval-sized slices; exit promptly when signalled.
+        while not stop.wait(heartbeat_interval):
+            elapsed = time.monotonic() - start
+            console.print(
+                f"  [dim]\\[{safe_label}]: still running, {_format_elapsed(elapsed)} elapsed[/dim]"
+            )
+
+    thread: threading.Thread | None = None
+    if not quiet:
+        thread = threading.Thread(target=_heartbeat, daemon=True)
+        thread.start()
+
+    try:
+        stdout, stderr = process.communicate()
+    finally:
+        stop.set()
+        if thread is not None:
+            thread.join(timeout=1.0)
+
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=process.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
 
 
 def _run_step_schematic(ctx: BuildContext, console: Console) -> BuildResult:
@@ -852,12 +950,15 @@ def _run_step_placement(ctx: BuildContext, console: Console) -> BuildResult:
         if ctx.verbose:
             cmd.append("--verbose")
 
-        result = subprocess.run(
+        result = _run_subprocess_with_heartbeat(
             cmd,
             cwd=str(ctx.project_dir),
-            capture_output=not ctx.verbose,
-            text=True,
+            console=console,
+            label="placement",
+            quiet=ctx.quiet,
         )
+        if ctx.verbose and result.stdout:
+            console.print(result.stdout)
 
         if result.returncode == 0:
             return BuildResult(
@@ -1336,12 +1437,15 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
         if ctx.quiet:
             cmd.append("--quiet")
 
-        result = subprocess.run(
+        result = _run_subprocess_with_heartbeat(
             cmd,
             cwd=str(ctx.project_dir),
-            capture_output=not ctx.verbose,
-            text=True,
+            console=console,
+            label="route",
+            quiet=ctx.quiet,
         )
+        if ctx.verbose and result.stdout:
+            console.print(result.stdout)
 
         if result.returncode == 0:
             # Defense-in-depth postcondition (issue #2740): the router can
@@ -2336,11 +2440,12 @@ def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
             str(drc_report_path),
         ]
 
-        result = subprocess.run(
+        result = _run_subprocess_with_heartbeat(
             cmd,
             cwd=str(ctx.project_dir),
-            capture_output=True,
-            text=True,
+            console=console,
+            label="verify",
+            quiet=ctx.quiet,
         )
 
         drc_success = result.returncode == 0
@@ -2365,11 +2470,12 @@ def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
                 str(pcb_to_verify),
             ]
 
-            sync_result = subprocess.run(
+            sync_result = _run_subprocess_with_heartbeat(
                 sync_cmd,
                 cwd=str(ctx.project_dir),
-                capture_output=True,
-                text=True,
+                console=console,
+                label="verify (sync)",
+                quiet=ctx.quiet,
             )
 
             if sync_result.returncode != 0:
@@ -2479,12 +2585,15 @@ def _run_step_export(ctx: BuildContext, console: Console) -> BuildResult:
             cmd.append("--no-bom")
             cmd.append("--no-cpl")
 
-        result = subprocess.run(
+        result = _run_subprocess_with_heartbeat(
             cmd,
             cwd=str(ctx.project_dir),
-            capture_output=not ctx.verbose,
-            text=True,
+            console=console,
+            label="export",
+            quiet=ctx.quiet,
         )
+        if ctx.verbose and result.stdout:
+            console.print(result.stdout)
 
         if result.returncode == 0:
             return BuildResult(
@@ -2857,6 +2966,11 @@ def main(argv: list[str] | None = None) -> int:
     # Run build steps
     results: list[BuildResult] = []
 
+    # Wall-clock anchor for the whole pipeline (issue #3944).  Uses
+    # ``time.monotonic()`` so the reported totals are immune to system
+    # clock adjustments mid-build.
+    build_start = time.monotonic()
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -2865,6 +2979,7 @@ def main(argv: list[str] | None = None) -> int:
     ) as progress:
         for step in steps:
             task = progress.add_task(f"[cyan]{step.value}[/cyan]...", total=None)
+            step_start = time.monotonic()
 
             if step == BuildStep.SCHEMATIC:
                 result = _run_step_schematic(ctx, console)
@@ -2921,13 +3036,18 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 result = BuildResult(step=step.value, success=False, message="Unknown step")
 
+            step_elapsed = time.monotonic() - step_start
             results.append(result)
             progress.remove_task(task)
 
-            # Print step result
+            # Print step result with per-step elapsed time (issue #3944)
+            # so users can see how long each stage took directly on the
+            # ledger line, e.g. ``[OK] route: ... (24.3s)``.
             if not args.quiet:
                 status = "[green]OK[/green]" if result.success else "[red]FAIL[/red]"
-                console.print(f"  [{status}] {step.value}: {result.message}")
+                console.print(
+                    f"  [{status}] {step.value}: {result.message} ({_format_elapsed(step_elapsed)})"
+                )
 
             # Stop on failure unless verifying or exporting
             if not result.success and step not in (
@@ -2957,13 +3077,15 @@ def main(argv: list[str] | None = None) -> int:
 
     # Print summary
     if not args.quiet:
+        total_elapsed = _format_elapsed(time.monotonic() - build_start)
         console.print()
         success_count = sum(1 for r in results if r.success)
         total_count = len(results)
 
         if success_count == total_count:
             console.print(
-                f"[green]Build completed successfully[/green] ({success_count}/{total_count} steps)"
+                f"[green]Build completed successfully[/green] "
+                f"({success_count}/{total_count} steps) in {total_elapsed}"
             )
 
             # Show output files
@@ -2978,7 +3100,8 @@ def main(argv: list[str] | None = None) -> int:
                 console.print(f"[dim]Manufacturing:[/dim] {export_results[0].output_file}")
         else:
             console.print(
-                f"[red]Build failed[/red] ({success_count}/{total_count} steps succeeded)"
+                f"[red]Build failed[/red] "
+                f"({success_count}/{total_count} steps succeeded) in {total_elapsed}"
             )
             return 1
 

@@ -22,12 +22,14 @@ These tests verify:
 
 from __future__ import annotations
 
+import sys
 import textwrap
 from pathlib import Path
 
 import pytest
 
-from kicad_tools.cli.build_cmd import _run_python_script
+from kicad_tools.cli import build_cmd
+from kicad_tools.cli.build_cmd import _run_python_script, _run_subprocess_with_heartbeat
 
 
 @pytest.fixture
@@ -220,6 +222,51 @@ class TestStdoutStreamingChildEnv:
         captured = capsys.readouterr()
         # Caller's value (``x``) wins over our default (``1``).
         assert "unbuffered=x" in captured.out
+
+
+class TestSubprocessHeartbeatStreaming:
+    """Issue #3944: the silent ``subprocess.run`` sites (placement,
+    route fallback, verify, export) now route through
+    ``_run_subprocess_with_heartbeat``, which surfaces a bounded-interval
+    "still running" heartbeat so long steps are distinguishable from a
+    hang without ``--verbose``."""
+
+    def test_heartbeat_visible_by_default(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A slow child produces at least one heartbeat line in the
+        default (non-quiet) mode."""
+        cmd = [sys.executable, "-c", "import time; time.sleep(0.25)"]
+        result = _run_subprocess_with_heartbeat(
+            cmd,
+            cwd=".",
+            console=build_cmd.Console(),
+            label="route",
+            quiet=False,
+            heartbeat_interval=0.05,
+        )
+        assert result.returncode == 0
+        assert "still running" in capsys.readouterr().out
+
+    def test_heartbeat_suppressed_when_quiet(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``quiet=True`` mirrors the ``--quiet`` contract and prints no
+        heartbeat, matching the streaming-suppression behaviour of
+        ``_run_python_script(quiet=True)``."""
+        cmd = [sys.executable, "-c", "import time; time.sleep(0.25)"]
+        result = _run_subprocess_with_heartbeat(
+            cmd,
+            cwd=".",
+            console=build_cmd.Console(),
+            label="route",
+            quiet=True,
+            heartbeat_interval=0.05,
+        )
+        assert result.returncode == 0
+        assert "still running" not in capsys.readouterr().out
 
 
 class TestRouteAllSmokeBudget:
