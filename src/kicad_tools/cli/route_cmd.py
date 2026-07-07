@@ -460,6 +460,47 @@ def _per_attempt_budgeted_timeout(args, attempt_index: int, max_attempts: int) -
     return min(float(timeout), remaining, per_attempt_slice)
 
 
+def _routable_multi_pad_nets(router: "Autorouter") -> list[int]:
+    """Return the multi-pad net IDs the router will actually route.
+
+    Issue #3942 (Bug B): the routed/total summary denominator must count
+    only the nets the router was asked to route.  A net that carries 2+
+    pads but is *pour-served* -- ``router._is_pour_net(net_id)`` is True
+    because its net class declares ``is_pour_net`` and it has a copper
+    zone -- is stripped from the routing order by
+    :meth:`Autorouter._filter_pour_nets` and is therefore never counted
+    in ``stats['nets_routed']``.
+
+    Historically these nets were excluded from the denominator only when
+    the CLI's ``skip_nets`` list caught them (their pads get rewritten to
+    net 0 at load time, so ``net_num > 0`` already drops them).  But the
+    router's own pour classification (``net_class_map``) can flag a net as
+    pour even when the CLI's zone-detection regex missed the zone and did
+    not add it to ``skip_nets``.  In that case the net kept ``net_num >
+    0``, landed in the multi-pad denominator, yet the router silently
+    skipped it -- producing a bogus ``PARTIAL: Routed 1/2`` line on a
+    board that routed every net it was asked to.
+
+    Gating on ``_is_pour_net`` (which returns False for pour nets in
+    ``_pour_nets_without_zones`` -- those are routed as signals, so they
+    stay in the count) makes the denominator match precisely the set the
+    router hands to the A* loop.
+
+    Args:
+        router: The Autorouter, already loaded (so ``net_class_map`` and
+            ``_pour_nets_without_zones`` are populated).
+
+    Returns:
+        Sorted list of net IDs with ``net_num > 0``, 2+ pads, that the
+        router will route (i.e. are not pour-served).
+    """
+    result: list[int] = []
+    for net_num, pads in router.nets.items():
+        if net_num > 0 and len(pads) >= 2 and not router._is_pour_net(net_num):
+            result.append(net_num)
+    return sorted(result)
+
+
 def _emit_single_pad_net_warning(
     router: "Autorouter",
     single_pad_nets: list[int],
@@ -1234,7 +1275,18 @@ def _finalize_routes(
     stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
 
     if not quiet:
-        flush_print("\n--- Results ---")
+        # Issue #3942 (Bug C): these statistics are scoped to the
+        # newly-routed multi-pad nets (``get_statistics`` is filtered by
+        # ``multi_pad_net_ids``).  When existing copper is preserved
+        # (``--preserve-existing``), the written PCB carries additional
+        # segments/vias re-emitted above and logged on the "Preserved
+        # existing:" line -- so the file totals are these counts PLUS the
+        # preserved copper.  Label the heading so the numbers are not
+        # mistaken for file-final totals.
+        _results_heading = "\n--- Results ---"
+        if preserve_existing:
+            _results_heading += " (newly-routed nets only; preserved copper counted above)"
+        flush_print(_results_heading)
         flush_print(f"  Routes created:  {stats['routes']}")
         flush_print(f"  Segments:        {stats['segments']}")
         flush_print(f"  Vias:            {stats['vias']}")
@@ -3443,10 +3495,11 @@ def route_with_layer_escalation(
         # Issue #1841: Tell the autorouter which pour nets lack zones
         router._pour_nets_without_zones = set(_no_zone)
 
-        # Count nets to route
-        multi_pad_nets = [
-            net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
-        ]
+        # Count nets to route.  Issue #3942 (Bug B): exclude pour-served
+        # multi-pad nets (router-stripped via _filter_pour_nets) from the
+        # denominator so routed/total matches what the router was asked to
+        # route.  See _routable_multi_pad_nets for the rationale.
+        multi_pad_nets = _routable_multi_pad_nets(router)
         single_pad_nets = [
             net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) == 1
         ]
@@ -4321,10 +4374,11 @@ def route_with_rule_relaxation(
         # Issue #1841: Tell the autorouter which pour nets lack zones
         router._pour_nets_without_zones = set(_no_zone)
 
-        # Count nets to route
-        multi_pad_nets = [
-            net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
-        ]
+        # Count nets to route.  Issue #3942 (Bug B): exclude pour-served
+        # multi-pad nets (router-stripped via _filter_pour_nets) from the
+        # denominator so routed/total matches what the router was asked to
+        # route.  See _routable_multi_pad_nets for the rationale.
+        multi_pad_nets = _routable_multi_pad_nets(router)
         single_pad_nets = [
             net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) == 1
         ]
@@ -6404,10 +6458,9 @@ def route_with_combined_escalation(
             # Issue #1841: Tell the autorouter which pour nets lack zones
             router._pour_nets_without_zones = set(_no_zone)
 
-            # Count nets to route
-            multi_pad_nets = [
-                net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
-            ]
+            # Count nets to route.  Issue #3942 (Bug B): exclude pour-served
+            # multi-pad nets from the denominator (see _routable_multi_pad_nets).
+            multi_pad_nets = _routable_multi_pad_nets(router)
             nets_to_route = len(multi_pad_nets)
 
             # Route
@@ -8768,15 +8821,19 @@ def main(argv: list[str] | None = None) -> int:
     # - Multi-pad nets: 2+ pads, need actual routing
     # - Single-pad nets: 1 pad, trivially complete (no routing needed)
     # - Power nets: skipped via skip_nets, handled by copper pours
-    multi_pad_nets = []
-    single_pad_nets = []
-    for net_num, pads in router.nets.items():
-        if net_num > 0:  # Skip net 0 (unconnected)
-            if len(pads) >= 2:
-                multi_pad_nets.append(net_num)
-            elif len(pads) == 1:
-                single_pad_nets.append(net_num)
-    nets_to_route = len(multi_pad_nets)  # Only multi-pad nets need routing
+    #
+    # Issue #3942 (Bug B): pour-served multi-pad nets that the router
+    # strips via ``_filter_pour_nets`` are excluded from the denominator
+    # by ``_routable_multi_pad_nets`` so the routed/total summary counts
+    # only the nets the router was actually asked to route.  Without this
+    # a pour net the CLI's zone regex missed (kept ``net_num > 0``) but the
+    # router's net-class flagged as pour was counted-but-never-routed,
+    # yielding a spurious ``PARTIAL: Routed 1/2`` on a fully-routed board.
+    multi_pad_nets = _routable_multi_pad_nets(router)
+    single_pad_nets = [
+        net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) == 1
+    ]
+    nets_to_route = len(multi_pad_nets)  # Only routable multi-pad nets need routing
     power_nets_skipped = len(skip_nets)
 
     if not quiet:

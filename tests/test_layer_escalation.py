@@ -855,6 +855,12 @@ class TestEarlyTermination:
         }
         router.power_stall_abort = False
         router._pour_nets_without_zones = set()
+        # Issue #3942 (Bug B): route_cmd._routable_multi_pad_nets calls
+        # router._is_pour_net(net_id) to exclude pour-served nets from the
+        # denominator.  A bare MagicMock returns a truthy sentinel, which
+        # would misclassify every net as pour-served (nets_to_route -> 0).
+        # These mock routers model boards with no pour nets, so return False.
+        router._is_pour_net.return_value = False
         # Provide real float values for rules attributes used by drc_nudge
         router.rules.via_diameter = 0.6
         router.rules.min_drill_clearance = 0.0
@@ -1374,6 +1380,10 @@ class TestRegressionEarlyExit:
         }
         router.power_stall_abort = False
         router._pour_nets_without_zones = set()
+        # Issue #3942 (Bug B): _routable_multi_pad_nets calls _is_pour_net;
+        # a bare MagicMock returns truthy, misclassifying every net as
+        # pour-served.  These mocks model boards with no pour nets.
+        router._is_pour_net.return_value = False
         router.rules.via_diameter = 0.6
         router.rules.min_drill_clearance = 0.0
         router.rules.trace_width = 0.2
@@ -2040,6 +2050,9 @@ class TestPlacementFeedbackOnPartial:
         router.get_failed_nets.return_value = list(range(1, nets_to_route - nets_routed + 1))
         router.power_stall_abort = False
         router._pour_nets_without_zones = set()
+        # Issue #3942 (Bug B): _routable_multi_pad_nets calls _is_pour_net;
+        # keep every net routable so nets_to_route matches the mock's count.
+        router._is_pour_net.return_value = False
         router.rules.via_diameter = 0.6
         router.rules.min_drill_clearance = 0.0
         router.rules.trace_width = 0.2
@@ -2845,6 +2858,9 @@ class TestStartingLayersEndToEnd:
         }
         router.power_stall_abort = False
         router._pour_nets_without_zones = set()
+        # Issue #3942 (Bug B): _routable_multi_pad_nets calls _is_pour_net;
+        # keep every net routable so nets_to_route matches the mock's count.
+        router._is_pour_net.return_value = False
         router.rules.via_diameter = 0.6
         router.rules.min_drill_clearance = 0.0
         router.rules.trace_width = 0.2
