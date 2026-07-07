@@ -126,19 +126,36 @@ MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 # (``net_ids=[]`` after ``_extract_pair_ids``), so board 07's MIPI_CSI_LANES
 # and HDMI_TMDS_LANES were never skew-checked.  ``derive_group_skew_data`` now
 # measures diff-pair members via the pair-average ``(L_P + L_N) / 2``
-# contribution, making both groups checkable.  On the COMMITTED board 07
-# artifact this baseline stays at 1: MIPI/HDMI each still have at least one
-# unrouted diff-pair leg (e.g. MIPI_CLK_N, MIPI_DAT0_N, TMDS_D0_*, TMDS_D1_*
-# carry zero geometry) and DDR_DATA_BYTE_0 has an unrouted DQ3, so all three
-# are correctly gated out by the existing partial-routing rule -- only the
-# fully-routed ADDR_BUS group produces a violation.  Once board 07 routes
-# those lanes end-to-end (blocked on the same artifact-churn work as #3931 /
-# #3925), MIPI (measured ~23mm skew vs 0.05mm) and HDMI (~8.7mm vs 0.075mm)
-# will each add a genuine ``match_group_length_skew`` error and this baseline
-# must be raised to 3 with a reroute of the committed artifact.  Composition
-# today: 1 = ADDR_BUS via-imbalance (#3931).
+# contribution, making both groups checkable.  This baseline is now **2**, but
+# the value the gate observes depends on WHICH artifact it runs against:
+#
+#   * ``--skip-route`` (committed-artifact path, used by the diff-driven
+#     routed-pcb-drc-check and by local verification): counts exactly **1**
+#     match-group violation.  On the COMMITTED board 07 artifact MIPI/HDMI
+#     each still have at least one unrouted diff-pair leg (e.g. MIPI_CLK_N,
+#     MIPI_DAT0_N, TMDS_D0_*, TMDS_D1_* carry zero geometry) and
+#     DDR_DATA_BYTE_0 has an unrouted DQ3, so all three are gated out by the
+#     partial-routing rule -- only the fully-routed ADDR_BUS group fires.
+#
+#   * full reroute (the Match-Group Routing Regression CI job, which runs
+#     ``generate_design.py --step route`` end-to-end before the gate):
+#     counts **2**.  The reroute lands every MIPI leg, so MIPI_CSI_LANES now
+#     produces a genuine ``match_group_length_skew`` error on top of
+#     ADDR_BUS's via-imbalance.  HDMI_TMDS_LANES does NOT fire even after the
+#     reroute: its TMDS_D0_N / TMDS_D1_N legs remain unrouted (the router
+#     reports them "still stranded -- NO relief path"), so the unrouted-leg
+#     gate correctly excludes HDMI.  A single baseline of 2 satisfies BOTH
+#     paths (the ``--skip-route`` count of 1 also passes, since 1 <= 2).
+#
+# Composition of the reroute baseline (2):
+#   1x ADDR_BUS via-imbalance (#3931) + 1x MIPI_CSI_LANES pair-only skew
+#   (#3916, the group newly made checkable by this change).
+# (An earlier prediction of 3 assumed HDMI would also fire once routed; the
+# reroute shows HDMI's TMDS legs do not route, so the observed count is 2.
+# Dropping this baseline toward strict 0 requires a via-balanced,
+# fully-routed board 07 -- blocked on the artifact-churn work in #3925.)
 MATCHGROUP_VIOLATION_BASELINE: dict[str, int] = {
-    "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb": 1,
+    "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb": 2,
 }
 
 
