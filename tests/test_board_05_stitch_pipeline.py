@@ -152,6 +152,7 @@ class TestBoard05StitchPipelineFunctional:
             f"{missing}. Detected: {sorted(plane_nets)}"
         )
 
+    @pytest.mark.slow
     def test_stitch_places_vias_on_pour_nets(
         self,
         routed_pcb_copy: Path,
@@ -164,6 +165,16 @@ class TestBoard05StitchPipelineFunctional:
         one via -- proving the stranded pads (issue: 58 across these
         nets) are reachable and the pipeline step will connect them on a
         fresh regen.
+
+        Marked ``@pytest.mark.slow`` (runs in ``slow-tests.yml`` at
+        ``--timeout=1200``): the full-coverage assertion dry-run-stitches
+        every auto-detected plane net -- GND alone has 33+ pads plus the
+        micro-via retry -- so it takes ~30s and blows the 60s reaper on
+        the ``not slow`` main CI job. The fast-lane
+        ``test_plane_nets_autodetected`` guard above still runs on every
+        push, and this preserves the full-net reachability proof. Same
+        gating pattern as sibling
+        ``test_board_05_routing_regression.py``.
         """
         plane_nets = find_all_plane_nets(load_pcb(routed_pcb_copy))
         result = run_stitch(
