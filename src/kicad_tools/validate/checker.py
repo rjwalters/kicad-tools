@@ -69,6 +69,7 @@ class DRCChecker:
         net_class_map: dict[str, NetClassRouting] | None = None,
         warn_on_inactive_skew_rules: bool = True,
         verbose: bool = False,
+        emit_measurements: bool = False,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -103,6 +104,15 @@ class DRCChecker:
                 measured per-pair / per-group values even when the pair /
                 group passes, so ``kct check --verbose`` surfaces the
                 measurements on a clean board (Issue #3917 AC5).
+            emit_measurements: When True, the sidecar-gated skew /
+                continuity rules emit the same advisory ``info``-severity
+                measurement findings regardless of ``verbose``.  This lets
+                a caller collect the measured per-pair / per-group values
+                (for a measurement-summary table) at default verbosity
+                without flooding the ``--verbose`` info stream (Issue
+                #3924 AC1).  The ``kct check`` CLI sets this True so it can
+                render a concise measurement summary after the violation
+                table.
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -115,6 +125,11 @@ class DRCChecker:
         self.net_class_map = net_class_map
         self.warn_on_inactive_skew_rules = warn_on_inactive_skew_rules
         self.verbose = verbose
+        self.emit_measurements = emit_measurements
+        # The skew / continuity rules surface their measured info findings
+        # when either the user asked for --verbose OR a caller wants the
+        # measurement summary (Issue #3924 AC1).
+        self._emit_skew_info = verbose or emit_measurements
         # Dedup guard so the per-rule INACTIVE warning fires at most once
         # per rule per checker instance (Issue #3917).
         self._inactive_skew_warned: set[str] = set()
@@ -439,13 +454,18 @@ class DRCChecker:
         if self.net_class_map is None:
             self._warn_inactive_skew_rule("diffpair_length_skew")
 
-        skew_data, skew_threshold_map = derive_skew_data(self.pcb, self.net_class_map)
+        skew_data, skew_threshold_map = derive_skew_data(
+            self.pcb,
+            self.net_class_map,
+            board_thickness_mm=self.design_rules.board_thickness_mm,
+            num_copper_layers=self.layers,
+        )
         engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
         rule = DiffPairLengthSkewRule(
             skew_data=skew_data,
             engaged_pairs=engaged_pairs,
             threshold_map=skew_threshold_map,
-            emit_info=self.verbose,
+            emit_info=self._emit_skew_info,
         )
         return rule.check(self.pcb, self.design_rules)
 
@@ -489,7 +509,7 @@ class DRCChecker:
         rule = DiffPairRoutingContinuityRule(
             engaged_pairs=engaged_pairs,
             threshold_map=threshold_map,
-            emit_info=self.verbose,
+            emit_info=self._emit_skew_info,
         )
         return rule.check(self.pcb, self.design_rules)
 
@@ -647,7 +667,7 @@ class DRCChecker:
                 group_skew_data=group_skew_data,
                 tracker_match_groups=tracker_match_groups,
                 threshold_map=threshold_map,
-                emit_info=self.verbose,
+                emit_info=self._emit_skew_info,
             )
         return rule.check(self.pcb, self.design_rules)
 

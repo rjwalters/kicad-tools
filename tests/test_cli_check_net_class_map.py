@@ -643,6 +643,101 @@ class TestVerboseMeasuredValues:
         assert "within tolerance" not in captured.out
 
 
+class TestMeasurementSummary:
+    """Issue #3924 AC1/AC4/AC5: the default (non-``--verbose``) ``kct check``
+    table surface prints a per-group / per-pair length-measurement summary
+    for boards with a net-class-map sidecar, showing measured skew and
+    tolerance for both passing and failing groups."""
+
+    def test_failing_group_summary_default_verbosity(self, tmp_path: Path, capsys):
+        """AC1: an over-skew group prints a MEASUREMENT SUMMARY row with the
+        measured skew, tolerance, and a FAIL status -- without ``--verbose``."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path)  # unequal -> over-skew
+        _write_matchgroup_sidecar(tmp_path)
+
+        main(
+            [
+                str(pcb),
+                "--only",
+                "match_group_length_skew",
+                "--allow-incomplete",
+            ]
+        )
+        out = capsys.readouterr().out
+        assert "MEASUREMENT SUMMARY" in out
+        # The DDR group's measured skew and tolerance appear with FAIL.
+        summary = out.split("MEASUREMENT SUMMARY", 1)[1]
+        assert "DDR" in summary
+        assert "0.500" in summary  # default tolerance column
+        assert "FAIL" in summary
+
+    def test_passing_group_summary_default_verbosity(self, tmp_path: Path, capsys):
+        """AC1: a passing (equal-length) group still appears in the summary
+        with a ``pass`` status at default verbosity -- but the raw info line
+        (``within tolerance``) is NOT shown outside ``--verbose`` (AC4)."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path, equal=True)
+        _write_matchgroup_sidecar(tmp_path)
+
+        main(
+            [
+                str(pcb),
+                "--only",
+                "match_group_length_skew",
+                "--allow-incomplete",
+            ]
+        )
+        out = capsys.readouterr().out
+        assert "MEASUREMENT SUMMARY" in out
+        summary = out.split("MEASUREMENT SUMMARY", 1)[1]
+        assert "DDR" in summary
+        assert "pass" in summary
+        # AC4: the advisory info-finding wording is reserved for --verbose.
+        assert "within tolerance" not in out
+
+    def test_verbose_still_shows_info_line_and_summary(self, tmp_path: Path, capsys):
+        """AC4: ``--verbose`` keeps the per-group advisory info line AND the
+        measurement summary table (no regression to PR #3948's AC5)."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path, equal=True)
+        _write_matchgroup_sidecar(tmp_path)
+
+        main(
+            [
+                str(pcb),
+                "--only",
+                "match_group_length_skew",
+                "--verbose",
+                "--allow-incomplete",
+            ]
+        )
+        out = capsys.readouterr().out
+        assert "MEASUREMENT SUMMARY" in out
+        assert "within tolerance" in out
+
+    def test_no_summary_without_sidecar(self, tmp_path: Path, capsys):
+        """AC5: no net-class-map sidecar -> no measurement findings -> no
+        MEASUREMENT SUMMARY table (graceful no-op unchanged)."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path)  # no sidecar written
+
+        main(
+            [
+                str(pcb),
+                "--only",
+                "match_group_length_skew",
+                "--allow-incomplete",
+            ]
+        )
+        out = capsys.readouterr().out
+        assert "MEASUREMENT SUMMARY" not in out
+
+
 class TestTenVanishingErrorsRegression:
     """Issue #3917 AC6: reproduce the board-07 "10 errors vanish" case --
     without the sidecar the error count is strictly lower, and the delta is
