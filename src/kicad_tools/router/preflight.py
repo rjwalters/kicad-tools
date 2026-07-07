@@ -109,6 +109,21 @@ class OffGridReport:
         """True when no off-grid pads were found."""
         return not self.off_grid_pads
 
+    def grouped_by_ref(self) -> dict[str, list[PreflightOffGridPad]]:
+        """Group off-grid pads by component reference.
+
+        Returns an insertion-ordered mapping from component ref (e.g.
+        ``"U2"``) to the list of that component's off-grid pads.  Pads with
+        an empty ``ref`` are collected under the ``""`` key.  This is the
+        aggregation primitive used by the DRC layer to collapse a
+        fixed-pitch footprint's 47+ per-pad warnings into a single
+        per-component warning (issue #3941).
+        """
+        groups: dict[str, list[PreflightOffGridPad]] = {}
+        for pad in self.off_grid_pads:
+            groups.setdefault(pad.ref, []).append(pad)
+        return groups
+
     def summary(self) -> str:
         """Human-readable, multi-line summary suitable for CLI output."""
         if self.passed:

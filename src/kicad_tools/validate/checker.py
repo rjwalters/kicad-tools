@@ -787,6 +787,7 @@ class DRCChecker:
         grid_resolution: float = 0.1,
         threshold: float | None = None,
         auto_derive_threshold: bool = False,
+        aggregate: bool = True,
     ) -> DRCResults:
         """Check that every pad aligns to the router grid.
 
@@ -813,12 +814,25 @@ class DRCChecker:
                 pad-offset histogram (issue #3061).  Defaults to
                 ``False`` so the Python API preserves PR #3057 behaviour;
                 ``kct check`` opts in by default.
+            aggregate: When ``True`` (the default), collapse the per-pad
+                warnings into one aggregated ``pad_grid`` warning per
+                component reference (issue #3941).  A fixed-pitch footprint
+                such as an LQFP-48 whose 0.5 mm pitch places all 48 pads off
+                the 0.1 mm router grid thus emits a single warning instead
+                of 47+.  When ``False`` (the ``--verbose`` path), emit one
+                warning per off-grid pad, preserving the full per-pad detail.
 
         Returns:
-            :class:`DRCResults` with one ``pad_grid`` violation (severity
-            error) per off-grid pad.  Empty when all pads align.
+            :class:`DRCResults` with ``pad_grid`` warnings.  When
+            ``aggregate=True`` there is one warning per component reference
+            (with a pad count and representative example); when
+            ``aggregate=False`` there is one warning per off-grid pad.
+            Empty when all pads align.
         """
-        from kicad_tools.router.preflight import check_pad_grid_alignment
+        from kicad_tools.router.preflight import (
+            PreflightOffGridPad,
+            check_pad_grid_alignment,
+        )
 
         results = DRCResults()
 
@@ -841,18 +855,75 @@ class DRCChecker:
 
         results.rules_checked += 1
 
-        for pad in report.off_grid_pads:
-            message = pad.message(report.grid_resolution, report.suggested_grid)
-            ref_label = pad.label
+        def _emit_per_pad(pads: list[PreflightOffGridPad]) -> None:
+            for pad in pads:
+                message = pad.message(report.grid_resolution, report.suggested_grid)
+                ref_label = pad.label
+                results.add(
+                    DRCViolation(
+                        rule_id="pad_grid",
+                        severity="warning",
+                        message=message,
+                        location=(pad.x, pad.y),
+                        actual_value=pad.offset_mm,
+                        required_value=report.threshold,
+                        items=(ref_label,) if ref_label else (),
+                    )
+                )
+
+        if not aggregate:
+            # ``--verbose`` path: preserve the full per-pad detail.
+            _emit_per_pad(report.off_grid_pads)
+            return results
+
+        # Default path: collapse each component's off-grid pads into a
+        # single aggregated warning (issue #3941).  A single-pad group keeps
+        # the original per-pad message so the common case is unchanged.
+        for ref, pads in report.grouped_by_ref().items():
+            if len(pads) == 1:
+                _emit_per_pad(pads)
+                continue
+
+            example = max(pads, key=lambda p: p.offset_mm)
+            max_offset = example.offset_mm
+            fp_name = example.footprint_name
+            count = len(pads)
+
+            if report.suggested_grid is not None:
+                message = (
+                    f"{ref}: {count} pads off-grid by up to "
+                    f"{max_offset:.3f}mm (grid {report.grid_resolution}mm"
+                    + (f", footprint {fp_name}" if fp_name else "")
+                    + ").\n"
+                    f"  Example: pad {example.label} at "
+                    f"({example.x:.3f}, {example.y:.3f}).\n"
+                    f"  Suggested fix: round pad positions OR set finer router "
+                    f"grid ({report.suggested_grid}mm would align all pads).\n"
+                    f"  Use --verbose for per-pad detail."
+                )
+            else:
+                message = (
+                    f"{ref}: {count} pads off-grid by up to "
+                    f"{max_offset:.3f}mm (grid {report.grid_resolution}mm"
+                    + (f", footprint {fp_name}" if fp_name else "")
+                    + ").\n"
+                    f"  Example: pad {example.label} at "
+                    f"({example.x:.3f}, {example.y:.3f}).\n"
+                    f"  Suggested fix: round pad positions to the router grid "
+                    f"(footprint pitch may not align to "
+                    f"{report.grid_resolution}mm).\n"
+                    f"  Use --verbose for per-pad detail."
+                )
+
             results.add(
                 DRCViolation(
                     rule_id="pad_grid",
                     severity="warning",
                     message=message,
-                    location=(pad.x, pad.y),
-                    actual_value=pad.offset_mm,
+                    location=(example.x, example.y),
+                    actual_value=max_offset,
                     required_value=report.threshold,
-                    items=(ref_label,) if ref_label else (),
+                    items=(ref,) if ref else (),
                 )
             )
         return results
