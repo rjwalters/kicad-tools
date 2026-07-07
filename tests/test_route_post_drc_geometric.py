@@ -310,27 +310,37 @@ class TestSidecarEmittedBeforeGeometricDRC:
         captured = capsys.readouterr().out
         assert "could not write DRC-constraint sidecars" in captured
 
-    def test_readonly_output_dir_is_non_fatal(self, monkeypatch, tmp_path, capsys):
-        """A read-only output directory warns and continues (route never fails)."""
-        import os
-        import stat
+    def test_unwritable_output_is_non_fatal(self, monkeypatch, tmp_path, capsys):
+        """An OSError while writing sidecars warns and continues (route never fails).
 
+        The failure is injected by monkeypatching ``write_drc_constraints`` to
+        raise ``OSError`` rather than relying on filesystem permission bits.
+        The latter is not portable to CI, which runs as root and bypasses
+        directory mode bits (so ``chmod 0o500`` would not actually block the
+        write) — see PR #3950 review.
+        """
         _patch_internal(monkeypatch, _FakeResults())
         _patch_geometric(monkeypatch, GeometricDRCResult(ran=True, error_count=0))
 
-        ro_dir = tmp_path / "ro"
-        ro_dir.mkdir()
-        os.chmod(ro_dir, stat.S_IRUSR | stat.S_IXUSR)
-        try:
-            out = ro_dir / "board.kicad_pcb"
-            # Must not raise despite the write being blocked.
-            errors, _ = route_cmd.run_post_route_drc(
-                output_path=out, manufacturer="jlcpcb-tier1", layers=4
-            )
-            assert errors == 0
-        finally:
-            os.chmod(ro_dir, stat.S_IRWXU)
+        # _write_drc_constraint_sidecars does
+        # ``from kicad_tools.manufacturers import ... write_drc_constraints``
+        # at call time, so patch the symbol on that module.
+        import kicad_tools.manufacturers as manufacturers_mod
 
+        def _boom(*args, **kwargs):
+            raise OSError("Read-only file system")
+
+        monkeypatch.setattr(manufacturers_mod, "write_drc_constraints", _boom)
+
+        out = tmp_path / "board.kicad_pcb"
+        # Must not raise despite the write being blocked.
+        errors, _ = route_cmd.run_post_route_drc(
+            output_path=out, manufacturer="jlcpcb-tier1", layers=4
+        )
+        assert errors == 0
+
+        # No sidecar is written when the write fails.
+        assert not (tmp_path / "board.kicad_pro").exists()
         captured = capsys.readouterr().out
         assert "could not write DRC-constraint sidecars" in captured
 
