@@ -32,6 +32,13 @@ if TYPE_CHECKING:
 class SchematicIOMixin:
     """Mixin providing I/O operations for Schematic class."""
 
+    if TYPE_CHECKING:
+        # Attributes provided by the concrete ``Schematic`` class (via
+        # ``SchematicElementsMixin`` and ``Schematic.__init__``).  Declared
+        # here so mypy can see them when this mixin references them.
+        _PWR_SYNTH_LIB_PREFIX: str
+        _synthesized_pwr_defs: dict[str, SExp]
+
     @classmethod
     def load(cls, path: str | Path) -> Schematic:
         """Load a schematic from a .kicad_sch file.
