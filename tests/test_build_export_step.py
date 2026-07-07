@@ -92,12 +92,24 @@ class TestRunStepExport:
         assert result.success
         assert "board_routed" in result.message
 
-    def test_uses_target_fab_from_spec(self, tmp_path: Path) -> None:
-        """When spec has target_fab, it should be used instead of ctx.mfr."""
+    def test_uses_ctx_mfr_not_stale_spec_reread(self, tmp_path: Path) -> None:
+        """The export step uses ctx.mfr, not a fresh re-read of spec.target_fab.
+
+        Issue #3920: previously ``_run_step_export`` re-read
+        ``spec.requirements.manufacturing.target_fab`` and let it override
+        ctx.mfr -- the "split-brain" where export judged against a different
+        profile than route/verify/stitch. The manufacturer is now resolved
+        exactly once (``build_cmd._resolve_effective_mfr``) and threaded
+        through ``ctx.mfr`` at BuildContext creation, so the export step must
+        honour ctx.mfr even when the spec carries a *different* target_fab
+        (e.g. when an explicit ``--mfr`` override was applied upstream).
+        """
         pcb_file = tmp_path / "board.kicad_pcb"
         pcb_file.write_text("(kicad_pcb)")
 
-        # Create a mock spec with target_fab
+        # Spec still declares "pcbway", but ctx.mfr was resolved to "oshpark"
+        # upstream (e.g. an explicit --mfr override). The export step must
+        # follow ctx.mfr, not silently snap back to the spec value.
         mock_spec = MagicMock()
         mock_spec.requirements.manufacturing.target_fab = "pcbway"
         mock_spec.requirements.manufacturing.assembly = None
@@ -107,13 +119,14 @@ class TestRunStepExport:
             spec_file=None,
             pcb_file=pcb_file,
             spec=mock_spec,
-            mfr="jlcpcb",
+            mfr="oshpark",
             dry_run=True,
         )
         console = Console(quiet=True)
         result = _run_step_export(ctx, console)
         assert result.success
-        assert "pcbway" in result.message
+        assert "oshpark" in result.message
+        assert "pcbway" not in result.message
 
     def test_falls_back_to_ctx_mfr(self, tmp_path: Path) -> None:
         """When spec has no target_fab, ctx.mfr should be used."""
