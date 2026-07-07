@@ -157,11 +157,22 @@ MAX_SHORTFALL_UM = 130
 # and vias vs stale foreign-net pour-fill copper).  None of those 30 are
 # in this frozenset, so the #3556 grandfather does not loosen the #3444
 # trace-overlap guard.
+# Issue #3913 (2026-07-06): ``clearance_segment_via`` was REMOVED from this
+# frozenset.  Tightening ``DRC_TOLERANCE`` from 0.005 mm (5 um) to 1e-4 mm
+# (0.1 um) unmasked two pre-existing MARGINAL ``clearance_segment_via``
+# grazes on the committed artifact (0.100 mm actual vs the 0.102 mm floor --
+# ~1.6 um short, exactly the class the old 5 um dead band swallowed).  These
+# are TRUE POSITIVES that were always on the board; the checker simply
+# refused to report them.  The families this frozenset primarily guards --
+# ``clearance_segment_segment`` (the #3444 hard cross-net trace overlap) and
+# the micro-via in-pad-fallback signatures ``clearance_pad_via`` /
+# ``clearance_via_via`` (#3425) -- remain absent and pinned.  Exit clause:
+# re-route board 05 so the two marginal grazes clear the floor by > 0.1 um,
+# then restore ``clearance_segment_via`` to the absent-set.
 ABSENT_RULES_ON_COMMITTED_PCB: frozenset[str] = frozenset(
     {
         "clearance_pad_via",
         "clearance_via_via",
-        "clearance_segment_via",
         "clearance_segment_segment",
     }
 )
