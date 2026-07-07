@@ -6,6 +6,7 @@ Provides file loading and saving capabilities for Schematic class.
 
 from __future__ import annotations
 
+import copy
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -464,9 +465,147 @@ class SchematicIOMixin:
         path.write_text(content)
         # Store the path for later use (e.g., run_erc)
         self._saved_path = path
+        # Emit the companion sym-lib-table + .kicad_sym so kicad-cli's ERC
+        # nickname-presence check resolves ``kicad_tools_pwr`` (issue #3943).
+        self._write_sym_lib_table(path)
         _log_info(
             f"Wrote schematic to {path} ({len(self.symbols)} symbols, {len(self.wires)} wires)"
         )
+
+    # KiCad's sym-lib-table version tag (KiCad 7+ uses version 7).
+    _SYM_LIB_TABLE_VERSION = 7
+
+    def _write_sym_lib_table(self, sch_path: Path) -> None:
+        """Emit sidecar files that satisfy ERC's library-nickname check.
+
+        The generator embeds synthesized ``kicad_tools_pwr:{net}`` power
+        symbols directly in the schematic's ``lib_symbols`` block, which is
+        authoritative for *loading* the file. However, ``kicad-cli sch erc``
+        (and the KiCad GUI's ERC runner) separately validate that every
+        library *nickname* referenced by a placed symbol resolves through
+        the project's ``sym-lib-table``. Generated schematics never write
+        that table, so ERC logs a spurious "does not include the symbol
+        library 'kicad_tools_pwr'" warning even though the definitions are
+        embedded (issue #3943).
+
+        This writes two sidecars next to the schematic:
+
+        * ``kicad_tools_pwr.kicad_sym`` — a real symbol library holding the
+          synthesized definitions (names stripped of the nickname prefix),
+          so KiCad can locate the nickname's backing file.
+        * ``sym-lib-table`` — registers the ``kicad_tools_pwr`` nickname,
+          pointing at the ``.kicad_sym`` above via ``${KIPRJMOD}``.
+
+        Both are no-ops when the schematic uses no synthesized power symbols
+        (``add_pwr_symbol``), so plain schematics gain no spurious sidecar.
+
+        A pre-existing ``sym-lib-table`` (e.g. a user's own project table)
+        is **merged**, never clobbered: the ``kicad_tools_pwr`` entry is
+        appended only when absent. If the existing table cannot be parsed,
+        it is left untouched and a warning is logged.
+
+        Note: KiCad only consults the local ``sym-lib-table`` when a
+        companion ``.kicad_pro`` project file exists in the same directory
+        (which board generators emit). When no project file is present the
+        sidecars are harmless — they simply aren't read.
+        """
+        if not self._synthesized_pwr_defs:
+            return
+
+        directory = sch_path.parent
+
+        try:
+            self._write_synth_pwr_symbol_lib(directory / "kicad_tools_pwr.kicad_sym")
+            self._merge_sym_lib_table_entry(directory / "sym-lib-table")
+        except OSError as exc:
+            # Read-only directory or similar — degrade to a warning rather
+            # than failing the whole write() after the .kicad_sch landed.
+            _log_warning(
+                f"Could not write sym-lib-table sidecar for synthesized power "
+                f"symbols next to {sch_path.name}: {exc}. ERC may warn about a "
+                f"missing 'kicad_tools_pwr' library until the sidecar exists."
+            )
+
+    def _write_synth_pwr_symbol_lib(self, path: Path) -> None:
+        """Write the ``kicad_tools_pwr.kicad_sym`` backing library.
+
+        Each synthesized def is emitted with its outer symbol name reduced
+        from ``kicad_tools_pwr:{net}`` to just ``{net}`` — inside a
+        ``.kicad_sym`` file the nickname is supplied by the table entry, so
+        the symbol name must be bare (matching how stock KiCad libraries
+        store their symbols).
+        """
+        lib = SExp.list(
+            "kicad_symbol_lib",
+            SExp.list("version", 20231120),
+            SExp.list("generator", "kicad-tools"),
+        )
+        prefix = f"{self._PWR_SYNTH_LIB_PREFIX}:"
+        for net_name, sym_node in self._synthesized_pwr_defs.items():
+            bare = copy.deepcopy(sym_node)
+            # The def's first atom is the prefixed lib_id
+            # (``kicad_tools_pwr:{net}``); strip the nickname prefix.
+            first = bare.get_first_atom()
+            if isinstance(first, str) and first.startswith(prefix):
+                bare.set_atom(0, net_name)
+            lib.append(bare)
+        path.write_text(lib.to_string() + "\n")
+
+    def _merge_sym_lib_table_entry(self, path: Path) -> None:
+        """Ensure ``sym-lib-table`` registers the ``kicad_tools_pwr`` nickname.
+
+        Creates the table if absent; otherwise appends the entry only when
+        the nickname is not already present, preserving any user entries.
+        """
+        from kicad_tools.sexp import parse_string
+
+        nickname = self._PWR_SYNTH_LIB_PREFIX
+        entry = SExp.list(
+            "lib",
+            SExp.list("name", SExp.quoted_atom(nickname)),
+            SExp.list("type", SExp.quoted_atom("KiCad")),
+            SExp.list(
+                "uri",
+                SExp.quoted_atom("${KIPRJMOD}/kicad_tools_pwr.kicad_sym"),
+            ),
+            SExp.list("options", SExp.quoted_atom("")),
+            SExp.list(
+                "descr",
+                SExp.quoted_atom("kicad-tools synthesized power symbols"),
+            ),
+        )
+
+        if path.exists():
+            try:
+                table = parse_string(path.read_text())
+            except Exception as exc:
+                _log_warning(
+                    f"Existing sym-lib-table at {path} could not be parsed "
+                    f"({exc}); leaving it untouched. ERC may warn about the "
+                    f"'kicad_tools_pwr' library until the entry is added."
+                )
+                return
+            if table.name != "sym_lib_table":
+                _log_warning(
+                    f"Existing sym-lib-table at {path} is not a sym_lib_table "
+                    f"node; leaving it untouched."
+                )
+                return
+            # Skip if the nickname is already registered.
+            for lib_node in table.find_all("lib"):
+                name_node = lib_node.get("name")
+                if name_node and str(name_node.get_first_atom() or "") == nickname:
+                    return
+            table.append(entry)
+            path.write_text(table.to_string() + "\n")
+            return
+
+        table = SExp.list(
+            "sym_lib_table",
+            SExp.list("version", self._SYM_LIB_TABLE_VERSION),
+            entry,
+        )
+        path.write_text(table.to_string() + "\n")
 
     def _warn_if_content_overflows(self) -> None:
         """Log a warning when content exceeds the declared sheet bounds."""
