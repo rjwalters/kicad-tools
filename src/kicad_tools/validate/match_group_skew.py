@@ -51,13 +51,25 @@ imports from router/match_group_length.py only).  Tests live in
 ``tests/test_validate_match_group_skew.py`` and the drift-prevention
 test mirrors PR #2685's pattern.
 
-Group-of-pairs note (Phase 2F reserve):
+Group-of-pairs composition (Issue #3916):
 
-The :class:`MatchGroup` dataclass has a ``pair_ids`` field reserved for
-Phase 2F group-of-pairs composition.  Phase 1B's measurement layer
-ignores it; this producer follows suit and only sums ``net_ids`` until
-Phase 2F lands.  This matches the Phase 1B forwarder semantics and the
-rule's current member-count documentation.
+The :class:`MatchGroup` dataclass carries a ``pair_ids`` field populated
+by :func:`match_group_detection._extract_pair_ids` for differential-pair
+members.  A group whose members are *exclusively* diff pairs (e.g.,
+MIPI_CSI_LANES, HDMI_TMDS_LANES) exits detection with ``net_ids=[]`` and
+a fully-populated ``pair_ids`` -- the old producer skipped those groups
+entirely (the ``not grp.net_ids`` guard), so the skew rule never fired
+on them regardless of how large their lane-to-lane skew was.
+
+This producer now measures both member kinds.  Single-ended members
+(``net_ids``) contribute their own length; diff-pair members
+(``pair_ids``) contribute the *pair-average* ``(L_P + L_N) / 2`` as a
+single lane-length entry.  Pair-average (not per-leg) is deliberate: the
+group-level skew is a *lane-to-lane* timing budget, so within-pair
+imbalance -- already gated by the separate ``diffpair_length_skew`` rule
+-- must not be double-counted in the group figure.  A group's
+contribution vector therefore has exactly ``len(net_ids) + len(pair_ids)``
+entries.
 """
 
 from __future__ import annotations
@@ -202,14 +214,17 @@ def derive_group_skew_data(
     # Build the {net_id -> net_name} reverse so we can look up the net
     # class for any member via the autorouter's name-keyed map.
     for grp in detected:
-        # Phase 2F reserve: pair_ids are ignored here -- the Phase 1B
-        # measurement layer does the same, and the rule's documented
-        # member-count today is len(net_ids) + 2 * len(pair_ids).  We
-        # match Phase 1B byte-for-byte (only net_ids contribute to the
-        # skew computation in this phase).
-        if not grp.net_ids:
+        # Issue #3916: a group whose members are exclusively differential
+        # pairs (MIPI_CSI_LANES, HDMI_TMDS_LANES on board 07) exits
+        # ``_extract_pair_ids`` with ``net_ids=[]`` and ``pair_ids`` fully
+        # populated.  The old ``if not grp.net_ids: continue`` guard
+        # silently dropped those groups so the skew rule never fired on
+        # them.  We now measure BOTH single-ended members (``net_ids``)
+        # AND diff-pair members (``pair_ids``); the early-exit only
+        # triggers when the group has no members of either kind.
+        if not grp.net_ids and not grp.pair_ids:
             logger.debug(
-                "[match-group-skew] %s skipped (no single-ended members in Phase 1B scope)",
+                "[match-group-skew] %s skipped (no members)",
                 grp.name,
             )
             continue
@@ -219,8 +234,13 @@ def derive_group_skew_data(
         # which only populates the name-keyed cache when ALL declared
         # members are routed (a partially-routed group is excluded from
         # the bulk skew report -- see match_group_length.py:310-316).
+        # For a diff-pair member the gate applies to BOTH legs: if either
+        # leg is unrouted the whole group is omitted (Issue #3916, matches
+        # the single-ended unrouted-member gating).
         any_unrouted = False
         measured: list[float] = []
+
+        # Single-ended members contribute their own length directly.
         for net_id in grp.net_ids:
             if not _net_has_geometry(pcb, net_id):
                 any_unrouted = True
@@ -232,6 +252,33 @@ def derive_group_skew_data(
                 num_copper_layers=num_copper_layers,
             )
             measured.append(length)
+
+        # Diff-pair members (Issue #3916) contribute the *pair-average*
+        # length ``(L_P + L_N) / 2`` as a single lane-length entry -- NOT
+        # both legs separately.  The group-level skew is a lane-to-lane
+        # timing budget ("does MIPI lane 0 arrive with lane 1?"), so
+        # collapsing each pair to one entry keeps the ``max - min``
+        # computation purely between-lane.  Including both legs would
+        # conflate within-pair imbalance (already gated by the separate
+        # ``diffpair_length_skew`` rule) into the group skew figure.
+        if not any_unrouted:
+            for p_id, n_id in grp.pair_ids:
+                if not _net_has_geometry(pcb, p_id) or not _net_has_geometry(pcb, n_id):
+                    any_unrouted = True
+                    break
+                l_p = MatchGroupTracker.measure_net_from_pcb(
+                    pcb,
+                    p_id,
+                    board_thickness_mm=board_thickness_mm,
+                    num_copper_layers=num_copper_layers,
+                )
+                l_n = MatchGroupTracker.measure_net_from_pcb(
+                    pcb,
+                    n_id,
+                    board_thickness_mm=board_thickness_mm,
+                    num_copper_layers=num_copper_layers,
+                )
+                measured.append((l_p + l_n) / 2.0)
 
         if any_unrouted or len(measured) < 2:
             logger.debug(
@@ -247,8 +294,13 @@ def derive_group_skew_data(
         # member (groups should span one class; if they diverge, the
         # first-member-by-net-id wins -- deterministic given
         # :class:`MatchGroup`'s sorted-by-net-id member ordering from
-        # detect_match_groups).
-        first_net_id = grp.net_ids[0]
+        # detect_match_groups).  Issue #3916: pair-only groups have empty
+        # ``net_ids``, so fall back to the P-leg of the first pair for the
+        # net-class anchor (pairs are sorted, so this is deterministic).
+        if grp.net_ids:
+            first_net_id = grp.net_ids[0]
+        else:
+            first_net_id = grp.pair_ids[0][0]
         first_net_name = net_names.get(first_net_id)
         nc = net_class_map.get(first_net_name) if first_net_name else None
         if nc is not None and hasattr(nc, "effective_length_match_tolerance"):
