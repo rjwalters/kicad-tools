@@ -1584,12 +1584,73 @@ def _write_net_class_map_sidecar(
         print(f"  Net-class-map sidecar: {sidecar_path}")
 
 
+def _write_drc_constraint_sidecars(
+    output_path: Path,
+    manufacturer: str,
+    layers: int,
+    copper_oz: float = 1.0,
+    quiet: bool = False,
+) -> None:
+    """Emit ``.kicad_pro`` + ``.kicad_dru`` next to the routed PCB.
+
+    Issue #3919: ``kicad-cli pcb drc`` auto-loads ``<board>.kicad_pro`` from
+    the PCB's directory to read the board design rules (min track width,
+    clearance, via diameter, etc.).  When no project file is present it falls
+    back to KiCad's stricter built-in defaults (0.20 mm track, 0.50 mm via,
+    0.20 mm clearance), producing *false* geometric violations for boards
+    routed at a finer manufacturer capability tier (e.g. board 03 flagged 87
+    bogus ``track_width`` errors on 0.15 mm traces).  Missing sidecars also
+    make verdicts state-dependent: a prior run that happens to write the
+    sidecars silently changes the next run's DRC result.
+
+    Resolving the manufacturer profile here (the same ``manufacturer`` +
+    ``layers`` + ``copper_oz`` the internal :class:`DRCChecker` resolves)
+    and delegating to :func:`write_drc_constraints` writes both files
+    atomically *before* the ``run_geometric_drc`` cross-check, so kicad-cli
+    -- ours or a later user invocation -- judges against the intended
+    constraints deterministically.  This mirrors the net-class-map sidecar
+    precedent (Issue #3917 / PR #3948): a read-only output directory or an
+    unknown manufacturer degrades to a non-fatal warning, never a route
+    failure.
+
+    Args:
+        output_path: Path to the routed PCB file.  The sidecars are written
+            to the same directory (``<board>.kicad_pro`` / ``.kicad_dru``).
+        manufacturer: Manufacturer profile ID (e.g. ``"jlcpcb-tier1"``).
+        layers: Copper-layer count (threaded into the profile's rules).
+        copper_oz: Copper weight in oz (defaults to 1.0, the system default
+            and the correct value for all 8 demo boards).
+        quiet: If True, suppress the confirmation line.
+    """
+    try:
+        from kicad_tools.manufacturers import get_profile, write_drc_constraints
+
+        profile = get_profile(manufacturer)
+        rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
+        written = write_drc_constraints(
+            output_path,
+            rules,
+            manufacturer_id=profile.id,
+            layers=layers,
+            copper_oz=copper_oz,
+        )
+    except (ValueError, OSError, KeyError) as e:
+        # Non-fatal: an unknown manufacturer (ValueError) or a read-only /
+        # blocked output directory (OSError) must not fail the route.
+        if not quiet:
+            print(f"  Warning: could not write DRC-constraint sidecars: {e}")
+        return
+    if not quiet and written:
+        print(f"  DRC-constraint sidecars: {', '.join(str(p) for p in written)}")
+
+
 def run_post_route_drc(
     output_path: Path,
     manufacturer: str,
     layers: int,
     quiet: bool = False,
     net_class_map: dict | None = None,
+    copper_oz: float = 1.0,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -1604,6 +1665,11 @@ def run_post_route_drc(
             its engagement state from this map + the routed PCB and
             fires per Epic #2556 Phase 2G.  Without it, that rule is a
             no-op (graceful degradation).
+        copper_oz: Copper weight in oz for the manufacturer profile's
+            design rules (defaults to 1.0, the system default and the
+            correct value for all 8 demo boards).  Threaded into both the
+            internal :class:`DRCChecker` and the emitted ``.kicad_pro`` /
+            ``.kicad_dru`` sidecars so both engines judge consistently.
 
     Returns:
         Tuple of (error_count, warning_count)
@@ -1619,6 +1685,18 @@ def run_post_route_drc(
     # here covers every callsite in one place.
     _write_net_class_map_sidecar(output_path, net_class_map, quiet=quiet)
 
+    # Issue #3919: emit the ``.kicad_pro`` + ``.kicad_dru`` constraint
+    # sidecars from the manufacturer profile *before* the geometric DRC
+    # cross-check below, so ``kicad-cli pcb drc`` auto-loads the intended
+    # capability-tier floors instead of KiCad's stricter built-in defaults
+    # (which flag false track_width/clearance/via violations on finer
+    # traces).  Writing here -- the shared post-route DRC entry for every
+    # route flow -- makes the verdict deterministic and independent of any
+    # sidecars a prior run may have left behind.
+    _write_drc_constraint_sidecars(
+        output_path, manufacturer, layers, copper_oz=copper_oz, quiet=quiet
+    )
+
     try:
         # Load the routed PCB
         pcb = PCB.load(str(output_path))
@@ -1628,6 +1706,7 @@ def run_post_route_drc(
             pcb,
             manufacturer=manufacturer,
             layers=layers,
+            copper_oz=copper_oz,
             net_class_map=net_class_map,
         )
         results = checker.check_all()

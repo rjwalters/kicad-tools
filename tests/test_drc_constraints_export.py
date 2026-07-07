@@ -368,3 +368,65 @@ def test_board_04_micro_vias_stay_clean_under_kicad_cli(tmp_path: Path):
     # Micro vias must not trip via_diameter / annular_width.
     assert "via_diameter" not in report, f"micro via flagged via_diameter:\n{report}"
     assert "annular_width" not in report, f"micro via flagged annular_width:\n{report}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #3919: the route pipeline (not just export) must emit the sibling
+# .kicad_pro / .kicad_dru constraint sidecars, so every downstream kicad-cli
+# invocation judges with the intended manufacturer floors.
+# ---------------------------------------------------------------------------
+
+
+def test_route_emits_sibling_kicad_pro(monkeypatch, tmp_path: Path):
+    """``run_post_route_drc`` writes a sibling .kicad_pro with the profile floors.
+
+    Mirrors the export-side emission but through the route entry point.  The
+    internal DRCChecker and geometric DRC are mocked so no real board or
+    kicad-cli is required; the assertion is purely on the emitted sidecar.
+    """
+    import json
+
+    import kicad_tools.drc as drc_mod
+    import kicad_tools.validate as validate_mod
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.drc.geometric import GeometricDRCResult
+    from kicad_tools.schema import pcb as pcb_mod
+
+    # Mock the internal engine + geometric DRC so the function focuses on
+    # sidecar emission (no real PCB parse, no kicad-cli).
+    monkeypatch.setattr(pcb_mod.PCB, "load", classmethod(lambda cls, p: object()))
+
+    class _Results:
+        error_count = 0
+        warning_count = 0
+
+    class _Checker:
+        def __init__(self, *a, **k):
+            pass
+
+        def check_all(self, *a, **k):
+            return _Results()
+
+    pro_exists_at_drc = {}
+
+    def _geo(output_path, *a, **k):
+        pro_exists_at_drc["ok"] = (output_path.parent / "board.kicad_pro").exists()
+        return GeometricDRCResult(ran=True, error_count=0)
+
+    monkeypatch.setattr(validate_mod, "DRCChecker", _Checker)
+    monkeypatch.setattr(drc_mod, "run_geometric_drc", _geo)
+
+    out = tmp_path / "board.kicad_pcb"
+    route_cmd.run_post_route_drc(output_path=out, manufacturer="jlcpcb-tier1", layers=4)
+
+    pro = tmp_path / "board.kicad_pro"
+    assert pro.exists()
+    # ordering: the .kicad_pro existed before kicad-cli DRC ran.
+    assert pro_exists_at_drc.get("ok") is True
+
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4, copper_oz=1.0)
+    data = json.loads(pro.read_text())
+    defaults = data["board"]["design_settings"]["defaults"]
+    assert defaults["clearance_min"] == rules.min_clearance_mm
+    assert defaults["track_min_width"] == rules.min_trace_width_mm
