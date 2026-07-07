@@ -373,6 +373,43 @@ def _parse_per_net_status(stdout: str) -> dict[str, str]:
     return result
 
 
+def _write_diffpair_sidecar(dest_dir: Path) -> Path:
+    """Write the board 03 net-class sidecar into ``dest_dir``.
+
+    Mirrors ``generate_design.py:route_pcb()`` exactly: annotate the USB
+    D+/D- pair with ``diffpair_partner`` and a 0.15mm
+    ``intra_pair_clearance`` (#3095) so the ``--net-class-map`` flag can
+    hand the CoupledPathfinder the coupled-routing metadata.  Returns the
+    path to the written ``net_class_map.json``.  KEEP IN SYNC with
+    generate_design.py:route_pcb() (Issue #3922).
+    """
+    import json as _json
+    from dataclasses import replace as _dc_replace
+
+    from kicad_tools.router import create_net_class_map
+    from kicad_tools.router.rules import net_class_map_to_dict
+
+    net_class_map = create_net_class_map(
+        power_nets=["VCC", "VBUS", "GND"],
+        high_speed_nets=["USB_D+", "USB_D-"],
+        clock_nets=["XTAL1", "XTAL2"],
+    )
+    if "USB_D+" in net_class_map and "USB_D-" in net_class_map:
+        net_class_map["USB_D+"] = _dc_replace(
+            net_class_map["USB_D+"],
+            diffpair_partner="USB_D-",
+            intra_pair_clearance=0.15,
+        )
+        net_class_map["USB_D-"] = _dc_replace(
+            net_class_map["USB_D-"],
+            diffpair_partner="USB_D+",
+            intra_pair_clearance=0.15,
+        )
+    sidecar_path = dest_dir / "net_class_map.json"
+    sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
+    return sidecar_path
+
+
 @pytest.fixture(scope="module")
 def unrouted_pcb_path() -> Path:
     """Verify the committed unrouted board 03 PCB exists.
@@ -399,6 +436,11 @@ def _run_kct_route(unrouted: Path, seed: int) -> str:
         pcb_copy = Path(td) / "usb_joystick.kicad_pcb"
         shutil.copy2(unrouted, pcb_copy)
         output_path = Path(td) / "usb_joystick_routed.kicad_pcb"
+        # Issue #3922: mirror the production net-class sidecar so
+        # ``--net-class-map`` (below) reads the same USB D+/D-
+        # diffpair_partner / intra_pair_clearance metadata the recipe
+        # writes.  KEEP IN SYNC with generate_design.py:route_pcb().
+        sidecar_path = _write_diffpair_sidecar(output_path.parent)
         cmd = [
             sys.executable,
             "-m",
@@ -421,6 +463,22 @@ def _run_kct_route(unrouted: Path, seed: int) -> str:
             "--deterministic-budget",
             "--timeout",
             "600",
+            # Issue #3922: --differential-pairs was silently dropped in the
+            # #3308/#3410 recipe consolidation, so USB_D+/USB_D- routed
+            # through the plain per-net A* loop and the CoupledPathfinder
+            # (Phase A) was never invoked.  Restored here in lock-step with
+            # generate_design.py:route_pcb().  --net-class-map forwards the
+            # sidecar so the router reads the diff-pair metadata.
+            "--differential-pairs",
+            "--net-class-map",
+            str(sidecar_path),
+            # Issue #3922: --auto-layers is kept (the default) so the escape
+            # pre-phase board 03's fine-pitch USB-C needs still runs (13/13 +
+            # 0 native DRC).  On this board --differential-pairs is inert at
+            # routing time because route_cmd's escape / escalation dispatch
+            # does not consult it (tracked in #3952); forcing the diff-pair
+            # path with --no-auto-layers would reintroduce a DRC clearance
+            # violation.  KEEP IN SYNC with generate_design.py:route_pcb().
             # Issues #3507/#3454: ``--raw`` removed in lock-step with the
             # production recipe in ``generate_design.py:route_pcb()`` --
             # the grid-transactional optimize pass retired the
@@ -589,6 +647,76 @@ class TestBoard03RoutingBaseline:
             "the destination MCU U1 (in which case generate_pcb.py "
             "needs to be regenerated)."
         )
+
+    @pytest.mark.xfail(
+        reason=(
+            "Issue #3952: --differential-pairs is inert on board 03's routing "
+            "path.  The board's fine-pitch USB-C forces the escape-routing "
+            "dispatch, and route_cmd's escape / auto-layers-escalation paths "
+            "do not consult args.differential_pairs, so route_all_with_diffpairs "
+            "(the CoupledPathfinder pre-pass) never runs.  Forcing the diff-pair "
+            "path with --no-auto-layers loses escape routing and reintroduces a "
+            "native-DRC clearance violation, so the recipe keeps --auto-layers.  "
+            "When #3952 integrates diff-pair routing into the escape path, this "
+            "flips to XPASS and should be un-xfailed."
+        ),
+        strict=False,
+    )
+    def test_coupled_pathfinder_phase_a_invoked(self, route_stdout: str) -> None:
+        """The diff-pair pre-pass (Phase A) actually runs under the recipe.
+
+        Executable documentation of the #3952 limitation: restoring
+        ``--differential-pairs`` (Issue #3922) makes the recipe *request*
+        coupled routing, but on board 03 the CLI dispatch never reaches the
+        ``route_all_with_diffpairs`` pre-pass.  This test asserts the
+        unconditional Phase A banner appears; it is expected to xfail until
+        #3952 wires diff-pair routing into the escape-routing path.  A
+        surprise XPASS means #3952 (or an equivalent) has landed -- remove
+        the xfail marker and pin the behavior.
+        """
+        assert "=== Differential Pair Routing ===" in route_stdout, (
+            "The diff-pair pre-pass (Phase A / route_all_with_diffpairs) did "
+            "not run -- see #3952.\n"
+            f"stdout (last 4000 chars):\n{route_stdout[-4000:]}"
+        )
+        assert "Detected 1 differential pairs" in route_stdout, (
+            "Phase A ran but did not detect the USB D+/D- pair.  Check that "
+            "--net-class-map still forwards the diffpair_partner metadata "
+            "(Issue #3922).\n"
+            f"stdout (last 4000 chars):\n{route_stdout[-4000:]}"
+        )
+
+
+def test_recipe_includes_differential_pairs_flag() -> None:
+    """Guard against recipe consolidations silently dropping --differential-pairs.
+
+    Issue #3922: the #3308/#3410 consolidation dropped ``--differential-pairs``
+    from ``generate_design.py:route_pcb()`` without any test detecting it, so
+    the recipe stopped even requesting diff-pair routing and the boards/README
+    claim went false.  This fast text-search guard makes the flag a contract:
+    if a future refactor drops it, this test goes red before the regression
+    can ship.  ``--net-class-map`` is checked too because it forwards the
+    diff-pair metadata (and engages the validate-side diff-pair DRC rules).
+
+    NB: on board 03 the flag is currently inert at routing time -- route_cmd's
+    escape / escalation dispatch does not consult it (tracked in #3952).  This
+    guard therefore protects the recipe *contract*, not the runtime behavior;
+    the runtime behavior is documented by the xfail'd
+    ``test_coupled_pathfinder_phase_a_invoked`` above.
+    """
+    source = (BOARD_DIR / "generate_design.py").read_text()
+    assert "--differential-pairs" in source, (
+        "generate_design.py:route_pcb() must include '--differential-pairs' so "
+        "the recipe requests diff-pair-aware routing.  If you changed the "
+        "routing recipe, keep the flag and mirror it in _run_kct_route() "
+        "(Issue #3922)."
+    )
+    assert "--net-class-map" in source, (
+        "generate_design.py:route_pcb() must forward '--net-class-map' so the "
+        "router reads the USB D+/D- diffpair_partner / intra_pair_clearance "
+        "metadata from the sidecar; without it --differential-pairs falls back "
+        "to default spacing (Issue #3922)."
+    )
 
 
 @pytest.mark.slow
