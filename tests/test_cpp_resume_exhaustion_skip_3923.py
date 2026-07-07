@@ -9,12 +9,22 @@ Two independent but compounding defects were reported:
    this fallback: (a) "post-route clearance validation failed; exhausted 5
    resume attempts" -- 5 avoidance-boosted resumes each produced a
    geometrically valid path that still violated clearance (carries
-   FAILURE_NONE; DOMINANT -- 22 of 30 board-07 fallbacks in the sweep); and
-   (b) "resume after rejected goal cell failed: ..." -- a resumed search
-   exhausted its open set (FAILURE_NO_PATH).  In both the pure-Python A* shares
-   the SAME ``_py_grid`` and clearance model, so it reproduces the failure
-   10-100x more slowly.  #3923 returns ``None`` BEFORE constructing the Python
-   ``Router``.
+   FAILURE_NONE; DOMINANT case); and (b) "resume after rejected goal cell
+   failed: ..." -- a resumed search exhausted its open set (FAILURE_NO_PATH).
+
+   PR #3956 narrowing (after the judge caught two regressions -- USB-joystick
+   5/16 and board-07 GND pad U1.24 stranded): the guard is now CASE-1 ONLY and
+   REPEAT-ONLY.
+     - Case 2 ALWAYS falls back: it is a path-finding failure on a distorted
+       open set, and a fresh full Python A* explores differently and rescues
+       real nets (the USB-joystick regression traced here).
+     - Case 1 falls back on the FIRST exhaustion of a net (the fresh Python A*
+       measurably rescues real nets/pads -- board-07 GND pad U1.24) and only
+       short-circuits on the SECOND+ identical clearance-exhaustion of the
+       SAME net, which is the genuine 60-200s/net dead loss (the negotiated
+       rip-up loop merely re-presenting a clearance the Python A* already
+       failed).  ``#3923`` returns ``None`` BEFORE constructing the Python
+       ``Router`` on that repeat.
 
 2. ``route_with_layer_escalation`` had no pre-rung deduplication, so an
    identical ``(layer_count, layer_stack, via_in_pad_fallback, skip_nets)``
@@ -23,14 +33,19 @@ Two independent but compounding defects were reported:
    is spent.  The fingerprint helper (``_rung_dedup_fingerprint``) is
    unit-tested directly.
 
-The guard keys on the resume-loop reason markers ("resume attempts" /
-"resume after rejected goal cell failed"), NOT on FAILURE_NO_PATH alone, so it
-never fires for the initial-search failure -- "no path (C++ A* open set
-exhausted)" contains "exhausted" but no resume marker, so single-corridor
-geometries the Python 45-degree/waypoint expansion legitimately rescues still
-fall back.  ``FAILURE_TIMEOUT`` (wall-clock artifact, handled by #3876) and
+The guard keys ONLY on the case-1 clearance-exhaustion marker ("resume
+attempts" in the reason), NOT on FAILURE_NO_PATH and NOT on the case-2 "resume
+after rejected goal cell failed" phrasing, so it never fires for the
+initial-search failure -- "no path (C++ A* open set exhausted)" contains
+"exhausted" but no "resume attempts" marker, so single-corridor geometries the
+Python 45-degree/waypoint expansion legitimately rescues still fall back.
+``FAILURE_TIMEOUT`` (wall-clock artifact, handled by #3876) and
 ``FAILURE_VIA_VIA_BLOCKED`` (distinct via obstruction) are excluded and still
 fall back.  It can be disabled with ``KICAD_ROUTER_SKIP_RESUME_FALLBACK=0``.
+
+``TestFailureReasonMarkersDoNotDrift`` pins the emitter/matcher contract: it
+fails loudly if the ``route()`` call-site reason strings or the C++ FAILURE_*
+enum members the guard references ever drift.
 """
 
 from __future__ import annotations
@@ -122,46 +137,110 @@ def _make_pads(net: int = 1, net_name: str = "NET1") -> tuple[Pad, Pad]:
 
 @requires_cpp
 class TestResumeExhaustionShortCircuitsFallback:
-    """A resume-loop dead-end must NOT enter the pure-Python fallback."""
+    """A REPEATED case-1 clearance-exhaustion must NOT enter the Python fallback.
 
-    @pytest.mark.parametrize(
-        ("reason", "cpp_code"),
-        [
-            # Dominant case: clearance-validation exhaustion carries FAILURE_NONE.
-            (CLEARANCE_EXHAUSTED_REASON, "FAILURE_NONE"),
-            # Resume search exhausted: carries FAILURE_NO_PATH.
-            (RESUME_FAILED_REASON, "FAILURE_NO_PATH"),
-        ],
-    )
-    def test_resume_exhaustion_does_not_construct_python_router(self, reason, cpp_code) -> None:
+    PR #3956 narrowing: the guard is case-1 only AND repeat-only.  The FIRST
+    clearance-exhaustion of a net still runs the Python fallback (a fresh full
+    A* measurably rescues real nets/pads there -- board-07 GND pad U1.24,
+    USB-joystick nets); only the SECOND+ identical clearance-exhaustion of the
+    SAME net short-circuits.  Case 2 ("resume after rejected goal cell failed")
+    ALWAYS falls back -- see ``TestResumeExhaustionGuardIsNarrow``.
+    """
+
+    def test_first_clearance_exhaustion_still_falls_back(self) -> None:
+        """The FIRST case-1 exhaustion of a net keeps its Python fallback."""
         pathfinder, _ = _make_pathfinder()
-        start, end = _make_pads(net_name="RESUME_EXHAUSTED")
+        start, end = _make_pads(net_name="RESUME_FIRST")
 
         with mock.patch("kicad_tools.router.pathfinder.Router") as router_cls:
+            router_cls.return_value.route.return_value = None
+            pathfinder._try_python_fallback(
+                start,
+                end,
+                reason=CLEARANCE_EXHAUSTED_REASON,
+                cpp_failure_reason=int(router_cpp.FAILURE_NONE),
+            )
+
+        # issue #3923 (PR #3956): the FIRST clearance-exhaustion must still fall
+        # back -- a fresh Python A* rescues real nets/pads there.
+        router_cls.assert_called_once()
+
+    def test_repeat_clearance_exhaustion_does_not_construct_python_router(self) -> None:
+        """The SECOND+ case-1 exhaustion of the SAME net short-circuits."""
+        pathfinder, _ = _make_pathfinder()
+        start, end = _make_pads(net_name="RESUME_REPEAT")
+
+        with mock.patch("kicad_tools.router.pathfinder.Router") as router_cls:
+            router_cls.return_value.route.return_value = None
+            # First exhaustion: falls back (constructs the Python Router).
+            pathfinder._try_python_fallback(
+                start,
+                end,
+                reason=CLEARANCE_EXHAUSTED_REASON,
+                cpp_failure_reason=int(router_cpp.FAILURE_NONE),
+            )
+            router_cls.reset_mock()
+            # Second exhaustion of the SAME net: short-circuits.
             result = pathfinder._try_python_fallback(
                 start,
                 end,
-                reason=reason,
-                cpp_failure_reason=int(getattr(router_cpp, cpp_code)),
+                reason=CLEARANCE_EXHAUSTED_REASON,
+                cpp_failure_reason=int(router_cpp.FAILURE_NONE),
             )
 
         assert result is None, (
-            "issue #3923: a resume-loop dead-end must fail the net fast "
-            "(return None), not grind in the Python A*."
+            "issue #3923: a REPEATED clearance-exhaustion must fail the net "
+            "fast (return None), not grind in the Python A*."
         )
         router_cls.assert_not_called()
 
-    def test_resume_exhaustion_emits_debug_not_warning(self, caplog) -> None:
+    def test_repeat_counter_is_per_net(self) -> None:
+        """A first exhaustion of net B does NOT skip just because net A already
+        exhausted once -- the counter is keyed per net_name."""
+        pathfinder, _ = _make_pathfinder()
+        start_a, end_a = _make_pads(net_name="NET_A")
+        start_b, end_b = _make_pads(net_name="NET_B")
+
+        with mock.patch("kicad_tools.router.pathfinder.Router") as router_cls:
+            router_cls.return_value.route.return_value = None
+            pathfinder._try_python_fallback(
+                start_a,
+                end_a,
+                reason=CLEARANCE_EXHAUSTED_REASON,
+                cpp_failure_reason=int(router_cpp.FAILURE_NONE),
+            )
+            router_cls.return_value.route.reset_mock()
+            # First exhaustion of a DIFFERENT net must still fall back.
+            pathfinder._try_python_fallback(
+                start_b,
+                end_b,
+                reason=CLEARANCE_EXHAUSTED_REASON,
+                cpp_failure_reason=int(router_cpp.FAILURE_NONE),
+            )
+
+        router_cls.return_value.route.assert_called_once()
+
+    def test_repeat_clearance_exhaustion_emits_debug_not_warning(self, caplog) -> None:
         pathfinder, _ = _make_pathfinder()
         start, end = _make_pads(net_name="RESUME_DBG")
 
-        with mock.patch("kicad_tools.router.pathfinder.Router"):
+        with mock.patch("kicad_tools.router.pathfinder.Router") as router_cls:
+            router_cls.return_value.route.return_value = None
             with caplog.at_level(logging.DEBUG, logger=CPP_BACKEND_LOGGER):
+                # Prime the per-net counter (first exhaustion falls back).
                 pathfinder._try_python_fallback(
                     start,
                     end,
-                    reason=RESUME_FAILED_REASON,
-                    cpp_failure_reason=int(router_cpp.FAILURE_NO_PATH),
+                    reason=CLEARANCE_EXHAUSTED_REASON,
+                    cpp_failure_reason=int(router_cpp.FAILURE_NONE),
+                )
+                caplog.clear()
+                # Repeat exhaustion: short-circuits with a debug line.
+                pathfinder._try_python_fallback(
+                    start,
+                    end,
+                    reason=CLEARANCE_EXHAUSTED_REASON,
+                    cpp_failure_reason=int(router_cpp.FAILURE_NONE),
                 )
 
         fallback_warnings = [
@@ -182,44 +261,87 @@ class TestResumeExhaustionShortCircuitsFallback:
             "the short-circuit should log a debug line naming the net"
         )
 
-    def test_resume_exhaustion_not_recorded_in_fallback_stats(self) -> None:
+    def test_repeat_clearance_exhaustion_not_recorded_in_fallback_stats(self) -> None:
         pathfinder, _ = _make_pathfinder()
         start, end = _make_pads(net_name="RESUME_STATS")
 
-        with mock.patch("kicad_tools.router.pathfinder.Router"):
+        with mock.patch("kicad_tools.router.pathfinder.Router") as router_cls:
+            router_cls.return_value.route.return_value = None
+            # First exhaustion falls back (records stats); we only assert the
+            # REPEAT short-circuit adds nothing new.
             pathfinder._try_python_fallback(
                 start,
                 end,
-                reason=RESUME_FAILED_REASON,
-                cpp_failure_reason=int(router_cpp.FAILURE_NO_PATH),
+                reason=CLEARANCE_EXHAUSTED_REASON,
+                cpp_failure_reason=int(router_cpp.FAILURE_NONE),
+            )
+            count_after_first = pathfinder.fallback_stats["fallback_count"]
+            pathfinder._try_python_fallback(
+                start,
+                end,
+                reason=CLEARANCE_EXHAUSTED_REASON,
+                cpp_failure_reason=int(router_cpp.FAILURE_NONE),
             )
 
         stats = pathfinder.fallback_stats
-        assert "RESUME_STATS" not in stats["fallback_reasons"]
-        assert "RESUME_STATS" not in stats["fallback_nets"]
-        assert stats["fallback_count"] == 0
+        assert stats["fallback_count"] == count_after_first, (
+            "the short-circuited REPEAT must not increment the fallback count"
+        )
 
     def test_env_opt_out_restores_grind(self, monkeypatch) -> None:
-        """KICAD_ROUTER_SKIP_RESUME_FALLBACK=0 restores pre-#3923 fallback."""
+        """KICAD_ROUTER_SKIP_RESUME_FALLBACK=0 restores pre-#3923 fallback even
+        on a REPEATED clearance-exhaustion."""
         monkeypatch.setenv("KICAD_ROUTER_SKIP_RESUME_FALLBACK", "0")
         pathfinder, _ = _make_pathfinder()
         start, end = _make_pads(net_name="RESUME_OPTOUT")
 
         with mock.patch("kicad_tools.router.pathfinder.Router") as router_cls:
             router_cls.return_value.route.return_value = None
-            pathfinder._try_python_fallback(
-                start,
-                end,
-                reason=RESUME_FAILED_REASON,
-                cpp_failure_reason=int(router_cpp.FAILURE_NO_PATH),
-            )
+            for _ in range(3):
+                pathfinder._try_python_fallback(
+                    start,
+                    end,
+                    reason=CLEARANCE_EXHAUSTED_REASON,
+                    cpp_failure_reason=int(router_cpp.FAILURE_NONE),
+                )
 
-        router_cls.assert_called_once()
+        # ``_py_router`` is cached, so count ``.route()`` calls, not the ctor.
+        assert router_cls.return_value.route.call_count == 3, (
+            "with the opt-out set, every exhaustion (including repeats) must "
+            "still run the Python fallback route()."
+        )
 
 
 @requires_cpp
 class TestResumeExhaustionGuardIsNarrow:
     """The guard must NOT fire for cases the Python fallback legitimately rescues."""
+
+    def test_case2_resume_after_rejected_goal_always_falls_back(self) -> None:
+        """PR #3956: case 2 ("resume after rejected goal cell failed") is a
+        path-finding failure on a distorted open set, NOT a clearance dead-end.
+        A fresh full Python A* explores differently and rescues real nets, so
+        case 2 must ALWAYS fall back -- even on repeated occurrences of the
+        same net."""
+        pathfinder, _ = _make_pathfinder()
+        start, end = _make_pads(net_name="CASE2_ALWAYS")
+
+        with mock.patch("kicad_tools.router.pathfinder.Router") as router_cls:
+            router_cls.return_value.route.return_value = None
+            for _ in range(3):
+                pathfinder._try_python_fallback(
+                    start,
+                    end,
+                    reason=RESUME_FAILED_REASON,
+                    cpp_failure_reason=int(router_cpp.FAILURE_NO_PATH),
+                )
+
+        # ``_py_router`` is a cached singleton (constructed once, reused), so we
+        # count the per-fallback ``.route()`` invocations, not the constructor.
+        assert router_cls.return_value.route.call_count == 3, (
+            "issue #3923 (PR #3956): case-2 resume-after-rejected-goal must "
+            "ALWAYS fall back -- the Python A* rescues real nets here "
+            "(regressed USB-joystick 5/16 when it was skipped)."
+        )
 
     def test_initial_no_path_still_falls_back(self) -> None:
         """An INITIAL-search FAILURE_NO_PATH (no resume keyword) must still
@@ -255,6 +377,91 @@ class TestResumeExhaustionGuardIsNarrow:
             )
 
         router_cls.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Drift guard: the guard matches failure-reason substrings and C++ FAILURE_*
+# codes.  If either the reason strings emitted at the ``route()`` call sites OR
+# the C++ enum constants drift, the guard would silently stop matching (never
+# firing -> the perf win evaporates, or over-firing -> real nets dropped).
+# These tests fail LOUDLY on such drift.  (PR #3956 judge follow-up.)
+# ---------------------------------------------------------------------------
+
+
+@requires_cpp
+class TestFailureReasonMarkersDoNotDrift:
+    """Fail if the reason strings / FAILURE_* codes the guard keys on change."""
+
+    def test_route_call_sites_still_emit_the_matched_markers(self) -> None:
+        """The two dead-end ``_try_python_fallback`` calls inside
+        ``CppPathfinder._route_impl()`` (the resume-loop body reached from
+        ``route()``) must keep emitting reason strings that the #3923 guard
+        recognises.  We read the SOURCE of ``_route_impl()`` and assert the
+        literal markers are present -- if a refactor rewords them (e.g. drops
+        "resume attempts" or renames "resume after rejected goal cell
+        failed"), the substring match in ``_try_python_fallback`` would
+        silently stop firing.  This test pins the contract between the emitter
+        and the matcher."""
+        import inspect
+
+        source = inspect.getsource(CppPathfinder._route_impl)
+        # Case 1 marker -- the guard matches ``"resume attempts" in reason``.
+        assert "resume attempts" in source, (
+            "issue #3923 drift: CppPathfinder.route() no longer emits the "
+            "'resume attempts' marker the case-1 guard keys on.  Update BOTH "
+            "the emitter and the guard in _try_python_fallback together."
+        )
+        # Case 2 marker -- the guard/tests recognise this exact prefix.
+        assert "resume after rejected goal cell failed" in source, (
+            "issue #3923 drift: CppPathfinder.route() no longer emits the "
+            "'resume after rejected goal cell failed' marker."
+        )
+
+    def test_guard_matches_the_exact_emitted_case1_marker(self) -> None:
+        """End-to-end: the reason string constructed at the case-1 call site
+        (``... exhausted N resume attempts``) must satisfy the guard's
+        ``"resume attempts" in reason`` predicate for any N."""
+        for n in (1, 5, 10):
+            reason = f"post-route clearance validation failed; exhausted {n} resume attempts"
+            assert "resume attempts" in reason
+
+    def test_cpp_failure_constants_the_guard_references_exist(self) -> None:
+        """The guard's exclusion list references ``FAILURE_TIMEOUT`` and
+        ``FAILURE_VIA_VIA_BLOCKED``; the fast-path callers reference
+        ``FAILURE_NONE`` / ``FAILURE_NO_PATH``.  If any of these enum members
+        is renamed/removed on the C++ side, ``int(getattr(...))`` would raise
+        AttributeError at runtime instead of matching -- pin their existence
+        here so the drift is caught at test time, not in a routing run."""
+        for name in (
+            "FAILURE_NONE",
+            "FAILURE_NO_PATH",
+            "FAILURE_TIMEOUT",
+            "FAILURE_VIA_VIA_BLOCKED",
+        ):
+            assert hasattr(router_cpp, name), (
+                f"issue #3923 drift: C++ enum member {name!r} is gone -- the "
+                "resume-exhaustion guard references it and would raise."
+            )
+            # Must be coercible to int (the guard does int(getattr(...))).
+            assert isinstance(int(getattr(router_cpp, name)), int)
+
+    def test_describe_cpp_failure_no_path_text_unchanged(self) -> None:
+        """The case-2 reason string embeds ``_describe_cpp_failure`` output for
+        FAILURE_NO_PATH.  The initial-search fall-back test and the board
+        gates rely on that text NOT itself containing "resume attempts" (or the
+        narrow guard would misfire on the initial-search failure)."""
+        pathfinder, _ = _make_pathfinder()
+
+        class _FakeResult:
+            failure_reason = int(router_cpp.FAILURE_NO_PATH)
+            blocking_via_net = 0
+
+        desc = pathfinder._describe_cpp_failure(_FakeResult())
+        assert "resume attempts" not in desc, (
+            "issue #3923 drift: the FAILURE_NO_PATH description now contains "
+            "'resume attempts' -- the case-1 guard would misfire on the "
+            "initial-search failure and drop nets the Python A* rescues."
+        )
 
     def test_timeout_with_resume_keyword_short_circuits_via_3876(self) -> None:
         """A FAILURE_TIMEOUT is short-circuited by the earlier #3876 guard
