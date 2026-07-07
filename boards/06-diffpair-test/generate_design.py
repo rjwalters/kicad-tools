@@ -85,25 +85,25 @@ REQUIRE_POUR_CONNECTIVITY: bool = True
 # audit PASS, so a higher cap only costs wall time in failure scenarios.
 MAX_POUR_REPAIR_ROUNDS: int = 6
 
-# Issue #3855 / #3532: segment uuids the 45-degree quantizer must leave
-# UNTOUCHED because BOTH dogleg variants of that off-angle chord clip a
-# neighbouring via barrel (a new ``clearance_segment_via`` error), so the
-# skewed chord is the only manufacturable path through the corridor.  The
-# committed ``--seed 42`` artifact's diff-pair crossover chord on net 2
-# (USB2_D-, ``(112.679,109.947)->(116.616,108.602)``) is such a residual:
-# the default dogleg pushes the strict-gate count 24 -> 26 and the
-# axis-first variant 24 -> 27, while skipping it holds the pinned 24 (18
-# diff-pair + 1 drill + 5 clearance/via).  It stays off-angle and is
-# pinned by uuid in ``tests/test_fleet_45_census.py::DOCUMENTED_OFF_ANGLE``.
+# Issue #3855 / #3532: SEED skip set for the 45-degree quantizer -- off-angle
+# chords whose BOTH dogleg variants clip a neighbouring via barrel (a new
+# ``clearance_segment_via`` error), so the skewed chord is the only
+# manufacturable path through the corridor.  The committed ``--seed 42``
+# artifact's diff-pair crossover chord on net 2 (USB2_D-,
+# ``(112.679,109.947)->(116.616,108.602)``) is such a residual, pinned by
+# uuid in ``tests/test_fleet_45_census.py::DOCUMENTED_OFF_ANGLE``.
 #
-# This set is uuid-keyed and therefore SEED-SPECIFIC: a re-route with a
-# different seed regenerates segment uuids, so an unmatched entry is
-# simply a no-op (the quantizer skips nothing, doglegs every chord, and
-# the resulting count stays within the .github/routed-drc-tolerance.yml
-# floor of 33).  It exists so a deterministic ``--seed 42`` regeneration
-# reproduces the committed artifact's pinned 24-error baseline byte-for-
-# byte.  Exit clause: drop the uuid when a re-route's chord no longer
-# collides (the quantizer then snaps it 45-aligned by construction).
+# IMPORTANT (#3913): this set is only a *seed* for
+# ``_resolve_quantize_treatment``, which recomputes the real flip/skip
+# assignment from the CURRENT run's uuids at build time.  A uuid-keyed skip
+# is unreliable on a fresh re-route because pour-repair *bridge* traces are
+# minted outside the seeded router path, so their uuids change every route
+# (the trap flagged in ``.claude/fresh-sweep-findings.md``): the #3946
+# clearance/connectivity landing shifted board-06's geometry and introduced a
+# GND-bridge dogleg that grazes a via near board-XY (57.050, 22.050), and a
+# hard-coded uuid for it silently no-ops in CI.  The dynamic resolver catches
+# it by geometry instead.  An unmatched seed entry is simply a no-op; keep
+# 864fb9ee so a deterministic regen still documents the committed crossover.
 QUANTIZE_SKIP_UUIDS: frozenset[str] = frozenset({"864fb9ee-effe-4a8c-8f8a-c93533e51a22"})
 
 
@@ -1340,6 +1340,87 @@ def _check_post_quantize_clearances(pcb_path: Path, baseline: set[tuple[str, ...
     return False
 
 
+def _resolve_quantize_treatment(
+    pre_quantize_path: Path,
+    baseline: set[tuple[str, ...]],
+    seed_skip_uuids: frozenset[str] | set[str] = frozenset(),
+) -> tuple[set[str], set[str]]:
+    """Compute per-segment 45-degree-quantize treatment for THIS run (#3913).
+
+    The quantizer replaces each off-angle chord with a two-leg dogleg whose
+    perpendicular bulge can graze a foreign via barrel (the #3855 mode).
+    ``dogleg_points()`` offers an axis-first *flip* variant (bulge on the
+    opposite side of the chord) as the escape hatch; when BOTH variants
+    graze, the chord must be left off-angle (skipped) -- it is the only
+    manufacturable path through that corridor.
+
+    Historically the offending uuids were hard-coded in
+    ``QUANTIZE_SKIP_UUIDS``.  That is fragile: the grazing chord here is a
+    GND pour-repair *bridge* trace, and bridge-trace uuids are NOT
+    reproducible across re-routes (they are minted outside the seeded
+    router path, so a fresh ``--seed 42`` regeneration mints new uuids --
+    the exact trap flagged in ``.claude/fresh-sweep-findings.md``).  A
+    hard-coded uuid therefore silently no-ops on the CI re-route and the
+    step-12d gate aborts the build (issue #3913).
+
+    This resolver instead reads the CURRENT artifact's uuids and greedily
+    assigns each grazing chord the cheapest clean treatment -- prefer a
+    flip (which keeps the chord 45-aligned), fall back to a skip -- so the
+    remediation tracks the geometry, not a run-specific uuid.  Returns
+    ``(axis_first_uuids, skip_uuids)`` ready for ``quantize_pcb_file``.
+    """
+    import os
+    import shutil
+    import tempfile
+
+    from kicad_tools.router.quantize import quantize_pcb_file
+
+    def _new_grazes(axis_first: set[str], skip: set[str]) -> set[tuple[str, ...]]:
+        fd, tmp = tempfile.mkstemp(suffix=".kicad_pcb")
+        os.close(fd)
+        try:
+            shutil.copy(pre_quantize_path, tmp)
+            quantize_pcb_file(
+                tmp,
+                axis_first_uuids=frozenset(axis_first),
+                skip_uuids=frozenset(skip),
+            )
+            return _clearance_signature(Path(tmp)) - baseline
+        finally:
+            os.unlink(tmp)
+
+    # ``dry_run`` lists every off-angle chord's uuid without mutating the file.
+    off_angle = quantize_pcb_file(pre_quantize_path, dry_run=True)
+    axis_first: set[str] = set()
+    skip: set[str] = set(seed_skip_uuids)
+
+    # Greedy fixpoint: each iteration commits at most one new treatment that
+    # strictly reduces the NEW-graze count; bounded by the off-angle count.
+    for _ in range(len(off_angle) + 1):
+        remaining = _new_grazes(axis_first, skip)
+        if not remaining:
+            break
+        chosen: tuple[str, str] | None = None
+        for u in off_angle:
+            if u in axis_first or u in skip:
+                continue
+            if len(_new_grazes(axis_first | {u}, skip)) < len(remaining):
+                axis_first.add(u)
+                chosen = ("flip", u)
+                break
+            if len(_new_grazes(axis_first, skip | {u})) < len(remaining):
+                skip.add(u)
+                chosen = ("skip", u)
+                break
+        if chosen is None:
+            # No single-segment flip/skip reduces the residual -- let the
+            # step-12d gate report it as a hard failure (a genuinely new,
+            # non-corridor short that a re-route must resolve).
+            break
+        print(f"   auto-remediate ({chosen[0]}) off-angle chord {chosen[1]} (#3913)")
+    return axis_first, skip
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB with per-protocol net-class engagement.
 
@@ -2224,10 +2305,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # so pour connectivity (and every net's reach) is unchanged.  Mirror the
     # board-07 / softstart quantize -> re-fill fixpoint: a dogleg's small
     # perpendicular bulge can graze a foreign via barrel, so re-fill carves
-    # clearance around the converged geometry before returning.  The net-2
-    # crossover chord whose BOTH dogleg variants clip a via is held off-angle
-    # via ``QUANTIZE_SKIP_UUIDS`` (a documented, seed-specific residual) so
-    # the pinned 24-error strict-gate baseline survives quantization.
+    # clearance around the converged geometry before returning.  Any chord
+    # whose BOTH dogleg variants clip a via is held off-angle -- the skip
+    # assignment is computed per-run by ``_resolve_quantize_treatment`` (#3913)
+    # from the current artifact's uuids, robust to the pour-repair bridge
+    # uuids that change every re-route.
     print("\n12. 45-degree quantization of off-angle copper (#3855 / #3532)...")
     try:
         from kicad_tools.router.quantize import quantize_pcb_file
@@ -2239,7 +2321,21 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # dogleg mutation NEWLY introduces (the #3855 "dogleg bulge grazes a
         # foreign via barrel" mode), not re-flag pre-existing baseline copper.
         pre_quantize_clearances = _clearance_signature(output_path)
-        quantized = quantize_pcb_file(output_path, skip_uuids=QUANTIZE_SKIP_UUIDS)
+        # Issue #3913: resolve per-segment treatment from THIS run's artifact
+        # (flip where it clears, skip where BOTH dogleg variants graze a via
+        # barrel).  Hard-coded uuids are unreliable here -- the grazing chord
+        # is a GND pour-repair bridge whose uuid is re-minted every re-route --
+        # so ``_resolve_quantize_treatment`` reads the current uuids instead of
+        # trusting the seed set.  ``QUANTIZE_SKIP_UUIDS`` is passed only as a
+        # documented seed for the committed artifact's known crossover chord.
+        axis_first_uuids, skip_uuids = _resolve_quantize_treatment(
+            output_path, pre_quantize_clearances, seed_skip_uuids=QUANTIZE_SKIP_UUIDS
+        )
+        quantized = quantize_pcb_file(
+            output_path,
+            axis_first_uuids=frozenset(axis_first_uuids),
+            skip_uuids=frozenset(skip_uuids),
+        )
         if quantized:
             print(f"   Quantized {len(quantized)} off-angle segment(s)")
             print("12b. Re-filling zones after quantization...")
@@ -2256,10 +2352,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
                     raise PostQuantizeClearanceError(
                         "Post-quantize clearance violation(s) detected -- "
                         "aborting build. The 45-degree quantizer's dogleg "
-                        "bulge grazed foreign copper (the #3855 mode). See the "
-                        "clearance report above; either re-route the offending "
-                        "segment or add its uuid to QUANTIZE_SKIP_UUIDS with a "
-                        "documented justification."
+                        "bulge grazed foreign copper (the #3855 mode) and "
+                        "``_resolve_quantize_treatment`` could not clear it "
+                        "with a single-segment flip/skip. See the clearance "
+                        "report above; the offending chord needs a re-route so "
+                        "its corridor is no longer shared with the via barrel."
                     )
             else:
                 print(
