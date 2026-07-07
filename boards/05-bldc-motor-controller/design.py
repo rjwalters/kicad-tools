@@ -3137,6 +3137,79 @@ def rescue_partial_nets(routed_path: Path) -> dict[str, bool]:
     return shared_rescue_partial_nets(routed_path, _RESCUE_CONFIG)
 
 
+def stitch_pcb(routed_path: Path) -> bool:
+    """Add stitching vias for every pour-net pad (Issue #3936).
+
+    board-05 carries copper-pour zones for its power/ground nets (GND,
+    +24V, +3V3, and +5V — see :func:`create_zones_for_pcb`).  ``route_pcb``
+    only routes signal nets; it does NOT drop stitching vias for the
+    plane nets.  As a result, after routing, every SMD pad whose net is
+    carried by a pour on a *different* copper layer than the pad is left
+    floating with respect to that pour: 58 pads across +24V (7), +3V3
+    (18), and GND (33) on a fresh regen.  ``kct net-status`` even prints
+    the exact remedy (``kct stitch board.kicad_pcb --net +24V ...``).
+
+    This step mirrors board-04's ``stitch_pcb`` and ``build_cmd._run_step_stitch``.
+    It runs ``kct stitch`` with **no explicit ``--net``** so the stitcher
+    auto-detects every plane net from the board's zones
+    (:func:`stitch_cmd.find_all_plane_nets`) — future-proofing against
+    zone-net changes.  Placement details:
+
+    * ``--mfr jlcpcb-tier1`` selects jlcpcb-tier1-compliant via
+      dimensions (0.6mm diameter / 0.3mm drill) so the stitch vias do
+      not introduce ``dimension_via_*`` DRC violations against the
+      board's manufacturer floor.
+    * ``--micro-via`` retries pads whose standard 0.6mm via cannot fit a
+      dense escape window with a 0.3mm/0.15mm micro-via (same rationale
+      as board-04's dense LQFP escape windows).
+
+    Ordering (critical): this must run **after** routing / rescue (so it
+    reads the real placed copper) and **before**
+    :func:`fill_zones_in_routed_pcb` (so the subsequent zone re-fill
+    bonds each new stitch via into the plane and the later DRC measures
+    the filled geometry).
+
+    PR #3930 (merged 2026-07-06) makes the stitcher reject any
+    connectivity-fallback via placement that would graze a foreign pour,
+    so no extra cross-net-short guard is needed here.
+
+    This step never changes the script's exit code: a stitch failure is
+    reported but the pipeline continues (parity with the informational
+    DRC / manufacturing steps).  Returns True if ``kct stitch`` ran and
+    exited 0, False otherwise.
+    """
+    print("\n" + "=" * 60)
+    print("Stitching pour-net pads (kct stitch)...")
+    print("=" * 60)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "stitch",
+        str(routed_path),
+        "--mfr",
+        "jlcpcb-tier1",
+        "--micro-via",
+        "--output",
+        str(routed_path),
+    ]
+    print(f"\n   Command: {' '.join(cmd)}")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        for line in result.stdout.strip().split("\n"):
+            print(f"   {line}")
+    if result.returncode != 0:
+        if result.stderr:
+            print(f"\n   Stitch stderr:\n{result.stderr}")
+        print(f"\n   FAILED: kct stitch exited {result.returncode}")
+        return False
+
+    print("\n   SUCCESS: kct stitch completed")
+    return True
+
+
 def fill_zones_in_routed_pcb(routed_path: Path) -> int:
     """Fill copper zones in the routed PCB via ``kicad-cli``.
 
@@ -3404,6 +3477,18 @@ def main() -> int:
                 # Every residual net rescued -- the board is fully routed
                 # even though step 6's exit code reported partial.
                 route_success = True
+
+        # Step 6c: Stitch pour-net pads to their planes (Issue #3936).
+        # route_pcb() routes signal nets only; it drops no stitching vias
+        # for the copper-pour nets (GND / +24V / +3V3 / +5V).  Without
+        # this step, SMD pads that sit on a different copper layer than
+        # their pour are left floating -- a fresh regen strands 58 pads
+        # (+24V: 7, +3V3: 18, GND: 33) and copper-LVS drowns in false
+        # "opens".  Must run AFTER routing/rescue (real copper placed) and
+        # BEFORE fill_zones_in_routed_pcb (so the re-fill bonds the new
+        # vias into the plane).  See stitch_pcb() for the full rationale.
+        if routed_path.exists():
+            stitch_pcb(routed_path)
 
         # Step 7: Repair DRC clearance violations introduced by routing.
         # Issue #3096: tried calling fix-drc as a separate subprocess
