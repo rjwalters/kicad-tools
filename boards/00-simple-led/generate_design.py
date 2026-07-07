@@ -324,7 +324,20 @@ def create_led_pcb(output_dir: Path) -> Path:
   )"""
 
     def generate_connector(ref: str, pos: tuple, pin1_net: str, pin2_net: str) -> str:
-        """Generate a 2-pin through-hole connector (2.54mm pitch)."""
+        """Generate a 2-pin through-hole connector (2.54mm pitch).
+
+        The refdes sits at local ``(0, -3.5)`` -- far enough above pad 1 to
+        clear its mask aperture (issue #3939).  Pad 1 is a 1.7x1.7 mm
+        thru-hole centred at ``(0, -1.27)`` (pitch/2), so the top edge of its
+        exposed copper is at ``-1.27 - 0.85 = -2.12`` mm.  A 1x1 mm refdes
+        with 0.15 mm stroke has a bottom edge ``0.5 + 0.075 = 0.575`` mm below
+        its centre, so the deepest safe centre is ``-2.12 - 0.575 = -2.70``
+        mm.  ``-3.5`` (matching the LED footprint below, which already passes
+        the ``silk_over_copper`` DRC rule) clears that with margin.  The
+        earlier ``-2.5`` placed the box centre only 1.23 mm above the pad
+        centre, so its bottom edge (``-1.925``) sat inside the aperture and
+        fired ``silk_over_copper``.
+        """
         x, y = pos
         pin1_num = NETS[pin1_net]
         pin2_num = NETS[pin2_net]
@@ -334,7 +347,7 @@ def create_led_pcb(output_dir: Path) -> Path:
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
-    (fp_text reference "{ref}" (at 0 -2.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+    (fp_text reference "{ref}" (at 0 -3.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "PWR" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")

@@ -1,8 +1,8 @@
 ---
 title: "simple_led_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-16 | jlcpcb"
+author: "kicad-tools 0.14.0"
+date: "Rev 1 | 2026-07-07 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -111,21 +111,27 @@ Minimal LED circuit
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Warnings | 0 |
+| Warnings | 2 |
 | Blocking | 0 |
 
 **Status**: PASS
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| copper_sliver | 2 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: READY
+**Verdict**: WARNING
 
 ### Action Items
 
 - **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
+- **[OPTIONAL]** Review 2 DRC warnings
 
 
 \newpage
