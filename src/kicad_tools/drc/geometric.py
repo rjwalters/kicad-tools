@@ -83,6 +83,19 @@ def run_geometric_drc(
     the manufacturer's fab-accurate rules with ``lib_footprint_mismatch``
     / ``isolated_copper`` already downgraded below error severity.
 
+    Issue #3969: the invocation passes ``--refill-zones`` so kicad-cli
+    re-fills the copper pours from scratch *before* evaluating clearance,
+    exactly as a fab-house DRC (and ``kicad-cli pcb drc --refill-zones``,
+    the acceptance command boards are gated against) does.  Without it,
+    kicad-cli judges the *stale* zone-fill polygons persisted in the
+    ``.kicad_pcb``; those can differ from a fresh fill by sub-micron
+    rounding and manufacture a phantom ``clearance`` violation (board 03
+    reported ``zone clearance 0.3000 mm; actual 0.2996 mm`` -- a 0.4 µm
+    gap that vanishes on refill).  This phantom was latent in the
+    committed board too and only surfaced once PR #3950 wired this
+    cross-check into the post-route gate; refilling makes both engines and
+    the shipped manufacturing bundle judge the same geometry.
+
     This never raises: every failure mode (kicad-cli absent, timeout, no
     report, parse error) returns a :class:`GeometricDRCResult` with
     ``ran=False`` and an explanatory ``note`` so callers can degrade
@@ -114,6 +127,11 @@ def run_geometric_drc(
             str(kicad_cli),
             "pcb",
             "drc",
+            # Issue #3969: refill zones before evaluating so clearance is
+            # judged against a fresh fill (as the fab / the acceptance
+            # command does), not the stale persisted pour polygons that
+            # can carry a sub-micron rounding phantom.
+            "--refill-zones",
             "--format",
             "json",
             "--severity-error",

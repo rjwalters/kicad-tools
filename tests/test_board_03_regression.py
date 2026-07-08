@@ -1481,3 +1481,142 @@ def test_joystick_j2_pin1_inside_pcb_edge(regenerated_board: Path) -> None:
         "edge-to-copper clearance, so this will likely DRC-fail.  Pull "
         "J2 back east."
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #3969: two defects on a fresh board-03 build.
+#
+#   Bug A -- ``kicad-cli pcb drc`` was run WITHOUT ``--refill-zones`` in the
+#   shared ``run_geometric_drc`` helper, so it judged the stale persisted
+#   pour polygons.  Those can differ from a fresh fill by sub-micron
+#   rounding, manufacturing a phantom ``clearance`` violation (board 03:
+#   ``zone clearance 0.3000 mm; actual 0.2996 mm`` -- a 0.4 um gap that is
+#   present in the COMMITTED artifact too and vanishes on refill).  The fix
+#   adds ``--refill-zones`` so both engines and the shipped manufacturing
+#   bundle judge the same geometry.
+#
+#   Bug B -- ``route_demo.py:run_drc()`` called ``kct check`` WITHOUT
+#   ``--drc-only``; the meta-check rollup exits INCOMPLETE (2) on a fresh
+#   temp-dir route (no ERC/LVS/Manifest artifacts) even though DRC found 0
+#   errors, and the caller then printed the impossible "0 DRC violation(s)
+#   detected!" banner.  The fix scopes the call to ``--drc-only`` and keys
+#   the ``passed`` verdict off the parsed error count.
+# ---------------------------------------------------------------------------
+
+
+def test_run_geometric_drc_passes_refill_zones() -> None:
+    """Bug A (#3969): the shared helper must invoke kicad-cli with
+    ``--refill-zones`` so clearance is judged against a fresh pour fill,
+    not the stale persisted zone polygons.
+
+    Pure command-construction assertion -- no kicad-cli required.  We
+    capture the ``subprocess.run`` argv the helper builds and assert the
+    refill flag is present.  Without it, the sub-micron stale-fill phantom
+    (``zone clearance 0.3000; actual 0.2996``) re-appears on board 03.
+    """
+    import kicad_tools.drc.geometric as geo_mod
+
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run(cmd, *a, **k):
+        captured["cmd"] = list(cmd)
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    # Force the helper past the kicad-cli discovery guard, then intercept
+    # the subprocess call so no real kicad-cli is needed.
+    fake_cli = Path("/usr/bin/kicad-cli")
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(geo_mod.subprocess, "run", _fake_run)
+        # The report file never gets written by our fake, so the helper
+        # returns ran=False -- that is fine; we only assert on the argv.
+        geo_mod.run_geometric_drc(
+            REPO_ROOT / "boards" / "03-usb-joystick" / "output" / "usb_joystick_routed.kicad_pcb",
+            kicad_cli=fake_cli,
+        )
+    finally:
+        monkey.undo()
+
+    cmd = captured.get("cmd")
+    assert cmd is not None, "run_geometric_drc did not invoke subprocess.run"
+    assert "--refill-zones" in cmd, (
+        "run_geometric_drc must pass --refill-zones so kicad-cli judges a "
+        "fresh zone fill (issue #3969); otherwise the stale-fill sub-micron "
+        f"clearance phantom returns.  argv was: {cmd}"
+    )
+    # The refill flag must precede the DRC evaluation flags in the same
+    # invocation (it is a mode flag on `pcb drc`, not a separate step).
+    assert cmd.index("--refill-zones") < cmd.index("--format")
+
+
+def test_committed_routed_board_is_geometrically_clean_with_refill() -> None:
+    """Bug A (#3969) end-to-end: the committed board-03 routed PCB reports
+    0 error-severity geometric violations from the shared helper.
+
+    This is the AC5 guard: the committed artifact must pass
+    ``kicad-cli pcb drc --refill-zones`` at 0 violations.  It exercises the
+    real ``run_geometric_drc`` (now refill-aware) against the committed
+    PCB.  Skipped when kicad-cli is unavailable (CI without KiCad).
+    """
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.drc import run_geometric_drc
+
+    if find_kicad_cli() is None:
+        pytest.skip("kicad-cli not installed")
+    if not ROUTED_PCB_FILE.exists():
+        pytest.skip(f"committed routed board not found at {ROUTED_PCB_FILE!s}")
+
+    result = run_geometric_drc(ROUTED_PCB_FILE)
+
+    assert result.ran is True, f"geometric DRC did not run: {result.note}"
+    assert result.error_count == 0, (
+        "Committed board-03 routed PCB has "
+        f"{result.error_count} error-severity geometric violation(s) after "
+        f"zone refill: {result.by_type}.  Before #3969 this reported a "
+        "phantom 'clearance' violation because zones were not refilled."
+    )
+
+
+def test_route_demo_run_drc_never_reports_zero_errors_on_failure() -> None:
+    """Bug B (#3969): ``route_demo.run_drc()`` must never return the
+    logically impossible ``(passed=False, errors=0)`` pair.
+
+    We drive the function against the (clean) committed board and assert
+    the invariant ``passed == (errors == 0)`` holds.  Because run_drc now
+    uses ``--drc-only``, the meta-check INCOMPLETE (exit 2) path that used
+    to yield ``(False, 0)`` cannot occur.  Skipped without kicad-cli /
+    committed artifact.
+    """
+    import importlib.util
+
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if find_kicad_cli() is None:
+        pytest.skip("kicad-cli not installed")
+    if not ROUTED_PCB_FILE.exists():
+        pytest.skip(f"committed routed board not found at {ROUTED_PCB_FILE!s}")
+
+    # Import route_demo.py by path (it is a board script, not a package).
+    spec = importlib.util.spec_from_file_location("board03_route_demo", str(ROUTE_DEMO_SCRIPT))
+    assert spec is not None and spec.loader is not None
+    route_demo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(route_demo)
+
+    passed, errors, _warnings = route_demo.run_drc(ROUTED_PCB_FILE)
+
+    # The core anti-regression: passed is True IFF there are zero errors.
+    # This makes "0 DRC violation(s) detected!" on a failing exit
+    # structurally impossible.
+    assert passed == (errors == 0), (
+        f"run_drc returned inconsistent (passed={passed}, errors={errors}); "
+        "the 'N DRC violation(s) detected' banner would lie.  passed must be "
+        "True exactly when errors == 0 (issue #3969 Bug B)."
+    )
+    # The committed board is clean, so this must be a clean PASS.
+    assert passed is True and errors == 0, (
+        f"committed board-03 expected DRC-clean, got passed={passed}, errors={errors}"
+    )
