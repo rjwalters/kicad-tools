@@ -43,6 +43,11 @@ from .layers import Layer
 from .observability import validate_net_connectivity
 from .path import calculate_route_length
 from .primitives import Pad, Route, Segment, Via
+from .quantize import (
+    OffAngleSegmentError,
+    dogleg_points,
+    verify_segment_45,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +113,19 @@ NEAR_MISS_RESCUE_CELLS: int = int(os.environ.get("KCT_COUPLED_RESCUE_CELLS", "60
 # keeps the coupled-length fraction comfortably above the 0.7-0.9
 # continuity thresholds.
 _SHADOW_MAX_TRIM_MM: float = float(os.environ.get("KCT_SHADOW_MAX_TRIM_MM", "5.0"))
+
+# Issue #3987 (unit 2a of #3921): hard per-pair wall-clock budget for the
+# shadow-construction coupled attempt.  When ``enable_shadow_construction``
+# is on, a pair is routed either as a validated parallel shadow (ms) or it
+# is DEFERRED to the uncoupled fallback -- it must NOT fall through to the
+# open joint-state A* search, which floods the cost_turn f-plateaus and
+# drove the >1200s tail the #3986 board-06 measurements documented (6 of 9
+# failed-shadow pairs each burned a ~45s corridor probe plus the negotiated
+# 360s backstop).  This budget bounds the corridor probe + shadow
+# construction per pair; on shadow failure the search fails fast to the
+# uncoupled fallback without re-flooding the open A*.  Env-overridable for
+# experimentation (KCT_SHADOW_PER_PAIR_BUDGET_S).
+_SHADOW_PER_PAIR_BUDGET_S: float = float(os.environ.get("KCT_SHADOW_PER_PAIR_BUDGET_S", "30.0"))
 
 
 # ---------------------------------------------------------------------------
@@ -3388,6 +3406,136 @@ class DiffPairRouter:
             )
         return tail
 
+    def _quantize_shadow_segments(
+        self,
+        route: Route,
+        pathfinder: CoupledPathfinder,
+    ) -> None:
+        """Rewrite off-angle shadow segments as 45-legal doglegs, in place.
+
+        Issue #3987 (unit 2a of #3921).  The shadow guide is the C++
+        on-grid per-net router's output, so every guide segment is already
+        45-aligned; off-angle shadow copper comes only from three
+        non-offset construction sites in :meth:`_shadow_route_pair`:
+
+        1. the raw miter-apex join at guide corners (acute / mixed
+           axis-diagonal turns land the apex off-grid, 3.7-11.9 deg off),
+        2. the shadow-via jog segments (the via site is chosen from a
+           lateral/stagger lattice that is not on the 8-direction set), and
+        3. the pad-approach rescue tails (off-grid pad centres).
+
+        Rather than dogleg each site individually, this pass lifts the
+        battle-tested file-layer transform (:func:`quantize.dogleg_points`,
+        #3532 / #3907) to the route layer: it walks the assembled
+        ``route.segments`` once and replaces any segment whose displacement
+        is off the {0, 45, 90, 135} set with a two-leg dogleg that shares
+        both endpoints exactly.  This makes shadow copper 45-compliant by
+        construction (census-clean, no ``OffAngleSegmentWarning``) with a
+        single transform covering all three sites -- the #3975 pattern
+        lifted from the file layer to the route layer.
+
+        The pass is OBSTACLE-AWARE (mirroring the subgrid escape doglegs of
+        #3975): a dogleg's perpendicular bulge is bounded by
+        ``min(|dx|, |dy|)`` but can still touch copper, so each candidate
+        variant's legs are re-rastered against ``pathfinder._is_cell_blocked``
+        and the first variant whose legs are both clear is kept.  When
+        neither the default nor the ``axis_first`` (outboard-bulge) variant
+        clears, the original segment is left untouched -- the downstream
+        self-check / physical-overlap gates and the emission census still
+        apply, so a residual off-angle segment degrades gracefully rather
+        than shipping a short.
+
+        The alignment decision is made on the SERIALIZED (4-decimal) copper
+        via :func:`quantize.verify_segment_45` -- the same predicate the
+        emission census reads -- not on the raw analytic displacement.  A
+        shadow body offset can be exactly 45-aligned analytically yet round
+        to a 2-quantum-asymmetric diagonal (``dx=0.0501, dy=0.0499``, 0.11
+        deg off), which the census flags; deciding on the raw floats would
+        skip it.  Doglegging on the rounded endpoints yields one exact axis
+        leg + one exact diagonal leg that both pass the census.
+        """
+        grid = self.autorouter.grid
+
+        def _is_census_clean(x1: float, y1: float, x2: float, y2: float) -> bool:
+            # True iff the SERIALIZED segment passes the emission census
+            # (``verify_segment_45`` accepts axis/diagonal within one 0.1 um
+            # quantum).  Forced strict so it raises rather than warns.
+            try:
+                verify_segment_45(x1, y1, x2, y2, strict=True)
+            except OffAngleSegmentError:
+                return False
+            return True
+
+        new_segments: list[Segment] = []
+        for seg in route.segments:
+            # Decide on the serialized (4dp) copper the census governs.
+            rx1, ry1 = round(seg.x1, 4), round(seg.y1, 4)
+            rx2, ry2 = round(seg.x2, 4), round(seg.y2, 4)
+            if _is_census_clean(rx1, ry1, rx2, ry2):
+                new_segments.append(seg)
+                continue
+            li = grid.layer_to_index(seg.layer.value)
+
+            def _legs_clear(mid: tuple[float, float], _li: int = li, _seg: Segment = seg) -> bool:
+                for x1, y1, x2, y2 in (
+                    (_seg.x1, _seg.y1, mid[0], mid[1]),
+                    (mid[0], mid[1], _seg.x2, _seg.y2),
+                ):
+                    seg_len = math.hypot(x2 - x1, y2 - y1)
+                    if seg_len < 1e-9:
+                        continue
+                    n_steps = max(1, int(math.ceil(seg_len / grid.resolution)))
+                    for i in range(n_steps + 1):
+                        t = i / n_steps
+                        gx, gy = grid.world_to_grid(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)
+                        if pathfinder._is_cell_blocked(gx, gy, _li, _seg.net):
+                            return False
+                return True
+
+            chosen_mid: tuple[float, float] | None = None
+            for axis_first in (False, True):
+                # Dogleg on the ROUNDED endpoints so the two legs the census
+                # reads are exactly axis / diagonal.
+                pts = dogleg_points(rx1, ry1, rx2, ry2, axis_first=axis_first)
+                if len(pts) != 3:
+                    # Already aligned after rounding: keep as-is.
+                    break
+                mid = pts[1]
+                # Only accept a variant whose BOTH legs are census-clean AND
+                # obstacle-clear.
+                if (
+                    _is_census_clean(rx1, ry1, mid[0], mid[1])
+                    and _is_census_clean(mid[0], mid[1], rx2, ry2)
+                    and _legs_clear(mid)
+                ):
+                    chosen_mid = mid
+                    break
+            if chosen_mid is None:
+                # No clean+clear dogleg variant -- keep the original segment;
+                # the self-check / overlap gates and the emission census
+                # still apply.  Graceful degradation, not a silent short.
+                new_segments.append(seg)
+                continue
+            for x1, y1, x2, y2 in (
+                (rx1, ry1, chosen_mid[0], chosen_mid[1]),
+                (chosen_mid[0], chosen_mid[1], rx2, ry2),
+            ):
+                if math.hypot(x2 - x1, y2 - y1) < 1e-9:
+                    continue
+                new_segments.append(
+                    Segment(
+                        x1=x1,
+                        y1=y1,
+                        x2=x2,
+                        y2=y2,
+                        width=seg.width,
+                        layer=seg.layer,
+                        net=seg.net,
+                        net_name=seg.net_name,
+                    )
+                )
+        route.segments[:] = new_segments
+
     def _shadow_route_pair(
         self,
         pair: DifferentialPair,
@@ -3825,6 +3973,19 @@ class DiffPairRouter:
                 )
             shadow_route.segments.extend(end_tail.segments)
             shadow_route.vias.extend(end_tail.vias)
+
+            # Issue #3987 (unit 2a of #3921): make the assembled shadow
+            # copper 45-compliant BY CONSTRUCTION.  The guide (P side, or N
+            # when swapped) is the C++ on-grid router's output and is
+            # already 45-aligned; the geometric shadow (miter apex, via
+            # jogs, pad-approach tails) is the only off-angle source.  Run
+            # the dogleg pass over the assembled shadow segments BEFORE the
+            # self-check / overlap gates below, so the doglegged geometry is
+            # what those gates -- and the downstream emission census
+            # (#3975) -- validate.  A residual off-angle segment (no clear
+            # dogleg variant) degrades gracefully; it is not silently
+            # shipped as a short.
+            self._quantize_shadow_segments(shadow_route, pathfinder)
 
             guide_net_pad = spec.n_start if swap_roles else spec.p_start
             guide_route_obj = Route(net=guide_net_pad.net, net_name=guide_net_pad.net_name)
@@ -4292,7 +4453,15 @@ class DiffPairRouter:
             if per_pair_timeout is None:
                 probe_timeout = None
             elif self.enable_shadow_construction:
-                probe_timeout = min(max(per_pair_timeout * 0.125, 45.0), per_pair_timeout * 0.5)
+                # Issue #3987 (unit 2a of #3921): a hard per-pair shadow
+                # budget.  When shadow is ON the pair is shadow-or-uncoupled
+                # (the joint-state fallback is gated OFF below), so the whole
+                # coupled attempt must fit a small budget: cap the P guide
+                # probe at ``_SHADOW_PER_PAIR_BUDGET_S`` (clamped to
+                # ``per_pair_timeout``).  This bounds the >1200s #3986 tail
+                # -- 6/9 failed-shadow pairs previously each burned a ~45s
+                # probe before falling through to the flooded A*.
+                probe_timeout = min(_SHADOW_PER_PAIR_BUDGET_S, per_pair_timeout)
             else:
                 probe_timeout = per_pair_timeout * 0.125
             probe_t0 = time.monotonic()
@@ -4343,8 +4512,21 @@ class DiffPairRouter:
                 # the N side (same endpoints geometry) will not be
                 # either, and the retry would just burn a second probe
                 # budget per deferred pair.
+                # Issue #3987: bound the N (swapped) probe by the REMAINDER
+                # of the hard per-pair shadow budget so the two probes
+                # together cannot exceed ``_SHADOW_PER_PAIR_BUDGET_S`` --
+                # the fail-fast contract is per PAIR, not per probe.
+                n_probe_timeout = probe_timeout
+                if per_pair_timeout is not None and probe_timeout is not None:
+                    n_probe_timeout = max(
+                        0.5,
+                        min(
+                            probe_timeout,
+                            _SHADOW_PER_PAIR_BUDGET_S - (time.monotonic() - spec_t0),
+                        ),
+                    )
                 n_guide = self._single_ended_guide_route(
-                    spec.n_start, spec.n_end, per_net_timeout=probe_timeout
+                    spec.n_start, spec.n_end, per_net_timeout=n_probe_timeout
                 )
                 if n_guide is not None and n_guide.segments:
                     shadow = self._shadow_route_pair(
@@ -4357,7 +4539,25 @@ class DiffPairRouter:
                             "    [coupled-shadow] pair constructed as N guide + parallel P shadow"
                         )
 
-            if result is None and guide_route is not None and guide_route.segments:
+            # Issue #3987 (unit 2a of #3921): when the shadow constructor is
+            # ON, a pair is EITHER a validated parallel shadow (ms) OR it is
+            # deferred to the uncoupled fallback.  It must NOT fall through
+            # to the corridor / open joint-state A* below: those flood the
+            # cost_turn f-plateaus (the #3954 bench disproved convergence at
+            # 20x iterations) and the 6/9 failed-shadow pairs each burning a
+            # corridor budget + the negotiated backstop is exactly the
+            # >1200s tail the #3986 board-06 measurements documented.  A hard
+            # per-pair shadow budget (``_SHADOW_PER_PAIR_BUDGET_S``) already
+            # bounds the corridor probe + shadow construction above; here we
+            # fail FAST to the uncoupled fallback -- shadow-or-uncoupled,
+            # never shadow-then-flooded-A*.
+            shadow_fail_fast = self.enable_shadow_construction
+            if (
+                result is None
+                and not shadow_fail_fast
+                and guide_route is not None
+                and guide_route.segments
+            ):
                 grid = self.autorouter.grid
                 resolution = grid.resolution
                 start_spacing_cells = (
@@ -4426,7 +4626,7 @@ class DiffPairRouter:
                 if result is not None:
                     coupled_phase = "corridor"
 
-            if result is None:
+            if result is None and not shadow_fail_fast:
                 remaining_budget = per_pair_timeout
                 if per_pair_timeout is not None:
                     remaining_budget = max(1.0, per_pair_timeout - (time.monotonic() - spec_t0))
