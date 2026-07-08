@@ -44,6 +44,7 @@ from .algorithms import (
     calculate_congestion_tuned_params,
     calculate_history_increment,
     calculate_present_cost,
+    derive_iter_per_net_cap,
     derive_per_net_cap,
     detect_oscillation,
     run_initial_pass_grace,
@@ -7618,6 +7619,44 @@ class Autorouter:
                         timed_out = True
                         break
 
+                    # Issue #3989: derive a per-net A* cap from the budget
+                    # REMAINING at this iteration's entry.  ``check_timeout()``
+                    # only fires BETWEEN nets, so a single unbounded Python A*
+                    # fallback (first-time geometric failure, ~200 s -- NOT
+                    # covered by #3956's resume-exhaustion fast-path) can blow
+                    # far past the stage backstop before the next check runs
+                    # (board-06 seed-42: a 360 s backstop overran to ~560 s
+                    # wall, all of it AFTER the best 21/21 state was already
+                    # banked -- the grind produced a strictly worse state that
+                    # the end-of-loop restore then discarded).  Deriving the cap
+                    # from the remaining budget keeps the backstop honest:
+                    # generous early (a fraction of the plentiful remaining
+                    # budget), tight late (shrinks toward PER_NET_CAP_FLOOR_S as
+                    # the deadline nears) so the loop can overshoot at most by
+                    # one final net's bounded cap plus per-iteration overhead.
+                    # The standing ``per_net_timeout`` (explicit
+                    # --per-net-timeout or the #3474 initial-pass derivation)
+                    # still binds when it is tighter; the remaining-budget cap
+                    # only ever tightens it.
+                    #
+                    # Issue #3877 (why this is safe under --deterministic-budget):
+                    # the deterministic iteration backstop bounds the PRIMARY
+                    # search by a fixed node-expansion count for machine-
+                    # independent REACH, and this block runs even in that mode
+                    # (``per_net_timeout`` is ``None`` there).  The derived cap
+                    # is a fraction of the WHOLE remaining stage budget (36 s
+                    # early on a 360 s stage) -- orders of magnitude larger than
+                    # any healthy per-net negotiated search on these boards
+                    # (<1 s/net), so it can never cut a legitimately-routing
+                    # net short and cannot regress reach.  It only bounds the
+                    # pathological Python fallback grind (60-200 s/net) on nets
+                    # that are geometrically failing anyway -- exactly the
+                    # unbounded overshoot this issue targets.
+                    iter_remaining = (
+                        None if timeout is None else (start_time + timeout) - time.time()
+                    )
+                    iter_per_net_cap = derive_iter_per_net_cap(per_net_timeout, iter_remaining)
+
                     # Issue #2540 + #2803: Snapshot state at top of each iteration
                     # BEFORE any destructive ``rip_up_nets`` call.  If a
                     # mid-iteration timeout escapes the per-net reroute loop, the
@@ -8200,7 +8239,7 @@ class Autorouter:
                                 if rn not in pads_by_net:
                                     continue
                                 routes = self._route_net_negotiated(
-                                    rn, recovery_factor, per_net_timeout=per_net_timeout
+                                    rn, recovery_factor, per_net_timeout=iter_per_net_cap
                                 )
                                 if routes:
                                     net_routes[rn] = routes
@@ -8301,7 +8340,7 @@ class Autorouter:
                                 continue
                             attempted += 1
                             routes = self._route_net_negotiated(
-                                fn, recovery_factor, per_net_timeout=per_net_timeout
+                                fn, recovery_factor, per_net_timeout=iter_per_net_cap
                             )
                             if routes:
                                 net_routes[fn] = routes
@@ -8503,7 +8542,7 @@ class Autorouter:
                                     mark_route_callback=mark_route,
                                     ripup_history=ripup_history,
                                     max_ripups_per_net=max_ripups_per_net,
-                                    per_net_timeout=per_net_timeout,
+                                    per_net_timeout=iter_per_net_cap,
                                 )
                                 if success:
                                     targeted_ripup_count += 1
@@ -8531,7 +8570,7 @@ class Autorouter:
                                     routes = self._route_net_negotiated(
                                         failed_net,
                                         present_factor,
-                                        per_net_timeout=per_net_timeout,
+                                        per_net_timeout=iter_per_net_cap,
                                     )
                                     if routes:
                                         net_routes[failed_net] = routes
@@ -8548,7 +8587,7 @@ class Autorouter:
                                         other_routes = self._route_net_negotiated(
                                             other_net,
                                             present_factor,
-                                            per_net_timeout=per_net_timeout,
+                                            per_net_timeout=iter_per_net_cap,
                                         )
                                         if other_routes:
                                             net_routes[other_net] = other_routes
@@ -8564,7 +8603,7 @@ class Autorouter:
                                     routes = self._route_net_negotiated(
                                         failed_net,
                                         present_factor,
-                                        per_net_timeout=per_net_timeout,
+                                        per_net_timeout=iter_per_net_cap,
                                     )
                                     if routes:
                                         net_routes[failed_net] = routes
@@ -8681,7 +8720,7 @@ class Autorouter:
                                     mark_route_callback=_mark_route_neighborhood,
                                     stall_count=neighborhood_stall_count
                                     - neighborhood_stall_threshold,
-                                    per_net_timeout=per_net_timeout,
+                                    per_net_timeout=iter_per_net_cap,
                                     max_attempts=neighborhood_max_attempts,
                                     initial_radius_factor=neighborhood_initial_radius,
                                     escalation_factor=neighborhood_escalation_factor,
@@ -8755,7 +8794,7 @@ class Autorouter:
                                 present_cost_factor=present_factor,
                                 mark_route_callback=mark_route_targeted,
                                 strategy_index=escape_strategy_index,
-                                per_net_timeout=per_net_timeout,
+                                per_net_timeout=iter_per_net_cap,
                                 escape_budget=escape_budget,
                             )
                             escape_strategy_index += tried
@@ -8804,10 +8843,10 @@ class Autorouter:
                         # Use region-based parallelism if enabled (Issue #965)
                         if region_router is not None and len(nets_to_reroute) > 1:
                             # Route using region-based parallelism
-                            def route_fn(net: int, pf: float) -> list[Route]:
-                                return self._route_net_negotiated(
-                                    net, pf, per_net_timeout=per_net_timeout
-                                )
+                            def route_fn(
+                                net: int, pf: float, _cap: float | None = iter_per_net_cap
+                            ) -> list[Route]:
+                                return self._route_net_negotiated(net, pf, per_net_timeout=_cap)
 
                             def mark_fn(route: Route) -> None:
                                 self.grid.mark_route_usage(route)
@@ -8843,7 +8882,7 @@ class Autorouter:
                                 )
 
                                 routes = self._route_net_negotiated(
-                                    net, present_factor, per_net_timeout=per_net_timeout
+                                    net, present_factor, per_net_timeout=iter_per_net_cap
                                 )
                                 if routes:
                                     net_routes[net] = routes
@@ -8924,7 +8963,7 @@ class Autorouter:
                                 mark_route_callback=_mark_route_via_blocked,
                                 ripup_history=ripup_history,
                                 max_ripups_per_net=max_ripups_per_net,
-                                per_net_timeout=per_net_timeout,
+                                per_net_timeout=iter_per_net_cap,
                             )
                             if via_attempted > 0:
                                 flush_print(
@@ -8973,7 +9012,7 @@ class Autorouter:
                                         ripup_history=ripup_history,
                                         present_cost_factor=present_factor,
                                         max_ripups_per_net=max_ripups_per_net,
-                                        per_net_timeout=per_net_timeout,
+                                        per_net_timeout=iter_per_net_cap,
                                     )
                                     if rescued:
                                         component_ripup_count += 1
@@ -9051,7 +9090,7 @@ class Autorouter:
                                         mark_route_callback=_mark_route_fallback,
                                         ripup_history=ripup_history,
                                         max_ripups_per_net=max_ripups_per_net,
-                                        per_net_timeout=per_net_timeout,
+                                        per_net_timeout=iter_per_net_cap,
                                     )
                                     if success:
                                         targeted_fallback_count += 1
@@ -9110,7 +9149,7 @@ class Autorouter:
                                     net_routes,
                                     pads_by_net,
                                     present_factor,
-                                    per_net_timeout,
+                                    iter_per_net_cap,
                                     flush_print,
                                     elapsed_str,
                                     deadline=relief_deadline,
@@ -9189,7 +9228,7 @@ class Autorouter:
                                             mark_route_callback=_mark_route_silent,
                                             ripup_history=ripup_history,
                                             max_ripups_per_net=max_ripups_per_net,
-                                            per_net_timeout=per_net_timeout,
+                                            per_net_timeout=iter_per_net_cap,
                                         ):
                                             silent_resolved += 1
                                             continue
@@ -9210,7 +9249,7 @@ class Autorouter:
                                         net_routes,
                                         pads_by_net,
                                         present_factor,
-                                        per_net_timeout,
+                                        iter_per_net_cap,
                                         flush_print,
                                         elapsed_str,
                                         deadline=relief_deadline,
@@ -9270,7 +9309,7 @@ class Autorouter:
                                     mark_route_callback=_mark_route_neighborhood_std,
                                     stall_count=neighborhood_stall_count
                                     - neighborhood_stall_threshold,
-                                    per_net_timeout=per_net_timeout,
+                                    per_net_timeout=iter_per_net_cap,
                                     max_attempts=neighborhood_max_attempts,
                                     initial_radius_factor=neighborhood_initial_radius,
                                     escalation_factor=neighborhood_escalation_factor,
@@ -9394,7 +9433,7 @@ class Autorouter:
                             present_cost_factor=present_factor,
                             mark_route_callback=mark_route,
                             strategy_index=escape_strategy_index,
-                            per_net_timeout=per_net_timeout,
+                            per_net_timeout=iter_per_net_cap,
                             escape_budget=escape_budget,
                         )
                         escape_strategy_index += tried

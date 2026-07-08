@@ -116,6 +116,62 @@ def derive_per_net_cap(
     return max(PER_NET_CAP_FLOOR_S, PER_NET_CAP_STAGE_FRACTION * float(stage_timeout))
 
 
+def derive_iter_per_net_cap(
+    per_net_timeout: float | None,
+    remaining_budget: float | None,
+) -> float | None:
+    """Return the per-net A* budget for one rip-up *iteration*.
+
+    Issue #3989 (rip-up-loop backstop integrity): :func:`derive_per_net_cap`
+    bounds the *initial* pass against the WHOLE stage budget, but that cap is
+    static for the life of the run.  The negotiated rip-up loop calls
+    ``_route_net_negotiated`` from several reroute sites (sequential reroute,
+    stagnation recovery, zero-overflow recovery), and the stage
+    ``check_timeout()`` only fires BETWEEN nets.  When a net drops to the
+    pure-Python A* fallback on a first-time geometric failure
+    (``FAILURE_NO_PATH`` / ``FAILURE_CLEARANCE`` -- not covered by #3956's
+    resume-exhaustion fast-path), one unbounded call can run ~200 s and
+    overshoot a 360 s backstop before the between-net check ever runs.
+
+    The fix is to derive a per-net cap from the *remaining* stage budget at
+    each iteration entry.  Early iterations get a generous cap (a fraction of
+    the plentiful remaining budget); late iterations shrink toward
+    ``PER_NET_CAP_FLOOR_S`` as the deadline approaches.  This makes the
+    backstop honest: the loop can overshoot at most by one final net's
+    bounded cap plus per-iteration overhead, never by an unbounded fallback.
+
+    An explicit ``per_net_timeout`` always binds when it is *tighter* than the
+    remaining-budget derivation, so an operator's ``--per-net-timeout`` is
+    never loosened; but as the deadline nears, the remaining-budget cap can
+    tighten below the explicit value so a late net cannot overrun the stage.
+
+    Args:
+        per_net_timeout: The effective per-net cap already in force for this
+            run (e.g. the value :func:`derive_per_net_cap` produced for the
+            initial pass, or an explicit ``--per-net-timeout``).  ``None`` =>
+            no standing cap.
+        remaining_budget: Seconds left in the stage budget at iteration entry
+            (``start_time + timeout - now``).  ``None`` => no stage budget
+            (legacy unbounded behaviour); non-positive => already past the
+            deadline, so clamp to the floor.
+
+    Returns:
+        The per-net budget in seconds for this iteration, or ``None`` when
+        neither a standing cap nor a stage budget is configured.
+    """
+    if remaining_budget is None:
+        # No stage budget: honour only whatever standing cap exists.
+        return per_net_timeout
+    # Derive a cap from the remaining budget: generous early, tight late.
+    remaining_cap = max(PER_NET_CAP_FLOOR_S, PER_NET_CAP_STAGE_FRACTION * float(remaining_budget))
+    if per_net_timeout is None:
+        return remaining_cap
+    # Both exist: take the tighter.  The remaining-budget derivation shrinks as
+    # the deadline nears, so late in the run it can bind below an explicit cap
+    # -- that is the whole point (the stage backstop must stay honest).
+    return min(per_net_timeout, remaining_cap)
+
+
 def run_initial_pass_grace(
     grace_nets: list[int],
     route_fn: Callable[[int, float], list],
