@@ -43,6 +43,8 @@ __all__ = [
     "dogleg_points",
     "segment_angle_census",
     "quantize_pcb_file",
+    "OffAngleSegmentError",
+    "verify_segment_45",
 ]
 
 #: Tolerance (degrees off the nearest multiple of 45) below which a
@@ -153,6 +155,111 @@ def dogleg_points(
         else:
             mid = (x1, y2 - math.copysign(adx, dy))
     return [(x1, y1), mid, (x2, y2)]
+
+
+# ---------------------------------------------------------------------------
+# By-construction emission choke point (issue #3907)
+# ---------------------------------------------------------------------------
+#
+# #3532 established the 45-only policy with an emit-then-repair
+# architecture: passes emit whatever geometry they compute, and a
+# post-hoc ``quantize_pcb_file`` sweep (plus the fleet census ratchet)
+# catches the leaks.  That architecture keeps leaking -- every new
+# emitter must independently remember to dogleg, and the post-hoc repair
+# has no obstacle model (PR #3906's first ``quantize_pcb_file`` pass
+# doglegged 9 board-05 segments straight into a 3-way short).
+#
+# #3907 moves legality to a single choke point: the point where a router
+# segment is serialized to KiCad ``(segment ...)`` text.  Every
+# router-emitted segment flows through ``Segment.to_sexp`` ->
+# ``Route.to_sexp`` -> ``Autorouter.to_sexp``, so a by-construction guard
+# here makes an off-angle leak impossible to serialize silently: it
+# raises instead of writing arbitrary-angle copper that only the census
+# would catch (in CI, after every local gate passed).
+#
+# The guard verifies the SERIALIZED displacement, not the analytic one:
+# ``Segment.to_sexp`` rounds coordinates to 4 decimals (0.1 um), and it
+# is the rounded text the census reads, so this is the population the
+# policy actually governs.
+
+
+class OffAngleSegmentError(ValueError):
+    """A segment whose serialized displacement is off the 45-degree set.
+
+    Raised by :func:`verify_segment_45` (and therefore by
+    :meth:`kicad_tools.router.primitives.Segment.to_sexp`) when a router
+    pass tries to serialize copper that is not on the {0, 45, 90, 135}
+    angle set.  This is the by-construction backstop for issue #3907:
+    every emitter must hand the serializer 45-legal geometry (dogleg
+    off-axis pad tails / mutations via :func:`dogleg_points` BEFORE
+    building the ``Segment``), so reaching this error means an emitter
+    leaked -- fix the emitter, do not repair the artifact afterwards.
+    """
+
+    def __init__(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        off_deg: float,
+        *,
+        context: str = "",
+    ) -> None:
+        self.x1, self.y1, self.x2, self.y2 = x1, y1, x2, y2
+        self.off_deg = off_deg
+        self.context = context
+        where = f" [{context}]" if context else ""
+        super().__init__(
+            f"off-angle segment{where}: ({x1:.4f}, {y1:.4f}) -> "
+            f"({x2:.4f}, {y2:.4f}) is {off_deg:.4f} deg off the "
+            f"0/45/90/135 set (tol {ANGLE_TOL_DEG} deg).  Emit a dogleg "
+            f"(kicad_tools.router.quantize.dogleg_points) at construction "
+            f"time instead of serializing skewed copper (issue #3907)."
+        )
+
+
+def _rounded_4(value: float) -> float:
+    """Round like ``Segment.to_sexp`` serializes coordinates (4 dp)."""
+    return round(value, 4)
+
+
+def verify_segment_45(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    *,
+    tol_deg: float = ANGLE_TOL_DEG,
+    context: str = "",
+) -> None:
+    """Assert that segment ``(x1, y1) -> (x2, y2)`` is 45-legal AS WRITTEN.
+
+    The check runs on the 4-decimal *serialized* coordinates (matching
+    :meth:`kicad_tools.router.primitives.Segment.to_sexp`), because it is
+    the rounded text the fleet census governs.  A zero-length segment
+    (both endpoints round to the same point) is legal -- it carries no
+    direction.
+
+    Raises:
+        OffAngleSegmentError: when the serialized displacement is off the
+            {0, 45, 90, 135} set by more than *tol_deg*.
+
+    This is the by-construction choke point for issue #3907.  It replaces
+    the emit-then-``quantize_pcb_file`` repair loop for the router's own
+    serialization path: callers must produce legal geometry (dogleg with
+    :func:`dogleg_points`) BEFORE serializing, where the obstacle context
+    still exists.
+    """
+    sx1, sy1 = _rounded_4(x1), _rounded_4(y1)
+    sx2, sy2 = _rounded_4(x2), _rounded_4(y2)
+    dx = sx2 - sx1
+    dy = sy2 - sy1
+    if dx == 0 and dy == 0:
+        return
+    off = off_angle_degrees(dx, dy)
+    if off > tol_deg:
+        raise OffAngleSegmentError(sx1, sy1, sx2, sy2, off, context=context)
 
 
 # ---------------------------------------------------------------------------
