@@ -7,6 +7,7 @@ from pathlib import Path
 
 from kicad_tools.cli.build_cmd import (
     BuildContext,
+    _capture_routed_artifact_mtime,
     _format_no_generator_message,
     _generate_design_supports_step_route,
     _generator_candidates,
@@ -14,6 +15,7 @@ from kicad_tools.cli.build_cmd import (
     _run_step_pcb,
     _run_step_route,
     _run_step_schematic,
+    _scan_recipe_routed_artifact,
     main,
 )
 
@@ -502,6 +504,166 @@ class TestRouteStepRecipeArtifactGuard:
 
         # With force, the guard is bypassed and the router actually runs.
         assert result.success is True
+        assert "recipe" not in result.message.lower()
+        mock_run.assert_called()
+
+
+class TestScanRecipeRoutedArtifact:
+    """The post-PCB scan must reject stale ``*_routed.kicad_pcb`` artifacts.
+
+    ``_scan_recipe_routed_artifact`` decides whether the routed sibling
+    produced beside the PCB output should be recorded on
+    ``ctx.routed_pcb_file``. It trusts the artifact only when the PCB step
+    created or refreshed it (mtime advanced past the pre-step snapshot),
+    guarding against stale copper committed in external boards (issue #3978)
+    while preserving in-place-routing recipe behavior (issue #3971).
+    """
+
+    def test_freshly_written_routed_artifact_is_trusted(self, tmp_path: Path) -> None:
+        """An in-place recipe that rewrites the routed file → artifact trusted.
+
+        Mirrors board 04: no routed file exists before the PCB step, so the
+        pre-step snapshot is ``None`` and any produced artifact is trusted.
+        """
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+
+        pre_mtime = _capture_routed_artifact_mtime(pcb_file)
+        assert pre_mtime is None  # no routed file existed before the PCB step
+
+        # PCB step writes the routed artifact.
+        routed_file = tmp_path / "board_routed.kicad_pcb"
+        routed_file.write_text("(kicad_pcb)")
+
+        result = _scan_recipe_routed_artifact(pcb_file, pre_mtime, Console(), quiet=True)
+        assert result == routed_file
+
+    def test_refreshed_routed_artifact_is_trusted(self, tmp_path: Path) -> None:
+        """A pre-existing routed file whose mtime advances → artifact trusted."""
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        routed_file = tmp_path / "board_routed.kicad_pcb"
+        routed_file.write_text("(kicad_pcb)")
+
+        # Simulate an old pre-existing routed artifact.
+        old = 1_000_000.0
+        os.utime(routed_file, (old, old))
+        pre_mtime = _capture_routed_artifact_mtime(pcb_file)
+        assert pre_mtime == old
+
+        # PCB step rewrites the routed artifact (mtime advances).
+        os.utime(routed_file, (old + 100, old + 100))
+
+        result = _scan_recipe_routed_artifact(pcb_file, pre_mtime, Console(), quiet=True)
+        assert result == routed_file
+
+    def test_stale_routed_artifact_is_rejected_with_warning(self, tmp_path: Path) -> None:
+        """A stale routed file untouched by the PCB step → rejected + warning.
+
+        Simulates an external board whose PCB generator does not route
+        in-place: the ``*_routed.kicad_pcb`` predates the PCB step and its
+        mtime does not advance, so it must not be recorded (issue #3978).
+        """
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        routed_file = tmp_path / "board_routed.kicad_pcb"
+        routed_file.write_text("(kicad_pcb)")
+
+        # Stale routed artifact, older than the "PCB step start".
+        old = 1_000_000.0
+        os.utime(routed_file, (old, old))
+        pre_mtime = _capture_routed_artifact_mtime(pcb_file)
+        assert pre_mtime == old
+
+        # PCB step runs but does NOT touch the routed file (mtime unchanged).
+        console = Console(record=True)
+        result = _scan_recipe_routed_artifact(pcb_file, pre_mtime, console)
+
+        assert result is None
+        output = console.export_text()
+        assert "Stale" in output
+        assert "board_routed.kicad_pcb" in output
+
+    def test_stale_rejection_is_quiet_when_requested(self, tmp_path: Path) -> None:
+        """``quiet=True`` suppresses the stale-artifact warning."""
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        routed_file = tmp_path / "board_routed.kicad_pcb"
+        routed_file.write_text("(kicad_pcb)")
+
+        old = 1_000_000.0
+        os.utime(routed_file, (old, old))
+        pre_mtime = _capture_routed_artifact_mtime(pcb_file)
+
+        console = Console(record=True)
+        result = _scan_recipe_routed_artifact(pcb_file, pre_mtime, console, quiet=True)
+
+        assert result is None
+        assert "Stale" not in console.export_text()
+
+    def test_no_routed_artifact_returns_none(self, tmp_path: Path) -> None:
+        """No routed sibling produced → nothing to record, no warning."""
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+
+        pre_mtime = _capture_routed_artifact_mtime(pcb_file)
+        console = Console(record=True)
+        result = _scan_recipe_routed_artifact(pcb_file, pre_mtime, console)
+
+        assert result is None
+        assert "Stale" not in console.export_text()
+
+    def test_stale_artifact_then_route_step_actually_routes(self, tmp_path: Path) -> None:
+        """End-to-end: a rejected stale artifact leaves ROUTE free to run.
+
+        With a stale routed file, the post-PCB scan returns ``None`` so
+        ``ctx.routed_pcb_file`` stays unset; ``_run_step_route`` then does not
+        hit the recipe-artifact short-circuit and invokes the router.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        routed_file = tmp_path / "board_routed.kicad_pcb"
+        routed_file.write_text("(kicad_pcb)")
+
+        # Stale artifact untouched by the (mock) PCB step.
+        old = 1_000_000.0
+        os.utime(routed_file, (old, old))
+        pre_mtime = _capture_routed_artifact_mtime(pcb_file)
+
+        ctx = BuildContext(project_dir=tmp_path, spec_file=None)
+        ctx.pcb_file = pcb_file
+        ctx.mfr = "jlcpcb"
+        ctx.quiet = True
+        ctx.verbose = False
+        ctx.dry_run = False
+        ctx.force = False
+        ctx.output_dir = None
+        ctx.spec = None
+
+        # Post-PCB scan rejects the stale artifact.
+        routed = _scan_recipe_routed_artifact(pcb_file, pre_mtime, Console(), quiet=True)
+        assert routed is None
+        ctx.routed_pcb_file = routed  # stays None → guard will not short-circuit
+
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            result = _run_step_route(ctx, Console())
+
+        # The router ran (not skipped via the recipe-artifact short-circuit).
         assert "recipe" not in result.message.lower()
         mock_run.assert_called()
 
