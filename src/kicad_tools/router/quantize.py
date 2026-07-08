@@ -30,13 +30,16 @@ copper junctions can etch poorly (acid traps).
 from __future__ import annotations
 
 import math
+import os
 import re
 import uuid as _uuid
+import warnings
 from decimal import Decimal
 from pathlib import Path
 
 __all__ = [
     "ANGLE_TOL_DEG",
+    "SERIALIZE_QUANTUM_MM",
     "off_angle_degrees",
     "is_45_aligned",
     "snap_direction_8",
@@ -44,13 +47,33 @@ __all__ = [
     "segment_angle_census",
     "quantize_pcb_file",
     "OffAngleSegmentError",
+    "OffAngleSegmentWarning",
     "verify_segment_45",
+    "segment_45_strict_enabled",
 ]
 
 #: Tolerance (degrees off the nearest multiple of 45) below which a
 #: segment counts as 45-aligned.  Float round-trips through KiCad
 #: S-expression text land well under this.
 ANGLE_TOL_DEG = 0.01
+
+#: One unit of the 4-decimal (0.1 um) serialization grid that
+#: ``Segment.to_sexp`` rounds coordinates onto.  A diagonal produced by
+#: the A* grid can have its two legs differ by a single quantum after
+#: rounding (e.g. dx=0.1385, dy=0.1384): geometrically a legal ~45-degree
+#: diagonal, but 0.02 deg off the exact 45-degree line -- over
+#: :data:`ANGLE_TOL_DEG`.  :func:`verify_segment_45` treats a displacement
+#: within one quantum of an exact 45/0/90/135 leg as legal so this benign
+#: rounding jitter is not mistaken for a genuinely skewed emit.
+SERIALIZE_QUANTUM_MM = 1e-4
+
+#: Environment variable that flips the by-construction guard from
+#: graceful-degradation (WARN + let the legacy quantize/repair fallback
+#: handle it) into strict mode (raise :class:`OffAngleSegmentError`).  CI
+#: enables this per-board as emission paths migrate onto obstacle-aware
+#: doglegs; boards whose emitters are not yet migrated keep the default
+#: WARN so a fresh re-route completes and the leak stays visible/migratable.
+SEGMENT_45_STRICT_ENV = "KICAD_TOOLS_SEGMENT_45_STRICT"
 
 _DIAG = math.sqrt(0.5)
 
@@ -187,13 +210,18 @@ class OffAngleSegmentError(ValueError):
     """A segment whose serialized displacement is off the 45-degree set.
 
     Raised by :func:`verify_segment_45` (and therefore by
-    :meth:`kicad_tools.router.primitives.Segment.to_sexp`) when a router
-    pass tries to serialize copper that is not on the {0, 45, 90, 135}
-    angle set.  This is the by-construction backstop for issue #3907:
-    every emitter must hand the serializer 45-legal geometry (dogleg
-    off-axis pad tails / mutations via :func:`dogleg_points` BEFORE
+    :meth:`kicad_tools.router.primitives.Segment.to_sexp`) **in strict mode
+    only** when a router pass tries to serialize copper that is not on the
+    {0, 45, 90, 135} angle set.  This is the by-construction backstop for
+    issue #3907: every emitter must hand the serializer 45-legal geometry
+    (dogleg off-axis pad tails / mutations via :func:`dogleg_points` BEFORE
     building the ``Segment``), so reaching this error means an emitter
     leaked -- fix the emitter, do not repair the artifact afterwards.
+
+    In the default graceful-degradation mode the same off-angle copper
+    surfaces as an :class:`OffAngleSegmentWarning` instead, so an
+    un-migrated emitter does not hard-crash a fresh route (see
+    :func:`segment_45_strict_enabled`).
     """
 
     def __init__(
@@ -219,9 +247,65 @@ class OffAngleSegmentError(ValueError):
         )
 
 
+class OffAngleSegmentWarning(UserWarning):
+    """A serialized off-angle segment reported in graceful-degradation mode.
+
+    Issue #3907.  When strict mode is OFF (the default -- see
+    :func:`segment_45_strict_enabled`), :func:`verify_segment_45` emits
+    this warning instead of raising :class:`OffAngleSegmentError`, naming
+    the emitting net/layer so the leak stays visible and migratable while
+    the offending emission path is ported onto obstacle-aware doglegs.
+    The segment still serializes, so the legacy file-level
+    :func:`quantize_pcb_file` repair pass a recipe runs afterward can fix
+    it -- the fallback the hard raise would otherwise preempt.
+    """
+
+
 def _rounded_4(value: float) -> float:
     """Round like ``Segment.to_sexp`` serializes coordinates (4 dp)."""
     return round(value, 4)
+
+
+def segment_45_strict_enabled() -> bool:
+    """True when the by-construction guard should raise, not just warn.
+
+    Issue #3907.  Controlled by the :data:`SEGMENT_45_STRICT_ENV`
+    environment variable (any of ``1``/``true``/``yes``/``on``,
+    case-insensitive).  Default is False: the guard degrades gracefully
+    (WARN + serialize) so an un-migrated off-angle emitter does not
+    hard-crash a fresh route, and the recipe's legacy
+    :func:`quantize_pcb_file` fallback still gets to repair the artifact.
+    CI opts individual boards into strict mode as their emission paths
+    migrate.
+    """
+    val = os.environ.get(SEGMENT_45_STRICT_ENV, "")
+    return val.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_quantum_aligned(dx: float, dy: float) -> bool:
+    """True if (dx, dy) is on the 45-degree set to within one 4dp quantum.
+
+    A diagonal emitted by the A* grid rounds to 4 decimals independently
+    per axis, so its two legs can differ by a single 0.1 um quantum
+    (e.g. |dx|=0.1385, |dy|=0.1384).  That is a legal ~45-degree diagonal
+    for all manufacturing purposes -- the 0.1 um asymmetry is below the
+    fabrication grid -- yet it sits ~0.02 deg off the exact 45-degree
+    line, over :data:`ANGLE_TOL_DEG`.  This predicate accepts a
+    displacement whose serialized legs are within one quantum of an exact
+    axis-aligned (one leg ~ 0) or exact diagonal (|dx| ~ |dy|) leg, so the
+    guard measures against the 4dp grid the census reads rather than raw
+    degrees.
+    """
+    adx = abs(dx)
+    ady = abs(dy)
+    q = SERIALIZE_QUANTUM_MM * 1.5  # half-open guard against fp round noise
+    # Axis-aligned (0 / 90 deg): the short leg is within a quantum of zero.
+    if adx <= q or ady <= q:
+        return True
+    # Diagonal (45 / 135 deg): the two legs differ by at most one quantum.
+    if abs(adx - ady) <= q:
+        return True
+    return False
 
 
 def verify_segment_45(
@@ -232,24 +316,40 @@ def verify_segment_45(
     *,
     tol_deg: float = ANGLE_TOL_DEG,
     context: str = "",
+    strict: bool | None = None,
 ) -> None:
-    """Assert that segment ``(x1, y1) -> (x2, y2)`` is 45-legal AS WRITTEN.
+    """Check that segment ``(x1, y1) -> (x2, y2)`` is 45-legal AS WRITTEN.
 
     The check runs on the 4-decimal *serialized* coordinates (matching
     :meth:`kicad_tools.router.primitives.Segment.to_sexp`), because it is
     the rounded text the fleet census governs.  A zero-length segment
     (both endpoints round to the same point) is legal -- it carries no
-    direction.
+    direction.  A displacement within one 0.1 um serialization quantum of
+    an exact 45/0/90/135 leg is also legal (see :func:`_is_quantum_aligned`):
+    that is benign per-axis rounding jitter on an A* diagonal, not a skewed
+    emit.
+
+    Failure mode (issue #3907, graceful degradation):
+
+    * **strict mode OFF (default)** -- an off-angle displacement emits an
+      :class:`OffAngleSegmentWarning` naming the emitter and RETURNS.  The
+      segment still serializes, so a recipe's legacy
+      :func:`quantize_pcb_file` repair pass can dogleg it afterward.  This
+      keeps un-migrated emission paths from hard-crashing a fresh route
+      while the leak stays visible and migratable.
+    * **strict mode ON** (``strict=True`` or :data:`SEGMENT_45_STRICT_ENV`)
+      -- raises :class:`OffAngleSegmentError`.  CI enables this per-board
+      as emitters migrate onto obstacle-aware doglegs; the fleet census
+      remains the ratchet.
+
+    Args:
+        strict: force strict/non-strict; ``None`` (default) consults
+            :func:`segment_45_strict_enabled` (the env-driven CI switch).
 
     Raises:
-        OffAngleSegmentError: when the serialized displacement is off the
-            {0, 45, 90, 135} set by more than *tol_deg*.
-
-    This is the by-construction choke point for issue #3907.  It replaces
-    the emit-then-``quantize_pcb_file`` repair loop for the router's own
-    serialization path: callers must produce legal geometry (dogleg with
-    :func:`dogleg_points`) BEFORE serializing, where the obstacle context
-    still exists.
+        OffAngleSegmentError: only in strict mode, when the serialized
+            displacement is off the {0, 45, 90, 135} set by more than
+            *tol_deg* (beyond one-quantum jitter).
     """
     sx1, sy1 = _rounded_4(x1), _rounded_4(y1)
     sx2, sy2 = _rounded_4(x2), _rounded_4(y2)
@@ -257,9 +357,26 @@ def verify_segment_45(
     dy = sy2 - sy1
     if dx == 0 and dy == 0:
         return
+    if _is_quantum_aligned(dx, dy):
+        return
     off = off_angle_degrees(dx, dy)
-    if off > tol_deg:
+    if off <= tol_deg:
+        return
+    if strict is None:
+        strict = segment_45_strict_enabled()
+    if strict:
         raise OffAngleSegmentError(sx1, sy1, sx2, sy2, off, context=context)
+    where = f" [{context}]" if context else ""
+    warnings.warn(
+        f"off-angle segment{where}: ({sx1:.4f}, {sy1:.4f}) -> "
+        f"({sx2:.4f}, {sy2:.4f}) is {off:.4f} deg off the 0/45/90/135 set "
+        f"(tol {tol_deg} deg).  Serializing as-is for the legacy "
+        f"quantize_pcb_file fallback to repair; migrate this emitter to a "
+        f"by-construction dogleg (issue #3907).  Set "
+        f"{SEGMENT_45_STRICT_ENV}=1 to make this a hard error.",
+        OffAngleSegmentWarning,
+        stacklevel=2,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +469,12 @@ def segment_angle_census(
     of dicts (``start``, ``end``, ``layer``, ``net``, ``uuid``,
     ``off_deg``) for each segment off the 0/45/90/135 set by more than
     *tol_deg*.  Zero-length segments are never reported.
+
+    Issue #3907: a diagonal whose serialized legs differ by a single
+    0.1 um quantum (a legal ~45-degree A* diagonal -- e.g. dx=0.1385,
+    dy=0.1384) is NOT reported, matching :func:`verify_segment_45`.  The
+    census and the by-construction guard must agree on what "legal" means
+    so a fresh route that the guard passes also passes the census ratchet.
     """
     text = Path(pcb_path).read_text()
     total = 0
@@ -359,6 +482,8 @@ def segment_angle_census(
     for m in _SEGMENT_BLOCK_RE.finditer(text):
         total += 1
         x1, y1, x2, y2 = (float(m.group(i)) for i in (2, 3, 4, 5))
+        if _is_quantum_aligned(x2 - x1, y2 - y1):
+            continue
         off = off_angle_degrees(x2 - x1, y2 - y1)
         if off > tol_deg:
             bad.append(

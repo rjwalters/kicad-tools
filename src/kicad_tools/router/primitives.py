@@ -299,11 +299,20 @@ class Segment:
         ``Autorouter.to_sexp`` fan into it).  Unless enforcement is
         explicitly disabled (see
         :func:`segment_45_enforcement_disabled`), a segment whose
-        4-decimal displacement is off the {0, 45, 90, 135} set raises
-        :class:`~kicad_tools.router.quantize.OffAngleSegmentError` rather
-        than silently writing arbitrary-angle copper -- making a
-        by-construction 45-legal artifact, not one repaired after the
-        fact.
+        4-decimal displacement is off the {0, 45, 90, 135} set is checked
+        by :func:`~kicad_tools.router.quantize.verify_segment_45`.
+
+        The check DEGRADES GRACEFULLY by default: an off-angle segment from
+        an un-migrated emission path emits an
+        :class:`~kicad_tools.router.quantize.OffAngleSegmentWarning` (naming
+        the net/layer) and still serializes, so a recipe's legacy
+        ``quantize_pcb_file`` repair pass can dogleg it afterward -- the
+        fallback a hard raise would otherwise preempt.  CI opts individual
+        boards into STRICT mode
+        (:data:`~kicad_tools.router.quantize.SEGMENT_45_STRICT_ENV`) as
+        their emitters migrate, where the same off-angle copper raises
+        :class:`~kicad_tools.router.quantize.OffAngleSegmentError`.  The
+        fleet census stays the ratchet throughout.
         """
         if _ENFORCE_SEGMENT_45:
             from .quantize import verify_segment_45

@@ -14095,7 +14095,11 @@ class Autorouter:
             return []
 
         flush_print(
-            f"  Sub-grid pre-pass: {subgrid_result.success_count} escape segments "
+            # Issue #3907: count escapes, not segments -- an off-angle escape
+            # is now emitted as a two-leg by-construction dogleg, so "escape
+            # segments" undercounted the emitted geometry and diverged from
+            # the route's actual segment list.
+            f"  Sub-grid pre-pass: {subgrid_result.success_count} escapes "
             f"for {subgrid_result.analysis.off_grid_count} off-grid pads, "
             f"{subgrid_result.unblocked_count} cells unblocked"
         )

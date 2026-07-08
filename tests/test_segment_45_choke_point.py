@@ -20,8 +20,11 @@ from kicad_tools.router.primitives import (
 )
 from kicad_tools.router.quantize import (
     ANGLE_TOL_DEG,
+    SEGMENT_45_STRICT_ENV,
     OffAngleSegmentError,
+    OffAngleSegmentWarning,
     off_angle_degrees,
+    segment_45_strict_enabled,
     verify_segment_45,
 )
 
@@ -43,15 +46,50 @@ class TestVerifySegment45:
         # Off by less than a rounding step at 4dp -> serialized as legal.
         verify_segment_45(0.0, 0.0, 3.0, 3.00001)
 
-    def test_off_angle_raises(self) -> None:
+    def test_off_angle_raises_in_strict_mode(self) -> None:
         with pytest.raises(OffAngleSegmentError) as exc:
-            verify_segment_45(139.75, 108.0, 139.5, 107.5)
+            verify_segment_45(139.75, 108.0, 139.5, 107.5, strict=True)
         assert exc.value.off_deg == pytest.approx(18.4349, abs=1e-3)
+
+    def test_off_angle_warns_by_default(self) -> None:
+        # Issue #3907 graceful degradation: default mode WARNs (naming the
+        # emitter) and returns so an un-migrated path does not hard-crash.
+        with pytest.warns(OffAngleSegmentWarning, match="net 7 on F.Cu"):
+            verify_segment_45(139.75, 108.0, 139.5, 107.5, context="net 7 on F.Cu")
 
     def test_error_carries_context(self) -> None:
         with pytest.raises(OffAngleSegmentError) as exc:
-            verify_segment_45(0.0, 0.0, 3.0, 1.0, context="net 7 on F.Cu")
+            verify_segment_45(0.0, 0.0, 3.0, 1.0, context="net 7 on F.Cu", strict=True)
         assert "net 7 on F.Cu" in str(exc.value)
+
+    def test_env_toggles_strict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Board-07 net 27 style: env-driven strict is the CI per-board switch.
+        monkeypatch.setenv(SEGMENT_45_STRICT_ENV, "1")
+        assert segment_45_strict_enabled() is True
+        with pytest.raises(OffAngleSegmentError):
+            verify_segment_45(0.0, 0.0, 3.0, 1.0)
+        monkeypatch.setenv(SEGMENT_45_STRICT_ENV, "0")
+        assert segment_45_strict_enabled() is False
+        with pytest.warns(OffAngleSegmentWarning):
+            verify_segment_45(0.0, 0.0, 3.0, 1.0)
+
+    def test_quantum_aligned_diagonal_passes(self) -> None:
+        # Board-07 net 27: a legal ~45-degree A* diagonal whose serialized
+        # legs differ by exactly one 0.1 um quantum (dx=0.1385, dy=0.1384)
+        # is 0.0207 deg off exact 45 -- over ANGLE_TOL_DEG, but legal copper.
+        # Neither raises (strict) nor warns (default).
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            verify_segment_45(117.5875, 175.4616, 117.7260, 175.6000, strict=True)
+        # The raw degrees really are over tolerance -- proves the guard
+        # accepts it via the quantum path, not by a loose angle tolerance.
+        assert off_angle_degrees(0.1385, 0.1384) > ANGLE_TOL_DEG
+
+    def test_quantum_aligned_axis_passes(self) -> None:
+        # One leg off by a single quantum from pure axis-aligned.
+        verify_segment_45(0.0, 0.0, 5.0, 0.0001, strict=True)
 
     def test_checks_serialized_4dp_coordinates(self) -> None:
         # Analytic angle is legal-ish but the 4dp serialization is what
@@ -61,13 +99,20 @@ class TestVerifySegment45:
 
 
 class TestSegmentToSexpEnforcement:
+    @pytest.fixture(autouse=True)
+    def _strict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # These tests pin the STRICT-mode contract (raise-on-off-angle).
+        # Default mode's graceful WARN is covered by
+        # TestSegmentToSexpGracefulDegradation below.
+        monkeypatch.setenv(SEGMENT_45_STRICT_ENV, "1")
+
     def test_legal_segment_serializes(self) -> None:
         s = Segment(0.0, 0.0, 1.0, 1.0, 0.2, Layer.F_CU, net=3)
         text = s.to_sexp()
         assert text.startswith("(segment")
         assert "(net 3)" in text
 
-    def test_off_angle_segment_raises_by_default(self) -> None:
+    def test_off_angle_segment_raises_in_strict_mode(self) -> None:
         s = Segment(0.0, 0.0, 3.0, 1.0, 0.2, Layer.F_CU, net=4)
         with pytest.raises(OffAngleSegmentError):
             s.to_sexp()
@@ -99,6 +144,30 @@ class TestSegmentToSexpEnforcement:
         with pytest.raises(RuntimeError), segment_45_enforcement_disabled():
             raise RuntimeError("boom")
         assert is_segment_45_enforcement_enabled() is True
+
+
+class TestSegmentToSexpGracefulDegradation:
+    """Issue #3907 default mode: WARN + serialize, never hard-crash."""
+
+    def test_off_angle_segment_warns_and_serializes_by_default(self) -> None:
+        # An un-migrated off-angle emitter must NOT abort the route: the
+        # segment still serializes (so the recipe's legacy quantize_pcb_file
+        # fallback can repair it) and a warning names the emitter.
+        s = Segment(0.0, 0.0, 3.0, 1.0, 0.2, Layer.F_CU, net=7)
+        with pytest.warns(OffAngleSegmentWarning, match="net 7"):
+            text = s.to_sexp()
+        assert text.startswith("(segment")
+        assert "(net 7)" in text
+
+    def test_quantum_diagonal_serializes_without_warning(self) -> None:
+        # Board-07 net 27: legal ~45 diagonal, one 0.1 um quantum asymmetry.
+        import warnings
+
+        s = Segment(117.5875, 175.4616, 117.7260, 175.6000, 0.2, Layer.F_CU, net=27)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            text = s.to_sexp()
+        assert text.startswith("(segment")
 
     def test_serialized_output_is_within_tolerance(self) -> None:
         # Every legal segment that serializes must be within ANGLE_TOL_DEG

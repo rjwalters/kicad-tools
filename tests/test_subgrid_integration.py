@@ -9,9 +9,22 @@ Tests verify that:
 4. All route_all variants (interleaved, parallel, negotiated) include pre-pass
 """
 
+import math
+
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.failure_analysis import FailureCause
+from kicad_tools.router.quantize import is_45_aligned
 from kicad_tools.router.rules import DesignRules
+
+
+def _escape_total_length(route) -> float:
+    """Summed leg length of an escape route (dogleg legs included)."""
+    return sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in route.segments)
+
+
+def _segment_is_45(seg) -> bool:
+    """True if a segment leg is on the 0/45/90/135 set (issue #3907)."""
+    return is_45_aligned(seg.x2 - seg.x1, seg.y2 - seg.y1)
 
 
 class TestSubgridPrepass:
@@ -120,24 +133,22 @@ class TestSubgridPrepass:
         routes = router.route_all()
         assert isinstance(routes, list)
 
-        # Check that escape routes were generated (they have single segments
-        # with very short length connecting off-grid pad to grid point)
-        escape_segments = [
+        # Check that escape routes were generated.  Issue #3907: an escape
+        # whose pad-centre -> grid-snap chord is off-angle is now emitted as
+        # a two-leg 45-legal dogleg by construction, so an escape route
+        # carries 1 (axis-aligned/legal) OR 2 (doglegged) short segments.
+        # Assert the dogleg contract: a short-total-length escape with 1-2
+        # segments, each leg 45-legal.
+        escape_routes = [
             r
             for r in routes
-            if len(r.segments) == 1
-            and (
-                (r.segments[0].x2 - r.segments[0].x1) ** 2
-                + (r.segments[0].y2 - r.segments[0].y1) ** 2
-            )
-            ** 0.5
-            < 0.5
+            if 1 <= len(r.segments) <= 2
+            and _escape_total_length(r) < 0.5
+            and all(_segment_is_45(s) for s in r.segments)
         ]
-        # We should have at least some escape segments for the off-grid pads
+        # We should have at least some escape routes for the off-grid pads
         # (10.65 and 11.30 are off-grid on 0.1mm grid)
-        assert len(escape_segments) >= 1, (
-            "Expected escape segments for off-grid pads but found none"
-        )
+        assert len(escape_routes) >= 1, "Expected escape routes for off-grid pads but found none"
 
     def test_route_all_prepass_is_noop_for_on_grid(self):
         """Pre-pass should be a no-op when all pads are on the grid."""
@@ -170,17 +181,15 @@ class TestSubgridPrepass:
         router = self._make_router_with_off_grid_pads()
         router._run_subgrid_prepass()
 
-        # Check that escape routes are in self.routes
+        # Check that escape routes are in self.routes.  Issue #3907: an
+        # off-angle escape is now a two-leg by-construction dogleg, so an
+        # escape route carries 1 (legal) or 2 (doglegged) short legs.
         escape_routes_in_self = [
             r
             for r in router.routes
-            if len(r.segments) == 1
-            and (
-                (r.segments[0].x2 - r.segments[0].x1) ** 2
-                + (r.segments[0].y2 - r.segments[0].y1) ** 2
-            )
-            ** 0.5
-            < 0.5
+            if 1 <= len(r.segments) <= 2
+            and _escape_total_length(r) < 0.5
+            and all(_segment_is_45(s) for s in r.segments)
         ]
         assert len(escape_routes_in_self) >= 1
 
