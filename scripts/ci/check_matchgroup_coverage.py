@@ -109,53 +109,64 @@ MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 # error-count allowlist floor to absorb new skew errors.  Keyed by
 # repo-relative routed-PCB path.
 #
-# Issue #3931 (via-imbalance now visible since #3915) -- board 07's ADDR_BUS
-# match group carries a via-count mismatch: the A4/A6 members route with an
-# extra via pair vs A0, adding ~1.6 mm of via-transition length that pushes
-# the group past its 0.5 mm length-match tolerance.  This was invisible while
-# ``check_match_group_length_skew`` was via-blind; PR #3915 threads the
-# board stackup (``board_thickness_mm`` / ``num_copper_layers``) into
-# ``derive_group_skew_data`` so via-transition length is now counted and the
-# pre-existing imbalance is correctly flagged as 1 ``match_group_length_skew``
-# error.  Dropping this baseline back to strict 0 requires a via-balanced
-# re-route (or an artifact refresh), which is blocked on the artifact-churn
-# problem tracked in #3925.  See #3931 for the resolution plan.
+# Issue #3931 (via-imbalance now COMPENSATED by the tuner) -- board 07's
+# ADDR_BUS match group carries a via-count mismatch: the A4/A6 members escape
+# to an inner layer behind a full-stack via while A0/A1/A2/A3/A5/A7 route flat
+# on F.Cu, adding ~1.6 mm of via drilled length that pushed the group past its
+# 0.5 mm length-match tolerance.  This was invisible while the DRC checker was
+# via-blind; PR #3915 threaded the board stackup (``board_thickness_mm`` /
+# ``num_copper_layers``) into ``derive_group_skew_data`` so via-transition
+# length is now counted, and the pre-existing imbalance was flagged as 1
+# ``match_group_length_skew`` error.  #3931 closes the loop on the *router*
+# side: the match-group length tuner is now ALSO via-aware
+# (``tune_match_group_v2`` / ``_tune_match_group_single_ended`` measure member
+# lengths with ``MatchGroupTracker._measure_route_total`` when a stackup is
+# supplied), so during a re-route the tuner adds F.Cu meander to the via-free
+# members to compensate the via-carrying members' drilled length.  A
+# via-imbalanced group therefore converges to within tolerance and ADDR_BUS no
+# longer fires on the reroute path.
 #
 # Issue #3916 (pair-only groups now length-checked) -- the producer used to
 # skip any match group whose members were exclusively differential pairs
 # (``net_ids=[]`` after ``_extract_pair_ids``), so board 07's MIPI_CSI_LANES
 # and HDMI_TMDS_LANES were never skew-checked.  ``derive_group_skew_data`` now
 # measures diff-pair members via the pair-average ``(L_P + L_N) / 2``
-# contribution, making both groups checkable.  This baseline is now **2**, but
-# the value the gate observes depends on WHICH artifact it runs against:
+# contribution, making both groups checkable.  MIPI_CSI_LANES is the one
+# genuine pair-only skew that survives -- it is tracked separately under #3916
+# and remains the sole entry in this baseline.
+#
+# The value the gate observes depends on WHICH artifact it runs against, and a
+# SINGLE baseline of **1** satisfies BOTH paths:
 #
 #   * ``--skip-route`` (committed-artifact path, used by the diff-driven
 #     routed-pcb-drc-check and by local verification): counts exactly **1**
-#     match-group violation.  On the COMMITTED board 07 artifact MIPI/HDMI
-#     each still have at least one unrouted diff-pair leg (e.g. MIPI_CLK_N,
-#     MIPI_DAT0_N, TMDS_D0_*, TMDS_D1_* carry zero geometry) and
-#     DDR_DATA_BYTE_0 has an unrouted DQ3, so all three are gated out by the
-#     partial-routing rule -- only the fully-routed ADDR_BUS group fires.
+#     match-group violation.  The #3931 tuner fix is a ROUTER change and does
+#     NOT regenerate the committed ``matchgroup_test_routed.kicad_pcb``
+#     artifact, so that artifact still carries the pre-fix via-imbalanced
+#     ADDR_BUS (which fires) while MIPI/HDMI/DDR are gated out by the
+#     partial-routing rule (at least one unrouted diff-pair leg each: e.g.
+#     MIPI_CLK_N, TMDS_D0_*, DQ3 carry zero geometry).  So the committed
+#     artifact reports 1 (ADDR_BUS), which passes (1 <= 1).  (Refreshing the
+#     committed artifact to also clear ADDR_BUS is the artifact-churn work
+#     tracked in #3925 -- once it lands the committed count drops to the MIPI
+#     violation and this baseline can be revisited.)
 #
 #   * full reroute (the Match-Group Routing Regression CI job, which runs
 #     ``generate_design.py --step route`` end-to-end before the gate):
-#     counts **2**.  The reroute lands every MIPI leg, so MIPI_CSI_LANES now
-#     produces a genuine ``match_group_length_skew`` error on top of
-#     ADDR_BUS's via-imbalance.  HDMI_TMDS_LANES does NOT fire even after the
-#     reroute: its TMDS_D0_N / TMDS_D1_N legs remain unrouted (the router
-#     reports them "still stranded -- NO relief path"), so the unrouted-leg
-#     gate correctly excludes HDMI.  A single baseline of 2 satisfies BOTH
-#     paths (the ``--skip-route`` count of 1 also passes, since 1 <= 2).
+#     also counts **1**.  The via-aware tuner now compensates ADDR_BUS's via
+#     imbalance during the re-route, so ADDR_BUS lands within tolerance and no
+#     longer fires; only MIPI_CSI_LANES's pair-only skew (#3916) remains.
+#     HDMI_TMDS_LANES does NOT fire even after the reroute: its TMDS_D0_N /
+#     TMDS_D1_N legs remain unrouted ("still stranded -- NO relief path"), so
+#     the unrouted-leg gate correctly excludes HDMI.
 #
-# Composition of the reroute baseline (2):
-#   1x ADDR_BUS via-imbalance (#3931) + 1x MIPI_CSI_LANES pair-only skew
-#   (#3916, the group newly made checkable by this change).
-# (An earlier prediction of 3 assumed HDMI would also fire once routed; the
-# reroute shows HDMI's TMDS legs do not route, so the observed count is 2.
-# Dropping this baseline toward strict 0 requires a via-balanced,
-# fully-routed board 07 -- blocked on the artifact-churn work in #3925.)
+# Composition of the baseline (1):
+#   1x MIPI_CSI_LANES pair-only skew (#3916).  (Prior to #3931 the reroute
+#   count was 2 = ADDR_BUS via-imbalance + MIPI; the via-aware tuner removed
+#   the ADDR_BUS term, so the reroute count is now 1 and matches the
+#   committed-artifact count.)
 MATCHGROUP_VIOLATION_BASELINE: dict[str, int] = {
-    "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb": 2,
+    "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb": 1,
 }
 
 

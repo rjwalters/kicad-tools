@@ -602,3 +602,99 @@ class TestTunedRoutesReachSelfRoutes:
         )
         # And the committed object IS the tuner's returned route.
         assert committed is results["G"][1][0]
+
+
+# =============================================================================
+# Via-inclusive stackup threading (Issue #3931)
+# =============================================================================
+
+
+class TestViaInclusiveStackupThreading:
+    """Issue #3931: ``apply_match_group_tuning`` threads the manufacturer
+    ``board_thickness_mm`` and the copper-layer count into
+    ``tune_match_group_v2`` so the tuner targets VIA-INCLUSIVE skew.
+
+    The board-07 ADDR_BUS defect was that the tuner measured planar-only
+    copper length (via-blind) while the DRC rule measured via-inclusive
+    skew: the tuner therefore never compensated the ~1.6 mm of drilled
+    length that pushed the group over tolerance.  These tests pin the
+    orchestrator's threading so the two stay in lock-step.
+    """
+
+    def test_board_thickness_and_layers_threaded_into_tuner(self):
+        """The tuner call receives ``board_thickness_mm`` + ``num_copper_layers``."""
+        from kicad_tools.router import match_group_tuning as mgt_module
+
+        ar, group = _make_autorouter_with_4_net_group()
+
+        captured: dict[str, object] = {}
+        real_tune = mgt_module.tune_match_group_v2
+
+        def spy(*args, **kwargs):
+            captured.update(kwargs)
+            return real_tune(*args, **kwargs)
+
+        with patch.object(mgt_module, "tune_match_group_v2", spy):
+            ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+
+        # The manufacturer profile's board thickness (default 1.6 mm for the
+        # synthesized adapter) must reach the tuner so via drilled length is
+        # compensable.
+        assert "board_thickness_mm" in captured
+        assert captured["board_thickness_mm"] == 1.6
+        # The copper-layer count must match the tracker's (bare autorouter
+        # with no layer_stack defaults to 2).
+        assert captured["num_copper_layers"] == 2
+
+    def test_via_carrying_member_becomes_reference_end_to_end(self):
+        """A via-imbalanced group is corrected through the orchestrator.
+
+        End-to-end analog of board 07's ADDR_BUS: one member escapes on a
+        through-via (adding drilled length) while the other routes flat.
+        After ``apply_match_group_tuning`` the via-free member has been
+        lengthened so the via-inclusive skew is within tolerance.
+        """
+        from kicad_tools.router.length import LengthTracker
+        from kicad_tools.router.match_group_length import MatchGroupTracker
+        from kicad_tools.router.primitives import Via
+
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {1: "A0", 2: "A4"}
+        # A0: 30 mm copper, no via.  A4: 30 mm copper + F.Cu->B.Cu via.
+        r0 = _straight_route(1, "A0", 30.0, y=0.0)
+        r4 = _straight_route(2, "A4", 30.0, y=10.0)
+        r4.vias.append(
+            Via(
+                x=30.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=2,
+                net_name="A4",
+            )
+        )
+        ar.routes = [r0, r4]
+        group = MatchGroup(
+            name="ADDR_BUS",
+            net_ids=[1, 2],
+            tolerance=0.5,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+
+        # Pull the (possibly meandered) A0 back out of self.routes.
+        tuned_a0 = next(r for r in ar.routes if r.net == 1)
+        tuned_a4 = next(r for r in ar.routes if r.net == 2)
+        # Bare autorouter -> num_copper_layers defaults to 2; the via spans
+        # the full 2-layer stack -> 1.6 mm drilled length.
+        a0_total = MatchGroupTracker._measure_route_total(tuned_a0, 1.6, 2)
+        a4_total = MatchGroupTracker._measure_route_total(tuned_a4, 1.6, 2)
+        assert abs(a0_total - a4_total) <= 0.5, (
+            f"via-inclusive skew should be within tolerance after tuning: "
+            f"A0={a0_total:.4f}mm vs A4={a4_total:.4f}mm"
+        )
+        # A0 gained real copper meander (~1.6 mm), it has no via of its own.
+        assert LengthTracker.calculate_route_length(tuned_a0) > 31.0

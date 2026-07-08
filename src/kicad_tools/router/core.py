@@ -12409,10 +12409,31 @@ class Autorouter:
             num_layers = len(self.layer_stack.layers)
         else:
             num_layers = 2
+
+        # Issue #3931: the board thickness the tuner uses to compute per-via
+        # drilled length MUST match the value the ``match_group_length_skew``
+        # DRC rule measures with, or the tuner would target a different skew
+        # than the checker validates.  The router's own ``self.rules``
+        # (``router.rules.DesignRules``) has NO ``board_thickness_mm`` field
+        # -- only ``manufacturers.base.DesignRules`` does (see the
+        # ``update_diffpair_skew`` docstring above).  The DRC checker reads
+        # the manufacturer profile's ``board_thickness_mm``, so we source the
+        # SAME value here via ``_build_manufacturer_design_rules`` (the
+        # manufacturer profile's DesignRules, honoring ``self.rules.manufacturer``
+        # and the layer count).  When that helper is unavailable (manufacturers
+        # module missing) we fall back to ``None`` -> vias contribute 0.0 and
+        # the tuner stays via-blind (byte-for-byte legacy behavior).  Record
+        # the tracker's lengths via-inclusively too, so post-tuning skew
+        # queries reflect drilled length.
+        board_thickness_mm: float | None = None
+        _mfr_rules = self._build_manufacturer_design_rules()
+        if _mfr_rules is not None:
+            board_thickness_mm = getattr(_mfr_rules, "board_thickness_mm", None)
         self._match_group_tracker.record_routes(
             routes=self.routes,
             groups=detected_groups,
             num_copper_layers=num_layers,
+            board_thickness_mm=board_thickness_mm,
         )
 
         # Issue #3317 follow-up (judge change-request on PR #3317):
@@ -12496,6 +12517,8 @@ class Autorouter:
                     diff_pair_partners=diff_pair_partners_by_id,
                     pads_by_net=pads_by_net,
                     pad_clearance_mm=pad_clearance_mm,
+                    board_thickness_mm=board_thickness_mm,
+                    num_copper_layers=num_layers,
                 )
             except ValueError as exc:
                 # Defensive: a malformed group (e.g. mixed pair/scalar
@@ -12573,11 +12596,14 @@ class Autorouter:
 
         # Refresh the skew tracker after tuning so downstream consumers
         # (e.g. the Phase 2G match_group_length_skew DRC rule) see the
-        # updated lengths.
+        # updated lengths.  Issue #3931: measure via-inclusively (matching
+        # the DRC rule) so the post-tuning skew query reflects drilled
+        # length, not planar-only copper.
         self._match_group_tracker.record_routes(
             routes=self.routes,
             groups=detected_groups,
             num_copper_layers=num_layers,
+            board_thickness_mm=board_thickness_mm,
         )
         return results
 

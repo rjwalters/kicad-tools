@@ -485,6 +485,8 @@ def tune_match_group_v2(
     diff_pair_partners: dict[int, int] | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    board_thickness_mm: float | None = None,
+    num_copper_layers: int = 4,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Tune the lengths of an N-trace match group to within tolerance.
 
@@ -588,6 +590,21 @@ def tune_match_group_v2(
             mm (Issue #3317 follow-up).  Required when ``pads_by_net``
             is non-empty.  Typical value:
             ``DesignRules.trace_clearance`` (0.2 mm for JLCPCB).
+        board_thickness_mm: Total stackup thickness in mm (Issue #3931).
+            When supplied, member lengths are measured VIA-INCLUSIVELY
+            (planar copper length + per-via drilled length) so the tuner
+            compensates for via-count imbalance -- a member that escapes
+            to an inner layer behind a full-stack via becomes the de-facto
+            reference and the copper-only members receive F.Cu meander to
+            match its drilled length.  When ``None`` (the default) vias
+            contribute ``0.0`` and the measurement collapses to the legacy
+            planar-only sum -- byte-for-byte prior behavior for callers
+            without a stackup context.  Only the single-ended (Phase 2E)
+            path is via-aware; the pair-aware path is unchanged.
+        num_copper_layers: Number of copper layers in the stack
+            (Issue #3931).  Used with ``board_thickness_mm`` to compute
+            per-via drilled length.  Defaults to 4; ignored when
+            ``board_thickness_mm`` is ``None``.
 
     Returns:
         ``{net_id: (route, result)}`` for every member of ``group``.
@@ -684,6 +701,8 @@ def tune_match_group_v2(
         intra_pair_clearance_mm=intra_pair_clearance_mm,
         pads_by_net=pads_by_net,
         pad_clearance_mm=pad_clearance_mm,
+        board_thickness_mm=board_thickness_mm,
+        num_copper_layers=num_copper_layers,
     )
 
 
@@ -701,6 +720,8 @@ def _tune_match_group_single_ended(
     intra_pair_clearance_mm: float | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    board_thickness_mm: float | None = None,
+    num_copper_layers: int = 4,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Scalar Phase 2E path: each net in ``group.net_ids`` tuned independently.
 
@@ -751,14 +772,34 @@ def _tune_match_group_single_ended(
     # the tuner is self-contained and does not require a tracker
     # instance.  See match_group_length.py:407-436 for the canonical
     # spec.
-    from .length import LengthTracker  # avoid cycle
+    from .match_group_length import MatchGroupTracker  # avoid cycle
+
+    # Issue #3931: measure member lengths VIA-INCLUSIVELY so the tuner
+    # targets the same skew the ``match_group_length_skew`` DRC rule
+    # measures.  ``LengthTracker.calculate_route_length`` sums only planar
+    # (copper) segment length -- it is via-blind.  When a match group has
+    # via-count imbalance (board 07 ADDR_BUS: A4/A6 escape to an inner
+    # layer behind a full-stack via while A0-A3/A5/A7 route flat on F.Cu),
+    # the copper lengths are within tolerance but the via drilled length
+    # (~1.6mm for two full-stack vias on a 1.6mm / 4-layer stack) pushes
+    # the group over its skew tolerance.  A planar-only tuner sees the
+    # members as already matched and does nothing.  Delegating to
+    # ``MatchGroupTracker._measure_route_total`` (which adds the per-via
+    # drilled length when ``board_thickness_mm`` is supplied) makes the
+    # tuner via-aware: the via-carrying members become the de-facto
+    # reference and the copper-only members get ~1.6mm of F.Cu meander to
+    # compensate their missing drilled length.  When ``board_thickness_mm``
+    # is ``None`` (legacy callers with no stackup context) the measurement
+    # collapses to the planar-only sum -- byte-for-byte prior behavior.
+    def _measure(route: Route) -> float:
+        return MatchGroupTracker._measure_route_total(route, board_thickness_mm, num_copper_layers)
 
     member_lengths: dict[int, float] = {}
     for net_id in group.net_ids:
         route = routes_by_net.get(net_id)
         if route is None:
             continue
-        member_lengths[net_id] = LengthTracker.calculate_route_length(route)
+        member_lengths[net_id] = _measure(route)
 
     # Resolve the reference length per policy.
     ref_length: float | None
@@ -1019,7 +1060,7 @@ def _tune_match_group_single_ended(
 
             # Precompute the length needed (constant across this
             # attempt's per-segment retries).
-            current_length_for_attempt = LengthTracker.calculate_route_length(current_route)
+            current_length_for_attempt = _measure(current_route)
             length_needed = target_length - current_length_for_attempt
             if length_needed <= 0:
                 # Already at/over target -- nothing to add this attempt.
@@ -1180,7 +1221,7 @@ def _tune_match_group_single_ended(
                     total_inserts_committed += 1
                     committed_this_attempt = True
 
-                    new_length = LengthTracker.calculate_route_length(current_route)
+                    new_length = _measure(current_route)
                     current_skew = abs(target_length - new_length)
 
                     if current_skew <= tolerance_mm:
@@ -1201,7 +1242,7 @@ def _tune_match_group_single_ended(
                 # Issue #3440 capacity diagnosis: name the shortfall
                 # (requested mm vs achieved mm) so a rollback is
                 # actionable rather than a bare count.
-                achieved_mm = LengthTracker.calculate_route_length(current_route) - current_length
+                achieved_mm = _measure(current_route) - current_length
                 capacity_note = (
                     f" Capacity: requested {abs(delta):.3f}mm of added length, "
                     f"achieved {achieved_mm:.3f}mm before giving up "
@@ -1243,12 +1284,12 @@ def _tune_match_group_single_ended(
                 f"inserts_applied={per_member_result.inserts_applied}, "
                 f"skew={current_skew:.4f}mm vs tol={tolerance_mm:.4f}mm; "
                 f"capacity: requested {abs(delta):.3f}mm, achieved "
-                f"{LengthTracker.calculate_route_length(current_route) - current_length:.3f}mm)"
+                f"{_measure(current_route) - current_length:.3f}mm)"
             )
 
         # Final length.
         if per_member_result.inserts_applied > 0:
-            per_member_result.length_after_mm = LengthTracker.calculate_route_length(current_route)
+            per_member_result.length_after_mm = _measure(current_route)
         else:
             per_member_result.length_after_mm = current_length
 
