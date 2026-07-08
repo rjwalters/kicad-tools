@@ -135,6 +135,32 @@ invoke the Phase A/B pipeline explicitly.  PR #3069 (board 03) and PR #3090
 > `test_coupled_pathfinder_phase_a_invoked` that will flip to XPASS when
 > [#3952] lands.
 
+### Determinism and artifact churn (`--seed`)
+
+Routing is deterministic **per router version**: two runs that share a
+`--seed` at the same code version emit a byte-identical routed
+`.kicad_pcb`. This is what lets a same-seed regen produce a zero-line
+`git diff` and what the board-06 determinism harness
+(`scripts/ci/board06_determinism_smoke.sh`,
+`tests/router/test_board06_determinism.py`) relies on. The property is
+implemented by `enable_deterministic_uuids()` in
+`router/primitives.py`, which derives every segment/via UUID from the
+seeded global RNG instead of `uuid.uuid4()`.
+
+Two caveats:
+
+- **Determinism is per-router-version, not forever.** A regen produced by
+  a *newer* router may legitimately differ from a committed artifact
+  (geometry improvements, quantization changes, new escape logic). An
+  artifact-vs-regen diff across router versions is expected; only
+  fresh-vs-fresh at the *same* version is guaranteed byte-identical.
+- **Segment/via serialization matches KiCad's canonical field order**
+  (`... uuid net`, uuid before net; issue #3925). Emitting `net` before
+  `uuid` used to churn every segment and via on the first KiCad open/save
+  round-trip, drowning real changes in reformat noise. If you regenerate a
+  board and see a large diff with no geometric change, confirm you are
+  comparing same-version fresh-vs-fresh before assuming a router bug.
+
 ### Subprocess (`kct route`) vs. in-process (`router.route_all_*`)
 
 Both are supported.  The subprocess path (`subprocess.run(["kct", "route", ...])`)

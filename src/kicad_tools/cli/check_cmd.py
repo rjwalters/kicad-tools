@@ -1022,9 +1022,14 @@ def run_selected_checks(
     # Build the pad_grid invocation as a thunk so the map below can
     # remain uniform (every value is a zero-arg callable).
     def _pad_grid_check() -> DRCResults:
+        # Issue #3941: collapse a fixed-pitch footprint's per-pad warnings
+        # into one aggregated warning per component ref by default; under
+        # ``--verbose`` (surfaced as ``checker.verbose``) emit the full
+        # per-pad detail instead.
         return checker.check_pad_grid_alignment(
             threshold=pad_grid_threshold,
             auto_derive_threshold=pad_grid_auto_derive,
+            aggregate=not checker.verbose,
         )
 
     # Map of category to check method.  This dict MUST stay a superset

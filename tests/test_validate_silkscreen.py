@@ -475,10 +475,11 @@ _BOARD_ROOT = "boards"
 @pytest.mark.parametrize(
     "rel_path, rule_id",
     [
-        (
-            "01-voltage-divider/output/voltage_divider_routed.kicad_pcb",
-            "silk_over_copper",
-        ),
+        # Issue #3939 moved board 01's connector refdes off pad-1 copper, so
+        # it no longer yields silk_over_copper (it now lives in the clean-board
+        # list below). Board 05 remains the silk_edge_clearance fixture. The
+        # silk_over_copper detector itself is exercised by the synthetic unit
+        # tests above (see the ``silk_over_copper`` section).
         (
             "05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
             "silk_edge_clearance",
@@ -486,7 +487,7 @@ _BOARD_ROOT = "boards"
     ],
 )
 def test_real_board_regression(rel_path, rule_id):
-    """board-01 yields silk_over_copper; board-05 yields silk_edge_clearance."""
+    """board-05 yields silk_edge_clearance."""
     import os
 
     path = os.path.join(_BOARD_ROOT, rel_path)
@@ -509,6 +510,8 @@ def test_real_board_regression(rel_path, rule_id):
 @pytest.mark.parametrize(
     "rel_path",
     [
+        # Issue #3939: board 01's connector refdes now clears pad-1 copper.
+        "01-voltage-divider/output/voltage_divider_routed.kicad_pcb",
         "02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb",
         "04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
     ],

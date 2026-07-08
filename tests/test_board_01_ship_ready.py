@@ -141,23 +141,17 @@ def test_board_01_drc_clean_with_jlcpcb_rules() -> None:
     # in the same PR).  No error class is exempt here.
     error_count = sum(1 for v in results.violations if v.is_error)
 
-    # Issue #3844: the geometric ``silk_over_copper`` rule flags the J1/J2
-    # reference designators printed over pad-1's mask aperture -- a real,
-    # kicad-cli-confirmed cosmetic silk defect on this committed fixture.  It
-    # is WARNING severity (non-blocking; the manufacturing gate keys on errors
-    # only), so it must NOT flip this ship-ready gate.  We keep the strict
-    # 0-error assertion and exclude the advisory silk-placement warnings from
-    # the 0-warning assertion (the fixture's silk would need re-spinning to
-    # clear them, which is out of scope for the DRC-rule change).
-    _SILK_PLACEMENT_RULES = {"silk_over_copper", "silk_edge_clearance"}
-    warn_count = sum(
-        1 for v in results.violations if v.is_warning and v.rule_id not in _SILK_PLACEMENT_RULES
-    )
+    # Issue #3939: the connector refdes offset in
+    # ``boards/01-voltage-divider/generate_design.py`` was moved from
+    # ``(at 0 -2.5)`` to ``(at 0 -3.5)`` so J1/J2's reference designators
+    # clear pad 1's mask aperture.  A fresh regen of the committed artifact
+    # now passes the geometric ``silk_over_copper`` rule cleanly, so the
+    # earlier ``_SILK_PLACEMENT_RULES`` carve-out is removed and the strict
+    # 0-warning gate holds unconditionally.
+    warn_count = sum(1 for v in results.violations if v.is_warning)
 
     sample = [
         f"{v.rule_id}: {v.message}" for v in results.violations if v.is_error or v.is_warning
     ][:5]
     assert error_count == 0, f"Expected 0 DRC errors, got {error_count}; sample={sample}"
-    assert warn_count == 0, (
-        f"Expected 0 non-silk-placement DRC warnings, got {warn_count}; sample={sample}"
-    )
+    assert warn_count == 0, f"Expected 0 DRC warnings, got {warn_count}; sample={sample}"

@@ -5221,18 +5221,19 @@ def _add_fleet_parser(subparsers) -> None:
 def _add_render_parser(subparsers) -> None:
     """Add the ``render`` subcommand parser (Epic #3674, Phase 1).
 
-    Generates per-board 2D layer plots and 3D ray-traced PNGs into
+    Generates per-board 2D layer plots (SVGs) and 3D ray-traced PNGs into
     ``boards/<id>/output/renders/`` for downstream gallery consumption.
     """
     render_parser = subparsers.add_parser(
         "render",
-        help="Render per-board 2D layer plots + 3D PNGs into output/renders/",
+        help="Render per-board 2D SVGs + 3D PNGs into output/renders/",
         description=(
             "Generate visual artifacts for one board or every board under a "
             "root: 2D front/back layer plots (copper + silkscreen + edge cuts) "
-            "via 'kicad-cli pcb export png', and 3D front/back ray-traced PNGs "
+            "via 'kicad-cli pcb export svg', and 3D front/back ray-traced PNGs "
             "via 'kicad-cli pcb render'. Outputs go to a fixed, documented path "
-            "(boards/<id>/output/renders/{pcb-front,pcb-back,3d-front,3d-back}.png). "
+            "(boards/<id>/output/renders/{pcb-front,pcb-back}.svg and "
+            "{3d-front,3d-back}.png). "
             "The routed PCB is preferred with graceful fallback to the unrouted "
             "PCB. 3D render requires KiCad 8.0.4+ and a display (xvfb on CI)."
         ),

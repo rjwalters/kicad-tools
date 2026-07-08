@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 import random
-import time
+import timeit
 
 import pytest
 
@@ -298,78 +298,125 @@ class TestViaRtreeCorrectness:
 # ---------------------------------------------------------------------------
 
 
+def _measure_via_rtree_ratio(n_trials: int = 5, n_iters: int = 1) -> tuple[float, float, float]:
+    """Measure the R-tree/linear-scan via-clearance timing ratio robustly.
+
+    Builds a 1000-via grid and 200 ``path_is_clear`` queries once, then
+    runs ``n_trials`` *interleaved* (R-tree, linear) measurement rounds --
+    each round times ``n_iters`` full passes over the 200 queries -- and
+    takes the **minimum** wall-clock for each path.
+
+    Interleaving means a transient CPU-contention spike (xdist sibling
+    workers, shared CI-runner neighbors) tends to hit both paths in the
+    same round rather than biasing one; taking the min discards
+    scheduler-noise-polluted rounds, since the minimum is the best
+    estimator of true cost for a deterministic micro-benchmark.  The
+    original single ``time.perf_counter()`` pair had no such protection
+    and flaked (observed ``ratio=1.855``) when the R-tree block happened
+    to land in a scheduler contention window (issue #3949).
+
+    Returns:
+        (ratio, rtree_min, linear_min) where ``ratio = rtree_min /
+        linear_min``.
+    """
+    grid = _make_grid(width=100.0, height=100.0)
+    # 1000 vias is a strict superset of any real board's via count.
+    _populate_vias(grid, 1000, width=100.0, height=100.0)
+
+    checker = VectorCollisionChecker(grid)
+    rng = random.Random(0xBEEF)
+
+    queries: list[tuple[float, float, float, float]] = []
+    for _ in range(200):
+        x1 = rng.uniform(0.5, 99.5)
+        y1 = rng.uniform(0.5, 99.5)
+        angle = rng.uniform(0, 2 * math.pi)
+        length = rng.uniform(0.5, 5.0)
+        x2 = x1 + math.cos(angle) * length
+        y2 = y1 + math.sin(angle) * length
+        queries.append((x1, y1, x2, y2))
+
+    saved_rtree = grid._via_rtree
+    saved_items = grid._via_rtree_items
+
+    def run_rtree() -> None:
+        for x1, y1, x2, y2 in queries:
+            checker.path_is_clear(x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999)
+
+    def run_linear() -> None:
+        # Null the index so the collision checker's fallback branch
+        # (linear scan over ``grid.routes``) runs, then restore it.
+        grid._via_rtree = None
+        grid._via_rtree_items = {}
+        try:
+            for x1, y1, x2, y2 in queries:
+                checker.path_is_clear(x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999)
+        finally:
+            grid._via_rtree = saved_rtree
+            grid._via_rtree_items = saved_items
+
+    # Warm up both paths so first-call lazy imports / index access don't
+    # taint the comparison.
+    run_rtree()
+    run_linear()
+
+    rtree_min = float("inf")
+    linear_min = float("inf")
+    for _ in range(n_trials):
+        rtree_min = min(rtree_min, timeit.timeit(run_rtree, number=n_iters))
+        linear_min = min(linear_min, timeit.timeit(run_linear, number=n_iters))
+
+    ratio = rtree_min / max(linear_min, 1e-9)
+    return ratio, rtree_min, linear_min
+
+
 class TestViaRtreePerformance:
     """The R-tree query must be significantly faster than the linear scan.
 
     The synthetic workload mirrors the optimizer hot path: thousands of
     short-segment ``path_is_clear`` calls against hundreds of foreign
-    vias.  The R-tree should reduce wall-clock by 5x+ on this size; we
-    assert a conservative 2x to keep the test stable on slow CI.
+    vias.  The R-tree should reduce wall-clock by 5x+ on this size.
 
     Issue #2960 acceptance criterion: "synthetic grid with 1000 vias +
     100 path_is_clear calls; wall-clock <5% of linear-scan baseline".
-    The bound below (<20% of linear, i.e. >5x speedup) over a tighter
-    workload (1000 vias / 200 calls) satisfies that criterion.
+    The nightly ``slow`` variant (<0.2 of linear, i.e. >5x speedup) over
+    a tighter workload (1000 vias / 200 calls) satisfies that criterion;
+    the per-PR guard uses a generous noise-tolerant bound instead.
     """
 
     def test_rtree_query_faster_than_linear_scan(self) -> None:
-        grid = _make_grid(width=100.0, height=100.0)
-        # 1000 vias is a strict superset of any real board's via count.
-        _populate_vias(grid, 1000, width=100.0, height=100.0)
+        """Per-PR guard: R-tree query is faster than the linear scan.
 
-        checker = VectorCollisionChecker(grid)
-        rng = random.Random(0xBEEF)
+        Uses interleaved min-of-N ``timeit`` trials (see
+        ``_measure_via_rtree_ratio``) so a transient scheduler spike
+        cannot bias a single measurement.  The bound is a generous,
+        noise-tolerant ``ratio < 0.75`` (R-tree runs in under 75% of
+        linear time) -- still a meaningful regression signal with ~25%
+        headroom above the real ~10x speedup floor.  The tight design
+        target is asserted in the nightly ``slow`` variant below.
+        """
+        ratio, rtree_min, linear_min = _measure_via_rtree_ratio()
+        assert ratio < 0.75, (
+            f"R-tree query is not faster than linear scan: "
+            f"rtree={rtree_min * 1000:.2f}ms, "
+            f"linear={linear_min * 1000:.2f}ms, "
+            f"ratio={ratio:.3f} (min of 5 interleaved trials; expected "
+            f"<0.75, CI noise budget; see issue #3949)."
+        )
 
-        queries: list[tuple[float, float, float, float]] = []
-        for _ in range(200):
-            x1 = rng.uniform(0.5, 99.5)
-            y1 = rng.uniform(0.5, 99.5)
-            angle = rng.uniform(0, 2 * math.pi)
-            length = rng.uniform(0.5, 5.0)
-            x2 = x1 + math.cos(angle) * length
-            y2 = y1 + math.sin(angle) * length
-            queries.append((x1, y1, x2, y2))
+    @pytest.mark.slow
+    def test_rtree_query_faster_than_linear_scan_tight(self) -> None:
+        """Nightly tight guard: R-tree query is >5x faster than linear scan.
 
-        # R-tree path: time the real collision checker.
-        # Warm-up so the first-call lazy import / index access doesn't
-        # taint the comparison.
-        for x1, y1, x2, y2 in queries[:5]:
-            checker.path_is_clear(x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999)
-        start = time.perf_counter()
-        for x1, y1, x2, y2 in queries:
-            checker.path_is_clear(x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999)
-        rtree_elapsed = time.perf_counter() - start
-
-        # Linear-scan path: re-run with the via R-tree disabled to
-        # simulate the pre-#2960 behaviour.  We point the checker at
-        # the grid AFTER nulling the index so the collision checker's
-        # fallback branch (linear scan over ``grid.routes``) runs.
-        saved_rtree = grid._via_rtree
-        saved_items = grid._via_rtree_items
-        try:
-            grid._via_rtree = None
-            grid._via_rtree_items = {}
-            for x1, y1, x2, y2 in queries[:5]:
-                checker.path_is_clear(x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999)
-            start = time.perf_counter()
-            for x1, y1, x2, y2 in queries:
-                checker.path_is_clear(x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999)
-            linear_elapsed = time.perf_counter() - start
-        finally:
-            grid._via_rtree = saved_rtree
-            grid._via_rtree_items = saved_items
-
-        # The R-tree must run at no more than 50% of the linear scan
-        # time on this workload.  We choose 50% (rather than the 5%
-        # bound from the issue description) to keep the assertion
-        # robust against slow CI and Python interpreter variance; in
-        # practice we observe ~10x speedup locally.  The slope of the
-        # underlying complexity gap is O(V) -> O(log V), so the bound
-        # is conservative.
-        ratio = rtree_elapsed / max(linear_elapsed, 1e-9)
-        assert ratio < 0.5, (
-            f"R-tree query is not significantly faster than linear scan: "
-            f"rtree={rtree_elapsed * 1000:.2f}ms, "
-            f"linear={linear_elapsed * 1000:.2f}ms, "
-            f"ratio={ratio:.3f} (expected <0.5)"
+        Runs only in the nightly ``slow-tests`` lane (and locally via
+        ``pytest -m slow``), where interleaved min-of-N sampling makes a
+        tighter bound reliable.  Asserts the issue #2960 design
+        acceptance criterion (``ratio < 0.2``, i.e. >5x speedup).
+        """
+        ratio, rtree_min, linear_min = _measure_via_rtree_ratio()
+        assert ratio < 0.2, (
+            f"R-tree query is not >5x faster than linear scan: "
+            f"rtree={rtree_min * 1000:.2f}ms, "
+            f"linear={linear_min * 1000:.2f}ms, "
+            f"ratio={ratio:.3f} (expected <0.2)."
         )

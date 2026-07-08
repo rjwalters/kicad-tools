@@ -657,6 +657,124 @@ class TestPreflightBomPcbMatchSeverity:
 
 
 # ---------------------------------------------------------------------------
+# PreflightChecker -- bom_fields LCSC spec-overlay awareness (issue #3926)
+# ---------------------------------------------------------------------------
+
+
+class TestPreflightBomFieldsSpecOverlay:
+    """`_check_bom_fields` must not falsely warn about LCSC that the spec fills.
+
+    Preflight loads a *raw* BOM (Step 0) before the assembly pipeline applies
+    the ``.kct`` spec overlay (Step 1).  Items whose LCSC will be populated
+    from the spec are not genuinely missing -- warning about them is the false
+    positive fixed in issue #3926.
+    """
+
+    def _make_checker(self, monkeypatch, bom_items, spec_lcsc_refs):
+        """Build a bare checker with mocked BOM and spec-resolution."""
+        from kicad_tools.schema.bom import BOM
+
+        checker = PreflightChecker.__new__(PreflightChecker)
+        checker.config = PreflightConfig()
+        checker.pcb_path = Path("board.kicad_pcb")
+
+        bom = BOM(items=bom_items)
+        monkeypatch.setattr(checker, "_load_bom", lambda: bom)
+        monkeypatch.setattr(checker, "_spec_lcsc_refs", lambda: set(spec_lcsc_refs))
+        return checker
+
+    def _item(self, reference, **kwargs):
+        from kicad_tools.schema.bom import BOMItem
+
+        defaults = {"value": "100nF", "footprint": "C_0402", "lib_id": "Device:C", "lcsc": ""}
+        defaults.update(kwargs)
+        return BOMItem(reference=reference, **defaults)
+
+    def test_all_missing_lcsc_covered_by_spec_no_warn(self, monkeypatch):
+        """When every missing-LCSC item is spec-covered, no WARN fires."""
+        items = [self._item("C1"), self._item("R1", lib_id="Device:R")]
+        checker = self._make_checker(monkeypatch, items, {"C1", "R1"})
+
+        result = checker._check_bom_fields()
+
+        assert result.status == "OK"
+        assert "missing LCSC" not in result.message
+        assert "missing LCSC" not in result.details
+        assert "spec overlay" in result.details
+
+    def test_partial_spec_coverage_warns_only_uncovered(self, monkeypatch):
+        """Only the items NOT covered by the spec are counted in the WARN."""
+        items = [
+            self._item("C1"),
+            self._item("C2"),
+            self._item("R1", lib_id="Device:R"),
+        ]
+        # Spec covers only C1, C2 -- R1 remains genuinely missing.
+        checker = self._make_checker(monkeypatch, items, {"C1", "C2"})
+
+        result = checker._check_bom_fields()
+
+        assert result.status == "WARN"
+        assert "1/3 active item(s) missing LCSC part number" in result.details
+        assert "2 resolvable from spec" in result.details
+
+    def test_no_spec_all_missing_still_warns(self, monkeypatch):
+        """With no spec coverage, every missing-LCSC item still warns."""
+        items = [self._item("C1"), self._item("R1", lib_id="Device:R")]
+        checker = self._make_checker(monkeypatch, items, set())
+
+        result = checker._check_bom_fields()
+
+        assert result.status == "WARN"
+        assert "2/2 active item(s) missing LCSC part number" in result.details
+        assert "resolvable from spec" not in result.details
+
+    def test_items_with_lcsc_never_warn(self, monkeypatch):
+        """Items that already carry an LCSC are never counted as missing."""
+        items = [self._item("C1", lcsc="C111"), self._item("R1", lcsc="C222")]
+        checker = self._make_checker(monkeypatch, items, set())
+
+        result = checker._check_bom_fields()
+
+        assert result.status == "OK"
+        assert "missing LCSC" not in result.details
+
+    def test_spec_lcsc_refs_reads_kct_file(self, monkeypatch, tmp_path):
+        """`_spec_lcsc_refs` resolves refs (incl. ranges) from a real .kct."""
+        (tmp_path / "project.kct").write_text(
+            'kct_version: "1.0"\n'
+            "project:\n"
+            '  name: "T"\n'
+            '  revision: "A"\n'
+            "bom_entries:\n"
+            "  - ref: C1\n"
+            "    part: MPN1\n"
+            "    lcsc: C111\n"
+            "  - ref: R1-R3\n"
+            "    part: MPN2\n"
+            "    lcsc: C222\n"
+            "  - ref: U1\n"  # MPN only, no lcsc -> must NOT be resolved
+            "    part: MPN3\n"
+        )
+        # No .git boundary in tmp_path, so find_spec_file finds project.kct.
+        checker = PreflightChecker.__new__(PreflightChecker)
+        checker.pcb_path = tmp_path / "board.kicad_pcb"
+
+        refs = checker._spec_lcsc_refs()
+
+        assert refs == {"C1", "R1", "R2", "R3"}
+        assert "U1" not in refs
+
+    def test_spec_lcsc_refs_no_spec_returns_empty(self, monkeypatch, tmp_path):
+        """No .kct file present -> empty set, preserving legacy warn behaviour."""
+        # tmp_path has no .kct and no .git; find_spec_file walks up harmlessly.
+        checker = PreflightChecker.__new__(PreflightChecker)
+        checker.pcb_path = tmp_path / "board.kicad_pcb"
+
+        assert checker._spec_lcsc_refs() == set()
+
+
+# ---------------------------------------------------------------------------
 # PreflightChecker -- skip all
 # ---------------------------------------------------------------------------
 

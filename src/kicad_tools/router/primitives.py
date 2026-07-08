@@ -193,13 +193,17 @@ class Via:
         layer_start = self.layers[0].kicad_name
         layer_end = self.layers[1].kicad_name
         type_token = " micro" if self.is_micro else ""
+        # Issue #3925: field order matches KiCad's canonical writer
+        # (uuid BEFORE net).  Emitting net before uuid caused every via to
+        # churn on the first KiCad open/save round-trip, producing a diff
+        # proportional to via count even when no geometry changed.
         return f"""(via{type_token}
 \t\t(at {self.x:.4f} {self.y:.4f})
 \t\t(size {_fmt(self.diameter)})
 \t\t(drill {_fmt(self.drill)})
 \t\t(layers "{layer_start}" "{layer_end}")
-\t\t(net {self.net})
 \t\t(uuid "{_make_uuid()}")
+\t\t(net {self.net})
 \t)"""
 
 
@@ -227,14 +231,20 @@ class Segment:
         return (self.x2, self.y2)
 
     def to_sexp(self) -> str:
-        """Generate KiCad S-expression."""
+        """Generate KiCad S-expression.
+
+        Issue #3925: field order matches KiCad's canonical writer (uuid
+        BEFORE net).  Emitting net before uuid caused every segment to
+        churn on the first KiCad open/save round-trip, producing a diff
+        proportional to segment count even when no geometry changed.
+        """
         return f"""(segment
 \t\t(start {self.x1:.4f} {self.y1:.4f})
 \t\t(end {self.x2:.4f} {self.y2:.4f})
 \t\t(width {_fmt(self.width)})
 \t\t(layer "{self.layer.kicad_name}")
-\t\t(net {self.net})
 \t\t(uuid "{_make_uuid()}")
+\t\t(net {self.net})
 \t)"""
 
 

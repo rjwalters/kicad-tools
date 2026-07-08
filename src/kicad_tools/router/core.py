@@ -360,6 +360,39 @@ def _format_pad_ref(pad: Pad) -> str:
 _select_seg_seg_demotion_nets = select_seg_seg_demotion_nets
 
 
+def _should_flush_oscillation_msgs(
+    deferred_msgs: list[str],
+    stranded_net_count: int,
+) -> bool:
+    """Decide whether buffered oscillation/escape diagnostics are surfaced.
+
+    Issue #3942 (Bug A): the negotiated loop buffers its mid-loop
+    ``⚠ Oscillation detected`` / ``All N escape strategies exhausted``
+    messages instead of printing them immediately.  After the loop exits,
+    they are surfaced ONLY when the route genuinely failed -- i.e. at
+    least one routable net remains stranded (its pads are not all in one
+    connected component).
+
+    We deliberately do NOT gate on residual overflow: a board can reach
+    full connectivity while carrying overflow from overlaps that the
+    post-loop demotion/correction passes resolve (e.g. the board 01
+    voltage divider ends 3/3 connected with overflow=2).  Gating on
+    overflow alone would still leak the failure-flavored wording there.
+
+    Args:
+        deferred_msgs: The buffered diagnostic lines (empty => nothing to
+            flush, so this returns False).
+        stranded_net_count: Number of routable nets NOT fully connected at
+            loop exit (``len(_stranded_nets())``).  Zero means the route
+            succeeded; any positive value is a genuine partial.
+
+    Returns:
+        True when the buffered messages should be printed (genuine
+        partial), False when they should be dropped (full success).
+    """
+    return bool(deferred_msgs) and stranded_net_count > 0
+
+
 def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     """Run a single Monte Carlo trial in a worker process.
 
@@ -6633,6 +6666,26 @@ class Autorouter:
         overflow_history: list[int] = []
         escape_strategy_index = 0
 
+        # Issue #3942 (Bug A): buffer oscillation/escape diagnostics printed
+        # mid-loop and only surface them if the router ends with stranded nets
+        # (a genuine partial route).  These messages describe an intermediate
+        # local-minimum the negotiated loop hit; when a later iteration (or the
+        # post-loop best-state restore) resolves the board to full connectivity
+        # they are misleading noise that reads as a failure on a 100%-routed
+        # board.  See ``_should_flush_oscillation_msgs`` for the gate and the
+        # post-loop flush site.
+        deferred_oscillation_msgs: list[str] = []
+
+        def _emit_oscillation_msg(message: str) -> None:
+            """Buffer an oscillation/escape diagnostic for conditional flush.
+
+            Issue #3942: mid-loop oscillation and escape messages are surfaced
+            only if the route ultimately fails to connect every routable net.
+            When the route converges to full connectivity they are dropped so a
+            100%%-routed board produces no failure-flavored wording.
+            """
+            deferred_oscillation_msgs.append(message)
+
         # Issue #2334: Stochastic perturbation state tracking.
         # perturbation_stagnation_count tracks how many iterations the
         # overflow has not improved, used to scale perturbation magnitude.
@@ -8655,8 +8708,13 @@ class Autorouter:
                                     f"stagnation={perturbation_stagnation_count}) ({elapsed_str()})"
                                 )
 
-                            print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
-                            print(
+                            # Issue #3942: buffer these diagnostics; they are
+                            # only surfaced if the route ends with residual
+                            # overflow (see deferred flush after the loop).
+                            _emit_oscillation_msg(
+                                f"  ⚠ Oscillation detected: {overflow_history[-4:]}"
+                            )
+                            _emit_oscillation_msg(
                                 f"    Attempting escape strategies starting from {escape_strategy_index + 1}..."
                             )
 
@@ -8686,14 +8744,14 @@ class Autorouter:
                             escape_strategy_index += tried
 
                             if success:
-                                print(
+                                _emit_oscillation_msg(
                                     f"    Escape successful! Overflow: {overflow} → {new_overflow}"
                                 )
                                 overflow = new_overflow
                                 overflow_history[-1] = new_overflow
                                 overused = self.grid.find_overused_cells()
                             else:
-                                print(
+                                _emit_oscillation_msg(
                                     f"    All {tried} escape strategies exhausted without improvement"
                                 )
 
@@ -9291,8 +9349,11 @@ class Autorouter:
                                 f"stagnation={perturbation_stagnation_count}) ({elapsed_str()})"
                             )
 
-                        print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
-                        print(
+                        # Issue #3942: buffer these diagnostics; they are only
+                        # surfaced if the route ends with residual overflow
+                        # (see deferred flush after the loop).
+                        _emit_oscillation_msg(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
+                        _emit_oscillation_msg(
                             f"    Attempting escape strategies starting from {escape_strategy_index + 1}..."
                         )
 
@@ -9322,12 +9383,14 @@ class Autorouter:
                         escape_strategy_index += tried
 
                         if success:
-                            print(f"    Escape successful! Overflow: {overflow} → {new_overflow}")
+                            _emit_oscillation_msg(
+                                f"    Escape successful! Overflow: {overflow} → {new_overflow}"
+                            )
                             overflow = new_overflow
                             overflow_history[-1] = new_overflow  # Update last entry
                             overused = self.grid.find_overused_cells()
                         else:
-                            print(
+                            _emit_oscillation_msg(
                                 f"    All {tried} escape strategies exhausted without improvement"
                             )
                             # Continue to next iteration with different parameters
@@ -9452,6 +9515,25 @@ class Autorouter:
             # queue every subsequent unmark_route on a long-lived grid
             # (follow-up to #3488).  No-op when no window is open.
             self._flush_corridor_reservation(net_routes)
+
+        # Issue #3942: flush buffered oscillation/escape diagnostics only when
+        # the route did NOT fully succeed.  These intermediate local-minimum
+        # messages describe a state the negotiated loop hit mid-way; when a
+        # later iteration (or the post-loop restore) resolves the board to full
+        # connectivity, they are misleading noise that reads as a failure on a
+        # 100%-routed board.
+        #
+        # "Fully succeeded" here means every routable net's pads are in one
+        # connected component (``_stranded_nets()`` is empty).  We deliberately
+        # do NOT gate on ``overflow == 0``: a board can route to 100%
+        # connectivity while carrying residual overflow from overlaps that the
+        # post-loop demotion/correction passes resolve (board 01 voltage
+        # divider ends 3/3 connected with overflow=2).  Gating on overflow
+        # alone would still surface the failure-flavored wording there.
+        if _should_flush_oscillation_msgs(deferred_oscillation_msgs, len(_stranded_nets())):
+            for _msg in deferred_oscillation_msgs:
+                print(_msg)
+        deferred_oscillation_msgs.clear()
 
         successful_nets = sum(1 for routes in net_routes.values() if routes)
         total_elapsed = time.time() - start_time

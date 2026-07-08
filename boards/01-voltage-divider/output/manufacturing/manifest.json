@@ -1,7 +1,7 @@
 {
   "version": "1.0",
-  "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-12T04:58:53.135784+00:00",
+  "kicad_tools_version": "0.14.0",
+  "generated_at": "2026-07-07T16:09:53.691854+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,51 +13,51 @@
       "size": 367
     },
     "gerbers.zip": {
-      "sha256": "66483fbdc236192062c370bbaa7bdfb7d9f0a0142fc90a36a5daae329cd22f7a",
-      "size": 10798
+      "sha256": "5659ab5027f374f4e9bf0f2a9c39bcee546884d3a4a55930790dca4be8af147a",
+      "size": 12517
     },
     "report.pdf": {
-      "sha256": "22fe6c78cc59e8262ac005611a4421c332a9a948a3ebf607d24c82ab2df2613c",
-      "size": 708095
+      "sha256": "21e590e5fc0fe5981d5b52046e1ee8457a974c4fedcda59605cd28a2697393d9",
+      "size": 32573
     },
     "report.md": {
-      "sha256": "08e6917d7a00f6987d3b9a475b2e1bfa595394400120e09656901c5f1b413804",
+      "sha256": "a475d2794db8d2c59c8b4376c94c836fbebedc38c16383b7deca5429fd844650",
       "size": 2383
     },
     "assembly.png": {
-      "sha256": "f939265d4e6094357cc3dc1a3edb94c5ed3954b25fcf2161a303273b7a182f43",
-      "size": 85525
+      "sha256": "24b69bff1a2e4e9811795fa7cc22414b2d3749e541419e13e4aafb613c2afdd5",
+      "size": 103411
     },
     "layer_B_Cu.png": {
-      "sha256": "4c0543ee930e66ff3cd16b8ea9d0a1780fb918e9e3e64dfb2a5567cb6c9f321e",
-      "size": 66802
+      "sha256": "a3b7bc0b8956ba400c379fc4bfc0f7651a5c89854b3a2a6c58f71b5a2882cadf",
+      "size": 79969
     },
     "layer_F_Cu.png": {
-      "sha256": "723ad2fbc492439df49fbce4a9d6e2e36a5716fa51b8860d4a1d0446ff507a67",
-      "size": 93163
+      "sha256": "ad0ca1c669c00972ca7cc465e067841fd03dfa6c49b42a78270496f1ddccc982",
+      "size": 106493
     },
     "pcb_back.png": {
-      "sha256": "b4661f9f7961a63921f2c34beace3c77a61210d0ced7b82c738e3c8034e4530b",
-      "size": 68648
+      "sha256": "8b0a1af6c8e0fc1701b4e130b5bda669baeb5f76bb4001c831dbdcb5cb04ad1a",
+      "size": 81948
     },
     "pcb_copper.png": {
-      "sha256": "4cb6feea93ca34be45298236002d727bb7afb52552d247afed8d09fec00e043b",
-      "size": 70708
+      "sha256": "04b48380bbf96e56a20b08a1eebb4726d6393be613a5aaa9d24b31653b3a54cc",
+      "size": 89322
     },
     "pcb_front.png": {
-      "sha256": "c3c1fd99e0af0f2ea0771a5fa1e13f31d2d1574d35bb305f79bac2289ddceb09",
-      "size": 110676
+      "sha256": "4743fe32bb2c196a4cbadbeea33362264c3ab64f4f7ddb87f4a691420f1b5d44",
+      "size": 125731
     },
     "schematic_voltage_divider.png": {
-      "sha256": "57fe1192c24ca71912345cd120d21457b22dfb3efb2a1ea33fb0af40ee8346ee",
-      "size": 117914
+      "sha256": "785663bec424b0523907760db8e872aea4528cdc7f8ddc02a42b6612e8f53f0a",
+      "size": 118034
     },
     "kicad_project.zip": {
-      "sha256": "67056fa8b20e63ba621145b54cd444176aa9ab167c8345967c171484758256eb",
-      "size": 10824
+      "sha256": "8f1c1cad0a2f175f2c6fa0a477d2c3f5400c3e79b5fcea5f933457e441a25cc5",
+      "size": 12880
     },
     "README.txt": {
-      "sha256": "0243c8aeb013dc632472380022ad84cec3f967b3897330662f8f59ad905ba4bc",
+      "sha256": "60ace5201809e58fb742dcfde757ef0fe9c578698abe8c2bb2406d9ae40b954e",
       "size": 881
     }
   },
@@ -78,6 +78,11 @@
       "message": "Schematic auto-detected: voltage_divider.kicad_sch"
     },
     {
+      "name": "schematic_footprints",
+      "status": "OK",
+      "message": "All schematic symbols have a footprint assigned"
+    },
+    {
       "name": "board_outline",
       "status": "OK",
       "message": "Board outline is closed (5 points)"
@@ -95,7 +100,7 @@
     {
       "name": "drill_holes",
       "status": "OK",
-      "message": "Drill holes present (0 vias, 4 TH pads)"
+      "message": "Drill holes present (2 vias, 4 TH pads)"
     },
     {
       "name": "tht_in_cpl",
@@ -104,9 +109,14 @@
     },
     {
       "name": "bom_fields",
-      "status": "WARN",
-      "message": "BOM field issues: 1 problem(s)",
-      "details": "4/4 active item(s) missing LCSC part number"
+      "status": "OK",
+      "message": "All 4 BOM items have required fields",
+      "details": "4 active item(s) will receive LCSC from spec overlay"
+    },
+    {
+      "name": "bom_lcsc_values",
+      "status": "OK",
+      "message": "No LCSC value/package mismatches detected (0 assigned item(s) checked against local parts cache)"
     },
     {
       "name": "bom_pcb_match",

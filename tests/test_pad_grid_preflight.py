@@ -362,6 +362,181 @@ class TestDRCCheckerIntegration:
 
 
 # ---------------------------------------------------------------------------
+# Issue #3941: aggregate per-pad warnings into one warning per component ref
+
+
+#: Per-axis offset that yields an L2 distance-to-grid of ~0.057 mm, clearly
+#: above the 0.05 mm default tolerance (issue #3042).  The max per-axis
+#: distance to a 0.1 mm grid is 0.05 mm, so a genuinely off-grid pad must be
+#: off on BOTH axes; 0.04 mm on each gives L2 = sqrt(0.04**2 * 2) ~= 0.0566.
+_OFF_GRID_AXIS = 0.04
+
+
+def _lqfp48_pads(axis_offset: float = _OFF_GRID_AXIS) -> list[tuple[str, float, float]]:
+    """Build 48 off-grid pads on a 0.5 mm pitch, each uniformly off-grid.
+
+    Emulates an LQFP-48 whose 0.5 mm lattice, placed at a non-integer
+    origin, leaves every pad the same L2 distance off the 0.1 mm router
+    grid.  ``axis_offset`` is applied on both axes so the L2 deviation
+    exceeds the 0.05 mm default tolerance.
+    """
+    pads: list[tuple[str, float, float]] = []
+    for i in range(48):
+        # 0.5 mm pitch lands on the 0.1 grid; the constant per-axis offset
+        # pushes every pad the same distance off-grid.
+        pads.append((str(i + 1), i * 0.5 + axis_offset, axis_offset))
+    return pads
+
+
+class TestAggregation:
+    """One aggregated ``pad_grid`` warning per component ref (issue #3941)."""
+
+    def _checker(self, tmp_path: Path, footprints: list) -> object:  # type: ignore[type-arg]
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        text = _pcb_with_pads(footprints)
+        pcb_path = _write_pcb(tmp_path, text)
+        pcb = PCB.load(pcb_path)
+        return DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+
+    def test_lqfp48_collapses_to_one_warning(self, tmp_path: Path) -> None:
+        """48 uniformly off-grid pads emit exactly 1 aggregated warning."""
+        checker = self._checker(
+            tmp_path,
+            [
+                (
+                    "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+                    "U2",
+                    100.0,
+                    100.0,
+                    0.0,
+                    _lqfp48_pads(),
+                )
+            ],
+        )
+        results = checker.check_pad_grid_alignment(grid_resolution=0.1)  # type: ignore[attr-defined]
+        assert results.warning_count == 1
+        v = results.violations[0]
+        assert v.rule_id == "pad_grid"
+        assert v.severity == "warning"
+        assert v.items == ("U2",)
+        # Message carries the count, the footprint context, and a verbose hint.
+        assert "48 pads off-grid" in v.message
+        assert "U2" in v.message
+        assert "LQFP-48" in v.message
+        assert "--verbose" in v.message
+
+    def test_verbose_preserves_per_pad_detail(self, tmp_path: Path) -> None:
+        """``aggregate=False`` restores one warning per off-grid pad."""
+        checker = self._checker(
+            tmp_path,
+            [
+                (
+                    "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+                    "U2",
+                    100.0,
+                    100.0,
+                    0.0,
+                    _lqfp48_pads(),
+                )
+            ],
+        )
+        results = checker.check_pad_grid_alignment(  # type: ignore[attr-defined]
+            grid_resolution=0.1, aggregate=False
+        )
+        assert results.warning_count == 48
+        # Each per-pad message keeps the original single-pad format.
+        assert all("is off-grid by" in v.message for v in results.violations)
+
+    def test_single_off_grid_pad_unchanged(self, tmp_path: Path) -> None:
+        """A component with one off-grid pad keeps the per-pad message."""
+        checker = self._checker(
+            tmp_path,
+            [
+                (
+                    "Test:FP",
+                    "U1",
+                    100.0,
+                    100.0,
+                    0.0,
+                    [("1", 0.0, 0.0), ("2", 1.25, 0.04)],
+                )
+            ],
+        )
+        results = checker.check_pad_grid_alignment(grid_resolution=0.1)  # type: ignore[attr-defined]
+        assert results.warning_count == 1
+        v = results.violations[0]
+        assert "U1.2" in v.message
+        assert "is off-grid by" in v.message
+        # Single-pad group is NOT rendered as an aggregate.
+        assert "pads off-grid" not in v.message
+
+    def test_multi_component_one_warning_per_ref(self, tmp_path: Path) -> None:
+        """Two off-grid footprints emit exactly two aggregated warnings."""
+        checker = self._checker(
+            tmp_path,
+            [
+                (
+                    "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+                    "U1",
+                    100.0,
+                    100.0,
+                    0.0,
+                    [(str(i + 1), i * 0.5 + 0.04, 0.04) for i in range(10)],
+                ),
+                (
+                    "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+                    "U2",
+                    100.0,
+                    120.0,
+                    0.0,
+                    [(str(i + 1), i * 0.5 + 0.04, 0.04) for i in range(5)],
+                ),
+            ],
+        )
+        results = checker.check_pad_grid_alignment(grid_resolution=0.1)  # type: ignore[attr-defined]
+        assert results.warning_count == 2
+        refs = {v.items[0] for v in results.violations}
+        assert refs == {"U1", "U2"}
+        by_ref = {v.items[0]: v for v in results.violations}
+        assert "10 pads off-grid" in by_ref["U1"].message
+        assert "5 pads off-grid" in by_ref["U2"].message
+
+    def test_grouped_by_ref_helper(self, tmp_path: Path) -> None:
+        """``OffGridReport.grouped_by_ref`` buckets pads by component ref."""
+        text = _pcb_with_pads(
+            [
+                (
+                    "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+                    "U1",
+                    100.0,
+                    100.0,
+                    0.0,
+                    [(str(i + 1), i * 0.5 + 0.04, 0.04) for i in range(4)],
+                ),
+                (
+                    "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+                    "U2",
+                    100.0,
+                    120.0,
+                    0.0,
+                    [(str(i + 1), i * 0.5 + 0.04, 0.04) for i in range(3)],
+                ),
+            ]
+        )
+        pcb = _write_pcb(tmp_path, text)
+        report = check_pad_grid_alignment(pcb, grid_resolution=0.1)
+        groups = report.grouped_by_ref()
+        assert set(groups.keys()) == {"U1", "U2"}
+        assert len(groups["U1"]) == 4
+        assert len(groups["U2"]) == 3
+        # Flattening the groups reproduces the full off_grid_pads list.
+        flat = [p for pads in groups.values() for p in pads]
+        assert len(flat) == len(report.off_grid_pads)
+
+
+# ---------------------------------------------------------------------------
 # Issue #3042: stock-library-friendly default tolerance
 
 

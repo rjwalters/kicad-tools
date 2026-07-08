@@ -1156,6 +1156,18 @@ def _survey_board(
     )
 
 
+def _is_single_board_dir(path: Path) -> bool:
+    """Return True if ``path`` appears to be a board directory itself.
+
+    Detects the presence of an ``output/`` child or a ``project.kct`` file,
+    which distinguishes a single board root (e.g. ``boards/04-stm32-devboard``)
+    from a fleet parent directory (e.g. ``boards/``). This lets discovery
+    auto-detect single-board-dir invocations instead of returning an empty
+    list when ``--boards-dir`` already points at a board.
+    """
+    return (path / "output").is_dir() or (path / "project.kct").is_file()
+
+
 def _discover_boards(
     boards_dir: Path,
     pattern: str,
@@ -1166,12 +1178,22 @@ def _discover_boards(
     A board is discovered if it contains a routed PCB matching ``pattern``
     under ``<board>/output/``. Boards without a routed PCB are silently
     skipped (they haven't reached the routing stage yet).
+
+    When ``boards_dir`` itself looks like a board directory (see
+    :func:`_is_single_board_dir`), it is surveyed directly as a single
+    board rather than being scanned for board sub-directories.
     """
     if not boards_dir.is_dir():
         return []
     tolerances = _load_drc_tolerances(
         drc_tolerance_path if drc_tolerance_path is not None else _DRC_TOLERANCE_PATH
     )
+    # Auto-detect single-board-dir invocation: --boards-dir points at a
+    # board rather than a parent of boards.
+    if _is_single_board_dir(boards_dir):
+        if _discover_routed_pcb(boards_dir, pattern) is None:
+            return []
+        return [_survey_board(boards_dir, pattern, tolerances)]
     boards: list[BoardStatus] = []
     for entry in sorted(boards_dir.iterdir()):
         if not entry.is_dir():
@@ -1232,14 +1254,20 @@ def _discover_ship_ready(
 ) -> list[ShipReadyStatus]:
     """Survey every board sub-directory for ship-readiness.
 
-    Mirrors :func:`_discover_boards` (same skip rules) but builds the
-    richer :class:`ShipReadyStatus` per board.
+    Mirrors :func:`_discover_boards` (same skip rules, including the
+    single-board-dir auto-detection) but builds the richer
+    :class:`ShipReadyStatus` per board.
     """
     if not boards_dir.is_dir():
         return []
     tolerances = _load_drc_tolerances(
         drc_tolerance_path if drc_tolerance_path is not None else _DRC_TOLERANCE_PATH
     )
+    # Auto-detect single-board-dir invocation (see _discover_boards).
+    if _is_single_board_dir(boards_dir):
+        if _discover_routed_pcb(boards_dir, pattern) is None:
+            return []
+        return [_survey_board_ship_ready(boards_dir, pattern, tolerances)]
     results: list[ShipReadyStatus] = []
     for entry in sorted(boards_dir.iterdir()):
         if not entry.is_dir():

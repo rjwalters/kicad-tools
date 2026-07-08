@@ -155,7 +155,7 @@ class TestRunStepExport:
         )
         console = Console(quiet=True)
 
-        with patch("subprocess.run") as mock_run:
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
             result = _run_step_export(ctx, console)
 
@@ -173,7 +173,7 @@ class TestRunStepExport:
         )
         console = Console(quiet=True)
 
-        with patch("subprocess.run") as mock_run:
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stderr="export error", stdout="")
             result = _run_step_export(ctx, console)
 
@@ -211,7 +211,7 @@ class TestRunStepExport:
         )
         console = Console(quiet=True)
 
-        with patch("subprocess.run") as mock_run:
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
             _run_step_export(ctx, console)
 
@@ -238,7 +238,7 @@ class TestRunStepExport:
         )
         console = Console(quiet=True)
 
-        with patch("subprocess.run") as mock_run:
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
             _run_step_export(ctx, console)
 
@@ -267,7 +267,7 @@ class TestRunStepExport:
         )
         console = Console(quiet=True)
 
-        with patch("subprocess.run") as mock_run:
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
             _run_step_export(ctx, console)
 
