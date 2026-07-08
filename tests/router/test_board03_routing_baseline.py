@@ -648,31 +648,22 @@ class TestBoard03RoutingBaseline:
             "needs to be regenerated)."
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Issue #3952: --differential-pairs is inert on board 03's routing "
-            "path.  The board's fine-pitch USB-C forces the escape-routing "
-            "dispatch, and route_cmd's escape / auto-layers-escalation paths "
-            "do not consult args.differential_pairs, so route_all_with_diffpairs "
-            "(the CoupledPathfinder pre-pass) never runs.  Forcing the diff-pair "
-            "path with --no-auto-layers loses escape routing and reintroduces a "
-            "native-DRC clearance violation, so the recipe keeps --auto-layers.  "
-            "When #3952 integrates diff-pair routing into the escape path, this "
-            "flips to XPASS and should be un-xfailed."
-        ),
-        strict=False,
-    )
     def test_coupled_pathfinder_phase_a_invoked(self, route_stdout: str) -> None:
         """The diff-pair pre-pass (Phase A) actually runs under the recipe.
 
-        Executable documentation of the #3952 limitation: restoring
-        ``--differential-pairs`` (Issue #3922) makes the recipe *request*
-        coupled routing, but on board 03 the CLI dispatch never reaches the
-        ``route_all_with_diffpairs`` pre-pass.  This test asserts the
-        unconditional Phase A banner appears; it is expected to xfail until
-        #3952 wires diff-pair routing into the escape-routing path.  A
-        surprise XPASS means #3952 (or an equivalent) has landed -- remove
-        the xfail marker and pin the behavior.
+        Issue #3952 (LANDED): ``route_with_escape_and_diffpairs`` now composes
+        the escape pre-phase with the CoupledPathfinder diff-pair pre-pass, and
+        all four escape/escalation dispatch sites in ``route_cmd.py`` are gated
+        on ``args.differential_pairs`` to call it.  On board 03 the fine-pitch
+        USB-C still forces the escape dispatch, but the composed path now runs
+        Phase A: the ``=== Differential Pair Routing ===`` banner appears and
+        the USB D+/D- pair is detected.  This test was previously ``xfail`` on
+        #3952 and now hard-pins the behavior -- if it regresses to no banner,
+        the diff-pair dispatch was re-bypassed on the escape path.
+
+        (The pair still budget-exits the coupled A* and falls through to the
+        escape main pass on board 03 -- routing it *coupled* at 0 DRC needs
+        #3921 -- but Phase A running is exactly what this gate asserts.)
         """
         assert "=== Differential Pair Routing ===" in route_stdout, (
             "The diff-pair pre-pass (Phase A / route_all_with_diffpairs) did "

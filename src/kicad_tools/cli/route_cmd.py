@@ -3614,11 +3614,25 @@ def route_with_layer_escalation(
 
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
-                router.route_with_escape(
-                    use_negotiated=(args.strategy == "negotiated"),
-                    timeout=_attempt_timeout,
-                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                )
+                # Issue #3952: compose the escape pre-phase with the
+                # CoupledPathfinder diff-pair pre-pass when
+                # --differential-pairs is requested so Phase A runs on
+                # escape-forced boards; otherwise take the unchanged escape
+                # path (byte-identical for no-pair boards).
+                _dp_cfg = _build_diffpair_config(args)
+                if _dp_cfg is not None:
+                    router.route_with_escape_and_diffpairs(
+                        _dp_cfg,
+                        use_negotiated=(args.strategy == "negotiated"),
+                        timeout=_attempt_timeout,
+                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                    )
+                else:
+                    router.route_with_escape(
+                        use_negotiated=(args.strategy == "negotiated"),
+                        timeout=_attempt_timeout,
+                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                    )
             elif getattr(args, "multi_resolution", False):
                 router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
@@ -4491,11 +4505,25 @@ def route_with_rule_relaxation(
 
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
-                router.route_with_escape(
-                    use_negotiated=(args.strategy == "negotiated"),
-                    timeout=_attempt_timeout,
-                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                )
+                # Issue #3952: compose the escape pre-phase with the
+                # CoupledPathfinder diff-pair pre-pass when
+                # --differential-pairs is requested so Phase A runs on
+                # escape-forced boards; otherwise take the unchanged escape
+                # path (byte-identical for no-pair boards).
+                _dp_cfg = _build_diffpair_config(args)
+                if _dp_cfg is not None:
+                    router.route_with_escape_and_diffpairs(
+                        _dp_cfg,
+                        use_negotiated=(args.strategy == "negotiated"),
+                        timeout=_attempt_timeout,
+                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                    )
+                else:
+                    router.route_with_escape(
+                        use_negotiated=(args.strategy == "negotiated"),
+                        timeout=_attempt_timeout,
+                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                    )
             elif getattr(args, "multi_resolution", False):
                 router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
@@ -6563,11 +6591,23 @@ def route_with_combined_escalation(
 
             try:
                 if _should_use_escape_routing(router, escape_flag, quiet):
-                    router.route_with_escape(
-                        use_negotiated=(args.strategy == "negotiated"),
-                        timeout=_attempt_timeout,
-                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    )
+                    # Issue #3952: compose escape + diff-pair pre-pass when
+                    # --differential-pairs is requested (combined 2D
+                    # escalation path); otherwise unchanged escape path.
+                    _dp_cfg = _build_diffpair_config(args)
+                    if _dp_cfg is not None:
+                        router.route_with_escape_and_diffpairs(
+                            _dp_cfg,
+                            use_negotiated=(args.strategy == "negotiated"),
+                            timeout=_attempt_timeout,
+                            per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                        )
+                    else:
+                        router.route_with_escape(
+                            use_negotiated=(args.strategy == "negotiated"),
+                            timeout=_attempt_timeout,
+                            per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                        )
                 elif getattr(args, "multi_resolution", False):
                     router.route_all_multi_resolution(
                         use_negotiated=(args.strategy == "negotiated"),
@@ -7013,6 +7053,37 @@ def _resolve_escape_routing_flag(args) -> bool | None:
     if escape:
         return True
     return None
+
+
+def _build_diffpair_config(args):
+    """Build a ``DifferentialPairConfig`` from parsed CLI args, or ``None``.
+
+    Issue #3952: the escape / auto-layers-escalation dispatch sites need a
+    ``diffpair_config`` to compose diff-pair routing with escape routing via
+    ``Autorouter.route_with_escape_and_diffpairs``.  The ``do_routing()``
+    fixed-layer path builds this inline (route_cmd.py); the escalation
+    functions build their own routers and so need their own config.  This
+    helper centralizes the construction so all four dispatch sites stay in
+    sync with the flag surface (``--diffpair-spacing``, ``--diffpair-max-delta``,
+    ``--diffpair-per-pair-timeout``).
+
+    Returns ``None`` when ``--differential-pairs`` was not requested so callers
+    can gate the composed path on a truthy result (the no-pair regression
+    firewall -- boards without pairs take the byte-identical old path).
+    """
+    if not getattr(args, "differential_pairs", False):
+        return None
+
+    from kicad_tools.router import DifferentialPairConfig
+
+    return DifferentialPairConfig(
+        enabled=True,
+        spacing=args.diffpair_spacing,
+        max_length_delta=args.diffpair_max_delta,
+        # Issue #3275: forward the optional per-pair wall-clock budget so the
+        # CoupledPathfinder's per-pair coupled A* search can be bounded.
+        per_pair_timeout=getattr(args, "diffpair_per_pair_timeout", None),
+    )
 
 
 def _should_use_escape_routing(router, escape_flag: bool | None, quiet: bool) -> bool:
@@ -9492,6 +9563,23 @@ def main(argv: list[str] | None = None) -> int:
 
             # Check if escape routing should run as a pre-phase
             if _should_use_escape_routing(router, escape_routing_flag, quiet):
+                # Issue #3952: compose the escape pre-phase with the
+                # CoupledPathfinder diff-pair pre-pass when
+                # --differential-pairs is requested so Phase A runs on
+                # escape-forced boards (the fixed-layer escape branch used
+                # to bypass the diff-pair dispatch just like the escalation
+                # paths).  ``diffpair_config`` is already built above and in
+                # scope here; gating on it keeps no-pair boards on the
+                # byte-identical old ``route_with_escape`` path.
+                if args.differential_pairs and diffpair_config is not None:
+                    routes, dp_warnings = router.route_with_escape_and_diffpairs(
+                        diffpair_config,
+                        use_negotiated=(args.strategy == "negotiated"),
+                        timeout=_budgeted_timeout(args),
+                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                    )
+                    diffpair_warnings.extend(dp_warnings)
+                    return routes
                 return router.route_with_escape(
                     use_negotiated=(args.strategy == "negotiated"),
                     timeout=_budgeted_timeout(args),
