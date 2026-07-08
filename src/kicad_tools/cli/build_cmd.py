@@ -60,6 +60,33 @@ class BuildStep(str, Enum):
     ALL = "all"
 
 
+# Canonical ordering for ``kct build --step all``.
+#
+# EXPORT precedes VERIFY (issue #3970): export writes
+# ``manufacturing/manifest.json``, and VERIFY's meta-check reads that
+# manifest.  Verifying before exporting left the manifest sub-check
+# ``NOT RUN`` -> rollup ``INCOMPLETE`` -> exit 2, which the verify step
+# misreported as "DRC found issues".  Producing the artifact before
+# verifying it is the correct dependency order and lets VERIFY validate
+# the freshly-exported bundle.
+_ALL_STEPS: tuple[BuildStep, ...] = (
+    BuildStep.SCHEMATIC,
+    BuildStep.ERC,
+    BuildStep.PCB,
+    BuildStep.SYNC,
+    BuildStep.OUTLINE,
+    BuildStep.PLACEMENT,
+    BuildStep.ZONES,
+    BuildStep.SILKSCREEN,
+    BuildStep.ROUTE,
+    BuildStep.STITCH,
+    BuildStep.PAGE_FIT,
+    BuildStep.PREFLIGHT_ROUTING,
+    BuildStep.EXPORT,
+    BuildStep.VERIFY,
+)
+
+
 @dataclass
 class BuildResult:
     """Result of a build step."""
@@ -2398,6 +2425,42 @@ def _run_step_preflight_routing(ctx: BuildContext, console: Console) -> BuildRes
     )
 
 
+def _classify_verify_result(returncode: int, stdout: str) -> str:
+    """Map a ``kct check`` exit code + stdout to a truthful verify message.
+
+    Issue #3970 (Bug B): the verify step previously mapped *every* nonzero
+    exit to ``"DRC found issues"``.  ``kct check`` runs in meta-check mode and
+    its exit codes carry finer meaning (check_cmd.py exit-code policy):
+
+    * ``0``  — all sub-checks PASSED.
+    * ``1``  — tool-level failure (file not found, parse error).
+    * ``2``  — a sub-check FAILED, **or** the rollup is ``INCOMPLETE`` because
+      a sub-check is ``NOT RUN`` (e.g. the manufacturing manifest has not been
+      generated yet), or warnings + ``--strict``.
+
+    An ``INCOMPLETE`` rollup is not a DRC failure, so reporting "DRC found
+    issues" there is self-contradicting (the log shows ``DRC: PASSED``).  With
+    EXPORT now running before VERIFY the manifest exists and this path should
+    not fire during a full build, but we keep the distinction so a genuinely
+    missing manifest (or single ``--step verify`` invocation) is reported
+    honestly rather than misattributed to DRC.
+    """
+    if returncode == 0:
+        return "DRC passed"
+
+    if returncode == 1:
+        return "Verification tool error"
+
+    # returncode == 2 (or any other nonzero): distinguish an INCOMPLETE
+    # rollup (manifest / sub-check NOT RUN) from an actual DRC/sub-check
+    # failure by inspecting the meta-check stdout.
+    haystack = stdout or ""
+    if "INCOMPLETE" in haystack or "NOT RUN" in haystack:
+        return "Manifest not yet generated (export step not run)"
+
+    return "DRC found issues"
+
+
 def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
     """Run verification step (DRC + audit)."""
     # Find the PCB to verify (prefer routed version)
@@ -2449,7 +2512,7 @@ def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
         )
 
         drc_success = result.returncode == 0
-        drc_message = "DRC passed" if drc_success else "DRC found issues"
+        drc_message = _classify_verify_result(result.returncode, result.stdout)
 
         if ctx.verbose and result.stdout:
             console.print(result.stdout)
@@ -2944,22 +3007,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Determine steps to run
     if args.step == "all":
-        steps = [
-            BuildStep.SCHEMATIC,
-            BuildStep.ERC,
-            BuildStep.PCB,
-            BuildStep.SYNC,
-            BuildStep.OUTLINE,
-            BuildStep.PLACEMENT,
-            BuildStep.ZONES,
-            BuildStep.SILKSCREEN,
-            BuildStep.ROUTE,
-            BuildStep.STITCH,
-            BuildStep.PAGE_FIT,
-            BuildStep.PREFLIGHT_ROUTING,
-            BuildStep.VERIFY,
-            BuildStep.EXPORT,
-        ]
+        steps = list(_ALL_STEPS)
     else:
         steps = [BuildStep(args.step)]
 

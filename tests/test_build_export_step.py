@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from rich.console import Console
 
 from kicad_tools.cli.build_cmd import (
+    _ALL_STEPS,
     BuildContext,
     BuildStep,
     _run_step_export,
@@ -22,16 +23,20 @@ class TestBuildStepExportEnum:
         assert BuildStep.EXPORT.value == "export"
 
     def test_export_in_all_steps(self) -> None:
-        """When --step all is used, EXPORT should be in the step list."""
-        all_steps = [
-            BuildStep.SCHEMATIC,
-            BuildStep.PCB,
-            BuildStep.OUTLINE,
-            BuildStep.ROUTE,
-            BuildStep.VERIFY,
-            BuildStep.EXPORT,
-        ]
-        assert BuildStep.EXPORT in all_steps
+        """When --step all is used, EXPORT should be in the canonical list."""
+        assert BuildStep.EXPORT in _ALL_STEPS
+
+    def test_export_precedes_verify_in_all_steps(self) -> None:
+        """Export must run before verify (issue #3970).
+
+        VERIFY's meta-check reads ``manufacturing/manifest.json``, which the
+        EXPORT step produces.  If VERIFY ran first the manifest sub-check
+        reported ``NOT RUN`` -> rollup ``INCOMPLETE`` -> exit 2, misreported
+        as "DRC found issues".
+        """
+        assert BuildStep.EXPORT in _ALL_STEPS
+        assert BuildStep.VERIFY in _ALL_STEPS
+        assert _ALL_STEPS.index(BuildStep.EXPORT) < _ALL_STEPS.index(BuildStep.VERIFY)
 
 
 class TestRunStepExport:
