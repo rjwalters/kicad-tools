@@ -127,6 +127,29 @@ _SHADOW_MAX_TRIM_MM: float = float(os.environ.get("KCT_SHADOW_MAX_TRIM_MM", "5.0
 # experimentation (KCT_SHADOW_PER_PAIR_BUDGET_S).
 _SHADOW_PER_PAIR_BUDGET_S: float = float(os.environ.get("KCT_SHADOW_PER_PAIR_BUDGET_S", "30.0"))
 
+# Issue #3990 (unit 2b of #3921): variable-gap parallel offset.  The
+# geometric shadow constructor historically offset the WHOLE guide by a
+# single constant center-to-center gap ``d = spacing_cells * resolution``.
+# At the tightened 0.225-0.275 mm coupled widths this fixed gap is
+# infeasible for 6/9 board-06 pairs: on inside curves the offset overlaps
+# the partner (the -0.165..-0.275 mm ``self-check overlap`` events) and
+# where the guide threaded a gap only wide enough for a zero-width
+# centerline the offset crosses an obstacle (the ``mid-route blockage``
+# events).  Because the diff-pair coupling constraint is a clearance BAND
+# (a floor set by ``effective_intra_pair_clearance()`` and a ceiling set by
+# the impedance tolerance), the offset gap may be varied PER SECTION within
+# ``[d_min, d_max]`` to dodge both failure modes -- tighten toward
+# ``d_min`` on an inside curve that would self-overlap, widen toward
+# ``d_max`` to step around an obstacle -- while both legs stay inside the
+# impedance band.  ``_SHADOW_GAP_BAND_STEPS`` is the number of candidate
+# gaps probed per section (a small linear ladder from ``d_min`` to
+# ``d_max``); the tightest feasible gap that clears both the partner and
+# the grid is kept.  ``_SHADOW_GAP_MAX_TOL_FRAC`` caps how far above the
+# nominal gap the ceiling may reach when the net class exposes no explicit
+# impedance tolerance.  Env-overridable for bench experimentation.
+_SHADOW_GAP_BAND_STEPS: int = int(os.environ.get("KCT_SHADOW_GAP_BAND_STEPS", "5"))
+_SHADOW_GAP_MAX_TOL_FRAC: float = float(os.environ.get("KCT_SHADOW_GAP_MAX_TOL_FRAC", "0.15"))
+
 
 # ---------------------------------------------------------------------------
 # Issue #3023 Phase A: intra-pair clearance violation detection
@@ -3536,6 +3559,129 @@ class DiffPairRouter:
                 )
         route.segments[:] = new_segments
 
+    @staticmethod
+    def _shadow_gap_ladder(d: float, d_min: float, d_max: float) -> list[float]:
+        """Ordered candidate offset gaps for the variable-gap parallel offset.
+
+        Issue #3990 (unit 2b of #3921).  Returns a list of center-to-center
+        gaps to try for a single guide section, ordered by PREFERENCE:
+
+        1. the nominal ``d`` first -- a section feasible at nominal keeps
+           the exact fixed-gap geometry (so the easy pairs are unchanged),
+        2. then TIGHTER gaps stepping down toward ``d_min`` -- the fix for
+           inside-curve self-overlap (a smaller gap pulls the offset off the
+           partner), tried before widening so the coupled gap stays as
+           close to nominal as feasibility allows,
+        3. then WIDER gaps stepping up toward ``d_max`` -- the fix for
+           obstacle blockage (a larger gap steps the offset around copper
+           the guide only cleared for a zero-width centerline).
+
+        All returned gaps lie in ``[d_min, d_max]`` (the impedance band).
+        ``_SHADOW_GAP_BAND_STEPS`` sets the ladder density.  When the band
+        is degenerate (``d_max <= d_min`` or steps <= 1) only ``d`` is
+        returned, collapsing to the fixed-gap constructor.
+        """
+        steps = max(1, _SHADOW_GAP_BAND_STEPS)
+        if steps <= 1 or d_max - d_min < 1e-6:
+            return [d]
+        tighter: list[float] = []
+        wider: list[float] = []
+        # Uniform ladder resolution across the whole band.
+        span = d_max - d_min
+        inc = span / steps
+        # Tighter rungs: from just below nominal down to d_min.
+        g = d - inc
+        while g >= d_min - 1e-9:
+            tighter.append(max(d_min, g))
+            g -= inc
+        # Wider rungs: from just above nominal up to d_max.
+        g = d + inc
+        while g <= d_max + 1e-9:
+            wider.append(min(d_max, g))
+            g += inc
+        ladder = [d]
+        # Interleave tighter-first (prefer holding the coupling as tight as
+        # feasibility allows), then wider fallbacks for obstacle stepping.
+        ladder.extend(tighter)
+        ladder.extend(wider)
+        # De-dup while preserving order (float rungs can coincide at bounds).
+        seen: list[float] = []
+        for gv in ladder:
+            if all(abs(gv - s) > 1e-9 for s in seen):
+                seen.append(gv)
+        return seen
+
+    def _shadow_select_gap(
+        self,
+        seg: Segment,
+        nx: float,
+        ny: float,
+        gap_ladder: list[float],
+        layer_idx: int,
+        s_net: int,
+        pathfinder: CoupledPathfinder,
+        guide_segs: list[Segment],
+        min_center_dist: float,
+    ) -> float:
+        """Choose the per-section parallel-offset gap from the impedance band.
+
+        Issue #3990 (unit 2b of #3921).  ``gap_ladder`` is the preference-
+        ordered list of candidate center-to-center gaps (nominal first, then
+        tighter, then wider -- all inside the impedance band).  This walks
+        the ladder and returns the FIRST gap whose offset of ``seg`` (by
+        ``gap * (nx, ny)``) is BOTH:
+
+        * obstacle-clear -- every rastered cell of the offset segment is
+          unblocked for ``s_net`` (dodges the ``mid-route blockage`` events
+          where the guide threaded a zero-width-centerline gap the offset
+          cannot fit through), AND
+        * partner-clear -- the offset segment's minimum distance to the
+          guide (partner) copper on this layer stays at or above
+          ``min_center_dist`` (center-to-center), i.e. the coupled EDGE gap
+          holds at or above the intra-pair clearance floor (dodges the
+          inside-curve ``self-check overlap`` events).
+
+        Because the ladder tries the nominal gap first and tighter rungs
+        before wider ones, an easy segment keeps the exact nominal geometry,
+        an inside-curve segment tightens just enough to pull off the
+        partner, and an obstructed segment widens just enough to step
+        around the obstacle -- always within ``[d_min, d_max]``.
+
+        When NO ladder rung is feasible the nominal gap (the ladder head) is
+        returned unchanged: the downstream self-check / physical-overlap
+        gates and the trim logic still apply, so an infeasible section
+        degrades to today's fixed-gap behaviour rather than shipping a
+        violation.
+        """
+        grid = self.autorouter.grid
+        step = grid.resolution
+        for gap in gap_ladder:
+            ax, ay = seg.x1 + gap * nx, seg.y1 + gap * ny
+            bx, by = seg.x2 + gap * nx, seg.y2 + gap * ny
+            # Obstacle raster over the candidate offset segment.
+            seg_len = math.hypot(bx - ax, by - ay)
+            if seg_len < 1e-9:
+                return gap
+            n_steps = max(1, int(math.ceil(seg_len / step)))
+            blocked = False
+            for i in range(n_steps + 1):
+                t = i / n_steps
+                gx, gy = grid.world_to_grid(ax + (bx - ax) * t, ay + (by - ay) * t)
+                if pathfinder._is_cell_blocked(gx, gy, layer_idx, s_net):
+                    blocked = True
+                    break
+            if blocked:
+                continue
+            # Partner-clearance: keep the coupled edge gap >= intra floor.
+            if (
+                self._min_distance_to_partner(ax, ay, bx, by, guide_segs, seg.layer)
+                < min_center_dist
+            ):
+                continue
+            return gap
+        # No feasible rung: keep nominal (ladder head), degrade gracefully.
+        return gap_ladder[0]
+
     def _shadow_route_pair(
         self,
         pair: DifferentialPair,
@@ -3589,6 +3735,51 @@ class DiffPairRouter:
         s_net_name = shadow_start.net_name
         s_width = pathfinder._get_trace_width_for_net(s_net_name)
         d = spacing_cells * grid.resolution
+
+        # Issue #3990 (unit 2b of #3921): the parallel-offset gap is a BAND,
+        # not a single value.  ``d`` above is the nominal center-to-center
+        # spacing; the offset for each guide section may vary within
+        # ``[d_min, d_max]`` to dodge inside-curve self-overlap (tighten
+        # toward ``d_min``) and obstacle blockages (widen toward ``d_max``)
+        # while both legs stay inside the impedance tolerance band.
+        #
+        # Band source (authoritative):
+        #   * ``d_min`` -- the intra-pair clearance FLOOR.  The center-to-
+        #     center spacing must keep at least
+        #     ``trace_width + effective_intra_pair_clearance()`` so the
+        #     within-pair EDGE clearance holds; this is exactly the
+        #     ``required_center_spacing`` the caller derives for
+        #     ``min_spacing_cells`` (``route_differential_pair_coupled``).
+        #     Read from the pair's ``NetClassRouting`` when available.
+        #   * ``d_max`` -- the impedance CEILING.  Widening the gap lowers
+        #     coupling and raises the differential impedance; the net
+        #     class' ``impedance_tolerance_percent`` (the same tolerance the
+        #     ``ImpedanceRule`` DRC fires on) bounds how far.  Differential
+        #     impedance is monotone-increasing and near-linear in the gap
+        #     for small deviations, so bounding the GAP deviation by that
+        #     percentage is a conservative proxy that keeps the pair inside
+        #     the impedance band.  Capped at ``_SHADOW_GAP_MAX_TOL_FRAC``.
+        pair_nc = (getattr(self.autorouter, "net_class_map", None) or {}).get(spec.p_start.net_name)
+        if pair_nc is not None:
+            nc_trace_width = float(pair_nc.trace_width)
+            intra_floor = float(pair_nc.effective_intra_pair_clearance())
+            tol_frac = min(
+                _SHADOW_GAP_MAX_TOL_FRAC,
+                max(0.0, float(pair_nc.impedance_tolerance_percent) / 100.0),
+            )
+        else:
+            nc_trace_width = float(s_width)
+            intra_floor = float(rules.trace_clearance)
+            tol_frac = _SHADOW_GAP_MAX_TOL_FRAC
+        # Never let the floor exceed the nominal (a class whose min-spacing
+        # already equals the nominal collapses the band to the single ``d``).
+        d_min = min(d, nc_trace_width + intra_floor)
+        d_max = d * (1.0 + tol_frac)
+        # Candidate gaps: a linear ladder from ``d_min`` up to ``d_max``,
+        # always including the nominal ``d`` and preferring the nominal so a
+        # section that is feasible at nominal is unchanged (byte-for-byte
+        # stable relative to the fixed-gap constructor for the easy pairs).
+        gap_ladder = self._shadow_gap_ladder(d, d_min, d_max)
         # Shadow via lateral offset: the barrel must clear the guide
         # trace (via_r + clearance + guide_width/2), independent of the
         # tighter coupled gap d.
@@ -3642,8 +3833,30 @@ class DiffPairRouter:
                     uy /= length
                     nx = -uy * side
                     ny = ux * side
-                    a = (seg.x1 + d * nx, seg.y1 + d * ny)
-                    b = (seg.x2 + d * nx, seg.y2 + d * ny)
+                    # Issue #3990 (unit 2b): pick the per-section offset gap
+                    # from the impedance band.  Prefer the nominal ``d``;
+                    # tighten (dodges inside-curve self-overlap) or widen
+                    # (dodges obstacle blockage) only when the nominal offset
+                    # is infeasible for THIS segment.  Feasibility is judged
+                    # on the offset segment's grid raster (obstacle-clear)
+                    # and its distance to the guide/partner copper (>= the
+                    # intra-pair clearance floor, so the coupled edge gap
+                    # holds).  Both bounds keep the pair inside the impedance
+                    # band by construction (``gap_ladder`` rungs are all in
+                    # ``[d_min, d_max]``).
+                    seg_gap = self._shadow_select_gap(
+                        seg,
+                        nx,
+                        ny,
+                        gap_ladder,
+                        sec_layer,
+                        s_net,
+                        pathfinder,
+                        guide_segs,
+                        intra_floor + s_width / 2.0 + guide_width / 2.0,
+                    )
+                    a = (seg.x1 + seg_gap * nx, seg.y1 + seg_gap * ny)
+                    b = (seg.x2 + seg_gap * nx, seg.y2 + seg_gap * ny)
                     if prev_pt is not None and prev_layer is not None:
                         if first_in_section and prev_layer != sec_layer:
                             # Guide layer change: place the shadow via.
