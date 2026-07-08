@@ -1,9 +1,9 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-3775/boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-3766/boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
-    "errors": 7,
+    "errors": 6,
     "warnings": 9,
     "infos": 8,
     "rules_checked": 36,
@@ -16,41 +16,45 @@
   },
   "violations": [
     {
-      "rule_id": "connectivity",
-      "type": "connectivity",
+      "rule_id": "clearance_segment_via",
+      "type": "clearance_segment_via",
       "severity": "error",
-      "message": "Net '+24V' is partially routed: 7 of 13 pads stranded (connected island has 6 pads)",
+      "message": "Segment to via clearance 0.100mm < minimum 0.102mm",
       "location": [
-        29.0,
-        8.0
+        20.75,
+        54.9
       ],
-      "layer": null,
-      "actual_value": null,
-      "required_value": null,
+      "layer": "F.Cu",
+      "actual_value": 0.1,
+      "required_value": 0.1016,
       "items": [
-        "C1.1"
+        "Trace-4111287c",
+        "Via-e4f2c71e"
       ],
       "nets": [
-        "+24V"
+        "GATE_DRV_CH",
+        "PHASE_C"
       ]
     },
     {
-      "rule_id": "connectivity",
-      "type": "connectivity",
+      "rule_id": "clearance_segment_via",
+      "type": "clearance_segment_via",
       "severity": "error",
-      "message": "Net 'GND' is partially routed: 33 of 36 pads stranded (connected island has 3 pads)",
+      "message": "Segment to via clearance 0.100mm < minimum 0.102mm",
       "location": [
-        31.0,
-        8.0
+        20.75,
+        54.9
       ],
-      "layer": null,
-      "actual_value": null,
-      "required_value": null,
+      "layer": "In1.Cu",
+      "actual_value": 0.1,
+      "required_value": 0.1016,
       "items": [
-        "C1.2"
+        "Trace-25bebe58",
+        "Via-e4f2c71e"
       ],
       "nets": [
-        "GND"
+        "PHASE_A",
+        "PHASE_C"
       ]
     },
     {
@@ -70,25 +74,6 @@
       ],
       "nets": [
         "ISENSE_A-"
-      ]
-    },
-    {
-      "rule_id": "connectivity",
-      "type": "connectivity",
-      "severity": "error",
-      "message": "Net 'ISENSE_B+' is partially routed: 3 of 4 pads stranded (connected island has 1 pads)",
-      "location": [
-        20.9,
-        84.0
-      ],
-      "layer": null,
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "R11.1"
-      ],
-      "nets": [
-        "ISENSE_B+"
       ]
     },
     {
@@ -133,13 +118,13 @@
       "rule_id": "copper_sliver",
       "type": "copper_sliver",
       "severity": "warning",
-      "message": "Copper sliver on B.Cu: region narrower than minimum copper width 0.102mm (approx width 0.025mm, area 0.0154mm^2)",
+      "message": "Copper sliver on B.Cu: region narrower than minimum copper width 0.102mm (approx width 0.023mm, area 0.0141mm^2)",
       "location": [
-        43.389,
-        42.848
+        43.379,
+        42.86
       ],
       "layer": "B.Cu",
-      "actual_value": 0.0246,
+      "actual_value": 0.0227,
       "required_value": 0.1016,
       "items": [],
       "nets": []
