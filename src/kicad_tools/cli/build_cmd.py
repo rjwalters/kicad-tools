@@ -1281,6 +1281,25 @@ def _resolve_routed_pcb_path(ctx: BuildContext) -> Path:
 
 def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     """Run autorouting step."""
+    # If the PCB step (or a prior run) already left a routed artifact and
+    # recorded it on the context, skip re-routing entirely. This protects
+    # recipe-routed boards (e.g. board 04's generate_design.py, which routes,
+    # stitches, and fills zones during the PCB step) from being clobbered by
+    # the generic autorouter. The post-PCB scan in main() populates
+    # ``ctx.routed_pcb_file`` when it finds a ``*_routed.kicad_pcb`` sibling,
+    # so this guard is robust against filesystem mtime granularity that the
+    # timestamp-based checks below cannot reliably resolve. ``--force`` (which
+    # sets ``ctx.force``) intentionally re-routes and bypasses this guard.
+    if not ctx.force and ctx.routed_pcb_file and ctx.routed_pcb_file.exists():
+        if not ctx.quiet:
+            console.print(f"  Recipe already produced routed PCB: {ctx.routed_pcb_file.name}")
+        return BuildResult(
+            step="route",
+            success=True,
+            message="Skipping route: recipe-produced routed PCB already present",
+            output_file=ctx.routed_pcb_file,
+        )
+
     # Check if a routed PCB already exists (e.g., from generate_design.py)
     # This prevents double-routing when a script already handled routing
     # Skip these checks if force rebuild is requested
@@ -3041,6 +3060,16 @@ def main(argv: list[str] | None = None) -> int:
                 result = _run_step_pcb(ctx, console)
                 if result.output_file:
                     ctx.pcb_file = result.output_file
+                    # If the PCB step's recipe already produced a routed
+                    # artifact (e.g. board 04's generate_design.py routes,
+                    # stitches, and fills zones in-place), record it so the
+                    # ROUTE step's guard skips re-routing instead of clobbering
+                    # it with the generic autorouter. See issue #3971.
+                    expected_routed = result.output_file.with_stem(
+                        result.output_file.stem + "_routed"
+                    )
+                    if expected_routed.exists():
+                        ctx.routed_pcb_file = expected_routed
 
             elif step == BuildStep.SYNC:
                 result = _run_step_sync(ctx, console)
