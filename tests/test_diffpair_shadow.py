@@ -818,10 +818,17 @@ def test_shadow_claim_rolls_back_when_goal_pad_stranded(monkeypatch):
     router, pair = _two_pad_coupled_router_and_pair()
     dpr = router._diffpair
     dpr.enable_shadow_construction = True
-    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: None)
     # P strands its J1 goal pad (stops at x=15.0); N reaches its goal.
     stranded = _coupled_routes_for_pair(pair, p_end_x=15.0, n_end_x=25.0)
-    _patch_pathfinder_capture_weight(monkeypatch, stranded, rescue_eligible=False)
+    # Issue #3987 (unit 2a of #3921): with shadow ON the joint-state
+    # ``route_coupled`` fallback is gated OFF, so the transactional rollback
+    # is reached via the SHADOW constructor.  Provide a guide and stub
+    # ``_shadow_route_pair`` to return the stranded result -- the connectivity
+    # gate that rips it is downstream of ``result`` and fires identically.
+    guide = _coupled_routes_for_pair(pair, p_end_x=25.0, n_end_x=25.0)[0]
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: guide)
+    monkeypatch.setattr(dpr, "_shadow_route_pair", lambda *a, **k: stranded)
+    _patch_pathfinder_capture_weight(monkeypatch, None, rescue_eligible=False)
 
     grid = router.grid
 
@@ -861,9 +868,18 @@ def test_shadow_claim_commits_when_all_pads_reached(monkeypatch):
     router, pair = _two_pad_coupled_router_and_pair()
     dpr = router._diffpair
     dpr.enable_shadow_construction = True
-    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: None)
     good = _coupled_routes_for_pair(pair, p_end_x=25.0, n_end_x=25.0)
-    _patch_pathfinder_capture_weight(monkeypatch, good, rescue_eligible=False)
+    # Issue #3987 (unit 2a of #3921): with shadow ON the pair is
+    # shadow-or-uncoupled -- the joint-state ``route_coupled`` fallback is
+    # gated OFF -- so a claimed pair reaches the transactional connectivity
+    # gate via the SHADOW constructor.  Provide a guide so the shadow path
+    # runs, and stub ``_shadow_route_pair`` to return the fully-connected
+    # result under test (the gate is downstream of ``result`` and is
+    # exercised identically whether the result came from shadow or search).
+    guide = _coupled_routes_for_pair(pair, p_end_x=25.0, n_end_x=25.0)[0]
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: guide)
+    monkeypatch.setattr(dpr, "_shadow_route_pair", lambda *a, **k: good)
+    _patch_pathfinder_capture_weight(monkeypatch, None, rescue_eligible=False)
 
     routes, _warning = dpr.route_differential_pair_coupled(pair, coupled_only=True)
 
@@ -1151,3 +1167,171 @@ def test_shadow_via_guard_is_load_bearing(monkeypatch):
         "the guard must change the committed geometry: clearing via "
         f"({guarded_dist:.4f} mm) vs grazing via ({unguarded_dist:.4f} mm)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 11. Issue #3987 (unit 2a of #3921): shadow copper is 45-compliant by
+# construction.
+#
+# ``_shadow_route_pair`` runs the assembled shadow segments through
+# ``_quantize_shadow_segments`` before its self-check gates, so every
+# shadow-emitted segment is on the {0, 45, 90, 135} angle set (census-clean,
+# no ``OffAngleSegmentWarning`` from the #3975 emission guard).  The guide
+# side is the C++ on-grid router's output and is already aligned; the
+# geometric shadow (miter apex / via jogs / pad-approach tails) was the only
+# off-angle source.  The dogleg pass reuses ``quantize.dogleg_points`` (the
+# #3532/#3907 file-layer transform) lifted to the route layer, and is
+# obstacle-aware: each dogleg variant's legs are re-rastered against
+# ``_is_cell_blocked`` and a variant that collides is rejected.
+# ---------------------------------------------------------------------------
+
+
+def _seg(x1, y1, x2, y2, net=1):
+    return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=net, net_name="N")
+
+
+def test_quantize_shadow_leaves_aligned_segments_untouched():
+    """Axis/diagonal shadow legs pass through the dogleg pass unchanged."""
+    from kicad_tools.router.quantize import is_45_aligned
+
+    router, _pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    pf = CoupledPathfinder(grid=router.grid, rules=router.rules, target_spacing_cells=4)
+
+    route = Route(net=1, net_name="N")
+    route.segments.append(_seg(1.0, 1.0, 5.0, 1.0))  # horizontal (0 deg)
+    route.segments.append(_seg(5.0, 1.0, 8.0, 4.0))  # exact diagonal (45 deg)
+    before = list(route.segments)
+
+    dpr._quantize_shadow_segments(route, pf)
+
+    assert route.segments == before, "aligned segments must not be rewritten"
+    for s in route.segments:
+        assert is_45_aligned(s.x2 - s.x1, s.y2 - s.y1)
+
+
+def test_quantize_shadow_doglegs_off_angle_segment():
+    """An off-angle shadow segment is split into two 45-legal legs.
+
+    The dogleg preserves both endpoints exactly (so the coupled gap the
+    constructor established is held) and every resulting leg is on the
+    {0,45,90,135} set -- the geometry the #3975 emission census reads.
+    """
+    from kicad_tools.router.quantize import is_45_aligned, off_angle_degrees
+
+    router, _pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    pf = CoupledPathfinder(grid=router.grid, rules=router.rules, target_spacing_cells=4)
+
+    # A miter-apex-like skew: 20 deg off the axis, off every 45-multiple.
+    off = _seg(2.0, 2.0, 8.0, 4.0)
+    assert off_angle_degrees(off.x2 - off.x1, off.y2 - off.y1) > 1.0
+    route = Route(net=1, net_name="N")
+    route.segments.append(off)
+
+    dpr._quantize_shadow_segments(route, pf)
+
+    assert len(route.segments) == 2, "off-angle segment must split into a two-leg dogleg"
+    for s in route.segments:
+        assert is_45_aligned(s.x2 - s.x1, s.y2 - s.y1), (
+            f"dogleg leg ({s.x1},{s.y1})->({s.x2},{s.y2}) is still off-angle"
+        )
+    # Endpoints preserved exactly (contiguous, and the chord's ends unchanged).
+    assert (route.segments[0].x1, route.segments[0].y1) == (2.0, 2.0)
+    assert (route.segments[-1].x2, route.segments[-1].y2) == (8.0, 4.0)
+    assert (route.segments[0].x2, route.segments[0].y2) == (
+        route.segments[1].x1,
+        route.segments[1].y1,
+    )
+
+
+def test_quantize_shadow_keeps_off_angle_when_no_clear_variant():
+    """Obstacle-aware: with BOTH dogleg bulges blocked, keep the original.
+
+    The pass re-rasters each dogleg variant against ``_is_cell_blocked``.
+    If the default and ``axis_first`` variants both collide, the segment is
+    left untouched (graceful degradation -- the downstream self-check /
+    overlap gates and the emission census still apply) rather than shipping a
+    dogleg through copper (the obstacle-blind post-hoc-quantizer short #3906
+    hit).
+    """
+    router, _pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    pf = CoupledPathfinder(grid=router.grid, rules=router.rules, target_spacing_cells=4)
+
+    off = _seg(2.0, 2.0, 8.0, 4.0, net=1)
+    route = Route(net=1, net_name="N")
+    route.segments.append(off)
+
+    # Force every candidate leg to look blocked (foreign net everywhere).
+    monkey = pf._is_cell_blocked
+    try:
+        pf._is_cell_blocked = lambda gx, gy, li, net: True  # type: ignore[method-assign]
+        dpr._quantize_shadow_segments(route, pf)
+    finally:
+        pf._is_cell_blocked = monkey  # type: ignore[method-assign]
+
+    assert len(route.segments) == 1, "no clear dogleg variant -> keep the original segment"
+    assert (
+        route.segments[0].x1,
+        route.segments[0].y1,
+        route.segments[0].x2,
+        route.segments[0].y2,
+    ) == (
+        2.0,
+        2.0,
+        8.0,
+        4.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 12. Issue #3987 (unit 2a of #3921): hard per-pair shadow time budget.
+#
+# When ``enable_shadow_construction`` is on, a pair is shadow-or-uncoupled:
+# on shadow failure it must fail FAST to the uncoupled fallback WITHOUT
+# running the open joint-state ``route_coupled`` search (which floods the
+# cost_turn f-plateaus and drove the >1200s #3986 board-06 tail).  With the
+# flag OFF the joint-state search remains the pre-phase, unchanged.
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_on_shadow_failure_does_not_flood_open_search(monkeypatch):
+    """Flag ON + shadow fails -> the joint-state search is NOT invoked."""
+    router, pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = True
+    # A guide exists (so the shadow path is attempted) but the shadow
+    # constructor declines the pair.
+    guide = _coupled_routes_for_pair(pair, p_end_x=25.0, n_end_x=25.0)[0]
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: guide)
+    monkeypatch.setattr(dpr, "_shadow_route_pair", lambda *a, **k: None)
+    captured = _patch_pathfinder_capture_weight(monkeypatch, None, rescue_eligible=False)
+    called = {"route_coupled": 0}
+    orig_factory_pf = _StubPathfinder
+
+    def _counting_pf(*a, **k):
+        pf = orig_factory_pf(None, rescue_eligible=False)
+        real_rc = pf.route_coupled
+
+        def _rc(*aa, **kk):
+            called["route_coupled"] += 1
+            return real_rc(*aa, **kk)
+
+        pf.route_coupled = _rc  # type: ignore[method-assign]
+        return pf
+
+    import kicad_tools.router.diffpair_routing as dpr_mod
+
+    monkeypatch.setattr(dpr_mod, "CoupledPathfinder", _counting_pf)
+
+    routes, _warning = dpr.route_differential_pair_coupled(pair, coupled_only=True)
+
+    assert called["route_coupled"] == 0, (
+        "with shadow ON and the shadow constructor failing, the open "
+        "joint-state route_coupled search must NOT run (fail fast to "
+        "uncoupled -- never shadow-then-flooded-A*)"
+    )
+    # coupled_only defers cleanly (uncoupled fallback returns [], None).
+    assert routes == []
+    assert captured is not None
