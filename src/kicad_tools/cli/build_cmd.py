@@ -569,6 +569,77 @@ def _run_step_schematic(ctx: BuildContext, console: Console) -> BuildResult:
     )
 
 
+def _capture_routed_artifact_mtime(pcb_file: Path | None) -> float | None:
+    """Snapshot the ``*_routed.kicad_pcb`` sibling's mtime before the PCB step.
+
+    Returns the ``st_mtime`` of the candidate routed artifact next to
+    ``pcb_file`` if it already exists on disk, otherwise ``None`` (no file
+    to compare against). Called immediately *before* ``_run_step_pcb()`` so
+    the post-PCB scan can tell whether the PCB step actually (re)wrote the
+    routed artifact or merely found a stale copy left in the repo. See
+    :func:`_scan_recipe_routed_artifact` and issue #3978.
+    """
+    if pcb_file is None:
+        return None
+    candidate = pcb_file.with_stem(pcb_file.stem + "_routed")
+    if candidate.exists():
+        return candidate.stat().st_mtime
+    return None
+
+
+def _scan_recipe_routed_artifact(
+    pcb_output_file: Path,
+    pre_pcb_routed_mtime: float | None,
+    console: Console,
+    *,
+    quiet: bool = False,
+) -> Path | None:
+    """Decide whether the PCB step produced a trustworthy routed artifact.
+
+    Board 04's ``generate_design.py`` routes, stitches, and fills zones
+    during the PCB step, writing ``*_routed.kicad_pcb`` in-place. When it
+    does, the ROUTE step's guard must skip re-routing instead of clobbering
+    that artifact with the generic autorouter (issue #3971).
+
+    However, *existence alone* is not proof of freshness: an external board
+    whose PCB generator does **not** route in-place could have a stale
+    ``*_routed.kicad_pcb`` committed in the repo (or left from a prior
+    partial run). Trusting it on existence would silently skip routing and
+    ship stale copper (issue #3978).
+
+    This helper compares the routed artifact's mtime *after* the PCB step
+    against the snapshot taken *before* it (``pre_pcb_routed_mtime``). The
+    artifact is trusted only when it was newly created (no prior file) or
+    its mtime advanced (the PCB step rewrote it). A stale file that survived
+    the PCB step unchanged is rejected with a warning so the ROUTE step
+    re-routes.
+
+    Note this compares the routed file against *its own* pre-run state, not
+    against the unrouted file, so it does not reintroduce the same-mtime
+    quantum race #3971 mitigated.
+
+    Returns the routed :class:`~pathlib.Path` when it should be recorded on
+    ``ctx.routed_pcb_file``, otherwise ``None``.
+    """
+    expected_routed = pcb_output_file.with_stem(pcb_output_file.stem + "_routed")
+    if not expected_routed.exists():
+        return None
+
+    routed_mtime = expected_routed.stat().st_mtime
+    if pre_pcb_routed_mtime is None or routed_mtime > pre_pcb_routed_mtime:
+        # Either the PCB step created the routed artifact, or it advanced an
+        # existing one's mtime — safe to trust it.
+        return expected_routed
+
+    # The file existed before the PCB step and was not updated by it: stale.
+    if not quiet:
+        console.print(
+            f"  [yellow]Stale {expected_routed.name} found (not written by the "
+            f"PCB step); ROUTE step will re-route. Use --force to override.[/yellow]"
+        )
+    return None
+
+
 def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
     """Run PCB generation step."""
     script = _find_generator_script(ctx.project_dir, "pcb")
@@ -3264,6 +3335,10 @@ def main(argv: list[str] | None = None) -> int:
                 result = _run_step_erc(ctx, console)
 
             elif step == BuildStep.PCB:
+                # Snapshot any pre-existing routed artifact's mtime *before*
+                # the PCB step runs so we can tell whether the step actually
+                # (re)wrote it or merely found a stale copy. See issue #3978.
+                pre_pcb_routed_mtime = _capture_routed_artifact_mtime(ctx.pcb_file)
                 result = _run_step_pcb(ctx, console)
                 if result.output_file:
                     ctx.pcb_file = result.output_file
@@ -3271,12 +3346,17 @@ def main(argv: list[str] | None = None) -> int:
                     # artifact (e.g. board 04's generate_design.py routes,
                     # stitches, and fills zones in-place), record it so the
                     # ROUTE step's guard skips re-routing instead of clobbering
-                    # it with the generic autorouter. See issue #3971.
-                    expected_routed = result.output_file.with_stem(
-                        result.output_file.stem + "_routed"
+                    # it with the generic autorouter (issue #3971). Only trust
+                    # the artifact when the PCB step created or refreshed it —
+                    # a stale pre-existing file is rejected (issue #3978).
+                    routed = _scan_recipe_routed_artifact(
+                        result.output_file,
+                        pre_pcb_routed_mtime,
+                        console,
+                        quiet=args.quiet,
                     )
-                    if expected_routed.exists():
-                        ctx.routed_pcb_file = expected_routed
+                    if routed is not None:
+                        ctx.routed_pcb_file = routed
 
             elif step == BuildStep.SYNC:
                 result = _run_step_sync(ctx, console)
