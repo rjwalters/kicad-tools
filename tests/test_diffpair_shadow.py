@@ -335,11 +335,21 @@ def test_proximity_guard_allows_exact_min_spacing():
 def test_shadow_construction_flag_defaults_off():
     """The geometric shadow constructor is opt-in (default False).
 
-    The 2026-06-11 board 06 seed-42 integration run showed the
-    constructor's committed geometry is not yet artifact-quality
-    (stranded shadow tails, shadow-via/partner intersections, corridor
-    competition stranding single-ended nets -> 16/21 reach).  Recipes
-    must explicitly opt in once the follow-up issues land.
+    Two of the three original artifact-quality defects are fixed on main
+    (stranded shadow tails -> #3665 transactional rollback; shadow-via /
+    partner intersections -> #3667 full-polyline via validation), and the
+    corridor-competition defect did not reproduce on the current
+    tightened-width geometry (#3921 seed-42 re-run reached 15/15 singles).
+
+    The flag stays OFF because the #3921 (2026-07-08) end-to-end
+    re-measurement found shadow-ON still un-shippable on board 06:
+    convergence collapsed to 3/9 (the 0.225-0.275 mm coupled widths make
+    the geometric parallel offset infeasible for 6/9 pairs), the surviving
+    shadow segments are off-angle (would fail the #3975 45-census if
+    committed), and the fallbacks blow the CI wall-clock (>1200 s vs
+    ~150 s / 21-21 shadow-OFF).  Flipping this default would regress CI;
+    it stays opt-in until a shadow-aware by-construction dogleg and a
+    parallel-offset feasibility fix land.  See #3921 for the full data.
     """
     from kicad_tools.router.diffpair import DifferentialPairConfig
 

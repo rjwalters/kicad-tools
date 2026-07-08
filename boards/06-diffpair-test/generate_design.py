@@ -1834,17 +1834,33 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # back to the Python pathfinder there) and the budget must cover
     # probe + shadow + swapped-probe + bounded fallback searches.
     # Issue #3508 (decomposition): the geometric shadow constructor is
-    # kept OFF for this recipe.  The 2026-06-11 seed-42 integration
-    # measurement (run-4) showed it converts 6/9 pairs nominally but
-    # the committed geometry is not yet artifact-quality: stranded
-    # shadow tails (USB3_RX1+/RX2+ goal pads), shadow vias physically
-    # intersecting the partner trace at the tightly-coupled gap, and
-    # greedily-claimed pre-phase corridors stranding MIPI_D0-/USB_CC1
-    # (16/21 reach vs the asserted 21/21; strict-gate 49 blocking vs
-    # the committed floor 20).  Flip BOTH this constant and the
-    # optimizer/nudge diff-pair protections below together once the
-    # #3508 follow-up issues land.
-    ENABLE_COUPLED_SHADOW = False
+    # kept OFF for this recipe.  Set ``KCT_BOARD06_SHADOW=1`` to reproduce
+    # the shadow-ON run (the constant defaults False so the committed
+    # artifact and CI stay on the pre-#3508 budget-exit behaviour).
+    #
+    # Issue #3921 (2026-07-08 re-scope + re-measure): two of the three
+    # original artifact-quality defects are now FIXED on main -- stranded
+    # shadow tails (#3665 transactional connectivity rollback) and shadow
+    # vias intersecting the partner (#3667 full-polyline via validation).
+    # The re-scoped corridor-competition defect did NOT reproduce on the
+    # current (#3413-phase-6, tightened-width) geometry: the shadow-ON
+    # seed-42 re-run reached 15/15 single-ended nets at its best
+    # negotiated snapshot (MIPI_D0-/USB_CC1 not stranded).  But shadow-ON
+    # is still not shippable here for two deeper reasons:
+    #   * Convergence collapsed 6-7/9 -> 3/9.  The 0.225-0.275 mm coupled
+    #     widths make the geometric parallel offset infeasible for 6/9
+    #     pairs (self-check overlap -0.165..-0.275 mm; mid-route blockage).
+    #   * The surviving shadow segments are 3.7-11.9 deg off-angle
+    #     (#3975 OffAngleSegmentWarning -> would fail the 45-census if
+    #     committed) and the 6 fallbacks blow the wall-clock (>1200 s vs
+    #     ~150 s / 21-21 shadow-OFF; the negotiated 360 s backstop fires).
+    # Enabling by default needs a shadow-aware by-construction dogleg
+    # (#3907/#3975) plus a parallel-offset feasibility fix at the tight
+    # widths.  When BOTH land, flip the env default and the optimizer/nudge
+    # diff-pair protections below together.  See #3921 for the full data.
+    import os as _os
+
+    ENABLE_COUPLED_SHADOW = _os.environ.get("KCT_BOARD06_SHADOW", "0") == "1"
 
     diffpair_config = DifferentialPairConfig(
         enabled=True,
