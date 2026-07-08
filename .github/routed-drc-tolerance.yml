@@ -1643,17 +1643,29 @@ tolerances:
   # exposes a PRE-EXISTING via-count mismatch on board 07's ADDR_BUS match
   # group (A4/A6 carry an extra via pair vs A0, ~1.6 mm of via-transition
   # length beyond the 0.5 mm tolerance).  The from-scratch re-route (seed 42)
-  # that the Match-Group Routing Regression gate runs therefore reports one
+  # that the Match-Group Routing Regression gate runs therefore reported one
   # NEW ``match_group_length_skew`` error, moving the binding re-route count
-  # 28 -> 29.  This +1 is PR-caused (via-aware detection), not route variance,
-  # so it is reconciled here rather than dismissed.  The committed-artifact
-  # gate (check_routed_drc.py, advisories filtered) measures 22 well under 29,
-  # so this bump does not loosen that gate.  Companion change: board 07's
-  # routed PCB is added to ``MATCHGROUP_VIOLATION_BASELINE = 1`` in
-  # scripts/ci/check_matchgroup_coverage.py, same #3931 reference.
-  # Exit clause: a via-balanced re-route (or artifact refresh, blocked on the
-  # artifact-churn problem #3925) drops the skew error, at which point restore
-  # 29 -> 28 and the MATCHGROUP baseline back to strict 0.  See #3931.
+  # 28 -> 29.
+  #
+  # !!! #3931 RESOLUTION (router-side via-length-aware tuner) !!!
+  # ----------------------------------------------------------------------
+  # #3931 makes the match-group length tuner via-aware: during the seed-42
+  # re-route the tuner now adds F.Cu meander to ADDR_BUS's via-free members to
+  # compensate the A4/A6 drilled-via length, so the ADDR_BUS via-inclusive skew
+  # converges to within its 0.5 mm tolerance and the ``match_group_length_skew``
+  # error it used to produce is REMOVED from the re-route path.  The reroute
+  # ``MATCHGROUP_VIOLATION_BASELINE`` drops 2 -> 1 (only MIPI_CSI_LANES's
+  # pair-only skew, #3916, remains) in
+  # scripts/ci/check_matchgroup_coverage.py.  This DRC-error floor is a MAXIMUM
+  # (allowed-count ceiling): the tuner fix only REMOVES a violation from the
+  # re-route path, never adds one, so the 35 ceiling is preserved as a safe
+  # upper bound and continues to cover the committed-artifact gate (which the
+  # #3931 router change does not regenerate; the committed artifact still
+  # carries the pre-fix ADDR_BUS and its own separately-tracked marginal-
+  # clearance count).  Exit clause: once the artifact-churn work (#3925)
+  # refreshes the committed board 07 so the via-balanced ADDR_BUS and the
+  # marginal clearances both clear, ratchet 35 down to the new committed count.
+  # See #3931 / #3925.
   #
   # !!! 29 -> 35 (Issue #3913, DRC_TOLERANCE 0.005 -> 1e-4 mm) !!!
   # ----------------------------------------------------------------------

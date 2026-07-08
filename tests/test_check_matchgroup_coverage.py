@@ -87,20 +87,28 @@ class TestCheckZeroViolations:
         assert mod.check_zero_violations({"match_group_length_skew": 4}, baseline=4) == []
 
     def test_board_07_documented_via_skew_baseline(self):
-        """Board 07's documented match-group baseline is 2 on the reroute path
-        that the Match-Group Routing Regression CI job exercises: 1x ADDR_BUS
-        via-count mismatch (A4/A6 extra via pair vs A0, visible since #3915
-        threaded the board stackup into via-aware skew; Issue #3931) plus 1x
-        MIPI_CSI_LANES pair-only skew (the group #3916 newly makes checkable,
-        which fires once the reroute lands every MIPI leg).  HDMI_TMDS_LANES
-        does not fire -- its TMDS_D0_N/TMDS_D1_N legs stay unrouted after the
-        reroute, so the unrouted-leg gate excludes it.  A baseline of 2 also
-        satisfies the ``--skip-route`` committed-artifact path, which counts 1
-        (MIPI/HDMI/DDR each have an unrouted leg there).  Neither count is
+        """Board 07's documented match-group baseline is 1 -- a single value
+        that satisfies BOTH the reroute and ``--skip-route`` paths.
+
+        On the reroute path (the Match-Group Routing Regression CI job) the
+        #3931 via-aware match-group tuner compensates ADDR_BUS's via-count
+        imbalance (A4/A6 escape behind a full-stack via; the tuner adds F.Cu
+        meander to the flat members), so ADDR_BUS's via-inclusive skew
+        converges to within tolerance and no longer fires.  Only MIPI_CSI_LANES'
+        pair-only skew (the group #3916 newly makes checkable) remains, giving a
+        reroute count of 1.  HDMI_TMDS_LANES does not fire -- its
+        TMDS_D0_N/TMDS_D1_N legs stay unrouted after the reroute, so the
+        unrouted-leg gate excludes it.
+
+        On the ``--skip-route`` committed-artifact path the count is also 1: the
+        #3931 router fix does NOT regenerate the committed artifact (an artifact
+        refresh is the separately-tracked #3925 churn work), so that artifact
+        still carries the pre-fix via-imbalanced ADDR_BUS (which fires) while
+        MIPI/HDMI/DDR are gated out by the unrouted-leg rule.  Neither count is
         silently absorbed by the large error-count allowlist floor."""
         mod = _load_helper_module()
         key = "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb"
-        assert mod.MATCHGROUP_VIOLATION_BASELINE.get(key, 0) == 2
+        assert mod.MATCHGROUP_VIOLATION_BASELINE.get(key, 0) == 1
 
 
 # ---------------------------------------------------------------------------

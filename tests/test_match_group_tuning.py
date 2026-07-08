@@ -3005,3 +3005,171 @@ class TestExactFitAmplitude:
             f"exact-fit amplitude should land within ~1um of the target, "
             f"got {tuned_length:.4f}mm vs 12.0mm"
         )
+
+
+# =============================================================================
+# Via-count imbalance (Issue #3931)
+# =============================================================================
+
+
+class TestViaCountImbalance:
+    """Issue #3931: the tuner targets VIA-INCLUSIVE skew when a stackup is
+    supplied via ``board_thickness_mm`` / ``num_copper_layers``.
+
+    Board 07's ADDR_BUS exposed the class of defect: some match-group
+    members escape to an inner layer behind a full-stack via while others
+    route flat on the surface.  Their COPPER lengths are matched (within
+    microns), but the ~1.6 mm of drilled via length pushes the group over
+    its skew tolerance.  A planar-only tuner sees the members as already
+    matched and does nothing; a via-aware tuner adds F.Cu meander to the
+    via-free members to compensate the drilled length.
+    """
+
+    @staticmethod
+    def _via_route(net_id: int, name: str, copper_mm: float, y: float) -> Route:
+        """Straight F.Cu route of ``copper_mm`` plus one F.Cu->B.Cu via.
+
+        On a 1.6 mm / 4-layer stack the through-via contributes exactly
+        1.6 mm of drilled length (|Δstack_index| = 3, so
+        ``1.6 * 3 / (4 - 1) = 1.6``), so the via-inclusive length is
+        ``copper_mm + 1.6``.
+        """
+        from kicad_tools.router.primitives import Via
+
+        route = _straight_route(net_id, name, copper_mm, y=y)
+        route.vias.append(
+            Via(
+                x=copper_mm,
+                y=y,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=net_id,
+                net_name=name,
+            )
+        )
+        return route
+
+    def test_via_free_member_lengthened_when_stackup_supplied(self):
+        """A0 (copper-only) gets ~1.6 mm of F.Cu meander to match A4's via."""
+        from kicad_tools.router.length import LengthTracker
+        from kicad_tools.router.match_group_length import MatchGroupTracker
+
+        # A0: 30 mm copper, NO via  -> via-inclusive length 30.0 mm.
+        # A4: 30 mm copper, ONE through-via -> via-inclusive length 31.6 mm.
+        # Copper-only skew is 0.0; via-inclusive skew is 1.6 mm (> 0.5 tol).
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.5)
+        routes = {
+            1: _straight_route(1, "A0", 30.0, y=0.0),
+            2: self._via_route(2, "A4", 30.0, y=5.0),
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+        )
+
+        # A4 carries the via -> it is the via-inclusive longest -> untouched.
+        assert results[2][1].reason in ("already_within_tolerance", "reference")
+        assert results[2][0] is routes[2]
+
+        # A0 must be lengthened to compensate A4's 1.6 mm drilled length.
+        assert results[1][1].reason == "tuned", (
+            f"expected A0 tuned, got {results[1][1].reason}: {results[1][1].message}"
+        )
+        # The tuned A0's via-inclusive length (== its copper length, no via)
+        # should now match A4's 31.6 mm within tolerance.
+        a0_total = MatchGroupTracker._measure_route_total(results[1][0], 1.6, 4)
+        a4_total = MatchGroupTracker._measure_route_total(results[2][0], 1.6, 4)
+        assert abs(a0_total - a4_total) <= 0.5, (
+            f"via-inclusive skew should be within tolerance after tuning: "
+            f"A0={a0_total:.4f}mm vs A4={a4_total:.4f}mm"
+        )
+        # The added copper is real F.Cu meander (~1.6 mm), not a via.
+        a0_copper = LengthTracker.calculate_route_length(results[1][0])
+        assert a0_copper > 31.0, (
+            f"A0 should have gained ~1.6 mm of copper meander, got {a0_copper:.4f}mm"
+        )
+
+    def test_via_blind_when_no_stackup_is_a_noop(self):
+        """Without ``board_thickness_mm`` the tuner ignores via drilled length.
+
+        Drift-prevention: the ``board_thickness_mm=None`` default must
+        preserve byte-for-byte prior behavior.  With the copper lengths
+        matched and vias invisible, both members are already within
+        tolerance and returned by reference.
+        """
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.5)
+        routes = {
+            1: _straight_route(1, "A0", 30.0, y=0.0),
+            2: self._via_route(2, "A4", 30.0, y=5.0),
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+            # board_thickness_mm omitted -> via-blind (legacy behavior).
+        )
+
+        # Copper lengths are identical -> nobody is tuned; both by reference.
+        for nid in (1, 2):
+            assert results[nid][1].reason in (
+                "already_within_tolerance",
+                "reference",
+                "longer_than_reference",
+            ), f"net {nid}: unexpected reason {results[nid][1].reason}"
+            assert results[nid][0] is routes[nid]
+            assert results[nid][0].segments is routes[nid].segments
+
+    def test_mixed_via_counts_multiple_members(self):
+        """Generalizes beyond board 07: 2 via-free + 2 via-carrying members.
+
+        Confirms the fix is not ADDR_BUS-specific -- any group with a
+        via-count imbalance gets F.Cu meander added to the via-free
+        members to compensate the drilled length of the via-carrying ones.
+        """
+        from kicad_tools.router.match_group_length import MatchGroupTracker
+
+        # Nets 1,2: copper-only 30 mm.  Nets 3,4: 30 mm copper + one via.
+        group = _ddr_group(net_ids=[1, 2, 3, 4], tolerance=0.5)
+        routes = {
+            1: _straight_route(1, "M0", 30.0, y=0.0),
+            2: _straight_route(2, "M1", 30.0, y=3.0),
+            3: self._via_route(3, "M2", 30.0, y=6.0),
+            4: self._via_route(4, "M3", 30.0, y=9.0),
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+        )
+
+        # The two via-free members must be lengthened.
+        for nid in (1, 2):
+            assert results[nid][1].reason == "tuned", (
+                f"net {nid}: expected tuned, got {results[nid][1].reason}: "
+                f"{results[nid][1].message}"
+            )
+
+        totals = {
+            nid: MatchGroupTracker._measure_route_total(results[nid][0], 1.6, 4)
+            for nid in (1, 2, 3, 4)
+        }
+        skew = max(totals.values()) - min(totals.values())
+        assert skew <= 0.5, (
+            f"via-inclusive group skew should converge within tolerance, "
+            f"got {skew:.4f}mm; totals={ {k: round(v, 3) for k, v in totals.items()} }"
+        )
