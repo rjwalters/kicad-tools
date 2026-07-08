@@ -49,6 +49,14 @@ import generate_schematic  # noqa: E402
 
 warn_if_stale()
 
+# Route-step discovery sentinel (Tier 2).  ``kct build``'s _run_step_route
+# greps for this literal to decide whether to invoke ``generate_design.py
+# --step route`` instead of falling back to the generic ``kct route``
+# autorouter (which drops this board's diff-pair / seed / 4-layer flags).
+# project.kct's ``build.route_recipe`` is the primary (Tier 1) signal; this
+# sentinel is the heuristic fallback for callers without the spec key.
+SUPPORTS_STEP_ROUTE = True
+
 
 # =============================================================================
 # Board routing contract (Issue #3413 phase 5)

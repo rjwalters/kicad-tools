@@ -30,6 +30,7 @@ __all__ = [
     "ProjectSpec",
     "ProjectMetadata",
     "ProjectArtifacts",
+    "BuildConfig",
     "DesignIntent",
     "Interface",
     "Requirements",
@@ -90,6 +91,33 @@ class ProjectArtifacts(BaseModel):
         ),
     )
     project: str | None = Field(default=None, description="Path to KiCad project file")
+
+
+class BuildConfig(BaseModel):
+    """Build-pipeline configuration (`kct build`).
+
+    Currently carries the route-step discovery contract. Boards whose
+    routing entry point is a recipe script invocation (rather than a
+    standalone ``route_demo.py`` / ``route.py``) declare it here so the
+    build pipeline invokes the *same* command their CI gates use — with
+    all the diff-pair / match-group / seed / layer flags baked into the
+    recipe — instead of falling through to the generic ``kct route``
+    autorouter, which drops those flags.
+    """
+
+    route_recipe: str | None = Field(
+        default=None,
+        description=(
+            "Command that routes the committed unrouted PCB into "
+            "``*_routed.kicad_pcb``. Interpreted relative to the project "
+            "directory and run with the project's Python interpreter, e.g. "
+            "``generate_design.py --step route``. When set, `kct build`'s "
+            "route step invokes it verbatim (forwarding the output dir as a "
+            "positional argument) instead of probing for route_demo.py / "
+            "route.py or falling back to generic `kct route`. See "
+            "``_run_step_route`` for the full probe order."
+        ),
+    )
 
 
 class ProjectMetadata(BaseModel):
@@ -813,6 +841,9 @@ class ProjectSpec(BaseModel):
 
     kct_version: str = Field(default="1.0", description="KCT format version")
     project: ProjectMetadata = Field(..., description="Project metadata")
+    build: BuildConfig | None = Field(
+        default=None, description="Build-pipeline configuration (route recipe, etc.)"
+    )
     intent: DesignIntent | None = Field(default=None, description="Design intent")
     requirements: Requirements | None = Field(default=None, description="Requirements")
     suggestions: Suggestions | None = Field(default=None, description="Suggestions")

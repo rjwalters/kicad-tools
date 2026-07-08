@@ -8,7 +8,9 @@ from pathlib import Path
 from kicad_tools.cli.build_cmd import (
     BuildContext,
     _format_no_generator_message,
+    _generate_design_supports_step_route,
     _generator_candidates,
+    _resolve_route_recipe,
     _run_step_pcb,
     _run_step_route,
     _run_step_schematic,
@@ -502,3 +504,288 @@ class TestRouteStepRecipeArtifactGuard:
         assert result.success is True
         assert "recipe" not in result.message.lower()
         mock_run.assert_called()
+
+
+def _make_route_ctx(project_dir: Path, pcb_file: Path, spec=None) -> BuildContext:
+    """Build a minimal BuildContext for route-discovery tests."""
+    ctx = BuildContext(project_dir=project_dir, spec_file=None)
+    ctx.pcb_file = pcb_file
+    ctx.routed_pcb_file = None
+    ctx.mfr = "jlcpcb"
+    ctx.quiet = True
+    ctx.verbose = False
+    ctx.dry_run = False
+    ctx.force = False
+    ctx.output_dir = None
+    ctx.spec = spec
+    return ctx
+
+
+class TestGenerateDesignSupportsStepRoute:
+    """Tests for the ``SUPPORTS_STEP_ROUTE`` sentinel detector."""
+
+    def test_detects_sentinel(self, tmp_path: Path) -> None:
+        script = tmp_path / "generate_design.py"
+        script.write_text("SUPPORTS_STEP_ROUTE = True\n\nprint('hi')\n")
+        assert _generate_design_supports_step_route(script) is True
+
+    def test_absent_sentinel(self, tmp_path: Path) -> None:
+        script = tmp_path / "generate_design.py"
+        script.write_text("print('no sentinel here')\n")
+        assert _generate_design_supports_step_route(script) is False
+
+    def test_missing_file(self, tmp_path: Path) -> None:
+        assert _generate_design_supports_step_route(tmp_path / "nope.py") is False
+
+
+class TestResolveRouteRecipe:
+    """Tests for the Tier 1 / Tier 2 route-recipe resolver."""
+
+    def test_tier1_project_kct_route_recipe(self, tmp_path: Path) -> None:
+        """A ``build.route_recipe`` key resolves to the declared script."""
+        from kicad_tools.spec import BuildConfig, ProjectMetadata, ProjectSpec
+
+        design = tmp_path / "generate_design.py"
+        design.write_text("# no sentinel; Tier 1 wins on the explicit key\n")
+        spec = ProjectSpec(
+            project=ProjectMetadata(name="t"),
+            build=BuildConfig(route_recipe="generate_design.py --step route"),
+        )
+        ctx = _make_route_ctx(tmp_path, tmp_path / "board.kicad_pcb", spec=spec)
+
+        argv = _resolve_route_recipe(ctx)
+        assert argv is not None
+        assert Path(argv[0]) == design
+        assert argv[1:] == ["--step", "route"]
+
+    def test_tier1_missing_script_falls_through(self, tmp_path: Path) -> None:
+        """A route_recipe pointing at a nonexistent script does not match Tier 1."""
+        from kicad_tools.spec import BuildConfig, ProjectMetadata, ProjectSpec
+
+        spec = ProjectSpec(
+            project=ProjectMetadata(name="t"),
+            build=BuildConfig(route_recipe="missing.py --step route"),
+        )
+        ctx = _make_route_ctx(tmp_path, tmp_path / "board.kicad_pcb", spec=spec)
+        assert _resolve_route_recipe(ctx) is None
+
+    def test_tier2_sentinel_without_project_kct_key(self, tmp_path: Path) -> None:
+        """generate_design.py with the sentinel resolves via Tier 2 (no spec key)."""
+        design = tmp_path / "generate_design.py"
+        design.write_text("SUPPORTS_STEP_ROUTE = True\n")
+        ctx = _make_route_ctx(tmp_path, tmp_path / "board.kicad_pcb", spec=None)
+
+        argv = _resolve_route_recipe(ctx)
+        assert argv is not None
+        assert Path(argv[0]) == design
+        assert argv[1:] == ["--step", "route"]
+
+    def test_tier2_no_sentinel_returns_none(self, tmp_path: Path) -> None:
+        """generate_design.py without the sentinel does not match Tier 2."""
+        design = tmp_path / "generate_design.py"
+        design.write_text("print('plain generator, no --step route support')\n")
+        ctx = _make_route_ctx(tmp_path, tmp_path / "board.kicad_pcb", spec=None)
+        assert _resolve_route_recipe(ctx) is None
+
+    def test_no_recipe_returns_none(self, tmp_path: Path) -> None:
+        """Empty project dir yields no recipe (caller falls back)."""
+        ctx = _make_route_ctx(tmp_path, tmp_path / "board.kicad_pcb", spec=None)
+        assert _resolve_route_recipe(ctx) is None
+
+
+class TestRouteStepRecipeDiscovery:
+    """End-to-end probe-order tests for _run_step_route discovery."""
+
+    def test_recipe_selected_over_generic_fallback(self, tmp_path: Path) -> None:
+        """A sentinel generate_design.py routes via the recipe, not `kct route`.
+
+        This is the core regression for #3972: boards with generate_design.py
+        --step route support (but no route_demo.py/route.py) previously fell
+        through to the generic autorouter, dropping their diff-pair/match-group
+        flags.
+        """
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        design = tmp_path / "generate_design.py"
+        design.write_text("SUPPORTS_STEP_ROUTE = True\n")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        console = Console()
+
+        def fake_run_script(script, cwd, verbose, *, env_vars, script_args, quiet):
+            # Simulate the recipe writing its routed artifact.
+            (tmp_path / "board_routed.kicad_pcb").write_text("(kicad_pcb)")
+            return True, f"Script {Path(script).name} completed successfully"
+
+        with (
+            patch(
+                "kicad_tools.cli.build_cmd._run_python_script",
+                side_effect=fake_run_script,
+            ) as mock_script,
+            patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_generic,
+        ):
+            result = _run_step_route(ctx, console)
+
+        # The recipe ran; the generic autorouter did NOT.
+        mock_script.assert_called_once()
+        assert Path(mock_script.call_args.args[0]).name == "generate_design.py"
+        mock_generic.assert_not_called()
+        assert result.success is True
+        assert result.output_file == tmp_path / "board_routed.kicad_pcb"
+
+    def test_recipe_wins_over_route_demo(self, tmp_path: Path) -> None:
+        """Tier 1/2 recipe takes precedence over a Tier 3 route_demo.py."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        (tmp_path / "generate_design.py").write_text("SUPPORTS_STEP_ROUTE = True\n")
+        (tmp_path / "route_demo.py").write_text("print('should not run')\n")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        console = Console()
+
+        def fake_run_script(script, cwd, verbose, *, env_vars, script_args, quiet):
+            (tmp_path / "board_routed.kicad_pcb").write_text("(kicad_pcb)")
+            return True, "ok"
+
+        with patch(
+            "kicad_tools.cli.build_cmd._run_python_script",
+            side_effect=fake_run_script,
+        ) as mock_script:
+            _run_step_route(ctx, console)
+
+        # generate_design.py wins; route_demo.py is never invoked.
+        assert Path(mock_script.call_args.args[0]).name == "generate_design.py"
+
+    def test_route_demo_still_selected_without_recipe(self, tmp_path: Path) -> None:
+        """Regression: a board with only route_demo.py still uses Tier 3."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        # generate_design.py present but WITHOUT the sentinel -> Tier 2 skipped.
+        (tmp_path / "generate_design.py").write_text("print('plain')\n")
+        (tmp_path / "route_demo.py").write_text("print('route demo')\n")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        console = Console()
+
+        def fake_run_script(script, cwd, verbose, *, env_vars, script_args, quiet):
+            (tmp_path / "board_routed.kicad_pcb").write_text("(kicad_pcb)")
+            return True, "ok"
+
+        with patch(
+            "kicad_tools.cli.build_cmd._run_python_script",
+            side_effect=fake_run_script,
+        ) as mock_script:
+            _run_step_route(ctx, console)
+
+        assert Path(mock_script.call_args.args[0]).name == "route_demo.py"
+
+    def test_generic_fallback_when_no_scripts(self, tmp_path: Path) -> None:
+        """Regression: no recipe and no route scripts -> generic `kct route`."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        console = Console()
+
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_generic:
+            mock_generic.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            result = _run_step_route(ctx, console)
+
+        mock_generic.assert_called()
+        assert result.success is True
+
+    def test_recipe_dry_run_does_not_execute(self, tmp_path: Path) -> None:
+        """--dry-run reports the recipe command without running it."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        (tmp_path / "generate_design.py").write_text("SUPPORTS_STEP_ROUTE = True\n")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        ctx.dry_run = True
+        console = Console()
+
+        with patch("kicad_tools.cli.build_cmd._run_python_script") as mock_script:
+            result = _run_step_route(ctx, console)
+
+        mock_script.assert_not_called()
+        assert result.success is True
+        assert "dry-run" in result.message.lower()
+        assert "generate_design.py --step route" in result.message
+
+    def test_recipe_success_but_no_artifact_is_failure(self, tmp_path: Path) -> None:
+        """A recipe that exits 0 but writes no routed PCB is reported as failed."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        (tmp_path / "generate_design.py").write_text("SUPPORTS_STEP_ROUTE = True\n")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        console = Console()
+
+        with patch(
+            "kicad_tools.cli.build_cmd._run_python_script",
+            return_value=(True, "ok"),
+        ):
+            result = _run_step_route(ctx, console)
+
+        assert result.success is False
+        assert "no *_routed.kicad_pcb" in result.message
+
+    def test_recipe_routed_artifact_in_nested_output_dir(self, tmp_path: Path) -> None:
+        """Recipe writing into an ``output/`` subdir (boards 06/07 layout) is found.
+
+        Regression for the initial #3972 implementation: the routed PCB is
+        written next to the unrouted PCB (in ``output/``), not at the project
+        root, so the output-file search must probe ``ctx.pcb_file.parent`` and
+        fall back to a recursive scan.  ``ctx.output_dir`` is unset here
+        (matching ``kct build boards/06-diffpair-test`` with no ``--output``).
+        """
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        pcb_file = output_dir / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        (tmp_path / "generate_design.py").write_text("SUPPORTS_STEP_ROUTE = True\n")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        console = Console()
+
+        def fake_run_script(script, cwd, verbose, *, env_vars, script_args, quiet):
+            # Recipe writes the routed PCB into output/, next to the unrouted one.
+            (output_dir / "board_routed.kicad_pcb").write_text("(kicad_pcb)")
+            return True, "ok"
+
+        with patch(
+            "kicad_tools.cli.build_cmd._run_python_script",
+            side_effect=fake_run_script,
+        ):
+            result = _run_step_route(ctx, console)
+
+        assert result.success is True
+        assert result.output_file == output_dir / "board_routed.kicad_pcb"
