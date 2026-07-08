@@ -2644,6 +2644,11 @@ class Autorouter:
         self.routing_failures = []
         self._perturbation_magnitude = 0.0
         self._congestion_estimator = None
+        # Issue #3952: the escape/diff-pair composition's one-shot guard is
+        # per-run mutable state; clear it so a reused Autorouter cannot leak
+        # _escapes_generated_this_run=True into the next attempt (which would
+        # silently skip escape generation in route_with_escape).
+        self._escapes_generated_this_run = False
 
     def _calculate_constraint_score(self, net_id: int) -> float:
         """Calculate a constraint score for a net based on routing difficulty.
@@ -14039,7 +14044,7 @@ class Autorouter:
             # here, so resetting the flag is safe for the coupled-success path
             # too.
             self.paired_escape_coupling = False
-            if getattr(self, "_escape_router", None) is not None:
+            if self._escape_router is not None:
                 self._escape_router.diff_pair_map = {}
 
             subgrid_escapes, dense_packages = self._run_escape_prephase()
