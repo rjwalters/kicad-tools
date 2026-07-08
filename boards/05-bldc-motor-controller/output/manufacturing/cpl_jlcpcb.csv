@@ -2,9 +2,9 @@ Designator,Val,Package,Mid X,Mid Y,Rotation,Layer
 C1,470uF,Capacitor_SMD:C_0805_2012Metric,30.0000mm,8.0000mm,0.0,Top
 C10,20pF,Capacitor_SMD:C_0805_2012Metric,60.0000mm,37.0000mm,0.0,Top
 C11,20pF,Capacitor_SMD:C_0805_2012Metric,60.0000mm,43.0000mm,0.0,Top
-C12,100nF,Capacitor_SMD:C_0805_2012Metric,4.0000mm,47.0000mm,0.0,Top
-C13,100nF,Capacitor_SMD:C_0805_2012Metric,4.0000mm,53.0000mm,0.0,Top
-C14,100nF,Capacitor_SMD:C_0805_2012Metric,4.0000mm,59.0000mm,0.0,Top
+C12,100nF,Capacitor_SMD:C_0805_2012Metric,14.5000mm,63.0000mm,0.0,Top
+C13,100nF,Capacitor_SMD:C_0805_2012Metric,29.0000mm,73.0000mm,0.0,Top
+C14,100nF,Capacitor_SMD:C_0805_2012Metric,46.5000mm,64.5000mm,0.0,Top
 C15,100nF,Capacitor_SMD:C_0805_2012Metric,12.0000mm,47.0000mm,0.0,Top
 C16,10uF,Capacitor_SMD:C_0805_2012Metric,12.0000mm,53.0000mm,0.0,Top
 C2,100nF,Capacitor_SMD:C_0805_2012Metric,30.0000mm,14.0000mm,0.0,Top

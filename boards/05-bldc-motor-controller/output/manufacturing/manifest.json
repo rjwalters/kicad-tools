@@ -1,71 +1,71 @@
 {
   "version": "1.0",
-  "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-12T05:03:41.535120+00:00",
+  "kicad_tools_version": "0.14.0",
+  "generated_at": "2026-07-08T21:56:22.291804+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
-      "sha256": "acdfa8d287b66ae952a02b90164ec6b4d9a05c4d3a2e939eca88195ab892135d",
-      "size": 1574
+      "sha256": "eea06d8c1abd76dc2527161f8c645e626476e3997bbbb3ccad6db826b475b6fd",
+      "size": 1619
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "1852681e4d18774db0984a2ab4deb94993404f43239b0b18400998160ffa696b",
-      "size": 3702
+      "sha256": "00966b0892f6cf65d85cd2d8e02f82eae5321c1dc58a72e2043f4d42f65aef33",
+      "size": 3705
     },
     "gerbers.zip": {
-      "sha256": "f09b7a718291ad74875fa9078b66319725311b4c96c0682746a220c09c4cc092",
-      "size": 101170
+      "sha256": "e22640fb79700acd9a28372ddd3e51a0f1f41cf05e87f566e5694687766d80e9",
+      "size": 132745
     },
     "report.pdf": {
-      "sha256": "b3b3b7574bcf875c0b68d7dfff07c5f47b16c133f02aa2a59522e82f6b2877a7",
-      "size": 2733387
+      "sha256": "c77af21295f041c514b1338fd4d091921638b9d7c9f839a0a120706941f197a9",
+      "size": 36376
     },
     "report.md": {
-      "sha256": "b814642af948d49eea5394259455d2dea76ab344cd1dba98f1f181e4bd86a2e8",
-      "size": 5106
+      "sha256": "e73dc89840d3812c3444afe602f62cd6ce1733d1ac125f82bb01406da7120925",
+      "size": 5317
     },
     "assembly.png": {
-      "sha256": "12840e2fe562e0a48c6bd1bff9a12d185f585a3684becb39baacd8fb198adade",
-      "size": 375073
+      "sha256": "5a11cbd1a59263db91bdbb3d1ecfab4f87e47137f4d7abd6ab2a7154ed49179d",
+      "size": 409815
     },
     "layer_B_Cu.png": {
-      "sha256": "c6a9418b71d0480a9cfb088e1fa950657a0cf4ec6949e7aa188bf4d093bf6386",
-      "size": 243971
+      "sha256": "23aa4247ad369ea13d0468084274a3d36e43bfd1c529936abf0deea9ffde5f05",
+      "size": 255491
     },
     "layer_F_Cu.png": {
-      "sha256": "463be5c28b7c6825a8e1d3a87e2285ff60aee12ade6bb768c00c1114085c1a08",
-      "size": 284136
+      "sha256": "2b51d8398e01d54518ab78677b64bc3b64331ee5210319a097e4a4c383899a46",
+      "size": 310464
     },
     "layer_In1_Cu.png": {
-      "sha256": "590eadf703a3b5362dec2ad3d4dfa5071e5ac6e6a83d4c586abc357732f5f271",
-      "size": 145365
+      "sha256": "5ad7068e3f92b7ac3280849ad36e2e8ad64c53068380fbffc0443f1d4266bd2e",
+      "size": 178915
     },
     "layer_In2_Cu.png": {
-      "sha256": "35960b9e191e7a5d9a6ac592b5432cf8e3ba3f423d570a1c8fde1b131637b47a",
-      "size": 140763
+      "sha256": "645b0aea1c70bc9d6376ad0f9e93c866f64f7b8f38be9881c97691667accc646",
+      "size": 189323
     },
     "pcb_back.png": {
-      "sha256": "79798715d33a1e0246ab2eca3c6f58d5269ec9423ef0174f7b3754376064df8f",
-      "size": 252459
+      "sha256": "b33350e04fb336283d7f4e93def9babea84e85ce8c93697321517b5943227642",
+      "size": 264069
     },
     "pcb_copper.png": {
-      "sha256": "f252b61503ac362ea2a7b8223c8c2121eaa95cf777e1dac5815153ea25d77437",
-      "size": 278474
+      "sha256": "ece30a2a0417d5a24275856f9660732ab4ca01858da0a50109174ad9b8c45b68",
+      "size": 313283
     },
     "pcb_front.png": {
-      "sha256": "3486a3f978b20b93333eeedbdf02ce2d4d906f3dbb23b2c1eb25488d44cda028",
-      "size": 399547
+      "sha256": "b5892bc55c6c87828b72da752fb7ba9c967fab8662648ffd62eb27f7211713e3",
+      "size": 429654
     },
     "schematic_bldc_controller.png": {
-      "sha256": "76a4def1efadeb6d54e34cd0976a01d71052d9eff1d441bed4dc76485a82671c",
-      "size": 448101
+      "sha256": "8ffb7921bcc6cfd2ded875712624a2d9549780daf277fc8a00239982106bb3fb",
+      "size": 364089
     },
     "kicad_project.zip": {
-      "sha256": "1abbf14f5c7d3b3971bac608050ac209510da36bba6ef0871d0402f5eaab4c35",
-      "size": 152267
+      "sha256": "8b7dea306e20b6a022cfd193e5518be694808d1cdcc1c58586a444110c050c35",
+      "size": 185005
     },
     "README.txt": {
-      "sha256": "0587de0a1ca3bec46fc5f2da260825343969c31b9cba5eeca8721c362a476a22",
+      "sha256": "49bd6a292ff6765e8b18efe44a5d68ff3dfd6e205dea4f5ee9e11e12afd61dbe",
       "size": 881
     }
   },
@@ -86,6 +86,11 @@
       "message": "Schematic auto-detected: bldc_controller.kicad_sch"
     },
     {
+      "name": "schematic_footprints",
+      "status": "OK",
+      "message": "All schematic symbols have a footprint assigned"
+    },
+    {
       "name": "board_outline",
       "status": "OK",
       "message": "Board outline is closed (5 points)"
@@ -103,7 +108,7 @@
     {
       "name": "drill_holes",
       "status": "OK",
-      "message": "Drill holes present (56 vias, 36 TH pads)"
+      "message": "Drill holes present (79 vias, 36 TH pads)"
     },
     {
       "name": "tht_in_cpl",
@@ -114,7 +119,12 @@
       "name": "bom_fields",
       "status": "WARN",
       "message": "BOM field issues: 1 problem(s)",
-      "details": "51/51 active item(s) missing LCSC part number"
+      "details": "21/51 active item(s) missing LCSC part number (30 resolvable from spec)"
+    },
+    {
+      "name": "bom_lcsc_values",
+      "status": "OK",
+      "message": "No LCSC value/package mismatches detected (0 assigned item(s) checked against local parts cache)"
     },
     {
       "name": "bom_pcb_match",
@@ -129,9 +139,9 @@
     },
     {
       "name": "drc",
-      "status": "WARN",
-      "message": "No DRC report found; run kicad-cli or kct check first",
-      "details": "Use --drc-report to specify a report file, or --skip-drc to skip"
+      "status": "FAIL",
+      "message": "DRC has 1 error(s)",
+      "details": "clearance_segment_via: Segment to via clearance 0.100mm < minimum 0.102mm"
     },
     {
       "name": "erc",
