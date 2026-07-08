@@ -27,6 +27,7 @@ from .negotiated import (
     calculate_congestion_tuned_params,
     calculate_history_increment,
     calculate_present_cost,
+    derive_iter_per_net_cap,
     derive_per_net_cap,
     detect_oscillation,
     detect_ripup_stagnation,
@@ -55,6 +56,8 @@ __all__ = [
     "PER_NET_CAP_FLOOR_S",
     "PER_NET_CAP_STAGE_FRACTION",
     "derive_per_net_cap",
+    # Per-iteration per-net cap from remaining budget (Issue #3989)
+    "derive_iter_per_net_cap",
     # Adaptive parameter functions (Issue #633, #2333)
     "calculate_congestion_tuned_params",
     "calculate_history_increment",

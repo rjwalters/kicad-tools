@@ -483,3 +483,207 @@ class TestHierarchicalTimeoutPropagation:
 
         # All initial-pass calls must have received ``per_net_timeout=42.0``.
         assert captured_per_net == [42.0]
+
+
+# =============================================================================
+# Issue #3989 — rip-up-loop backstop integrity
+# =============================================================================
+#
+# ``route_all_negotiated`` takes a stage ``timeout`` (the backstop) and
+# enforces it via ``check_timeout()``, which fires only BETWEEN nets.  When a
+# net drops to the pure-Python A* fallback on a first-time geometric failure
+# (``FAILURE_NO_PATH`` / ``FAILURE_CLEARANCE`` -- NOT covered by #3956's
+# resume-exhaustion fast-path), one unbounded call can run ~200 s and overshoot
+# a 360 s backstop before the next between-net check runs.
+#
+# The fix (Option A) derives a per-net A* cap from the budget REMAINING at each
+# iteration entry and threads it to every reroute call site.  The cap is
+# generous early (a fraction of the plentiful remaining budget) and tightens
+# toward ``PER_NET_CAP_FLOOR_S`` as the deadline nears, so the loop can overshoot
+# by at most one final net's bounded cap plus per-iteration overhead.
+
+from kicad_tools.router.algorithms import (  # noqa: E402
+    PER_NET_CAP_FLOOR_S,
+    PER_NET_CAP_STAGE_FRACTION,
+    derive_iter_per_net_cap,
+    derive_per_net_cap,
+)
+from kicad_tools.router.core import Autorouter  # noqa: E402
+
+
+class TestDeriveIterPerNetCap:
+    """Unit coverage for the remaining-budget per-net cap derivation."""
+
+    def test_no_stage_budget_returns_standing_cap(self):
+        # ``remaining_budget=None`` => legacy unbounded stage: honour only the
+        # standing cap (explicit --per-net-timeout, or None for unbounded).
+        assert derive_iter_per_net_cap(None, None) is None
+        assert derive_iter_per_net_cap(30.0, None) == 30.0
+
+    def test_generous_early_when_budget_plentiful(self):
+        # Early in a 600 s stage: 10% of remaining = 60 s, well above floor.
+        assert derive_iter_per_net_cap(None, 600.0) == (PER_NET_CAP_STAGE_FRACTION * 600.0)
+
+    def test_curation_worked_example(self):
+        # The acceptance-criteria example: timeout=60 => derive_per_net_cap
+        # gives the standing cap of 6.0; at iteration entry with the full 60 s
+        # still remaining, the iter cap is also 6.0.
+        standing = derive_per_net_cap(None, 60.0)
+        assert standing == 6.0
+        assert derive_iter_per_net_cap(standing, 60.0) == 6.0
+
+    def test_tightens_toward_floor_late_in_stage(self):
+        # As the deadline nears, the remaining-budget cap shrinks; below the
+        # floor it clamps to PER_NET_CAP_FLOOR_S so a late net still gets a
+        # fair (but bounded) share.
+        assert derive_iter_per_net_cap(None, 1.0) == PER_NET_CAP_FLOOR_S
+        assert derive_iter_per_net_cap(None, 0.0) == PER_NET_CAP_FLOOR_S
+        # Already past the deadline (negative remaining) also clamps to floor.
+        assert derive_iter_per_net_cap(None, -50.0) == PER_NET_CAP_FLOOR_S
+
+    def test_explicit_cap_binds_when_tighter(self):
+        # An operator's explicit --per-net-timeout is never LOOSENED: when it is
+        # tighter than the remaining-budget derivation, it binds.
+        # 10% of 600 = 60; explicit 30 < 60 => 30 binds.
+        assert derive_iter_per_net_cap(30.0, 600.0) == 30.0
+
+    def test_remaining_budget_tightens_explicit_cap_late(self):
+        # Late in the stage the remaining-budget cap can drop BELOW an explicit
+        # cap -- that is the whole point: the backstop must stay honest even
+        # when the operator set a generous per-net budget.
+        # 10% of 20 = 2 -> clamps to floor 5.0; explicit 36 > 5 => 5 binds.
+        assert derive_iter_per_net_cap(36.0, 20.0) == PER_NET_CAP_FLOOR_S
+
+
+def _build_slow_net_router() -> Autorouter:
+    """Two nets on a 20x20 board.  Net 1 is trivial; net 2 is the
+    pathological net whose A* fallback we mock as slow.  Geometry keeps the
+    loop iterating via the mocked grid overflow below.
+    """
+    ar = Autorouter(width=20.0, height=20.0)
+    ar.add_component(
+        "R1",
+        [
+            {"number": "1", "x": 2.0, "y": 2.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 18.0, "y": 2.0, "net": 1, "net_name": "NET1"},
+        ],
+    )
+    ar.add_component(
+        "R2",
+        [
+            {"number": "1", "x": 2.0, "y": 18.0, "net": 2, "net_name": "NET2"},
+            {"number": "2", "x": 18.0, "y": 18.0, "net": 2, "net_name": "NET2"},
+        ],
+    )
+    return ar
+
+
+class _ControllableClock:
+    """``time.time()`` returns ``self.now`` WITHOUT auto-advancing.  The mocked
+    slow net advances ``self.now`` explicitly by however long its (capped) A*
+    'runs'.  This drives ``check_timeout()`` deterministically with no real
+    sleeping, so the test is instant and load-independent."""
+
+    def __init__(self, start: float = 1000.0):
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestRipupLoopBackstopHonored:
+    """Issue #3989: a single slow Python-fallback A* call must not let the
+    negotiated rip-up loop overshoot its stage backstop unboundedly."""
+
+    def _run(self, timeout: float, per_net_timeout, unbounded_call_cost: float):
+        """Drive ``route_all_negotiated`` with net 2's ``_route_net_negotiated``
+        mocked to 'run' for ``unbounded_call_cost`` seconds UNLESS a
+        ``per_net_timeout`` bounds it -- exactly how a deadline-respecting A*
+        behaves.  Returns ``(final_now, start, clock)``.
+        """
+        ar = _build_slow_net_router()
+        clock = _ControllableClock(start=1000.0)
+
+        # Force overflow to persist so the rip-up loop keeps iterating and the
+        # slow net is re-attempted each iteration (the #3413/#3448 recovery
+        # paths that this fix threads the cap into).
+        ar.grid.get_total_overflow = lambda: 5  # type: ignore[method-assign]
+        # ``find_overused_cells`` yields (gx, gy, layer, overflow) 4-tuples.
+        ar.grid.find_overused_cells = lambda: [(10, 10, 0, 5)]  # type: ignore[method-assign]
+
+        orig = ar._route_net_negotiated
+
+        def slow_fake(net, present_factor, per_net_timeout=None):
+            if net != 2:
+                return orig(net, present_factor, per_net_timeout=per_net_timeout)
+            # A deadline-respecting A*: it 'runs' for its cost, but never past
+            # the per-net cap it was handed.  A ``None`` cap (the bug) means an
+            # UNBOUNDED run that eats ``unbounded_call_cost`` whole.
+            cost = unbounded_call_cost
+            if per_net_timeout is not None:
+                cost = min(cost, per_net_timeout)
+            clock.now += cost
+            # Return a partial/empty result so the net stays 'unrouted' and the
+            # recovery paths keep re-attempting it (drives repeated slow calls).
+            return []
+
+        ar._route_net_negotiated = slow_fake  # type: ignore[method-assign]
+
+        with patch("kicad_tools.router.core.time.time", clock):
+            ar.route_all_negotiated(
+                max_iterations=8,
+                timeout=timeout,
+                per_net_timeout=per_net_timeout,
+                adaptive=False,
+                perturbation=False,
+            )
+        return clock.now, 1000.0, clock
+
+    def test_single_slow_call_does_not_blow_past_backstop(self):
+        """With ``timeout=60`` and ``per_net_timeout=None`` (board-06's recipe),
+        a net whose fallback would run 200 s must be capped so the loop's total
+        overshoot is bounded to ~one final net's derived cap.
+
+        Acceptance criterion: elapsed <= timeout + derived_cap + epsilon, where
+        derived_cap = derive_per_net_cap(None, 60.0) = 6.0.
+        """
+        final_now, start, _ = self._run(
+            timeout=60.0, per_net_timeout=None, unbounded_call_cost=200.0
+        )
+        elapsed = final_now - start
+        derived_cap = derive_per_net_cap(None, 60.0)
+        assert derived_cap == 6.0
+        # Overshoot bounded to one final net's cap plus a small overhead grace.
+        # WITHOUT the fix, one uncapped 200 s call alone lands elapsed >= 200.
+        assert elapsed <= 60.0 + derived_cap + 1.0, (
+            f"loop overshot backstop: elapsed={elapsed:.1f}s (budget 60 + cap {derived_cap} + eps)"
+        )
+        # Sanity: it must actually have consumed most of the budget (the slow
+        # net really did run), not exit trivially early.
+        assert elapsed >= 60.0 - 12.0
+
+    def test_no_stage_budget_leaves_slow_call_unbounded(self):
+        """Edge case: ``timeout=None, per_net_timeout=None`` (legacy unbounded)
+        derives no cap -- the slow call is NOT bounded.  Confirms the fix does
+        not silently impose a cap when no budget exists."""
+        final_now, start, _ = self._run(
+            timeout=None, per_net_timeout=None, unbounded_call_cost=200.0
+        )
+        elapsed = final_now - start
+        # No backstop => the full 200 s call ran unbounded at least once.
+        assert elapsed >= 200.0
+
+    def test_explicit_per_net_timeout_is_respected(self):
+        """Edge case: an explicit ``per_net_timeout`` that is TIGHTER than the
+        remaining-budget derivation must bind, not be loosened to the derived
+        stage fraction."""
+        # timeout=360 => standing derived cap would be 36; but the caller passes
+        # an explicit 8.0, which is tighter and must bind every call.
+        final_now, start, _ = self._run(
+            timeout=360.0, per_net_timeout=8.0, unbounded_call_cost=200.0
+        )
+        elapsed = final_now - start
+        # Each slow call is capped at 8s (< 36 derived, < 200 unbounded).  With
+        # a 360 s budget the loop runs several iterations but each net call is
+        # bounded at 8 s, so it never overshoots by a whole 200 s call.
+        assert elapsed <= 360.0 + 8.0 + 1.0
