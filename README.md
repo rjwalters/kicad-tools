@@ -652,6 +652,10 @@ uv run mypy src/
 uv run ruff format . --check && uv run ruff check . && uv run pytest
 ```
 
+## Agent Skills (`kct` namespace)
+
+kicad-tools ships its own Claude agent skills under `.claude/commands/kct/` (invoked as `/kct:<name>`), a harness-agnostic namespace kept separate from any installed orchestration framework. Currently available: **`/kct:ee-review <issue-or-board>`** — produces an advisory EE decision document (escalating intervention ladder + binding electrical constraints, cited and confidence-graded) for analog/placement-blocked boards; it emits decisions for human ratification, never routes copper.
+
 ## Related Projects
 
 - **[Zeo](https://github.com/zeodotdev/zeo)** — A KiCad fork with an integrated AI agent sidebar and MCP server. Takes a complementary approach: live editor manipulation via IPC vs. our offline file-based analysis and optimization.
