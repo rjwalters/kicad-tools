@@ -728,7 +728,26 @@ jobs:
     # pour-repair rounds, so the prior 15-min ceiling leaves no headroom.
     # Bumped 15 -> 20 to match the container + fill re-measure (same value
     # PR #3625 sets for issue #3620's container move of this job).
-    timeout-minutes: 20
+    #
+    # Issue #3923 (PR #3956) re-measure: the resume-fallback NARROWING
+    # (case-1 repeat-only + always-fall-back on case-2) is required to fix
+    # two real regressions the earlier broad skip introduced -- the
+    # USB-joystick 6/16 net floor and the board-07 GND pad U1.24 pour
+    # stranding.  Restoring those necessary Python fallbacks (the first
+    # case-1 exhaustion of every net + every case-2, plus the untouched
+    # initial-search FAILURE_NO_PATH grind like DQ4) adds wall time back to
+    # this board's negotiated rip-up loop.  Locally the full route is ~11-12
+    # min (688s), comfortably inside budget and NET-FASTER than the pre-#3923
+    # full-grind baseline (805s).  On the 2-core CI runner the pure-Python
+    # fallback runs ~2x slower, so run 28862990993's matchgroup job clipped
+    # exactly 20m03s and was killed at the wall (no headroom), even though the
+    # earlier pre-narrowing run completed the same job in ~14m and only failed
+    # the pour gate.  Bumped 20 -> 30 to give the runner-variance headroom the
+    # 20-min ceiling lacked.  This is PARITY with the sibling
+    # diffpair-routing-regression job (also timeout-minutes: 30) rather than a
+    # special exception, and does NOT weaken any correctness gate -- the pour
+    # connectivity + DRC allowlist floors are unchanged.
+    timeout-minutes: 30
     # Issue #3146 closure: the matrix-scoped soft-fail
     # (``continue-on-error: ${{ matrix.board == 'boards/07-matchgroup-test' }}``)
     # that PR #3145 installed pending matchgroup-routing
