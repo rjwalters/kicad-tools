@@ -1335,3 +1335,111 @@ def test_shadow_on_shadow_failure_does_not_flood_open_search(monkeypatch):
     # coupled_only defers cleanly (uncoupled fallback returns [], None).
     assert routes == []
     assert captured is not None
+
+
+# ---------------------------------------------------------------------------
+# 13. Issue #3990 (unit 2b of #3921): variable-gap parallel offset within the
+# impedance band.
+#
+# The fixed-gap constructor offset the whole guide by a single ``d``; at the
+# tightened 0.225-0.275 mm coupled widths this is infeasible for 6/9 board-06
+# pairs (inside-curve self-overlap + obstacle blockage).  The per-section gap
+# may vary within ``[d_min, d_max]`` -- floor from
+# ``effective_intra_pair_clearance()``, ceiling from
+# ``impedance_tolerance_percent`` -- tightening to dodge self-overlap and
+# widening to step around obstacles, always inside the impedance band.
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_gap_ladder_prefers_nominal_first():
+    """The nominal gap is always the ladder head (easy sections unchanged)."""
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    ladder = DiffPairRouter._shadow_gap_ladder(0.30, 0.25, 0.345)
+    assert ladder[0] == 0.30, "nominal gap must be tried first"
+    # Every rung stays inside the band.
+    assert all(0.25 - 1e-9 <= g <= 0.345 + 1e-9 for g in ladder)
+    # Tighter rungs come before wider rungs (tighten-first preference).
+    below = [g for g in ladder[1:] if g < 0.30 - 1e-9]
+    above = [g for g in ladder[1:] if g > 0.30 + 1e-9]
+    assert below, "band should include tighter rungs"
+    assert above, "band should include wider rungs"
+    first_above_idx = next(i for i, g in enumerate(ladder) if g > 0.30 + 1e-9)
+    first_below_idx = next(i for i, g in enumerate(ladder) if g < 0.30 - 1e-9)
+    assert first_below_idx < first_above_idx, "tighter rungs must precede wider rungs"
+
+
+def test_shadow_gap_ladder_collapses_to_nominal_when_band_degenerate():
+    """A collapsed band (d_max == d_min) yields only the nominal gap."""
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    ladder = DiffPairRouter._shadow_gap_ladder(0.30, 0.30, 0.30)
+    assert ladder == [0.30], "degenerate band collapses to the fixed-gap constructor"
+
+
+def test_shadow_select_gap_keeps_nominal_when_feasible():
+    """An unobstructed segment far from the partner keeps the nominal gap."""
+    router, _pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    pf = CoupledPathfinder(grid=router.grid, rules=router.rules, target_spacing_cells=4)
+
+    seg = _seg(2.0, 2.0, 8.0, 2.0)  # horizontal, on F.Cu
+    li = router.grid.layer_to_index(Layer.F_CU.value)
+    # Partner far away (single distant segment) so partner-clearance never binds;
+    # empty grid so no obstacle binds -> nominal (ladder head) is chosen.
+    guide_segs = [_seg(2.0, 20.0, 8.0, 20.0)]
+    ladder = [0.30, 0.25, 0.35]
+    nx, ny = 0.0, 1.0
+    gap = dpr._shadow_select_gap(seg, nx, ny, ladder, li, seg.net, pf, guide_segs, 0.2)
+    assert gap == 0.30, "feasible nominal section must keep the nominal gap"
+
+
+def test_shadow_select_gap_tightens_to_dodge_partner_overlap():
+    """When the nominal offset lands too close to the partner, a tighter gap wins.
+
+    The partner (guide) copper sits at ``y = 2.0 + 0.28`` (just inside the
+    nominal 0.30 offset).  The nominal gap would put the offset segment within
+    ``min_center_dist`` of the partner (self-overlap); the ladder's tighter
+    rung (0.25) pulls the offset back to a legal separation.
+    """
+    router, _pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    pf = CoupledPathfinder(grid=router.grid, rules=router.rules, target_spacing_cells=4)
+
+    seg = _seg(2.0, 2.0, 8.0, 2.0)
+    li = router.grid.layer_to_index(Layer.F_CU.value)
+    nx, ny = 0.0, 1.0  # offset upward (+y)
+    # Partner copper just above the nominal offset: at y=2.30 the nominal
+    # offset (y=2.30) coincides; a tighter 0.24 offset (y=2.24) clears by
+    # 0.06 which exceeds min_center_dist below.
+    guide_segs = [_seg(2.0, 2.30, 8.0, 2.30)]
+    ladder = [0.30, 0.24, 0.36]
+    min_center = 0.05
+    gap = dpr._shadow_select_gap(seg, nx, ny, ladder, li, seg.net, pf, guide_segs, min_center)
+    assert gap == 0.24, (
+        "an inside-curve section whose nominal offset overlaps the partner "
+        "must tighten to a legal gap within the band"
+    )
+
+
+def test_shadow_select_gap_degrades_to_nominal_when_no_rung_feasible():
+    """With every rung obstacle-blocked, the nominal gap is returned (graceful)."""
+    router, _pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    pf = CoupledPathfinder(grid=router.grid, rules=router.rules, target_spacing_cells=4)
+
+    seg = _seg(2.0, 2.0, 8.0, 2.0)
+    li = router.grid.layer_to_index(Layer.F_CU.value)
+    guide_segs = [_seg(2.0, 20.0, 8.0, 20.0)]
+    ladder = [0.30, 0.25, 0.35]
+    # Force every candidate offset to look obstacle-blocked.
+    saved = pf._is_cell_blocked
+    try:
+        pf._is_cell_blocked = lambda gx, gy, layer, net: True  # type: ignore[method-assign]
+        gap = dpr._shadow_select_gap(seg, 0.0, 1.0, ladder, li, seg.net, pf, guide_segs, 0.2)
+    finally:
+        pf._is_cell_blocked = saved  # type: ignore[method-assign]
+    assert gap == 0.30, (
+        "no feasible rung must degrade to the nominal gap (ladder head), not "
+        "silently ship a blocked offset -- the downstream self-check gates apply"
+    )
