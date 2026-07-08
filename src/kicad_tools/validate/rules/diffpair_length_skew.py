@@ -161,6 +161,7 @@ class DiffPairLengthSkewRule(DRCRule):
         engaged_pairs: set[tuple[int, int]] | None = None,
         threshold_map: dict[tuple[int, int], float] | None = None,
         default_tolerance_mm: float = DEFAULT_SKEW_TOLERANCE_MM,
+        emit_info: bool = False,
     ) -> None:
         """Initialize the rule.
 
@@ -184,6 +185,12 @@ class DiffPairLengthSkewRule(DRCRule):
             default_tolerance_mm: Fallback when no per-pair tolerance
                 is set.  Defaults to
                 :data:`DEFAULT_SKEW_TOLERANCE_MM` (0.5).
+            emit_info: When True, emit an advisory ``info``-severity
+                :class:`DRCViolation` for each engaged pair that *passes*
+                its skew tolerance, carrying the measured skew.  Lets
+                ``kct check --verbose`` surface per-pair measurements even
+                on a clean board (Issue #3917 AC5).  Defaults to False
+                (no advisory noise on the default, non-verbose path).
         """
         # Normalize skew_data keys -- name tuples sorted lexicographically
         # so the caller does not have to maintain P/N ordering.
@@ -205,6 +212,7 @@ class DiffPairLengthSkewRule(DRCRule):
                 self._threshold_map[key] = thr
 
         self._default_tolerance_mm = default_tolerance_mm
+        self._emit_info = emit_info
 
     def check(
         self,
@@ -285,8 +293,44 @@ class DiffPairLengthSkewRule(DRCRule):
                         tolerance_mm=tolerance_mm,
                     )
                 )
+            elif self._emit_info:
+                # Passing pair -- surface the measured skew as an advisory
+                # ``info`` finding so ``kct check --verbose`` reports the
+                # per-pair measurement even on a clean board (Issue #3917).
+                results.add(
+                    self._make_info(
+                        name_a=name_a,
+                        name_b=name_b,
+                        skew_mm=skew_mm,
+                        tolerance_mm=tolerance_mm,
+                    )
+                )
 
         return results
+
+    def _make_info(
+        self,
+        name_a: str,
+        name_b: str,
+        skew_mm: float,
+        tolerance_mm: float,
+    ) -> DRCViolation:
+        """Build an ``info`` DRCViolation for a passing engaged pair."""
+        first, second = sorted([name_a, name_b])
+        return DRCViolation(
+            rule_id=self.rule_id,
+            severity="info",
+            message=(
+                f"Engaged differential pair {first}/{second} length-skew "
+                f"{skew_mm:.3f} mm within tolerance {tolerance_mm:.3f} mm"
+            ),
+            location=None,
+            layer=None,
+            actual_value=round(skew_mm, 4),
+            required_value=round(tolerance_mm, 4),
+            items=(),
+            nets=(first, second),
+        )
 
     def _make_violation(
         self,

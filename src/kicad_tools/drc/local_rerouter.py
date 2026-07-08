@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import heapq
 import math
-import uuid
 from dataclasses import dataclass, field
 
+from ..router.primitives import _make_uuid
 from ..sexp import SExp
 from .net_compat import resolve_net_atom
 
@@ -636,6 +636,11 @@ class LocalRerouter:
         seg.append(SExp.list("end", round(x2, 4), round(y2, 4)))
         seg.append(SExp.list("width", round(width, 4)))
         seg.append(SExp.list("layer", layer))
+        # Issue #3925: mint the UUID through router.primitives._make_uuid so
+        # DRC-triggered local re-routes honor enable_deterministic_uuids()
+        # (a bare uuid.uuid4() bypassed the seed toggle, breaking fresh-vs-
+        # fresh byte identity).  uuid is emitted BEFORE net to match KiCad's
+        # canonical segment field order and avoid round-trip churn.
+        seg.append(SExp.list("uuid", _make_uuid()))
         seg.append(SExp.list("net", net))
-        seg.append(SExp.list("uuid", str(uuid.uuid4())))
         return seg

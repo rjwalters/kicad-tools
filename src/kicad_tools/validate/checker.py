@@ -6,6 +6,7 @@ Checks on PCB designs without requiring kicad-cli.
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 from kicad_tools.manufacturers import DesignRules, get_profile
@@ -66,6 +67,9 @@ class DRCChecker:
         copper_oz: float = 1.0,
         suppress_library: bool = False,
         net_class_map: dict[str, NetClassRouting] | None = None,
+        warn_on_inactive_skew_rules: bool = True,
+        verbose: bool = False,
+        emit_measurements: bool = False,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -84,6 +88,31 @@ class DRCChecker:
                 ``engaged_pairs`` set + per-pair threshold map.  When
                 omitted, the rule degrades to a no-op (graceful
                 standalone-``kct check`` behaviour).
+            warn_on_inactive_skew_rules: When True (default), the three
+                sidecar-gated skew rules
+                (``match_group_length_skew``, ``diffpair_length_skew``,
+                ``diffpair_routing_continuity``) emit a one-time stderr
+                warning when they degrade to a no-op because
+                ``net_class_map`` is ``None``.  This makes the "silently
+                passes without a sidecar" failure mode visible on *every*
+                invocation surface -- not just the ``kct check`` CLI
+                entry point, which prints its own up-front warning
+                (Issue #3917 Defect 3).  The CLI passes ``False`` here to
+                avoid duplicating its own warning.
+            verbose: When True, the sidecar-gated skew / continuity rules
+                emit advisory ``info``-severity findings that carry the
+                measured per-pair / per-group values even when the pair /
+                group passes, so ``kct check --verbose`` surfaces the
+                measurements on a clean board (Issue #3917 AC5).
+            emit_measurements: When True, the sidecar-gated skew /
+                continuity rules emit the same advisory ``info``-severity
+                measurement findings regardless of ``verbose``.  This lets
+                a caller collect the measured per-pair / per-group values
+                (for a measurement-summary table) at default verbosity
+                without flooding the ``--verbose`` info stream (Issue
+                #3924 AC1).  The ``kct check`` CLI sets this True so it can
+                render a concise measurement summary after the violation
+                table.
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -94,6 +123,16 @@ class DRCChecker:
         self.copper_oz = copper_oz
         self.suppress_library = suppress_library
         self.net_class_map = net_class_map
+        self.warn_on_inactive_skew_rules = warn_on_inactive_skew_rules
+        self.verbose = verbose
+        self.emit_measurements = emit_measurements
+        # The skew / continuity rules surface their measured info findings
+        # when either the user asked for --verbose OR a caller wants the
+        # measurement summary (Issue #3924 AC1).
+        self._emit_skew_info = verbose or emit_measurements
+        # Dedup guard so the per-rule INACTIVE warning fires at most once
+        # per rule per checker instance (Issue #3917).
+        self._inactive_skew_warned: set[str] = set()
 
         # Load manufacturer profile and design rules
         profile = get_profile(manufacturer)
@@ -340,6 +379,33 @@ class DRCChecker:
         rule = DiffPairClearanceIntraRule()
         return rule.check(self.pcb, self.design_rules)
 
+    def _warn_inactive_skew_rule(self, rule_name: str) -> None:
+        """Emit a one-time stderr warning that a skew rule is inactive.
+
+        Issue #3917 Defect 3: the three sidecar-gated rules
+        (``match_group_length_skew``, ``diffpair_length_skew``,
+        ``diffpair_routing_continuity``) degrade to silent no-ops when the
+        checker was built without a ``net_class_map``.  The ``kct check``
+        CLI prints an up-front warning, but *direct* ``DRCChecker``
+        instantiations (the build pipeline, embedded post-route checks)
+        bypass it entirely.  Emitting the warning here makes the
+        degradation visible on every invocation surface.
+
+        Guarded by ``warn_on_inactive_skew_rules`` (the CLI disables it to
+        avoid double-warning) and deduplicated per rule per instance.
+        """
+        if not self.warn_on_inactive_skew_rules:
+            return
+        if rule_name in self._inactive_skew_warned:
+            return
+        self._inactive_skew_warned.add(rule_name)
+        print(
+            f"WARNING: rule {rule_name!r} is INACTIVE without a net-class-map "
+            "sidecar and will silently pass; pass the routed board's sidecar "
+            "(e.g. output/net_class_map.json) to validate length-match skew.",
+            file=sys.stderr,
+        )
+
     def check_diffpair_length_skew(self) -> DRCResults:
         """Check routed-length skew for engaged differential pairs.
 
@@ -385,12 +451,21 @@ class DRCChecker:
         from kicad_tools.validate.diffpair_engagement import derive_engagement_state
         from kicad_tools.validate.diffpair_skew import derive_skew_data
 
-        skew_data, skew_threshold_map = derive_skew_data(self.pcb, self.net_class_map)
+        if self.net_class_map is None:
+            self._warn_inactive_skew_rule("diffpair_length_skew")
+
+        skew_data, skew_threshold_map = derive_skew_data(
+            self.pcb,
+            self.net_class_map,
+            board_thickness_mm=self.design_rules.board_thickness_mm,
+            num_copper_layers=self.layers,
+        )
         engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
         rule = DiffPairLengthSkewRule(
             skew_data=skew_data,
             engaged_pairs=engaged_pairs,
             threshold_map=skew_threshold_map,
+            emit_info=self._emit_skew_info,
         )
         return rule.check(self.pcb, self.design_rules)
 
@@ -427,10 +502,14 @@ class DRCChecker:
         """
         from kicad_tools.validate.diffpair_engagement import derive_engagement_state
 
+        if self.net_class_map is None:
+            self._warn_inactive_skew_rule("diffpair_routing_continuity")
+
         engaged_pairs, threshold_map = derive_engagement_state(self.pcb, self.net_class_map)
         rule = DiffPairRoutingContinuityRule(
             engaged_pairs=engaged_pairs,
             threshold_map=threshold_map,
+            emit_info=self._emit_skew_info,
         )
         return rule.check(self.pcb, self.design_rules)
 
@@ -573,6 +652,7 @@ class DRCChecker:
         if self.net_class_map is None:
             # Graceful-no-op: no router context -> no skew data to
             # validate.  Matches the standalone-``kct check`` contract.
+            self._warn_inactive_skew_rule("match_group_length_skew")
             rule = MatchGroupLengthSkewRule()
         else:
             from kicad_tools.validate.match_group_skew import derive_group_skew_data
@@ -587,6 +667,7 @@ class DRCChecker:
                 group_skew_data=group_skew_data,
                 tracker_match_groups=tracker_match_groups,
                 threshold_map=threshold_map,
+                emit_info=self._emit_skew_info,
             )
         return rule.check(self.pcb, self.design_rules)
 
@@ -706,6 +787,7 @@ class DRCChecker:
         grid_resolution: float = 0.1,
         threshold: float | None = None,
         auto_derive_threshold: bool = False,
+        aggregate: bool = True,
     ) -> DRCResults:
         """Check that every pad aligns to the router grid.
 
@@ -732,12 +814,25 @@ class DRCChecker:
                 pad-offset histogram (issue #3061).  Defaults to
                 ``False`` so the Python API preserves PR #3057 behaviour;
                 ``kct check`` opts in by default.
+            aggregate: When ``True`` (the default), collapse the per-pad
+                warnings into one aggregated ``pad_grid`` warning per
+                component reference (issue #3941).  A fixed-pitch footprint
+                such as an LQFP-48 whose 0.5 mm pitch places all 48 pads off
+                the 0.1 mm router grid thus emits a single warning instead
+                of 47+.  When ``False`` (the ``--verbose`` path), emit one
+                warning per off-grid pad, preserving the full per-pad detail.
 
         Returns:
-            :class:`DRCResults` with one ``pad_grid`` violation (severity
-            error) per off-grid pad.  Empty when all pads align.
+            :class:`DRCResults` with ``pad_grid`` warnings.  When
+            ``aggregate=True`` there is one warning per component reference
+            (with a pad count and representative example); when
+            ``aggregate=False`` there is one warning per off-grid pad.
+            Empty when all pads align.
         """
-        from kicad_tools.router.preflight import check_pad_grid_alignment
+        from kicad_tools.router.preflight import (
+            PreflightOffGridPad,
+            check_pad_grid_alignment,
+        )
 
         results = DRCResults()
 
@@ -760,18 +855,75 @@ class DRCChecker:
 
         results.rules_checked += 1
 
-        for pad in report.off_grid_pads:
-            message = pad.message(report.grid_resolution, report.suggested_grid)
-            ref_label = pad.label
+        def _emit_per_pad(pads: list[PreflightOffGridPad]) -> None:
+            for pad in pads:
+                message = pad.message(report.grid_resolution, report.suggested_grid)
+                ref_label = pad.label
+                results.add(
+                    DRCViolation(
+                        rule_id="pad_grid",
+                        severity="warning",
+                        message=message,
+                        location=(pad.x, pad.y),
+                        actual_value=pad.offset_mm,
+                        required_value=report.threshold,
+                        items=(ref_label,) if ref_label else (),
+                    )
+                )
+
+        if not aggregate:
+            # ``--verbose`` path: preserve the full per-pad detail.
+            _emit_per_pad(report.off_grid_pads)
+            return results
+
+        # Default path: collapse each component's off-grid pads into a
+        # single aggregated warning (issue #3941).  A single-pad group keeps
+        # the original per-pad message so the common case is unchanged.
+        for ref, pads in report.grouped_by_ref().items():
+            if len(pads) == 1:
+                _emit_per_pad(pads)
+                continue
+
+            example = max(pads, key=lambda p: p.offset_mm)
+            max_offset = example.offset_mm
+            fp_name = example.footprint_name
+            count = len(pads)
+
+            if report.suggested_grid is not None:
+                message = (
+                    f"{ref}: {count} pads off-grid by up to "
+                    f"{max_offset:.3f}mm (grid {report.grid_resolution}mm"
+                    + (f", footprint {fp_name}" if fp_name else "")
+                    + ").\n"
+                    f"  Example: pad {example.label} at "
+                    f"({example.x:.3f}, {example.y:.3f}).\n"
+                    f"  Suggested fix: round pad positions OR set finer router "
+                    f"grid ({report.suggested_grid}mm would align all pads).\n"
+                    f"  Use --verbose for per-pad detail."
+                )
+            else:
+                message = (
+                    f"{ref}: {count} pads off-grid by up to "
+                    f"{max_offset:.3f}mm (grid {report.grid_resolution}mm"
+                    + (f", footprint {fp_name}" if fp_name else "")
+                    + ").\n"
+                    f"  Example: pad {example.label} at "
+                    f"({example.x:.3f}, {example.y:.3f}).\n"
+                    f"  Suggested fix: round pad positions to the router grid "
+                    f"(footprint pitch may not align to "
+                    f"{report.grid_resolution}mm).\n"
+                    f"  Use --verbose for per-pad detail."
+                )
+
             results.add(
                 DRCViolation(
                     rule_id="pad_grid",
                     severity="warning",
                     message=message,
-                    location=(pad.x, pad.y),
-                    actual_value=pad.offset_mm,
+                    location=(example.x, example.y),
+                    actual_value=max_offset,
                     required_value=report.threshold,
-                    items=(ref_label,) if ref_label else (),
+                    items=(ref,) if ref else (),
                 )
             )
         return results

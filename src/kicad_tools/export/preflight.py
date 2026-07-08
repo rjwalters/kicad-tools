@@ -666,6 +666,10 @@ class PreflightChecker:
         ]
 
         issues: list[str] = []
+        # Informational notes that do NOT constitute a problem (e.g. missing
+        # LCSC fields that the spec overlay will populate).  Kept separate so
+        # they never inflate the problem count or force a WARN status.
+        notes: list[str] = []
         status: Literal["OK", "WARN", "FAIL"] = "OK"
 
         if missing_fp:
@@ -680,11 +684,28 @@ class PreflightChecker:
                 status = "WARN"
 
         if missing_lcsc:
-            count = len(missing_lcsc)
             total = len([i for i in bom.items if not i.is_virtual and not i.dnp])
-            issues.append(f"{count}/{total} active item(s) missing LCSC part number")
-            if status != "FAIL":
-                status = "WARN"
+            # Preflight loads a *raw* BOM (Step 0) before the assembly
+            # pipeline applies the spec overlay (Step 1).  Items whose LCSC
+            # will be populated from the project ``.kct`` spec are not
+            # genuinely missing -- warning about them here produces a false
+            # positive (issue #3926).  Resolve which refs the spec covers and
+            # only warn about the genuinely-unresolved remainder.
+            spec_lcsc_refs = self._spec_lcsc_refs()
+            unresolved = [item for item in missing_lcsc if item.reference not in spec_lcsc_refs]
+            resolvable = len(missing_lcsc) - len(unresolved)
+
+            if unresolved:
+                msg = f"{len(unresolved)}/{total} active item(s) missing LCSC part number"
+                if resolvable:
+                    msg += f" ({resolvable} resolvable from spec)"
+                issues.append(msg)
+                if status != "FAIL":
+                    status = "WARN"
+            elif resolvable:
+                # Every missing-LCSC item is covered by the spec overlay:
+                # record an informational note instead of a false WARN.
+                notes.append(f"{resolvable} active item(s) will receive LCSC from spec overlay")
 
         if not issues:
             active_count = len([i for i in bom.items if not i.is_virtual])
@@ -692,13 +713,14 @@ class PreflightChecker:
                 name="bom_fields",
                 status="OK",
                 message=f"All {active_count} BOM items have required fields",
+                details="; ".join(notes),
             )
 
         return PreflightResult(
             name="bom_fields",
             status=status,
             message=f"BOM field issues: {len(issues)} problem(s)",
-            details="; ".join(issues),
+            details="; ".join(issues + notes),
         )
 
     def _check_bom_lcsc_values(self) -> PreflightResult:
@@ -1040,6 +1062,48 @@ class PreflightChecker:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _spec_lcsc_refs(self) -> set[str]:
+        """Return references whose LCSC will be populated by the spec overlay.
+
+        Preflight (Step 0) inspects a *raw* BOM, but the assembly pipeline
+        (Step 1) applies the project ``.kct`` spec overlay before shipping
+        the BOM.  This helper mirrors the overlay's ref resolution so that
+        ``_check_bom_fields`` can tell which "missing LCSC" items will in
+        fact be filled in from the spec, and avoid a false-positive warning
+        (issue #3926).
+
+        Only references that both (a) match a spec ``bom_entries`` entry and
+        (b) carry a non-empty ``lcsc`` value in that entry are returned --
+        an entry with only an MPN does not resolve the LCSC gap.
+
+        The lookup is best-effort: if no spec file is found or it cannot be
+        parsed, an empty set is returned so the check falls back to its
+        original (warn-on-missing) behaviour.
+        """
+        try:
+            from .bom_spec_overlay import expand_ref_range, find_spec_file
+
+            spec_file = find_spec_file(self.pcb_path.parent)
+            if spec_file is None:
+                return set()
+
+            from ..spec.parser import load_spec
+
+            spec = load_spec(spec_file)
+            if not spec.bom_entries:
+                return set()
+
+            refs: set[str] = set()
+            for entry in spec.bom_entries:
+                if not entry.lcsc:
+                    continue
+                for ref in expand_ref_range(entry.ref):
+                    refs.add(ref)
+            return refs
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("Spec LCSC resolution failed (ignoring): %s", e)
+            return set()
 
     def _load_bom(self):
         """Load and cache BOM data.

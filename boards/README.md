@@ -32,7 +32,7 @@ kct build boards/01-voltage-divider --mfr jlcpcb
 |---|-------|--------|------------|------|-------|
 | 01 | [Voltage Divider](01-voltage-divider/) | ✅ Working | 4 | 3 | Simplest possible design, workflow validation |
 | 02 | [Charlieplex LED](02-charlieplex-led/) | ✅ Working | 14 | 8 | Routes 8/8 signal nets; both DRC engines clean (verified 2026-07-05) |
-| 03 | [USB Joystick](03-usb-joystick/) | ✅ Working | ~20 | 13 | Routes 13/13 on 2-layer in ~24s; diff-pair entry regression tracked in [#3922] |
+| 03 | [USB Joystick](03-usb-joystick/) | ✅ Working | ~20 | 13 | Routes 13/13 on 2-layer in ~24s, 0 native DRC; recipe requests `--differential-pairs` (runtime coupling gated on [#3952]) |
 | 04 | [STM32 Dev Board](04-stm32-devboard/) | ✅ Working | ~30 | 12 | Fully routed via `generate_design.py`; kicad-cli DRC clean (verified 2026-07-05) |
 | 06 | [Diff-Pair Test](06-diffpair-test/) | ⚠️ Scaffold | 7 | 26 | Epic [#2556] Phase 4L regression bench --- USB 2.0/3.0, PCIe, MIPI on 4-layer; exercises Phase 1-3 features (intra_pair_clearance, coupled_routing, coupled_continuity_threshold, target_diff_impedance, skew_tolerance_mm) |
 | 07 | [Match-Group Test](07-matchgroup-test/) | ⚠️ Scaffold | 8 | 33 | Epic [#2661] Phase 3L regression bench --- DDR data byte, MIPI CSI, HDMI TMDS, address bus on 4-layer; exercises Phase 1A-2G match-group features (length_match_group, length_match_reference, length_match_tolerance_mm) |
@@ -108,12 +108,58 @@ the `intra_pair_clearance`, `coupled_continuity_threshold`, and
 invoke the Phase A/B pipeline explicitly.  PR #3069 (board 03) and PR #3090
 (board 06) migrated to this entry after the bypass bug was diagnosed.
 
-> **⚠️ Regression ([#3922]):** the #3308/#3410 recipe consolidation silently
-> dropped `--differential-pairs` from board 03's routing recipe
-> (`generate_design.py:route_pcb()`), so board 03 currently routes its USB
-> pair through the plain per-net path again. Its clean skew today is
-> coincidental, not constructed. Do not copy board 03's recipe for a new
-> diff-pair board until [#3922] lands.
+> **✅ Recipe restored ([#3922]):** the #3308/#3410 recipe consolidation had
+> silently dropped `--differential-pairs` from board 03's routing recipe
+> (`generate_design.py:route_pcb()`), so the recipe no longer even *requested*
+> diff-pair routing and this README's claim went false. The flag (plus
+> `--net-class-map`, which forwards the D+/D- `intra_pair_clearance` metadata
+> and engages the validate-side diff-pair DRC rules) is now restored and
+> mirrored in `tests/router/test_board03_routing_baseline.py`, guarded by
+> `test_recipe_includes_differential_pairs_flag()` so a future consolidation
+> cannot drop it silently again.
+>
+> **Known limitation — runtime coupling gated on [#3952]:** on board 03 the
+> flag is currently **inert at routing time**. The board's fine-pitch USB-C
+> (J1) and QFP-32 (U1) force the CLI's escape-routing dispatch, and
+> `route_cmd`'s escape / auto-layers-escalation paths do not consult
+> `args.differential_pairs` — so the `CoupledPathfinder` pre-pass
+> (`route_all_with_diffpairs`) never runs and the D+/D- skew remains
+> coincidental rather than constructed. The recipe deliberately keeps
+> `--auto-layers` (the default) because it preserves the escape pre-phase
+> board 03 needs for **13/13 + 0 native DRC**; forcing the diff-pair path with
+> `--no-auto-layers` *does* invoke Phase A but drops escape routing and
+> reintroduces a `kicad-cli` clearance violation. Integrating diff-pair
+> routing into the escape path (so Phase A runs *with* escape routing at 0
+> DRC) is tracked in [#3952] (adjacent to the `CoupledPathfinder` convergence
+> work in [#3921]). The behavior is pinned by an xfail'd
+> `test_coupled_pathfinder_phase_a_invoked` that will flip to XPASS when
+> [#3952] lands.
+
+### Determinism and artifact churn (`--seed`)
+
+Routing is deterministic **per router version**: two runs that share a
+`--seed` at the same code version emit a byte-identical routed
+`.kicad_pcb`. This is what lets a same-seed regen produce a zero-line
+`git diff` and what the board-06 determinism harness
+(`scripts/ci/board06_determinism_smoke.sh`,
+`tests/router/test_board06_determinism.py`) relies on. The property is
+implemented by `enable_deterministic_uuids()` in
+`router/primitives.py`, which derives every segment/via UUID from the
+seeded global RNG instead of `uuid.uuid4()`.
+
+Two caveats:
+
+- **Determinism is per-router-version, not forever.** A regen produced by
+  a *newer* router may legitimately differ from a committed artifact
+  (geometry improvements, quantization changes, new escape logic). An
+  artifact-vs-regen diff across router versions is expected; only
+  fresh-vs-fresh at the *same* version is guaranteed byte-identical.
+- **Segment/via serialization matches KiCad's canonical field order**
+  (`... uuid net`, uuid before net; issue #3925). Emitting `net` before
+  `uuid` used to churn every segment and via on the first KiCad open/save
+  round-trip, drowning real changes in reformat noise. If you regenerate a
+  board and see a large diff with no geometric change, confirm you are
+  comparing same-version fresh-vs-fresh before assuming a router bug.
 
 ### Subprocess (`kct route`) vs. in-process (`router.route_all_*`)
 
@@ -149,7 +195,11 @@ reasons:
    **Update 2026-07-05: the footgun bit** --- board 03 lost its
    diff-pair-aware entry in a later recipe consolidation without anyone
    noticing ([#3922]), exactly the failure mode auto-detect would have
-   prevented. Weigh this when re-promoting the auto-detect work.
+   prevented. The flag was restored and a recipe-contract test now guards
+   it ([#3922]); note the restored flag is still inert on board 03 until the
+   route_cmd escape/diff-pair dispatch is fixed ([#3952]). The procedural
+   footgun remains for the *next* new board — weigh this when re-promoting
+   the auto-detect work.
 2. An auto-detect change would have to land on both surfaces (in-process
    and CLI) to be complete, and the `CoupledPathfinder` latency issue
    tracked in [#3089] makes a CLI-default flip premature.
@@ -173,7 +223,9 @@ These are known limitations that may affect your experience:
 [#659]: https://github.com/rjwalters/kicad-tools/issues/659
 [#661]: https://github.com/rjwalters/kicad-tools/issues/661
 [#3918]: https://github.com/rjwalters/kicad-tools/issues/3918
+[#3921]: https://github.com/rjwalters/kicad-tools/issues/3921
 [#3922]: https://github.com/rjwalters/kicad-tools/issues/3922
+[#3952]: https://github.com/rjwalters/kicad-tools/issues/3952
 
 ## Project Files (.kct)
 

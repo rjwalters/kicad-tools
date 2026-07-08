@@ -271,7 +271,24 @@ class PlacementSession:
         return SessionState(positions=positions, violations=violations, score=score)
 
     def _compute_score(self) -> float:
-        """Compute placement score (lower is better)."""
+        """Compute the interactive-session placement score (lower is better).
+
+        .. note::
+            This is a **physics-simulation energy proxy**, *not* a
+            placement-quality score comparable to the other scoring surfaces.
+            It combines the force-directed optimizer's total wire length with
+            a spacing-energy term (``wire_length + energy * 0.1``) purely to
+            drive the interactive ``kct placement refine`` hill-climb toward
+            shorter, less-congested layouts.
+
+            It deliberately does **not** delegate to
+            :func:`kicad_tools.placement.cost.evaluate_placement` (the
+            optimizer objective used by ``optimize-placement``) nor to the
+            courtyard-based ``kct placement check`` metric. The three surfaces
+            measure different things and their scalar outputs are not
+            interchangeable -- see ``docs/placement-scoring.md`` for the full
+            comparison (issue #3940).
+        """
         # Use total wire length as primary metric
         wire_length = self._optimizer.total_wire_length()
         # Add energy as secondary (captures component spacing)

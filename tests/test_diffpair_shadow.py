@@ -491,6 +491,9 @@ class _StubPathfinder:
     def __init__(self, result, rescue_eligible: bool = True):
         self._result = result
         self.last_timeout_exceeded = False
+        # Issue #3921: iteration-vs-wall-clock discriminator read by the
+        # caller's budget-exit diagnostic.
+        self.last_iteration_limited = False
         self.last_iterations = 1
         self.last_best_progress = 0.0  # <= NEAR_MISS_RESCUE_CELLS
         self.last_best_state = object()
@@ -569,6 +572,112 @@ def test_flag_on_uses_weighted_astar_search(monkeypatch):
         "flag-on run must use the weighted-A* upgrade "
         f"({COUPLED_HEURISTIC_WEIGHT}), got {captured.get('heuristic_weight')}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #3921: coupled budget-exit DIAGNOSTIC.
+#
+# ``CoupledPathfinder.route_coupled`` raises the shared
+# ``last_timeout_exceeded`` flag for BOTH its iteration budget
+# (``max_iterations_budget``) and its wall-clock budget
+# (``timeout_seconds``).  The old budget-exit WARNING hard-coded the
+# ``per_pair_timeout`` seconds ("budget exceeded (120s)") even when the
+# iteration budget bailed the search in 0.3s.  ``last_iteration_limited``
+# now disambiguates the two, and the message reports the actual iteration
+# count and per-phase split so the exit reason is no longer opaque.
+#
+# (The curation comment also proposed raising the flag-off iteration
+# budget to a FLOOR to restore board-06 coupled convergence.  That was
+# measured against the real seed-42 bench and does NOT converge any pair
+# -- best-progress plateaus identically at 20x the iterations while
+# wall-time balloons -- so the floor was dropped as ineffective and
+# wall-time-harmful.  See the #3921 PR body.)
+# ---------------------------------------------------------------------------
+
+
+def test_flag_off_iteration_exit_diagnostic_reports_iterations(monkeypatch, capsys):
+    """Issue #3921 diagnostic: iteration-budget exit must NOT say "120s".
+
+    When the ITERATION budget fires (``last_iteration_limited=True``) the
+    user-visible budget-exit WARNING must cite the iteration count, not
+    hard-code the wall-clock ``per_pair_timeout`` seconds.  Previously the
+    message read "budget exceeded (120s)" even for a search that bailed in
+    0.3s after exhausting its iteration budget.
+    """
+    router, pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = False
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: None)
+
+    # Script an ITERATION-budget exit: search deferred, timeout flag set,
+    # discriminator says the iteration budget was the binding constraint.
+    def _factory(*_a, **kwargs):
+        stub = _StubPathfinder(None, rescue_eligible=False)
+        stub.last_timeout_exceeded = True
+        stub.last_iteration_limited = True
+        stub.last_iterations = 20000
+        return stub
+
+    import kicad_tools.router.diffpair_routing as dpr_mod
+
+    monkeypatch.setattr(dpr_mod, "CoupledPathfinder", _factory)
+
+    routes, _warning = dpr.route_differential_pair_coupled(
+        pair,
+        coupled_only=True,
+        per_pair_timeout=120.0,
+        per_pair_max_iterations=2000,
+    )
+
+    out = capsys.readouterr().out
+    assert "iteration budget exceeded" in out, (
+        f"iteration-budget exit must report an iteration budget; got: {out!r}"
+    )
+    assert "20000 iters" in out, (
+        f"iteration-budget exit must cite the iteration count; got: {out!r}"
+    )
+    # The pair is skipped (deferred to the main strategy) on a budget exit.
+    assert routes == []
+
+
+def test_flag_off_wallclock_exit_diagnostic_reports_seconds(monkeypatch, capsys):
+    """Control: a genuine wall-clock exit still reports seconds.
+
+    When the WALL-CLOCK budget fires (``last_iteration_limited=False``)
+    the message reports the ``per_pair_timeout`` seconds, not an iteration
+    budget -- the two exit reasons are now distinguished.
+    """
+    router, pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = False
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: None)
+    holder: dict = {}
+
+    def _factory(*_a, **kwargs):
+        stub = _StubPathfinder(None, rescue_eligible=False)
+        stub.last_timeout_exceeded = True
+        stub.last_iteration_limited = False  # wall-clock, not iterations
+        stub.last_iterations = 137
+        holder["stub"] = stub
+        return stub
+
+    import kicad_tools.router.diffpair_routing as dpr_mod
+
+    monkeypatch.setattr(dpr_mod, "CoupledPathfinder", _factory)
+
+    dpr.route_differential_pair_coupled(
+        pair,
+        coupled_only=True,
+        per_pair_timeout=120.0,
+        per_pair_max_iterations=2000,
+    )
+
+    out = capsys.readouterr().out
+    assert "wall-clock budget exceeded" in out, (
+        f"wall-clock exit must report a wall-clock budget; got: {out!r}"
+    )
+    assert "120s" in out, f"wall-clock exit must cite the seconds budget; got: {out!r}"
+    assert "iteration budget exceeded" not in out
 
 
 def test_flag_off_does_not_invoke_near_miss_rescue(monkeypatch):

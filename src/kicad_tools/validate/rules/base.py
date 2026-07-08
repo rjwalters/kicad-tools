@@ -16,10 +16,25 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
 
-# Manufacturing tolerance for DRC comparisons (in mm).
-# Clearance shortfalls below this threshold are within floating-point
-# rounding and fabrication precision and should not be flagged.
-DRC_TOLERANCE: float = 0.005
+# Numerical guard band for DRC clearance comparisons (in mm).
+#
+# This exists ONLY to suppress IEEE-754 float64 rounding artifacts in the
+# geometric distance computation -- NOT to model manufacturing precision.
+# Board coordinates live in the ~0-300 mm range; the relative epsilon of
+# float64 there is ~1e-14 mm, and a few chained subtract/hypot operations
+# accumulate to at most ~1e-9 mm. A guard band of 1e-4 mm (0.1 um) is
+# ~5 orders of magnitude above that noise floor while still being far
+# below any real manufacturing feature, and it matches
+# ``_COLOCATION_EPSILON_MM`` used for the co-location check in
+# ``clearance.py``.
+#
+# The previous value of 0.005 mm (5 um) created a dead band that silently
+# passed genuine marginal violations: the entire marginal class this guard
+# was masking is on the order of 1.6 um (e.g. actual 0.1000 mm vs a
+# 0.1016 mm / 4 mil floor). KiCad's own DRC works at IU granularity
+# (1 nm), so a 5 um dead band was ~10^8x wider than float noise requires
+# and hid real, fabricable-clearance-violating copper. See issue #3913.
+DRC_TOLERANCE: float = 1e-4
 
 
 class DRCRule(ABC):

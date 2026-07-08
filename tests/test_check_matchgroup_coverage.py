@@ -87,15 +87,20 @@ class TestCheckZeroViolations:
         assert mod.check_zero_violations({"match_group_length_skew": 4}, baseline=4) == []
 
     def test_board_07_documented_via_skew_baseline(self):
-        """Board 07's ADDR_BUS carries a via-count mismatch (A4/A6 extra via
-        pair vs A0) that became visible once #3915 threaded the board stackup
-        into via-aware match-group skew measurement.  It is documented as a
-        baseline of 1 pending a via-balanced re-route (Issue #3931, blocked on
-        the artifact-churn problem #3925), not silently absorbed by the large
-        error-count allowlist floor."""
+        """Board 07's documented match-group baseline is 2 on the reroute path
+        that the Match-Group Routing Regression CI job exercises: 1x ADDR_BUS
+        via-count mismatch (A4/A6 extra via pair vs A0, visible since #3915
+        threaded the board stackup into via-aware skew; Issue #3931) plus 1x
+        MIPI_CSI_LANES pair-only skew (the group #3916 newly makes checkable,
+        which fires once the reroute lands every MIPI leg).  HDMI_TMDS_LANES
+        does not fire -- its TMDS_D0_N/TMDS_D1_N legs stay unrouted after the
+        reroute, so the unrouted-leg gate excludes it.  A baseline of 2 also
+        satisfies the ``--skip-route`` committed-artifact path, which counts 1
+        (MIPI/HDMI/DDR each have an unrouted leg there).  Neither count is
+        silently absorbed by the large error-count allowlist floor."""
         mod = _load_helper_module()
         key = "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb"
-        assert mod.MATCHGROUP_VIOLATION_BASELINE.get(key, 0) == 1
+        assert mod.MATCHGROUP_VIOLATION_BASELINE.get(key, 0) == 2
 
 
 # ---------------------------------------------------------------------------

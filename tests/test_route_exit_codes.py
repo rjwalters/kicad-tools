@@ -738,7 +738,10 @@ class TestBuildCmdExitCodeHandling:
 
         console = MagicMock()
 
-        with patch("kicad_tools.cli.build_cmd.subprocess.run", return_value=mock_result):
+        with patch(
+            "kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat",
+            return_value=mock_result,
+        ):
             # Mock _get_routing_params to avoid needing a real spec
             with patch(
                 "kicad_tools.cli.build_cmd._get_routing_params",

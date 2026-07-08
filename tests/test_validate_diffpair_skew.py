@@ -295,6 +295,83 @@ class TestDeriveSkewDataBasic:
         assert threshold_map[(4, 5)] == 3.0
 
 
+class TestDeriveSkewDataViaInclusive:
+    """Issue #3924 AC3: ``derive_skew_data`` must thread ``board_thickness_mm``
+    and ``num_copper_layers`` so per-pair skew is *via-inclusive* on
+    multi-layer boards -- the sibling of PR #3928's
+    ``derive_group_skew_data`` fix (which threaded the same args for match
+    groups).  Without the threading, a via that appears on only one half of
+    the pair contributes 0 mm and the skew reads 0.0.
+    """
+
+    @staticmethod
+    def _pair_pcb_with_via_on_positive() -> _StubPCB:
+        """Symmetric-copper pair (both halves 10 mm on F.Cu) where the
+        positive half additionally carries one via.  Any measured skew is
+        therefore attributable solely to the via's drilled contribution."""
+        p_net, n_net = 4, 5
+        p_name, n_name = "USB_D+", "USB_D-"
+        nets = {
+            0: _StubNet(0, ""),
+            p_net: _StubNet(p_net, p_name),
+            n_net: _StubNet(n_net, n_name),
+        }
+        segs = [
+            _StubSegment(start=(0.0, 0.0), end=(10.0, 0.0), net_number=p_net, net_name=p_name),
+            _StubSegment(start=(0.0, 1.0), end=(10.0, 1.0), net_number=n_net, net_name=n_name),
+        ]
+        # A single F.Cu<->B.Cu via on the positive half only.
+        vias = [
+            _StubVia(
+                position=(10.0, 0.0),
+                layers=["F.Cu", "B.Cu"],
+                net_number=p_net,
+                net_name=p_name,
+            )
+        ]
+        return _StubPCB(_nets=nets, _segments=segs, _vias=vias)
+
+    def test_via_blind_without_board_thickness(self):
+        """Default call (no ``board_thickness_mm``) -> via contributes 0 mm,
+        so the copper-symmetric pair reads 0.0 skew (the old via-blind
+        behaviour the AC3 fix must NOT change for the no-thickness path)."""
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.diffpair_skew import derive_skew_data
+
+        nc = NetClassRouting(name="HIGH_SPEED", coupled_routing=True)
+        net_class_map = {"USB_D+": nc, "USB_D-": nc}
+
+        pcb = self._pair_pcb_with_via_on_positive()
+        skew_data, _ = derive_skew_data(pcb, net_class_map)
+
+        assert skew_data[("USB_D+", "USB_D-")] == 0.0
+
+    def test_via_inclusive_with_board_thickness(self):
+        """4-layer board with ``board_thickness_mm`` supplied -> the lone via
+        on the positive half adds its drilled length, so the pair now reports
+        a non-zero via-inclusive skew (AC3: matches the #3928 group fix)."""
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.diffpair_skew import derive_skew_data
+
+        nc = NetClassRouting(name="HIGH_SPEED", coupled_routing=True)
+        net_class_map = {"USB_D+": nc, "USB_D-": nc}
+
+        pcb = self._pair_pcb_with_via_on_positive()
+        skew_data, _ = derive_skew_data(
+            pcb,
+            net_class_map,
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+        )
+
+        skew = skew_data[("USB_D+", "USB_D-")]
+        # The via's drilled contribution is strictly positive and bounded by
+        # the total stackup thickness (a single F.Cu<->B.Cu via spans the
+        # full 1.6 mm on a 4-layer board).
+        assert skew > 0.0
+        assert skew <= 1.6
+
+
 class TestDeriveSkewDataUnroutedHalf:
     """Pairs where one half has no geometry are omitted (graceful degradation)."""
 

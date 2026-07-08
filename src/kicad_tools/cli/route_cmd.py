@@ -460,6 +460,47 @@ def _per_attempt_budgeted_timeout(args, attempt_index: int, max_attempts: int) -
     return min(float(timeout), remaining, per_attempt_slice)
 
 
+def _routable_multi_pad_nets(router: "Autorouter") -> list[int]:
+    """Return the multi-pad net IDs the router will actually route.
+
+    Issue #3942 (Bug B): the routed/total summary denominator must count
+    only the nets the router was asked to route.  A net that carries 2+
+    pads but is *pour-served* -- ``router._is_pour_net(net_id)`` is True
+    because its net class declares ``is_pour_net`` and it has a copper
+    zone -- is stripped from the routing order by
+    :meth:`Autorouter._filter_pour_nets` and is therefore never counted
+    in ``stats['nets_routed']``.
+
+    Historically these nets were excluded from the denominator only when
+    the CLI's ``skip_nets`` list caught them (their pads get rewritten to
+    net 0 at load time, so ``net_num > 0`` already drops them).  But the
+    router's own pour classification (``net_class_map``) can flag a net as
+    pour even when the CLI's zone-detection regex missed the zone and did
+    not add it to ``skip_nets``.  In that case the net kept ``net_num >
+    0``, landed in the multi-pad denominator, yet the router silently
+    skipped it -- producing a bogus ``PARTIAL: Routed 1/2`` line on a
+    board that routed every net it was asked to.
+
+    Gating on ``_is_pour_net`` (which returns False for pour nets in
+    ``_pour_nets_without_zones`` -- those are routed as signals, so they
+    stay in the count) makes the denominator match precisely the set the
+    router hands to the A* loop.
+
+    Args:
+        router: The Autorouter, already loaded (so ``net_class_map`` and
+            ``_pour_nets_without_zones`` are populated).
+
+    Returns:
+        Sorted list of net IDs with ``net_num > 0``, 2+ pads, that the
+        router will route (i.e. are not pour-served).
+    """
+    result: list[int] = []
+    for net_num, pads in router.nets.items():
+        if net_num > 0 and len(pads) >= 2 and not router._is_pour_net(net_num):
+            result.append(net_num)
+    return sorted(result)
+
+
 def _emit_single_pad_net_warning(
     router: "Autorouter",
     single_pad_nets: list[int],
@@ -1234,7 +1275,18 @@ def _finalize_routes(
     stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
 
     if not quiet:
-        flush_print("\n--- Results ---")
+        # Issue #3942 (Bug C): these statistics are scoped to the
+        # newly-routed multi-pad nets (``get_statistics`` is filtered by
+        # ``multi_pad_net_ids``).  When existing copper is preserved
+        # (``--preserve-existing``), the written PCB carries additional
+        # segments/vias re-emitted above and logged on the "Preserved
+        # existing:" line -- so the file totals are these counts PLUS the
+        # preserved copper.  Label the heading so the numbers are not
+        # mistaken for file-final totals.
+        _results_heading = "\n--- Results ---"
+        if preserve_existing:
+            _results_heading += " (newly-routed nets only; preserved copper counted above)"
+        flush_print(_results_heading)
         flush_print(f"  Routes created:  {stats['routes']}")
         flush_print(f"  Segments:        {stats['segments']}")
         flush_print(f"  Vias:            {stats['vias']}")
@@ -1538,12 +1590,119 @@ def show_preview(
         return "n"
 
 
+def _write_net_class_map_sidecar(
+    output_path: Path,
+    net_class_map: dict | None,
+    quiet: bool = False,
+) -> None:
+    """Serialize the router's net-class map to a sidecar next to the PCB.
+
+    Issue #3917 Defect 1: ``net_class_map_to_dict()`` existed and was
+    round-trip tested but was never called from the route step, so the
+    ``output/net_class_map.json`` sidecar that every user-facing hint (and
+    ``kct check`` auto-discovery) points at was never actually written.
+
+    Writes ``<output_dir>/net_class_map.json`` adjacent to the routed PCB
+    so ``kct check`` can auto-load it and fire the sidecar-gated skew /
+    continuity rules.  A blocked write (read-only output dir) is a
+    non-fatal warning, never a route failure.
+
+    Args:
+        output_path: Path to the routed PCB file.  The sidecar is written
+            to the same directory.
+        net_class_map: The autorouter's ``{net_name: NetClassRouting}``
+            map.  Skipped when ``None`` or empty (an empty map would write
+            a misleading sidecar that the check-side probe would treat as
+            present).
+        quiet: If True, suppress the confirmation line.
+    """
+    if not net_class_map:
+        return
+    import json
+
+    from kicad_tools.router.rules import net_class_map_to_dict
+
+    sidecar_path = output_path.parent / "net_class_map.json"
+    try:
+        payload = net_class_map_to_dict(net_class_map)
+        sidecar_path.write_text(json.dumps(payload, indent=2))
+    except (OSError, TypeError, ValueError) as e:
+        # Non-fatal: a blocked / read-only output directory (or an
+        # unexpectedly non-serializable map) must not fail the route.
+        if not quiet:
+            print(f"  Warning: could not write net-class-map sidecar: {e}")
+        return
+    if not quiet:
+        print(f"  Net-class-map sidecar: {sidecar_path}")
+
+
+def _write_drc_constraint_sidecars(
+    output_path: Path,
+    manufacturer: str,
+    layers: int,
+    copper_oz: float = 1.0,
+    quiet: bool = False,
+) -> None:
+    """Emit ``.kicad_pro`` + ``.kicad_dru`` next to the routed PCB.
+
+    Issue #3919: ``kicad-cli pcb drc`` auto-loads ``<board>.kicad_pro`` from
+    the PCB's directory to read the board design rules (min track width,
+    clearance, via diameter, etc.).  When no project file is present it falls
+    back to KiCad's stricter built-in defaults (0.20 mm track, 0.50 mm via,
+    0.20 mm clearance), producing *false* geometric violations for boards
+    routed at a finer manufacturer capability tier (e.g. board 03 flagged 87
+    bogus ``track_width`` errors on 0.15 mm traces).  Missing sidecars also
+    make verdicts state-dependent: a prior run that happens to write the
+    sidecars silently changes the next run's DRC result.
+
+    Resolving the manufacturer profile here (the same ``manufacturer`` +
+    ``layers`` + ``copper_oz`` the internal :class:`DRCChecker` resolves)
+    and delegating to :func:`write_drc_constraints` writes both files
+    atomically *before* the ``run_geometric_drc`` cross-check, so kicad-cli
+    -- ours or a later user invocation -- judges against the intended
+    constraints deterministically.  This mirrors the net-class-map sidecar
+    precedent (Issue #3917 / PR #3948): a read-only output directory or an
+    unknown manufacturer degrades to a non-fatal warning, never a route
+    failure.
+
+    Args:
+        output_path: Path to the routed PCB file.  The sidecars are written
+            to the same directory (``<board>.kicad_pro`` / ``.kicad_dru``).
+        manufacturer: Manufacturer profile ID (e.g. ``"jlcpcb-tier1"``).
+        layers: Copper-layer count (threaded into the profile's rules).
+        copper_oz: Copper weight in oz (defaults to 1.0, the system default
+            and the correct value for all 8 demo boards).
+        quiet: If True, suppress the confirmation line.
+    """
+    try:
+        from kicad_tools.manufacturers import get_profile, write_drc_constraints
+
+        profile = get_profile(manufacturer)
+        rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
+        written = write_drc_constraints(
+            output_path,
+            rules,
+            manufacturer_id=profile.id,
+            layers=layers,
+            copper_oz=copper_oz,
+        )
+    except (ValueError, OSError, KeyError) as e:
+        # Non-fatal: an unknown manufacturer (ValueError) or a read-only /
+        # blocked output directory (OSError) must not fail the route.
+        if not quiet:
+            print(f"  Warning: could not write DRC-constraint sidecars: {e}")
+        return
+    if not quiet and written:
+        print(f"  DRC-constraint sidecars: {', '.join(str(p) for p in written)}")
+
+
 def run_post_route_drc(
     output_path: Path,
     manufacturer: str,
     layers: int,
     quiet: bool = False,
     net_class_map: dict | None = None,
+    copper_oz: float = 1.0,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -1558,12 +1717,37 @@ def run_post_route_drc(
             its engagement state from this map + the routed PCB and
             fires per Epic #2556 Phase 2G.  Without it, that rule is a
             no-op (graceful degradation).
+        copper_oz: Copper weight in oz for the manufacturer profile's
+            design rules (defaults to 1.0, the system default and the
+            correct value for all 8 demo boards).  Threaded into both the
+            internal :class:`DRCChecker` and the emitted ``.kicad_pro`` /
+            ``.kicad_dru`` sidecars so both engines judge consistently.
 
     Returns:
         Tuple of (error_count, warning_count)
     """
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate import DRCChecker
+
+    # Issue #3917 Defect 1: persist the net-class map as a sidecar next to
+    # the routed PCB so ``kct check`` (and re-runs of this DRC) can
+    # auto-load it and fire the sidecar-gated skew / continuity rules.
+    # This is the shared post-route DRC entry for all three route flows
+    # (default multi-layer, rule-relaxation, and single-layer), so writing
+    # here covers every callsite in one place.
+    _write_net_class_map_sidecar(output_path, net_class_map, quiet=quiet)
+
+    # Issue #3919: emit the ``.kicad_pro`` + ``.kicad_dru`` constraint
+    # sidecars from the manufacturer profile *before* the geometric DRC
+    # cross-check below, so ``kicad-cli pcb drc`` auto-loads the intended
+    # capability-tier floors instead of KiCad's stricter built-in defaults
+    # (which flag false track_width/clearance/via violations on finer
+    # traces).  Writing here -- the shared post-route DRC entry for every
+    # route flow -- makes the verdict deterministic and independent of any
+    # sidecars a prior run may have left behind.
+    _write_drc_constraint_sidecars(
+        output_path, manufacturer, layers, copper_oz=copper_oz, quiet=quiet
+    )
 
     try:
         # Load the routed PCB
@@ -1574,6 +1758,7 @@ def run_post_route_drc(
             pcb,
             manufacturer=manufacturer,
             layers=layers,
+            copper_oz=copper_oz,
             net_class_map=net_class_map,
         )
         results = checker.check_all()
@@ -3310,10 +3495,11 @@ def route_with_layer_escalation(
         # Issue #1841: Tell the autorouter which pour nets lack zones
         router._pour_nets_without_zones = set(_no_zone)
 
-        # Count nets to route
-        multi_pad_nets = [
-            net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
-        ]
+        # Count nets to route.  Issue #3942 (Bug B): exclude pour-served
+        # multi-pad nets (router-stripped via _filter_pour_nets) from the
+        # denominator so routed/total matches what the router was asked to
+        # route.  See _routable_multi_pad_nets for the rationale.
+        multi_pad_nets = _routable_multi_pad_nets(router)
         single_pad_nets = [
             net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) == 1
         ]
@@ -4188,10 +4374,11 @@ def route_with_rule_relaxation(
         # Issue #1841: Tell the autorouter which pour nets lack zones
         router._pour_nets_without_zones = set(_no_zone)
 
-        # Count nets to route
-        multi_pad_nets = [
-            net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
-        ]
+        # Count nets to route.  Issue #3942 (Bug B): exclude pour-served
+        # multi-pad nets (router-stripped via _filter_pour_nets) from the
+        # denominator so routed/total matches what the router was asked to
+        # route.  See _routable_multi_pad_nets for the rationale.
+        multi_pad_nets = _routable_multi_pad_nets(router)
         single_pad_nets = [
             net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) == 1
         ]
@@ -6271,10 +6458,9 @@ def route_with_combined_escalation(
             # Issue #1841: Tell the autorouter which pour nets lack zones
             router._pour_nets_without_zones = set(_no_zone)
 
-            # Count nets to route
-            multi_pad_nets = [
-                net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
-            ]
+            # Count nets to route.  Issue #3942 (Bug B): exclude pour-served
+            # multi-pad nets from the denominator (see _routable_multi_pad_nets).
+            multi_pad_nets = _routable_multi_pad_nets(router)
             nets_to_route = len(multi_pad_nets)
 
             # Route
@@ -7057,14 +7243,19 @@ def main(argv: list[str] | None = None) -> int:
             "``_escape_random_subset``, ``_escape_full_reorder``) and the "
             "MST fine-grid trial shuffle become deterministic across "
             "invocations, so two runs with identical inputs and the same "
-            "--seed produce byte-identical routed output (modulo UUID lines, "
-            "which are intentionally random per element). Without --seed the "
+            "--seed produce byte-identical routed output -- including the "
+            "per-element UUID lines, which are derived from the seeded RNG "
+            "when --seed is set (Issue #3272/#3925), so a same-seed regen "
+            "yields a zero-line git diff. Without --seed the "
             "router uses Python's default os.urandom-derived entropy and "
-            "results vary run-to-run. Note: --seed does NOT remove all "
-            "sources of variance -- wall-clock escape budgets (e.g. "
-            "--timeout) can still terminate early on a loaded machine; "
-            "for fully reproducible CI runs combine --seed with a generous "
-            "--timeout."
+            "results (and UUIDs) vary run-to-run. Note: determinism is "
+            "per-router-version -- a regen from a newer router may "
+            "legitimately differ from a committed artifact; only "
+            "fresh-vs-fresh at the same version is byte-identical. --seed "
+            "also does NOT remove all sources of variance -- wall-clock "
+            "escape budgets (e.g. --timeout) can still terminate early on a "
+            "loaded machine; for fully reproducible CI runs combine --seed "
+            "with a generous --timeout."
         ),
     )
     parser.add_argument(
@@ -8673,15 +8864,19 @@ def main(argv: list[str] | None = None) -> int:
     # - Multi-pad nets: 2+ pads, need actual routing
     # - Single-pad nets: 1 pad, trivially complete (no routing needed)
     # - Power nets: skipped via skip_nets, handled by copper pours
-    multi_pad_nets = []
-    single_pad_nets = []
-    for net_num, pads in router.nets.items():
-        if net_num > 0:  # Skip net 0 (unconnected)
-            if len(pads) >= 2:
-                multi_pad_nets.append(net_num)
-            elif len(pads) == 1:
-                single_pad_nets.append(net_num)
-    nets_to_route = len(multi_pad_nets)  # Only multi-pad nets need routing
+    #
+    # Issue #3942 (Bug B): pour-served multi-pad nets that the router
+    # strips via ``_filter_pour_nets`` are excluded from the denominator
+    # by ``_routable_multi_pad_nets`` so the routed/total summary counts
+    # only the nets the router was actually asked to route.  Without this
+    # a pour net the CLI's zone regex missed (kept ``net_num > 0``) but the
+    # router's net-class flagged as pour was counted-but-never-routed,
+    # yielding a spurious ``PARTIAL: Routed 1/2`` on a fully-routed board.
+    multi_pad_nets = _routable_multi_pad_nets(router)
+    single_pad_nets = [
+        net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) == 1
+    ]
+    nets_to_route = len(multi_pad_nets)  # Only routable multi-pad nets need routing
     power_nets_skipped = len(skip_nets)
 
     if not quiet:

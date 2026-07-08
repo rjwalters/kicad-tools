@@ -77,7 +77,7 @@ requirements:
       height: "60mm"
 
   manufacturing:
-    target_fab: jlcpcb
+    target_fab: jlcpcb-tier1
     layers:
       preferred: 2
     min_trace: "0.15mm"

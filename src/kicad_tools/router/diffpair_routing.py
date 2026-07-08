@@ -618,6 +618,18 @@ class CoupledPathfinder:
         # invocation.
         self.last_timeout_exceeded: bool = False
 
+        # Issue #3921: disambiguates WHICH budget fired when
+        # ``last_timeout_exceeded`` is True.  ``route_coupled`` sets the
+        # shared ``last_timeout_exceeded`` flag for both the iteration
+        # budget (``max_iterations_budget``) and the wall-clock budget
+        # (``timeout_seconds``), so the caller's budget-exit diagnostic
+        # cannot tell a 0.3s iteration bail from a 120s wall-clock bail.
+        # ``True`` means the ITERATION budget was the binding constraint;
+        # ``False`` (with ``last_timeout_exceeded`` True) means the
+        # wall-clock budget fired.  Reset to ``False`` at the start of
+        # every ``route_coupled`` invocation.
+        self.last_iteration_limited: bool = False
+
         # Issue #3473 (review of #3439): number of A* iterations the
         # most recent ``route_coupled`` call consumed.  The two-phase
         # corridor-then-open caller charges the corridor attempt's
@@ -1480,6 +1492,8 @@ class CoupledPathfinder:
         # this immediately after ``route_coupled`` returns ``None`` to
         # decide whether to attempt an independent-routing fallback.
         self.last_timeout_exceeded = False
+        # Issue #3921: reset the iteration-vs-wall-clock discriminator.
+        self.last_iteration_limited = False
         # Issue #3473: reset the iteration counter for this call.
         self.last_iterations = 0
         # Issue #3508: best progress-toward-goal (joint Manhattan
@@ -1659,6 +1673,10 @@ class CoupledPathfinder:
                     n_start.net_name,
                 )
                 self.last_timeout_exceeded = True
+                # Issue #3921: mark the ITERATION budget as the binding
+                # constraint so the caller's diagnostic reports iteration
+                # counts, not a misleading wall-clock-seconds figure.
+                self.last_iteration_limited = True
                 return None
 
             # Issue #3089: periodic wall-clock check.  Exits with ``None``
@@ -4181,6 +4199,22 @@ class DiffPairRouter:
         # re-route gate's per-pair budget), so this default never narrows
         # an opt-in run.  An explicit ``per_pair_max_iterations`` (board
         # configs, the re-route gate) always takes precedence.
+        #
+        # Issue #3921 (investigation): the curation comment proposed
+        # raising this flag-off default to a FLOOR so board 06's explicit
+        # ``per_pair_max_iterations=2000`` would be lifted to 40000.  That
+        # was VERIFIED against the actual seed-42 bench and does NOT
+        # restore convergence: at 20000 iters/phase the joint search's
+        # best-progress plateaus identically to the 1000-iter run
+        # (398->398, 61->64 cells from goal) while wall-time balloons
+        # 562s -> >600s.  The reason is the ``heuristic_weight`` note
+        # above: classic optimal A* (weight=1.0, the flag-off search)
+        # floods cost_turn f-plateaus and "no CI-affordable iteration
+        # budget converges".  The historical 6/9 convergence came from the
+        # geometric SHADOW CONSTRUCTOR (``enable_shadow_construction=
+        # True``), not the joint A* search -- so a budget floor is the
+        # wrong lever and was dropped.  See the #3921 PR body for the
+        # three-way measurement (floor / weighted / shadow).
         if (
             not self.enable_shadow_construction
             and (per_pair_max_iterations is None or per_pair_max_iterations <= 0)
@@ -4519,18 +4553,58 @@ class DiffPairRouter:
                 # budget was actually plumbed; otherwise let the search
                 # DEFER to the independent fallback below.
                 if pathfinder.last_timeout_exceeded and per_pair_timeout is not None:
+                    # Issue #3921: report WHICH budget actually fired.
+                    # ``route_coupled`` raises ``last_timeout_exceeded``
+                    # for both the iteration budget and the wall-clock
+                    # budget, so the old message hard-coded the
+                    # ``per_pair_timeout`` seconds ("budget exceeded
+                    # (120s)") even when the iteration budget bailed the
+                    # search in 0.3s.  ``last_iteration_limited``
+                    # disambiguates; surface the actual iteration count
+                    # and the per-phase split so the exit reason is not
+                    # opaque.
+                    if pathfinder.last_iteration_limited:
+                        # ``per_pair_max_iterations`` is the total budget;
+                        # the two-phase caller splits it ~half corridor /
+                        # half open (see ``corridor_iteration_budget``).
+                        total_budget = per_pair_max_iterations
+                        phase_budget = (
+                            max(1, total_budget // 2)
+                            if total_budget is not None and total_budget > 0
+                            else None
+                        )
+                        budget_desc = (
+                            f"iteration budget exceeded "
+                            f"({pathfinder.last_iterations} iters; "
+                            f"phase cap {phase_budget}, total {total_budget}) "
+                            f"in {spec_elapsed:.1f}s"
+                            if phase_budget is not None
+                            else f"iteration budget exceeded "
+                            f"({pathfinder.last_iterations} iters) "
+                            f"in {spec_elapsed:.1f}s"
+                        )
+                    else:
+                        budget_desc = (
+                            f"wall-clock budget exceeded "
+                            f"({per_pair_timeout:.0f}s; "
+                            f"{pathfinder.last_iterations} iters)"
+                        )
                     print(
-                        "    WARNING: Coupled routing budget exceeded "
-                        f"({per_pair_timeout:.0f}s); skipping diff-pair "
-                        "and leaving nets for the main strategy."
+                        f"    WARNING: Coupled routing {budget_desc}; "
+                        "skipping diff-pair and leaving nets for the "
+                        "main strategy."
                     )
                     logger.warning(
                         "diffpair coupled-routing budget exceeded: pair=%r "
-                        "p_net=%r n_net=%r budget=%.1fs",
+                        "p_net=%r n_net=%r reason=%s iters=%d "
+                        "wall_budget=%.1fs elapsed=%.2fs",
                         pair.name,
                         pair.positive.net_name,
                         pair.negative.net_name,
+                        "iteration" if pathfinder.last_iteration_limited else "wall-clock",
+                        pathfinder.last_iterations,
                         float(per_pair_timeout) if per_pair_timeout else -1.0,
+                        spec_elapsed,
                     )
                     self._last_pair_budget_exit = True
                     return [], None

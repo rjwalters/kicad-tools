@@ -406,6 +406,237 @@ class TestDeriveGroupSkewDataPartialRouting:
 
 
 # ---------------------------------------------------------------------------
+# Pair-only groups (Issue #3916)
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveGroupSkewDataPairOnly:
+    """Groups composed exclusively of diff pairs must be length-checked.
+
+    Regression coverage for Issue #3916: MIPI_CSI_LANES / HDMI_TMDS_LANES
+    on board 07 exit ``_extract_pair_ids`` with ``net_ids=[]`` and a
+    fully-populated ``pair_ids``.  The old ``if not grp.net_ids: continue``
+    guard silently dropped those groups so the skew rule never fired.  The
+    producer now measures diff-pair members via the pair-average
+    ``(L_P + L_N) / 2`` contribution.
+    """
+
+    def test_pair_only_group_produces_skew(self):
+        """AC6: a group of 2+ diff pairs yields a non-empty skew_data dict.
+
+        Three MIPI lanes (P/N per lane), all legs routed.  With net_ids=[]
+        and pair_ids populated, the group must still be measured and appear
+        in group_skew_data with a correct between-lane skew value.
+        """
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        nc = NetClassRouting(
+            name="MIPI",
+            length_match_group="MIPI_LANES",
+            length_match_tolerance_mm=0.05,
+        )
+        # 3 lanes: DAT0 (P/N), DAT1 (P/N), CLK (P/N).  _P/_N suffixes make
+        # the detector pair them, so the group ends up pair-only.
+        net_class_map = {
+            "MIPI_DAT0_P": nc,
+            "MIPI_DAT0_N": nc,
+            "MIPI_DAT1_P": nc,
+            "MIPI_DAT1_N": nc,
+            "MIPI_CLK_P": nc,
+            "MIPI_CLK_N": nc,
+        }
+        # Lane averages: lane0 = (10.0+10.0)/2 = 10.0, lane1 = 11.0,
+        # lane2 = 12.0  ->  between-lane skew = 12.0 - 10.0 = 2.0
+        pcb = _make_ddr_pcb(
+            net_lengths_mm={
+                40: 10.0,  # DAT0_P
+                41: 10.0,  # DAT0_N
+                42: 11.0,  # DAT1_P
+                43: 11.0,  # DAT1_N
+                44: 12.0,  # CLK_P
+                45: 12.0,  # CLK_N
+            },
+            net_names_map={
+                40: "MIPI_DAT0_P",
+                41: "MIPI_DAT0_N",
+                42: "MIPI_DAT1_P",
+                43: "MIPI_DAT1_N",
+                44: "MIPI_CLK_P",
+                45: "MIPI_CLK_N",
+            },
+        )
+        skew_data, groups, threshold_map = derive_group_skew_data(pcb, net_class_map)
+
+        # The group is pair-only: net_ids empty, three pairs.
+        assert len(groups) == 1
+        assert groups[0].name == "MIPI_LANES"
+        assert groups[0].net_ids == []
+        assert len(groups[0].pair_ids) == 3
+
+        # AC6: pair-only group is measured, not skipped.
+        assert "MIPI_LANES" in skew_data
+        assert abs(skew_data["MIPI_LANES"] - 2.0) < 1e-9
+        # Threshold falls back to the P-leg-of-first-pair net class.
+        assert threshold_map["MIPI_LANES"] == 0.05
+
+    def test_pair_average_not_per_leg_semantics(self):
+        """AC7: each pair contributes ONE averaged entry, not two per-leg entries.
+
+        Lane 0: L_P=10.0, L_N=10.1 -> average 10.05.
+        Lane 1: L_P=10.3, L_N=10.3 -> average 10.30.
+        Pair-average skew = 10.30 - 10.05 = 0.25mm.
+        Per-leg (wrong) skew would be max(10.3) - min(10.0) = 0.30mm.
+        """
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        nc = NetClassRouting(
+            name="HDMI",
+            length_match_group="TMDS_LANES",
+            length_match_tolerance_mm=0.075,
+        )
+        net_class_map = {
+            "TMDS_D0_P": nc,
+            "TMDS_D0_N": nc,
+            "TMDS_D1_P": nc,
+            "TMDS_D1_N": nc,
+        }
+        pcb = _make_ddr_pcb(
+            net_lengths_mm={
+                50: 10.0,  # D0_P
+                51: 10.1,  # D0_N  -> lane0 avg 10.05
+                52: 10.3,  # D1_P
+                53: 10.3,  # D1_N  -> lane1 avg 10.30
+            },
+            net_names_map={
+                50: "TMDS_D0_P",
+                51: "TMDS_D0_N",
+                52: "TMDS_D1_P",
+                53: "TMDS_D1_N",
+            },
+        )
+        skew_data, groups, _ = derive_group_skew_data(pcb, net_class_map)
+
+        assert groups[0].net_ids == []
+        assert len(groups[0].pair_ids) == 2
+        assert "TMDS_LANES" in skew_data
+        # Pair-average, NOT per-leg.
+        assert abs(skew_data["TMDS_LANES"] - 0.25) < 1e-9
+        # Guard the anti-pattern explicitly: must NOT be the per-leg 0.30.
+        assert abs(skew_data["TMDS_LANES"] - 0.30) > 1e-3
+
+    def test_pair_with_one_unrouted_leg_omits_group(self):
+        """AC8: a pair with one unrouted leg omits the whole group.
+
+        Matches the single-ended unrouted-member gating: if either leg of
+        any pair has zero geometry, the group is excluded from skew_data.
+        """
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        nc = NetClassRouting(
+            name="MIPI",
+            length_match_group="MIPI_LANES",
+            length_match_tolerance_mm=0.05,
+        )
+        net_class_map = {
+            "MIPI_DAT0_P": nc,
+            "MIPI_DAT0_N": nc,
+            "MIPI_DAT1_P": nc,
+            "MIPI_DAT1_N": nc,
+        }
+        # DAT1_N (net 43) unrouted -> its pair, hence the group, is dropped.
+        pcb = _make_ddr_pcb(
+            net_lengths_mm={
+                40: 10.0,  # DAT0_P
+                41: 10.0,  # DAT0_N
+                42: 11.0,  # DAT1_P
+                43: None,  # DAT1_N unrouted
+            },
+            net_names_map={
+                40: "MIPI_DAT0_P",
+                41: "MIPI_DAT0_N",
+                42: "MIPI_DAT1_P",
+                43: "MIPI_DAT1_N",
+            },
+        )
+        skew_data, _, threshold_map = derive_group_skew_data(pcb, net_class_map)
+
+        assert skew_data == {}
+        assert threshold_map == {}
+
+    def test_single_pair_group_below_min_members(self):
+        """A group with a single diff pair contributes one entry -> skipped.
+
+        The ``< 2 members`` guard stays: one pair collapses to one averaged
+        value (len(measured) == 1), which is not enough for max-min skew.
+        """
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        nc = NetClassRouting(
+            name="MIPI",
+            length_match_group="MIPI_LANES",
+            length_match_tolerance_mm=0.05,
+        )
+        net_class_map = {"MIPI_DAT0_P": nc, "MIPI_DAT0_N": nc}
+        pcb = _make_ddr_pcb(
+            net_lengths_mm={40: 10.0, 41: 10.2},
+            net_names_map={40: "MIPI_DAT0_P", 41: "MIPI_DAT0_N"},
+        )
+        skew_data, _, _ = derive_group_skew_data(pcb, net_class_map)
+
+        # One pair -> one averaged member -> below the 2-member floor.
+        assert skew_data == {}
+
+    def test_mixed_single_ended_and_pair_members(self):
+        """A group with both net_ids and pair_ids measures both kinds.
+
+        Regression guard for DDR-style groups (single-ended DQ nets +
+        a DQS pair): the pair contributes its average alongside the
+        single-ended lengths.
+        """
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        nc = NetClassRouting(
+            name="DDR",
+            length_match_group="DDR_BYTE",
+            length_match_tolerance_mm=0.5,
+        )
+        net_class_map = {
+            "DQ0": nc,
+            "DQ1": nc,
+            "DQS_P": nc,
+            "DQS_N": nc,
+        }
+        # DQ0=10.0, DQ1=10.0, DQS pair avg = (10.4+10.6)/2 = 10.5
+        # skew = 10.5 - 10.0 = 0.5
+        pcb = _make_ddr_pcb(
+            net_lengths_mm={
+                60: 10.0,  # DQ0
+                61: 10.0,  # DQ1
+                62: 10.4,  # DQS_P
+                63: 10.6,  # DQS_N
+            },
+            net_names_map={
+                60: "DQ0",
+                61: "DQ1",
+                62: "DQS_P",
+                63: "DQS_N",
+            },
+        )
+        skew_data, groups, _ = derive_group_skew_data(pcb, net_class_map)
+
+        assert len(groups) == 1
+        assert sorted(groups[0].net_ids) == [60, 61]
+        assert len(groups[0].pair_ids) == 1
+        assert "DDR_BYTE" in skew_data
+        assert abs(skew_data["DDR_BYTE"] - 0.5) < 1e-9
+
+
+# ---------------------------------------------------------------------------
 # Drift-prevention tests (the core property tested in this issue).
 # ---------------------------------------------------------------------------
 

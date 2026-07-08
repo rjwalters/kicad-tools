@@ -343,6 +343,16 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
         ``value`` is the footprint-value text written on F.Fab; pass the
         schematic-side connector value (e.g. ``"IN"`` / ``"OUT"``) so the
         sync analyzer doesn't flag a spurious value mismatch.
+
+        The refdes sits at local ``(0, -3.5)`` -- far enough above pad 1 to
+        clear its mask aperture (issue #3939).  Pad 1 is a 1.7x1.7 mm
+        thru-hole centred at ``(0, -1.27)`` (pitch/2), so the top edge of its
+        exposed copper is at ``-1.27 - 0.85 = -2.12`` mm.  A 1x1 mm refdes
+        with 0.15 mm stroke has a bottom edge ``0.5 + 0.075 = 0.575`` mm below
+        its centre, so the deepest safe centre is ``-2.12 - 0.575 = -2.70``
+        mm.  ``-3.5`` clears that with margin; the earlier ``-2.5`` placed the
+        box bottom edge (``-1.925``) inside the aperture and fired
+        ``silk_over_copper`` on J1/J2.
         """
         x, y = pos
         pin1_num = NETS[pin1_net]
@@ -355,7 +365,7 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
-    (fp_text reference "{ref}" (at 0 -2.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+    (fp_text reference "{ref}" (at 0 -3.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "{value}" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")

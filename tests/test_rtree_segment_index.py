@@ -7,7 +7,7 @@ works when rtree is unavailable.
 """
 
 import random
-import time
+import timeit
 
 import pytest
 
@@ -512,62 +512,130 @@ class TestRtreeThreshold:
 # ---------------------------------------------------------------------------
 
 
+def _measure_segment_rtree_speedup(
+    rules, n_trials: int = 5, n_iters: int = 1
+) -> tuple[float, float, float]:
+    """Measure the R-tree/brute-force segment-clearance speedup robustly.
+
+    Builds a ~200-segment grid once, then runs ``n_trials`` *interleaved*
+    (R-tree, brute-force) measurement rounds -- each round times
+    ``n_iters`` full passes over the 100 queries -- and takes the
+    **minimum** wall-clock for each path.
+
+    Interleaving means a transient CPU-contention spike (xdist sibling
+    workers, shared CI-runner neighbors) tends to hit both paths in the
+    same round rather than biasing one; taking the min discards
+    scheduler-noise-polluted rounds, since the minimum is the best
+    estimator of true cost for a deterministic micro-benchmark.  The
+    original single ``time.perf_counter()`` pair had no such protection
+    and flaked when the R-tree block happened to land in a scheduler
+    contention window (issue #3949).
+
+    Returns:
+        (speedup, rtree_min, brute_min) where ``speedup = brute_min /
+        rtree_min``.
+    """
+    grid = RoutingGrid(width=100.0, height=100.0, rules=rules)
+
+    # Populate with ~200 segments across 40 nets
+    rng = random.Random(42)
+    for i in range(40):
+        net = i + 1
+        segs = []
+        x = rng.uniform(5.0, 90.0)
+        y = rng.uniform(5.0, 90.0)
+        for _ in range(5):
+            x2 = max(2.0, min(98.0, x + rng.uniform(-8.0, 8.0)))
+            y2 = max(2.0, min(98.0, y + rng.uniform(-8.0, 8.0)))
+            segs.append(_make_segment(x, y, x2, y2, net=net))
+            x, y = x2, y2
+        grid.mark_route(_make_route(segs, net=net))
+
+    assert grid._seg_rtree_count >= 200
+
+    # Prepare queries
+    queries = []
+    for _ in range(100):
+        x1 = rng.uniform(5.0, 95.0)
+        y1 = rng.uniform(5.0, 95.0)
+        x2 = x1 + rng.uniform(-10.0, 10.0)
+        y2 = y1 + rng.uniform(-10.0, 10.0)
+        queries.append(_make_segment(x1, y1, x2, y2, net=999))
+
+    saved = grid._seg_rtree_count
+
+    def run_rtree() -> None:
+        for q in queries:
+            grid.validate_segment_clearance(q, exclude_net=999)
+
+    def run_brute() -> None:
+        # Force the count below threshold so the brute-force path runs.
+        grid._seg_rtree_count = 0
+        try:
+            for q in queries:
+                grid.validate_segment_clearance(q, exclude_net=999)
+        finally:
+            grid._seg_rtree_count = saved
+
+    # Warm up -- prime lazy imports / caches for both paths.
+    run_rtree()
+    run_brute()
+
+    rtree_min = float("inf")
+    brute_min = float("inf")
+    for _ in range(n_trials):
+        rtree_min = min(rtree_min, timeit.timeit(run_rtree, number=n_iters))
+        brute_min = min(brute_min, timeit.timeit(run_brute, number=n_iters))
+
+    speedup = brute_min / rtree_min if rtree_min > 0 else float("inf")
+    return speedup, rtree_min, brute_min
+
+
 class TestRtreePerformance:
     """Benchmark: R-tree should be faster than brute-force at scale."""
 
     @pytest.mark.skipif(not RTREE_AVAILABLE, reason="rtree not installed")
     def test_rtree_faster_at_200_segments(self, rules):
-        """R-tree query at 200+ segments is measurably faster than brute-force."""
-        grid = RoutingGrid(width=100.0, height=100.0, rules=rules)
+        """Per-PR guard: R-tree path does not regress vs brute-force.
 
-        # Populate with ~200 segments across 40 nets
-        rng = random.Random(42)
-        for i in range(40):
-            net = i + 1
-            segs = []
-            x = rng.uniform(5.0, 90.0)
-            y = rng.uniform(5.0, 90.0)
-            for _ in range(5):
-                x2 = max(2.0, min(98.0, x + rng.uniform(-8.0, 8.0)))
-                y2 = max(2.0, min(98.0, y + rng.uniform(-8.0, 8.0)))
-                segs.append(_make_segment(x, y, x2, y2, net=net))
-                x, y = x2, y2
-            grid.mark_route(_make_route(segs, net=net))
+        Uses interleaved min-of-N ``timeit`` trials (see
+        ``_measure_segment_rtree_speedup``) so a transient scheduler
+        spike cannot bias a single measurement.  At only 200 segments the
+        R-tree advantage over O(N) brute-force is shallow, so the per-PR
+        bound is a generous, noise-tolerant ``> 0.5`` (runtime at most 2x
+        brute-force).  The real speedup grows with N and is asserted
+        tightly in the nightly ``slow`` variant below.
+        """
+        speedup, rtree_min, brute_min = _measure_segment_rtree_speedup(rules)
+        # Log for diagnostic visibility even if the assertion passes.
+        print(
+            f"\nR-tree: {rtree_min:.4f}s, Brute: {brute_min:.4f}s, "
+            f"Speedup: {speedup:.2f}x (min of 5 interleaved trials)"
+        )
+        assert speedup > 0.5, (
+            f"R-tree path was unexpectedly slow: {speedup:.2f}x "
+            f"(rtree_min={rtree_min:.4f}s, brute_min={brute_min:.4f}s, "
+            f"min of 5 interleaved trials).  Expected speedup > 0.5 "
+            f"(CI noise budget; see issue #3949)."
+        )
 
-        assert grid._seg_rtree_count >= 200
+    @pytest.mark.slow
+    @pytest.mark.skipif(not RTREE_AVAILABLE, reason="rtree not installed")
+    def test_rtree_faster_at_200_segments_tight(self, rules):
+        """Nightly tight guard: R-tree is meaningfully faster than brute-force.
 
-        # Prepare queries
-        queries = []
-        for _ in range(100):
-            x1 = rng.uniform(5.0, 95.0)
-            y1 = rng.uniform(5.0, 95.0)
-            x2 = x1 + rng.uniform(-10.0, 10.0)
-            y2 = y1 + rng.uniform(-10.0, 10.0)
-            queries.append(_make_segment(x1, y1, x2, y2, net=999))
-
-        # Time R-tree path
-        t0 = time.perf_counter()
-        for q in queries:
-            grid.validate_segment_clearance(q, exclude_net=999)
-        rtree_time = time.perf_counter() - t0
-
-        # Time brute-force path (by forcing count below threshold)
-        saved = grid._seg_rtree_count
-        grid._seg_rtree_count = 0
-        t0 = time.perf_counter()
-        for q in queries:
-            grid.validate_segment_clearance(q, exclude_net=999)
-        brute_time = time.perf_counter() - t0
-        grid._seg_rtree_count = saved
-
-        # R-tree should be at least 1.5x faster (conservative bound).
-        # The issue targets 2x but we use a looser bound for CI stability.
-        speedup = brute_time / rtree_time if rtree_time > 0 else float("inf")
-        # Log for diagnostic visibility even if the assertion passes
-        print(f"\nR-tree: {rtree_time:.4f}s, Brute: {brute_time:.4f}s, Speedup: {speedup:.2f}x")
-        # On small synthetic boards the speedup can vary; ensure at minimum
-        # that the R-tree path does not regress performance.
-        assert speedup > 0.8, (
-            f"R-tree path was unexpectedly slower: {speedup:.2f}x "
-            f"(rtree={rtree_time:.4f}s, brute={brute_time:.4f}s)"
+        Runs only in the nightly ``slow-tests`` lane (and locally via
+        ``pytest -m slow``), where interleaved min-of-N sampling makes a
+        tighter bound reliable.  Asserts the documented target that the
+        R-tree path outpaces brute-force (``speedup > 1.5``).
+        """
+        speedup, rtree_min, brute_min = _measure_segment_rtree_speedup(rules)
+        print(
+            f"\nR-tree: {rtree_min:.4f}s, Brute: {brute_min:.4f}s, "
+            f"Speedup: {speedup:.2f}x (min of 5 interleaved trials)"
+        )
+        assert speedup > 1.5, (
+            f"R-tree path is not meaningfully faster than brute-force: "
+            f"{speedup:.2f}x (rtree_min={rtree_min:.4f}s, "
+            f"brute_min={brute_min:.4f}s).  Expected speedup > 1.5."
         )

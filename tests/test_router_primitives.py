@@ -486,6 +486,108 @@ class TestSegment:
         assert "F.Cu" in sexp
 
 
+class TestToSexpKiCadCanonicalFormat:
+    """Issue #3925: to_sexp() must match KiCad's canonical field order.
+
+    KiCad's native ``.kicad_pcb`` writer emits segment/via child nodes in
+    the order ``... uuid net`` (uuid BEFORE net).  Before #3925 kicad-tools
+    emitted ``... net uuid``, so every segment and via churned on the first
+    KiCad open/save round-trip -- producing a diff proportional to copper
+    count even when no geometry changed.  These tests pin the canonical
+    order so that regression cannot silently return.
+    """
+
+    def test_segment_uuid_before_net(self):
+        """Segment emits (uuid ...) before (net ...) like KiCad."""
+        seg = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=3)
+        sexp = seg.to_sexp()
+        assert sexp.index("(uuid") < sexp.index("(net"), (
+            f"Segment must emit uuid before net (KiCad canonical order), got:\n{sexp}"
+        )
+
+    def test_via_uuid_before_net(self):
+        """Via emits (uuid ...) before (net ...) like KiCad."""
+        via = Via(x=10.0, y=20.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=3)
+        sexp = via.to_sexp()
+        assert sexp.index("(uuid") < sexp.index("(net"), (
+            f"Via must emit uuid before net (KiCad canonical order), got:\n{sexp}"
+        )
+
+    def test_segment_field_order_matches_kicad(self):
+        """Full segment child order: start, end, width, layer, uuid, net."""
+        seg = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=3)
+        sexp = seg.to_sexp()
+        order = [
+            sexp.index("(start"),
+            sexp.index("(end"),
+            sexp.index("(width"),
+            sexp.index("(layer"),
+            sexp.index("(uuid"),
+            sexp.index("(net"),
+        ]
+        assert order == sorted(order), f"Segment field order diverged from KiCad:\n{sexp}"
+
+    def test_via_field_order_matches_kicad(self):
+        """Full via child order: at, size, drill, layers, uuid, net."""
+        via = Via(x=10.0, y=20.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=3)
+        sexp = via.to_sexp()
+        order = [
+            sexp.index("(at"),
+            sexp.index("(size"),
+            sexp.index("(drill"),
+            sexp.index("(layers"),
+            sexp.index("(uuid"),
+            sexp.index("(net"),
+        ]
+        assert order == sorted(order), f"Via field order diverged from KiCad:\n{sexp}"
+
+
+class TestDeterministicUuidByteIdentity:
+    """Issue #3925: seeded to_sexp() output is byte-identical fresh-vs-fresh.
+
+    ``enable_deterministic_uuids()`` derives each UUID from the seeded
+    global RNG so two independent runs sharing a seed emit byte-identical
+    copper.  These tests exercise that property directly on ``Route``,
+    ``Segment`` and ``Via`` so a regression in the deterministic-UUID path
+    fails fast without needing a full board re-route.
+    """
+
+    @staticmethod
+    def _serialize_route(seed: int) -> str:
+        import random
+
+        from kicad_tools.router.primitives import (
+            enable_deterministic_uuids,
+            reset_deterministic_uuids,
+        )
+
+        random.seed(seed)
+        enable_deterministic_uuids(True)
+        try:
+            route = Route(net=1, net_name="GND")
+            route.segments.append(Segment(0, 0, 10, 0, 0.2, Layer.F_CU, net=1))
+            route.segments.append(Segment(10, 0, 10, 10, 0.2, Layer.F_CU, net=1))
+            route.vias.append(Via(10, 10, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net=1))
+            return route.to_sexp()
+        finally:
+            reset_deterministic_uuids()
+
+    def test_same_seed_is_byte_identical(self):
+        """Two seeded runs at the same seed produce identical bytes."""
+        first = self._serialize_route(seed=42)
+        second = self._serialize_route(seed=42)
+        assert first == second, (
+            "Seeded regeneration must be byte-identical fresh-vs-fresh "
+            "(deterministic UUID path regressed)."
+        )
+
+    def test_different_seed_diverges(self):
+        """Sanity: a different seed produces different UUIDs (not a no-op)."""
+        first = self._serialize_route(seed=42)
+        other = self._serialize_route(seed=99)
+        assert first != other, "Different seeds must produce different UUIDs."
+
+
 class TestRoute:
     """Tests for Route class."""
 

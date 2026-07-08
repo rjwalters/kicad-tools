@@ -17,9 +17,13 @@ def run_build_command(args) -> int:
     if getattr(args, "build_step", "all") != "all":
         sub_argv.extend(["--step", args.build_step])
 
-    # Manufacturer
-    if getattr(args, "build_mfr", "jlcpcb") != "jlcpcb":
-        sub_argv.extend(["--mfr", args.build_mfr])
+    # Manufacturer. The outer parser default is None so an explicit --mfr
+    # (even "--mfr jlcpcb") is forwarded and treated as an override, while
+    # omitting the flag lets build_cmd resolve the spec's target_fab
+    # (issue #3920). Forwarding only-when-not-None preserves that signal.
+    build_mfr = getattr(args, "build_mfr", None)
+    if build_mfr is not None:
+        sub_argv.extend(["--mfr", build_mfr])
 
     # Flags
     if getattr(args, "build_dry_run", False):

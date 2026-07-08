@@ -124,6 +124,22 @@ class TestTripleGate:
         assert "DDR_DATA_BYTE_0" in results
         assert "DDR_DATA_BYTE_1" in results
 
+    def test_verbose_summary_reports_before_after_skew(self, capsys):
+        """Issue #3924 AC2: the verbose per-group summary prints an achieved
+        ``skew: <before>mm -> <after>mm`` line alongside the reason buckets."""
+        ar, group = _make_autorouter_with_4_net_group()
+        ar.apply_match_group_tuning(
+            detected_groups=[group],
+            verbose=True,
+        )
+        out = capsys.readouterr().out
+        # The reason-bucket line is still present ...
+        assert "DDR_DATA_BYTE_0" in out
+        assert "members" in out
+        # ... and now the achieved-skew line accompanies it.
+        assert "skew:" in out
+        assert "mm ->" in out
+
     def test_returns_per_member_tune_results_keyed_by_net_id(self):
         ar, group = _make_autorouter_with_4_net_group()
         results = ar.apply_match_group_tuning(

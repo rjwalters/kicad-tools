@@ -1,10 +1,17 @@
-"""Tests for DRC tolerance on clearance and dimension checks.
+"""Tests for the DRC numerical guard band on clearance and dimension checks.
 
-Verifies that clearance shortfalls within DRC_TOLERANCE (0.005mm) are
-not flagged as violations, while genuine violations are still caught.
+``DRC_TOLERANCE`` is a float-rounding guard band -- NOT a manufacturing
+tolerance.  Issue #3913 reduced it from 0.005 mm (5 um) to 1e-4 mm
+(0.1 um): the old 5 um dead band silently PASSED genuine marginal
+violations up to 5 um below the floor (e.g. a 0.0999 mm clearance vs a
+0.1016 mm / 4 mil JLCPCB floor is only 1.7 um short).  The guard now
+suppresses only IEEE-754 rounding noise (~1e-9 mm at board coordinates)
+while marginal-class shortfalls of a few um correctly FAIL.
 
-Regression test for issue #1803: segment-to-via clearance 0.101mm
-flagged against 0.102mm minimum (0.001mm false positive).
+Historical note: issue #1803 originally motivated a wide dead band to
+avoid a 1 um false positive (0.101 mm vs 0.102 mm).  #3913 established
+that such a shortfall is a TRUE positive at KiCad IU granularity (1 nm),
+so that case is now (correctly) reported.
 """
 
 import pytest
@@ -115,16 +122,25 @@ class TestDRCToleranceConstant:
         assert DRC_TOLERANCE > 0
 
     def test_tolerance_value(self):
-        assert pytest.approx(0.005) == DRC_TOLERANCE
+        """Guard band is 0.1 um (#3913), tight enough to catch marginal-class
+        violations while still suppressing float64 rounding noise."""
+        assert pytest.approx(1e-4) == DRC_TOLERANCE
+
+    def test_tolerance_is_sub_micron(self):
+        """The band must stay well below the ~1.6 um marginal-violation width
+        (0.1000 vs 0.1016 mm) it previously masked, and far above float64
+        rounding (~1e-9 mm at board coordinates)."""
+        assert DRC_TOLERANCE < 1.6e-3  # below the marginal class it must catch
+        assert DRC_TOLERANCE > 1e-9  # above float rounding noise
 
 
 # ---------------------------------------------------------------------------
-# Tests for clearance tolerance (issue #1803 regression)
+# Tests for clearance tolerance (#3913: the dead band is gone)
 # ---------------------------------------------------------------------------
 
 
 class TestClearanceRuleTolerance:
-    """Verify the ClearanceRule respects DRC_TOLERANCE."""
+    """Verify the ClearanceRule guard band only suppresses float noise."""
 
     def _make_segment_via_pcb(self, gap_mm: float) -> tuple:
         """Create a PCB with a segment and via separated by gap_mm edge-to-edge.
@@ -159,32 +175,39 @@ class TestClearanceRuleTolerance:
         rules = MockDesignRules(min_clearance_mm=0.102)
         return pcb, rules
 
-    def test_exact_issue_1803_case_passes(self):
-        """0.101mm clearance vs 0.102mm minimum -- within tolerance, should pass."""
+    def test_issue_1803_case_now_fails(self):
+        """0.101mm vs 0.102mm min (1 um short) is a TRUE positive (#3913).
+
+        The old 5 um dead band passed this; at KiCad IU granularity (1 nm)
+        it is a real sub-floor clearance and must now be reported.
+        """
         pcb, rules = self._make_segment_via_pcb(0.101)
         result = ClearanceRule().check(pcb, rules)
-        assert result.error_count == 0, (
-            f"Expected no errors for 0.101mm vs 0.102mm, got: "
-            f"{[v.message for v in result.violations]}"
+        assert result.error_count == 1, (
+            "0.101mm vs 0.102mm min is 1 um below the floor; with the tightened "
+            "0.1 um guard band it must FAIL (was masked by the old 5 um band)."
         )
 
-    def test_clearance_within_tolerance_passes(self):
-        """Clearance short by less than DRC_TOLERANCE should pass."""
-        # 0.098mm clearance vs 0.102mm min => 0.004mm short, within 0.005mm tol
+    def test_marginal_shortfall_fails(self):
+        """A 4 um shortfall (inside the old dead band) now fails."""
+        # 0.098mm clearance vs 0.102mm min => 4 um short (was passed by 5 um band)
         pcb, rules = self._make_segment_via_pcb(0.098)
         result = ClearanceRule().check(pcb, rules)
-        assert result.error_count == 0
+        assert result.error_count == 1
 
-    def test_clearance_at_tolerance_boundary_passes(self):
-        """Clearance short by exactly DRC_TOLERANCE should pass (boundary)."""
-        # 0.097mm clearance vs 0.102mm min => 0.005mm short, exactly at tol
-        pcb, rules = self._make_segment_via_pcb(0.097)
+    def test_float_rounding_noise_still_passes(self):
+        """A shortfall below the 0.1 um guard band (pure float noise) passes."""
+        # 0.10195mm clearance vs 0.102mm min => 0.05 um short, below the guard
+        pcb, rules = self._make_segment_via_pcb(0.10195)
         result = ClearanceRule().check(pcb, rules)
-        assert result.error_count == 0
+        assert result.error_count == 0, (
+            "A 0.05 um shortfall is within float64 rounding noise and must not "
+            "be flagged; only genuine sub-floor clearances should fail."
+        )
 
     def test_clearance_beyond_tolerance_fails(self):
-        """Clearance short by more than DRC_TOLERANCE should fail."""
-        # 0.090mm clearance vs 0.102mm min => 0.012mm short, beyond 0.005mm tol
+        """Clearance short by more than the guard band should fail."""
+        # 0.090mm clearance vs 0.102mm min => 12 um short, well beyond the guard
         pcb, rules = self._make_segment_via_pcb(0.090)
         result = ClearanceRule().check(pcb, rules)
         assert result.error_count == 1
@@ -203,15 +226,15 @@ class TestClearanceRuleTolerance:
 
 
 # ---------------------------------------------------------------------------
-# Tests for dimension tolerance
+# Tests for dimension tolerance (#3913: same tightened guard band)
 # ---------------------------------------------------------------------------
 
 
 class TestDimensionRulesTolerance:
-    """Verify DimensionRules respects DRC_TOLERANCE for all checks."""
+    """Verify DimensionRules respects the tightened DRC_TOLERANCE guard band."""
 
-    def test_trace_width_within_tolerance_passes(self):
-        """Trace 0.124mm vs 0.127mm minimum -- 0.003mm short, within tolerance."""
+    def test_trace_width_marginal_shortfall_fails(self):
+        """Trace 0.124mm vs 0.127mm min -- 3 um short, now a TRUE positive."""
         seg = MockSegment(
             start=(0, 0),
             end=(10, 0),
@@ -223,10 +246,28 @@ class TestDimensionRulesTolerance:
         rules = MockDesignRules(min_trace_width_mm=0.127)
         result = DimensionRules().check(pcb, rules)
         width_violations = [v for v in result.violations if v.rule_id == "dimension_trace_width"]
+        assert len(width_violations) == 1, (
+            "A 3 um trace-width shortfall (0.124 vs 0.127) is below the floor "
+            "and must fail now that the guard band is 0.1 um (#3913)."
+        )
+
+    def test_trace_width_float_noise_passes(self):
+        """Trace within the 0.1 um guard band of the floor still passes."""
+        seg = MockSegment(
+            start=(0, 0),
+            end=(10, 0),
+            width=0.12695,  # 0.05 um below 0.127 floor -> float noise
+            layer="F.Cu",
+            net_number=1,
+        )
+        pcb = MockPCB(segments=[seg], nets=[MockNet(1, "VCC")])
+        rules = MockDesignRules(min_trace_width_mm=0.127)
+        result = DimensionRules().check(pcb, rules)
+        width_violations = [v for v in result.violations if v.rule_id == "dimension_trace_width"]
         assert len(width_violations) == 0
 
     def test_trace_width_beyond_tolerance_fails(self):
-        """Trace 0.110mm vs 0.127mm minimum -- 0.017mm short, should fail."""
+        """Trace 0.110mm vs 0.127mm minimum -- 17 um short, should fail."""
         seg = MockSegment(
             start=(0, 0),
             end=(10, 0),
@@ -240,8 +281,8 @@ class TestDimensionRulesTolerance:
         width_violations = [v for v in result.violations if v.rule_id == "dimension_trace_width"]
         assert len(width_violations) == 1
 
-    def test_via_drill_within_tolerance_passes(self):
-        """Via drill 0.297mm vs 0.300mm minimum -- 0.003mm short, passes."""
+    def test_via_drill_marginal_shortfall_fails(self):
+        """Via drill 0.297mm vs 0.300mm min -- 3 um short, now a TRUE positive."""
         via = MockVia(
             position=(5, 5),
             size=0.8,
@@ -255,10 +296,10 @@ class TestDimensionRulesTolerance:
         )
         result = DimensionRules().check(pcb, rules)
         drill_violations = [v for v in result.violations if v.rule_id == "dimension_via_drill"]
-        assert len(drill_violations) == 0
+        assert len(drill_violations) == 1
 
-    def test_drill_clearance_within_tolerance_passes(self):
-        """Drill edge-to-edge 0.124mm vs 0.127mm min -- 0.003mm short, passes."""
+    def test_drill_clearance_marginal_shortfall_fails(self):
+        """Drill edge-to-edge 0.124mm vs 0.127mm min -- 3 um short, now fails."""
         via1 = MockVia(
             position=(0, 0),
             size=0.6,
@@ -266,19 +307,7 @@ class TestDimensionRulesTolerance:
             layers=["F.Cu", "B.Cu"],
             net_number=1,
         )
-        via2 = MockVia(
-            position=(0.724, 0),
-            size=0.6,
-            drill=0.3,
-            layers=["F.Cu", "B.Cu"],
-            net_number=2,
-            uuid="via0002",
-        )
-        # edge distance = 0.724 - 0.15 - 0.15 = 0.424 ... let me recalculate
-        # edge = center_dist - r1 - r2 = 0.724 - 0.15 - 0.15 = 0.424
-        # That's too large. Let me use drill/2 values.
-        # edge = center_dist - drill1/2 - drill2/2
-        # Want edge = 0.124, drill = 0.3, so center = 0.124 + 0.15 + 0.15 = 0.424
+        # edge = center_dist - drill1/2 - drill2/2 = 0.424 - 0.15 - 0.15 = 0.124
         via2 = MockVia(
             position=(0.424, 0),
             size=0.6,
@@ -293,4 +322,4 @@ class TestDimensionRulesTolerance:
         drill_violations = [
             v for v in result.violations if v.rule_id == "dimension_drill_clearance"
         ]
-        assert len(drill_violations) == 0
+        assert len(drill_violations) == 1
