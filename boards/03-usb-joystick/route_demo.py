@@ -47,15 +47,33 @@ warn_if_stale()
 
 
 def run_drc(pcb_path: Path) -> tuple[bool, int, int]:
-    """Run DRC on the PCB using kct check for consistent results.
+    """Run DRC on the routed PCB and return a truthful (passed, errors, warnings).
 
     Issue #3150 / #3308: align the local DRC summary with the
     jlcpcb-tier1 profile this board ships and is gated against (see
     ``.github/routed-drc-tolerance.yml`` and
     ``generate_design.py:run_drc()``).
 
+    Issue #3969 (Bug B): this used to call ``kct check`` WITHOUT
+    ``--drc-only``.  That runs the *meta-check rollup* (DRC + ERC + LVS +
+    Manifest).  On a fresh route the PCB lives in a directory with no
+    ERC/LVS/Manifest artifacts, so those sub-checks are ``NOT RUN`` and
+    the rollup exits ``INCOMPLETE`` (exit code 2) even though the DRC
+    engine itself found ``Errors: 0``.  The old code read
+    ``returncode != 0`` as ``drc_passed=False``, parsed 0 errors, and the
+    caller then printed the logically impossible
+    ``"0 DRC violation(s) detected!"`` banner.
+
+    The fix mirrors ``generate_design.py:run_drc()``: add ``--drc-only``
+    so the exit code reflects *geometric DRC only* (non-zero iff
+    ``error_count > 0``).  This guarantees the invariant the caller relies
+    on -- ``passed`` is True iff ``errors == 0`` -- so the "0 violations
+    detected" message can never appear on a failing exit.
+
     Returns:
-        Tuple of (success, error_count, warning_count)
+        Tuple of (passed, error_count, warning_count).  ``passed`` is True
+        exactly when ``error_count == 0``.  On a hard failure to run the
+        checker, returns ``(False, -1, -1)``.
     """
     try:
         result = subprocess.run(
@@ -67,6 +85,11 @@ def run_drc(pcb_path: Path) -> tuple[bool, int, int]:
                 str(pcb_path),
                 "--mfr",
                 "jlcpcb-tier1",
+                # Issue #3969: scope to geometric DRC so a fresh-route temp
+                # dir without ERC/LVS/Manifest artifacts does not exit
+                # INCOMPLETE (2) and get misread as a DRC failure with 0
+                # parsed errors.  Matches generate_design.py:run_drc().
+                "--drc-only",
             ],
             capture_output=True,
             text=True,
@@ -83,7 +106,13 @@ def run_drc(pcb_path: Path) -> tuple[bool, int, int]:
                 with contextlib.suppress(ValueError):
                     warning_count = int(line.split(":")[-1].strip())
 
-        return result.returncode == 0, error_count, warning_count
+        # Issue #3969: derive ``passed`` from the parsed error count, not
+        # solely the exit code, so the (passed, errors) pair is always
+        # self-consistent.  With --drc-only the exit code already tracks
+        # error_count, but keying off the count as well makes the "0
+        # violations on a failing exit" banner structurally impossible.
+        passed = result.returncode == 0 and error_count == 0
+        return passed, error_count, warning_count
 
     except Exception as e:
         print(f"  Warning: DRC check failed: {e}")
@@ -154,8 +183,18 @@ def main():
         print("SUCCESS: All nets routed, DRC passed!")
         exit_code = 0
     elif success and not drc_passed:
-        print(f"WARNING: All nets routed, but {drc_errors} DRC violation(s) detected!")
-        print("  Review DRC errors before manufacturing.")
+        # Issue #3969 (Bug B): never claim "0 DRC violation(s) detected!"
+        # on a failing path.  run_drc() now guarantees drc_passed is False
+        # only when errors are present (drc_errors > 0) or the checker
+        # could not run (drc_errors == -1).  Word the banner to match
+        # whichever case actually occurred instead of blindly printing the
+        # count.
+        if drc_errors > 0:
+            print(f"WARNING: All nets routed, but {drc_errors} DRC violation(s) detected!")
+            print("  Review DRC errors before manufacturing.")
+        else:
+            print("WARNING: All nets routed, but the DRC check could not be completed.")
+            print("  Re-run 'kct check' manually before manufacturing.")
         exit_code = 1
     else:
         # ``route_pcb`` already printed the per-net partial line; here we
@@ -164,7 +203,12 @@ def main():
         # is within the jlcpcb-tier1 ceiling.
         print("PARTIAL: not all nets routed (see route_pcb output above)")
         if not drc_passed:
-            print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
+            # Issue #3969: only report a violation *count* when there
+            # actually is one; otherwise say the DRC could not complete.
+            if drc_errors > 0:
+                print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
+            else:
+                print("  Additionally, the DRC check could not be completed.")
         # Partial routing is acceptable for this board; the USB-C
         # connector pad density exceeds what a 2-layer autorouter can
         # fully handle.  Match the approach used by generate_design.py:
