@@ -913,6 +913,18 @@ class Autorouter:
         # thread the diff_pair_map into the EscapeRouter.
         self.paired_escape_coupling: bool = False
 
+        # Issue #3952: one-shot guard so ``route_with_escape_and_diffpairs``
+        # cannot double-generate escape stubs.  The diff-pair pre-pass
+        # (``route_all_with_diffpairs``) lazily drives escape generation for
+        # the pair's package; the escape leg of the non-diff-pair strategy
+        # then runs ``_run_escape_prephase`` for the remaining dense-package
+        # pads.  When this flag is True, ``_run_escape_prephase`` skips the
+        # dense-package escape-generation step (the sub-grid pre-pass and
+        # pad-channel budgets still run) so the same package is never escaped
+        # twice.  Default False preserves ``route_with_escape``'s behaviour
+        # bit-for-bit for the no-diff-pair path.
+        self._escapes_generated_this_run: bool = False
+
         # Issue #2838 (closes #2761 gap): Lazy-initialized via conflict
         # manager.  Wired into the single-ended PIN_ACCESS retry path in
         # ``route_net`` so vias from already-routed nets that sit within
@@ -2632,6 +2644,11 @@ class Autorouter:
         self.routing_failures = []
         self._perturbation_magnitude = 0.0
         self._congestion_estimator = None
+        # Issue #3952: the escape/diff-pair composition's one-shot guard is
+        # per-run mutable state; clear it so a reused Autorouter cannot leak
+        # _escapes_generated_this_run=True into the next attempt (which would
+        # silently skip escape generation in route_with_escape).
+        self._escapes_generated_this_run = False
 
     def _calculate_constraint_score(self, net_id: int) -> float:
         """Calculate a constraint score for a net based on routing difficulty.
@@ -13858,6 +13875,228 @@ class Autorouter:
 
         return budgets
 
+    def _run_escape_prephase(self) -> tuple[list[Route], list[PackageInfo]]:
+        """Run the escape pre-phase: sub-grid, dense detection, escapes, budgets.
+
+        Issue #3952: extracted verbatim from ``route_with_escape``'s Phase-1
+        body so it can be reused as the escape leg of
+        ``route_with_escape_and_diffpairs``'s non-diff-pair strategy.  This
+        method has NO Phase-2 main pass and NO summary -- callers own those.
+
+        Returns a ``(subgrid_escapes, dense_packages)`` tuple.  The
+        dense-package escape routes themselves survive on the grid (they are
+        registered as fixed infrastructure by ``generate_escape_routes``), so
+        only the sub-grid escapes -- which are infrastructure, not net routes
+        -- are returned to the caller for combination into the final route set.
+
+        When ``self._escapes_generated_this_run`` is already True (set by
+        ``route_with_escape_and_diffpairs`` after the diff-pair pre-pass drove
+        its own paired escape generation), the dense-package escape-generation
+        step is skipped so the same package is never escaped twice.  The
+        sub-grid pre-pass and pad-channel budgets still run because they are
+        idempotent and cover pads the coupled pre-pass did not touch.
+        """
+        # Issue #2294: Sub-grid escape pre-pass for off-grid pads.
+        # This must run before dense-package escape routing so that
+        # off-grid pads (e.g. J2 connector pads that don't snap to the
+        # routing grid) get escape segments that bridge them to the
+        # nearest on-grid cell.  Without this, off-grid pads are
+        # classified as PADS_OFF_GRID and excluded from rip-up recovery.
+        subgrid_escapes = self._run_subgrid_prepass()
+
+        # Phase 1: Detect and route dense packages
+        dense_packages = self.detect_dense_packages()
+
+        already_escaped = self._escapes_generated_this_run
+        if dense_packages and not already_escaped:
+            print(f"\n--- Phase 1: Escape Routing ({len(dense_packages)} dense packages) ---")
+            for pkg in dense_packages:
+                print(f"  {pkg.ref}: {pkg.package_type.name}, {pkg.pin_count} pins")
+
+            escape_routes = self.generate_escape_routes(dense_packages)
+            print(f"  Generated {len(escape_routes)} escape route segments")
+            # Issue #3952: mark escapes generated so a subsequent
+            # _run_escape_prephase call in the same run does not regenerate
+            # them (idempotency guard for the diffpair composition).
+            self._escapes_generated_this_run = True
+        elif dense_packages and already_escaped:
+            # Issue #3952: the diff-pair pre-pass already generated the
+            # paired escape stubs for these packages; skip regeneration.
+            print(
+                f"\n--- Phase 1: Escape Routing SKIPPED ({len(dense_packages)} dense "
+                "packages already escaped by the diff-pair pre-pass, Issue #3952) ---"
+            )
+        else:
+            print("\n--- No dense packages detected, skipping escape routing ---")
+
+        # Issue #3143: Compute per-pad lateral-channel budgets from the
+        # escape pad overrides registered above.  The budgets nudge the
+        # C++ A* main router away from contested escape channels adjacent
+        # to dense-package pad rows -- exactly the failure mode that
+        # capped softstart routing reach at 6/10 nets in PR #3142.  Empty
+        # list (no dense packages, no overrides, or Python backend in use)
+        # silently leaves the per-net cost function pre-#3143 identical.
+        #
+        # Issue #3201 diagnostic: setting environment variable
+        # ``KCT_DISABLE_PAD_BUDGETS=1`` disables budget application to
+        # establish an A/B comparison without recompilation.  Useful for
+        # confirming whether a routing regression originates from the
+        # budget code path (per PR #3222's diagnostic pattern that
+        # confirmed board 05 does not invoke this code path).
+        if dense_packages and not os.environ.get("KCT_DISABLE_PAD_BUDGETS"):
+            pad_channel_budgets = self._build_pad_channel_budgets(dense_packages)
+            if pad_channel_budgets and hasattr(self.router, "set_pad_channel_budgets"):
+                self.router.set_pad_channel_budgets(pad_channel_budgets)
+                print(
+                    f"  Pad-channel budgets: {len(pad_channel_budgets)} "
+                    f"escape channel(s) tagged (Issue #3143)"
+                )
+
+        return subgrid_escapes, dense_packages
+
+    def route_with_escape_and_diffpairs(
+        self,
+        diffpair_config: DifferentialPairConfig,
+        use_negotiated: bool = True,
+        progress_callback: ProgressCallback | None = None,
+        timeout: float | None = None,
+        per_net_timeout: float | None = None,
+    ) -> tuple[list[Route], list[LengthMismatchWarning]]:
+        """Compose escape routing with the differential-pair pre-pass.
+
+        Issue #3952: on boards whose fine-pitch packages force the escape
+        dispatch (e.g. board 03's USB-C connector), ``--differential-pairs``
+        was a silent no-op -- ``route_with_escape`` returned before any
+        diff-pair branch ran, so the CoupledPathfinder pre-pass (Phase A) was
+        never invoked.  This orchestrator wires the two together by delegating
+        to ``route_all_with_diffpairs`` (which already flips
+        ``paired_escape_coupling=True`` and refreshes the ``diff_pair_map``
+        BEFORE the escape phase runs) and handing it the escape main-pass as
+        its ``non_diffpair_strategy``.
+
+        Sequencing (answers the "where does Phase A run" design question):
+
+        1. ``route_all_with_diffpairs`` flips ``paired_escape_coupling=True``
+           and refreshes ``self._escape_router.diff_pair_map`` in place, so any
+           escape generation that follows emits *paired* (coupled-at-launch)
+           endpoints on the dense package.
+        2. It runs the CoupledPathfinder coupled A* over the pair (printing the
+           ``=== Differential Pair Routing ===`` banner the acceptance gate
+           asserts), lazily driving paired escape generation for the pair's
+           package.
+        3. Pairs the CoupledPathfinder cannot handle (budget-exit / refused)
+           are dropped back into the non-diff-pair net set (``coupled_only=True``)
+           and routed by the ``non_diffpair_strategy`` closure below -- which
+           runs the escape pre-phase for the *remaining* dense-package pads and
+           then the negotiated/basic main pass.  No net goes unrouted on a
+           budget exit; the pair falls through to the same main pass that
+           produces today's escape-only copper.
+
+        The ``_escapes_generated_this_run`` guard prevents the closure's
+        ``_run_escape_prephase`` from regenerating escapes the coupled pre-pass
+        already emitted for the same package.
+
+        Args:
+            diffpair_config: Differential-pair configuration (must be enabled).
+            use_negotiated: Use the negotiated two-phase main pass (default) or
+                the plain per-net main pass for the non-diff-pair nets.
+            progress_callback: Optional callback for progress updates.
+            timeout: Optional board-level wall-clock budget in seconds.
+            per_net_timeout: Optional per-net A* wall-clock timeout.
+
+        Returns:
+            A ``(routes, length_warnings)`` tuple mirroring
+            ``route_all_with_diffpairs``.  ``self.routes`` /
+            ``self.routing_failures`` are populated as a side effect so the CLI
+            escalation reach-measurement logic is unchanged.
+        """
+        print("\n=== Routing with Escape Pattern Generation + Differential Pairs ===")
+
+        # Reset the one-shot escape guard for this run so a reused Autorouter
+        # (e.g. across escalation attempts) starts clean.
+        self._escapes_generated_this_run = False
+
+        def _escape_main_pass() -> list[Route]:
+            """Non-diff-pair strategy: escape pre-phase then the main pass.
+
+            Mirrors ``route_with_escape``'s Phase-1 -> Phase-2 order minus the
+            summary (the outer diff-pair call finalizes routing).
+            """
+            # Issue #3952: by the time this closure runs, the CoupledPathfinder
+            # pre-pass has already had its chance to route the pair coupled
+            # (committing its paired escape stubs to the grid as fixed
+            # infrastructure).  Any pair that reached here budget-exited or was
+            # refused, so it will be routed uncoupled by the main pass below.
+            #
+            # Reset ``paired_escape_coupling`` and clear the escape router's
+            # ``diff_pair_map`` BEFORE ``_run_escape_prephase`` generates the
+            # escapes for the remaining (non-coupled) dense-package pads.
+            # Paired escape endpoints sit at intra-pair clearance and are
+            # unroutable by the plain per-net A* -- threading the paired map
+            # into the fall-through escape generation shifts the dense
+            # package's channel geometry and strands a *neighbouring* net
+            # (measured empirically on board 03: XTAL1 regressed 13/13 -> 12/13
+            # with a partial XTAL1 when the paired J1 escapes were emitted on a
+            # budget-exit pair).  This is the same "paired map regresses reach
+            # on non-coupled boards" hazard the escape router already guards
+            # (core.py: the board-06 41%->27% note).  Committed coupled routes
+            # (if any) are already marked on the grid and are NOT regenerated
+            # here, so resetting the flag is safe for the coupled-success path
+            # too.
+            self.paired_escape_coupling = False
+            if self._escape_router is not None:
+                self._escape_router.diff_pair_map = {}
+
+            subgrid_escapes, dense_packages = self._run_escape_prephase()
+
+            print("\n--- Phase 2: Main Routing ---")
+            if use_negotiated:
+                # Issue #2401: escape routes are permanent infrastructure; the
+                # main pass routes between escape endpoints, not pad centers.
+                main_routes = self.route_all_two_phase(
+                    use_negotiated=True,
+                    corridor_width_factor=2.0,
+                    progress_callback=progress_callback,
+                    timeout=timeout,
+                    per_net_timeout=per_net_timeout,
+                )
+            else:
+                main_routes = self.route_all(
+                    progress_callback=progress_callback,
+                    timeout=timeout,
+                    per_net_timeout=per_net_timeout,
+                    suppress_no_timeout_warning=True,
+                )
+
+            # Sub-grid escapes are infrastructure, not net routes; combine
+            # them with the main routes so they survive into the final set.
+            return subgrid_escapes + main_routes
+
+        # Delegate to the existing diff-pair orchestrator.  ``coupled_only``
+        # keeps budget-exit pairs flowing into ``_escape_main_pass`` so no net
+        # is left unrouted (the xfail flips WITHOUT needing #3921).
+        routes, warnings = self.route_all_with_diffpairs(
+            diffpair_config,
+            non_diffpair_strategy=_escape_main_pass,
+            coupled_only=True,
+            timeout=timeout,
+        )
+
+        # Summary (mirrors route_with_escape's tail so operators see the same
+        # escape statistics on this path).
+        stats = self.get_statistics()
+        print("\n=== Routing with Escape + Diff Pairs Complete ===")
+        print(f"  Total nets routed: {stats['nets_routed']}")
+        print(f"  Total segments: {stats['segments']}")
+        print(f"  Total vias: {stats['vias']}")
+
+        if self.routing_failures:
+            failure_summary = format_failed_nets_summary(self.routing_failures)
+            if failure_summary:
+                print(failure_summary)
+
+        return routes, warnings
+
     def route_with_escape(
         self,
         use_negotiated: bool = True,
@@ -13897,50 +14136,13 @@ class Autorouter:
         """
         print("\n=== Routing with Escape Pattern Generation ===")
 
-        # Issue #2294: Sub-grid escape pre-pass for off-grid pads.
-        # This must run before dense-package escape routing so that
-        # off-grid pads (e.g. J2 connector pads that don't snap to the
-        # routing grid) get escape segments that bridge them to the
-        # nearest on-grid cell.  Without this, off-grid pads are
-        # classified as PADS_OFF_GRID and excluded from rip-up recovery.
-        subgrid_escapes = self._run_subgrid_prepass()
-
-        # Phase 1: Detect and route dense packages
-        dense_packages = self.detect_dense_packages()
-
-        if dense_packages:
-            print(f"\n--- Phase 1: Escape Routing ({len(dense_packages)} dense packages) ---")
-            for pkg in dense_packages:
-                print(f"  {pkg.ref}: {pkg.package_type.name}, {pkg.pin_count} pins")
-
-            escape_routes = self.generate_escape_routes(dense_packages)
-            print(f"  Generated {len(escape_routes)} escape route segments")
-        else:
-            print("\n--- No dense packages detected, skipping escape routing ---")
-            escape_routes = []
-
-        # Issue #3143: Compute per-pad lateral-channel budgets from the
-        # escape pad overrides registered above.  The budgets nudge the
-        # C++ A* main router away from contested escape channels adjacent
-        # to dense-package pad rows -- exactly the failure mode that
-        # capped softstart routing reach at 6/10 nets in PR #3142.  Empty
-        # list (no dense packages, no overrides, or Python backend in use)
-        # silently leaves the per-net cost function pre-#3143 identical.
-        #
-        # Issue #3201 diagnostic: setting environment variable
-        # ``KCT_DISABLE_PAD_BUDGETS=1`` disables budget application to
-        # establish an A/B comparison without recompilation.  Useful for
-        # confirming whether a routing regression originates from the
-        # budget code path (per PR #3222's diagnostic pattern that
-        # confirmed board 05 does not invoke this code path).
-        if dense_packages and not os.environ.get("KCT_DISABLE_PAD_BUDGETS"):
-            pad_channel_budgets = self._build_pad_channel_budgets(dense_packages)
-            if pad_channel_budgets and hasattr(self.router, "set_pad_channel_budgets"):
-                self.router.set_pad_channel_budgets(pad_channel_budgets)
-                print(
-                    f"  Pad-channel budgets: {len(pad_channel_budgets)} "
-                    f"escape channel(s) tagged (Issue #3143)"
-                )
+        # Issue #3952: the escape pre-phase (sub-grid pre-pass, dense
+        # detection, escape generation, pad-channel budgets) is extracted
+        # into ``_run_escape_prephase`` so it can be reused verbatim as the
+        # escape leg of ``route_with_escape_and_diffpairs``'s
+        # non-diff-pair strategy.  ``route_with_escape`` keeps its exact
+        # behaviour: pre-phase then the Phase-2 main pass then the summary.
+        subgrid_escapes, dense_packages = self._run_escape_prephase()
 
         # Phase 2: Route remaining connections
         print("\n--- Phase 2: Main Routing ---")
