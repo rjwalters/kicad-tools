@@ -3033,6 +3033,21 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # CI-terminating (see the --deterministic-budget note above).
         "--per-net-timeout",
         "60",
+        # Issue #3911: board 05 is the fine-pitch (0.5mm DRV8301) board that
+        # auto-grid intentionally routes at 0.1mm > clearance/2 (0.075mm)
+        # because that pad-aligned grid reaches farther than the memory-safe
+        # 0.05mm alternative on this 80x100 4-layer board (28/35 vs fewer
+        # nets).  ``auto_select_grid_resolution`` now flags that exact grid as
+        # ``memory_forced_unsafe_grid`` and ``kct route`` refuses it BY DEFAULT
+        # (an unrouted net is safer than a silent short).  Board 05 knowingly
+        # accepts the coarse-grid DRC risk: its routing completion is a
+        # separately-tracked WIP (#3775/#3766/#3829), its CI gate asserts only
+        # the blocking-net baseline (<=11), and its DRC hotspots are pinned by
+        # tests/test_board_05_drc_hotspot_regression.py.  So opt in EXPLICITLY
+        # here rather than let the recipe die at the gate.  This is the issue's
+        # sanctioned "require explicit opt-in" remedy: the unsafe grid is now a
+        # deliberate, documented choice instead of a silent default.
+        "--allow-unsafe-grid",
         "--skip-nets",
         ",".join(skip_nets),
     ]

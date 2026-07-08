@@ -2803,6 +2803,15 @@ def _add_route_parser(subparsers) -> None:
         help="Force routing even when grid > clearance (may cause DRC violations)",
     )
     route_parser.add_argument(
+        "--allow-unsafe-grid",
+        action="store_true",
+        help=(
+            "Allow --grid auto to route on a grid coarser than clearance/2 when "
+            "the memory budget cap forces it (issue #3911). Refused by default "
+            "because it reliably produces cross-net clearance shorts."
+        ),
+    )
+    route_parser.add_argument(
         "--no-optimize",
         action="store_true",
         help="Skip trace optimization (keep raw grid-step segments)",

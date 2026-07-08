@@ -7467,6 +7467,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--allow-unsafe-grid",
+        action="store_true",
+        help=(
+            "Allow --grid auto to route on a grid coarser than clearance/2 when "
+            "the memory budget cap forces it (issue #3911). Without this flag, "
+            "routing is REFUSED in that case because it reliably produces "
+            "cross-net clearance shorts (an unrouted net is strictly safer than "
+            "a short). Only pass this if you understand and accept the DRC risk; "
+            "prefer enlarging/splitting the board, adding layers, or loosening "
+            "the manufacturer clearance instead. (--force also overrides.)"
+        ),
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help=(
@@ -8417,6 +8430,36 @@ def main(argv: list[str] | None = None) -> int:
 
         # Store grid origin offset from auto-selection for DesignRules
         args._grid_origin_offset = grid_auto_result.origin_offset
+
+        # Issue #3911: gate on the memory-forced unsafe grid.  When the memory
+        # budget cap forced auto-grid coarser than clearance/2 (while a finer
+        # safe candidate existed and this was NOT a deliberate #3441 lattice
+        # rescue), the router's own safety rule (min_res = clearance/2) rejects
+        # the grid and routing reliably produces cross-net clearance shorts.
+        # Refuse to route rather than silently ship shorts; require an explicit
+        # opt-in (--allow-unsafe-grid or --force) to override.
+        if grid_auto_result.memory_forced_unsafe_grid and not (
+            args.force or getattr(args, "allow_unsafe_grid", False)
+        ):
+            recommended = args.clearance / 2
+            print(
+                f"Error: Auto-grid selected {grid_auto_result.resolution}mm > "
+                f"clearance/2 ({recommended}mm) because the memory budget cap "
+                f"(max_cells={grid_auto_result.memory_budget_used:,}) forced a "
+                f"coarser grid.\n"
+                f"The router's own safety rule rejects this grid; routing WILL "
+                f"produce clearance-violating vias/segments (DRC shorts).\n"
+                f"An unrouted net is strictly safer than a short.\n\n"
+                f"Options:\n"
+                f"  1. Enlarge or split the board (fewer cells per mm^2)\n"
+                f"  2. Add routing layers (--auto-layers / --starting-layers)\n"
+                f"  3. Loosen the manufacturer clearance (looser --manufacturer "
+                f"profile or larger --clearance)\n"
+                f"  4. Pass --allow-unsafe-grid (or --force) to route anyway and "
+                f"accept the DRC risk (not recommended)\n",
+                file=sys.stderr,
+            )
+            return 1
     else:
         try:
             args.grid = float(args.grid)

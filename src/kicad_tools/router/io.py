@@ -105,6 +105,62 @@ class GridResolutionError(ValueError):
         super().__init__(message)
 
 
+class GridSafetyError(ValueError):
+    """Raised when auto-grid selection would route on a DRC-unsafe grid.
+
+    Issue #3911: :func:`auto_select_grid_resolution` computes a
+    ``memory_forced_unsafe_grid`` flag on :class:`GridAutoSelection` whenever
+    the memory-budget cap forces the routing grid coarser than
+    ``clearance / 2`` even though a finer, clearance-safe candidate existed.
+    The router's own A* pathfinder documents ``min_res = clearance / 2`` as a
+    hard DRC-safety floor, so routing on such a grid reliably produces
+    cross-net clearance shorts (e.g. board 05: NRST<->OSC_IN, PWM_AH<->OSC_OUT
+    vias at -0.188 / -0.100mm).
+
+    Callers gate on the flag and raise this error rather than route silently
+    into shorts.  Shorts are strictly worse than unrouted nets: an open is
+    caught by LVS, but a short can propagate power faults and damage hardware.
+    Pass an explicit opt-in (``allow_unsafe_grid=True`` / ``--allow-unsafe-grid``
+    / ``--force``) to override when the risk is understood and accepted.
+
+    Attributes:
+        grid_resolution: The unsafe (memory-forced) grid resolution in mm
+        clearance: The required clearance in mm
+        recommended: The clearance/2 safety floor in mm
+        memory_budget_used: The effective ``max_cells`` budget the selector hit
+    """
+
+    def __init__(
+        self,
+        grid_resolution: float,
+        clearance: float,
+        memory_budget_used: int | None = None,
+        message: str | None = None,
+    ):
+        self.grid_resolution = grid_resolution
+        self.clearance = clearance
+        self.recommended = clearance / 2
+        self.memory_budget_used = memory_budget_used
+
+        if message is None:
+            budget = (
+                f" even at max_cells={memory_budget_used:,}"
+                if memory_budget_used is not None
+                else ""
+            )
+            message = (
+                f"Auto-grid selected {grid_resolution}mm > clearance/2 "
+                f"({self.recommended}mm) because the memory budget cap forced a "
+                f"coarser grid{budget}. The router's own safety rule rejects this "
+                f"grid; routing would produce clearance-violating vias/segments "
+                f"(DRC shorts). Options: enlarge/split the board, loosen the "
+                f"manufacturer clearance, add layers, or pass "
+                f"allow_unsafe_grid=True (CLI: --allow-unsafe-grid or --force) to "
+                f"route anyway and accept the DRC risk."
+            )
+        super().__init__(message)
+
+
 @dataclass
 class GridAdjustment:
     """Result of automatic grid resolution adjustment.
@@ -623,6 +679,34 @@ class GridAutoSelection:
         lattice_rescued: True if the issue #3441 lattice rescue bumped the
             memory budget to admit a candidate that aligns the board's
             dominant pad lattice (<= clearance but > clearance/2).
+        memory_forced_unsafe_grid: True only when ALL of the following hold:
+            (1) the memory budget cap forced the selector onto a grid coarser
+            than ``clearance / 2`` *even though* a finer clearance-safe
+            candidate existed before the memory filter; (2) that selection was
+            NOT the deliberate #3441 lattice rescue; AND (3) the board carries
+            **fine-pitch pads** -- some pair of pad centres is spaced
+            ``<= FINE_PITCH_SPACING_MM`` apart.  This is the precise signal for
+            issue #3911: the router's own safety rule
+            (``min_res = clearance / 2``) rejects such a grid, and on a
+            fine-pitch board the coarse grid's per-axis quantisation genuinely
+            cannot thread copper between adjacent pads without eroding
+            clearance -- producing the exact clearance-violating vias/segments
+            the warning predicts (board 05: 0.5mm-pitch DRV8301, grid 0.1mm >
+            clearance/2 0.075mm -> NRST<->OSC_IN / PWM_AH<->OSC_OUT via shorts).
+            Callers MUST gate on this flag (refuse / require explicit opt-in)
+            rather than route silently into DRC shorts.
+
+            The fine-pitch condition (3) is what keeps the gate from
+            over-firing on *sparse* boards that select a coarse grid but
+            cannot short: a 2.54mm-pitch divider (board 01) or a 0.8mm-pitch
+            match-group board (board 07) is > clearance/2 and memory-capped
+            yet routes cleanly, because the inter-pad channel is wide enough
+            for grid-quantised copper.  Those boards set
+            ``clearance_compliant_at_clearance_over_2 is False`` but leave this
+            flag False.  Likewise a plain #2387 relaxation (0.1mm at clearance
+            0.15mm with no memory pressure) and a #3441 lattice rescue are
+            intentional pad-alignment trade-offs, not memory-cap coercion, so
+            they do NOT set this flag.
     """
 
     resolution: float
@@ -636,6 +720,7 @@ class GridAutoSelection:
     clearance_compliant_at_clearance_over_2: bool = False
     memory_budget_used: int = 0
     lattice_rescued: bool = False
+    memory_forced_unsafe_grid: bool = False
 
     def summary(self) -> str:
         """Human-readable summary of the selection."""
@@ -804,6 +889,54 @@ def _find_optimal_origin_offset(
     y_off = best_offset_for_axis(y_coords)
 
     return (round(x_off, 6), round(y_off, 6))
+
+
+# Issue #3911: pad centre-to-centre spacing at or below this (mm) marks a board
+# as "fine-pitch".  0.65mm is the industry fine-pitch boundary (0.65mm-pitch
+# TSSOP and below: 0.5mm QFN/QFP, sub-0.5mm BGA) -- packages whose adjacent
+# different-net pads leave an inter-pad channel too narrow to thread
+# grid-quantised copper once the grid is coarser than clearance/2.  Above this,
+# the channel is wide enough that a coarse grid still routes cleanly (board 06/07
+# at 0.8mm, board 01 at 2.54mm), so the memory-forced-unsafe gate must NOT fire.
+FINE_PITCH_SPACING_MM = 0.65
+
+
+def _min_pad_center_spacing(
+    pad_list: list[Pad] | list[PadPosition],
+    early_exit: float = FINE_PITCH_SPACING_MM,
+) -> float | None:
+    """Return the smallest centre-to-centre distance between any two pads (mm).
+
+    Used by :func:`auto_select_grid_resolution` to decide whether a board is
+    fine-pitch (issue #3911).  Pads are swept in x-sorted order with an
+    x-gap prune so the common case is far below the O(n^2) worst case, and the
+    sweep short-circuits as soon as it proves a spacing ``<= early_exit`` (the
+    only thing the fine-pitch test needs to know).  Coincident pads (distance
+    ``< 1um``, e.g. a pad and its own thermal paste aperture) are ignored.
+
+    Returns None when fewer than two pads are present.
+    """
+    n = len(pad_list)
+    if n < 2:
+        return None
+    pts = sorted(((p.x, p.y) for p in pad_list), key=lambda t: (t[0], t[1]))
+    best = math.inf
+    for i in range(n):
+        xi, yi = pts[i]
+        for j in range(i + 1, n):
+            xj, yj = pts[j]
+            dx = xj - xi
+            if dx >= best:
+                # Remaining pads are even farther in x -> cannot improve.
+                break
+            dist = math.hypot(dx, yj - yi)
+            if dist < 1e-3:
+                continue  # coincident / duplicate aperture
+            if dist < best:
+                best = dist
+                if best <= early_exit:
+                    return best
+    return None if best is math.inf else best
 
 
 def _compute_gcd_grid_candidates(
@@ -1273,11 +1406,28 @@ def auto_select_grid_resolution(
     # generic "may cause clearance violations" warning from
     # validate_grid_resolution -- it tells the user that the memory budget,
     # not the candidate list, is the binding constraint.
-    if (
+    grid_unsafe_by_memory_cap = (
         memory_capped
         and best_resolution > recommended_max
         and any(c <= recommended_max for c in pre_memory_candidates)
-    ):
+    )
+    # Issue #3911: distinguish the memory-cap coercion from the deliberate
+    # #3441 lattice rescue AND from sparse boards that route cleanly on a
+    # coarse grid.  The gate must fire ONLY when routing on this grid can
+    # genuinely short, which requires BOTH (a) the memory cap coerced a grid
+    # > clearance/2 while a finer safe candidate existed and it was not the
+    # #3441 lattice rescue, AND (b) the board carries fine-pitch pads whose
+    # inter-pad channel the coarse grid cannot honour.  Without (b) the coarse
+    # grid is harmless: board 01 (2.54mm divider) and board 07 (0.8mm match
+    # group) are memory-capped and > clearance/2 yet route cleanly, so gating
+    # them would refuse boards that never short (the over-fire the #3911 gate
+    # must avoid).  Board 05's 0.5mm-pitch DRV8301 is exactly case (b).
+    has_fine_pitch = False
+    if grid_unsafe_by_memory_cap and not lattice_rescued:
+        min_spacing = _min_pad_center_spacing(pad_list)
+        has_fine_pitch = min_spacing is not None and min_spacing <= FINE_PITCH_SPACING_MM
+    memory_forced_unsafe_grid = grid_unsafe_by_memory_cap and not lattice_rescued and has_fine_pitch
+    if grid_unsafe_by_memory_cap:
         if lattice_rescued:
             # Issue #3441: the lattice rescue *chose* this grid because it
             # aligns the board's dominant pad lattice; it is <= clearance
@@ -1317,6 +1467,7 @@ def auto_select_grid_resolution(
         clearance_compliant_at_clearance_over_2=best_resolution <= recommended_max,
         memory_budget_used=effective_max_cells,
         lattice_rescued=lattice_rescued,
+        memory_forced_unsafe_grid=memory_forced_unsafe_grid,
     )
 
 
