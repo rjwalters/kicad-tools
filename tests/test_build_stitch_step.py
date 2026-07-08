@@ -29,6 +29,7 @@ import pytest
 from rich.console import Console
 
 from kicad_tools.cli.build_cmd import (
+    _ALL_STEPS,
     _PCB_WRITE_STEPS,
     BuildContext,
     BuildStep,
@@ -341,21 +342,18 @@ class TestDefaultChainOrdering:
     """Verify that `kct build` (no --step) executes STITCH between ROUTE and VERIFY."""
 
     def test_default_chain_includes_stitch_between_route_and_verify(self):
-        """Reconstruct the default chain from the source and assert ordering."""
-        import inspect
+        """The default chain (`_ALL_STEPS`) must order ROUTE -> STITCH -> VERIFY.
 
-        from kicad_tools.cli import build_cmd
-
-        source = inspect.getsource(build_cmd.main)
-        # The default chain block starts at `if args.step == "all":`.
-        # We assert STITCH is listed AFTER ROUTE and BEFORE VERIFY.
-        route_pos = source.find("BuildStep.ROUTE,")
-        stitch_pos = source.find("BuildStep.STITCH,")
-        verify_pos = source.find("BuildStep.VERIFY,")
-        assert route_pos != -1, "ROUTE entry missing from default chain"
-        assert stitch_pos != -1, "STITCH entry missing from default chain"
-        assert verify_pos != -1, "VERIFY entry missing from default chain"
-        assert route_pos < stitch_pos < verify_pos, (
+        Introspects the `_ALL_STEPS` tuple directly (the canonical default
+        chain consumed by `main()`), mirroring `test_export_precedes_verify_in_all_steps`.
+        """
+        assert BuildStep.ROUTE in _ALL_STEPS, "ROUTE entry missing from default chain"
+        assert BuildStep.STITCH in _ALL_STEPS, "STITCH entry missing from default chain"
+        assert BuildStep.VERIFY in _ALL_STEPS, "VERIFY entry missing from default chain"
+        route_idx = _ALL_STEPS.index(BuildStep.ROUTE)
+        stitch_idx = _ALL_STEPS.index(BuildStep.STITCH)
+        verify_idx = _ALL_STEPS.index(BuildStep.VERIFY)
+        assert route_idx < stitch_idx < verify_idx, (
             "default chain order must be ROUTE -> STITCH -> VERIFY"
         )
 
