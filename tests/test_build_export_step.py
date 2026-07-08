@@ -10,6 +10,7 @@ from rich.console import Console
 from kicad_tools.cli.build_cmd import (
     _ALL_STEPS,
     BuildContext,
+    BuildResult,
     BuildStep,
     _run_step_export,
     main,
@@ -300,3 +301,195 @@ class TestBuildStepExportCLI:
         # With dry-run, all steps should be listed without error
         ret = main([str(kct_file), "--dry-run", "--quiet"])
         assert ret in (0, 1)
+
+
+class TestExportVerifyInteraction:
+    """Re-arm the #3929 connectivity DRC safety floor on EXPORT-before-VERIFY.
+
+    After PR #3974 put EXPORT ahead of VERIFY (#3970), a fresh single-pass
+    build writes the manufacturing bundle before VERIFY produces the
+    ``drc_report.json`` that the export-time floor reads. A shorted board
+    could therefore leave a bundle on disk even though the build correctly
+    exits FAILED. Issue #3976 deletes that bundle when VERIFY fails after a
+    successful EXPORT.
+
+    These tests drive ``main()`` with a trimmed ``_ALL_STEPS`` of just
+    ``[EXPORT, VERIFY]`` so the step loop runs without invoking the whole
+    routing pipeline; the two step functions are mocked to isolate the
+    removal branch.
+    """
+
+    def _make_bundle(self, tmp_path: Path) -> Path:
+        """Create a fake manufacturing bundle directory with a file inside."""
+        mfr_dir = tmp_path / "manufacturing"
+        mfr_dir.mkdir()
+        (mfr_dir / "manifest.json").write_text("{}")
+        return mfr_dir
+
+    def test_bundle_removed_when_verify_fails_after_export(self, tmp_path: Path) -> None:
+        """A VERIFY failure after a successful EXPORT deletes the bundle."""
+        kct_file = tmp_path / "project.kct"
+        kct_file.write_text("[project]\nname = 'test'\n")
+        mfr_dir = self._make_bundle(tmp_path)
+
+        export_result = BuildResult(
+            step=BuildStep.EXPORT.value,
+            success=True,
+            message="exported",
+            output_file=mfr_dir,
+        )
+        verify_result = BuildResult(
+            step=BuildStep.VERIFY.value,
+            success=False,
+            message="DRC found shorts",
+        )
+
+        with (
+            patch(
+                "kicad_tools.cli.build_cmd._ALL_STEPS",
+                [BuildStep.EXPORT, BuildStep.VERIFY],
+            ),
+            patch(
+                "kicad_tools.cli.build_cmd._run_step_export",
+                return_value=export_result,
+            ),
+            patch(
+                "kicad_tools.cli.build_cmd._run_step_verify",
+                return_value=verify_result,
+            ),
+        ):
+            # No --quiet: the non-quiet summary block is where the failing
+            # exit code (return 1) is emitted.
+            ret = main([str(kct_file)])
+
+        # Build fails (VERIFY failed) and the bundle no longer exists.
+        assert ret == 1
+        assert not mfr_dir.exists()
+
+    def test_bundle_removed_prints_warn(self, tmp_path: Path) -> None:
+        """Console prints a WARN line referencing DRC failures on removal."""
+        kct_file = tmp_path / "project.kct"
+        kct_file.write_text("[project]\nname = 'test'\n")
+        mfr_dir = self._make_bundle(tmp_path)
+
+        export_result = BuildResult(
+            step=BuildStep.EXPORT.value,
+            success=True,
+            message="exported",
+            output_file=mfr_dir,
+        )
+        verify_result = BuildResult(
+            step=BuildStep.VERIFY.value,
+            success=False,
+            message="DRC found shorts",
+        )
+
+        console_mock = MagicMock()
+        with (
+            patch(
+                "kicad_tools.cli.build_cmd._ALL_STEPS",
+                [BuildStep.EXPORT, BuildStep.VERIFY],
+            ),
+            patch(
+                "kicad_tools.cli.build_cmd._run_step_export",
+                return_value=export_result,
+            ),
+            patch(
+                "kicad_tools.cli.build_cmd._run_step_verify",
+                return_value=verify_result,
+            ),
+            patch("kicad_tools.cli.build_cmd.Console", return_value=console_mock),
+        ):
+            main([str(kct_file)])
+
+        printed = " ".join(
+            str(call.args[0]) if call.args else "" for call in console_mock.print.call_args_list
+        )
+        assert "manufacturing bundle removed" in printed
+        assert "DRC failures" in printed
+
+    def test_bundle_kept_when_verify_passes(self, tmp_path: Path) -> None:
+        """No removal when VERIFY succeeds after EXPORT (no false positive)."""
+        kct_file = tmp_path / "project.kct"
+        kct_file.write_text("[project]\nname = 'test'\n")
+        mfr_dir = self._make_bundle(tmp_path)
+
+        export_result = BuildResult(
+            step=BuildStep.EXPORT.value,
+            success=True,
+            message="exported",
+            output_file=mfr_dir,
+        )
+        verify_result = BuildResult(
+            step=BuildStep.VERIFY.value,
+            success=True,
+            message="DRC clean",
+        )
+
+        with (
+            patch(
+                "kicad_tools.cli.build_cmd._ALL_STEPS",
+                [BuildStep.EXPORT, BuildStep.VERIFY],
+            ),
+            patch(
+                "kicad_tools.cli.build_cmd._run_step_export",
+                return_value=export_result,
+            ),
+            patch(
+                "kicad_tools.cli.build_cmd._run_step_verify",
+                return_value=verify_result,
+            ),
+        ):
+            ret = main([str(kct_file), "--quiet"])
+
+        assert ret == 0
+        assert mfr_dir.exists()
+
+    def test_verify_only_run_does_not_remove(self, tmp_path: Path) -> None:
+        """--step verify in isolation removes nothing (no EXPORT ran).
+
+        There is no EXPORT result in ``results``, so even a failing VERIFY
+        must not delete a pre-existing bundle from a prior build.
+        """
+        kct_file = tmp_path / "project.kct"
+        kct_file.write_text("[project]\nname = 'test'\n")
+        mfr_dir = self._make_bundle(tmp_path)
+
+        verify_result = BuildResult(
+            step=BuildStep.VERIFY.value,
+            success=False,
+            message="DRC found shorts",
+        )
+
+        with patch(
+            "kicad_tools.cli.build_cmd._run_step_verify",
+            return_value=verify_result,
+        ):
+            ret = main([str(kct_file), "--step", "verify"])
+
+        # VERIFY failed but there was no EXPORT in this run, so the
+        # pre-existing bundle is left untouched.
+        assert ret == 1
+        assert mfr_dir.exists()
+
+    def test_export_only_run_does_not_remove(self, tmp_path: Path) -> None:
+        """--step export in isolation never removes the bundle it wrote."""
+        kct_file = tmp_path / "project.kct"
+        kct_file.write_text("[project]\nname = 'test'\n")
+        mfr_dir = self._make_bundle(tmp_path)
+
+        export_result = BuildResult(
+            step=BuildStep.EXPORT.value,
+            success=True,
+            message="exported",
+            output_file=mfr_dir,
+        )
+
+        with patch(
+            "kicad_tools.cli.build_cmd._run_step_export",
+            return_value=export_result,
+        ):
+            ret = main([str(kct_file), "--step", "export", "--quiet"])
+
+        assert ret == 0
+        assert mfr_dir.exists()
