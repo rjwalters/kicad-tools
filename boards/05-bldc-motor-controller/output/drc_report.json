@@ -3,8 +3,8 @@
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
-    "errors": 6,
-    "warnings": 9,
+    "errors": 1,
+    "warnings": 11,
     "infos": 8,
     "rules_checked": 36,
     "rules_checked_by_rule": {
@@ -15,27 +15,6 @@
     "passed": false
   },
   "violations": [
-    {
-      "rule_id": "clearance_segment_via",
-      "type": "clearance_segment_via",
-      "severity": "error",
-      "message": "Segment to via clearance 0.100mm < minimum 0.102mm",
-      "location": [
-        20.75,
-        54.9
-      ],
-      "layer": "F.Cu",
-      "actual_value": 0.1,
-      "required_value": 0.1016,
-      "items": [
-        "Trace-4111287c",
-        "Via-e4f2c71e"
-      ],
-      "nets": [
-        "GATE_DRV_CH",
-        "PHASE_C"
-      ]
-    },
     {
       "rule_id": "clearance_segment_via",
       "type": "clearance_segment_via",
@@ -58,61 +37,19 @@
       ]
     },
     {
-      "rule_id": "connectivity",
-      "type": "connectivity",
-      "severity": "error",
-      "message": "Net 'ISENSE_A-' is partially routed: 3 of 4 pads stranded (connected island has 1 pads)",
+      "rule_id": "copper_sliver",
+      "type": "copper_sliver",
+      "severity": "warning",
+      "message": "Copper sliver on F.Cu: region narrower than minimum copper width 0.102mm (approx width 0.038mm, area 0.0216mm^2)",
       "location": [
-        43.1,
-        84.0
+        18.782,
+        57.948
       ],
-      "layer": null,
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "R12.2"
-      ],
-      "nets": [
-        "ISENSE_A-"
-      ]
-    },
-    {
-      "rule_id": "connectivity",
-      "type": "connectivity",
-      "severity": "error",
-      "message": "Net 'ISENSE_B-' is partially routed: 3 of 4 pads stranded (connected island has 1 pads)",
-      "location": [
-        32.825,
-        40.7
-      ],
-      "layer": null,
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "U10.6"
-      ],
-      "nets": [
-        "ISENSE_B-"
-      ]
-    },
-    {
-      "rule_id": "connectivity",
-      "type": "connectivity",
-      "severity": "error",
-      "message": "Net 'ISENSE_C-' is partially routed: 2 of 3 pads stranded (connected island has 1 pads)",
-      "location": [
-        32.825,
-        41.5
-      ],
-      "layer": null,
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "U10.7"
-      ],
-      "nets": [
-        "ISENSE_C-"
-      ]
+      "layer": "F.Cu",
+      "actual_value": 0.0382,
+      "required_value": 0.1016,
+      "items": [],
+      "nets": []
     },
     {
       "rule_id": "copper_sliver",
@@ -130,25 +67,19 @@
       "nets": []
     },
     {
-      "rule_id": "dimension_drill_clearance",
-      "type": "dimension_drill_clearance",
-      "severity": "error",
-      "message": "Hole-to-hole clearance 0.407mm < minimum 0.500mm",
+      "rule_id": "copper_sliver",
+      "type": "copper_sliver",
+      "severity": "warning",
+      "message": "Copper sliver on B.Cu: region narrower than minimum copper width 0.102mm (approx width 0.020mm, area 0.0110mm^2)",
       "location": [
-        18.95,
-        55.25
+        22.05,
+        60.0
       ],
-      "layer": null,
-      "actual_value": 0.40710678118654753,
-      "required_value": 0.5,
-      "items": [
-        "ISENSE_A+",
-        "ISENSE_A+"
-      ],
-      "nets": [
-        "ISENSE_A+",
-        "ISENSE_A+"
-      ]
+      "layer": "B.Cu",
+      "actual_value": 0.0201,
+      "required_value": 0.1016,
+      "items": [],
+      "nets": []
     },
     {
       "rule_id": "silk_over_copper",
