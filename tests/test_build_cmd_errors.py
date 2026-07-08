@@ -419,3 +419,86 @@ class TestBuildRouteExitCode2:
 
         assert result.success is True
         assert "DRC violations remain" in result.message
+
+
+class TestRouteStepRecipeArtifactGuard:
+    """The ROUTE step must not clobber a recipe-produced routed PCB.
+
+    Board 04's ``generate_design.py`` routes, stitches, and fills zones
+    during the PCB step, writing ``*_routed.kicad_pcb`` in-place. The PCB
+    arm of ``main()`` records that artifact on ``ctx.routed_pcb_file``; the
+    ROUTE step must then skip re-routing instead of overwriting it with the
+    generic autorouter (issue #3971).
+    """
+
+    def test_route_step_skips_when_recipe_artifact_present(self, tmp_path: Path) -> None:
+        """Pre-set ``routed_pcb_file`` short-circuits the route step."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        routed_file = tmp_path / "board_routed.kicad_pcb"
+        routed_file.write_text("(kicad_pcb)")
+
+        ctx = BuildContext(
+            project_dir=tmp_path,
+            spec_file=None,
+        )
+        ctx.pcb_file = pcb_file
+        ctx.routed_pcb_file = routed_file
+        ctx.mfr = "jlcpcb"
+        ctx.quiet = True
+        ctx.verbose = False
+        ctx.dry_run = False
+        ctx.force = False
+        ctx.output_dir = None
+        ctx.spec = None
+
+        console = Console()
+
+        # The router must never be invoked when the recipe already routed.
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
+            result = _run_step_route(ctx, console)
+
+        assert result.success is True
+        assert "recipe" in result.message.lower()
+        assert result.output_file == routed_file
+        mock_run.assert_not_called()
+
+    def test_force_bypasses_recipe_artifact_guard(self, tmp_path: Path) -> None:
+        """``--force`` (ctx.force) re-routes even when a routed artifact exists."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        routed_file = tmp_path / "board_routed.kicad_pcb"
+        routed_file.write_text("(kicad_pcb)")
+
+        ctx = BuildContext(
+            project_dir=tmp_path,
+            spec_file=None,
+        )
+        ctx.pcb_file = pcb_file
+        ctx.routed_pcb_file = routed_file
+        ctx.mfr = "jlcpcb"
+        ctx.quiet = True
+        ctx.verbose = False
+        ctx.dry_run = False
+        ctx.force = True
+        ctx.output_dir = None
+        ctx.spec = None
+
+        console = Console()
+
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            result = _run_step_route(ctx, console)
+
+        # With force, the guard is bypassed and the router actually runs.
+        assert result.success is True
+        assert "recipe" not in result.message.lower()
+        mock_run.assert_called()
