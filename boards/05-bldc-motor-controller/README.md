@@ -26,17 +26,30 @@ uv run python boards/05-bldc-motor-controller/design.py
 > drops just north of the GATE_DRV_CH diagonal into a clear In2.Cu column
 > (Q1.3<->Q2.2 -> deep lane -> J2.1).  All new copper is 45-legal
 > (`tests/test_fleet_45_census.py` passes).  **Blocking signal nets: 6 ->
-> 0** (the artifact now reports only the four U3-south current-sense
-> (ISENSE_A-/B+/B-/C-) nets incomplete, plus the two advisory
-> POUR_DISCONTINUOUS plane pours).
+> 0** for PHASE; the U3-south current-sense cluster is now down to three
+> open nets.
 >
-> The four **ISENSE Kelvin-sense nets remain open**: `kct net-status
-> --why` classifies them PLACEMENT_BOUND / CONGESTION_SATURATED -- each
-> threads U3's 0.5mm-pitch south band into the dense U10/R10-R12 analog
-> cluster (nearest strict blocker 0.050-0.354mm; "a part must move" or a
-> 1:1 rip trade), and re-routing them risks the shunt-to-pad Kelvin
-> geometry.  They are documented advisory residuals on #3766 pending an
-> analog-aware relayout; connecting them is not a targeted-copper fix.
+> **ISENSE_B+ is now routed** (artifact-first, #3766, EE-unblocked
+> 2026-07-09): U3.30 escapes south on F.Cu to a through-via at (17.55,
+> 55.55) into the open west In1.Cu field, which carries the spine down to
+> the R11.1 shunt tap (via adjacent-north of the pad, F.Cu into the pad
+> metal) and branches at (17.55,66.99) on a 45deg diagonal to Q4.3; the
+> north leg to U3.26 runs on In2.Cu (crossing the PHASE_A In1 wall on a
+> different layer, per the Kelvin rule "no same-layer PHASE crossing").
+> No part moves (escalation level 1) and no ripped copper.  Referee
+> (`kicad-cli pcb drc --refill-zones`) adds 0 violations; zones refilled;
+> 45-census clean.
+>
+> **Three ISENSE nets remain open** (`ISENSE_A-`, `ISENSE_B-`,
+> `ISENSE_C-`): each has a U3-south pin (A-: U3.33/U3.44; B-: U3.39; C-:
+> U3.34) that cannot via-escape without moving the adjacent GATE_DRV_CH /
+> GATE_CL / PHASE_C copper -- the all-layer via window directly south of
+> the 0.5mm-pitch sense pins fits only three of the five sense pins even
+> after ripping all six ISENSE nets.  Completing them requires escalation
+> **level 2** (re-dress GATE_CL U3.35->Q2.1 + GATE_DRV_CH U3.37->R20.1 so
+> they vacate the x19-20,y55-58 cells).  Tracked on #3766 with the exact
+> escape geometry; the negotiated auto-router does not converge on this
+> 0.5mm-pitch band, so it is a hand-finish task.
 
 ## Overview
 
