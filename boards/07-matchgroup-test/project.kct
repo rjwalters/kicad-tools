@@ -30,6 +30,18 @@ project:
     pcb_routed: "output/matchgroup_test_routed.kicad_pcb"
     net_class_map_sidecar: "output/net_class_map.json"
 
+# Route-step discovery contract (Tier 1).  This board's routing entry point is
+# ``generate_design.py --step route`` — the same command the
+# ``matchgroup-routing-regression`` CI gate uses (via
+# scripts/ci/check_matchgroup_coverage.py).  The recipe wires
+# ``--length-match-groups`` + the net_class_map.json sidecar into its ``kct
+# route`` call; the generic ``kct route`` fallback that ``kct build`` would
+# otherwise use drops those flags and under-routes the TMDS pairs / DDR byte.
+# Declaring the recipe here makes ``kct build`` route via the recipe.  See
+# _run_step_route in src/kicad_tools/cli/build_cmd.py.
+build:
+  route_recipe: "generate_design.py --step route"
+
 intent:
   summary: |
     Multi-protocol match-group test board with 4 length-matched

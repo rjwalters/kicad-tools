@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -1279,8 +1280,204 @@ def _resolve_routed_pcb_path(ctx: BuildContext) -> Path:
     return ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
 
 
+# Module-level sentinel a recipe script can define to opt into the Tier 2
+# ``generate_design.py --step route`` discovery path without needing a
+# ``build.route_recipe`` declaration in ``project.kct``.  Detection greps the
+# script source for this literal (see ``_generate_design_supports_step_route``)
+# so no import/exec of the recipe is required at probe time.
+_ROUTE_STEP_SENTINEL = "SUPPORTS_STEP_ROUTE = True"
+
+
+def _resolve_route_recipe(ctx: BuildContext) -> list[str] | None:
+    """Resolve the route-step recipe command from the discovery contract.
+
+    Returns the argv (as a list, ``sys.executable`` prepended by the caller)
+    for the recipe that should route the committed unrouted PCB, or ``None``
+    if no recipe applies (the caller then falls through to the standalone
+    ``route_demo.py`` / ``route.py`` probe and finally generic ``kct route``).
+
+    Probe order (first match wins):
+
+    1. **Tier 1 — ``project.kct`` explicit declaration.** If
+       ``spec.build.route_recipe`` is set, split it into argv and resolve the
+       first token (the script) relative to ``ctx.project_dir``.  This is the
+       cleanest, heuristic-free contract for recipe-first boards.
+    2. **Tier 2 — ``generate_design.py --step route`` sentinel.** If
+       ``generate_design.py`` exists in ``ctx.project_dir`` and its source
+       contains the ``SUPPORTS_STEP_ROUTE = True`` sentinel, invoke it with
+       ``--step route``.  Covers boards 06/07 even without a ``project.kct``
+       key.
+
+    The returned argv is a *script + args* list (no interpreter); the caller
+    runs it with ``sys.executable`` and forwards the output dir as a trailing
+    positional argument.
+    """
+    # Tier 1: explicit project.kct declaration.  Guard on ``isinstance(str)``
+    # rather than mere truthiness so a partially-mocked BuildContext (whose
+    # ``spec`` auto-vivifies attributes) never reaches ``shlex.split`` with a
+    # non-string; a real spec always carries a ``str | None`` here.
+    route_recipe = getattr(getattr(ctx.spec, "build", None), "route_recipe", None)
+    if isinstance(route_recipe, str) and route_recipe.strip():
+        tokens = shlex.split(route_recipe)
+        if tokens:
+            script = Path(tokens[0])
+            if not script.is_absolute():
+                script = ctx.project_dir / script
+            if script.exists():
+                return [str(script), *tokens[1:]]
+
+    # Tier 2: generate_design.py with the --step route sentinel.
+    design_script = ctx.project_dir / "generate_design.py"
+    if design_script.exists() and _generate_design_supports_step_route(design_script):
+        return [str(design_script), "--step", "route"]
+
+    return None
+
+
+def _generate_design_supports_step_route(script: Path) -> bool:
+    """Return True if ``script`` opts into the ``--step route`` recipe path.
+
+    Detection is a cheap source grep for the ``SUPPORTS_STEP_ROUTE = True``
+    module-level sentinel — no import or ``--help`` subprocess is required, so
+    a syntactically-broken or side-effectful recipe never runs merely to be
+    probed.  Boards 06 and 07 declare the sentinel near the top of their
+    ``generate_design.py``.
+    """
+    try:
+        return _ROUTE_STEP_SENTINEL in script.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+
+
+def _run_route_recipe(
+    ctx: BuildContext,
+    console: Console,
+    recipe_argv: list[str],
+) -> BuildResult:
+    """Invoke a discovered route recipe (Tier 1 / Tier 2) and locate its output.
+
+    ``recipe_argv`` is a *script + args* list (no interpreter). The output dir
+    is forwarded as a trailing positional argument so the recipe writes its
+    ``*_routed.kicad_pcb`` where the rest of the pipeline looks for it.
+    """
+    script = Path(recipe_argv[0])
+    grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(ctx.mfr, ctx.spec)
+    route_env_vars = {
+        "KCT_ROUTE_GRID": str(grid),
+        "KCT_ROUTE_CLEARANCE": str(clearance),
+        "KCT_ROUTE_TRACE_WIDTH": str(trace_width),
+        "KCT_ROUTE_VIA_DRILL": str(via_drill),
+        "KCT_ROUTE_VIA_DIAMETER": str(via_diameter),
+    }
+
+    # The recipe takes the output dir as a positional argument (matching the
+    # convention generate_design.py / route_demo.py already use).
+    script_args = list(recipe_argv[1:])
+    if ctx.output_dir:
+        script_args.append(str(ctx.output_dir))
+
+    recipe_desc = " ".join([script.name, *recipe_argv[1:]])
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="route",
+            success=True,
+            message=f"[dry-run] Would run: {recipe_desc}",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running {recipe_desc}...")
+
+    success, message = _run_python_script(
+        script,
+        ctx.project_dir,
+        ctx.verbose,
+        env_vars=route_env_vars,
+        script_args=script_args,
+        quiet=ctx.quiet,
+    )
+
+    # Locate the routed PCB the recipe wrote.  Recipes conventionally write
+    # ``<name>_routed.kicad_pcb`` next to the unrouted PCB (typically an
+    # ``output/`` subdir), so probe the explicit output dir, the unrouted
+    # PCB's own directory, and the project dir — non-recursively first, then
+    # fall back to a recursive scan so a nested ``output/`` layout is still
+    # found regardless of how ``ctx.output_dir`` was (or wasn't) set.
+    search_dirs: list[Path] = []
+    if ctx.output_dir:
+        search_dirs.append(ctx.output_dir)
+    if ctx.pcb_file:
+        search_dirs.append(ctx.pcb_file.parent)
+    search_dirs.append(ctx.project_dir)
+
+    # Preserve order while de-duplicating.
+    seen: set[Path] = set()
+    unique_search_dirs: list[Path] = []
+    for d in search_dirs:
+        if d not in seen:
+            seen.add(d)
+            unique_search_dirs.append(d)
+
+    output_file: Path | None = None
+    for search_dir in unique_search_dirs:
+        routed_files_found = list(search_dir.glob("*_routed.kicad_pcb"))
+        if routed_files_found:
+            output_file = routed_files_found[0]
+            break
+    if output_file is None:
+        # Recursive fallback: recipes that write into a nested ``output/``
+        # subdir the search above didn't enumerate (e.g. ``ctx.output_dir``
+        # unset and the PCB discovered elsewhere) are still located here.
+        for search_dir in unique_search_dirs:
+            routed_files_found = sorted(search_dir.glob("**/*_routed.kicad_pcb"))
+            if routed_files_found:
+                output_file = routed_files_found[0]
+                break
+
+    if success and output_file is None:
+        # The recipe reported success but produced no routed artifact — surface
+        # this as a failure rather than silently continuing to verify the
+        # unrouted PCB.
+        return BuildResult(
+            step="route",
+            success=False,
+            message=f"{recipe_desc} completed but no *_routed.kicad_pcb was produced",
+        )
+
+    return BuildResult(
+        step="route",
+        success=success,
+        message=message,
+        output_file=output_file,
+    )
+
+
 def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
-    """Run autorouting step."""
+    """Run the autorouting step.
+
+    Route-recipe discovery contract (first match wins):
+
+    0. **Recipe-produced artifact guard.** If a prior step (or run) already
+       left a ``*_routed.kicad_pcb`` recorded on ``ctx.routed_pcb_file`` (or
+       newer than the unrouted PCB), preserve it instead of re-routing. See
+       issue #3971 / #3977. ``--force`` bypasses this.
+    1. **Tier 1 — ``project.kct`` ``build.route_recipe``.** An explicit
+       command (e.g. ``generate_design.py --step route``) is invoked verbatim
+       with the output dir forwarded. Cleanest contract for recipe-first
+       boards (see ``_resolve_route_recipe``).
+    2. **Tier 2 — ``generate_design.py --step route`` sentinel.** If
+       ``generate_design.py`` exists and declares ``SUPPORTS_STEP_ROUTE =
+       True``, invoke ``generate_design.py --step route``. Covers boards
+       06/07 without a ``project.kct`` key.
+    3. **Tier 3 — ``route_demo.py`` / ``route.py``.** Standalone route scripts.
+    4. **Fallback — generic ``kct route``.** Boards with no dedicated routing
+       recipe route through the CLI autorouter with manufacturer defaults.
+
+    Tiers 1-2 exist because recipe-first boards (06 diff-pair, 07 match-group)
+    bake diff-pair / match-group / seed / layer flags into their recipe that
+    the generic ``kct route`` fallback does not replicate; routing them through
+    the fallback silently drops those flags and under-routes the board.
+    """
     # If the PCB step (or a prior run) already left a routed artifact and
     # recorded it on the context, skip re-routing entirely. This protects
     # recipe-routed boards (e.g. board 04's generate_design.py, which routes,
@@ -1369,7 +1566,16 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
             if ctx.verbose:
                 console.print(f"  [warning] Pad grid preflight skipped: {e}")
 
-    # First check for a route script
+    # Tier 1 / Tier 2: a declared or sentinel-detected route recipe. These
+    # recipes bake diff-pair / match-group / seed / layer flags into their
+    # own `kct route` invocation, so they must win over both the standalone
+    # route_demo.py probe below and the generic `kct route` fallback (which
+    # would silently drop those flags). See _resolve_route_recipe.
+    recipe_argv = _resolve_route_recipe(ctx)
+    if recipe_argv is not None:
+        return _run_route_recipe(ctx, console, recipe_argv)
+
+    # Tier 3: standalone route script.
     route_script = ctx.project_dir / "route_demo.py"
     if not route_script.exists():
         route_script = ctx.project_dir / "route.py"

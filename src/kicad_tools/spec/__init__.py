@@ -33,6 +33,7 @@ from .parser import (
     validate_spec,
 )
 from .schema import (
+    BuildConfig,
     Compliance,
     Decision,
     DesignIntent,
@@ -58,6 +59,7 @@ __all__ = [
     "ProjectSpec",
     "ProjectMetadata",
     "ProjectArtifacts",
+    "BuildConfig",
     "DesignIntent",
     "Interface",
     "Requirements",

@@ -28,6 +28,18 @@ project:
     pcb: "output/diffpair_test.kicad_pcb"
     pcb_routed: "output/diffpair_test_routed.kicad_pcb"
 
+# Route-step discovery contract (Tier 1).  This board's routing entry point is
+# ``generate_design.py --step route`` — the same command the
+# ``diffpair-routing-regression`` CI gate uses (via
+# scripts/ci/check_diffpair_coverage.py).  The recipe wires the 4-layer
+# JLCPCB tier-1 stackup, seed, and diff-pair-aware ``kct route`` flags into its
+# invocation; the generic ``kct route`` fallback that ``kct build`` would
+# otherwise use drops those flags and under-routes the USB3 / PCIe / MIPI
+# pairs.  Declaring the recipe here makes ``kct build`` route via the recipe.
+# See _run_step_route in src/kicad_tools/cli/build_cmd.py.
+build:
+  route_recipe: "generate_design.py --step route"
+
 intent:
   summary: |
     Multi-protocol HSDI test board with 9 differential pairs across
