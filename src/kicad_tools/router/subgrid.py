@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 from .layers import Layer
 from .primitives import Pad, Route, Segment, Via
+from .quantize import dogleg_points, is_45_aligned
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,17 @@ class SubGridEscape:
     snap_point: tuple[float, float]
     via: Via | None = None
     via_layer: Layer | None = None
+    # Issue #3907: when the pad-centre -> grid-snap chord is off the
+    # {0,45,90,135} angle set, the escape is emitted as a two-leg dogleg
+    # (45-legal BY CONSTRUCTION at the emission choke point) instead of a
+    # single skewed segment.  ``dogleg_mid`` is the intermediate vertex;
+    # both legs were clearance-validated before this escape was accepted
+    # (``_try_candidates_with_clearance``), so the obstacle context lives
+    # here, at emission -- not in a post-hoc, obstacle-blind repair pass.
+    # ``segment`` still spans pad-centre -> grid-snap (its endpoints drive
+    # ``apply_escape_segments``' grid unblocking); ``get_escape_routes``
+    # splits it at ``dogleg_mid`` when present.
+    dogleg_mid: tuple[float, float] | None = None
 
 
 @dataclass
@@ -950,6 +962,22 @@ class SubGridRouter:
         """
         pad = sgp.pad
 
+        def _validate_leg(seg: Segment) -> tuple[bool, tuple[float, float] | None]:
+            """Clearance-check one escape leg (relaxed or normal mode)."""
+            if min_clearance is not None:
+                # Relaxed mode: manually check clearance against neighbor
+                # pads using the reduced threshold, bypassing per-component
+                # clearance overrides that would use the stricter value.
+                ok = self._validate_segment_relaxed(seg, pad.net, min_clearance)
+                return ok, None
+            # Normal mode: use full validate_segment_clearance
+            ok, _clr, loc = self.grid.validate_segment_clearance(
+                seg,
+                exclude_net=pad.net,
+                component_pitches=component_pitches,
+            )
+            return ok, loc
+
         for _score, gx, gy, snap_x, snap_y in candidates:
             segment = Segment(
                 x1=pad.x,
@@ -962,23 +990,54 @@ class SubGridRouter:
                 net_name=pad.net_name,
             )
 
-            if min_clearance is not None:
-                # Relaxed mode: manually check clearance against neighbor
-                # pads using the reduced threshold, bypassing per-component
-                # clearance overrides that would use the stricter value.
-                is_valid = self._validate_segment_relaxed(
-                    segment,
-                    pad.net,
-                    min_clearance,
-                )
-                violation_loc = None
-            else:
-                # Normal mode: use full validate_segment_clearance
-                is_valid, _clearance, violation_loc = self.grid.validate_segment_clearance(
-                    segment,
-                    exclude_net=pad.net,
-                    component_pitches=component_pitches,
-                )
+            # Issue #3907: enforce 45-legality BY CONSTRUCTION at the
+            # emission choke point.  A pad-centre -> grid-snap chord is
+            # frequently off the {0,45,90,135} set (the off-grid pad
+            # centre and the on-grid snap point rarely line up on a legal
+            # angle).  Instead of emitting the skewed chord and repairing
+            # it later (obstacle-blind, PR #3906's shorts), split it into
+            # a two-leg dogleg NOW and clearance-check each leg against
+            # the same obstacle model the straight chord used.  If either
+            # leg collides, this candidate is rejected and the next
+            # (differently-angled) grid snap is tried -- the obstacle-aware
+            # fallback the post-hoc quantizer never had.
+            dogleg_mid: tuple[float, float] | None = None
+            legs: list[Segment] = [segment]
+            if not is_45_aligned(snap_x - pad.x, snap_y - pad.y):
+                pts = dogleg_points(pad.x, pad.y, snap_x, snap_y)
+                if len(pts) == 3:
+                    dogleg_mid = pts[1]
+                    legs = [
+                        Segment(
+                            x1=pts[0][0],
+                            y1=pts[0][1],
+                            x2=pts[1][0],
+                            y2=pts[1][1],
+                            width=width,
+                            layer=layer,
+                            net=pad.net,
+                            net_name=pad.net_name,
+                        ),
+                        Segment(
+                            x1=pts[1][0],
+                            y1=pts[1][1],
+                            x2=pts[2][0],
+                            y2=pts[2][1],
+                            width=width,
+                            layer=layer,
+                            net=pad.net,
+                            net_name=pad.net_name,
+                        ),
+                    ]
+
+            violation_loc: tuple[float, float] | None = None
+            is_valid = True
+            for leg in legs:
+                ok, loc = _validate_leg(leg)
+                if not ok:
+                    is_valid = False
+                    violation_loc = loc
+                    break
 
             if is_valid:
                 return SubGridEscape(
@@ -986,6 +1045,7 @@ class SubGridRouter:
                     segment=segment,
                     grid_point=(gx, gy),
                     snap_point=(snap_x, snap_y),
+                    dogleg_mid=dogleg_mid,
                 )
             else:
                 logger.debug(
@@ -1755,6 +1815,36 @@ class SubGridRouter:
             segments: list[Segment]
             if seg_length < 1e-6:
                 segments = []
+            elif escape.dogleg_mid is not None:
+                # Issue #3907: emit the 45-legal two-leg dogleg the
+                # emitter validated (both legs cleared their obstacle
+                # context in ``_try_candidates_with_clearance``).  This is
+                # what makes the escape 45-aligned BY CONSTRUCTION -- the
+                # ``Segment.to_sexp`` choke-point guard never has to see a
+                # skewed chord from this pass.
+                mx, my = escape.dogleg_mid
+                segments = [
+                    Segment(
+                        x1=seg.x1,
+                        y1=seg.y1,
+                        x2=mx,
+                        y2=my,
+                        width=seg.width,
+                        layer=seg.layer,
+                        net=seg.net,
+                        net_name=seg.net_name,
+                    ),
+                    Segment(
+                        x1=mx,
+                        y1=my,
+                        x2=seg.x2,
+                        y2=seg.y2,
+                        width=seg.width,
+                        layer=seg.layer,
+                        net=seg.net,
+                        net_name=seg.net_name,
+                    ),
+                ]
             else:
                 segments = [seg]
             vias: list[Via] = []

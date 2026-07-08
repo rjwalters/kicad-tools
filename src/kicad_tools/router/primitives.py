@@ -11,9 +11,11 @@ This module provides:
 - Obstacle: Area to avoid during routing
 """
 
+import contextlib
 import dataclasses
 import random
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from .layers import Layer
@@ -57,6 +59,60 @@ def reset_deterministic_uuids() -> None:
     """Restore default (non-deterministic) UUID emission.  Issue #3272."""
     global _DETERMINISTIC_UUIDS
     _DETERMINISTIC_UUIDS = False
+
+
+# Issue #3907: by-construction 45-degree enforcement at the serialization
+# choke point.  ``Segment.to_sexp`` is the single point every
+# router-emitted segment flows through (``Route.to_sexp`` /
+# ``Autorouter.to_sexp`` fan into it), so verifying 45-legality here makes
+# it IMPOSSIBLE to silently serialize off-angle copper -- the leak the
+# #3532 emit-then-repair architecture kept springing.  Enforcement is ON
+# by default; the toggle exists only as an escape hatch for a legacy path
+# that must serialize a documented residual (none in the fleet today) and
+# for tests that deliberately construct off-angle geometry.
+_ENFORCE_SEGMENT_45: bool = True
+
+
+def enable_segment_45_enforcement(enabled: bool = True) -> None:
+    """Toggle by-construction 45-degree enforcement in :meth:`Segment.to_sexp`.
+
+    Issue #3907.  When enabled (the default), serializing a segment whose
+    4-decimal displacement is off the {0, 45, 90, 135} set raises
+    :class:`kicad_tools.router.quantize.OffAngleSegmentError` instead of
+    writing arbitrary-angle copper.  Emitters must dogleg off-axis tails
+    (via :func:`kicad_tools.router.quantize.dogleg_points`) BEFORE
+    constructing the :class:`Segment`.
+
+    This is a module-level toggle (mirroring the deterministic-UUID one)
+    so a legacy path can opt out without threading a flag through every
+    router call site.  Prefer :func:`segment_45_enforcement_disabled` for
+    scoped, exception-safe opt-out.
+    """
+    global _ENFORCE_SEGMENT_45
+    _ENFORCE_SEGMENT_45 = bool(enabled)
+
+
+def is_segment_45_enforcement_enabled() -> bool:
+    """Return the current :func:`enable_segment_45_enforcement` state."""
+    return _ENFORCE_SEGMENT_45
+
+
+@contextlib.contextmanager
+def segment_45_enforcement_disabled() -> Iterator[None]:
+    """Temporarily disable 45-degree serialization enforcement (issue #3907).
+
+    Restores the prior state on exit even if the body raises.  Intended
+    for the narrow set of callers that must serialize a knowingly
+    off-angle documented residual, and for tests that construct off-angle
+    geometry on purpose.
+    """
+    global _ENFORCE_SEGMENT_45
+    prior = _ENFORCE_SEGMENT_45
+    _ENFORCE_SEGMENT_45 = False
+    try:
+        yield
+    finally:
+        _ENFORCE_SEGMENT_45 = prior
 
 
 def is_deterministic_uuids_enabled() -> bool:
@@ -237,7 +293,37 @@ class Segment:
         BEFORE net).  Emitting net before uuid caused every segment to
         churn on the first KiCad open/save round-trip, producing a diff
         proportional to segment count even when no geometry changed.
+
+        Issue #3907: this is the single serialization choke point every
+        router-emitted segment flows through (``Route.to_sexp`` /
+        ``Autorouter.to_sexp`` fan into it).  Unless enforcement is
+        explicitly disabled (see
+        :func:`segment_45_enforcement_disabled`), a segment whose
+        4-decimal displacement is off the {0, 45, 90, 135} set is checked
+        by :func:`~kicad_tools.router.quantize.verify_segment_45`.
+
+        The check DEGRADES GRACEFULLY by default: an off-angle segment from
+        an un-migrated emission path emits an
+        :class:`~kicad_tools.router.quantize.OffAngleSegmentWarning` (naming
+        the net/layer) and still serializes, so a recipe's legacy
+        ``quantize_pcb_file`` repair pass can dogleg it afterward -- the
+        fallback a hard raise would otherwise preempt.  CI opts individual
+        boards into STRICT mode
+        (:data:`~kicad_tools.router.quantize.SEGMENT_45_STRICT_ENV`) as
+        their emitters migrate, where the same off-angle copper raises
+        :class:`~kicad_tools.router.quantize.OffAngleSegmentError`.  The
+        fleet census stays the ratchet throughout.
         """
+        if _ENFORCE_SEGMENT_45:
+            from .quantize import verify_segment_45
+
+            verify_segment_45(
+                self.x1,
+                self.y1,
+                self.x2,
+                self.y2,
+                context=f"net {self.net} on {self.layer.kicad_name}",
+            )
         return f"""(segment
 \t\t(start {self.x1:.4f} {self.y1:.4f})
 \t\t(end {self.x2:.4f} {self.y2:.4f})
