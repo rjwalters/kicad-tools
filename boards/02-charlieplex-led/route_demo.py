@@ -155,11 +155,25 @@ def main():
     """Run the routing demo via ``kct route`` (matching generate_design.py)."""
     # Parse arguments
     demo_dir = Path(__file__).parent
-    input_pcb = sys.argv[1] if len(sys.argv) > 1 else "output/charlieplex_3x3.kicad_pcb"
-    output_pcb = sys.argv[2] if len(sys.argv) > 2 else "output/charlieplex_3x3_routed.kicad_pcb"
+    default_input = "charlieplex_3x3.kicad_pcb"
+    default_output = "charlieplex_3x3_routed.kicad_pcb"
 
-    input_path = demo_dir / input_pcb
-    output_path = demo_dir / output_pcb
+    if len(sys.argv) > 1 and Path(sys.argv[1]).is_dir():
+        # ``kct build -o <dir>`` passes the output directory as the sole
+        # positional argument (matching generate_design.py's output_dir
+        # contract). Derive the input/output PCB filenames within it.
+        output_dir = Path(sys.argv[1])
+        input_path = output_dir / default_input
+        output_path = output_dir / default_output
+    else:
+        # Standalone invocation: positional args are file paths resolved
+        # against this script's directory.
+        input_pcb = sys.argv[1] if len(sys.argv) > 1 else f"output/{default_input}"
+        output_pcb = sys.argv[2] if len(sys.argv) > 2 else f"output/{default_output}"
+        input_path = demo_dir / input_pcb
+        output_path = demo_dir / output_pcb
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not input_path.exists():
         print(f"Error: Input PCB not found: {input_path}")
