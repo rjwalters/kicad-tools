@@ -622,19 +622,50 @@ class DifferentialPairConfig:
     # (``DiffPairRouter._shadow_route_pair``: single-ended guide route
     # + validated parallel offset, tried before the joint-state
     # coupled A*).  The constructor converges pairs the joint search
-    # cannot (6/9 nominal on board 06's seed-42 recipe vs 0/9), but
-    # the 2026-06-11 board 06 integration measurement shows its
-    # committed geometry is not yet artifact-quality: shadow tails can
-    # leave goal pads stranded while still claiming the net
-    # (USB3_RX1+/RX2+ "1 of 2 pads stranded"), staggered shadow vias
-    # physically intersect the partner trace at tightly-coupled gaps
-    # (0.3 mm via radius > 0.15 mm edge gap + 0.1125 mm half-width),
-    # and the pre-phase's greedily-claimed corridors strand later
-    # single-ended nets that the negotiated loop cannot rip
-    # (MIPI_D0-, USB_CC1 -> 16/21 reach vs board 06's asserted
-    # 21/21).  Default False keeps recipes on their pre-#3508
-    # budget-exit behaviour; flip on per-board once the #3508
-    # decomposition follow-ups land.
+    # cannot -- historically 6-7/9 on board 06's seed-42 recipe vs 0/9
+    # for the joint A* -- but its committed geometry has not been
+    # artifact-quality.  The three original defects (2026-06-11 run-4):
+    #
+    #   1. Stranded shadow tails: a parallel-offset tail claimed the net
+    #      but left a goal pad unreachable (USB3_RX1+/RX2+ "1 of 2 pads
+    #      stranded").  FIXED (#3665): the post-commit
+    #      ``validate_net_connectivity`` check rolls back the whole pair
+    #      on any strand (``diffpair_routing.py`` ~4795-4866).
+    #   2. Shadow via intersecting the partner trace at tightly-coupled
+    #      gaps.  FIXED (#3667): via sites are validated against the full
+    #      guide polyline with the crossing-tail via-clear bound
+    #      (``_shadow_route_pair`` ~3448-3465).
+    #   3. Corridor competition stranding later single-ended nets.  This
+    #      one did NOT reproduce on the current (post-#3413-phase-6)
+    #      board-06 geometry: the 2026-07-08 seed-42 shadow-ON re-run
+    #      reached 15/15 single-ended nets at its best negotiated
+    #      snapshot -- MIPI_D0-/USB_CC1 were not stranded.
+    #
+    # Issue #3921 (2026-07-08) re-measured shadow-ON end-to-end and found
+    # TWO NEW blockers that keep the flag OFF on the current geometry:
+    #
+    #   A. Convergence collapsed to 3/9.  The tightened coupled widths
+    #      (0.225-0.275 mm from #3413 phase 6) make the geometric parallel
+    #      offset infeasible for 6/9 pairs: the offset lands copper on the
+    #      partner (10 "self-check overlap" events, worst -0.165..-0.275 mm)
+    #      or cannot clear an obstacle the guide threaded (12 "mid-route
+    #      blockage" events).  Only MIPI_CLK/MIPI_D0/PCIE_RX construct.
+    #   B. Off-angle geometry + wall-time blowup.  The surviving shadow
+    #      segments serialize at 3.7-11.9 deg off the 0/45/90/135 set
+    #      (``OffAngleSegmentWarning`` from the #3975 emission guard), so a
+    #      committed shadow-ON artifact would fail the fleet 45-census; and
+    #      the 6 failed-shadow pairs fall back to a ~350 s coupled pre-phase
+    #      plus a negotiated phase that hits its 360 s backstop, blowing the
+    #      CI wall-clock (>1200 s vs ~150 s shadow-OFF, which reaches 21/21).
+    #
+    # Enabling this by default is therefore blocked on (i) a shadow-aware
+    # by-construction dogleg at the emission site (migrating
+    # ``_shadow_route_pair`` per #3907/#3975) and (ii) restoring the
+    # parallel-offset feasibility at the tightened widths -- both deeper
+    # than the corridor-competition rip-up this field was re-scoped for.
+    # Set ``KCT_BOARD06_SHADOW=1`` on the board-06 recipe to reproduce the
+    # shadow-ON run.  Default False keeps recipes on their pre-#3508
+    # budget-exit behaviour (0/9 coupled, 21/21 single-ended reach).
     enable_shadow_construction: bool = False
 
     def get_rules(self, pair_type: DifferentialPairType) -> DifferentialPairRules:
