@@ -17,6 +17,7 @@ import argparse
 import logging
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -3312,6 +3313,30 @@ def main(argv: list[str] | None = None) -> int:
 
             elif step == BuildStep.VERIFY:
                 result = _run_step_verify(ctx, console)
+                # Re-arm the #3929 connectivity DRC safety floor on the
+                # reordered EXPORT-before-VERIFY path (#3976). After PR #3974
+                # put EXPORT ahead of VERIFY, a fresh single-pass build writes
+                # the manufacturing bundle before VERIFY has produced a
+                # drc_report.json for the export-time floor to read — so a
+                # shorted board could leave a bundle on disk even though the
+                # build correctly exits FAILED. If VERIFY fails after EXPORT
+                # already ran, delete the bundle it wrote so no artifact
+                # survives a shorted build.
+                if not result.success:
+                    export_result = next(
+                        (r for r in results if r.step == BuildStep.EXPORT.value and r.output_file),
+                        None,
+                    )
+                    if (
+                        export_result is not None
+                        and export_result.output_file is not None
+                        and export_result.output_file.exists()
+                    ):
+                        shutil.rmtree(export_result.output_file)
+                        console.print(
+                            "  [yellow]WARN[/yellow] manufacturing bundle "
+                            "removed — verify step detected DRC failures"
+                        )
 
             elif step == BuildStep.EXPORT:
                 result = _run_step_export(ctx, console)
