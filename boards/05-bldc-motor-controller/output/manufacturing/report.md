@@ -2,7 +2,7 @@
 title: "bldc_controller_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.14.0"
-date: "Rev 1 | 2026-07-08 | jlcpcb"
+date: "Rev 1 | 2026-07-08 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -148,16 +148,15 @@ Thermal analysis and high-current routing demo
 
 | Metric | Count |
 |--------|-------|
-| Errors | 24 |
+| Errors | 4 |
 | Warnings | 11 |
-| Blocking | 24 |
+| Blocking | 4 |
 
 **Status**: FAIL
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
-| via_in_pad | 20 |
 | single_pad_net | 8 |
 | silk_over_copper | 6 |
 | copper_sliver | 3 |
@@ -175,7 +174,7 @@ Thermal analysis and high-current routing demo
 
 ### Action Items
 
-- **[CRITICAL]** Fix 24 blocking DRC violations (via_in_pad (20), clearance_segment_via (1); kicad-cli: hole_clearance (2), clearance (1))
+- **[CRITICAL]** Fix 4 blocking DRC violations (clearance_segment_via (1); kicad-cli: hole_clearance (2), clearance (1))
 - **[CRITICAL]** Increase min via drill: 0.150mm < 0.200mm required
 - **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets
 - **[OPTIONAL]** Review 11 DRC warnings
@@ -227,9 +226,9 @@ Thermal analysis and high-current routing demo
 | Metric | Per Board (estimated) |
 |--------|-------|
 | PCB Fabrication | ~3.6 USD |
-| Components (estimated) | ~3.2 USD |
+| Components (estimated) | ~3.17 USD |
 | Assembly (estimated) | ~2.35 USD |
-| **Total (estimated)** | **~9.16 USD** |
+| **Total (estimated)** | **~9.12 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~45.78 USD |
+| Batch Total (estimated) | ~45.61 USD |
 
