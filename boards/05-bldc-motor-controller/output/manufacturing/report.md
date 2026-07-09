@@ -2,7 +2,7 @@
 title: "bldc_controller_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.14.0"
-date: "Rev 1 | 2026-07-08 | jlcpcb-tier1"
+date: "Rev 1 | 2026-07-09 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -148,11 +148,11 @@ Thermal analysis and high-current routing demo
 
 | Metric | Count |
 |--------|-------|
-| Errors | 4 |
+| Errors | 0 |
 | Warnings | 11 |
-| Blocking | 4 |
+| Blocking | 0 |
 
-**Status**: FAIL
+**Status**: PASS
 ### Violations by Type
 
 | Violation Type | Count |
@@ -161,21 +161,17 @@ Thermal analysis and high-current routing demo
 | silk_over_copper | 6 |
 | copper_sliver | 3 |
 | silk_edge_clearance | 2 |
-| kicad-cli:hole_clearance | 2 |
-| clearance_segment_via | 1 |
-| kicad-cli:clearance | 1 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: NOT_READY
+**Verdict**: WARNING
 
 ### Action Items
 
-- **[CRITICAL]** Fix 4 blocking DRC violations (clearance_segment_via (1); kicad-cli: hole_clearance (2), clearance (1))
-- **[CRITICAL]** Increase min via drill: 0.150mm < 0.200mm required
+- **[OPTIONAL]** Verify zone fill in KiCad: 10 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets
 - **[OPTIONAL]** Review 11 DRC warnings
 - **[OPTIONAL]** Analog net: ISENSE_A+ — analog signal; noise-sensitive, avoid crossing digital signals

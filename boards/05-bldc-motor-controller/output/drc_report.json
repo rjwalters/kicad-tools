@@ -1,9 +1,9 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-3766/boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.claude/worktrees/agent-adc50049687a0fbe8/boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
-    "errors": 1,
+    "errors": 0,
     "warnings": 11,
     "infos": 8,
     "rules_checked": 36,
@@ -12,30 +12,9 @@
       "copper_sliver": 1,
       "diffpair_clearance_intra": 3
     },
-    "passed": false
+    "passed": true
   },
   "violations": [
-    {
-      "rule_id": "clearance_segment_via",
-      "type": "clearance_segment_via",
-      "severity": "error",
-      "message": "Segment to via clearance 0.100mm < minimum 0.102mm",
-      "location": [
-        20.75,
-        54.9
-      ],
-      "layer": "In1.Cu",
-      "actual_value": 0.1,
-      "required_value": 0.1016,
-      "items": [
-        "Trace-25bebe58",
-        "Via-e4f2c71e"
-      ],
-      "nets": [
-        "PHASE_A",
-        "PHASE_C"
-      ]
-    },
     {
       "rule_id": "copper_sliver",
       "type": "copper_sliver",
@@ -377,5 +356,24 @@
         "unconnected-(U10-PB5-Pad28)"
       ]
     }
-  ]
+  ],
+  "meta_checks": {
+    "drc": {
+      "status": "PASSED",
+      "detail": "36 rules checked, 0 error(s), 11 warning(s)"
+    },
+    "erc": {
+      "status": "PASSED",
+      "detail": "0 error(s), 14 warning(s)"
+    },
+    "lvs": {
+      "status": "PASSED",
+      "detail": "label + copper: 0 mismatch(es)"
+    },
+    "manifest": {
+      "status": "PASSED",
+      "detail": "manifest.json mtime within tolerance of routed PCB mtime"
+    },
+    "overall": "PASSED"
+  }
 }
