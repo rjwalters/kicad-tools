@@ -2,7 +2,7 @@
 title: "usb_joystick_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.14.0"
-date: "Rev 1 | 2026-06-17 | jlcpcb"
+date: "Rev 1 | 2026-07-09 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -21,7 +21,7 @@ header-includes:
 | Footprints | 19 (17 SMD, 2 THT, 0 other) |
 | Nets | 16 |
 | Traces | 570 segments |
-| Vias | 17 |
+| Vias | 19 |
 | Board Size | 80.0 x 60.0 mm |
 
 ## Design Overview
@@ -130,31 +130,30 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 | Metric | Count |
 |--------|-------|
-| Errors | 5 |
-| Warnings | 16 |
-| Blocking | 5 |
+| Errors | 0 |
+| Warnings | 20 |
+| Blocking | 0 |
 
-**Status**: FAIL
+**Status**: PASS
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
 | silkscreen_text_height | 16 |
-| via_in_pad | 4 |
-| kicad-cli:clearance | 1 |
+| copper_sliver | 2 |
+| silk_over_copper | 2 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: NOT_READY
+**Verdict**: WARNING
 
 ### Action Items
 
-- **[CRITICAL]** Fix 5 blocking DRC violations (via_in_pad (4); kicad-cli: clearance (1))
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
-- **[OPTIONAL]** Review 16 DRC warnings
+- **[OPTIONAL]** Review 20 DRC warnings
 
 
 \newpage

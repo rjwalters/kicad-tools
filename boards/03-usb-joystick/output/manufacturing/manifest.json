@@ -1,8 +1,8 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.14.0",
-  "generated_at": "2026-06-17T18:41:35.354883+00:00",
-  "manufacturer": "jlcpcb",
+  "generated_at": "2026-07-09T03:21:22.462418+00:00",
+  "manufacturer": "jlcpcb-tier1",
   "files": {
     "bom_jlcpcb.csv": {
       "sha256": "f01da67f3eb95652840a9985249bdeb2303173ae15171af77021aaba64a5ee02",
@@ -13,56 +13,131 @@
       "size": 1305
     },
     "gerbers.zip": {
-      "sha256": "2cbbe626be9840307b36c965710d2311b6224d0dc4b17ebf25784c05f0039fdd",
-      "size": 48885
+      "sha256": "698a58c06acc43c48eeffe37a1c41c16a9b1172e75d76cd971f6f2f90d27604e",
+      "size": 49195
     },
     "report.pdf": {
-      "sha256": "1e191cb132b626b2b1f845bdddb74966e96a0e4e95dc51038988d255d0358ec1",
-      "size": 1213715
+      "sha256": "fbc1369f113847037f61ed5d0b8d439f43e8ccbccac3d6a1a47e48831674c046",
+      "size": 35957
     },
     "report.md": {
-      "sha256": "8aec9d0d5e34e202d76296aa90b413dfd18e5dc9e741758f8d72804ad37f9cb5",
-      "size": 3529
+      "sha256": "09c68f01cdfb7b948876257b47fcf48ce9728451ef596623df9a91769046a66b",
+      "size": 3443
     },
     "assembly.png": {
-      "sha256": "c122e2f3197ca9e1553670af9156b7cbd2da6e7d8612163278f774a063613eaa",
-      "size": 143472
+      "sha256": "635483ae560b1d9b8d9956b9ddf44901fad54e609d46628180ff304314d794ab",
+      "size": 144093
     },
     "layer_B_Cu.png": {
-      "sha256": "93e10a61420efa96f5fc452fedc0ad7c97d7da115ff41baeec705ae602ecab9e",
-      "size": 91804
+      "sha256": "3b03a65dd995d53cc6cec1ec348bfcee1a2478c6ea937fc453ddde25c6b966a4",
+      "size": 92333
     },
     "layer_F_Cu.png": {
-      "sha256": "47576f7fde4d197d5cd68d18e332f1c81bd90d56b038be35effa09a8610988e5",
-      "size": 131541
+      "sha256": "532e58b93d4c47a47ad63d5d0256ee23bb33c3e5c5f5d31df62194a4ab1583b9",
+      "size": 132564
     },
     "pcb_back.png": {
-      "sha256": "d99b9846d64f221bdb761e46cbf4073ad1fbdfa6ef4e59ea002e74a0be7f228a",
-      "size": 94666
+      "sha256": "f3e473367d771d0ccf5d89b2218c415f335cac218e7c80c55782c931517d3ba5",
+      "size": 95176
     },
     "pcb_copper.png": {
-      "sha256": "ecf6bcd397bac81f28bdb3d8282bc3b901de881a41580f0ce807b9534fa26e91",
-      "size": 111979
+      "sha256": "3012690c7252f28a23f64965be924002f49fab64a18a2384f78f2b8f020667aa",
+      "size": 112533
     },
     "pcb_front.png": {
-      "sha256": "2844fb1eb1aa08e4414953a24dec567487a5ea0522e0ac9e5650b726cf58f2dc",
-      "size": 170408
+      "sha256": "d620e986375833a2c777868d743ee4a31a3ac115d3a5d9069ae7a35bc88897a5",
+      "size": 171340
     },
     "schematic_usb_joystick.png": {
-      "sha256": "e952e76dbeba3ec58f669130e0dc77bd5fc4de0221a76723d9902c94283bbe7a",
-      "size": 378978
+      "sha256": "90e54492b37750f5dd584e85c673f78f84a211e7202b67d968241cdd134f4a3c",
+      "size": 378941
     },
     "kicad_project.zip": {
-      "sha256": "81266d5a4225eb661e93bd52428d7097ff427af09a79ad0a8adeb93ed271ceb8",
-      "size": 74450
+      "sha256": "3bce67ae2d336d5c7bc4b656b22266aa42838fb527c6a9c65e7732e0041587e8",
+      "size": 74788
     },
     "README.txt": {
-      "sha256": "0bbef839388eb69bf9bef7a9a9a83f7e0efeba502825113be9a3b9a13bede3a2",
-      "size": 993
+      "sha256": "897cbf78e576d8197461fec7b45b77ea87014df973fd20f7ad7fc300541e884a",
+      "size": 999
     }
   },
   "board": {
     "name": "usb_joystick_routed",
     "pcb_file": "usb_joystick_routed.kicad_pcb"
-  }
+  },
+  "preflight": [
+    {
+      "name": "pcb_file",
+      "status": "OK",
+      "message": "PCB file parsed successfully",
+      "details": "Footprints: 19"
+    },
+    {
+      "name": "schematic_file",
+      "status": "OK",
+      "message": "Schematic auto-detected: usb_joystick.kicad_sch"
+    },
+    {
+      "name": "schematic_footprints",
+      "status": "OK",
+      "message": "All schematic symbols have a footprint assigned"
+    },
+    {
+      "name": "board_outline",
+      "status": "OK",
+      "message": "Board outline is closed (5 points)"
+    },
+    {
+      "name": "footprints",
+      "status": "OK",
+      "message": "All 19 footprints have library footprint names"
+    },
+    {
+      "name": "board_dimensions",
+      "status": "OK",
+      "message": "Board dimensions within limits (80.00 x 60.00 mm)"
+    },
+    {
+      "name": "drill_holes",
+      "status": "OK",
+      "message": "Drill holes present (19 vias, 9 TH pads)"
+    },
+    {
+      "name": "tht_in_cpl",
+      "status": "OK",
+      "message": "1 through-hole component(s) included in CPL",
+      "details": "THT references: J2"
+    },
+    {
+      "name": "bom_fields",
+      "status": "WARN",
+      "message": "BOM field issues: 1 problem(s)",
+      "details": "7/19 active item(s) missing LCSC part number (12 resolvable from spec)"
+    },
+    {
+      "name": "bom_lcsc_values",
+      "status": "OK",
+      "message": "No LCSC value/package mismatches detected (0 assigned item(s) checked against local parts cache)"
+    },
+    {
+      "name": "bom_pcb_match",
+      "status": "OK",
+      "message": "BOM and PCB references match (19 components)"
+    },
+    {
+      "name": "bom_cpl_match",
+      "status": "OK",
+      "message": "BOM and CPL references match (19 components)"
+    },
+    {
+      "name": "drc",
+      "status": "WARN",
+      "message": "DRC passed with 16 warning(s)"
+    },
+    {
+      "name": "erc",
+      "status": "WARN",
+      "message": "ERC passed with 3 warning(s)"
+    }
+  ]
 }
