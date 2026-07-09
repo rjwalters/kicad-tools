@@ -60,6 +60,7 @@ __all__ = [
     "centered_origin",
     "edge_cuts_bbox",
     "select_paper",
+    "translate_pcb_text",
     "usable_area",
 ]
 
@@ -359,6 +360,35 @@ def _apply_edits(text: str, edits: list[tuple[int, int, str]]) -> str:
         prev = e
     out.append(text[prev:])
     return "".join(out)
+
+
+def translate_pcb_text(
+    text: str,
+    dx_mm: float,
+    dy_mm: float,
+    *,
+    grid: float = DEFAULT_GRID_MM,
+) -> str:
+    """Rigidly translate all board geometry by ``(dx_mm, dy_mm)``.
+
+    The same exact decimal-string transform ``center_pcb_text`` applies, but
+    with an explicit caller-chosen delta instead of a computed centering
+    delta.  ``(dx_mm, dy_mm)`` is snapped once to *grid* in integer
+    nanometres and added identically to every sheet-absolute coordinate, so
+    45-degree copper stays exactly 45 degrees and the transform is exactly
+    invertible (translating by the negated delta restores every coordinate).
+
+    Used by board recipes that route in a fixed historical frame and place
+    the artifact on the sheet as a final step (see board 07's
+    ``generate_design.py``: the negotiated router's escape/rip-up dynamics
+    are empirically sensitive to the board's absolute position, so the
+    recipe keeps the routing frame invariant and translates artifacts).
+    """
+    grid_nm = round(grid * _NM_PER_MM)
+    dx_nm = round(round(dx_mm * _NM_PER_MM / grid_nm) * grid_nm)
+    dy_nm = round(round(dy_mm * _NM_PER_MM / grid_nm) * grid_nm)
+    new_text, _items = _translate_pcb_text(text, dx_nm, dy_nm)
+    return new_text
 
 
 # --------------------------------------------------------------------------

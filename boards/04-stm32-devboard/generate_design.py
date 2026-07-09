@@ -1286,20 +1286,22 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
 # --- OSC_OUT escape-stub short fix (issue #3797) ---------------------------
 #
-# On the fresh deterministic route (post-#3800), OSC_OUT (net 5, U2.6 @ abs
-# (126.8375, 121.750)) escapes to B.Cu through a via-in-pad at the U2.6 pad
-# centre, and its FIRST B.Cu hop runs straight north into the U2.5 OSC_IN pad
-# centre at abs (126.8375, 121.250) — the two adjacent 0.5 mm-pitch HSE crystal
-# pins — before turning west.  That single hop shorts OSC_IN <-> OSC_OUT
-# (witnesses C10.1 / C11.1).  This is the #2834 escape-stub short that #3785
-# fixed BY HAND on the committed PCB; here it is fixed PROGRAMMATICALLY so a
-# fresh ``generate_design.py`` regen reproduces a copper-LVS-clean board (the
-# same class of recipe fix board-02 #3783 uses).
+# On the fresh deterministic route (post-#3800), OSC_OUT (net 5, U2.6 @
+# board origin + (26.8375, 21.750)) escapes to B.Cu through a via-in-pad at
+# the U2.6 pad centre, and its FIRST B.Cu hop runs straight north into the
+# U2.5 OSC_IN pad centre at origin + (26.8375, 21.250) — the two adjacent
+# 0.5 mm-pitch HSE crystal pins — before turning west.  That single hop
+# shorts OSC_IN <-> OSC_OUT (witnesses C10.1 / C11.1).  This is the #2834
+# escape-stub short that #3785 fixed BY HAND on the committed PCB; here it
+# is fixed PROGRAMMATICALLY so a fresh ``generate_design.py`` regen
+# reproduces a copper-LVS-clean board (the same class of recipe fix
+# board-02 #3783 uses).
 #
 # The fix is a deterministic post-route s-expression surgery (a sibling of
 # ``tie_power_pads``): re-aim that one B.Cu hop's endpoint off the U2.5 pad
-# column to (126.6875, 121.100) — south-west of the U2.5 pad halo, where the
-# next hop already turns — and drop the now-degenerate follow-on segment.  The
+# column to origin + (26.6875, 21.100) — south-west of the U2.5 pad halo,
+# where the next hop already turns — and drop the now-degenerate follow-on
+# segment.  The
 # re-aimed escape clears the U2.5 pad while staying >= the jlcpcb-tier1 track
 # clearance from it (curator-proven: ``compare_copper_netlist`` -> shorts: []).
 #
@@ -1307,9 +1309,27 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 # placement), so the surgery is exact-match and idempotent.  It asserts the
 # offending hop is present so a future router change that moves the escape
 # fails LOUDLY rather than silently leaving the short.
-_OSC_VIA = (126.8375, 121.75)  # OSC_OUT (net 5) B.Cu escape via @ U2.6 centre
-_OSC_IN_PAD = (126.8375, 121.25)  # U2.5 OSC_IN pad centre (the short target)
-_OSC_REAIM = (126.6875, 121.1)  # re-aimed first-hop endpoint, off the U2.5 column
+#
+# The absolutes are DERIVED from the shared ``centered_origin`` helper (the
+# same call ``create_stm32_pcb`` uses for ``BOARD_ORIGIN_*``) so they can
+# never go stale against a sheet-position change again (PR #4015 judge
+# feedback: the old hardcoded (100, 100)-origin absolutes stranded the
+# exact-match assert after the boards were sheet-centered).  The offsets are
+# board-frame: U2 sits at origin + (31, 22); U2.6 = U2 + (-4.1625, -0.25),
+# U2.5 = U2 + (-4.1625, -0.75), and the re-aim point is U2 + (-4.3125, -0.9).
+_OSC_ORIGIN_X, _OSC_ORIGIN_Y = centered_origin(60.0, 40.0)  # == BOARD_ORIGIN_*
+_OSC_VIA = (
+    _OSC_ORIGIN_X + 26.8375,
+    _OSC_ORIGIN_Y + 21.75,
+)  # OSC_OUT (net 5) B.Cu escape via @ U2.6 centre
+_OSC_IN_PAD = (
+    _OSC_ORIGIN_X + 26.8375,
+    _OSC_ORIGIN_Y + 21.25,
+)  # U2.5 OSC_IN pad centre (the short target)
+_OSC_REAIM = (
+    _OSC_ORIGIN_X + 26.6875,
+    _OSC_ORIGIN_Y + 21.1,
+)  # re-aimed first-hop endpoint, off the U2.5 column
 
 
 def fix_osc_escape(routed_path: Path) -> bool:
@@ -1405,9 +1425,10 @@ def quantize_escapes(routed_path: Path) -> bool:
 
     The default (diagonal-first) dogleg variant is used for every segment.  For
     the OSC re-aim hop this is load-bearing: the axis-first variant's midpoint
-    lands exactly on the U2.5 OSC_IN pad centre ``(126.8375, 121.25)`` and would
+    lands exactly on the U2.5 OSC_IN pad centre (``_OSC_IN_PAD``, board origin
+    + (26.8375, 21.25)) and would
     re-introduce the OSC_IN<->OSC_OUT short, whereas the diagonal-first midpoint
-    ``(126.6875, 121.6)`` keeps the escape clear of the pad column (copper-LVS
+    (origin + (26.6875, 21.6)) keeps the escape clear of the pad column (copper-LVS
     stays 0/0; verified).  The subsequent :func:`fill_zones` re-pour backs the
     GND plane off any small dogleg bulge so DRC stays 0-blocking.
 
@@ -1466,9 +1487,9 @@ def stitch_pcb(routed_path: Path) -> bool:
     ``--micro-via`` retry, ``U2.23`` is now successfully stitched (17 of
     18 GND pads connect to the plane).  ``U2.8`` remains stranded
     because the ``OSC_OUT`` (net 5) escape passes through the U2.8 west
-    escape window on B.Cu: a 0.5mm-wide stub segment runs from
-    ``(126.8375, 121.75)`` -> ``(126.8375, 122.4)`` directly north of
-    U2.8 at ``(126.8375, 122.75)``.  Even the 0.3mm micro-via cannot
+    escape window on B.Cu: a 0.5mm-wide stub segment runs from board
+    origin + (26.8375, 21.75) -> origin + (26.8375, 22.4) directly north
+    of U2.8 at origin + (26.8375, 22.75).  Even the 0.3mm micro-via cannot
     fit (gap=0.10mm vs jlcpcb-tier1 minimum 0.20mm clearance against
     foreign-net copper).  This is the same root-cause cluster tracked
     under #2834 (the OSC_OUT escape produces 4 additional

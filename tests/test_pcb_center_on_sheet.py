@@ -22,6 +22,7 @@ from kicad_tools.pcb.center_sheet import (
     centered_origin,
     edge_cuts_bbox,
     select_paper,
+    translate_pcb_text,
     usable_area,
 )
 
@@ -372,3 +373,45 @@ class TestReport:
         assert src.read_bytes() == blob
         assert dst.exists()
         assert edge_cuts_bbox(dst.read_text()) == (133.5, 77.5, 163.5, 97.5)
+
+
+# --------------------------------------------------------------------------
+# translate_pcb_text (explicit-delta rigid translation; board-07 routing
+# frame sandwich, PR #4015)
+# --------------------------------------------------------------------------
+
+
+class TestTranslatePcbText:
+    def test_translates_all_geometry_by_explicit_delta(self):
+        moved = translate_pcb_text(make_pcb(), 6.5, -60.0)
+        assert edge_cuts_bbox(moved) == (106.5, 40.0, 136.5, 60.0)
+        assert "(at 111.5 50 90)" in moved  # footprint (at ...) moved
+        assert "(at -0.9125 0 90)" in moved  # pad-relative coords untouched
+        assert "(start 111.5 50)" in moved  # segment
+        assert "(xy 106.75 40.25)" in moved  # filled_polygon vertex
+
+    def test_zero_delta_is_identity(self):
+        text = make_pcb()
+        assert translate_pcb_text(text, 0.0, 0.0) == text
+
+    def test_round_trip_is_byte_exact(self):
+        # The board-07 recipe relies on this: centering then un-centering
+        # (and vice versa) must restore every coordinate exactly.
+        text = make_pcb()
+        there = translate_pcb_text(text, -6.5, -60.0)
+        back = translate_pcb_text(there, 6.5, 60.0)
+        assert back == text
+
+    def test_delta_snaps_to_grid(self):
+        # 6.51 snaps to 6.5 on the default 0.05 mm grid.
+        assert translate_pcb_text(make_pcb(), 6.51, 0.0) == translate_pcb_text(make_pcb(), 6.5, 0.0)
+
+    def test_paper_node_is_never_touched(self):
+        moved = translate_pcb_text(make_pcb(), 10.0, 10.0)
+        assert '(paper "A4")' in moved
+
+    def test_45_degree_copper_stays_exact(self):
+        moved = translate_pcb_text(make_pcb(), 3.35, -7.15)
+        # fixture segment is exactly 45 deg: (105,110)->(110.05,115.05)
+        assert "(start 108.35 102.85)" in moved
+        assert "(end 113.4 107.9)" in moved
