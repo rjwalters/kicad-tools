@@ -1615,21 +1615,43 @@ class ManufacturingAudit:
         return 0.2  # Default - JLCPCB min is 0.127mm
 
     def _get_min_via_drill(self, pcb: PCB) -> float:
-        """Get minimum via drill size."""
+        """Get minimum *through/blind* via drill size.
+
+        Micro vias are excluded: they are laser-drilled and carry their own
+        (much smaller) drill floor — e.g. jlcpcb-tier1 allows 0.10 mm
+        microvia drills while requiring 0.20 mm mechanical via drills, and
+        the exported ``.kicad_pro`` models them as separate
+        ``min_via_hole`` / ``min_microvia_drill`` constraints.  Lumping
+        microvias into this minimum compared a legal 0.15 mm in-pad rescue
+        microvia against the 0.20 mm mechanical limit and produced a false
+        "Increase min via drill" CRITICAL action item (and a NOT_READY
+        verdict) on a board kicad-cli DRC passes at the same profile.
+        """
         min_drill = float("inf")
         for via in pcb.vias:
+            if getattr(via, "via_type", None) == "micro":
+                continue
             if via.drill < min_drill:
                 min_drill = via.drill
         return min_drill if min_drill != float("inf") else 0.3  # Default
 
     def _get_min_annular_ring(self, pcb: PCB) -> float:
-        """Get minimum annular ring.
+        """Get minimum *through/blind* via annular ring.
 
         Returns the minimum annular ring from actual vias, or a JLCPCB-compliant
         default of 0.15mm (exactly at JLCPCB 2-layer minimum) when no vias exist.
+
+        Micro vias are excluded for the same reason as in
+        :meth:`_get_min_via_drill`: laser microvias carry their own annular
+        floor (the tier-1 project generator emits ``min_via_annular_width``
+        0.05 mm, which kicad-cli enforces), so comparing a legal 0.075 mm
+        microvia annular against the 0.10 mm mechanical-via limit
+        manufactured a false compatibility failure / NOT_READY verdict.
         """
         min_annular = float("inf")
         for via in pcb.vias:
+            if getattr(via, "via_type", None) == "micro":
+                continue
             annular = (via.size - via.drill) / 2
             if annular < min_annular:
                 min_annular = annular

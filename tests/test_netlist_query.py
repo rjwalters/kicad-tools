@@ -473,3 +473,99 @@ class TestComplexNetlist:
         pins = netlist["I2C_SDA"]
         assert len(pins) == 1
         assert pins[0].symbol_ref == "R1"
+
+
+class TestPinEndpointOnlyWireAttach:
+    """Pins attach to wires at endpoints or junctions only (PR #4003).
+
+    Pins the KiCad connection semantics adopted for the board-05
+    phantom-LVS-short fix: a symbol/power pin connects to a wire only
+    when a wire *endpoint* lands on the pin position or a junction dot
+    sits there.  A wire passing straight *through* a pin position
+    mid-span does NOT connect (KiCad's netlister keeps them separate),
+    while labels keep the mid-span attach (a label placed anywhere
+    along a wire names that wire).
+    """
+
+    def _crossing_schematic(self) -> Schematic:
+        """R1 pin 2 crossed mid-span by a vertical wire ending on R2 pin 1.
+
+        R1 at (100, 50) puts pin 2 at (102.54, 50).  The vertical wire
+        runs (102.54, 40) -> (102.54, 60), passing straight through the
+        pin position mid-span.  Its top endpoint (102.54, 40) lands
+        exactly on R2 pin 1 (R2 at (105.08, 40), pin 1 offset -2.54).
+        """
+        sch = Schematic("Test")
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        r1 = SymbolInstance(symbol_def=r_def, x=100, y=50, rotation=0, reference="R1", value="10k")
+        r2 = SymbolInstance(
+            symbol_def=r_def, x=105.08, y=40, rotation=0, reference="R2", value="10k"
+        )
+        sch.symbols.extend([r1, r2])
+        sch.wires.append(Wire(x1=102.54, y1=40, x2=102.54, y2=60))
+        return sch
+
+    def test_wire_crossing_pin_mid_span_does_not_connect(self):
+        """A wire passing through a pin position mid-span is NOT a connection.
+
+        This was the board-05 false short: a motor-phase wire drawn
+        across U10's SWDIO pin fused two unrelated nets even though the
+        KiCad netlister keeps them separate.
+        """
+        sch = self._crossing_schematic()
+        assert sch.are_connected("R1", "2", "R2", "1") is False
+
+    def test_junction_at_pin_position_connects(self):
+        """A junction dot at the pin position restores the connection.
+
+        The junction shares the pin's rounded coordinate key, so the
+        junction loop unions the crossing wire into the pin's point even
+        though the pin itself only attaches at wire endpoints.
+        """
+        sch = self._crossing_schematic()
+        sch.junctions.append(Junction(x=102.54, y=50))
+        assert sch.are_connected("R1", "2", "R2", "1") is True
+
+    def test_wire_endpoint_on_pin_connects(self):
+        """A wire *ending* exactly on the pin position still connects."""
+        sch = Schematic("Test")
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        r1 = SymbolInstance(symbol_def=r_def, x=100, y=50, rotation=0, reference="R1", value="10k")
+        r2 = SymbolInstance(
+            symbol_def=r_def, x=105.08, y=40, rotation=0, reference="R2", value="10k"
+        )
+        sch.symbols.extend([r1, r2])
+        # Wire endpoint (102.54, 50) lands ON R1 pin 2; the other
+        # endpoint (102.54, 40) lands on R2 pin 1.
+        sch.wires.append(Wire(x1=102.54, y1=50, x2=102.54, y2=40))
+        assert sch.are_connected("R1", "2", "R2", "1") is True
+
+    def test_label_mid_span_still_names_net(self):
+        """Labels keep the mid-span attach: they name the wire they sit on."""
+        sch = Schematic("Test")
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        r1 = SymbolInstance(symbol_def=r_def, x=100, y=50, rotation=0, reference="R1", value="10k")
+        sch.symbols.append(r1)
+        # Wire starts ON R1 pin 2 and runs east; the label sits mid-span.
+        sch.wires.append(Wire(x1=102.54, y1=50, x2=110, y2=50))
+        sch.labels.append(Label(text="SIG_MID", x=106, y=50))
+
+        netlist = sch.extract_netlist()
+        assert "SIG_MID" in netlist
+        assert {str(p) for p in netlist["SIG_MID"]} == {"R1.2"}
+
+    def test_power_symbol_mid_span_does_not_connect(self):
+        """Power symbols follow the same endpoint-or-junction pin rule."""
+        from kicad_tools.schematic.models.elements import PowerSymbol
+
+        sch = Schematic("Test")
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        r1 = SymbolInstance(symbol_def=r_def, x=100, y=50, rotation=0, reference="R1", value="10k")
+        sch.symbols.append(r1)
+        # Wire starts ON R1 pin 2; the GND symbol's pin sits mid-span.
+        sch.wires.append(Wire(x1=102.54, y1=50, x2=110, y2=50))
+        sch.power_symbols.append(PowerSymbol(lib_id="power:GND", x=106, y=50, rotation=0))
+
+        netlist = sch.extract_netlist()
+        gnd_pins = {str(p) for p in netlist.get("GND", [])}
+        assert "R1.2" not in gnd_pins

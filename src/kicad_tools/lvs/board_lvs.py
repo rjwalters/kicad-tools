@@ -204,8 +204,20 @@ def compare_netlists(sch_path: str | Path, pcb_path: str | Path) -> LVSResult:
     # name — is the "no connection" placeholder, not a real net.
     # Collapse it to ``None`` so unconnected pads compare equal to
     # schematic pins that genuinely lack a net (floating pin).
-    def _norm_pcb(name: str | None) -> str | None:
+    #
+    # KiCad's *explicit* no-connect encoding is normalized the same way:
+    # a pad on a pin marked NC in the schematic is emitted with the
+    # sentinel net ``unconnected-(<REF>-<PINNAME>-Pad<PAD>)`` (single-pad
+    # by construction; kct's DRC ``single_pad_net`` rule already treats it
+    # as "explicit no-connect, no action required").  It is only collapsed
+    # when the sentinel names *this very pad* — a pad carrying some OTHER
+    # pad's unconnected sentinel is a genuine anomaly and still mismatches.
+    # A schematic pin that expects a real net over a PCB no-connect also
+    # still mismatches (sch side is non-None).
+    def _norm_pcb(name: str | None, ref: str, pad: str) -> str | None:
         if name is None or name == "":
+            return None
+        if name.startswith(f"unconnected-({ref}-") and name.endswith(f"-Pad{pad})"):
             return None
         return name
 
@@ -216,7 +228,7 @@ def compare_netlists(sch_path: str | Path, pcb_path: str | Path) -> LVSResult:
     for key in all_keys:
         ref, pad = key
         sch_net = sch_map.get(key)
-        pcb_net = _norm_pcb(pcb_map.get(key))
+        pcb_net = _norm_pcb(pcb_map.get(key), ref, pad)
         if sch_net != pcb_net:
             mismatches.append(
                 LVSMismatch(

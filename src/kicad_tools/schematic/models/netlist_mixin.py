@@ -80,10 +80,26 @@ class SchematicNetlistMixin:
                 return min(x1, x2) < px < max(x1, x2)
             return False
 
-        def connect_to_wire(pos: tuple) -> None:
-            """Connect a position to any wire it touches."""
+        def connect_to_wire(pos: tuple, *, endpoint_only: bool = False) -> None:
+            """Connect a position to any wire it touches.
+
+            ``endpoint_only=True`` implements KiCad's pin-connection
+            semantics: a symbol/power pin connects to a wire only when a
+            wire *endpoint* lands on the pin position (or a junction dot
+            sits there — junctions share the same coordinate key so the
+            union happens via the junction loop above).  A wire passing
+            straight *through* a pin position mid-span does NOT connect
+            in KiCad, and treating it as connected falsely merged
+            unrelated nets (e.g. board 05's PHASE_C motor wire crossing
+            U10's SWDIO pin produced phantom LVS shorts — the KiCad
+            netlister keeps them separate).  Labels keep the mid-span
+            attach (``endpoint_only=False``): a label placed anywhere
+            along a wire names that wire in KiCad.
+            """
             for seg_start, seg_end in wire_segments:
-                if pos in (seg_start, seg_end) or point_on_segment(pos, seg_start, seg_end):
+                if pos in (seg_start, seg_end) or (
+                    not endpoint_only and point_on_segment(pos, seg_start, seg_end)
+                ):
                     union(pos, seg_start)
                     break
 
@@ -108,8 +124,9 @@ class SchematicNetlistMixin:
                     point_to_pins[pos_rounded] = []
                 point_to_pins[pos_rounded].append(PinRef(symbol_ref=sym.reference, pin=pin.number))
 
-                # Connect to wires
-                connect_to_wire(pos_rounded)
+                # Connect to wires (KiCad: pins connect at wire endpoints
+                # or junctions only, never to a wire crossing mid-span)
+                connect_to_wire(pos_rounded, endpoint_only=True)
 
         # Connect power symbols and track their net names
         for pwr in self.power_symbols:
@@ -121,7 +138,9 @@ class SchematicNetlistMixin:
                 point_to_net_names[pwr_pos] = []
             point_to_net_names[pwr_pos].append(net_name)
 
-            connect_to_wire(pwr_pos)
+            # Power symbols connect through their pin — same endpoint-or-
+            # junction rule as symbol pins.
+            connect_to_wire(pwr_pos, endpoint_only=True)
 
         # Connect local labels and track their net names
         for label in self.labels:
