@@ -2023,38 +2023,44 @@ def main() -> int:
             route_success = route_pcb(pcb_path, routed_path)
             drc_ok = run_drc(routed_path)
 
-            # LVS (#3779) -- copper-only, and currently VACUOUS on this
-            # board (issue #4006).  The generated schematic is a PCB-first
+            # LVS (#3779) -- copper-only, and VACUOUS on this board
+            # (issue #4006).  The generated schematic is a PCB-first
             # fixture with ZERO ``(wire ...)`` elements (floating labels
             # only), so ``_schematic_pin_to_net`` binds 0 of ~223 pins --
             # ALL nets, DDR included, not just the MIPI/TMDS connectors.
             # With an empty pad->net map the copper comparator has no
             # evidence and can detect neither opens nor shorts, so the
-            # ``clean: true`` it reports is a zero-comparison result, not a
-            # verification (this board's 5 unrouted nets are real copper
-            # opens it cannot see).  The write stays because the
-            # board-07-end-to-end CI job regenerates into a tmp dir and
-            # asserts ``lvs.json`` exists there, but ``output/lvs.json``
-            # must NOT be committed: ``kct board-metrics`` + the site
-            # gallery key the "Ready" badge off ``lvs_clean`` (#3749), and
-            # a missing file renders the honest "LVS not run" chip.  See
-            # #4006 for the vacuity guard (gate ``clean`` on a nonzero
-            # bound-pin count).  This step only runs in ``--step all`` (the
+            # #4006 vacuity guard now reports ``clean=false`` with a
+            # synthetic ``vacuous`` mismatch instead of the old
+            # zero-comparison ``clean: true`` (which masked this board's
+            # real copper opens).  ``require_clean=False`` (advisory)
+            # because the vacuous verdict is EXPECTED here: a hard gate
+            # would abort the recipe before the manufacturing-bundle
+            # export.  The write stays because the board-07-end-to-end CI
+            # job regenerates into a tmp dir, asserts ``lvs.json`` exists
+            # there, and gates on the vacuity-guard verdict
+            # (``check_board_00_e2e.py --lvs-vacuous`` +
+            # ``check_copper_lvs.py --expect-vacuous``); ``output/lvs.json``
+            # must NOT be committed: ``kct board-metrics`` treats a vacuous
+            # report as "LVS not run" (#3749/#4006) and the site renders
+            # the honest chip.  This step only runs in ``--step all`` (the
             # ``--step route`` CI branch has no schematic).
             copper_clean, _label_clean = write_lvs_report(
                 sch_path,
                 routed_path,
                 output_dir,
-                require_clean=True,
+                require_clean=False,
                 run_copper=True,
                 run_label=False,
             )
-            print(
-                "[lvs] WARNING: copper-LVS is VACUOUS on this fixture "
-                "(schematic has no wires, so 0 pins bind to nets; issue "
-                "#4006).  lvs.json is written for the CI e2e tmp gate "
-                "only -- never commit output/lvs.json."
-            )
+            if not copper_clean:
+                print(
+                    "[lvs] WARNING: copper-LVS is VACUOUS on this fixture "
+                    "(schematic has no wires, so 0 pins bind to nets; issue "
+                    "#4006) -- lvs.json carries clean=false/copper_vacuous. "
+                    "It is written for the CI e2e tmp gate only -- never "
+                    "commit output/lvs.json."
+                )
 
             # Export manufacturing bundle (#3147) so ``kct fleet status``
             # reports ``ship_ready=true`` (the bundle's manifest mtime must
