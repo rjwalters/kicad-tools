@@ -1484,3 +1484,179 @@ class TestExtractPartitionViaIntoPour:
         assert "C3.2" not in gnd_comp
         # No synthetic via node leaks into the returned partition.
         assert all(not p.startswith("__via") for c in partition for p in c)
+
+
+# ---------------------------------------------------------------------------
+# Segment-endpoint pad layer gating (PR #4003)
+# ---------------------------------------------------------------------------
+
+# Two single-pad footprints with F.Cu-only SMD pads on the SAME net, joined
+# by one segment whose layer is templated: on F.Cu it is a real connection,
+# on B.Cu it merely passes *under* both pads with no copper contact.
+_SMD_SAME_NET_SEGMENT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r1"))
+    (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "SIG"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r2")
+    (at 110 100)
+    (property "Reference" "R2" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r2"))
+    (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "SIG"))
+  )
+  (segment (start 100 100) (end 110 100) (width 0.2) (layer "{segment_layer}") (net 1) (uuid "seg-1"))
+)
+"""
+
+# Two through-hole (``*.Cu`` wildcard) pads on different declared nets,
+# joined by a B.Cu segment: the barrel has copper on every layer, so this
+# IS a physical connection and the label-free partition must fuse them.
+_THRU_HOLE_PADS_SEGMENT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "NETA")
+  (net 2 "NETB")
+  (footprint "Connector_PinHeader:PinHeader_1x01"
+    (layer "F.Cu")
+    (uuid "fp-j1")
+    (at 100 100)
+    (property "Reference" "J1" (at 0 0 0) (layer "F.SilkS") (uuid "ref-j1"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.0 1.0) (drill 0.5) (layers "*.Cu" "*.Mask") (net 1 "NETA"))
+  )
+  (footprint "Connector_PinHeader:PinHeader_1x01"
+    (layer "F.Cu")
+    (uuid "fp-j2")
+    (at 110 100)
+    (property "Reference" "J2" (at 0 0 0) (layer "F.SilkS") (uuid "ref-j2"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.0 1.0) (drill 0.5) (layers "*.Cu" "*.Mask") (net 2 "NETB"))
+  )
+  (segment (start 100 100) (end 110 100) (width 0.2) (layer "B.Cu") (net 1) (uuid "seg-1"))
+)
+"""
+
+# An F.Cu-only pad with a via at the pad centre bridging to a B.Cu escape
+# trace that ends on a B.Cu-only pad: the via barrel makes this a real
+# cross-layer connection, so via probes must not be narrowed to the
+# segment's layer.
+_VIA_AT_PAD_BRIDGE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "NETA")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r1"))
+    (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NETA"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "B.Cu")
+    (uuid "fp-r2")
+    (at 110 100)
+    (property "Reference" "R2" (at 0 0 0) (layer "B.SilkS") (uuid "ref-r2"))
+    (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "B.Cu" "B.Paste" "B.Mask") (net 1 "NETA"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+  (segment (start 100 100) (end 110 100) (width 0.2) (layer "B.Cu") (net 1) (uuid "seg-1"))
+)
+"""
+
+
+class TestSegmentEndpointPadLayerGating:
+    """Segment-endpoint pad hits are layer-gated (PR #4003 + e9d0625d).
+
+    A track-segment endpoint only lands ON a pad when the pad has copper
+    on the segment's layer; a B.Cu trace ending at the XY of an F.Cu-only
+    SMD pad passes *under* the pad with no copper contact.  The
+    label-free ``extract_pad_partition`` side of this contract (false
+    copper-LVS shorts) is pinned by
+    ``test_copper_lvs.py::test_trace_under_smd_pad_on_other_layer_does_not_fuse``;
+    this class pins the remaining surfaces:
+
+    * the per-net ``validate()`` path (``_build_net_copper_graph``): the
+      same under-pad geometry must not count a same-net pad as *reached*,
+      or a genuinely open net would be reported fully routed;
+    * through-hole (``*.Cu``) pads still match a segment on any copper
+      layer;
+    * via probes are gated by the via's bridged layer span, not the
+      segment's layer, because a via barrel bridges layers.
+    """
+
+    def _partition(self, tmp_path: Path, name: str, content: str) -> list[frozenset[str]]:
+        pcb_file = tmp_path / name
+        pcb_file.write_text(content)
+        return ConnectivityValidator(pcb_file).extract_pad_partition()
+
+    def _group_of(self, partition: list[frozenset[str]], pad_id: str) -> frozenset[str]:
+        return next(c for c in partition if pad_id in c)
+
+    def test_validate_bcu_trace_under_fcu_pads_is_not_routed(self, tmp_path: Path):
+        """A same-net B.Cu trace ending under two F.Cu-only pads is an open.
+
+        Without the layer gate in ``_build_net_copper_graph`` the
+        validator matched the endpoints to the pads by XY alone and
+        reported SIG fully routed even though no copper connects the two
+        pads (no via anywhere on the board).
+        """
+        pcb_file = tmp_path / "bcu_under_fcu.kicad_pcb"
+        pcb_file.write_text(_SMD_SAME_NET_SEGMENT_PCB.format(segment_layer="B.Cu"))
+        result = ConnectivityValidator(pcb_file).validate()
+
+        assert not result.is_fully_routed
+        sig_issues = [i for i in result.issues if i.net_name == "SIG"]
+        assert len(sig_issues) >= 1
+
+    def test_validate_fcu_trace_same_geometry_is_routed(self, tmp_path: Path):
+        """Control: the identical segment on F.Cu IS a real connection.
+
+        Guards the open-net test against passing vacuously (e.g. because
+        of a position/tolerance mistake in the fixture): the only
+        difference between the two runs is the segment's layer.
+        """
+        pcb_file = tmp_path / "fcu_on_fcu.kicad_pcb"
+        pcb_file.write_text(_SMD_SAME_NET_SEGMENT_PCB.format(segment_layer="F.Cu"))
+        result = ConnectivityValidator(pcb_file).validate()
+
+        assert result.is_fully_routed
+        assert result.error_count == 0
+
+    def test_thru_hole_wildcard_pads_match_any_layer_segment(self, tmp_path: Path):
+        """``*.Cu`` through-hole pads still match a B.Cu segment endpoint."""
+        partition = self._partition(tmp_path, "thru_hole.kicad_pcb", _THRU_HOLE_PADS_SEGMENT_PCB)
+        assert self._group_of(partition, "J1.1") == self._group_of(partition, "J2.1")
+
+    def test_via_probe_bridges_fcu_pad_to_bcu_trace(self, tmp_path: Path):
+        """A via at an F.Cu pad still bridges that pad to B.Cu copper.
+
+        The segment-layer gate applies to *segment endpoint* probes only:
+        the via barrel is copper on every layer it spans, so the
+        F.Cu-only pad, the via, the B.Cu trace, and the B.Cu pad form one
+        island in the label-free partition.
+        """
+        partition = self._partition(tmp_path, "via_bridge.kicad_pcb", _VIA_AT_PAD_BRIDGE_PCB)
+        assert self._group_of(partition, "R1.1") == self._group_of(partition, "R2.1")

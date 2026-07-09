@@ -3502,3 +3502,104 @@ class TestCheckerCrashesFailLoud:
         # kicad-cli absent is an expected skip, not a hard fail.
         assert status.passed is True
         assert status.blocking_error_count == 0
+
+
+class _FloorVia:
+    """Minimal via stand-in for the compatibility floor helpers (PR #4003).
+
+    Mirrors the attributes ``_get_min_via_drill`` / ``_get_min_annular_ring``
+    read: ``size``, ``drill``, and the schema-side ``via_type`` tag (``"micro"``
+    when parsed from ``(via micro ...)``, ``None`` for through vias — same
+    tagging contract as the #3118 DimensionRules exemption).
+    """
+
+    def __init__(self, size: float, drill: float, via_type: str | None = None):
+        self.size = size
+        self.drill = drill
+        self.via_type = via_type
+
+
+class _FloorPcb:
+    """Minimal PCB stand-in for ``_check_compatibility`` and its helpers."""
+
+    def __init__(self, vias):
+        self.vias = vias
+        self.segments = []  # -> min trace width falls back to the 0.15 default
+        self.copper_layers = ["F.Cu", "B.Cu"]
+        self.graphic_items = []  # -> board size falls back to the 100x100 default
+        self.setup = None  # -> min clearance falls back to the 0.2 default
+
+
+class TestMicroViaCompatibilityFloorExclusion:
+    """Micro vias are excluded from the mechanical via floors (PR #4003).
+
+    Mirrors the #3118 contract in ``test_validate_dimensions.py``: laser
+    microvias carry their own (much smaller) drill/annular floors, modelled
+    separately in the exported project (``min_microvia_drill`` /
+    ``Via_Type != 'Micro'`` dru conditions), so lumping them into the
+    mechanical minimums manufactured a false "Increase min via drill"
+    CRITICAL action item / NOT_READY verdict on boards kicad-cli DRC
+    passes.  Pins both directions: tagged microvias are skipped, while
+    untagged (mechanical) vias below the floor still fail compatibility.
+    """
+
+    def _make_audit(self, tmp_path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        return ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+    def test_mixed_board_floors_come_from_mechanical_vias_only(self, tmp_path):
+        """0.15 mm microvia + 0.3 mm mechanical via -> floors from the mechanical.
+
+        This is the board-05 shape (in-pad rescue microvias next to 0.3 mm
+        through vias): the reported minimums must be 0.3 mm drill and the
+        mechanical via's annular ring, not the microvia's.
+        """
+        audit = self._make_audit(tmp_path)
+        pcb = _FloorPcb(
+            vias=[
+                _FloorVia(size=0.3, drill=0.15, via_type="micro"),
+                _FloorVia(size=0.6, drill=0.3),
+            ]
+        )
+        assert audit._get_min_via_drill(pcb) == pytest.approx(0.3)
+        assert audit._get_min_annular_ring(pcb) == pytest.approx(0.15)
+
+    def test_mechanical_via_below_floor_still_fails_compat(self, tmp_path):
+        """The exclusion rides on the ``micro`` tag, not on small dimensions.
+
+        An UNtagged 0.25 mm-drill via on the same board still drives the
+        min-via-drill compatibility check below JLCPCB's 0.3 mm floor and
+        fails the audit — the microvia exclusion must not blind the
+        checker to genuinely undersized mechanical vias.
+        """
+        audit = self._make_audit(tmp_path)
+        pcb = _FloorPcb(
+            vias=[
+                _FloorVia(size=0.3, drill=0.15, via_type="micro"),
+                _FloorVia(size=0.6, drill=0.25),  # mechanical, below 0.3 floor
+            ]
+        )
+        compat = audit._check_compatibility(pcb)
+        actual, required, passed = compat.min_via_drill
+        assert actual == pytest.approx(0.25)
+        assert actual < required
+        assert passed is False
+        assert compat.passed is False
+
+    def test_all_microvia_board_returns_defaults(self, tmp_path):
+        """A board whose only vias are microvias reports the no-via defaults.
+
+        With every via excluded, the floors fall back to the same
+        JLCPCB-compliant defaults used when the board has no vias at all
+        (0.3 mm drill / 0.15 mm annular), so compatibility passes instead
+        of comparing the microvia geometry against mechanical limits.
+        """
+        audit = self._make_audit(tmp_path)
+        pcb = _FloorPcb(vias=[_FloorVia(size=0.3, drill=0.15, via_type="micro")])
+        assert audit._get_min_via_drill(pcb) == pytest.approx(0.3)
+        assert audit._get_min_annular_ring(pcb) == pytest.approx(0.15)
+
+        compat = audit._check_compatibility(pcb)
+        assert compat.min_via_drill[2] is True
+        assert compat.min_annular_ring[2] is True
