@@ -298,10 +298,29 @@ if (board.manifest_generated_at !== undefined) {
   var isLoaded = function () {
     return !!(embed && embed.loaded);
   };
+  // Re-frame the camera on the board outline instead of the drawing sheet.
+  // KiCanvas's load path unconditionally calls zoom_to_page(), which fits the
+  // whole worksheet frame — boards sitting in a corner of the sheet render
+  // tiny and offset (user-visible on every board page). The board viewer
+  // exposes zoom_to_board() (fits Edge.Cuts bbox + 10%) but nothing calls it,
+  // so we do, once, when the viewer reports loaded. Best-effort: any failure
+  // leaves the stock page-fit behavior.
+  var zoomToBoard = function () {
+    try {
+      var root = embed && (embed.renderRoot || embed.shadowRoot);
+      var app = root && root.querySelector("kc-board-app");
+      var viewer = app && app.viewer;
+      if (viewer && typeof viewer.zoom_to_board === "function") {
+        viewer.zoom_to_board();
+        if (typeof viewer.draw === "function") viewer.draw();
+      }
+    } catch (e) {}
+  };
   var hideOverlay = function () {
     if (settled) return;
     settled = true;
     stopPolling();
+    zoomToBoard();
     try {
       if (overlay && overlay.parentNode) overlay.remove();
     } catch (e) {}
