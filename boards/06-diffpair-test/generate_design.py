@@ -39,6 +39,7 @@ from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
+from kicad_tools.lvs import write_lvs_report
 from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED, NET_CLASS_POWER, NetClassRouting
 
 # Re-export net definitions and footprint generators from generate_pcb.
@@ -3402,35 +3403,29 @@ def main() -> int:
             route_success = route_pcb(pcb_path, routed_path)
             drc_ok = run_drc(routed_path)
 
-            # LVS: SKIPPED -- schematic not wired, LVS unavailable (#4005
-            # review).  Board 06 is a PCB-first routing fixture whose
-            # schematic has no ``(wire ...)`` elements, so every schematic
-            # pin is floating: the copper comparator binds 0 of the board's
-            # 198 pads and can detect neither shorts nor opens.  The
-            # copper-only hard gate #4004 added here
-            # (``write_lvs_report(..., require_clean=True, run_label=False)``)
-            # therefore passed on ZERO evidence -- and with the vacuity
-            # guard it now (correctly) raises instead.  Rather than weaken
-            # the guard, this recipe skips the LVS step and emits NO
-            # ``lvs.json``: ``kct board-metrics`` omits ``lvs_clean`` and
-            # the gallery honestly shows "LVS not run".  Re-enable
-            # ``write_lvs_report`` here if/when the fixture schematic gets
-            # wired nets.
-            print("\n" + "=" * 60)
-            print("LVS: SKIPPED -- schematic not wired, LVS unavailable")
-            print("=" * 60)
-            print(
-                "   Board 06's fixture schematic binds 0 pins (no wires/"
-                "labels), so copper-LVS would be vacuous (#4005 review).\n"
-                "   No lvs.json is emitted; board-metrics reports 'LVS not "
-                "run'."
+            # LVS (#3779, re-enabled by #4012): the fixture schematic is
+            # now FULLY WIRED (generate_schematic.py emits a wire stub +
+            # global label for all 198 pins, PIN_NETS mirroring
+            # generate_pcb.py pad-for-pad), so both comparators carry real
+            # evidence: the copper comparator binds 198/198 pads and the
+            # label comparator agrees pin-for-pin.  Gate on BOTH
+            # comparators, boards 00-02 style (see the gate-policy matrix
+            # in kicad_tools/lvs/recipe.py): ``require_clean=True`` raises
+            # BoardNetlistMismatch on any short/open/label divergence so
+            # the recipe exit gate trips before the manufacturing export.
+            # (History: the pre-#4012 schematic had ZERO wires, the copper
+            # comparator bound 0 pins, and the #4006 vacuity guard rightly
+            # refused to call that clean -- the LVS step was skipped
+            # entirely.  #4012 wired the schematic, restoring the hard
+            # gate #4004 originally intended.)
+            write_lvs_report(
+                sch_path,
+                routed_path,
+                output_dir,
+                require_clean=True,
+                run_copper=True,
+                run_label=True,
             )
-            # Drop any stale lvs.json from an earlier recipe version so the
-            # gallery cannot keep rendering a zero-evidence LVS badge.
-            stale_lvs = output_dir / "lvs.json"
-            if stale_lvs.exists():
-                stale_lvs.unlink()
-                print(f"   Removed stale {stale_lvs} (vacuous artifact).")
 
             # Export manufacturing bundle (#3147) so ``kct fleet status``
             # reports ``ship_ready=true`` (the bundle's manifest mtime must

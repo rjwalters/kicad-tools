@@ -329,3 +329,175 @@ def test_default_mode_rejects_vacuous_clean_true_lvs_json(tmp_path: Path) -> Non
     )
     rc = helper.main([str(board_dir), "--stem", "voltage_divider"])
     assert rc == 2
+
+
+# --- --lvs-known-opens mode (#4012, board 07) --------------------------------
+#
+# Wired fixture schematic on a partial-by-design board (5 seed-invariant
+# unroutable nets, #3438): lvs.json is honestly DIRTY with exactly those
+# opens, and board.json renders lvs_clean=false.
+
+_B07_OPENS = ["DQ3", "DQ4", "MIPI_DAT0_N", "TMDS_D0_N", "TMDS_D1_N"]
+_B07_OPENS_ARG = ",".join(_B07_OPENS)
+
+
+def _stage_known_opens_board(root: Path, stem: str) -> Path:
+    """Staging dir mimicking board 07 post-#4012: honest 5-opens lvs.json."""
+    helper = _load_helper()
+    board_dir = root / "board"
+    output = board_dir / "output"
+    (output / "manufacturing").mkdir(parents=True)
+    for rel in helper.required_artifacts(stem):
+        p = output / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("placeholder")
+    (output / "lvs.json").write_text(
+        json.dumps(
+            {
+                "clean": False,
+                "mismatches": [],
+                "copper_mismatches": [
+                    {"kind": "open", "net_a": n, "net_b": n, "pad_a": "U1.1", "pad_b": "U2.1"}
+                    for n in _B07_OPENS
+                ],
+                "copper_vacuous": False,
+                "copper_bound_pad_count": 244,
+            }
+        )
+    )
+    (output / "board.json").write_text(
+        json.dumps(
+            {
+                "status": "partial",
+                "drc_violations": 0,
+                "lvs_clean": False,
+                "lvs_mismatches": 5,
+            }
+        )
+    )
+    return board_dir
+
+
+def test_lvs_known_opens_passes_honest_state(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_known_opens_board(tmp_path, "matchgroup_test")
+    rc = helper.main(
+        [str(board_dir), "--stem", "matchgroup_test", "--lvs-known-opens", _B07_OPENS_ARG]
+    )
+    assert rc == 0
+
+
+def test_lvs_known_opens_rejects_clean_true(tmp_path: Path) -> None:
+    # The nets got routed: the gate forces a deliberate graduation to
+    # --lvs-only instead of silently blessing a stale expectation.
+    helper = _load_helper()
+    board_dir = _stage_known_opens_board(tmp_path, "matchgroup_test")
+    (board_dir / "output" / "lvs.json").write_text(json.dumps({"clean": True, "mismatches": []}))
+    rc = helper.main(
+        [str(board_dir), "--stem", "matchgroup_test", "--lvs-known-opens", _B07_OPENS_ARG]
+    )
+    assert rc == 2
+
+
+def test_lvs_known_opens_rejects_vacuous(tmp_path: Path) -> None:
+    # The schematic regressed to unwired: vacuity is never "known opens".
+    helper = _load_helper()
+    board_dir = _stage_known_opens_board(tmp_path, "matchgroup_test")
+    (board_dir / "output" / "lvs.json").write_text(
+        json.dumps(
+            {
+                "clean": False,
+                "mismatches": [],
+                "copper_mismatches": [
+                    {
+                        "kind": "vacuous",
+                        "net_a": "<no-schematic-evidence>",
+                        "net_b": "<no-schematic-evidence>",
+                        "pad_a": "bound_pads=0",
+                        "pad_b": "board_pads=244",
+                    }
+                ],
+                "copper_vacuous": True,
+                "copper_bound_pad_count": 0,
+            }
+        )
+    )
+    rc = helper.main(
+        [str(board_dir), "--stem", "matchgroup_test", "--lvs-known-opens", _B07_OPENS_ARG]
+    )
+    assert rc == 2
+
+
+def test_lvs_known_opens_rejects_short(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_known_opens_board(tmp_path, "matchgroup_test")
+    payload = json.loads((board_dir / "output" / "lvs.json").read_text())
+    payload["copper_mismatches"].append(
+        {"kind": "short", "net_a": "A", "net_b": "B", "pad_a": "U1.1", "pad_b": "U1.2"}
+    )
+    (board_dir / "output" / "lvs.json").write_text(json.dumps(payload))
+    rc = helper.main(
+        [str(board_dir), "--stem", "matchgroup_test", "--lvs-known-opens", _B07_OPENS_ARG]
+    )
+    assert rc == 2
+
+
+def test_lvs_known_opens_rejects_unexpected_open(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_known_opens_board(tmp_path, "matchgroup_test")
+    payload = json.loads((board_dir / "output" / "lvs.json").read_text())
+    payload["copper_mismatches"].append(
+        {"kind": "open", "net_a": "SURPRISE", "net_b": "SURPRISE", "pad_a": "X.1", "pad_b": "Y.1"}
+    )
+    (board_dir / "output" / "lvs.json").write_text(json.dumps(payload))
+    rc = helper.main(
+        [str(board_dir), "--stem", "matchgroup_test", "--lvs-known-opens", _B07_OPENS_ARG]
+    )
+    assert rc == 2
+
+
+def test_lvs_known_opens_rejects_label_mismatches(tmp_path: Path) -> None:
+    # The label leg is expected clean on board 07; a label mismatch is a
+    # separate regression the known-opens allowance must not absorb.
+    helper = _load_helper()
+    board_dir = _stage_known_opens_board(tmp_path, "matchgroup_test")
+    payload = json.loads((board_dir / "output" / "lvs.json").read_text())
+    payload["mismatches"] = [{"ref": "U1", "pad": "1", "schematic_net": "A", "pcb_net": "B"}]
+    (board_dir / "output" / "lvs.json").write_text(json.dumps(payload))
+    rc = helper.main(
+        [str(board_dir), "--stem", "matchgroup_test", "--lvs-known-opens", _B07_OPENS_ARG]
+    )
+    assert rc == 2
+
+
+def test_lvs_known_opens_rejects_board_json_omitting_lvs_clean(tmp_path: Path) -> None:
+    # board.json must carry the honest lvs_clean=false -- omission means
+    # "LVS not run", which would misrepresent real evidence.
+    helper = _load_helper()
+    board_dir = _stage_known_opens_board(tmp_path, "matchgroup_test")
+    (board_dir / "output" / "board.json").write_text(
+        json.dumps({"status": "partial", "drc_violations": 0})
+    )
+    rc = helper.main(
+        [str(board_dir), "--stem", "matchgroup_test", "--lvs-known-opens", _B07_OPENS_ARG]
+    )
+    assert rc == 2
+
+
+def test_lvs_known_opens_rejects_board_json_lvs_clean_true(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_known_opens_board(tmp_path, "matchgroup_test")
+    (board_dir / "output" / "board.json").write_text(
+        json.dumps({"status": "partial", "drc_violations": 0, "lvs_clean": True})
+    )
+    rc = helper.main(
+        [str(board_dir), "--stem", "matchgroup_test", "--lvs-known-opens", _B07_OPENS_ARG]
+    )
+    assert rc == 2
+
+
+def test_lvs_known_opens_mutually_exclusive_with_other_modes(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_known_opens_board(tmp_path, "matchgroup_test")
+    with pytest.raises(SystemExit):
+        helper.main([str(board_dir), "--lvs-vacuous", "--lvs-known-opens", _B07_OPENS_ARG])

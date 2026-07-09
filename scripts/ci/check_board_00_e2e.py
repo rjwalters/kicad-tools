@@ -38,14 +38,26 @@ artifacts EXCEPT ``lvs.json`` present, ``lvs.json`` ABSENT, and
 ``board.json`` carrying NO ``lvs_clean`` key (the site then renders
 "LVS not run" instead of a zero-evidence "Ready" badge).
 
-``--lvs-vacuous`` mode (#4006, board 07): same unwired-fixture situation,
+``--lvs-vacuous`` mode (#4006): same unwired-fixture situation,
 but for a recipe that still *emits* ``lvs.json`` (its CI job asserts the
 file exists).  Asserts ``lvs.json`` is present and carries the
 vacuity-guard verdict (``clean: false`` + ``copper_vacuous: true``), and
 that ``board.json`` does NOT claim ``lvs_clean`` (board-metrics treats a
 vacuous report as LVS-not-run).  A ``clean: true`` here means the guard
 regressed; a non-vacuous dirty result means the schematic gained wired
-nets and the job should graduate to ``--lvs-only``.
+nets and the job should graduate to ``--lvs-only``.  (Boards 06/07 used
+the unwired-fixture modes until #4012 wired their schematics; no current
+board uses ``--lvs-not-run``/``--lvs-vacuous``, but the modes stay for
+future PCB-first fixtures.)
+
+``--lvs-known-opens NET[,NET...]`` mode (#4012, board 07): for a *wired*
+fixture schematic on a board that routes PARTIAL by design (5
+seed-invariant unroutable nets, #3438).  Asserts ``lvs.json`` is present
+and honestly dirty: ``clean: false``, NOT vacuous, ONLY ``kind="open"``
+copper mismatches on exactly the named nets, an empty label-mismatch
+list, and ``board.json`` carrying ``lvs_clean: false``.  Any short, any
+open outside the set, or one of the named nets becoming routable fails
+the gate (the expectation must then be updated deliberately).
 
 and exits non-zero with a ``::error::``-annotated message on any mismatch
 so the failure surfaces inline on the GitHub PR Files-changed view.
@@ -209,6 +221,61 @@ def assert_lvs_vacuous(lvs_path: Path) -> str | None:
     return None
 
 
+def assert_lvs_known_opens(lvs_path: Path, expected_nets: set[str]) -> str | None:
+    """Assert ``lvs.json`` carries EXACTLY the expected known opens (#4012).
+
+    For wired-schematic boards that route PARTIAL by design (board 07: 5
+    seed-invariant unroutable nets, #3438).  Expected shape:
+
+    * ``clean: false`` (the opens are real evidence, not vacuity);
+    * NOT vacuous (``copper_vacuous`` false/absent, bound pads > 0);
+    * ``copper_mismatches`` contains ONLY ``kind="open"`` entries whose
+      net names are exactly ``expected_nets`` (a short, a new open, or a
+      no-longer-open net all fail);
+    * label ``mismatches`` empty (the label comparator agrees pin-for-pin).
+
+    Returns ``None`` on pass, or a human-readable error message on fail.
+    """
+    try:
+        data = json.loads(lvs_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        return f"could not read/parse {lvs_path}: {e}"
+    if data.get("clean"):
+        return (
+            f"expected lvs.json clean=false with opens on {sorted(expected_nets)} "
+            "(#3438) but it reports clean=true -- the previously-unroutable nets "
+            "appear routed now; graduate this job to --lvs-only"
+        )
+    if data.get("copper_vacuous") is True or data.get("copper_bound_pad_count") == 0:
+        return (
+            "expected named copper opens but lvs.json is VACUOUS "
+            "(copper_vacuous/copper_bound_pad_count=0) -- the schematic regressed "
+            "to unwired (binds 0 pins)"
+        )
+    label_mismatches = data.get("mismatches") or []
+    if label_mismatches:
+        return (
+            f"expected an empty label-mismatch list but got {len(label_mismatches)} "
+            f"label mismatch(es); first: {label_mismatches[0]}"
+        )
+    copper = data.get("copper_mismatches") or []
+    kinds = sorted({m.get("kind") for m in copper if isinstance(m, dict)})
+    if kinds != ["open"]:
+        return (
+            f"expected ONLY kind='open' copper mismatches but got kinds {kinds} "
+            f"({len(copper)} total) -- a copper short is a hard regression"
+        )
+    got_nets = {m.get("net_a", "?") for m in copper if isinstance(m, dict)}
+    if got_nets != expected_nets:
+        unexpected = sorted(got_nets - expected_nets)
+        missing = sorted(expected_nets - got_nets)
+        return (
+            f"copper opens {sorted(got_nets)} != expected {sorted(expected_nets)} "
+            f"(unexpected: {unexpected or 'none'}; no-longer-open: {missing or 'none'})"
+        )
+    return None
+
+
 def assert_board_json_fields(
     board_json_path: Path,
     required_fields: dict[str, Any] = REQUIRED_BOARD_JSON_FIELDS,
@@ -287,13 +354,32 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "Honest-state gate for an unwired fixture schematic whose recipe "
-            "still EMITS lvs.json (#4006, board 07): assert lvs.json is "
+            "still EMITS lvs.json (#4006): assert lvs.json is "
             "present with the vacuity-guard verdict (clean=false, "
             "copper_vacuous=true) and board.json carries NO lvs_clean key, "
             "and SKIP the status/drc_violations assertions."
         ),
     )
+    mode_group.add_argument(
+        "--lvs-known-opens",
+        metavar="NET[,NET...]",
+        help=(
+            "Honest-state gate for a WIRED fixture schematic on a board that "
+            "routes PARTIAL by design (#4012, board 07): assert lvs.json is "
+            "present, clean=false, NOT vacuous, with ONLY kind='open' copper "
+            "mismatches whose net names are exactly this comma-separated set "
+            "(and an empty label-mismatch list); assert board.json carries "
+            "lvs_clean=false; SKIP the status/drc_violations assertions."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    known_open_nets: set[str] = set()
+    if args.lvs_known_opens:
+        known_open_nets = {n.strip() for n in args.lvs_known_opens.split(",") if n.strip()}
+        if not known_open_nets:
+            _err("--lvs-known-opens was given an empty net list")
+            return 1
 
     board_dir: Path = args.board_dir
     if not board_dir.is_dir():
@@ -344,6 +430,18 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("[ok] lvs.json carries the vacuity-guard verdict (#4006)")
         # (missing lvs.json was already reported above)
+    elif known_open_nets:
+        if lvs_path.is_file():
+            lvs_err = assert_lvs_known_opens(lvs_path, known_open_nets)
+            if lvs_err is not None:
+                _err(lvs_err, file=lvs_path)
+                failed = True
+            else:
+                print(
+                    "[ok] lvs.json carries exactly the expected known opens "
+                    f"({', '.join(sorted(known_open_nets))}) and nothing else (#4012)"
+                )
+        # (missing lvs.json was already reported above)
     elif lvs_path.is_file():
         lvs_err = assert_lvs_clean(lvs_path)
         if lvs_err is not None:
@@ -379,9 +477,16 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     print("[ok] board.json omits lvs_clean ('LVS not run')")
     else:
-        required_fields = (
-            LVS_ONLY_BOARD_JSON_FIELDS if args.lvs_only else REQUIRED_BOARD_JSON_FIELDS
-        )
+        if known_open_nets:
+            # Known-opens boards (#4012) are honestly DIRTY: board-metrics
+            # must render lvs_clean=false (never omit it -- that would be
+            # "LVS not run", and never true).  status/drc are not asserted
+            # (partial-by-design boards carry allowlisted residuals).
+            required_fields: dict[str, Any] = {"lvs_clean": False}
+        elif args.lvs_only:
+            required_fields = LVS_ONLY_BOARD_JSON_FIELDS
+        else:
+            required_fields = REQUIRED_BOARD_JSON_FIELDS
         if board_json_path.is_file():
             field_errors = assert_board_json_fields(board_json_path, required_fields)
             if field_errors:

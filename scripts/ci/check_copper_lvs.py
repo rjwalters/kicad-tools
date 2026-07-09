@@ -155,6 +155,59 @@ def assert_vacuous(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def assert_known_opens(payload: dict[str, Any], expected_nets: set[str]) -> str | None:
+    """Assert a copper-LVS payload reports EXACTLY the expected opens (#4012).
+
+    Used for boards that route PARTIAL by design with a *wired* fixture
+    schematic (board 07: 5 seed-invariant unroutable nets, #3438).  The
+    honest expectation is ``clean: false`` with only ``kind="open"``
+    mismatches whose net names are exactly ``expected_nets`` — nothing
+    more (a NEW open/short is a regression), nothing less (an expected
+    open disappearing means the router improved and the expectation, or
+    the gate, must be updated), and never the vacuity verdict (the
+    schematic regressed to unwired).
+
+    Returns:
+        ``None`` on pass.  A human-readable error message otherwise
+        (caller maps to exit 2).
+
+    Raises:
+        KeyError: If ``clean`` is absent (caller maps to exit 1).
+    """
+    clean = payload["clean"]
+    mismatches = payload.get("mismatches", [])
+    if not isinstance(mismatches, list):
+        mismatches = []
+    kinds = sorted({m.get("kind") for m in mismatches if isinstance(m, dict)})
+    if clean:
+        return (
+            f"expected copper-LVS opens on {sorted(expected_nets)} (#3438) but got "
+            "clean=true -- the previously-unroutable nets appear routed now; "
+            "graduate this CI gate to a plain clean assertion"
+        )
+    if "vacuous" in kinds:
+        return (
+            "expected named copper-LVS opens but got the vacuity-guard verdict "
+            "(kind='vacuous') -- the schematic regressed to unwired (binds 0 pins)"
+        )
+    if kinds != ["open"]:
+        return (
+            f"expected ONLY kind='open' mismatches but got kinds {kinds}: "
+            f"{_summarize_mismatches(mismatches)} -- a copper short is a hard "
+            "regression regardless of the known-opens allowance"
+        )
+    got_nets = sorted({m.get("net_a", "?") for m in mismatches if isinstance(m, dict)})
+    if set(got_nets) != expected_nets:
+        unexpected = sorted(set(got_nets) - expected_nets)
+        missing = sorted(expected_nets - set(got_nets))
+        return (
+            f"copper-LVS opens {got_nets} != expected {sorted(expected_nets)} "
+            f"(unexpected: {unexpected or 'none'}; no-longer-open: {missing or 'none'}) "
+            f"-- {_summarize_mismatches(mismatches)}"
+        )
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="check_copper_lvs.py",
@@ -172,15 +225,28 @@ def main(argv: list[str] | None = None) -> int:
             "(use '-' or '/dev/stdin' to read from stdin)."
         ),
     )
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--expect-vacuous",
         action="store_true",
         help=(
-            "Invert the contract for deliberately-unwired fixture schematics "
-            "(board 06): assert the result is the vacuity-guard verdict "
+            "Invert the contract for deliberately-unwired fixture schematics: "
+            "assert the result is the vacuity-guard verdict "
             "(clean=false with only kind='vacuous' mismatches, #4005 review). "
             "Fails on clean=true (guard regression) AND on real shorts/opens "
             "(schematic gained nets; upgrade the gate)."
+        ),
+    )
+    mode_group.add_argument(
+        "--expect-opens",
+        metavar="NET[,NET...]",
+        help=(
+            "Known-opens contract for wired-schematic boards that route "
+            "PARTIAL by design (board 07, #3438/#4012): assert clean=false "
+            "with ONLY kind='open' mismatches whose net names are exactly "
+            "this comma-separated set.  Fails on clean=true (nets became "
+            "routable; upgrade the gate), on any short, on the vacuous "
+            "verdict, and on any open outside the set."
         ),
     )
     args = parser.parse_args(argv)
@@ -211,9 +277,18 @@ def main(argv: list[str] | None = None) -> int:
         _err(f"copper-LVS JSON from {display} is not a JSON object: {type(payload).__name__}")
         return 1
 
+    expected_open_nets: set[str] = set()
+    if args.expect_opens:
+        expected_open_nets = {n.strip() for n in args.expect_opens.split(",") if n.strip()}
+        if not expected_open_nets:
+            _err("--expect-opens was given an empty net list")
+            return 1
+
     try:
         if args.expect_vacuous:
             dirty_msg = assert_vacuous(payload)
+        elif expected_open_nets:
+            dirty_msg = assert_known_opens(payload, expected_open_nets)
         else:
             dirty_msg = assert_clean(payload)
     except KeyError:
@@ -234,6 +309,11 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "[ok] copper-LVS vacuity guard fired as expected "
             "(clean=false, kind='vacuous'; unwired fixture schematic)"
+        )
+    elif expected_open_nets:
+        print(
+            "[ok] copper-LVS reports exactly the expected known opens "
+            f"({', '.join(sorted(expected_open_nets))}) and nothing else"
         )
     else:
         print("[ok] copper-LVS clean (independent out-of-process re-check)")

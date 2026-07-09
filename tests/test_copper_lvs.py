@@ -954,7 +954,7 @@ def test_pour_extraction_unions_pads_across_disjoint_fill_islands_of_one_zone(
 
 @requires_shapely
 def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
-    """End-to-end: pour-heavy extraction runs, and the verdict is VACUOUS.
+    """End-to-end: pour-heavy extraction reports board 07's 5 honest opens.
 
     Board 07 (match-group test) carries the GND / +1V2 / +1V8 plane pours
     (one zone per net since #3818 de-duplicated the router/recipe overlap),
@@ -963,12 +963,13 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
     extraction and the pad-box erosion guard on real routed copper without
     crashing.
 
-    The verdict itself, however, is *vacuous* (#4006): board 07's fixture
-    schematic has no ``(wire ...)`` elements, so zero pins bind and the
-    historical ``clean=True`` this test pinned was zero-evidence (it would
-    have masked board 07's 5 real copper opens).  The honest contract is
-    now ``clean=False`` + ``vacuous`` — this is the guard's end-to-end
-    regression pin on a real pour-heavy board.
+    The fixture schematic is fully wired since #4012 (244/244 pads bound),
+    so the comparator carries real evidence — and board 07 routes PARTIAL
+    by design (5 seed-invariant unroutable nets, #3438), so the honest
+    verdict is ``clean=False`` with exactly those 5 opens and no shorts.
+    (History: pre-#4012 the schematic bound 0 pins; this test pinned the
+    #4006 vacuous verdict, and before that a zero-evidence ``clean=True``
+    that masked these same 5 real opens.)
     """
     repo_root = Path(__file__).resolve().parent.parent
     board_out = repo_root / "boards" / "07-matchgroup-test" / "output"
@@ -978,22 +979,31 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
         pytest.skip("board 07 artifacts not present; run generate_design.py")
     result = compare_copper_netlist(sch, pcb)
     assert isinstance(result, CopperLVSResult)
-    assert result.vacuous, (
-        "board 07's fixture schematic was expected to bind 0 pins (vacuous, "
-        f"#4006) but bound {result.bound_pad_count}; if the schematic gained "
-        "wired nets, upgrade this test to a real clean assertion"
+    assert not result.vacuous, (
+        "board 07's fixture schematic is wired since #4012 and must bind "
+        f"pins; got vacuous with bound_pad_count={result.bound_pad_count}"
     )
+    assert result.bound_pad_count == 244
     assert not result.clean
-    assert result.bound_pad_count == 0
+    assert result.shorts == ()
+    assert sorted({m.net_a for m in result.opens}) == [
+        "DQ3",
+        "DQ4",
+        "MIPI_DAT0_N",
+        "TMDS_D0_N",
+        "TMDS_D1_N",
+    ], "expected exactly the 5 seed-invariant unroutable nets (#3438)"
 
 
-def test_compare_copper_netlist_on_board06_wireless_fixture_is_vacuous() -> None:
-    """End-to-end #4006 pin: board 06's unwired schematic yields VACUOUS.
+def test_compare_copper_netlist_on_board06_wired_fixture_is_clean() -> None:
+    """End-to-end #4012 pin: board 06's wired schematic yields a real clean.
 
-    Board 06's committed ``lvs.json`` (merged in #4004) claimed
-    ``clean=true`` off exactly this pair of artifacts while binding zero
-    pins — the vacuity hole from PR #4005's review.  The comparator must
-    now refuse that: dirty, vacuous, zero bound pads.
+    History: board 06's schematic was unwired pre-#4012 (0/198 pins bound)
+    and its #4004 ``lvs.json`` claimed ``clean=true`` on zero evidence —
+    the vacuity hole from PR #4005's review, pinned here as a VACUOUS
+    verdict until #4012 wired the schematic.  Now the comparator binds all
+    198 pads and the clean verdict is genuinely evidenced (21/21 nets
+    routed to copper completion).
     """
     repo_root = Path(__file__).resolve().parent.parent
     board_out = repo_root / "boards" / "06-diffpair-test" / "output"
@@ -1002,10 +1012,10 @@ def test_compare_copper_netlist_on_board06_wireless_fixture_is_vacuous() -> None
     if not (sch.exists() and pcb.exists()):
         pytest.skip("board 06 artifacts not present; run generate_design.py")
     result = compare_copper_netlist(sch, pcb)
-    assert not result.clean
-    assert result.vacuous
-    assert result.bound_pad_count == 0
-    assert [m.kind for m in result.mismatches] == [VACUOUS_KIND]
+    assert not result.vacuous
+    assert result.bound_pad_count == 198
+    assert result.clean
+    assert result.mismatches == ()
 
 
 # ---------------------------------------------------------------------------

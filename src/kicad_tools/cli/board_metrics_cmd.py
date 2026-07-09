@@ -243,7 +243,14 @@ def _parse_lvs(lvs_path: Path, slug: str) -> dict:
         return {}
     return {
         "lvs_clean": bool(data.get("clean", False)),
-        "lvs_mismatches": len(data.get("mismatches") or []),
+        # Count BOTH comparator legs (#4012): ``mismatches`` is the
+        # label-based list (historical board-00 schema) and
+        # ``copper_mismatches`` the copper-extracted shorts/opens (#3762).
+        # A board like 07 -- label-clean but with 5 real copper opens
+        # (#3438) -- must render "5 mismatches", not a dishonest 0.
+        "lvs_mismatches": (
+            len(data.get("mismatches") or []) + len(data.get("copper_mismatches") or [])
+        ),
     }
 
 

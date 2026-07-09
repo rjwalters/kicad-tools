@@ -2023,27 +2023,28 @@ def main() -> int:
             route_success = route_pcb(pcb_path, routed_path)
             drc_ok = run_drc(routed_path)
 
-            # LVS (#3779) -- copper-only, and VACUOUS on this board
-            # (issue #4006).  The generated schematic is a PCB-first
-            # fixture with ZERO ``(wire ...)`` elements (floating labels
-            # only), so ``_schematic_pin_to_net`` binds 0 of ~223 pins --
-            # ALL nets, DDR included, not just the MIPI/TMDS connectors.
-            # With an empty pad->net map the copper comparator has no
-            # evidence and can detect neither opens nor shorts, so the
-            # #4006 vacuity guard now reports ``clean=false`` with a
-            # synthetic ``vacuous`` mismatch instead of the old
-            # zero-comparison ``clean: true`` (which masked this board's
-            # real copper opens).  ``require_clean=False`` (advisory)
-            # because the vacuous verdict is EXPECTED here: a hard gate
-            # would abort the recipe before the manufacturing-bundle
-            # export.  The write stays because the board-07-end-to-end CI
-            # job regenerates into a tmp dir, asserts ``lvs.json`` exists
-            # there, and gates on the vacuity-guard verdict
-            # (``check_board_00_e2e.py --lvs-vacuous`` +
-            # ``check_copper_lvs.py --expect-vacuous``); ``output/lvs.json``
-            # must NOT be committed: ``kct board-metrics`` treats a vacuous
-            # report as "LVS not run" (#3749/#4006) and the site renders
-            # the honest chip.  This step only runs in ``--step all`` (the
+            # LVS (#3779, wired schematic #4012) -- HONESTLY DIRTY on this
+            # board.  The fixture schematic is now fully wired
+            # (generate_schematic.py emits a wire stub + global label for
+            # all 244 pins, PIN_NETS mirroring generate_pcb.py
+            # pad-for-pad), so the copper comparator binds 244/244 pads
+            # and carries real evidence.  Board 07 routes PARTIAL by
+            # design -- 5 seed-invariant unroutable nets (#3438: DQ3, DQ4,
+            # MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N) -- so copper-LVS reports
+            # exactly those 5 opens and ``lvs.json`` carries the honest
+            # ``clean=false`` verdict (label comparator: clean; it is run
+            # so the payload records both legs).  ``require_clean=False``
+            # (advisory) because the 5 opens are EXPECTED here: a hard
+            # gate would abort the recipe before the manufacturing-bundle
+            # export.  ``kct board-metrics`` renders lvs_clean=false /
+            # lvs_mismatches=5 and downgrades status to 'partial' -- that
+            # is the truthful gallery state.  The board-07-end-to-end CI
+            # job regenerates into a tmp dir and asserts exactly these 5
+            # named opens and nothing else (``check_copper_lvs.py
+            # --expect-opens`` + ``check_board_00_e2e.py
+            # --lvs-known-opens``), so a NEW open/short -- or one of the 5
+            # becoming routable -- fails the job and forces this comment
+            # to be updated.  This step only runs in ``--step all`` (the
             # ``--step route`` CI branch has no schematic).
             copper_clean, _label_clean = write_lvs_report(
                 sch_path,
@@ -2051,15 +2052,18 @@ def main() -> int:
                 output_dir,
                 require_clean=False,
                 run_copper=True,
-                run_label=False,
+                run_label=True,
             )
             if not copper_clean:
                 print(
-                    "[lvs] WARNING: copper-LVS is VACUOUS on this fixture "
-                    "(schematic has no wires, so 0 pins bind to nets; issue "
-                    "#4006) -- lvs.json carries clean=false/copper_vacuous. "
-                    "It is written for the CI e2e tmp gate only -- never "
-                    "commit output/lvs.json."
+                    "[lvs] copper-LVS is dirty -- EXPECTED on this "
+                    "partial-by-design board (#3438 known opens: DQ3, DQ4, "
+                    "MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N).  lvs.json carries "
+                    "the honest clean=false verdict; board-metrics "
+                    "downgrades status to 'partial'.  The CI e2e job "
+                    "asserts the mismatch set is EXACTLY those 5 opens and "
+                    "no shorts (check_copper_lvs.py --expect-opens); see "
+                    "the summary above for what this run actually produced."
                 )
 
             # Export manufacturing bundle (#3147) so ``kct fleet status``
