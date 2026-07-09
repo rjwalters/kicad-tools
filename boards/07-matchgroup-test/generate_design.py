@@ -2023,15 +2023,23 @@ def main() -> int:
             route_success = route_pcb(pcb_path, routed_path)
             drc_ok = run_drc(routed_path)
 
-            # LVS (#3779) -- copper-only hard gate.  Board 07 is a PCB-first
-            # routing fixture (MIPI/TMDS connectors with no schematic-side
-            # net), so the label comparator reports every pad as
-            # ``schematic_net=None`` (advisory noise, not a real defect).  The
-            # copper-extracted comparator correctly ignores ``None``-net pads,
-            # so we gate on copper only (``run_label=False``): a copper
-            # short/open raises ``BoardNetlistMismatch`` and fails the recipe.
-            # Writes ``output/lvs.json`` so ``kct board-metrics`` surfaces
-            # ``lvs_clean: true``.  This step only runs in ``--step all`` (the
+            # LVS (#3779) -- copper-only, and currently VACUOUS on this
+            # board (issue #4006).  The generated schematic is a PCB-first
+            # fixture with ZERO ``(wire ...)`` elements (floating labels
+            # only), so ``_schematic_pin_to_net`` binds 0 of ~223 pins --
+            # ALL nets, DDR included, not just the MIPI/TMDS connectors.
+            # With an empty pad->net map the copper comparator has no
+            # evidence and can detect neither opens nor shorts, so the
+            # ``clean: true`` it reports is a zero-comparison result, not a
+            # verification (this board's 5 unrouted nets are real copper
+            # opens it cannot see).  The write stays because the
+            # board-07-end-to-end CI job regenerates into a tmp dir and
+            # asserts ``lvs.json`` exists there, but ``output/lvs.json``
+            # must NOT be committed: ``kct board-metrics`` + the site
+            # gallery key the "Ready" badge off ``lvs_clean`` (#3749), and
+            # a missing file renders the honest "LVS not run" chip.  See
+            # #4006 for the vacuity guard (gate ``clean`` on a nonzero
+            # bound-pin count).  This step only runs in ``--step all`` (the
             # ``--step route`` CI branch has no schematic).
             copper_clean, _label_clean = write_lvs_report(
                 sch_path,
@@ -2040,6 +2048,12 @@ def main() -> int:
                 require_clean=True,
                 run_copper=True,
                 run_label=False,
+            )
+            print(
+                "[lvs] WARNING: copper-LVS is VACUOUS on this fixture "
+                "(schematic has no wires, so 0 pins bind to nets; issue "
+                "#4006).  lvs.json is written for the CI e2e tmp gate "
+                "only -- never commit output/lvs.json."
             )
 
             # Export manufacturing bundle (#3147) so ``kct fleet status``
