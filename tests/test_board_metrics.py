@@ -418,6 +418,31 @@ def test_lvs_dirty_downgrades_status_to_partial(tmp_path: Path):
     assert m["status"] == "partial"
 
 
+def test_lvs_copper_mismatches_counted(tmp_path: Path):
+    # #4012 (board 07 shape): label leg clean (mismatches=[]) but the copper
+    # comparator reports real opens.  lvs_mismatches must count the copper
+    # leg too -- rendering "0 mismatches" for a clean=false report would be
+    # dishonest -- and the dirty verdict still downgrades status.
+    board = _make_board(
+        tmp_path,
+        lvs={
+            "$schema": "https://kicad-tools.org/schemas/lvs/v1.json",
+            "clean": False,
+            "mismatches": [],
+            "copper_mismatches": [
+                {"kind": "open", "net_a": n, "net_b": n, "pad_a": "U1.1", "pad_b": "U2.1"}
+                for n in ("DQ3", "DQ4", "MIPI_DAT0_N", "TMDS_D0_N", "TMDS_D1_N")
+            ],
+            "copper_vacuous": False,
+            "copper_bound_pad_count": 244,
+        },
+    )
+    m = extract_board_metrics(board)
+    assert m["lvs_clean"] is False
+    assert m["lvs_mismatches"] == 5
+    assert m["status"] == "partial"
+
+
 def test_vacuous_lvs_json_treated_as_lvs_not_run(tmp_path: Path):
     # A vacuous lvs.json (#4006: schematic bound zero pins, copper_vacuous
     # true) carries NO evidence either way -- both LVS fields are OMITTED

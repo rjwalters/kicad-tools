@@ -272,3 +272,91 @@ def test_default_mode_rejects_vacuous_as_dirty(tmp_path: Path) -> None:
     # the default clean-assertion path must exit 2, never 0.
     p = _write_json(tmp_path, _VACUOUS_PAYLOAD)
     assert check_copper_lvs.main([str(p)]) == 2
+
+
+# --- --expect-opens mode (#4012, board 07) ----------------------------------
+#
+# Known-opens contract for wired-schematic boards that route PARTIAL by
+# design (board 07: 5 seed-invariant unroutable nets, #3438).  The gate
+# passes ONLY when the result carries kind='open' mismatches on exactly the
+# named net set -- clean=true, a short, a vacuous verdict, an unexpected
+# open, or a missing expected open all trip it.
+
+_KNOWN_OPENS_ARG = "DQ3,DQ4,MIPI_DAT0_N"
+
+
+def _opens_payload(nets: list[str], extra: list[dict] | None = None) -> dict:
+    mismatches = [
+        {"kind": "open", "net_a": n, "net_b": n, "pad_a": "U1.1", "pad_b": "U2.1"} for n in nets
+    ]
+    if extra:
+        mismatches.extend(extra)
+    return {"clean": False, "bound_pad_count": 244, "mismatches": mismatches}
+
+
+def test_expect_opens_passes_on_exact_set(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    p = _write_json(tmp_path, _opens_payload(["DQ3", "DQ4", "MIPI_DAT0_N"]))
+    assert check_copper_lvs.main(["--expect-opens", _KNOWN_OPENS_ARG, str(p)]) == 0
+    assert "expected known opens" in capsys.readouterr().out
+
+
+def test_expect_opens_fails_on_clean_true(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The previously-unroutable nets got routed: the expectation is stale
+    # and the gate must force a deliberate upgrade to a clean assertion.
+    p = _write_json(tmp_path, {"clean": True, "mismatches": []})
+    assert check_copper_lvs.main(["--expect-opens", _KNOWN_OPENS_ARG, str(p)]) == 2
+    assert "graduate" in capsys.readouterr().out
+
+
+def test_expect_opens_fails_on_short(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # A short is a hard regression regardless of the known-opens allowance.
+    p = _write_json(
+        tmp_path,
+        _opens_payload(
+            ["DQ3", "DQ4", "MIPI_DAT0_N"],
+            extra=[{"kind": "short", "net_a": "A", "net_b": "B", "pad_a": "U1.1", "pad_b": "U1.2"}],
+        ),
+    )
+    assert check_copper_lvs.main(["--expect-opens", _KNOWN_OPENS_ARG, str(p)]) == 2
+    assert "short" in capsys.readouterr().out
+
+
+def test_expect_opens_fails_on_unexpected_open(tmp_path: Path) -> None:
+    p = _write_json(tmp_path, _opens_payload(["DQ3", "DQ4", "MIPI_DAT0_N", "SURPRISE_NET"]))
+    assert check_copper_lvs.main(["--expect-opens", _KNOWN_OPENS_ARG, str(p)]) == 2
+
+
+def test_expect_opens_fails_on_missing_expected_open(tmp_path: Path) -> None:
+    # One of the named nets is no longer open: the expectation must be
+    # updated deliberately (net became routable), so the gate trips.
+    p = _write_json(tmp_path, _opens_payload(["DQ3", "DQ4"]))
+    assert check_copper_lvs.main(["--expect-opens", _KNOWN_OPENS_ARG, str(p)]) == 2
+
+
+def test_expect_opens_fails_on_vacuous_verdict(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The schematic regressed to unwired: vacuity is never "known opens".
+    p = _write_json(tmp_path, _VACUOUS_PAYLOAD)
+    assert check_copper_lvs.main(["--expect-opens", _KNOWN_OPENS_ARG, str(p)]) == 2
+    assert "unwired" in capsys.readouterr().out
+
+
+def test_expect_opens_missing_clean_key_exits_1(tmp_path: Path) -> None:
+    p = _write_json(tmp_path, {"mismatches": []})
+    assert check_copper_lvs.main(["--expect-opens", _KNOWN_OPENS_ARG, str(p)]) == 1
+
+
+def test_expect_opens_empty_net_list_exits_1(tmp_path: Path) -> None:
+    p = _write_json(tmp_path, _opens_payload(["DQ3"]))
+    assert check_copper_lvs.main(["--expect-opens", " , ", str(p)]) == 1
+
+
+def test_expect_opens_mutually_exclusive_with_expect_vacuous(tmp_path: Path) -> None:
+    p = _write_json(tmp_path, _opens_payload(["DQ3"]))
+    with pytest.raises(SystemExit):
+        check_copper_lvs.main(["--expect-vacuous", "--expect-opens", "DQ3", str(p)])

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://kicad-tools.org/schemas/lvs/v1.json",
+  "clean": false,
+  "mismatches": [],
+  "copper_mismatches": [
+    {
+      "kind": "open",
+      "net_a": "DQ3",
+      "net_b": "DQ3",
+      "pad_a": "U1.28",
+      "pad_b": "U2.4"
+    },
+    {
+      "kind": "open",
+      "net_a": "DQ4",
+      "net_b": "DQ4",
+      "pad_a": "U1.32",
+      "pad_b": "U2.8"
+    },
+    {
+      "kind": "open",
+      "net_a": "MIPI_DAT0_N",
+      "net_b": "MIPI_DAT0_N",
+      "pad_a": "J1.4",
+      "pad_b": "U3.4"
+    },
+    {
+      "kind": "open",
+      "net_a": "TMDS_D0_N",
+      "net_b": "TMDS_D0_N",
+      "pad_a": "J2.2",
+      "pad_b": "U4.B2"
+    },
+    {
+      "kind": "open",
+      "net_a": "TMDS_D1_N",
+      "net_b": "TMDS_D1_N",
+      "pad_a": "J2.5",
+      "pad_b": "U4.B4"
+    }
+  ],
+  "copper_vacuous": false,
+  "copper_bound_pad_count": 244
+}
