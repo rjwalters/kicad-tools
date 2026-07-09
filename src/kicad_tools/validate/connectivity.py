@@ -737,9 +737,17 @@ class ConnectivityValidator:
 
         # Connect pads through track segments
         for seg in segments:
-            # Find pads at segment endpoints
-            start_pads = self._find_pads_at_point(seg.start, pad_positions)
-            end_pads = self._find_pads_at_point(seg.end, pad_positions)
+            # Find pads at segment endpoints (layer-gated, mirroring the
+            # extract_pad_partition fix: a trace endpoint at the XY of a
+            # pad with no copper on the trace's layer passes *under* the
+            # pad and is not a connection, so it must not count the pad
+            # as reached when checking net completeness)
+            start_pads = self._find_pads_at_point(
+                seg.start, pad_positions, pad_layers=pad_layers, layer=seg.layer
+            )
+            end_pads = self._find_pads_at_point(
+                seg.end, pad_positions, pad_layers=pad_layers, layer=seg.layer
+            )
 
             # Connect pads at start to pads at end
             for start_pad in start_pads:
