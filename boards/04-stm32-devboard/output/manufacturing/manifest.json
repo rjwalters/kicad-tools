@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.14.0",
-  "generated_at": "2026-06-19T05:29:43.706067+00:00",
+  "generated_at": "2026-07-09T19:15:27.944900+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,16 +13,16 @@
       "size": 1257
     },
     "gerbers.zip": {
-      "sha256": "03098ad99235c5b0fc159435b940e7b39ca578a657fc465c7a41c53b133618d1",
-      "size": 45294
+      "sha256": "3e7b102f12e54d2eeb2f09f657590880bb0dcee733b868edc91b0e39aba12871",
+      "size": 45446
     },
     "report.pdf": {
-      "sha256": "60ba8949725384ced449d8ce50117d0fbc0bed2d501c51205422b0e16d13f4f2",
-      "size": 1170345
+      "sha256": "83dc7a197e38478453feba7f3cedadc397bf6c9ac929e724f49aadd47f8123a4",
+      "size": 35168
     },
     "report.md": {
-      "sha256": "0725cab5eb42c5deb7a19a967494324a0a313267f9c00b7befe4a2a8d6c215d0",
-      "size": 3201
+      "sha256": "6b26a39a86de1c27c52842bc3308da8e3cc7f6afde18ad97fb077e6bcf98e82a",
+      "size": 3391
     },
     "assembly.png": {
       "sha256": "320bff9d08c1f72607421e4f62709a8c4eea6fbaec551f5a654671cf28ff9bdb",
@@ -49,15 +49,15 @@
       "size": 194208
     },
     "schematic_stm32_devboard.png": {
-      "sha256": "d42bc526f35b3c835a7db1f81bf89c52f560f69831be594299ba22683ddff1c4",
-      "size": 276645
+      "sha256": "0111515ac069f97a122cdb8dcbac08bcda9a51eb7d858a8cf588c4595d90d4d9",
+      "size": 276554
     },
     "kicad_project.zip": {
-      "sha256": "44a61d1594f097ffe04c8e662b4b71fde6e2e3a238feebd11387ebf136b23dba",
-      "size": 62731
+      "sha256": "7a0534f384025bdc89db0e949bdb5de6a3b287ae808532007e4e367edc3644e2",
+      "size": 62628
     },
     "README.txt": {
-      "sha256": "a5430d9550e6df1a9fb36f73dac88d139ccb07240f1e1cf4645be7bf46ada027",
+      "sha256": "0f71e96fb36ef1171ce78d69d27dcecfd74f875726d437219c4221500342aeeb",
       "size": 886
     }
   },
@@ -76,6 +76,11 @@
       "name": "schematic_file",
       "status": "OK",
       "message": "Schematic auto-detected: stm32_devboard.kicad_sch"
+    },
+    {
+      "name": "schematic_footprints",
+      "status": "OK",
+      "message": "All schematic symbols have a footprint assigned"
     },
     {
       "name": "board_outline",
@@ -106,7 +111,7 @@
       "name": "bom_fields",
       "status": "WARN",
       "message": "BOM field issues: 1 problem(s)",
-      "details": "17/17 active item(s) missing LCSC part number"
+      "details": "7/17 active item(s) missing LCSC part number (10 resolvable from spec)"
     },
     {
       "name": "bom_lcsc_values",
@@ -126,8 +131,8 @@
     {
       "name": "drc",
       "status": "FAIL",
-      "message": "DRC has 1 error(s)",
-      "details": "connectivity: Net 'GND' is partially routed: 1 of 18 pads stranded (connected island has 17 pads)"
+      "message": "DRC has 2 error(s)",
+      "details": "dimension_drill_clearance: Hole-to-hole clearance 0.350mm < minimum 0.500mm; dimension_drill_clearance: Hole-to-hole clearance 0.350mm < minimum 0.500mm"
     },
     {
       "name": "erc",

@@ -1816,6 +1816,67 @@ def _add_pcb_parser(subparsers) -> None:
         help="Preview the new page size without modifying the PCB file",
     )
 
+    # pcb center-on-sheet
+    pcb_center_sheet = pcb_subparsers.add_parser(
+        "center-on-sheet",
+        help="Center the board in the drawing sheet's usable area "
+        "(inside the frame, above the title block)",
+        description="Rigidly translate ALL board geometry by a single "
+        "grid-snapped (dx, dy) so the Edge.Cuts bounding box is centered in "
+        "the sheet's usable drawing area: inside the 10 mm frame border and "
+        "above the 35 mm title-block band (KiCad default worksheet). "
+        '(paper "User" W H) sheets are upgraded to the smallest standard '
+        "landscape size that fits the board with 15 mm slack per side. "
+        "Pure text transform with exact decimal arithmetic: only coordinate "
+        "atoms change, so routing, 45-degree copper and DRC results are "
+        "preserved exactly.",
+    )
+    pcb_center_sheet.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_center_sheet.add_argument(
+        "--paper",
+        default="auto",
+        help="Sheet handling: 'auto' (default: keep a fitting standard sheet, "
+        "upgrade User/too-small sheets), 'keep' (never change the sheet), or "
+        "an explicit landscape size (A4, A3, A2, A1, A0)",
+    )
+    pcb_center_sheet.add_argument(
+        "--margin",
+        type=float,
+        default=None,
+        help="Frame border inset per side in mm (default: 10)",
+    )
+    pcb_center_sheet.add_argument(
+        "--title-block",
+        dest="title_block",
+        type=float,
+        default=None,
+        help="Reserved title-block band height above the bottom frame line "
+        "in mm (default: 35 -- KiCad default worksheet block is 34 mm)",
+    )
+    pcb_center_sheet.add_argument(
+        "--grid",
+        type=float,
+        default=None,
+        help="Grid to snap the translation delta to in mm (default: 0.05)",
+    )
+    pcb_center_sheet.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: modify input PCB in place)",
+    )
+    pcb_center_sheet.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_center_sheet.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the would-be transform without modifying the PCB file",
+    )
+
     # pcb lock-footprints / unlock-footprints
     for _cmd_name, _help_verb in (
         ("lock-footprints", "Lock"),

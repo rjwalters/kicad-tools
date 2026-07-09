@@ -40,7 +40,7 @@
   (net 10 "USER_LED")
   (net 11 "LED_K")
   (net 12 "BOOT0")
-  (gr_rect (start 100.0 100.0) (end 160.0 140.0)
+  (gr_rect (start 118.5 67.5) (end 178.5 107.5)
     (stroke (width 0.1) (type default))
     (fill none)
     (layer "Edge.Cuts")
@@ -49,7 +49,7 @@
   (footprint "Package_TO_SOT_SMD:SOT-223-3_TabPin2"
     (layer "F.Cu")
     (uuid "5d5a3331-52b0-4633-b040-89cff59d0a70")
-    (at 108.0 110.0)
+    (at 126.5 77.5)
     (fp_text reference "U1" (at 0 -4) (layer "F.SilkS") (uuid "763a948b-41e7-46c6-807b-e8464c7a3f76")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -75,7 +75,7 @@
   (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "172c38d3-0217-41fb-b7bf-f59635beecf4")
-    (at 104.0 118.0)
+    (at 122.5 85.5)
     (fp_text reference "C1" (at 0 -1.5) (layer "F.SilkS") (uuid "4564ae4a-7cbc-4e73-ab5c-23c7f806e3c5")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -99,7 +99,7 @@
   (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "cfc54074-10e0-4e00-bf63-470d9f039160")
-    (at 115.0 110.0)
+    (at 133.5 77.5)
     (fp_text reference "C2" (at 0 -1.5) (layer "F.SilkS") (uuid "3271a184-f9c8-4f69-9c9a-c4f47b4b736d")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -123,7 +123,7 @@
   (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "be705d72-f13a-4634-956e-5ed1450c225d")
-    (at 115.0 116.0)
+    (at 133.5 83.5)
     (fp_text reference "C3" (at 0 -1.5) (layer "F.SilkS") (uuid "038159ee-c679-4ce0-b46e-820bf6c60922")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -147,7 +147,7 @@
   (footprint "Package_QFP:LQFP-48_7x7mm_P0.5mm"
     (layer "F.Cu")
     (uuid "ccc44cf8-61ff-4b3d-8ff6-b8a3f417c465")
-    (at 131.0 122.0)
+    (at 149.5 89.5)
     (fp_text reference "U2" (at 0 -5.5) (layer "F.SilkS") (uuid "6ffa1b5c-6829-4802-97a0-cbd7cd52f1b9")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -217,7 +217,7 @@
   (footprint "Crystal:Crystal_HC49-4H_Vertical"
     (layer "F.Cu")
     (uuid "a49fb276-8ee0-4deb-a0be-b8a4b5dbfc00")
-    (at 122.0 110.0)
+    (at 140.5 77.5)
     (fp_text reference "Y1" (at 0 -3) (layer "F.SilkS") (uuid "47d124ce-2022-432b-b605-7a9c9e7cfe31")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -241,7 +241,7 @@
   (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "8d8fa65e-c558-44fa-8f05-1fd797e9d692")
-    (at 119.0 116.0)
+    (at 137.5 83.5)
     (fp_text reference "C10" (at 0 -1.5) (layer "F.SilkS") (uuid "9b265b5e-854c-420a-953a-c85fcc321ac9")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -265,7 +265,7 @@
   (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "5a928962-2417-4092-bb3d-176a49c84e9b")
-    (at 125.0 116.0)
+    (at 143.5 83.5)
     (fp_text reference "C11" (at 0 -1.5) (layer "F.SilkS") (uuid "f7b64170-1193-4c02-b70a-98fb8025ba6e")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -289,7 +289,7 @@
   (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "ea2bd3e3-2a6b-4e75-a5c5-160529194944")
-    (at 126.0 132.0)
+    (at 144.5 99.5)
     (fp_text reference "C12" (at 0 -1.5) (layer "F.SilkS") (uuid "3cd84387-09f6-492b-b843-6d83356f6683")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -313,7 +313,7 @@
   (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "da7370fc-dd24-4696-a506-d83fa6f9117c")
-    (at 131.0 132.0)
+    (at 149.5 99.5)
     (fp_text reference "C13" (at 0 -1.5) (layer "F.SilkS") (uuid "489ca24d-2222-4cef-a1e2-ae44291c1dd5")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -337,7 +337,7 @@
   (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "a9474458-4ed0-47eb-992b-4f5b4a9b35e5")
-    (at 136.0 132.0)
+    (at 154.5 99.5)
     (fp_text reference "C14" (at 0 -1.5) (layer "F.SilkS") (uuid "68d206fc-66d3-4e66-9946-587d98ee3351")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -361,7 +361,7 @@
   (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "056688e8-babf-4ace-8734-e7ef4fdc7111")
-    (at 126.0 136.0)
+    (at 144.5 103.5)
     (fp_text reference "C15" (at 0 -1.5) (layer "F.SilkS") (uuid "bde87fa1-8cdc-42ed-9e1a-a126a3a62812")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -385,7 +385,7 @@
   (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "718d1326-b4d1-4c08-84bc-a680e8f0e62c")
-    (at 131.0 136.0)
+    (at 149.5 103.5)
     (fp_text reference "C16" (at 0 -1.5) (layer "F.SilkS") (uuid "88417356-af80-4fa8-a6a3-3064694f4f76")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -409,7 +409,7 @@
   (footprint "Resistor_SMD:R_0805_2012Metric"
     (layer "F.Cu")
     (uuid "8c11db5f-10aa-4084-b819-315b32fe2994")
-    (at 147.0 108.0)
+    (at 165.5 75.5)
     (fp_text reference "R1" (at 0 -1.5) (layer "F.SilkS") (uuid "faf53fb3-407d-4814-a199-17e835447c3c")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -433,7 +433,7 @@
   (footprint "LED_SMD:LED_0805_2012Metric"
     (layer "F.Cu")
     (uuid "a5345961-3832-475d-a266-c2679931ee00")
-    (at 147.0 112.0)
+    (at 165.5 79.5)
     (fp_text reference "D1" (at 0 -1.5) (layer "F.SilkS") (uuid "3b2553d7-b9bf-464e-853a-5faf9dd3ef84")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -457,7 +457,7 @@
   (footprint "Resistor_SMD:R_0805_2012Metric"
     (layer "F.Cu")
     (uuid "258e56cf-8ea0-474a-831c-3bec21d1f257")
-    (at 147.0 122.0)
+    (at 165.5 89.5)
     (fp_text reference "R2" (at 0 -1.5) (layer "F.SilkS") (uuid "0f66de6c-a398-43e2-acdc-242a506db748")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -481,7 +481,7 @@
   (footprint "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"
     (layer "F.Cu")
     (uuid "43649998-f9b5-46ed-8699-499b0d1e431b")
-    (at 155.0 122.0)
+    (at 173.5 89.5)
     (fp_text reference "J1" (at 0 -8) (layer "F.SilkS") (uuid "63f439df-559c-490d-9b72-6bdfbd0c263f")
       (effects (font (size 1 1) (thickness 0.15)))
     )

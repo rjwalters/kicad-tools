@@ -1,8 +1,8 @@
 ---
 title: "charlieplex_3x3_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-16 | jlcpcb-tier1"
+author: "kicad-tools 0.14.0"
+date: "Rev 1 | 2026-07-09 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -111,21 +111,27 @@ Charlieplex LED Grid
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Warnings | 0 |
+| Warnings | 6 |
 | Blocking | 0 |
 
 **Status**: PASS
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| copper_sliver | 6 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: READY
+**Verdict**: WARNING
 
 ### Action Items
 
 - **[OPTIONAL]** Verify zone fill in KiCad for 1 zone-connected nets
+- **[OPTIONAL]** Review 6 DRC warnings
 - **[OPTIONAL]** Analog net: LINE_A — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_B — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_C — audio signal; keep short, away from digital/switching nets

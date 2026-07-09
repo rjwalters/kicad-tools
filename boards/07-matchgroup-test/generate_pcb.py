@@ -27,6 +27,8 @@ import sys
 import uuid
 from pathlib import Path
 
+from kicad_tools.pcb.center_sheet import centered_origin
+
 
 def generate_uuid() -> str:
     """Generate a KiCad-format UUID."""
@@ -38,8 +40,10 @@ def generate_uuid() -> str:
 # match group to escape and meander.
 BOARD_WIDTH = 110.0
 BOARD_HEIGHT = 95.0
-BOARD_ORIGIN_X = 100.0
-BOARD_ORIGIN_Y = 100.0
+# Sheet-center the outline: middle of the A4 sheet's usable drawing area
+# (inside the 10 mm frame border, above the 35 mm title-block band).
+# All placement below derives from BOARD_ORIGIN_*.
+BOARD_ORIGIN_X, BOARD_ORIGIN_Y = centered_origin(BOARD_WIDTH, BOARD_HEIGHT)
 
 # =============================================================================
 # Net Definitions

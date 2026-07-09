@@ -32,7 +32,7 @@ Match-Group Test Board
 
 N-trace + group-of-pairs match-group regression testbench
 
-Epic #2661 Phase 3L (issue #2724)
+Epic #2661 Phase 3L (issue #2724); wired netlist #4012
 
 ### Power Architecture
 

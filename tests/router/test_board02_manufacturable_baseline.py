@@ -11,12 +11,14 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 24 vias / 328.16mm total
+- **Deterministic output**: 22 routes / 24 vias / 327.93mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
-  has fully converged.  Segment count is 397 on macOS-arm64 and 399
-  on Linux-x86_64 (platform-dependent collinear resplit at identical
-  geometry; see the #3545 PLATFORM NOTE in
-  ``test_routing_output_deterministic_across_seeds``).  (387 segments
+  has fully converged.  Segment count is 393 on macOS-arm64
+  (platform-dependent collinear resplit at identical geometry; see
+  the #3545 PLATFORM NOTE in
+  ``test_routing_output_deterministic_across_seeds``).  (397/328.16mm
+  before the 2026-07-09 sheet-centering translation of the unrouted
+  artifact -- kct pcb center-on-sheet; 387 segments
   before the #3545 static-halo rip-up survival; 193/325.08mm before
   the #3532 45-degree pad-tail doglegs; 299/325.55 before the #3436
   burn-down straightening (#3203/#3510); 206/324.92 before the #3438
@@ -606,14 +608,24 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # that the cross-seed equality check above would silently allow
     # (e.g. a router cost-function tweak that improves all seeds in
     # lockstep -- still a measurable regression vs the PR #3265 baseline).
+    # Re-baselined 2026-07-09 for the sheet-centering PR (kct pcb
+    # center-on-sheet): the committed unrouted artifact was rigidly
+    # translated by (+23.5, -40) mm to center the board in the A4
+    # sheet's usable drawing area.  Routing the board at the new
+    # absolute position converges to (22, 393, 24, 327.93) on
+    # macOS-arm64 -- same 22 routes / 24 vias / full 8/8 reach and
+    # DRC 0 at jlcpcb-tier1, with a -0.23 mm length and -4 segment
+    # delta from grid-relative pad alignment at the new absolute
+    # coordinates.  Prior pin (22, 397, 24, 328.16), #3545 era.
     EXPECTED_ROUTES = 22
     EXPECTED_VIAS = 24
-    EXPECTED_LENGTH = 328.16
-    # Measured: 397 on macOS-arm64, 399 on CI Linux-x86_64 (see
-    # PLATFORM NOTE above).  Band is deliberately tight (+/-3 around
-    # the two measured values) so a real collinear-handling regression
-    # still trips it.
-    EXPECTED_SEGMENTS_RANGE = (394, 402)
+    EXPECTED_LENGTH = 327.93
+    # Measured: 393 on macOS-arm64.  The pre-centering baseline showed
+    # a +2 platform skew on CI Linux-x86_64 (397 vs 399; see PLATFORM
+    # NOTE above), so the band keeps the same +/-3 envelope around the
+    # macOS value and its assumed Linux sibling (395).  Deliberately
+    # tight so a real collinear-handling regression still trips it.
+    EXPECTED_SEGMENTS_RANGE = (390, 398)
     got_routes, got_segments, got_vias, got_length = ref
     exact = (got_routes, got_vias, got_length)
     expected_exact = (EXPECTED_ROUTES, EXPECTED_VIAS, EXPECTED_LENGTH)

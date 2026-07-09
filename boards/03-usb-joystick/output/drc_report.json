@@ -1,19 +1,82 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-3787/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.claude/worktrees/agent-ad6fa686b6d3e80e2/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 2,
   "summary": {
     "errors": 0,
-    "warnings": 16,
-    "infos": 0,
-    "rules_checked": 29,
+    "warnings": 20,
+    "infos": 2,
+    "rules_checked": 34,
     "rules_checked_by_rule": {
       "connectivity": 1,
-      "diffpair_clearance_intra": 1
+      "copper_sliver": 1,
+      "diffpair_clearance_intra": 1,
+      "diffpair_length_skew": 1,
+      "diffpair_routing_continuity": 1
     },
     "passed": true
   },
   "violations": [
+    {
+      "rule_id": "copper_sliver",
+      "type": "copper_sliver",
+      "severity": "warning",
+      "message": "Copper sliver on F.Cu: region narrower than minimum copper width 0.127mm (approx width 0.085mm, area 0.1942mm^2)",
+      "location": [
+        38.266,
+        38.867
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0852,
+      "required_value": 0.127,
+      "items": [],
+      "nets": []
+    },
+    {
+      "rule_id": "copper_sliver",
+      "type": "copper_sliver",
+      "severity": "warning",
+      "message": "Copper sliver on F.Cu: region narrower than minimum copper width 0.127mm (approx width 0.032mm, area 0.0665mm^2)",
+      "location": [
+        29.0,
+        33.258
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0319,
+      "required_value": 0.127,
+      "items": [],
+      "nets": []
+    },
+    {
+      "rule_id": "diffpair_length_skew",
+      "type": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair USB_D+/USB_D- length-skew 0.000 mm within tolerance 0.500 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.0,
+      "required_value": 0.5,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ]
+    },
+    {
+      "rule_id": "diffpair_routing_continuity",
+      "type": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair USB_D+/USB_D- coupled 92.5% of its length (>= 70.0% required)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.9253,
+      "required_value": 0.7,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ]
+    },
     {
       "rule_id": "silkscreen_text_height",
       "type": "silkscreen_text_height",
@@ -283,6 +346,42 @@
       "required_value": 1.0,
       "items": [
         "C1 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silk_over_copper",
+      "type": "silk_over_copper",
+      "severity": "warning",
+      "message": "Silkscreen R11 (reference) overlaps exposed copper of R10 pad 1",
+      "location": [
+        27.0,
+        32.8
+      ],
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "R11 (reference)",
+        "R10 pad 1"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silk_over_copper",
+      "type": "silk_over_copper",
+      "severity": "warning",
+      "message": "Silkscreen C11 (reference) overlaps exposed copper of C10 pad 1",
+      "location": [
+        29.0,
+        32.8
+      ],
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C11 (reference)",
+        "C10 pad 1"
       ],
       "nets": []
     }

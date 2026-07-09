@@ -1459,13 +1459,16 @@ def test_joystick_j2_pin1_inside_pcb_edge(regenerated_board: Path) -> None:
 
     # J2-1 (GND) sits at pad offset -4 mm from J2 centre.  Pad diameter
     # is 1.6 mm, so the pad's west edge is at j2_cx - 4 - 0.8 = j2_cx - 4.8.
-    # BOARD_ORIGIN_X = 100 (world coords).  We need pad-west-edge >
-    # BOARD_ORIGIN_X (>= 0 mm slack), and ideally with some safety margin.
+    # We need pad-west-edge > BOARD_ORIGIN_X (>= 0 mm slack), and ideally
+    # with some safety margin.
     pad1_centre_x = j2_cx - 4.0
     pad1_west_edge_x = pad1_centre_x - 0.8  # 1.6 mm dia / 2
 
-    # BOARD_ORIGIN_X is 100.0 from the generator constant.
-    board_west_x = 100.0
+    # The generator derives BOARD_ORIGIN_X from centered_origin() (sheet
+    # centering); compute the same value here instead of pinning 100.0.
+    from kicad_tools.pcb.center_sheet import centered_origin
+
+    board_west_x, _ = centered_origin(80.0, 60.0)  # board 03 is 80x60 mm
     edge_clearance = pad1_west_edge_x - board_west_x
 
     assert edge_clearance > 0.0, (

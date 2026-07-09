@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.14.0",
-  "generated_at": "2026-07-09T03:21:22.462418+00:00",
+  "generated_at": "2026-07-09T19:15:13.203110+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,12 +13,12 @@
       "size": 1305
     },
     "gerbers.zip": {
-      "sha256": "698a58c06acc43c48eeffe37a1c41c16a9b1172e75d76cd971f6f2f90d27604e",
-      "size": 49195
+      "sha256": "0e69189eb32e4ff3ce983df937bc01bd9a96d70e19725588870fa9420b6d98dd",
+      "size": 49100
     },
     "report.pdf": {
-      "sha256": "fbc1369f113847037f61ed5d0b8d439f43e8ccbccac3d6a1a47e48831674c046",
-      "size": 35957
+      "sha256": "8e6b70bf99e61073787f78618627ce8f3e7c3f48805c8fc290eda6aacd4b2f91",
+      "size": 35960
     },
     "report.md": {
       "sha256": "09c68f01cdfb7b948876257b47fcf48ce9728451ef596623df9a91769046a66b",
@@ -53,11 +53,11 @@
       "size": 378941
     },
     "kicad_project.zip": {
-      "sha256": "3bce67ae2d336d5c7bc4b656b22266aa42838fb527c6a9c65e7732e0041587e8",
-      "size": 74788
+      "sha256": "1693f73323de23fc9b9b4a7f94b0f4cceae79300ae79b64a2f1a131452a1cb03",
+      "size": 74548
     },
     "README.txt": {
-      "sha256": "897cbf78e576d8197461fec7b45b77ea87014df973fd20f7ad7fc300541e884a",
+      "sha256": "eef56fdf8e4cad658bec5f78447f24cc75a7f25830bd7bfe6b5723b434bba9d5",
       "size": 999
     }
   },
@@ -132,7 +132,7 @@
     {
       "name": "drc",
       "status": "WARN",
-      "message": "DRC passed with 16 warning(s)"
+      "message": "DRC passed with 22 warning(s)"
     },
     {
       "name": "erc",

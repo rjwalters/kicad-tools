@@ -32,7 +32,7 @@ Differential Pair Test Board
 
 Multi-protocol HSDI regression testbench
 
-Epic #2556 Phase 4L (issue #2658)
+Epic #2556 Phase 4L (issue #2658); wired netlist #4012
 
 ### Communication Interfaces
 

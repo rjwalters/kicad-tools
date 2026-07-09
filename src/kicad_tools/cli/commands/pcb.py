@@ -12,7 +12,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, add-3d-models, remove-footprint, move-footprint, page-fit, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses"
         )
         return 1
 
@@ -52,6 +52,10 @@ def run_pcb_command(args) -> int:
     # Handle page-fit command
     if args.pcb_command == "page-fit":
         return _run_page_fit_command(args, pcb_path)
+
+    # Handle center-on-sheet command
+    if args.pcb_command == "center-on-sheet":
+        return _run_center_on_sheet_command(args, pcb_path)
 
     # Handle lock-footprints / unlock-footprints commands
     if args.pcb_command in ("lock-footprints", "unlock-footprints"):
@@ -765,6 +769,23 @@ def _run_page_fit_command(args, pcb_path: Path) -> int:
         dry_run=dry_run,
         output_path=output_path,
         output_format=output_format,
+    )
+
+
+def _run_center_on_sheet_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb center-on-sheet' command."""
+    from kicad_tools.cli.pcb_center_on_sheet import run_center_on_sheet
+
+    output = getattr(args, "output", None)
+    return run_center_on_sheet(
+        pcb_path=pcb_path,
+        output_path=Path(output) if output else None,
+        paper=getattr(args, "paper", "auto"),
+        margin=getattr(args, "margin", None),
+        title_block=getattr(args, "title_block", None),
+        grid=getattr(args, "grid", None),
+        dry_run=getattr(args, "dry_run", False),
+        output_format=getattr(args, "format", "text"),
     )
 
 

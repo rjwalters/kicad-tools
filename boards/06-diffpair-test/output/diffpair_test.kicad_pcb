@@ -56,7 +56,7 @@
   (net 24 "USB_CC1")
   (net 25 "USB_CC2")
   (net 26 "MIPI_RST")
-  (gr_rect (start 100.0 100.0) (end 200.0 180.0)
+  (gr_rect (start 98.5 47.5) (end 198.5 127.5)
     (stroke (width 0.1) (type default))
     (fill none)
     (layer "Edge.Cuts")
@@ -65,7 +65,7 @@
   (footprint "Connector_USB:USB_C_Receptacle_USB2.0"
     (layer "F.Cu")
     (uuid "2abc4e86-aaf4-4c77-9758-0391be0662de")
-    (at 115.0 108.0)
+    (at 113.5 55.5)
     (fp_text reference "J1" (at 0 -3) (layer "F.SilkS") (uuid "65351a6c-69fe-437d-a644-06f4a6d79726")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -102,7 +102,7 @@
   (footprint "Connector_PCIE:PCIE_Mini_Edge"
     (layer "F.Cu")
     (uuid "e64f5278-18e7-437b-952d-42d552f4d26b")
-    (at 195.0 145.0)
+    (at 193.5 92.5)
     (fp_text reference "J3" (at 0 -7) (layer "F.SilkS") (uuid "1a82f321-edd3-4db3-b504-1cc2569703fc")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -125,7 +125,7 @@
   (footprint "Connector_FFC:FFC_4P_0.5mm"
     (layer "F.Cu")
     (uuid "0dc8dc00-97e0-4535-9f9a-a95869504449")
-    (at 108.0 170.0)
+    (at 106.5 117.5)
     (fp_text reference "J4" (at 0 -3) (layer "F.SilkS") (uuid "f33a5739-b4e8-4f99-aee8-e93fe7b2ce16")
       (effects (font (size 0.8 0.8) (thickness 0.12)))
     )
@@ -143,7 +143,7 @@
   (footprint "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm"
     (layer "F.Cu")
     (uuid "26fc26d5-8012-40a4-ba3a-55f81463b5be")
-    (at 115.0 122.0)
+    (at 113.5 69.5)
     (fp_text reference "U1" (at 0 -4) (layer "F.SilkS") (uuid "0715558d-2fe3-441d-89aa-a5bab579cb80")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -197,7 +197,7 @@
   (footprint "Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm"
     (layer "F.Cu")
     (uuid "fcf0f437-0ab4-4c5a-88c0-e86110b149f7")
-    (at 155.0 120.0)
+    (at 153.5 67.5)
     (fp_text reference "U2" (at 0 -4) (layer "F.SilkS") (uuid "5789d13f-0394-4638-b3ea-e3b19894306d")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -257,7 +257,7 @@
   (footprint "Package_QFP:LQFP-48_7x7mm_P0.5mm"
     (layer "F.Cu")
     (uuid "e53df1e7-eec0-4156-8b9c-11a792ad5bc2")
-    (at 170.0 145.0)
+    (at 168.5 92.5)
     (fp_text reference "U3" (at 0 -5) (layer "F.SilkS") (uuid "4582d905-ae80-415c-b9f9-d442b3264f68")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -327,7 +327,7 @@
   (footprint "Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm"
     (layer "F.Cu")
     (uuid "93e4429c-354d-4875-a0c3-99f6da11cd46")
-    (at 130.0 170.0)
+    (at 128.5 117.5)
     (fp_text reference "U4" (at 0 -3) (layer "F.SilkS") (uuid "26fd1bf4-967a-444c-9233-5bd79b3ab656")
       (effects (font (size 0.8 0.8) (thickness 0.12)))
     )

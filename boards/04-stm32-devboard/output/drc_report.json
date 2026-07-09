@@ -1,35 +1,74 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-3797/boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.claude/worktrees/agent-ad6fa686b6d3e80e2/boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 2,
   "summary": {
-    "errors": 1,
-    "warnings": 0,
+    "errors": 2,
+    "warnings": 1,
     "infos": 0,
-    "rules_checked": 29,
+    "rules_checked": 32,
     "rules_checked_by_rule": {
-      "connectivity": 1
+      "connectivity": 1,
+      "copper_sliver": 1
     },
     "passed": false
   },
   "violations": [
     {
-      "rule_id": "connectivity",
-      "type": "connectivity",
-      "severity": "error",
-      "message": "Net 'GND' is partially routed: 1 of 18 pads stranded (connected island has 17 pads)",
+      "rule_id": "copper_sliver",
+      "type": "copper_sliver",
+      "severity": "warning",
+      "message": "Copper sliver on F.Cu: region narrower than minimum copper width 0.127mm (approx width 0.028mm, area 0.0277mm^2)",
       "location": [
-        33.25,
-        26.1625
+        32.74,
+        31.781
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0277,
+      "required_value": 0.127,
+      "items": [],
+      "nets": []
+    },
+    {
+      "rule_id": "dimension_drill_clearance",
+      "type": "dimension_drill_clearance",
+      "severity": "error",
+      "message": "Hole-to-hole clearance 0.350mm < minimum 0.500mm",
+      "location": [
+        26.837249999999997,
+        22.5
       ],
       "layer": null,
-      "actual_value": null,
-      "required_value": null,
+      "actual_value": 0.3500002499999375,
+      "required_value": 0.5,
       "items": [
-        "U2.23"
+        "GND",
+        "NRST"
       ],
       "nets": [
-        "GND"
+        "GND",
+        "NRST"
+      ]
+    },
+    {
+      "rule_id": "dimension_drill_clearance",
+      "type": "dimension_drill_clearance",
+      "severity": "error",
+      "message": "Hole-to-hole clearance 0.350mm < minimum 0.500mm",
+      "location": [
+        26.837500000000006,
+        22.0
+      ],
+      "layer": null,
+      "actual_value": 0.35,
+      "required_value": 0.5,
+      "items": [
+        "OSC_OUT",
+        "NRST"
+      ],
+      "nets": [
+        "OSC_OUT",
+        "NRST"
       ]
     }
   ]

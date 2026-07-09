@@ -1,5 +1,5 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.claude/worktrees/agent-adc50049687a0fbe8/boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.claude/worktrees/agent-ad6fa686b6d3e80e2/boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
@@ -356,24 +356,5 @@
         "unconnected-(U10-PB5-Pad28)"
       ]
     }
-  ],
-  "meta_checks": {
-    "drc": {
-      "status": "PASSED",
-      "detail": "36 rules checked, 0 error(s), 11 warning(s)"
-    },
-    "erc": {
-      "status": "PASSED",
-      "detail": "0 error(s), 14 warning(s)"
-    },
-    "lvs": {
-      "status": "PASSED",
-      "detail": "label + copper: 0 mismatch(es)"
-    },
-    "manifest": {
-      "status": "PASSED",
-      "detail": "manifest.json mtime within tolerance of routed PCB mtime"
-    },
-    "overall": "PASSED"
-  }
+  ]
 }

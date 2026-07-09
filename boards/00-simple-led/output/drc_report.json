@@ -1,16 +1,48 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/boards/00-simple-led/output/simple_led_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.claude/worktrees/agent-ad6fa686b6d3e80e2/boards/00-simple-led/output/simple_led_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
   "layers": 2,
   "summary": {
     "errors": 0,
-    "warnings": 0,
+    "warnings": 2,
     "infos": 0,
-    "rules_checked": 29,
+    "rules_checked": 32,
     "rules_checked_by_rule": {
-      "connectivity": 1
+      "connectivity": 1,
+      "copper_sliver": 1
     },
     "passed": true
   },
-  "violations": []
+  "violations": [
+    {
+      "rule_id": "copper_sliver",
+      "type": "copper_sliver",
+      "severity": "warning",
+      "message": "Copper sliver on F.Cu: region narrower than minimum copper width 0.127mm (approx width 0.062mm, area 0.0733mm^2)",
+      "location": [
+        5.337,
+        9.935
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0616,
+      "required_value": 0.127,
+      "items": [],
+      "nets": []
+    },
+    {
+      "rule_id": "copper_sliver",
+      "type": "copper_sliver",
+      "severity": "warning",
+      "message": "Copper sliver on F.Cu: region narrower than minimum copper width 0.127mm (approx width 0.062mm, area 0.0733mm^2)",
+      "location": [
+        4.662,
+        9.933
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0615,
+      "required_value": 0.127,
+      "items": [],
+      "nets": []
+    }
+  ]
 }

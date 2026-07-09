@@ -168,8 +168,12 @@ class TestBoard03UnconditionalUsbcStitch:
         pads (the committed board's persisted fill does, on most hosts), the
         unconditional pass must still place a via at each F.Cu-only USB-C GND
         pad so the result does not depend on which fill happened to bond it.
-        The four pads are J1.A1 (137.25,108), J1.A12 (142.75,108),
-        J1.B1 (142.75,109), J1.B12 (137.25,109).
+        The four pads are J1.A1 (145.75,65.5), J1.A12 (151.25,65.5),
+        J1.B1 (151.25,66.5), J1.B12 (145.75,66.5).
+
+        (Pad coordinates updated for the sheet-centering translation of the
+        committed board-03 artifact: dx=+8.5, dy=-42.5 -- kct pcb
+        center-on-sheet.)
         """
         sch, pcb = board03_artifacts
         add_gnd_stitching_vias = _load_add_gnd_stitching_vias()
@@ -181,7 +185,9 @@ class TestBoard03UnconditionalUsbcStitch:
         # route whose fill happened to bond the pads (the single-island
         # detect result that shipped the #3841 bug).
         text = pcb.read_text()
-        for coord in ("137.25 108", "142.75 108", "142.75 109", "137.25 109"):
+        # J1 shield pad positions in the sheet-centered committed artifact
+        # (was 137.25/142.75 x 108/109 before the center-on-sheet shift).
+        for coord in ("145.75 65.5", "151.25 65.5", "151.25 66.5", "145.75 66.5"):
             text = re.sub(
                 r"\t\(via\n\t\t\(at " + re.escape(coord) + r"\)\n.*?\t\)\n",
                 "",
@@ -196,7 +202,7 @@ class TestBoard03UnconditionalUsbcStitch:
         assert added == 4, f"expected 4 USB-C GND stitch vias, added {added}"
 
         out = work_pcb.read_text()
-        for coord in ("137.25 108", "142.75 108", "142.75 109", "137.25 109"):
+        for coord in ("145.75 65.5", "151.25 65.5", "151.25 66.5", "145.75 66.5"):
             assert f"(at {coord})" in out, f"no GND stitch via placed at J1 pad ({coord})"
 
 
