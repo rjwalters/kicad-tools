@@ -31,6 +31,7 @@ from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
+from kicad_tools.pcb.center_sheet import centered_origin
 from kicad_tools.router.partial_rescue import RescueConfig
 from kicad_tools.router.partial_rescue import rescue_partial_nets as shared_rescue_partial_nets
 from kicad_tools.schematic.blocks import (
@@ -1442,8 +1443,10 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # from the new corners via the BOARD_ORIGIN + offset arithmetic below.
     BOARD_WIDTH = 80.0
     BOARD_HEIGHT = 100.0
-    BOARD_ORIGIN_X = 100.0
-    BOARD_ORIGIN_Y = 100.0
+    # Sheet-center the outline: middle of the A4 sheet's usable drawing area
+    # (inside the 10 mm frame border, above the 35 mm title-block band).
+    # All placement below derives from BOARD_ORIGIN_*.
+    BOARD_ORIGIN_X, BOARD_ORIGIN_Y = centered_origin(BOARD_WIDTH, BOARD_HEIGHT)
 
     # Mounting hole positions (M3 at corners, 3mm inset)
     MH_INSET = 3.0

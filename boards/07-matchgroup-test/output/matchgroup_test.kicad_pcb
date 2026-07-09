@@ -64,7 +64,7 @@
   (net 32 "A5")
   (net 33 "A6")
   (net 34 "A7")
-  (gr_rect (start 100.0 100.0) (end 210.0 195.0)
+  (gr_rect (start 93.5 40) (end 203.5 135)
     (stroke (width 0.1) (type default))
     (fill none)
     (layer "Edge.Cuts")
@@ -73,7 +73,7 @@
   (footprint "Package_DFN_QFN:QFN-48-1EP_7x7mm_P0.5mm"
     (layer "F.Cu")
     (uuid "1790b718-24bc-428c-90b1-8ac082bc091e")
-    (at 120.0 125.0)
+    (at 113.5 65)
     (fp_text reference "U1" (at 0 -6) (layer "F.SilkS") (uuid "9e7c6a7d-ce9b-40b2-aeb2-3f3f855727eb")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -143,7 +143,7 @@
   (footprint "Package_DFN_QFN:QFN-48-1EP_7x7mm_P0.5mm"
     (layer "F.Cu")
     (uuid "ca8e69a2-bbbd-4431-8082-ecd0c503a1c4")
-    (at 150.0 125.0)
+    (at 143.5 65)
     (fp_text reference "U2" (at 0 -6) (layer "F.SilkS") (uuid "6d377585-4726-4177-9773-9e011f59ced9")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -213,7 +213,7 @@
   (footprint "Connector_FFC:FFC_6P_1.0mm"
     (layer "F.Cu")
     (uuid "8332c854-d559-40d9-9f27-180fb5163b1c")
-    (at 115.0 155.0)
+    (at 108.5 95)
     (fp_text reference "J1" (at 0 -3) (layer "F.SilkS") (uuid "1c1ebcfd-5723-4c0d-a00c-8178a4d1f06e")
       (effects (font (size 0.8 0.8) (thickness 0.12)))
     )
@@ -232,7 +232,7 @@
   (footprint "Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm"
     (layer "F.Cu")
     (uuid "ada3be1e-53e3-47b0-a54c-1099c3bc34c3")
-    (at 135.0 155.0)
+    (at 128.5 95)
     (fp_text reference "U3" (at 0 -3) (layer "F.SilkS") (uuid "8cf8c93d-f09a-4903-8f9c-780094ec246b")
       (effects (font (size 0.8 0.8) (thickness 0.12)))
     )
@@ -278,7 +278,7 @@
   (footprint "Connector_Video:HDMI_A_Receptacle"
     (layer "F.Cu")
     (uuid "b126a22b-4e2b-4774-aa1e-0115798543c5")
-    (at 160.0 155.0)
+    (at 153.5 95)
     (fp_text reference "J2" (at 0 -3) (layer "F.SilkS") (uuid "ef0cb596-2e4d-46b1-ac5a-9e23a53527f7")
       (effects (font (size 0.8 0.8) (thickness 0.12)))
     )
@@ -299,7 +299,7 @@
   (footprint "Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm"
     (layer "F.Cu")
     (uuid "b00df64e-98f2-46f2-b430-ead8cd2880cf")
-    (at 185.0 155.0)
+    (at 178.5 95)
     (fp_text reference "U4" (at 0 -4) (layer "F.SilkS") (uuid "a9437058-5eeb-421d-ad49-c94f52a8e037")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -359,7 +359,7 @@
   (footprint "Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"
     (layer "F.Cu")
     (uuid "78e13054-2012-4a8e-97dd-14cbc5449dd2")
-    (at 120.0 180.0)
+    (at 113.5 120)
     (fp_text reference "J3" (at 0 -3) (layer "F.SilkS") (uuid "1423f931-3b93-4d34-9d84-22dae3d1064e")
       (effects (font (size 0.8 0.8) (thickness 0.12)))
     )
@@ -390,7 +390,7 @@
   (footprint "Package_QFP:LQFP-48_7x7mm_P0.5mm"
     (layer "F.Cu")
     (uuid "7feb9160-06a8-4abb-9d01-e83febe1680b")
-    (at 160.0 180.0)
+    (at 153.5 120)
     (fp_text reference "U5" (at 0 -5) (layer "F.SilkS") (uuid "34f12a84-af7b-4658-958a-d84f70424689")
       (effects (font (size 1 1) (thickness 0.15)))
     )

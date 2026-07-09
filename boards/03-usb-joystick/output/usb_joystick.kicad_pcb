@@ -44,7 +44,7 @@
   (net 14 "BTN4")
   (net 15 "XTAL1")
   (net 16 "XTAL2")
-  (gr_rect (start 100.0 100.0) (end 180.0 160.0)
+  (gr_rect (start 108.5 57.5) (end 188.5 117.5)
     (stroke (width 0.1) (type default))
     (fill none)
     (layer "Edge.Cuts")
@@ -53,7 +53,7 @@
   (footprint "Package_QFP:TQFP-32_7x7mm_P0.8mm"
     (layer "F.Cu")
     (uuid "5704f1c8-f1c5-468f-b513-d182bc254850")
-    (at 140.0 132.0)
+    (at 148.5 89.5)
     (fp_text reference "U1" (at 0 -6) (layer "F.SilkS") (uuid "bf36e509-b7db-4792-92b6-da1ea393d3cb")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -107,7 +107,7 @@
   (footprint "Connector_USB:USB_C_Receptacle_GCT_USB4105"
     (layer "F.Cu")
     (uuid "d37c64b6-af2c-47f2-9136-f372f26a6b1d")
-    (at 140.0 108.0)
+    (at 148.5 65.5)
     (attr smd)
     (locked yes)
     (fp_text reference "J1" (at 0 -3) (layer "F.SilkS") (uuid "ec6522be-1ac3-4baf-b57e-0ed2b74af053")
@@ -149,7 +149,7 @@
   (footprint "Module:Joystick_Analog"
     (layer "F.Cu")
     (uuid "ea5c6678-39ad-45f1-9233-aee58a030bd8")
-    (at 113.0 135.0)
+    (at 121.5 92.5)
     (attr through_hole)
     (locked yes)
     (fp_text reference "J2" (at 0 -3) (layer "F.SilkS") (uuid "85057fdb-55c9-4724-ab49-c824b865ed8f")
@@ -167,7 +167,7 @@
   (footprint "Crystal:Crystal_HC49-U_Vertical"
     (layer "F.Cu")
     (uuid "ce915f40-fa73-4d1d-abb3-cb2625b91a05")
-    (at 122.0 130.0)
+    (at 130.5 87.5)
     (fp_text reference "Y1" (at 0 -3) (layer "F.SilkS") (uuid "5caa76fb-a033-44e0-ad19-2062c47dedc9")
       (effects (font (size 0.8 0.8) (thickness 0.12)))
     )
@@ -191,7 +191,7 @@
   (footprint "Capacitor_SMD:C_0402_1005Metric"
     (layer "F.Cu")
     (uuid "40e763fe-b67c-41a4-a859-0aa21c31bfa2")
-    (at 119.56 126.0)
+    (at 128.06 83.5)
     (fp_text reference "C5" (at 0 -1.2) (layer "F.SilkS") (uuid "28ee970c-af24-4c99-a9aa-893b4d5a75f6")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
@@ -215,7 +215,7 @@
   (footprint "Capacitor_SMD:C_0402_1005Metric"
     (layer "F.Cu")
     (uuid "2b388738-9a07-4717-89d0-96e77491b832")
-    (at 124.44 126.0)
+    (at 132.94 83.5)
     (fp_text reference "C6" (at 0 -1.2) (layer "F.SilkS") (uuid "1a27914f-50ff-460e-b4ad-207475a92443")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
@@ -239,7 +239,7 @@
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
     (uuid "acc0ff44-9543-4139-ac8d-72fe31b1c74c")
-    (at 127.0 132.5)
+    (at 135.5 90)
     (fp_text reference "R10" (at 0 -1.2) (layer "F.SilkS") (uuid "b004eac2-1a3c-4147-b04b-91ff04c24aeb")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
@@ -263,7 +263,7 @@
   (footprint "Capacitor_SMD:C_0402_1005Metric"
     (layer "F.Cu")
     (uuid "4843e117-5705-4137-8ce6-b1930289a883")
-    (at 129.0 132.5)
+    (at 137.5 90)
     (fp_text reference "C10" (at 0 -1.2) (layer "F.SilkS") (uuid "c2a3fa01-ae56-4dd4-bda2-14a485799cdb")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
@@ -287,7 +287,7 @@
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
     (uuid "5dd501a0-98b1-45ed-8ef8-72feccdb36bb")
-    (at 127.0 134.0)
+    (at 135.5 91.5)
     (fp_text reference "R11" (at 0 -1.2) (layer "F.SilkS") (uuid "4f11c052-4b13-4e70-9d39-a7376ee3b66a")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
@@ -311,7 +311,7 @@
   (footprint "Capacitor_SMD:C_0402_1005Metric"
     (layer "F.Cu")
     (uuid "76aa099f-24b6-4fc9-b2f0-2d073e7bad8e")
-    (at 129.0 134.0)
+    (at 137.5 91.5)
     (fp_text reference "C11" (at 0 -1.2) (layer "F.SilkS") (uuid "34f19bd2-6c6a-4b4d-b74b-c38484b84269")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
@@ -335,7 +335,7 @@
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
     (uuid "f9012e43-14d2-4324-a6c3-e1a4ada5bec4")
-    (at 127.0 140.0)
+    (at 135.5 97.5)
     (fp_text reference "R12" (at 0 -1.2) (layer "F.SilkS") (uuid "7207db3b-d5d7-429d-9d8b-52d2becc0ddd")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
@@ -359,7 +359,7 @@
   (footprint "Button_Switch_SMD:SW_SPST_TL3342"
     (layer "F.Cu")
     (uuid "bc93843a-7dfc-4a9e-96d4-72256711f936")
-    (at 120.0 152.0)
+    (at 128.5 109.5)
     (fp_text reference "SW1" (at 0 -3.5) (layer "F.SilkS") (uuid "8b599452-6448-4b0e-b6a7-4bbc12e283d2")
       (effects (font (size 0.8 0.8) (thickness 0.12)))
     )
@@ -383,7 +383,7 @@
   (footprint "Button_Switch_SMD:SW_SPST_TL3342"
     (layer "F.Cu")
     (uuid "6355f284-6196-4d31-84e6-af1f78827512")
-    (at 135.0 152.0)
+    (at 143.5 109.5)
     (fp_text reference "SW2" (at 0 -3.5) (layer "F.SilkS") (uuid "c7c64065-862f-4819-913c-706ff135cffc")
       (effects (font (size 0.8 0.8) (thickness 0.12)))
     )
@@ -407,7 +407,7 @@
   (footprint "Button_Switch_SMD:SW_SPST_TL3342"
     (layer "F.Cu")
     (uuid "f20970da-c2fe-4dc9-a6c0-bb5ee31a6c14")
-    (at 150.0 152.0)
+    (at 158.5 109.5)
     (fp_text reference "SW3" (at 0 -3.5) (layer "F.SilkS") (uuid "efcd34ec-24d4-4167-bc59-6389c314ebd4")
       (effects (font (size 0.8 0.8) (thickness 0.12)))
     )
@@ -431,7 +431,7 @@
   (footprint "Button_Switch_SMD:SW_SPST_TL3342"
     (layer "F.Cu")
     (uuid "9830e309-1dc9-4a8a-83ea-3e407c8395c9")
-    (at 165.0 152.0)
+    (at 173.5 109.5)
     (fp_text reference "SW4" (at 0 -3.5) (layer "F.SilkS") (uuid "14f3b8d7-e4f3-4857-b8f0-fa58f12009a4")
       (effects (font (size 0.8 0.8) (thickness 0.12)))
     )
@@ -455,7 +455,7 @@
   (footprint "Capacitor_SMD:C_0402_1005Metric"
     (layer "F.Cu")
     (uuid "fce2e451-86e5-4ae4-a927-92c530b7e453")
-    (at 132.0 128.0)
+    (at 140.5 85.5)
     (fp_text reference "C1" (at 0 -1.2) (layer "F.SilkS") (uuid "dc542b5b-80ca-416c-9851-ca4bc37246f3")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
@@ -479,7 +479,7 @@
   (footprint "Capacitor_SMD:C_0402_1005Metric"
     (layer "F.Cu")
     (uuid "afb37b86-169c-487c-b613-24a9a083ae26")
-    (at 148.0 128.0)
+    (at 156.5 85.5)
     (fp_text reference "C2" (at 0 -1.2) (layer "F.SilkS") (uuid "e5e551cc-a9f3-4099-8683-5dcaf8271151")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
@@ -503,7 +503,7 @@
   (footprint "Capacitor_SMD:C_0402_1005Metric"
     (layer "F.Cu")
     (uuid "cdf13a13-4fbc-4b07-8c12-ad5e76b420fe")
-    (at 140.0 142.0)
+    (at 148.5 99.5)
     (fp_text reference "C3" (at 0 -1.2) (layer "F.SilkS") (uuid "72f4d2dc-1f22-4b22-90e7-d50142c7afe0")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
@@ -527,7 +527,7 @@
   (footprint "Capacitor_SMD:C_0402_1005Metric"
     (layer "F.Cu")
     (uuid "b7c1e188-a80c-4933-acb8-2217507a2ce5")
-    (at 146.0 112.0)
+    (at 154.5 69.5)
     (fp_text reference "C4" (at 0 -1.2) (layer "F.SilkS") (uuid "0eb9b634-a498-4719-8e32-14677d8228e5")
       (effects (font (size 0.5 0.5) (thickness 0.1)))
     )
@@ -561,7 +561,7 @@
     (filled_areas_thickness no)
     (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
     )
-    (polygon (pts (xy 100.3 100.3) (xy 179.7 100.3) (xy 179.7 159.7) (xy 100.3 159.7))
+    (polygon (pts (xy 108.8 57.8) (xy 188.2 57.8) (xy 188.2 117.2) (xy 108.8 117.2))
     )
   )
   (zone
@@ -577,7 +577,7 @@
     (filled_areas_thickness no)
     (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
     )
-    (polygon (pts (xy 100.3 100.3) (xy 179.7 100.3) (xy 179.7 159.7) (xy 100.3 159.7))
+    (polygon (pts (xy 108.8 57.8) (xy 188.2 57.8) (xy 188.2 117.2) (xy 108.8 117.2))
     )
   )
   (zone
@@ -593,7 +593,7 @@
     (filled_areas_thickness no)
     (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
     )
-    (polygon (pts (xy 108.0 126.5) (xy 149.0 126.5) (xy 149.0 144.0) (xy 108.0 144.0))
+    (polygon (pts (xy 116.5 84) (xy 157.5 84) (xy 157.5 101.5) (xy 116.5 101.5))
     )
   )
   (zone
@@ -609,7 +609,7 @@
     (filled_areas_thickness no)
     (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
     )
-    (polygon (pts (xy 137.4 106.4) (xy 147.6 106.4) (xy 147.6 128.6) (xy 137.4 128.6))
+    (polygon (pts (xy 145.9 63.9) (xy 156.1 63.9) (xy 156.1 86.1) (xy 145.9 86.1))
     )
   )
 )

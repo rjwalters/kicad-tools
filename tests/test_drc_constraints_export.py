@@ -328,9 +328,23 @@ def test_subspec_standard_via_fires_under_kicad_cli(tmp_path: Path):
     # 0.4 mm diameter (0.05 mm annular) -- below the jlcpcb-tier1 standard
     # 0.6 mm diameter / 0.15 mm annular floors.  This is NOT a micro via, so
     # it must be caught by the built-in standard-via floor.
-    needle = "(at 116.5 117.15)\n\t\t(size 0.6)\n\t\t(drill 0.3)"
-    replacement = "(at 116.5 117.15)\n\t\t(size 0.4)\n\t\t(drill 0.3)"
-    assert needle in text, "expected standard via at (116.5, 117.15) in board 04"
+    #
+    # The via sits at board origin + (16.5, 17.15); derive the absolute
+    # position from the same ``centered_origin(60, 40)`` helper board 04's
+    # generator uses so this pin cannot go stale against a sheet-position
+    # change (it was previously hardcoded to the historical (100, 100)
+    # origin, i.e. ``(at 116.5 117.15)`` -- PR #4015 judge feedback).
+    from kicad_tools.pcb.center_sheet import centered_origin
+
+    def _fmt(v: float) -> str:
+        # KiCad's minimal decimal formatting ("135" / "84.65").
+        return f"{v:.6f}".rstrip("0").rstrip(".")
+
+    ox, oy = centered_origin(60.0, 40.0)  # board 04 outline origin
+    via_at = f"(at {_fmt(ox + 16.5)} {_fmt(oy + 17.15)})"
+    needle = f"{via_at}\n\t\t(size 0.6)\n\t\t(drill 0.3)"
+    replacement = f"{via_at}\n\t\t(size 0.4)\n\t\t(drill 0.3)"
+    assert needle in text, f"expected standard via at {via_at} in board 04"
     pcb.write_text(text.replace(needle, replacement, 1))
 
     profile = get_profile("jlcpcb-tier1")

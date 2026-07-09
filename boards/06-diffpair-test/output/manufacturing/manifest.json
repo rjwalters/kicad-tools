@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.14.0",
-  "generated_at": "2026-07-09T03:55:29.412138+00:00",
+  "generated_at": "2026-07-09T19:16:11.179070+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,16 +13,16 @@
       "size": 583
     },
     "gerbers.zip": {
-      "sha256": "1bb0df5985236dfb2e6a980b99255225acbfabff4c5041e9ed97d7b9026f86b9",
-      "size": 150396
+      "sha256": "e9ef51a6e883dccc8b014db3805873507bb40065888883fec4a5f7b0b9b9a08e",
+      "size": 150367
     },
     "report.pdf": {
-      "sha256": "a4896c8625744ed9b1fd01c609562123ff2f0f19bb99c4bab7851f1ce206f8a5",
-      "size": 34982
+      "sha256": "8565d68ebab2486aff96ac6a121cc64424201257ed754fe68833c049432f5b63",
+      "size": 35061
     },
     "report.md": {
-      "sha256": "66e70cc27d1794425f913d7bcf2fa1864a47a94bd4b3f6b51e794be396a7db4d",
-      "size": 3195
+      "sha256": "f78c60e087eee6e96d6a35e92ce6401ec93b194b7302bef87e49ffaa0efca198",
+      "size": 3216
     },
     "assembly.png": {
       "sha256": "f85c620749ec926e0b59a26c4aca206c1d8014496795415ec9264f3df9f7f337",
@@ -57,20 +57,96 @@
       "size": 172841
     },
     "schematic_diffpair_test.png": {
-      "sha256": "978c3ba98b3a065bd40bf5d499e9a4828389e1284035d3c4d6569bdd11239c35",
-      "size": 241817
+      "sha256": "5175e2e8fd68f8377881657d069d1d7a42b2fb2aeeccd0abe1e6a966f15273ed",
+      "size": 381919
     },
     "kicad_project.zip": {
-      "sha256": "59237a8087d8b30ca04aa1b62b06170ed06da850a3fec004fe9e906e64c0b860",
-      "size": 194810
+      "sha256": "9841e2d5cfa1b3c80f37b019dfaadd6d0f299508b78330a64cfdf04662fac3a9",
+      "size": 208121
     },
     "README.txt": {
-      "sha256": "38ce0eccfbe0409fc5fb4054df3838f0ac34e56267f7925eac6a0d28c1edb1f2",
+      "sha256": "0ad2e3c90fdc1ced7508310dfae3b081d5ad5077a5fe9a64dec323c3c694a477",
       "size": 879
     }
   },
   "board": {
     "name": "diffpair_test_routed",
     "pcb_file": "diffpair_test_routed.kicad_pcb"
-  }
+  },
+  "preflight": [
+    {
+      "name": "pcb_file",
+      "status": "OK",
+      "message": "PCB file parsed successfully",
+      "details": "Footprints: 7"
+    },
+    {
+      "name": "schematic_file",
+      "status": "OK",
+      "message": "Schematic auto-detected: diffpair_test.kicad_sch"
+    },
+    {
+      "name": "schematic_footprints",
+      "status": "OK",
+      "message": "All schematic symbols have a footprint assigned"
+    },
+    {
+      "name": "board_outline",
+      "status": "OK",
+      "message": "Board outline is closed (5 points)"
+    },
+    {
+      "name": "footprints",
+      "status": "OK",
+      "message": "All 7 footprints have library footprint names"
+    },
+    {
+      "name": "board_dimensions",
+      "status": "OK",
+      "message": "Board dimensions within limits (100.00 x 80.00 mm)"
+    },
+    {
+      "name": "drill_holes",
+      "status": "OK",
+      "message": "Drill holes present (167 vias, 4 TH pads)"
+    },
+    {
+      "name": "tht_in_cpl",
+      "status": "OK",
+      "message": "No through-hole components in CPL-eligible footprints"
+    },
+    {
+      "name": "bom_fields",
+      "status": "OK",
+      "message": "All 7 BOM items have required fields",
+      "details": "7 active item(s) will receive LCSC from spec overlay"
+    },
+    {
+      "name": "bom_lcsc_values",
+      "status": "OK",
+      "message": "No LCSC value/package mismatches detected (0 assigned item(s) checked against local parts cache)"
+    },
+    {
+      "name": "bom_pcb_match",
+      "status": "OK",
+      "message": "BOM and PCB references match (7 components)"
+    },
+    {
+      "name": "bom_cpl_match",
+      "status": "OK",
+      "message": "BOM and CPL references match (7 components)"
+    },
+    {
+      "name": "drc",
+      "status": "WARN",
+      "message": "No DRC report found; run kicad-cli or kct check first",
+      "details": "Use --drc-report to specify a report file, or --skip-drc to skip"
+    },
+    {
+      "name": "erc",
+      "status": "WARN",
+      "message": "No ERC report found; run kicad-cli first",
+      "details": "Use --erc-report to specify a report file, or --skip-erc to skip"
+    }
+  ]
 }

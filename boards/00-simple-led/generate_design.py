@@ -25,6 +25,7 @@ from pathlib import Path
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
+from kicad_tools.pcb.center_sheet import centered_origin
 from kicad_tools.schematic.models.schematic import Schematic
 
 # Warn if running source scripts with stale pipx install
@@ -238,8 +239,10 @@ def create_led_pcb(output_dir: Path) -> Path:
     # Board dimensions (mm)
     BOARD_WIDTH = 25.0
     BOARD_HEIGHT = 20.0
-    BOARD_ORIGIN_X = 100.0
-    BOARD_ORIGIN_Y = 100.0
+    # Sheet-center the outline: middle of the A4 sheet's usable drawing area
+    # (inside the 10 mm frame border, above the 35 mm title-block band).
+    # All placement below derives from BOARD_ORIGIN_*.
+    BOARD_ORIGIN_X, BOARD_ORIGIN_Y = centered_origin(BOARD_WIDTH, BOARD_HEIGHT)
 
     # Net definitions
     NETS = {

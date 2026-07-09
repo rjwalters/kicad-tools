@@ -31,7 +31,7 @@
   (net 1 "VCC")
   (net 2 "LED_ANODE")
   (net 3 "GND")
-  (gr_rect (start 100.0 100.0) (end 125.0 120.0)
+  (gr_rect (start 136 77.5) (end 161 97.5)
     (stroke (width 0.1) (type default))
     (fill none)
     (layer "Edge.Cuts")
@@ -40,7 +40,7 @@
   (footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
     (layer "F.Cu")
     (uuid "727f6bd3-740e-4046-969c-5247ab06bd84")
-    (at 105.0 110.0)
+    (at 141 87.5)
     (fp_text reference "J1" (at 0 -3.5) (layer "F.SilkS") (uuid "b9df8b63-c0d7-4d15-a7b6-652823ec043b")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -64,7 +64,7 @@
   (footprint "Resistor_SMD:R_0805_2012Metric"
     (layer "F.Cu")
     (uuid "36c2dbbf-1398-4b65-b95d-148013d5564f")
-    (at 112.5 108.0 0)
+    (at 148.5 85.5 0)
     (fp_text reference "R1" (at 0 -1.5) (layer "F.SilkS") (uuid "5ea1ca1e-d87c-4bfc-83a2-744a4804e620")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -88,7 +88,7 @@
   (footprint "LED_THT:LED_D5.0mm"
     (layer "F.Cu")
     (uuid "ad4a7c48-beee-4bbb-9df8-1e574a8a9c52")
-    (at 120.0 110.0 0)
+    (at 156 87.5 0)
     (fp_text reference "D1" (at 0 -3.5) (layer "F.SilkS") (uuid "ebe75dc7-abac-4983-99e6-0f2449bf602c")
       (effects (font (size 1 1) (thickness 0.15)))
     )

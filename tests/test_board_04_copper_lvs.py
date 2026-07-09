@@ -58,6 +58,30 @@ def _load_recipe():
     return module
 
 
+def _fmt(v: float) -> str:
+    """KiCad's minimal decimal formatting (mirrors fix_osc_escape's _fmt)."""
+    return f"{v:.6f}".rstrip("0").rstrip(".")
+
+
+def _osc_hops(recipe) -> tuple[str, str, str]:
+    """(offending_hop, reaimed_hop, follow_on_hop) needles derived from the
+    recipe's _OSC_* constants.
+
+    Derived (not hardcoded) so the test tracks the recipe's
+    ``centered_origin``-based coordinates and cannot go stale against a
+    sheet-position change (PR #4015 judge feedback: the old hardcoded
+    (100, 100)-origin absolutes went stale when the boards were
+    sheet-centered).
+    """
+    via = f"(start {_fmt(recipe._OSC_VIA[0])} {_fmt(recipe._OSC_VIA[1])})"
+    pad = f"{_fmt(recipe._OSC_IN_PAD[0])} {_fmt(recipe._OSC_IN_PAD[1])}"
+    reaim = f"{_fmt(recipe._OSC_REAIM[0])} {_fmt(recipe._OSC_REAIM[1])}"
+    offending = f"{via}\n\t\t(end {pad})"
+    reaimed = f"{via}\n\t\t(end {reaim})"
+    follow_on = f"(start {pad})\n\t\t(end {reaim})"
+    return offending, reaimed, follow_on
+
+
 @pytest.fixture(scope="module")
 def board04_artifacts() -> tuple[Path, Path]:
     """The committed board 04 schematic + routed PCB.
@@ -127,25 +151,26 @@ class TestBoard04CopperLVSClean:
         """The OSC_OUT escape must not run into the U2.5 OSC_IN pad (#3797).
 
         The deterministic fresh route drops the OSC_OUT (net 5) B.Cu escape
-        straight north into the U2.5 OSC_IN pad centre at (126.8375, 121.25),
-        shorting the two crystal pins.  ``fix_osc_escape`` re-aims that hop, so
-        the committed (fresh) artifact must NOT contain the offending hop.
+        straight north into the U2.5 OSC_IN pad centre (board origin +
+        (26.8375, 21.25)), shorting the two crystal pins.  ``fix_osc_escape``
+        re-aims that hop, so the committed (fresh) artifact must NOT contain
+        the offending hop.
         """
         _, pcb = board04_artifacts
         text = pcb.read_text()
-        offending = "(start 126.8375 121.75)\n\t\t(end 126.8375 121.25)"
+        offending, _reaimed, _follow_on = _osc_hops(_load_recipe())
         assert offending not in text, (
             "board 04 routed PCB still contains the OSC_OUT escape hop running "
-            "into the U2.5 OSC_IN pad centre (126.8375, 121.25) — the #3797 "
-            "fix_osc_escape re-aim is missing or regressed; copper-LVS will "
-            "report an OSC_IN<->OSC_OUT short."
+            "into the U2.5 OSC_IN pad centre (board origin + (26.8375, 21.25)) "
+            "— the #3797 fix_osc_escape re-aim is missing or regressed; "
+            "copper-LVS will report an OSC_IN<->OSC_OUT short."
         )
 
 
 class TestFixOscEscapeStep:
     """Unit coverage for the deterministic ``fix_osc_escape`` recipe step (#3797)."""
 
-    def _routed_with_offending_hop(self, tmp_path: Path) -> Path:
+    def _routed_with_offending_hop(self, tmp_path: Path, recipe) -> Path:
         """A synthetic routed-PCB fixture carrying the pre-fix OSC_OUT escape.
 
         ``fix_osc_escape`` runs before the recipe's 45-quantize step (#3797),
@@ -154,15 +179,17 @@ class TestFixOscEscapeStep:
         of the post-route quantization, build a minimal PCB containing exactly
         the geometry ``fix_osc_escape`` operates on as a fresh route emits it:
         the straight-north first hop into the U2.5 OSC_IN pad centre plus the
-        degenerate follow-on segment (pad centre -> re-aim point).
+        degenerate follow-on segment (pad centre -> re-aim point).  Coordinates
+        derive from the recipe's ``_OSC_*`` constants via :func:`_osc_hops`.
         """
+        offending, _reaimed, follow_on_hop = _osc_hops(recipe)
         original = (
-            "\t(segment\n\t\t(start 126.8375 121.75)\n\t\t(end 126.8375 121.25)\n"
+            f"\t(segment\n\t\t{offending}\n"
             '\t\t(width 0.2)\n\t\t(layer "B.Cu")\n'
             '\t\t(uuid "11111111-1111-1111-1111-111111111111")\n\t\t(net 5)\n\t)\n'
         )
         follow_on = (
-            "\t(segment\n\t\t(start 126.8375 121.25)\n\t\t(end 126.6875 121.1)\n"
+            f"\t(segment\n\t\t{follow_on_hop}\n"
             '\t\t(width 0.2)\n\t\t(layer "B.Cu")\n'
             '\t\t(uuid "00000000-0000-0000-0000-000000000000")\n\t\t(net 5)\n\t)\n'
         )
@@ -176,16 +203,17 @@ class TestFixOscEscapeStep:
 
     def test_fix_clears_offending_hop_and_is_idempotent(self, tmp_path: Path) -> None:
         recipe = _load_recipe()
-        pcb = self._routed_with_offending_hop(tmp_path)
+        offending, reaimed, follow_on = _osc_hops(recipe)
+        pcb = self._routed_with_offending_hop(tmp_path, recipe)
         text = pcb.read_text()
-        assert "(start 126.8375 121.75)\n\t\t(end 126.8375 121.25)" in text
+        assert offending in text
 
         assert recipe.fix_osc_escape(pcb) is True
         fixed = pcb.read_text()
         # Offending hop gone, re-aimed hop present, follow-on dropped.
-        assert "(start 126.8375 121.75)\n\t\t(end 126.8375 121.25)" not in fixed
-        assert "(start 126.8375 121.75)\n\t\t(end 126.6875 121.1)" in fixed
-        assert "(start 126.8375 121.25)\n\t\t(end 126.6875 121.1)" not in fixed
+        assert offending not in fixed
+        assert reaimed in fixed
+        assert follow_on not in fixed
 
         # Idempotent: a second pass is a no-op and leaves the file unchanged.
         assert recipe.fix_osc_escape(pcb) is True
