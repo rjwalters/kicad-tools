@@ -1706,7 +1706,27 @@ tolerances:
   # unaffected (clearance tolerance does not change routing).  Exit clause:
   # re-route board 07 so the six marginal pairs clear the floor by > 0.1 um,
   # then ratchet 35 back down to the new committed count.  See #3913.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 35
+  #
+  # 2026-07-08 (fix/board07-gallery-ready): the #3913 exit clause fired --
+  # committed artifact regenerated end-to-end on the post-#3919 pipeline
+  # (DRC-constraint sidecars now committed next to the routed PCB, stitch
+  # sibling-net pad obstacles, edge-based repair-via drill spacing).
+  # kicad-cli pcb drc --refill-zones: ZERO violations (was 592 against
+  # KiCad's built-in defaults when the sidecars were missing).  kct check
+  # blocking = exactly the 9 sidecar-gated errors (4 diffpair_length_skew +
+  # 4 diffpair_routing_continuity + 1 ADDR_BUS match_group_length_skew,
+  # via-inclusive 1.069 mm vs 0.500 -- route-side tuner converges via-BLIND
+  # skew only, see #3928/#3931).  Advisory connectivity = 5 (DQ3, DQ4,
+  # MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N -- the #3438 negotiated-reach
+  # residual; 26/31 is seed-invariant under --deterministic-budget, verified
+  # across 7 seeds + --differential-pairs + --order-method congestion).
+  # Ratcheted 35 -> 14.  Counter-semantics note: check_routed_drc.py
+  # compares its ADVISORY-FILTERED blocking count (9) against this value,
+  # while check_matchgroup_coverage.py compares the RAW kct-check
+  # summary.errors (14 = 9 blocking + 5 advisory connectivity).  The single
+  # shared value must satisfy the raw counter, so 14 is zero-slack for the
+  # match-group gate and +5 slack for the blocking gate.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 14
 
   # Board 05 (BLDC motor controller).  Issue #3470 (2026-06-10) removed
   # this board's tolerances entry -- the committed artifact reached a

@@ -104,8 +104,15 @@ NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
 # 14); 2026-06-09 (issue #3458 inventory, PR #3462: 5+5+2=12, blocking 16);
 # 2026-06-06 (Issue #3263: 5+5+1=11, blocking 17).
 BOARD_07_EXPECTED_FAMILY_DELTA: dict[str, int] = {
-    "diffpair_length_skew": 7,
-    "diffpair_routing_continuity": 7,
+    # Re-baselined 2026-07-08 (board-07 fresh re-route, fix/board07-gallery-ready):
+    # 26/31 nets routed (DQ3/DQ4/MIPI_DAT0_N/TMDS_D0_N/TMDS_D1_N stranded, the
+    # #3438 negotiated-reach residual).  4 pairs carry both legs but fail
+    # skew/continuity (DQS, MIPI_CLK, MIPI_DAT1, TMDS_D2); ADDR_BUS carries
+    # the via-inclusive 1.069mm residual (route-side tuner converges the
+    # via-BLIND skew to 0.000 -- see the #3928/#3931 note in
+    # scripts/ci/check_matchgroup_coverage.py).
+    "diffpair_length_skew": 4,
+    "diffpair_routing_continuity": 4,
     "match_group_length_skew": 1,
 }
 
@@ -292,10 +299,23 @@ class TestBoard07KctCheckParity:
     """
 
     @pytest.fixture(scope="class")
-    def bare(self) -> dict:
+    def bare(self, tmp_path_factory: pytest.TempPathFactory) -> dict:
+        """Run ``kct check`` with NO net-class map resolvable.
+
+        Issue #3948 made ``kct check`` auto-discover a committed
+        ``net_class_map.json`` next to the PCB, so running against the
+        in-repo artifact is no longer "bare" -- the no-op contract this
+        class pins is only observable when no sidecar is DISCOVERABLE.
+        Copy the routed PCB into an isolated tmp dir (without the sidecar)
+        so the graceful-degradation path is actually exercised.
+        """
         if not BOARD_07_PCB.is_file():
             pytest.skip("board 07 routed PCB not present")
-        return _run_kct_check(BOARD_07_PCB, sidecar=None)
+        import shutil
+
+        isolated = tmp_path_factory.mktemp("board07-bare") / BOARD_07_PCB.name
+        shutil.copy2(BOARD_07_PCB, isolated)
+        return _run_kct_check(isolated, sidecar=None)
 
     @pytest.fixture(scope="class")
     def with_sidecar(self) -> dict:
@@ -304,10 +324,12 @@ class TestBoard07KctCheckParity:
         return _run_kct_check(BOARD_07_PCB, sidecar=BOARD_07_SIDECAR)
 
     def test_bare_check_noop_contract_preserved(self, bare: dict) -> None:
-        """Bare ``kct check`` reports ZERO of the net-class-gated families.
+        """Sidecar-less ``kct check`` reports ZERO of the net-class-gated families.
 
         This is the graceful-degradation contract external-router boards
         rely on; it must NEVER regress to firing these rules without a map.
+        (Since #3948 the map may be auto-discovered from a committed
+        sidecar; the ``bare`` fixture isolates the PCB so no map resolves.)
         """
         counts = _family_counts(bare)
         for family in NET_CLASS_GATED_FAMILIES:
@@ -417,16 +439,21 @@ class TestCiGateCountsGatedFamilies:
             pytest.skip("board 07 routed PCB not present")
         gate = self._load_gate()
         blocking, advisory = gate.count_errors(BOARD_07_PCB)
-        # Re-baselined 2026-06-13 (Issue #3556): the new
-        # ``clearance_via_zone`` / ``clearance_pad_zone`` rule (vias and
-        # pads vs foreign-net zone *fill* copper) surfaces 51 pre-existing
-        # findings on this committed artifact (47 pad-vs-fill + 4
-        # via-vs-fill, all foreign-net sub-0.102mm gaps / overlaps that no
-        # gate previously caught). 69 prior blocking + 51 = 120 blocking;
-        # the advisory connectivity count is unchanged at 1. The tolerance
-        # floor in .github/routed-drc-tolerance.yml rises 70 -> 120 to match.
-        assert blocking == 120, (
-            f"expected 120 blocking errors with net_class_map awareness "
-            f"+ via/pad-vs-zone-fill checks, got {blocking}"
+        # Re-baselined 2026-07-08 (fix/board07-gallery-ready fresh re-route):
+        # the committed artifact is regenerated end-to-end on the post-#3919
+        # pipeline (sibling .kicad_pro/.kicad_dru DRC-constraint sidecars,
+        # sibling-stitch-net pad obstacles, edge-based repair-via drill
+        # spacing).  kicad-cli pcb drc --refill-zones now reports ZERO
+        # violations; kct check's remaining blocking errors are exactly the
+        # sidecar-gated families: 4 diffpair_length_skew +
+        # 4 diffpair_routing_continuity + 1 match_group_length_skew = 9.
+        # Advisory connectivity is 5 (the DQ3/DQ4/MIPI_DAT0_N/TMDS_D0_N/
+        # TMDS_D1_N #3438 negotiated-reach residual).  The tolerance floor in
+        # .github/routed-drc-tolerance.yml tightens 35 -> 14 (raw count; the
+        # match-group gate compares the UNFILTERED kct-check summary.errors,
+        # 9 blocking + 5 advisory -- see the counter-semantics note there).
+        assert blocking == 9, (
+            f"expected 9 blocking errors (4+4+1 gated families) on the "
+            f"2026-07-08 re-routed artifact, got {blocking}"
         )
-        assert advisory.get("connectivity", 0) == 1
+        assert advisory.get("connectivity", 0) == 5

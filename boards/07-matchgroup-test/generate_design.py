@@ -635,15 +635,22 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         )
         seg_index.append((line.buffer(width / 2.0), id_to_name.get(nid, ""), lay))
 
-    # Vias: (center_point, net, radius)
+    # Vias: (center_point, net, radius, drill_radius)
     via_index: list[tuple] = []
     for via in _find_sexp_blocks(text, "\n\t(via") + _find_sexp_blocks(text, "\n  (via"):
         at = re.search(r"\(at ([\d.-]+) ([\d.-]+)\)", via)
         sz = re.search(r"\(size ([\d.]+)\)", via)
+        dr = re.search(r"\(drill ([\d.]+)\)", via)
         nid = re.search(r"\(net (\d+)\)", via).group(1)
         radius = (float(sz.group(1)) if sz else 0.6) / 2.0
+        drill_radius = (float(dr.group(1)) if dr else 0.3) / 2.0
         via_index.append(
-            (Point(float(at.group(1)), float(at.group(2))), id_to_name.get(nid, ""), radius)
+            (
+                Point(float(at.group(1)), float(at.group(2))),
+                id_to_name.get(nid, ""),
+                radius,
+                drill_radius,
+            )
         )
 
     # Zone fills: net -> [(poly, layer)]
@@ -667,10 +674,17 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     max_y = generate_pcb.BOARD_ORIGIN_Y + generate_pcb.BOARD_HEIGHT - 0.5
 
     VIA_R = 0.225  # 0.45 mm via
+    VIA_DRILL_R = 0.125  # 0.25 mm drill on every repair via
     CLEAR = 0.15
     STUB_W = 0.15
     BRIDGE_W = 0.2
-    DRILL_CC = 0.45  # min center-to-center vs other drills
+    # Fab hole-to-hole floor, EDGE-to-edge (mirrors the jlcpcb
+    # ``min_hole_to_hole_mm`` = 0.5 that ``kct check`` enforces as
+    # ``dimension_drill_clearance``).  The old constant here was a bare
+    # 0.45 mm CENTER-to-center -- for a 0.25 mm repair drill next to a
+    # 0.20 mm stitch drill that allowed an edge gap of just 0.225 mm and
+    # shipped two ~0.39 mm violations on the re-routed artifact.
+    MIN_HOLE_TO_HOLE = 0.5
 
     def _via_ok(net: str, vx: float, vy: float) -> bool:
         if not (min_x <= vx <= max_x and min_y <= vy <= max_y):
@@ -683,13 +697,15 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 return False  # via-in-pad ban (same-net included)
             if pnet != net and vgeom.distance(geom) < CLEAR:
                 return False
-            if drill_r > 0 and math.hypot(vx - px, vy - py) < drill_r + 0.125 + 0.2:
+            if drill_r > 0 and math.hypot(vx - px, vy - py) < (
+                drill_r + VIA_DRILL_R + MIN_HOLE_TO_HOLE
+            ):
                 return False
         for geom, snet, _lay in seg_index:
             if snet != net and vgeom.distance(geom) < CLEAR:
                 return False
-        for pt, vnet, radius in via_index:
-            if pt.distance(vpt) < DRILL_CC:
+        for pt, vnet, radius, drill_r in via_index:
+            if pt.distance(vpt) < MIN_HOLE_TO_HOLE + VIA_DRILL_R + drill_r:
                 return False
             if vnet != net and vgeom.distance(pt.buffer(radius)) < CLEAR:
                 return False
@@ -713,7 +729,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         for geom, snet, lay in seg_index:
             if snet != net and lay == layer and path.distance(geom) < CLEAR:
                 return False
-        for pt, vnet, radius in via_index:
+        for pt, vnet, radius, _drill_r in via_index:
             if vnet != net and path.distance(pt.buffer(radius)) < CLEAR:
                 return False
         return True
@@ -739,7 +755,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             f"  (via (at {vx:.3f} {vy:.3f}) (size 0.45) (drill 0.25) "
             f'(layers "F.Cu" "B.Cu") (net {nid}) (uuid "{_generate_uuid()}"))'
         )
-        via_index.append((Point(vx, vy), net, VIA_R))
+        via_index.append((Point(vx, vy), net, VIA_R, VIA_DRILL_R))
         vias_placed += 1
 
     def _emit_seg(
@@ -810,7 +826,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         for geom, snet, lay in seg_index:
             if snet == net:
                 own.append((geom, frozenset({lay}), "seg"))
-        for pt, vnet, radius in via_index:
+        for pt, vnet, radius, _drill_r in via_index:
             if vnet == net:
                 own.append((pt.buffer(radius), all_layers, "via"))
         for entry in pad_index:
@@ -2007,15 +2023,23 @@ def main() -> int:
             route_success = route_pcb(pcb_path, routed_path)
             drc_ok = run_drc(routed_path)
 
-            # LVS (#3779) -- copper-only hard gate.  Board 07 is a PCB-first
-            # routing fixture (MIPI/TMDS connectors with no schematic-side
-            # net), so the label comparator reports every pad as
-            # ``schematic_net=None`` (advisory noise, not a real defect).  The
-            # copper-extracted comparator correctly ignores ``None``-net pads,
-            # so we gate on copper only (``run_label=False``): a copper
-            # short/open raises ``BoardNetlistMismatch`` and fails the recipe.
-            # Writes ``output/lvs.json`` so ``kct board-metrics`` surfaces
-            # ``lvs_clean: true``.  This step only runs in ``--step all`` (the
+            # LVS (#3779) -- copper-only, and currently VACUOUS on this
+            # board (issue #4006).  The generated schematic is a PCB-first
+            # fixture with ZERO ``(wire ...)`` elements (floating labels
+            # only), so ``_schematic_pin_to_net`` binds 0 of ~223 pins --
+            # ALL nets, DDR included, not just the MIPI/TMDS connectors.
+            # With an empty pad->net map the copper comparator has no
+            # evidence and can detect neither opens nor shorts, so the
+            # ``clean: true`` it reports is a zero-comparison result, not a
+            # verification (this board's 5 unrouted nets are real copper
+            # opens it cannot see).  The write stays because the
+            # board-07-end-to-end CI job regenerates into a tmp dir and
+            # asserts ``lvs.json`` exists there, but ``output/lvs.json``
+            # must NOT be committed: ``kct board-metrics`` + the site
+            # gallery key the "Ready" badge off ``lvs_clean`` (#3749), and
+            # a missing file renders the honest "LVS not run" chip.  See
+            # #4006 for the vacuity guard (gate ``clean`` on a nonzero
+            # bound-pin count).  This step only runs in ``--step all`` (the
             # ``--step route`` CI branch has no schematic).
             copper_clean, _label_clean = write_lvs_report(
                 sch_path,
@@ -2024,6 +2048,12 @@ def main() -> int:
                 require_clean=True,
                 run_copper=True,
                 run_label=False,
+            )
+            print(
+                "[lvs] WARNING: copper-LVS is VACUOUS on this fixture "
+                "(schematic has no wires, so 0 pins bind to nets; issue "
+                "#4006).  lvs.json is written for the CI e2e tmp gate "
+                "only -- never commit output/lvs.json."
             )
 
             # Export manufacturing bundle (#3147) so ``kct fleet status``
