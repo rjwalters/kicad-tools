@@ -21,14 +21,31 @@ board directory it:
 
 ``--lvs-only`` mode (issue #3779) restricts the gate to artifact presence
 + ``lvs.json clean: true`` and **skips** the ``board.json``
-``status``/``drc_violations`` assertions.  This is for boards 06/07
-(diffpair-test, matchgroup-test): they are copper-LVS clean (so the LVS
-gate applies) but carry **allowlisted DRC residuals** in
-``.github/routed-drc-tolerance.yml`` and route PARTIAL by design, so their
-``board.json`` is ``status: "partial"`` / ``drc_violations > 0`` and the
-full ``status: ok`` / ``drc_violations: 0`` assertion would (incorrectly)
+``status``/``drc_violations`` assertions.  This is for boards with
+**allowlisted DRC residuals** in ``.github/routed-drc-tolerance.yml``
+that route PARTIAL by design, so their ``board.json`` is
+``status: "partial"`` / ``drc_violations > 0`` and the full
+``status: ok`` / ``drc_violations: 0`` assertion would (incorrectly)
 fail.  ``board.json[lvs_clean]`` is still asserted when ``board.json`` is
 present, since copper-LVS clean is the whole point of those jobs.
+
+``--lvs-not-run`` mode (#4006, board 06): for PCB-first fixture boards
+whose schematic is deliberately unwired, LVS is *unavailable* — the
+copper comparator binds zero pins and any verdict would be zero-evidence
+(the vacuity hole found in PR #4005's review).  Board 06's recipe skips
+the LVS step entirely, so this mode asserts the honest state: all
+artifacts EXCEPT ``lvs.json`` present, ``lvs.json`` ABSENT, and
+``board.json`` carrying NO ``lvs_clean`` key (the site then renders
+"LVS not run" instead of a zero-evidence "Ready" badge).
+
+``--lvs-vacuous`` mode (#4006, board 07): same unwired-fixture situation,
+but for a recipe that still *emits* ``lvs.json`` (its CI job asserts the
+file exists).  Asserts ``lvs.json`` is present and carries the
+vacuity-guard verdict (``clean: false`` + ``copper_vacuous: true``), and
+that ``board.json`` does NOT claim ``lvs_clean`` (board-metrics treats a
+vacuous report as LVS-not-run).  A ``clean: true`` here means the guard
+regressed; a non-vacuous dirty result means the schematic gained wired
+nets and the job should graduate to ``--lvs-only``.
 
 and exits non-zero with a ``::error::``-annotated message on any mismatch
 so the failure surfaces inline on the GitHub PR Files-changed view.
@@ -152,6 +169,43 @@ def assert_lvs_clean(lvs_path: Path) -> str | None:
             f"lvs.json reports clean=False with {len(mismatches)} mismatch(es); "
             f"first: {mismatches[0] if mismatches else '<none>'}"
         )
+    if data.get("copper_vacuous") is True or data.get("copper_bound_pad_count") == 0:
+        # Belt-and-braces (#4006): a clean=true report claiming zero bound
+        # pins is exactly the zero-evidence artifact the vacuity guard
+        # forbids; never accept it as clean.
+        return (
+            "lvs.json reports clean=true but is VACUOUS "
+            "(copper_vacuous/copper_bound_pad_count=0, #4006) -- zero-evidence "
+            "clean is not clean"
+        )
+    return None
+
+
+def assert_lvs_vacuous(lvs_path: Path) -> str | None:
+    """Assert ``lvs.json`` carries the vacuity-guard verdict (#4006).
+
+    Expected shape for an unwired fixture schematic:
+    ``clean: false`` AND ``copper_vacuous: true``.
+
+    Returns ``None`` on pass, or a human-readable error message on fail.
+    """
+    try:
+        data = json.loads(lvs_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        return f"could not read/parse {lvs_path}: {e}"
+    if data.get("clean"):
+        return (
+            "expected a VACUOUS lvs.json (clean=false, copper_vacuous=true, "
+            "#4006) but it reports clean=true -- either the vacuity guard "
+            "regressed or the schematic is now wired (graduate this job to "
+            "--lvs-only)"
+        )
+    if data.get("copper_vacuous") is not True:
+        return (
+            "expected a VACUOUS lvs.json (copper_vacuous=true, #4006) but got "
+            "a non-vacuous dirty report -- the schematic appears to bind pins "
+            "now; graduate this job to --lvs-only and fix the real mismatches"
+        )
     return None
 
 
@@ -206,15 +260,37 @@ def main(argv: list[str] | None = None) -> int:
             "for board 01)."
         ),
     )
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--lvs-only",
         action="store_true",
         help=(
             "Restrict the gate to artifact presence + lvs.json clean=true "
             "(plus board.json lvs_clean=true when present), and SKIP the "
             "board.json status=ok / drc_violations=0 assertions.  Use for "
-            "boards 06/07 (diffpair-test, matchgroup-test): copper-LVS clean "
-            "but carrying allowlisted DRC residuals (status='partial')."
+            "boards with genuinely wired schematics that carry allowlisted "
+            "DRC residuals (status='partial')."
+        ),
+    )
+    mode_group.add_argument(
+        "--lvs-not-run",
+        action="store_true",
+        help=(
+            "Honest-state gate for an unwired fixture schematic whose recipe "
+            "SKIPS the LVS step (#4006, board 06): assert lvs.json is ABSENT "
+            "and board.json carries NO lvs_clean key ('LVS not run'), and "
+            "SKIP the status/drc_violations assertions."
+        ),
+    )
+    mode_group.add_argument(
+        "--lvs-vacuous",
+        action="store_true",
+        help=(
+            "Honest-state gate for an unwired fixture schematic whose recipe "
+            "still EMITS lvs.json (#4006, board 07): assert lvs.json is "
+            "present with the vacuity-guard verdict (clean=false, "
+            "copper_vacuous=true) and board.json carries NO lvs_clean key, "
+            "and SKIP the status/drc_violations assertions."
         ),
     )
     args = parser.parse_args(argv)
@@ -230,6 +306,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     artifacts = required_artifacts(args.stem)
+    if args.lvs_not_run:
+        # The recipe deliberately emits NO lvs.json (#4006); its absence is
+        # asserted below instead of its presence here.
+        artifacts = tuple(a for a in artifacts if a != "lvs.json")
     failed = False
 
     # 1. Artifact presence ----------------------------------------------------
@@ -241,9 +321,30 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"[ok] all {len(artifacts)} required artifacts present")
 
-    # 2. LVS clean ------------------------------------------------------------
+    # 2. LVS verdict -----------------------------------------------------------
     lvs_path = output_dir / "lvs.json"
-    if lvs_path.is_file():
+    if args.lvs_not_run:
+        if lvs_path.is_file():
+            _err(
+                "lvs.json must be ABSENT in --lvs-not-run mode (#4006): this "
+                "board's schematic is unwired, so any emitted LVS verdict is "
+                "zero-evidence.  If the schematic is now wired, graduate this "
+                "job to --lvs-only.",
+                file=lvs_path,
+            )
+            failed = True
+        else:
+            print("[ok] lvs.json absent (LVS not run -- unwired fixture schematic)")
+    elif args.lvs_vacuous:
+        if lvs_path.is_file():
+            lvs_err = assert_lvs_vacuous(lvs_path)
+            if lvs_err is not None:
+                _err(lvs_err, file=lvs_path)
+                failed = True
+            else:
+                print("[ok] lvs.json carries the vacuity-guard verdict (#4006)")
+        # (missing lvs.json was already reported above)
+    elif lvs_path.is_file():
         lvs_err = assert_lvs_clean(lvs_path)
         if lvs_err is not None:
             _err(lvs_err, file=lvs_path)
@@ -253,22 +354,45 @@ def main(argv: list[str] | None = None) -> int:
     # (missing lvs.json was already reported above)
 
     # 3. board.json fields ----------------------------------------------------
-    # In --lvs-only mode assert only lvs_clean (boards 06/07 carry allowlisted
-    # DRC residuals -> status='partial' / drc_violations>0, which the full
-    # field set would incorrectly reject).
-    required_fields = LVS_ONLY_BOARD_JSON_FIELDS if args.lvs_only else REQUIRED_BOARD_JSON_FIELDS
+    # In --lvs-only mode assert only lvs_clean (allowlisted-DRC boards are
+    # status='partial' / drc_violations>0, which the full field set would
+    # incorrectly reject).  In the unwired-fixture modes (#4006) assert
+    # lvs_clean is ABSENT: board-metrics omits it when LVS was not run / the
+    # report is vacuous, and its presence would mean a zero-evidence badge.
     board_json_path = output_dir / "board.json"
-    if board_json_path.is_file():
-        field_errors = assert_board_json_fields(board_json_path, required_fields)
-        if field_errors:
-            for msg in field_errors:
-                _err(msg, file=board_json_path)
-            failed = True
-        else:
-            print(
-                "[ok] board.json fields: "
-                + ", ".join(f"{k}={v!r}" for k, v in required_fields.items())
-            )
+    if args.lvs_not_run or args.lvs_vacuous:
+        if board_json_path.is_file():
+            try:
+                board_data = json.loads(board_json_path.read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                _err(f"could not read/parse {board_json_path}: {e}")
+                failed = True
+            else:
+                if "lvs_clean" in board_data:
+                    _err(
+                        "board.json must NOT carry lvs_clean for an unwired "
+                        f"fixture board (#4006); got lvs_clean="
+                        f"{board_data['lvs_clean']!r}",
+                        file=board_json_path,
+                    )
+                    failed = True
+                else:
+                    print("[ok] board.json omits lvs_clean ('LVS not run')")
+    else:
+        required_fields = (
+            LVS_ONLY_BOARD_JSON_FIELDS if args.lvs_only else REQUIRED_BOARD_JSON_FIELDS
+        )
+        if board_json_path.is_file():
+            field_errors = assert_board_json_fields(board_json_path, required_fields)
+            if field_errors:
+                for msg in field_errors:
+                    _err(msg, file=board_json_path)
+                failed = True
+            else:
+                print(
+                    "[ok] board.json fields: "
+                    + ", ".join(f"{k}={v!r}" for k, v in required_fields.items())
+                )
 
     return 2 if failed else 0
 

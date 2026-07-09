@@ -46,6 +46,8 @@ from kicad_tools.lvs.board_lvs import (
     compare_netlists,
 )
 from kicad_tools.lvs.copper_lvs import (
+    VACUOUS_KIND,
+    VACUOUS_NET,
     CopperLVSMismatch,
     CopperLVSResult,
     compare_copper_netlist,
@@ -65,6 +67,8 @@ __all__ = [
     "FreshCopperCheckError",
     "LVSMismatch",
     "LVSResult",
+    "VACUOUS_KIND",
+    "VACUOUS_NET",
     "_ref_of",
     "compare_copper_netlist",
     "compare_netlists",

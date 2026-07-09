@@ -24,6 +24,22 @@ Pads present on only one side (schematic-only or PCB-only) are ignored
 for the partition diff — that asymmetry is the label-based comparator's
 job (:func:`board_lvs.compare_netlists`), and the two checks are meant
 to run side by side.
+
+Vacuity guard (#4005 review): when the schematic binds **zero** pads —
+every pin floats (a PCB-first fixture schematic with no ``(wire ...)``
+elements) or no schematic pin matches a board pad — the partition diff
+can detect neither shorts nor opens, so an empty mismatch list is *no
+evidence*, not a pass.  The comparator refuses to report ``clean=True``
+in that case: it emits a single synthetic mismatch of
+``kind="vacuous"`` (see :data:`VACUOUS_KIND`), making the result dirty.
+
+The contract is deliberately the simplest defensible one: **vacuous iff
+zero bound pads**.  A percentage floor (e.g. "<50% of pads bindable")
+was considered and rejected: any bound pad contributes real, falsifiable
+evidence for the nets it touches, and legitimate boards mix wired power
+nets with PCB-only connector fixtures — a ratio threshold would need an
+arbitrary constant and misfire on those.  Zero bound pads is the unique
+case where the comparator can observe literally nothing.
 """
 
 from __future__ import annotations
@@ -33,18 +49,34 @@ from pathlib import Path
 
 from kicad_tools.lvs.board_lvs import _schematic_pin_to_net
 
+# Mismatch ``kind`` emitted by the vacuity guard (#4005 review): the
+# schematic bound zero pads, so the comparator has no evidence and must
+# not report clean.  Additive to the v1 lvs.json schema (a new enum value
+# inside the existing ``copper_mismatches[].kind`` field).
+VACUOUS_KIND = "vacuous"
+
+# Sentinel "net name" carried by the synthetic vacuity mismatch.  Angle
+# brackets keep it out of the legal KiCad net-name space.
+VACUOUS_NET = "<no-schematic-evidence>"
+
 
 @dataclass(frozen=True)
 class CopperLVSMismatch:
     """A single copper-vs-schematic partition disagreement.
 
     Attributes:
-        kind: ``"short"`` (different schematic nets fused in copper) or
-            ``"open"`` (same schematic net split across copper islands).
+        kind: ``"short"`` (different schematic nets fused in copper),
+            ``"open"`` (same schematic net split across copper islands),
+            or ``"vacuous"`` (the schematic bound zero pads, so the
+            comparator has no evidence either way — synthetic guard
+            entry, see :data:`VACUOUS_KIND`).
         net_a / net_b: The schematic net names involved.  For a short
-            these differ; for an open they are equal.
+            these differ; for an open they are equal; for a vacuous
+            entry both are :data:`VACUOUS_NET`.
         pad_a / pad_b: The two offending pads (``"REF.PAD"`` form) that
-            witness the mismatch.
+            witness the mismatch.  For a vacuous entry these carry the
+            evidence counters (``"bound_pads=0"`` / ``"board_pads=N"``)
+            instead of pad ids.
     """
 
     kind: str
@@ -60,10 +92,17 @@ class CopperLVSResult:
 
     ``clean`` is ``True`` iff ``mismatches`` is empty.  ``shorts`` and
     ``opens`` partition the mismatches by kind for convenient reporting.
+
+    ``bound_pad_count`` records how many board pads carried a real
+    (non-``None``) schematic net — the amount of evidence the diff was
+    computed from.  ``None`` means the count was not recorded (results
+    hand-built by older callers/tests); results produced by
+    :func:`compare_partitions` always set it.
     """
 
     clean: bool
     mismatches: tuple[CopperLVSMismatch, ...]
+    bound_pad_count: int | None = None
 
     @property
     def shorts(self) -> tuple[CopperLVSMismatch, ...]:
@@ -72,6 +111,17 @@ class CopperLVSResult:
     @property
     def opens(self) -> tuple[CopperLVSMismatch, ...]:
         return tuple(m for m in self.mismatches if m.kind == "open")
+
+    @property
+    def vacuous(self) -> bool:
+        """True when this result is the vacuity-guard verdict (#4005 review).
+
+        A vacuous result means the schematic bound zero pads, so the
+        comparator observed nothing — ``clean`` is forced ``False`` and
+        the sole mismatch has ``kind="vacuous"``.  Derived from the
+        mismatch list (not stored) so JSON round-trips preserve it.
+        """
+        return any(m.kind == VACUOUS_KIND for m in self.mismatches)
 
 
 def compare_partitions(
@@ -106,6 +156,12 @@ def compare_partitions(
         net pair (the lexicographically smallest pad witnesses are used);
         an open is reported once per pair of same-net copper islands, except
         for nets in ``advisory_net_names`` (opens suppressed).
+
+        **Vacuity guard (#4005 review):** if zero pads end up bound (no
+        schematic pin carries a real net AND matches a board pad), the
+        diff has no evidence and the result is NOT clean — it carries a
+        single synthetic ``kind="vacuous"`` mismatch and
+        ``bound_pad_count=0`` instead of a vacuous ``clean=True``.
     """
     # Build {pad_id -> schematic_net} restricted to pads that (a) have a
     # real schematic net and (b) actually appear on the board, so the diff
@@ -122,6 +178,22 @@ def compare_partitions(
         pad_id = f"{ref}.{pad}"
         if pad_id in on_board:
             pad_net[pad_id] = net
+
+    # --- Vacuity guard (#4005 review): zero bound pads means the diff
+    #     below can detect neither shorts nor opens, so an empty mismatch
+    #     list would be zero-evidence, not a pass.  Refuse to report clean:
+    #     emit one synthetic ``vacuous`` mismatch so ``clean`` is False and
+    #     every downstream consumer (recipe gate, lvs.json, CI asserters,
+    #     JSON round-trip) sees a dirty result. ---
+    if not pad_net:
+        vacuity = CopperLVSMismatch(
+            kind=VACUOUS_KIND,
+            net_a=VACUOUS_NET,
+            net_b=VACUOUS_NET,
+            pad_a="bound_pads=0",
+            pad_b=f"board_pads={len(on_board)}",
+        )
+        return CopperLVSResult(clean=False, mismatches=(vacuity,), bound_pad_count=0)
 
     # Map each pad to its copper-component index.
     comp_of_pad: dict[str, int] = {}
@@ -196,7 +268,11 @@ def compare_partitions(
                 )
             )
 
-    return CopperLVSResult(clean=not mismatches, mismatches=tuple(mismatches))
+    return CopperLVSResult(
+        clean=not mismatches,
+        mismatches=tuple(mismatches),
+        bound_pad_count=len(pad_net),
+    )
 
 
 def compare_copper_netlist(sch_path: str | Path, pcb_path: str | Path) -> CopperLVSResult:
@@ -254,6 +330,10 @@ def result_to_json(result: CopperLVSResult) -> dict:
     """
     return {
         "clean": result.clean,
+        # Additive evidence field (#4005 review): how many board pads carried
+        # a real schematic net.  ``null`` when the producing result predates
+        # the vacuity guard / was hand-built without a count.
+        "bound_pad_count": result.bound_pad_count,
         "mismatches": [
             {
                 "kind": m.kind,
@@ -279,7 +359,12 @@ def result_from_json(payload: dict) -> CopperLVSResult:
         )
         for m in payload.get("mismatches", ())
     )
-    return CopperLVSResult(clean=bool(payload["clean"]), mismatches=mismatches)
+    bound = payload.get("bound_pad_count")
+    return CopperLVSResult(
+        clean=bool(payload["clean"]),
+        mismatches=mismatches,
+        bound_pad_count=int(bound) if bound is not None else None,
+    )
 
 
 def _main(argv: list[str] | None = None) -> int:

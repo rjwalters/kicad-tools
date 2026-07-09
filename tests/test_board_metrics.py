@@ -418,6 +418,53 @@ def test_lvs_dirty_downgrades_status_to_partial(tmp_path: Path):
     assert m["status"] == "partial"
 
 
+def test_vacuous_lvs_json_treated_as_lvs_not_run(tmp_path: Path):
+    # A vacuous lvs.json (#4006: schematic bound zero pins, copper_vacuous
+    # true) carries NO evidence either way -- both LVS fields are OMITTED
+    # ("LVS not run" on the site) and status is not downgraded.
+    board = _make_board(
+        tmp_path,
+        lvs={
+            "$schema": "https://kicad-tools.org/schemas/lvs/v1.json",
+            "clean": False,
+            "mismatches": [],
+            "copper_mismatches": [
+                {
+                    "kind": "vacuous",
+                    "net_a": "<no-schematic-evidence>",
+                    "net_b": "<no-schematic-evidence>",
+                    "pad_a": "bound_pads=0",
+                    "pad_b": "board_pads=198",
+                }
+            ],
+            "copper_vacuous": True,
+            "copper_bound_pad_count": 0,
+        },
+    )
+    m = extract_board_metrics(board)
+    assert "lvs_clean" not in m
+    assert "lvs_mismatches" not in m
+    assert m["status"] == "ok"
+
+
+def test_legacy_vacuous_clean_true_lvs_json_not_rendered_clean(tmp_path: Path):
+    # Defense-in-depth (#4006): a pre-guard artifact claiming clean=true
+    # while self-identifying zero bound pads must NOT surface lvs_clean=true.
+    board = _make_board(
+        tmp_path,
+        lvs={
+            "$schema": "https://kicad-tools.org/schemas/lvs/v1.json",
+            "clean": True,
+            "mismatches": [],
+            "copper_mismatches": [],
+            "copper_bound_pad_count": 0,
+        },
+    )
+    m = extract_board_metrics(board)
+    assert "lvs_clean" not in m
+    assert "lvs_mismatches" not in m
+
+
 def test_lvs_fields_omitted_when_lvs_json_absent(tmp_path: Path):
     # No lvs.json on disk -> both LVS fields are OMITTED (never null), and
     # status follows the existing DRC-only logic (does NOT downgrade).
