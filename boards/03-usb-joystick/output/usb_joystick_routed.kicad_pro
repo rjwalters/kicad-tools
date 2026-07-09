@@ -2,7 +2,7 @@
   "meta": {
     "filename": "usb_joystick_routed.kicad_pro",
     "version": 1,
-    "manufacturer": "jlcpcb",
+    "manufacturer": "jlcpcb-tier1",
     "layers": 2,
     "copper_oz": 1.0
   },
