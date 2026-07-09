@@ -829,7 +829,25 @@ class TestBoard06StrictGateGuard:
     #
     # Net: 18 diff-pair + 1 drill + 5 clearance/via = 24.  When #3540-#3544
     # drive the diff-pair errors down, tighten this AND the tolerance entry.
-    EXPECTED_STRICT_GATE_ERRORS = 24
+    #
+    # Re-baselined 2026-07-08 (fix/board06-gallery-ready, 24 -> 18): the
+    # committed artifact is a fresh recipe re-route on the current router
+    # (45-by-construction #3975, min_hole_to_hole #3857, connectivity-
+    # fallback via fixes #3930) plus the recipe's new step-13 legalization
+    # passes (``_split_offangle_chords`` + ``_legalize_signal_vias``).
+    # All 6 non-diff-pair errors are GONE: the June artifact's 2 kicad-cli
+    # shorts (a USB_CC1 In1.Cu track through the USB2_D-/USB3_RX1- via
+    # barrels) and the U2-F1 clearance pair do not re-appear on the fresh
+    # route, and the residual same-net via_in_pad (USB_CC1 at U1-12) + 2
+    # ``dimension_drill_clearance`` staples (USB2_D+, MIPI_RST) are
+    # repaired by step 13.  kicad-cli reports 0 errors / 0 unconnected and
+    # the manufacturing bundle's report.md shows Errors = 0.  What remains
+    # is EXACTLY the diff-pair quality block: 9 ``diffpair_length_skew`` +
+    # 9 ``diffpair_routing_continuity`` -- coupled convergence is the
+    # #3540-#3544 tracked problem (shadow constructor stays OFF per the
+    # #3921 measurement).  When that work lands, tighten this toward 0 AND
+    # the tolerance entry.
+    EXPECTED_STRICT_GATE_ERRORS = 18
     # Advisory ``connectivity`` is now 0 (Issue #3914).  The residual entries
     # were ``NetStatusAnalyzer`` false positives on GND / +1V2 pour nets: the
     # pre-#3914 per-net model bulk-connected every pad inside a zone boundary

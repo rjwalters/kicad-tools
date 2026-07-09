@@ -110,9 +110,15 @@ MAX_POUR_REPAIR_ROUNDS: int = 6
 # clearance/connectivity landing shifted board-06's geometry and introduced a
 # GND-bridge dogleg that grazes a via near board-XY (57.050, 22.050), and a
 # hard-coded uuid for it silently no-ops in CI.  The dynamic resolver catches
-# it by geometry instead.  An unmatched seed entry is simply a no-op; keep
-# 864fb9ee so a deterministic regen still documents the committed crossover.
-QUANTIZE_SKIP_UUIDS: frozenset[str] = frozenset({"864fb9ee-effe-4a8c-8f8a-c93533e51a22"})
+# it by geometry instead.
+#
+# 2026-07-08 (gallery-ready refresh): EMPTY.  The historical 864fb9ee seed
+# documented the committed artifact's USB2_D- crossover chord, which the
+# fresh re-route no longer produces; and any chord the resolver still has
+# to skip is now picked up by the step-13 ``_split_offangle_chords``
+# mid-split pass, so the committed artifact ships 0 off-angle segments
+# (the fleet-45-census exemption for this board is retired).
+QUANTIZE_SKIP_UUIDS: frozenset[str] = frozenset()
 
 
 # =============================================================================
@@ -1053,6 +1059,765 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     for msg in failed:
         print(f"   UNREPAIRED: {msg}")
     return vias_placed, bridges_placed
+
+
+# =============================================================================
+# Gallery-ready legalization passes (2026-07-08)
+# =============================================================================
+# Two residual defect classes survive the router + optimizer + nudge + pour
+# pipeline on this board.  Both are SAME-NET via-placement artifacts (no
+# short risk), and both block the manufacturing bundle's "Errors = 0" gate:
+#
+#   1. ``dimension_drill_clearance`` -- the A* leaves a two-via "staple"
+#      (via -> short inter-via chain on one layer -> via) whose drills sit
+#      closer than the 0.5 mm fab hole-to-hole floor.  This is the #3855
+#      holdout (the guard covers the via PLACERS, not the A* path builder).
+#
+#   2. ``via_in_pad`` -- a layer-change via dropped at an SMD pad center
+#      (the USB_CC1 In1.Cu -> U1-12 landing), illegal at the plain jlcpcb
+#      tier this board targets.
+#
+# ``_legalize_signal_vias`` repairs both classes geometrically and
+# transactionally, mirroring the ``_repair_pour_connectivity`` conventions:
+# shapely validation against ALL existing copper, axis/45-aligned new
+# copper by construction, and per-defect rollback when no legal repair
+# exists (the residual is then reported honestly, never hidden).
+# =============================================================================
+
+
+def _parse_copper(text: str):
+    """Parse (segments, vias, pads) with tolerant field extraction.
+
+    Segment/via blocks appear in two serializations on this board (the
+    KiCad multiline writer and the recipe's single-line emitters); fields
+    are extracted per-block so ordering differences don't matter.
+
+    Returns:
+        ``(net_ids, segs, vias)`` where ``segs`` entries are
+        ``{block, x1, y1, x2, y2, w, layer, net, uuid}`` and ``vias``
+        entries are ``{block, x, y, size, drill, net, uuid}``.  ``net``
+        is the net NAME.
+    """
+    import re
+
+    net_ids = dict(re.findall(r'\(net (\d+) "([^"]*)"\)', text))
+    segs = []
+    for block in _find_sexp_blocks(text, "(segment"):
+        st = re.search(r"\(start ([\d.-]+) ([\d.-]+)\)", block)
+        en = re.search(r"\(end ([\d.-]+) ([\d.-]+)\)", block)
+        wd = re.search(r"\(width ([\d.]+)\)", block)
+        lay = re.search(r'\(layer "([^"]+)"\)', block)
+        nid = re.search(r"\(net (\d+)\)", block)
+        uid = re.search(r'\(uuid "([^"]+)"\)', block)
+        if not (st and en and lay and nid):
+            continue
+        segs.append(
+            {
+                "block": block,
+                "x1": float(st.group(1)),
+                "y1": float(st.group(2)),
+                "x2": float(en.group(1)),
+                "y2": float(en.group(2)),
+                "w": float(wd.group(1)) if wd else 0.2,
+                "layer": lay.group(1),
+                "net": net_ids.get(nid.group(1), ""),
+                "uuid": uid.group(1) if uid else "",
+            }
+        )
+    vias = []
+    for block in _find_sexp_blocks(text, "(via"):
+        at = re.search(r"\(at ([\d.-]+) ([\d.-]+)\)", block)
+        sz = re.search(r"\(size ([\d.]+)\)", block)
+        dr = re.search(r"\(drill ([\d.]+)\)", block)
+        nid = re.search(r"\(net (\d+)\)", block)
+        uid = re.search(r'\(uuid "([^"]+)"\)', block)
+        if not (at and nid):
+            continue
+        vias.append(
+            {
+                "block": block,
+                "x": float(at.group(1)),
+                "y": float(at.group(2)),
+                "size": float(sz.group(1)) if sz else 0.6,
+                "drill": float(dr.group(1)) if dr else 0.25,
+                "net": net_ids.get(nid.group(1), ""),
+                "uuid": uid.group(1) if uid else "",
+            }
+        )
+    return net_ids, segs, vias
+
+
+def _parse_pads(pcb_path: Path):
+    """Absolute-coordinate pad list via the analyzer's PCB model.
+
+    Returns entries ``{x, y, w, h, net, name, is_th, drill, layers}``
+    with ``w``/``h`` the axis-aligned bbox dimensions (cardinal-rotation
+    swap applied, matching the ``via_in_pad`` rule's model).
+    """
+    import math
+
+    from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+    analyzer = NetStatusAnalyzer(pcb_path)
+    origin_x, origin_y = analyzer.pcb.board_origin
+    all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
+    pads = []
+    for fp in analyzer.pcb.footprints:
+        rot = fp.rotation or 0.0
+        theta = math.radians(rot)
+        for pad in fp.pads:
+            px, py = pad.position
+            rx = px * math.cos(theta) + py * math.sin(theta)
+            ry = -px * math.sin(theta) + py * math.cos(theta)
+            x = fp.position[0] + rx + origin_x
+            y = fp.position[1] + ry + origin_y
+            w, h = pad.size
+            total = rot % 360
+            if abs(total - 90) < 0.001 or abs(total - 270) < 0.001:
+                w, h = h, w
+            elif not (abs(total) < 0.001 or abs(total - 180) < 0.001):
+                aw = abs(math.cos(theta)) * pad.size[0] + abs(math.sin(theta)) * pad.size[1]
+                ah = abs(math.sin(theta)) * pad.size[0] + abs(math.cos(theta)) * pad.size[1]
+                w, h = aw, ah
+            is_th = any("*" in str(layer) for layer in pad.layers)
+            layers = (
+                all_layers if is_th else frozenset({l for l in pad.layers if l.endswith(".Cu")})
+            )
+            pads.append(
+                {
+                    "x": x,
+                    "y": y,
+                    "w": w,
+                    "h": h,
+                    "net": pad.net_name or "",
+                    "name": f"{fp.reference}.{pad.number}",
+                    "is_th": is_th,
+                    "drill": float(getattr(pad, "drill", 0.0) or 0.0),
+                    "layers": layers,
+                }
+            )
+    return pads
+
+
+def _legalize_signal_vias(pcb_path: Path) -> int:
+    """Repair same-net ``via_in_pad`` + sub-floor drill-pair residuals.
+
+    Strategy per defect class (both validated with shapely against ALL
+    copper; every new segment is axis/45-aligned by construction):
+
+    * **Staple collapse** (``dimension_drill_clearance``, same-net pair):
+      find the single-layer chain of same-net segments joining the two
+      vias.  Delete one via (the "victim") plus the chain, and re-draw
+      the link on the victim's OTHER attached layer as a 1-2 leg
+      axis/45 dogleg to the survivor.  Net effect: one fewer via, the
+      drill pair gone, connectivity preserved by construction (the
+      victim's other-layer copper now reaches the survivor barrel,
+      which spans all layers).
+
+    * **Via relocation** (``via_in_pad``): ring-search candidate
+      positions (8 compass directions x increasing offsets) whose barrel
+      clears EVERY pad, foreign copper by >= 0.15 mm and every drill by
+      >= 0.5 mm edge-to-edge; bridge old -> new with connector stubs on
+      every layer the via previously joined plus the pad's copper layer
+      (compass directions keep connectors axis/45 by construction).
+
+    Returns the number of defects repaired.  Unrepairable defects are
+    printed and left in place (never silently dropped).
+    """
+    import math
+
+    from shapely.geometry import LineString, Point, box
+
+    CLEAR = 0.15
+    MIN_H2H = 0.5
+    # KiCad board-setup ``hole_clearance`` constraint: FOREIGN copper must
+    # stay >= 0.25 mm from any drilled hole edge.  kct's clearance rules
+    # do not model this (the #3855-adjacent engine gap: kicad-cli flagged
+    # a 0.248 mm track-to-hole graze that every kct rule passed), so the
+    # repair validators enforce it directly.
+    HOLE_CLEAR = 0.25
+    EPS = 1e-3
+
+    fixed = 0
+    pads = _parse_pads(pcb_path)
+
+    def _pad_box(p, inflate: float = 0.0):
+        return box(
+            p["x"] - p["w"] / 2 - inflate,
+            p["y"] - p["h"] / 2 - inflate,
+            p["x"] + p["w"] / 2 + inflate,
+            p["y"] + p["h"] / 2 + inflate,
+        )
+
+    min_x = generate_pcb.BOARD_ORIGIN_X + 0.5
+    min_y = generate_pcb.BOARD_ORIGIN_Y + 0.5
+    max_x = generate_pcb.BOARD_ORIGIN_X + generate_pcb.BOARD_WIDTH - 0.5
+    max_y = generate_pcb.BOARD_ORIGIN_Y + generate_pcb.BOARD_HEIGHT - 0.5
+
+    def _via_pos_ok(net, vx, vy, radius, drill, vias, skip_uuids=frozenset()):
+        if not (min_x <= vx <= max_x and min_y <= vy <= max_y):
+            return False
+        vgeom = Point(vx, vy).buffer(radius)
+        for p in pads:
+            pb = _pad_box(p)
+            if vgeom.intersects(pb):
+                return False  # via-in-pad ban (same-net included)
+            if p["net"] != net and vgeom.distance(pb) < CLEAR:
+                return False
+            if p["drill"] > 0:
+                edge = math.hypot(vx - p["x"], vy - p["y"]) - drill / 2 - p["drill"] / 2
+                if edge + EPS < MIN_H2H:
+                    return False
+        hole = Point(vx, vy).buffer(drill / 2)
+        for s in segs:
+            if s["net"] != net:
+                sgeom = LineString([(s["x1"], s["y1"]), (s["x2"], s["y2"])]).buffer(s["w"] / 2)
+                if vgeom.distance(sgeom) < CLEAR:
+                    return False
+                # New hole vs existing foreign copper (any layer -- the
+                # drill passes through all of them).
+                if hole.distance(sgeom) < HOLE_CLEAR:
+                    return False
+        for v in vias:
+            if v["uuid"] in skip_uuids:
+                continue
+            edge = math.hypot(vx - v["x"], vy - v["y"]) - drill / 2 - v["drill"] / 2
+            if edge + EPS < MIN_H2H:
+                return False
+            if v["net"] != net:
+                if vgeom.distance(Point(v["x"], v["y"]).buffer(v["size"] / 2)) < CLEAR:
+                    return False
+                # New barrel vs existing foreign hole.
+                if vgeom.distance(Point(v["x"], v["y"]).buffer(v["drill"] / 2)) < HOLE_CLEAR:
+                    return False
+        return True
+
+    def _leg_ok(net, p0, p1, layer, width, vias, skip_uuids=frozenset()):
+        if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) < EPS:
+            return True
+        path = LineString([p0, p1]).buffer(width / 2)
+        for p in pads:
+            if p["net"] != net:
+                if layer in p["layers"] and path.distance(_pad_box(p)) < CLEAR:
+                    return False
+                # Track vs foreign TH pad hole (any layer).
+                if p["drill"] > 0:
+                    if path.distance(Point(p["x"], p["y"]).buffer(p["drill"] / 2)) < HOLE_CLEAR:
+                        return False
+        for s in segs:
+            if s["net"] != net and s["layer"] == layer:
+                sgeom = LineString([(s["x1"], s["y1"]), (s["x2"], s["y2"])]).buffer(s["w"] / 2)
+                if path.distance(sgeom) < CLEAR:
+                    return False
+        for v in vias:
+            if v["uuid"] in skip_uuids or v["net"] == net:
+                continue
+            if path.distance(Point(v["x"], v["y"]).buffer(v["size"] / 2)) < CLEAR:
+                return False
+            # Track vs foreign via hole (KiCad ``hole_clearance``).
+            if path.distance(Point(v["x"], v["y"]).buffer(v["drill"] / 2)) < HOLE_CLEAR:
+                return False
+        return True
+
+    def _is_45(dx: float, dy: float) -> bool:
+        return abs(dx) < EPS or abs(dy) < EPS or abs(abs(dx) - abs(dy)) < EPS
+
+    def _dogleg(p0, p1):
+        """1-2 leg axis/45 decompositions of p0 -> p1 (both orders)."""
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        if _is_45(dx, dy):
+            return [[(p0, p1)]]
+        sx = math.copysign(1.0, dx)
+        sy = math.copysign(1.0, dy)
+        diag = min(abs(dx), abs(dy))
+        cands = []
+        if abs(dx) > abs(dy):
+            mid_a = (p0[0] + sx * (abs(dx) - diag), p0[1])  # axis first
+            mid_b = (p0[0] + sx * diag, p0[1] + sy * diag)  # diag first
+        else:
+            mid_a = (p0[0], p0[1] + sy * (abs(dy) - diag))
+            mid_b = (p0[0] + sx * diag, p0[1] + sy * diag)
+        cands.append([(p0, mid_a), (mid_a, p1)])
+        cands.append([(p0, mid_b), (mid_b, p1)])
+        return cands
+
+    def _seg_line(net_name, p0, p1, layer, width, net_num):
+        return (
+            f"  (segment (start {p0[0]:.3f} {p0[1]:.3f}) (end {p1[0]:.3f} {p1[1]:.3f}) "
+            f'(width {width}) (layer "{layer}") (net {net_num}) '
+            f'(uuid "{_generate_uuid()}"))'
+        )
+
+    # Iterate: re-parse after every applied repair so obstacle state is
+    # always current.
+    for _round in range(8):
+        text = pcb_path.read_text()
+        net_ids, segs, vias = _parse_copper(text)
+        net_num_by_name = {v: k for k, v in net_ids.items()}
+
+        def _attached(vx, vy):
+            out = []
+            for s in segs:
+                if (abs(s["x1"] - vx) < EPS and abs(s["y1"] - vy) < EPS) or (
+                    abs(s["x2"] - vx) < EPS and abs(s["y2"] - vy) < EPS
+                ):
+                    out.append(s)
+            return out
+
+        repair_applied = False
+
+        # ---- defect class 1: sub-floor same-net drill pairs ----------------
+        for i in range(len(vias)):
+            for j in range(i + 1, len(vias)):
+                a, b = vias[i], vias[j]
+                edge = (
+                    math.hypot(a["x"] - b["x"], a["y"] - b["y"]) - a["drill"] / 2 - b["drill"] / 2
+                )
+                if edge + EPS >= MIN_H2H:
+                    continue
+                if a["net"] != b["net"] or not a["net"]:
+                    print(
+                        f"   UNREPAIRED drill pair (foreign nets "
+                        f"{a['net']}/{b['net']}) at ({a['x']:.2f},{a['y']:.2f})"
+                    )
+                    continue
+                net = a["net"]
+                # Find the single-layer same-net chain joining a and b.
+                chain = None
+                chain_layer = None
+                for lay in ("F.Cu", "B.Cu", "In1.Cu", "In2.Cu"):
+                    lsegs = [s for s in segs if s["net"] == net and s["layer"] == lay]
+                    # BFS from a's position to b's position.
+                    frontier = [(a["x"], a["y"])]
+                    seen_pts = {(round(a["x"], 3), round(a["y"], 3))}
+                    used = []
+                    parent_map = {}
+                    found = False
+                    while frontier and not found:
+                        cx, cy = frontier.pop(0)
+                        for s in lsegs:
+                            for near_end, far_end in (
+                                ((s["x1"], s["y1"]), (s["x2"], s["y2"])),
+                                ((s["x2"], s["y2"]), (s["x1"], s["y1"])),
+                            ):
+                                if abs(near_end[0] - cx) < EPS and abs(near_end[1] - cy) < EPS:
+                                    key = (round(far_end[0], 3), round(far_end[1], 3))
+                                    if key in seen_pts:
+                                        continue
+                                    seen_pts.add(key)
+                                    parent_map[key] = (s, (round(cx, 3), round(cy, 3)))
+                                    if (
+                                        abs(far_end[0] - b["x"]) < EPS
+                                        and abs(far_end[1] - b["y"]) < EPS
+                                    ):
+                                        found = True
+                                        break
+                                    frontier.append(far_end)
+                            if found:
+                                break
+                    if found:
+                        # Walk parents back to collect the chain.
+                        used = []
+                        key = (round(b["x"], 3), round(b["y"], 3))
+                        start_key = (round(a["x"], 3), round(a["y"], 3))
+                        while key != start_key:
+                            s, prev = parent_map[key]
+                            used.append(s)
+                            key = prev
+                        chain = used
+                        chain_layer = lay
+                        break
+                if chain is None:
+                    print(
+                        f"   UNREPAIRED drill pair {net} at "
+                        f"({a['x']:.2f},{a['y']:.2f}): no single-layer chain"
+                    )
+                    continue
+                # Interior chain nodes must have no other attachments.
+                interior = set()
+                for s in chain:
+                    for pt in ((s["x1"], s["y1"]), (s["x2"], s["y2"])):
+                        k = (round(pt[0], 3), round(pt[1], 3))
+                        if k not in (
+                            (round(a["x"], 3), round(a["y"], 3)),
+                            (round(b["x"], 3), round(b["y"], 3)),
+                        ):
+                            interior.add(k)
+                chain_ids = {id(s) for s in chain}
+                tee = False
+                for k in interior:
+                    for s in segs:
+                        if id(s) in chain_ids:
+                            continue
+                        for pt in ((s["x1"], s["y1"]), (s["x2"], s["y2"])):
+                            if abs(pt[0] - k[0]) < EPS and abs(pt[1] - k[1]) < EPS:
+                                tee = True
+                    for v in vias:
+                        if abs(v["x"] - k[0]) < EPS and abs(v["y"] - k[1]) < EPS:
+                            tee = True
+                    for p in pads:
+                        if math.hypot(p["x"] - k[0], p["y"] - k[1]) < 0.2:
+                            tee = True
+                if tee:
+                    print(
+                        f"   drill pair {net} at ({a['x']:.2f},{a['y']:.2f}): "
+                        f"chain has tee (pad escape) -- collapse skipped, trying slide"
+                    )
+                done = False
+                for victim, survivor in () if tee else ((a, b), (b, a)):
+                    other = [
+                        s
+                        for s in _attached(victim["x"], victim["y"])
+                        if id(s) not in chain_ids and s["layer"] != chain_layer
+                    ]
+                    other_layers = {s["layer"] for s in other}
+                    if len(other_layers) != 1:
+                        continue
+                    lay = next(iter(other_layers))
+                    width = max(s["w"] for s in other)
+                    for legs in _dogleg((victim["x"], victim["y"]), (survivor["x"], survivor["y"])):
+                        if all(_leg_ok(net, p0, p1, lay, width, vias) for p0, p1 in legs):
+                            new_text = text
+                            new_text = new_text.replace(victim["block"], "")
+                            for s in chain:
+                                new_text = new_text.replace(s["block"], "")
+                            add = [
+                                _seg_line(net, p0, p1, lay, width, net_num_by_name[net])
+                                for p0, p1 in legs
+                                if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) >= EPS
+                            ]
+                            # If the collapse leaves the SURVIVOR with
+                            # copper on a single layer only (the dogleg
+                            # re-landed on its own escape layer), the via
+                            # no longer changes layers -- remove it too so
+                            # no dangling barrel ships.
+                            surv_att = [
+                                s
+                                for s in _attached(survivor["x"], survivor["y"])
+                                if id(s) not in chain_ids
+                            ]
+                            surv_layers = {s["layer"] for s in surv_att} | {lay}
+                            n_removed = 1
+                            if len(surv_layers) == 1:
+                                new_text = new_text.replace(survivor["block"], "")
+                                n_removed = 2
+                            new_text = new_text.rstrip().rstrip(")")
+                            new_text += "\n" + "\n".join(add) + "\n)\n"
+                            pcb_path.write_text(new_text)
+                            print(
+                                f"   collapsed {net} via staple at "
+                                f"({victim['x']:.2f},{victim['y']:.2f}) -> "
+                                f"({survivor['x']:.2f},{survivor['y']:.2f}) "
+                                f"[{len(add)} new {lay} leg(s), {n_removed} via(s) removed]"
+                            )
+                            fixed += 1
+                            done = True
+                            break
+                    if done:
+                        break
+                if done:
+                    repair_applied = True
+                    break
+                # Fallback: SLIDE one via of the pair to a ring candidate
+                # that clears the drill floor, bridging old -> new with
+                # axis/45 connector stubs on every attached layer (the
+                # staple-through-pad case: the inter-via chain carries a
+                # pad escape, so it cannot be deleted -- J1.B6 here).
+                directions = [
+                    (math.cos(k * math.pi / 4.0), math.sin(k * math.pi / 4.0)) for k in range(8)
+                ]
+                for victim in (b, a):
+                    # ALL attached layers need a connector -- including the
+                    # chain layer: the slide keeps the chain in place, so
+                    # the copper ending at the old via position on EVERY
+                    # layer must be bridged to the new barrel.
+                    att = _attached(victim["x"], victim["y"])
+                    att_layers = sorted({s["layer"] for s in att}) or ["F.Cu"]
+                    width_by_layer = {
+                        lay: max(s["w"] for s in att if s["layer"] == lay) for lay in att_layers
+                    }
+                    radius = victim["size"] / 2
+                    for off in (0.25, 0.35, 0.5, 0.7, 0.9, 1.2, 1.6):
+                        for ux, uy in directions:
+                            nx = victim["x"] + ux * off
+                            ny = victim["y"] + uy * off
+                            if not _via_pos_ok(
+                                net,
+                                nx,
+                                ny,
+                                radius,
+                                victim["drill"],
+                                vias,
+                                skip_uuids={victim["uuid"]},
+                            ):
+                                continue
+                            if not all(
+                                _leg_ok(
+                                    net,
+                                    (victim["x"], victim["y"]),
+                                    (nx, ny),
+                                    lay,
+                                    width_by_layer[lay],
+                                    vias,
+                                    skip_uuids={victim["uuid"]},
+                                )
+                                for lay in att_layers
+                            ):
+                                continue
+                            import re as _re
+
+                            new_block = _re.sub(
+                                r"\(at [\d.-]+ [\d.-]+\)",
+                                f"(at {nx:.3f} {ny:.3f})",
+                                victim["block"],
+                                count=1,
+                            )
+                            new_text = text.replace(victim["block"], new_block)
+                            add = [
+                                _seg_line(
+                                    net,
+                                    (victim["x"], victim["y"]),
+                                    (nx, ny),
+                                    lay,
+                                    width_by_layer[lay],
+                                    net_num_by_name[net],
+                                )
+                                for lay in att_layers
+                            ]
+                            new_text = new_text.rstrip().rstrip(")")
+                            new_text += "\n" + "\n".join(add) + "\n)\n"
+                            pcb_path.write_text(new_text)
+                            print(
+                                f"   slid {net} via ({victim['x']:.2f},{victim['y']:.2f})"
+                                f" -> ({nx:.3f},{ny:.3f}) to clear drill floor "
+                                f"[connectors on {att_layers}]"
+                            )
+                            fixed += 1
+                            done = True
+                            break
+                        if done:
+                            break
+                    if done:
+                        break
+                if done:
+                    repair_applied = True
+                    break
+                print(
+                    f"   UNREPAIRED drill pair {net} at ({a['x']:.2f},{a['y']:.2f}): "
+                    f"no legal dogleg or slide"
+                )
+            if repair_applied:
+                break
+        if repair_applied:
+            continue
+
+        # ---- defect class 2: via drilled inside an SMD pad -----------------
+        for v in vias:
+            in_pad = None
+            for p in pads:
+                if p["is_th"]:
+                    continue
+                # Drill circle fully inside the pad bbox (rule geometry).
+                r = v["drill"] / 2
+                if (
+                    p["x"] - p["w"] / 2 <= v["x"] - r
+                    and v["x"] + r <= p["x"] + p["w"] / 2
+                    and p["y"] - p["h"] / 2 <= v["y"] - r
+                    and v["y"] + r <= p["y"] + p["h"] / 2
+                ):
+                    in_pad = p
+                    break
+            if in_pad is None:
+                continue
+            net = v["net"]
+            att_layers = {s["layer"] for s in _attached(v["x"], v["y"])}
+            pad_layer = "F.Cu" if "F.Cu" in in_pad["layers"] else "B.Cu"
+            conn_layers = sorted(att_layers | {pad_layer})
+            radius = v["size"] / 2
+            directions = [
+                (math.cos(k * math.pi / 4.0), math.sin(k * math.pi / 4.0)) for k in range(8)
+            ]
+            placed = False
+            for off in (0.55, 0.65, 0.75, 0.9, 1.1, 1.4, 1.8):
+                for ux, uy in directions:
+                    nx, ny = v["x"] + ux * off, v["y"] + uy * off
+                    if not _via_pos_ok(
+                        net, nx, ny, radius, v["drill"], vias, skip_uuids={v["uuid"]}
+                    ):
+                        continue
+                    if not all(
+                        _leg_ok(
+                            net,
+                            (v["x"], v["y"]),
+                            (nx, ny),
+                            lay,
+                            0.15,
+                            vias,
+                            skip_uuids={v["uuid"]},
+                        )
+                        for lay in conn_layers
+                    ):
+                        continue
+                    import re as _re
+
+                    new_block = _re.sub(
+                        r"\(at [\d.-]+ [\d.-]+\)",
+                        f"(at {nx:.3f} {ny:.3f})",
+                        v["block"],
+                        count=1,
+                    )
+                    new_text = text.replace(v["block"], new_block)
+                    add = [
+                        _seg_line(net, (v["x"], v["y"]), (nx, ny), lay, 0.15, net_num_by_name[net])
+                        for lay in conn_layers
+                    ]
+                    new_text = new_text.rstrip().rstrip(")")
+                    new_text += "\n" + "\n".join(add) + "\n)\n"
+                    pcb_path.write_text(new_text)
+                    print(
+                        f"   relocated {net} via out of pad {in_pad['name']}: "
+                        f"({v['x']:.2f},{v['y']:.2f}) -> ({nx:.3f},{ny:.3f}) "
+                        f"[connectors on {conn_layers}]"
+                    )
+                    fixed += 1
+                    placed = True
+                    break
+                if placed:
+                    break
+            if placed:
+                repair_applied = True
+                break
+            print(
+                f"   UNREPAIRED via-in-pad {net} at ({v['x']:.2f},{v['y']:.2f}) "
+                f"in {in_pad['name']}: no legal relocation"
+            )
+        if not repair_applied:
+            break
+    return fixed
+
+
+def _split_offangle_chords(pcb_path: Path, baseline: set[tuple[str, ...]]) -> int:
+    """Mid-split 3-leg fallback for off-angle chords the quantizer skipped.
+
+    ``quantize_pcb_file`` offers exactly two dogleg variants per chord
+    (diag-first and axis-first); when BOTH graze foreign copper the chord
+    is skipped and ships off-angle (the fleet-45-census documented
+    residual).  A 3-leg *mid-split* (axis leg, 45 diag, axis leg) slides
+    the diagonal along the chord, which often threads corridors both
+    2-leg bulges cannot (board 06: the GND pour-repair bridge between the
+    USB3_RX2+/RX2- via barrels in the BGA field).
+
+    Each candidate is validated the same way as the step-12d gate: the
+    mutated copy's clearance signature must introduce nothing beyond
+    ``baseline``.  Returns the number of chords replaced.
+    """
+    import math
+    import os
+    import tempfile
+
+    from kicad_tools.router.quantize import segment_angle_census
+
+    EPS = 1e-3
+    HOLE_CLEAR = 0.25  # KiCad board-setup hole_clearance (see _legalize_signal_vias)
+    _total, off_angle = segment_angle_census(pcb_path)
+    if not off_angle:
+        return 0
+
+    text = pcb_path.read_text()
+    _net_ids, segs, vias = _parse_copper(text)
+    fixed = 0
+
+    def _legs_clear_foreign_holes(legs, width: float, net: str) -> bool:
+        from shapely.geometry import LineString as _LS
+        from shapely.geometry import Point as _Pt
+
+        for q0, q1 in legs:
+            path = _LS([q0, q1]).buffer(width / 2)
+            for v in vias:
+                if v["net"] == net:
+                    continue
+                if path.distance(_Pt(v["x"], v["y"]).buffer(v["drill"] / 2)) < HOLE_CLEAR:
+                    return False
+        return True
+
+    for entry in off_angle:
+        uuid = entry["uuid"]
+        seg = next((s for s in segs if s["uuid"] == uuid), None)
+        if seg is None:
+            continue
+        p0 = (seg["x1"], seg["y1"])
+        p1 = (seg["x2"], seg["y2"])
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        adx, ady = abs(dx), abs(dy)
+        diag = min(adx, ady)
+        extra = max(adx, ady) - diag
+        if diag < EPS or extra < EPS:
+            continue
+        sx = math.copysign(1.0, dx)
+        sy = math.copysign(1.0, dy)
+        net_num = None
+        import re as _re
+
+        m = _re.search(r"\(net (\d+)\)", seg["block"])
+        net_num = m.group(1) if m else "0"
+        replaced = False
+        for frac in (0.5, 0.35, 0.65, 0.25, 0.75, 0.15, 0.85):
+            if replaced:
+                break
+            # Round the split length to the emitted 3-decimal precision so
+            # the diagonal leg is EXACTLY 45 degrees after formatting (a
+            # half-thousandth propagation would re-trip the census).
+            a_len = round(extra * frac, 3)
+            if adx > ady:
+                m1 = (round(p0[0] + sx * a_len, 3), p0[1])
+                m2 = (round(m1[0] + sx * diag, 3), round(p0[1] + sy * diag, 3))
+                m2 = (m2[0], round(m1[1] + sy * abs(m2[0] - m1[0]), 3))
+            else:
+                m1 = (p0[0], round(p0[1] + sy * a_len, 3))
+                m2 = (round(p0[0] + sx * diag, 3), round(m1[1] + sy * diag, 3))
+                m2 = (m2[0], round(m1[1] + sy * abs(m2[0] - m1[0]), 3))
+            legs = [(p0, m1), (m1, m2), (m2, p1)]
+            legs = [(q0, q1) for q0, q1 in legs if math.hypot(q1[0] - q0[0], q1[1] - q0[1]) >= EPS]
+            # Width fallback: the original width first; then a narrowed
+            # bridge (>= the 0.1016 mm fab floor) -- corridor chords sit in
+            # via-dense fields where the full-width leg can violate the
+            # 0.25 mm KiCad hole-clearance even though every kct clearance
+            # rule passes (the 2 um USB3_RX2 graze this pass exists for).
+            for width in (seg["w"], 0.15):
+                if not _legs_clear_foreign_holes(legs, width, seg["net"]):
+                    continue
+                add = "\n".join(
+                    f"  (segment (start {q0[0]:.3f} {q0[1]:.3f}) (end {q1[0]:.3f} {q1[1]:.3f}) "
+                    f'(width {width}) (layer "{seg["layer"]}") (net {net_num}) '
+                    f'(uuid "{_generate_uuid()}"))'
+                    for q0, q1 in legs
+                )
+                new_text = text.replace(seg["block"], "").rstrip().rstrip(")")
+                new_text += "\n" + add + "\n)\n"
+                fd, tmp = tempfile.mkstemp(suffix=".kicad_pcb")
+                os.close(fd)
+                try:
+                    Path(tmp).write_text(new_text)
+                    if _clearance_signature(Path(tmp)) - baseline:
+                        continue
+                finally:
+                    os.unlink(tmp)
+                pcb_path.write_text(new_text)
+                text = new_text
+                print(
+                    f"   split off-angle chord {uuid[:8]} ({entry['off_deg']:.1f} deg, "
+                    f"net {seg['net']}) into {len(legs)} 45-aligned leg(s) "
+                    f"[mid-split frac={frac}, width={width}]"
+                )
+                fixed += 1
+                replaced = True
+                break
+        if not replaced:
+            print(
+                f"   off-angle chord {uuid[:8]} ({entry['off_deg']:.1f} deg) "
+                f"has no clean mid-split -- kept as documented residual"
+            )
+    return fixed
 
 
 def _repair_pair_overlap_solo(router, net_map: dict[str, int]) -> list[str]:
@@ -2397,6 +3162,48 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         raise
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   WARNING: 45-degree quantization step skipped: {exc}")
+
+    # Step 13 (gallery-ready, 2026-07-08): legalize the same-net via
+    # residuals (sub-floor drill pairs + via-in-pad) and mid-split any
+    # off-angle chord the step-12 flip/skip resolver had to skip.  Both
+    # passes are transactional per defect and validated with shapely
+    # against ALL copper; a failed repair is reported and left in place.
+    # Gate exactly like step 12d: the combined mutation must introduce
+    # ZERO new clearance violations or the whole step is rolled back.
+    print("\n13. Same-net via legalization + off-angle mid-split (gallery-ready)...")
+    try:
+        import shutil as _shutil
+        import tempfile as _tempfile
+
+        pre_legalize_clearances = _clearance_signature(output_path)
+        snapshot = _tempfile.mkstemp(suffix=".kicad_pcb")[1]
+        _shutil.copy(output_path, snapshot)
+        n_split = _split_offangle_chords(output_path, pre_legalize_clearances)
+        n_vias_fixed = _legalize_signal_vias(output_path)
+        if n_split or n_vias_fixed:
+            print(f"   {n_vias_fixed} via defect(s) repaired, {n_split} chord(s) split")
+            print("13b. Re-filling zones after legalization...")
+            fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
+            if fill_result.returncode != 0:
+                print(f"   Zone re-fill failed (rc={fill_result.returncode})")
+            print("13c. Copper-union pour audit + clearance gate (post-legalize)...")
+            pour_ok_13 = _run_pour_audit("[legal]")
+            new_clearances = _clearance_signature(output_path) - pre_legalize_clearances
+            if not pour_ok_13 or new_clearances:
+                print(
+                    f"   POST-LEGALIZE GATE: FAIL "
+                    f"(pours={'OK' if pour_ok_13 else 'BROKEN'}, "
+                    f"{len(new_clearances)} new clearance violation(s)) -- rolling back"
+                )
+                _shutil.copy(snapshot, output_path)
+                subprocess.run(fill_argv, capture_output=True, text=True)
+            else:
+                print("   POST-LEGALIZE GATE: PASS (0 new clearance violations)")
+        else:
+            print("   No repairable via/chord residuals detected")
+        Path(snapshot).unlink(missing_ok=True)
+    except Exception as exc:  # pragma: no cover - degrade gracefully
+        print(f"   WARNING: legalization step skipped: {exc}")
 
     total_signal_nets = len([n for n in router.nets if n > 0])
     success = stats["nets_routed"] == total_signal_nets
