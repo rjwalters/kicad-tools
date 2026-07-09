@@ -1517,3 +1517,149 @@ def test_via_in_pad_does_not_bond_foreign_pad(tmp_path: Path) -> None:
         "a via 3 mm clear of U1.8's pad copper must NOT bond it (no via-in-pad "
         f"false bond); partition={sorted(sorted(c) for c in partition)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Layer-aware endpoint matching + via-barrel/track overlap (softstart fixes)
+# ---------------------------------------------------------------------------
+
+
+def test_trace_under_smd_pad_on_other_layer_does_not_fuse(tmp_path: Path) -> None:
+    """A B.Cu trace ending at the XY of an F.Cu-only SMD pad is NOT a bond.
+
+    Regression for the softstart false shorts (VGATE<->SRC_POS<->SRC_NEG,
+    AC_LINE<->AC_NEUTRAL): the extractor matched segment endpoints to pads
+    by XY alone, so a legal DRC-clean inner/B.Cu trace routed under an SMD
+    pad fused the pad's net into the trace's chain.
+    """
+    pcb = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "A")
+  (net 2 "B")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000f1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-f1-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-f1-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "A"))
+    (pad "2" smd roundrect (at 2 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 2 "B"))
+  )
+  (segment (start 100 100) (end 102 100) (width 0.25) (layer "B.Cu") (net 2)
+    (uuid "00000000-0000-0000-0000-0000000000f2"))
+)
+"""
+    pcb_path = _write(tmp_path, "b.kicad_pcb", pcb)
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    # The B.Cu segment runs exactly under both F.Cu pads but touches
+    # neither -> two singleton components, no false short.
+    assert frozenset({"R1.1"}) in partition
+    assert frozenset({"R1.2"}) in partition
+    assert len(partition) == 2
+
+
+def test_via_barrel_overlapping_track_mid_segment_bonds(tmp_path: Path) -> None:
+    """A thru via grazed mid-segment by tracks on two layers bonds them.
+
+    Regression for the softstart false open (NRST_FS_POS): the router hops
+    F.Cu -> inner/B.Cu through a via whose barrel overlaps both tracks
+    mid-segment (no endpoint coincides with the via centre).  KiCad's own
+    connectivity treats that as connected; the extractor must too.
+    """
+    pcb = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "A")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000f3")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-f3-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-f3-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "A"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000f4")
+    (at 110 100)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-f4-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-f4-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "B.Cu" "B.Paste" "B.Mask")
+      (roundrect_rratio 0.25) (net 1 "A"))
+  )
+  (segment (start 100 100) (end 105 100.25) (width 0.2) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000f5"))
+  (segment (start 105 99.75) (end 110 100) (width 0.2) (layer "B.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000f6"))
+  (via (at 105 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000f7"))
+)
+"""
+    pcb_path = _write(tmp_path, "b.kicad_pcb", pcb)
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    # F.Cu track ends 0.25 mm above the via centre, B.Cu track starts
+    # 0.25 mm below it; neither endpoint hits the via centre within the
+    # 0.01 mm tolerance, but both swept tracks overlap the 0.3 mm-radius
+    # barrel -> one component through the via.
+    assert frozenset({"R1.1", "R2.1"}) in partition, (
+        f"via-barrel overlap must bond the F.Cu and B.Cu tracks; "
+        f"partition={sorted(sorted(c) for c in partition)}"
+    )
+
+
+def test_via_barrel_clear_of_foreign_track_does_not_fuse(tmp_path: Path) -> None:
+    """A via separated from a foreign track by real clearance must NOT bond."""
+    pcb = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "A")
+  (net 2 "B")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000f8")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-f8-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-f8-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "A"))
+    (pad "2" smd roundrect (at 5 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 2 "B"))
+  )
+  (segment (start 100 100) (end 103 100) (width 0.2) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000f9"))
+  (segment (start 105 100) (end 106 100) (width 0.2) (layer "F.Cu") (net 2)
+    (uuid "00000000-0000-0000-0000-0000000000fa"))
+  (via (at 105 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2)
+    (uuid "00000000-0000-0000-0000-0000000000fb"))
+)
+"""
+    pcb_path = _write(tmp_path, "b.kicad_pcb", pcb)
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    # Net-1 copper (R1.1 + its track) ends 2 mm + clearance away from the
+    # net-2 via; only R1.2's net-2 chain may own the via.
+    assert frozenset({"R1.1"}) in partition, (
+        f"net-1 track ends 1.6 mm clear of the via barrel and must not bond; "
+        f"partition={sorted(sorted(c) for c in partition)}"
+    )

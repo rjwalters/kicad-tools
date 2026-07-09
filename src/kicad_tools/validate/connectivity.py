@@ -20,6 +20,7 @@ Example:
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -441,10 +442,25 @@ class ConnectivityValidator:
         #     (``self.pcb.segments``), not segments filtered by a net number,
         #     so a mislabeled segment still physically connects whatever it
         #     touches.
+        #
+        #     Endpoint→pad matching is LAYER-AWARE (softstart false-short
+        #     fix): a segment endpoint only bonds a pad whose copper exists
+        #     on the segment's layer.  A B.Cu / inner-layer trace that ends
+        #     directly under an F.Cu-only SMD pad's XY is a legal, DRC-clean
+        #     routing pattern with NO copper contact — matching it by XY
+        #     alone fused foreign nets (e.g. a SRC_POS B.Cu trace ending
+        #     under U5.1's VGATE pad merged VGATE↔SRC_POS↔SRC_NEG on a
+        #     DRC-clean board).  Through-hole pads (``*.Cu``) and synthetic
+        #     via nodes (expanded copper span) still bridge every layer
+        #     they span.
         segments = list(self.pcb.segments)
         for seg in segments:
-            start_pads = self._find_pads_at_point(seg.start, pad_positions)
-            end_pads = self._find_pads_at_point(seg.end, pad_positions)
+            start_pads = self._find_pads_at_point(
+                seg.start, pad_positions, pad_layers=pad_layers, layer=seg.layer
+            )
+            end_pads = self._find_pads_at_point(
+                seg.end, pad_positions, pad_layers=pad_layers, layer=seg.layer
+            )
             for sp in start_pads:
                 for ep in end_pads:
                     _connect(sp, ep)
@@ -453,17 +469,70 @@ class ConnectivityValidator:
                     for other in group[i + 1 :]:
                         _connect(p, other)
 
+        # 2a2. Via-barrel/track overlap (softstart false-open fix).  A track
+        #      that passes over (or ends near) a via so that its swept copper
+        #      overlaps the via barrel is galvanically bonded to the via even
+        #      though no *endpoint* coincides with the via centre — KiCad's
+        #      own connectivity treats this as connected and routers emit it
+        #      (e.g. softstart NRST_FS_POS hops F.Cu→In2.Cu through a thru
+        #      via that both tracks merely graze mid-segment).  Bond the
+        #      via's synthetic node into every layer-compatible segment that
+        #      overlaps its barrel; the chain builder below then carries the
+        #      connectivity across the whole chain.  A strictly positive
+        #      contact depth (> 1 µm) is required, so copper separated by a
+        #      real clearance moat (≥ 0.1 mm on any DRC-clean board) can
+        #      never fuse.
+        segment_extra_nodes: dict[int, set[str]] = {}
+        for via_index, via in enumerate(self.pcb.vias):
+            node_id = f"__via{via_index}"
+            via_span = self._via_bridged_layers(via.layers)
+            via_radius = (getattr(via, "size", 0.0) or 0.0) / 2.0
+            if via_radius <= 0:
+                continue
+            for seg_index, seg in enumerate(segments):
+                if seg.layer not in via_span:
+                    continue
+                reach = via_radius + (seg.width or 0.0) / 2.0 - 1e-3
+                if reach <= 0:
+                    continue
+                dist = self._point_segment_distance(via.position, seg.start, seg.end)
+                if dist < reach:
+                    segment_extra_nodes.setdefault(seg_index, set()).add(node_id)
+                    for pad_id in self._find_pads_at_point(
+                        seg.start, pad_positions, pad_layers=pad_layers, layer=seg.layer
+                    ) + self._find_pads_at_point(
+                        seg.end, pad_positions, pad_layers=pad_layers, layer=seg.layer
+                    ):
+                        _connect(node_id, pad_id)
+
         # 2b. Segment chains: pads connected through a chain of segments that
         #     share endpoints are galvanically connected even with no pad at
         #     the intermediate junctions.  Reuse the existing chain builder,
         #     which is itself label-agnostic (it only looks at endpoints).
         #     It is layer-aware (issue #3783): cross-layer hops require a via /
         #     multi-layer pad bridge, so pad_layers is passed through.
-        graph = self._build_segment_chains(segments, pad_positions, graph, pad_layers)
+        #     ``segment_extra_nodes`` carries the 2a2 via-barrel bonds into
+        #     each segment's chain component.
+        graph = self._build_segment_chains(
+            segments,
+            pad_positions,
+            graph,
+            pad_layers,
+            segment_extra_nodes=segment_extra_nodes,
+        )
 
         # 2c. Vias: pads coincident with a via are connected (layer bridge).
         for via in self.pcb.vias:
-            via_pads = self._find_pads_at_point(via.position, pad_positions)
+            via_span = self._via_bridged_layers(via.layers)
+            via_pads = [
+                pad_id
+                for pad_id in self._find_pads_at_point(via.position, pad_positions)
+                if pad_layers is None
+                or any(
+                    layer in via_span
+                    for layer in self._copper_layers_of(pad_layers.get(pad_id, []))
+                )
+            ]
             for i, p in enumerate(via_pads):
                 for other in via_pads[i + 1 :]:
                     _connect(p, other)
@@ -931,6 +1000,7 @@ class ConnectivityValidator:
         pad_positions: dict[str, tuple[float, float]],
         graph: dict[str, set[str]],
         pad_layers: dict[str, list[str]] | None = None,
+        segment_extra_nodes: dict[int, set[str]] | None = None,
     ) -> dict[str, set[str]]:
         """Build connectivity through chains of connected segments.
 
@@ -944,6 +1014,17 @@ class ConnectivityValidator:
         traces that merely cross at the same XY on opposite layers with no
         via — a legal, DRC-clean layer crossover — are NOT fused.  Same-layer
         chaining is unchanged.
+
+        Pad membership in a chain is ALSO layer-gated when ``pad_layers``
+        is supplied (softstart false-short fix): a chain endpoint only
+        claims a pad whose copper exists on that segment's layer.  Without
+        the gate, an inner/B.Cu trace ending at the XY of an F.Cu-only SMD
+        pad pulled that pad — and its whole net — into a foreign chain.
+
+        ``segment_extra_nodes`` (segment index -> node ids) injects
+        additional graph nodes (via-barrel overlap bonds from step 2a2 of
+        :meth:`extract_pad_partition`) into the chain component that owns
+        the segment.
         """
         if not segments:
             return graph
@@ -984,8 +1065,18 @@ class ConnectivityValidator:
             component_pads: set[str] = set()
             for seg_idx in component:
                 seg = segments[seg_idx]
-                component_pads.update(self._find_pads_at_point(seg.start, pad_positions))
-                component_pads.update(self._find_pads_at_point(seg.end, pad_positions))
+                component_pads.update(
+                    self._find_pads_at_point(
+                        seg.start, pad_positions, pad_layers=pad_layers, layer=seg.layer
+                    )
+                )
+                component_pads.update(
+                    self._find_pads_at_point(
+                        seg.end, pad_positions, pad_layers=pad_layers, layer=seg.layer
+                    )
+                )
+                if segment_extra_nodes:
+                    component_pads.update(segment_extra_nodes.get(seg_idx, ()))
 
             # Connect all pads in this component
             pad_list = list(component_pads)
@@ -1031,21 +1122,76 @@ class ConnectivityValidator:
         self,
         point: tuple[float, float],
         pad_positions: dict[str, tuple[float, float]],
+        pad_layers: dict[str, list[str]] | None = None,
+        layer: str | None = None,
     ) -> list[str]:
-        """Find all pads at a given point.
+        """Find all pads at a given point, optionally gated by copper layer.
 
         Args:
             point: Point to check
             pad_positions: Mapping of pad IDs to positions
+            pad_layers: Optional pad-id -> layer-list mapping.  Only
+                consulted when ``layer`` is also given.
+            layer: Optional copper layer the *toucher* (e.g. a track
+                segment) lives on.  When given together with
+                ``pad_layers``, a pad only matches if its copper exists on
+                that layer (``*.Cu`` and expanded via spans match any
+                copper layer).  XY coincidence across disjoint layers is
+                NOT a connection — a trace may legally run under an
+                SMD pad on another layer (softstart false-short fix).
 
         Returns:
             List of pad IDs at this point
         """
-        return [
+        hits = [
             pad_id
             for pad_id, pad_pos in pad_positions.items()
             if self._points_close(point, pad_pos)
         ]
+        if layer is None or pad_layers is None:
+            return hits
+        return [
+            pad_id
+            for pad_id in hits
+            if pad_id not in pad_layers or self._pad_copper_on_layer(pad_layers[pad_id], layer)
+        ]
+
+    @staticmethod
+    def _pad_copper_on_layer(layers: list[str] | frozenset[str], layer: str) -> bool:
+        """True iff a pad/via node with ``layers`` has copper on ``layer``."""
+        return layer in layers or "*.Cu" in layers
+
+    def _copper_layers_of(self, layers: list[str] | frozenset[str]) -> frozenset[str]:
+        """Expand a pad's layer list to the concrete copper layers it spans.
+
+        ``*.Cu`` (through-hole pads) expands to every copper layer in the
+        board's stackup; explicit ``.Cu`` entries pass through unchanged.
+        """
+        out: set[str] = set()
+        for layer_str in layers:
+            if layer_str == "*.Cu":
+                out.update(self._copper_layer_order())
+            elif layer_str.endswith(".Cu"):
+                out.add(layer_str)
+        return frozenset(out)
+
+    @staticmethod
+    def _point_segment_distance(
+        point: tuple[float, float],
+        seg_start: tuple[float, float],
+        seg_end: tuple[float, float],
+    ) -> float:
+        """Shortest distance from ``point`` to the segment ``seg_start-seg_end``."""
+        px, py = point
+        ax, ay = seg_start
+        bx, by = seg_end
+        dx, dy = bx - ax, by - ay
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 0.0:
+            return math.hypot(px - ax, py - ay)
+        t = ((px - ax) * dx + (py - ay) * dy) / length_sq
+        t = max(0.0, min(1.0, t))
+        return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
     def _points_close(
         self,
