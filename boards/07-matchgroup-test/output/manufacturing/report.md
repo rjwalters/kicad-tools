@@ -1,8 +1,8 @@
 ---
 title: "matchgroup_test_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-12 | jlcpcb"
+author: "kicad-tools 0.14.0"
+date: "Rev 1 | 2026-07-09 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 8 (5 SMD, 3 THT, 0 other) |
 | Nets | 34 |
-| Traces | 1150 segments |
-| Vias | 48 |
+| Traces | 897 segments |
+| Vias | 209 |
 | Board Size | 110.0 x 95.0 mm |
 
 ## Design Overview
@@ -42,7 +42,7 @@ Epic #2661 Phase 3L (issue #2724)
 
 5 fine-pitch components
 
-- **Fine-pitch components**: 5 (U2, U1, U5, U4, U3)
+- **Fine-pitch components**: 5 (U1, U5, U3, U4, U2)
 
 ## ERC Status
 
@@ -123,22 +123,19 @@ Epic #2661 Phase 3L (issue #2724)
 
 | Metric | Count |
 |--------|-------|
-| Errors | 4 |
-| Warnings | 8 |
-| Blocking | 4 |
+| Errors | 0 |
+| Warnings | 11 |
+| Blocking | 0 |
 
-**Status**: FAIL
+**Status**: PASS
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
 | connectivity | 5 |
 | silkscreen_text_height | 4 |
-| zone_unfilled | 3 |
-| clearance_segment_via | 1 |
-| clearance_pad_segment | 1 |
-| clearance_pad_via | 1 |
-| diffpair_clearance_intra | 1 |
+| copper_sliver | 3 |
+| silk_over_copper | 3 |
 | silkscreen_over_pad | 1 |
 
 
@@ -146,14 +143,13 @@ Epic #2661 Phase 3L (issue #2724)
 
 ## Manufacturing Readiness
 
-**Verdict**: NOT_READY
+**Verdict**: WARNING
 
 ### Action Items
 
-- **[CRITICAL]** Fix 4 blocking DRC violations (clearance_segment_via (1), clearance_pad_segment (1), clearance_pad_via (1))
-- **[OPTIONAL]** Verify zone fill in KiCad: 3 nets appear incomplete but may be connected via zone fills
+- **[OPTIONAL]** Verify zone fill in KiCad: 5 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
-- **[OPTIONAL]** Review 8 DRC warnings
+- **[OPTIONAL]** Review 11 DRC warnings
 
 
 \newpage
@@ -162,12 +158,12 @@ Epic #2661 Phase 3L (issue #2724)
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 90.3% (28/31) |
+| Signal Net Completion | 83.9% (26/31) |
 | Overall Completion | 85.3% |
 | Complete Nets | 29 / 34 |
 | Zone-Connected Nets | 3 |
 | Incomplete Nets | 5 |
-| Unconnected Pads | 161 |
+| Unconnected Pads | 5 |
 
 ### Zone-Connected Nets
 
@@ -177,15 +173,19 @@ Epic #2661 Phase 3L (issue #2724)
 
 ### Unrouted Signal Nets
 
-- DQS_P
-- MIPI_DAT1_N
+- DQ3
+- DQ4
+- MIPI_DAT0_N
 - TMDS_D0_N
+- TMDS_D1_N
 
 ### Unrouted Signal Nets
 
-- DQS_P
-- MIPI_DAT1_N
+- DQ3
+- DQ4
+- MIPI_DAT0_N
 - TMDS_D0_N
+- TMDS_D1_N
 
 
 ## Cost Estimate

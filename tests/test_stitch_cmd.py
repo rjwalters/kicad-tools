@@ -17,6 +17,7 @@ from kicad_tools.cli.stitch_cmd import (
     _carve_foreign_copper_after_stitch,
     _check_point_filled_polygon_clearance,
     _fallback_grazes_foreign_pour,
+    _fallback_overlaps_sibling_stitch,
     _is_ground_net,
     _should_use_stackup_fallback,
     calculate_dogleg_via_position,
@@ -480,10 +481,11 @@ class TestRunStitch:
         assert {v.pad.net_name for v in result.vias_added} == {"GND", "+3.3V"}
         # No pour pad is stranded.
         assert len(result.pads_skipped) == 0
-        # The 3 +3.3V pads had no clearing placement, so they were rescued by
-        # the connectivity fallback rather than dropped.
-        assert len(result.connectivity_fallback) == 3
-        assert all(pad.net_name == "+3.3V" for pad, _ in result.connectivity_fallback)
+        # Board-07 sibling-pad fix: sibling stitch-net pads are hard
+        # obstacles, so the GND vias avoid the +3.3V escape band up front and
+        # every +3.3V pad finds a genuinely CLEARING placement -- no
+        # grandfathered-graze fallback is needed on this fixture any more.
+        assert len(result.connectivity_fallback) == 0
 
     def test_run_stitch_custom_via_size(self, stitch_test_pcb: Path):
         """Should use custom via size."""
@@ -5882,22 +5884,24 @@ class TestPourConnectivityFallback:
             dry_run=True,
         )
 
-        # The three +3.3V pads have no cross-net-clearing placement (each
-        # grazes the adjacent GND stitch via).  Pre-fix they were stranded;
-        # the fallback must rescue every one of them.
-        #
         # No pour pad is stranded.
         assert not any(pad.net_name == "+3.3V" for pad, _ in result.pads_skipped), (
             "no +3.3V pour pad may be stranded"
         )
         assert len(result.pads_skipped) == 0
 
-        # Each rescued +3.3V pad still receives a via via the fallback path
-        # and is recorded in connectivity_fallback for auditability.
+        # Every +3.3V pad receives a via.  Board-07 sibling-pad fix: the
+        # sibling +3.3V pads are now hard obstacles while GND stitches, so
+        # the GND vias no longer land inside the +3.3V escape band and every
+        # +3.3V pad finds a genuinely CLEARING placement -- the grandfathered
+        # graze fallback is no longer needed on this fixture (it used to
+        # rescue all 3).  The fallback path itself is covered by
+        # ``test_no_committed_fallback_via_grazes_foreign_pour``.
         plus_vias = [v for v in result.vias_added if v.pad.net_name == "+3.3V"]
-        assert len(plus_vias) == 3, "every stranded pour pad must get a via"
-        assert len(result.connectivity_fallback) == 3
-        assert all(pad.net_name == "+3.3V" for pad, _ in result.connectivity_fallback)
+        assert len(plus_vias) == 3, "every pour pad must get a via"
+        assert len(result.connectivity_fallback) == 0, (
+            "sibling-pad-aware placement should clear without the fallback"
+        )
 
     def test_no_committed_fallback_via_grazes_foreign_pour(self, tmp_path: Path) -> None:
         """Issue #3910: no via recorded in ``connectivity_fallback`` may graze
@@ -6403,3 +6407,204 @@ class TestPostStitchForeignCopperCarve:
         # Must not raise and must not modify the board.
         _carve_foreign_copper_after_stitch(pcb_path)
         assert pcb_path.read_text() == original
+
+
+class TestSiblingStitchNetObstacles:
+    """Board-07 pour-rail short regression: pads (and drills) of SIBLING
+    stitch-target nets must be hard obstacles during placement.
+
+    Pre-fix, ``run_stitch``'s obstacle pools excluded ALL stitch-target nets,
+    so a +1V2 stitch via could land on top of a +1V8 BGA pad (board 07
+    U4.C3) and short the rails once zones re-filled; kicad-cli also flagged
+    ``hole_clearance`` on vias whose DRILL edge sat closer than 0.25mm to
+    sibling-net pad copper.
+    """
+
+    def _pads_by_net(self, pcb_path: Path) -> list[PadInfo]:
+        sexp = load_pcb(pcb_path)
+        return find_pads_on_nets(sexp, {"GND", "+3.3V"})
+
+    def test_stitch_vias_clear_sibling_net_pad_copper(self, stitch_test_pcb: Path) -> None:
+        """Every placed via must clear every SIBLING-net pad's copper by the
+        clearance floor, and its drill edge by the KiCad 0.25mm
+        hole-to-copper default."""
+        import math
+
+        from kicad_tools.cli.stitch_cmd import KICAD_HOLE_TO_COPPER_CLEARANCE
+
+        clearance = 0.2
+        via_size = 0.6
+        drill = 0.3
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND", "+3.3V"],
+            via_size=via_size,
+            drill=drill,
+            clearance=clearance,
+            dry_run=True,
+        )
+        assert result.vias_added, "fixture must place vias"
+
+        all_pads = self._pads_by_net(stitch_test_pcb)
+        for placement in result.vias_added:
+            for pad in all_pads:
+                if pad.net_number == placement.pad.net_number:
+                    continue
+                dist = math.hypot(placement.via_x - pad.x, placement.via_y - pad.y)
+                pad_radius = max(pad.width, pad.height) / 2
+                copper_floor = via_size / 2 + pad_radius + clearance
+                hole_floor = drill / 2 + pad_radius + KICAD_HOLE_TO_COPPER_CLEARANCE
+                floor = max(copper_floor, hole_floor)
+                assert dist + 1e-9 >= floor, (
+                    f"stitch via for {placement.pad.reference}.{placement.pad.pad_number} "
+                    f"({placement.pad.net_name}) at ({placement.via_x:.3f}, "
+                    f"{placement.via_y:.3f}) sits {dist:.3f}mm from sibling-net pad "
+                    f"{pad.reference}.{pad.pad_number} ({pad.net_name}); "
+                    f"required {floor:.3f}mm"
+                )
+
+    def test_hole_to_copper_guard_in_calculate_via_position(self) -> None:
+        """The straight placement rejects candidates whose DRILL edge would
+        sit inside the 0.25mm hole-to-copper band of a foreign pad even when
+        plain copper clearance is satisfied."""
+        pad = PadInfo(
+            reference="U1",
+            pad_number="1",
+            net_number=1,
+            net_name="+1V2",
+            x=10.0,
+            y=10.0,
+            layer="F.Cu",
+            width=0.4,
+            height=0.4,
+            pad_type="smd",
+        )
+        # Foreign pad ring: candidates at pad_radius+offset in 8 directions.
+        # Choose geometry so copper clears (via edge to pad edge >= clearance)
+        # but the drill edge is inside 0.25mm of the foreign pad copper.
+        # via 0.45/0.30: copper floor = 0.225 + 0.2 + 0.1  = 0.525
+        #                hole floor   = 0.150 + 0.2 + 0.25 = 0.600
+        # Foreign pads at 0.55mm from every candidate would pass the copper
+        # floor and must now be rejected by the hole floor.
+        offset = 0.4
+        test_offset = max(pad.width, pad.height) / 2 + offset  # 0.6
+        foreign = []
+        for dx, dy in [(1, 0), (0, 1), (-1, 0), (0, -1)]:
+            # place a foreign pad 0.55mm past each candidate position
+            foreign.append(
+                (10.0 + dx * (test_offset + 0.55), 10.0 + dy * (test_offset + 0.55), 0.2, 99)
+            )
+
+        # Without the drill (via_drill=0): the cardinal candidates clear.
+        pos = calculate_via_position(
+            pad,
+            offset=offset,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.1,
+            other_net_pads=foreign,
+        )
+        assert pos is not None
+
+        # With via_drill=0.30 the hole floor (0.6mm) rejects them all at the
+        # first ring; the search escapes to a farther ring or fails -- either
+        # way the accepted position must satisfy the hole floor.
+        import math
+
+        pos2 = calculate_via_position(
+            pad,
+            offset=offset,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.1,
+            other_net_pads=foreign,
+            via_drill=0.30,
+        )
+        if pos2 is not None:
+            for px, py, p_radius, _pnet in foreign:
+                dist = math.hypot(pos2[0] - px, pos2[1] - py)
+                assert dist + 1e-9 >= 0.15 + p_radius + 0.25
+
+
+class TestFallbackOverlapGuard:
+    """The #3633 connectivity fallback may accept a marginal clearance graze
+    against just-placed sibling stitch copper but must reject a physical
+    OVERLAP (a manufactured short -- board 07's +1V8 escape trace across a
+    just-placed +1V2 stitch via)."""
+
+    def _pad(self) -> PadInfo:
+        return PadInfo(
+            reference="U4",
+            pad_number="C3",
+            net_number=2,
+            net_name="+1V8",
+            x=0.0,
+            y=0.0,
+            layer="F.Cu",
+            width=0.4,
+            height=0.4,
+            pad_type="smd",
+        )
+
+    def test_overlapping_sibling_via_rejected(self) -> None:
+        # Straight trace from pad (0,0) to via at (1.0, 0); sibling via
+        # sits ON the trace path at (0.5, 0).
+        assert _fallback_overlaps_sibling_stitch(
+            (1.0, 0.0),
+            None,
+            None,
+            0.45,
+            0.2,
+            self._pad(),
+            [],
+            [(0.5, 0.0, 0.45, 1)],
+        )
+
+    def test_overlapping_sibling_track_rejected(self) -> None:
+        # Sibling track crosses the via barrel.
+        track = TrackSegment(
+            start_x=0.9,
+            start_y=-1.0,
+            end_x=0.9,
+            end_y=1.0,
+            width=0.2,
+            layer="F.Cu",
+            net_number=1,
+        )
+        assert _fallback_overlaps_sibling_stitch(
+            (1.0, 0.0),
+            None,
+            None,
+            0.45,
+            0.2,
+            self._pad(),
+            [track],
+            [],
+        )
+
+    def test_marginal_graze_still_grandfathered(self) -> None:
+        # Sibling via 0.5mm from the placed via: centers clear the combined
+        # radii (0.225 + 0.225 = 0.45) but sit inside a typical 0.1-0.2mm
+        # clearance band -- a graze, not a short.  Must NOT be rejected.
+        assert not _fallback_overlaps_sibling_stitch(
+            (1.0, 0.0),
+            None,
+            None,
+            0.45,
+            0.2,
+            self._pad(),
+            [],
+            [(1.0, 0.5, 0.45, 1)],
+        )
+
+    def test_no_sibling_geometry_never_rejects(self) -> None:
+        assert not _fallback_overlaps_sibling_stitch(
+            (1.0, 0.0),
+            None,
+            None,
+            0.45,
+            0.2,
+            self._pad(),
+            [],
+            [],
+        )
