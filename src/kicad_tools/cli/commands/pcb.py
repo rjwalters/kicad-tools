@@ -12,7 +12,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, remove-footprint, move-footprint, page-fit, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, add-3d-models, remove-footprint, move-footprint, page-fit, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses"
         )
         return 1
 
@@ -36,6 +36,10 @@ def run_pcb_command(args) -> int:
     # Handle sync-netlist command
     if args.pcb_command == "sync-netlist":
         return _run_sync_netlist_command(args, pcb_path)
+
+    # Handle add-3d-models command
+    if args.pcb_command == "add-3d-models":
+        return _run_add_3d_models_command(args, pcb_path)
 
     # Handle remove-footprint command
     if args.pcb_command == "remove-footprint":
@@ -651,6 +655,22 @@ def _run_sync_netlist_command(args, pcb_path: Path) -> int:
         force=force,
         auto_rename=auto_rename,
         remove_orphan_nets=remove_orphan_nets,
+    )
+
+
+def _run_add_3d_models_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb add-3d-models' command."""
+    from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+    output = getattr(args, "output", None)
+    lib_path = getattr(args, "lib_path", None)
+    return run_add_3d_models(
+        pcb_path=pcb_path,
+        output_path=Path(output) if output else None,
+        lib_path=Path(lib_path) if lib_path else None,
+        allow_variants=not getattr(args, "exact", False),
+        dry_run=getattr(args, "dry_run", False),
+        output_format=getattr(args, "format", "text"),
     )
 
 

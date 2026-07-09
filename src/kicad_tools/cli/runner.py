@@ -4,6 +4,7 @@ Provides functions to locate and run kicad-cli commands for
 ERC validation, DRC validation, netlist export, and more.
 """
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -1610,6 +1611,76 @@ def run_pcb_export_svg(
         return KiCadCLIResult(success=False, stderr=f"Failed to export SVG: {e}")
 
 
+# KiCad text-variable names used by footprint (model ...) references across
+# KiCad releases. Footprints embedded from a KiCad-N library reference
+# ${KICADn_3DMODEL_DIR}; a given kicad-cli only auto-resolves names it knows,
+# so renders of boards whose footprints came from a different KiCad release
+# need the missing names supplied (KiCad resolves them from the process
+# environment).
+KICAD_3DMODEL_ENV_VARS = (
+    "KICAD10_3DMODEL_DIR",
+    "KICAD9_3DMODEL_DIR",
+    "KICAD8_3DMODEL_DIR",
+    "KICAD7_3DMODEL_DIR",
+    "KICAD6_3DMODEL_DIR",
+)
+
+
+def find_kicad_3dmodel_dir(kicad_cli: Path | None = None) -> Path | None:
+    """Locate the KiCad 3D model library directory (``*.3dshapes`` parent).
+
+    Checks, in order:
+    1. ``KICADn_3DMODEL_DIR`` environment variables (newest first).
+    2. A directory derived from the ``kicad-cli`` location (macOS app
+       bundle ``Contents/SharedSupport/3dmodels``, or a sibling
+       ``share/kicad/3dmodels`` on Linux-style prefixes).
+    3. Common platform install locations.
+
+    Returns:
+        Path to the 3dmodels directory, or None if not found.
+    """
+    for var in KICAD_3DMODEL_ENV_VARS:
+        val = os.environ.get(var)
+        if val and Path(val).is_dir():
+            return Path(val)
+
+    candidates: list[Path] = []
+    if kicad_cli is not None:
+        kicad_cli = Path(kicad_cli)
+        # macOS bundle: .../KiCad.app/Contents/MacOS/kicad-cli
+        candidates.append(kicad_cli.parent.parent / "SharedSupport" / "3dmodels")
+        # Unix prefix: <prefix>/bin/kicad-cli -> <prefix>/share/kicad/3dmodels
+        candidates.append(kicad_cli.parent.parent / "share" / "kicad" / "3dmodels")
+
+    candidates += [
+        Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/3dmodels"),
+        Path.home() / "Applications/KiCad/KiCad.app/Contents/SharedSupport/3dmodels",
+        Path("/usr/share/kicad/3dmodels"),
+        Path("/usr/local/share/kicad/3dmodels"),
+        Path("/opt/homebrew/share/kicad/3dmodels"),
+    ]
+
+    for cand in candidates:
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def _render_env(kicad_cli: Path | None) -> dict[str, str] | None:
+    """Build a subprocess environment that resolves 3D model path variables.
+
+    Returns None (inherit as-is) when no model directory can be located.
+    Existing environment variables are never overridden.
+    """
+    model_dir = find_kicad_3dmodel_dir(kicad_cli)
+    if model_dir is None:
+        return None
+    env = os.environ.copy()
+    for var in KICAD_3DMODEL_ENV_VARS:
+        env.setdefault(var, str(model_dir))
+    return env
+
+
 def run_pcb_render(
     pcb_path: Path,
     output_path: Path,
@@ -1680,7 +1751,17 @@ def run_pcb_render(
     cmd.append(str(pcb_path))
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        # Supply KICADn_3DMODEL_DIR for all KiCad releases so footprint
+        # (model "${KICADn_3DMODEL_DIR}/...") references resolve even when
+        # they were embedded from a different KiCad version than the one
+        # rendering (kicad-cli only auto-resolves its own version's name).
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=_render_env(kicad_cli),
+        )
 
         if output_path.exists() and output_path.stat().st_size > 0:
             return KiCadCLIResult(

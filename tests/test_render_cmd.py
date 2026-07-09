@@ -344,6 +344,108 @@ class TestRenderObliqueFlags:
 
 
 # --------------------------------------------------------------------------
+# 3D model path environment plumbing (bare-board gallery renders): footprint
+# (model "${KICADn_3DMODEL_DIR}/...") refs must resolve for every KiCad
+# release var name, so run_pcb_render injects the detected model dir into
+# the subprocess environment for any name not already set.
+# --------------------------------------------------------------------------
+
+
+class TestRender3DModelEnv:
+    _RUNNER = "kicad_tools.cli.runner"
+
+    def _run_and_capture_kwargs(self, tmp_path: Path, monkeypatch, model_dir):
+        import kicad_tools.cli.runner as runner
+
+        monkeypatch.setattr(runner, "find_kicad_3dmodel_dir", lambda *a, **k: model_dir)
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        out = tmp_path / "3d-front.png"
+
+        captured: dict = {}
+
+        def fake_run(cmd, *args, **kwargs):
+            out.write_bytes(b"PNG3D")
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(f"{self._RUNNER}.subprocess.run", side_effect=fake_run):
+            res = runner.run_pcb_render(
+                pcb, out, side="front", kicad_cli=Path("/usr/bin/kicad-cli")
+            )
+        assert res.success
+        return captured
+
+    def test_injects_all_version_vars(self, tmp_path, monkeypatch):
+        from kicad_tools.cli.runner import KICAD_3DMODEL_ENV_VARS
+
+        model_dir = tmp_path / "3dmodels"
+        model_dir.mkdir()
+        for var in KICAD_3DMODEL_ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+
+        captured = self._run_and_capture_kwargs(tmp_path, monkeypatch, model_dir)
+        env = captured["kwargs"]["env"]
+        assert env is not None
+        for var in KICAD_3DMODEL_ENV_VARS:
+            assert env[var] == str(model_dir)
+
+    def test_existing_env_var_not_overridden(self, tmp_path, monkeypatch):
+        model_dir = tmp_path / "3dmodels"
+        model_dir.mkdir()
+        monkeypatch.setenv("KICAD9_3DMODEL_DIR", "/custom/models")
+
+        captured = self._run_and_capture_kwargs(tmp_path, monkeypatch, model_dir)
+        env = captured["kwargs"]["env"]
+        assert env["KICAD9_3DMODEL_DIR"] == "/custom/models"
+        assert env["KICAD10_3DMODEL_DIR"] == str(model_dir)
+
+    def test_no_model_dir_inherits_environment(self, tmp_path, monkeypatch):
+        captured = self._run_and_capture_kwargs(tmp_path, monkeypatch, None)
+        assert captured["kwargs"]["env"] is None
+
+    def test_find_kicad_3dmodel_dir_env_wins(self, tmp_path, monkeypatch):
+        from kicad_tools.cli.runner import find_kicad_3dmodel_dir
+
+        model_dir = tmp_path / "envmodels"
+        model_dir.mkdir()
+        monkeypatch.setenv("KICAD10_3DMODEL_DIR", str(model_dir))
+        assert find_kicad_3dmodel_dir() == model_dir
+
+    def test_find_kicad_3dmodel_dir_derived_from_cli_prefix(self, tmp_path, monkeypatch):
+        from kicad_tools.cli.runner import (
+            KICAD_3DMODEL_ENV_VARS,
+            find_kicad_3dmodel_dir,
+        )
+
+        for var in KICAD_3DMODEL_ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+
+        prefix = tmp_path / "prefix"
+        (prefix / "bin").mkdir(parents=True)
+        models = prefix / "share" / "kicad" / "3dmodels"
+        models.mkdir(parents=True)
+        assert find_kicad_3dmodel_dir(prefix / "bin" / "kicad-cli") == models
+
+    def test_find_kicad_3dmodel_dir_derived_from_macos_bundle(self, tmp_path, monkeypatch):
+        from kicad_tools.cli.runner import (
+            KICAD_3DMODEL_ENV_VARS,
+            find_kicad_3dmodel_dir,
+        )
+
+        for var in KICAD_3DMODEL_ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+
+        contents = tmp_path / "KiCad.app" / "Contents"
+        (contents / "MacOS").mkdir(parents=True)
+        models = contents / "SharedSupport" / "3dmodels"
+        models.mkdir(parents=True)
+        assert find_kicad_3dmodel_dir(contents / "MacOS" / "kicad-cli") == models
+
+
+# --------------------------------------------------------------------------
 # Edge cases
 # --------------------------------------------------------------------------
 

@@ -1642,6 +1642,47 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_zones.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_zones.add_argument("--format", choices=["text", "json"], default="text")
 
+    # pcb add-3d-models
+    pcb_add_models = pcb_subparsers.add_parser(
+        "add-3d-models",
+        help="Add missing (model ...) 3D refs from the installed KiCad libraries",
+        description="Patch missing (model ...) 3D model references into PCB "
+        "footprints by copying them from the installed KiCad footprint "
+        "libraries (.kicad_mod sources). Pure metadata insertion: copper, "
+        "placement, zones and nets are untouched, so DRC results are "
+        "identical. Makes kicad-cli pcb render / the KiCad 3D viewer show "
+        "component bodies instead of a bare board.",
+    )
+    pcb_add_models.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_add_models.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: patch input in place)",
+    )
+    pcb_add_models.add_argument(
+        "--lib-path",
+        help="Explicit KiCad footprints directory (default: auto-detect; "
+        "KICAD_FOOTPRINT_DIR is also honored)",
+    )
+    pcb_add_models.add_argument(
+        "--exact",
+        action="store_true",
+        help="Require exact footprint-name matches (disable the same-library "
+        "name-variant fallback used for visual model lookup)",
+    )
+    pcb_add_models.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_add_models.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be inserted without modifying the PCB file",
+    )
+
     # pcb remove-footprint
     pcb_remove_fp = pcb_subparsers.add_parser(
         "remove-footprint",
