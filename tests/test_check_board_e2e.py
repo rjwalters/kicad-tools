@@ -22,6 +22,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HELPER_SCRIPT_PATH = REPO_ROOT / "scripts" / "ci" / "check_board_00_e2e.py"
 
@@ -171,4 +173,159 @@ def test_lvs_only_rejects_board_json_lvs_clean_false(tmp_path: Path) -> None:
         json.dumps({"status": "partial", "drc_violations": 18, "lvs_clean": False})
     )
     rc = helper.main([str(board_dir), "--stem", "diffpair_test", "--lvs-only"])
+    assert rc == 2
+
+
+# --- --lvs-not-run / --lvs-vacuous modes (#4006) ----------------------------
+#
+# Unwired fixture schematics make LVS unavailable: the copper comparator
+# binds zero pins and any 'clean' verdict is zero-evidence (PR #4005
+# review).  Board 06's recipe now SKIPS the LVS step (no lvs.json at all:
+# --lvs-not-run) while board 07's still emits a vacuity-guard-marked
+# lvs.json (--lvs-vacuous).  Both modes also require board.json to OMIT
+# lvs_clean ("LVS not run" on the gallery).
+
+
+def _stage_lvs_not_run_board(root: Path, stem: str) -> Path:
+    """Staging dir mimicking board 06 post-#4006: no lvs.json at all."""
+    helper = _load_helper()
+    board_dir = root / "board"
+    output = board_dir / "output"
+    (output / "manufacturing").mkdir(parents=True)
+    for rel in helper.required_artifacts(stem):
+        if rel == "lvs.json":
+            continue
+        p = output / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("placeholder")
+    (output / "board.json").write_text(json.dumps({"status": "partial", "drc_violations": 18}))
+    return board_dir
+
+
+def _stage_lvs_vacuous_board(root: Path, stem: str) -> Path:
+    """Staging dir mimicking board 07 post-#4006: vacuous lvs.json emitted."""
+    board_dir = _stage_lvs_not_run_board(root, stem)
+    (board_dir / "output" / "lvs.json").write_text(
+        json.dumps(
+            {
+                "clean": False,
+                "mismatches": [],
+                "copper_mismatches": [
+                    {
+                        "kind": "vacuous",
+                        "net_a": "<no-schematic-evidence>",
+                        "net_b": "<no-schematic-evidence>",
+                        "pad_a": "bound_pads=0",
+                        "pad_b": "board_pads=223",
+                    }
+                ],
+                "copper_vacuous": True,
+                "copper_bound_pad_count": 0,
+            }
+        )
+    )
+    return board_dir
+
+
+def test_lvs_not_run_passes_honest_state(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_lvs_not_run_board(tmp_path, "diffpair_test")
+    rc = helper.main([str(board_dir), "--stem", "diffpair_test", "--lvs-not-run"])
+    assert rc == 0
+
+
+def test_lvs_not_run_rejects_present_lvs_json(tmp_path: Path) -> None:
+    # Any emitted lvs.json (even a "clean" one) is zero-evidence on an
+    # unwired fixture board -- its presence must trip the gate.
+    helper = _load_helper()
+    board_dir = _stage_lvs_not_run_board(tmp_path, "diffpair_test")
+    (board_dir / "output" / "lvs.json").write_text(json.dumps({"clean": True, "mismatches": []}))
+    rc = helper.main([str(board_dir), "--stem", "diffpair_test", "--lvs-not-run"])
+    assert rc == 2
+
+
+def test_lvs_not_run_rejects_board_json_claiming_lvs_clean(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_lvs_not_run_board(tmp_path, "diffpair_test")
+    (board_dir / "output" / "board.json").write_text(
+        json.dumps({"status": "partial", "drc_violations": 18, "lvs_clean": True})
+    )
+    rc = helper.main([str(board_dir), "--stem", "diffpair_test", "--lvs-not-run"])
+    assert rc == 2
+
+
+def test_lvs_vacuous_passes_honest_state(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_lvs_vacuous_board(tmp_path, "matchgroup_test")
+    rc = helper.main([str(board_dir), "--stem", "matchgroup_test", "--lvs-vacuous"])
+    assert rc == 0
+
+
+def test_lvs_vacuous_rejects_clean_true(tmp_path: Path) -> None:
+    # clean=true under --lvs-vacuous means the vacuity guard regressed.
+    helper = _load_helper()
+    board_dir = _stage_lvs_vacuous_board(tmp_path, "matchgroup_test")
+    (board_dir / "output" / "lvs.json").write_text(json.dumps({"clean": True, "mismatches": []}))
+    rc = helper.main([str(board_dir), "--stem", "matchgroup_test", "--lvs-vacuous"])
+    assert rc == 2
+
+
+def test_lvs_vacuous_rejects_non_vacuous_dirty(tmp_path: Path) -> None:
+    # A real (non-vacuous) dirty report means the schematic binds pins now;
+    # the job must graduate to --lvs-only instead of blessing the mismatch.
+    helper = _load_helper()
+    board_dir = _stage_lvs_vacuous_board(tmp_path, "matchgroup_test")
+    (board_dir / "output" / "lvs.json").write_text(
+        json.dumps(
+            {
+                "clean": False,
+                "mismatches": [],
+                "copper_mismatches": [
+                    {"kind": "open", "net_a": "N", "net_b": "N", "pad_a": "R1.1", "pad_b": "R2.1"}
+                ],
+            }
+        )
+    )
+    rc = helper.main([str(board_dir), "--stem", "matchgroup_test", "--lvs-vacuous"])
+    assert rc == 2
+
+
+def test_lvs_vacuous_rejects_missing_lvs_json(tmp_path: Path) -> None:
+    # --lvs-vacuous is for recipes that still EMIT lvs.json; absence is a
+    # regression of that contract (the board-07 CI job asserts the file).
+    helper = _load_helper()
+    board_dir = _stage_lvs_vacuous_board(tmp_path, "matchgroup_test")
+    (board_dir / "output" / "lvs.json").unlink()
+    rc = helper.main([str(board_dir), "--stem", "matchgroup_test", "--lvs-vacuous"])
+    assert rc == 2
+
+
+def test_lvs_vacuous_rejects_board_json_claiming_lvs_clean(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_lvs_vacuous_board(tmp_path, "matchgroup_test")
+    (board_dir / "output" / "board.json").write_text(
+        json.dumps({"status": "partial", "drc_violations": 18, "lvs_clean": False})
+    )
+    rc = helper.main([str(board_dir), "--stem", "matchgroup_test", "--lvs-vacuous"])
+    assert rc == 2
+
+
+def test_lvs_modes_are_mutually_exclusive(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_lvs_not_run_board(tmp_path, "diffpair_test")
+    with pytest.raises(SystemExit):
+        helper.main([str(board_dir), "--lvs-only", "--lvs-not-run"])
+
+
+def test_default_mode_rejects_vacuous_clean_true_lvs_json(tmp_path: Path) -> None:
+    # Belt-and-braces: even the default clean assertion refuses a clean=true
+    # report that self-identifies as vacuous (#4006).
+    helper = _load_helper()
+    board_dir = _stage_clean_board(tmp_path, "voltage_divider")
+    (board_dir / "output" / "lvs.json").write_text(
+        json.dumps(
+            {"clean": True, "mismatches": [], "copper_vacuous": True, "copper_bound_pad_count": 0}
+        )
+    )
+    rc = helper.main([str(board_dir), "--stem", "voltage_divider"])
     assert rc == 2

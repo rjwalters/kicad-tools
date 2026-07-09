@@ -69,6 +69,22 @@ _FLOATING_LABEL = LVSResult(
     clean=False,
     mismatches=(LVSMismatch(ref="J1", pad="1", schematic_net=None, pcb_net="USB_DP"),),
 )
+# Vacuity-guard verdict (#4006): a wireless fixture schematic binds zero
+# pins, so the comparator refuses to report clean (single synthetic
+# ``vacuous`` mismatch, bound_pad_count=0).
+_VACUOUS_COPPER = CopperLVSResult(
+    clean=False,
+    mismatches=(
+        CopperLVSMismatch(
+            kind="vacuous",
+            net_a="<no-schematic-evidence>",
+            net_b="<no-schematic-evidence>",
+            pad_a="bound_pads=0",
+            pad_b="board_pads=198",
+        ),
+    ),
+    bound_pad_count=0,
+)
 
 
 def _read(tmp_path: Path) -> dict:
@@ -180,6 +196,75 @@ def test_copper_only_gating_ignores_label_mismatches(
     data = _read(tmp_path)
     assert data["clean"] is True
     assert data["mismatches"] == []  # no label result -> empty
+
+
+def test_vacuous_copper_only_gate_raises_instead_of_passing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #4006 crux: copper-only gate + wireless schematic must FAIL.
+
+    Before the vacuity guard this exact configuration (board 06/07's
+    ``run_label=False`` hard gate) passed with a zero-evidence
+    ``clean=true`` lvs.json.  Now the vacuous copper verdict is dirty, so
+    ``require_clean=True`` raises — a board gating copper-only on a
+    wireless schematic can no longer pass vacuously.
+    """
+    _patch_comparators(monkeypatch, copper=_VACUOUS_COPPER, label=_FLOATING_LABEL)
+    with pytest.raises(BoardNetlistMismatch):
+        write_lvs_report(
+            Path("sch"),
+            Path("pcb"),
+            tmp_path,
+            require_clean=True,
+            run_copper=True,
+            run_label=False,
+            fresh_copper_check=False,
+        )
+    data = _read(tmp_path)
+    assert data["clean"] is False
+    assert data["copper_vacuous"] is True
+    assert data["copper_bound_pad_count"] == 0
+    assert data["copper_mismatches"][0]["kind"] == "vacuous"
+    # Additive v1 schema: historical fields unchanged in shape.
+    assert data["$schema"] == "https://kicad-tools.org/schemas/lvs/v1.json"
+    assert data["mismatches"] == []  # label comparator not run
+
+
+def test_vacuous_copper_advisory_writes_dirty_report_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Advisory mode (require_clean=False) logs the vacuity, never clean=true."""
+    _patch_comparators(monkeypatch, copper=_VACUOUS_COPPER, label=_FLOATING_LABEL)
+    copper_clean, label_clean = write_lvs_report(
+        Path("sch"),
+        Path("pcb"),
+        tmp_path,
+        require_clean=False,
+        run_copper=True,
+        run_label=False,
+        fresh_copper_check=False,
+    )
+    assert copper_clean is False  # vacuous counts as dirty
+    assert label_clean is True  # not run -> vacuously true for the gate AND
+    data = _read(tmp_path)
+    assert data["clean"] is False
+    assert data["copper_vacuous"] is True
+
+
+def test_clean_copper_payload_carries_evidence_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuinely clean copper result records its evidence (#4006 additive)."""
+    wired_clean = CopperLVSResult(clean=True, mismatches=(), bound_pad_count=6)
+    _patch_comparators(monkeypatch, copper=wired_clean, label=_CLEAN_LABEL)
+    copper_clean, label_clean = write_lvs_report(
+        Path("sch"), Path("pcb"), tmp_path, require_clean=True, fresh_copper_check=False
+    )
+    assert (copper_clean, label_clean) == (True, True)
+    data = _read(tmp_path)
+    assert data["clean"] is True
+    assert data["copper_vacuous"] is False
+    assert data["copper_bound_pad_count"] == 6
 
 
 def test_no_comparator_selected_raises_value_error(

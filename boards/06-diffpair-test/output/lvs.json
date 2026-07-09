@@ -1,6 +1,0 @@
-{
-  "$schema": "https://kicad-tools.org/schemas/lvs/v1.json",
-  "clean": true,
-  "mismatches": [],
-  "copper_mismatches": []
-}

@@ -186,3 +186,89 @@ def test_reads_dirty_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
     assert check_copper_lvs.main(["/dev/stdin"]) == 2
+
+
+# --- --expect-vacuous mode (#4006) ------------------------------------------
+#
+# For deliberately-unwired fixture schematics (board 06) the honest verdict
+# is the vacuity guard's (clean=false, only kind='vacuous' mismatches).
+# --expect-vacuous asserts exactly that shape and fails BOTH ways: on
+# clean=true (guard regression -- the zero-evidence pass) and on real
+# shorts/opens (schematic gained nets; the CI gate must graduate).
+
+_VACUOUS_PAYLOAD = {
+    "clean": False,
+    "bound_pad_count": 0,
+    "mismatches": [
+        {
+            "kind": "vacuous",
+            "net_a": "<no-schematic-evidence>",
+            "net_b": "<no-schematic-evidence>",
+            "pad_a": "bound_pads=0",
+            "pad_b": "board_pads=198",
+        }
+    ],
+}
+
+
+def test_expect_vacuous_passes_on_vacuous_verdict(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    p = _write_json(tmp_path, _VACUOUS_PAYLOAD)
+    assert check_copper_lvs.main(["--expect-vacuous", str(p)]) == 0
+    assert "vacuity guard fired as expected" in capsys.readouterr().out
+
+
+def test_expect_vacuous_fails_on_clean_true(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # clean=true under --expect-vacuous means the #4006 guard regressed
+    # (or the schematic got wired): either way the gate must trip.
+    p = _write_json(tmp_path, {"clean": True, "mismatches": []})
+    assert check_copper_lvs.main(["--expect-vacuous", str(p)]) == 2
+    assert "::error" in capsys.readouterr().out
+
+
+def test_expect_vacuous_fails_on_real_short(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    p = _write_json(
+        tmp_path,
+        {
+            "clean": False,
+            "mismatches": [
+                {"kind": "short", "net_a": "A", "net_b": "B", "pad_a": "U1.1", "pad_b": "U1.2"}
+            ],
+        },
+    )
+    assert check_copper_lvs.main(["--expect-vacuous", str(p)]) == 2
+    out = capsys.readouterr().out
+    assert "::error" in out
+    assert "graduate" in out or "upgrade" in out
+
+
+def test_expect_vacuous_fails_on_mixed_kinds(tmp_path: Path) -> None:
+    # A vacuous mismatch mixed with a real one is malformed evidence; trip.
+    p = _write_json(
+        tmp_path,
+        {
+            "clean": False,
+            "mismatches": [
+                {"kind": "vacuous", "net_a": "x", "net_b": "x", "pad_a": "a", "pad_b": "b"},
+                {"kind": "open", "net_a": "N", "net_b": "N", "pad_a": "R1.1", "pad_b": "R2.1"},
+            ],
+        },
+    )
+    assert check_copper_lvs.main(["--expect-vacuous", str(p)]) == 2
+
+
+def test_expect_vacuous_missing_clean_key_exits_1(tmp_path: Path) -> None:
+    p = _write_json(tmp_path, {"mismatches": []})
+    assert check_copper_lvs.main(["--expect-vacuous", str(p)]) == 1
+
+
+def test_default_mode_rejects_vacuous_as_dirty(tmp_path: Path) -> None:
+    # Without --expect-vacuous, a vacuous verdict is simply a dirty result:
+    # the default clean-assertion path must exit 2, never 0.
+    p = _write_json(tmp_path, _VACUOUS_PAYLOAD)
+    assert check_copper_lvs.main([str(p)]) == 2

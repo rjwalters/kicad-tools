@@ -220,6 +220,12 @@ def _parse_lvs(lvs_path: Path, slug: str) -> dict:
     present and readable; returns ``{}`` when the file is absent or unparseable
     so the keys are *omitted* from the emitted ``board.json`` rather than set
     to ``null`` (the board.json contract: missing artifact → field omitted).
+
+    A *vacuous* report (#4006: ``copper_vacuous: true`` or
+    ``copper_bound_pad_count: 0`` — the schematic bound zero pins, so the
+    comparator observed nothing) is also treated as "LVS not run" (``{}``):
+    rendering it as either "clean" or "dirty" would claim evidence that does
+    not exist.
     """
     if not lvs_path.is_file():
         return {}
@@ -227,6 +233,13 @@ def _parse_lvs(lvs_path: Path, slug: str) -> dict:
         data = json.loads(lvs_path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("board %s: could not read lvs.json (%s)", slug, exc)
+        return {}
+    if data.get("copper_vacuous") is True or data.get("copper_bound_pad_count") == 0:
+        logger.info(
+            "board %s: lvs.json is vacuous (0 schematic pins bound, #4006); "
+            "treating as LVS-not-run",
+            slug,
+        )
         return {}
     return {
         "lvs_clean": bool(data.get("clean", False)),

@@ -18,10 +18,13 @@ import pytest
 
 from kicad_tools.core.geometry import rotate_pad_offset
 from kicad_tools.lvs import (
+    VACUOUS_KIND,
+    VACUOUS_NET,
     CopperLVSResult,
     compare_copper_netlist,
     compare_partitions,
 )
+from kicad_tools.lvs.copper_lvs import result_from_json, result_to_json
 from kicad_tools.validate.connectivity import ConnectivityValidator
 
 # ---------------------------------------------------------------------------
@@ -196,6 +199,99 @@ def test_short_reported_once_per_net_pair() -> None:
         frozenset({"N1", "N3"}),
         frozenset({"N2", "N3"}),
     }
+
+
+# ---------------------------------------------------------------------------
+# Vacuity guard (#4006, PR #4005 review): zero bound pins must not be "clean"
+# ---------------------------------------------------------------------------
+
+
+def test_wireless_schematic_is_vacuous_not_clean() -> None:
+    """A schematic that binds zero pins (all floating) must NOT read clean.
+
+    This is the exact PR #4005 review hole: PCB-first fixture schematics
+    with no ``(wire ...)`` elements resolve every pin to ``None``, so the
+    partition diff observes nothing.  The old behavior returned a
+    zero-evidence ``clean=True``; the guard now returns a dirty result
+    carrying a single synthetic ``vacuous`` mismatch.
+    """
+    sch: dict[tuple[str, str], str | None] = {
+        ("J1", "1"): None,
+        ("J1", "2"): None,
+        ("R1", "1"): None,
+    }
+    partition = [frozenset({"J1.1", "J1.2"}), frozenset({"R1.1"})]
+    result = compare_partitions(sch, partition)
+    assert not result.clean
+    assert result.vacuous
+    assert result.bound_pad_count == 0
+    assert len(result.mismatches) == 1
+    m = result.mismatches[0]
+    assert m.kind == VACUOUS_KIND
+    assert m.net_a == m.net_b == VACUOUS_NET
+    assert m.pad_a == "bound_pads=0"
+    assert m.pad_b == "board_pads=3"
+    # The synthetic entry is neither a short nor an open.
+    assert result.shorts == ()
+    assert result.opens == ()
+
+
+def test_no_schematic_board_overlap_is_vacuous() -> None:
+    """Wired schematic pins that match NO board pad also bind nothing."""
+    sch = {("R9", "1"): "VCC", ("R9", "2"): "GND"}  # R9 not on the board
+    partition = [frozenset({"U1.1"}), frozenset({"U1.2"})]
+    result = compare_partitions(sch, partition)
+    assert not result.clean
+    assert result.vacuous
+    assert result.bound_pad_count == 0
+
+
+def test_single_bound_pad_is_evidence_not_vacuous() -> None:
+    """The floor is exactly zero: one bound pad is real (if thin) evidence."""
+    sch = {("R1", "1"): "VCC", ("R1", "2"): None}
+    partition = [frozenset({"R1.1"}), frozenset({"R1.2"})]
+    result = compare_partitions(sch, partition)
+    assert result.clean
+    assert not result.vacuous
+    assert result.bound_pad_count == 1
+
+
+def test_wired_clean_result_records_bound_pad_count() -> None:
+    """Non-vacuous results carry their evidence count (#4006)."""
+    sch = {
+        ("R1", "1"): "VCC",
+        ("R1", "2"): "LED_ANODE",
+        ("D1", "1"): "LED_ANODE",
+        ("D1", "2"): "GND",
+    }
+    partition = [
+        frozenset({"R1.1"}),
+        frozenset({"R1.2", "D1.1"}),
+        frozenset({"D1.2"}),
+    ]
+    result = compare_partitions(sch, partition)
+    assert result.clean
+    assert not result.vacuous
+    assert result.bound_pad_count == 4
+
+
+def test_vacuous_result_survives_json_round_trip() -> None:
+    """The subprocess gate marshals results as JSON; vacuity must survive."""
+    sch: dict[tuple[str, str], str | None] = {("J1", "1"): None}
+    result = compare_partitions(sch, [frozenset({"J1.1"})])
+    round_tripped = result_from_json(result_to_json(result))
+    assert round_tripped == result
+    assert round_tripped.vacuous
+    assert not round_tripped.clean
+    assert round_tripped.bound_pad_count == 0
+
+
+def test_legacy_payload_without_bound_pad_count_round_trips() -> None:
+    """Older JSON payloads (no bound_pad_count key) still parse (additive)."""
+    result = result_from_json({"clean": True, "mismatches": []})
+    assert result.clean
+    assert result.bound_pad_count is None
+    assert not result.vacuous
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +607,10 @@ def test_compare_copper_netlist_on_board00_artifacts() -> None:
     result = compare_copper_netlist(sch, pcb)
     assert isinstance(result, CopperLVSResult)
     assert result.clean, f"board 00 copper LVS unexpectedly dirty: {result.mismatches}"
+    # Board 00's schematic is genuinely wired: its clean verdict must carry
+    # real evidence, not the vacuous zero-comparison kind (#4006).
+    assert not result.vacuous
+    assert result.bound_pad_count is not None and result.bound_pad_count > 0
 
 
 # ---------------------------------------------------------------------------
@@ -854,15 +954,21 @@ def test_pour_extraction_unions_pads_across_disjoint_fill_islands_of_one_zone(
 
 @requires_shapely
 def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
-    """End-to-end: the label-free pour model stays clean on a pour-heavy board.
+    """End-to-end: pour-heavy extraction runs, and the verdict is VACUOUS.
 
     Board 07 (match-group test) carries the GND / +1V2 / +1V8 plane pours
     (one zone per net since #3818 de-duplicated the router/recipe overlap),
     fragmented into multiple ``filled_polygons`` by thermal reliefs and
     foreign-pad clearance moats, so it exercises the hole-aware solid-region
-    extraction and the pad-box erosion guard on real routed copper.  It must
-    NOT introduce false shorts.  Skips when the artifacts (or shapely) are
-    absent, mirroring the board-00 end-to-end policy.
+    extraction and the pad-box erosion guard on real routed copper without
+    crashing.
+
+    The verdict itself, however, is *vacuous* (#4006): board 07's fixture
+    schematic has no ``(wire ...)`` elements, so zero pins bind and the
+    historical ``clean=True`` this test pinned was zero-evidence (it would
+    have masked board 07's 5 real copper opens).  The honest contract is
+    now ``clean=False`` + ``vacuous`` — this is the guard's end-to-end
+    regression pin on a real pour-heavy board.
     """
     repo_root = Path(__file__).resolve().parent.parent
     board_out = repo_root / "boards" / "07-matchgroup-test" / "output"
@@ -872,7 +978,34 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
         pytest.skip("board 07 artifacts not present; run generate_design.py")
     result = compare_copper_netlist(sch, pcb)
     assert isinstance(result, CopperLVSResult)
-    assert result.clean, f"pour-heavy board 07 copper LVS unexpectedly dirty: {result.mismatches}"
+    assert result.vacuous, (
+        "board 07's fixture schematic was expected to bind 0 pins (vacuous, "
+        f"#4006) but bound {result.bound_pad_count}; if the schematic gained "
+        "wired nets, upgrade this test to a real clean assertion"
+    )
+    assert not result.clean
+    assert result.bound_pad_count == 0
+
+
+def test_compare_copper_netlist_on_board06_wireless_fixture_is_vacuous() -> None:
+    """End-to-end #4006 pin: board 06's unwired schematic yields VACUOUS.
+
+    Board 06's committed ``lvs.json`` (merged in #4004) claimed
+    ``clean=true`` off exactly this pair of artifacts while binding zero
+    pins — the vacuity hole from PR #4005's review.  The comparator must
+    now refuse that: dirty, vacuous, zero bound pads.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    board_out = repo_root / "boards" / "06-diffpair-test" / "output"
+    sch = board_out / "diffpair_test.kicad_sch"
+    pcb = board_out / "diffpair_test_routed.kicad_pcb"
+    if not (sch.exists() and pcb.exists()):
+        pytest.skip("board 06 artifacts not present; run generate_design.py")
+    result = compare_copper_netlist(sch, pcb)
+    assert not result.clean
+    assert result.vacuous
+    assert result.bound_pad_count == 0
+    assert [m.kind for m in result.mismatches] == [VACUOUS_KIND]
 
 
 # ---------------------------------------------------------------------------

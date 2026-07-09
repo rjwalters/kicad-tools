@@ -115,6 +115,46 @@ def assert_clean(payload: dict[str, Any]) -> str | None:
     return f"copper-LVS reports clean=false with {_summarize_mismatches(mismatches)}"
 
 
+def assert_vacuous(payload: dict[str, Any]) -> str | None:
+    """Assert a copper-LVS payload is the *vacuity-guard* verdict (#4005).
+
+    Used for boards whose fixture schematic is deliberately unwired (board
+    06): the honest expectation is that the comparator binds zero pins and
+    reports ``clean: false`` with exactly the synthetic ``kind="vacuous"``
+    mismatch — no shorts/opens are detectable, and a ``clean: true`` here
+    would mean the vacuity guard regressed (the zero-evidence pass this
+    gate exists to prevent).  A short/open or a genuinely clean result also
+    fails: either means the schematic gained wired nets and the CI job must
+    be upgraded to a real ``clean`` assertion.
+
+    Returns:
+        ``None`` on pass (vacuous verdict as expected).  A human-readable
+        error message otherwise (caller maps to exit 2).
+
+    Raises:
+        KeyError: If ``clean`` is absent (caller maps to exit 1).
+    """
+    clean = payload["clean"]
+    mismatches = payload.get("mismatches", [])
+    if not isinstance(mismatches, list):
+        mismatches = []
+    kinds = sorted({m.get("kind") for m in mismatches if isinstance(m, dict)})
+    if clean:
+        return (
+            "expected a VACUOUS copper-LVS verdict (clean=false, kind='vacuous') "
+            "but got clean=true -- either the vacuity guard regressed, or the "
+            "schematic is now wired and this CI gate should assert clean instead"
+        )
+    if kinds != ["vacuous"]:
+        return (
+            "expected a VACUOUS copper-LVS verdict (only kind='vacuous') but got "
+            f"mismatch kinds {kinds}: {_summarize_mismatches(mismatches)} -- the "
+            "schematic appears to bind pins now; upgrade this CI gate to a real "
+            "clean assertion"
+        )
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="check_copper_lvs.py",
@@ -130,6 +170,17 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Path to the JSON file emitted by python -m kicad_tools.lvs.copper_lvs "
             "(use '-' or '/dev/stdin' to read from stdin)."
+        ),
+    )
+    parser.add_argument(
+        "--expect-vacuous",
+        action="store_true",
+        help=(
+            "Invert the contract for deliberately-unwired fixture schematics "
+            "(board 06): assert the result is the vacuity-guard verdict "
+            "(clean=false with only kind='vacuous' mismatches, #4005 review). "
+            "Fails on clean=true (guard regression) AND on real shorts/opens "
+            "(schematic gained nets; upgrade the gate)."
         ),
     )
     args = parser.parse_args(argv)
@@ -161,7 +212,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        dirty_msg = assert_clean(payload)
+        if args.expect_vacuous:
+            dirty_msg = assert_vacuous(payload)
+        else:
+            dirty_msg = assert_clean(payload)
     except KeyError:
         _err(f"copper-LVS JSON from {display} missing required 'clean' key: {payload!r}")
         return 1
@@ -176,7 +230,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    print("[ok] copper-LVS clean (independent out-of-process re-check)")
+    if args.expect_vacuous:
+        print(
+            "[ok] copper-LVS vacuity guard fired as expected "
+            "(clean=false, kind='vacuous'; unwired fixture schematic)"
+        )
+    else:
+        print("[ok] copper-LVS clean (independent out-of-process re-check)")
     return 0
 
 

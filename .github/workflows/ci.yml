@@ -1302,36 +1302,36 @@ jobs:
             /tmp/board03-staging/03-usb-joystick
 
   board-06-end-to-end:
-    # Issue #3779: LVS-ONLY end-to-end gate for board 06 ("diffpair-test").
-    # Board 06 is a PCB-first routing fixture (USB3 connectors with no
-    # schematic-side net), so its label-LVS is all ``schematic_net=None``
-    # advisory noise.  Its recipe now runs
-    # ``write_lvs_report(..., require_clean=True, run_copper=True,
-    # run_label=False)`` in the ``--step all`` branch, hard-gating on the
-    # copper-extracted comparator only and emitting ``output/lvs.json``.
+    # Issue #3779 (reworked for #4006): end-to-end gate for board 06
+    # ("diffpair-test").  Board 06 is a PCB-first routing fixture whose
+    # generated schematic has NO ``(wire ...)`` elements, so LVS is
+    # UNAVAILABLE: the copper comparator binds 0 of the 198 board pads and
+    # can detect neither shorts nor opens.  The former copper-only hard
+    # gate here (``write_lvs_report(..., run_label=False)``, #4004)
+    # therefore passed on ZERO evidence -- the vacuity hole found in PR
+    # #4005's review.  The recipe now SKIPS the LVS step (emits NO
+    # ``lvs.json``), and this job asserts the honest state instead of a
+    # zero-evidence ``clean=true``:
     #
-    # This job is a NEW, ADDITIVE gate -- it does NOT replace the
-    # ``diffpair-routing-regression`` job (which keeps its allowlist-based
-    # DRC coverage gate on the ``--step route`` re-route).  Unlike board
-    # 00/01, board 06 carries allowlisted DRC residuals
-    # (.github/routed-drc-tolerance.yml: diffpair_test_routed.kicad_pcb=18)
-    # and routes PARTIAL by design, so its board.json is
-    # ``status:"partial"`` / ``drc_violations>0``.  It therefore CANNOT
-    # assert ``kct check Overall: PASSED`` or ``board.json status:ok`` --
-    # this job uses the asserter's ``--lvs-only`` mode, which checks only
-    # artifact presence + ``lvs.json clean=true`` (+ ``board.json
-    # lvs_clean=true``).
+    # * the vacuity guard fires on the regenerated schematic+PCB pair
+    #   (``check_copper_lvs.py --expect-vacuous``) -- a ``clean=true``
+    #   there would mean the #4006 guard regressed;
+    # * ``lvs.json`` is ABSENT and ``board.json`` omits ``lvs_clean``
+    #   (``check_board_00_e2e.py --lvs-not-run``) -- the gallery renders
+    #   "LVS not run", never a zero-evidence "Ready" LVS chip.
     #
-    # The recipe returns non-zero on PARTIAL routing (expected on this
-    # board), so the regen step tolerates a non-zero recipe exit (``|| true``)
-    # and the LVS-only asserter is the real gate: a copper short/open makes
-    # ``write_lvs_report`` write ``lvs.json clean=false`` (before it raises),
-    # which the asserter catches.  Determinism via ``--seed 42`` +
-    # PYTHONHASHSEED (mirrors the routing-regression jobs).
+    # This job does NOT replace the ``diffpair-routing-regression`` job
+    # (which keeps its allowlist-based DRC coverage gate on the ``--step
+    # route`` re-route).  Board 06 carries allowlisted DRC residuals
+    # (.github/routed-drc-tolerance.yml) and routes PARTIAL by design, so
+    # its recipe may exit non-zero (tolerated) and no ``status:ok``
+    # assertion applies.  If the fixture schematic ever gains real wired
+    # nets, graduate this job back to a true LVS gate (--lvs-only +
+    # a plain check_copper_lvs.py clean assertion).
     #
     # Advisory until a repo admin adds it to branch protection (same as the
     # board 00/01 e2e jobs).
-    name: Board 06 End-to-End (LVS-only)
+    name: Board 06 End-to-End (LVS vacuity)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -1368,35 +1368,36 @@ jobs:
 
       - name: Regenerate board 06 from recipe (--step all, clean tmp directory)
         # PARTIAL routing is expected on this board (USB3_TX1 blocked by the
-        # BGA partner-via escape, #2677), so the recipe may exit non-zero
-        # even when copper-LVS is clean -- tolerate it (|| true).  The
-        # LVS-only asserter below is the gate: write_lvs_report writes
-        # lvs.json (clean=false before raising) on any copper short/open.
+        # BGA partner-via escape, #2677), so the recipe may exit non-zero --
+        # tolerate it (|| true).  The recipe SKIPS the LVS step (#4006:
+        # unwired fixture schematic, LVS unavailable) so lvs.json must NOT
+        # exist; the asserters below are the gate.
         run: |
           set -uo pipefail
           rm -rf /tmp/board06-ci
           mkdir -p /tmp/board06-ci
           uv run python boards/06-diffpair-test/generate_design.py \
             /tmp/board06-ci --step all --seed 42 || true
-          test -f /tmp/board06-ci/lvs.json
+          test ! -f /tmp/board06-ci/lvs.json
           test -f /tmp/board06-ci/diffpair_test.kicad_sch
           test -f /tmp/board06-ci/diffpair_test_routed.kicad_pcb
 
-      - name: Independent copper-LVS re-check (out-of-process, issue #3840)
+      - name: Copper-LVS vacuity-guard re-check (out-of-process, #4006)
         # Re-run compare_copper_netlist in a process the CI job controls (NOT
-        # the recipe) on the REGENERATED schematic + routed PCB, and assert
-        # clean.  Does NOT read lvs.json, so it catches a copper short/open
-        # even if the recipe mis-wrote lvs.json.  Board 06 routes PARTIAL by
-        # design (recipe exits non-zero, tolerated above), but the persisted
-        # *_routed.kicad_pcb exists regardless, so this re-check still runs and
-        # gates.  Entrypoint from #3838; asserter maps clean->0, dirty->2.
+        # the recipe) on the REGENERATED schematic + routed PCB.  Board 06's
+        # schematic is unwired, so the honest verdict is the vacuity guard's
+        # (clean=false, kind='vacuous'): --expect-vacuous asserts exactly
+        # that.  A clean=true result means the #4006 guard regressed (the
+        # zero-evidence pass this job used to encode); a short/open means the
+        # schematic gained wired nets -- graduate this job to a real clean
+        # assertion.  Entrypoint from #3838.
         run: |
           set -euo pipefail
           uv run python -m kicad_tools.lvs.copper_lvs \
             /tmp/board06-ci/diffpair_test.kicad_sch \
             /tmp/board06-ci/diffpair_test_routed.kicad_pcb \
             > /tmp/board06-copper.json
-          uv run python scripts/ci/check_copper_lvs.py /tmp/board06-copper.json
+          uv run python scripts/ci/check_copper_lvs.py --expect-vacuous /tmp/board06-copper.json
 
       - name: Independent DRC re-check within allowlist (out-of-process, issue #3840)
         # Validate the REGENERATED routed PCB's DRC out-of-process against the
@@ -1423,34 +1424,40 @@ jobs:
           cp -r /tmp/board06-ci/. /tmp/board06-staging/06-diffpair-test/output/
           uv run kct board-metrics /tmp/board06-staging/06-diffpair-test
 
-      - name: Assert artifacts + lvs.json clean (LVS-only)
-        # --lvs-only: assert artifact presence + lvs.json clean=true +
-        # board.json lvs_clean=true, but NOT status:ok / drc_violations:0
-        # (board 06 carries allowlisted DRC residuals -> status='partial').
+      - name: Assert artifacts + honest LVS-not-run state (#4006)
+        # --lvs-not-run: assert lvs.json ABSENT + board.json omits lvs_clean
+        # ("LVS not run" on the gallery -- never a zero-evidence badge), but
+        # NOT status:ok / drc_violations:0 (board 06 carries allowlisted DRC
+        # residuals -> status='partial').
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
             --stem diffpair_test \
-            --lvs-only \
+            --lvs-not-run \
             /tmp/board06-staging/06-diffpair-test
 
   board-07-end-to-end:
-    # Issue #3779: LVS-ONLY end-to-end gate for board 07 ("matchgroup-test").
-    # Same shape as the board-06 job: board 07 is a PCB-first routing
-    # fixture (MIPI/TMDS connectors with no schematic-side net) whose
-    # label-LVS is all ``schematic_net=None`` advisory noise.  Its recipe
-    # now runs ``write_lvs_report(..., require_clean=True, run_copper=True,
-    # run_label=False)`` in the ``--step all`` branch, hard-gating on
-    # copper only and emitting ``output/lvs.json``.
+    # Issue #3779 (reworked for #4006): end-to-end gate for board 07
+    # ("matchgroup-test").  Same unwired-fixture situation as board 06:
+    # the generated schematic has no ``(wire ...)`` elements, so the
+    # copper comparator binds 0 pins and LVS is UNAVAILABLE -- the former
+    # copper-only ``clean=true`` here was zero-evidence (PR #4005 review /
+    # #4006; board 07 in fact had 5 real copper opens the vacuous verdict
+    # masked).  Unlike board 06, board 07's recipe still EMITS
+    # ``output/lvs.json`` in ``--step all`` (this job asserts the file
+    # exists); with the #4006 vacuity guard that file now carries the
+    # honest dirty verdict (clean=false, copper_vacuous=true) and
+    # ``kct board-metrics`` treats it as "LVS not run" (omits lvs_clean).
     #
     # NEW, ADDITIVE gate -- does NOT replace the
     # ``matchgroup-routing-regression`` job.  Board 07 carries allowlisted
     # DRC residuals (.github/routed-drc-tolerance.yml:
     # matchgroup_test_routed.kicad_pcb=120) and routes PARTIAL by design,
-    # so it uses the asserter's ``--lvs-only`` mode (no Overall: PASSED /
-    # status:ok / drc_violations:0 assertions).  Advisory until a repo
-    # admin adds it to branch protection.
-    name: Board 07 End-to-End (LVS-only)
+    # so no Overall: PASSED / status:ok / drc_violations:0 assertions
+    # apply.  If the fixture schematic ever gains real wired nets,
+    # graduate this job to --lvs-only + a plain copper-clean assertion.
+    # Advisory until a repo admin adds it to branch protection.
+    name: Board 07 End-to-End (LVS vacuity)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -1487,7 +1494,10 @@ jobs:
 
       - name: Regenerate board 07 from recipe (--step all, clean tmp directory)
         # PARTIAL routing is expected on this board, so tolerate a non-zero
-        # recipe exit (|| true); the LVS-only asserter is the real gate.
+        # recipe exit (|| true).  The recipe still emits lvs.json; with the
+        # #4006 vacuity guard it carries clean=false / copper_vacuous=true
+        # (the recipe's LVS gate raising on the vacuous verdict is part of
+        # the tolerated non-zero exit).  The asserters below are the gate.
         run: |
           set -uo pipefail
           rm -rf /tmp/board07-ci
@@ -1498,21 +1508,21 @@ jobs:
           test -f /tmp/board07-ci/matchgroup_test.kicad_sch
           test -f /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
 
-      - name: Independent copper-LVS re-check (out-of-process, issue #3840)
+      - name: Copper-LVS vacuity-guard re-check (out-of-process, #4006)
         # Re-run compare_copper_netlist in a process the CI job controls (NOT
-        # the recipe) on the REGENERATED schematic + routed PCB, and assert
-        # clean.  Does NOT read lvs.json, so it catches a copper short/open
-        # even if the recipe mis-wrote lvs.json.  Board 07 routes PARTIAL by
-        # design (recipe exits non-zero, tolerated above), but the persisted
-        # *_routed.kicad_pcb exists regardless, so this re-check still runs and
-        # gates.  Entrypoint from #3838; asserter maps clean->0, dirty->2.
+        # the recipe) on the REGENERATED schematic + routed PCB.  Board 07's
+        # schematic is unwired, so the honest verdict is the vacuity guard's
+        # (clean=false, kind='vacuous'): --expect-vacuous asserts exactly
+        # that.  A clean=true result means the #4006 guard regressed; a
+        # short/open means the schematic gained wired nets -- graduate this
+        # job to a real clean assertion.  Entrypoint from #3838.
         run: |
           set -euo pipefail
           uv run python -m kicad_tools.lvs.copper_lvs \
             /tmp/board07-ci/matchgroup_test.kicad_sch \
             /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
             > /tmp/board07-copper.json
-          uv run python scripts/ci/check_copper_lvs.py /tmp/board07-copper.json
+          uv run python scripts/ci/check_copper_lvs.py --expect-vacuous /tmp/board07-copper.json
 
       - name: Independent DRC re-check within allowlist (out-of-process, issue #3840)
         # Validate the REGENERATED routed PCB's DRC out-of-process against the
@@ -1538,12 +1548,17 @@ jobs:
           cp -r /tmp/board07-ci/. /tmp/board07-staging/07-matchgroup-test/output/
           uv run kct board-metrics /tmp/board07-staging/07-matchgroup-test
 
-      - name: Assert artifacts + lvs.json clean (LVS-only)
+      - name: Assert artifacts + honest vacuous-LVS state (#4006)
+        # --lvs-vacuous: lvs.json must be present (this recipe still emits
+        # it) and must carry the vacuity-guard verdict (clean=false,
+        # copper_vacuous=true); board.json must OMIT lvs_clean ("LVS not
+        # run" on the gallery).  No status/drc_violations assertions
+        # (allowlisted DRC residuals -> status='partial').
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
             --stem matchgroup_test \
-            --lvs-only \
+            --lvs-vacuous \
             /tmp/board07-staging/07-matchgroup-test
 
   board-05-routing-regression:

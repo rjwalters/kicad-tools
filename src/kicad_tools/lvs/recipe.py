@@ -23,9 +23,19 @@ payload but does not flip ``clean`` or trigger a raise.
 Gate policy is per-board (see the curator matrix on #3762):
 
 * Boards verified clean (00, 01, 02) gate on both comparators.
-* Boards 06/07 are copper-clean but label-dirty (PCB-first test fixtures
-  whose floating schematic pins read ``schematic_net=None``); they gate on
-  copper only (``run_label=False``).
+* Boards 06/07 are label-dirty (PCB-first test fixtures whose floating
+  schematic pins read ``schematic_net=None``); they gate on copper only
+  (``run_label=False``).  **Vacuity caveat (#4005 review):** on a fully
+  *wireless* fixture schematic the copper comparator binds zero pins, so
+  its historical ``clean=True`` was zero-evidence.  The comparator now
+  returns a dirty ``vacuous`` result in that case, which means a
+  copper-only gate (``run_label=False``) on a wireless schematic FAILS
+  instead of passing vacuously — such boards must either wire their
+  schematic or skip the LVS step explicitly (emit no ``lvs.json``; the
+  gallery then honestly shows "LVS not run").  Note the label comparator
+  has no symmetric hole: on a wireless schematic every netted PCB pad
+  mismatches ``schematic_net=None``, so label-LVS reads *dirty*, never
+  vacuously clean.
 * Boards in :data:`ADVISORY_LVS_BOARDS` (04/05) are genuinely dirty on a
   fresh clean-room regen; they still run LVS and emit ``lvs.json`` so the
   gallery chip and ``board-metrics`` surface the true state, but pass
@@ -214,7 +224,10 @@ def write_lvs_report(
         require_clean: When ``True`` (hard gate), raise
             :class:`BoardNetlistMismatch` if any *gated* comparator is dirty.
             When ``False`` (advisory), log the mismatch summary and return
-            the dirty flags without raising.
+            the dirty flags without raising.  A *vacuous* copper result
+            (schematic binds zero pins, #4005 review) counts as dirty:
+            gating copper-only on a wireless schematic raises rather than
+            passing on zero evidence.
         run_copper: When ``True``, run the copper-extracted comparator and
             include it in the gated ``clean`` decision.
         run_label: When ``True``, run the label-based comparator and include
@@ -302,6 +315,9 @@ def _build_payload(
     historical board-00 schema so ``_parse_lvs`` and the e2e asserter keep
     working).  ``copper_mismatches`` is an additive field recording the
     copper-extracted shorts/opens so a copper-dirty board is reflected too.
+    ``copper_vacuous`` / ``copper_bound_pad_count`` (additive, #4005
+    review) record whether the copper verdict carried any schematic
+    evidence; a vacuous copper leg forces ``clean=false``.
     """
     payload: dict = {
         "$schema": _LVS_SCHEMA_URL,
@@ -326,6 +342,9 @@ def _build_payload(
             for cm in (copper_result.mismatches if copper_result is not None else ())
         ],
     }
+    if copper_result is not None:
+        payload["copper_vacuous"] = copper_result.vacuous
+        payload["copper_bound_pad_count"] = copper_result.bound_pad_count
     return payload
 
 
@@ -364,8 +383,17 @@ def _print_summary(
                 )
 
     if run_copper and copper_result is not None:
-        if copper_result.clean:
-            print("   copper-LVS PASS: 0 shorts / 0 opens")
+        if copper_result.vacuous:
+            print(
+                "   copper-LVS VACUOUS (treated as FAIL): schematic binds 0 pins "
+                "-- no shorts/opens are detectable, so 'clean' would be "
+                "zero-evidence (#4005 review).  Wire the schematic or skip the "
+                "LVS step explicitly."
+            )
+        elif copper_result.clean:
+            bound = copper_result.bound_pad_count
+            evidence = f" ({bound} bound pad(s))" if bound is not None else ""
+            print(f"   copper-LVS PASS: 0 shorts / 0 opens{evidence}")
         else:
             print(
                 f"   copper-LVS FAIL: {len(copper_result.shorts)} short(s) / "
