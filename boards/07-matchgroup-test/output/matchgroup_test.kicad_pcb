@@ -128,6 +128,17 @@
     (pad "46" smd rect (at -2.800 5.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
     (pad "47" smd rect (at -3.600 5.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
     (pad "48" smd rect (at -4.400 5.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
+  	(model "${KICAD10_3DMODEL_DIR}/Package_DFN_QFN.3dshapes/QFN-48-1EP_7x7mm_P0.5mm_EP3.5x3.5mm.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Package_DFN_QFN:QFN-48-1EP_7x7mm_P0.5mm"
     (layer "F.Cu")
@@ -187,6 +198,17 @@
     (pad "46" smd rect (at -2.800 5.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
     (pad "47" smd rect (at -3.600 5.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
     (pad "48" smd rect (at -4.400 5.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
+  	(model "${KICAD10_3DMODEL_DIR}/Package_DFN_QFN.3dshapes/QFN-48-1EP_7x7mm_P0.5mm_EP3.5x3.5mm.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Connector_FFC:FFC_6P_1.0mm"
     (layer "F.Cu")
@@ -241,6 +263,17 @@
     (pad "22" smd rect (at -0.400 3.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
     (pad "23" smd rect (at -1.200 3.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
     (pad "24" smd rect (at -2.000 3.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
+  	(model "${KICAD10_3DMODEL_DIR}/Package_DFN_QFN.3dshapes/QFN-24-1EP_4x4mm_P0.5mm_EP2.5x2.5mm.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Connector_Video:HDMI_A_Receptacle"
     (layer "F.Cu")
@@ -342,6 +375,17 @@
     (pad "7" thru_hole circle (at 5.080 0.000) (size 1.500 1.500) (drill 0.800) (layers "*.Cu" "*.Mask") (net 32 "A5"))
     (pad "8" thru_hole circle (at 7.620 0.000) (size 1.500 1.500) (drill 0.800) (layers "*.Cu" "*.Mask") (net 33 "A6"))
     (pad "9" thru_hole circle (at 10.160 0.000) (size 1.500 1.500) (drill 0.800) (layers "*.Cu" "*.Mask") (net 34 "A7"))
+  	(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x09_P2.54mm_Vertical.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Package_QFP:LQFP-48_7x7mm_P0.5mm"
     (layer "F.Cu")
@@ -401,5 +445,16 @@
     (pad "46" smd rect (at -2.800 5.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
     (pad "47" smd rect (at -3.600 5.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
     (pad "48" smd rect (at -4.400 5.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
+  	(model "${KICAD10_3DMODEL_DIR}/Package_QFP.3dshapes/LQFP-48_7x7mm_P0.5mm.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
 )

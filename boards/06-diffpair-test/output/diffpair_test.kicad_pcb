@@ -182,6 +182,17 @@
     (pad "30" smd rect (at -1.200 3.500) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
     (pad "31" smd rect (at -2.000 3.500) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
     (pad "32" smd rect (at -2.800 3.500) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
+  	(model "${KICAD10_3DMODEL_DIR}/Package_DFN_QFN.3dshapes/QFN-32-1EP_5x5mm_P0.5mm_EP3.1x3.1mm.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm"
     (layer "F.Cu")
@@ -301,6 +312,17 @@
     (pad "46" smd rect (at -2.800 5.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
     (pad "47" smd rect (at -3.600 5.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
     (pad "48" smd rect (at -4.400 5.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
+  	(model "${KICAD10_3DMODEL_DIR}/Package_QFP.3dshapes/LQFP-48_7x7mm_P0.5mm.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm"
     (layer "F.Cu")
@@ -336,5 +358,16 @@
     (pad "22" smd rect (at -0.400 3.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
     (pad "23" smd rect (at -1.200 3.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
     (pad "24" smd rect (at -2.000 3.000) (size 0.300 0.700) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
+  	(model "${KICAD10_3DMODEL_DIR}/Package_DFN_QFN.3dshapes/QFN-24-1EP_4x4mm_P0.5mm_EP2.5x2.5mm.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
 )
