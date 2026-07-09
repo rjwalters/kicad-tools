@@ -66,23 +66,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: Exit clause: remove the entry when the owning net is re-routed (the
 #: quantized emitters will not regenerate the skew).
 DOCUMENTED_OFF_ANGLE: dict[str, dict[str, str]] = {
-    "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb": {
-        # (112.679, 109.947) -> (116.616, 108.602), 18.9 deg, net 2
-        # (USB2_D-): the diff-pair crossover chord at the J1 landing
-        # corridor.  BOTH dogleg variants clip a neighbouring via barrel
-        # -- the default bulge adds 2 clearance_segment_via errors (DRC
-        # 26 vs the pinned 24) and the axis-first bulge adds 3 (DRC 27),
-        # so the only manufacturable path through this corridor is the
-        # skewed chord.  The board-06 recipe quantizes this uuid via
-        # ``skip_uuids`` (see ``route_pcb``'s step-12 comment) so the
-        # committed artifact holds the pinned 24-error / 18-diff-pair
-        # baseline.  Issue #3855 re-routed the corridor (the prior net-7
-        # ``e9af299d`` residual is gone -- the fresh route doglegs it
-        # 45-aligned); this net-2 chord is the new in-place residual.
-        # Exit clause: remove when a re-route's chord no longer collides
-        # (the quantizer will then snap it 45-aligned by construction).
-        "864fb9ee-effe-4a8c-8f8a-c93533e51a22": "diffpair crossover chord",
-    },
+    # 2026-07-08 (fix/board06-gallery-ready): board 06's prior exemption
+    # (864fb9ee-..., the USB2_D- diff-pair crossover chord at the J1
+    # landing corridor) exercised its exit clause -- the gallery-ready
+    # refresh re-routed the board from the recipe, and the one chord the
+    # step-12 flip/skip resolver still had to skip (a GND pour-repair
+    # bridge threading the USB3_RX2 via field) is now resolved by the
+    # recipe's step-13 ``_split_offangle_chords`` mid-split pass (axis
+    # leg + exact-45 diag + axis leg, clearance- AND hole-clearance-
+    # validated).  The committed board-06 artifact carries 0 off-angle
+    # segments, so no entry remains.
+    #
     # Issue #3617: board 07's prior corridor-chord exemption
     # (351d1137-..., TMDS_D0) is gone -- the regenerated filled artifact
     # routes that area 45-aligned, and the pour-repair emitter now runs

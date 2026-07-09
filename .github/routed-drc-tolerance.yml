@@ -1101,6 +1101,26 @@ tolerances:
   # tests/test_board_06_diffpair_test.py already equals this committed
   # count, so it is unchanged.  Exit clause (unchanged): when #3847
   # re-spaces the drills, the committed count drops and this floor follows.
+  #
+  # !!! COMMITTED COUNT 24 -> 18 (fix/board06-gallery-ready, July 8 2026) !!!
+  # ----------------------------------------------------------------------
+  # The committed artifact was regenerated from the recipe on the current
+  # router and the recipe gained a step-13 legalization pass
+  # (``_split_offangle_chords`` + ``_legalize_signal_vias``) that repairs
+  # the same-net via_in_pad + sub-0.5 mm drill staples the A* leaves (the
+  # #3855 holdout; closes #3847's board-06 slice by construction).  The
+  # committed strict-gate count is now 18 -- exactly the diff-pair
+  # quality block (9 diffpair_length_skew + 9 diffpair_routing_continuity,
+  # #3540-#3544), pinned by EXPECTED_STRICT_GATE_ERRORS = 18.  kicad-cli:
+  # 0 errors / 0 unconnected; manufacturing report.md Errors = 0.
+  #
+  # This floor deliberately STAYS at 24: the binding count is
+  # max(committed 18, seed-42 re-route as measured ON CI), and the
+  # re-route has not been CI-measured with the new step-13 pass yet (the
+  # measure-on-CI-never-guess rule, #3822 -- local counts are
+  # non-authoritative).  Exit clause: after the next CI run of the
+  # Diff-Pair Routing Regression gate reports its deterministic count,
+  # ratchet this floor to max(18, that count).
   boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 24
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
