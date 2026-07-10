@@ -322,9 +322,7 @@ class TestBoard07KctCheckParity:
         """
         if not BOARD_07_PCB.is_file():
             pytest.skip("board 07 routed PCB not present")
-        isolated = isolate_pcb_from_sidecars(
-            BOARD_07_PCB, tmp_path_factory.mktemp("board07-bare")
-        )
+        isolated = isolate_pcb_from_sidecars(BOARD_07_PCB, tmp_path_factory.mktemp("board07-bare"))
         return _run_kct_check(isolated, sidecar=None)
 
     @pytest.fixture(scope="class")
