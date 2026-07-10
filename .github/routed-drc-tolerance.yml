@@ -1114,14 +1114,30 @@ tolerances:
   # #3540-#3544), pinned by EXPECTED_STRICT_GATE_ERRORS = 18.  kicad-cli:
   # 0 errors / 0 unconnected; manufacturing report.md Errors = 0.
   #
-  # This floor deliberately STAYS at 24: the binding count is
-  # max(committed 18, seed-42 re-route as measured ON CI), and the
-  # re-route has not been CI-measured with the new step-13 pass yet (the
-  # measure-on-CI-never-guess rule, #3822 -- local counts are
-  # non-authoritative).  Exit clause: after the next CI run of the
-  # Diff-Pair Routing Regression gate reports its deterministic count,
-  # ratchet this floor to max(18, that count).
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 24
+  # !!! FLOOR RATCHETED 24 -> 18 (#4019, July 10 2026) !!!
+  # ----------------------------------------------------------------------
+  # The exit clause above is now closed.  The seed-42 Diff-Pair Routing
+  # Regression gate has been CI-measured with the step-13 legalization
+  # pass in place, and it reports the deterministic count on three
+  # independent green ``main`` runs, all measuring exactly 18 with ZERO
+  # divergence between the committed artifact and the from-scratch
+  # re-route (measure-on-CI-never-guess rule, #3822):
+  #   * run 29075253404 (main 076d5efd) -- seed-42 re-route: 18
+  #   * run 29072031350 (main de0d91ec) -- seed-42 re-route: 18
+  #   * run 29070816533 (main ad2d703f) -- seed-42 re-route: 18
+  # The diff-pair violation breakdown is stable: 9 diffpair_length_skew +
+  # 9 diffpair_routing_continuity = 18 (#3540-#3544), matching the
+  # committed strict-gate count exactly.  Binding count =
+  # max(committed 18, seed-42 re-route 18) = 18, so all three gated paths
+  # (committed-artifact routed-pcb-drc-check, seed-42 Diff-Pair Routing
+  # Regression, and the Board 06 E2E "Independent DRC re-check" fresh
+  # regen) agree at 18 -- unlike board 04, no ``--allow`` split is needed
+  # (#4035 was board-04-specific).  check_routed_drc.py's own slack
+  # warning independently recommended "Tighten to 18".  This is the
+  # tightest honest monotonic floor (floor >= committed deterministic
+  # count, zero slack).  EXPECTED_STRICT_GATE_ERRORS = 18 in
+  # tests/test_board_06_diffpair_test.py already equals this count.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 18
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure

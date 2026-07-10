@@ -68,6 +68,42 @@ def test_clean_result_no_mismatches_key_exits_0(tmp_path: Path) -> None:
     assert check_copper_lvs.main([str(p)]) == 0
 
 
+# --- vacuity guard (#4019) -------------------------------------------------
+
+
+def test_assert_clean_rejects_clean_true_with_zero_bound_pads() -> None:
+    # Belt-and-braces vacuity guard (#4019, mirrors check_board_00_e2e.py):
+    # a clean=true payload claiming zero bound pins is the zero-evidence
+    # artifact the vacuity guard forbids (#4006) -- assert_clean must reject
+    # it rather than pass it as clean.
+    msg = check_copper_lvs.assert_clean({"clean": True, "bound_pad_count": 0})
+    assert msg is not None
+    assert "VACUOUS" in msg
+
+
+def test_clean_true_zero_bound_pads_exits_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The full asserter maps the vacuity rejection to a dirty exit (2).
+    p = _write_json(tmp_path, {"clean": True, "bound_pad_count": 0, "mismatches": []})
+    rc = check_copper_lvs.main([str(p)])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "::error" in out
+    assert "VACUOUS" in out
+
+
+def test_assert_clean_passes_clean_true_with_positive_bound_pads() -> None:
+    # A clean=true payload with real bound evidence is still clean.
+    assert check_copper_lvs.assert_clean({"clean": True, "bound_pad_count": 42}) is None
+
+
+def test_assert_clean_passes_clean_true_without_bound_pad_count() -> None:
+    # ``bound_pad_count`` is optional/``null`` on pre-guard payloads; its
+    # absence must not spuriously trip the vacuity guard.
+    assert check_copper_lvs.assert_clean({"clean": True}) is None
+
+
 # --- dirty result -> exit 2 ------------------------------------------------
 
 
