@@ -238,6 +238,10 @@ def point_clear_of_copper(
     other_net_pads: list[ForeignPadTuple] | None = None,
     same_net_vias: list[tuple[float, float]] | None = None,
     other_net_filled_polygons: list[FilledPolygonLike] | None = None,
+    via_drill: float = 0.0,
+    other_net_drills: list[tuple[float, float, float, int]] | None = None,
+    hole_to_copper_clearance: float = 0.0,
+    min_hole_to_hole: float = 0.0,
 ) -> bool:
     """Check if a via at (x, y) clears all surrounding copper.
 
@@ -287,12 +291,47 @@ def point_clear_of_copper(
         other_net_filled_polygons: Foreign-net filled polygons from
             zone fills (any structural type with
             ``points/min_x/min_y/max_x/max_y``).
+        via_drill: Drill diameter of the candidate via in mm.  When
+            ``> 0`` and ``hole_to_copper_clearance > 0``, the copper
+            checks (tracks/vias/pads) additionally enforce the KiCad
+            ``hole_clearance`` band -- the via DRILL edge must clear
+            foreign copper by ``hole_to_copper_clearance`` -- taking the
+            max of the copper-to-copper floor and the drill-to-copper
+            floor (Issue #4010, mirrors
+            :func:`kicad_tools.cli.stitch_cmd.calculate_via_position`).
+            Defaults to ``0.0`` (guard disabled) so existing callers are
+            unaffected.
+        other_net_drills: Foreign-net DRILL registry (through-hole pads
+            + vias) as ``(x, y, drill_diameter_mm, net_num)`` tuples.
+            When supplied with ``via_drill > 0`` and
+            ``min_hole_to_hole > 0``, the candidate drill must clear
+            every foreign drill edge-to-edge by ``min_hole_to_hole``
+            (fab ``dimension_drill_clearance`` floor, Issue #3855).
+        hole_to_copper_clearance: KiCad ``hole_clearance`` band in mm
+            (typically :data:`kicad_tools.cli.stitch_cmd.KICAD_HOLE_TO_COPPER_CLEARANCE`).
+            Only consulted when ``via_drill > 0``.
+        min_hole_to_hole: Minimum drill edge-to-edge spacing in mm for
+            the ``other_net_drills`` guard.  Only consulted when
+            ``via_drill > 0`` and ``other_net_drills`` is non-empty.
 
     Returns:
         True if the position is clear for via placement; False if any
         clearance threshold is violated.
     """
     via_radius = via_size / 2
+
+    # Hole-to-copper guard (kicad-cli ``hole_clearance``): the via DRILL
+    # edge must clear foreign copper by ``hole_to_copper_clearance`` when
+    # the drill term dominates.  Applied as an extra radius on the via
+    # candidate, mirroring ``calculate_via_position``'s ``hole_extra``.
+    # Zero (guard disabled) unless the caller opts in with a drill +
+    # clearance (Issue #4010).
+    hole_extra = 0.0
+    if via_drill > 0 and hole_to_copper_clearance > 0:
+        hole_extra = max(
+            0.0,
+            (via_drill / 2 + hole_to_copper_clearance) - (via_radius + clearance),
+        )
 
     if same_net_vias:
         for vx, vy in same_net_vias:
@@ -303,14 +342,14 @@ def point_clear_of_copper(
     if other_net_tracks:
         for seg in other_net_tracks:
             dist = point_to_segment_distance(x, y, seg.start_x, seg.start_y, seg.end_x, seg.end_y)
-            min_dist = via_radius + seg.width / 2 + clearance
+            min_dist = via_radius + seg.width / 2 + clearance + hole_extra
             if dist < min_dist:
                 return False
 
     if other_net_vias:
         for ovx, ovy, ov_size, _onet in other_net_vias:
             dist = math.sqrt((ovx - x) ** 2 + (ovy - y) ** 2)
-            min_dist = via_radius + ov_size / 2 + clearance
+            min_dist = via_radius + ov_size / 2 + clearance + hole_extra
             if dist < min_dist:
                 return False
 
@@ -319,7 +358,7 @@ def point_clear_of_copper(
         # forms below (the disc form folds the pad's effective radius
         # into the threshold, while the rect form measures distance to
         # the pad's edge directly).
-        required_from_edge = via_radius + clearance
+        required_from_edge = via_radius + clearance + hole_extra
         for pad in other_net_pads:
             if len(pad) == 5:
                 # Rect-aware: (x, y, width, height, net).
@@ -346,8 +385,23 @@ def point_clear_of_copper(
                 # Disc-bound legacy: (x, y, radius, net).
                 px, py, p_radius, _pnet = pad
                 dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)
-                if dist < via_radius + p_radius + clearance:
+                if dist < via_radius + p_radius + clearance + hole_extra:
                     return False
+
+    # Drill hole-to-hole guard (Issue #3855): the copper checks above do
+    # not enforce the fab's drill-to-drill minimum.  A via dropped within
+    # ``min_hole_to_hole`` (drill edge-to-edge) of a foreign through-hole
+    # pad / via drill trips ``dimension_drill_clearance`` even when copper
+    # clears.  Reuses the canonical edge-to-edge predicate.
+    if via_drill > 0 and min_hole_to_hole > 0 and other_net_drills:
+        if not drill_hole_to_hole_clear(
+            x,
+            y,
+            via_drill,
+            [(dx_, dy_, ddrill) for dx_, dy_, ddrill, _dnet in other_net_drills],
+            min_hole_to_hole=min_hole_to_hole,
+        ):
+            return False
 
     if other_net_filled_polygons:
         if not _point_clear_of_filled_polygons(

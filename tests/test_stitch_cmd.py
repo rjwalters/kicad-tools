@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.stitch_cmd import (
+    KICAD_HOLE_TO_COPPER_CLEARANCE,
     FilledPolygon,
     PadInfo,
     SkipDetail,
@@ -48,6 +49,7 @@ from kicad_tools.cli.stitch_cmd import (
     run_blanket_stitch,
     run_post_stitch_drc,
     run_stitch,
+    run_thermal_stitch,
     segment_to_segment_distance,
     trace_to_track_segments,
 )
@@ -6608,3 +6610,414 @@ class TestFallbackOverlapGuard:
             [],
             [],
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #4010: thermal + blanket stitch sibling-net obstacle parity
+# ---------------------------------------------------------------------------
+#
+# ``run_thermal_stitch`` / ``run_blanket_stitch`` used the pre-#4005 pattern
+# (``exclude_nets=target_net_nums`` on every obstacle pool), so a sibling
+# stitch-target net's pads were INVISIBLE obstacles -- a via for one plane
+# net could land on a sibling plane net's pad and short the rails once zones
+# re-fill.  These fixtures place two sibling target nets whose pads sit close
+# enough for placed vias to interact.
+
+# Thermal fixture: two heat-sink footprints (reference prefix ``Q`` triggers
+# thermal candidacy) with large exposed pads on two sibling plane nets
+# (VMOTOR / PHASE_A), 1mm edge-to-edge.  Both nets have In1.Cu zones so the
+# in-zone check passes.
+THERMAL_SIBLING_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "VMOTOR")
+  (net 2 "PHASE_A")
+  (footprint "Package_TO_SOT_SMD:TO-220-3_Vertical"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000q01")
+    (at 110 110)
+    (property "Reference" "Q1" (at 0 -3 0) (layer "F.SilkS") (uuid "ref-uuid-q1"))
+    (pad "2" smd rect (at 0 0) (size 1.8 1.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "VMOTOR"))
+  )
+  (footprint "Package_TO_SOT_SMD:TO-220-3_Vertical"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000q02")
+    (at 112.5 110)
+    (property "Reference" "Q2" (at 0 -3 0) (layer "F.SilkS") (uuid "ref-uuid-q2"))
+    (pad "2" smd rect (at 0 0) (size 1.8 1.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "PHASE_A"))
+  )
+  (zone (net 1) (net_name "VMOTOR") (layer "In1.Cu") (uuid "zone-vmotor-uuid")
+    (name "VMOTOR_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 105 105) (xy 120 105) (xy 120 116) (xy 105 116)))
+  )
+  (zone (net 2) (net_name "PHASE_A") (layer "In1.Cu") (uuid "zone-phasea-uuid")
+    (name "PHASE_A_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 105 105) (xy 120 105) (xy 120 116) (xy 105 116)))
+  )
+)
+"""
+
+
+# Blanket fixture: a GND In1.Cu zone containing a foreign +3.3V pad (U1.1)
+# and a same-net GND pad.  Blanket grid vias for GND must clear the sibling
+# +3.3V pad (which the old ``exclude_nets=target_net_nums`` pool hid when
+# both GND and +3.3V are stitched together).
+BLANKET_SIBLING_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Package_BGA:BGA-fixture"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000b1")
+    (at 115.2 115)
+    (property "Reference" "U1" (at 0 -3 0) (layer "F.SilkS") (uuid "ref-uuid-u1"))
+    (pad "1" smd circle (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V"))
+    (pad "2" smd circle (at 3 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+  )
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-gnd-blanket-uuid")
+    (name "GND_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 130 100) (xy 130 130) (xy 100 130)))
+  )
+  (zone (net 2) (net_name "+3.3V") (layer "In1.Cu") (uuid "zone-3v3-blanket-uuid")
+    (name "3V3_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 130 100) (xy 130 130) (xy 100 130)))
+  )
+)
+"""
+
+
+class TestCheckViaClearanceHoleToCopper:
+    """Issue #4010: the drill-aware ``check_via_clearance`` guard rejects a
+    candidate whose DRILL edge would sit inside the 0.25mm hole-to-copper
+    band of foreign copper even when plain copper clearance passes.  This is
+    the shared guard now consumed by ``run_thermal_stitch`` /
+    ``run_blanket_stitch`` (mirrors
+    ``test_hole_to_copper_guard_in_calculate_via_position``)."""
+
+    def test_copper_clears_but_hole_band_rejects_pad(self) -> None:
+        # via 0.6 / drill 0.6, clearance 0.2, foreign pad radius 0.2.
+        #   copper floor (center-to-center) = 0.3 + 0.2 + 0.2 = 0.70
+        #   hole floor   (center-to-center) = 0.3 + 0.2 + 0.25 = 0.75
+        # A pad 0.72mm away passes the copper floor but must be rejected by
+        # the hole floor when via_drill is supplied.
+        foreign_pad = (10.72, 10.0, 0.2, 99)
+
+        # Without the drill: copper clears -> passes.
+        assert check_via_clearance(
+            10.0,
+            10.0,
+            0.6,
+            0.2,
+            [],
+            [],
+            [foreign_pad],
+            [],
+        )
+
+        # With the drill + hole clearance: the 0.25mm band rejects it.
+        assert not check_via_clearance(
+            10.0,
+            10.0,
+            0.6,
+            0.2,
+            [],
+            [],
+            [foreign_pad],
+            [],
+            via_drill=0.6,
+            hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
+        )
+
+    def test_drill_hole_to_hole_guard_rejects_foreign_drill(self) -> None:
+        # Foreign drill 0.3 at 0.6mm center-to-center from a candidate with
+        # drill 0.3: edge-to-edge = 0.6 - 0.15 - 0.15 = 0.3mm < 0.5mm floor.
+        foreign_drill = (10.6, 10.0, 0.3, 99)
+
+        # Without drill params: no hole-to-hole check -> passes (copper clear).
+        assert check_via_clearance(
+            10.0,
+            10.0,
+            0.45,
+            0.1,
+            [],
+            [],
+            [],
+            [],
+        )
+
+        # With the drill registry + min_hole_to_hole: rejected.
+        assert not check_via_clearance(
+            10.0,
+            10.0,
+            0.45,
+            0.1,
+            [],
+            [],
+            [],
+            [],
+            via_drill=0.3,
+            other_net_drills=[foreign_drill],
+            min_hole_to_hole=0.5,
+        )
+
+    def test_guard_noop_when_drill_zero(self) -> None:
+        # via_drill=0 -> guard disabled even if a foreign pad sits inside the
+        # would-be hole band (matches calculate_via_position's via_drill>0 gate).
+        foreign_pad = (10.72, 10.0, 0.2, 99)
+        assert check_via_clearance(
+            10.0,
+            10.0,
+            0.6,
+            0.2,
+            [],
+            [],
+            [foreign_pad],
+            [],
+            via_drill=0.0,
+            hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
+        )
+
+
+class TestThermalStitchSiblingNetObstacles:
+    """Issue #4010: ``run_thermal_stitch`` must treat sibling stitch-net pads
+    as hard obstacles (same defect class fixed for ``run_stitch`` in
+    PR #4005).  Ported from ``TestSiblingStitchNetObstacles``."""
+
+    def test_thermal_vias_clear_sibling_net_pad_copper(self, tmp_path: Path) -> None:
+        """Every placed thermal via must clear every SIBLING-net pad's copper
+        by the clearance floor and its drill edge by the KiCad 0.25mm
+        hole-to-copper default."""
+        pcb_file = tmp_path / "thermal_sibling.kicad_pcb"
+        pcb_file.write_text(THERMAL_SIBLING_PCB)
+
+        clearance = 0.2
+        via_size = 0.6
+        drill = 0.3
+        result = run_thermal_stitch(
+            pcb_path=pcb_file,
+            net_names=["VMOTOR", "PHASE_A"],
+            via_size=via_size,
+            drill=drill,
+            clearance=clearance,
+            vias_per_pad=8,
+            dry_run=True,
+        )
+        assert result.vias_added, "fixture must place thermal vias"
+
+        sexp = load_pcb(pcb_file)
+        all_pads = find_pads_on_nets(sexp, {"VMOTOR", "PHASE_A"})
+        for placement in result.vias_added:
+            for pad in all_pads:
+                if pad.net_number == placement.pad.net_number:
+                    continue
+                dist = math.hypot(placement.via_x - pad.x, placement.via_y - pad.y)
+                pad_radius = max(pad.width, pad.height) / 2
+                copper_floor = via_size / 2 + pad_radius + clearance
+                hole_floor = drill / 2 + pad_radius + KICAD_HOLE_TO_COPPER_CLEARANCE
+                floor = max(copper_floor, hole_floor)
+                assert dist + 1e-9 >= floor, (
+                    f"thermal via for {placement.pad.reference}.{placement.pad.pad_number} "
+                    f"({placement.pad.net_name}) at ({placement.via_x:.3f}, "
+                    f"{placement.via_y:.3f}) sits {dist:.3f}mm from sibling-net pad "
+                    f"{pad.reference}.{pad.pad_number} ({pad.net_name}); "
+                    f"required {floor:.3f}mm"
+                )
+
+    def test_thermal_single_net_unchanged(self, tmp_path: Path) -> None:
+        """Stitching one net only (no siblings) still places vias -- the
+        sibling guard must not spuriously skip in the single-net case."""
+        pcb_file = tmp_path / "thermal_single.kicad_pcb"
+        pcb_file.write_text(THERMAL_SIBLING_PCB)
+
+        result = run_thermal_stitch(
+            pcb_path=pcb_file,
+            net_names=["VMOTOR"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            vias_per_pad=8,
+            dry_run=True,
+        )
+        assert result.vias_added, "single-net thermal stitch must still place vias"
+
+    def test_thermal_hole_to_copper_guard(self, tmp_path: Path) -> None:
+        """A larger drill trips the 0.25mm hole-to-copper band and reduces the
+        placed-via count vs a tiny drill, and every placed via satisfies the
+        hole floor against sibling-net pads."""
+        pcb_file = tmp_path / "thermal_hole.kicad_pcb"
+        pcb_file.write_text(THERMAL_SIBLING_PCB)
+
+        clearance = 0.2
+        via_size = 0.6
+
+        small = run_thermal_stitch(
+            pcb_path=pcb_file,
+            net_names=["VMOTOR", "PHASE_A"],
+            via_size=via_size,
+            drill=0.05,
+            clearance=clearance,
+            vias_per_pad=8,
+            dry_run=True,
+        )
+        big = run_thermal_stitch(
+            pcb_path=pcb_file,
+            net_names=["VMOTOR", "PHASE_A"],
+            via_size=via_size,
+            drill=0.5,
+            clearance=clearance,
+            vias_per_pad=8,
+            dry_run=True,
+        )
+        # The larger drill's hole-to-copper band is strictly wider, so it can
+        # never place MORE vias than the tiny drill.
+        assert len(big.vias_added) <= len(small.vias_added)
+
+        sexp = load_pcb(pcb_file)
+        all_pads = find_pads_on_nets(sexp, {"VMOTOR", "PHASE_A"})
+        for placement in big.vias_added:
+            for pad in all_pads:
+                if pad.net_number == placement.pad.net_number:
+                    continue
+                dist = math.hypot(placement.via_x - pad.x, placement.via_y - pad.y)
+                pad_radius = max(pad.width, pad.height) / 2
+                hole_floor = 0.5 / 2 + pad_radius + KICAD_HOLE_TO_COPPER_CLEARANCE
+                assert dist + 1e-9 >= hole_floor
+
+
+class TestBlanketStitchSiblingNetObstacles:
+    """Issue #4010: ``run_blanket_stitch`` must treat sibling stitch-net pads
+    as hard obstacles (same defect class fixed for ``run_stitch`` in
+    PR #4005).  Ported from ``TestSiblingStitchNetObstacles``."""
+
+    def test_blanket_vias_clear_sibling_net_pad_copper(self, tmp_path: Path) -> None:
+        """Every placed blanket via must clear every SIBLING-net pad's copper
+        by the clearance floor and its drill edge by the KiCad 0.25mm
+        hole-to-copper default."""
+        pcb_file = tmp_path / "blanket_sibling.kicad_pcb"
+        pcb_file.write_text(BLANKET_SIBLING_PCB)
+
+        clearance = 0.2
+        via_size = 0.6
+        drill = 0.3
+        result = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND", "+3.3V"],
+            via_size=via_size,
+            drill=drill,
+            clearance=clearance,
+            spacing=1.0,
+            dry_run=True,
+        )
+        assert result.vias_added, "fixture must place blanket vias"
+
+        sexp = load_pcb(pcb_file)
+        all_pads = find_pads_on_nets(sexp, {"GND", "+3.3V"})
+        for placement in result.vias_added:
+            for pad in all_pads:
+                if pad.net_number == placement.pad.net_number:
+                    continue
+                dist = math.hypot(placement.via_x - pad.x, placement.via_y - pad.y)
+                pad_radius = max(pad.width, pad.height) / 2
+                copper_floor = via_size / 2 + pad_radius + clearance
+                hole_floor = drill / 2 + pad_radius + KICAD_HOLE_TO_COPPER_CLEARANCE
+                floor = max(copper_floor, hole_floor)
+                assert dist + 1e-9 >= floor, (
+                    f"blanket via ({placement.pad.net_name}) at ({placement.via_x:.3f}, "
+                    f"{placement.via_y:.3f}) sits {dist:.3f}mm from sibling-net pad "
+                    f"{pad.reference}.{pad.pad_number} ({pad.net_name}); "
+                    f"required {floor:.3f}mm"
+                )
+
+    def test_blanket_single_net_unchanged(self, tmp_path: Path) -> None:
+        """Stitching one net only (no siblings) still places vias -- the
+        sibling guard must not spuriously skip in the single-net case."""
+        pcb_file = tmp_path / "blanket_single.kicad_pcb"
+        pcb_file.write_text(BLANKET_SIBLING_PCB)
+
+        result = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            spacing=3.0,
+            dry_run=True,
+        )
+        assert result.vias_added, "single-net blanket stitch must still place vias"
+
+    def test_blanket_hole_to_copper_guard(self, tmp_path: Path) -> None:
+        """A larger drill trips the 0.25mm hole-to-copper band and reduces the
+        placed-via count vs a tiny drill, and every placed via satisfies the
+        hole floor against sibling-net pads."""
+        pcb_file = tmp_path / "blanket_hole.kicad_pcb"
+        pcb_file.write_text(BLANKET_SIBLING_PCB)
+
+        clearance = 0.2
+        via_size = 0.6
+        spacing = 1.0
+
+        small = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND", "+3.3V"],
+            via_size=via_size,
+            drill=0.05,
+            clearance=clearance,
+            spacing=spacing,
+            dry_run=True,
+        )
+        big = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND", "+3.3V"],
+            via_size=via_size,
+            drill=0.6,
+            clearance=clearance,
+            spacing=spacing,
+            dry_run=True,
+        )
+        # The larger drill's hole-to-copper band is strictly wider, so it can
+        # never place MORE vias than the tiny drill.
+        assert len(big.vias_added) <= len(small.vias_added)
+
+        sexp = load_pcb(pcb_file)
+        all_pads = find_pads_on_nets(sexp, {"GND", "+3.3V"})
+        for placement in big.vias_added:
+            for pad in all_pads:
+                if pad.net_number == placement.pad.net_number:
+                    continue
+                dist = math.hypot(placement.via_x - pad.x, placement.via_y - pad.y)
+                pad_radius = max(pad.width, pad.height) / 2
+                hole_floor = 0.6 / 2 + pad_radius + KICAD_HOLE_TO_COPPER_CLEARANCE
+                assert dist + 1e-9 >= hole_floor
