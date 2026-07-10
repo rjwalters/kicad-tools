@@ -83,6 +83,7 @@ def run_add_3d_models(
         "unresolved": report.unresolved,
         "no_model_in_library": report.no_model_in_library,
         "variant_matches": report.variant_matches,
+        "substitution_matches": report.substitution_matches,
     }
 
     if output_format == "json":
@@ -104,6 +105,10 @@ def run_add_3d_models(
             print("  Same-library variant models used (visual match):")
             for lib_id, stem in sorted(report.variant_matches.items()):
                 print(f"    {lib_id} -> {stem}")
+        if report.substitution_matches:
+            print("  Cross-library substitution models used (curated equivalent):")
+            for lib_id, sub in sorted(report.substitution_matches.items()):
+                print(f"    {lib_id} -> {sub}")
         if report.already_present:
             print(f"  Already had models: {len(report.already_present)}")
         if report.no_model_in_library:

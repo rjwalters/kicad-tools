@@ -228,6 +228,17 @@
     (pad "6" smd rect (at 2.500 0.000) (size 0.400 0.900) (layers "F.Cu" "F.Paste" "F.Mask") (net 20 "MIPI_DAT1_N"))
     (pad "M1" thru_hole circle (at -3.500 1.500) (size 1.000 1.000) (drill 0.600) (layers "*.Cu" "*.Mask") (net 3 "GND"))
     (pad "M2" thru_hole circle (at 3.500 1.500) (size 1.000 1.000) (drill 0.600) (layers "*.Cu" "*.Mask") (net 3 "GND"))
+  	(model "${KICAD10_3DMODEL_DIR}/Connector_FFC-FPC.3dshapes/TE_84952-6_1x06-1MP_P1.0mm_Horizontal.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm"
     (layer "F.Cu")
@@ -295,6 +306,17 @@
     (pad "8" smd rect (at 3.500 0.000) (size 0.400 1.000) (layers "F.Cu" "F.Paste" "F.Mask") (net 26 "TMDS_D2_N"))
     (pad "S1" thru_hole circle (at -5.000 1.500) (size 1.200 1.200) (drill 0.700) (layers "*.Cu" "*.Mask") (net 3 "GND"))
     (pad "S2" thru_hole circle (at 5.000 1.500) (size 1.200 1.200) (drill 0.700) (layers "*.Cu" "*.Mask") (net 3 "GND"))
+  	(model "${KICAD10_3DMODEL_DIR}/Connector_Video.3dshapes/HDMI_A_Amphenol_10029449-x01xLF_Horizontal.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm"
     (layer "F.Cu")
@@ -355,6 +377,17 @@
     (pad "G5" smd rect (at 1.270 3.810) (size 0.450 0.450) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
     (pad "G6" smd rect (at 2.540 3.810) (size 0.450 0.450) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
     (pad "G7" smd rect (at 3.810 3.810) (size 0.450 0.450) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
+  	(model "${KICAD10_3DMODEL_DIR}/Package_BGA.3dshapes/VFBGA-49_5.0x5.0mm_Layout7x7_P0.65mm.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"
     (layer "F.Cu")

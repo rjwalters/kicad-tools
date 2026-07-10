@@ -29,6 +29,7 @@ from kicad_tools.footprints.library_path import (
     detect_kicad_library_path,
     parse_library_id,
 )
+from kicad_tools.pcb.model_substitutions import substitute_lib_id
 
 __all__ = [
     "FootprintBlock",
@@ -241,7 +242,9 @@ def make_library_resolver(
     library_paths: LibraryPaths | None = None,
     *,
     allow_variants: bool = True,
+    allow_substitutions: bool = True,
     variant_log: dict[str, str] | None = None,
+    substitution_log: dict[str, str] | None = None,
 ) -> Resolver:
     """Build a resolver that reads model refs from installed KiCad libraries.
 
@@ -251,34 +254,73 @@ def make_library_resolver(
     found and ``[]`` when it exists but carries no model reference.
     Results are cached per lib id.
 
+    Resolution tiers (first hit wins):
+
+    1. **Exact** installed footprint for ``library:name``.
+    2. **Same-library variant** (``_find_variant_mod``) — a suffixed name in
+       the same library, when ``allow_variants`` is set.
+    3. **Cross-library substitution** (``model_substitutions``) — an explicit,
+       curated ``lib_id -> lib_id`` mapping for generic/synthetic lib ids that
+       have a body-compatible equivalent in a *different* library, when
+       ``allow_substitutions`` is set.
+
     Args:
         library_paths: Explicit library location (default: auto-detect).
         allow_variants: When the exact footprint name is missing, fall back
             to a same-library name variant (see ``_find_variant_mod``).
+        allow_substitutions: When exact + variant matching both miss, fall
+            back to the curated cross-library substitution table.
         variant_log: Optional dict populated with ``lib_id -> variant stem``
-            for every fallback match, so callers can report them.
+            for every same-library variant match, so callers can report them.
+        substitution_log: Optional dict populated with
+            ``lib_id -> substitute lib_id`` for every cross-library
+            substitution, so callers can report them.
     """
     paths = library_paths if library_paths is not None else detect_kicad_library_path()
     cache: dict[str, list[str] | None] = {}
+
+    def _lookup_mod(lib_id: str) -> tuple[Path | None, str | None]:
+        """Return (mod path, substitute lib id) for *lib_id*, or (None, None).
+
+        The second element is set only when the match came from the
+        cross-library substitution table.
+        """
+        library, name = parse_library_id(lib_id)
+        if not library:
+            return None, None
+        mod_path = paths.get_footprint_file(library, name, fallback_search=False)
+        if mod_path is not None:
+            return mod_path, None
+        if allow_variants:
+            mod_path = _find_variant_mod(paths, library, name)
+            if mod_path is not None:
+                if variant_log is not None:
+                    variant_log[lib_id] = mod_path.stem
+                return mod_path, None
+        if allow_substitutions:
+            sub_id = substitute_lib_id(lib_id)
+            if sub_id is not None:
+                sub_lib, sub_name = parse_library_id(sub_id)
+                if sub_lib:
+                    mod_path = paths.get_footprint_file(sub_lib, sub_name, fallback_search=False)
+                    if mod_path is not None:
+                        return mod_path, sub_id
+        return None, None
 
     def resolve(lib_id: str) -> list[str] | None:
         if lib_id in cache:
             return cache[lib_id]
         result: list[str] | None = None
         if paths.found:
-            library, name = parse_library_id(lib_id)
-            mod_path = None
-            if library:
-                mod_path = paths.get_footprint_file(library, name, fallback_search=False)
-                if mod_path is None and allow_variants:
-                    mod_path = _find_variant_mod(paths, library, name)
-                    if mod_path is not None and variant_log is not None:
-                        variant_log[lib_id] = mod_path.stem
+            mod_path, sub_id = _lookup_mod(lib_id)
             if mod_path is not None:
                 try:
                     result = extract_model_blocks(mod_path.read_text())
                 except OSError:
                     result = None
+                else:
+                    if sub_id is not None and substitution_log is not None:
+                        substitution_log[lib_id] = sub_id
         cache[lib_id] = result
         return result
 
@@ -305,6 +347,9 @@ class ModelPatchReport:
     variant_matches: dict[str, str] = field(default_factory=dict)
     """Lib ids whose model came from a same-library name variant
     (``lib_id -> matched footprint name``)."""
+    substitution_matches: dict[str, str] = field(default_factory=dict)
+    """Lib ids whose model came from a cross-library substitution
+    (``lib_id -> substitute lib_id``)."""
 
     @property
     def changed(self) -> bool:
@@ -360,6 +405,7 @@ def add_model_refs(
     library_paths: LibraryPaths | None = None,
     resolver: Resolver | None = None,
     allow_variants: bool = True,
+    allow_substitutions: bool = True,
     dry_run: bool = False,
 ) -> ModelPatchReport:
     """Patch missing 3D model refs into a ``.kicad_pcb`` file.
@@ -373,6 +419,9 @@ def add_model_refs(
         allow_variants: Accept same-library footprint-name variants when the
             exact name is missing (visual fallback; reported in
             ``variant_matches``). Ignored when *resolver* is supplied.
+        allow_substitutions: Accept curated cross-library substitutions when
+            exact + variant matching both miss (reported in
+            ``substitution_matches``). Ignored when *resolver* is supplied.
         dry_run: When True, nothing is written.
 
     Returns:
@@ -381,14 +430,22 @@ def add_model_refs(
     pcb_path = Path(pcb_path)
     text = pcb_path.read_text()
     variant_log: dict[str, str] = {}
+    substitution_log: dict[str, str] = {}
     if resolver is None:
         resolver = make_library_resolver(
-            library_paths, allow_variants=allow_variants, variant_log=variant_log
+            library_paths,
+            allow_variants=allow_variants,
+            allow_substitutions=allow_substitutions,
+            variant_log=variant_log,
+            substitution_log=substitution_log,
         )
     new_text, report = add_model_refs_to_text(text, resolver)
-    # Only surface variants that actually got patched in.
+    # Only surface variants/substitutions that actually got patched in.
     report.variant_matches = {
         lib_id: stem for lib_id, stem in variant_log.items() if lib_id in report.patched
+    }
+    report.substitution_matches = {
+        lib_id: sub for lib_id, sub in substitution_log.items() if lib_id in report.patched
     }
     if report.changed and not dry_run:
         dest = Path(output_path) if output_path is not None else pcb_path

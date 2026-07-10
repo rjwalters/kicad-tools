@@ -274,6 +274,155 @@ class TestVariantFallback:
 
 
 # --------------------------------------------------------------------------
+# Cross-library substitution tier (curated lib_id -> lib_id equivalents)
+# --------------------------------------------------------------------------
+
+# A synthetic lib id with no exact match and no same-library variant, but a
+# curated substitute in a *different* library.
+SUBSTITUTION_PCB_TEXT = """(kicad_pcb
+\t(version 20240108)
+\t(footprint "Connector_FFC:FFC_4P_0.5mm"
+\t\t(layer "F.Cu")
+\t\t(at 100 100)
+\t)
+)
+"""
+
+
+def _make_substitution_library(tmp_path: Path) -> LibraryPaths:
+    """Build a library where only the *substitute* library exists.
+
+    The requested ``Connector_FFC`` library is entirely absent (mirrors the
+    real upstream rename to ``Connector_FFC-FPC``), so only the cross-library
+    substitution tier can resolve it.
+    """
+    root = tmp_path / "footprints"
+    lib = root / "Connector_FFC-FPC.pretty"
+    lib.mkdir(parents=True)
+    name = "Amphenol_F32Q-1A7x1-11004_1x04-1MP_P0.5mm_Horizontal"
+    model = (
+        f'(footprint "{name}"\n'
+        '\t(layer "F.Cu")\n'
+        f'\t(model "${{KICAD10_3DMODEL_DIR}}/Connector_FFC-FPC.3dshapes/{name}.step"\n'
+        "\t\t(offset\n\t\t\t(xyz 0 0 0)\n\t\t)\n"
+        "\t)\n"
+        ")\n"
+    )
+    (lib / f"{name}.kicad_mod").write_text(model)
+    return LibraryPaths(footprints_path=root, source="config")
+
+
+class TestCrossLibrarySubstitution:
+    def test_substitution_match_used_and_reported(self, tmp_path):
+        lib = _make_substitution_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(SUBSTITUTION_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib)
+        assert report.patched == ["Connector_FFC:FFC_4P_0.5mm"]
+        # Reported as a cross-library substitution, NOT a same-library variant.
+        assert report.substitution_matches == {
+            "Connector_FFC:FFC_4P_0.5mm": (
+                "Connector_FFC-FPC:Amphenol_F32Q-1A7x1-11004_1x04-1MP_P0.5mm_Horizontal"
+            )
+        }
+        assert report.variant_matches == {}
+        assert "Connector_FFC-FPC.3dshapes" in pcb.read_text()
+
+    def test_substitution_disabled_leaves_unresolved(self, tmp_path):
+        lib = _make_substitution_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(SUBSTITUTION_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib, allow_substitutions=False)
+        assert report.patched == []
+        assert report.unresolved == ["Connector_FFC:FFC_4P_0.5mm"]
+        assert pcb.read_text() == SUBSTITUTION_PCB_TEXT
+
+    def test_exact_match_never_redirected_to_substitution(self, tmp_path):
+        """A lib id that resolves exactly must NOT hit the substitution tier."""
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib)
+        assert report.patched == ["Resistor_SMD:R_0805_2012Metric"]
+        assert report.substitution_matches == {}
+
+    def test_variant_beats_substitution(self, tmp_path):
+        """When a same-library variant exists, it wins over substitution.
+
+        Uses a lib id in the substitution table but provides a same-library
+        variant; the resolver must report a variant match, not a substitution.
+        """
+        root = tmp_path / "footprints"
+        lib = root / "Package_BGA.pretty"
+        lib.mkdir(parents=True)
+        name = "BGA-49_5.0x5.0mm_Layout7x7_P0.5mm_ExtraSuffix"
+        model = (
+            f'(footprint "{name}"\n'
+            '\t(layer "F.Cu")\n'
+            f'\t(model "${{KICAD10_3DMODEL_DIR}}/Package_BGA.3dshapes/{name}.step"\n'
+            "\t\t(offset\n\t\t\t(xyz 0 0 0)\n\t\t)\n"
+            "\t)\n"
+            ")\n"
+        )
+        (lib / f"{name}.kicad_mod").write_text(model)
+        paths = LibraryPaths(footprints_path=root, source="config")
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(
+            SUBSTITUTION_PCB_TEXT.replace(
+                "Connector_FFC:FFC_4P_0.5mm",
+                "Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm",
+            )
+        )
+        report = add_model_refs(pcb, library_paths=paths)
+        assert report.patched == ["Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm"]
+        assert report.variant_matches == {"Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm": name}
+        assert report.substitution_matches == {}
+
+    def test_substitution_reported_in_cli_json(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        _make_substitution_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(SUBSTITUTION_PCB_TEXT)
+        rc = run_add_3d_models(pcb, lib_path=tmp_path / "footprints", output_format="json")
+        assert rc == 0
+        import json
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["patched"] == ["Connector_FFC:FFC_4P_0.5mm"]
+        assert payload["substitution_matches"] == {
+            "Connector_FFC:FFC_4P_0.5mm": (
+                "Connector_FFC-FPC:Amphenol_F32Q-1A7x1-11004_1x04-1MP_P0.5mm_Horizontal"
+            )
+        }
+
+
+# --------------------------------------------------------------------------
+# Substitution table integrity
+# --------------------------------------------------------------------------
+
+
+class TestSubstitutionTable:
+    def test_table_covers_required_lib_ids(self):
+        from kicad_tools.pcb.model_substitutions import MODEL_SUBSTITUTIONS
+
+        required = {
+            "Connector_FFC:FFC_4P_0.5mm",
+            "Connector_FFC:FFC_6P_1.0mm",
+            "Connector_USB:USB_C_Receptacle_USB2.0",
+            "Connector_Video:HDMI_A_Receptacle",
+            "Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm",
+        }
+        assert required <= set(MODEL_SUBSTITUTIONS)
+
+    def test_substitute_lib_id_helper(self):
+        from kicad_tools.pcb.model_substitutions import substitute_lib_id
+
+        assert substitute_lib_id("Connector_FFC:FFC_4P_0.5mm") is not None
+        assert substitute_lib_id("Nonexistent:Thing") is None
+
+
+# --------------------------------------------------------------------------
 # File-level API + parseability
 # --------------------------------------------------------------------------
 

@@ -98,6 +98,17 @@
     (pad "B12" smd rect (at -5.500 2.000) (size 0.300 0.600) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
     (pad "S1" thru_hole circle (at -7.500 1.000) (size 1.000 1.000) (drill 0.600) (layers "*.Cu" "*.Mask") (net 5 "GND"))
     (pad "S2" thru_hole circle (at 7.500 1.000) (size 1.000 1.000) (drill 0.600) (layers "*.Cu" "*.Mask") (net 5 "GND"))
+  	(model "${KICAD10_3DMODEL_DIR}/Connector_USB.3dshapes/USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Connector_PCIE:PCIE_Mini_Edge"
     (layer "F.Cu")
@@ -139,6 +150,17 @@
     (pad "M1" thru_hole circle (at -1.500 1.200) (size 1.000 1.000) (drill 0.600) (layers "*.Cu" "*.Mask") (net 5 "GND"))
     (pad "M2" thru_hole circle (at 1.500 1.200) (size 1.000 1.000) (drill 0.600) (layers "*.Cu" "*.Mask") (net 5 "GND"))
     (pad "RST" smd rect (at 0.000 -1.500) (size 0.500 0.500) (layers "F.Cu" "F.Paste" "F.Mask") (net 26 "MIPI_RST"))
+  	(model "${KICAD10_3DMODEL_DIR}/Connector_FFC-FPC.3dshapes/Amphenol_F32Q-1A7x1-11004_1x04-1MP_P0.5mm_Horizontal.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm"
     (layer "F.Cu")
@@ -253,6 +275,17 @@
     (pad "G5" smd rect (at 1.270 3.810) (size 0.450 0.450) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
     (pad "G6" smd rect (at 2.540 3.810) (size 0.450 0.450) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
     (pad "G7" smd rect (at 3.810 3.810) (size 0.450 0.450) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
+  	(model "${KICAD10_3DMODEL_DIR}/Package_BGA.3dshapes/VFBGA-49_5.0x5.0mm_Layout7x7_P0.65mm.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Package_QFP:LQFP-48_7x7mm_P0.5mm"
     (layer "F.Cu")
