@@ -1720,13 +1720,21 @@ tolerances:
   # MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N -- the #3438 negotiated-reach
   # residual; 26/31 is seed-invariant under --deterministic-budget, verified
   # across 7 seeds + --differential-pairs + --order-method congestion).
-  # Ratcheted 35 -> 14.  Counter-semantics note: check_routed_drc.py
-  # compares its ADVISORY-FILTERED blocking count (9) against this value,
-  # while check_matchgroup_coverage.py compares the RAW kct-check
-  # summary.errors (14 = 9 blocking + 5 advisory connectivity).  The single
-  # shared value must satisfy the raw counter, so 14 is zero-slack for the
-  # match-group gate and +5 slack for the blocking gate.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 14
+  # Ratcheted 35 -> 14 -> 9.
+  #
+  # 2026-07-09 (Issue #4008): the dual-counter seam is GONE.  Both gates now
+  # count BLOCKING errors: check_matchgroup_coverage.py's
+  # count_errors_via_kct_check delegates to the shared
+  # net_class_map_resolver.count_blocking_errors, the same advisory-filtered
+  # counter check_routed_drc.py uses.  Previously this floor had to satisfy
+  # the RAW-errors counter (14 = 9 blocking + 5 advisory connectivity),
+  # which forced +5 dead slack onto the blocking gate -- a 9 -> 13 blocking
+  # regression would have silently passed CI (13 <= 14).  Now both gates
+  # compare the identical blocking count (9), so the floor drops to the
+  # zero-slack blocking value.  Exit clause unchanged: re-route so the
+  # remaining 9 sidecar-gated errors clear (skew tuner + #3438
+  # negotiated-reach residual) and ratchet 9 downward.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 9
 
   # Board 05 (BLDC motor controller).  Issue #3470 (2026-06-10) removed
   # this board's tolerances entry -- the committed artifact reached a

@@ -48,17 +48,14 @@ from typing import Any
 import yaml
 
 # The CI gate mirrors the audit pipeline's advisory-rule classification
-# (``src/kicad_tools/audit/auditor.py:768``) so any rule classified as
-# advisory by :class:`DRCChecker.ADVISORY_RULE_IDS` does NOT block the gate.
-# Today that is just ``connectivity`` (partial-route reports surface in the
-# diagnostic output but do not gate manufacturability).
+# (``src/kicad_tools/audit/auditor.py``) so any rule classified as advisory
+# by :class:`DRCChecker.ADVISORY_RULE_IDS` does NOT block the gate.  Today
+# that is just ``connectivity`` (partial-route reports surface in the
+# diagnostic output but do not gate manufacturability).  The classifier
+# import now lives inside :func:`net_class_map_resolver.count_blocking_errors`
+# (Issue #4008 hoisted the shared counter), so this gate no longer imports
+# ``DRCChecker`` directly.
 #
-# The import lives here at module scope so a missing/renamed classifier
-# surfaces immediately at script start, not deep inside ``count_errors``.
-# The helper script runs under ``uv run`` (see ``main()`` call to
-# ``uv run kct check``) so ``kicad_tools`` is always importable.
-from kicad_tools.validate.checker import DRCChecker  # noqa: E402
-
 # Issue #3151: the strict error-count gate must count the diff-pair and
 # match-group rule families, which only fire when ``kct check`` is given a
 # ``--net-class-map`` sidecar (the rules no-op without one -- the documented
@@ -67,7 +64,10 @@ from kicad_tools.validate.checker import DRCChecker  # noqa: E402
 # import works whether the gate is launched as ``scripts/ci/check_routed_drc.py``
 # or imported as a module by the test suite.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from net_class_map_resolver import resolve_net_class_map_sidecar  # noqa: E402
+from net_class_map_resolver import (  # noqa: E402
+    count_blocking_errors,
+    resolve_net_class_map_sidecar,
+)
 
 DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
 DEFAULT_MANUFACTURER = "jlcpcb"
@@ -189,67 +189,16 @@ def load_manufacturers(allowlist_path: Path) -> dict[str, str]:
 def _count_blocking_errors(data: dict[str, Any]) -> tuple[int, dict[str, int]]:
     """Filter advisory rules out of a ``kct check --format json`` payload.
 
-    The gating verdict mirrors the audit pipeline's classifier
-    (``DRCChecker.is_advisory_rule``): rules in
-    :attr:`DRCChecker.ADVISORY_RULE_IDS` (currently just ``connectivity``)
-    surface to consumers but do not block manufacturability.  PR #3060 added
-    the ``connectivity`` rule and PR #3064 introduced the central classifier;
-    this helper makes the CI gate honour the same severity model as
-    ``ManufacturingAudit._check_drc``.
+    Issue #4008: the implementation now lives in
+    :func:`net_class_map_resolver.count_blocking_errors` so this gate and
+    ``check_matchgroup_coverage.py`` share ONE blocking-vs-advisory counter.
+    This thin wrapper is retained for the module's existing callers and unit
+    tests; it delegates verbatim to the shared helper.
 
-    Args:
-        data: Parsed JSON object emitted by ``kct check --format json``.
-            Expected to contain ``violations`` (a list with per-violation
-            ``rule_id`` and ``severity`` fields) and a ``summary.errors``
-            integer (the unfiltered count, used as a fall-back when no
-            ``violations`` array is present).
-
-    Returns:
-        Tuple of ``(blocking_errors, advisory_by_rule)``:
-
-        * ``blocking_errors`` -- number of error-severity violations whose
-          ``rule_id`` is NOT in ``ADVISORY_RULE_IDS``.  This is what the
-          gate compares to the allowlist.
-        * ``advisory_by_rule`` -- mapping of advisory ``rule_id`` to count
-          of error-severity violations of that rule, so callers can still
-          print the connectivity findings for diagnostic visibility per
-          the issue #3074 AC ("connectivity rule still appears in
-          violation reports").
-
-    Raises:
-        RuntimeError: If the JSON lacks both a ``violations`` array and a
-            ``summary.errors`` integer (the payload is malformed).
+    See :func:`net_class_map_resolver.count_blocking_errors` for the full
+    contract.
     """
-    violations = data.get("violations")
-    if isinstance(violations, list):
-        blocking = 0
-        advisory_by_rule: dict[str, int] = {}
-        for v in violations:
-            if not isinstance(v, dict):
-                continue
-            # Only error-severity violations count toward the gate; warnings
-            # are filtered upstream by ``--errors-only`` but we re-check
-            # defensively in case a future flag change loosens that.
-            severity = v.get("severity", "error")
-            if severity != "error":
-                continue
-            rule_id = v.get("rule_id", "")
-            if not isinstance(rule_id, str):
-                continue
-            if DRCChecker.is_advisory_rule(rule_id):
-                advisory_by_rule[rule_id] = advisory_by_rule.get(rule_id, 0) + 1
-            else:
-                blocking += 1
-        return blocking, advisory_by_rule
-
-    # Fall-back: no per-violation array (legacy format).  Trust
-    # ``summary.errors``.  Advisory awareness degrades gracefully -- the
-    # gate behaves exactly as it did before this change in that path.
-    summary = data.get("summary", {})
-    errors = summary.get("errors")
-    if not isinstance(errors, int):
-        raise RuntimeError(f"kct check JSON missing both violations and summary.errors: {data!r}")
-    return errors, {}
+    return count_blocking_errors(data)
 
 
 def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> tuple[int, dict[str, int]]:

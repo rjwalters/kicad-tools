@@ -74,9 +74,17 @@ Reusing logic from ``check_diffpair_coverage.py`` / ``check_routed_drc.py``:
     * Re-route + PCB-locate helpers (``re_route_board``, ``find_routed_pcb``)
     * net_class_map import from generate_design.py (``build_net_class_map_for_board``)
 
-The helpers are duplicated rather than imported to keep each CI gate's
+Most helpers are duplicated rather than imported to keep each CI gate's
 blast radius minimal and to match the byte-for-byte convention
 established by ``check_diffpair_coverage.py``.
+
+Exception (Issue #4008): the blocking-vs-advisory error counter is
+IMPORTED from :mod:`net_class_map_resolver` rather than duplicated, so
+this gate and ``check_routed_drc.py`` compare the *same* count against the
+*same* ``.github/routed-drc-tolerance.yml`` floor.  This script previously
+read the raw ``summary.errors`` integer (advisory ``connectivity`` errors
+included), which diverged from ``check_routed_drc.py``'s blocking-only
+count and forced the shared floor up to absorb the difference.
 """
 
 from __future__ import annotations
@@ -89,6 +97,12 @@ import sys
 from pathlib import Path
 
 import yaml
+
+# Issue #4008: import the single shared blocking-error counter so this gate
+# and ``check_routed_drc.py`` agree on the count they gate against.
+# ``net_class_map_resolver`` lives next to this script in ``scripts/ci``.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from net_class_map_resolver import count_blocking_errors  # noqa: E402
 
 # --- shared with check_routed_drc.py / check_diffpair_coverage.py ------------
 
@@ -442,12 +456,25 @@ def measure_pour_connectivity(recipe_mod, pcb_path: Path, pour_nets: set[str]) -
 
 
 def count_errors_via_kct_check(pcb_path: Path, sidecar: Path | None) -> int:
-    """Count errors via ``kct check --mfr jlcpcb --errors-only --format json``.
+    """Count BLOCKING errors via ``kct check --mfr jlcpcb --errors-only``.
 
-    Mirrors ``check_diffpair_coverage.count_errors_via_kct_check`` so the
-    allowlist semantic matches the sibling CI gates exactly -- a value of
-    80 on the same routed PCB must mean the same thing across all three
-    gates (committed-diff, diff-pair regression, match-group regression).
+    Issue #4008: this counter now applies the same advisory-rule filter as
+    ``check_routed_drc.py`` -- it delegates to the shared
+    :func:`net_class_map_resolver.count_blocking_errors`, which excludes
+    ``DRCChecker.ADVISORY_RULE_IDS`` (currently just ``connectivity``) from
+    the count.  Previously this function returned the raw ``summary.errors``
+    integer, so on board 07 it reported 14 (9 blocking + 5 advisory
+    connectivity) while ``check_routed_drc.py`` reported 9 for the SAME
+    routed PCB against the SAME ``.github/routed-drc-tolerance.yml`` floor.
+    That divergence forced the shared floor up to the raw count and granted
+    the blocking gate dead slack.  Both gates now compare the identical
+    blocking-only count, so the floor can be tightened to the blocking
+    number.
+
+    The allowlist semantic still matches the sibling CI gates exactly -- a
+    value of N on the same routed PCB means the same thing across all
+    gates (committed-diff, diff-pair regression, match-group regression),
+    now that they all count blocking errors.
 
     The ``--net-class-map`` sidecar (when present) is passed through
     explicitly per the Phase 3L pattern (#2724 / curator comment).
@@ -460,7 +487,8 @@ def count_errors_via_kct_check(pcb_path: Path, sidecar: Path | None) -> int:
             the match-group rule to fire under standalone ``kct check``.
 
     Returns:
-        The ``summary.errors`` integer from the kct check JSON envelope.
+        The blocking (advisory-filtered) error count from the kct check
+        JSON envelope.
     """
     cmd = [
         "uv",
@@ -486,16 +514,25 @@ def count_errors_via_kct_check(pcb_path: Path, sidecar: Path | None) -> int:
             f"kct check returned unexpected exit code {proc.returncode} on "
             f"{pcb_path}. stderr:\n{proc.stderr.strip()}"
         )
+
+    # ``kct check``'s advisory drift banner is routed to stderr, but strip
+    # any leading non-``{`` lines defensively (mirrors check_routed_drc.py)
+    # so an older/regressed ``kct`` that prints ahead of the JSON body
+    # cannot break this parser.  The payload is always a single top-level
+    # object, so the first ``{`` reliably marks its start.
+    raw_stdout = proc.stdout
+    first_brace = raw_stdout.find("{")
+    json_stdout = raw_stdout[first_brace:] if first_brace > 0 else raw_stdout
     try:
-        data = json.loads(proc.stdout)
+        data = json.loads(json_stdout)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"kct check produced invalid JSON on {pcb_path}: {e}") from e
 
-    summary = data.get("summary", {})
-    errors = summary.get("errors")
-    if not isinstance(errors, int):
-        raise RuntimeError(f"kct check JSON missing summary.errors field for {pcb_path}: {data!r}")
-    return errors
+    try:
+        blocking, _advisory_by_rule = count_blocking_errors(data)
+    except RuntimeError as e:
+        raise RuntimeError(f"{e} (source: {pcb_path})") from e
+    return blocking
 
 
 def compute_rule_coverage(
