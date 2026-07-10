@@ -8,7 +8,12 @@ INFEASIBILITY_OFFSET`` under :class:`CostMode.LEXICOGRAPHIC`).
 
 from __future__ import annotations
 
-from kicad_tools.placement.cmaes_strategy import CMAESStrategy
+import pytest
+
+# Skip entire module if cmaes is not installed
+pytest.importorskip("cmaes", reason="cmaes not installed (optional 'placement'/'dev' extra)")
+
+from kicad_tools.placement.cmaes_strategy import CMAESStrategy  # noqa: E402
 from kicad_tools.placement.cost import INFEASIBILITY_OFFSET, BoardOutline
 from kicad_tools.placement.strategy import StrategyConfig
 from kicad_tools.placement.vector import ComponentDef, bounds

@@ -19,7 +19,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from kicad_tools.placement.cmaes_strategy import CMAESStrategy, _auto_population_size
+# Skip entire module if cmaes is not installed
+pytest.importorskip("cmaes", reason="cmaes not installed (optional 'placement'/'dev' extra)")
+
+from kicad_tools.placement.cmaes_strategy import (  # noqa: E402
+    CMAESStrategy,
+    _auto_population_size,
+)
 from kicad_tools.placement.cost import BoardOutline
 from kicad_tools.placement.strategy import PlacementStrategy, StrategyConfig
 from kicad_tools.placement.vector import (

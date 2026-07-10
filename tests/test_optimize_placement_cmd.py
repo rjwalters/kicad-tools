@@ -8,7 +8,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from kicad_tools.cli.optimize_placement_cmd import (
+# Skip entire module if cmaes is not installed
+pytest.importorskip("cmaes", reason="cmaes not installed (optional 'placement'/'dev' extra)")
+
+from kicad_tools.cli.optimize_placement_cmd import (  # noqa: E402
     _build_footprint_sizes,
     _create_strategy,
     _evaluate,
@@ -19,7 +22,7 @@ from kicad_tools.cli.optimize_placement_cmd import (
     _write_placements_to_pcb_atomic,
     run_optimize_placement,
 )
-from kicad_tools.placement.cmaes_strategy import CMAESStrategy
+from kicad_tools.placement.cmaes_strategy import CMAESStrategy  # noqa: E402
 from kicad_tools.placement.cost import (
     BoardOutline,
     CostBreakdown,
