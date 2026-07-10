@@ -34,6 +34,20 @@ path entirely.  Do not treat this throughput floor as a manufacturability
 or DRC-cleanliness gate for board 05; that is
 ``tests/test_board_05_drc_hotspot_regression.py`` against the committed
 cpp/tier1/4L snapshot.
+
+The recipe also passes ``--allow-unsafe-grid`` (Issue #4024).  Board 05's
+geometry (210 pads, 0.15mm clearance, 80x100mm) makes ``--grid auto``
+select a grid coarser than clearance/2 once the memory budget cap
+(max_cells=2,000,000) is hit, which trips the #3911 auto-grid safety gate
+(``route_cmd.py`` ~8594) BEFORE any backend selection happens -- so the
+gate does ``return 1`` identically under both ``--backend python`` and
+``--backend cpp``.  A fatal exit 1 raised inside the class-scoped fixture
+turns into pytest ERROR (not FAIL) for every dependent test.  Because this
+throughput guard discards its routed output (written to a
+``TemporaryDirectory`` and never manufactured or DRC-checked), the
+DRC-safety gate is irrelevant here; ``--allow-unsafe-grid`` makes the gate
+a no-op for this fixture without touching production behavior anywhere
+else.
 """
 
 from __future__ import annotations
@@ -181,6 +195,19 @@ class TestBoard05RoutingThroughput:
             # cached route rather than current router throughput.  Both
             # tests in this class pin THROUGHPUT, so the route must
             # actually run.
+            # ``--allow-unsafe-grid`` (issue #4024): board 05's dense
+            # geometry (210 pads, 0.15mm clearance) forces ``--grid auto``
+            # coarser than clearance/2 under the memory budget cap, tripping
+            # the #3911 auto-grid safety gate (route_cmd.py ~8594), which
+            # does ``return 1`` BEFORE backend selection -- identically for
+            # python and cpp.  That fatal exit inside this class-scoped
+            # fixture surfaces as pytest ERROR (not FAIL) on every dependent
+            # test.  This is a throughput-only guard: the routed PCB is
+            # written to the TemporaryDirectory above and discarded (never
+            # manufactured, never DRC-checked), so the DRC-safety intent of
+            # the gate does not apply.  The flag makes the gate a no-op here
+            # WITHOUT altering production gate behavior (see #3911); it does
+            # not change the throughput numbers the assertions below parse.
             cmd = [
                 sys.executable,
                 "-m",
@@ -200,6 +227,7 @@ class TestBoard05RoutingThroughput:
                 "--backend",
                 "python",
                 "--no-cache",
+                "--allow-unsafe-grid",
             ]
             proc = subprocess.run(
                 cmd,
