@@ -37,6 +37,14 @@ The real-``kct check`` parity checks are marked ``integration`` + ``slow``
 (they run the full DRC engine on a routed BGA board, ~30s each).  The
 resolver unit tests are fast (temp dirs + a tiny derived map) and always
 run.
+
+Sidecar isolation (Issue #4009): since #3948 ``kct check`` auto-discovers a
+committed ``net_class_map.json`` next to the PCB, so a "bare" run against a
+committed board artifact is no longer actually bare.  The ``bare`` fixture
+below isolates the PCB from its sidecar via the shared
+``isolate_pcb_from_sidecars`` helper in ``tests/conftest.py`` -- reuse that
+helper for any future board's bare-check parity test instead of
+re-deriving the tmp-dir-copy pattern.
 """
 
 from __future__ import annotations
@@ -49,6 +57,8 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+
+from tests.conftest import isolate_pcb_from_sidecars
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_DIR = REPO_ROOT / "scripts" / "ci"
@@ -306,15 +316,13 @@ class TestBoard07KctCheckParity:
         ``net_class_map.json`` next to the PCB, so running against the
         in-repo artifact is no longer "bare" -- the no-op contract this
         class pins is only observable when no sidecar is DISCOVERABLE.
-        Copy the routed PCB into an isolated tmp dir (without the sidecar)
-        so the graceful-degradation path is actually exercised.
+        Use the shared ``isolate_pcb_from_sidecars`` helper (Issue #4009)
+        to copy the routed PCB into an isolated tmp dir without the
+        sidecar so the graceful-degradation path is actually exercised.
         """
         if not BOARD_07_PCB.is_file():
             pytest.skip("board 07 routed PCB not present")
-        import shutil
-
-        isolated = tmp_path_factory.mktemp("board07-bare") / BOARD_07_PCB.name
-        shutil.copy2(BOARD_07_PCB, isolated)
+        isolated = isolate_pcb_from_sidecars(BOARD_07_PCB, tmp_path_factory.mktemp("board07-bare"))
         return _run_kct_check(isolated, sidecar=None)
 
     @pytest.fixture(scope="class")
