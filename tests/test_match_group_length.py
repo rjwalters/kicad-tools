@@ -476,9 +476,7 @@ class TestThroughViaPromotion:
         partial = DiffPairLengthTracker._via_length(via, 1.6, 4)
         assert abs(partial - 1.6 * 1 / 3) < 1e-9
         # Promoted (blind unsupported): full board thickness.
-        promoted = DiffPairLengthTracker._via_length(
-            via, 1.6, 4, blind_buried_supported=False
-        )
+        promoted = DiffPairLengthTracker._via_length(via, 1.6, 4, blind_buried_supported=False)
         assert abs(promoted - 1.6) < 1e-9
 
     def test_via_length_micro_keeps_partial_span_when_unsupported(self):
@@ -492,9 +490,7 @@ class TestThroughViaPromotion:
             net=1,
             is_micro=True,
         )
-        promoted = DiffPairLengthTracker._via_length(
-            micro, 1.6, 4, blind_buried_supported=False
-        )
+        promoted = DiffPairLengthTracker._via_length(micro, 1.6, 4, blind_buried_supported=False)
         assert abs(promoted - 1.6 * 1 / 3) < 1e-9
 
     def test_tuner_measured_length_matches_pcb_through_via_measurement(self):

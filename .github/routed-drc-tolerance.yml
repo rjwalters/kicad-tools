@@ -1734,7 +1734,17 @@ tolerances:
   # zero-slack blocking value.  Exit clause unchanged: re-route so the
   # remaining 9 sidecar-gated errors clear (skew tuner + #3438
   # negotiated-reach residual) and ratchet 9 downward.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 9
+  #
+  # 2026-07-09 (Issue #4007): the lone ADDR_BUS match_group_length_skew
+  # error is GONE.  #4007 measures standard (non-micro) vias as full-stack
+  # through-vias in the via-inclusive skew primitive -- KiCad promotes them
+  # to through-holes on the post-route zone-fill re-save -- so the route-side
+  # tuner and the checker now agree on ADDR_BUS at PASS (via-inclusive skew
+  # collapses ~1.069 mm -> ~0.0015 mm, well within the 0.5 mm tolerance).
+  # Blocking drops 9 -> 8 (now 4 diffpair_length_skew + 4
+  # diffpair_routing_continuity; connectivity=5 still advisory-excluded).
+  # Ratcheted 9 -> 8 (zero-slack blocking value on the regenerated artifact).
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 8
 
   # Board 05 (BLDC motor controller).  Issue #3470 (2026-06-10) removed
   # this board's tolerances entry -- the committed artifact reached a

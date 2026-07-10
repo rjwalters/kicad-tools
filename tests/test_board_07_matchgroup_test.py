@@ -451,24 +451,43 @@ class TestMatchGroupTrackerQueryable:
 
 
 # =============================================================================
-# Issue #3915: ADDR_BUS via-inclusive skew must be non-zero on the routed board
+# Issue #4007: ADDR_BUS via-inclusive skew must AGREE with the tuner at PASS
+# (supersedes the pre-#4007 #3915 tests that pinned a large residual skew)
 # =============================================================================
 
 
 class TestAddrBusViaInclusiveSkew:
-    """Pin the via-blind regression fixed by Issue #3915.
+    """Pin the tuner/checker agreement restored by Issue #4007.
 
-    ``derive_group_skew_data`` accepts ``board_thickness_mm`` /
-    ``num_copper_layers`` so vias contribute their drilled length to a
-    member's routed length.  The ``DRCChecker`` callsite previously
-    omitted both, so on the 4-layer board 07 the ADDR_BUS group -- whose
-    A4/A6 members traverse extra vias relative to A0 -- reported a
-    via-blind skew of < 0.005 mm and silently passed the 0.5 mm
-    tolerance.
+    History
+    -------
+    Issue #3915 wired ``board_thickness_mm`` / ``num_copper_layers`` into
+    ``derive_group_skew_data`` so vias contribute their drilled length to a
+    member's routed length, and the ``DRCChecker`` callsite passes both.
+    On the 4-layer board 07 the ADDR_BUS group's via-carrying members
+    (A4/A6) traverse extra vias relative to A0, so that wiring is load-
+    bearing: without it the drilled length is invisible in the via-blind
+    path.
+
+    Issue #4007 completed the picture.  The route-side tuner (#3931) always
+    modelled standard (non-micro) vias as full-stack **through**-vias --
+    because KiCad promotes them to through-holes on the post-route
+    zone-fill re-save -- but the via-inclusive skew *measurement* was still
+    treating them as short blind segments.  That producer/consumer mismatch
+    left a spurious ~1.069 mm via-inclusive residual on ADDR_BUS: the tuner
+    reported PASS (it had already compensated the copper against the full
+    drilled length) while ``kct check`` reported a 0.5 mm-tolerance
+    violation.  #4007 measures standard vias as through-vias too, so the
+    two agree: ADDR_BUS's via-inclusive skew collapses to ~0.0015 mm and
+    the checker no longer fires.
 
     These tests exercise the committed routed artifact + its
-    ``net_class_map.json`` sidecar directly, so they fire if a future
-    change re-drops the via-length contribution at the producer seam.
+    ``net_class_map.json`` sidecar directly.  They pin the post-#4007
+    invariant (tuner and checker agree, ADDR_BUS is within tolerance) while
+    retaining a #3915-style guard that a standard via still contributes its
+    full drilled length to the measurement -- so a genuine
+    ``board_thickness_mm`` / ``num_copper_layers`` regression is still
+    caught.
     """
 
     @pytest.fixture
@@ -492,22 +511,22 @@ class TestAddrBusViaInclusiveSkew:
         data = json.loads(sidecar.read_text())
         return {net: NetClassRouting(**entry) for net, entry in data.items()}
 
-    def test_addr_bus_via_inclusive_skew_exceeds_tolerance(
+    def test_addr_bus_via_inclusive_skew_within_tolerance(
         self, routed_pcb, net_class_map_from_sidecar
     ) -> None:
-        """AC1/AC2: 4-layer via-inclusive skew for ADDR_BUS exceeds tolerance.
+        """#4007: 4-layer via-inclusive ADDR_BUS skew is WITHIN tolerance.
 
-        With the correct board_thickness_mm / num_copper_layers threaded
-        through, the extra ADDR via traversal adds full-stack drilled length
-        that is invisible in the via-blind path.
+        With standard vias measured as full-stack through-vias (the
+        checker default, ``blind_buried_supported=False``) the tuner's
+        copper compensation lines up with the drilled length it was
+        compensating against, so the via-inclusive residual collapses to
+        ~0.0015 mm -- comfortably inside the group's 0.5 mm tolerance.
 
-        Re-baselined 2026-07-08 (fresh re-route, fix/board07-gallery-ready):
-        the via-aware route-side tuner (#3931) compensates most of the
-        drilled length, but the via-inclusive residual (1.069 mm on the
-        regenerated artifact) still exceeds the group's 0.5 mm tolerance
-        while the via-BLIND skew is ~0.000 -- exactly the visibility
-        property #3915 pins.  The old 1.5 mm threshold matched the pre-#3931
-        (tuner-uncompensated) artifact.
+        This is the exact inversion of the pre-#4007 property: the old
+        tests asserted ``skew > 0.5`` (a ~1.069 mm residual); #4007 makes
+        the tuner and the measurement agree, so the residual is now
+        sub-tolerance.  A regression that re-introduces the producer/
+        consumer mismatch would push this back above 0.5 mm and fail here.
         """
         from kicad_tools.validate.match_group_skew import derive_group_skew_data
 
@@ -521,32 +540,34 @@ class TestAddrBusViaInclusiveSkew:
         assert "ADDR_BUS" in skew_seen, (
             "ADDR_BUS group should be measured on the fully-routed board 07 artifact"
         )
-        assert skew_seen["ADDR_BUS"] > 0.5, (
-            f"Issue #3915: ADDR_BUS via-inclusive skew {skew_seen['ADDR_BUS']:.4f} mm "
-            "must exceed the 0.5 mm group tolerance (via-carrying members add "
-            "drilled length invisible in the via-blind path).  If this dropped "
-            "to ~0.0 mm, the board_thickness_mm/num_copper_layers wiring "
-            "regressed."
+        # Measured 0.0015 mm on the regenerated 2026-07-09 artifact.
+        assert skew_seen["ADDR_BUS"] < 0.5, (
+            f"Issue #4007: ADDR_BUS via-inclusive skew {skew_seen['ADDR_BUS']:.4f} mm "
+            "must be WITHIN the 0.5 mm group tolerance once standard vias are "
+            "measured as full-stack through-vias (the tuner already compensates "
+            "the copper against that drilled length).  A value back above 0.5 mm "
+            "means the through-via measurement regressed to the old blind-segment "
+            "model (#4007), re-opening the tuner/checker split."
         )
 
-    def test_addr_bus_via_blind_skew_is_near_zero(
+    def test_standard_via_still_contributes_drilled_length(
         self, routed_pcb, net_class_map_from_sidecar
     ) -> None:
-        """Guard: the via-blind path under-reports ADDR_BUS vs via-inclusive.
+        """#3915 guard: the drilled via length is still VISIBLE in the metric.
 
-        Documents the regression Issue #3915 closes -- without
-        ``board_thickness_mm`` the extra ADDR via traversals contribute
-        0.0 mm, so the copper-only skew is SUB-TOLERANCE while the
-        via-inclusive skew is above it.
+        Retains the #3915 wiring guard through the #4007 rebaseline.  The
+        durable property is that a standard via still adds its full-stack
+        drilled length to the measurement: turning the via contribution ON
+        (``board_thickness_mm`` / ``num_copper_layers``) must move ADDR_BUS
+        by roughly the drilled length relative to the via-BLIND path.
 
-        Re-baselined 2026-07-08 (fresh re-route): the via-aware tuner
-        (#3931) targets the via-INCLUSIVE metric, deliberately trading
-        copper-length imbalance to offset drilled length, so the via-blind
-        residual is no longer ~0.000 (measured 0.533 mm on the regenerated
-        artifact).  The durable #3915 property is that the drilled length is
-        VISIBLE: via-inclusive skew must exceed via-blind skew by a
-        meaningful margin (a full-stack via traversal is ~0.27 mm on a
-        1.6 mm 4-layer stack; ADDR carries a 2-traversal imbalance).
+        Post-#4007 the sign flips relative to #3915's framing -- the tuner
+        deliberately over-balances the copper so that *adding* the drilled
+        length brings the group into balance -- so the via-inclusive skew is
+        now SMALLER than the via-blind skew.  Either way the two must differ
+        by a substantial margin; a ~0 gap means the ``board_thickness_mm`` /
+        ``num_copper_layers`` wiring was dropped at the producer seam and the
+        via length went uncounted.
         """
         from kicad_tools.validate.match_group_skew import derive_group_skew_data
 
@@ -559,22 +580,31 @@ class TestAddrBusViaInclusiveSkew:
         )
 
         assert "ADDR_BUS" in skew_blind
-        gap = skew_via["ADDR_BUS"] - skew_blind["ADDR_BUS"]
+        # Measured on the 2026-07-09 artifact: blind 1.6015 mm, via 0.0015 mm,
+        # so the drilled via length shifts the metric by ~1.6 mm.  A standard
+        # through-via on a 1.6 mm 4-layer stack contributes its full drill
+        # depth; ADDR carries a multi-traversal imbalance.
+        gap = abs(skew_via["ADDR_BUS"] - skew_blind["ADDR_BUS"])
         assert gap > 0.2, (
-            f"Via-inclusive ADDR_BUS skew ({skew_via['ADDR_BUS']:.4f} mm) should "
-            f"exceed the via-blind value ({skew_blind['ADDR_BUS']:.4f} mm) by the "
-            f"drilled via length; gap was {gap:.4f} mm.  A ~0 gap means the "
-            "board_thickness_mm/num_copper_layers wiring regressed (#3915)."
+            f"Via-inclusive ADDR_BUS skew ({skew_via['ADDR_BUS']:.4f} mm) must "
+            f"differ from the via-blind value ({skew_blind['ADDR_BUS']:.4f} mm) by "
+            f"the drilled via length; |gap| was {gap:.4f} mm.  A ~0 gap means the "
+            "board_thickness_mm/num_copper_layers wiring regressed (#3915) -- a "
+            "standard via stopped contributing drilled length to the measurement."
         )
 
-    def test_checker_reports_addr_bus_violation_on_four_layer_board(
+    def test_checker_reports_no_addr_bus_violation_on_four_layer_board(
         self, routed_pcb, net_class_map_from_sidecar
     ) -> None:
-        """AC2/AC3: DRCChecker(layers=4) raises the ADDR_BUS via-skew violation.
+        """#4007: DRCChecker(layers=4) and the tuner AGREE -- no ADDR_BUS fire.
 
-        End-to-end through the fixed callsite: the checker threads its
-        4-layer / 1.6 mm design rules into the producer, so the group's
-        via-inclusive skew fires the 0.5 mm tolerance rule.
+        End-to-end through the checker callsite: with standard vias measured
+        as full-stack through-vias, the 4-layer / 1.6 mm ADDR_BUS
+        via-inclusive skew is within the 0.5 mm tolerance, so
+        ``kct check`` no longer raises the match-group length-skew
+        violation.  This is the whole point of #4007 -- the checker now
+        agrees with the route-side tuner at PASS, eliminating the
+        0.000-vs-1.069 mm split.
         """
         from kicad_tools.validate.checker import DRCChecker
 
@@ -584,24 +614,20 @@ class TestAddrBusViaInclusiveSkew:
             layers=4,
             net_class_map=net_class_map_from_sidecar,
         )
+        # The 4-layer design rules must still be threaded through (the #3915
+        # wiring); otherwise the "no violation" below would be vacuous.
         assert checker.design_rules.board_thickness_mm == 1.6
 
         results = checker.check_match_group_length_skew()
 
         addr_violations = [v for v in results.violations if "ADDR_BUS" in v.message]
-        assert addr_violations, (
-            "Issue #3915: DRCChecker(layers=4) must report an ADDR_BUS "
-            "match-group length-skew violation once via lengths are threaded "
-            "through.  Before the fix this passed silently."
+        assert not addr_violations, (
+            "Issue #4007: DRCChecker(layers=4) must NOT report an ADDR_BUS "
+            "match-group length-skew violation -- once standard vias are measured "
+            "as through-vias the checker agrees with the tuner at PASS.  A fresh "
+            f"ADDR_BUS violation ({[v.actual_value for v in addr_violations]}) "
+            "means the tuner/checker split reopened."
         )
-        v = addr_violations[0]
-        assert v.rule_id == "match_group_length_skew"
-        assert "mm" in v.message
-        # Re-baselined 2026-07-08: the via-aware tuner (#3931) narrows the
-        # residual to 1.069 mm on the regenerated artifact (was > 1.5 mm on
-        # the pre-#3931 artifact); still above the 0.5 mm tolerance.
-        assert v.actual_value > 0.5
-        assert v.required_value == 0.5
 
 
 # =============================================================================
