@@ -715,6 +715,56 @@ class TestMainDriftWarningEmission:
         assert rel_pcb in proc.stdout
         assert "Tighten to 15" in proc.stdout
 
+    def test_allow_flag_overrides_yaml_and_passes(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``--allow N`` gates the FRESH-regen path independently of the YAML.
+
+        Board 04's recipe-vs-artifact divergence (#4017): the committed
+        artifact is strict-0 (no YAML entry), but the fresh regen still
+        routes the legacy 0.350mm drill pair (2 errors).  ``--allow 2`` on
+        the fresh-regen invocation tolerates exactly those 2 while the YAML
+        stays entry-free for the committed-artifact ratchet.
+        """
+        pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=None)
+        with patch.object(self.helper, "count_errors", return_value=(2, {})):
+            rc = self.helper.main(["--allowlist", str(allowlist), "--allow", "2", str(pcb)])
+        assert rc == 0  # 2 <= 2 (explicit override), gate passes
+
+    def test_allow_flag_still_fails_on_excess(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``--allow N`` is a ceiling, not a bypass: N+1 blocking errors fail."""
+        pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=None)
+        with patch.object(self.helper, "count_errors", return_value=(3, {})):
+            rc = self.helper.main(["--allowlist", str(allowlist), "--allow", "2", str(pcb)])
+        assert rc == 2  # 3 > 2, gate fails
+        captured = capsys.readouterr()
+        assert "::error file=" in captured.out
+
+    def test_allow_flag_suppresses_drift_warning(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """No drift nag under ``--allow``: the tolerance is an intentional
+        recipe-vs-artifact divergence, not a stale YAML floor to tighten."""
+        pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=None)
+        with patch.object(self.helper, "count_errors", return_value=(0, {})):
+            rc = self.helper.main(["--allowlist", str(allowlist), "--allow", "2", str(pcb)])
+        assert rc == 0  # 0 <= 2
+        captured = capsys.readouterr()
+        assert "::warning file=" not in captured.out
+        assert "Tighten to" not in captured.out
+
+    def test_allow_flag_rejects_negative(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A negative ``--allow`` is a config error -> exit 1."""
+        pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=None)
+        rc = self.helper.main(["--allowlist", str(allowlist), "--allow", "-1", str(pcb)])
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "--allow must be a non-negative integer" in captured.out
+
 
 # ---------------------------------------------------------------------------
 # main() integration: per-board manufacturer overrides (issue #3033 / PR #3038).
