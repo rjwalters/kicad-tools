@@ -164,6 +164,7 @@ class DiffPairLengthTracker:
         route: Route,
         board_thickness_mm: float | None,
         num_copper_layers: int,
+        blind_buried_supported: bool = True,
     ) -> float:
         """Return the geometric length of a route in mm, including via drill.
 
@@ -173,6 +174,11 @@ class DiffPairLengthTracker:
         computed from the via's ``layers`` tuple and the supplied
         ``board_thickness_mm`` / ``num_copper_layers``; when
         ``board_thickness_mm`` is ``None`` each via contributes ``0.0``.
+
+        ``blind_buried_supported`` (Issue #4007) forwards to
+        :meth:`_via_length`: when ``False`` a standard (non-micro) via is
+        measured as a full through-via, matching KiCad's post-route
+        via promotion on boards without blind/buried drilling.
         """
         # Segment portion (reuses the existing primitive -- no duplication).
         total = LengthTracker.calculate_route_length(route)
@@ -184,7 +190,12 @@ class DiffPairLengthTracker:
             return total
 
         for via in route.vias:
-            total += DiffPairLengthTracker._via_length(via, board_thickness_mm, num_copper_layers)
+            total += DiffPairLengthTracker._via_length(
+                via,
+                board_thickness_mm,
+                num_copper_layers,
+                blind_buried_supported=blind_buried_supported,
+            )
         return total
 
     @staticmethod
@@ -192,6 +203,7 @@ class DiffPairLengthTracker:
         via: Via,
         board_thickness_mm: float,
         num_copper_layers: int,
+        blind_buried_supported: bool = True,
     ) -> float:
         """Return the geometric drilled length of ``via`` in mm.
 
@@ -215,7 +227,35 @@ class DiffPairLengthTracker:
         on a 2-layer board) is correct because the via's physical
         drilled length depends on how many dielectric layers it actually
         crosses, not on KiCad's nominal layer numbering.
+
+        Through-via promotion (Issue #4007)
+        -----------------------------------
+        When ``blind_buried_supported`` is ``False`` (the board's via rules
+        do not allow blind/buried vias -- the ``standard_2layer`` /
+        ``standard_4layer`` / ``standard_6layer`` default), a *standard*
+        (non-micro) via is a plated through-hole that drills the **full**
+        board thickness regardless of which two copper layers it
+        electrically bridges.  This mirrors what KiCad materializes: its
+        post-route zone-fill re-save (``kicad-cli``) promotes every
+        non-micro blind/buried span to a full F.Cu->B.Cu through-via
+        because the board's stackup does not enable blind/buried drilling.
+        Measuring the pre-promotion partial span here made the match-group
+        tuner converge against a via drilled-length (e.g. board 07 ADDR_BUS
+        A4/A6 F.Cu->In1.Cu = 0.533mm) that the shipped board never had
+        (promoted to F.Cu->B.Cu = 1.6mm), so ``kct check`` re-measured a
+        1.069mm skew the tuner reported as 0.000mm.
+
+        Micro vias (``is_micro``) are laser-drilled HDI features that KiCad
+        does **not** promote, so they keep their actual partial span even
+        when ``blind_buried_supported`` is ``False``.
         """
+        # Issue #4007: a standard (non-micro) via on a board that does not
+        # support blind/buried vias drills the full stack -- KiCad promotes
+        # it to a through-via on serialization.  Measure that shipped
+        # geometry so the tuner and the checker agree.
+        if not blind_buried_supported and not getattr(via, "is_micro", False):
+            return board_thickness_mm
+
         layer_start, layer_end = via.layers
         idx_start = DiffPairLengthTracker._stack_position(layer_start, num_copper_layers)
         idx_end = DiffPairLengthTracker._stack_position(layer_end, num_copper_layers)
@@ -310,6 +350,7 @@ class DiffPairLengthTracker:
         net_id: int,
         board_thickness_mm: float | None = None,
         num_copper_layers: int = 2,
+        blind_buried_supported: bool = True,
     ) -> float:
         """Return the geometric routed length of a net in mm, read from a routed PCB.
 
@@ -340,6 +381,13 @@ class DiffPairLengthTracker:
             num_copper_layers: Number of copper layers in the stack (used
                 to compute per-via drilled length when
                 ``board_thickness_mm`` is supplied).  Defaults to ``2``.
+            blind_buried_supported: When ``False`` (Issue #4007), a
+                standard (non-micro) via is measured as a full through-via
+                because the board's stackup does not support blind/buried
+                drilling -- KiCad promotes every such via to F.Cu->B.Cu on
+                serialization.  Micro vias (``via_type == "micro"``) keep
+                their actual partial span.  Defaults to ``True``
+                (byte-for-byte legacy partial-span behavior).
 
         Returns:
             Total geometric length (segments + vias) in mm.
@@ -381,6 +429,15 @@ class DiffPairLengthTracker:
             layers = via.layers
             if not layers or len(layers) < 2:
                 # Malformed via (no layer span) -- skip rather than crash.
+                continue
+            # Issue #4007: a standard (non-micro) via on a board without
+            # blind/buried support drills the full stack (KiCad promotes it
+            # to a through-via on serialization).  Micro vias keep their
+            # actual partial span.  Mirrors the router-Route path in
+            # :meth:`_via_length`.
+            is_micro = getattr(via, "via_type", None) == "micro"
+            if not blind_buried_supported and not is_micro:
+                total += board_thickness_mm
                 continue
             try:
                 layer_start = CopperLayer.from_kicad_name(layers[0])

@@ -91,6 +91,7 @@ def derive_group_skew_data(
     net_class_map: dict[str, NetClassRouting] | None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 2,
+    blind_buried_supported: bool = False,
 ) -> tuple[dict[str, float], list[MatchGroup], dict[str, float]]:
     """Re-derive ``(group_skew_data, tracker_match_groups, threshold_map)``.
 
@@ -117,6 +118,14 @@ def derive_group_skew_data(
         num_copper_layers: Number of copper layers in the stack (used
             to compute per-via drilled length when ``board_thickness_mm``
             is supplied).  Defaults to ``2``.
+        blind_buried_supported: When ``False`` (Issue #4007, the default
+            here), a standard (non-micro) via is measured as a full
+            through-via.  This matches both what the router-side tuner
+            targets and what KiCad materializes on disk (every non-micro
+            via is promoted to a full F.Cu->B.Cu through-hole on the
+            post-route zone-fill re-save), so the checker's skew agrees
+            with the tuner's converged value.  Micro vias
+            (``via_type == "micro"``) keep their actual partial span.
 
     Returns:
         ``(group_skew_data, tracker_match_groups, threshold_map)`` where
@@ -250,6 +259,7 @@ def derive_group_skew_data(
                 net_id,
                 board_thickness_mm=board_thickness_mm,
                 num_copper_layers=num_copper_layers,
+                blind_buried_supported=blind_buried_supported,
             )
             measured.append(length)
 
@@ -271,12 +281,14 @@ def derive_group_skew_data(
                     p_id,
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_copper_layers,
+                    blind_buried_supported=blind_buried_supported,
                 )
                 l_n = MatchGroupTracker.measure_net_from_pcb(
                     pcb,
                     n_id,
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_copper_layers,
+                    blind_buried_supported=blind_buried_supported,
                 )
                 measured.append((l_p + l_n) / 2.0)
 

@@ -224,6 +224,7 @@ class MatchGroupTracker:
         groups: list[MatchGroup],
         board_thickness_mm: float | None = None,
         num_copper_layers: int = 2,
+        blind_buried_supported: bool = True,
     ) -> None:
         """Measure and record the routed length of each member of each group.
 
@@ -240,6 +241,11 @@ class MatchGroupTracker:
             num_copper_layers: Number of copper layers in the stack (used
                 to compute per-via drilled length when ``board_thickness_mm``
                 is supplied).  Defaults to ``2`` (typical 2-layer stack).
+            blind_buried_supported: When ``False`` (Issue #4007), a
+                standard (non-micro) via is measured as a full through-via
+                to match KiCad's post-route via promotion on boards without
+                blind/buried drilling.  Defaults to ``True`` (legacy
+                partial-span behavior).
 
         Notes:
             * Routes whose ``net`` is not a member of any supplied group
@@ -289,7 +295,12 @@ class MatchGroupTracker:
                 route = routes_by_net.get(net_id)
                 if route is None:
                     continue
-                length = self._measure_route_total(route, board_thickness_mm, num_copper_layers)
+                length = self._measure_route_total(
+                    route,
+                    board_thickness_mm,
+                    num_copper_layers,
+                    blind_buried_supported=blind_buried_supported,
+                )
                 self.lengths[net_id] = length
                 measured.append(length)
             # Pair members (Phase 2F).  Each half is measured independently
@@ -299,11 +310,21 @@ class MatchGroupTracker:
                 p_route = routes_by_net.get(p_id)
                 n_route = routes_by_net.get(n_id)
                 if p_route is not None:
-                    l_p = self._measure_route_total(p_route, board_thickness_mm, num_copper_layers)
+                    l_p = self._measure_route_total(
+                        p_route,
+                        board_thickness_mm,
+                        num_copper_layers,
+                        blind_buried_supported=blind_buried_supported,
+                    )
                     self.lengths[p_id] = l_p
                     measured.append(l_p)
                 if n_route is not None:
-                    l_n = self._measure_route_total(n_route, board_thickness_mm, num_copper_layers)
+                    l_n = self._measure_route_total(
+                        n_route,
+                        board_thickness_mm,
+                        num_copper_layers,
+                        blind_buried_supported=blind_buried_supported,
+                    )
                     self.lengths[n_id] = l_n
                     measured.append(l_n)
 
@@ -320,6 +341,7 @@ class MatchGroupTracker:
         route: Route,
         board_thickness_mm: float | None,
         num_copper_layers: int,
+        blind_buried_supported: bool = True,
     ) -> float:
         """Return the geometric length of a route in mm, including via drill.
 
@@ -339,6 +361,10 @@ class MatchGroupTracker:
             board_thickness_mm: Total stackup thickness in mm.  ``None``
                 ->  vias contribute ``0.0``.
             num_copper_layers: Number of copper layers in the stack.
+            blind_buried_supported: When ``False`` (Issue #4007), a
+                standard (non-micro) via is measured as a full through-via
+                (see :meth:`DiffPairLengthTracker._via_length`).  Defaults
+                to ``True`` (legacy partial-span behavior).
 
         Returns:
             Total geometric length (segments + vias) in mm.
@@ -355,7 +381,12 @@ class MatchGroupTracker:
             return total
 
         for via in route.vias:
-            total += DiffPairLengthTracker._via_length(via, board_thickness_mm, num_copper_layers)
+            total += DiffPairLengthTracker._via_length(
+                via,
+                board_thickness_mm,
+                num_copper_layers,
+                blind_buried_supported=blind_buried_supported,
+            )
         return total
 
     # =========================================================================
@@ -457,6 +488,7 @@ class MatchGroupTracker:
         net_id: int,
         board_thickness_mm: float | None = None,
         num_copper_layers: int = 2,
+        blind_buried_supported: bool = True,
     ) -> float:
         """Return the geometric routed length of a net in mm, read from a routed PCB.
 
@@ -484,6 +516,9 @@ class MatchGroupTracker:
             num_copper_layers: Number of copper layers in the stack
                 (used to compute per-via drilled length when
                 ``board_thickness_mm`` is supplied).  Defaults to ``2``.
+            blind_buried_supported: When ``False`` (Issue #4007), a
+                standard (non-micro) via is measured as a full through-via.
+                Defaults to ``True`` (legacy partial-span behavior).
 
         Returns:
             Total geometric length (segments + vias) in mm.
@@ -493,6 +528,7 @@ class MatchGroupTracker:
             net_id,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
         )
 
     # =========================================================================

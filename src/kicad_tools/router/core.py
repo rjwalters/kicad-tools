@@ -12468,11 +12468,32 @@ class Autorouter:
         _mfr_rules = self._build_manufacturer_design_rules()
         if _mfr_rules is not None:
             board_thickness_mm = getattr(_mfr_rules, "board_thickness_mm", None)
+
+        # Issue #4007: resolve whether the board supports blind/buried vias.
+        # The router only ever emits through-holes (``standard_*layer`` via
+        # rules; ``hdi_4layer`` is defined but never instantiated) plus
+        # laser-drilled MICRO in-pad vias, so blind/buried support is False
+        # for every current board.  When False, the length measurement
+        # promotes each standard (non-micro) via to a full through-via --
+        # matching what KiCad's post-route zone-fill re-save materializes on
+        # disk, so the tuner's converged skew equals what ``kct check``
+        # re-derives from the committed PCB.  Sourced from ``self.via_rules``
+        # (an optional attribute) so an HDI board can opt back into partial
+        # spans; defaults to False.
+        blind_buried_supported = False
+        _via_rules = getattr(self, "via_rules", None)
+        if _via_rules is not None:
+            blind_buried_supported = bool(
+                getattr(_via_rules, "allow_blind", False)
+                or getattr(_via_rules, "allow_buried", False)
+            )
+
         self._match_group_tracker.record_routes(
             routes=self.routes,
             groups=detected_groups,
             num_copper_layers=num_layers,
             board_thickness_mm=board_thickness_mm,
+            blind_buried_supported=blind_buried_supported,
         )
 
         # Issue #3317 follow-up (judge change-request on PR #3317):
@@ -12558,6 +12579,7 @@ class Autorouter:
                     pad_clearance_mm=pad_clearance_mm,
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_layers,
+                    blind_buried_supported=blind_buried_supported,
                 )
             except ValueError as exc:
                 # Defensive: a malformed group (e.g. mixed pair/scalar
@@ -12643,6 +12665,7 @@ class Autorouter:
             groups=detected_groups,
             num_copper_layers=num_layers,
             board_thickness_mm=board_thickness_mm,
+            blind_buried_supported=blind_buried_supported,
         )
         return results
 

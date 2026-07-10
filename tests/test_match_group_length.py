@@ -421,6 +421,161 @@ class TestViaLengthPolicy:
 
 
 # =============================================================================
+# 4b. Through-via promotion (Issue #4007)
+# =============================================================================
+
+
+class TestThroughViaPromotion:
+    """A standard blind via drills the full stack when blind vias are unsupported.
+
+    Regression for Issue #4007: the match-group tuner measured board 07's
+    ADDR_BUS A4/A6 escape vias as partial-thickness F.Cu->In1.Cu spans
+    (0.533mm on a 1.6mm / 4-layer stack), converging the group to skew
+    0.000mm.  But the board's stackup does not support blind/buried vias, so
+    KiCad's post-route zone-fill re-save promoted every such via to a full
+    F.Cu->B.Cu through-hole (1.6mm).  ``kct check`` then re-derived a 1.069mm
+    skew from the promoted through-vias -- a 0.000-vs-1.069mm split.  The fix
+    measures a standard (non-micro) via as a full through-via whenever
+    ``blind_buried_supported`` is ``False``, so the tuner targets the same
+    length the shipped board (and the checker) sees.
+    """
+
+    def _blind_via_route(self, net_id: int, net_name: str) -> Route:
+        """A route with a single F.Cu->In1.Cu blind via (delta-1 span)."""
+        return Route(
+            net=net_id,
+            net_name=net_name,
+            segments=[
+                Segment(0.0, 0.0, 5.0, 0.0, 0.2, Layer.F_CU, net=net_id, net_name=net_name),
+                Segment(5.0, 0.0, 10.0, 0.0, 0.2, Layer.IN1_CU, net=net_id, net_name=net_name),
+            ],
+            vias=[
+                Via(
+                    x=5.0,
+                    y=0.0,
+                    drill=0.3,
+                    diameter=0.6,
+                    layers=(CopperLayer.F_CU, CopperLayer.IN1_CU),
+                    net=net_id,
+                    net_name=net_name,
+                )
+            ],
+        )
+
+    def test_via_length_promotes_standard_via_to_through(self):
+        """A non-micro F.Cu->In1.Cu via drills the full stack when unsupported."""
+        via = Via(
+            x=0.0,
+            y=0.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(CopperLayer.F_CU, CopperLayer.IN1_CU),
+            net=1,
+        )
+        # Default (blind supported): partial span 1.6 * 1/3 = 0.5333mm.
+        partial = DiffPairLengthTracker._via_length(via, 1.6, 4)
+        assert abs(partial - 1.6 * 1 / 3) < 1e-9
+        # Promoted (blind unsupported): full board thickness.
+        promoted = DiffPairLengthTracker._via_length(
+            via, 1.6, 4, blind_buried_supported=False
+        )
+        assert abs(promoted - 1.6) < 1e-9
+
+    def test_via_length_micro_keeps_partial_span_when_unsupported(self):
+        """A micro via is NOT promoted even when blind vias are unsupported."""
+        micro = Via(
+            x=0.0,
+            y=0.0,
+            drill=0.1,
+            diameter=0.3,
+            layers=(CopperLayer.F_CU, CopperLayer.IN1_CU),
+            net=1,
+            is_micro=True,
+        )
+        promoted = DiffPairLengthTracker._via_length(
+            micro, 1.6, 4, blind_buried_supported=False
+        )
+        assert abs(promoted - 1.6 * 1 / 3) < 1e-9
+
+    def test_tuner_measured_length_matches_pcb_through_via_measurement(self):
+        """The route-object length (promoted) equals the promoted PCB measurement.
+
+        This is the core Issue #4007 acceptance criterion: the via-inclusive
+        length the tuner converges against (route-object form,
+        blind-unsupported) must equal what the checker re-derives from the
+        committed PCB after KiCad promotes the via to a full through-hole
+        (PCB-segment form, blind-unsupported).
+        """
+        route = self._blind_via_route(100, "A4")
+
+        # Route-object measurement (tuner side) with through-via promotion.
+        route_len = MatchGroupTracker._measure_route_total(
+            route, 1.6, 4, blind_buried_supported=False
+        )
+
+        # The committed board carries a PROMOTED through-via (F.Cu->B.Cu) --
+        # this is what KiCad writes and what the checker reads.  Its
+        # PCB-segment measurement (blind-unsupported) must match the route
+        # measurement byte-for-byte.
+        pcb = _StubPCB(
+            _segments=[
+                _StubSegment(start=(0.0, 0.0), end=(5.0, 0.0), net_number=100, layer="F.Cu"),
+                _StubSegment(start=(5.0, 0.0), end=(10.0, 0.0), net_number=100, layer="In1.Cu"),
+            ],
+            _vias=[
+                _StubVia(
+                    position=(5.0, 0.0),
+                    layers=["F.Cu", "B.Cu"],  # promoted through-via
+                    net_number=100,
+                )
+            ],
+        )
+        pcb_len = MatchGroupTracker.measure_net_from_pcb(
+            pcb, 100, board_thickness_mm=1.6, num_copper_layers=4, blind_buried_supported=False
+        )
+
+        # Both measure 10mm copper + 1.6mm through-via = 11.6mm.
+        assert abs(route_len - 11.6) < 1e-9
+        assert abs(route_len - pcb_len) < 1e-9
+
+    def test_group_converges_to_matching_skew_under_promotion(self):
+        """A group with a via-count imbalance stays skew-clean under promotion.
+
+        A0 routes flat (no via); A4 has a promoted through-via.  Recorded
+        with ``blind_buried_supported=False``, A4's via drills the full
+        1.6mm; A0 must be that much longer to match -- mirroring the board 07
+        ADDR_BUS geometry the tuner produces.
+        """
+        # A4: 10mm copper + 1.6mm promoted through-via = 11.6mm.
+        a4 = self._blind_via_route(100, "A4")
+        # A0: a flat 11.6mm route (no via) -- the length the tuner would
+        # meander a planar member to, once it accounts for A4's through-via.
+        a0 = _make_straight_route(101, "A0", 11.6)
+        group = _make_ddr_group(net_ids=[100, 101])
+
+        tracker = MatchGroupTracker()
+        tracker.record_routes(
+            [a4, a0],
+            [group],
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+            blind_buried_supported=False,
+        )
+
+        lengths = tracker.get_group_lengths(group)
+        assert abs(lengths[100] - 11.6) < 1e-9
+        assert abs(lengths[101] - 11.6) < 1e-9
+        assert tracker.get_group_skew(group) < 1e-9
+
+        # Sanity: with the legacy partial-span policy the SAME geometry
+        # would read a nonzero skew (A4 = 10 + 0.533 = 10.533 vs A0 = 11.6),
+        # which is exactly the tuner-vs-checker split Issue #4007 fixed.
+        legacy = MatchGroupTracker()
+        legacy.record_routes([a4, a0], [group], board_thickness_mm=1.6, num_copper_layers=4)
+        assert legacy.get_group_skew(group) > 1.0
+
+
+# =============================================================================
 # 5. get_all_skews -- ordering + omission of partial groups
 # =============================================================================
 
@@ -578,6 +733,10 @@ class _StubVia:
     net_number: int = 0
     net_name: str = ""
     uuid: str = ""
+    # Mirrors :attr:`kicad_tools.schema.pcb.Via.via_type` -- ``None`` for a
+    # standard plated through-hole; ``"micro"`` / ``"blind"`` / ``"buried"``
+    # for the corresponding KiCad via-type token (Issue #4007).
+    via_type: str | None = None
 
 
 @dataclass
@@ -628,8 +787,16 @@ class TestMeasureNetFromPcbDelegation:
             MatchGroupTracker.measure_net_from_pcb(pcb, 100)
 
         assert spy.call_count == 1
-        # The forwarder must pass through all four positional/kw args.
-        spy.assert_called_with(pcb, 100, board_thickness_mm=None, num_copper_layers=2)
+        # The forwarder must pass through all positional/kw args, including
+        # the Issue #4007 ``blind_buried_supported`` through-via-promotion
+        # flag (default True preserves the legacy partial-span behavior).
+        spy.assert_called_with(
+            pcb,
+            100,
+            board_thickness_mm=None,
+            num_copper_layers=2,
+            blind_buried_supported=True,
+        )
 
     def test_forwarder_returns_same_value_as_diffpair_primitive(self):
         """For the same input, both helpers produce byte-for-byte identical results.
