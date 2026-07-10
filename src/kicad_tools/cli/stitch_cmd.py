@@ -3780,7 +3780,19 @@ def run_thermal_stitch(
     other_net_pads = find_all_pads(sexp, exclude_nets=target_net_nums)
     other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=target_net_nums)
     # Issue #3855: foreign-net DRILL registry for the hole-to-hole guard.
-    other_net_drills = find_all_drills(sexp, exclude_nets=target_net_nums)
+    # Issue #4010: exclude target-net PAD drills from the base pool too --
+    # a thermal via halo rings a TO-220 pad at ~0.55mm from its center,
+    # which lands INSIDE the 0.5mm MIN_HOLE_TO_HOLE_CLEARANCE of the pad's
+    # own 1.0mm plated drill.  ``find_all_drills(exclude_nets=...)`` only
+    # excludes foreign-net VIAS; without ``pad_exclude_nets`` the target
+    # pad's own drill survives here and the guard rejects every halo via
+    # against it (board-05: all six MOSFETs dropped to ZERO thermal vias).
+    # Sibling-net pad drills still enter the guard via ``target_pad_drills``.
+    other_net_drills = find_all_drills(
+        sexp,
+        exclude_nets=target_net_nums,
+        pad_exclude_nets=target_net_nums,
+    )
 
     # Issue #4010: sibling stitch-net pads are HARD obstacles.  The
     # ``other_net_*`` pools above exclude ALL stitch-target nets, so when
@@ -4026,7 +4038,16 @@ def run_blanket_stitch(
     other_net_pads = find_all_pads(sexp, exclude_nets=target_net_nums)
     other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=target_net_nums)
     # Issue #3855: foreign-net DRILL registry for the hole-to-hole guard.
-    other_net_drills = find_all_drills(sexp, exclude_nets=target_net_nums)
+    # Issue #4010: exclude target-net PAD drills from the base pool too (see
+    # the matching note in run_thermal_stitch).  A blanket via ringing a
+    # thru-hole pad can land inside the pad's own drill hole-to-hole floor;
+    # without ``pad_exclude_nets`` the guard would reject it against its own
+    # pad drill.  Sibling-net pad drills still enter via ``target_pad_drills``.
+    other_net_drills = find_all_drills(
+        sexp,
+        exclude_nets=target_net_nums,
+        pad_exclude_nets=target_net_nums,
+    )
 
     # Issue #4010: sibling stitch-net pads/drills are HARD obstacles.  The
     # ``other_net_*`` pools above exclude ALL stitch-target nets, so when
