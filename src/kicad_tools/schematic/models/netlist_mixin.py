@@ -29,6 +29,31 @@ class PinRef:
         return f"{self.symbol_ref}.{self.pin}"
 
 
+def _instance_owns_pin(sym, pin) -> bool:
+    """Return True if a placed ``SymbolInstance`` owns ``pin``.
+
+    Multi-unit KiCad symbols (e.g. the LM393 dual comparator) share a
+    single ``SymbolDef`` — and therefore a single ``symbol_def.pins``
+    list containing *every* unit's pins — across several placed
+    ``SymbolInstance`` rows that share a ``reference`` but differ in
+    their ``unit`` field.  Connectivity must attribute each pin to the
+    instance that actually carries it, otherwise a unit-2-only pin gets
+    positioned against a unit-1 instance's placement anchor and produces
+    "phantom" nets from unit-1 geometry (issue #4020).
+
+    A pin belongs to an instance when its ``pin.unit`` matches the
+    instance's ``unit`` field, or when it is a unit-0 "common to all
+    units" pin (shared package power pins, and single-unit symbols whose
+    pins are all tagged ``unit=0``).  This mirrors ``_pin_matches_unit``
+    in :meth:`SymbolInstance.pin_position` and the per-unit filter in
+    :meth:`Schematic._check_unconnected_pins` (issue #3349), keeping the
+    three code paths from drifting apart.
+    """
+    pin_unit = getattr(pin, "unit", 0)
+    sym_unit = getattr(sym, "unit", 1)
+    return pin_unit == 0 or pin_unit == sym_unit
+
+
 class SchematicNetlistMixin:
     """Mixin providing netlist extraction and query operations for Schematic class."""
 
@@ -114,8 +139,19 @@ class SchematicNetlistMixin:
                     union(junc_pos, seg_end)
 
         # Connect symbol pins to wires and track pin locations
+        #
+        # ``symbol_def.pins`` lists every unit's pins, shared across all
+        # placed instances of a multi-unit symbol.  Only contribute the
+        # pins this instance actually owns (``_instance_owns_pin``) so a
+        # unit-2 pin is never registered at a unit-1 instance's position
+        # — the phantom-net / duplicate-PinRef bug of issue #4020.  Unit-0
+        # "common" pins are still contributed by every placed instance
+        # (each at its own resolved coordinate) because connectivity, not
+        # a one-shot flag, is being computed here.
         for sym in self.symbols:
             for pin in sym.symbol_def.pins:
+                if not _instance_owns_pin(sym, pin):
+                    continue
                 pos = sym.pin_position(pin.number)
                 pos_rounded = (round(pos[0], 2), round(pos[1], 2))
 
@@ -289,6 +325,33 @@ class SchematicNetlistMixin:
 
         return netlist
 
+    def _resolve_pin_instance(self, symbol_ref: str, pin: str):
+        """Return the placed ``SymbolInstance`` that owns ``pin``.
+
+        For multi-unit symbols the same ``reference`` is placed once per
+        unit; a given pin number lives on exactly one unit.  This selects
+        the instance whose ``unit`` owns the requested pin so a pin's net
+        is resolved against that unit's real placement, not the first
+        instance with a matching reference (issue #4020).
+
+        ``pin`` may be a pin number or a pin name.  Matching prefers an
+        instance that both matches the reference and owns the pin under
+        :func:`_instance_owns_pin`; if none does (e.g. the owning unit is
+        not placed, or the pin is a unit-0 common), the first
+        matching-reference instance is returned, preserving single-unit
+        behaviour.  Returns ``None`` if no instance matches the reference.
+        """
+        fallback = None
+        for sym in self.symbols:
+            if sym.reference != symbol_ref:
+                continue
+            if fallback is None:
+                fallback = sym
+            for p in sym.symbol_def.pins:
+                if (p.number == pin or p.name == pin) and _instance_owns_pin(sym, p):
+                    return sym
+        return fallback
+
     def get_net_for_pin(self, symbol_ref: str, pin: str) -> str | None:
         """Get the net name connected to a symbol's pin.
 
@@ -305,12 +368,15 @@ class SchematicNetlistMixin:
             >>> print(net)
             '+3.3V'
         """
-        # Find the symbol
-        symbol = None
-        for sym in self.symbols:
-            if sym.reference == symbol_ref:
-                symbol = sym
-                break
+        # Find the placed instance that owns this pin.  A multi-unit
+        # symbol shares a ``reference`` across several instances (one per
+        # unit); the requested pin lives on exactly one of them.  Pick the
+        # instance whose ``unit`` owns the pin rather than the first
+        # matching reference, otherwise a unit-2 pin resolves against
+        # unit-1's placement and returns a phantom net (issue #4020).
+        # Fall back to the first matching-reference instance when no
+        # unit-owning instance is placed, preserving single-unit behaviour.
+        symbol = self._resolve_pin_instance(symbol_ref, pin)
 
         if symbol is None:
             return None
@@ -389,13 +455,13 @@ class SchematicNetlistMixin:
             >>> if sch.are_connected("U1", "VO", "C1", "1"):
             ...     print("Regulator output connected to capacitor")
         """
-        # Find both symbols and their pin positions
-        sym1 = sym2 = None
-        for sym in self.symbols:
-            if sym.reference == symbol1:
-                sym1 = sym
-            if sym.reference == symbol2:
-                sym2 = sym
+        # Find the placed instance that owns each pin.  For multi-unit
+        # symbols the reference is shared across units, so select the
+        # unit-owning instance rather than the first reference match —
+        # otherwise two pins on different units resolve to the same
+        # unit-1 geometry and report a false connection (issue #4020).
+        sym1 = self._resolve_pin_instance(symbol1, pin1)
+        sym2 = self._resolve_pin_instance(symbol2, pin2)
 
         if sym1 is None or sym2 is None:
             return False
