@@ -1,12 +1,50 @@
 """Pytest fixtures for kicad-tools tests."""
 
 import hashlib
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def isolate_pcb_from_sidecars(pcb_path: Path, dest_dir: Path) -> Path:
+    """Copy a routed PCB into ``dest_dir`` WITHOUT any sidecar files.
+
+    Issue #3948 made ``kct check`` auto-discover a committed
+    ``net_class_map.json`` next to the PCB (see
+    ``check_cmd._discover_net_class_map_sidecar``, which probes
+    ``<pcb_dir>/net_class_map.json``, ``<pcb_dir>/output/net_class_map.json``
+    and ``<pcb_dir>/../output/net_class_map.json``).  A "bare" ``kct check``
+    against a committed board artifact is therefore no longer actually
+    bare -- the sidecar auto-loads and the no-op / graceful-degradation
+    contract for external-router boards can no longer be observed.
+
+    This helper copies ONLY the PCB into a fresh, otherwise-empty
+    ``dest_dir`` so none of the auto-probe candidate paths resolve
+    (no sibling ``net_class_map.json``, no ``output/`` subtree, no
+    ``../output/`` sibling).  The returned path can be handed to a
+    subprocess ``kct check`` invocation with the guarantee that no
+    sidecar is discoverable.
+
+    Reuse this instead of re-deriving the tmp-dir-copy pattern whenever a
+    board that commits a ``net_class_map.json`` sidecar needs a genuinely
+    sidecar-less ``kct check`` run (Issue #4009).
+
+    Args:
+        pcb_path: The committed routed PCB to isolate.
+        dest_dir: A directory (typically a pytest tmp dir) to copy into.
+            Must not already contain sidecar files; a freshly created
+            ``tmp_path`` / ``tmp_path_factory.mktemp(...)`` dir is ideal.
+
+    Returns:
+        The path to the isolated PCB copy inside ``dest_dir``.
+    """
+    isolated = dest_dir / pcb_path.name
+    shutil.copy2(pcb_path, isolated)
+    return isolated
 
 
 def _committed_board_output_files() -> list[str]:
