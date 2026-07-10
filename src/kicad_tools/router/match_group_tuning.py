@@ -487,6 +487,7 @@ def tune_match_group_v2(
     pad_clearance_mm: float | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
+    blind_buried_supported: bool = True,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Tune the lengths of an N-trace match group to within tolerance.
 
@@ -605,6 +606,16 @@ def tune_match_group_v2(
             (Issue #3931).  Used with ``board_thickness_mm`` to compute
             per-via drilled length.  Defaults to 4; ignored when
             ``board_thickness_mm`` is ``None``.
+        blind_buried_supported: When ``False`` (Issue #4007), each
+            standard (non-micro) via is measured as a full through-via
+            because the board's stackup does not enable blind/buried
+            drilling -- KiCad's post-route zone-fill re-save promotes every
+            such via to a full F.Cu->B.Cu through-hole.  Measuring the
+            pre-promotion partial span made the tuner converge (skew
+            0.000mm) against a via drilled-length the shipped board never
+            had, so ``kct check`` re-derived a nonzero skew from the
+            promoted through-vias (board 07 ADDR_BUS 0.000 vs 1.069mm).
+            Defaults to ``True`` (legacy partial-span behavior).
 
     Returns:
         ``{net_id: (route, result)}`` for every member of ``group``.
@@ -703,6 +714,7 @@ def tune_match_group_v2(
         pad_clearance_mm=pad_clearance_mm,
         board_thickness_mm=board_thickness_mm,
         num_copper_layers=num_copper_layers,
+        blind_buried_supported=blind_buried_supported,
     )
 
 
@@ -722,6 +734,7 @@ def _tune_match_group_single_ended(
     pad_clearance_mm: float | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
+    blind_buried_supported: bool = True,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Scalar Phase 2E path: each net in ``group.net_ids`` tuned independently.
 
@@ -792,7 +805,12 @@ def _tune_match_group_single_ended(
     # is ``None`` (legacy callers with no stackup context) the measurement
     # collapses to the planar-only sum -- byte-for-byte prior behavior.
     def _measure(route: Route) -> float:
-        return MatchGroupTracker._measure_route_total(route, board_thickness_mm, num_copper_layers)
+        return MatchGroupTracker._measure_route_total(
+            route,
+            board_thickness_mm,
+            num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
+        )
 
     member_lengths: dict[int, float] = {}
     for net_id in group.net_ids:
