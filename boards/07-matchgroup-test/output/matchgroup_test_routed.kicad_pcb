@@ -1223,6 +1223,17 @@
 			(net 3 "GND")
 		)
 		(embedded_fonts no)
+		(model "${KICAD10_3DMODEL_DIR}/Connector_FFC-FPC.3dshapes/TE_84952-6_1x06-1MP_P1.0mm_Horizontal.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
 	)
 	(footprint "Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm"
 		(layer "F.Cu")
@@ -1903,6 +1914,17 @@
 			(net 3 "GND")
 		)
 		(embedded_fonts no)
+		(model "${KICAD10_3DMODEL_DIR}/Package_BGA.3dshapes/VFBGA-49_5.0x5.0mm_Layout7x7_P0.65mm.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
 	)
 	(footprint "Connector_Video:HDMI_A_Receptacle"
 		(layer "F.Cu")
@@ -2030,6 +2052,17 @@
 			(net 3 "GND")
 		)
 		(embedded_fonts no)
+		(model "${KICAD10_3DMODEL_DIR}/Connector_Video.3dshapes/HDMI_A_Amphenol_10029449-x01xLF_Horizontal.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
 	)
 	(footprint "Package_DFN_QFN:QFN-48-1EP_7x7mm_P0.5mm"
 		(layer "F.Cu")
