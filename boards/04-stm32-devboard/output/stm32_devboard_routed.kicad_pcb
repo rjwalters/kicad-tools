@@ -2736,7 +2736,7 @@
 		(net 9)
 	)
 	(via micro
-		(at 145.3375 89.75)
+		(at 145.8375 89.75)
 		(size 0.3)
 		(drill 0.15)
 		(layers "F.Cu" "B.Cu")
@@ -2753,7 +2753,7 @@
 		(start 145.3375 89.75)
 		(end 145.8375 89.75)
 		(width 0.127)
-		(layer "B.Cu")
+		(layer "F.Cu")
 		(uuid "3ce59053-64f0-4eae-a1c1-ea7986985e14")
 		(net 9)
 	)
