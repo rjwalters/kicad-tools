@@ -161,6 +161,12 @@ def render_pdf(html_content: str, output_path: Path | str) -> None:
     weasyprint.HTML(string=html_content).write_pdf(str(output_path))
 
 
+# Pattern pandoc prints to stderr (exit 0) when it cannot resolve a
+# referenced image/resource. Each occurrence names one dropped figure, e.g.
+#   [WARNING] Could not fetch resource images/pcb_front.png: replacing ...
+_PANDOC_DROPPED_RESOURCE_RE = re.compile(r"Could not fetch resource ([^:]+):")
+
+
 def render_pdf_pandoc(
     markdown_path: Path | str,
     output_path: Path | str,
@@ -168,13 +174,27 @@ def render_pdf_pandoc(
 ) -> None:
     """Render a Markdown file to PDF via pandoc and a TeX engine.
 
+    Relative image references in the Markdown (e.g. ``images/pcb_front.png``)
+    are resolved against the *Markdown file's own directory* via pandoc's
+    ``--resource-path`` flag, so image resolution is deterministic regardless
+    of the process's current working directory. Without this, running
+    ``kct export`` from the repo root would resolve ``images/*.png`` against
+    the repo root instead of the report directory, silently dropping every
+    figure (issue #4023).
+
+    Pandoc exits 0 even when it cannot fetch a referenced resource — it only
+    prints a ``Could not fetch resource ...`` warning to stderr and replaces
+    the image with its alt text. This function inspects stderr for that
+    pattern and raises so the failure is never silently swallowed.
+
     Args:
         markdown_path: Path to the Markdown source file.
         output_path: Destination path for the PDF file.
         pdf_engine: TeX engine to use (xelatex, pdflatex, or lualatex).
 
     Raises:
-        RuntimeError: If pandoc exits with a non-zero status.
+        RuntimeError: If pandoc exits non-zero, or exits 0 but reported one
+            or more resources it could not fetch (dropped figures).
         FileNotFoundError: If pandoc is not installed.
     """
     markdown_path = Path(markdown_path)
@@ -190,11 +210,57 @@ def render_pdf_pandoc(
         "--from=markdown+yaml_metadata_block+pipe_tables+raw_tex",
         "--variable=geometry:margin=1in",
         "--variable=colorlinks:true",
+        # Resolve relative image paths against the Markdown's own directory,
+        # not the caller's cwd. This is the core fix for issue #4023.
+        f"--resource-path={markdown_path.parent}",
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"pandoc failed (exit {result.returncode}): {result.stderr}")
+
+    # Even on exit 0, pandoc may have dropped figures it could not resolve.
+    # Surface this loudly rather than producing a figure-less PDF silently.
+    dropped = _PANDOC_DROPPED_RESOURCE_RE.findall(result.stderr or "")
+    if dropped:
+        dropped_list = ", ".join(sorted(set(dropped)))
+        raise RuntimeError(
+            "pandoc could not fetch "
+            f"{len(dropped)} resource(s) and dropped them from the PDF: "
+            f"{dropped_list}. The generated report is missing figures."
+        )
+
+
+# Matches a PDF image XObject declaration, tolerating optional whitespace
+# between the /Subtype key and the /Image name (both "/Subtype /Image" and
+# "/Subtype/Image" are valid PDF syntax).
+_PDF_IMAGE_XOBJECT_RE = re.compile(rb"/Subtype\s*/Image")
+
+
+def count_pdf_images(pdf_path: Path | str) -> int:
+    """Count embedded image XObjects in a PDF file.
+
+    Scans the raw PDF bytes for ``/Subtype /Image`` XObject declarations. This
+    is a dependency-free integrity check: it needs neither a Python PDF library
+    (pypdf/PyMuPDF are optional extras, absent on plain ``uv sync`` hosts) nor
+    an external binary (``pdfimages``). The count is an upper bound on distinct
+    figures — a single embedded PNG with transparency yields both an image and
+    a soft-mask XObject — but for bundle-integrity we only care that the value
+    is ``>= 1`` when the report references figures.
+
+    Args:
+        pdf_path: Path to the PDF file to inspect.
+
+    Returns:
+        The number of ``/Subtype /Image`` occurrences, or ``0`` if the file
+        does not exist or cannot be read.
+    """
+    pdf_path = Path(pdf_path)
+    try:
+        data = pdf_path.read_bytes()
+    except OSError:
+        return 0
+    return len(_PDF_IMAGE_XOBJECT_RE.findall(data))
 
 
 def _pandoc_available() -> bool:

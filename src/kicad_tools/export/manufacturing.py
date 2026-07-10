@@ -904,13 +904,13 @@ class ManufacturingPackage:
             return
 
         pdf_path = report_path.with_suffix(".pdf")
+        figures_dir = version_dir / "figures"
 
         try:
             if renderer == "weasyprint":
                 from ..report.renderers import render_html, render_pdf
 
                 md_content = report_path.read_text(encoding="utf-8")
-                figures_dir = version_dir / "figures"
                 html_content = render_html(
                     md_content,
                     figures_dir=figures_dir if figures_dir.is_dir() else None,
@@ -925,6 +925,57 @@ class ManufacturingPackage:
             logger.info(f"Generated PDF report via {renderer}: {pdf_path}")
         except Exception as exc:
             logger.warning(f"PDF report rendering via {renderer} failed: {exc}")
+            return
+
+        # Bundle-integrity check (issue #4023): when the report references
+        # figures and those figures exist on disk, the generated PDF must
+        # embed at least one image object. A figure-less PDF here means the
+        # renderer silently dropped every image (e.g. pandoc resolving
+        # relative paths against the wrong cwd) — surface it loudly instead
+        # of shipping a broken bundle. This guard runs for BOTH the
+        # weasyprint and pandoc code paths.
+        ManufacturingPackage._verify_report_pdf_images(pdf_path, report_path, figures_dir)
+
+    @staticmethod
+    def _verify_report_pdf_images(
+        pdf_path: Path,
+        report_path: Path,
+        figures_dir: Path,
+    ) -> None:
+        """Warn loudly if a figure-referencing report produced a figure-less PDF.
+
+        Only fires when the Markdown references images AND the figures
+        directory is non-empty; a report that legitimately has no figures
+        (empty/absent figures dir, or no ``![...]`` references) is not a
+        violation.
+        """
+        from ..report.renderers import count_pdf_images
+
+        # No figures on disk → nothing to embed → not a violation.
+        if not figures_dir.is_dir():
+            return
+        if not any(figures_dir.glob("*.png")):
+            return
+
+        # No image references in the Markdown → not a violation.
+        try:
+            md_content = report_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        if "![" not in md_content:
+            return
+
+        image_count = count_pdf_images(pdf_path)
+        if image_count < 1:
+            logger.warning(
+                "PDF report integrity check FAILED: %s embeds 0 images despite "
+                "%d figure(s) in %s and image references in the report. Figures "
+                "were silently dropped during rendering — the bundle is missing "
+                "its visuals.",
+                pdf_path,
+                len(list(figures_dir.glob("*.png"))),
+                figures_dir,
+            )
 
     @staticmethod
     def _load_report_data_dir(data_dir: Path) -> dict:

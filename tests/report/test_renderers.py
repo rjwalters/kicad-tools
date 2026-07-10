@@ -338,6 +338,214 @@ class TestRenderPdf:
 
 
 # ---------------------------------------------------------------------------
+# render_pdf_pandoc tests (issue #4023: cwd-independent image resolution +
+# loud detection of dropped resources)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCompletedProcess:
+    """Stand-in for subprocess.CompletedProcess in pandoc mocks."""
+
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class TestRenderPdfPandoc:
+    """Tests for render_pdf_pandoc's resource resolution and error surfacing."""
+
+    def test_passes_resource_path_of_markdown_dir(self, tmp_path: Path) -> None:
+        """The pandoc command includes --resource-path=<markdown dir>.
+
+        This is the core cwd-independence fix (issue #4023): relative image
+        references must resolve against the Markdown's own directory, not the
+        process cwd.
+        """
+        from kicad_tools.report import renderers
+
+        report_dir = tmp_path / "manufacturing"
+        report_dir.mkdir()
+        md_path = report_dir / "report.md"
+        md_path.write_text("# Report\n\n![Fig](images/x.png)\n")
+        out_pdf = report_dir / "report.pdf"
+
+        captured: dict = {}
+
+        def fake_run(cmd, capture_output, text):  # noqa: ANN001, ANN202
+            captured["cmd"] = cmd
+            return _FakeCompletedProcess(returncode=0, stderr="")
+
+        with patch.object(renderers.subprocess, "run", side_effect=fake_run):
+            renderers.render_pdf_pandoc(md_path, out_pdf)
+
+        resource_args = [a for a in captured["cmd"] if a.startswith("--resource-path=")]
+        assert resource_args == [f"--resource-path={report_dir}"]
+
+    def test_resource_path_independent_of_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--resource-path points at the markdown dir regardless of the cwd.
+
+        Simulates ``kct export`` being invoked from the repo root while the
+        report lives in a nested directory.
+        """
+        from kicad_tools.report import renderers
+
+        report_dir = tmp_path / "boards" / "05" / "manufacturing"
+        report_dir.mkdir(parents=True)
+        md_path = report_dir / "report.md"
+        md_path.write_text("# Report\n\n![Fig](images/x.png)\n")
+
+        # Change cwd to somewhere unrelated (the "repo root" analogue).
+        other_dir = tmp_path / "repo_root"
+        other_dir.mkdir()
+        monkeypatch.chdir(other_dir)
+
+        captured: dict = {}
+
+        def fake_run(cmd, capture_output, text):  # noqa: ANN001, ANN202
+            captured["cmd"] = cmd
+            return _FakeCompletedProcess(returncode=0, stderr="")
+
+        with patch.object(renderers.subprocess, "run", side_effect=fake_run):
+            # Pass a path relative to cwd would break; we pass absolute here,
+            # matching how the exporter calls it.
+            renderers.render_pdf_pandoc(md_path, report_dir / "report.pdf")
+
+        assert f"--resource-path={report_dir}" in captured["cmd"]
+        # The resource path must be the markdown's dir, never the cwd.
+        assert f"--resource-path={other_dir}" not in captured["cmd"]
+
+    def test_dropped_resource_raises(self, tmp_path: Path) -> None:
+        """A pandoc 'Could not fetch resource' warning (exit 0) raises loudly.
+
+        This is the silent-failure guard: pandoc exits 0 but drops figures.
+        The function must not let that pass as success.
+        """
+        from kicad_tools.report import renderers
+
+        md_path = tmp_path / "report.md"
+        md_path.write_text("# Report\n\n![Fig](images/pcb_front.png)\n")
+        out_pdf = tmp_path / "report.pdf"
+
+        stderr = (
+            "[WARNING] Could not fetch resource images/pcb_front.png: "
+            "replacing image with description\n"
+            "[WARNING] Could not fetch resource images/pcb_back.png: "
+            "replacing image with description\n"
+        )
+
+        with patch.object(
+            renderers.subprocess,
+            "run",
+            return_value=_FakeCompletedProcess(returncode=0, stderr=stderr),
+        ):
+            with pytest.raises(RuntimeError, match="could not fetch"):
+                renderers.render_pdf_pandoc(md_path, out_pdf)
+
+    def test_dropped_resource_names_missing_files(self, tmp_path: Path) -> None:
+        """The raised error names each dropped resource so it is diagnosable."""
+        from kicad_tools.report import renderers
+
+        md_path = tmp_path / "report.md"
+        md_path.write_text("# Report\n")
+        out_pdf = tmp_path / "report.pdf"
+
+        stderr = (
+            "[WARNING] Could not fetch resource images/pcb_front.png: replacing\n"
+            "[WARNING] Could not fetch resource images/pcb_back.png: replacing\n"
+        )
+
+        with patch.object(
+            renderers.subprocess,
+            "run",
+            return_value=_FakeCompletedProcess(returncode=0, stderr=stderr),
+        ):
+            with pytest.raises(RuntimeError) as excinfo:
+                renderers.render_pdf_pandoc(md_path, out_pdf)
+
+        msg = str(excinfo.value)
+        assert "images/pcb_front.png" in msg
+        assert "images/pcb_back.png" in msg
+
+    def test_clean_render_does_not_raise(self, tmp_path: Path) -> None:
+        """Exit 0 with no dropped-resource warnings succeeds silently."""
+        from kicad_tools.report import renderers
+
+        md_path = tmp_path / "report.md"
+        md_path.write_text("# Report\n\n![Fig](images/x.png)\n")
+        out_pdf = tmp_path / "report.pdf"
+
+        with patch.object(
+            renderers.subprocess,
+            "run",
+            return_value=_FakeCompletedProcess(returncode=0, stderr="[INFO] fine\n"),
+        ):
+            renderers.render_pdf_pandoc(md_path, out_pdf)  # must not raise
+
+    def test_nonzero_exit_still_raises(self, tmp_path: Path) -> None:
+        """A non-zero pandoc exit continues to raise RuntimeError."""
+        from kicad_tools.report import renderers
+
+        md_path = tmp_path / "report.md"
+        md_path.write_text("# Report\n")
+        out_pdf = tmp_path / "report.pdf"
+
+        with patch.object(
+            renderers.subprocess,
+            "run",
+            return_value=_FakeCompletedProcess(returncode=1, stderr="fatal: boom"),
+        ):
+            with pytest.raises(RuntimeError, match="pandoc failed"):
+                renderers.render_pdf_pandoc(md_path, out_pdf)
+
+
+# ---------------------------------------------------------------------------
+# count_pdf_images tests (issue #4023 bundle-integrity check)
+# ---------------------------------------------------------------------------
+
+
+class TestCountPdfImages:
+    """Tests for the count_pdf_images integrity helper."""
+
+    def test_counts_image_xobjects(self, tmp_path: Path) -> None:
+        """Counts /Subtype /Image XObject declarations in the raw PDF bytes."""
+        from kicad_tools.report.renderers import count_pdf_images
+
+        pdf = tmp_path / "with_images.pdf"
+        pdf.write_bytes(
+            b"%PDF-1.5\n"
+            b"<< /Type /XObject /Subtype /Image >>\n"
+            b"<< /Type /XObject /Subtype/Image >>\n"  # no space variant
+            b"%%EOF\n"
+        )
+        assert count_pdf_images(pdf) == 2
+
+    def test_zero_for_imageless_pdf(self, tmp_path: Path) -> None:
+        """A PDF with no image XObjects returns 0 (the broken-bundle signature)."""
+        from kicad_tools.report.renderers import count_pdf_images
+
+        pdf = tmp_path / "no_images.pdf"
+        pdf.write_bytes(b"%PDF-1.5\n<< /Type /Page >>\n%%EOF\n")
+        assert count_pdf_images(pdf) == 0
+
+    def test_missing_file_returns_zero(self, tmp_path: Path) -> None:
+        """A non-existent path returns 0 rather than raising."""
+        from kicad_tools.report.renderers import count_pdf_images
+
+        assert count_pdf_images(tmp_path / "does_not_exist.pdf") == 0
+
+    def test_accepts_string_path(self, tmp_path: Path) -> None:
+        """count_pdf_images accepts a plain str path."""
+        from kicad_tools.report.renderers import count_pdf_images
+
+        pdf = tmp_path / "s.pdf"
+        pdf.write_bytes(b"<< /Subtype /Image >>")
+        assert count_pdf_images(str(pdf)) == 1
+
+
+# ---------------------------------------------------------------------------
 # CSS tests
 # ---------------------------------------------------------------------------
 
