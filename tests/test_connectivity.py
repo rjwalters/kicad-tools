@@ -1320,6 +1320,119 @@ def _four_layer_thruvia_pcb() -> str:
 """
 
 
+def _hdi_blind_via_under_foreign_pad_pcb() -> str:
+    """4-layer HDI PCB: a blind via (B.Cu-In2.Cu) sits at the same XY as an
+    F.Cu-only SMD pad on a *different* net.
+
+    The blind via's bridged span is {In2.Cu, B.Cu}; the SMD pad lives only on
+    F.Cu.  They share no copper layer, so an XY coincidence must NOT fuse them
+    (HDI false-connect, issue #4022).  Each footprint has a second pad so the
+    net has a real anchor and never trivially collapses.
+    """
+    return """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG_TOP")
+  (net 2 "SIG_BOT")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000f1")
+    (at 110 110)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-f1-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-f1-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "SIG_TOP"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000f2")
+    (at 120 110)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-f2-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-f2-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "SIG_TOP"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000f3")
+    (at 130 110)
+    (property "Reference" "R3" (at 0 -1.5 0) (layer "B.SilkS") (uuid "fp-f3-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "B.Fab") (uuid "fp-f3-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "B.Cu" "B.Paste" "B.Mask")
+      (roundrect_rratio 0.25) (net 2 "SIG_BOT"))
+  )
+  (segment (start 110 110) (end 120 110) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000f4"))
+  (segment (start 110 110) (end 130 110) (width 0.25) (layer "B.Cu") (net 2)
+    (uuid "00000000-0000-0000-0000-0000000000f5"))
+  (via (at 110 110) (size 0.4) (drill 0.2) (layers "In2.Cu" "B.Cu") (net 2)
+    (uuid "00000000-0000-0000-0000-0000000000f6"))
+)
+"""
+
+
+def _through_via_under_pad_pcb() -> str:
+    """4-layer PCB: a through via (F.Cu-B.Cu) sits at the same XY as an F.Cu
+    SMD pad on a *different* net, with no trace tying them.
+
+    The via's span includes F.Cu (through-hole), so it DOES share a copper
+    layer with the F.Cu pad.  Their XY coincidence therefore SHOULD still
+    fuse (proves the layer gate narrows correctly rather than breaking
+    legitimate stacked pad/via fusion, issue #4022).
+    """
+    return """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG_A")
+  (net 2 "SIG_B")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000g1")
+    (at 110 110)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-g1-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-g1-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "SIG_A"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000g3")
+    (at 130 110)
+    (property "Reference" "R3" (at 0 -1.5 0) (layer "B.SilkS") (uuid "fp-g3-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "B.Fab") (uuid "fp-g3-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "B.Cu" "B.Paste" "B.Mask")
+      (roundrect_rratio 0.25) (net 2 "SIG_B"))
+  )
+  (segment (start 130 110) (end 110 110) (width 0.25) (layer "B.Cu") (net 2)
+    (uuid "00000000-0000-0000-0000-0000000000g5"))
+  (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2)
+    (uuid "00000000-0000-0000-0000-0000000000g6"))
+)
+"""
+
+
 class TestLayerAwareSegmentChaining:
     """Issue #3783: cross-layer copper only fuses where a via/pad bridges."""
 
@@ -1375,6 +1488,37 @@ class TestLayerAwareSegmentChaining:
         assert order == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
         bridged = validator._via_bridged_layers(["F.Cu", "B.Cu"])
         assert bridged == frozenset({"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"})
+
+    def test_blind_via_under_foreign_pad_does_not_fuse(self, tmp_path: Path) -> None:
+        """Issue #4022: step 2e must be layer-aware.
+
+        A blind via spanning In2.Cu-B.Cu that lands at the same XY as an
+        F.Cu-only SMD pad on a different net shares NO copper layer with the
+        pad — the XY coincidence alone must NOT fuse them.
+        """
+        pcb_file = tmp_path / "hdi_blind_via.kicad_pcb"
+        pcb_file.write_text(_hdi_blind_via_under_foreign_pad_pcb())
+        partition = ConnectivityValidator(pcb_file).extract_pad_partition()
+        # SIG_TOP (F.Cu, R1/R2) and SIG_BOT (B.Cu, R3) must stay separate: the
+        # blind via under R1.1 does not reach F.Cu, so it cannot bridge them.
+        assert frozenset({"R1.1", "R2.1"}) in partition
+        assert frozenset({"R3.1"}) in partition
+        assert len(partition) == 2
+
+    def test_through_via_under_pad_still_fuses(self, tmp_path: Path) -> None:
+        """Issue #4022: the layer gate must not break legitimate fusion.
+
+        A through via (F.Cu-B.Cu) coincident with an F.Cu pad DOES share the
+        F.Cu copper layer, so the XY coincidence must STILL fuse — proving the
+        gate narrows correctly rather than suppressing valid stacked ties.
+        """
+        pcb_file = tmp_path / "through_via_under_pad.kicad_pcb"
+        pcb_file.write_text(_through_via_under_pad_pcb())
+        partition = ConnectivityValidator(pcb_file).extract_pad_partition()
+        # The through via (net 2, reached from R3.1 on B.Cu) is F.Cu-B.Cu, so
+        # it fuses to R1.1's F.Cu pad at the shared XY -> one component.
+        assert frozenset({"R1.1", "R3.1"}) in partition
+        assert len(partition) == 1
 
 
 # ---------------------------------------------------------------------------

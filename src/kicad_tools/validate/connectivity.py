@@ -608,13 +608,24 @@ class ConnectivityValidator:
         else:  # pragma: no cover - exercised only on core-only installs
             self._connect_pour_pads_by_declared_net(pad_positions, pad_layers, _connect)
 
-        # 2e. Coincident pads with no intervening copper still share metal
-        #     if they occupy the same point (e.g. stacked pads).
+        # 2e. Coincident pads/via-nodes with no intervening copper still share
+        #     metal if they occupy the same point AND share a copper layer.
+        #     The layer gate mirrors steps 2a/2c/2c2: an XY match alone is not
+        #     enough — a blind/buried via stacked under a foreign pad on a
+        #     disjoint layer span must NOT fuse (HDI false-connect, issue
+        #     #4022). ``pad_layers`` is populated for both real pads and
+        #     synthetic via nodes at this point, so no extra plumbing is needed.
         pad_ids = list(pad_positions)
         for i, p in enumerate(pad_ids):
             for other in pad_ids[i + 1 :]:
-                if self._points_close(pad_positions[p], pad_positions[other]):
-                    _connect(p, other)
+                if not self._points_close(pad_positions[p], pad_positions[other]):
+                    continue
+                if not (
+                    self._copper_layers_of(pad_layers.get(p, []))
+                    & self._copper_layers_of(pad_layers.get(other, []))
+                ):
+                    continue
+                _connect(p, other)
 
         # 3. Flood-fill connected components of the pad graph.  Synthetic via
         #    nodes (1b) participate in the flood so they carry connectivity
