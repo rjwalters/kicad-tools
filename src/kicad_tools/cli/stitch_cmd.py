@@ -43,6 +43,14 @@ from kicad_tools.sexp.builders import segment_node, via_node
 #: so via-candidate checks take the max of both constraints.
 KICAD_HOLE_TO_COPPER_CLEARANCE = 0.25
 
+#: Default minimum drill edge-to-edge spacing, in mm, for the hole-to-hole
+#: guard (``dimension_drill_clearance`` fab floor, Issue #3855).  Matches the
+#: ``calculate_via_position`` default and the local checks in
+#: ``run_stitch``'s connectivity fallback.  Used by the thermal/blanket
+#: stitch paths (Issue #4010) so a stitch via never lands within this floor
+#: of a foreign through-hole pad / via drill.
+MIN_HOLE_TO_HOLE_CLEARANCE = 0.5
+
 
 def _count_copper_layers(pcb_path: Path) -> int:
     """Count the number of copper layers in the PCB.
@@ -3315,6 +3323,10 @@ def check_via_clearance(
     other_net_pads: list[tuple[float, float, float, int]],
     same_net_vias: list[tuple[float, float]],
     other_net_filled_polygons: list[FilledPolygon] | None = None,
+    via_drill: float = 0.0,
+    other_net_drills: list[tuple[float, float, float, int]] | None = None,
+    hole_to_copper_clearance: float = 0.0,
+    min_hole_to_hole: float = 0.0,
 ) -> bool:
     """Check if a via at (x, y) passes all clearance checks.
 
@@ -3334,6 +3346,17 @@ def check_via_clearance(
         other_net_pads: Pads on other nets as (x, y, radius, net_num)
         same_net_vias: Existing same-net vias as (x, y) for stacking prevention
         other_net_filled_polygons: Filled polygons from other-net zone fills
+        via_drill: Drill diameter of the candidate via in mm.  When ``> 0``
+            with ``hole_to_copper_clearance > 0`` the copper checks also
+            enforce the KiCad ``hole_clearance`` band on the drill edge
+            (Issue #4010).
+        other_net_drills: Foreign-net drill registry as
+            ``(x, y, drill, net_num)``; when supplied with ``via_drill > 0``
+            and ``min_hole_to_hole > 0`` the candidate drill must clear
+            every foreign drill edge-to-edge (Issue #3855).
+        hole_to_copper_clearance: KiCad ``hole_clearance`` band in mm
+            (typically :data:`KICAD_HOLE_TO_COPPER_CLEARANCE`).
+        min_hole_to_hole: Minimum drill edge-to-edge spacing in mm.
 
     Returns:
         True if the position is clear for via placement
@@ -3350,6 +3373,10 @@ def check_via_clearance(
         other_net_pads=other_net_pads,
         same_net_vias=same_net_vias,
         other_net_filled_polygons=other_net_filled_polygons,
+        via_drill=via_drill,
+        other_net_drills=other_net_drills,
+        hole_to_copper_clearance=hole_to_copper_clearance,
+        min_hole_to_hole=min_hole_to_hole,
     )
 
 
@@ -3752,6 +3779,33 @@ def run_thermal_stitch(
     other_net_vias = find_all_board_vias(sexp, exclude_nets=target_net_nums)
     other_net_pads = find_all_pads(sexp, exclude_nets=target_net_nums)
     other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=target_net_nums)
+    # Issue #3855: foreign-net DRILL registry for the hole-to-hole guard.
+    # Issue #4010: exclude target-net PAD drills from the base pool too --
+    # a thermal via halo rings a TO-220 pad at ~0.55mm from its center,
+    # which lands INSIDE the 0.5mm MIN_HOLE_TO_HOLE_CLEARANCE of the pad's
+    # own 1.0mm plated drill.  ``find_all_drills(exclude_nets=...)`` only
+    # excludes foreign-net VIAS; without ``pad_exclude_nets`` the target
+    # pad's own drill survives here and the guard rejects every halo via
+    # against it (board-05: all six MOSFETs dropped to ZERO thermal vias).
+    # Sibling-net pad drills still enter the guard via ``target_pad_drills``.
+    other_net_drills = find_all_drills(
+        sexp,
+        exclude_nets=target_net_nums,
+        pad_exclude_nets=target_net_nums,
+    )
+
+    # Issue #4010: sibling stitch-net pads are HARD obstacles.  The
+    # ``other_net_*`` pools above exclude ALL stitch-target nets, so when
+    # several plane nets are stitched in one pass (e.g. GND + VMOTOR +
+    # PHASE_A) the pads/drills of SIBLING target nets were invisible --
+    # a VMOTOR thermal via could land on a PHASE_A pad and short the rails
+    # once zones re-fill (same defect class fixed for run_stitch in
+    # PR #4005).  Build the target-net registries once; per-candidate
+    # placement augments the pools with every target-net pad/drill on a
+    # DIFFERENT net than the candidate's own (own-net pads must not block
+    # their own thermal escape).
+    target_pad_circles = [p for p in find_all_pads(sexp) if p[3] in target_net_nums]
+    target_pad_drills = [d for d in find_all_drills(sexp) if d[3] in target_net_nums]
 
     # Per-net same-net via positions (existing + newly placed).  Treated
     # as obstacles to prevent stacking on the same net.  A via placed for
@@ -3855,9 +3909,20 @@ def run_thermal_stitch(
             if cn != pad_net:
                 other_net_vias_with_placed.append((cx, cy, via_size, cn))
 
+        # Issue #4010: augment obstacle pools with SIBLING stitch-net
+        # pads/drills (every target net except this candidate's own).
+        other_net_pads_with_siblings = other_net_pads + [
+            p for p in target_pad_circles if p[3] != pad_net
+        ]
+        other_net_drills_with_siblings = other_net_drills + [
+            d for d in target_pad_drills if d[3] != pad_net
+        ]
+
         placed_for_pad = 0
         for vx, vy in positions:
-            # Clearance against other-net copper and same-net stacking.
+            # Clearance against other-net copper and same-net stacking,
+            # including the 0.25mm hole-to-copper guard on the via drill
+            # and the drill hole-to-hole floor (Issue #4010 / #3855).
             if not check_via_clearance(
                 vx,
                 vy,
@@ -3865,9 +3930,13 @@ def run_thermal_stitch(
                 clearance,
                 other_net_tracks,
                 other_net_vias_with_placed,
-                other_net_pads,
+                other_net_pads_with_siblings,
                 same_net_vias_for_pad,
                 other_net_filled_polys,
+                via_drill=drill,
+                other_net_drills=other_net_drills_with_siblings,
+                hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
+                min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
             ):
                 continue
 
@@ -3968,6 +4037,28 @@ def run_blanket_stitch(
     other_net_vias = find_all_board_vias(sexp, exclude_nets=target_net_nums)
     other_net_pads = find_all_pads(sexp, exclude_nets=target_net_nums)
     other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=target_net_nums)
+    # Issue #3855: foreign-net DRILL registry for the hole-to-hole guard.
+    # Issue #4010: exclude target-net PAD drills from the base pool too (see
+    # the matching note in run_thermal_stitch).  A blanket via ringing a
+    # thru-hole pad can land inside the pad's own drill hole-to-hole floor;
+    # without ``pad_exclude_nets`` the guard would reject it against its own
+    # pad drill.  Sibling-net pad drills still enter via ``target_pad_drills``.
+    other_net_drills = find_all_drills(
+        sexp,
+        exclude_nets=target_net_nums,
+        pad_exclude_nets=target_net_nums,
+    )
+
+    # Issue #4010: sibling stitch-net pads/drills are HARD obstacles.  The
+    # ``other_net_*`` pools above exclude ALL stitch-target nets, so when
+    # several plane nets are stitched in one pass (e.g. GND + +1V2 + +1V8)
+    # the pads of SIBLING target nets were invisible -- a +1V2 blanket via
+    # could land on a +1V8 pad and short the rails once zones re-fill (same
+    # defect class fixed for run_stitch in PR #4005).  Build the target-net
+    # registries once; the per-net loop below augments the pools with every
+    # target-net pad/drill on a net DIFFERENT than the one being stitched.
+    target_pad_circles = [p for p in find_all_pads(sexp) if p[3] in target_net_nums]
+    target_pad_drills = [d for d in find_all_drills(sexp) if d[3] in target_net_nums]
 
     # Collect all existing same-net vias (to prevent stacking)
     all_same_net_vias = find_existing_vias(sexp, target_net_nums)
@@ -3997,6 +4088,15 @@ def run_blanket_stitch(
         if net_number is None:
             continue
 
+        # Issue #4010: augment obstacle pools with SIBLING stitch-net
+        # pads/drills (every target net except the one being stitched now).
+        other_net_pads_with_siblings = other_net_pads + [
+            p for p in target_pad_circles if p[3] != net_number
+        ]
+        other_net_drills_with_siblings = other_net_drills + [
+            d for d in target_pad_drills if d[3] != net_number
+        ]
+
         # Determine target layer
         if target_layer:
             net_target_layer = target_layer
@@ -4021,7 +4121,9 @@ def run_blanket_stitch(
             grid_positions = generate_grid_positions(zone_poly.points, spacing, margin)
 
             for gx, gy in grid_positions:
-                # Check clearance against all existing copper
+                # Check clearance against all existing copper, including
+                # sibling stitch-net pads/drills and the 0.25mm
+                # hole-to-copper guard on the via drill (Issue #4010 / #3855).
                 if not check_via_clearance(
                     gx,
                     gy,
@@ -4029,9 +4131,13 @@ def run_blanket_stitch(
                     clearance,
                     other_net_tracks,
                     other_net_vias,
-                    other_net_pads,
+                    other_net_pads_with_siblings,
                     same_net_via_positions,
                     other_net_filled_polys,
+                    via_drill=drill,
+                    other_net_drills=other_net_drills_with_siblings,
+                    hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
+                    min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
                 ):
                     continue
 
