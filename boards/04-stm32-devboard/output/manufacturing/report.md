@@ -2,7 +2,7 @@
 title: "stm32_devboard_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.14.0"
-date: "Rev 1 | 2026-07-09 | jlcpcb-tier1"
+date: "Rev 1 | 2026-07-10 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -123,16 +123,15 @@ Demonstrates circuit blocks API
 
 | Metric | Count |
 |--------|-------|
-| Errors | 2 |
+| Errors | 0 |
 | Warnings | 1 |
-| Blocking | 2 |
+| Blocking | 0 |
 
-**Status**: FAIL
+**Status**: PASS
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
-| dimension_drill_clearance | 2 |
 | copper_sliver | 1 |
 
 
@@ -140,12 +139,11 @@ Demonstrates circuit blocks API
 
 ## Manufacturing Readiness
 
-**Verdict**: NOT_READY
+**Verdict**: WARNING
 
 ### Action Items
 
-- **[CRITICAL]** Fix 2 blocking DRC violations (dimension_drill_clearance (2))
-- **[OPTIONAL]** Verify zone fill in KiCad: 3 nets appear incomplete but may be connected via zone fills
+- **[OPTIONAL]** Verify zone fill in KiCad: 2 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
 - **[OPTIONAL]** Review 1 DRC warnings
 

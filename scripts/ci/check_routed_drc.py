@@ -431,7 +431,32 @@ def main(argv: list[str] | None = None) -> int:
         default=str(DEFAULT_ALLOWLIST),
         help=f"Path to the tolerance allowlist YAML (default: {DEFAULT_ALLOWLIST}).",
     )
+    parser.add_argument(
+        "--allow",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Explicit blocking-error tolerance for EVERY file passed on this "
+            "invocation, overriding the per-board value from the allowlist "
+            "YAML.  This intentionally decouples a fresh-regen gate (which "
+            "measures the recipe's output) from the committed-artifact "
+            "ratchet (which the YAML governs): the two can legitimately "
+            "diverge when a board is fixed artifact-only (committed PCB is "
+            "strict-0, but the recipe still emits N grandfathered errors "
+            "until the router is touched).  Board 04's 'End-to-End' job uses "
+            "``--allow 2`` for exactly this reason (#4017 / #3847): the "
+            "committed artifact is strict-0 (no YAML entry), while the fresh "
+            "``generate_design.py`` regen still routes the legacy 0.350mm "
+            "drill pair.  Must be a non-negative integer.  The per-invocation "
+            "mfr override still comes from the YAML's ``manufacturers:`` map."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.allow is not None and args.allow < 0:
+        print(f"::error::--allow must be a non-negative integer, got {args.allow}", flush=True)
+        return 1
 
     if not args.files:
         print("No routed PCBs to check -- gate is a no-op.")
@@ -469,7 +494,10 @@ def main(argv: list[str] | None = None) -> int:
             # Path is outside cwd (unlikely in CI); fall back to the raw form.
             pass
 
-        allowed = allowlist.get(lookup_key, 0)
+        # ``--allow N`` (fresh-regen gate) overrides the YAML allowlist for
+        # every file in this invocation.  Without it, the per-board YAML value
+        # (absent == strict-0) applies -- the committed-artifact ratchet.
+        allowed = args.allow if args.allow is not None else allowlist.get(lookup_key, 0)
         mfr = manufacturers.get(lookup_key, DEFAULT_MANUFACTURER)
 
         try:
@@ -489,7 +517,11 @@ def main(argv: list[str] | None = None) -> int:
             # explicit). The gate's exit code is unchanged: warnings are
             # advisory, matching the precedent at the deleted-file branch
             # above.
-            if allowed > 0 and errors < allowed:
+            # Skip the drift nag when ``--allow`` is explicitly set: the
+            # tolerance there is an intentional recipe-vs-artifact divergence
+            # (the fresh regen genuinely differs from the strict-0 committed
+            # artifact), not a stale YAML floor to be tightened.
+            if args.allow is None and allowed > 0 and errors < allowed:
                 annotate_drift_warning(lookup_key, errors, allowed)
         else:
             annotate_error(str(pcb_path), message)

@@ -1802,24 +1802,23 @@ tolerances:
   # only legal under tier-1's Capability+ process).  ``MAX_DRC_ERRORS`` in
   # tests/test_board_04_mfr_gate.py is tightened to 0 in the same commit.
   #
-  # !!! RE-BASELINE: strict-0 -> 2 (Issue #3842, June 21 2026) !!!
+  # !!! RE-BASELINE CLOSED: 2 -> strict-0 (Issue #4017, July 09 2026) !!!
   # ----------------------------------------------------------------------
-  # PR #3842 / Issue #3842 gates the drill-to-drill check on a dedicated
-  # ``min_hole_to_hole_mm`` spec (canonical 0.5 mm fab default; previously
-  # the check keyed off ``min_clearance_mm`` and never fired below 0.5 mm).
-  # The corrected rule surfaces 2 genuine pre-existing
-  # ``dimension_drill_clearance`` violations on the committed board-04
-  # artifact -- a 0.350 mm hole-to-hole drill pair at PCB-local
-  # [26.84, 22.5] and [26.84, 22.0], BELOW the 0.500 mm fab minimum.  These
-  # are TRUE POSITIVES (real sub-0.5 mm drill geometry that the old code
-  # missed), NOT new regressions introduced by this PR; the board layout
-  # fix (re-spacing the drill pair to >= 0.5 mm) is tracked in **#3847**.
-  # Rule change refs #3842 / #3830.  The floor is set to exactly the
-  # measured count (2) so the gate still catches any NEW
-  # ``dimension_drill_clearance`` (or other blocking) regression beyond
-  # these two known drills -- a 3rd error fails the gate.  Exit clause:
-  # when #3847 re-spaces the drill pair, drop this entry back to strict-0.
-  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 2
+  # The 2 ``dimension_drill_clearance`` violations grandfathered at 2 by
+  # #3842 (a 0.350 mm hole-to-hole micro-via pair on the LQFP-48 west
+  # escape: GND/NRST and OSC_OUT/NRST, both in-pad ``(via micro ...)``
+  # structures at 0.5 mm pin pitch) have been re-spaced.  The middle NRST
+  # in-pad via was relocated 0.5 mm east onto its own B.Cu escape node and
+  # bonded back to pad U2.7 with a short F.Cu stub, lifting both pairs from
+  # 0.350 mm to 0.557 mm edge-to-edge (>= the 0.500 mm fab minimum) without
+  # a re-route or any change to ``generate_design.py`` (artifact-only fix,
+  # board-05 PR #4003 precedent).  Fresh measurement on the committed
+  # artifact: 0 errors under BOTH ``kct check --mfr jlcpcb-tier1`` and
+  # ``kicad-cli pcb drc --refill-zones`` (0 violations, 0 unconnected).
+  # This closes the #3847 exit clause: the entry is now REMOVED, so board
+  # 04 is back on the strict 0-error gate (absence == strict-0 per this
+  # file's convention).  ``MAX_DRC_ERRORS`` in tests/test_board_04_mfr_gate.py
+  # and tests/test_board_04_main_gate.py are dropped to 0 in the same commit.
 
   # Board 04 history (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12
   # by Issue #2908.  The narrowing introduced in #2871 / #2874

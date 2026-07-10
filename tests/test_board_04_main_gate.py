@@ -5,10 +5,11 @@ already-computed ``drc_success`` and discarded ``write_lvs_report``'s
 ``(copper_clean, label_clean)`` return -- so a board with a NEW blocking DRC
 error or a copper-LVS short printed SUCCESS and exited 0.  Issue #3839 wires
 both into the gate.  ``run_drc`` is now ALLOWLIST-AWARE: it parses the DRC
-JSON and tolerates exactly the grandfathered violations the CI gate tolerates
-(the 2 sub-0.5mm ``dimension_drill_clearance`` drills tracked in #3847 + the
-advisory ``connectivity`` rule), failing on a 3rd drill or any new blocking
-rule.
+JSON and tolerates exactly the grandfathered violations the CI gate tolerates.
+Since Issue #4017 re-spaced the LQFP-48 west-escape drill pair, the
+``dimension_drill_clearance`` allowance is strict-0 -- the only remaining
+grandfathered rule is the advisory ``connectivity`` finding; ANY drill error
+or any other blocking rule fails the gate.
 
 These tests are hermetic: they monkeypatch ``subprocess.run`` (for
 ``run_drc``) and ``write_lvs_report`` (for the LVS leg) so no router /
@@ -17,7 +18,8 @@ directly without re-routing the board.
 
 References:
 - ``boards/04-stm32-devboard/generate_design.py`` -- the gate under test.
-- ``.github/routed-drc-tolerance.yml`` -- the board-04 floor of 2 (#3847).
+- ``.github/routed-drc-tolerance.yml`` -- the board-04 strict-0 gate (entry
+  removed by #4017; absence == strict-0 per that file's convention).
 - ``tests/test_board_04_mfr_gate.py`` -- the committed-artifact DRC pin.
 """
 
@@ -89,30 +91,36 @@ def _patch_run_drc(
 # --------------------------------------------------------------------------
 
 
-def test_run_drc_passes_with_two_drills_and_connectivity(
+def test_run_drc_passes_with_only_advisory_connectivity(
     board04: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The current committed board: 2 drills + 1 advisory connectivity -> PASS."""
+    """The current committed board: 0 drills + 1 advisory connectivity -> PASS.
+
+    Post-#4017 the LQFP-48 west-escape drill pair is re-spaced to
+    >= 0.500mm, so the drill-clearance allowance is strict-0.  The only
+    grandfathered finding left is the advisory ``connectivity`` GND-stitch
+    pad, which is excluded from the gate.
+    """
     _patch_run_drc(
         board04,
         monkeypatch,
         tmp_path,
-        ["dimension_drill_clearance", "dimension_drill_clearance", "connectivity"],
+        ["connectivity"],
     )
     pcb = tmp_path / "stm32_devboard_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
     assert board04.run_drc(pcb) is True
 
 
-def test_run_drc_fails_on_third_drill(
+def test_run_drc_fails_on_any_drill(
     board04: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A 3rd drill-clearance error exceeds the allowance of 2 -> FAIL."""
+    """Any drill-clearance error exceeds the strict-0 allowance (#4017) -> FAIL."""
     _patch_run_drc(
         board04,
         monkeypatch,
         tmp_path,
-        ["dimension_drill_clearance"] * 3,
+        ["dimension_drill_clearance"],
     )
     pcb = tmp_path / "stm32_devboard_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
@@ -145,16 +153,22 @@ def test_run_drc_passes_clean_board(
 
 
 def test_run_drc_drill_allowance_matches_yaml() -> None:
-    """The recipe's drill allowance must equal the CI tolerance floor (#3847)."""
+    """The recipe's drill allowance must equal the CI tolerance floor (#3847/#4017).
+
+    Since #4017 re-spaced the drill pair, the board-04 entry is REMOVED from
+    the tolerance YAML -- absence means strict-0 per that file's convention --
+    so the effective floor is 0 and ``_DRILL_CLEARANCE_ALLOWANCE`` must match.
+    """
     import yaml
 
     board04 = _load_board04_module()
     tolerance = yaml.safe_load((REPO_ROOT / ".github" / "routed-drc-tolerance.yml").read_text())
     floor = (tolerance.get("tolerances") or {}).get(
-        "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb"
+        "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
+        0,  # absence == strict-0 (see the file's convention)
     )
     assert floor == board04._DRILL_CLEARANCE_ALLOWANCE, (
         "The board-04 recipe's _DRILL_CLEARANCE_ALLOWANCE must stay in lockstep "
-        "with .github/routed-drc-tolerance.yml.  When #3847 re-spaces the drill "
-        "pair, drop BOTH to 0 in the same PR."
+        "with .github/routed-drc-tolerance.yml (strict-0 since #4017 re-spaced "
+        "the drill pair and removed the tolerance entry)."
     )

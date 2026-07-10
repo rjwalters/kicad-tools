@@ -13,14 +13,15 @@ the same gate the CI ``routed-pcb-drc-check`` job uses
    ``.github/routed-drc-tolerance.yml``'s ``manufacturers:`` block.
 
 2. The gate's blocking error count stays at or below the floor declared
-   for board 04 in the same YAML.  Re-baselined to 2 by Issue #3842
-   (the corrected ``min_hole_to_hole_mm`` drill-clearance gate surfaces 2
-   pre-existing TRUE-POSITIVE sub-0.5mm ``dimension_drill_clearance``
-   drills -- a 0.350mm pair at [26.84, 22.5]/[26.84, 22.0] -- that the
-   old code, which keyed off ``min_clearance_mm``, never fired below
-   0.5mm).  Board-layout fix tracked in #3847; rule change refs
-   #3842/#3830.  Was strict 0 since #3734 (entry removed); the entry is
-   re-added at 2 so the gate still catches a 3rd (NEW) drill regression.
+   for board 04 in the same YAML.  The floor is strict-0: Issue #3842
+   re-baselined it to 2 for the pre-existing TRUE-POSITIVE sub-0.5mm
+   ``dimension_drill_clearance`` drills (a 0.350mm pair at
+   [26.84, 22.5]/[26.84, 22.0]), and Issue #4017 re-spaced that pair to
+   >= 0.500mm edge-to-edge (artifact-only nudge: the NRST in-pad via
+   relocated 0.5mm east onto its B.Cu escape node, re-bonded to pad U2.7
+   with a short F.Cu stub) and REMOVED the tolerance entry -- absence
+   means strict-0 per that file's convention, so the gate now fires on
+   ANY blocking error, including any drill-clearance error.
 
 3. The advisory ``connectivity`` finding documented in
    ``.github/routed-drc-tolerance.yml`` (a single stranded GND-stitch
@@ -155,15 +156,12 @@ def test_board_04_blocking_errors_within_ci_floor(board_04_mfr_check: dict) -> N
     a blocking DRC error that the CI gate does not allowlist, this pin
     fires immediately at PR time rather than after a fleet-status sweep.
 
-    The current floor is 2 (Issue #3842 re-baseline -- the corrected
-    ``min_hole_to_hole_mm`` gate surfaces 2 pre-existing TRUE-POSITIVE
-    sub-0.5mm ``dimension_drill_clearance`` drills; board-layout fix
-    tracked in #3847).  It was strict 0 from #3734 (entry removed) until
-    this PR re-added it.  If the floor is loosened further, the YAML and
-    this test stay in lockstep -- the test reads the floor from the YAML
-    (defaulting to 0 when no entry exists) so a YAML edit is sufficient.
-    The gate still fires on a 3rd (NEW) blocking error beyond the 2 known
-    drills.
+    The current floor is strict-0: Issue #4017 re-spaced the drill pair
+    #3842 grandfathered at 2 and REMOVED the board-04 tolerance entry, so
+    the YAML lookup falls back to 0 (absence == strict-0).  The test reads
+    the floor from the YAML (defaulting to 0 when no entry exists) so it
+    stays in lockstep with any future floor change.  The gate now fires on
+    ANY blocking error against jlcpcb-tier1.
     """
     summary = board_04_mfr_check.get("summary", {})
     violations = board_04_mfr_check.get("violations", [])

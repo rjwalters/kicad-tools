@@ -1783,20 +1783,19 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
 # violations the CI gate tolerates -- no more.  Today that is:
 #
 #   * advisory ``connectivity`` (1 stranded GND-stitch pad; in
-#     ``DRCChecker.ADVISORY_RULE_IDS``, filtered from every CI gate), and
-#   * up to 2 ``dimension_drill_clearance`` errors -- the 2 true-positive
-#     sub-0.5mm drills (a 0.350mm hole-to-hole pair) surfaced by the
-#     corrected ``min_hole_to_hole_mm`` rule (#3842/#3846).  These are
-#     allowlisted at exactly 2 in ``.github/routed-drc-tolerance.yml``
-#     (board-layout fix tracked in #3847).
+#     ``DRCChecker.ADVISORY_RULE_IDS``, filtered from every CI gate).
 #
-# Any 3rd drill error, OR any OTHER blocking rule, fails the gate so a
-# real DRC regression cannot ship 0.  EXIT CLAUSE: when #3847 re-spaces
-# the drill pair, drop the allowlist entry back to strict-0 and set
-# ``_DRILL_CLEARANCE_ALLOWANCE`` to 0 here in lockstep.
+# The 2 ``dimension_drill_clearance`` errors that #3842 grandfathered at 2
+# (a 0.350mm hole-to-hole micro-via pair on the LQFP-48 west escape) were
+# re-spaced to >= 0.500mm edge-to-edge by Issue #4017 (artifact-only nudge:
+# the NRST in-pad via relocated 0.5mm east onto its B.Cu escape node and
+# bonded back to pad U2.7 with a short F.Cu stub).  With that fix the
+# drill-clearance allowance is now strict-0 and the CI tolerance entry is
+# removed -- ANY ``dimension_drill_clearance`` error, or any other blocking
+# rule, fails the gate so a real DRC regression cannot ship 0.
 _ADVISORY_DRC_RULE_IDS: frozenset[str] = frozenset({"connectivity"})
 _DRILL_CLEARANCE_RULE_ID = "dimension_drill_clearance"
-_DRILL_CLEARANCE_ALLOWANCE = 2  # keep in lockstep with .github/routed-drc-tolerance.yml (#3847)
+_DRILL_CLEARANCE_ALLOWANCE = 0  # strict-0 since #4017 re-spaced the drill pair
 
 
 def run_drc(pcb_path: Path) -> bool:
