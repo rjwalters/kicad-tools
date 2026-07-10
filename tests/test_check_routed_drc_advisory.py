@@ -34,17 +34,31 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HELPER_SCRIPT_PATH = REPO_ROOT / "scripts" / "ci" / "check_routed_drc.py"
+CI_DIR = REPO_ROOT / "scripts" / "ci"
+HELPER_SCRIPT_PATH = CI_DIR / "check_routed_drc.py"
+COVERAGE_SCRIPT_PATH = CI_DIR / "check_matchgroup_coverage.py"
+
+
+def _load_script_module(name: str, path: Path):
+    """Import a ``scripts/ci`` helper script as a module.
+
+    ``scripts/ci`` is added to ``sys.path`` first so the scripts'
+    ``from net_class_map_resolver import ...`` statements resolve when the
+    module is loaded outside its own ``sys.path.insert`` (the insert runs at
+    import time, but pytest may import a sibling first)."""
+    if str(CI_DIR) not in sys.path:
+        sys.path.insert(0, str(CI_DIR))
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_helper_module():
     """Import ``scripts/ci/check_routed_drc.py`` as a module."""
-    spec = importlib.util.spec_from_file_location("check_routed_drc", HELPER_SCRIPT_PATH)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["check_routed_drc"] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_script_module("check_routed_drc", HELPER_SCRIPT_PATH)
 
 
 def _make_violation(rule_id: str, severity: str = "error", message: str = "synthetic") -> dict:
@@ -86,35 +100,28 @@ def _make_kct_json(violations: list[dict]) -> str:
 
 
 class TestAdvisoryRuleIdsImport:
-    """Pin that the helper imports the classifier from the canonical source.
+    """Pin that the shared counter uses the classifier from the canonical
+    source.
 
     A future refactor that hardcodes a local set instead of using
     ``DRCChecker.is_advisory_rule`` would silently drift -- the audit
-    pipeline and the gate must stay in lockstep.
+    pipeline and the gates must stay in lockstep.  Issue #4008 hoisted the
+    counter into ``net_class_map_resolver.count_blocking_errors``, so the
+    ``DRCChecker`` import now lives there (imported lazily) rather than at
+    ``check_routed_drc.py`` module scope.
     """
-
-    def setup_method(self) -> None:
-        self.helper = _load_helper_module()
-
-    def test_helper_imports_drcchecker(self) -> None:
-        """The helper module must expose the imported ``DRCChecker`` so
-        the gate's filtering uses the same classifier as the audit
-        pipeline (``src/kicad_tools/audit/auditor.py:768``)."""
-        assert hasattr(self.helper, "DRCChecker"), (
-            "scripts/ci/check_routed_drc.py must import DRCChecker so the "
-            "advisory-rule classifier stays in lockstep with the audit "
-            "pipeline (issue #3074)."
-        )
 
     def test_connectivity_is_currently_advisory(self) -> None:
         """Document the current ADVISORY_RULE_IDS membership so a future
         refactor that drops ``connectivity`` (or adds a new rule whose
         severity should NOT block the gate) surfaces a test failure that
         triggers an explicit re-think rather than a silent CI drift."""
-        assert self.helper.DRCChecker.is_advisory_rule("connectivity")
+        from kicad_tools.validate.checker import DRCChecker
+
+        assert DRCChecker.is_advisory_rule("connectivity")
         # Non-advisory blocking rules must NOT be misclassified.
-        assert not self.helper.DRCChecker.is_advisory_rule("clearance_segment_via")
-        assert not self.helper.DRCChecker.is_advisory_rule("clearance_pad_via")
+        assert not DRCChecker.is_advisory_rule("clearance_segment_via")
+        assert not DRCChecker.is_advisory_rule("clearance_pad_via")
 
 
 class TestCountBlockingErrorsDirect:
@@ -373,3 +380,92 @@ class TestStdoutPrefixTolerance:
         with self._stub_kct(polluted):
             with pytest.raises(RuntimeError, match="invalid JSON"):
                 self.helper.count_errors(Path("synthetic.kicad_pcb"))
+
+
+class TestCrossScriptCounterParity:
+    """Issue #4008: the two routed-PCB CI gates must count the SAME blocking
+    errors for the same ``kct check`` payload.
+
+    Before this issue, ``check_routed_drc.py`` filtered advisory rules while
+    ``check_matchgroup_coverage.py`` read the raw ``summary.errors`` integer,
+    so on board 07 they reported 9 vs 14 against the SAME
+    ``.github/routed-drc-tolerance.yml`` floor -- forcing +5 dead slack onto
+    the blocking gate.  These tests pin that both gates now delegate to the
+    single shared ``net_class_map_resolver.count_blocking_errors``.
+    """
+
+    def setup_method(self) -> None:
+        # Drop any stale cached copies so the two scripts import a fresh,
+        # shared ``net_class_map_resolver`` in a deterministic order.
+        for name in ("check_routed_drc", "check_matchgroup_coverage", "net_class_map_resolver"):
+            sys.modules.pop(name, None)
+        self.drc = _load_helper_module()
+        self.coverage = _load_script_module("check_matchgroup_coverage", COVERAGE_SCRIPT_PATH)
+        # Reuse the resolver the scripts already imported (same object) so the
+        # identity assertion below is meaningful; both scripts do
+        # ``from net_class_map_resolver import count_blocking_errors``.
+        self.resolver = sys.modules["net_class_map_resolver"]
+
+    def _stub_kct(self, json_payload: str, returncode: int = 2):
+        mock_proc = MagicMock()
+        mock_proc.returncode = returncode
+        mock_proc.stdout = json_payload
+        mock_proc.stderr = ""
+        return patch.object(subprocess, "run", return_value=mock_proc)
+
+    def test_board07_shaped_payload_agrees_across_scripts(self) -> None:
+        """A payload matching board 07 (9 blocking + 5 advisory
+        connectivity = 14 raw) must yield 9 from BOTH gates, not 9 vs 14."""
+        violations = (
+            [_make_violation("diffpair_length_skew") for _ in range(4)]
+            + [_make_violation("diffpair_routing_continuity") for _ in range(4)]
+            + [_make_violation("match_group_length_skew")]
+            + [_make_violation("connectivity") for _ in range(5)]
+        )
+        payload = _make_kct_json(violations)
+        # Raw summary.errors is 14 (the OLD count) -- assert we do NOT use it.
+        assert json.loads(payload)["summary"]["errors"] == 14
+
+        # check_routed_drc.py path
+        with self._stub_kct(payload):
+            drc_blocking, drc_advisory = self.drc.count_errors(
+                Path("boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb")
+            )
+        # check_matchgroup_coverage.py path
+        with self._stub_kct(payload):
+            coverage_blocking = self.coverage.count_errors_via_kct_check(
+                Path("boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb"),
+                sidecar=None,
+            )
+        # Shared helper path (the source of truth both delegate to)
+        shared_blocking, shared_advisory = self.resolver.count_blocking_errors(json.loads(payload))
+
+        assert drc_blocking == coverage_blocking == shared_blocking == 9, (
+            f"Gates disagree: check_routed_drc={drc_blocking}, "
+            f"check_matchgroup_coverage={coverage_blocking}, "
+            f"shared={shared_blocking} (expected 9 blocking, advisory excluded)."
+        )
+        assert drc_advisory == shared_advisory == {"connectivity": 5}
+
+    def test_both_scripts_share_one_counter_function(self) -> None:
+        """Both scripts must reference the SAME ``count_blocking_errors``
+        object from ``net_class_map_resolver`` -- not private copies that
+        could drift.  This is the structural guard against the seam ever
+        re-opening."""
+        assert self.drc.count_blocking_errors is self.resolver.count_blocking_errors
+        assert self.coverage.count_blocking_errors is self.resolver.count_blocking_errors
+
+    def test_pure_advisory_payload_agrees_at_zero(self) -> None:
+        """A payload with only advisory connectivity must yield 0 blocking
+        from both gates (not the raw connectivity count)."""
+        violations = [_make_violation("connectivity") for _ in range(3)]
+        payload = _make_kct_json(violations)
+        assert json.loads(payload)["summary"]["errors"] == 3
+
+        with self._stub_kct(payload):
+            drc_blocking, _ = self.drc.count_errors(Path("synthetic.kicad_pcb"))
+        with self._stub_kct(payload):
+            coverage_blocking = self.coverage.count_errors_via_kct_check(
+                Path("synthetic.kicad_pcb"), sidecar=None
+            )
+        assert drc_blocking == coverage_blocking == 0

@@ -54,6 +54,90 @@ from typing import Any
 SIDECAR_FILENAME = "net_class_map.json"
 
 
+def count_blocking_errors(data: dict[str, Any]) -> tuple[int, dict[str, int]]:
+    """Filter advisory rules out of a ``kct check --format json`` payload.
+
+    Issue #4008: this is the single shared implementation of the
+    blocking-vs-advisory error count used by BOTH routed-PCB CI gates
+    (``check_routed_drc.py`` and ``check_matchgroup_coverage.py``).  Before
+    it was hoisted here, ``check_routed_drc.py`` filtered advisory rules but
+    ``check_matchgroup_coverage.py`` read the raw ``summary.errors`` integer,
+    so the two gates compared *different* counts (9 blocking vs 14 raw on
+    board 07) against the *same* ``.github/routed-drc-tolerance.yml`` floor.
+    That forced the shared floor up to the raw count, silently granting the
+    blocking gate dead slack (a 9->13 blocking regression could pass CI).
+    Centralising the counter lets both gates agree and lets the floor drop
+    to the blocking-only count.
+
+    The gating verdict mirrors the audit pipeline's classifier
+    (``DRCChecker.is_advisory_rule``): rules in
+    :attr:`DRCChecker.ADVISORY_RULE_IDS` (currently just ``connectivity``)
+    surface to consumers but do not block manufacturability.  PR #3060 added
+    the ``connectivity`` rule and PR #3064 introduced the central classifier;
+    this helper makes the CI gates honour the same severity model as
+    ``ManufacturingAudit._check_drc``.
+
+    Args:
+        data: Parsed JSON object emitted by ``kct check --format json``.
+            Expected to contain ``violations`` (a list with per-violation
+            ``rule_id`` and ``severity`` fields) and a ``summary.errors``
+            integer (the unfiltered count, used as a fall-back when no
+            ``violations`` array is present).
+
+    Returns:
+        Tuple of ``(blocking_errors, advisory_by_rule)``:
+
+        * ``blocking_errors`` -- number of error-severity violations whose
+          ``rule_id`` is NOT in ``ADVISORY_RULE_IDS``.  This is what the
+          gates compare to the allowlist.
+        * ``advisory_by_rule`` -- mapping of advisory ``rule_id`` to count
+          of error-severity violations of that rule, so callers can still
+          print the connectivity findings for diagnostic visibility per
+          the issue #3074 AC ("connectivity rule still appears in
+          violation reports").
+
+    Raises:
+        RuntimeError: If the JSON lacks both a ``violations`` array and a
+            ``summary.errors`` integer (the payload is malformed).
+    """
+    # Import lazily so the module stays importable in contexts where
+    # ``kicad_tools`` is not yet on the path (the CI scripts run under
+    # ``uv run`` where it always is).  A missing/renamed classifier surfaces
+    # here, at the first count, rather than at module import time.
+    from kicad_tools.validate.checker import DRCChecker
+
+    violations = data.get("violations")
+    if isinstance(violations, list):
+        blocking = 0
+        advisory_by_rule: dict[str, int] = {}
+        for v in violations:
+            if not isinstance(v, dict):
+                continue
+            # Only error-severity violations count toward the gate; warnings
+            # are filtered upstream by ``--errors-only`` but we re-check
+            # defensively in case a future flag change loosens that.
+            severity = v.get("severity", "error")
+            if severity != "error":
+                continue
+            rule_id = v.get("rule_id", "")
+            if not isinstance(rule_id, str):
+                continue
+            if DRCChecker.is_advisory_rule(rule_id):
+                advisory_by_rule[rule_id] = advisory_by_rule.get(rule_id, 0) + 1
+            else:
+                blocking += 1
+        return blocking, advisory_by_rule
+
+    # Fall-back: no per-violation array (legacy format).  Trust
+    # ``summary.errors``.  Advisory awareness degrades gracefully -- the
+    # gates behave exactly as they did before this change in that path.
+    summary = data.get("summary", {})
+    errors = summary.get("errors")
+    if not isinstance(errors, int):
+        raise RuntimeError(f"kct check JSON missing both violations and summary.errors: {data!r}")
+    return errors, {}
+
+
 def _import_module_from_path(module_name: str, path: Path) -> Any:
     """Import a module by file path without permanently polluting sys.path."""
     spec = importlib.util.spec_from_file_location(module_name, path)
