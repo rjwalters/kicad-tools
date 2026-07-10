@@ -3488,6 +3488,179 @@ class TestKiCad10NetNumberRecovery:
             elif seg.net_name == "VCC":
                 assert seg.net_number == 2
 
+    def test_save_board_no_header_synthesizes_net_table(self, tmp_path):
+        """No top-level (net N) table + inline (net "name") -> table synthesized.
+
+        Reproduces KiCad 10.0.4 ``--save-board`` output: the header net table
+        is deleted and every inline ref is name-only.  The parser must
+        synthesize the table instead of collapsing every element to
+        net_number=0 (the silent false-clean failure mode of issue #4021).
+        """
+        pcb_content = """\
+(kicad_pcb
+  (version 20260206)
+  (generator "pcbnew")
+  (generator_version "10.0")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (footprint "TestFP"
+    (layer "F.Cu")
+    (uuid "fp-uuid")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net "VCC"))
+    (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Cu") (net "GND"))
+  )
+  (segment (start 0 0) (end 10 0) (width 0.25) (layer "F.Cu") (net "GND") (uuid "seg-1"))
+  (via (at 5 5) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net "VCC") (uuid "via-1"))
+)
+"""
+        pcb_path = tmp_path / "save_board.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+        pcb = PCB.load(pcb_path)
+
+        # A net table must have been synthesized (net 0 "" plus the two nets).
+        assert pcb.nets, "net table should be synthesized from inline names"
+        assert pcb.nets[0].name == ""  # sentinel preserved
+
+        # Names -> deterministic first-seen numbering: VCC=1 (pad 1), GND=2.
+        name_to_num = {net.name: net.number for net in pcb.nets.values()}
+        assert name_to_num["VCC"] == 1
+        assert name_to_num["GND"] == 2
+
+        pad1 = next(p for p in pcb.footprints[0].pads if p.number == "1")
+        pad2 = next(p for p in pcb.footprints[0].pads if p.number == "2")
+        assert (pad1.net_name, pad1.net_number) == ("VCC", 1)
+        assert (pad2.net_name, pad2.net_number) == ("GND", 2)
+
+        # Segment and via recover the same numbers, not 0.
+        assert pcb.segments[0].net_number == 2  # GND
+        assert pcb.vias[0].net_number == 1  # VCC
+
+    def test_save_board_numbering_is_deterministic(self, tmp_path):
+        """Synthesized net numbers are stable across repeated loads."""
+        pcb_content = """\
+(kicad_pcb
+  (version 20260206)
+  (generator "pcbnew")
+  (generator_version "10.0")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (footprint "TestFP"
+    (layer "F.Cu")
+    (uuid "fp-uuid")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net "SIGA"))
+    (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Cu") (net "SIGB"))
+    (pad "3" smd rect (at 4 0) (size 1 1) (layers "F.Cu") (net "SIGC"))
+  )
+)
+"""
+        pcb_path = tmp_path / "save_board_det.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+
+        first = {net.name: net.number for net in PCB.load(pcb_path).nets.values()}
+        second = {net.name: net.number for net in PCB.load(pcb_path).nets.values()}
+        assert first == second
+        assert first == {"": 0, "SIGA": 1, "SIGB": 2, "SIGC": 3}
+
+    def test_save_board_preserves_surviving_numeric_ref(self, tmp_path):
+        """A surviving inline (net N "name") keeps its number when synthesizing."""
+        pcb_content = """\
+(kicad_pcb
+  (version 20260206)
+  (generator "pcbnew")
+  (generator_version "10.0")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (footprint "TestFP"
+    (layer "F.Cu")
+    (uuid "fp-uuid")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net "VCC"))
+    (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Cu") (net 7 "GND"))
+  )
+)
+"""
+        pcb_path = tmp_path / "save_board_survivor.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+        pcb = PCB.load(pcb_path)
+
+        name_to_num = {net.name: net.number for net in pcb.nets.values()}
+        # GND keeps its surviving number 7; VCC fills the lowest free slot (1).
+        assert name_to_num["GND"] == 7
+        assert name_to_num["VCC"] == 1
+
+    def test_save_board_fixture_recovers_all_nets(self):
+        """The committed --save-board fixture recovers all four nets.
+
+        Guards the exact issue #4021 failure: a real KiCad 10.0.4
+        ``kicad-cli pcb drc --refill-zones --save-board`` output (no header
+        net table, name-only inline refs) must load with a populated net
+        table and nonzero pad net_numbers, and ConnectivityValidator must
+        report total_nets > 0 rather than a false-clean 0.
+        """
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        fixture_path = Path(__file__).parent / "fixtures" / "test_kicad10_save_board.kicad_pcb"
+        assert fixture_path.exists(), "test_kicad10_save_board.kicad_pcb fixture missing"
+
+        pcb = PCB.load(fixture_path)
+
+        # The board has four nets: "" (sentinel), VCC, LED_ANODE, GND.
+        assert pcb.nets, "net table should be synthesized, not empty"
+        names = {net.name for net in pcb.nets.values()}
+        assert names == {"", "VCC", "LED_ANODE", "GND"}
+
+        name_to_num = {net.name: net.number for net in pcb.nets.values()}
+        # Every populated pad must recover a nonzero number matching its name.
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_name:
+                    assert pad.net_number != 0, (
+                        f"{fp.reference} pad {pad.number} ({pad.net_name}) "
+                        f"collapsed to net_number=0"
+                    )
+                    assert pad.net_number == name_to_num[pad.net_name]
+
+        # Regression guard for the "silent false-clean" mode.
+        result = ConnectivityValidator(pcb).validate()
+        assert result.total_nets > 0
+
+    def test_save_board_fixture_round_trips_through_save(self, tmp_path):
+        """Loading + saving the --save-board fixture writes back a net table."""
+        fixture_path = Path(__file__).parent / "fixtures" / "test_kicad10_save_board.kicad_pcb"
+        assert fixture_path.exists()
+
+        pcb = PCB.load(fixture_path)
+        out_path = tmp_path / "resaved.kicad_pcb"
+        pcb.save(out_path)
+
+        # The saved file must contain a canonical (net N "name") header table.
+        text = out_path.read_text()
+        assert '(net 0 "")' in text
+        assert "(net 1" in text
+
+        # And re-loading recovers the same nets.
+        reloaded = PCB.load(out_path)
+        assert {n.name for n in reloaded.nets.values()} == {
+            "",
+            "VCC",
+            "LED_ANODE",
+            "GND",
+        }
+
     def test_traditional_format_still_works(self, minimal_pcb):
         """Traditional (net N "name") format still parses correctly."""
         pcb = PCB.load(minimal_pcb)

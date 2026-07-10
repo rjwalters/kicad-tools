@@ -1796,7 +1796,7 @@ class PCB:
     def _fixup_net_numbers(self) -> None:
         """Reconcile net_number and net_name using PCB header declarations.
 
-        Handles two complementary cases:
+        Handles three cases:
 
         1. **KiCad 10 name-only format** -- inline references are
            ``(net "name")`` without a numeric ID.  We resolve ``net_number``
@@ -1805,7 +1805,21 @@ class PCB:
         2. **Traditional number-only format** -- inline references are
            ``(net N)`` without an inline name string.  We resolve
            ``net_name`` from ``net_number`` using the same header map.
+
+        3. **KiCad 10 ``--save-board`` format (no header table)** -- KiCad
+           10.0.4's ``kicad-cli pcb drc --refill-zones --save-board`` deletes
+           the entire top-level ``(net N "name")`` table *and* rewrites every
+           inline ref to name-only ``(net "name")`` form.  With no header to
+           recover numbers from, we synthesize the table from the inline
+           names (see :meth:`_synthesize_net_table`) before running the
+           recovery loop, otherwise ``self._nets`` stays empty and every
+           element silently collapses to ``net_number=0``.
         """
+        # KiCad 10 --save-board: no header table survived. Synthesize one from
+        # the inline name-only references so the recovery loop below has a map.
+        if not self._nets:
+            self._synthesize_net_table()
+
         # Build bidirectional lookups from the header declarations
         name_to_number: dict[str, int] = {}
         for net in self._nets.values():
@@ -1851,6 +1865,115 @@ class PCB:
                 net = self._nets.get(zone.net_number)
                 if net:
                     zone.net_name = net.name
+
+    def _synthesize_net_table(self) -> None:
+        """Rebuild ``self._nets`` from inline name-only references.
+
+        KiCad 10.0.4's ``kicad-cli pcb drc --refill-zones --save-board``
+        deletes the top-level ``(net N "name")`` header table entirely and
+        rewrites every inline reference to name-only ``(net "name")`` form.
+        Without the header, :meth:`_parse_net` never populates
+        ``self._nets``, so the fixup loop in :meth:`_fixup_net_numbers` has
+        no map and every element silently keeps ``net_number=0`` while its
+        name is (correctly) preserved -- a false-clean connectivity model.
+
+        This method reconstructs the table from the inline names:
+
+        * Net 0 is reserved for the "no net" sentinel (empty name), matching
+          KiCad's own convention.
+        * Any *surviving* numeric reference (e.g. an inline ``(net 3 "GND")``
+          that escaped the name-only rewrite) is honored, so its name keeps
+          its original number.
+        * Remaining named nets are assigned numbers deterministically, in
+          first-seen order across pads -> segments -> vias -> zones, filling
+          the lowest unused positive integers.  This is stable across loads
+          of the same file.
+
+        The synthesized ``(net N "name")`` declarations are also written back
+        into ``self._sexp`` (after the ``layers`` node, where KiCad keeps the
+        net table) so that ``PCB.save()`` round-trips a canonical file KiCad
+        can re-open.
+
+        No-op if a header table already exists or if there are no named
+        inline references to recover from.
+        """
+        if self._nets:
+            return
+
+        # Iterate elements in a stable order and collect (name, surviving_num).
+        name_to_number: dict[str, int] = {"": 0}
+        reserved: set[int] = {0}
+        ordered_names: list[str] = []
+
+        def observe(name: str, number: int) -> None:
+            if not name:
+                return
+            if name not in name_to_number:
+                ordered_names.append(name)
+                name_to_number[name] = 0  # placeholder, resolved below
+            # Honor a surviving numeric ref (nonzero) if we have not already
+            # locked a nonzero number for this name.
+            if number and name_to_number[name] == 0:
+                name_to_number[name] = number
+                reserved.add(number)
+
+        for fp in self._footprints:
+            for pad in fp.pads:
+                observe(pad.net_name, pad.net_number)
+        for seg in self._segments:
+            observe(seg.net_name, seg.net_number)
+        for via in self._vias:
+            observe(via.net_name, via.net_number)
+        for zone in self._zones:
+            observe(zone.net_name, zone.net_number)
+
+        if not ordered_names:
+            return  # nothing to synthesize (empty board / no named nets)
+
+        # Assign the lowest unused positive integers to names that had no
+        # surviving numeric ref, in first-seen order.
+        next_number = 1
+        for name in ordered_names:
+            if name_to_number[name] != 0:
+                continue  # already fixed by a surviving numeric ref
+            while next_number in reserved:
+                next_number += 1
+            name_to_number[name] = next_number
+            reserved.add(next_number)
+
+        # Populate self._nets (including the net 0 "" sentinel) ...
+        self._nets[0] = Net(0, "")
+        for name in ordered_names:
+            number = name_to_number[name]
+            self._nets[number] = Net(number, name)
+
+        # ... and write the canonical header table back into self._sexp so
+        # PCB.save() emits a file KiCad can re-open.
+        self._write_net_declarations()
+
+    def _write_net_declarations(self) -> None:
+        """Insert ``(net N "name")`` header declarations into ``self._sexp``.
+
+        Writes one node per entry in ``self._nets`` (sorted by number),
+        placed immediately after the ``layers`` node -- the position KiCad
+        uses for the net table.  Falls back to appending at the end of the
+        top-level children if there is no ``layers`` node.
+        """
+        nodes = [SExp.list("net", number, self._nets[number].name) for number in sorted(self._nets)]
+        if not nodes:
+            return
+
+        # Find the layers node to anchor the insertion; KiCad orders the net
+        # table right after it (following setup, but before footprints).
+        insert_index: int | None = None
+        for i, child in enumerate(self._sexp.children):
+            if child.name in ("layers", "setup"):
+                insert_index = i + 1
+        if insert_index is None:
+            insert_index = len(self._sexp.children)
+
+        for offset, node in enumerate(nodes):
+            self._sexp.insert(insert_index + offset, node)
 
     def _parse_setup(self, sexp: SExp):
         """Parse setup/design rules."""

@@ -903,3 +903,94 @@ class TestNumericPropertyValueRoundtrip:
             producer="PCB.add_footprint_from_file (numeric Reference)",
             tmp_path=tmp_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# Reader direction: kicad-cli's writer output -> kicad-tools' reader
+# ---------------------------------------------------------------------------
+
+_SAVE_BOARD_SOURCE = (
+    REPO_ROOT / "boards" / "00-simple-led" / "output" / "simple_led_routed.kicad_pcb"
+)
+
+
+class TestKiCad10SaveBoardReaderRoundtrip:
+    """Reader-direction smoke test for KiCad 10's ``--save-board`` output.
+
+    The rest of this module tests the *writer* direction (kicad-tools emits a
+    file, kicad-cli must load it). This class closes the complementary gap
+    from issue #4021: kicad-cli 10.0.4's ``pcb drc --refill-zones
+    --save-board`` re-serializes a board *deleting the top-level ``(net N
+    "name")`` table* and rewriting every inline ref to name-only form.
+    ``PCB.load()`` used to silently collapse every element to net_number=0
+    (a false-clean connectivity model). This test shells out to the real
+    kicad-cli and asserts the reader recovers the nets.
+    """
+
+    def test_save_board_output_recovers_nets(self, tmp_path: Path) -> None:
+        """Real --save-board output loads with a populated net table."""
+        if not _SAVE_BOARD_SOURCE.exists():
+            pytest.skip(f"source board not found: {_SAVE_BOARD_SOURCE}")
+
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        # Baseline: the committed board has a real net table.
+        original = PCB.load(_SAVE_BOARD_SOURCE)
+        original_named = {n.number: n.name for n in original.nets.values() if n.name}
+        assert original_named, "source board should have named nets"
+
+        # Copy into tmp and re-serialize with kicad-cli's --save-board path.
+        board_copy = tmp_path / "board.kicad_pcb"
+        board_copy.write_bytes(_SAVE_BOARD_SOURCE.read_bytes())
+
+        kicad_cli = find_kicad_cli()
+        assert kicad_cli is not None  # guarded by module-level pytestmark
+        drc_json = tmp_path / "drc.json"
+        proc = subprocess.run(
+            [
+                str(kicad_cli),
+                "pcb",
+                "drc",
+                str(board_copy),
+                "--refill-zones",
+                "--save-board",
+                "-o",
+                str(drc_json),
+                "--format",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode in (0, 5), (
+            "kicad-cli pcb drc --save-board failed to run:\n"
+            f"returncode={proc.returncode}\nstderr={proc.stderr}"
+        )
+
+        # Confirm the fixture-triggering condition actually reproduced:
+        # the top-level net table must be gone from the re-saved file.
+        resaved_text = board_copy.read_text()
+        assert '\t(net 0 "")' not in resaved_text, (
+            "kicad-cli did not strip the net table; this environment's "
+            "--save-board behavior differs from the tested KiCad 10.0.4"
+        )
+
+        # The reader must recover the full net model, not collapse to 0.
+        pcb = PCB.load(board_copy)
+        assert pcb.nets, "PCB.load() must synthesize the net table"
+
+        recovered_names = {n.name for n in pcb.nets.values() if n.name}
+        assert recovered_names == set(original_named.values())
+
+        # Every populated pad must carry a nonzero net_number.
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_name:
+                    assert pad.net_number != 0, (
+                        f"{fp.reference} pad {pad.number} ({pad.net_name}) "
+                        "collapsed to net_number=0 after --save-board"
+                    )
+
+        # And the false-clean regression is guarded.
+        result = ConnectivityValidator(pcb).validate()
+        assert result.total_nets > 0
