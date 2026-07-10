@@ -108,6 +108,19 @@ def assert_clean(payload: dict[str, Any]) -> str | None:
     """
     clean = payload["clean"]
     if clean:
+        if payload.get("bound_pad_count") == 0:
+            # Belt-and-braces (#4019, mirrors check_board_00_e2e.py:184): a
+            # clean=true report claiming zero bound pins is exactly the
+            # zero-evidence vacuity artifact the guard forbids (#4006).  The
+            # copper_lvs.py producer already forces clean=False on vacuity
+            # (copper_lvs.py:196), so this is unreachable via the guarded
+            # core -- defense-in-depth against a hand-built or regressed
+            # payload, never accept it as clean.
+            return (
+                "copper-LVS reports clean=true but is VACUOUS "
+                "(bound_pad_count=0, #4006/#4019) -- zero-evidence clean "
+                "is not clean"
+            )
         return None
     mismatches = payload.get("mismatches", [])
     if not isinstance(mismatches, list):
