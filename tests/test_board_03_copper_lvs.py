@@ -114,8 +114,8 @@ class TestBoard03CopperLVSClean:
         )
 
 
-def _load_add_gnd_stitching_vias():
-    """Import ``add_gnd_stitching_vias`` from the board-03 recipe module."""
+def _load_board03_module():
+    """Import the board-03 ``generate_design.py`` recipe module."""
     import importlib.util
 
     gen = BOARD_DIR / "generate_design.py"
@@ -123,7 +123,12 @@ def _load_add_gnd_stitching_vias():
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.add_gnd_stitching_vias
+    return module
+
+
+def _load_add_gnd_stitching_vias():
+    """Import ``add_gnd_stitching_vias`` from the board-03 recipe module."""
+    return _load_board03_module().add_gnd_stitching_vias
 
 
 class TestBoard03UnconditionalUsbcStitch:
@@ -204,6 +209,116 @@ class TestBoard03UnconditionalUsbcStitch:
         out = work_pcb.read_text()
         for coord in ("145.75 65.5", "151.25 65.5", "151.25 66.5", "145.75 66.5"):
             assert f"(at {coord})" in out, f"no GND stitch via placed at J1 pad ({coord})"
+
+
+class TestBoard03PartialRouteFastFail:
+    """A partial route fails fast with a distinct message, not an LVS trace (#4027).
+
+    Root cause of the #4027 flake: ``route_pcb`` routes under a ``--timeout
+    600`` wall-clock SAFETY backstop layered above the load-independent
+    per-net ``--deterministic-budget`` iteration cap.  Under concurrent CPU
+    load that outer deadline can fire before every signal net lands, so
+    ``route_pcb`` returns ``False``.  Before this fix ``main()`` never
+    checked that return value and fell through to ``add_gnd_stitching_vias``
+    -> ``fill_zones_in_routed_pcb`` -> ``write_lvs_report(require_clean=True)``,
+    which raised ``BoardNetlistMismatch`` on the unrouted net's copper OPEN
+    and surfaced as a misleading "copper-LVS DIRTY / GND stitching" failure.
+
+    These tests are fast and hermetic: they monkeypatch the recipe's own
+    module-level functions so ``main()`` runs without invoking the router,
+    ``kicad-cli``, or the LVS comparator.  They pin two guarantees:
+      1. a partial route (``route_pcb`` -> ``False``) exits non-zero with a
+         distinct "partial route" message BEFORE any stitching/fill/LVS step;
+      2. a full route (``route_pcb`` -> ``True``) still reaches the existing
+         LVS gate (no false positive on the happy path).
+    """
+
+    def _stub_pipeline_prefix(self, module, monkeypatch, tmp_path: Path) -> None:
+        """Neutralise the recipe steps that run before the route_success gate."""
+        sch = tmp_path / "usb_joystick.kicad_sch"
+        sch.write_text("(kicad_sch)")
+        pcb = tmp_path / "usb_joystick.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        monkeypatch.setattr(module, "create_project", lambda *a, **k: tmp_path / "p.kicad_pro")
+        monkeypatch.setattr(module, "create_usb_joystick_schematic", lambda *a, **k: sch)
+        monkeypatch.setattr(module, "run_erc", lambda *a, **k: True)
+        monkeypatch.setattr(module, "create_usb_joystick_pcb", lambda *a, **k: pcb)
+        monkeypatch.setattr(module, "create_zones_for_pcb", lambda *a, **k: None)
+
+    def _forbid_downstream(self, module, monkeypatch) -> None:
+        """Make every post-gate step blow up loudly if the gate lets them run."""
+
+        def _boom(name):
+            def _raise(*a, **k):
+                raise AssertionError(
+                    f"{name} ran despite a partial route -- the route_success "
+                    "gate (#4027) did not short-circuit the pipeline"
+                )
+
+            return _raise
+
+        monkeypatch.setattr(module, "add_gnd_stitching_vias", _boom("add_gnd_stitching_vias"))
+        monkeypatch.setattr(module, "fill_zones_in_routed_pcb", _boom("fill_zones_in_routed_pcb"))
+        monkeypatch.setattr(module, "run_drc", _boom("run_drc"))
+        monkeypatch.setattr(module, "write_lvs_report", _boom("write_lvs_report"))
+
+    def test_partial_route_fails_fast_with_distinct_message(
+        self, monkeypatch, capsys, tmp_path: Path
+    ) -> None:
+        module = _load_board03_module()
+        self._stub_pipeline_prefix(module, monkeypatch, tmp_path)
+        self._forbid_downstream(module, monkeypatch)
+        # The proximate cause of the #4027 flake: route_pcb returns False.
+        monkeypatch.setattr(module, "route_pcb", lambda *a, **k: False)
+        monkeypatch.setattr(module.sys, "argv", ["generate_design.py", str(tmp_path / "out")])
+
+        rc = module.main()
+
+        assert rc == 1, "partial route must make main() exit non-zero"
+        err = capsys.readouterr().err
+        # The message must name the real cause (partial route / wall-clock
+        # budget) and must NOT be a copper-LVS / GND-stitching trace.
+        assert "partial route" in err.lower(), (
+            "partial-route failure must be reported with a distinct 'partial "
+            f"route' message, got stderr:\n{err}"
+        )
+        assert "wall-clock budget" in err.lower()
+        assert "BoardNetlistMismatch" not in err, (
+            "a partial route must NOT surface as an LVS BoardNetlistMismatch"
+        )
+
+    def test_full_route_still_reaches_lvs_gate(self, monkeypatch, tmp_path: Path) -> None:
+        """A full route (N==M) must NOT trip the fast-fail gate.
+
+        The gate keys strictly off ``route_pcb`` returning ``False``; a full
+        route still flows into the existing stitching/fill/LVS steps.  We stub
+        those to no-ops and assert the LVS gate is the one that runs (proving
+        the fast-fail path did not swallow the happy path).
+        """
+        module = _load_board03_module()
+        self._stub_pipeline_prefix(module, monkeypatch, tmp_path)
+        monkeypatch.setattr(module, "route_pcb", lambda *a, **k: True)
+        monkeypatch.setattr(module, "add_gnd_stitching_vias", lambda *a, **k: 0)
+        monkeypatch.setattr(module, "fill_zones_in_routed_pcb", lambda *a, **k: None)
+        monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
+
+        lvs_called: list[bool] = []
+
+        def _fake_lvs(*a, **k):
+            lvs_called.append(True)
+
+        monkeypatch.setattr(module, "write_lvs_report", _fake_lvs)
+        monkeypatch.setattr(module, "export_manufacturing_bundle", lambda *a, **k: True)
+        monkeypatch.setattr(module.sys, "argv", ["generate_design.py", str(tmp_path / "out")])
+
+        rc = module.main()
+
+        assert lvs_called == [True], (
+            "a full (N==M) route must still reach write_lvs_report -- the "
+            "#4027 fast-fail gate must not fire on a complete route"
+        )
+        assert rc == 0
 
 
 @pytest.mark.slow
