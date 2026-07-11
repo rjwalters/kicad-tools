@@ -712,6 +712,7 @@ class ManufacturingPackage:
             from ..report.collector import ReportDataCollector
             from ..report.generator import ReportGenerator
             from ..report.models import ReportData
+            from ..report.net_class_map import resolve_committed_net_class_map
         except ImportError:
             logger.warning(
                 "Report generation skipped: required dependency not installed (e.g. jinja2)"
@@ -724,10 +725,21 @@ class ManufacturingPackage:
             version_dir = ReportGenerator.next_version_dir(out_dir)
             data_dir = version_dir / "data"
 
+            # Resolve a committed net_class_map.json sidecar (Part B of
+            # #4008). Without it the report's DRC section runs the three
+            # sidecar-gated rule families (diffpair_length_skew,
+            # diffpair_routing_continuity, match_group_length_skew) as no-ops
+            # and would print "Errors 0 / PASS" on boards that actually have
+            # blocking diff-pair / match-group errors (e.g. board 07 has 9).
+            # Boards without a committed sidecar resolve to None and keep the
+            # documented graceful no-op behavior.
+            net_class_map_path = resolve_committed_net_class_map(self.pcb_path)
+
             # Collect design data snapshots
             collector = ReportDataCollector(
                 pcb_path=self.pcb_path,
                 manufacturer=self.manufacturer,
+                net_class_map_path=net_class_map_path,
             )
             collector.collect_all(data_dir)
 
