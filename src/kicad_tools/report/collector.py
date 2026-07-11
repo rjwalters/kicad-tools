@@ -59,6 +59,14 @@ class ReportDataCollector:
         manufacturer: Target manufacturer ID (default: "jlcpcb").
         quantity: Quantity for cost estimation (default: 5).
         skip_erc: Skip ERC check (default: False).
+        net_class_map_path: Optional path to a committed ``net_class_map.json``
+            sidecar. When provided, it is forwarded to ``ManufacturingAudit``
+            so the three sidecar-gated DRC rule families
+            (``diffpair_length_skew``, ``diffpair_routing_continuity``,
+            ``match_group_length_skew``) are actually evaluated in the report's
+            DRC section instead of silently no-op'ing (Part B of #4008). When
+            ``None`` the report keeps the documented graceful no-op behavior
+            for external-router boards.
     """
 
     def __init__(
@@ -67,11 +75,15 @@ class ReportDataCollector:
         manufacturer: str = "jlcpcb",
         quantity: int = 5,
         skip_erc: bool = False,
+        net_class_map_path: str | Path | None = None,
     ) -> None:
         self.pcb_path = Path(pcb_path)
         self.manufacturer = manufacturer
         self.quantity = quantity
         self.skip_erc = skip_erc
+        self.net_class_map_path = (
+            Path(net_class_map_path) if net_class_map_path is not None else None
+        )
 
     def collect_all(self, output_dir: Path) -> dict[str, Path]:
         """Run all collectors, write JSON files, return mapping of name to path.
@@ -105,6 +117,7 @@ class ReportDataCollector:
                 manufacturer=self.manufacturer,
                 quantity=self.quantity,
                 skip_erc=self.skip_erc,
+                net_class_map_path=self.net_class_map_path,
             )
             audit_result = audit.run()
         except Exception:

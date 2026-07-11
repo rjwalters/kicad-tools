@@ -126,8 +126,9 @@ class TestProfileThreading:
         captured = {}
 
         class FakeAudit:
-            def __init__(self, path, manufacturer, quantity, skip_erc):
+            def __init__(self, path, manufacturer, quantity, skip_erc, net_class_map_path=None):
                 captured["manufacturer"] = manufacturer
+                captured["net_class_map_path"] = net_class_map_path
 
             def run(self):
                 raise RuntimeError("stop after capture")
@@ -223,8 +224,9 @@ class TestProfileThreading:
         captured = {}
 
         class FakeCollector:
-            def __init__(self, pcb_path, manufacturer):
+            def __init__(self, pcb_path, manufacturer, net_class_map_path=None):
                 captured["manufacturer"] = manufacturer
+                captured["net_class_map_path"] = net_class_map_path
 
             def collect_all(self, data_dir):
                 raise RuntimeError("stop after capture")
@@ -233,6 +235,10 @@ class TestProfileThreading:
             pkg._generate_report(tmp_path / "out", result)
 
         assert captured["manufacturer"] == "jlcpcb-tier1"
+        # No committed net_class_map.json sidecar next to this fixture PCB, so
+        # the collector is constructed with net_class_map_path=None (Part B of
+        # #4008 must-not-regress: graceful no-op without a sidecar).
+        assert captured["net_class_map_path"] is None
 
 
 # ---------------------------------------------------------------------------
