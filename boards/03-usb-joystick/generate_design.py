@@ -818,6 +818,35 @@ def main() -> int:
         routed_path = output_dir / "usb_joystick_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
 
+        # Step 5.3: Fast-fail gate on a PARTIAL route (#4027).  ``route_pcb``
+        # returns ``False`` when fewer than all signal nets landed.  Under
+        # concurrent CPU load the ``--timeout 600`` wall-clock SAFETY backstop
+        # (route_cmd._set_wall_clock_deadline / _remaining_budget) can fire
+        # BEFORE the outer escalation loop routes every net -- 600 real seconds
+        # buys fewer CPU cycles on a loaded machine.  (The per-net A* search is
+        # already load-independent via --deterministic-budget, #3538/#3799, so
+        # the flake lives in the OUTER wall-clock loop, not the router
+        # internals.)  If we fall through, the downstream ``add_gnd_stitching_
+        # vias`` -> ``fill_zones_in_routed_pcb`` -> ``write_lvs_report(
+        # require_clean=True)`` sees a genuinely unrouted signal net as a copper
+        # OPEN and raises ``BoardNetlistMismatch``, which the broad ``except``
+        # below reports as exit 1 -- misdirecting the reviewer to the GND
+        # stitching / LVS subsystem when the true cause is upstream route
+        # truncation.  Raise a DISTINCT, clearly-worded error here instead so
+        # the failure names the real cause.  The "PARTIAL: Routed N/M signal
+        # nets" line is already printed above by ``route_pcb``.
+        if not route_success:
+            raise RuntimeError(
+                "partial route -- likely wall-clock budget exhaustion under "
+                "load (the --timeout 600 safety backstop fired before every "
+                "signal net landed; see the 'PARTIAL: Routed N/M signal nets' "
+                "line above for the exact count). This is NOT a copper-LVS / "
+                "GND-stitching failure -- the pipeline stopped before the LVS "
+                "gate. Re-run boards/03-usb-joystick/generate_design.py in "
+                "isolation on a quiet machine, or raise the --timeout in "
+                "route_pcb() if this recurs on an unloaded host."
+            )
+
         # Step 5.4: Add GND F.Cu<->B.Cu stitching vias (#3787).  The board
         # has GND planes on both copper layers but the router emits zero GND
         # vias, so the J1 USB-C F.Cu-only shield pads strand in their own
