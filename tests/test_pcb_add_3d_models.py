@@ -13,6 +13,9 @@ from pathlib import Path
 
 from kicad_tools.footprints.library_path import LibraryPaths
 from kicad_tools.pcb.models3d import (
+    ResolvedModels,
+    _apply_offset_delta,
+    _pad_anchor,
     add_model_refs,
     add_model_refs_to_text,
     extract_model_blocks,
@@ -506,3 +509,242 @@ class TestCLI:
         rc = run_add_3d_models(pcb, output_format="text")
         assert rc == 1
         assert "not found" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Origin-convention offset (issue #4034)
+# --------------------------------------------------------------------------
+#
+# kct-generated footprints reuse canonical KiCad names but place pads on an
+# *origin-centered* convention, while the library footprint (and its STEP
+# model) uses pad-1-at-origin.  Copying the model with a zero offset leaves
+# the body shifted by the pad-centroid delta (half the pitch for a 2-pad
+# part).  The patcher must add ``target_centroid - source_centroid`` into the
+# model ``(offset (xyz ...))`` -- with the model-frame Y negated relative to
+# the footprint 2D frame -- so the body lands on the target's pads.
+
+# Library footprint: pad 1 at origin, pad 2 one 2.54mm pitch up in +Y
+# (KiCad's convention for a vertical 2-pin header).  Centroid = (0, 1.27).
+HEADER_LIB_MOD = """(footprint "PinHeader_1x02_P2.54mm_Vertical"
+\t(layer "F.Cu")
+\t(pad "1" thru_hole rect
+\t\t(at 0 0)
+\t\t(size 1.7 1.7)
+\t\t(drill 1)
+\t\t(layers "*.Cu" "*.Mask")
+\t)
+\t(pad "2" thru_hole oval
+\t\t(at 0 2.54)
+\t\t(size 1.7 1.7)
+\t\t(drill 1)
+\t\t(layers "*.Cu" "*.Mask")
+\t)
+\t(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x02_P2.54mm_Vertical.step"
+\t\t(offset
+\t\t\t(xyz 0 0 0)
+\t\t)
+\t\t(scale
+\t\t\t(xyz 1 1 1)
+\t\t)
+\t\t(rotate
+\t\t\t(xyz 0 0 0)
+\t\t)
+\t)
+)
+"""
+
+# Board footprint reusing that lib id but origin-centered: pads at (0, -1.27)
+# and (0, +1.27).  Centroid = (0, 0).  Expected delta = (0, 0) - (0, 1.27) =
+# (0, -1.27); model-frame offset = (0 + 0, 0 - (-1.27), 0) = (0, 1.27, 0).
+HEADER_PCB_TEXT = """(kicad_pcb
+\t(version 20240108)
+\t(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+\t\t(layer "F.Cu")
+\t\t(at 100 100)
+\t\t(pad "1" thru_hole rect
+\t\t\t(at 0 -1.27)
+\t\t\t(size 1.7 1.7)
+\t\t\t(drill 1)
+\t\t\t(layers "*.Cu" "*.Mask")
+\t\t)
+\t\t(pad "2" thru_hole oval
+\t\t\t(at 0 1.27)
+\t\t\t(size 1.7 1.7)
+\t\t\t(drill 1)
+\t\t\t(layers "*.Cu" "*.Mask")
+\t\t)
+\t)
+)
+"""
+
+
+def _make_header_library(tmp_path: Path) -> LibraryPaths:
+    root = tmp_path / "footprints"
+    lib = root / "Connector_PinHeader_2.54mm.pretty"
+    lib.mkdir(parents=True)
+    (lib / "PinHeader_1x02_P2.54mm_Vertical.kicad_mod").write_text(HEADER_LIB_MOD)
+    return LibraryPaths(footprints_path=root, source="config")
+
+
+class TestPadAnchorHelper:
+    def test_centroid_of_two_pads(self):
+        block = (
+            '(footprint "x"\n'
+            '\t(pad "1" thru_hole rect (at 0 -1.27) (size 1 1))\n'
+            '\t(pad "2" thru_hole oval (at 0 1.27) (size 1 1))\n'
+            ")\n"
+        )
+        assert _pad_anchor(block) == (0.0, 0.0)
+
+    def test_centroid_ignores_pad_rotation_angle(self):
+        block = (
+            '(footprint "x"\n'
+            '\t(pad "1" smd rect (at 1 2 90) (size 1 1))\n'
+            '\t(pad "2" smd rect (at 3 4 270) (size 1 1))\n'
+            ")\n"
+        )
+        assert _pad_anchor(block) == (2.0, 3.0)
+
+    def test_no_pads_returns_none(self):
+        assert _pad_anchor('(footprint "x"\n\t(layer "F.Cu")\n)\n') is None
+
+    def test_pad_token_in_string_ignored(self):
+        block = '(footprint "x"\n\t(property "n" "(pad ...)")\n\t(pad "1" smd rect (at 5 0))\n)\n'
+        assert _pad_anchor(block) == (5.0, 0.0)
+
+
+class TestApplyOffsetDelta:
+    MODEL = '(model "a.step"\n\t(offset\n\t\t(xyz 0 0 0)\n\t)\n\t(scale\n\t\t(xyz 1 1 1)\n\t)\n)'
+
+    def test_y_is_negated_relative_to_footprint_frame(self):
+        # footprint-local delta (0, -1.27) -> model offset (0, +1.27, 0)
+        out = _apply_offset_delta(self.MODEL, 0.0, -1.27)
+        assert "(xyz 0 1.27 0)" in out
+        # only the xyz numbers changed; scale untouched
+        assert "(xyz 1 1 1)" in out
+
+    def test_x_follows_footprint_frame(self):
+        out = _apply_offset_delta(self.MODEL, -1.27, 0.0)
+        assert "(xyz -1.27 0 0)" in out
+
+    def test_zero_delta_is_verbatim(self):
+        assert _apply_offset_delta(self.MODEL, 0.0, 0.0) == self.MODEL
+
+    def test_subnanometre_delta_is_verbatim(self):
+        # Centroid-averaging FP noise below 1nm must not perturb the block.
+        assert _apply_offset_delta(self.MODEL, 1e-9, -1e-9) == self.MODEL
+
+    def test_existing_nonzero_offset_is_added_to(self):
+        model = '(model "a.step"\n\t(offset\n\t\t(xyz 1 2 3)\n\t)\n)'
+        out = _apply_offset_delta(model, 0.5, -0.5)
+        # x: 1 + 0.5 = 1.5 ; y: 2 - (-0.5) = 2.5 ; z unchanged
+        assert "(xyz 1.5 2.5 3)" in out
+
+
+class TestOriginConventionOffset:
+    def test_centered_header_gets_half_pitch_offset(self, tmp_path):
+        """A synthetic origin-centered header resolved against a pad-1-at-
+        origin library footprint gets the centroid-delta offset written."""
+        lib = _make_header_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(HEADER_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib)
+        assert report.patched == ["Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"]
+        text = pcb.read_text()
+        # Model-frame offset: (0, 1.27, 0) (Y negated vs the (0,-1.27) delta).
+        assert "(xyz 0 1.27 0)" in text
+        # The offset node specifically must no longer read the zero default
+        # (scale/rotate legitimately keep their own 0/1 xyz nodes).
+        import re
+
+        offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", text)
+        assert offset_xyz is not None
+        assert offset_xyz.group(1).strip() == "0 1.27 0"
+
+    def test_matched_centroid_gets_zero_offset(self, tmp_path):
+        """R_0805-style part: library and board share centroid (0,0) despite
+        different pad pitch -> zero offset, verbatim insertion."""
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(PCB_TEXT)  # R1 pads at (-1,0)/(1,0); lib at (-0.9125,0)/(0.9125,0)
+        add_model_refs(pcb, library_paths=lib)
+        text = pcb.read_text()
+        # The inserted R_0805 model keeps its verbatim zero offset.
+        assert "R_0805_2012Metric.step" in text
+        assert "(xyz 0 0 0)" in text
+
+    def test_offset_is_pure_metadata_no_copper_delta(self, tmp_path):
+        """Only the newly-inserted model block bytes differ; every pad/at line
+        of the original text is preserved verbatim."""
+        lib = _make_header_library(tmp_path)
+        new_text, _ = add_model_refs_to_text(HEADER_PCB_TEXT, make_library_resolver(lib))
+        original_lines = HEADER_PCB_TEXT.splitlines()
+        new_lines = new_text.splitlines()
+        # No original line removed or reordered: original is a subsequence.
+        it = iter(new_lines)
+        assert all(line in it for line in original_lines), "an original line moved/was dropped"
+        # Every added line is model metadata.
+        added = set(new_lines) - set(original_lines)
+        for line in added:
+            body = line.strip()
+            assert body.startswith(("(model", "(offset", "(scale", "(rotate", "(xyz", ")"))
+
+    def test_offset_applies_through_substitution_tier(self, tmp_path):
+        """The offset must be computed for cross-library substitution matches
+        too -- keyed off the *target* footprint's own centroid, since the
+        substitute is a different physical part."""
+        root = tmp_path / "footprints"
+        lib = root / "Connector_FFC-FPC.pretty"
+        lib.mkdir(parents=True)
+        # Substitute library part: pads at (0,0) and (0.5,0) -> centroid (0.25, 0).
+        sub_name = "Amphenol_F32Q-1A7x1-11004_1x04-1MP_P0.5mm_Horizontal"
+        sub_mod = (
+            f'(footprint "{sub_name}"\n'
+            '\t(pad "1" smd rect (at 0 0) (size 0.3 1))\n'
+            '\t(pad "2" smd rect (at 0.5 0) (size 0.3 1))\n'
+            f'\t(model "${{KICAD10_3DMODEL_DIR}}/Connector_FFC-FPC.3dshapes/{sub_name}.step"\n'
+            "\t\t(offset\n\t\t\t(xyz 0 0 0)\n\t\t)\n"
+            "\t)\n"
+            ")\n"
+        )
+        (lib / f"{sub_name}.kicad_mod").write_text(sub_mod)
+        paths = LibraryPaths(footprints_path=root, source="config")
+        # Target footprint (no exact/variant match): centroid (2, 3).
+        pcb_text = (
+            "(kicad_pcb\n"
+            '\t(footprint "Connector_FFC:FFC_4P_0.5mm"\n'
+            '\t\t(layer "F.Cu")\n'
+            '\t\t(pad "1" smd rect (at 1 3) (size 0.3 1))\n'
+            '\t\t(pad "2" smd rect (at 3 3) (size 0.3 1))\n'
+            "\t)\n"
+            ")\n"
+        )
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(pcb_text)
+        report = add_model_refs(pcb, library_paths=paths)
+        assert report.substitution_matches  # went through the substitution tier
+        text = pcb.read_text()
+        # delta = target(2,3) - source(0.25,0) = (1.75, 3) -> model (1.75, -3, 0)
+        assert "(xyz 1.75 -3 0)" in text
+
+
+class TestResolvedModels:
+    def test_resolver_returns_source_anchor(self, tmp_path):
+        lib = _make_header_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        resolved = resolver("Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical")
+        assert isinstance(resolved, ResolvedModels)
+        assert resolved.source_anchor == (0.0, 1.27)
+        assert len(resolved.models) == 1
+
+    def test_legacy_list_resolver_still_supported(self):
+        """A resolver returning a bare list[str] (no anchor) inserts verbatim."""
+        model = '(model "x.step"\n\t(offset\n\t\t(xyz 0 0 0)\n\t)\n)'
+
+        def resolver(lib_id: str):
+            return [model] if lib_id.endswith("PinHeader_1x02_P2.54mm_Vertical") else None
+
+        new_text, report = add_model_refs_to_text(HEADER_PCB_TEXT, resolver)
+        assert report.patched
+        # No anchor available -> zero offset applied (verbatim).
+        assert "(xyz 0 0 0)" in new_text

@@ -10,10 +10,27 @@ copies those references into an existing ``.kicad_pcb`` after the fact.
 
 The patch is **pure text insertion**: for each footprint block whose lib id
 resolves to an installed KiCad library footprint that has one or more
-``(model ...)`` nodes, the nodes are inserted verbatim (re-indented) just
-before the footprint's closing paren.  No other bytes of the file change --
-copper, placement, zones and nets are untouched, so DRC results are
-guaranteed identical.
+``(model ...)`` nodes, the nodes are inserted (re-indented) just before the
+footprint's closing paren.  No other bytes of the file change -- copper,
+placement, zones and nets are untouched, so DRC results are guaranteed
+identical.
+
+**Origin-convention offset.**  A STEP model is authored in its *library*
+footprint's local frame (pad 1 at the library footprint's pad-1 position).
+kicad-tools boards often reuse a canonical footprint *name* while placing
+pads on a different origin convention -- e.g. a 2-pad 0.1" header whose pads
+sit at ``(0, -1.27)`` / ``(0, +1.27)`` (centered on the origin) instead of
+KiCad's ``(0, 0)`` / ``(0, 2.54)`` (pad 1 at origin).  Copying the model with
+a zero offset then leaves the body shifted by the pad-1 delta (half the pitch
+for a 2-pad part).  So before inserting a ``(model ...)`` node we add the
+``target_pad1 - source_pad1`` delta into its ``(offset (xyz ...))`` node,
+expressed in the KiCad 3D-model frame (X follows the footprint X, **Y is
+negated** relative to the footprint 2D frame, Z is unchanged).  This keeps
+the change pure render metadata -- only the newly inserted model block's own
+offset numbers differ from the library source; no pre-existing byte moves and
+no copper/pad/zone/net geometry changes.  Footprints that already share the
+library's origin convention (most SMD parts, e.g. ``R_0805_2012Metric``)
+compute a zero delta and are inserted verbatim.
 
 Used by ``kct pcb add-3d-models``.
 """
@@ -34,6 +51,7 @@ from kicad_tools.pcb.model_substitutions import substitute_lib_id
 __all__ = [
     "FootprintBlock",
     "ModelPatchReport",
+    "ResolvedModels",
     "add_model_refs",
     "add_model_refs_to_text",
     "extract_model_blocks",
@@ -208,10 +226,156 @@ def _indent_block(block: str, indent: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# Pad-1 origin-convention offset
+# --------------------------------------------------------------------------
+
+
+def _pad_anchor(block_text: str) -> tuple[float, float] | None:
+    """Return the pad *centroid* of a footprint block, in local coordinates.
+
+    Scans *block_text* (a full ``(footprint ...)`` or ``.kicad_mod`` body,
+    string-aware) for every copper ``(pad ...)`` node and averages the ``(at
+    x y)`` positions.  The centroid -- not pad 1 alone -- is the anchor for
+    the origin-convention offset because a STEP body is centered on the
+    footprint's pad field: two footprints that share a centroid (even with
+    different pad *pitch*, e.g. ``R_0805`` with 1.0mm vs the library's
+    0.9125mm half-pitch) need **zero** offset, while a footprint translated
+    off the library origin (e.g. a header re-centered from pad-1-at-origin to
+    origin-centered) needs the centroid delta.
+
+    A pad rotation angle (the optional third ``at`` field) is ignored: a
+    pad's *position* is already in the footprint-local (unrotated) frame, so
+    the centroid delta is well defined regardless of pad rotation.  Returns
+    ``None`` when the block has no positioned pads (e.g. a footprint whose
+    pads all lack an ``(at ...)``).
+    """
+    xs: list[float] = []
+    ys: list[float] = []
+    i = 0
+    n = len(block_text)
+    needle = "(pad"
+    while i < n:
+        c = block_text[i]
+        if c == '"':
+            i = _skip_string(block_text, i)
+            continue
+        if c == "(" and block_text.startswith(needle, i):
+            after = i + len(needle)
+            if after < n and block_text[after] in " \t\n":
+                pad_end = _find_matching_paren(block_text, i)
+                at = _find_first_at(block_text, i, pad_end)
+                if at is not None:
+                    xs.append(at[0])
+                    ys.append(at[1])
+                i = pad_end + 1
+                continue
+        i += 1
+    if not xs:
+        return None
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
+def _find_first_at(text: str, start: int, end: int) -> tuple[float, float] | None:
+    """Return ``(x, y)`` of the first ``(at x y ...)`` in ``text[start:end]``."""
+    i = start
+    at_needle = "(at"
+    while i < end:
+        c = text[i]
+        if c == '"':
+            i = _skip_string(text, i)
+            continue
+        if c == "(" and text.startswith(at_needle, i):
+            after = i + len(at_needle)
+            if after < end and text[after] in " \t\n":
+                close = _find_matching_paren(text, i)
+                fields = text[after:close].split()
+                if len(fields) >= 2:
+                    try:
+                        return float(fields[0]), float(fields[1])
+                    except ValueError:
+                        return None
+                return None
+        i += 1
+    return None
+
+
+def _apply_offset_delta(model_block: str, dx: float, dy: float) -> str:
+    """Return *model_block* with ``(dx, -dy)`` added into its ``(offset ...)``.
+
+    KiCad's 3D-model ``(offset (xyz ...))`` lives in the model frame whose X
+    matches the footprint X but whose **Y is negated** relative to the
+    footprint 2D frame (Z is unchanged).  A pad-1 delta of ``(dx, dy)`` in
+    footprint-local 2D coordinates therefore maps to a model offset delta of
+    ``(dx, -dy, 0)``.
+
+    Only the ``x`` and ``y`` numbers of the model's own ``(offset (xyz ...))``
+    are rewritten; every other byte of the node is preserved.  When *dx* and
+    *dy* are both (near) zero (target shares the library origin convention)
+    the block is returned unchanged so already-correct footprints get a
+    verbatim insert -- a 1nm tolerance absorbs centroid-averaging FP noise.
+    """
+    if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+        return model_block
+    # Locate (offset ... (xyz X Y Z) ...) inside the model node.
+    off_idx = model_block.find("(offset")
+    if off_idx == -1:
+        return model_block
+    off_end = _find_matching_paren(model_block, off_idx)
+    xyz_idx = model_block.find("(xyz", off_idx, off_end)
+    if xyz_idx == -1:
+        return model_block
+    xyz_end = _find_matching_paren(model_block, xyz_idx)
+    inner = model_block[xyz_idx + len("(xyz") : xyz_end]
+    fields = inner.split()
+    if len(fields) < 3:
+        return model_block
+    try:
+        ox, oy, oz = float(fields[0]), float(fields[1]), float(fields[2])
+    except ValueError:
+        return model_block
+    nx = _fmt_num(ox + dx)
+    ny = _fmt_num(oy - dy)  # model-frame Y is negated vs footprint 2D Y
+    nz = _fmt_num(oz)
+    new_xyz = f"(xyz {nx} {ny} {nz})"
+    return model_block[:xyz_idx] + new_xyz + model_block[xyz_end + 1 :]
+
+
+def _fmt_num(value: float) -> str:
+    """Format a float the way KiCad writes model offsets (no trailing zeros)."""
+    if value == 0.0:
+        value = 0.0  # normalize -0.0 -> 0.0
+    # Round to a hair under KiCad's 6-dp model-offset precision to avoid FP
+    # noise like 1.2699999999 while keeping legitimate sub-micron values.
+    rounded = round(value, 6)
+    if rounded == int(rounded):
+        return str(int(rounded))
+    return f"{rounded:g}"
+
+
+# --------------------------------------------------------------------------
 # Resolvers: lib id -> dedented (model ...) block texts
 # --------------------------------------------------------------------------
 
-Resolver = Callable[[str], list[str] | None]
+
+@dataclass
+class ResolvedModels:
+    """A resolver hit: the model block texts plus the source pad-1 position.
+
+    *models* are the dedented ``(model ...)`` node texts from the resolved
+    library ``.kicad_mod``.  *source_anchor* is that footprint's own pad
+    centroid (``None`` when it has no positioned pads), used to compute the
+    origin-convention offset ``target_anchor - source_anchor`` at insertion
+    time.
+    """
+
+    models: list[str]
+    source_anchor: tuple[float, float] | None = None
+
+
+# A resolver maps a lib id to its resolved models.  For backward
+# compatibility it may return a bare ``list[str]`` (models only, no pad-1
+# information -> zero offset applied) instead of a ``ResolvedModels``.
+Resolver = Callable[[str], "ResolvedModels | list[str] | None"]
 
 
 def _find_variant_mod(paths: LibraryPaths, library: str, name: str) -> Path | None:
@@ -277,7 +441,7 @@ def make_library_resolver(
             substitution, so callers can report them.
     """
     paths = library_paths if library_paths is not None else detect_kicad_library_path()
-    cache: dict[str, list[str] | None] = {}
+    cache: dict[str, ResolvedModels | None] = {}
 
     def _lookup_mod(lib_id: str) -> tuple[Path | None, str | None]:
         """Return (mod path, substitute lib id) for *lib_id*, or (None, None).
@@ -307,18 +471,22 @@ def make_library_resolver(
                         return mod_path, sub_id
         return None, None
 
-    def resolve(lib_id: str) -> list[str] | None:
+    def resolve(lib_id: str) -> ResolvedModels | None:
         if lib_id in cache:
             return cache[lib_id]
-        result: list[str] | None = None
+        result: ResolvedModels | None = None
         if paths.found:
             mod_path, sub_id = _lookup_mod(lib_id)
             if mod_path is not None:
                 try:
-                    result = extract_model_blocks(mod_path.read_text())
+                    mod_text = mod_path.read_text()
                 except OSError:
                     result = None
                 else:
+                    result = ResolvedModels(
+                        models=extract_model_blocks(mod_text),
+                        source_anchor=_pad_anchor(mod_text),
+                    )
                     if sub_id is not None and substitution_log is not None:
                         substitution_log[lib_id] = sub_id
         cache[lib_id] = result
@@ -371,17 +539,35 @@ def add_model_refs_to_text(pcb_text: str, resolver: Resolver) -> tuple[str, Mode
         if _contains_token(body, "model"):
             report.already_present.append(block.lib_id)
             continue
-        models = resolver(block.lib_id)
-        if models is None:
+        resolved = resolver(block.lib_id)
+        if resolved is None:
             report.unresolved.append(block.lib_id)
             continue
+        # Accept a bare list[str] (legacy resolvers) or a ResolvedModels.
+        if isinstance(resolved, ResolvedModels):
+            models = resolved.models
+            source_anchor = resolved.source_anchor
+        else:
+            models = resolved
+            source_anchor = None
         if not models:
             report.no_model_in_library.append(block.lib_id)
             continue
+        # Origin-convention offset: shift the body by target_anchor -
+        # source_anchor (pad centroids) so the model lands on the target
+        # footprint's pads even when it reuses a canonical name on a
+        # different origin convention.
+        target_anchor = _pad_anchor(body)
+        dx = dy = 0.0
+        if source_anchor is not None and target_anchor is not None:
+            dx = target_anchor[0] - source_anchor[0]
+            dy = target_anchor[1] - source_anchor[1]
         # Insert before the line that holds the footprint's closing paren.
         close_line_start = pcb_text.rfind("\n", 0, block.end) + 1
         child_indent = block.indent + "\t"
-        text = "".join(_indent_block(m, child_indent) + "\n" for m in models)
+        text = "".join(
+            _indent_block(_apply_offset_delta(m, dx, dy), child_indent) + "\n" for m in models
+        )
         insertions.append((close_line_start, text))
         report.patched.append(block.lib_id)
 

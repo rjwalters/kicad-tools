@@ -269,7 +269,7 @@
 		)
 		(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x02_P2.54mm_Vertical.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz 0 1.27 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -545,7 +545,7 @@
 		)
 		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_SMD.3dshapes/TO-263-5_TabPin3.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz 1.035 0 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -1127,7 +1127,7 @@
 		)
 		(model "${KICAD10_3DMODEL_DIR}/Crystal.3dshapes/Crystal_HC49-4H_Vertical.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz -2.44 0 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -2248,7 +2248,7 @@
 		)
 		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_THT.3dshapes/TO-220-3_Vertical.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz -2.54 0 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -2307,7 +2307,7 @@
 		)
 		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_THT.3dshapes/TO-220-3_Vertical.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz -2.54 0 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -2366,7 +2366,7 @@
 		)
 		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_THT.3dshapes/TO-220-3_Vertical.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz -2.54 0 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -2425,7 +2425,7 @@
 		)
 		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_THT.3dshapes/TO-220-3_Vertical.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz -2.54 0 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -2484,7 +2484,7 @@
 		)
 		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_THT.3dshapes/TO-220-3_Vertical.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz -2.54 0 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -2543,7 +2543,7 @@
 		)
 		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_THT.3dshapes/TO-220-3_Vertical.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz -2.54 0 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -2914,7 +2914,7 @@
 		)
 		(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x03_P2.54mm_Vertical.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz 0 2.54 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -2987,7 +2987,7 @@
 		)
 		(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x05_P2.54mm_Vertical.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz 0 5.08 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -3067,7 +3067,7 @@
 		)
 		(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x06_P2.54mm_Vertical.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz 0 6.35 0)
 			)
 			(scale
 				(xyz 1 1 1)

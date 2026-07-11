@@ -598,7 +598,7 @@
 		(embedded_fonts no)
 		(model "${KICAD10_3DMODEL_DIR}/Package_DIP.3dshapes/DIP-8_W7.62mm.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz -3.81 3.76 0)
 			)
 			(scale
 				(xyz 1 1 1)

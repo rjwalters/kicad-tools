@@ -64,7 +64,7 @@
     (pad "8" thru_hole oval (at 3.800 -3.700) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") (net 10 "GND"))
   	(model "${KICAD10_3DMODEL_DIR}/Package_DIP.3dshapes/DIP-8_W7.62mm.step"
   		(offset
-  			(xyz 0 0 0)
+  			(xyz -3.81 3.76 0)
   		)
   		(scale
   			(xyz 1 1 1)

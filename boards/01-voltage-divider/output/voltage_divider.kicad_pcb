@@ -51,7 +51,7 @@
     (pad "2" thru_hole oval (at 0 1.270) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 3 "GND"))
   	(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x02_P2.54mm_Vertical.step"
   		(offset
-  			(xyz 0 0 0)
+  			(xyz 0 1.27 0)
   		)
   		(scale
   			(xyz 1 1 1)
@@ -123,7 +123,7 @@
     (pad "2" thru_hole oval (at 0 1.270) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 3 "GND"))
   	(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x02_P2.54mm_Vertical.step"
   		(offset
-  			(xyz 0 0 0)
+  			(xyz 0 1.27 0)
   		)
   		(scale
   			(xyz 1 1 1)

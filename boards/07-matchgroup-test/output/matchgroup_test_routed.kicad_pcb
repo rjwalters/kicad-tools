@@ -533,10 +533,15 @@
 			(net 3 "GND")
 		)
 		(embedded_fonts no)
-		(model "${KICAD10_3DMODEL_DIR}/Package_DFN_QFN.3dshapes/QFN-48-1EP_7x7mm_P0.5mm_EP3.5x3.5mm.step" (offset (xyz 0 0 0))
-			(scale (xyz 1 1 1)
+		(model "${KICAD10_3DMODEL_DIR}/Package_DFN_QFN.3dshapes/QFN-48-1EP_7x7mm_P0.5mm_EP3.5x3.5mm.step"
+			(offset
+				(xyz 0 0 0)
 			)
-			(rotate (xyz 0 0 0)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
 			)
 		)
 	)
@@ -671,10 +676,15 @@
 			(net 34 "A7")
 		)
 		(embedded_fonts no)
-		(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x09_P2.54mm_Vertical.step" (offset (xyz 0 0 0))
-			(scale (xyz 1 1 1)
+		(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x09_P2.54mm_Vertical.step"
+			(offset
+				(xyz 0 10.16 0)
 			)
-			(rotate (xyz 0 0 0)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
 			)
 		)
 	)
@@ -1104,10 +1114,15 @@
 			(net 3 "GND")
 		)
 		(embedded_fonts no)
-		(model "${KICAD10_3DMODEL_DIR}/Package_QFP.3dshapes/LQFP-48_7x7mm_P0.5mm.step" (offset (xyz 0 0 0))
-			(scale (xyz 1 1 1)
+		(model "${KICAD10_3DMODEL_DIR}/Package_QFP.3dshapes/LQFP-48_7x7mm_P0.5mm.step"
+			(offset
+				(xyz 0 0 0)
 			)
-			(rotate (xyz 0 0 0)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
 			)
 		)
 	)
@@ -1225,7 +1240,7 @@
 		(embedded_fonts no)
 		(model "${KICAD10_3DMODEL_DIR}/Connector_FFC-FPC.3dshapes/TE_84952-6_1x06-1MP_P1.0mm_Horizontal.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz 0 -1.475 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -1471,10 +1486,15 @@
 			(net 3 "GND")
 		)
 		(embedded_fonts no)
-		(model "${KICAD10_3DMODEL_DIR}/Package_DFN_QFN.3dshapes/QFN-24-1EP_4x4mm_P0.5mm_EP2.5x2.5mm.step" (offset (xyz 0 0 0))
-			(scale (xyz 1 1 1)
+		(model "${KICAD10_3DMODEL_DIR}/Package_DFN_QFN.3dshapes/QFN-24-1EP_4x4mm_P0.5mm_EP2.5x2.5mm.step"
+			(offset
+				(xyz 0 0 0)
 			)
-			(rotate (xyz 0 0 0)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
 			)
 		)
 	)
@@ -2054,7 +2074,7 @@
 		(embedded_fonts no)
 		(model "${KICAD10_3DMODEL_DIR}/Connector_Video.3dshapes/HDMI_A_Amphenol_10029449-x01xLF_Horizontal.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz -0.206522 -4.7 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -2487,10 +2507,15 @@
 			(net 3 "GND")
 		)
 		(embedded_fonts no)
-		(model "${KICAD10_3DMODEL_DIR}/Package_DFN_QFN.3dshapes/QFN-48-1EP_7x7mm_P0.5mm_EP3.5x3.5mm.step" (offset (xyz 0 0 0))
-			(scale (xyz 1 1 1)
+		(model "${KICAD10_3DMODEL_DIR}/Package_DFN_QFN.3dshapes/QFN-48-1EP_7x7mm_P0.5mm_EP3.5x3.5mm.step"
+			(offset
+				(xyz 0 0 0)
 			)
-			(rotate (xyz 0 0 0)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
 			)
 		)
 	)
