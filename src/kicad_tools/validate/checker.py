@@ -240,7 +240,7 @@ class DRCChecker:
             sheet-absolute coordinates.  Violations with ``location=None``
             are left untouched.
         """
-        ox, oy = self.pcb.board_origin
+        ox, oy = getattr(self.pcb, "board_origin", (0.0, 0.0))
         if ox == 0.0 and oy == 0.0:
             # No offset to apply -- board is already at the sheet origin.
             return results
