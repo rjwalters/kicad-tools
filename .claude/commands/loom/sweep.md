@@ -889,6 +889,14 @@ Each builder is responsible for:
 
 **Await all builders in the wave** before proceeding to Judge. Collect each builder's PR number (or failure marker).
 
+**Backstop: verify the main worktree is clean after the builders return (#3513).** A builder subagent runs without `LOOM_WORKTREE_PATH` injected, so the `guard-worktree-paths.sh` hook does not fire on this path. If a builder used repo-relative paths after a cwd reset, it may have written to the **main** worktree instead of its issue worktree. After the wave's builders return and before advancing any PR to Judge, run:
+
+```bash
+./.loom/scripts/check-main-clean.sh   # exit 3 ⇒ main is dirty (builder contamination)
+```
+
+If it exits `3`, the main worktree carries uncommitted changes a builder left behind. Surface this loudly in the wave summary and do not advance the wave to Judge until the contamination is investigated and the stray changes reverted. This is a backstop only — the builder guidance (capture the absolute worktree path once, use absolute paths everywhere) is the primary defense.
+
 **On successful PR creation**, write the `builder-done` checkpoint for that issue (record the PR number):
 ```bash
 # Append --model <resolved> when you passed a model param to the builder subagent (#3482).

@@ -169,6 +169,10 @@ REPO_ROOT="$(find_main_repo_root)" || \
 # Source forge helpers for multi-forge support
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/forge-helpers.sh"
+# Shared worktree-root resolver (#3530) — cleanup must discover worktrees at an
+# overridden root, not just the default .loom/worktrees.
+# shellcheck source=lib/worktree-root.sh
+source "$SCRIPT_DIR/lib/worktree-root.sh"
 forge_detect
 
 # Use gh-cached for read-only queries to reduce API calls (see issue #1609)
@@ -692,14 +696,17 @@ if [[ "$CLEANUP_WORKTREE" == "true" ]]; then
   else
     # Strict pattern: only `feature/issue-<N>` matches. Trailing-number
     # heuristics would misclassify branches like `release-1`.
+    # Resolve the worktree base through the shared helper so an overridden
+    # root (#3530) is discovered here; defaults to $REPO_ROOT/.loom/worktrees.
+    WT_ROOT_DIR="$(loom_worktree_root "$REPO_ROOT")"
     DEFAULT_WT_PATH=""
     if [[ "$PR_BRANCH" =~ ^feature/issue-([0-9]+)$ ]]; then
       ISSUE_NUM="${BASH_REMATCH[1]}"
-      DEFAULT_WT_PATH="$REPO_ROOT/.loom/worktrees/issue-$ISSUE_NUM"
+      DEFAULT_WT_PATH="$WT_ROOT_DIR/issue-$ISSUE_NUM"
     else
       # External-fork / ad-hoc branch — the doctor would have used a
       # `pr-<PR_NUMBER>` worktree if any.
-      DEFAULT_WT_PATH="$REPO_ROOT/.loom/worktrees/pr-$PR_NUMBER"
+      DEFAULT_WT_PATH="$WT_ROOT_DIR/pr-$PR_NUMBER"
     fi
     if [[ -d "$DEFAULT_WT_PATH" ]]; then
       _remove_loom_worktree "$DEFAULT_WT_PATH"

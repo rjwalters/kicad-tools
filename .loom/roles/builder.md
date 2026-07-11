@@ -262,12 +262,54 @@ After claiming an issue, **before writing any code**, verify you are in the corr
 # 1. Create the worktree (if not already created)
 ./.loom/scripts/worktree.sh <issue-number>
 
-# 2. Change to the worktree directory
-cd .loom/worktrees/issue-<issue-number>
+# 2. Capture the worktree's ABSOLUTE path ONCE — do not rely on cwd persisting
+WORKTREE_ABS="$(cd .loom/worktrees/issue-<issue-number> && pwd)"
+echo "$WORKTREE_ABS"  # MUST end in /.loom/worktrees/issue-<number>
 
-# 3. Verify your location
-pwd  # MUST show: .loom/worktrees/issue-<number>
-git branch  # MUST show: feature/issue-<number>
+# 3. Verify the worktree's branch (works from anywhere via -C)
+git -C "$WORKTREE_ABS" branch --show-current  # MUST show: feature/issue-<number>
+```
+
+### CRITICAL: Absolute-Path Discipline (cwd does NOT persist across tool calls)
+
+**The harness resets your working directory between tool calls.** A `cd` into
+the worktree in one Bash call does **not** carry over to the next Write, Edit,
+or Bash call. If you use repo-relative paths after a cwd reset, your file
+operations resolve against the **main repo root** and silently contaminate the
+main worktree instead of your issue worktree. This is the exact failure this
+section exists to prevent (#3513, a recurrence of #2802).
+
+**The rule:** capture the worktree absolute path **once**, immediately after
+creating the worktree, and use absolute paths for **every** subsequent
+file-mutating operation. Shell variables do not survive across tool calls, so
+re-derive the literal absolute path and embed it directly in each call:
+
+```bash
+WORKTREE_ABS="$(cd .loom/worktrees/issue-<N> && pwd)"
+# e.g. /Users/you/repo/.loom/worktrees/issue-<N>
+```
+
+| Operation | WRONG (relative — lands in main after a cwd reset) | RIGHT (absolute — always lands in the worktree) |
+|-----------|-----------------------------------------------------|--------------------------------------------------|
+| Write tool | `src/foo.ts` | `<WORKTREE_ABS>/src/foo.ts` |
+| Edit tool | `src/foo.ts` | `<WORKTREE_ABS>/src/foo.ts` |
+| Bash file write | `echo x > src/foo.ts` | `echo x > "<WORKTREE_ABS>/src/foo.ts"` |
+| Bash git op | `git status` (cwd unknown) | `git -C "<WORKTREE_ABS>" status` |
+| Bash build | `cargo check` (cwd unknown) | `cd "<WORKTREE_ABS>" && cargo check` |
+
+- **Write / Edit tools**: always pass the **full absolute path** under the
+  worktree. These tools have no working directory of their own — the path you
+  give them is exactly the path that is written.
+- **Bash file mutations**: either prefix each invocation with
+  `cd "<WORKTREE_ABS>" &&`, or use absolute paths / `git -C "<WORKTREE_ABS>"`.
+  Never assume a prior `cd` is still in effect.
+
+**Before committing**, confirm your changes landed in the worktree and NOT in
+main:
+
+```bash
+git -C "<WORKTREE_ABS>" status        # your changes should appear HERE
+./.loom/scripts/check-main-clean.sh   # exits 3 if you contaminated main (#3513)
 ```
 
 **If your working directory does NOT contain `.loom/worktrees/issue-`:**
@@ -289,8 +331,9 @@ Working directly on main causes:
 
 Before writing any code, confirm ALL of these:
 - [ ] Worktree exists at `.loom/worktrees/issue-<N>`
-- [ ] Current directory is inside the worktree (not repo root)
-- [ ] Branch is `feature/issue-<N>` (not `main`)
+- [ ] Captured the worktree ABSOLUTE path once (`WORKTREE_ABS="$(cd .loom/worktrees/issue-<N> && pwd)"`)
+- [ ] Branch is `feature/issue-<N>` (not `main`) — `git -C "$WORKTREE_ABS" branch --show-current`
+- [ ] Will use absolute paths under `$WORKTREE_ABS` for every Write/Edit/Bash file operation (cwd does NOT persist across tool calls)
 - [ ] Issue is claimed with `loom:building` label
 
 **If any of these fail, STOP and fix the setup before proceeding.**

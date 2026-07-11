@@ -41,22 +41,49 @@ gh issue edit 84 --remove-label "loom:issue" --add-label "loom:building"
 # -> Creates: .loom/worktrees/issue-84
 # -> Branch: feature/issue-84
 
-# 3. Change to worktree directory
-cd .loom/worktrees/issue-84
+# 3. Capture the worktree ABSOLUTE path ONCE (see warning below)
+WORKTREE_ABS="$(cd .loom/worktrees/issue-84 && pwd)"
+# -> e.g. /Users/you/repo/.loom/worktrees/issue-84
 
-# 4. Do your work (implement, test, commit)
+# 4. Do your work using ABSOLUTE paths (implement, test, commit)
+#    - Write/Edit: pass "$WORKTREE_ABS/<file>"
+#    - Bash:       git -C "$WORKTREE_ABS" ...  OR  cd "$WORKTREE_ABS" && <cmd>
 # ... work work work ...
 
-# 5. Push and create PR from worktree
-git push -u origin feature/issue-84
+# 5. Push and create PR from the worktree
+git -C "$WORKTREE_ABS" push -u origin feature/issue-84
 gh pr create --label "loom:review-requested"
 
-# 6. Return to main workspace
-cd ../..  # Back to workspace root
-
-# 7. Worktree cleanup is automatic - DO NOT manually delete worktrees
+# 6. Worktree cleanup is automatic - DO NOT manually delete worktrees
 # Worktrees are cleaned up automatically when PRs merge or by loom-clean
 ```
+
+### CRITICAL: `cd` Does NOT Persist Across Tool Calls
+
+**The harness resets your working directory between tool calls.** A `cd
+.loom/worktrees/issue-N` in one Bash call does **not** carry over to the next
+Write, Edit, or Bash call — the next call starts back at the main repo root.
+If you rely on a persisted `cd` and then use a repo-relative path, your file
+operation lands in the **main worktree** instead of your issue worktree,
+silently contaminating main (#3513, recurrence of #2802).
+
+**Do this instead:**
+
+1. Capture the worktree's absolute path **once**, right after creating it:
+   ```bash
+   WORKTREE_ABS="$(cd .loom/worktrees/issue-N && pwd)"
+   ```
+2. Use absolute paths for **every** file-mutating operation thereafter:
+   - **Write / Edit tools** — pass the full path `"$WORKTREE_ABS/path/to/file"`.
+     These tools have no cwd; the path you give is the path written.
+   - **Bash** — either re-assert `cd "$WORKTREE_ABS" &&` at the **start of each
+     file-mutating invocation**, or use `git -C "$WORKTREE_ABS" ...` and
+     absolute paths. Never assume an earlier `cd` is still in effect.
+3. Before committing, verify your changes are in the worktree and main is clean:
+   ```bash
+   git -C "$WORKTREE_ABS" status        # changes should be HERE
+   ./.loom/scripts/check-main-clean.sh  # backstop: exits 3 if main is dirty
+   ```
 
 ### Collision Detection
 

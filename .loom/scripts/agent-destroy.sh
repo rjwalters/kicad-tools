@@ -21,6 +21,10 @@ SESSION_PREFIX="loom-"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=kill-session-tree.sh
 source "$SCRIPT_DIR/kill-session-tree.sh"
+# Shared worktree-root resolver (#3530). Terminal-destroy cleanup must
+# recognize worktrees at an overridden root, not just under .loom/worktrees.
+# shellcheck source=lib/worktree-root.sh
+source "$SCRIPT_DIR/lib/worktree-root.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -128,8 +132,18 @@ main() {
         else
             local repo_root
             if repo_root=$(find_repo_root); then
+                # Resolve the configured worktree root (#3530) so an overridden
+                # base (e.g. an external volume) is recognized as a Loom
+                # worktree here; without an override this is
+                # "$repo_root/.loom/worktrees". We accept a match against either
+                # the resolved root OR the historical .loom/worktrees substring
+                # so mixed setups (an override configured after worktrees were
+                # created under the default) still GC correctly.
+                local wt_root_dir
+                wt_root_dir="$(loom_worktree_root "$repo_root")"
                 # Only clean if it's actually a worktree (not the main repo)
-                if [[ "$worktree_path" != "$repo_root" ]] && [[ "$worktree_path" == *".loom/worktrees/"* ]]; then
+                if [[ "$worktree_path" != "$repo_root" ]] && \
+                   { [[ "$worktree_path" == "$wt_root_dir/"* ]] || [[ "$worktree_path" == *".loom/worktrees/"* ]]; }; then
                     if [[ ! -f "$worktree_path/.loom-managed" ]]; then
                         log_warn "Worktree at $worktree_path lacks .loom-managed sentinel — refusing to remove (user-owned)"
                     else

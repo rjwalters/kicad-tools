@@ -78,7 +78,14 @@ GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null) || {
 }
 REPO_ROOT=$(cd "$(dirname "$GIT_COMMON_DIR")" && pwd)
 
-WORKTREE_PATH="$REPO_ROOT/.loom/worktrees/pr-$PR_NUMBER"
+# Shared worktree-root resolver (#3530). Redirects the worktree base to an
+# external volume when LOOM_WORKTREE_ROOT / worktree.root is configured;
+# otherwise returns "$REPO_ROOT/.loom/worktrees" unchanged.
+# shellcheck source=lib/worktree-root.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree-root.sh"
+WORKTREE_ROOT_DIR="$(loom_worktree_root "$REPO_ROOT")"
+
+WORKTREE_PATH="$WORKTREE_ROOT_DIR/pr-$PR_NUMBER"
 
 # If the worktree already exists, treat it as reusable. The doctor may
 # re-enter for the same PR across multiple iterations.
@@ -106,7 +113,7 @@ print_info "  Path: $WORKTREE_PATH"
 # Create the worktree on a detached HEAD of origin/main, then run
 # `gh pr checkout` from inside it. This avoids ever touching the
 # orchestrator's main worktree HEAD.
-mkdir -p "$REPO_ROOT/.loom/worktrees"
+mkdir -p "$WORKTREE_ROOT_DIR"
 
 # Fetch origin/main so we have something to base the worktree on.
 git -C "$REPO_ROOT" fetch origin main >/dev/null 2>&1 || \

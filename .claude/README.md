@@ -112,14 +112,6 @@ The `commands/` directory contains slash commands that define Loom roles. Each c
 | `/champion` | Champion | Auto-merges approved PRs with `loom:pr` label |
 | `/loom help` | Help | Comprehensive help guide with sub-topics (roles, workflow, commands, etc.) |
 
-### kicad-tools-native Commands (`kct` namespace)
-
-The Loom commands above are vendored from [rjwalters/loom](https://github.com/rjwalters/loom). kicad-tools' **own** agent skills live under `commands/kct/` (invoked as `/kct:<name>`) — a harness-agnostic namespace kept separate from the loom tree so kicad-tools skills coexist with any installed orchestration framework. See `commands/kct/README.md` for the convention.
-
-| Command | Purpose | Model |
-|---------|---------|-------|
-| `/kct:ee-review <issue-or-board>` | Produce an advisory EE decision document (escalating intervention ladder + binding constraints, cited and confidence-graded) for an analog/placement-blocked board. Decisions, not copper. | opus |
-
 ### How Slash Commands Work
 
 **Manual Invocation**: Use slash commands to assume a role:

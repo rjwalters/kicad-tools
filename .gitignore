@@ -55,8 +55,8 @@ boards/*/*/output/renders/
 # Board metrics (generated at runtime by `kct board-metrics`, Epic #3674)
 boards/*/output/board.json
 boards/*/*/output/board.json
+.loom/sweep-checkpoint/
 .loom/worktrees/
 .loom/state.json
 .loom/*.log
 .loom/*.sock
-.loom/sweep-checkpoint/
