@@ -230,7 +230,7 @@
     (pad "M2" thru_hole circle (at 3.500 1.500) (size 1.000 1.000) (drill 0.600) (layers "*.Cu" "*.Mask") (net 3 "GND"))
   	(model "${KICAD10_3DMODEL_DIR}/Connector_FFC-FPC.3dshapes/TE_84952-6_1x06-1MP_P1.0mm_Horizontal.step"
   		(offset
-  			(xyz 0 0 0)
+  			(xyz 0 -1.475 0)
   		)
   		(scale
   			(xyz 1 1 1)
@@ -308,7 +308,7 @@
     (pad "S2" thru_hole circle (at 5.000 1.500) (size 1.200 1.200) (drill 0.700) (layers "*.Cu" "*.Mask") (net 3 "GND"))
   	(model "${KICAD10_3DMODEL_DIR}/Connector_Video.3dshapes/HDMI_A_Amphenol_10029449-x01xLF_Horizontal.step"
   		(offset
-  			(xyz 0 0 0)
+  			(xyz -0.206522 -4.7 0)
   		)
   		(scale
   			(xyz 1 1 1)
@@ -410,7 +410,7 @@
     (pad "9" thru_hole circle (at 10.160 0.000) (size 1.500 1.500) (drill 0.800) (layers "*.Cu" "*.Mask") (net 34 "A7"))
   	(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x09_P2.54mm_Vertical.step"
   		(offset
-  			(xyz 0 0 0)
+  			(xyz 0 10.16 0)
   		)
   		(scale
   			(xyz 1 1 1)

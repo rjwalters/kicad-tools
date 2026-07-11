@@ -3,8 +3,16 @@
 ``kct pcb add-3d-models`` patches missing ``(model ...)`` nodes into a
 ``.kicad_pcb`` so ``kicad-cli pcb render`` (and the KiCad 3D viewer) shows
 component bodies instead of a bare board.  The model references are copied
-verbatim from the installed KiCad footprint libraries (``.kicad_mod``
-sources), so offsets/rotations match what KiCad itself would embed.
+from the installed KiCad footprint libraries (``.kicad_mod`` sources).
+
+kicad-tools boards often reuse a canonical footprint *name* while placing
+pads on a different origin convention (origin-centered rather than KiCad's
+pad-1-at-origin), so a verbatim copy would leave the body shifted by half the
+pad pitch.  The patcher therefore adds the ``target_centroid -
+source_centroid`` pad delta into each inserted model's ``(offset (xyz ...))``
+(model-frame Y negated vs the footprint 2D frame) so the body lands on the
+target's pads.  Footprints already sharing the library convention compute a
+zero delta and are inserted verbatim.
 
 The patch is pure text insertion scoped to ``(model ...)`` metadata — no
 copper, placement, zone, or net bytes change, so DRC results are identical
