@@ -20,7 +20,10 @@ from typing import Any
 
 import pytest
 
-from kicad_tools.placement.cmaes_strategy import CMAESStrategy
+# Skip entire module if cmaes is not installed
+pytest.importorskip("cmaes", reason="cmaes not installed (optional 'placement'/'dev' extra)")
+
+from kicad_tools.placement.cmaes_strategy import CMAESStrategy  # noqa: E402
 from kicad_tools.placement.cost import (
     BoardOutline,
     ComponentPlacement,
