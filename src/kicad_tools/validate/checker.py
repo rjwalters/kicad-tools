@@ -7,6 +7,7 @@ Checks on PCB designs without requiring kicad-cli.
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from kicad_tools.manufacturers import DesignRules, get_profile
@@ -206,6 +207,53 @@ class DRCChecker:
         """
         return rule_id in cls.ADVISORY_RULE_IDS
 
+    def _absolutize(self, results: DRCResults) -> DRCResults:
+        """Rewrite violation locations from board-relative to sheet-absolute.
+
+        Every DRC rule that inspects :class:`~kicad_tools.schema.pcb.PCB`
+        geometry (pad/footprint positions, segment endpoints, via
+        positions, zone-polygon vertices) reads those attributes *after*
+        :meth:`PCB._detect_board_origin` has subtracted ``board_origin``
+        from them in place -- an internal, board-relative frame the
+        connectivity / zone-generation code relies on (see the
+        ``PCB.board_origin`` docstring).  The rules therefore build
+        ``DRCViolation.location`` in that board-relative frame.
+
+        Users, the KiCad GUI, and ``kicad-cli pcb drc`` all speak
+        sheet-absolute coordinates (the literal ``(at ...)`` values in the
+        ``.kicad_pcb`` file).  This helper adds ``board_origin`` back to
+        each violation's ``location`` exactly once so ``kct check`` reports
+        the same coordinates a human would see when clicking the defect in
+        KiCad -- fixing the per-board offset described in issue #4025.
+
+        Applied by every rule-backed ``check_*`` method.  It is deliberately
+        NOT applied to :meth:`check_pad_grid_alignment`, whose locations
+        come from :func:`router.io.load_pads_for_analysis` parsing the raw
+        ``.kicad_pcb`` text directly and are already sheet-absolute (adding
+        ``board_origin`` there would double-shift them).
+
+        Args:
+            results: A rule's board-relative :class:`DRCResults`.
+
+        Returns:
+            The same ``results`` object with each ``location`` shifted to
+            sheet-absolute coordinates.  Violations with ``location=None``
+            are left untouched.
+        """
+        ox, oy = self.pcb.board_origin
+        if ox == 0.0 and oy == 0.0:
+            # No offset to apply -- board is already at the sheet origin.
+            return results
+        shifted: list[DRCViolation] = []
+        for v in results.violations:
+            if v.location is None:
+                shifted.append(v)
+                continue
+            lx, ly = v.location
+            shifted.append(replace(v, location=(round(lx + ox, 3), round(ly + oy, 3))))
+        results.violations = shifted
+        return results
+
     def check_all(
         self,
         filters: list[ViolationFilter] | None = None,
@@ -261,7 +309,7 @@ class DRCChecker:
             DRCResults containing clearance violations
         """
         rule = ClearanceRule()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_segment_zone_clearances(self) -> DRCResults:
         """Check track segments against foreign-net zone fill copper.
@@ -281,7 +329,7 @@ class DRCChecker:
             (severity error, blocking).
         """
         rule = SegmentZoneClearanceRule()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_via_zone_clearances(self) -> DRCResults:
         """Check vias and pads against foreign-net zone fill copper.
@@ -301,7 +349,7 @@ class DRCChecker:
             ``clearance_pad_zone`` violations (severity error, blocking).
         """
         rule = ViaZoneClearanceRule()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_copper_slivers(self) -> DRCResults:
         """Check copper layers for thin slivers via a morphological open.
@@ -327,7 +375,7 @@ class DRCChecker:
             DRCResults containing ``copper_sliver`` warnings.
         """
         rule = CopperSliverRule()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_connectivity(self) -> DRCResults:
         """Check that every multi-pad net is fully connected.
@@ -349,7 +397,7 @@ class DRCChecker:
             multi-pad net (severity error).
         """
         rule = ConnectivityRule()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_diffpair_clearance_intra(self) -> DRCResults:
         """Check within-pair clearance for differential pairs.
@@ -377,7 +425,7 @@ class DRCChecker:
         """
 
         rule = DiffPairClearanceIntraRule()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def _warn_inactive_skew_rule(self, rule_name: str) -> None:
         """Emit a one-time stderr warning that a skew rule is inactive.
@@ -467,7 +515,7 @@ class DRCChecker:
             threshold_map=skew_threshold_map,
             emit_info=self._emit_skew_info,
         )
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_diffpair_routing_continuity(self) -> DRCResults:
         """Check routing continuity for engaged differential pairs.
@@ -511,7 +559,7 @@ class DRCChecker:
             threshold_map=threshold_map,
             emit_info=self._emit_skew_info,
         )
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_dimensions(self) -> DRCResults:
         """Check dimension rules (trace width, via drill, annular ring).
@@ -529,7 +577,7 @@ class DRCChecker:
         from .rules.dimensions import DimensionRules
 
         rule = DimensionRules()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_edge_clearances(self) -> DRCResults:
         """Check edge clearance rules (copper-to-board-edge).
@@ -542,7 +590,7 @@ class DRCChecker:
             DRCResults containing edge clearance violations
         """
         rule = EdgeClearanceRule()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_impedance(self) -> DRCResults:
         """Check trace widths against target impedance specifications.
@@ -602,7 +650,7 @@ class DRCChecker:
             # single-ended impedance, ``specs`` is empty -> conservative
             # no-op (no single-ended impedance errors).
             rule = ImpedanceRule(specs=specs)
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_match_group_length_skew(self) -> DRCResults:
         """Check routed-length skew for declared N-trace match groups.
@@ -669,7 +717,7 @@ class DRCChecker:
                 threshold_map=threshold_map,
                 emit_info=self._emit_skew_info,
             )
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_silkscreen(self) -> DRCResults:
         """Check silkscreen rules.
@@ -687,8 +735,10 @@ class DRCChecker:
         Returns:
             DRCResults containing silkscreen violations
         """
-        return check_all_silkscreen(
-            self.pcb, self.design_rules, suppress_library=self.suppress_library
+        return self._absolutize(
+            check_all_silkscreen(
+                self.pcb, self.design_rules, suppress_library=self.suppress_library
+            )
         )
 
     def check_solder_mask_pads(self) -> DRCResults:
@@ -705,7 +755,7 @@ class DRCChecker:
         from .rules.solder_mask import SolderMaskPadRules
 
         rule = SolderMaskPadRules()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_footprint_placement(self) -> DRCResults:
         """Check that footprints are placed inside the board outline.
@@ -717,7 +767,7 @@ class DRCChecker:
             DRCResults containing placement violations
         """
         rule = FootprintOutsideBoardRule()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_netlist(self) -> DRCResults:
         """Check for pads referencing undeclared nets.
@@ -732,7 +782,7 @@ class DRCChecker:
         from .rules.netlist import NetlistRule
 
         rule = NetlistRule()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_single_pad_nets(self) -> DRCResults:
         """Check for signal nets that are connected to only one pad.
@@ -749,7 +799,7 @@ class DRCChecker:
         from .rules.single_pad_net import SinglePadNetRule
 
         rule = SinglePadNetRule()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_via_in_pad(self) -> DRCResults:
         """Check for vias placed inside SMD pads on unsupported profiles.
@@ -767,7 +817,7 @@ class DRCChecker:
             via-in-pad (e.g., jlcpcb-tier1, pcbway).
         """
         rule = ViaInPadRule()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_zones(self) -> DRCResults:
         """Check zone fill rules (unfilled zones, disabled fill, unassigned nets).
@@ -780,7 +830,7 @@ class DRCChecker:
             DRCResults containing zone fill violations
         """
         rule = ZoneFillRule()
-        return rule.check(self.pcb, self.design_rules)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_pad_grid_alignment(
         self,
