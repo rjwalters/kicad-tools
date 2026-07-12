@@ -203,6 +203,11 @@ def run_route_command(args) -> int:
     # explicitly-provided values (matches the early-stop-patience pattern).
     if getattr(args, "targeted_ripup", False):
         sub_argv.append("--targeted-ripup")
+    # Issue #4053: forward --bundle-river-planner.  Both parsers declare it
+    # as store_true defaulting to False, so only forward when the user set
+    # it (byte-identical when absent).
+    if getattr(args, "bundle_river_planner", False):
+        sub_argv.append("--bundle-river-planner")
     max_ripups_val = getattr(args, "max_ripups_per_net", None)
     if max_ripups_val is not None:
         sub_argv.extend(["--max-ripups-per-net", str(max_ripups_val)])

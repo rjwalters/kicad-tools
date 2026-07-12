@@ -2746,6 +2746,23 @@ def _add_route_parser(subparsers) -> None:
             "and the two-phase initial-pass stall recovery."
         ),
     )
+    route_parser.add_argument(
+        "--bundle-river-planner",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable the scoped bundle river planner for mirrored byte-lane "
+            "bus reversals (Issue #4053, epic #4049).  Board 07's DDR data "
+            "byte is a FULL bus reversal between two facing QFN-48 pin "
+            "columns (all C(11,2)=55 pairs cross), which planar same-layer "
+            "lane ordering cannot solve (every ordering-only approach "
+            "capped at <=10/11).  Resolves both facing rows, diffs their "
+            "permutation, and reserves one inner-layer via-hop corridor per "
+            "inverted (crossing) pair so the losing net can dip under its "
+            "partner.  Default OFF (byte-identical when absent); DDR-bundle "
+            "scoped in v1."
+        ),
+    )
     # Issue #3054 (Phase 2 of #3045): wire region-based parallelism through to
     # ``route_all_negotiated``.  Opt-in (default off) so existing scripts and
     # CI runs see byte-identical routes; when set, the negotiated loop

@@ -2785,6 +2785,21 @@ def _apply_ripup_budget_override(router: "Autorouter", args) -> None:
     router.stall_ripup_budget = budget
 
 
+def _apply_bundle_river_planner(router: "Autorouter", args) -> None:
+    """Enable the scoped bundle river planner when requested (Issue #4053).
+
+    Off by default (mirrors ``enable_byte_lane_reorder`` / the #4051
+    precedent).  When ``--bundle-river-planner`` is passed, set the
+    router's ``enable_bundle_river_planner`` flag so
+    ``_apply_byte_lane_inner_priority`` reserves inner-layer via-hop
+    corridors for the inverted (crossing) pairs of a mirrored byte-lane
+    bus reversal (board 07's DDR byte).  A no-op when the flag is absent,
+    so production routing is byte-identical to pre-#4053 main.
+    """
+    if getattr(args, "bundle_river_planner", False):
+        router.enable_bundle_river_planner = True
+
+
 def _targeted_ripup_budget(args) -> int:
     """Resolve ``--max-ripups-per-net`` for the negotiated targeted path.
 
@@ -3558,6 +3573,7 @@ def route_with_layer_escalation(
         # Issue #3470: thread --max-ripups-per-net into the destructive
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
+        _apply_bundle_river_planner(router, args)
 
         # Issue #3171: inject boosted analog routing class for --analog-nets /
         # --auto-analog selected nets (pour/ground nets are left untouched).
@@ -4457,6 +4473,7 @@ def route_with_rule_relaxation(
         # Issue #3470: thread --max-ripups-per-net into the destructive
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
+        _apply_bundle_river_planner(router, args)
 
         # Issue #3171: inject boosted analog routing class for --analog-nets /
         # --auto-analog selected nets (pour/ground nets are left untouched).
@@ -6557,6 +6574,7 @@ def route_with_combined_escalation(
             # Issue #3470: thread --max-ripups-per-net into the destructive
             # rip-up budgets (route_all + two-phase stall recovery).
             _apply_ripup_budget_override(router, args)
+            _apply_bundle_river_planner(router, args)
 
             # Issue #3171: inject boosted analog routing class for --analog-nets
             # / --auto-analog selected nets (pour/ground nets left untouched).
@@ -7271,6 +7289,23 @@ def main(argv: list[str] | None = None) -> int:
             "cannot recover.  The underlying implementation "
             "(route_all_negotiated(use_targeted_ripup=...)) predates this "
             "flag but was previously unreachable from the CLI."
+        ),
+    )
+    parser.add_argument(
+        "--bundle-river-planner",
+        action="store_true",
+        help=(
+            "Enable the scoped bundle river planner for mirrored byte-lane "
+            "bus reversals (Issue #4053, epic #4049).  Board 07's DDR data "
+            "byte is a FULL bus reversal between two facing QFN-48 pin "
+            "columns (all C(11,2)=55 pairs cross), which planar same-layer "
+            "lane ordering cannot solve — every ordering-only approach "
+            "(#3438/#4050/#4051) capped at <=10/11.  This flag resolves both "
+            "facing rows, diffs their permutation, and reserves one "
+            "inner-layer via-hop corridor per inverted (crossing) pair so "
+            "the losing net can dip under its partner.  Default OFF "
+            "(byte-identical to prior behaviour when absent); DDR-bundle "
+            "scoped in v1."
         ),
     )
     parser.add_argument(
@@ -8952,6 +8987,7 @@ def main(argv: list[str] | None = None) -> int:
     # Issue #3470: thread --max-ripups-per-net into the destructive
     # rip-up budgets (route_all + two-phase stall recovery).
     _apply_ripup_budget_override(router, args)
+    _apply_bundle_river_planner(router, args)
 
     # Issue #3171: inject boosted analog routing class for --analog-nets /
     # --auto-analog selected nets (pour/ground nets are left untouched).
