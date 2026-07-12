@@ -1,12 +1,18 @@
-"""Tests for the mirrored byte-lane scaffolding hook (Issue #2962).
+"""Tests for the mirrored byte-lane escape ordering (Issues #2962 /
+#2983 / #4051).
 
 The :meth:`Autorouter._apply_byte_lane_inner_priority` helper detects
 mirrored byte-lane match groups (e.g. board 07's DDR data byte on a
-mirrored QFN-48 pair) but, in this scaffolding-only cut, **returns the
-input net order unchanged**.  The detection / projection / sort
-machinery and the three integration hook sites (``route_all``,
-``route_all_negotiated``, ``TwoPhaseRouter``) are preserved as the
-surface for a future layered-escape PR.
+mirrored QFN-48 pair) and, for a qualifying group, (a) reserves an
+inner-corner corridor (Issue #2983) and (b) reorders the group's slots
+by *reactive escape freedom* (Issue #4051): the least-free/outermost
+nets are scheduled first so they claim lanes on the shared F.Cu escape
+strip before their more-free neighbours fill them.  The reorder is
+applied only to the slots the group already occupies, so non-group nets
+and the three integration hook sites (``route_all``,
+``route_all_negotiated``, ``TwoPhaseRouter``) preserve their ordering.
+Non-qualifying inputs (tiny / no-group / small-group) keep the identity
+ordering.
 
 PR #2969 design history (preserved as the AC for issue #2962's
 net-ordering exploration):
@@ -49,7 +55,7 @@ issue):
         remaining lateral lane.
     The inner-corner nets are squeezed out.
 
-The helper's current scaffolding contract:
+The helper's current contract:
 
 1.  **Identity on tiny inputs** -- ``net_order`` shorter than 4 is
     returned unchanged.
@@ -58,11 +64,12 @@ The helper's current scaffolding contract:
 3.  **Identity on small groups** -- groups with fewer than 5 members
     don't exhibit the mirrored byte-lane topology; the helper degrades
     to identity for them.
-4.  **Identity on mirrored byte-lane groups** -- detection runs but
-    no reorder is applied.  A future PR will replace this with a
-    placement-aware layered-escape strategy.
-5.  **Multi-group preservation** -- non-byte-lane groups in the same
-    routing pass are not affected.
+4.  **Reactive reorder on mirrored byte-lane groups** (Issue #4051) --
+    detection runs and the group's slots are permuted into a
+    corner-first escape-freedom schedule.
+5.  **Multi-group / non-group preservation** -- nets outside a
+    qualifying byte-lane keep their exact slots (the reorder only
+    permutes within the group's occupied slots).
 6.  **Length and membership invariant** -- output is always a
     permutation of the input.
 """
@@ -223,70 +230,84 @@ class TestIdentityOnSmallGroups:
         assert out == net_ids
 
 
-class TestScaffoldingIdentityOnByteLane:
-    """Mirrored byte-lane groups return identity, with corridor reservation.
+class TestReactiveReorderOnByteLane:
+    """Mirrored byte-lane groups are reordered by escape freedom.
 
-    Issue #2983 updates the contract: the helper still returns the
-    input net order unchanged (PR #2969 R1/R2/R3 proved net-ordering
-    changes alone are insufficient and, in R1, regressed DRC), but
-    the **corridor reservation** side-effect now runs for each
-    detected mirrored byte-lane group.  The reservation lands ONLY
-    when a routable inner layer is available in the stack-up; the
-    fixture here does NOT pass a ``layer_stack`` so the internal
-    2-layer fallback is in effect and the reservation is correctly
-    skipped (the 2-layer guard prevents starving partner-net
-    escapes — see ``test_byte_lane_corridor_reservation.py`` for
-    the multi-layer reservation contract).
+    Issue #4051 (Phase 1b of epic #4049) updates the contract: for a
+    qualifying mirrored byte-lane the helper now returns a *reactive
+    escape-freedom permutation* of the input (least-free/outermost nets
+    scheduled first), not the identity order.  Historical context: PR
+    #2969's R1/R2/R3 proved a *static* permutation alone is insufficient
+    and #2983 shipped corridor-reservation-only with an identity order;
+    #4051 adds the *reactive* schedule on top of that reservation.
 
-    The detection / projection / sort machinery runs eagerly so
-    callers observe consistent intermediate state.  The integration
-    hooks (``route_all``, ``route_all_negotiated``, ``TwoPhaseRouter``)
-    consume the unchanged order and the escape pre-pass + main
-    routing loop honour the per-cell reservation via
-    ``RoutingGrid._mark_via``.
+    The schedule seeds the two row extremes (corners), then advances
+    inward from whichever side's frontier gap is currently smallest,
+    ending on the centre net.  For a uniform-pitch synthetic row the
+    gaps tie, so the schedule is deterministic:
+    ``[0, N-1, N-2, ..., 1]``-style corner-first walk (see
+    :meth:`Autorouter._schedule_by_escape_freedom`).
     """
 
-    def test_nine_net_byte_lane_identity(self) -> None:
-        """9-net byte-lane (DDR-byte minus DQS pair): detection runs,
-        no reorder applied — output equals input.
+    def test_default_flag_off_is_identity(self) -> None:
+        """Default (``enable_byte_lane_reorder`` False): a qualifying
+        byte-lane returns the identity order.
 
-        Issue #2983 contract: ordering is identity, AND on a
-        multi-layer stack-up the corridor reservation runs as a
-        side effect.  This fixture uses the default 2-layer
-        Autorouter (no ``layer_stack``), so the reservation is
-        correctly skipped here by the 2-layer guard.  See
-        ``test_byte_lane_corridor_reservation.py`` for the
-        reservation count assertions on 4-layer stack-ups.
+        This pins the production non-regression contract — the reorder
+        is opt-in because it regressed board 07's DDR bundle.
         """
         router, net_ids, _ = _make_byte_lane_router(group_size=9)
+        # Flag defaults to False; do NOT enable it.
+        out = router._apply_byte_lane_inner_priority(net_ids)
+        assert out == net_ids
+
+    def test_nine_net_byte_lane_reordered(self) -> None:
+        """9-net byte-lane (DDR-byte minus DQS pair): reactive reorder
+        applied — output is a corner-first permutation of the input.
+
+        This fixture uses the default 2-layer Autorouter (no
+        ``layer_stack``), so the corridor reservation is correctly
+        skipped by the 2-layer guard, but the *reorder* still fires
+        (it is independent of the reservation).  See
+        ``test_byte_lane_corridor_reservation.py`` for the
+        reservation-count assertions on 4-layer stack-ups.
+        """
+        router, net_ids, _ = _make_byte_lane_router(group_size=9)
+        # Issue #4051: the reorder is opt-in (OFF by default because it
+        # regressed board 07); enable it to exercise the reorder contract.
+        router.enable_byte_lane_reorder = True
 
         out = router._apply_byte_lane_inner_priority(net_ids)
 
-        # Identity contract: output is the input list, unchanged.
-        assert out == net_ids
-        # Membership + length invariants hold trivially under identity.
+        # Permutation invariant.
         assert len(out) == len(net_ids)
         assert set(out) == set(net_ids)
+        # Non-identity: the reorder is active for this qualifying group.
+        assert out != net_ids
+        # Corner-first: both row extremes are scheduled before the centre.
+        assert out[0] == net_ids[0]  # top corner first
+        assert out[1] == net_ids[-1]  # bottom corner second
+        assert out[-1] == net_ids[len(net_ids) // 2]  # centre last
         # 2-layer fallback => no reservation on this fixture.
         assert router._escape.byte_lane_corridor_reservations == 0
 
-    def test_ten_net_byte_lane_identity(self) -> None:
-        """A 10-net byte-lane (full DDR-byte): detection runs, but
-        no reorder is applied — output equals input.
+    def test_ten_net_byte_lane_reordered(self) -> None:
+        """A 10-net byte-lane (full DDR-byte): reactive reorder applied.
 
-        See the module docstring for the R1/R2/R3 design-history
-        trace explaining why net-ordering alone is insufficient,
-        and ``test_byte_lane_corridor_reservation.py`` for the
-        Issue #2983 reservation-count assertions on multi-layer
-        stack-ups (where the corridor is actually carved out).
+        See the module docstring for the R1/R2/R3 design-history trace
+        explaining why a *static* net-ordering alone is insufficient,
+        and ``test_byte_lane_corridor_reservation.py`` for the Issue
+        #2983 reservation-count assertions on multi-layer stack-ups.
         """
         router, net_ids, _ = _make_byte_lane_router(group_size=10)
+        router.enable_byte_lane_reorder = True
         out = router._apply_byte_lane_inner_priority(net_ids)
 
-        # Identity contract.
-        assert out == net_ids
         assert len(out) == len(net_ids)
         assert set(out) == set(net_ids)
+        assert out != net_ids
+        assert out[0] == net_ids[0]  # top corner first
+        assert out[1] == net_ids[-1]  # bottom corner second
         # 2-layer fallback => no reservation on this fixture.
         assert router._escape.byte_lane_corridor_reservations == 0
 
@@ -297,6 +318,7 @@ class TestMultiGroupPreservation:
     def test_non_group_nets_keep_position(self) -> None:
         """Add 3 ungrouped nets and confirm they keep their slots."""
         router, byte_lane_ids, _ = _make_byte_lane_router(group_size=9)
+        router.enable_byte_lane_reorder = True
 
         # Add 3 standalone nets after the byte-lane group.  These have
         # NO match-group declaration, so the helper must leave them in
@@ -320,12 +342,17 @@ class TestMultiGroupPreservation:
         net_order = byte_lane_ids + extra_ids
         out = router._apply_byte_lane_inner_priority(net_order)
 
-        # Under the scaffolding cut the full input order is preserved,
-        # which trivially keeps the standalone nets in place.
-        assert out == net_order
         # Membership preserved.
         assert set(out) == set(net_order)
         assert len(out) == len(net_order)
+        # Issue #4051: the byte-lane group is reordered *within the
+        # slots it already occupies* (slots 0..8 here), so the 3
+        # standalone nets at slots 9,10,11 keep their exact positions.
+        assert out[9:] == extra_ids
+        # The byte-lane slots now hold a permutation of the group.
+        assert set(out[:9]) == set(byte_lane_ids)
+        # And the reorder is active (non-identity) on the group slots.
+        assert out[:9] != byte_lane_ids
 
 
 class TestPermutationInvariant:
@@ -340,14 +367,12 @@ class TestPermutationInvariant:
 
     def test_horizontal_row_orientation(self) -> None:
         """A horizontal row (pads share y, vary x) exercises the
-        axis-with-greater-variance detection branch but, in the
-        scaffolding cut, still returns identity.
+        axis-with-greater-variance detection branch AND the reactive
+        reorder (Issue #4051).
 
-        Round-4 contract per PR #2969: even when the detection logic
-        successfully classifies the row, no reorder is applied.  The
-        axis-selection branch is exercised here for coverage so a
-        future layered-escape implementation has a regression
-        fingerprint to compare against.
+        The row long axis is x here; the scheduler projects onto x,
+        seeds the two x-extremes, and walks inward — a corner-first
+        permutation, same as the vertical case.
         """
         cls = NetClassRouting(
             name="HORIZ_BUS",
@@ -392,12 +417,17 @@ class TestPermutationInvariant:
             net_class_map[nm] = cls
             net_ids.append(net_id)
         router.net_class_map = net_class_map
+        router.enable_byte_lane_reorder = True
 
         out = router._apply_byte_lane_inner_priority(net_ids)
 
-        # Identity contract: horizontal row detection runs but no
-        # reorder is applied.
-        assert out == net_ids
+        # Issue #4051: reactive reorder is applied to the horizontal row.
+        assert set(out) == set(net_ids)
+        assert out != net_ids
+        # Corner-first: the two x-extremes escape before the centre.
+        assert out[0] == net_ids[0]
+        assert out[1] == net_ids[-1]
+        assert out[-1] == net_ids[len(net_ids) // 2]
 
 
 class TestNonMirroredTopologyGracefulFallback:
@@ -439,3 +469,64 @@ class TestNonMirroredTopologyGracefulFallback:
         # No primary component has 5+ group-member pads -> no promotion
         # plan -> identity.
         assert out == net_ids
+
+
+class TestScheduleByEscapeFreedom:
+    """Unit tests for the reactive escape-freedom scheduler (Issue #4051).
+
+    The scheduler operates on a row-sorted member list and a row-axis
+    projection map.  It seeds the two extremes (corners), then advances
+    inward from whichever side's frontier gap is currently smaller,
+    ending on the centre.  For a uniform-pitch row the gaps tie every
+    step so the walk is deterministic and reproducible.
+    """
+
+    def test_permutation_invariant(self) -> None:
+        members = list(range(11))
+        pos = {i: float(i) * 0.8 for i in members}
+        sched = Autorouter._schedule_by_escape_freedom(members, pos)
+        assert sorted(sched) == sorted(members)
+
+    def test_corners_first_centre_last_uniform(self) -> None:
+        """Uniform pitch: extremes scheduled first, centre last."""
+        members = list(range(11))
+        pos = {i: float(i) * 0.8 for i in members}
+        sched = Autorouter._schedule_by_escape_freedom(members, pos)
+        assert sched[0] == 0  # top corner
+        assert sched[1] == 10  # bottom corner
+        assert sched[-1] == 5  # centre net routes last
+
+    def test_tighter_side_advances_first(self) -> None:
+        """Reactive property: the side with the smaller frontier gap is
+        served before the looser side.
+
+        Squeeze the high end (indices 8,9 close together) and leave the
+        low end evenly spaced.  After the two corners (0 and 10) are
+        seeded, the high frontier's inward gap (10->9) is smaller than
+        the low frontier's (0->1), so index 9 is scheduled before 1.
+        """
+        members = list(range(11))
+        pos = {i: float(i) for i in members}
+        pos[9] = 8.1  # 9 close to 10 (gap 1.9 vs low gap 1.0)... make hi tighter
+        pos[8] = 8.0
+        # Recompute to guarantee the hi frontier gap (|pos[10]-pos[9]|)
+        # is the smaller one after seeding corners.
+        pos[10] = 8.15
+        sched = Autorouter._schedule_by_escape_freedom(members, pos)
+        assert sorted(sched) == sorted(members)
+        # index 9 (tighter hi frontier) is scheduled before index 1.
+        assert sched.index(9) < sched.index(1)
+
+    def test_short_group_returns_input(self) -> None:
+        """Fewer than 3 members: nothing to schedule, return as-is."""
+        assert Autorouter._schedule_by_escape_freedom([7, 8], {7: 0.0, 8: 1.0}) == [
+            7,
+            8,
+        ]
+
+    def test_odd_and_even_sizes_terminate(self) -> None:
+        for n in (5, 6, 9, 10, 11, 12):
+            members = list(range(n))
+            pos = {i: float(i) for i in members}
+            sched = Autorouter._schedule_by_escape_freedom(members, pos)
+            assert sorted(sched) == sorted(members), f"n={n}"

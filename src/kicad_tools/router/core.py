@@ -865,6 +865,18 @@ class Autorouter:
         # iteration slice and skips the Python fallback for capped nets.
         self._per_net_iterations = int(per_net_iterations) if per_net_iterations else 0
 
+        # Issue #4051 (Phase 1b, epic #4049): reactive escape-freedom
+        # reorder for mirrored byte-lane bundles.  OFF by default:
+        # measured on board 07's DDR bundle it REGRESSED reach
+        # (10/11 -> 9/11, DQ2+DQ3 stranded vs DQ3 alone), matching
+        # #3438's finding that an outside-in-style schedule tops out
+        # below the identity baseline on this bundle.  The scheduler
+        # (``_schedule_by_escape_freedom``) and its wiring are kept
+        # behind this flag so the capability + diagnostics are available
+        # for future geometries without perturbing production routing.
+        # Set to True to opt in (see ``_apply_byte_lane_inner_priority``).
+        self.enable_byte_lane_reorder = False
+
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
         self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
@@ -4698,15 +4710,38 @@ class Autorouter:
         return out
 
     def _apply_byte_lane_inner_priority(self, net_order: list[int]) -> list[int]:
-        """Scaffolding-only detection hook for mirrored byte-lane match groups.
+        """Escape-freedom net ordering for mirrored byte-lane match groups.
 
-        Status: **scaffolding only (identity return)**.  This helper
-        detects mirrored byte-lane match groups (e.g. board 07's DDR
-        data byte on a mirrored QFN-48 pair) but does NOT modify the
-        net order.  It exists as the integration surface for a future
-        layered-escape strategy (see follow-up issue
-        ``router: layered-escape strategy for mirrored byte-lane DDR
-        (decouples via placement from net ordering)``).
+        This helper detects mirrored byte-lane match groups (e.g. board
+        07's DDR data byte on a mirrored QFN-48 pair) and, for each
+        qualifying group, does two things:
+
+        1. **Corridor reservation** (Issue #2983 / PR #2987): reserves an
+           inner-layer lateral corridor for the inner-corner pads (sorted
+           row positions 1 and N-2) before any corner-net through-hole
+           via is placed.  This is a *geometric* side effect and is
+           preserved unchanged.
+        2. **Reactive escape-freedom reorder** (Issue #4051, Phase 1b of
+           epic #4049): permutes the group's slots in ``net_order`` so
+           the least-free (outermost/corner) nets escape onto the shared
+           F.Cu strip before their more-free neighbours fill it.  See
+           ``_reactive_escape_freedom_order`` for the scheduling rule.
+           Only the slots the group already occupies are permuted; every
+           non-group net keeps its exact position.
+
+        Gating (``enable_byte_lane_reorder``, default ``False``): the
+        reorder in step 2 is **off by default** because it was measured
+        to REGRESS board 07's DDR bundle (10/11 -> 9/11 routed; see the
+        Issue #4051 measurement).  When disabled, this method still runs
+        detection and the corridor reservation (step 1) and returns the
+        identity order, exactly as before Issue #4051.  The scheduler is
+        retained behind the flag so the capability and its diagnostics
+        stay available for future non-uniform bundle geometries where an
+        outside-in-style schedule is not equivalent to the reactive one.
+        Detection requires a match group of at least
+        ``MIN_BYTE_LANE_SIZE`` members projecting onto a single
+        co-located row on one component (the mirrored byte-lane
+        topology); boards without such a group are always identity.
 
         Issue #2962: On board 07 a DDR data byte (10 nets routed between
         mirrored QFN-48 packages U1 and U2) repeatedly leaves the
@@ -4742,14 +4777,21 @@ class Autorouter:
           DRC 12 (well under 70 allowlist), but DQ5 still blocked by
           DQ4 with the SAME 0.44mm clearance failure as round 2 --
           the underlying constraint is geometric, not orderable.
-        - **Conclusion** (this PR, terminal outcome): convert the
-          helper to scaffolding-only (identity return).  The
-          detection / projection / sort machinery and all three
-          integration hook sites are kept in place as the surface
-          for a future PR that implements a layered-escape strategy
-          (corridor reservation, deferred via stitching for the
-          inner-corner pads, or explicit lateral-lane assignment --
-          all approaches that decouple via placement from priority).
+        - **PR #2969 outcome**: net-ordering *permutation alone* could
+          not resolve the round-1/2/3 geometric collision, so that PR
+          left the helper as a detection-only scaffold (identity return)
+          and preserved the three integration hook sites.
+        - **Issue #2983 / PR #2987**: landed corridor reservation as the
+          first real side effect (see item 1 above) while keeping the
+          net order identity.
+        - **Issue #4051 (this change)**: adds the reactive
+          escape-freedom reorder (item 2 above) *on top of* the corridor
+          reservation.  It differs from PR #2969's static permutations by
+          re-evaluating each net's escape freedom against the neighbours
+          committed so far, rather than applying a permutation fixed up
+          front (the three static permutations tried in #3438 --
+          monotone, reverse, outside-in -- topped out at 10/11, 10/11,
+          8/11).
 
         Three integration hooks remain wired (``route_all``,
         ``route_all_negotiated``, and ``TwoPhaseRouter`` via the
@@ -4758,8 +4800,7 @@ class Autorouter:
         ``_interleave_match_groups`` BEFORE this helper, preserving
         PR #2914's starvation-fairness guarantee.
 
-        Detection (kept for inspection / future use, geometry-only,
-        no hardcoded net names):
+        Detection (geometry-only, no hardcoded net names):
 
         1. Identify match groups with at least ``MIN_BYTE_LANE_SIZE``
            members.  Smaller groups don't exhibit the mirrored byte-lane
@@ -4771,22 +4812,18 @@ class Autorouter:
            least ``MIN_BYTE_LANE_SIZE`` to confirm a co-located row.
         4. Project pads onto the axis with greater spatial variance
            (the row's long axis).  Sort by that projection.
-        5. The pads at sorted index 1 and N-2 are "inner-corner".
-
-        The detection loop runs eagerly but is otherwise side-effect
-        free; the eventual reorder step is intentionally omitted in
-        this scaffolding cut.  Future work can replace the
-        ``# (scaffolding fallback) ...`` block at the end with a real
-        layered-escape implementation without touching the three
-        callers.
+        5. The pads at sorted index 1 and N-2 are "inner-corner"
+           (corridor-reservation targets); the row-sorted list is then
+           handed to the reactive escape-freedom scheduler for reorder.
 
         Args:
             net_order: Routing order after ``_interleave_match_groups``.
 
         Returns:
-            ``net_order`` unchanged.  Detection telemetry is currently
-            discarded; future revisions may emit a diagnostic via the
-            logger or thread a placement-aware reorder through here.
+            ``net_order`` with each qualifying byte-lane group's occupied
+            slots permuted into the reactive escape-freedom schedule
+            (identity when no qualifying group is present).  Always a
+            permutation of the input.
         """
         # Minimum group size to qualify as a mirrored byte-lane.  A
         # 4-net group can't be congested enough at its row middle to
@@ -4840,11 +4877,23 @@ class Autorouter:
             if nid in net_order_set:
                 groups.setdefault(grp, []).append(nid)
 
-        # Detection-only scan.  We walk each candidate group, identify
-        # its primary component, project pads onto the row axis, and
-        # locate the inner-corner indices -- but DO NOT promote (the
-        # round-3 promote-rank-0 implementation was a no-op against the
-        # underlying geometric constraint; see method docstring).
+        # Reorder plans collected during the scan: for each qualifying
+        # byte-lane group we record the row-sorted net ids so that, after
+        # the corridor-reservation pass, we can permute each group's
+        # occupied slots into an escape-freedom schedule (see
+        # ``_reactive_escape_freedom_order``).  ``escape_row_positions``
+        # maps net_id -> its 1D projection along the row long axis, used
+        # by the reactive scheduler to reason about neighbour proximity.
+        reorder_plans: list[list[int]] = []
+        escape_row_positions: dict[int, float] = {}
+
+        # Detection scan.  We walk each candidate group, identify its
+        # primary component, project pads onto the row axis, and locate
+        # the inner-corner indices.  As of Issue #4051 (Phase 1b of epic
+        # #4049) this scan additionally records a reorder plan per
+        # qualifying group; the corridor reservation for the
+        # inner-corner pads (positions 1 / N-2, Issue #2983 / PR #2987)
+        # still fires as before.
         for grp_name, grp_net_ids in groups.items():
             if len(grp_net_ids) < MIN_BYTE_LANE_SIZE:
                 continue
@@ -4910,6 +4959,17 @@ class Autorouter:
             n = len(sorted_nets)
             if n < MIN_BYTE_LANE_SIZE:
                 continue
+
+            # Issue #4051: record this group's row-sorted order and the
+            # per-net row-axis projection so the reactive escape-freedom
+            # scheduler (applied after the corridor-reservation pass) can
+            # permute the group's slots in ``net_order``.  ``proj`` is the
+            # coordinate along the row long axis (y for a vertical row,
+            # x for a horizontal one).
+            proj_index = 1 if y_span >= x_span else 0
+            for nid_s in sorted_nets:
+                escape_row_positions[nid_s] = net_to_pad[nid_s][proj_index]
+            reorder_plans.append(list(sorted_nets))
 
             # Inner-corner indices in the sorted row.  Position 1 (one in
             # from the top corner) and position n-2 (one in from the
@@ -4996,14 +5056,210 @@ class Autorouter:
                         exc_info=True,
                     )
 
-        # Identity ordering preserved: the corridor reservation is the
-        # mechanism that breaks the geometric collision (PR #2969 proved
-        # net-ordering changes alone could not).  Callers
-        # (``route_all``, ``route_all_negotiated``, ``TwoPhaseRouter``)
-        # consume the unchanged order and the escape pre-pass + main
-        # routing loop honour the per-cell reservation via
-        # ``RoutingGrid._mark_via``.
-        return net_order
+        # Issue #4051 (Phase 1b, epic #4049): apply a reactive
+        # escape-freedom reorder on top of the corridor reservation.
+        # Each qualifying byte-lane group's members are permuted *within
+        # the slots they already occupy* in ``net_order`` so that nets
+        # with the least escape freedom are scheduled first (they claim
+        # lanes on the shared F.Cu escape strip before their more-free
+        # neighbours fill them).  Non-group nets keep their positions
+        # exactly; the corridor reservation above is unchanged.  See
+        # ``_reactive_escape_freedom_order`` for the scheduling rule and
+        # the design history (three *static* permutations -- monotone,
+        # reverse, outside-in -- were already isolation-tested on this
+        # bundle in #3438 and topped out at 10/11, 10/11, 8/11; this is a
+        # *reactive* schedule that re-evaluates neighbour proximity as
+        # each net is placed, the one variant not yet tried).
+        #
+        # Gated OFF by default (``enable_byte_lane_reorder``): the reorder
+        # was measured to REGRESS board 07's DDR bundle (10/11 -> 9/11, DQ2
+        # and DQ3 stranded vs DQ3 alone), matching #3438's finding that an
+        # outside-in-style schedule tops out below the identity baseline on
+        # this bundle.  When disabled the method still runs detection +
+        # corridor reservation and returns the identity order, exactly as
+        # before Issue #4051 -- so production routing is unperturbed.  The
+        # scheduler and its wiring are retained behind the flag so the
+        # capability + diagnostics remain available for future geometries.
+        if not reorder_plans or not getattr(self, "enable_byte_lane_reorder", False):
+            return net_order
+
+        reordered = self._reactive_escape_freedom_order(
+            net_order, reorder_plans, escape_row_positions
+        )
+        # Permutation invariant: never drop or duplicate a net.  A
+        # bug in the reorder must degrade to identity, not corrupt the
+        # routing set (defense-in-depth, mirrors _interleave_match_groups).
+        if sorted(reordered) != sorted(net_order):
+            logger.error(
+                "_apply_byte_lane_inner_priority reorder produced a "
+                "non-permutation (%d in, %d out); falling back to identity",
+                len(net_order),
+                len(reordered),
+            )
+            return net_order
+        return reordered
+
+    def _reactive_escape_freedom_order(
+        self,
+        net_order: list[int],
+        reorder_plans: list[list[int]],
+        row_positions: dict[int, float],
+    ) -> list[int]:
+        """Reactively schedule byte-lane members by escape freedom.
+
+        Issue #4051.  For each detected mirrored byte-lane group
+        (``reorder_plans`` entries are the group members sorted along the
+        row long axis, outer-to-inner-to-outer), compute a routing order
+        that schedules the **least-free** nets first, re-evaluating each
+        net's freedom against the neighbours already committed *this
+        step* rather than from a fixed positional rule.
+
+        Why reactive rather than static:  on the board-07 DDR bundle
+        every net must escape onto one shared F.Cu strip (in-column vias
+        are forbidden at 0.8 mm pitch), and whichever nets are scheduled
+        *last* get sealed out by earlier nets' stubs/vias (#3438).  The
+        outermost/corner nets have the least lateral freedom (only one
+        direction is "outward" and it is the one most likely already
+        claimed), so they must go first.  Three *static* permutations of
+        this intuition (monotone, reverse, outside-in) were already
+        measured on this exact bundle in #3438 and none reached 11/11.
+        The untried signal is a schedule that, at every step, picks the
+        remaining net whose escape corridor is *currently* most
+        threatened by an already-scheduled neighbour -- a greedy that
+        reacts to committed geometry instead of a permutation fixed up
+        front.
+
+        The scheduler:
+
+        1. Seed the schedule with the two row extremes (indices 0 and
+           N-1 of the sorted group).  These are the corner nets: each has
+           an already-open outward side and a single inward neighbour, so
+           they are the least free and must escape first.
+        2. Repeatedly select, from the not-yet-scheduled members, the net
+           adjacent to the *frontier* (the innermost scheduled net on each
+           side) whose remaining escape gap is smallest -- i.e. the net
+           most threatened by the neighbour just committed.  This walks
+           inward from both ends, but the *choice of which side advances*
+           is recomputed each step from the current frontier gaps, so a
+           tighter side is served before a looser one (the reactive part).
+        3. The centre net(s) -- flanked on both sides by committed
+           neighbours and therefore having a corridor argument on each
+           side -- are scheduled last.
+
+        The permutation is applied only to the ``net_order`` slots the
+        group already occupies, so non-group nets and inter-group
+        ordering (starvation fairness from ``_interleave_match_groups``)
+        are preserved exactly.
+
+        Args:
+            net_order: The full routing order after corridor reservation.
+            reorder_plans: One list per qualifying group, each the group's
+                net ids sorted along the row long axis.
+            row_positions: net_id -> row-axis projection (mm).
+
+        Returns:
+            ``net_order`` with each group's occupied slots permuted into
+            the reactive escape-freedom schedule.  Always a permutation
+            of the input.
+        """
+        result = list(net_order)
+        pos_in_order = {nid: i for i, nid in enumerate(net_order)}
+
+        for sorted_nets in reorder_plans:
+            members = [nid for nid in sorted_nets if nid in pos_in_order]
+            if len(members) < 3:
+                continue
+
+            schedule = self._schedule_by_escape_freedom(members, row_positions)
+            if sorted(schedule) != sorted(members):
+                # Defensive: bad schedule -> leave this group untouched.
+                continue
+
+            # The slots this group occupies in net_order, in ascending
+            # index order.  We drop the group's members into those exact
+            # slots following the escape-freedom schedule, so every other
+            # net keeps its position.
+            slots = sorted(pos_in_order[nid] for nid in members)
+            for slot, nid in zip(slots, schedule, strict=True):
+                result[slot] = nid
+
+        return result
+
+    @staticmethod
+    def _schedule_by_escape_freedom(
+        members: list[int],
+        row_positions: dict[int, float],
+    ) -> list[int]:
+        """Order one byte-lane group least-free-first (Issue #4051).
+
+        ``members`` is the group's net ids sorted along the row long
+        axis.  Returns a reordering that schedules the two row extremes
+        first, then reactively advances whichever side's frontier gap is
+        currently smallest, ending on the centre net(s).
+
+        The "gap" for a candidate net is its row-axis distance to the
+        neighbour already scheduled on its outward side -- the smaller
+        the gap, the more threatened its escape corridor by that
+        committed neighbour, so it is scheduled sooner.  Because the gap
+        is read from the *current* frontier each iteration (not a fixed
+        positional rank), a side that has been squeezed tighter by prior
+        commits is served before a looser side -- the reactive property
+        the three static permutations in #3438 lacked.
+        """
+        n = len(members)
+        if n < 3:
+            return list(members)
+
+        # Row-axis coordinate for each member; fall back to positional
+        # index if a projection is missing (should not happen).
+        coord = {nid: row_positions.get(nid, float(idx)) for idx, nid in enumerate(members)}
+
+        # Two frontiers walking inward from each end.
+        lo = 0
+        hi = n - 1
+        schedule: list[int] = []
+
+        # Seed with both corners (least free: one already-open side).
+        schedule.append(members[lo])
+        if hi != lo:
+            schedule.append(members[hi])
+        lo += 1
+        hi -= 1
+
+        # ``last_side`` tracks which frontier advanced most recently so
+        # that on a *tie* (uniform pitch is the common case on a DDR row)
+        # the two frontiers alternate and converge symmetrically on the
+        # centre -- otherwise a strict ``<=`` would drain one side fully
+        # and schedule the true centre net second-to-last instead of last.
+        _EPS = 1e-9
+        last_side = "hi"  # so the first tie advances lo (mirrors seed order)
+
+        while lo <= hi:
+            if lo == hi:
+                # Single centre net remaining.
+                schedule.append(members[lo])
+                break
+            # Gap from each candidate to its just-committed outward
+            # neighbour.  The side with the smaller gap is more
+            # threatened and advances first.
+            lo_gap = abs(coord[members[lo]] - coord[members[lo - 1]])
+            hi_gap = abs(coord[members[hi]] - coord[members[hi + 1]])
+            if abs(lo_gap - hi_gap) <= _EPS:
+                # Tie: alternate to keep both frontiers balanced so the
+                # geometric centre is genuinely scheduled last.
+                advance_lo = last_side == "hi"
+            else:
+                advance_lo = lo_gap < hi_gap
+            if advance_lo:
+                schedule.append(members[lo])
+                lo += 1
+                last_side = "lo"
+            else:
+                schedule.append(members[hi])
+                hi -= 1
+                last_side = "hi"
+
+        return schedule
 
     def _compute_mst_edges(self, net_id: int) -> list[MSTEdgeInfo]:
         """Compute MST edges for a net and return them sorted by distance.
@@ -5339,12 +5595,13 @@ class Autorouter:
         # match suffix-inference patterns) receive an identity ordering.
         net_order = self._interleave_match_groups(net_order)
 
-        # Issue #2962: Mirrored byte-lane detection hook (scaffolding only).
-        # ``_apply_byte_lane_inner_priority`` currently returns ``net_order``
-        # unchanged.  The detection / projection / sort machinery is
-        # preserved as the integration surface for a future layered-escape
-        # PR; see that method's docstring for the R1/R2/R3 trace and the
-        # follow-up issue link.
+        # Issue #2962 / #2983 / #4051: Mirrored byte-lane escape ordering.
+        # ``_apply_byte_lane_inner_priority`` reserves inner-corner
+        # corridors (#2983) and reorders each qualifying byte-lane group's
+        # slots by reactive escape freedom (#4051), least-free-first.
+        # Applied AFTER ``_interleave_match_groups`` so the head-class
+        # starvation-fairness ordering is preserved; only within-group
+        # neighbour priorities are adjusted.
         net_order = self._apply_byte_lane_inner_priority(net_order)
 
         if parallel:
@@ -6851,12 +7108,14 @@ class Autorouter:
         # for the fairness-vs-priority trade-off rationale.
         net_order = self._interleave_match_groups(net_order)
 
-        # Issue #2962: Mirrored byte-lane detection hook (scaffolding only;
-        # see ``_apply_byte_lane_inner_priority`` docstring).  Identical
-        # hook to ``route_all``: applied AFTER ``_interleave_match_groups``
-        # so a future implementation that swaps the helper body for a real
-        # reorder keeps the starvation-fairness ordering and adjusts only
-        # within-class neighbour priorities.
+        # Issue #2962 / #2983 / #4051: Mirrored byte-lane escape ordering.
+        # Reserves inner-corner corridors (#2983) and reorders each
+        # qualifying byte-lane group by reactive escape freedom (#4051).
+        # This is the negotiated production path (``kct route`` defaults
+        # to ``--strategy negotiated``, and board 07's
+        # ``generate_design.py --step route`` routes through here).
+        # Applied AFTER ``_interleave_match_groups`` so starvation
+        # fairness is preserved; only within-group priorities shift.
         net_order = self._apply_byte_lane_inner_priority(net_order)
 
         total_nets = len(net_order)

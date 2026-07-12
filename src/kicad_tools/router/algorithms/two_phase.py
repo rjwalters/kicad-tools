@@ -303,12 +303,12 @@ class TwoPhaseRouter:
         if self._interleave_match_groups is not None:
             net_order = self._interleave_match_groups(net_order)
 
-        # Issue #2962: Mirrored byte-lane detection hook (scaffolding only).
-        # See the ``Autorouter._apply_byte_lane_inner_priority`` docstring
-        # for the rationale and the R1/R2/R3 trace.  Applied after the
-        # starvation-fairness pass so a future implementation that swaps
-        # the helper body for a real reorder keeps the head-class ordering
-        # exact; only within-class neighbour priorities would be adjusted.
+        # Issue #2962 / #2983 / #4051: Mirrored byte-lane escape ordering.
+        # ``_apply_byte_lane_inner_priority`` reserves inner-corner
+        # corridors (#2983) and reorders each qualifying byte-lane group
+        # by reactive escape freedom (#4051).  Applied after the
+        # starvation-fairness pass so the head-class ordering stays exact;
+        # only within-group neighbour priorities are adjusted.
         if self._apply_byte_lane_inner_priority is not None:
             net_order = self._apply_byte_lane_inner_priority(net_order)
 

@@ -29,8 +29,12 @@ Tests in this module pin the contract:
 3. The reservation runs as part of
    :meth:`_apply_byte_lane_inner_priority` (so it lands BEFORE
    any corner-net via marking in the escape pre-pass).
-4. The ordering output is still identity (PR #2969 contract
-   preserved — corridor reservation does not perturb net order).
+4. The reservation coexists with the reactive escape-freedom
+   reorder added in Issue #4051: for a qualifying byte-lane the
+   ordering output is now a *permutation* of the input (not
+   identity), while the reservation counters are unchanged (the two
+   effects are independent).  Non-qualifying inputs (small / no-group /
+   non-mirrored) keep the identity ordering.
 5. The 2-layer guard is honoured (no reservation on 2-layer
    stack-ups; that case has no via-blocking contention to
    resolve and would actively starve partner-net escapes).
@@ -172,8 +176,11 @@ class TestCorridorReservationOnPlaneStackup:
         # Drive the detection + reservation pass.
         out = router._apply_byte_lane_inner_priority(net_ids)
 
-        # Identity contract preserved.
-        assert out == net_ids
+        # Issue #4051: ordering is no longer identity for a qualifying
+        # byte-lane — it is now a reactive escape-freedom permutation.
+        # The reservation side-effect (this test's subject) is unchanged.
+        assert set(out) == set(net_ids)
+        assert len(out) == len(net_ids)
         # Two inner-corner pads (positions 1 and N-2) on the primary
         # component (U1 or U2 — both host all 10 group members; the
         # tie-break picks one deterministically).
@@ -186,7 +193,8 @@ class TestCorridorReservationOnPlaneStackup:
         router, net_ids, _ = _make_byte_lane_router(group_size=9, layer_stack=stack)
 
         out = router._apply_byte_lane_inner_priority(net_ids)
-        assert out == net_ids
+        # Issue #4051: reorder active; reservation count unchanged.
+        assert set(out) == set(net_ids)
         assert router._escape.byte_lane_corridor_reservations == 2
         assert router._escape.byte_lane_corridor_reserved_cells > 0
 
@@ -208,7 +216,8 @@ class TestCorridorReservationOnSignalStackup:
         router, net_ids, _ = _make_byte_lane_router(group_size=10, layer_stack=stack)
 
         out = router._apply_byte_lane_inner_priority(net_ids)
-        assert out == net_ids
+        # Issue #4051: reorder active; reservation count unchanged.
+        assert set(out) == set(net_ids)
         assert router._escape.byte_lane_corridor_reservations == 2
         assert router._escape.byte_lane_corridor_reserved_cells > 0
 
@@ -283,35 +292,59 @@ class TestTwoLayerStackupGuard:
 
 
 # =============================================================================
-# Tests: Identity preservation (PR #2969 ordering contract)
+# Tests: Reorder coexists with reservation (Issue #4051 ordering contract)
 # =============================================================================
 
 
-class TestOrderingStillIdentity:
-    """Corridor reservation must NOT change net ordering.
+class TestReorderCoexistsWithReservation:
+    """The reactive escape-freedom reorder (Issue #4051) fires alongside
+    the corridor reservation (Issue #2983) — the two are independent.
 
-    PR #2969's R1/R2/R3 trace proved net-ordering changes alone are
-    insufficient AND, in R1, actively regressed DRC.  The Issue #2983
-    fix is corridor-reservation-only: the helper's return value must
-    remain identical to the input order so the downstream priority
-    semantics (PR #2914 starvation fairness, PR #2482 connector
-    sibling promotion, complexity-tier ordering, etc.) are
-    preserved verbatim.
+    Historical note: PR #2969's R1/R2/R3 trace proved a *static*
+    net-ordering permutation alone is insufficient (and, in R1,
+    regressed DRC), so #2983 shipped corridor-reservation-only with an
+    identity order.  Issue #4051 adds a *reactive* schedule on top: the
+    return value is now a permutation of the input (not identity) for
+    qualifying byte-lanes, while the reservation side-effect is
+    unchanged and the group's occupied slots are permuted in place so
+    non-group ordering (PR #2914 starvation fairness, PR #2482 connector
+    sibling promotion) is preserved.
     """
 
-    def test_identity_on_4_layer_signal_stack(self) -> None:
+    def test_reorder_on_4_layer_signal_stack(self) -> None:
         stack = LayerStack.four_layer_all_signal()
         router, net_ids, _ = _make_byte_lane_router(group_size=10, layer_stack=stack)
+        router.enable_byte_lane_reorder = True  # opt in (OFF by default)
         out = router._apply_byte_lane_inner_priority(net_ids)
-        assert out == net_ids
+        # Permutation invariant holds; ordering is no longer identity.
         assert set(out) == set(net_ids)
         assert len(out) == len(net_ids)
+        assert out != net_ids
+        # Reservation still fires (independent of the reorder flag).
+        assert router._escape.byte_lane_corridor_reservations == 2
 
-    def test_identity_on_plane_stack(self) -> None:
+    def test_reorder_on_plane_stack(self) -> None:
         stack = LayerStack.four_layer_sig_gnd_pwr_sig()
         router, net_ids, _ = _make_byte_lane_router(group_size=10, layer_stack=stack)
+        router.enable_byte_lane_reorder = True
         out = router._apply_byte_lane_inner_priority(net_ids)
-        assert out == net_ids
+        assert set(out) == set(net_ids)
+        assert out != net_ids
+        assert router._escape.byte_lane_corridor_reservations == 2
+
+    def test_reservation_without_reorder_is_identity(self) -> None:
+        """Default (flag OFF): reservation fires but order is identity.
+
+        This pins the non-regression contract — production routing (flag
+        OFF) keeps the pre-#4051 identity ordering while still reserving
+        the inner-corner corridors from #2983.
+        """
+        stack = LayerStack.four_layer_all_signal()
+        router, net_ids, _ = _make_byte_lane_router(group_size=10, layer_stack=stack)
+        # enable_byte_lane_reorder defaults to False.
+        out = router._apply_byte_lane_inner_priority(net_ids)
+        assert out == net_ids  # identity preserved when flag is off
+        assert router._escape.byte_lane_corridor_reservations == 2
 
 
 # =============================================================================
