@@ -28,6 +28,7 @@ to a near-1D tube, which the pure-Python search completes in seconds.
 from __future__ import annotations
 
 import logging
+import math
 
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair import DifferentialPairConfig
@@ -535,3 +536,193 @@ def test_failed_probe_clears_avoidance_costs():
     result = router._diffpair._single_ended_guide_route(start, end)
     assert result is None
     assert stub.cleared == 1, "clear_avoidance_costs must run even when the probe raises"
+
+
+# ---------------------------------------------------------------------------
+# Issue #4052: impedance-coupling gap must not become the within-pair floor
+# ---------------------------------------------------------------------------
+
+
+def _impedance_class_map(net_names: list[str], intra_gap: float) -> dict[str, NetClassRouting]:
+    """A coupled-routing net class whose ``intra_pair_clearance`` has been
+    OVERWRITTEN with a stackup-impedance edge-to-edge coupling gap.
+
+    This mirrors what ``diffpair_impedance.resolve_impedance_driven_sizing``
+    does when a class carries ``target_diff_impedance``: it replaces
+    ``intra_pair_clearance`` with the physics gap needed to hit the target
+    impedance on the board's stackup (board 07: 8.425 mm for loosely-coupled
+    100 ohm on a thick 4-layer stack).  The resulting ``NetClassRouting``
+    that reaches ``route_differential_pair_coupled`` therefore reports a
+    within-pair clearance FAR wider than any geometric spacing floor.
+    """
+    nc = NetClassRouting(
+        name="ImpedanceCoupled",
+        coupled_routing=True,
+        intra_pair_clearance=intra_gap,
+        target_diff_impedance=100.0,
+    )
+    return dict.fromkeys(net_names, nc)
+
+
+def test_impedance_gap_does_not_inflate_coupled_spacing_floor(monkeypatch):
+    """Issue #4052: the impedance-coupling gap must be clamped OUT of the
+    coupled search's ``min_spacing_cells`` floor.
+
+    Regression: board 07 declares ``target_diff_impedance=100`` on its
+    diff pairs, so the impedance resolver overwrites
+    ``intra_pair_clearance`` with an 8.425 mm coupling gap.  Before the
+    fix, ``route_differential_pair_coupled`` fed
+    ``ceil((trace_width + 8.425 mm) / resolution)`` -- ~86 cells -- as the
+    within-pair floor.  The joint-state search then rejected EVERY move
+    off the ~1 mm pad pitch as a spacing-floor violation and died at the
+    start state after 4 iterations (measured: ``sym_floor`` /
+    ``asym_floor_p`` / ``asym_floor_n`` rejections only, ``best_progress``
+    never improving).  The impedance gap is a stackup quantity, not a
+    within-pair spacing floor; the floor must clamp to the geometric
+    ``trace_width + trace_clearance``.
+    """
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1)
+    router = Autorouter(
+        width=30.0,
+        height=10.0,
+        rules=rules,
+        net_class_map=_impedance_class_map(["USB_D+", "USB_D-"], intra_gap=8.425),
+    )
+    # Same two-pad straight geometry as ``_two_pad_diffpair_router``.
+    p_y, n_y = 5.0 - 0.4, 5.0 + 0.4
+    for ref, x in (("U1", 5.0), ("J1", 25.0)):
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": "1",
+                    "x": x,
+                    "y": p_y,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 1,
+                    "net_name": "USB_D+",
+                },
+                {
+                    "number": "2",
+                    "x": x,
+                    "y": n_y,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 2,
+                    "net_name": "USB_D-",
+                },
+            ],
+        )
+
+    # Capture the floor passed into every CoupledPathfinder construction.
+    seen_floors: list[int] = []
+    orig_init = CoupledPathfinder.__init__
+
+    def spying_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        seen_floors.append(self.min_spacing_cells)
+
+    monkeypatch.setattr(CoupledPathfinder, "__init__", spying_init)
+
+    pairs = router._diffpair.detect_differential_pairs()
+    assert len(pairs) == 1
+    router._diffpair.route_differential_pair_coupled(
+        pairs[0],
+        coupled_only=True,
+        per_pair_timeout=5.0,
+    )
+
+    assert seen_floors, "route_differential_pair_coupled never built a CoupledPathfinder"
+
+    # The impedance-driven floor would be ceil((0.2 + 8.425) / 0.1) = 87
+    # cells.  The clamped floor is ceil((0.2 + 0.15) / 0.1) = 4 cells --
+    # the geometric trace_width + trace_clearance.
+    impedance_floor = math.ceil((0.2 + 8.425) / 0.1)
+    geometric_floor = math.ceil((0.2 + 0.15) / 0.1)
+    for floor in seen_floors:
+        assert floor < impedance_floor, (
+            f"coupled spacing floor {floor} still reflects the 8.425 mm "
+            f"impedance gap ({impedance_floor} cells); it must clamp to the "
+            f"geometric trace_width+trace_clearance floor ({geometric_floor})"
+        )
+        assert floor <= geometric_floor, (
+            f"coupled spacing floor {floor} exceeds the geometric "
+            f"trace_width+trace_clearance floor ({geometric_floor} cells)"
+        )
+
+
+def test_declared_wide_intra_clearance_survives_clamp(monkeypatch):
+    """Issue #4052 clamp must NOT touch a legitimately-declared wide
+    within-pair clearance (the #3012 case).
+
+    The clamp is gated on ``target_diff_impedance`` -- the signal that
+    ``intra_pair_clearance`` was overwritten by the impedance resolver.
+    A pair that DECLARES a wider ``intra_pair_clearance`` without a target
+    impedance (board 07's original 0.1 mm within-pair clearance was the
+    motivating #3012 case) must keep its declared floor so the post-route
+    partner-edge clearance still holds; clamping it down to
+    ``trace_clearance`` would reintroduce the #3012
+    ``diffpair_clearance_intra`` violations.
+    """
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1)
+    # Declared intra clearance 0.5 mm (> trace_clearance 0.15 mm), no impedance.
+    nc = NetClassRouting(name="WideDeclared", coupled_routing=True, intra_pair_clearance=0.5)
+    router = Autorouter(
+        width=30.0,
+        height=10.0,
+        rules=rules,
+        net_class_map=dict.fromkeys(["USB_D+", "USB_D-"], nc),
+    )
+    p_y, n_y = 5.0 - 0.4, 5.0 + 0.4
+    for ref, x in (("U1", 5.0), ("J1", 25.0)):
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": "1",
+                    "x": x,
+                    "y": p_y,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 1,
+                    "net_name": "USB_D+",
+                },
+                {
+                    "number": "2",
+                    "x": x,
+                    "y": n_y,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 2,
+                    "net_name": "USB_D-",
+                },
+            ],
+        )
+
+    seen_floors: list[int] = []
+    orig_init = CoupledPathfinder.__init__
+
+    def spying_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        seen_floors.append(self.min_spacing_cells)
+
+    monkeypatch.setattr(CoupledPathfinder, "__init__", spying_init)
+
+    pairs = router._diffpair.detect_differential_pairs()
+    router._diffpair.route_differential_pair_coupled(
+        pairs[0],
+        coupled_only=True,
+        per_pair_timeout=5.0,
+    )
+
+    assert seen_floors, "route_differential_pair_coupled never built a CoupledPathfinder"
+    # Declared floor: ceil((0.2 + 0.5) / 0.1) = 7 cells.  A wrongful clamp
+    # to trace_clearance would give ceil((0.2 + 0.15) / 0.1) = 4.
+    declared_floor = math.ceil((0.2 + 0.5) / 0.1)
+    for floor in seen_floors:
+        assert floor >= declared_floor, (
+            f"declared within-pair floor was clamped from {declared_floor} to "
+            f"{floor} cells; the #4052 clamp must only fire when "
+            f"target_diff_impedance is set"
+        )
