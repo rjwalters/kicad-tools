@@ -2534,6 +2534,193 @@ class EscapeRouter:
             )
         return count
 
+    def reserve_bundle_river_via_hop_corridor(
+        self,
+        pad: Pad,
+        launch_dx: float,
+        launch_dy: float,
+        row_axis_dx: float,
+        row_axis_dy: float,
+        crossing_span: float,
+        target_inner_layer: Layer | None = None,
+    ) -> int:
+        """Reserve an inner-layer via-hop corridor for one crossing net.
+
+        Issue #4053 (Phase 3, epic #4049): the single-strip generalisation
+        of ``reserve_inner_corner_lane_corridor``.  Where that helper
+        protects a single inner-corner pad's *straight* continuation lane,
+        this one reserves an inner-layer corridor for the "losing" net of
+        an inverted (crossing) pair in a full/partial bus reversal — the
+        net that must dip to an inner layer, travel LATERALLY across the
+        escape strip to pass under its partner, then return.
+
+        A bus reversal between two facing pin columns forces every net
+        whose relative row order flips to cross its partner.  On a single
+        shared F.Cu strip those crossings cannot be planarised by lane
+        ordering (the conflict graph of a full reversal is complete), so
+        v1 gives each losing net a reserved inner-layer channel that spans
+        the crossing: forward along the launch vector AND laterally along
+        the row axis by ``crossing_span``, so the reserved cells cover the
+        under-pass the net needs.
+
+        Same soft mechanic as the diff-pair / inner-corner corridors
+        (``RoutingGrid.reserve_corridor_cells`` + the ``_mark_via`` per-cell
+        skip + the A* attractor bonus): the cells are net-OWNED, not
+        universally blocked, so partner-net vias detour while the crossing
+        net is *attracted* onto the reserved inner layer.  This is the
+        SOFT reservation the epic scoped — deliberately NOT a hard
+        pre-routed via (``--preserve-existing`` measured counterproductive
+        in #3414) and NOT the coupled-search primitive (#4052/#4065 proved
+        it basin-floods).
+
+        Args:
+            pad: The losing net's pad (origin of the via hop).  Must have
+                a non-zero ``pad.net``.
+            launch_dx, launch_dy: Outward launch direction (perpendicular
+                to the row, away from the package body) — same convention
+                as ``reserve_inner_corner_lane_corridor``.  Normalised
+                internally.
+            row_axis_dx, row_axis_dy: Unit vector ALONG the row's long
+                axis.  The lateral extent of the corridor is grown along
+                this axis so the reserved channel covers the net's
+                cross-strip travel toward its partner's lane.
+            crossing_span: How far along the row axis (mm) the corridor
+                must reach — sized by the caller to the row-position gap
+                between the losing net and the partner it passes under.
+            target_inner_layer: Inner copper layer.  Defaults to
+                ``_select_inner_escape_layer(pad.layer)`` (In1.Cu on a
+                4-layer signal stack; B.Cu fallback on a plane stack).
+
+        Returns:
+            Number of grid cells reserved (0 on any no-op: zero net id,
+            zero launch vector, 2-layer stack, layer not in stack).
+        """
+        net_id = int(pad.net) if pad.net else 0
+        if net_id == 0:
+            return 0
+
+        length_norm = math.hypot(launch_dx, launch_dy)
+        if length_norm == 0:
+            return 0
+        dx = launch_dx / length_norm
+        dy = launch_dy / length_norm
+
+        # Normalise the row axis vector (defensive; caller passes a unit
+        # vector but a zero vector collapses the lateral extent to the
+        # single-pad case, which is still a valid — if minimal — hop).
+        row_norm = math.hypot(row_axis_dx, row_axis_dy)
+        if row_norm > 0:
+            rax = row_axis_dx / row_norm
+            ray = row_axis_dy / row_norm
+        else:
+            rax = ray = 0.0
+
+        if target_inner_layer is None:
+            target_inner_layer = self._select_inner_escape_layer(pad.layer)
+
+        # Same 2-layer / layer-presence guards as the inner-corner helper:
+        # on a 2-layer board there is no inner layer to hop to, and a B.Cu
+        # reservation would starve partner escapes.
+        if self.grid.layer_stack is not None:
+            if self.grid.layer_stack.num_layers < 3:
+                logger.debug("Bundle-river via-hop corridor skipped: 2-layer stack-up")
+                return 0
+            target_def = self.grid.layer_stack.get_layer_by_name(target_inner_layer.kicad_name)
+            if target_def is None:
+                logger.debug(
+                    "Bundle-river via-hop corridor skipped: layer %s not in stack",
+                    target_inner_layer.name,
+                )
+                return 0
+
+        try:
+            target_idx = self.grid.layer_to_index(target_inner_layer.value)
+        except Exception:
+            logger.debug(
+                "Bundle-river via-hop corridor skipped: layer %s not in grid stack",
+                target_inner_layer.name,
+            )
+            return 0
+
+        trace_w = self._get_trace_width_for_net(pad.net_name or "")
+        launch_step = self.escape_clearance + 2 * trace_w
+
+        # Forward extent: a couple of launch steps to clear the pad's own
+        # escape via before the lateral run begins.
+        corridor_length = launch_step * 2.0
+        # Lateral half-width: one launch step of protection around the
+        # under-pass channel, matching the inner-corner recipe's
+        # starvation-avoidance sizing (narrow, per-net, not a wide halo).
+        corridor_half_width = launch_step
+
+        # Enumerate cells: a rectangle that extends ``corridor_length``
+        # forward along the launch vector AND spans ``crossing_span`` along
+        # the row axis (the cross-strip under-pass), padded laterally by
+        # ``corridor_half_width`` on the launch-perpendicular sides.
+        cx, cy = pad.x, pad.y
+        # Lateral (launch-perpendicular) unit vector.
+        lat_dx, lat_dy = -dy, dx
+
+        span = max(0.0, float(crossing_span))
+        step = self.grid.resolution * 0.5
+        cells: set[tuple[int, int]] = set()
+
+        # Segment 1: forward launch stub (pad -> inner layer).
+        t = 0.0
+        while t <= corridor_length:
+            u = -corridor_half_width
+            while u <= corridor_half_width:
+                wx = cx + dx * t + lat_dx * u
+                wy = cy + dy * t + lat_dy * u
+                gx, gy = self.grid.world_to_grid(wx, wy)
+                cells.add((gx, gy))
+                u += step
+            t += step
+
+        # Segment 2: lateral under-pass run along the row axis, offset
+        # forward by the launch stub so it sits in the escape channel, not
+        # on top of the pad row.  Reserved as a band ``2*corridor_half_width``
+        # wide (perpendicular to the row axis) sliding ``span`` along it.
+        base_x = cx + dx * corridor_length
+        base_y = cy + dy * corridor_length
+        s = 0.0
+        while s <= span:
+            w = -corridor_half_width
+            while w <= corridor_half_width:
+                # Perpendicular to the row axis within the strip plane is
+                # the launch direction (dx, dy).
+                wx = base_x + rax * s + dx * w
+                wy = base_y + ray * s + dy * w
+                gx, gy = self.grid.world_to_grid(wx, wy)
+                cells.add((gx, gy))
+                w += step
+            s += step
+
+        if not cells:
+            return 0
+
+        count = self.grid.reserve_corridor_cells(
+            layer_idx=target_idx,
+            cells=cells,
+            net_ids={net_id},
+        )
+        if count > 0:
+            self.byte_lane_corridor_reservations += 1
+            self.byte_lane_corridor_reserved_cells += count
+            logger.debug(
+                "Bundle-river via-hop corridor reserved: layer=%s cells=%d "
+                "net=%d pad=%s.%s launch=(%.2f,%.2f) span=%.2fmm",
+                target_inner_layer.name,
+                count,
+                net_id,
+                pad.ref,
+                pad.pin,
+                dx,
+                dy,
+                span,
+            )
+        return count
+
     def _escape_bga_rings(self, package: PackageInfo) -> list[EscapeRoute]:
         """Generate ring-based escape routes for BGA packages.
 

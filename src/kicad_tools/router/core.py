@@ -877,6 +877,24 @@ class Autorouter:
         # Set to True to opt in (see ``_apply_byte_lane_inner_priority``).
         self.enable_byte_lane_reorder = False
 
+        # Issue #4053 (Phase 3, epic #4049): scoped bundle river planner.
+        # OFF by default.  When enabled, ``_apply_byte_lane_inner_priority``
+        # resolves BOTH facing rows of a mirrored byte-lane group, diffs
+        # their permutation, and reserves one inner-layer via-hop corridor
+        # per inverted (crossing) pair so the "losing" net of each crossing
+        # can dip to an inner layer and pass under its partner.  The board-07
+        # DDR byte is a full bus reversal (all C(11,2)=55 pairs cross) that
+        # planar same-layer lane ordering cannot solve, which is why every
+        # ordering-only approach (#3438/#4050/#4051) capped at <=10/11.
+        #
+        # Gated OFF (mirrors ``enable_byte_lane_reorder`` and the #4051
+        # precedent) because even a geometry-only auto-detect regressed
+        # production once; flag-off is byte-identical to pre-#4053 main
+        # (detection + the pre-existing #2983 inner-corner reservation still
+        # run; the new via-hop reservations do NOT).  Set True to opt in
+        # (see ``_apply_byte_lane_inner_priority`` / ``bundle_river.py``).
+        self.enable_bundle_river_planner = False
+
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
         self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
@@ -5056,6 +5074,37 @@ class Autorouter:
                         exc_info=True,
                     )
 
+            # Issue #4053 (Phase 3, epic #4049): scoped bundle river
+            # planner.  When ``enable_bundle_river_planner`` is set, resolve
+            # the SECONDARY facing component's row for this group, diff the
+            # two rows' permutations, and reserve one inner-layer via-hop
+            # corridor per inverted (crossing) pair so the losing net can
+            # dip under its partner.  Gated OFF by default; when off this
+            # entire block is skipped and behaviour is byte-identical to the
+            # pre-#4053 inner-corner-reservation-only path above.
+            if getattr(self, "enable_bundle_river_planner", False):
+                try:
+                    self._reserve_bundle_river_via_hops(
+                        escape=escape,
+                        primary_ref=primary_ref,
+                        comp_pad_count=comp_pad_count,
+                        primary_net_to_pad=net_to_pad,
+                        sorted_nets=sorted_nets,
+                        vertical_row=(y_span >= x_span),
+                        cx=cx,
+                        cy=cy,
+                        grp_name=grp_name,
+                    )
+                except Exception:
+                    # Planner is advisory; any failure degrades to the
+                    # inner-corner-reservation-only behaviour (no via hops).
+                    logger.debug(
+                        "Bundle river planner failed for group %s; "
+                        "continuing without via-hop reservations",
+                        grp_name,
+                        exc_info=True,
+                    )
+
         # Issue #4051 (Phase 1b, epic #4049): apply a reactive
         # escape-freedom reorder on top of the corridor reservation.
         # Each qualifying byte-lane group's members are permuted *within
@@ -5098,6 +5147,151 @@ class Autorouter:
             )
             return net_order
         return reordered
+
+    def _reserve_bundle_river_via_hops(
+        self,
+        *,
+        escape: Any,
+        primary_ref: str,
+        comp_pad_count: dict[str, list[tuple[int, float, float]]],
+        primary_net_to_pad: dict[int, tuple[float, float]],
+        sorted_nets: list[int],
+        vertical_row: bool,
+        cx: float,
+        cy: float,
+        grp_name: str,
+    ) -> int:
+        """Reserve inner-layer via-hop corridors for a bus-reversal bundle.
+
+        Issue #4053 (Phase 3, epic #4049).  Given the primary facing row
+        already resolved by ``_apply_byte_lane_inner_priority``'s detection
+        scan, this resolves the SECONDARY facing component's row, diffs the
+        two rows' permutations via ``bundle_river.compute_facing_row_inversions``,
+        and reserves one inner-layer via-hop corridor per losing net so
+        crossings in a bus reversal actually get an under-pass.
+
+        The crossing set is fully determined by the two pad rows' geometry
+        (no search).  For a genuinely planar (co-oriented) bundle the
+        inversion set is empty and this reserves nothing — the
+        over-triggering guard the curation called for.
+
+        Returns:
+            Number of via-hop corridors reserved (0 when there is no
+            secondary row, no clean matched bus, or no inversions).
+        """
+        from .bundle_river import (
+            RowMember,
+            compute_facing_row_inversions,
+            via_hop_loser_nets,
+        )
+
+        proj_index = 1 if vertical_row else 0
+
+        # Resolve the secondary facing component: the component (other than
+        # the primary) hosting the most group-member pads.  In a mirrored
+        # byte-lane topology this is the opposite QFN (U2 when primary is
+        # U1).  Collapse to one pad per net, same as the primary row.
+        secondary_candidates = {
+            ref: pads for ref, pads in comp_pad_count.items() if ref != primary_ref
+        }
+        if not secondary_candidates:
+            return 0
+        secondary_ref = max(
+            secondary_candidates.keys(),
+            key=lambda r: (len(secondary_candidates[r]), -ord(r[0]) if r else 0),
+        )
+        secondary_net_to_pad: dict[int, tuple[float, float]] = {}
+        for nid, px, py in secondary_candidates[secondary_ref]:
+            if nid not in secondary_net_to_pad:
+                secondary_net_to_pad[nid] = (px, py)
+
+        # Build the two RowMember lists (only nets present on BOTH rows).
+        primary_row: list[RowMember] = []
+        secondary_row: list[RowMember] = []
+        for nid in sorted_nets:
+            name = self.net_names.get(nid, str(nid))
+            if nid in primary_net_to_pad:
+                primary_row.append(RowMember(nid, name, primary_net_to_pad[nid][proj_index]))
+            if nid in secondary_net_to_pad:
+                secondary_row.append(RowMember(nid, name, secondary_net_to_pad[nid][proj_index]))
+
+        inversions = compute_facing_row_inversions(primary_row, secondary_row)
+        if not inversions:
+            return 0
+
+        losers = via_hop_loser_nets(inversions)
+
+        # Row-axis unit vector on the primary row (for the lateral
+        # under-pass extent).  Projections increase along +proj_index.
+        if vertical_row:
+            row_axis_dx, row_axis_dy = 0.0, 1.0
+        else:
+            row_axis_dx, row_axis_dy = 1.0, 0.0
+
+        # The crossing span for a losing net is the row-position distance
+        # from its own lane to the FARTHEST partner it inverts against —
+        # that is how far it must travel laterally under the strip.
+        primary_proj = {m.net_id: m.projection for m in primary_row}
+        loser_span: dict[int, float] = {}
+        for pair in inversions:
+            for loser in (pair.loser_net_id,):
+                if loser not in primary_proj:
+                    continue
+                other = pair.net_a_id if pair.net_b_id == loser else pair.net_b_id
+                if other not in primary_proj:
+                    continue
+                dist = abs(primary_proj[loser] - primary_proj[other])
+                loser_span[loser] = max(loser_span.get(loser, 0.0), dist)
+
+        reserved = 0
+        for loser in losers:
+            pad_obj = None
+            for pkey, p in self.pads.items():
+                if p.ref == primary_ref and p.net is not None and int(p.net) == loser:
+                    pad_obj = p
+                    break
+            if pad_obj is None:
+                continue
+
+            px, py = primary_net_to_pad.get(loser, (pad_obj.x, pad_obj.y))
+            # Launch outward from the primary centroid, perpendicular to
+            # the row (same convention as the inner-corner reservation).
+            if vertical_row:
+                launch_dx = 1.0 if px >= cx else -1.0
+                launch_dy = 0.0
+            else:
+                launch_dx = 0.0
+                launch_dy = 1.0 if py >= cy else -1.0
+
+            try:
+                count = escape.reserve_bundle_river_via_hop_corridor(
+                    pad=pad_obj,
+                    launch_dx=launch_dx,
+                    launch_dy=launch_dy,
+                    row_axis_dx=row_axis_dx,
+                    row_axis_dy=row_axis_dy,
+                    crossing_span=loser_span.get(loser, 0.0),
+                )
+            except Exception:
+                logger.debug(
+                    "Bundle-river via-hop reservation failed for net %d (group %s); continuing",
+                    loser,
+                    grp_name,
+                    exc_info=True,
+                )
+                continue
+            if count > 0:
+                reserved += 1
+
+        logger.debug(
+            "Bundle river planner (group %s): %d inversions, %d losing nets, "
+            "%d via-hop corridors reserved",
+            grp_name,
+            len(inversions),
+            len(losers),
+            reserved,
+        )
+        return reserved
 
     def _reactive_escape_freedom_order(
         self,
