@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from .core import Autorouter
+    from .cpp_backend import CppCoupledPathfinder
     from .grid import RoutingGrid
     from .rules import DesignRules, NetClassRouting
 
@@ -749,8 +750,8 @@ class CoupledPathfinder:
         # the one-time grid marshalling + pathfinder construction is reused
         # across route_coupled calls on the same pathfinder instance
         # (mirrors how CppPathfinder is constructed once and reused).
-        self._cpp_coupled_impl = None  # type: ignore[var-annotated]
-        self._cpp_coupled_grid = None  # type: ignore[var-annotated]
+        self._cpp_coupled_impl: CppCoupledPathfinder | None = None
+        self._cpp_coupled_grid: RoutingGrid | None = None
 
     def _is_cell_blocked(self, gx: int, gy: int, layer: int, net: int) -> bool:
         """Check if a cell is blocked for this net.
@@ -1490,7 +1491,7 @@ class CoupledPathfinder:
 
         return is_cpp_available()
 
-    def _get_cpp_coupled_impl(self):  # type: ignore[no-untyped-def]
+    def _get_cpp_coupled_impl(self) -> CppCoupledPathfinder | None:
         """Build (once) and return the cached C++ coupled pathfinder.
 
         Mirrors the ``CppPathfinder`` lifecycle: the ``CppGrid`` is
