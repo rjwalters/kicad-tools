@@ -4491,6 +4491,38 @@ class DiffPairRouter:
             # behaviour for callers that don't supply a net_class_map.
             pair_intra_clearance = float(spacing)
 
+        # Issue #4052: clamp the impedance-coupling gap out of the coupled
+        # spacing target.  When a net class carries a ``target_diff_impedance``
+        # the impedance resolver (``diffpair_impedance.py:524``) OVERWRITES
+        # ``intra_pair_clearance`` with the physics-derived edge-to-edge
+        # coupling gap needed to hit that impedance on the board's stackup
+        # (board 07: 8.425 mm for loosely-coupled 100 ohm on a thick
+        # 4-layer stack).  That gap is a *stackup impedance* quantity, NOT
+        # a within-pair spacing floor: fed straight into the coupled
+        # search's ``min_spacing_cells`` it demands the two centerlines sit
+        # ~8.6 mm apart (87 cells at 0.1 mm), so every move from the
+        # physical pad pitch (~1 mm) is rejected by the spacing floor and
+        # the joint-state search dies at the start state in 4 iterations
+        # (measured: ALL board-07 coupled pairs, ``sym_floor`` /
+        # ``asym_floor_p`` / ``asym_floor_n`` rejections only,
+        # ``best_progress`` never improving).
+        #
+        # Clamp is gated on ``target_diff_impedance`` being set -- that is
+        # the SIGNAL that ``intra_pair_clearance`` was overwritten with a
+        # stackup gap (``diffpair_impedance.resolve_impedance_driven_sizing``
+        # only replaces the field when a target impedance drove the sizing,
+        # ``used_target=True``).  A pair that legitimately DECLARES a wider
+        # ``intra_pair_clearance`` (the #3012 case: board 07's 0.1 mm
+        # within-pair clearance with a 0.15 mm trace) has no
+        # ``target_diff_impedance`` and is left untouched, so its floor
+        # still holds the declared within-pair separation post-route.  When
+        # gated, clamp to the geometric ``trace_clearance`` floor (the
+        # tightest DRC-legal within-pair separation), mirroring the
+        # match-group tuner's identical impedance-gap mis-read fix in #3440.
+        if getattr(pair_net_class, "target_diff_impedance", None) is not None:
+            within_pair_clearance_floor = float(self.autorouter.rules.trace_clearance)
+            pair_intra_clearance = min(pair_intra_clearance, within_pair_clearance_floor)
+
         required_center_spacing = pair_trace_width + pair_intra_clearance
         min_spacing_cells = max(
             1, math.ceil(required_center_spacing / self.autorouter.grid.resolution)
