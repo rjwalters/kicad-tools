@@ -725,13 +725,24 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print("\n8. Filling copper zones...")
     _fill_zones_after_route(output_path)
 
-    total_nets = len([n for n in router.nets if n > 0])
+    # Count only the nets that were actually submitted for TRACE routing.
+    # ``router.nets`` keys include VCC, which is a pour net
+    # (``is_pour_net=True``): the router logs "Skipping N pour net(s)" and
+    # connects it via a copper zone in step 7 rather than as a trace.  GND is
+    # already excluded because ``load_pcb_for_routing(skip_nets=["GND"])``
+    # collapses its pads to net 0.  Reuse the router's own ``_is_pour_net``
+    # classifier -- the same predicate that drives ``_filter_pour_nets`` -- so
+    # ``total_nets`` reflects the trace-routable signal nets only.  Without
+    # this the count double-includes the never-routed VCC pour net, making
+    # ``success`` always False even on a clean run (issue #4066).
+    trace_nets = [n for n in router.nets if n > 0 and not router._is_pour_net(n)]
+    total_nets = len(trace_nets)
     success = stats["nets_routed"] == total_nets
 
     if success:
-        print("\n   SUCCESS: All nets routed!")
+        print("\n   SUCCESS: All signal nets routed!")
     else:
-        print(f"\n   PARTIAL: Routed {stats['nets_routed']}/{total_nets} nets")
+        print(f"\n   PARTIAL: Routed {stats['nets_routed']}/{total_nets} signal nets")
 
     return success
 
@@ -948,28 +959,31 @@ def main() -> int:
         route_success = route_pcb(pcb_path, routed_path)
 
         # Step 5.5: route_success fast-fail gate (#4066, mirrors board 03's
-        # gate at boards/03-usb-joystick/generate_design.py:838).  route_pcb
-        # runs under a wall-clock ``--timeout`` SAFETY backstop layered above
-        # the load-independent per-net ``--deterministic-budget`` iteration
-        # cap, so on a loaded machine that outer deadline can fire before every
-        # signal net lands and ``route_pcb`` returns ``False``.  If we fall
-        # through, the downstream ``run_lvs`` -> ``write_lvs_report(
-        # require_clean=True)`` sees a genuinely unrouted signal net as a copper
-        # OPEN and raises ``BoardNetlistMismatch``, which the broad ``except``
-        # below reports as exit 1 -- misdirecting the reviewer to the LVS
-        # subsystem when the true cause is upstream route truncation.  Raise a
-        # DISTINCT, clearly-worded error here instead.  The "PARTIAL: Routed
-        # N/M signal nets" line is already printed above by ``route_pcb``.
+        # gate at boards/03-usb-joystick/generate_design.py:838).  ``route_pcb``
+        # returns ``False`` when at least one trace-routable SIGNAL net failed
+        # to land (``nets_routed`` < the pour-net-excluded ``total_nets``; see
+        # the count accounting in ``route_pcb``).  If we fall through, the
+        # downstream ``run_lvs`` -> ``write_lvs_report(require_clean=True)`` sees
+        # that unrouted signal net as a copper OPEN and raises
+        # ``BoardNetlistMismatch``, which the broad ``except`` below reports as
+        # exit 1 -- misdirecting the reviewer to the LVS subsystem when the true
+        # cause is upstream route truncation.  Raise a DISTINCT, clearly-worded
+        # error here instead.  The "PARTIAL: Routed N/M signal nets" line is
+        # already printed above by ``route_pcb``.
+        #
+        # NOTE: board 00 calls bare ``router.route_all()`` with no ``--timeout``
+        # backstop, so a partial route here means a genuinely unroutable signal
+        # net (or a net-count accounting slip), NOT a wall-clock budget timeout.
         if not route_success:
             raise RuntimeError(
-                "partial route -- likely wall-clock budget exhaustion under "
-                "load (the --timeout safety backstop fired before every "
-                "signal net landed; see the 'PARTIAL: Routed N/M signal nets' "
-                "line above for the exact count). This is NOT a copper-LVS / "
-                "GND-stitching failure -- the pipeline stopped before the LVS "
-                "gate. Re-run boards/00-simple-led/generate_design.py in "
-                "isolation on a quiet machine, or raise the --timeout in "
-                "route_pcb() if this recurs on an unloaded host."
+                "partial route -- at least one trace-routable signal net did "
+                "not land (see the 'PARTIAL: Routed N/M signal nets' line above "
+                "for the exact count). This is NOT a copper-LVS / GND-stitching "
+                "failure -- the pipeline stopped before the LVS gate. Board 00 "
+                "routes with a bare route_all() (no --timeout), so this is not a "
+                "wall-clock budget exhaustion: investigate the unrouted signal "
+                "net directly, or re-check the pour-net-excluded net-count "
+                "accounting in route_pcb() if the count looks wrong."
             )
 
         # Step 6: Run DRC
