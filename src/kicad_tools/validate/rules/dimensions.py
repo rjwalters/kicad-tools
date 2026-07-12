@@ -9,6 +9,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.geometry import rotate_pad_offset
+
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
 
@@ -207,9 +209,18 @@ class DimensionRules(DRCRule):
         for fp in pcb.footprints:
             for pad in fp.pads:
                 if pad.type == "thru_hole" and pad.drill > 0:
-                    # Pad position is relative to footprint
-                    abs_x = fp.position[0] + pad.position[0]
-                    abs_y = fp.position[1] + pad.position[1]
+                    # Pad position is stored footprint-local and must be
+                    # rotated by the footprint orientation before translating
+                    # to board coordinates (KiCad's negated-angle convention;
+                    # see core.geometry.rotate_pad_offset, issue #3739). A
+                    # naive add ignores rotation and produces phantom
+                    # hole-to-hole violations on rotated/flipped footprints
+                    # (issue #4044).
+                    rotated_x, rotated_y = rotate_pad_offset(
+                        pad.position[0], pad.position[1], fp.rotation
+                    )
+                    abs_x = fp.position[0] + rotated_x
+                    abs_y = fp.position[1] + rotated_y
                     net_name = pad.net_name if pad.net_name else f"net:{pad.net_number}"
                     drills.append(
                         (

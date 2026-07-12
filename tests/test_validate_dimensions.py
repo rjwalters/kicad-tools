@@ -117,10 +117,16 @@ class MockFootprint:
         reference: str,
         position: tuple[float, float],
         pads: list[MockPad],
+        rotation: float = 0.0,
     ):
         self.reference = reference
         self.position = position
         self.pads = pads
+        # Footprint orientation in degrees. Pad positions are stored
+        # footprint-local and must be rotated by this angle before
+        # translation to board coordinates (issue #4044). Defaults to 0.0
+        # so existing tests are unaffected.
+        self.rotation = rotation
 
 
 class MockPCB:
@@ -528,6 +534,109 @@ class TestDrillClearanceCheck:
             v for v in results.violations if v.rule_id == "dimension_drill_clearance"
         ]
         assert len(clearance_violations) == 1
+
+    def test_rotated_footprint_no_false_positive(self):
+        """Issue #4044: a rotated THT footprint must not phantom-flag.
+
+        A footprint at (10, 10) rotated 90 deg has pad 1 at local offset
+        (0, 4). KiCad's negated-angle convention (rotate_pad_offset) maps
+        that to board offset (4, 0), so the true hole center is (14, 10).
+
+        - Naive (buggy) add:  fp.position + pad.position = (10, 14)
+        - Rotation-correct:                                 (14, 10)
+
+        A via is placed at (14, 1.0) -- i.e. 9.0mm from the *true* pad
+        position (safe: 9.0 - 0.2 - 0.2 = 8.6mm >> 0.5mm) but only 1.0mm
+        from the *naive* (14 vs 10 in x is 4mm; but y 14 vs 1 is 13mm...).
+
+        Concretely the via is placed 0.7mm from the buggy position and
+        far from the true one, so the naive code flags a hole-to-hole
+        violation that does not exist in the rotated geometry.
+        """
+        # Buggy position: (10, 14). True position: (14, 10).
+        # Via placed at (10, 14.7): 0.7mm from buggy pos (would flag),
+        # but sqrt((14-10)^2 + (10-14.7)^2) = sqrt(16 + 22.09) = 6.17mm
+        # from the true pos (edge = 6.17 - 0.4 = 5.77mm, safe).
+        pcb = MockPCB(
+            vias=[
+                MockVia((10, 14.7), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(10, 10),
+                    rotation=90.0,
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 4),  # local; rotates to board (4, 0)
+                            drill=0.4,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.127, min_hole_to_hole_mm=0.5)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
+        # Buggy code would find the via 0.7mm from the (10,14) pad -> flag.
+        # Correct code measures against (14,10) -> 5.77mm edge -> no flag.
+        assert len(clearance_violations) == 0
+
+    def test_rotated_footprint_genuine_violation_detected(self):
+        """Issue #4044: a real hole-to-hole conflict at rotation still flags.
+
+        Same 90 deg footprint whose pad 1 true hole center is (14, 10).
+        A via placed at (14.7, 10) is a genuine 0.3mm edge-to-edge conflict
+        (0.7 center - 0.2 - 0.2) with the *true* rotated pad position. The
+        fix must not silently disable the check (guard against a false
+        negative).
+        """
+        # True pad pos (14, 10). Via at (14.7, 10): center dist 0.7mm,
+        # edge = 0.7 - 0.2 - 0.2 = 0.3mm < 0.5mm -> genuine violation.
+        pcb = MockPCB(
+            vias=[
+                MockVia((14.7, 10), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(10, 10),
+                    rotation=90.0,
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 4),  # local; rotates to board (4, 0)
+                            drill=0.4,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.127, min_hole_to_hole_mm=0.5)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].actual_value == pytest.approx(0.3)
+        assert clearance_violations[0].required_value == pytest.approx(0.5)
 
     def test_smd_pads_not_checked(self):
         """Test that SMD pads are not included in drill clearance check."""
