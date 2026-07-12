@@ -469,3 +469,86 @@ class TestCrossScriptCounterParity:
                 Path("synthetic.kicad_pcb"), sidecar=None
             )
         assert drc_blocking == coverage_blocking == 0
+
+
+class TestMfrCliOverride:
+    """``--mfr TIER`` is a per-invocation CLI override for the manufacturer
+    profile, mirroring ``--allow``.
+
+    Consumer repos that vendor this gate (Epic #4054, issue #4058 pilot into
+    ../chorus) have no ``.github/routed-drc-tolerance.yml``, so the only way
+    to gate a board routed to a non-default tier (e.g. ``jlcpcb-tier1`` in-pad
+    via rescue) used to be authoring a repo-internal allowlist YAML just to
+    name a profile.  ``--mfr`` is the escape hatch: it overrides both the
+    ``jlcpcb`` default AND the YAML ``manufacturers:`` map.
+    """
+
+    def setup_method(self) -> None:
+        self.helper = _load_helper_module()
+
+    def _run_main_capturing_mfr(self, tmp_path: Path, argv: list[str]) -> tuple[int, list[str]]:
+        """Run ``main(argv)`` with a stubbed ``kct check`` subprocess.
+
+        Returns ``(exit_code, captured_mfr_values)`` where each captured value
+        is the ``--mfr`` argument the gate passed to ``kct check`` (one per
+        file). The stub returns a clean (zero-error) payload so the gate's
+        verdict depends only on argument wiring, not on DRC content.
+        """
+        captured: list[str] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            # cmd is the full ["uv","run","kct","check",<pcb>,"--mfr",<tier>,...]
+            if "--mfr" in cmd:
+                captured.append(cmd[cmd.index("--mfr") + 1])
+            proc = MagicMock()
+            proc.returncode = 0
+            proc.stdout = _make_kct_json([])  # no violations -> clean
+            proc.stderr = ""
+            return proc
+
+        # main() resolves lookup_key relative to cwd; run from tmp_path so the
+        # board path is repo-relative and the (absent) default allowlist is a
+        # clean no-op.
+        board = tmp_path / "board_routed.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        old_cwd = Path.cwd()
+        import os
+
+        os.chdir(tmp_path)
+        try:
+            with patch.object(subprocess, "run", side_effect=fake_run):
+                code = self.helper.main([*argv, "board_routed.kicad_pcb"])
+        finally:
+            os.chdir(old_cwd)
+        return code, captured
+
+    def test_default_mfr_is_jlcpcb(self, tmp_path: Path) -> None:
+        """No ``--mfr`` and no allowlist YAML -> the gate checks at the
+        ``jlcpcb`` default."""
+        code, captured = self._run_main_capturing_mfr(tmp_path, ["--allow", "0"])
+        assert code == 0
+        assert captured == ["jlcpcb"]
+
+    def test_mfr_flag_overrides_default(self, tmp_path: Path) -> None:
+        """``--mfr jlcpcb-tier1`` threads through to ``kct check --mfr``.
+
+        This is the exact chorus-pilot scenario: a tier1 board in a consumer
+        repo with no allowlist YAML."""
+        code, captured = self._run_main_capturing_mfr(
+            tmp_path, ["--mfr", "jlcpcb-tier1", "--allow", "0"]
+        )
+        assert code == 0
+        assert captured == ["jlcpcb-tier1"]
+
+    def test_mfr_help_documents_flag(self) -> None:
+        """The ``--help`` output advertises ``--mfr`` so a consumer can
+        discover the escape hatch."""
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
+            self.helper.main(["--help"])
+        out = buf.getvalue()
+        assert "--mfr" in out
+        assert "jlcpcb-tier1" in out

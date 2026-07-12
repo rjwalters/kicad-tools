@@ -442,11 +442,21 @@ explicitly. Do **not** rely on the default `--allowlist`
 (`.github/routed-drc-tolerance.yml`) — that is the kicad-tools repo's own
 per-board grandfather list and does not exist in a fresh consumer repo.
 
+The gate checks at `--mfr jlcpcb` by default. If your board targets a
+different fab tier (e.g. `jlcpcb-tier1` for in-pad-via rescue), name it
+explicitly with `--mfr` — there is no need to author an allowlist YAML just
+to set the profile in a fresh consumer repo:
+
 ```bash
 # Fail on any blocking DRC error (fresh repo, no grandfathered history):
 uv run python .kct/ci/check_routed_drc.py \
   hardware/<your-board>/output/<board>_routed.kicad_pcb \
   --allow 0
+
+# Same, gating at a non-default fab tier:
+uv run python .kct/ci/check_routed_drc.py \
+  hardware/<your-board>/output/<board>_routed.kicad_pcb \
+  --mfr jlcpcb-tier1 --allow 0
 ```
 
 Exit `0` = within tolerance, `2` = exceeded (job fails), `1` = tool error.
