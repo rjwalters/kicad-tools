@@ -128,7 +128,22 @@ namespace router {
 // (a via needs >= 2 routable layers), and fine-pitch neck-down survives
 // via the #1018 post-processing #3456/PR #3623 added to
 // ``cpp_backend.py::_convert_result_to_route``.
-constexpr int ROUTER_CPP_BUILD_VERSION = 14;
+// Version 15 (Issue #4065): C++ port of the CoupledPathfinder joint-state
+// A* loop (Board 07 Phase 2b).  Adds a new ``CoupledPathfinder`` C++ class
+// (``coupled_pathfinder.hpp`` / ``coupled_pathfinder.cpp``) exposed through
+// the nanobind layer, plus two new binding-surface structs in this header:
+// ``CoupledAStarNode`` (the joint ``(p, n, direction)`` search node with the
+// #3508 LIFO-seq tie-break -- distinct from ``AStarNode``'s FIFO convention)
+// and ``CoupledRouteResult`` (the two-trace path plus the #4052 diagnostic
+// vocabulary: iterations, best_progress, timeout/iteration-limited flags).
+// The single-ended ``Pathfinder`` surface is unchanged; the coupled search
+// is a NEW consumer of the SAME ``Grid3D``.  Old .so files lack the coupled
+// class/structs and would mismatch the post-#4065 Python caller
+// (``cpp_backend.py::CppCoupledPathfinder``); the build-version bump forces a
+// rebuild via ``kct build-native``.  The pure-Python ``route_coupled`` is
+// preserved as the fallback for the ``allow_swap_via`` /
+// ``manhattan_sum`` code paths the v1 port intentionally defers.
+constexpr int ROUTER_CPP_BUILD_VERSION = 15;
 
 // Grid cell state
 struct GridCell {
@@ -263,6 +278,49 @@ struct RouteResult {
     int blocking_via_net = 0;       // Net of the offending stored via (if any).
     float failure_x = 0.0f;         // World-coord of last rejected candidate.
     float failure_y = 0.0f;
+};
+
+// One joint-state node on the reconstructed coupled path (Issue #4065).
+//
+// The coupled A* returns its winning path as a flat vector of these, in
+// ROOT->GOAL order.  The Python wrapper unpacks them into the exact same
+// ``p_path`` / ``n_path`` ``(world_x, world_y, layer, via_from_parent)``
+// lists that ``CoupledPathfinder._reconstruct_coupled_routes`` builds from
+// the parent chain, then feeds them to the UNCHANGED Python
+// ``_build_route_from_path`` -- so C++ and Python produce byte-identical
+// :class:`Route` objects for the same joint path, and the curator's
+// "do NOT port _reconstruct_coupled_routes" guidance is honored.
+struct CoupledPathNode {
+    int p_x, p_y, p_layer;
+    int n_x, n_y, n_layer;
+    bool via_from_parent;
+};
+
+// Coupled diff-pair A* result (Issue #4065).
+//
+// Mirrors the pure-Python ``CoupledPathfinder.route_coupled`` return value
+// PLUS the #3089/#3473/#3508/#3921 diagnostic attributes the Python caller
+// reads off the pathfinder instance after each call.
+//
+// The diagnostic fields are load-bearing: the epic acceptance criteria and
+// the whole #4052 budget-exit vocabulary depend on them surviving the port.
+//   iterations           -- A* iterations consumed (``last_iterations``).
+//   best_progress        -- smallest joint remaining Manhattan distance any
+//                           popped state achieved, max over the two heads
+//                           (``last_best_progress``; -1 means "never popped").
+//   timeout_exceeded     -- iteration OR wall-clock budget fired
+//                           (``last_timeout_exceeded``).
+//   iteration_limited    -- when ``timeout_exceeded``, TRUE iff the ITERATION
+//                           budget was the binding constraint (else the
+//                           wall-clock budget); mirrors ``last_iteration_limited``.
+struct CoupledRouteResult {
+    std::vector<CoupledPathNode> path;  // root->goal; empty when !success.
+    bool success = false;
+    // Diagnostics (always populated, success or not).
+    int iterations = 0;
+    double best_progress = -1.0;
+    bool timeout_exceeded = false;
+    bool iteration_limited = false;
 };
 
 // Neighbor direction: dx, dy, dlayer, cost_multiplier
