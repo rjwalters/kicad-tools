@@ -2623,9 +2623,7 @@ class EscapeRouter:
         # reservation would starve partner escapes.
         if self.grid.layer_stack is not None:
             if self.grid.layer_stack.num_layers < 3:
-                logger.debug(
-                    "Bundle-river via-hop corridor skipped: 2-layer stack-up"
-                )
+                logger.debug("Bundle-river via-hop corridor skipped: 2-layer stack-up")
                 return 0
             target_def = self.grid.layer_stack.get_layer_by_name(target_inner_layer.kicad_name)
             if target_def is None:

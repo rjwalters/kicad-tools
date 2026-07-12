@@ -5211,13 +5211,9 @@ class Autorouter:
         for nid in sorted_nets:
             name = self.net_names.get(nid, str(nid))
             if nid in primary_net_to_pad:
-                primary_row.append(
-                    RowMember(nid, name, primary_net_to_pad[nid][proj_index])
-                )
+                primary_row.append(RowMember(nid, name, primary_net_to_pad[nid][proj_index]))
             if nid in secondary_net_to_pad:
-                secondary_row.append(
-                    RowMember(nid, name, secondary_net_to_pad[nid][proj_index])
-                )
+                secondary_row.append(RowMember(nid, name, secondary_net_to_pad[nid][proj_index]))
 
         inversions = compute_facing_row_inversions(primary_row, secondary_row)
         if not inversions:
@@ -5278,8 +5274,7 @@ class Autorouter:
                 )
             except Exception:
                 logger.debug(
-                    "Bundle-river via-hop reservation failed for net %d "
-                    "(group %s); continuing",
+                    "Bundle-river via-hop reservation failed for net %d (group %s); continuing",
                     loser,
                     grp_name,
                     exc_info=True,
