@@ -5212,9 +5212,7 @@ class Autorouter:
 
         # Row-axis coordinate for each member; fall back to positional
         # index if a projection is missing (should not happen).
-        coord = {
-            nid: row_positions.get(nid, float(idx)) for idx, nid in enumerate(members)
-        }
+        coord = {nid: row_positions.get(nid, float(idx)) for idx, nid in enumerate(members)}
 
         # Two frontiers walking inward from each end.
         lo = 0
