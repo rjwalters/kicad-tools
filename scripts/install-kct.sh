@@ -7,10 +7,17 @@
 #      (git source by default, local path source with --path <dir>).
 #   2. Vendors .claude/commands/kct/*.md skills into the target (NEVER touches
 #      .claude/commands/loom/ — coexists additively with Loom).
-#   3. Appends a guarded, idempotent <!-- BEGIN KICAD-TOOLS --> block to the
+#   3. Vendors the portable CI gate scripts (scripts/ci/check_copper_lvs.py,
+#      check_routed_drc.py, net_class_map_resolver.py) into the target's
+#      .kct/ci/ (Epic #4054 Child 2, #4056). These are stdlib+yaml only, take
+#      the board path as a CLI argument, and gate copper-LVS / routed-DRC in
+#      the consumer's own CI. Copied verbatim as a sibling triple so
+#      check_routed_drc.py's local `from net_class_map_resolver import ...`
+#      (a sys.path insert relative to the script's own dir) still resolves.
+#   4. Appends a guarded, idempotent <!-- BEGIN KICAD-TOOLS --> block to the
 #      target's CLAUDE.md carrying the three hard-won Epic #4054 conventions.
-#   4. Writes .kct/install-metadata.json for a future uninstaller/upgrader.
-#   5. --dry-run prints every planned write and writes nothing.
+#   5. Writes .kct/install-metadata.json for a future uninstaller/upgrader.
+#   6. --dry-run prints every planned write and writes nothing.
 #
 # Usage:
 #   ./scripts/install-kct.sh [OPTIONS] <target-repo>
@@ -127,7 +134,23 @@ KCT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [[ -f "$KCT_ROOT/pyproject.toml" ]] || error "source root missing pyproject.toml: $KCT_ROOT"
 SKILLS_SRC="$KCT_ROOT/.claude/commands/kct"
 [[ -d "$SKILLS_SRC" ]] || error "source root missing .claude/commands/kct/: $KCT_ROOT"
+CI_GATES_SRC="$KCT_ROOT/scripts/ci"
+[[ -d "$CI_GATES_SRC" ]] || error "source root missing scripts/ci/: $KCT_ROOT"
 ok "KCT_ROOT=$KCT_ROOT"
+
+# The portable CI gate scripts vendored into the consumer's .kct/ci/ (#4056).
+# This list is DELIBERATELY explicit, not a glob: only these three gates are
+# consumer-generic (stdlib+yaml, CLI-arg-driven, no boards/ assumption). The
+# board-specific / repo-internal gates in scripts/ci/ (check_board_00_e2e.py,
+# check_board_05_blocking.py, check_diffpair_coverage.py, etc.) are NOT vendored.
+# They are copied verbatim as a sibling triple: check_routed_drc.py imports
+# net_class_map_resolver via a sys.path insert relative to its OWN directory,
+# so the three must land together in one dir for that import to resolve.
+CI_GATE_FILES=(
+  "check_copper_lvs.py"
+  "check_routed_drc.py"
+  "net_class_map_resolver.py"
+)
 
 # Extract kicad-tools version from the source pyproject.toml (first version =).
 KCT_VERSION="$(grep -m1 -E '^version[[:space:]]*=' "$KCT_ROOT/pyproject.toml" \
@@ -357,6 +380,87 @@ for s in "${SELECTED_SKILLS[@]}"; do
 done
 ok "vendored ${#VENDORED_FILES[@]} skill file(s)"
 
+# ----- Stage 6b: vendor portable CI gate scripts (#4056) --------------------
+# Copy the three consumer-generic gates verbatim into .kct/ci/ as a sibling
+# triple. Executable (chmod 0755) so a consumer can invoke them directly; also
+# recorded in installed_files for the upgrader. Re-running the installer
+# overwrites them from the (possibly newer) source checkout — the documented
+# `uv lock --upgrade` + re-run refresh path (no separate versioning scheme).
+info "Stage 6b: vendor portable CI gate scripts into .kct/ci/"
+DST_CI_DIR="$TARGET/.kct/ci"
+
+vendor_ci_gate() {
+  local src="$1" dst="$2"
+  mkdir -p "$(dirname "$dst")"
+  cp "$src" "$dst"
+  chmod 0755 "$dst"
+}
+
+for gate in "${CI_GATE_FILES[@]}"; do
+  [[ -f "$CI_GATES_SRC/$gate" ]] || error "source CI gate missing: $CI_GATES_SRC/$gate"
+  do_action "vendor .kct/ci/$gate" \
+    vendor_ci_gate "$CI_GATES_SRC/$gate" "$DST_CI_DIR/$gate"
+  VENDORED_FILES+=(".kct/ci/$gate")
+done
+# Ship a short README next to the gates documenting the consumer-side
+# invocation (path-as-CLI-arg, --allow N instead of the repo-internal allowlist).
+CI_README_DST="$DST_CI_DIR/README.md"
+write_ci_readme() {
+  mkdir -p "$DST_CI_DIR"
+  cat > "$CI_README_DST" <<'CI_README_EOF'
+# Portable kicad-tools CI gates (`.kct/ci/`)
+
+These scripts are vendored by `install-kct.sh` (kicad-tools Epic #4054,
+Child #4056). They are copies of `scripts/ci/*.py` from the kicad-tools
+source repo — **installer-managed**: re-running `install-kct.sh` (the
+`uv lock --upgrade` + re-run upgrade path) overwrites them. Edit the
+upstream originals, not these copies.
+
+They are stdlib + `yaml` only (no `kicad_tools` import) and take the board
+path as a CLI argument, so they run against **your** board path — there is
+no `boards/` assumption.
+
+## `check_copper_lvs.py` — copper-LVS gate
+
+Run the checker from the `kicad_tools` package (available via the uv
+dependency) to emit a JSON verdict, then gate on it:
+
+```bash
+uv run python -m kicad_tools.lvs.copper_lvs \
+  hardware/<your-board>/<board>.kicad_sch \
+  hardware/<your-board>/output/<board>_routed.kicad_pcb \
+  > /tmp/copper-lvs.json
+uv run python .kct/ci/check_copper_lvs.py /tmp/copper-lvs.json
+```
+
+Exit `0` = clean, `2` = a short/open was found, `1` = usage/tool error.
+
+## `check_routed_drc.py` — routed-DRC blocking-error gate
+
+Pass your routed `*.kicad_pcb` path(s). Use `--allow N` to set the tolerance
+explicitly. Do **not** rely on the default `--allowlist`
+(`.github/routed-drc-tolerance.yml`) — that is the kicad-tools repo's own
+per-board grandfather list and does not exist in a fresh consumer repo.
+
+```bash
+# Fail on any blocking DRC error (fresh repo, no grandfathered history):
+uv run python .kct/ci/check_routed_drc.py \
+  hardware/<your-board>/output/<board>_routed.kicad_pcb \
+  --allow 0
+```
+
+Exit `0` = within tolerance, `2` = exceeded (job fails), `1` = tool error.
+Passing zero files is a no-op that exits `0` (a first CI run with no changed
+`*_routed.kicad_pcb` files passes).
+
+`net_class_map_resolver.py` is a dependency of `check_routed_drc.py`; keep
+all three files together in this directory so its sibling import resolves.
+CI_README_EOF
+}
+do_action "write .kct/ci/README.md" write_ci_readme
+VENDORED_FILES+=(".kct/ci/README.md")
+ok "vendored ${#CI_GATE_FILES[@]} CI gate script(s) + README into .kct/ci/"
+
 # ----- Stage 7: guarded CLAUDE.md block -------------------------------------
 info "Stage 7: CLAUDE.md guarded block"
 CLAUDE_MD="$TARGET/CLAUDE.md"
@@ -369,8 +473,10 @@ NEW_BLOCK="$KCT_MARK_BEGIN
 
 This repo uses [kicad-tools](https://github.com/rjwalters/kicad-tools) (\`kct\`)
 for PCB design/routing/DRC. Skills live under \`.claude/commands/kct/\` and are
-invoked as \`/kct:<name>\`. This block is managed by \`install-kct.sh\` — edit
-outside the markers only; re-running the installer replaces it in place.
+invoked as \`/kct:<name>\`. Portable CI gates (copper-LVS, routed-DRC) live under
+\`.kct/ci/\` — see \`.kct/ci/README.md\` for consumer-side invocation. This block
+is managed by \`install-kct.sh\` — edit outside the markers only; re-running the
+installer replaces it in place.
 
 ### Conventions (load-bearing — do not drop)
 1. **Build the C++ router backend after every fresh checkout/worktree.** Run

@@ -25,6 +25,15 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts" / "install-kct.sh"
 SKILLS_SRC = REPO_ROOT / ".claude" / "commands" / "kct"
+CI_GATES_SRC = REPO_ROOT / "scripts" / "ci"
+
+# The three portable CI gates vendored into the consumer's .kct/ci/ (#4056).
+# Must stay in sync with CI_GATE_FILES in scripts/install-kct.sh.
+VENDORED_CI_GATES = (
+    "check_copper_lvs.py",
+    "check_routed_drc.py",
+    "net_class_map_resolver.py",
+)
 
 
 # --- fake uv -----------------------------------------------------------------
@@ -369,3 +378,137 @@ def test_git_mode_writes_git_source(target_repo: Path, fake_uv_env: dict[str, st
     assert "v0.14.0" in src
     meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
     assert meta["source_mode"] == "git"
+
+
+# --- portable CI gates vendored into .kct/ci/ (#4056) ------------------------
+
+
+def test_ci_gates_vendored_byte_identical_and_executable(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """The 3 portable gates land in .kct/ci/, byte-identical + executable."""
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+
+    ci_dir = target_repo / ".kct" / "ci"
+    for name in VENDORED_CI_GATES:
+        dst = ci_dir / name
+        assert dst.exists(), f"{name} not vendored into .kct/ci/"
+        assert dst.read_bytes() == (CI_GATES_SRC / name).read_bytes(), (
+            f"{name} must be a verbatim copy of scripts/ci/{name}"
+        )
+        # Executable so a consumer can invoke the gate directly.
+        assert dst.stat().st_mode & 0o111, f"{name} must be executable"
+
+    # A README documenting consumer-side invocation ships alongside the gates.
+    readme = ci_dir / "README.md"
+    assert readme.exists()
+    readme_text = readme.read_text()
+    assert "--allow" in readme_text, "README must document the --allow N pattern"
+    assert "check_copper_lvs.py" in readme_text
+    assert "check_routed_drc.py" in readme_text
+
+
+def test_ci_gates_not_over_vendored(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """Repo-internal / board-specific gates must NOT be vendored."""
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    ci_dir = target_repo / ".kct" / "ci"
+    for excluded in (
+        "check_board_00_e2e.py",
+        "check_board_05_blocking.py",
+        "check_diffpair_coverage.py",
+        "check_matchgroup_coverage.py",
+    ):
+        assert not (ci_dir / excluded).exists(), f"{excluded} must not be vendored"
+
+
+def test_ci_gates_recorded_in_metadata(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """install-metadata.json installed_files lists every vendored gate + README."""
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    for name in VENDORED_CI_GATES:
+        assert f".kct/ci/{name}" in meta["installed_files"]
+    assert ".kct/ci/README.md" in meta["installed_files"]
+
+
+def test_ci_gates_dry_run_writes_nothing(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """--dry-run must not create .kct/ci/ or any gate file."""
+    result = run_installer(target_repo, "--dry-run", "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert not (target_repo / ".kct" / "ci").exists()
+    assert "vendor .kct/ci/check_copper_lvs.py" in result.stdout
+
+
+def test_ci_gates_rerun_idempotent(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """A second install re-copies the gates without duplication or drift."""
+    first = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert first.returncode == 0, first.stderr
+    second = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert second.returncode == 0, second.stderr
+
+    ci_dir = target_repo / ".kct" / "ci"
+    # Still exactly the expected set (3 gates + README), all byte-identical.
+    vendored = sorted(p.name for p in ci_dir.iterdir())
+    assert vendored == sorted([*VENDORED_CI_GATES, "README.md"])
+    for name in VENDORED_CI_GATES:
+        assert (ci_dir / name).read_bytes() == (CI_GATES_SRC / name).read_bytes()
+
+    # Metadata still lists each gate exactly once.
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    for name in VENDORED_CI_GATES:
+        assert meta["installed_files"].count(f".kct/ci/{name}") == 1
+
+
+def test_vendored_gates_run_standalone_from_consumer(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """Functional smoke: the vendored gates operate standalone from .kct/ci/.
+
+    Proves (a) check_routed_drc.py's sibling `from net_class_map_resolver
+    import ...` still resolves after relocation (its --help importing the
+    module is the tell), (b) the zero-files no-op exits 0, and (c) copper-LVS
+    gates a JSON verdict with no repo-relative path leakage.
+    """
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    ci_dir = target_repo / ".kct" / "ci"
+
+    # (a) check_routed_drc.py --help succeeds ONLY if the sibling import of
+    # net_class_map_resolver resolves at module load (it is a top-level import).
+    drc_help = subprocess.run(
+        ["python3", str(ci_dir / "check_routed_drc.py"), "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert drc_help.returncode == 0, drc_help.stderr
+    assert "usage: check_routed_drc" in drc_help.stdout
+
+    # (b) zero files passed is a documented no-op that exits 0.
+    drc_noop = subprocess.run(
+        ["python3", str(ci_dir / "check_routed_drc.py"), "--allow", "0"],
+        capture_output=True,
+        text=True,
+    )
+    assert drc_noop.returncode == 0, drc_noop.stderr
+
+    # (c) copper-LVS gate: clean verdict -> 0, dirty verdict -> 2, from a path
+    # outside this repo (the tmp target), proving no boards/-relative assumption.
+    clean = target_repo / "clean.json"
+    clean.write_text('{"clean": true, "mismatches": []}')
+    clean_run = subprocess.run(
+        ["python3", str(ci_dir / "check_copper_lvs.py"), str(clean)],
+        capture_output=True,
+        text=True,
+    )
+    assert clean_run.returncode == 0, clean_run.stderr
+
+    dirty = target_repo / "dirty.json"
+    dirty.write_text('{"clean": false, "mismatches": [{"net": "N", "kind": "short"}]}')
+    dirty_run = subprocess.run(
+        ["python3", str(ci_dir / "check_copper_lvs.py"), str(dirty)],
+        capture_output=True,
+        text=True,
+    )
+    assert dirty_run.returncode == 2, dirty_run.stdout
