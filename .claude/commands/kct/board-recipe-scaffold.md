@@ -50,7 +50,23 @@ Emit a `<board-path>/generate_design.py` with these nine steps as functions, and
 
 4. **`create_‹circuit›_pcb(output_dir)`** — build the `.kicad_pcb` with an explicit `NETS` dict and footprints placed at **0° / 45° / 90° / 135° only**. Non-multiple-of-45° rotations hit a footprint rotation-transform ambiguity (see issue #3737 for *why* — cited as rationale, not a required read). Return the unrouted PCB path.
 
-5. **`route_pcb(input_path, output_path)`** — `kicad_tools.router.DesignRules` + `load_pcb_for_routing` + `router.route_all()` + `TraceOptimizer`; then pour: `kicad_tools.router.auto_pour.auto_pour_if_missing()` + `kicad_tools.cli.route_cmd._fill_zones_after_route()` for the power/ground pour nets. Return success (partial routing is tolerated — see `main()`).
+5. **`route_pcb(input_path, output_path)`** — `kicad_tools.router.DesignRules` + `load_pcb_for_routing` + `router.route_all()` + `TraceOptimizer`; then pour: `kicad_tools.router.auto_pour.auto_pour_if_missing()` + `kicad_tools.cli.route_cmd._fill_zones_after_route()` for the power/ground pour nets. Return a `route_success` boolean (`True` only when **all** signal nets landed) — do **not** swallow a partial route here; the gate in step 5.5 owns the decision.
+
+5.5. **`route_success` fast-fail gate (do this in `main()`, immediately after `route_pcb(...)`, BEFORE pour-stitching / LVS / export).** If `not route_success`, `raise` a **distinct, clearly-worded** error and stop — do not fall through to the LVS/pour/export steps:
+
+   ```python
+   if not route_success:
+       raise RuntimeError(
+           "partial route — likely wall-clock budget exhaustion under load "
+           "(the routing wall-clock safety backstop fired before every signal "
+           "net landed; see the 'PARTIAL: Routed N/M signal nets' line above "
+           "for the exact count). This is NOT a copper-LVS / GND-stitching "
+           "failure — the pipeline stopped before the LVS gate. Re-run on a "
+           "quiet machine, or raise the routing timeout if it recurs."
+       )
+   ```
+
+   **Why (issue #4047).** Without this gate, a partial route falls through to step 7's `write_lvs_report(..., require_clean=True)`, where an unrouted signal net reaches the copper comparator as a GND OPEN and raises `BoardNetlistMismatch`. The broad `try/except` in `main()` then reports exit 1 with a **misleading LVS traceback**, misdirecting the reviewer to the LVS / GND-stitching subsystem when the true cause is upstream route truncation (a loaded machine buys fewer CPU cycles inside the fixed wall-clock budget). Raising a distinct error here names the real cause. The reference recipe only dodged this by routing fully; a generic scaffold must teach the guard, because any board large enough to route partially will hit it. This is a hard fail-fast: it **supersedes** the "partial route → exit 0" tolerance below whenever LVS is a `require_clean=True` gate (which it always is in step 7).
 
 6. **`run_drc(pcb_path)`** — subprocess the CLI: `kct check <pcb> --allow-incomplete`. The `--allow-incomplete` opt-in matters: it runs **before** the manufacturing bundle exists, so the Manifest sub-check would otherwise report NOT RUN and fail the whole gate. Hard-fail on real DRC errors.
 
@@ -58,7 +74,7 @@ Emit a `<board-path>/generate_design.py` with these nine steps as functions, and
 
 8. **`export_manufacturing_bundle(routed_path, output_dir)`** — subprocess `kct export <routed.kicad_pcb> --output <output_dir>/manufacturing --mfr ‹tier› --skip-preflight`; then verify `manifest.json` was written. Resolve ‹tier› per the `--mfr` argument rules above (never hardcode a tier list). Run this **unconditionally** so the manifest mtime stays newer than the routed PCB even when routing is incomplete.
 
-9. **`main()`** — run steps 1-8 in order, print a summary table (ERC / Routing / DRC / LVS / MFG), and **exit 0 only if ERC + DRC + LVS all pass**. **Routing partial-completion is tolerated and tracked separately** — surface this as a documented, explicit option in the summary (e.g. print `Routing: PARTIAL`), not a silent swallow. Wrap the body in try/except that prints the traceback and returns 1.
+9. **`main()`** — run steps 1-8 in order (with the step 5.5 `route_success` gate right after routing), print a summary table (ERC / Routing / DRC / LVS / MFG), and **exit 0 only if ERC + DRC + LVS all pass**. Wrap the body in try/except that prints the traceback and returns 1. **A partial route never reaches this exit gate** — step 5.5 fast-fails it with a distinct "partial route" error *before* LVS, precisely so the reviewer is not handed a misleading `BoardNetlistMismatch`/LVS trace for what is really route truncation (issue #4047). If you ever downgrade LVS out of the `require_clean=True` hard gate, then and only then may a partial route be surfaced as a tolerated `Routing: PARTIAL` summary line instead of a hard fail-fast.
 
 ## The gating contract (make it explicit in `main()`)
 
@@ -67,7 +83,7 @@ return 0 if erc_success and drc_success and lvs_success else 1
 ```
 
 - ERC, DRC, LVS are **hard gates** — any failure ⇒ non-zero exit.
-- Routing may be **PARTIAL** and still exit 0, but the summary must say so plainly (documented option, not hidden).
+- A **partial route is a fast-fail** (step 5.5): while LVS is a `require_clean=True` hard gate, `not route_success` `raise`s a distinct "partial route" error *before* LVS runs, so the recipe never emits a misleading `BoardNetlistMismatch`/LVS traceback for what is really route truncation (issue #4047). Only a recipe that intentionally downgrades LVS below `require_clean=True` may instead tolerate a partial route as an explicit `Routing: PARTIAL` summary line (documented option, never a silent swallow).
 - LVS specifically is never downgraded to advisory — it is the divergence catcher.
 
 ## What to leave as fill-in points (do NOT invent a circuit)
@@ -89,5 +105,5 @@ Mark each of these `# TODO(author): ...` in the emitted template so they cannot 
 
 ## References
 
-- The nine-step skeleton is the validated artifact-first pipeline shape used across kicad-tools' own board fleet (validated end-to-end on the repo's own smallest fixture recipe). Issue #3737 (rotation-transform ambiguity → 45°-multiple placements) and #3747 (LVS caught a polarity divergence) are the *why* behind two of the constraints.
+- The nine-step skeleton is the validated artifact-first pipeline shape used across kicad-tools' own board fleet (validated end-to-end on the repo's own smallest fixture recipe). Issue #3737 (rotation-transform ambiguity → 45°-multiple placements), #3747 (LVS caught a polarity divergence), and #4047 (the `route_success` fast-fail so a partial route surfaces as a distinct "partial route" error, not a misleading LVS `BoardNetlistMismatch`) are the *why* behind three of the constraints.
 - `/kct:manufacturing-readiness` — the sibling sign-off skill for the committed artifact (adds the `kicad-cli pcb drc --refill-zones` cross-gate on top of `kct check` + `kct export`).
