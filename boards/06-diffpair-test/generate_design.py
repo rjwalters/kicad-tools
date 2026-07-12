@@ -3401,6 +3401,38 @@ def main() -> int:
             pcb_path = create_pcb(output_dir)
             routed_path = output_dir / "diffpair_test_routed.kicad_pcb"
             route_success = route_pcb(pcb_path, routed_path)
+
+            # route_success fast-fail gate (#4066, mirrors board 03's gate at
+            # boards/03-usb-joystick/generate_design.py:838).  route_pcb runs
+            # under a wall-clock ``--timeout`` SAFETY backstop layered above
+            # the load-independent per-net ``--deterministic-budget`` iteration
+            # cap, so on a loaded machine that outer deadline can fire before
+            # every signal net lands and ``route_pcb`` returns ``False``.  If
+            # we fall through, the ``write_lvs_report(require_clean=True)`` call
+            # below sees a genuinely unrouted signal net as a copper OPEN and
+            # raises ``BoardNetlistMismatch``, which the broad ``except`` below
+            # reports as exit 1 -- misdirecting the reviewer to the LVS
+            # subsystem when the true cause is upstream route truncation.
+            # SCOPE: this gate is deliberately confined to the ``--step all``
+            # branch.  The separate ``--step route`` branch below is the
+            # Phase 4N CI re-route path (#2677) that TOLERATES a partial route
+            # by design (USB3_TX1+/- is blocked by the BGA partner-via escape)
+            # and does not call LVS -- it must NOT gain this gate.  The
+            # "PARTIAL: Routed N/M signal nets" line is already printed above
+            # by ``route_pcb``.
+            if not route_success:
+                raise RuntimeError(
+                    "partial route -- likely wall-clock budget exhaustion "
+                    "under load (the --timeout safety backstop fired before "
+                    "every signal net landed; see the 'PARTIAL: Routed N/M "
+                    "signal nets' line above for the exact count). This is NOT "
+                    "a copper-LVS / GND-stitching failure -- the pipeline "
+                    "stopped before the LVS gate. Re-run "
+                    "boards/06-diffpair-test/generate_design.py --step all in "
+                    "isolation on a quiet machine, or raise the --timeout in "
+                    "route_pcb() if this recurs on an unloaded host."
+                )
+
             drc_ok = run_drc(routed_path)
 
             # LVS (#3779, re-enabled by #4012): the fixture schematic is

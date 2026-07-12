@@ -947,6 +947,31 @@ def main() -> int:
         routed_path = output_dir / "simple_led_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
 
+        # Step 5.5: route_success fast-fail gate (#4066, mirrors board 03's
+        # gate at boards/03-usb-joystick/generate_design.py:838).  route_pcb
+        # runs under a wall-clock ``--timeout`` SAFETY backstop layered above
+        # the load-independent per-net ``--deterministic-budget`` iteration
+        # cap, so on a loaded machine that outer deadline can fire before every
+        # signal net lands and ``route_pcb`` returns ``False``.  If we fall
+        # through, the downstream ``run_lvs`` -> ``write_lvs_report(
+        # require_clean=True)`` sees a genuinely unrouted signal net as a copper
+        # OPEN and raises ``BoardNetlistMismatch``, which the broad ``except``
+        # below reports as exit 1 -- misdirecting the reviewer to the LVS
+        # subsystem when the true cause is upstream route truncation.  Raise a
+        # DISTINCT, clearly-worded error here instead.  The "PARTIAL: Routed
+        # N/M signal nets" line is already printed above by ``route_pcb``.
+        if not route_success:
+            raise RuntimeError(
+                "partial route -- likely wall-clock budget exhaustion under "
+                "load (the --timeout safety backstop fired before every "
+                "signal net landed; see the 'PARTIAL: Routed N/M signal nets' "
+                "line above for the exact count). This is NOT a copper-LVS / "
+                "GND-stitching failure -- the pipeline stopped before the LVS "
+                "gate. Re-run boards/00-simple-led/generate_design.py in "
+                "isolation on a quiet machine, or raise the --timeout in "
+                "route_pcb() if this recurs on an unloaded host."
+            )
+
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)
 

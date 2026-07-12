@@ -1953,6 +1953,36 @@ def main() -> int:
         routed_path = output_dir / "stm32_devboard_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
 
+        # Step 5.5a: route_success fast-fail gate (#4066, mirrors board 03's
+        # gate at boards/03-usb-joystick/generate_design.py:838).  route_pcb
+        # runs under a wall-clock ``--timeout`` SAFETY backstop layered above
+        # the load-independent per-net ``--deterministic-budget`` iteration
+        # cap, so on a loaded machine that outer deadline can fire before every
+        # signal net lands and ``route_pcb`` returns ``False``.  This gate must
+        # land HERE -- immediately after route_pcb and before the five
+        # copper-mutating steps below (fix_osc_escape / stitch_pcb /
+        # tie_power_pads / quantize_escapes / fill_zones) -- so none of them
+        # ever touch a partially-routed board and the downstream
+        # ``write_lvs_report(require_clean=True)`` never sees an unrouted signal
+        # net as a copper OPEN (which would raise ``BoardNetlistMismatch`` and
+        # misdirect the reviewer to the LVS subsystem when the true cause is
+        # upstream route truncation).  NOTE: the final exit gate below still
+        # ANDs ``route_success`` into its return (#3839) -- that term is left
+        # in place as defense-in-depth; this early raise makes it unreachable
+        # on the partial-route path but not redundant.  The "PARTIAL: Routed
+        # N/M signal nets" line is already printed above by ``route_pcb``.
+        if not route_success:
+            raise RuntimeError(
+                "partial route -- likely wall-clock budget exhaustion under "
+                "load (the --timeout safety backstop fired before every "
+                "signal net landed; see the 'PARTIAL: Routed N/M signal nets' "
+                "line above for the exact count). This is NOT a copper-LVS / "
+                "GND-stitching failure -- the pipeline stopped before the LVS "
+                "gate. Re-run boards/04-stm32-devboard/generate_design.py in "
+                "isolation on a quiet machine, or raise the --timeout in "
+                "route_pcb() if this recurs on an unloaded host."
+            )
+
         # Step 5.5: Fix the OSC_OUT escape-stub short (#3797) -- the fresh
         # deterministic route drops the OSC_OUT B.Cu escape straight into the
         # U2.5 OSC_IN pad, shorting the two crystal pins.  This deterministic
