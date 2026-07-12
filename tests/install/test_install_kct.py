@@ -244,6 +244,81 @@ def test_loom_dir_untouched(target_repo: Path, fake_uv_env: dict[str, str]) -> N
     assert loom_file.read_bytes() == before, "installer must never touch loom skills"
 
 
+# --- malformed CLAUDE.md markers: error, never silent data loss --------------
+
+
+def test_unterminated_begin_marker_errors_without_data_loss(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """A BEGIN with no matching END must abort and leave the file byte-unchanged.
+
+    Regression for the PR #4062 judge finding: the in-place line rebuild dropped
+    every line after a stale BEGIN (in_block never cleared), then clobbered the
+    original — silent data loss on exit 0.
+    """
+    claude = target_repo / "CLAUDE.md"
+    claude.write_text(
+        "# My Repo\n"
+        "IMPORTANT USER CONTENT\n"
+        "<!-- BEGIN KICAD-TOOLS -->\n"
+        "stale half block\n"
+        "MORE IMPORTANT CONTENT AFTER STALE BEGIN\n"
+    )
+    before = claude.read_bytes()
+
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+
+    assert result.returncode != 0, "unterminated BEGIN must fail, not exit 0"
+    assert "unterminated" in result.stderr.lower()
+    assert claude.read_bytes() == before, "malformed target must be byte-unchanged"
+
+
+def test_unterminated_begin_marker_dry_run_errors(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """--dry-run must surface the malformed-marker error, not report an in-place replace."""
+    claude = target_repo / "CLAUDE.md"
+    claude.write_text("# My Repo\n<!-- BEGIN KICAD-TOOLS -->\nstale half block\nUSER CONTENT\n")
+    before = claude.read_bytes()
+
+    result = run_installer(target_repo, "--dry-run", "--path", str(REPO_ROOT), env=fake_uv_env)
+
+    assert result.returncode != 0
+    assert "unterminated" in result.stderr.lower()
+    assert "replace existing kicad-tools block" not in result.stdout
+    assert claude.read_bytes() == before
+
+
+def test_end_before_begin_marker_errors_without_data_loss(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """Inverse malformation (END before BEGIN): also errors out, file unchanged.
+
+    Documented behavior: an END that precedes its BEGIN is treated as malformed
+    and aborts (the grep gate still fires because a BEGIN exists later). Either
+    an error or a safe no-op is acceptable per the issue; we choose to error so
+    the operator fixes the markers. Never silent corruption.
+    """
+    claude = target_repo / "CLAUDE.md"
+    claude.write_text(
+        "# My Repo\n"
+        "USER CONTENT ABOVE\n"
+        "<!-- END KICAD-TOOLS -->\n"
+        "USER CONTENT BETWEEN\n"
+        "<!-- BEGIN KICAD-TOOLS -->\n"
+        "block body\n"
+        "<!-- END KICAD-TOOLS -->\n"
+    )
+    before = claude.read_bytes()
+
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+
+    assert result.returncode != 0
+    err = result.stderr.lower()
+    assert "before any" in err or "unterminated" in err
+    assert claude.read_bytes() == before
+
+
 # --- skill selection ---------------------------------------------------------
 
 

@@ -385,6 +385,34 @@ outside the markers only; re-running the installer replaces it in place.
    authoritative over a committed board.
 $KCT_MARK_END"
 
+# Validate the kicad-tools marker structure of a CLAUDE.md. Echoes a
+# human-readable reason and returns non-zero when the markers are malformed
+# (unterminated BEGIN, or an END that appears before its BEGIN). Shared by the
+# real merge and the --dry-run preview so both agree on what will happen.
+#
+# A malformed file MUST NOT be edited: an unterminated BEGIN would cause every
+# line after it to be silently dropped, then clobber the original on `mv`.
+claude_md_marker_error() {
+  local file="$1"
+  local line depth=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == *"$KCT_MARK_BEGIN"* ]]; then
+      depth=$((depth + 1))
+    elif [[ "$line" == *"$KCT_MARK_END"* ]]; then
+      if [[ "$depth" -eq 0 ]]; then
+        echo "CLAUDE.md has an $KCT_MARK_END before any $KCT_MARK_BEGIN; refusing to edit — fix the markers and re-run"
+        return 1
+      fi
+      depth=$((depth - 1))
+    fi
+  done < "$file"
+  if [[ "$depth" -ne 0 ]]; then
+    echo "CLAUDE.md has an unterminated $KCT_MARK_BEGIN block (no $KCT_MARK_END marker); refusing to edit — fix the markers and re-run"
+    return 1
+  fi
+  return 0
+}
+
 merge_claude_md() {
   if [[ ! -f "$CLAUDE_MD" ]]; then
     printf '%s\n' "$NEW_BLOCK" > "$CLAUDE_MD"
@@ -392,6 +420,12 @@ merge_claude_md() {
   fi
 
   if grep -qF "$KCT_MARK_BEGIN" "$CLAUDE_MD"; then
+    # Abort on a malformed target rather than risk silent data loss.
+    local marker_err
+    if ! marker_err="$(claude_md_marker_error "$CLAUDE_MD")"; then
+      error "$marker_err"
+    fi
+
     # Replace the marked block in place. Pure-bash line rebuild (BSD-sed-safe;
     # no GNU `sed -i`). Preserves everything outside the markers, including any
     # Loom or Anvil block.
@@ -431,6 +465,7 @@ if [[ "$DRY_RUN" == true ]]; then
   if [[ ! -f "$CLAUDE_MD" ]]; then
     echo "  [dry-run] create CLAUDE.md with kicad-tools marker block"
   elif grep -qF "$KCT_MARK_BEGIN" "$CLAUDE_MD"; then
+    marker_err="$(claude_md_marker_error "$CLAUDE_MD")" || error "$marker_err"
     echo "  [dry-run] replace existing kicad-tools block in CLAUDE.md (in place)"
   else
     echo "  [dry-run] append kicad-tools marker block to CLAUDE.md (preserves existing content)"
