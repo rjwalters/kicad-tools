@@ -52,6 +52,30 @@ _MEASUREMENT_RULE_IDS: frozenset[str] = frozenset(
     }
 )
 
+# Issue #4102: ``dimension_drill_clearance`` hole-to-hole findings carry both
+# endpoints' resolved net names in ``nets=(net1, net2)``.  A user reading the
+# report needs to separate the fab's real concern (different-net pairs, where a
+# drill-wall break creates a short) from same-net / floating pairs.  The data is
+# already present per-finding and in ``--format json``; the report just needs to
+# surface it (net names shown unconditionally, plus an explicit same-net /
+# different-net qualifier).  This is presentational only -- severity is
+# unchanged (see #2976: same-net drill overlap is still a manufacturing defect).
+_NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset({"dimension_drill_clearance"})
+
+
+def _net_relationship(nets: tuple[str, ...]) -> str | None:
+    """Classify a hole-to-hole finding's net pair as same-net / different-net.
+
+    Returns ``"same-net"`` when both endpoints resolve to the same net name,
+    ``"different-net"`` when they differ, and ``None`` when the finding does
+    not carry exactly two net names (nothing to compare).  Unnamed nets are
+    already resolved to distinct ``net:<n>`` placeholders upstream, so an
+    unconnected pin next to a signal via reads as ``different-net``.
+    """
+    if len(nets) != 2:
+        return None
+    return "same-net" if nets[0] == nets[1] else "different-net"
+
 
 @dataclass
 class SubCheckResult:
@@ -1303,6 +1327,11 @@ def output_table(
         else [v for v in violations if not (v.is_info and v.rule_id in _MEASUREMENT_RULE_IDS)]
     )
     by_rule: dict[str, dict[str, int]] = {}
+    # Issue #4102: for net-relationship rules (dimension_drill_clearance),
+    # additionally tally a same-net / different-net breakdown so the BY RULE
+    # summary line is immediately actionable -- directly answering the
+    # "49-finding wall" complaint without scrolling the detail list.
+    by_rule_relationship: dict[str, dict[str, int]] = {}
     for v in by_rule_source:
         if v.rule_id not in by_rule:
             by_rule[v.rule_id] = {"errors": 0, "warnings": 0, "infos": 0}
@@ -1312,6 +1341,14 @@ def output_table(
             by_rule[v.rule_id]["infos"] += 1
         else:
             by_rule[v.rule_id]["warnings"] += 1
+
+        if v.rule_id in _NET_RELATIONSHIP_RULE_IDS:
+            relationship = _net_relationship(v.nets)
+            if relationship is not None:
+                counts = by_rule_relationship.setdefault(
+                    v.rule_id, {"same-net": 0, "different-net": 0}
+                )
+                counts[relationship] += 1
 
     # ``by_rule`` can be empty when the only findings are measurement info
     # rows suppressed above (already surfaced in MEASUREMENT SUMMARY); skip the
@@ -1330,7 +1367,16 @@ def output_table(
             parts.append(f"{counts['warnings']} warning{'s' if counts['warnings'] != 1 else ''}")
         if counts["infos"]:
             parts.append(f"{counts['infos']} info{'s' if counts['infos'] != 1 else ''}")
-        print(f"  {rule_id}: {', '.join(parts)}")
+        line = f"  {rule_id}: {', '.join(parts)}"
+        # Issue #4102: append the same-net / different-net breakdown for
+        # net-relationship rules, e.g.
+        #   dimension_drill_clearance: 49 errors (32 different-net, 17 same-net)
+        rel = by_rule_relationship.get(rule_id)
+        if rel:
+            diff_n = rel["different-net"]
+            same_n = rel["same-net"]
+            line += f" ({diff_n} different-net, {same_n} same-net)"
+        print(line)
 
     # Detailed output
     errors = [v for v in violations if v.is_error]
@@ -1387,8 +1433,26 @@ def _print_violation(v: DRCViolation, verbose: bool, indent: str = "  ") -> None
         symbol = "i"
     else:
         symbol = "!"
-    print(f"\n{indent}[{symbol}] {v.rule_id}")
+
+    # Issue #4102: for hole-to-hole clearance findings, tag the header line
+    # with the net relationship (same-net / different-net) so a user scanning
+    # a wall of findings can immediately tell the fab's real concern
+    # (different-net drill-wall breakage -> short) from lower-risk same-net /
+    # floating pairs -- without eyeballing two net names.  Presentational only;
+    # severity is unchanged.
+    relationship = _net_relationship(v.nets) if v.rule_id in _NET_RELATIONSHIP_RULE_IDS else None
+    header = v.rule_id if relationship is None else f"{v.rule_id} ({relationship})"
+    print(f"\n{indent}[{symbol}] {header}")
     print(f"{indent}    {v.message}")
+
+    # Issue #4102: show the net endpoints unconditionally for net-relationship
+    # rules (not only under --verbose), rendered as ``net1 / net2`` so the
+    # same-net / different-net qualifier above is self-evident.
+    net_shown = False
+    if relationship is not None and v.nets:
+        net_labels = [n if n else "<no net>" for n in v.nets]
+        print(f"{indent}    Nets: {' / '.join(net_labels)}")
+        net_shown = True
 
     if verbose:
         if v.location:
@@ -1399,7 +1463,7 @@ def _print_violation(v: DRCViolation, verbose: bool, indent: str = "  ") -> None
             print(f"{indent}    Actual: {v.actual_value:.3f}mm, Required: {v.required_value:.3f}mm")
         if v.items:
             print(f"{indent}    Items: {', '.join(v.items)}")
-        if v.nets:
+        if v.nets and not net_shown:
             net_labels = [n if n else "<no net>" for n in v.nets]
             print(f"{indent}    Nets: {', '.join(net_labels)}")
 
