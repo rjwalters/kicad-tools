@@ -1714,6 +1714,17 @@
 			(net 10 "JOY_BTN")
 		)
 		(embedded_fonts no)
+		(model "${KCT_LCSC_3D_DIR}/C50950.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
 	)
 	(footprint "Button_Switch_SMD:SW_SPST_TL3342"
 		(layer "F.Cu")
