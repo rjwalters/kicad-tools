@@ -36,12 +36,21 @@ from .cost import INFEASIBILITY_OFFSET
 from .strategy import PlacementStrategy, StrategyConfig
 from .vector import PlacementBounds, PlacementVector
 
+# Actionable install hint pointing at the declared ``placement`` optional
+# extra (see pyproject.toml ``[project.optional-dependencies] placement``)
+# rather than a bare ``pip install cmaes`` that silently mutates a venv
+# without pinning to the declared extra (issue #4100).
+CMAES_INSTALL_HINT = (
+    "The 'cmaes' package is required for CMAESStrategy. "
+    "Install it with the 'placement' extra: uv sync --extra placement "
+    '(or: pip install "kicad-tools[placement]"). '
+    "The 'dev' and 'all' extras already include it."
+)
+
 try:
     from cmaes import CMAwM
 except ImportError as exc:  # pragma: no cover
-    raise ImportError(
-        "The 'cmaes' package is required for CMAESStrategy. Install it with: pip install cmaes"
-    ) from exc
+    raise ImportError(CMAES_INSTALL_HINT) from exc
 
 
 def _auto_population_size(ndim: int) -> int:
