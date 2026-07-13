@@ -6,6 +6,7 @@
 #include "grid.hpp"
 #include "geometry.hpp"
 #include "pathfinder.hpp"
+#include "coupled_pathfinder.hpp"
 #include "types.hpp"
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
@@ -343,6 +344,56 @@ NB_MODULE(router_cpp, m) {
         .def_prop_ro("relief_mode", &Pathfinder::relief_mode)
         .def_prop_ro("iterations", &Pathfinder::get_iterations)
         .def_prop_ro("nodes_explored", &Pathfinder::get_nodes_explored);
+
+    // CoupledPathNode struct (Issue #4065): one joint-state node on the
+    // reconstructed coupled path (root->goal order).  The Python wrapper
+    // unpacks these into the ``p_path`` / ``n_path`` lists that
+    // ``_reconstruct_coupled_routes`` builds, then feeds them to the
+    // unchanged Python ``_build_route_from_path``.
+    nb::class_<CoupledPathNode>(m, "CoupledPathNode")
+        .def(nb::init<>())
+        .def_ro("p_x", &CoupledPathNode::p_x)
+        .def_ro("p_y", &CoupledPathNode::p_y)
+        .def_ro("p_layer", &CoupledPathNode::p_layer)
+        .def_ro("n_x", &CoupledPathNode::n_x)
+        .def_ro("n_y", &CoupledPathNode::n_y)
+        .def_ro("n_layer", &CoupledPathNode::n_layer)
+        .def_ro("via_from_parent", &CoupledPathNode::via_from_parent);
+
+    // CoupledRouteResult struct (Issue #4065): the two-trace joint path plus
+    // the #4052 budget-exit diagnostics (iterations / best_progress /
+    // timeout_exceeded / iteration_limited) the Python caller reads back as
+    // ``last_*`` attributes.
+    nb::class_<CoupledRouteResult>(m, "CoupledRouteResult")
+        .def(nb::init<>())
+        .def_ro("path", &CoupledRouteResult::path)
+        .def_ro("success", &CoupledRouteResult::success)
+        .def_ro("iterations", &CoupledRouteResult::iterations)
+        .def_ro("best_progress", &CoupledRouteResult::best_progress)
+        .def_ro("timeout_exceeded", &CoupledRouteResult::timeout_exceeded)
+        .def_ro("iteration_limited", &CoupledRouteResult::iteration_limited);
+
+    // CoupledPathfinder class (Issue #4065): C++ port of the joint-state
+    // diff-pair A* loop.  Consumes the SAME Grid3D as the single-ended
+    // Pathfinder.  See coupled_pathfinder.hpp for the v1 scope / deferred
+    // features (allow_swap_via, manhattan_sum heuristic, string-keyed
+    // rejection counters remain Python-only).
+    nb::class_<CoupledPathfinder>(m, "CoupledPathfinder")
+        .def(nb::init<Grid3D&, const DesignRules&, int, int, int, int, int,
+                      double, double>(),
+             "grid"_a, "rules"_a, "target_spacing_cells"_a, "min_spacing_cells"_a,
+             "trace_half_width_cells"_a, "via_extra_cells"_a, "via_drill_cells"_a,
+             "spacing_penalty_factor"_a, "heuristic_weight"_a)
+        .def("route", &CoupledPathfinder::route,
+             "p_start_x"_a, "p_start_y"_a, "n_start_x"_a, "n_start_y"_a,
+             "start_layer"_a,
+             "p_goal_x"_a, "p_goal_y"_a, "n_goal_x"_a, "n_goal_y"_a,
+             "end_layer"_a,
+             "p_net"_a, "n_net"_a,
+             "effective_target_spacing"_a, "effective_approach_radius"_a,
+             "effective_departure_radius"_a,
+             "routable_layers"_a, "corridor_bitset"_a,
+             "max_iterations_budget"_a, "timeout_seconds"_a);
 
     // Geometry functions (Issue #2439)
     m.def("fnv1a_hash", [](const std::string& s) -> uint32_t {

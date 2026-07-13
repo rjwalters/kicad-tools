@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from .core import Autorouter
+    from .cpp_backend import CppCoupledPathfinder
     from .grid import RoutingGrid
     from .rules import DesignRules, NetClassRouting
 
@@ -736,6 +737,21 @@ class CoupledPathfinder:
             (0, 1),  # Down
             (0, -1),  # Up
         ]
+
+        # Issue #4065: opt-in flag for the C++ coupled joint-state A*.
+        # Default ON when a C++ backend is present; the search still falls
+        # back to pure Python for the v1-deferred features
+        # (``allow_swap_via``, ``manhattan_sum``) and whenever construction
+        # of the C++ pathfinder raises.  Env-overridable
+        # (KCT_COUPLED_CPP=0) so measurement / parity tests can force the
+        # Python path without monkeypatching.
+        self._use_cpp_coupled = os.environ.get("KCT_COUPLED_CPP", "1") != "0"
+        # Cached (CppGrid, CppCoupledPathfinder) keyed by grid identity so
+        # the one-time grid marshalling + pathfinder construction is reused
+        # across route_coupled calls on the same pathfinder instance
+        # (mirrors how CppPathfinder is constructed once and reused).
+        self._cpp_coupled_impl: CppCoupledPathfinder | None = None
+        self._cpp_coupled_grid: RoutingGrid | None = None
 
     def _is_cell_blocked(self, gx: int, gy: int, layer: int, net: int) -> bool:
         """Check if a cell is blocked for this net.
@@ -1457,6 +1473,203 @@ class CoupledPathfinder:
         )
         return max_dist * self.rules.cost_straight + spacing_penalty + layer_cost
 
+    def _cpp_coupled_available(self) -> bool:
+        """Whether the C++ coupled search may handle THIS pathfinder.
+
+        v1 scope (Issue #4065): the C++ port covers the ``partner_aware``
+        heuristic with ``allow_swap_via`` off.  The legacy ``manhattan_sum``
+        heuristic and the USB-C polarity-swap ``allow_swap_via`` move are
+        deferred and stay on the pure-Python search.
+        """
+        if not self._use_cpp_coupled:
+            return False
+        if self.allow_swap_via:
+            return False
+        if self.heuristic_mode != "partner_aware":
+            return False
+        from .cpp_backend import is_cpp_available
+
+        return is_cpp_available()
+
+    def _get_cpp_coupled_impl(self) -> CppCoupledPathfinder | None:
+        """Build (once) and return the cached C++ coupled pathfinder.
+
+        Mirrors the ``CppPathfinder`` lifecycle: the ``CppGrid`` is
+        marshalled from ``self.grid`` once and the C++ pathfinder is
+        constructed once, then reused across ``route_coupled`` calls.
+        Returns ``None`` when the backend is unavailable or construction
+        raises (the caller then falls back to pure Python).
+        """
+        if self._cpp_coupled_impl is not None and self._cpp_coupled_grid is self.grid:
+            return self._cpp_coupled_impl
+        try:
+            from .cpp_backend import CppCoupledPathfinder, CppGrid
+
+            # Issue #4065 (reach-regression root cause): ``from_routing_grid``
+            # unconditionally reassigns ``grid._cpp_grid = <new CppGrid>``
+            # (cpp_backend.py, #2481 back-reference).  That back-reference is
+            # the ONE the single-ended ``CppPathfinder`` relies on for rip-up
+            # invalidation: ``RoutingGrid.unmark_route`` calls
+            # ``self._cpp_grid.invalidate_stored_routes()`` so the C++
+            # ``stored_vias_`` / ``stored_segments_`` snapshot no longer
+            # references a ripped-up route.  The single-ended router marks its
+            # routes on its OWN grid (``RoutingCore.router._grid``), a
+            # DIFFERENT object.  When the coupled pre-phase builds its private
+            # CppGrid here it HIJACKS ``grid._cpp_grid`` to point at the
+            # coupled snapshot, so every subsequent negotiated-loop rip-up
+            # invalidates the wrong grid and the single-ended router keeps
+            # consulting stale via/segment blockers -- which is exactly why the
+            # board-06 negotiated loop re-routed only 2/4 (vs 3/4 on the Python
+            # baseline) at iter 2 and dropped USB3_RX1- (20/21 instead of
+            # 21/21).  The coupled pathfinder needs its own CppGrid but must
+            # NOT steal the single-ended router's paired back-reference, so
+            # snapshot ``grid._cpp_grid`` and restore it afterwards.
+            saved_cpp_grid = getattr(self.grid, "_cpp_grid", None)
+            cpp_grid = CppGrid.from_routing_grid(self.grid)
+            # Restore the single-ended router's back-reference (or ``None`` if
+            # it had none): the coupled pathfinder keeps ``cpp_grid`` in
+            # ``impl`` below, but the Python grid's ``_cpp_grid`` invalidation
+            # hook must continue to target the single-ended router's grid.
+            self.grid._cpp_grid = saved_cpp_grid
+            impl = CppCoupledPathfinder(
+                cpp_grid,
+                self.rules,
+                target_spacing_cells=self.target_spacing_cells,
+                min_spacing_cells=self.min_spacing_cells,
+                trace_half_width_cells=self._trace_half_width_cells,
+                via_extra_cells=self._via_extra_cells,
+                via_drill_cells=max(
+                    0, int(math.ceil((self.rules.via_drill / 2) / self.grid.resolution))
+                ),
+                spacing_penalty_factor=self.spacing_penalty_factor,
+                heuristic_weight=self.heuristic_weight,
+            )
+        except Exception:
+            logger.debug("C++ coupled pathfinder construction failed; using Python", exc_info=True)
+            self._use_cpp_coupled = False
+            return None
+        self._cpp_coupled_impl = impl
+        self._cpp_coupled_grid = self.grid
+        return impl
+
+    def _try_cpp_route_coupled(
+        self,
+        *,
+        p_start_pos: GridPos,
+        n_start_pos: GridPos,
+        p_goal_pos: GridPos,
+        n_goal_pos: GridPos,
+        start_layer: int,
+        end_layer: int,
+        p_net: int,
+        n_net: int,
+        effective_target_spacing: int,
+        effective_approach_radius: int,
+        effective_departure_radius: int,
+        corridor: frozenset[tuple[int, int]] | None,
+        timeout_seconds: float | None,
+        max_iterations_budget: int | None,
+    ) -> tuple[bool, tuple[Route, Route] | None] | None:
+        """Attempt the coupled search via the C++ backend (Issue #4065).
+
+        Returns ``None`` when the C++ path does not apply (backend absent /
+        deferred feature / construction failed) -- the caller then runs the
+        pure-Python A*.  Otherwise returns ``(handled=True, result)`` where
+        ``result`` is the reconstructed ``(p_route, n_route)`` tuple or
+        ``None`` (search failed / budget exit); the C++ diagnostics are
+        written to ``self.last_*`` so budget-exit handling is unchanged.
+        """
+        if not self._cpp_coupled_available():
+            return None
+        impl = self._get_cpp_coupled_impl()
+        if impl is None:
+            return None
+
+        # Marshal the corridor frozenset -> flat cols*rows bitset for O(1)
+        # C++ membership (diffpair_routing.py:446 build_corridor_mask churn
+        # -> a byte array here).  Empty list = no corridor.
+        corridor_bitset: list[int] = []
+        if corridor is not None:
+            cols, rows = self.grid.cols, self.grid.rows
+            bitset = bytearray(cols * rows)
+            for cx, cy in corridor:
+                if 0 <= cx < cols and 0 <= cy < rows:
+                    bitset[cy * cols + cx] = 1
+            corridor_bitset = list(bitset)
+
+        routable_layers = list(self.grid.get_routable_indices())
+
+        path, diagnostics = impl.route(
+            p_start_xy=(p_start_pos.x, p_start_pos.y),
+            n_start_xy=(n_start_pos.x, n_start_pos.y),
+            start_layer=start_layer,
+            p_goal_xy=(p_goal_pos.x, p_goal_pos.y),
+            n_goal_xy=(n_goal_pos.x, n_goal_pos.y),
+            end_layer=end_layer,
+            p_net=p_net,
+            n_net=n_net,
+            effective_target_spacing=effective_target_spacing,
+            effective_approach_radius=effective_approach_radius,
+            effective_departure_radius=effective_departure_radius,
+            routable_layers=routable_layers,
+            corridor_bitset=corridor_bitset,
+            max_iterations_budget=(
+                max_iterations_budget
+                if max_iterations_budget is not None and max_iterations_budget > 0
+                else 0
+            ),
+            timeout_seconds=(
+                float(timeout_seconds)
+                if timeout_seconds is not None and timeout_seconds > 0
+                else 0.0
+            ),
+        )
+
+        # Mirror the diagnostic bookkeeping the Python loop maintains.
+        self.last_iterations = int(diagnostics["iterations"])
+        bp = diagnostics["best_progress"]
+        self.last_best_progress = float("inf") if bp < 0 else float(bp)
+        self.last_best_state = None
+        self.last_best_node = None
+        self.last_timeout_exceeded = bool(diagnostics["timeout_exceeded"])
+        self.last_iteration_limited = bool(diagnostics["iteration_limited"])
+        self.last_rejections = collections.defaultdict(int)
+
+        if path is None:
+            return True, None
+
+        return True, self._reconstruct_coupled_routes_from_cpp_path(path)
+
+    def _reconstruct_coupled_routes_from_cpp_path(
+        self,
+        path: list[tuple[int, int, int, int, int, int, bool]],
+    ) -> tuple[Route, Route]:
+        """Build (p_route, n_route) from a C++ joint grid-cell path.
+
+        Produces the exact same ``p_path`` / ``n_path`` world-coordinate
+        lists that ``_reconstruct_coupled_routes`` builds from the Python
+        parent chain, then feeds them to the UNCHANGED
+        ``_build_route_from_path`` -- so C++ and Python routes are
+        byte-identical for the same joint path (Issue #4065).  The Pad
+        identity for width/net/name is recovered from the endpoint cells
+        via the stored ``_cpp_reconstruct_pads`` set by the caller.
+        """
+        p_start, p_end, n_start, n_end = self._cpp_reconstruct_pads
+        p_route = Route(net=p_start.net, net_name=p_start.net_name)
+        n_route = Route(net=n_start.net, net_name=n_start.net_name)
+
+        p_path: list[tuple[float, float, int, bool]] = []
+        n_path: list[tuple[float, float, int, bool]] = []
+        for p_x, p_y, p_layer, n_x, n_y, n_layer, via_from_parent in path:
+            p_wx, p_wy = self.grid.grid_to_world(p_x, p_y)
+            n_wx, n_wy = self.grid.grid_to_world(n_x, n_y)
+            p_path.append((p_wx, p_wy, p_layer, via_from_parent))
+            n_path.append((n_wx, n_wy, n_layer, via_from_parent))
+
+        self._build_route_from_path(p_route, p_path, p_start, p_end)
+        self._build_route_from_path(n_route, n_path, n_start, n_end)
+        return p_route, n_route
+
     def route_coupled(
         self,
         p_start: Pad,
@@ -1548,6 +1761,11 @@ class CoupledPathfinder:
         # Issue #3508: reset the per-search rejection counters.
         self.last_rejections = collections.defaultdict(int)
 
+        # Issue #4065: stash the pads for the C++-path reconstruction helper
+        # (it recovers width/net/name from the same Pad objects the Python
+        # reconstruction uses, so routes are byte-identical).
+        self._cpp_reconstruct_pads = (p_start, p_end, n_start, n_end)
+
         # Convert to grid coordinates
         p_start_gx, p_start_gy = self.grid.world_to_grid(p_start.x, p_start.y)
         p_end_gx, p_end_gy = self.grid.world_to_grid(p_end.x, p_end.y)
@@ -1620,6 +1838,41 @@ class CoupledPathfinder:
         # the coupled target one cell per step.
         start_spacing_delta = int(round(abs(actual_start_spacing - effective_target_spacing)))
         effective_departure_radius = max(effective_target_spacing, 6, start_spacing_delta * 2 + 4)
+
+        # Issue #4065: try the C++ coupled joint-state A* first.  The C++
+        # search consumes the SAME Grid3D the single-ended C++ pathfinder
+        # uses and returns a joint grid-cell path we reconstruct below with
+        # the UNCHANGED ``_build_route_from_path`` -- so C++ and Python
+        # produce byte-identical Routes for the same joint path.  Preserved
+        # as an optional accelerator: the pure-Python A* below is the
+        # fallback, exercised when the backend is absent/stale, when the
+        # v1-deferred features are requested (``allow_swap_via`` /
+        # ``manhattan_sum``), or when ``_use_cpp_coupled`` is disabled.
+        cpp_path = self._try_cpp_route_coupled(
+            p_start_pos=p_start_pos,
+            n_start_pos=n_start_pos,
+            p_goal_pos=p_goal_pos,
+            n_goal_pos=n_goal_pos,
+            start_layer=start_layer,
+            end_layer=end_layer,
+            p_net=p_start.net,
+            n_net=n_start.net,
+            effective_target_spacing=effective_target_spacing,
+            effective_approach_radius=effective_approach_radius,
+            effective_departure_radius=effective_departure_radius,
+            corridor=corridor,
+            timeout_seconds=timeout_seconds,
+            max_iterations_budget=max_iterations_budget,
+        )
+        if cpp_path is not None:
+            handled, cpp_result = cpp_path
+            if handled:
+                # C++ owns this search (backend available + no deferred
+                # feature).  ``cpp_result`` is the reconstructed
+                # (p_route, n_route) tuple or None (search failed / budget
+                # exit); either way we do NOT run the Python A* -- the
+                # diagnostics on ``self`` were set by the wrapper.
+                return cpp_result
 
         start_state = CoupledState(p_start_pos, n_start_pos, (0, 0))
 

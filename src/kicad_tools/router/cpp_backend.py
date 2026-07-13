@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 14
+_REQUIRED_CPP_BUILD_VERSION = 15
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -2906,3 +2906,134 @@ def create_hybrid_router(
     from .pathfinder import Router
 
     return Router(grid, rules, net_class_map=net_class_map, diagonal_routing=diagonal_routing)
+
+
+# ---------------------------------------------------------------------------
+# Coupled diff-pair pathfinder (Issue #4065)
+# ---------------------------------------------------------------------------
+
+
+class CppCoupledPathfinder:
+    """C++ wrapper for the coupled differential-pair joint-state A* search.
+
+    Mirrors the marshalling contract of :class:`CppPathfinder`: a
+    :class:`CppGrid` is built once from the Python :class:`RoutingGrid` (or
+    reused), the derived clearance radii + rule scalars are passed in once,
+    and each :meth:`route` call marshals the per-pair pad grid coordinates,
+    the corridor bitset and the budgets across the nanobind boundary.
+
+    The C++ side returns a joint grid-cell path (``CoupledRouteResult.path``);
+    :meth:`route` returns that path as a list of
+    ``(p_x, p_y, p_layer, n_x, n_y, n_layer, via_from_parent)`` tuples plus a
+    diagnostics dict.  The pure-Python ``CoupledPathfinder.route_coupled``
+    caller unpacks this into the same ``p_path`` / ``n_path`` lists its own
+    ``_reconstruct_coupled_routes`` produces and builds the two
+    :class:`Route` objects with the unchanged Python ``_build_route_from_path``
+    -- so C++ and Python produce byte-identical routes for the same joint
+    path (Issue #4065 curator guidance: do NOT port ``_reconstruct``).
+
+    v1 scope (deferred features stay on the Python fallback): this wrapper is
+    only used for the ``partner_aware`` heuristic with ``allow_swap_via`` off;
+    the Python caller checks those preconditions before dispatching here.
+    """
+
+    def __init__(
+        self,
+        cpp_grid: CppGrid,
+        rules: DesignRules,
+        target_spacing_cells: int,
+        min_spacing_cells: int,
+        trace_half_width_cells: int,
+        via_extra_cells: int,
+        via_drill_cells: int,
+        spacing_penalty_factor: float,
+        heuristic_weight: float,
+    ):
+        if not _CPP_AVAILABLE:
+            raise RuntimeError("C++ router backend not available")
+        self._grid = cpp_grid
+        # Marshal the DesignRules scalars into the C++ struct (mirrors the
+        # single-ended CppPathfinder rules marshalling).
+        cpp_rules = router_cpp.DesignRules()
+        cpp_rules.trace_width = float(rules.trace_width)
+        cpp_rules.trace_clearance = float(rules.trace_clearance)
+        cpp_rules.via_drill = float(rules.via_drill)
+        cpp_rules.via_diameter = float(rules.via_diameter)
+        cpp_rules.via_clearance = float(rules.via_clearance)
+        cpp_rules.grid_resolution = float(rules.grid_resolution)
+        cpp_rules.cost_straight = float(rules.cost_straight)
+        cpp_rules.cost_turn = float(rules.cost_turn)
+        cpp_rules.cost_via = float(rules.cost_via)
+        self._impl = router_cpp.CoupledPathfinder(
+            cpp_grid._impl,
+            cpp_rules,
+            int(target_spacing_cells),
+            int(min_spacing_cells),
+            int(trace_half_width_cells),
+            int(via_extra_cells),
+            int(via_drill_cells),
+            float(spacing_penalty_factor),
+            float(heuristic_weight),
+        )
+
+    def route(
+        self,
+        *,
+        p_start_xy: tuple[int, int],
+        n_start_xy: tuple[int, int],
+        start_layer: int,
+        p_goal_xy: tuple[int, int],
+        n_goal_xy: tuple[int, int],
+        end_layer: int,
+        p_net: int,
+        n_net: int,
+        effective_target_spacing: int,
+        effective_approach_radius: int,
+        effective_departure_radius: int,
+        routable_layers: list[int],
+        corridor_bitset: list[int],
+        max_iterations_budget: int,
+        timeout_seconds: float,
+    ) -> tuple[list[tuple[int, int, int, int, int, int, bool]] | None, dict]:
+        """Run the coupled C++ search.
+
+        Returns ``(path, diagnostics)`` where ``path`` is a list of
+        ``(p_x, p_y, p_layer, n_x, n_y, n_layer, via_from_parent)`` tuples in
+        root->goal order (or ``None`` when the search failed), and
+        ``diagnostics`` carries ``iterations`` / ``best_progress`` /
+        ``timeout_exceeded`` / ``iteration_limited`` for the caller's
+        ``last_*`` bookkeeping.
+        """
+        res = self._impl.route(
+            int(p_start_xy[0]),
+            int(p_start_xy[1]),
+            int(n_start_xy[0]),
+            int(n_start_xy[1]),
+            int(start_layer),
+            int(p_goal_xy[0]),
+            int(p_goal_xy[1]),
+            int(n_goal_xy[0]),
+            int(n_goal_xy[1]),
+            int(end_layer),
+            int(p_net),
+            int(n_net),
+            int(effective_target_spacing),
+            int(effective_approach_radius),
+            int(effective_departure_radius),
+            list(routable_layers),
+            corridor_bitset,
+            int(max_iterations_budget),
+            float(timeout_seconds),
+        )
+        diagnostics = {
+            "iterations": int(res.iterations),
+            "best_progress": float(res.best_progress),
+            "timeout_exceeded": bool(res.timeout_exceeded),
+            "iteration_limited": bool(res.iteration_limited),
+        }
+        if not res.success:
+            return None, diagnostics
+        path = [
+            (n.p_x, n.p_y, n.p_layer, n.n_x, n.n_y, n.n_layer, n.via_from_parent) for n in res.path
+        ]
+        return path, diagnostics
