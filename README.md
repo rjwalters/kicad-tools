@@ -462,6 +462,67 @@ for table in tables:
     print(table.to_markdown())
 ```
 
+### Parts Lookup (LCSC / JLCPCB)
+
+Look up LCSC part numbers, check BOM availability, and pull pricing/stock:
+
+```python
+from kicad_tools.parts import LCSCClient
+
+client = LCSCClient()
+part = client.lookup("C2040")
+if part:
+    print(f"{part.mfr_part}: {part.stock} in stock, best ${part.best_price:.4f}")
+```
+
+Part lookups resolve through a tiered chain (each tier falls back to the next):
+
+1. **Local response cache** — previously fetched parts.
+2. **Official JLCPCB open-platform API** — only when you supply your own API key
+   (see below). Off by default; inert without keys.
+3. **Anonymous scrape API** — the public JLCPCB web endpoints (requires the
+   `parts` extra: `pip install "kicad-tools[parts]"`).
+4. **Offline jlcparts catalog** — a locally synced mirror
+   (`kct parts sync-catalog`), usable fully offline.
+
+#### Using your own JLCPCB API key
+
+kicad-tools can talk to the **official JLCPCB open-platform API** using
+credentials you register yourself at the JLCPCB developer portal
+(<https://jlcpcb.com/> → developer/open platform). This is strictly opt-in: you
+bring your own key, kicad-tools ships only the signed client. **Without keys,
+behavior is unchanged** — the official tier is simply skipped.
+
+Set all three environment variables (kicad-tools reads them via `os.environ`;
+it does **not** load a `.env` file itself, so use your shell, `direnv`, or a
+dotenv runner — see [`.env.example`](.env.example)):
+
+```bash
+export JLCPCB_APP_ID="your-app-id"
+export JLCPCB_ACCESS_KEY="your-access-key"
+export JLCPCB_SECRET_KEY="your-secret-key"
+```
+
+All three must be set (and non-empty) to activate the official tier; if any is
+missing it stays inert. Once set, `LCSCClient.lookup()` / `lookup_many()` prefer
+the official API for part-detail-by-code, falling back down the chain above on
+any failure.
+
+Notes and caveats:
+
+- **What it unlocks:** authenticated *part detail lookup by LCSC code* only.
+  There is **no confirmed official keyword/MPN search endpoint**, so
+  `LCSCClient.search()` always uses the anonymous/offline path even with keys.
+- **IP whitelisting:** the developer portal offers an IP-whitelist feature. If
+  you enable it, your machine's public IP must be whitelisted or requests are
+  rejected (surfaced as a distinct, actionable error).
+- **Never commit credentials.** `.env` is gitignored; the secret key is used
+  only as HMAC key material and is never transmitted.
+- The request-signing scheme is not first-party-documented by JLCPCB; the client
+  implements the best-available community-reverse-engineered variant for the
+  Parts surface, with the two ambiguous parameters isolated as single
+  flip-points in `parts/jlcpcb_api.py` (see that module and issue #4118).
+
 ## CLI Commands
 
 ### Unified CLI (`kct` or `kicad-tools`)

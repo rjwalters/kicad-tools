@@ -67,6 +67,14 @@ from .importer import (
     PartImporter,
 )
 from .jlcparts_catalog import JlcpartsCatalog, get_catalog_path, sync_catalog
+from .jlcpcb_api import (
+    JLCAPIError,
+    JLCAuthError,
+    JLCCredentials,
+    JLCIPNotWhitelistedError,
+    JLCOpenAPIClient,
+    JLCQuotaError,
+)
 from .lcsc import LCSCClient, LCSCForbiddenError, RateLimiter
 from .models import (
     BOMAvailability,
@@ -96,6 +104,13 @@ __all__ = [
     "JlcpartsCatalog",
     "get_catalog_path",
     "sync_catalog",
+    # Official JLCPCB open-platform API (BYO key)
+    "JLCOpenAPIClient",
+    "JLCCredentials",
+    "JLCAPIError",
+    "JLCAuthError",
+    "JLCIPNotWhitelistedError",
+    "JLCQuotaError",
     # Composition
     "ComposedPart",
     "ComposedPartStore",
