@@ -16,7 +16,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from .cache import PartsCache
 from .models import (
@@ -32,6 +32,7 @@ from .models import (
 if TYPE_CHECKING:
     from ..schema.bom import BOMItem
     from .jlcparts_catalog import JlcpartsCatalog
+    from .jlcpcb_api import JLCOpenAPIClient
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +286,7 @@ class LCSCClient:
         base_retry_delay: float = 2.0,
         use_local_catalog: bool = True,
         catalog_path: Path | None = None,
+        use_official_api: bool = True,
     ):
         """
         Initialize the client.
@@ -304,6 +306,13 @@ class LCSCClient:
                 when no catalog has been synced (default: True).
             catalog_path: Override path to the local jlcparts SQLite catalog
                 (default: ``~/.cache/kicad-tools/jlcparts.sqlite3``).
+            use_official_api: Whether to consult the official JLCPCB
+                open-platform API (BYO key) ahead of the anonymous scrape API
+                for ``lookup()``/``lookup_many()``. This tier only activates
+                when all three of ``JLCPCB_APP_ID``/``JLCPCB_ACCESS_KEY``/
+                ``JLCPCB_SECRET_KEY`` are set in the environment; without keys
+                it is a silent no-op, so keyless behavior is byte-for-byte
+                unchanged (default: True). See issue #4118.
         """
         self.cache = cache if cache is not None else PartsCache() if use_cache else None
         self.timeout = timeout
@@ -315,6 +324,10 @@ class LCSCClient:
         self._use_local_catalog = use_local_catalog
         self._catalog_path = catalog_path
         self._catalog: JlcpartsCatalog | None = None
+        self._use_official_api = use_official_api
+        # Resolved lazily on first lookup. ``None`` = not yet probed;
+        # ``False`` (the sentinel) = probed, no keys/deps; otherwise the client.
+        self._official_client: JLCOpenAPIClient | Literal[False] | None = None
 
     def _get_catalog(self) -> JlcpartsCatalog | None:
         """Return the lazily-constructed offline catalog reader, or None.
@@ -330,6 +343,37 @@ class LCSCClient:
 
             self._catalog = JlcpartsCatalog(self._catalog_path)
         return self._catalog
+
+    def _get_official_client(self) -> JLCOpenAPIClient | None:
+        """Return the official JLCPCB open-platform client, or ``None``.
+
+        Returns ``None`` (silently, not an error) when the official-API tier is
+        disabled, the ``requests`` extra is absent, or the three credential env
+        vars are not all present -- in which case ``lookup()``/``lookup_many()``
+        fall through to the anonymous scrape API and the offline catalog exactly
+        as they did without keys. The result is memoized so the environment /
+        credential check runs at most once per client. See issue #4118.
+        """
+        if not self._use_official_api:
+            return None
+        if self._official_client is None:
+            # Not yet resolved -- probe env + deps exactly once.
+            self._official_client = self._build_official_client() or False
+        if self._official_client is False:
+            return None
+        return self._official_client
+
+    def _build_official_client(self) -> JLCOpenAPIClient | None:
+        """Construct the official client if keys + ``requests`` are available."""
+        if not _requests_installed():
+            return None
+        from .jlcpcb_api import JLCCredentials, JLCOpenAPIClient
+
+        credentials = JLCCredentials.from_env()
+        if credentials is None:
+            # Missing / partial keys == keyless. Not an error.
+            return None
+        return JLCOpenAPIClient(credentials, timeout=self.timeout)
 
     def _get_session(self):
         """Get or create requests session."""
@@ -439,11 +483,13 @@ class LCSCClient:
         """
         Look up a single part by LCSC number.
 
-        Resolution order: local response cache -> live JLCPCB API -> offline
-        jlcparts catalog. The catalog is only consulted when the live API is
-        unavailable (403 circuit breaker, network error, or the ``requests``
-        extra is not installed) and a synced catalog exists; when no catalog
-        is present the live-API path is byte-for-byte unchanged.
+        Resolution order: local response cache -> official JLCPCB open-platform
+        API (only when BYO keys are present, issue #4118) -> live JLCPCB scrape
+        API -> offline jlcparts catalog. The official tier is a silent no-op
+        without the three credential env vars, so the keyless path is
+        byte-for-byte unchanged. The catalog is only consulted when the higher
+        tiers are unavailable (403 circuit breaker, network error, or the
+        ``requests`` extra is not installed) and a synced catalog exists.
 
         Args:
             lcsc_part: LCSC part number (e.g., "C123456")
@@ -471,6 +517,24 @@ class LCSCClient:
                 return cached
 
         catalog = self._get_catalog()
+
+        # Tier 0: official JLCPCB open-platform API (only when BYO keys are
+        # present -- see issue #4118). Silent no-op without keys/deps, so the
+        # keyless path below is byte-for-byte unchanged.
+        official = self._get_official_client()
+        if official is not None:
+            try:
+                found = official.get_component_detail_by_codes([lcsc_part])
+            except Exception as e:
+                # Auth/quota/whitelist/network failure -- log the actionable
+                # message and fall through to the anonymous / offline tiers.
+                logger.warning(f"Official JLCPCB API lookup failed for {lcsc_part}: {e}")
+            else:
+                official_part = found.get(lcsc_part.upper())
+                if official_part is not None:
+                    if self.cache:
+                        self.cache.put(official_part)
+                    return official_part
 
         # If requests is unavailable, the live API cannot be reached. Preserve
         # the historical (Import)Error only when there is no offline fallback.
@@ -650,8 +714,9 @@ class LCSCClient:
         """
         Look up multiple parts.
 
-        Uses cache where possible, fetches missing parts from the live API,
-        then fills any still-missing parts from the offline jlcparts catalog
+        Uses cache where possible, batch-fetches missing parts from the official
+        open-platform API when BYO keys are present, then from the live scrape
+        API, then fills any still-missing parts from the offline jlcparts catalog
         (see :meth:`lookup` for the full resolution order).
 
         Args:
@@ -681,6 +746,24 @@ class LCSCClient:
             parts = [p for p in parts if p not in cached]
 
         catalog = self._get_catalog()
+
+        # Tier 0: official JLCPCB open-platform API (BYO keys, issue #4118).
+        # Batch-fetch all still-missing parts in a single signed request. Silent
+        # no-op without keys/deps -- keyless behavior is byte-for-byte unchanged.
+        official = self._get_official_client()
+        if official is not None and parts:
+            try:
+                found = official.get_component_detail_by_codes(parts)
+            except Exception as e:
+                logger.warning(f"Official JLCPCB API batch lookup failed: {e}")
+            else:
+                for part_num in parts:
+                    official_part = found.get(part_num.upper())
+                    if official_part is not None:
+                        result[part_num] = official_part
+                        if self.cache:
+                            self.cache.put(official_part)
+                parts = [p for p in parts if p not in result]
 
         if not _requests_installed():
             if catalog is None or not catalog.available:
@@ -766,10 +849,13 @@ class LCSCClient:
         )
 
     def close(self) -> None:
-        """Close the HTTP session."""
+        """Close the HTTP session(s)."""
         if self._session:
             self._session.close()
             self._session = None
+        if self._official_client and self._official_client is not False:
+            self._official_client.close()
+            self._official_client = None
 
     def __enter__(self):
         return self
