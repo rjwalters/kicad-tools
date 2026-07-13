@@ -204,6 +204,8 @@ NB_MODULE(router_cpp, m) {
         .def("is_reserved_for", &Grid3D::is_reserved_for,
              "x"_a, "y"_a, "layer"_a, "net"_a)
         .def("has_reservations", &Grid3D::has_reservations)
+        .def("corridor_attractor_bonus", &Grid3D::corridor_attractor_bonus,
+             "x"_a, "y"_a, "layer"_a, "net"_a, "bonus"_a)
         // DRC avoidance feedback
         .def("boost_region_cost", &Grid3D::boost_region_cost,
              "center_x"_a, "center_y"_a, "layer"_a, "radius_cells"_a, "amount"_a)
