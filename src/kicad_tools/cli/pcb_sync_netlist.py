@@ -331,19 +331,43 @@ def sync_netlist(
 
             # Add missing footprints at board edge
             placement_x, placement_y = _get_board_edge_position(pcb)
+            outline_bbox = _outline_bbox(pcb)
+            if outline_bbox is None:
+                # No Edge.Cuts geometry detected at all: _get_board_edge_position
+                # fell back to the board origin (0, 0), which has no relationship
+                # to the true outline extent.  Surface this loudly so it is not
+                # silently mistaken for a routing-density failure downstream.
+                result.warnings.append(
+                    "No Edge.Cuts outline detected; new footprints placed at "
+                    "board origin (0, 0) — verify placement manually."
+                )
             x_offset = 0.0
             for action in result.added:
+                place_x = placement_x + x_offset
+                place_y = placement_y
                 try:
                     pcb.add_footprint(
                         library_id=action.footprint,
                         reference=action.reference,
-                        x=placement_x + x_offset,
-                        y=placement_y,
+                        x=place_x,
+                        y=place_y,
                         value=action.value,
                     )
                     x_offset += 5.0  # Space footprints horizontally
                 except Exception as e:
                     result.errors.append(f"Failed to add footprint for {action.reference}: {e}")
+                    continue
+                # Warn if the placed position falls outside the board outline's
+                # bounding box (padded to exempt the deliberate ~10mm staging
+                # offset).  This fires regardless of *why* a part ended up
+                # off-board — a mis-read outline, an origin fallback, or a
+                # staging placement never followed by a manual placement pass —
+                # so the off-board condition can't survive silently to routing.
+                if outline_bbox is not None and _is_outside_bbox(place_x, place_y, outline_bbox):
+                    result.warnings.append(
+                        f"{action.reference} placed outside board outline at "
+                        f"({place_x:.3f}, {place_y:.3f}) — nets may be unroutable"
+                    )
 
             # Remove orphaned footprints
             for action in result.removed:
@@ -619,6 +643,49 @@ def _get_board_edge_position(pcb) -> tuple[float, float]:
         # get_board_outline() already returns board-relative coords.
         return (max_x + 10.0, min_y)
     return (0.0, 0.0)
+
+
+# Padding (mm) added around the outline bbox before flagging a placement as
+# "off-board".  Must exceed the deliberate ~10mm staging offset applied by
+# _get_board_edge_position() (plus a little headroom for the 5mm-per-part
+# horizontal spacing) so that legitimate staging placement does NOT warn,
+# while a genuinely mis-placed part (mis-read outline, origin fallback) does.
+_OUTLINE_STAGING_MARGIN_MM = 25.0
+
+
+def _outline_bbox(pcb) -> tuple[float, float, float, float] | None:
+    """Return the board outline bounding box in board-relative coordinates.
+
+    Uses :meth:`PCB.get_board_outline` (which now covers ``gr_poly``/``gr_curve``
+    outlines as well as ``gr_line``/``gr_arc``/``gr_rect``) so the bbox is in
+    the same coordinate space as the board-relative positions passed to
+    :meth:`PCB.add_footprint`.
+
+    Returns:
+        ``(min_x, min_y, max_x, max_y)`` or ``None`` when no outline was found.
+    """
+    outline = pcb.get_board_outline()
+    if not outline:
+        return None
+    xs = [pt[0] for pt in outline]
+    ys = [pt[1] for pt in outline]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _is_outside_bbox(
+    x: float,
+    y: float,
+    bbox: tuple[float, float, float, float],
+    margin: float = _OUTLINE_STAGING_MARGIN_MM,
+) -> bool:
+    """Return True if ``(x, y)`` lies outside ``bbox`` padded by ``margin``.
+
+    The padding exempts the deliberate staging offset applied to newly-added
+    footprints (see :func:`_get_board_edge_position`) so only genuinely
+    off-board placements are flagged.
+    """
+    min_x, min_y, max_x, max_y = bbox
+    return x < min_x - margin or x > max_x + margin or y < min_y - margin or y > max_y + margin
 
 
 def format_text(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
