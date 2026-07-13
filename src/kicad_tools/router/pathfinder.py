@@ -1460,6 +1460,15 @@ class Router:
         # soft-negotiable.  Mirrors C++ ``Pathfinder::is_trace_blocked``.
         reserved_map = self.grid._reserved_for_nets
         if reserved_map:
+            # Issue #4079: only HARD reservations fence a foreign lateral
+            # trace out.  A SOFT reservation (attractor-only, the #2983 /
+            # #4053 byte-lane helpers on board 07's fully-reversed DDR byte,
+            # whose crossings are mandatory by construction) does NOT block
+            # -- fencing there would force the crossings to route around and
+            # short/open elsewhere.  ``_soft_reservations`` mirrors the C++
+            # ``GridCell::reserved_soft`` flag consulted by
+            # ``is_reserved_excluding``.
+            soft_reservations = self.grid._soft_reservations
             # Only the (typically few) reserved cells that fall inside this
             # region's Euclidean disc can contribute; iterate them directly
             # rather than materialising a full-region mask.
@@ -1468,8 +1477,9 @@ class Router:
                 for rx in range(x1, x2):
                     if not within_disc[row_off, rx - x1]:
                         continue
-                    owners = reserved_map.get((layer, ry, rx))
-                    if owners is not None and net not in owners:
+                    key = (layer, ry, rx)
+                    owners = reserved_map.get(key)
+                    if owners is not None and net not in owners and key not in soft_reservations:
                         return True
 
         # Issue #2559 / Phase 1C: Build partner-relaxation mask.

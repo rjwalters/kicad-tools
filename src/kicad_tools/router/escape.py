@@ -2510,19 +2510,42 @@ class EscapeRouter:
         if not cells:
             return 0
 
-        # Issue #4079: this #2983 inner-corner reservation is now mirrored to
-        # the C++ backend (mirror_to_cpp defaults True).  PR #4078's Path B
-        # kept it Python-only because the C++ backend then honoured
-        # reservations for VIAS only -- foreign LATERAL traces could still
-        # cross the corridor, regressing board 07's fully-reversed DDR byte
-        # into copper shorts.  #4079 added lateral-trace keep-out to both
-        # ``Grid3D::mark_segment`` and ``Pathfinder::is_trace_blocked``, so
-        # the C++ A* now fences foreign lateral traces out of the corridor
-        # and the shorts no longer occur.
+        # Issue #4079: this #2983 inner-corner reservation stays Python-only
+        # (``mirror_to_cpp=False``, PR #4078's "Path B").  #4079 investigated
+        # honouring it on the C++ backend two ways and MEASURED both to
+        # regress board 07's fully-reversed DDR byte on the CI recipe
+        # (`generate_design.py ... --step all --seed 42`, out-of-process
+        # copper-LVS re-check):
+        #
+        #   * HARD lateral-trace keep-out (fence foreign traces out): 25/31,
+        #     3 shorts (DM0<->DQ7, DM0<->DQS_N, DQ7<->DQS_N at U1.29/31/35)
+        #     + 6 opens.  The byte's crossing conflict graph is COMPLETE, so
+        #     a hard fence forces the mandatory crossings AROUND the corridor
+        #     and they collide at the tight U1 pad fan-in.
+        #   * SOFT attractor-only reservation (``soft=True``, no keep-out):
+        #     IDENTICAL 25/31, 3 shorts, 6 opens.  The attractor concentrates
+        #     the reversed-byte nets onto one inner-layer channel that then
+        #     fans into the same congested U1 pad box and shorts -- and costs
+        #     a net of reach vs Path B.
+        #   * Path B (this branch, Python-only, NO C++ honouring): 26/31,
+        #     ZERO shorts, exactly the 5 seed-invariant #3438 opens.  Clean.
+        #
+        # So honouring this single-ended byte-lane corridor on C++ AT ALL
+        # (hard OR soft) is topologically over-constraining for the reversed
+        # byte -- the crossing must resolve at the pad fan-in, which no
+        # corridor reservation can planarise.  Fixing that needs a different
+        # approach (re-shaped/relaxed byte-lane geometry, or a coupled/pad-
+        # aware fan-in planner) tracked for architect re-scoping on #4079.
+        # The lateral keep-out machinery + the per-reservation HARD/SOFT flag
+        # #4079 built are still shipped and USED: the #2677 pair-continuation
+        # corridor (board 06, PLANAR) mirrors to C++ as a HARD reservation
+        # and benefits from the new lateral-trace fence.
         count = self.grid.reserve_corridor_cells(
             layer_idx=target_idx,
             cells=cells,
             net_ids={net_id},
+            soft=True,
+            mirror_to_cpp=False,
         )
         if count > 0:
             self.byte_lane_corridor_reservations += 1
@@ -2708,18 +2731,27 @@ class EscapeRouter:
         if not cells:
             return 0
 
-        # Issue #4079: this #4053 bundle-river via-hop reservation is now
-        # mirrored to the C++ backend (mirror_to_cpp defaults True), for the
-        # same reason as the #2983 inner-corner sibling above -- the C++ A*
-        # now enforces lateral-trace keep-out (via ``is_trace_blocked`` /
-        # ``mark_segment``), so honouring single-ended byte-lane reservations
-        # on the C++ backend no longer regresses board 07 into copper shorts.
+        # Issue #4079: this #4053 bundle-river via-hop reservation stays
+        # Python-only (``mirror_to_cpp=False``, PR #4078's "Path B"), for the
+        # same MEASURED reason as the #2983 inner-corner sibling above -- it
+        # too sits on the fully-reversed DDR byte, whose crossings are
+        # mandatory by construction.  #4079 verified on the CI recipe that
+        # honouring this corridor on C++ regresses board 07 into the
+        # DM0<->DQ7 short cluster whether the keep-out is HARD (fence) or
+        # SOFT (attractor-only): the crossing must resolve at the tight U1
+        # pad fan-in, which no corridor reservation can planarise.  Path B
+        # (Python-only) is clean: 26/31, 0 shorts, exactly the 5 known opens.
         # (This planner is also OFF by default via
-        # ``enable_bundle_river_planner``; the gate keeps it safe if opted in.)
+        # ``enable_bundle_river_planner``.)  The lateral keep-out machinery
+        # and the per-reservation HARD/SOFT flag #4079 built still ship and
+        # are used by the #2677 pair-continuation corridor (board 06, PLANAR)
+        # which mirrors to C++ as a HARD reservation.
         count = self.grid.reserve_corridor_cells(
             layer_idx=target_idx,
             cells=cells,
             net_ids={net_id},
+            soft=True,
+            mirror_to_cpp=False,
         )
         if count > 0:
             self.byte_lane_corridor_reservations += 1

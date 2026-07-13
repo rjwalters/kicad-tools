@@ -924,6 +924,25 @@ class RoutingGrid:
         # ``reserve_corridor_cells`` already skips it directly).
         self._cpp_suppressed_reservations: set[tuple[int, int, int]] = set()
 
+        # Issue #4079: (layer_idx, y, x) keys whose reservation is SOFT --
+        # attractor-only, no foreign keep-out.  A soft reservation still
+        # lives in ``_reserved_for_nets`` (so the owner net gets the A*
+        # attractor bonus via ``get_corridor_attractor_bonus`` /
+        # ``is_reserved_for``) but the keep-out consumers
+        # (``_mark_via`` / ``_mark_segment`` / ``Router._is_trace_blocked``)
+        # SKIP it, so foreign vias and lateral traces may still cross.  This
+        # replaces PR #4078's ``mirror_to_cpp=False`` opt-out for the two
+        # single-ended byte-lane helpers (#2983 inner-corner, #4053
+        # bundle-river): their corridors sit on board 07's fully-reversed
+        # DDR byte, whose crossing conflict graph is COMPLETE -- a HARD
+        # lateral fence forces the mandatory crossings to route AROUND the
+        # corridor, colliding elsewhere (copper shorts) or failing (extra
+        # opens).  Soft-honouring keeps the attractor (pulling the owning
+        # crossing net onto its inner-layer channel) while leaving the
+        # crossings legal.  The #2677 pair-continuation reservation
+        # (board 06) is PLANAR, so it keeps the HARD default.
+        self._soft_reservations: set[tuple[int, int, int]] = set()
+
     def _select_backend(self) -> tuple[BackendType, Any]:
         """Select the appropriate backend based on config and grid size.
 
@@ -4073,12 +4092,19 @@ class RoutingGrid:
                 for dx in range(-clearance_cells, clearance_cells + 1):
                     nx, ny = gx + dx, gy + dy
                     if 0 <= nx < self.cols and 0 <= ny < self.rows:
-                        # Issue #4079: skip cells reserved for a net set
+                        # Issue #4079: skip cells HARD-reserved for a net set
                         # that excludes seg.net (lateral-trace keep-out,
-                        # mirrors _mark_via).
+                        # mirrors _mark_via + C++ ``is_reserved_excluding``).
+                        # A SOFT reservation (attractor-only) does NOT fence
+                        # foreign traces -- the cell is claimed normally.
                         if has_reservations:
-                            owners = self._reserved_for_nets.get((layer_idx, ny, nx))
-                            if owners is not None and seg_net not in owners:
+                            rkey = (layer_idx, ny, nx)
+                            owners = self._reserved_for_nets.get(rkey)
+                            if (
+                                owners is not None
+                                and seg_net not in owners
+                                and rkey not in self._soft_reservations
+                            ):
                                 continue
                         cell = self.grid[layer_idx][ny][nx]
                         if not cell.blocked:
@@ -4176,11 +4202,18 @@ class RoutingGrid:
                 for dx in range(-radius, radius + 1):
                     nx, ny = gx + dx, gy + dy
                     if 0 <= nx < self.cols and 0 <= ny < self.rows:
-                        # Issue #2677: Skip cells reserved for a different
-                        # net (or net set that excludes via.net).
+                        # Issue #2677: Skip cells HARD-reserved for a different
+                        # net (or net set that excludes via.net).  Issue #4079:
+                        # a SOFT reservation (attractor-only) does NOT fence
+                        # foreign vias -- the cell is claimed normally.
                         if has_reservations:
-                            owners = self._reserved_for_nets.get((layer_idx, ny, nx))
-                            if owners is not None and via_net not in owners:
+                            rkey = (layer_idx, ny, nx)
+                            owners = self._reserved_for_nets.get(rkey)
+                            if (
+                                owners is not None
+                                and via_net not in owners
+                                and rkey not in self._soft_reservations
+                            ):
                                 continue
                         cell = self.grid[layer_idx][ny][nx]
                         if not cell.blocked:
@@ -4199,6 +4232,7 @@ class RoutingGrid:
         net_ids: frozenset[int] | set[int] | list[int] | tuple[int, ...],
         *,
         mirror_to_cpp: bool = True,
+        soft: bool = False,
     ) -> int:
         """Reserve a set of grid cells on a layer for one or more nets.
 
@@ -4221,19 +4255,36 @@ class RoutingGrid:
                 reserved cells.  For a diff pair this is exactly two IDs
                 (P-net and N-net).  For a match group (#2661) this can be
                 three or more.  Must not be empty.
-            mirror_to_cpp: Issue #4071 (PR #4078 Path B).  When ``True``
-                (default) the reservation is also written to the attached
-                C++ grid so the ported keep-out + attractor honour it.
-                Callers pass ``False`` to keep a reservation *Python-only*:
-                the single-ended byte-lane reservations (#2983 inner-corner,
-                #4053 bundle-river) regress board 07's dense reversed DDR
-                bundle into copper shorts when honoured on the C++ backend
-                (the attractor concentrates each single-net corridor while
-                the via-only keep-out cannot fence off foreign lateral
-                traces), so they opt OUT of C++ mirroring until the corridor
-                geometry is fixed.  The #2677 pair-continuation reservation
-                that benefits board 06 keeps the default ``True``.  See the
-                PR #4078 discussion / issues #4071 / #4053.
+            mirror_to_cpp: Issue #4071.  When ``True`` (default) the
+                reservation is also written to the attached C++ grid so the
+                ported keep-out + attractor honour it.  ``False`` keeps a
+                reservation *Python-only* (legacy PR #4078 Path B opt-out;
+                the byte-lane helpers now use ``soft=True`` instead of this).
+            soft: Issue #4079.  Selects the keep-out STRENGTH.
+
+                ``False`` (default) is a HARD reservation: foreign vias AND
+                foreign lateral traces are fenced out of the corridor
+                (``_mark_via`` / ``_mark_segment`` skip the cell for a
+                foreign net; ``Router._is_trace_blocked`` blocks a foreign
+                lateral step; the C++ ``is_reserved_excluding`` mirror does
+                the same).  This is what #2677 pair-continuation needs -- its
+                corridor is PLANAR, so fencing foreign copper out is both
+                correct and beneficial (board 06).
+
+                ``True`` is a SOFT reservation: ONLY the A* attractor bonus
+                applies (the owning net is pulled onto the reserved cells via
+                ``get_corridor_attractor_bonus`` / ``is_reserved_for``), and
+                NO foreign keep-out is enforced -- foreign vias and lateral
+                traces may still cross the cell.  This is required for the
+                single-ended byte-lane helpers (#2983 inner-corner, #4053
+                bundle-river) on board 07's fully-reversed DDR byte, whose
+                crossing conflict graph is COMPLETE: a hard lateral fence
+                would force the mandatory crossings to route AROUND the
+                corridor, colliding elsewhere (the DM0<->DQ7 copper shorts
+                PR #4078's Path B was avoiding) or failing to route (extra
+                opens).  A soft reservation keeps the crossings legal while
+                still attracting the owner net onto its inner-layer channel.
+                See issues #4079 / #4053 and the PR #4087 discussion.
 
         Returns:
             Number of cells newly reserved (existing reservations
@@ -4269,8 +4320,15 @@ class RoutingGrid:
             if 0 <= x < self.cols and 0 <= y < self.rows:
                 key = (layer_idx, y, x)
                 self._reserved_for_nets[key] = owners
+                # Issue #4079: track soft (attractor-only) vs hard (keep-out)
+                # strength per cell.  last-writer-wins, mirroring the owner-set
+                # replace semantics.
+                if soft:
+                    self._soft_reservations.add(key)
+                else:
+                    self._soft_reservations.discard(key)
                 if cpp_grid is not None:
-                    cpp_grid._impl.reserve_cell(x, y, layer_idx, owner_list)
+                    cpp_grid._impl.reserve_cell(x, y, layer_idx, owner_list, soft)
                     # A later mirrored reservation over a previously-suppressed
                     # cell re-enables C++ honouring for it.
                     self._cpp_suppressed_reservations.discard(key)
@@ -4291,6 +4349,8 @@ class RoutingGrid:
         self._reserved_for_nets.clear()
         # PR #4078 Path B: reset the Python-only suppression tracking too.
         self._cpp_suppressed_reservations.clear()
+        # Issue #4079: reset the soft (attractor-only) reservation tracking.
+        self._soft_reservations.clear()
         # Issue #4071: keep the attached C++ grid in lock-step.
         cpp_grid = getattr(self, "_cpp_grid", None)
         if cpp_grid is not None:

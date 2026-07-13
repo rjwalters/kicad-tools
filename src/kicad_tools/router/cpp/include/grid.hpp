@@ -117,8 +117,14 @@ public:
     // Overlapping reservations REPLACE (last-writer-wins), matching the
     // Python semantics.  A single reserved cell flips the grid-wide
     // ``has_reservations_`` fast-path flag.
+    // Issue #4079: ``soft`` selects the keep-out strength.  ``false``
+    // (default) is a HARD reservation -- foreign vias AND lateral traces
+    // are fenced out (``is_reserved_excluding`` true).  ``true`` is a SOFT
+    // reservation -- only the A* attractor bonus applies for the owner
+    // net; foreign traces may still cross (``is_reserved_excluding``
+    // false).  See the #4079 note in ``types.hpp``.
     void reserve_cell(int x, int y, int layer,
-                      const std::vector<int>& net_ids);
+                      const std::vector<int>& net_ids, bool soft = false);
 
     // Clear every corridor reservation (owner sets + fast-path flag).
     void clear_reservations();
@@ -155,10 +161,14 @@ public:
         if (!is_valid(x, y, layer)) return false;
         const auto& cell = at(x, y, layer);
         if (cell.reserved_count <= 0) return false;
+        // Issue #4079: a SOFT reservation never fences foreign traffic out
+        // -- it contributes only the A* attractor bonus for its owner net.
+        // Only HARD reservations produce a foreign keep-out.
+        if (cell.reserved_soft) return false;
         for (int i = 0; i < cell.reserved_count; ++i) {
             if (cell.reserved_nets[i] == net) return false;  // owner net
         }
-        return true;  // reserved, but not for this net
+        return true;  // hard-reserved, but not for this net
     }
 
     // True iff ANY cell is currently reserved (grid-wide fast path).

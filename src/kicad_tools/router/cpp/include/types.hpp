@@ -161,7 +161,23 @@ namespace router {
 // first time.  Old .so files lack the ``reserved_*`` GridCell fields and
 // the ``cost_corridor_attractor`` DesignRules field; the version bump
 // forces a rebuild via ``kct build-native``.
-constexpr int ROUTER_CPP_BUILD_VERSION = 16;
+// Version 17 (Issue #4079): per-reservation HARD vs SOFT keep-out.
+// ``GridCell`` gains a ``reserved_soft`` flag and ``reserve_cell`` gains a
+// ``soft`` parameter (bindings-surface change -> version bump).  A HARD
+// reservation (default, e.g. #2677 pair-continuation) fences foreign vias
+// AND foreign lateral traces out of the corridor
+// (``is_reserved_excluding`` true -> ``mark_via`` / ``mark_segment`` /
+// ``is_trace_blocked`` skip/block).  A SOFT reservation (the #2983
+// inner-corner / #4053 bundle-river byte-lane helpers) keeps ONLY the A*
+// attractor bonus for the owning net -- it does NOT fence foreign traces.
+// This is required for board 07's fully-reversed DDR byte, whose crossing
+// conflict graph is COMPLETE: a hard lateral fence forces the crossing
+// foreign nets to route AROUND the corridor, colliding elsewhere (copper
+// shorts) or failing (extra opens).  The soft attractor pulls the owning
+// crossing net onto its inner-layer channel while leaving the mandatory
+// crossings legal.  Old .so files lack ``reserved_soft`` and the new
+// ``reserve_cell`` signature; the version bump forces a rebuild.
+constexpr int ROUTER_CPP_BUILD_VERSION = 17;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -201,6 +217,14 @@ struct GridCell {
     // (last-writer-wins), matching Python ``reserve_corridor_cells``.
     int8_t reserved_count = 0;
     int32_t reserved_nets[RESERVED_NETS_CAP] = {0, 0, 0, 0};
+    // Issue #4079: HARD (false, default) vs SOFT (true) reservation.  A
+    // HARD reservation fences foreign vias AND lateral traces out of the
+    // cell (``is_reserved_excluding`` returns true for a foreign net).  A
+    // SOFT reservation keeps ONLY the A* attractor bonus (``is_reserved_for``
+    // for the owning net) -- ``is_reserved_excluding`` returns false, so
+    // foreign traces may still cross.  Meaningful only when
+    // ``reserved_count > 0``.  See ``ROUTER_CPP_BUILD_VERSION`` note.
+    bool reserved_soft = false;
 };
 
 // A* node for priority queue

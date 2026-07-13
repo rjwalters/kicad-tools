@@ -189,7 +189,7 @@ void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
 // sets larger than ``RESERVED_NETS_CAP`` are truncated; overlapping
 // reservations REPLACE (last-writer-wins).
 void Grid3D::reserve_cell(int x, int y, int layer,
-                          const std::vector<int>& net_ids) {
+                          const std::vector<int>& net_ids, bool soft) {
     if (!is_valid(x, y, layer)) return;
     auto& cell = at(x, y, layer);
     int n = 0;
@@ -203,6 +203,9 @@ void Grid3D::reserve_cell(int x, int y, int layer,
         cell.reserved_nets[i] = 0;
     }
     cell.reserved_count = static_cast<int8_t>(n);
+    // Issue #4079: HARD (soft=false) vs SOFT (soft=true) keep-out strength.
+    // Last-writer-wins mirrors the owner-set replace semantics above.
+    cell.reserved_soft = (n > 0) ? soft : false;
     if (n > 0) has_reservations_ = true;
 }
 
@@ -210,6 +213,7 @@ void Grid3D::clear_reservations() {
     for (auto& cell : cells_) {
         if (cell.reserved_count > 0) {
             cell.reserved_count = 0;
+            cell.reserved_soft = false;
             for (int i = 0; i < RESERVED_NETS_CAP; ++i) {
                 cell.reserved_nets[i] = 0;
             }

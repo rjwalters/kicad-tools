@@ -488,3 +488,168 @@ class TestLateralTraceReservationParity:
         assert cpp_blocked == py_blocked == False, (  # noqa: E712
             "Empty-reservation grid must leave an empty cell passable on both backends."
         )
+
+
+class TestSoftReservationParity:
+    """Pin the SOFT (attractor-only) corridor reservation contract (Issue #4079).
+
+    A ``soft=True`` reservation (the #2983 inner-corner / #4053 bundle-river
+    byte-lane helpers, which sit on board 07's fully-reversed DDR byte where
+    the crossing conflict graph is COMPLETE) must:
+
+      * NOT fence a foreign lateral trace out (``is_trace_blocked`` /
+        ``_is_trace_blocked`` return False for a foreign net) -- otherwise the
+        mandatory crossings route around and short/open elsewhere.
+      * NOT fence a foreign via/segment out (``mark_segment`` / ``mark_via``
+        claim the cell normally for a foreign net).
+      * STILL give the A* attractor bonus to the owning net
+        (``is_reserved_for`` / ``corridor_attractor_bonus`` unchanged).
+
+    A HARD reservation on the same cell (the #2677 pair-continuation default)
+    keeps the foreign keep-out.  These tests assert Python == C++ for both.
+    """
+
+    def _find_inner_layer(self, grid: RoutingGrid) -> int:
+        for idx in range(grid.num_layers):
+            layer_enum = grid.index_to_layer(idx)
+            if layer_enum not in (Layer.F_CU.value, Layer.B_CU.value):
+                return idx
+        raise AssertionError("4-layer stack should expose an inner layer")
+
+    def test_soft_reservation_does_not_block_foreign_trace(self, grid_4layer: RoutingGrid) -> None:
+        """SOFT reservation: foreign lateral trace passes on both backends."""
+        if not is_cpp_available():
+            pytest.skip("C++ router backend not built (run: kct build-native)")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.pathfinder import Router
+
+        gx, gy = 25, 25
+        inner_layer_idx = self._find_inner_layer(grid_4layer)
+        rules = grid_4layer.rules
+
+        grid_4layer.reserve_corridor_cells(
+            inner_layer_idx, [(gx, gy)], frozenset({1, 2}), soft=True
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid_4layer)
+        # A soft reservation still flips ``has_reservations`` (the attractor
+        # needs the fast-path enabled), but must NOT block foreign traffic.
+        assert cpp_grid._impl.has_reservations()
+        assert cpp_grid._impl.reserved_cell_count() == 1
+
+        cpp_pf = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+        cpp_pf.set_routable_layers(cpp_grid.get_routable_indices())
+        py_router = Router(grid_4layer, rules, diagonal_routing=True)
+
+        for probe_net, label in ((1, "owner-net"), (42, "foreign-net")):
+            cpp_blocked = cpp_pf._impl.is_trace_blocked(gx, gy, inner_layer_idx, probe_net, False)
+            py_blocked = py_router._is_trace_blocked(gx, gy, inner_layer_idx, probe_net, False)
+            assert cpp_blocked == py_blocked, (
+                f"Issue #4079: {label} soft-reservation predicate diverges "
+                f"(cpp={cpp_blocked}, py={py_blocked})"
+            )
+            assert py_blocked is False, (
+                f"Issue #4079: SOFT reservation must NOT block {label} (got blocked={py_blocked})"
+            )
+
+    def test_soft_reservation_mark_segment_claims_foreign_cell(
+        self, grid_4layer: RoutingGrid
+    ) -> None:
+        """SOFT reservation: foreign segment CLAIMS the cell (no keep-out)."""
+        if not is_cpp_available():
+            pytest.skip("C++ router backend not built (run: kct build-native)")
+
+        from kicad_tools.router.cpp_backend import CppGrid
+        from kicad_tools.router.primitives import Segment
+
+        gx, gy = 25, 25
+        inner_layer_idx = self._find_inner_layer(grid_4layer)
+        inner_layer = grid_4layer.index_to_layer(inner_layer_idx)
+
+        grid_4layer.reserve_corridor_cells(
+            inner_layer_idx, [(gx, gy)], frozenset({1, 2}), soft=True
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid_4layer)
+
+        # Foreign-net (42) segment: soft reservation does NOT fence it out --
+        # the cell is claimed on both backends.
+        wx, wy = grid_4layer.grid_to_world(gx, gy)
+        foreign_seg = Segment(
+            x1=wx, y1=wy, x2=wx, y2=wy, width=0.2, layer=Layer(inner_layer), net=42
+        )
+        grid_4layer._mark_segment(foreign_seg, clearance_cells=0)
+        cpp_grid._impl.mark_segment(gx, gy, gx, gy, inner_layer_idx, 42, 0)
+
+        py_blocked = grid_4layer.grid[inner_layer_idx][gy][gx].blocked
+        cpp_blocked = cpp_grid._impl.at(gx, gy, inner_layer_idx).blocked
+        assert py_blocked == cpp_blocked, (
+            "Issue #4079: soft-reservation mark_segment diverges "
+            f"(py={py_blocked}, cpp={cpp_blocked})"
+        )
+        assert py_blocked is True, (
+            "Issue #4079: SOFT reservation must let a foreign segment claim the cell."
+        )
+
+    def test_soft_reservation_still_attracts_owner(self, grid_4layer: RoutingGrid) -> None:
+        """SOFT reservation: owner net still gets the attractor bonus.
+
+        The soft flag suppresses the keep-out but NOT the attractor, so
+        ``is_reserved_for`` (which drives ``corridor_attractor_bonus``) still
+        reports the owner net on both backends.
+        """
+        if not is_cpp_available():
+            pytest.skip("C++ router backend not built (run: kct build-native)")
+
+        from kicad_tools.router.cpp_backend import CppGrid
+
+        gx, gy = 25, 25
+        inner_layer_idx = self._find_inner_layer(grid_4layer)
+
+        grid_4layer.reserve_corridor_cells(
+            inner_layer_idx, [(gx, gy)], frozenset({1, 2}), soft=True
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid_4layer)
+
+        for probe_net, expect in ((1, True), (2, True), (42, False)):
+            py_res = grid_4layer.is_reserved_for(inner_layer_idx, gx, gy, probe_net)
+            cpp_res = cpp_grid._impl.is_reserved_for(gx, gy, inner_layer_idx, probe_net)
+            assert py_res == cpp_res == expect, (
+                f"Issue #4079: soft-reservation attractor for net {probe_net} "
+                f"diverges/incorrect (py={py_res}, cpp={cpp_res}, expect={expect})"
+            )
+        # And the raw bonus applies for the owner on the C++ hot path.
+        assert cpp_grid._impl.corridor_attractor_bonus(gx, gy, inner_layer_idx, 1, 3.0) == 3.0
+        assert cpp_grid._impl.corridor_attractor_bonus(gx, gy, inner_layer_idx, 42, 3.0) == 0.0
+
+    def test_hard_vs_soft_last_writer_wins(self, grid_4layer: RoutingGrid) -> None:
+        """Re-reserving the same cell flips its strength (last-writer-wins)."""
+        if not is_cpp_available():
+            pytest.skip("C++ router backend not built (run: kct build-native)")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.pathfinder import Router
+
+        gx, gy = 25, 25
+        inner_layer_idx = self._find_inner_layer(grid_4layer)
+        rules = grid_4layer.rules
+
+        # First HARD, then SOFT over the same cell -> soft wins (no keep-out).
+        grid_4layer.reserve_corridor_cells(
+            inner_layer_idx, [(gx, gy)], frozenset({1, 2}), soft=False
+        )
+        grid_4layer.reserve_corridor_cells(
+            inner_layer_idx, [(gx, gy)], frozenset({1, 2}), soft=True
+        )
+        assert (inner_layer_idx, gy, gx) in grid_4layer._soft_reservations
+
+        cpp_grid = CppGrid.from_routing_grid(grid_4layer)
+        cpp_pf = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+        cpp_pf.set_routable_layers(cpp_grid.get_routable_indices())
+        py_router = Router(grid_4layer, rules, diagonal_routing=True)
+
+        cpp_blocked = cpp_pf._impl.is_trace_blocked(gx, gy, inner_layer_idx, 42, False)
+        py_blocked = py_router._is_trace_blocked(gx, gy, inner_layer_idx, 42, False)
+        assert cpp_blocked == py_blocked is False, (
+            "Issue #4079: soft-over-hard must leave the foreign trace passable "
+            f"(cpp={cpp_blocked}, py={py_blocked})"
+        )
