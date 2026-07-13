@@ -1165,6 +1165,19 @@ class CoupledPathfinder:
             if state.direction != (0, 0) and state.direction != new_direction:
                 cost += self.rules.cost_turn
 
+            # Issue #4080: corridor attractor for the coupled joint-state
+            # loop.  A symmetric move advances BOTH nets, so query each
+            # landing cell against its own net (mirrors the single-ended
+            # attractor in ``pathfinder.py``).  Clamped at 0 so the joint
+            # step cost stays non-negative and A* admissibility holds.
+            attractor_bonus = self.grid.get_corridor_attractor_bonus(
+                new_p.layer, new_p.x, new_p.y, p_net, self.rules.cost_corridor_attractor
+            ) + self.grid.get_corridor_attractor_bonus(
+                new_n.layer, new_n.x, new_n.y, n_net, self.rules.cost_corridor_attractor
+            )
+            if attractor_bonus > 0.0:
+                cost = max(0.0, cost - attractor_bonus)
+
             new_state = CoupledState(new_p, new_n, new_direction)
             neighbors.append((new_state, cost, False))
 
@@ -1263,6 +1276,24 @@ class CoupledPathfinder:
                             cost = self.rules.cost_straight
                             if state.direction != (0, 0) and state.direction != (dx, dy):
                                 cost += self.rules.cost_turn
+                            # Issue #4080: corridor attractor (per-net) for
+                            # the asymmetric P-advance move.  See the
+                            # symmetric-move comment above.
+                            attractor_bonus = self.grid.get_corridor_attractor_bonus(
+                                cand_p.layer,
+                                cand_p.x,
+                                cand_p.y,
+                                p_net,
+                                self.rules.cost_corridor_attractor,
+                            ) + self.grid.get_corridor_attractor_bonus(
+                                cand_n.layer,
+                                cand_n.x,
+                                cand_n.y,
+                                n_net,
+                                self.rules.cost_corridor_attractor,
+                            )
+                            if attractor_bonus > 0.0:
+                                cost = max(0.0, cost - attractor_bonus)
                             new_state = CoupledState(cand_p, cand_n, (dx, dy))
                             neighbors.append((new_state, cost, False))
 
@@ -1317,6 +1348,24 @@ class CoupledPathfinder:
                 cost = self.rules.cost_straight
                 if state.direction != (0, 0) and state.direction != (dx, dy):
                     cost += self.rules.cost_turn
+                # Issue #4080: corridor attractor (per-net) for the
+                # asymmetric N-advance move.  See the symmetric-move
+                # comment above.
+                attractor_bonus = self.grid.get_corridor_attractor_bonus(
+                    cand_p2.layer,
+                    cand_p2.x,
+                    cand_p2.y,
+                    p_net,
+                    self.rules.cost_corridor_attractor,
+                ) + self.grid.get_corridor_attractor_bonus(
+                    cand_n2.layer,
+                    cand_n2.x,
+                    cand_n2.y,
+                    n_net,
+                    self.rules.cost_corridor_attractor,
+                )
+                if attractor_bonus > 0.0:
+                    cost = max(0.0, cost - attractor_bonus)
                 new_state = CoupledState(cand_p2, cand_n2, (dx, dy))
                 neighbors.append((new_state, cost, False))
 
@@ -1361,6 +1410,19 @@ class CoupledPathfinder:
 
             # Via cost for both traces
             cost = self.rules.cost_via * 2
+
+            # Issue #4080: corridor attractor on the via-drop destination
+            # cells -- the reservation is what makes the coupled router
+            # prefer to actually via-hop INTO the reserved channel
+            # (mirrors the single-ended via-drop attractor in
+            # ``pathfinder.py``).  Per-net query, clamped at 0.
+            attractor_bonus = self.grid.get_corridor_attractor_bonus(
+                new_p.layer, new_p.x, new_p.y, p_net, self.rules.cost_corridor_attractor
+            ) + self.grid.get_corridor_attractor_bonus(
+                new_n.layer, new_n.x, new_n.y, n_net, self.rules.cost_corridor_attractor
+            )
+            if attractor_bonus > 0.0:
+                cost = max(0.0, cost - attractor_bonus)
 
             new_state = CoupledState(new_p, new_n, state.direction)
             neighbors.append((new_state, cost, True))
