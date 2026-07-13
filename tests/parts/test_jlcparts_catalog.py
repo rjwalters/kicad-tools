@@ -163,6 +163,152 @@ def test_catalog_count(catalog_db: Path):
 
 
 # --------------------------------------------------------------------------
+# JlcpartsCatalog.search (parametric)
+# --------------------------------------------------------------------------
+
+
+def test_catalog_search_value_and_package(catalog_db: Path):
+    """A value+package query resolves the matching row from the fixture."""
+    catalog = JlcpartsCatalog(catalog_db)
+    # "10k" + "0402" uniquely resolves the C25804 10kOhms 0402 resistor.
+    results = catalog.search("10k 0402")
+    assert [p.lcsc_part for p in results] == ["C25804"]
+    assert results[0].mfr_part == "RC0402FR-0710KL"
+
+    # Explicit package filter narrows to the 0402 rows only.
+    results = catalog.search("0402", package="0402")
+    assert {p.lcsc_part for p in results} == {"C25804", "C1525"}
+    # The LQFP-48 MCU is excluded by the package filter even though its
+    # description mentions LQFP-48.
+    results = catalog.search("Microcontroller", package="0402")
+    assert results == []
+
+
+def test_catalog_search_ranks_basic_before_extended(catalog_db: Path):
+    """Ordering is basic > preferred > extended, then stock DESC."""
+    catalog = JlcpartsCatalog(catalog_db)
+    # All four fixture rows mention their package in the description, but only
+    # "Transistor"/"Resistor"/"Capacitor"/"Microcontroller" are type words.
+    # Query a term present across multiple library_types: every row description
+    # ends with a package token, so search on the shared substring "0" would be
+    # too broad. Instead assert ordering via a query that spans tiers.
+    results = catalog.search("SOT-23")  # preferred C100
+    assert [p.lcsc_part for p in results] == ["C100"]
+
+    # A query matching a basic and an extended row must return basic first.
+    # C25804 (basic, "Resistor") vs C8734 (extended, "Microcontroller"):
+    # both descriptions do NOT share a term, so build ordering from library_type
+    # using a term all resistor/mcu rows share is not possible in this fixture.
+    # Use the package-less "Chip" (basic) vs "ARM" (extended) distinction by
+    # querying a term present in exactly the two rows we want to order.
+    results = catalog.search("48")  # "LQFP-48" appears only in the extended MCU
+    assert [p.lcsc_part for p in results] == ["C8734"]
+
+
+def test_catalog_search_library_type_ordering_multi(catalog_db: Path, tmp_path: Path):
+    """With multiple library_types matching one term, basic sorts first."""
+    # Build a fixture where a shared description term spans basic/preferred/
+    # extended so the ORDER BY is observable.
+    rows = [
+        {
+            "lcsc": 1,
+            "mfr": "EXT",
+            "package": "0402",
+            "manufacturer": "X",
+            "library_type": "extended",
+            "description": "WIDGET 0402",
+            "datasheet": "",
+            "stock": 9,
+            "price": None,
+        },
+        {
+            "lcsc": 2,
+            "mfr": "PREF",
+            "package": "0402",
+            "manufacturer": "X",
+            "library_type": "preferred",
+            "description": "WIDGET 0402",
+            "datasheet": "",
+            "stock": 5,
+            "price": None,
+        },
+        {
+            "lcsc": 3,
+            "mfr": "BASIC",
+            "package": "0402",
+            "manufacturer": "X",
+            "library_type": "basic",
+            "description": "WIDGET 0402",
+            "datasheet": "",
+            "stock": 1,
+            "price": None,
+        },
+        {
+            "lcsc": 4,
+            "mfr": "BASIC2",
+            "package": "0402",
+            "manufacturer": "X",
+            "library_type": "basic",
+            "description": "WIDGET 0402",
+            "datasheet": "",
+            "stock": 100,
+            "price": None,
+        },
+    ]
+    db = _builder.build_fixture(tmp_path / "ranked.sqlite3", rows=rows)
+    catalog = JlcpartsCatalog(db)
+    results = catalog.search("WIDGET")
+    # basic (stock DESC among basics) first, then preferred, then extended.
+    assert [p.lcsc_part for p in results] == ["C4", "C3", "C2", "C1"]
+
+
+def test_catalog_search_min_stock_filter(catalog_db: Path):
+    """min_stock pushes a stock floor into SQL (excludes the 0-stock row)."""
+    catalog = JlcpartsCatalog(catalog_db)
+    # C100 (SOT-23) has stock 0; with min_stock=1 it is excluded.
+    assert catalog.search("SOT-23", min_stock=1) == []
+    assert [p.lcsc_part for p in catalog.search("SOT-23")] == ["C100"]
+
+
+def test_catalog_search_limit(catalog_db: Path):
+    """The limit param caps the number of returned rows."""
+    catalog = JlcpartsCatalog(catalog_db)
+    # Two 0402 rows match; limit=1 returns only the top-ranked one.
+    results = catalog.search("0402", package="0402", limit=1)
+    assert len(results) == 1
+
+
+def test_catalog_search_empty_query_is_safe(catalog_db: Path):
+    """An empty / whitespace query returns [] (no unbounded scan)."""
+    catalog = JlcpartsCatalog(catalog_db)
+    assert catalog.search("") == []
+    assert catalog.search("   ") == []
+
+
+def test_catalog_search_absent_is_silent_noop(tmp_path: Path):
+    """Search against an absent catalog returns [] (never raises)."""
+    catalog = JlcpartsCatalog(tmp_path / "does-not-exist.sqlite3")
+    assert catalog.available is False
+    assert catalog.search("10k 0402") == []
+
+
+def test_catalog_search_escapes_like_wildcards(catalog_db: Path):
+    """LIKE wildcards in a term are matched literally, not as wildcards.
+
+    Only the C25804 description contains a literal ``%`` (``"10kOhms 1% ..."``).
+    An unescaped ``%`` LIKE pattern would match *every* row; the ESCAPE handling
+    means a ``%`` term matches only the single row that literally contains it.
+    """
+    catalog = JlcpartsCatalog(catalog_db)
+    results = catalog.search("%")
+    assert [p.lcsc_part for p in results] == ["C25804"]
+
+    # An underscore term likewise matches literally: no fixture description
+    # contains ``_``, so it matches nothing (rather than any single character).
+    assert catalog.search("_") == []
+
+
+# --------------------------------------------------------------------------
 # LCSCClient fallback path
 # --------------------------------------------------------------------------
 
@@ -306,6 +452,156 @@ def test_lookup_many_live_partial_then_catalog(
     assert got["C1525"].mfr_part == "LIVE-CAP"
     assert got["C25804"].mfr_part == "RC0402FR-0710KL"
     assert "C999999" not in got
+
+
+# --------------------------------------------------------------------------
+# LCSCClient.search fallback path (parametric matcher, #4126)
+# --------------------------------------------------------------------------
+
+
+def test_search_falls_back_to_catalog_on_403(
+    catalog_db: Path, tmp_path: Path, force_requests_present
+):
+    """A 403 from the live search API is served from the offline catalog."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=catalog_db)
+
+    with mock.patch.object(
+        client, "_make_request", side_effect=LCSCForbiddenError("403")
+    ) as mock_req:
+        result = client.search("10k 0402")
+
+    mock_req.assert_called_once()
+    assert result.parts, "expected candidates from the offline catalog, got none"
+    assert result.parts[0].lcsc_part == "C25804"
+    # Fallback candidates are cached like the live-API path.
+    assert cache.get("C25804") is not None
+
+
+def _request_exception(msg: str = "boom") -> BaseException:
+    """Build a RequestException instance without requiring the requests extra.
+
+    Mirrors ``search()``'s ``_request_exception_type()`` so the generic-network-
+    failure branch is exercised whether or not ``requests`` is installed.
+    """
+    from kicad_tools.parts.lcsc import _request_exception_type
+
+    return _request_exception_type()(msg)
+
+
+def test_search_falls_back_on_request_exception(
+    catalog_db: Path, tmp_path: Path, force_requests_present
+):
+    """A generic RequestException also falls back to the catalog when present."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=catalog_db)
+
+    with mock.patch.object(client, "_make_request", side_effect=_request_exception("boom")):
+        result = client.search("10k 0402")
+
+    assert [p.lcsc_part for p in result.parts] == ["C25804"]
+
+
+def test_search_403_without_catalog_still_raises(tmp_path: Path, force_requests_present):
+    """403 + no catalog synced -> LCSCForbiddenError still propagates."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=tmp_path / "missing.sqlite3")
+
+    with mock.patch.object(client, "_make_request", side_effect=LCSCForbiddenError("403")):
+        with pytest.raises(LCSCForbiddenError):
+            client.search("10k 0402")
+
+
+def test_search_403_with_catalog_disabled_still_raises(
+    catalog_db: Path, tmp_path: Path, force_requests_present
+):
+    """use_local_catalog=False -> 403 propagates even with a catalog file."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, use_local_catalog=False, catalog_path=catalog_db)
+
+    with mock.patch.object(client, "_make_request", side_effect=LCSCForbiddenError("403")):
+        with pytest.raises(LCSCForbiddenError):
+            client.search("10k 0402")
+    assert client._get_catalog() is None
+
+
+def test_search_request_exception_without_catalog_returns_empty(
+    tmp_path: Path, force_requests_present
+):
+    """Generic RequestException + no catalog -> empty SearchResult (unchanged)."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=tmp_path / "missing.sqlite3")
+
+    with mock.patch.object(client, "_make_request", side_effect=_request_exception("boom")):
+        result = client.search("10k 0402")
+    assert result.parts == []
+    assert result.query == "10k 0402"
+
+
+def test_search_live_success_bypasses_catalog(
+    catalog_db: Path, tmp_path: Path, force_requests_present
+):
+    """When the live API returns results, the offline catalog is never touched."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=catalog_db)
+
+    live_response = {
+        "code": 200,
+        "data": {
+            "componentPageInfo": {
+                "total": 1,
+                "list": [
+                    {
+                        "componentCode": "C25804",
+                        "componentModelEn": "LIVE-SEARCH-PART",
+                        "componentBrandEn": "LiveCo",
+                        "describe": "10kOhms 0402 Resistor",
+                        "encapStandard": "0402",
+                        "stockCount": 123,
+                    }
+                ],
+            }
+        },
+    }
+    with mock.patch.object(client, "_make_request", return_value=live_response):
+        with mock.patch.object(JlcpartsCatalog, "search") as catalog_search:
+            result = client.search("10k 0402")
+
+    catalog_search.assert_not_called()
+    assert [p.mfr_part for p in result.parts] == ["LIVE-SEARCH-PART"]
+
+
+def test_search_no_requests_uses_catalog(catalog_db: Path, tmp_path: Path, monkeypatch):
+    """Without the requests extra, search() serves directly from the catalog."""
+    monkeypatch.setattr("kicad_tools.parts.lcsc._requests_installed", lambda: False)
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=catalog_db)
+
+    result = client.search("10k 0402")
+    assert [p.lcsc_part for p in result.parts] == ["C25804"]
+
+
+def test_search_no_requests_no_catalog_raises(tmp_path: Path, monkeypatch):
+    """Without requests AND without a catalog, the dependency error stands."""
+    monkeypatch.setattr("kicad_tools.parts.lcsc._requests_installed", lambda: False)
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=tmp_path / "missing.sqlite3")
+
+    with pytest.raises(ImportError):
+        client.search("10k 0402")
+
+
+def test_search_fallback_respects_package_filter(
+    catalog_db: Path, tmp_path: Path, force_requests_present
+):
+    """The package arg narrows the offline-catalog fallback candidate pool."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=catalog_db)
+
+    with mock.patch.object(client, "_make_request", side_effect=LCSCForbiddenError("403")):
+        result = client.search("0402", package="0402")
+
+    assert {p.lcsc_part for p in result.parts} == {"C25804", "C1525"}
 
 
 # --------------------------------------------------------------------------

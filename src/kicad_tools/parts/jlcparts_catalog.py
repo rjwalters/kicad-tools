@@ -28,8 +28,12 @@ Design notes
 * No ``PartProvider`` protocol / multi-backend abstraction is introduced
   (deferred per owner direction on #4108) -- the catalog is consulted as a
   fallback inside :class:`~kicad_tools.parts.lcsc.LCSCClient`.
-* Only exact ``lcsc`` lookup is supported in this phase; full-catalog fuzzy
-  matching is explicitly out of scope.
+* Both exact ``lcsc`` lookup (:meth:`JlcpartsCatalog.lookup`) and a
+  parametric ``description``/``package`` search
+  (:meth:`JlcpartsCatalog.search`) are supported. The parametric search backs
+  ``LCSCClient.search``'s offline fallback so parts-matching / BOM enrichment
+  survives a 403'd live API. Confidence scoring stays in the caller
+  (``PartMatcher``); the catalog only returns a candidate pool.
 * The dataset is *never* committed to the repository; ``sync_catalog`` writes
   only into the cache directory.
 """
@@ -184,6 +188,85 @@ class JlcpartsCatalog:
 
         return result
 
+    def search(
+        self,
+        query: str,
+        package: str | None = None,
+        *,
+        min_stock: int = 0,
+        limit: int = 100,
+    ) -> list[Part]:
+        """Parametrically search the catalog by free-text value + package.
+
+        The jlcparts schema has *no* dedicated value column, so the query terms
+        are matched against the free-text ``description`` column (the same field
+        the live-API path scores against). Each whitespace-separated term must
+        appear in ``description`` (AND-combined, case-insensitive), optionally
+        constrained to a known ``package``. Filtering is pushed into SQL rather
+        than post-filtered in Python because the real catalog is ~600k+ rows.
+
+        Results are ordered ``library_type`` basic > preferred > extended (the
+        JLCPCB assembly tier, matching the downstream
+        ``PartMatcher.suggest_for_component`` ranking) then by ``stock``
+        descending, and capped at ``limit``. Exact numeric/confidence scoring is
+        left to the caller (``PartMatcher._calculate_confidence``); this method
+        only returns a *candidate pool* shaped like the live-API path.
+
+        Args:
+            query: Free-text search string (e.g. ``"10k 0402"``). Split on
+                whitespace into AND-combined ``description LIKE`` terms. An
+                empty/blank query yields an empty list (no unbounded scan).
+            package: Optional exact package filter (e.g. ``"0402"``,
+                ``"LQFP-48"``), matched case-insensitively against ``package``.
+            min_stock: Minimum ``stock`` to include (pushed into SQL). Default
+                ``0`` includes zero-stock rows.
+            limit: Maximum number of rows to return.
+
+        Returns:
+            A list of translated :class:`Part` objects (possibly empty). An
+            empty list is returned when the catalog file does not exist (same
+            silent-no-op convention as :meth:`lookup`/:meth:`lookup_many`).
+        """
+        if not self.available:
+            return []
+
+        terms = [t for t in query.split() if t]
+        if not terms:
+            return []
+
+        conditions = ["description LIKE ? ESCAPE '\\' COLLATE NOCASE"] * len(terms)
+        params: list[object] = [f"%{_escape_like(t)}%" for t in terms]
+
+        if package:
+            conditions.append("package = ? COLLATE NOCASE")
+            params.append(package)
+
+        if min_stock > 0:
+            conditions.append("stock >= ?")
+            params.append(min_stock)
+
+        where_clause = " AND ".join(conditions)
+        sql = (
+            "SELECT * FROM jlc_components "
+            f"WHERE {where_clause} "
+            "ORDER BY CASE library_type "
+            "WHEN 'basic' THEN 0 WHEN 'preferred' THEN 1 ELSE 2 END, "
+            "stock DESC "
+            "LIMIT ?"
+        )
+        params.append(int(limit))
+
+        try:
+            with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(sql, params)
+                rows = cursor.fetchall()
+        except sqlite3.Error as e:
+            logger.warning(f"jlcparts catalog search failed for {query!r}: {e}")
+            return []
+
+        return [_row_to_part(row) for row in rows]
+
     def count(self) -> int:
         """Return the number of components in the catalog (0 if absent)."""
         if not self.available:
@@ -201,6 +284,17 @@ def _canonical_lcsc(lcsc_part: str) -> str:
     if not normalized.startswith("C"):
         normalized = f"C{normalized}"
     return normalized
+
+
+def _escape_like(term: str) -> str:
+    """Escape SQL ``LIKE`` wildcards in a user-supplied search term.
+
+    The search terms come from parsed component values (e.g. ``"10k"``,
+    ``"0402"``) and are embedded in a ``LIKE '%term%'`` pattern. A stray ``%``
+    or ``_`` in a term would otherwise act as a wildcard; escape them (paired
+    with ``ESCAPE '\\'`` in the query) so terms match literally.
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _normalize_lcsc_id(lcsc_part: str) -> int | None:
