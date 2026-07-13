@@ -1096,6 +1096,8 @@ class EscapeRouter:
         diff_pair_map: dict[str, str] | None = None,
         net_pad_positions: dict[str, list[tuple[float, float]]] | None = None,
         net_target_positions: dict[int, list[tuple[float, float, str]]] | None = None,
+        enable_cross_package_pair_corridor: bool = False,
+        net_name_to_id: dict[str, int] | None = None,
     ):
         """Initialize the escape router.
 
@@ -1148,6 +1150,28 @@ class EscapeRouter:
                 directions exactly.  Distinct from ``net_pad_positions``
                 (Issue #3419), which is keyed by net NAME and consumed by
                 the diff-pair launch heuristic.
+            enable_cross_package_pair_corridor: Issue #4086 (Phase 1,
+                epic #4049).  Default ``False``.  When ``True`` and a
+                diff pair's two halves live on DIFFERENT packages,
+                ``_generate_paired_escapes`` resolves the off-package
+                partner endpoint via ``net_pad_positions`` and reserves a
+                SOFT (attractor-only) corridor from this leg's escape
+                launch point toward the partner, so the downstream coupled
+                pathfinder (``CoupledPathfinder`` / #4080 attractor) has
+                real geometry to follow even when no single-ended guide
+                route exists yet.  The two legs still escape independently
+                at the per-pad level (this is NOT joint pin-assignment
+                ILP).  With the flag ``False`` cross-package pairs fall
+                through to the single-ended dispatcher exactly as before
+                (byte-identical), so the intra-package Phase 2F behaviour
+                and all board 00-07 fixtures are unchanged.
+            net_name_to_id: Optional board-wide map of net name to net id
+                (Issue #4086).  Consulted ONLY by the cross-package
+                corridor path to resolve the off-package partner's net id
+                for the corridor owner set (so both legs of the pair see
+                the soft attractor bonus).  Defaults to ``None``; when
+                absent the cross-package corridor owner set falls back to
+                this leg's net id alone.
         """
         self.grid = grid
         self.rules = rules
@@ -1191,6 +1215,21 @@ class EscapeRouter:
         # the total number of grid cells reserved across all calls.
         self.pair_corridor_reservations: int = 0
         self.pair_corridor_reserved_cells: int = 0
+        # Issue #4086 (Phase 1): cross-package diff-pair corridor gate +
+        # instrumentation.  When enabled, a diff pair whose two halves are
+        # on different packages gets a SOFT continuation corridor from each
+        # leg's escape launch point toward the off-package partner.  The
+        # counters mirror ``pair_corridor_reservations`` /
+        # ``pair_corridor_reserved_cells`` so tests can assert the
+        # cross-package path fired (or did not, when the flag is off / no
+        # partner is resolvable) without monkey-patching internals.
+        self.enable_cross_package_pair_corridor: bool = bool(enable_cross_package_pair_corridor)
+        self.cross_package_pair_corridor_reservations: int = 0
+        self.cross_package_pair_corridor_reserved_cells: int = 0
+        # Issue #4086: board-wide net-name -> net-id map used ONLY to
+        # resolve the off-package partner's net id for the cross-package
+        # corridor owner set.  Empty map => owner set is this leg alone.
+        self.net_name_to_id: dict[str, int] = net_name_to_id or {}
         # Issue #2983: Instrumentation counters for single-ended byte-lane
         # inner-corner corridor reservations.  Mirrors the diff-pair
         # ``pair_corridor_*`` pattern but tracks calls into
@@ -1772,11 +1811,23 @@ class EscapeRouter:
         package already at the target intra-pair spacing.
 
         Pads whose partner is on a DIFFERENT package (cross-package
-        pair coupling) are skipped here -- those cases fall through to
-        the single-ended dispatcher and are coupled by the main
-        pathfinder later.  This matches the issue scope note: "Coupling
-        escapes across different packages ... is out of scope (Phase 2F
-        handles intra-package only)."
+        pair coupling) fall through to the single-ended dispatcher and
+        are coupled by the main pathfinder later -- their per-pad escape
+        geometry is NOT hijacked here (this is not joint pin-assignment
+        ILP; see Issue #4086's scope).
+
+        Issue #4086 (Phase 1, epic #4049): when
+        ``self.enable_cross_package_pair_corridor`` is True (default
+        False) AND ``self.net_pad_positions`` resolves an off-package
+        endpoint for the partner net, this method additionally reserves a
+        SOFT continuation corridor from this leg's escape launch point
+        toward the partner (via ``_reserve_cross_package_pair_corridor``)
+        so the downstream coupled pathfinder has geometry to follow.  The
+        pad is deliberately NOT added to ``paired_pad_keys`` in that case
+        -- the leg still escapes single-ended; only the corridor
+        reservation is added.  With the flag False the cross-package
+        branch is a byte-identical no-op ``continue`` (all board 00-07
+        fixtures, whose pairs are intra-package, are unaffected).
 
         Args:
             package: Package info, expected to be one of the three
@@ -1831,9 +1882,23 @@ class EscapeRouter:
                 continue
             partner_pad = net_to_pad.get(partner_name)
             if partner_pad is None:
-                # Partner net does not appear on this package -- defer
-                # to the per-package dispatcher (cross-package coupling
-                # is handled by the main pathfinder).
+                # Partner net does not appear on this package.  The leg
+                # defers to the per-package dispatcher (single-ended
+                # escape); cross-package coupling is handled by the main
+                # pathfinder.  Issue #4086 (Phase 1): when the gate is on
+                # and the off-package partner endpoint is resolvable,
+                # additionally reserve a SOFT continuation corridor from
+                # this leg toward the partner so the coupled pathfinder
+                # has geometry to follow.  This does NOT change the leg's
+                # own escape geometry -- the pad is intentionally left out
+                # of ``paired_pad_keys`` so it still escapes single-ended.
+                if self.enable_cross_package_pair_corridor:
+                    self._reserve_cross_package_pair_corridor(
+                        pad=pad,
+                        partner_name=partner_name,
+                        intra_pair_clearance=_resolve_intra_pair_clearance(pad.net_name),
+                        package=package,
+                    )
                 continue
             if partner_pad is pad:
                 # Self-pair shouldn't happen but be defensive.
@@ -2343,6 +2408,200 @@ class EscapeRouter:
                 sorted(owner_nets),
                 len(members),
                 members[0].direction.name,
+            )
+        return count
+
+    def _reserve_cross_package_pair_corridor(
+        self,
+        pad: Pad,
+        partner_name: str,
+        intra_pair_clearance: float,
+        package: PackageInfo,
+    ) -> int:
+        """Reserve a SOFT continuation corridor for a cross-package pair leg.
+
+        Issue #4086 (Phase 1, epic #4049).  When a diff pair's two halves
+        live on DIFFERENT packages, the intra-package paired-escape path
+        (``_escape_diff_pair_segment`` +
+        ``_reserve_pair_continuation_corridor``) does not apply -- each
+        leg escapes single-ended and the only coupling downstream is
+        ``CoupledPathfinder`` free-searching the joint state space.  This
+        helper reserves a corridor connecting THIS leg's escape launch
+        point to the off-package partner endpoint so the coupled search
+        (via the #4080 attractor) has geometry to follow instead of
+        discovering feasibility from scratch.
+
+        Unlike ``_reserve_pair_continuation_corridor`` (a HARD keep-out
+        that fences foreign copper out of a planar intra-package
+        corridor), this reservation is SOFT (``soft=True``): it applies
+        ONLY the A* attractor bonus and does NOT fence foreign vias or
+        lateral traces out.  A hard fence spanning the whole board between
+        two packages would carve a foreign-copper-free channel across the
+        board and starve unrelated nets -- the #4087 evidence that hard
+        fences short-induce in dense areas applies doubly to a long
+        cross-package span.  Soft keeps the corridor attractor-visible
+        (so the coupled pair is pulled onto it) while leaving every other
+        net free to cross it.
+
+        Geometry (single leg -> partner):
+            * Partner endpoint is the nearest off-package position for
+              ``partner_name`` in ``self.net_pad_positions``.  If none is
+              resolvable the method is a no-op (returns 0) -- this is the
+              fallback-safety contract mirrored on
+              ``_select_pair_launch_direction``.
+            * Launch direction is the unit vector from THIS pad toward the
+              partner endpoint (this is where the leg wants to go, so the
+              single-ended escape and the coupled continuation both head
+              this way).
+            * Origin is this pad's escape launch point
+              (``pad + direction * escape_dist``), the same launch
+              distance the single-ended and paired escapes use.
+            * The corridor is a rectangle from the launch point toward the
+              partner, laterally padded by ``intra_pair_clearance +
+              trace_width`` so both legs of the pair fit side by side.
+            * Length is clamped so the corridor never overshoots the
+              partner endpoint.
+
+        Args:
+            pad: This leg's pad (on ``package``).
+            partner_name: Net name of the off-package partner half.
+            intra_pair_clearance: Target intra-pair clearance (resolved by
+                the caller from the net class), used for lateral padding.
+            package: This leg's package (for the on-package exclusion set
+                when picking the partner endpoint).
+
+        Returns:
+            Number of grid cells reserved.  0 when the flag path is a
+            no-op (partner endpoint unresolvable, degenerate direction,
+            no inner layer, or grid cells empty).
+        """
+        if not self.net_pad_positions:
+            return 0
+        if pad.net_name is None:
+            return 0
+
+        # Resolve the partner's nearest OFF-package endpoint.  Positions
+        # that coincide with a pad on THIS package are excluded (the
+        # partner's on-package pads, if any, are not the cross-package
+        # target).  Position-keyed exclusion mirrors
+        # ``_select_pair_launch_direction``.
+        on_package = {(round(p.x, 3), round(p.y, 3)) for p in package.pads}
+        partner_positions = [
+            (x, y)
+            for (x, y) in self.net_pad_positions.get(partner_name, ())
+            if (round(x, 3), round(y, 3)) not in on_package
+        ]
+        if not partner_positions:
+            return 0
+
+        # Nearest off-package partner endpoint to this pad.
+        tx, ty = min(
+            partner_positions,
+            key=lambda pt: math.hypot(pt[0] - pad.x, pt[1] - pad.y),
+        )
+
+        # Launch direction: from this pad toward the partner.
+        vx = tx - pad.x
+        vy = ty - pad.y
+        span = math.hypot(vx, vy)
+        if span == 0:
+            return 0
+        dx = vx / span
+        dy = vy / span
+        # Lateral (right-hand-rule perpendicular) unit vector.
+        lat_dx, lat_dy = -dy, dx
+
+        # Inner routable layer for the corridor (same selection the
+        # intra-package continuation corridor uses).
+        target_inner_layer = self._select_inner_escape_layer(pad.layer)
+        if self.grid.layer_stack is not None:
+            target_def = self.grid.layer_stack.get_layer_by_name(target_inner_layer.kicad_name)
+            if target_def is None or target_def.is_outer:
+                # 2-layer boards / no inner signal layer: no corridor.
+                return 0
+        try:
+            target_idx = self.grid.layer_to_index(target_inner_layer.value)
+        except Exception:
+            return 0
+
+        # Owner set: this leg's net id plus (when resolvable) the partner
+        # net id, so BOTH legs of the pair receive the soft attractor
+        # bonus toward this corridor.
+        owner_nets: set[int] = set()
+        if pad.net is not None:
+            owner_nets.add(int(pad.net))
+        partner_id = self.net_name_to_id.get(partner_name)
+        if partner_id is not None:
+            owner_nets.add(int(partner_id))
+        if not owner_nets:
+            return 0
+
+        # Trace width for the padding term (widest of the two legs when
+        # the partner width is resolvable, else this leg's width).
+        trace_w = self._get_trace_width_for_net(pad.net_name)
+        partner_w = self._get_trace_width_for_net(partner_name)
+        max_trace_w = max(trace_w, partner_w)
+
+        # Escape launch point: step off the pad by the same launch
+        # distance the single-ended / paired escapes use, so the corridor
+        # begins where the leg actually leaves the package.
+        escape_dist = self.escape_clearance + max_trace_w * 2
+        # Do not overshoot the partner endpoint if it is closer than the
+        # launch distance (degenerate very-near packages).
+        launch = min(escape_dist, span * 0.5)
+        cx = pad.x + dx * launch
+        cy = pad.y + dy * launch
+
+        # Corridor length: from the launch point to the partner endpoint,
+        # clamped to the remaining span.  This connects the two escape
+        # exits without overshooting into the partner package.
+        corridor_length = max(0.0, span - launch)
+        if corridor_length <= 0.0:
+            return 0
+
+        # Lateral half-width: room for both legs side by side plus the
+        # intra-pair clearance.  (No via-halo widening -- the soft
+        # reservation does not fence, so over-reserving would only dilute
+        # the attractor field, not fence neighbours out.)
+        lat_half = intra_pair_clearance + max_trace_w
+
+        # Enumerate covered cells with a (t, u) parametric walk, stepping
+        # by half the grid resolution to avoid diagonal aliasing -- same
+        # sampling ``_reserve_pair_continuation_corridor`` uses.
+        step = self.grid.resolution * 0.5
+        if step <= 0:
+            return 0
+        cells: set[tuple[int, int]] = set()
+        t = 0.0
+        while t <= corridor_length:
+            u = -lat_half
+            while u <= lat_half:
+                wx = cx + dx * t + lat_dx * u
+                wy = cy + dy * t + lat_dy * u
+                gx, gy = self.grid.world_to_grid(wx, wy)
+                cells.add((gx, gy))
+                u += step
+            t += step
+        if not cells:
+            return 0
+
+        count = self.grid.reserve_corridor_cells(
+            layer_idx=target_idx,
+            cells=cells,
+            net_ids=owner_nets,
+            soft=True,
+        )
+        if count > 0:
+            self.cross_package_pair_corridor_reservations += 1
+            self.cross_package_pair_corridor_reserved_cells += count
+            logger.debug(
+                "Issue #4086 cross-package corridor reserved (soft): "
+                "layer=%s cells=%d nets=%s %s->%s",
+                target_inner_layer.name,
+                count,
+                sorted(owner_nets),
+                pad.net_name,
+                partner_name,
             )
         return count
 
