@@ -163,6 +163,17 @@
     (pad "3" thru_hole circle (at 0 0) (size 1.6 1.6) (drill 1.0) (layers "*.Cu" "*.Mask") (net 8 "JOY_X"))
     (pad "4" thru_hole circle (at 2 0) (size 1.6 1.6) (drill 1.0) (layers "*.Cu" "*.Mask") (net 9 "JOY_Y"))
     (pad "5" thru_hole circle (at 4 0) (size 1.6 1.6) (drill 1.0) (layers "*.Cu" "*.Mask") (net 10 "JOY_BTN"))
+  	(model "${KCT_LCSC_3D_DIR}/C50950.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Crystal:Crystal_HC49-U_Vertical"
     (layer "F.Cu")

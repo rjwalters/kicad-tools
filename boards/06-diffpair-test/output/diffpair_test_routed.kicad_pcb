@@ -1626,6 +1626,17 @@
 			(net 5 "GND")
 		)
 		(embedded_fonts no)
+		(model "${KCT_LCSC_3D_DIR}/C444929.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
 	)
 	(footprint "Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm"
 		(layer "F.Cu")

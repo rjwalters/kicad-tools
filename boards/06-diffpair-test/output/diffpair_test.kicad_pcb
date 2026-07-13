@@ -132,6 +132,17 @@
     (pad "10" smd rect (at 0.000 2.800) (size 0.500 0.600) (layers "F.Cu" "F.Paste" "F.Mask") (net 4 "+1V2"))
     (pad "11" smd rect (at 0.000 3.600) (size 0.500 0.600) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
     (pad "12" smd rect (at 0.000 4.400) (size 0.500 0.600) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "GND"))
+  	(model "${KCT_LCSC_3D_DIR}/C444929.step"
+  		(offset
+  			(xyz 0 0 0)
+  		)
+  		(scale
+  			(xyz 1 1 1)
+  		)
+  		(rotate
+  			(xyz 0 0 0)
+  		)
+  	)
   )
   (footprint "Connector_FFC:FFC_4P_0.5mm"
     (layer "F.Cu")
