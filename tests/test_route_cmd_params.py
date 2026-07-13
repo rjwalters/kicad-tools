@@ -510,6 +510,106 @@ class TestRouteCommandAutoFixFlags:
             passes_idx = call_args.index("--auto-fix-passes")
             assert call_args[passes_idx + 1] == "5"
 
+    # --- Issue #4094: monotone-certificate / cross-package / slack flags ---
+
+    def test_monotone_certificate_order_forwarded(self):
+        """--monotone-certificate-order is forwarded to route_cmd.main."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(monotone_certificate_order=True)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--monotone-certificate-order" in call_args
+
+    def test_monotone_certificate_order_not_forwarded_when_false(self):
+        """--monotone-certificate-order is not forwarded when not set."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(monotone_certificate_order=False)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--monotone-certificate-order" not in call_args
+
+    def test_cross_package_pair_corridor_forwarded(self):
+        """--cross-package-pair-corridor is forwarded to route_cmd.main."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(cross_package_pair_corridor=True)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--cross-package-pair-corridor" in call_args
+
+    def test_cross_package_pair_corridor_not_forwarded_when_false(self):
+        """--cross-package-pair-corridor is not forwarded when not set."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(cross_package_pair_corridor=False)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--cross-package-pair-corridor" not in call_args
+
+    def test_slack_corridor_widening_forwarded(self):
+        """--slack-corridor-widening is forwarded to route_cmd.main."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(slack_corridor_widening=True)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--slack-corridor-widening" in call_args
+
+    def test_slack_corridor_widening_not_forwarded_when_false(self):
+        """--slack-corridor-widening is not forwarded when not set."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(slack_corridor_widening=False)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--slack-corridor-widening" not in call_args
+
+    def test_new_routing_flags_all_absent_by_default(self):
+        """None of the three #4094 flags appear when the base args omit them.
+
+        Guards flag-off byte-identity at the sub_argv boundary: with no flag
+        set (the production default), the forwarded argv must not contain any
+        of the three new flags.
+        """
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args()
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--monotone-certificate-order" not in call_args
+            assert "--cross-package-pair-corridor" not in call_args
+            assert "--slack-corridor-widening" not in call_args
+
     def test_auto_fix_passes_not_forwarded_when_none(self):
         """--auto-fix-passes is not forwarded when None (default)."""
         from kicad_tools.cli.commands.routing import run_route_command

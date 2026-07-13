@@ -129,6 +129,38 @@ def test_route_cmd_region_parallel_help_escapes_percent_signs() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--monotone-certificate-order",
+        "--cross-package-pair-corridor",
+        "--slack-corridor-widening",
+    ],
+)
+def test_route_cmd_help_exposes_new_routing_flags(flag: str) -> None:
+    """``kct route --help`` must advertise the Issue #4094 routing flags.
+
+    The three constructor-only flags (#4089/#4090/#4092) were unreachable
+    from the CLI until #4094 wired them.  This pins that each flag appears
+    in the inner ``route_cmd`` parser's ``--help`` output with help text.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "kicad_tools.cli", "route", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"kct route --help exited {result.returncode}; stderr: {result.stderr[-500:]}"
+    )
+    assert flag in result.stdout, (
+        f"Expected {flag} in `kct route --help`; got: {result.stdout[:2000]}"
+    )
+
+
 def _placeholder_to_keep_argparse_imported() -> argparse.ArgumentParser:
     """Keep the argparse import alive for tooling; not a real test."""
     return argparse.ArgumentParser()
