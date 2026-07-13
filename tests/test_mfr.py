@@ -449,6 +449,142 @@ class TestMfrCLICommands:
         # Should return 0 (success) on dry-run
         assert result is None  # main() doesn't return anything on success
 
+        # dry-run must not write a sibling .kicad_pro (issue #4097)
+        assert not (tmp_path / "test.kicad_pro").exists()
+
+    # Minimal, self-contained .kicad_pcb so these regression tests do not
+    # depend on generated demo-board artifacts (which are not committed).
+    _MINIMAL_PCB = "(kicad_pcb (version 20240108) (generator test))"
+
+    def test_apply_rules_pcb_creates_kicad_pro(self, tmp_path):
+        """apply-rules on a bare .kicad_pcb creates a sibling .kicad_pro.
+
+        Regression for #4097: without a .kicad_pro, kicad-cli pcb drc falls
+        back to KiCad factory defaults.  The sidecar must carry the profile's
+        design_settings.rules and a Default netclass matching the tier.
+        """
+        import json
+
+        from kicad_tools.cli.mfr import main as mfr_main
+        from kicad_tools.manufacturers import get_profile
+
+        test_pcb = tmp_path / "test.kicad_pcb"
+        test_pcb.write_text(self._MINIMAL_PCB)
+
+        pro_path = tmp_path / "test.kicad_pro"
+        assert not pro_path.exists()  # precondition: no project file yet
+
+        mfr_main(["apply-rules", str(test_pcb), "jlcpcb", "--layers", "4", "--copper", "1"])
+
+        assert pro_path.exists(), "sibling .kicad_pro was not created"
+
+        data = json.loads(pro_path.read_text())
+        rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1.0)
+
+        proj_rules = data["board"]["design_settings"]["rules"]
+        assert proj_rules["min_clearance"] == pytest.approx(rules.min_clearance_mm)
+        assert proj_rules["min_track_width"] == pytest.approx(rules.min_trace_width_mm)
+        assert proj_rules["min_via_diameter"] == pytest.approx(rules.min_via_diameter_mm)
+
+        # Default netclass must carry the profile clearance, not the stock 0.20
+        classes = data["net_settings"]["classes"]
+        default_cls = next(c for c in classes if c.get("name") == "Default")
+        assert default_cls["clearance"] == pytest.approx(rules.min_clearance_mm)
+        assert default_cls["track_width"] == pytest.approx(rules.min_trace_width_mm)
+        assert default_cls["via_diameter"] == pytest.approx(rules.min_via_diameter_mm)
+        assert default_cls["via_drill"] == pytest.approx(rules.min_via_drill_mm)
+
+    def test_apply_rules_pcb_merges_existing_kicad_pro(self, tmp_path):
+        """apply-rules updates an existing .kicad_pro without clobbering keys."""
+        import json
+
+        from kicad_tools.cli.mfr import main as mfr_main
+        from kicad_tools.manufacturers import get_profile
+
+        test_pcb = tmp_path / "test.kicad_pcb"
+        test_pcb.write_text(self._MINIMAL_PCB)
+
+        # Pre-existing project with an unrelated key that must survive.
+        pro_path = tmp_path / "test.kicad_pro"
+        pro_path.write_text(
+            json.dumps(
+                {
+                    "board": {"design_settings": {"rules": {"min_clearance": 0.05}}},
+                    "text_variables": {"MY_VAR": "keep-me"},
+                    "sheets": [["abc", "Root"]],
+                }
+            )
+        )
+
+        mfr_main(["apply-rules", str(test_pcb), "jlcpcb", "--layers", "4", "--copper", "1"])
+
+        data = json.loads(pro_path.read_text())
+        rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1.0)
+
+        # Unrelated keys preserved.
+        assert data["text_variables"] == {"MY_VAR": "keep-me"}
+        assert data["sheets"] == [["abc", "Root"]]
+
+        # Rules overwritten to the new profile (not left at 0.05).
+        assert data["board"]["design_settings"]["rules"]["min_clearance"] == pytest.approx(
+            rules.min_clearance_mm
+        )
+        default_cls = next(c for c in data["net_settings"]["classes"] if c.get("name") == "Default")
+        assert default_cls["clearance"] == pytest.approx(rules.min_clearance_mm)
+
+    def test_apply_rules_pcb_output_redirect_places_sidecar(self, tmp_path):
+        """--output places the .kicad_pro next to the redirected board."""
+        from kicad_tools.cli.mfr import main as mfr_main
+
+        test_pcb = tmp_path / "input.kicad_pcb"
+        test_pcb.write_text(self._MINIMAL_PCB)
+
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        out_pcb = out_dir / "redirected.kicad_pcb"
+
+        mfr_main(
+            [
+                "apply-rules",
+                str(test_pcb),
+                "jlcpcb",
+                "--layers",
+                "4",
+                "--output",
+                str(out_pcb),
+            ]
+        )
+
+        # Sidecar lands next to the redirected board, not the input.
+        assert (out_dir / "redirected.kicad_pro").exists()
+        assert not (tmp_path / "input.kicad_pro").exists()
+
+    def test_apply_rules_pro_input_writes_default_netclass(self, tmp_path):
+        """apply-rules on a .kicad_pro input also writes the Default netclass.
+
+        Previously the .kicad_pro branch set design_settings.rules but never
+        touched net_settings.classes, so KiCad's clearance test kept the stock
+        0.20 mm Default (issue #4097).
+        """
+        import json
+
+        from kicad_tools.cli.mfr import main as mfr_main
+        from kicad_tools.manufacturers import get_profile
+
+        pro_path = tmp_path / "test.kicad_pro"
+        pro_path.write_text(json.dumps({"meta": {"version": 1}}))
+
+        mfr_main(["apply-rules", str(pro_path), "jlcpcb", "--layers", "4", "--copper", "1"])
+
+        data = json.loads(pro_path.read_text())
+        rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1.0)
+
+        default_cls = next(c for c in data["net_settings"]["classes"] if c.get("name") == "Default")
+        assert default_cls["clearance"] == pytest.approx(rules.min_clearance_mm)
+        assert default_cls["track_width"] == pytest.approx(rules.min_trace_width_mm)
+        assert default_cls["via_diameter"] == pytest.approx(rules.min_via_diameter_mm)
+        assert default_cls["via_drill"] == pytest.approx(rules.min_via_drill_mm)
+
     def test_validate_command(self, tmp_path):
         """Test validate command."""
         from pathlib import Path

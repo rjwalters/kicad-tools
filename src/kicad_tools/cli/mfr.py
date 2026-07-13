@@ -290,6 +290,7 @@ def cmd_export_dru(args):
 def cmd_apply_rules(args):
     """Apply manufacturer design rules to a KiCad project or PCB file."""
     from kicad_tools.core.project_file import (
+        add_netclass_definition,
         apply_manufacturer_rules,
         load_project,
         save_project,
@@ -361,6 +362,19 @@ def cmd_apply_rules(args):
             copper_oz=args.copper,
         )
 
+        # Write/update the Default netclass so KiCad's clearance DRC test
+        # (which reads the applied netclass clearance, not
+        # design_settings.rules.min_clearance) enforces the manufacturer tier
+        # instead of the stock 0.20 mm Default (issue #4097).
+        add_netclass_definition(
+            data,
+            "Default",
+            track_width=rules.min_trace_width_mm,
+            clearance=rules.min_clearance_mm,
+            via_diameter=rules.min_via_diameter_mm,
+            via_drill=rules.min_via_drill_mm,
+        )
+
         # Save
         output_path = Path(args.output) if args.output else file_path
         try:
@@ -395,6 +409,31 @@ def cmd_apply_rules(args):
         except Exception as e:
             print(f"Error saving PCB: {e}", file=sys.stderr)
             sys.exit(1)
+
+        # A bare .kicad_pcb has no sibling .kicad_pro, so kicad-cli pcb drc
+        # silently falls back to KiCad factory defaults (0.20 mm track/clearance,
+        # etc.).  Create-or-merge the sibling .kicad_pro (and a companion
+        # .kicad_dru) from the manufacturer profile so both the GUI and
+        # kicad-cli enforce the intended tier, including the Default netclass
+        # clearance (issue #4097).  Non-fatal: the zone-clearance write above
+        # already succeeded, so a sidecar failure only warns.
+        from kicad_tools.manufacturers import write_drc_constraints
+
+        try:
+            written = write_drc_constraints(
+                output_path,
+                rules,
+                manufacturer_id=profile.id,
+                layers=args.layers,
+                copper_oz=args.copper,
+            )
+            if written:
+                print("DRC-constraint sidecars updated: " + ", ".join(str(p) for p in written))
+        except (ValueError, OSError, KeyError) as e:
+            print(
+                f"Warning: could not write DRC-constraint sidecars: {e}",
+                file=sys.stderr,
+            )
 
     else:
         print(f"Error: Unsupported file type: {file_path.suffix}", file=sys.stderr)
