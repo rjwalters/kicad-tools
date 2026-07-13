@@ -325,9 +325,11 @@ run_uv_add() {
     # CI-no-network constraint). The operator runs `uv sync` afterwards.
     ( cd "$TARGET" && uv add "$RESOLVED_PATH" --editable --frozen )
   elif [[ -n "$GIT_TAG" ]]; then
-    ( cd "$TARGET" && uv add kicad-tools --git "$KCT_GIT_URL" --tag "$GIT_TAG" )
+    # uv >= 0.5 dropped `--git`; the supported spelling is a git+ URL with
+    # the ref appended (works across uv versions).
+    ( cd "$TARGET" && uv add "kicad-tools @ git+${KCT_GIT_URL}@${GIT_TAG}" )
   else
-    ( cd "$TARGET" && uv add kicad-tools --git "$KCT_GIT_URL" --rev "$GIT_REV" )
+    ( cd "$TARGET" && uv add "kicad-tools @ git+${KCT_GIT_URL}@${GIT_REV}" )
   fi
 }
 
