@@ -62,11 +62,13 @@ class MockFootprint:
         reference: str = "U1",
         position: tuple[float, float] = (10.0, 20.0),
         layer: str = "F.Cu",
+        rotation: float = 0.0,
         pads: list[MockPad] | None = None,
     ):
         self.reference = reference
         self.position = position
         self.layer = layer
+        self.rotation = rotation
         self.pads = pads or []
 
 
@@ -325,6 +327,128 @@ class TestMinPadSize:
         pad_violations = [v for v in results.violations if v.rule_id == "min_pad_size"]
         assert len(pad_violations) == 1
         assert pad_violations[0].location == pytest.approx((105.0, 203.0))
+
+
+# -- Rotation-Correct Location Tests ---------------------------------------
+
+
+class TestRotatedViolationLocation:
+    """Issue #4081: reported violation location must account for rotation.
+
+    The pad position is stored footprint-local; before translating to board
+    coordinates it must be rotated by the footprint orientation using KiCad's
+    negated-angle convention (core.geometry.rotate_pad_offset, issue #3739).
+    A non-cardinal angle (37 deg) is used deliberately to avoid the 90/270
+    "test trap" where sign errors can hide.
+    """
+
+    @staticmethod
+    def _expected_location(
+        fp_pos: tuple[float, float],
+        pad_local: tuple[float, float],
+        rotation_deg: float,
+    ) -> tuple[float, float]:
+        # Re-derive independently of the implementation under test to make
+        # this a genuine regression guard (KiCad negated-angle convention).
+        import math
+
+        angle_rad = math.radians(-rotation_deg)
+        rx = pad_local[0] * math.cos(angle_rad) - pad_local[1] * math.sin(angle_rad)
+        ry = pad_local[0] * math.sin(angle_rad) + pad_local[1] * math.cos(angle_rad)
+        return (fp_pos[0] + rx, fp_pos[1] + ry)
+
+    def test_min_pad_size_location_is_rotation_correct(self):
+        """min_pad_size violation location accounts for footprint rotation."""
+        fp_pos = (100.0, 200.0)
+        pad_local = (5.0, 3.0)
+        rotation_deg = 37.0
+
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    position=fp_pos,
+                    rotation=rotation_deg,
+                    pads=[
+                        MockPad(position=pad_local, size=(0.1, 0.1)),
+                    ],
+                ),
+            ],
+        )
+        rules = MockDesignRules(min_pad_size_mm=0.25)
+        rule = SolderMaskPadRules()
+
+        results = rule.check(pcb, rules)
+
+        pad_violations = [v for v in results.violations if v.rule_id == "min_pad_size"]
+        assert len(pad_violations) == 1
+        expected = self._expected_location(fp_pos, pad_local, rotation_deg)
+        assert pad_violations[0].location == pytest.approx(expected)
+        # Sanity: rotation actually moved the reported point away from the
+        # naive (unrotated) add, so this test would fail against the old code.
+        naive = (fp_pos[0] + pad_local[0], fp_pos[1] + pad_local[1])
+        assert pad_violations[0].location != pytest.approx(naive)
+
+    def test_solder_mask_clearance_location_is_rotation_correct(self):
+        """solder_mask_clearance violation location accounts for rotation."""
+        fp_pos = (100.0, 200.0)
+        pad_local = (5.0, 3.0)
+        rotation_deg = 37.0
+
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    position=fp_pos,
+                    rotation=rotation_deg,
+                    pads=[
+                        MockPad(position=pad_local, solder_mask_margin=0.02),
+                    ],
+                ),
+            ],
+        )
+        rules = MockDesignRules(min_solder_mask_clearance_mm=0.05)
+        rule = SolderMaskPadRules()
+
+        results = rule.check(pcb, rules)
+
+        mask_violations = [v for v in results.violations if v.rule_id == "solder_mask_clearance"]
+        assert len(mask_violations) == 1
+        expected = self._expected_location(fp_pos, pad_local, rotation_deg)
+        assert mask_violations[0].location == pytest.approx(expected)
+
+    def test_pth_annular_ring_location_is_rotation_correct(self):
+        """pth_annular_ring violation location accounts for rotation."""
+        fp_pos = (100.0, 200.0)
+        pad_local = (5.0, 3.0)
+        rotation_deg = 37.0
+
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    position=fp_pos,
+                    rotation=rotation_deg,
+                    pads=[
+                        MockPad(
+                            position=pad_local,
+                            type="thru_hole",
+                            size=(1.0, 1.0),
+                            drill=0.9,
+                            layers=["*.Cu", "*.Mask"],
+                            net_name="VCC",
+                        ),
+                    ],
+                ),
+            ],
+        )
+        # annular_ring = (1.0 - 0.9) / 2 = 0.05mm < 0.15mm -> violation
+        rules = MockDesignRules(min_annular_ring_mm=0.15)
+        rule = SolderMaskPadRules()
+
+        results = rule.check(pcb, rules)
+
+        ring_violations = [v for v in results.violations if v.rule_id == "pth_annular_ring"]
+        assert len(ring_violations) == 1
+        expected = self._expected_location(fp_pos, pad_local, rotation_deg)
+        assert ring_violations[0].location == pytest.approx(expected)
 
 
 # -- PTH Annular Ring Tests ------------------------------------------------

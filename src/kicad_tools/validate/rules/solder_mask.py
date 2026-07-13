@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.geometry import rotate_pad_offset
+
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
 
@@ -97,8 +99,17 @@ class SolderMaskPadRules(DRCRule):
                 # AND is non-zero (a zero value is KiCad's default meaning
                 # "use global/manufacturer default" and should not be flagged).
                 if effective_clearance != 0.0 and effective_clearance < min_clearance:
-                    abs_x = fp.position[0] + pad.position[0]
-                    abs_y = fp.position[1] + pad.position[1]
+                    # Pad position is stored footprint-local and must be
+                    # rotated by the footprint orientation before translating
+                    # to board coordinates (KiCad's negated-angle convention;
+                    # see core.geometry.rotate_pad_offset, issue #3739). A
+                    # naive add misreports the violation location on
+                    # rotated/flipped footprints (issue #4081).
+                    rotated_x, rotated_y = rotate_pad_offset(
+                        pad.position[0], pad.position[1], fp.rotation
+                    )
+                    abs_x = fp.position[0] + rotated_x
+                    abs_y = fp.position[1] + rotated_y
 
                     results.add(
                         DRCViolation(
@@ -140,8 +151,15 @@ class SolderMaskPadRules(DRCRule):
                 min_dim = min(pad_w, pad_h)
 
                 if min_dim > 0 and min_dim < min_size:
-                    abs_x = fp.position[0] + pad.position[0]
-                    abs_y = fp.position[1] + pad.position[1]
+                    # Rotate footprint-local pad offset into board frame
+                    # before translating (KiCad negated-angle convention;
+                    # see core.geometry.rotate_pad_offset, issue #3739;
+                    # display-only fix, issue #4081).
+                    rotated_x, rotated_y = rotate_pad_offset(
+                        pad.position[0], pad.position[1], fp.rotation
+                    )
+                    abs_x = fp.position[0] + rotated_x
+                    abs_y = fp.position[1] + rotated_y
 
                     results.add(
                         DRCViolation(
@@ -192,8 +210,15 @@ class SolderMaskPadRules(DRCRule):
                 annular_ring = (min_pad_dim - pad.drill) / 2
 
                 if annular_ring < min_annular:
-                    abs_x = fp.position[0] + pad.position[0]
-                    abs_y = fp.position[1] + pad.position[1]
+                    # Rotate footprint-local pad offset into board frame
+                    # before translating (KiCad negated-angle convention;
+                    # see core.geometry.rotate_pad_offset, issue #3739;
+                    # display-only fix, issue #4081).
+                    rotated_x, rotated_y = rotate_pad_offset(
+                        pad.position[0], pad.position[1], fp.rotation
+                    )
+                    abs_x = fp.position[0] + rotated_x
+                    abs_y = fp.position[1] + rotated_y
                     net_name = pad.net_name or f"net:{pad.net_number}"
 
                     results.add(
