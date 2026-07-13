@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import zipfile
 from datetime import datetime
@@ -310,7 +311,7 @@ def _discover_split_parts(base_url: str) -> list[str]:
     ``cache.zip`` is the *last* segment. This helper returns URLs in the
     correct concatenation order (``z01``, ``z02``, ..., then ``cache.zip``).
     """
-    import requests
+    import requests  # type: ignore[import-untyped]
 
     part_urls: list[str] = []
     index = 1
@@ -434,9 +435,17 @@ def _extract_catalog(archive: Path, dest: Path) -> None:
                 f"Could not locate a SQLite database in the jlcparts archive; members: {names}"
             )
 
-        with zf.open(member) as src, dest.open("wb") as out:
-            while True:
-                chunk = src.read(1 << 20)
-                if not chunk:
-                    break
-                out.write(chunk)
+        # Extract to a sibling temp file and promote atomically so a killed
+        # or failed extraction can never leave a truncated catalog that
+        # later lookups would silently trust.
+        tmp_dest = dest.with_suffix(".extract.tmp")
+        try:
+            with zf.open(member) as src, tmp_dest.open("wb") as out:
+                while True:
+                    chunk = src.read(1 << 20)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            os.replace(tmp_dest, dest)
+        finally:
+            tmp_dest.unlink(missing_ok=True)
