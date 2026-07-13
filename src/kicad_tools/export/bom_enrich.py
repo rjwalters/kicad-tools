@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from ..cost.suggest import PartSuggester
 from ..parts.cache import PartsCache
-from ..parts.lcsc import LCSCForbiddenError
+from ..parts.lcsc import LCSCDependencyMissingError, LCSCForbiddenError
 from .lcsc_value_check import (
     check_lcsc_against_cache,
     find_package_mismatch,
@@ -308,6 +308,17 @@ def enrich_bom_lcsc(
                     footprint=footprint,
                     existing_lcsc=None,
                 )
+            except LCSCDependencyMissingError:
+                # The optional ``parts`` extra (``requests``) is absent, so
+                # the LCSC matcher cannot run for ANY group.  Short-circuit
+                # on the first occurrence and re-raise instead of recording
+                # a full pass of misleadingly-worded "no LCSC match" entries
+                # with an empty ``LCSC Part #`` column.  Callers surface this
+                # as a hard, actionable failure with the install hint
+                # (issue #4104).  Distinct from LCSCForbiddenError, which is
+                # a transient/global API state that legitimately falls back
+                # to the offline cache.
+                raise
             except LCSCForbiddenError:
                 # API is globally unavailable -- emit a single warning and
                 # fall back to cache for this and all remaining groups.

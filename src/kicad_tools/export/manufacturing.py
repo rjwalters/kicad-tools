@@ -19,6 +19,7 @@ from pathlib import Path
 
 import kicad_tools
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
+from kicad_tools.parts.lcsc import LCSCDependencyMissingError
 
 from .assembly import AssemblyConfig, AssemblyPackage, AssemblyPackageResult
 from .preflight import PreflightChecker, PreflightConfig, PreflightResult
@@ -699,6 +700,17 @@ class ManufacturingPackage:
             result.assembly_result = assembly.export(out_dir)
             if result.assembly_result.errors:
                 result.errors.extend(result.assembly_result.errors)
+        except LCSCDependencyMissingError as e:
+            # The optional ``parts`` extra is missing, so --auto-lcsc could
+            # not populate any LCSC part numbers.  This is raised out of BOM
+            # generation BEFORE the BOM CSV (the first artefact) is written,
+            # so nothing is on disk yet.  Abort the whole pipeline so we
+            # never finalize a manifest/bundle whose BOM has an empty
+            # ``LCSC Part #`` column; ``kct export`` then exits non-zero with
+            # this actionable install hint (issue #4104).
+            result.errors.append(str(e))
+            logger.error("LCSC auto-matching requires the 'parts' extra: %s", e)
+            return False
         except Exception as e:
             result.errors.append(f"Assembly generation failed: {e}")
             logger.error(f"Assembly generation failed: {e}")

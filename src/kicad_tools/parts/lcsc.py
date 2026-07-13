@@ -34,11 +34,37 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Canonical install hint for the optional ``parts`` extra.  Mirrors the
+# ``CMAES_INSTALL_HINT`` convention established for the ``placement`` extra
+# (issue #4100 / PR #4111): name the declared extra and give both the
+# ``uv sync`` and ``pip install`` incantations so a base-install failure is
+# actionable rather than a silent degrade.  Unlike ``cmaes``, ``parts`` is
+# NOT pulled in transitively by the ``dev`` or ``all`` extras.
+PARTS_INSTALL_HINT = (
+    "The 'requests' library is required for LCSC API access. "
+    "Install it with the 'parts' extra: uv sync --extra parts "
+    '(or: pip install "kicad-tools[parts]").'
+)
+
+
 class LCSCForbiddenError(Exception):
     """Raised when the JLCPCB API returns 403 Forbidden.
 
     This indicates the API is globally unavailable (e.g. authentication
     required, geo-blocking) and further requests should not be attempted.
+    """
+
+
+class LCSCDependencyMissingError(Exception):
+    """Raised when the optional ``parts`` extra (``requests``) is absent.
+
+    This is a *capability* failure -- the requested LCSC matcher cannot run
+    at all -- and is deliberately distinct from a per-part "no match found"
+    result.  Callers (BOM enrichment, ``kct export``) short-circuit on the
+    first occurrence and surface it as a hard, actionable failure instead of
+    degrading silently to an empty ``LCSC Part #`` column (issue #4104).
+
+    The message is the canonical :data:`PARTS_INSTALL_HINT`.
     """
 
 
@@ -92,11 +118,8 @@ def _requires_requests(func):
     def wrapper(*args, **kwargs):
         try:
             import requests  # noqa: F401
-        except ImportError:
-            raise ImportError(
-                "The 'requests' library is required for LCSC API access. "
-                "Install with: pip install kicad-tools[parts]"
-            )
+        except ImportError as exc:
+            raise ImportError(PARTS_INSTALL_HINT) from exc
         return func(*args, **kwargs)
 
     return wrapper
