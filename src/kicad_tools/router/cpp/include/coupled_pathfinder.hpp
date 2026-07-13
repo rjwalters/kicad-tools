@@ -62,19 +62,26 @@ struct CoupledAStarNode {
 // Min-heap comparator (std::priority_queue is a MAX-heap, so ``operator()``
 // returns true when ``a`` should sort AFTER ``b`` = pop later).
 //   Primary:   lower f_score pops first.
-//   Secondary: higher g_score pops first on an f tie (greedy-on-ties, the
-//              same #3199 rule the single-ended node uses -- pushes toward
-//              the goal frontier).  This matches the Python coupled loop's
-//              behavior: the Python heap orders CoupledNode by (f_score, seq)
-//              with a NEGATED seq, and among equal (f, g) the negated seq is
-//              the LIFO discriminator.  We fold in g here to stay consistent
-//              with the single-ended greedy tie-break already validated by
-//              the determinism suite; equal-(f,g) ties then fall to LIFO seq.
-//   Tertiary:  higher seq pops first (LIFO; see the ``seq`` note above).
+//   Secondary: higher seq pops first (LIFO; see the ``seq`` note above).
+//
+// Issue #4065 reach-parity fix (2026-07-12): this comparator now orders
+// EXACTLY on ``(f_score, seq)`` -- the same key set as the Python
+// ``CoupledNode`` dataclass, which declares ``g_score`` as
+// ``field(compare=False)`` (diffpair_routing.py:440) and orders strictly on
+// ``(f_score, seq)``.  The earlier port folded in a ``g_score`` secondary
+// tie level ("greedy-on-ties", borrowed from the single-ended ``AStarNode``)
+// between f and seq.  On the board-07 pairs this was empirically harmless
+// (identical ``best_progress`` on all 7 pairs), but on CONVERGING searches
+// -- notably board-06's USB3 pairs -- the extra g level reorders the frontier
+// pop sequence relative to Python and drives the coupled A* down a different,
+// worse route (dropping USB3_RX1-, 20/21).  Removing the g level restores
+// bit-for-bit frontier-ordering parity with the Python coupled loop and its
+// reach (21/21).  The single-ended greedy-on-ties rule intentionally stays in
+// ``AStarNode`` (types.hpp); the coupled loop does not use it because Python's
+// coupled loop never did.
 struct CoupledNodeGreater {
     bool operator()(const CoupledAStarNode& a, const CoupledAStarNode& b) const {
         if (a.f_score != b.f_score) return a.f_score > b.f_score;
-        if (a.g_score != b.g_score) return a.g_score < b.g_score;  // higher g first
         return a.seq < b.seq;  // higher seq first (LIFO)
     }
 };

@@ -1505,7 +1505,32 @@ class CoupledPathfinder:
         try:
             from .cpp_backend import CppCoupledPathfinder, CppGrid
 
+            # Issue #4065 (reach-regression root cause): ``from_routing_grid``
+            # unconditionally reassigns ``grid._cpp_grid = <new CppGrid>``
+            # (cpp_backend.py, #2481 back-reference).  That back-reference is
+            # the ONE the single-ended ``CppPathfinder`` relies on for rip-up
+            # invalidation: ``RoutingGrid.unmark_route`` calls
+            # ``self._cpp_grid.invalidate_stored_routes()`` so the C++
+            # ``stored_vias_`` / ``stored_segments_`` snapshot no longer
+            # references a ripped-up route.  The single-ended router marks its
+            # routes on its OWN grid (``RoutingCore.router._grid``), a
+            # DIFFERENT object.  When the coupled pre-phase builds its private
+            # CppGrid here it HIJACKS ``grid._cpp_grid`` to point at the
+            # coupled snapshot, so every subsequent negotiated-loop rip-up
+            # invalidates the wrong grid and the single-ended router keeps
+            # consulting stale via/segment blockers -- which is exactly why the
+            # board-06 negotiated loop re-routed only 2/4 (vs 3/4 on the Python
+            # baseline) at iter 2 and dropped USB3_RX1- (20/21 instead of
+            # 21/21).  The coupled pathfinder needs its own CppGrid but must
+            # NOT steal the single-ended router's paired back-reference, so
+            # snapshot ``grid._cpp_grid`` and restore it afterwards.
+            saved_cpp_grid = getattr(self.grid, "_cpp_grid", None)
             cpp_grid = CppGrid.from_routing_grid(self.grid)
+            # Restore the single-ended router's back-reference (or ``None`` if
+            # it had none): the coupled pathfinder keeps ``cpp_grid`` in
+            # ``impl`` below, but the Python grid's ``_cpp_grid`` invalidation
+            # hook must continue to target the single-ended router's grid.
+            self.grid._cpp_grid = saved_cpp_grid
             impl = CppCoupledPathfinder(
                 cpp_grid,
                 self.rules,

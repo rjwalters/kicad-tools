@@ -248,3 +248,110 @@ def test_cpp_reports_best_progress_on_partial_search():
     # least one node has been popped.
     assert pf.last_best_progress != float("inf")
     assert pf.last_best_progress >= 0
+
+
+# ---------------------------------------------------------------------------
+# Converging-search reach parity (Issue #4065 regression guard)
+# ---------------------------------------------------------------------------
+#
+# The synthetic open/corridor pairs above route down a straight, obstacle-free
+# channel: their frontier never accumulates many equal-``f_score`` /
+# unequal-``g_score`` nodes, so the C++ comparator's now-removed ``g_score``
+# secondary tie level was never exercised and the 8/8 gate stayed green while
+# board-06's USB3 pairs regressed (20/21, USB3_RX1- dropped).  The tests below
+# force a CONVERGING search -- an obstacle wall with a single gap that both
+# heads must funnel through -- which is exactly the frontier shape where the
+# extra g level reordered the pop sequence and drove the C++ route to a
+# different (worse) outcome than Python.  Deterministic (fixed geometry, LIFO
+# seq, no wall clock), so CI-stable.
+
+
+def _block_wall_with_gap(
+    grid: RoutingGrid,
+    x_mm: float,
+    gap_lo_mm: float,
+    gap_hi_mm: float,
+) -> None:
+    """Block a full-height vertical wall at ``x_mm`` on every routable layer,
+    leaving a single horizontal gap in ``[gap_lo_mm, gap_hi_mm]``.
+
+    Both the P and N heads must funnel through the gap, forcing a converging
+    frontier with many equal-f competing detour nodes -- the geometry that
+    exposed the #4065 comparator divergence.
+    """
+    gx, _ = grid.world_to_grid(x_mm, 0.0)
+    for layer in (Layer.F_CU, Layer.B_CU):
+        layer_idx = grid.layer_to_index(layer.value)
+        for gy in range(grid.rows):
+            y_mm = grid.origin_y + gy * grid.resolution
+            if gap_lo_mm <= y_mm <= gap_hi_mm:
+                continue
+            grid._blocked[layer_idx, gy, gx] = True
+            grid._is_obstacle[layer_idx, gy, gx] = True
+
+
+def _converging_pair_pads() -> tuple[Pad, Pad, Pad, Pad]:
+    """A pair whose start/goal straddle a gap wall placed at x=6mm."""
+    p_start = Pad(x=2.0, y=4.6, width=0.4, height=0.4, net=1, net_name="D+", layer=Layer.F_CU)
+    p_end = Pad(x=10.0, y=4.6, width=0.4, height=0.4, net=1, net_name="D+", layer=Layer.F_CU)
+    n_start = Pad(x=2.0, y=6.6, width=0.4, height=0.4, net=2, net_name="D-", layer=Layer.F_CU)
+    n_end = Pad(x=10.0, y=6.6, width=0.4, height=0.4, net=2, net_name="D-", layer=Layer.F_CU)
+    return p_start, p_end, n_start, n_end
+
+
+def test_cpp_matches_python_on_converging_gap_search():
+    """C++ and Python coupled searches reach the goal AND agree on cost when
+    the frontier must converge through an obstacle gap.
+
+    This is the board-06-representative regression guard: it is the frontier
+    shape that dropped USB3_RX1- when the C++ comparator carried an extra
+    ``g_score`` tie level Python does not have.  Reach parity (both route) and
+    cost-equality here stand in for the full-board 21/21 reach check the CI
+    diffpair-coverage gate runs, at unit-test cost.
+    """
+    pads = _converging_pair_pads()
+
+    py_grid = _make_grid()
+    cpp_grid = _make_grid()
+    # Identical obstacle geometry on both grids (CppGrid.from_routing_grid
+    # marshals the blocked/obstacle arrays, so the backends see the same wall).
+    _block_wall_with_gap(py_grid, x_mm=6.0, gap_lo_mm=4.2, gap_hi_mm=7.0)
+    _block_wall_with_gap(cpp_grid, x_mm=6.0, gap_lo_mm=4.2, gap_hi_mm=7.0)
+
+    py_pf = _make_pf(py_grid, use_cpp=False)
+    cpp_pf = _make_pf(cpp_grid, use_cpp=True)
+
+    py_res = py_pf.route_coupled(*pads)
+    cpp_res = cpp_pf.route_coupled(*pads)
+
+    # REACH PARITY: both backends must route through the gap.  Before the
+    # comparator fix the C++ search could diverge here (the board-06 failure
+    # class); this assertion is the unit-scale analogue of "USB3_RX1- routes".
+    assert py_res is not None, "python coupled must route through the gap"
+    assert cpp_res is not None, (
+        "C++ coupled must reach parity with Python and route through the gap "
+        "(Issue #4065 reach regression guard)"
+    )
+
+    py_p, py_n = py_res
+    cpp_p, cpp_n = cpp_res
+    # COST PARITY: equal-cost up to a grid cell (A* is unique only up to
+    # equal-cost paths; the comparator now shares Python's (f_score, seq) key).
+    assert _route_length(cpp_p) == pytest.approx(_route_length(py_p), abs=0.3)
+    assert _route_length(cpp_n) == pytest.approx(_route_length(py_n), abs=0.3)
+
+
+def test_cpp_converging_search_is_deterministic():
+    """The C++ converging-gap route is stable run-to-run (guards against a
+    reintroduced allocator-dependent tie-break)."""
+    pads = _converging_pair_pads()
+    lengths = []
+    for _ in range(3):
+        grid = _make_grid()
+        _block_wall_with_gap(grid, x_mm=6.0, gap_lo_mm=4.2, gap_hi_mm=7.0)
+        pf = _make_pf(grid, use_cpp=True)
+        res = pf.route_coupled(*pads)
+        assert res is not None, "C++ converging-gap route must reach the goal"
+        p, n = res
+        lengths.append((round(_route_length(p), 6), round(_route_length(n), 6)))
+    assert lengths[0] == lengths[1] == lengths[2], f"non-deterministic C++ result: {lengths}"
