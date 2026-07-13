@@ -36,9 +36,18 @@ pip install kicad-tools[metal]
 # With native C++ router backend
 pip install kicad-tools[native]
 
+# With CMA-ES placement optimization (kct optimize-placement / kct build --optimize-placement)
+pip install kicad-tools[placement]
+
 # Everything (all optional dependencies)
 pip install kicad-tools[all]
 ```
+
+> The `placement` extra pulls in `cmaes` (and, transitively, `scipy`). It is
+> required by `kct optimize-placement` and the placement step of
+> `kct build --optimize-placement`; without it those commands exit with a
+> clear message naming the extra. The `dev` and `all` extras already include
+> it, so `uv sync --extra dev` is sufficient for development.
 
 To check GPU acceleration status:
 ```bash
