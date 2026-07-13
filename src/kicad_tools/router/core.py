@@ -946,6 +946,23 @@ class Autorouter:
         # no-op ``continue`` there regardless.  Set True to opt in.
         self.enable_cross_package_pair_corridor = False
 
+        # Issue #4085 (Phase 1): slack-corridor reservation for
+        # length-matching by construction.  When True, two independent
+        # things engage:
+        #   (1) ``EscapeRouter._reserve_pair_continuation_corridor`` widens
+        #       a pair's inner-layer continuation corridor by a
+        #       pin-geometry-estimated slack budget when the estimated skew
+        #       exceeds the net-class tolerance (via the escape router's
+        #       ``enable_slack_corridor_widening`` flag, threaded below).
+        #   (2) ``apply_diffpair_length_tuning`` passes the routing grid to
+        #       ``tune_diff_pair_skew`` with ``prefer_reserved_slack=True``
+        #       so the serpentine tuner prefers segments inside the pair's
+        #       own reserved slack corridor.
+        # Flag-off (default) is byte-identical to pre-#4085 main: the escape
+        # corridor keeps its fixed padding and the tuner uses the
+        # geometric-only segment heuristic.  Set True to opt in.
+        self.enable_slack_corridor_widening = False
+
         # Issue #4084: records the most recent certificate classification
         # per qualifying byte-lane group (group name -> MonotoneCertificate)
         # so callers/tests can inspect the feasibility decision and failure
@@ -13032,6 +13049,13 @@ class Autorouter:
                 tolerance_mm=tolerance_mm,
                 intra_pair_clearance_mm=intra_pair_clearance_mm,
                 length_critical=length_critical,
+                # Issue #4085 (Phase 1): when the slack-corridor gate is on,
+                # let the tuner prefer segments inside the pair's own
+                # reserved slack corridor.  Grid is passed unconditionally
+                # (cheap) but only consulted when prefer_reserved_slack is
+                # True; flag-off keeps the pre-#4085 geometric selection.
+                grid=self.grid,
+                prefer_reserved_slack=self.enable_slack_corridor_widening,
             )
 
             # Commit any new Route references back into self.routes and the
@@ -13985,6 +14009,10 @@ class Autorouter:
                 # cross-package branch is a no-op ``continue``.
                 enable_cross_package_pair_corridor=self.enable_cross_package_pair_corridor,
                 net_name_to_id=net_name_to_id,
+                # Issue #4085 (Phase 1): slack-corridor widening gate
+                # (default OFF).  When OFF the pair continuation corridor
+                # keeps its fixed padding, byte-identical to pre-#4085.
+                enable_slack_corridor_widening=self.enable_slack_corridor_widening,
                 # Issue #3428: board-wide net-id -> pad-position map so the
                 # fine-pitch QFP in-pad rescue can aim its inner stub at
                 # the net's actual routing target instead of the parity-

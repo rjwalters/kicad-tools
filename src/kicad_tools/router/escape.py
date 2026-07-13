@@ -1098,6 +1098,7 @@ class EscapeRouter:
         net_target_positions: dict[int, list[tuple[float, float, str]]] | None = None,
         enable_cross_package_pair_corridor: bool = False,
         net_name_to_id: dict[str, int] | None = None,
+        enable_slack_corridor_widening: bool = False,
     ):
         """Initialize the escape router.
 
@@ -1172,6 +1173,20 @@ class EscapeRouter:
                 the soft attractor bonus).  Defaults to ``None``; when
                 absent the cross-package corridor owner set falls back to
                 this leg's net id alone.
+            enable_slack_corridor_widening: Issue #4085 (Phase 1,
+                epic #4049 Gap 2).  Default ``False``.  When ``True``,
+                ``_reserve_pair_continuation_corridor`` estimates the
+                pair's expected length skew from pin geometry (via
+                :func:`slack_budget.estimate_pair_skew_budget`) and, when
+                that estimate exceeds the pair's net-class skew tolerance,
+                WIDENS the reserved corridor's lateral half-width by the
+                estimated slack budget.  This reserves room for the
+                downstream serpentine tuner to meander the shorter half
+                into already-protected cells rather than scavenging
+                leftover space.  With the flag ``False`` the corridor
+                width is byte-identical to today (the fixed
+                ``intra_pair_clearance + trace_width`` padding), so all
+                board 00-07 fixtures are unchanged.
         """
         self.grid = grid
         self.rules = rules
@@ -1226,6 +1241,18 @@ class EscapeRouter:
         self.enable_cross_package_pair_corridor: bool = bool(enable_cross_package_pair_corridor)
         self.cross_package_pair_corridor_reservations: int = 0
         self.cross_package_pair_corridor_reserved_cells: int = 0
+        # Issue #4085 (Phase 1): slack-corridor widening gate +
+        # instrumentation.  When enabled, ``_reserve_pair_continuation_corridor``
+        # widens its lateral reservation by a pin-geometry-estimated slack
+        # budget for pairs whose estimated skew exceeds their net class's
+        # ``effective_skew_tolerance``.  ``pair_corridor_slack_widened``
+        # counts how many reservations were actually widened;
+        # ``pair_corridor_slack_budget_mm`` accumulates the total slack
+        # (mm) applied so tests can assert the widening fired without
+        # monkey-patching internals.
+        self.enable_slack_corridor_widening: bool = bool(enable_slack_corridor_widening)
+        self.pair_corridor_slack_widened: int = 0
+        self.pair_corridor_slack_budget_mm: float = 0.0
         # Issue #4086: board-wide net-name -> net-id map used ONLY to
         # resolve the off-package partner's net id for the cross-package
         # corridor owner set.  Empty map => owner set is this leg alone.
@@ -2174,11 +2201,86 @@ class EscapeRouter:
         )
         return escape_p, escape_n
 
+    def _resolve_slack_budget(
+        self,
+        members: list[EscapeRoute],
+        slack_budget_mm: float | None,
+    ) -> float:
+        """Resolve the pin-geometry slack budget for a paired corridor.
+
+        Issue #4085 (Phase 1).  When ``slack_budget_mm`` is supplied it is
+        returned verbatim (a caller that already computed the estimate).
+        Otherwise the budget is estimated from the members' boundary pin
+        geometry via :func:`slack_budget.estimate_pair_skew_budget` (2
+        legs) or :func:`slack_budget.estimate_group_skew_budget` (N>2).
+
+        The per-leg pin set prefers the board-wide ``net_pad_positions``
+        map (all pads on the net, so the estimate spans the full
+        source->sink extent) and falls back to the escape point + pad
+        centre when the map is not populated.
+
+        Args:
+            members: The paired EscapeRoutes.
+            slack_budget_mm: Optional explicit override.
+
+        Returns:
+            The slack budget in mm (``>= 0``).
+        """
+        if slack_budget_mm is not None:
+            return max(0.0, float(slack_budget_mm))
+
+        from .slack_budget import (
+            estimate_group_skew_budget,
+            estimate_pair_skew_budget,
+        )
+
+        legs_pins: list[list[tuple[float, float]]] = []
+        for m in members:
+            name = m.pad.net_name or ""
+            pins = list(self.net_pad_positions.get(name, [])) if name else []
+            if len(pins) < 2:
+                # Fallback: the two endpoints we know about are the pad
+                # centre and the escape point.  This still captures the
+                # per-leg launch asymmetry when no board-wide map exists.
+                pins = [(m.pad.x, m.pad.y), m.escape_point]
+            legs_pins.append(pins)
+
+        if len(legs_pins) == 2:
+            return estimate_pair_skew_budget(legs_pins[0], legs_pins[1])
+        return estimate_group_skew_budget(legs_pins)
+
+    def _resolve_pair_skew_tolerance(self, members: list[EscapeRoute]) -> float:
+        """Resolve the skew tolerance (mm) for a paired corridor.
+
+        Issue #4085 (Phase 1).  Reads the first member's net class from
+        ``net_class_map`` and returns its
+        :meth:`NetClassRouting.effective_skew_tolerance`.  Falls back to
+        the module-level 0.5 mm default (matching
+        ``Autorouter.apply_diffpair_length_tuning``) when no net class is
+        configured for the pair.
+
+        Args:
+            members: The paired EscapeRoutes.
+
+        Returns:
+            The skew tolerance in mm.
+        """
+        default = 0.5
+        first_net = members[0].pad.net_name or ""
+        nc = self.net_class_map.get(first_net) if self.net_class_map else None
+        if nc is not None and hasattr(nc, "effective_skew_tolerance"):
+            try:
+                return float(nc.effective_skew_tolerance(default))
+            except Exception:
+                return default
+        return default
+
     def _reserve_pair_continuation_corridor(
         self,
         members: list[EscapeRoute],
         target_inner_layer: Layer,
         intra_pair_clearance: float | None = None,
+        slack_budget_mm: float | None = None,
     ) -> int:
         """Reserve an inner-layer continuation corridor for paired escapes.
 
@@ -2247,6 +2349,17 @@ class EscapeRouter:
                 first member's net class via
                 ``_resolve_intra_pair_clearance`` (same value the
                 segment generator used).
+            slack_budget_mm: Issue #4085 (Phase 1).  Optional pre-computed
+                pin-geometry slack budget (mm).  Only consulted when
+                ``self.enable_slack_corridor_widening`` is ``True`` and the
+                budget exceeds the pair's net-class skew tolerance, in
+                which case ``lat_half`` is widened by the budget so the
+                downstream serpentine tuner has reserved cells to meander
+                into.  When ``None`` (default) the estimator is invoked
+                internally from the members' pad geometry; pass an explicit
+                value to override (e.g. from a caller that already computed
+                it).  Ignored entirely when the widening gate is off, so
+                behaviour is byte-identical to today.
 
         Returns:
             Number of grid cells reserved.  Returns 0 if the helper is
@@ -2344,6 +2457,28 @@ class EscapeRouter:
         max_trace_w = max(self._get_trace_width_for_net(m.pad.net_name or "") for m in members)
         lat_pad = intra_pair_clearance + max_trace_w
         lat_half = lat_extent + lat_pad
+
+        # Issue #4085 (Phase 1): widen the corridor by a pin-geometry slack
+        # budget so the downstream serpentine tuner has reserved cells to
+        # meander the shorter half into, instead of scavenging leftover
+        # space.  Gated OFF by default -- when the gate is off, or the
+        # estimated skew is within the pair's tolerance, ``lat_half`` is
+        # unchanged and the reservation is byte-identical to today.
+        if self.enable_slack_corridor_widening and len(members) >= 2:
+            budget = self._resolve_slack_budget(members, slack_budget_mm)
+            tol = self._resolve_pair_skew_tolerance(members)
+            if budget > tol:
+                lat_half += budget
+                self.pair_corridor_slack_widened += 1
+                self.pair_corridor_slack_budget_mm += budget
+                logger.debug(
+                    "Issue #4085 slack widening: budget=%.4fmm > tol=%.4fmm; "
+                    "lat_half widened to %.4fmm for nets %s",
+                    budget,
+                    tol,
+                    lat_half,
+                    [m.pad.net_name for m in members],
+                )
 
         # Issue #2911 (AC6 envelope robustness): The corridor reservation
         # is consulted PER CELL by ``RoutingGrid._mark_via`` -- when a

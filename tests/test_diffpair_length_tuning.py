@@ -706,3 +706,158 @@ class TestTargetHeadroom:
             # partner length (which is what overshot pre-fix).
             assert tgt == pytest.approx(target_length - expected_headroom, abs=1e-9)
             assert tgt < target_length
+
+
+# =============================================================================
+# Issue #4085 (Phase 1): slack-cell-aware serpentine segment preference
+# =============================================================================
+
+
+from kicad_tools.router.grid import RoutingGrid  # noqa: E402
+from kicad_tools.router.layers import LayerStack  # noqa: E402
+from kicad_tools.router.rules import DesignRules  # noqa: E402
+
+
+def _reserved_grid(net_id: int, world_xy: tuple[float, float]) -> RoutingGrid:
+    """Build a 4-layer grid with one F.Cu cell reserved for ``net_id``."""
+    rules = DesignRules()
+    stack = LayerStack.four_layer_all_signal()
+    grid = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0, layer_stack=stack)
+    layer_idx = grid.layer_to_index(Layer.F_CU.value)
+    gx, gy = grid.world_to_grid(*world_xy)
+    grid.reserve_corridor_cells(layer_idx=layer_idx, cells={(gx, gy)}, net_ids={net_id})
+    return grid
+
+
+class TestSerpentineSlackPreference:
+    """``find_best_segment`` prefers grid-reserved slack cells (Issue #4085)."""
+
+    def _two_segment_route(self, net_id: int) -> Route:
+        """Route with two straight candidate segments.
+
+        Segment 0 midpoint at (5, 0) spans 6mm (x 2..8).
+        Segment 1 midpoint at (5, 4) spans 6mm (x 2..8, y=4).
+        Both are equal length and axis-aligned, so the pure-geometric
+        heuristic picks the FIRST (segment 0) on a strict-greater tie.
+        A reservation at segment 1's midpoint flips the choice to it.
+        """
+        return Route(
+            net=net_id,
+            net_name="USB_D+",
+            segments=[
+                Segment(
+                    x1=2.0,
+                    y1=0.0,
+                    x2=8.0,
+                    y2=0.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net_id,
+                    net_name="USB_D+",
+                ),
+                Segment(
+                    x1=2.0,
+                    y1=4.0,
+                    x2=8.0,
+                    y2=4.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net_id,
+                    net_name="USB_D+",
+                ),
+            ],
+        )
+
+    def test_no_grid_is_geometric_baseline(self):
+        """Without a grid, selection is the pre-#4085 geometric choice."""
+        route = self._two_segment_route(1)
+        gen = SerpentineGenerator(SerpentineConfig(min_segment_length=2.0))
+        best = gen.find_best_segment(route)
+        assert best is not None
+        idx, _seg = best
+        # Equal-length, equal-score tie -> first segment wins (strict >).
+        assert idx == 0
+
+    def test_reservation_flips_choice_to_reserved_segment(self):
+        """A reservation at segment 1's midpoint biases selection to it."""
+        route = self._two_segment_route(1)
+        # Reserve the cell under segment 1's midpoint (5, 4) for net 1.
+        grid = _reserved_grid(net_id=1, world_xy=(5.0, 4.0))
+        gen = SerpentineGenerator(SerpentineConfig(min_segment_length=2.0))
+
+        # Sanity: without the grid, choice is segment 0.
+        assert gen.find_best_segment(route)[0] == 0
+
+        # With the grid + reserved net, choice flips to the reserved seg 1.
+        best = gen.find_best_segment(route, grid=grid, reserved_net_id=1)
+        assert best is not None
+        assert best[0] == 1, "Reserved-cell bonus should pull selection to seg 1"
+
+    def test_reservation_for_other_net_does_not_flip(self):
+        """A reservation owned by a DIFFERENT net leaves the choice geometric."""
+        route = self._two_segment_route(1)
+        # Reserve seg 1's midpoint cell for net 99 (not our net 1).
+        grid = _reserved_grid(net_id=99, world_xy=(5.0, 4.0))
+        gen = SerpentineGenerator(SerpentineConfig(min_segment_length=2.0))
+        best = gen.find_best_segment(route, grid=grid, reserved_net_id=1)
+        assert best is not None
+        assert best[0] == 0, "Foreign-net reservation must not bias selection"
+
+
+class TestTunerSlackThreading:
+    """``tune_diff_pair_skew`` threads the grid/preference flag (Issue #4085)."""
+
+    def test_prefer_reserved_slack_off_is_geometric(self):
+        """prefer_reserved_slack defaults off: grid is ignored in selection."""
+        pair = _make_pair(p_id=1, n_id=2)
+        # P shorter (needs tuning), long straight segments so a trombone fits.
+        p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+        n = _straight_route(2, "USB_D-", 24.0, y=0.5)
+        routes = {1: p, 2: n}
+        grid = _reserved_grid(net_id=1, world_xy=(10.0, 0.0))
+
+        # With the flag OFF, passing a grid must not change the outcome vs
+        # not passing one at all -- assert the same reason + inserts.
+        _p1, _n1, r_off = tune_diff_pair_skew(
+            pair,
+            {
+                1: _straight_route(1, "USB_D+", 20.0, y=0.0),
+                2: _straight_route(2, "USB_D-", 24.0, y=0.5),
+            },
+            tolerance_mm=0.5,
+            intra_pair_clearance_mm=0.1,
+        )
+        _p2, _n2, r_on = tune_diff_pair_skew(
+            pair,
+            routes,
+            tolerance_mm=0.5,
+            intra_pair_clearance_mm=0.1,
+            grid=grid,
+            prefer_reserved_slack=False,
+        )
+        assert r_off.reason == r_on.reason
+        assert r_off.inserts_applied == r_on.inserts_applied
+
+    def test_prefer_reserved_slack_on_accepts_grid(self):
+        """With the flag ON and a grid, tuning still succeeds (smoke)."""
+        pair = _make_pair(p_id=1, n_id=2)
+        p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+        n = _straight_route(2, "USB_D-", 24.0, y=0.5)
+        routes = {1: p, 2: n}
+        # Reserve a cell inside P's segment so the tuner's slack-aware
+        # selection has something to prefer.
+        grid = _reserved_grid(net_id=1, world_xy=(10.0, 0.0))
+
+        _p, _n, result = tune_diff_pair_skew(
+            pair,
+            routes,
+            tolerance_mm=0.5,
+            intra_pair_clearance_mm=0.1,
+            grid=grid,
+            prefer_reserved_slack=True,
+        )
+        # The tuner engaged (skew 4mm > 0.5mm tol) and produced a result;
+        # the exact reason depends on trombone geometry, but it must not
+        # error and must have attempted at least one insertion.
+        assert result.attempts >= 1
+        assert result.reason in {"tuned", "exceeded_max_inserts", "no_suitable_segment"}
