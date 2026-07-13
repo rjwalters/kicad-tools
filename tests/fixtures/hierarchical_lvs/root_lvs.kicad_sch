@@ -1,0 +1,42 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "hlvs-root-uuid")
+	(paper "A4")
+	(title_block
+		(title "Hierarchical LVS Root (sheet symbols only)")
+		(date "2025-01-01")
+		(rev "1.0")
+	)
+	(lib_symbols
+	)
+	(sheet
+		(at 50 30) (size 40 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "hlvs-sheet-mcu-uuid")
+		(property "Sheetname" "SubMcu"
+			(at 50 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "sub_mcu.kicad_sch"
+			(at 50 61 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+	)
+	(sheet
+		(at 120 30) (size 40 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "hlvs-sheet-pwr-uuid")
+		(property "Sheetname" "SubPwr"
+			(at 120 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "sub_pwr.kicad_sch"
+			(at 120 61 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+	)
+)

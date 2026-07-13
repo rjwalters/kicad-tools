@@ -8,10 +8,12 @@ fleet-wide rollout (issue #3742).
 
 Inputs:
 
-* ``.kicad_sch`` — walked via :class:`Schematic` +
-  :meth:`Schematic.get_net_for_pin` so each pin resolves to the
-  label-bound net name (``VCC``, ``GND``, ``LED_ANODE``, ...) rather
-  than the post-merge ``PWR_FLAG`` blob.
+* ``.kicad_sch`` — the full sheet hierarchy is walked (root sheet plus
+  every ``(sheet ...)`` sub-sheet); each pin resolves to its label-bound
+  net name (``VCC``, ``GND``, ``LED_ANODE``, ...) via
+  :meth:`Schematic.get_net_for_pin` on its own sheet, rather than the
+  post-merge ``PWR_FLAG`` blob.  A root sheet holding only ``(sheet ...)``
+  symbols still binds every sub-sheet pin (issue #4099).
 * ``.kicad_pcb`` — walked via :func:`kicad_tools.sexp.parse_file` and the
   ``(footprint ... (pad N ... (net K "NAME")))`` shape.  Pads with no
   ``(net ...)`` child are treated as unconnected (``None``).
@@ -105,38 +107,86 @@ def _ref_of(fp: SExp) -> str | None:
     return None
 
 
+def _walk_hierarchy_schematics(sch_path: Path):
+    """Yield every ``Schematic`` in a hierarchy, root first, depth-first.
+
+    Follows ``(sheet ...)`` references the same way
+    :func:`kicad_tools.operations.netlist._collect_hierarchy_components`
+    does — resolving each ``Sheetfile`` relative to its parent's
+    directory and guarding against circular references — so the set of
+    ``(ref, pad)`` keys spans the full design, not just the root sheet.
+
+    Yielding the loaded ``Schematic`` objects (rather than only their
+    net dict) lets the caller enumerate *every* pin declared on *every*
+    symbol across the hierarchy, including pins that never connect to a
+    net.  That preserves the "floating pins resolve to ``None``, not
+    dropped" contract the single-sheet loader had.
+    """
+    from kicad_tools.operations.netlist import _get_sheet_entries
+    from kicad_tools.schematic.models.schematic import Schematic
+
+    visited: set[Path] = set()
+
+    def _walk(path: Path):
+        resolved = path.resolve()
+        if resolved in visited or not path.exists():
+            return
+        visited.add(resolved)
+        yield Schematic.load(str(path))
+        parent_dir = path.parent
+        for entry in _get_sheet_entries(path):
+            yield from _walk(parent_dir / entry.filename)
+
+    yield from _walk(Path(sch_path))
+
+
 def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
     """Build ``{(ref, pad) -> net_name | None}`` for every pin in the schematic.
 
-    Uses :meth:`Schematic.get_net_for_pin` per pin: it correctly resolves
-    each pin to the *label-bound* net name (``VCC``, ``GND``,
+    Walks the full sheet hierarchy: the root ``.kicad_sch`` plus every
+    sub-sheet referenced via ``(sheet ...)``.  On a root sheet that
+    contains only ``(sheet ...)`` symbols (all components living in
+    sub-sheets — the normal organization for a non-trivial board), the
+    previous single-file loader saw zero symbols and bound zero pads,
+    making LVS vacuous (issue #4099).  This version resolves every
+    sub-sheet pin as well.
+
+    Each pin is resolved via that sheet's :meth:`Schematic.get_net_for_pin`,
+    which returns the *label-bound* net name (``VCC``, ``GND``,
     ``LED_ANODE``, ...) rather than collapsing power rails through a
-    ``PWR_FLAG`` symbol.  ``build_netlist_from_schematic`` merges every
-    pin touching the same ``PWR_FLAG`` symbol into one net called
-    ``PWR_FLAG``, which loses the VCC/GND distinction and makes LVS
-    spuriously fail on every board that uses PWR_FLAG.
+    ``PWR_FLAG`` symbol.  This PWR_FLAG-safety is why the per-sheet
+    ``get_net_for_pin`` path is used rather than the merged ``net_dict``
+    from ``_collect_hierarchy_components``: the latter unifies every pin
+    touching a ``PWR_FLAG`` symbol into a single ``PWR_FLAG`` net, which
+    loses the VCC/GND distinction and makes LVS spuriously fail on every
+    board that uses PWR_FLAG.  For a single-sheet design (root only) the
+    resolution is byte-identical to the previous behaviour — the loop is
+    simply applied to each recursed sheet in turn.
 
-    ``None`` indicates a floating pin (not connected to anything in the
-    schematic), matching the convention used for unconnected PCB pads.
+    ``None`` indicates a floating pin (declared on the symbol but not
+    connected to anything on its sheet), matching the convention used for
+    unconnected PCB pads.
+
+    Net names local to each sheet are used as-is.  Hierarchical-label /
+    sheet-pin nets therefore resolve to the label name (matching KiCad's
+    common netlist naming).  Full cross-instance sheet-pin unification
+    (the same sub-sheet placed twice under different parent net contexts)
+    is out of scope here (a Phase 2 concern, issue #4099).
     """
-    # Import lazily — ``Schematic`` pulls in a substantial chunk of the
-    # schematic stack and we want ``import kicad_tools.lvs`` cheap.
-    from kicad_tools.schematic.models.schematic import Schematic
-
-    sch = Schematic.load(sch_path)
     out: dict[tuple[str, str], str | None] = {}
-    for sym in sch.symbols:
-        ref = sym.reference
-        if not ref:
-            continue
-        # ``symbol_def.pins`` is the canonical pin list for this symbol;
-        # iterate by pin number so the mapping aligns with the PCB pads
-        # (which are also keyed by pin/pad number).
-        for pin in sym.symbol_def.pins:
-            number = pin.number
-            if not number:
+    for sch in _walk_hierarchy_schematics(Path(sch_path)):
+        for sym in sch.symbols:
+            ref = sym.reference
+            if not ref:
                 continue
-            out[(ref, number)] = sch.get_net_for_pin(ref, number)
+            # ``symbol_def.pins`` is the canonical pin list for this
+            # symbol; iterate by pin number so the mapping aligns with the
+            # PCB pads (which are also keyed by pin/pad number).
+            for pin in sym.symbol_def.pins:
+                number = pin.number
+                if not number:
+                    continue
+                out[(ref, number)] = sch.get_net_for_pin(ref, number)
     return out
 
 
@@ -185,7 +235,10 @@ def compare_netlists(sch_path: str | Path, pcb_path: str | Path) -> LVSResult:
     side -- it's the "no connection" sentinel, not a real net name.
 
     Args:
-        sch_path: Path to a ``.kicad_sch`` (root sheet for hierarchy).
+        sch_path: Path to a root ``.kicad_sch``.  The full sheet
+            hierarchy is walked — every ``(sheet ...)`` sub-sheet is
+            loaded and its pins are bound, not just the root sheet
+            (issue #4099).
         pcb_path: Path to a ``.kicad_pcb`` (routed or unrouted; routing
             does not affect the netlist).
 
