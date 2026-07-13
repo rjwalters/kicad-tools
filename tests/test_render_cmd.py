@@ -403,8 +403,20 @@ class TestRender3DModelEnv:
         assert env["KICAD10_3DMODEL_DIR"] == str(model_dir)
 
     def test_no_model_dir_inherits_environment(self, tmp_path, monkeypatch):
+        # With no KiCad model dir AND the LCSC cache var already set, there is
+        # nothing to inject, so the env is inherited as-is (None).
+        monkeypatch.setenv("KCT_LCSC_3D_DIR", str(tmp_path / "lcsc"))
         captured = self._run_and_capture_kwargs(tmp_path, monkeypatch, None)
         assert captured["kwargs"]["env"] is None
+
+    def test_no_model_dir_still_injects_lcsc_cache_var(self, tmp_path, monkeypatch):
+        # No KiCad model dir, but the LCSC cache var is unset: inject its
+        # default so committed ${KCT_LCSC_3D_DIR} refs still resolve at render.
+        monkeypatch.delenv("KCT_LCSC_3D_DIR", raising=False)
+        captured = self._run_and_capture_kwargs(tmp_path, monkeypatch, None)
+        env = captured["kwargs"]["env"]
+        assert env is not None
+        assert "KCT_LCSC_3D_DIR" in env
 
     def test_find_kicad_3dmodel_dir_env_wins(self, tmp_path, monkeypatch):
         from kicad_tools.cli.runner import find_kicad_3dmodel_dir

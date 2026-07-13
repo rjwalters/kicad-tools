@@ -1672,6 +1672,21 @@ def _add_pcb_parser(subparsers) -> None:
         "name-variant fallback used for visual model lookup)",
     )
     pcb_add_models.add_argument(
+        "--lcsc-models",
+        dest="lcsc_models",
+        help="Path to an lcsc_models.json sidecar mapping lib_id -> LCSC "
+        "C-number, enabling the LCSC/EasyEDA fetch-on-demand tier. Bodies are "
+        "resolved from a cache dir (${KCT_LCSC_3D_DIR}, default "
+        "~/.cache/kicad-tools/lcsc-3d/) and emitted as portable "
+        "${KCT_LCSC_3D_DIR}/C#####.step refs",
+    )
+    pcb_add_models.add_argument(
+        "--fetch-lcsc",
+        action="store_true",
+        help="Fetch missing LCSC STEP bodies from EasyEDA on a cache miss "
+        "(default: cache-only, no network; also enabled by KCT_LCSC_FETCH=1)",
+    )
+    pcb_add_models.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
