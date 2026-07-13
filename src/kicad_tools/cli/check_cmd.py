@@ -55,25 +55,54 @@ _MEASUREMENT_RULE_IDS: frozenset[str] = frozenset(
 # Issue #4102: ``dimension_drill_clearance`` hole-to-hole findings carry both
 # endpoints' resolved net names in ``nets=(net1, net2)``.  A user reading the
 # report needs to separate the fab's real concern (different-net pairs, where a
-# drill-wall break creates a short) from same-net / floating pairs.  The data is
+# drill-wall break creates a short) from same-net pairs.  The data is
 # already present per-finding and in ``--format json``; the report just needs to
 # surface it (net names shown unconditionally, plus an explicit same-net /
 # different-net qualifier).  This is presentational only -- severity is
 # unchanged (see #2976: same-net drill overlap is still a manufacturing defect).
+#
+# Issue #4127: the classifier uses a floating-aware check (``_is_floating_net``),
+# not naive string equality.  Every genuinely unconnected pad/via resolves to
+# the *same* ``net:0`` placeholder (net 0 is a single canonical no-net sentinel
+# in the PCB net table -- see ``PCB`` construction in schema/pcb.py), so a naive
+# ``nets[0] == nets[1]`` would mislabel two *distinct* floating pins as
+# ``same-net``.  Floating pins share no electrical identity, so any pair
+# involving a floating endpoint is ``different-net``.
 _NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset({"dimension_drill_clearance"})
+
+
+def _is_floating_net(net: str) -> bool:
+    """True for KiCad's unconnected/no-net sentinel as resolved by dimensions.py.
+
+    Unconnected pads/vias always carry ``net_number == 0`` (a single canonical
+    sentinel -- see ``PCB`` net-table construction, ``self._nets[0] = Net(0,
+    "")``), which resolves to the empty string or, in dimensions.py's fallback,
+    the literal placeholder ``"net:0"``.  Treat either spelling as floating so
+    this stays correct if the empty-string form ever reaches here directly
+    (e.g. a future caller that skips the ``f"net:{number}"`` fallback).
+    """
+    return net in ("", "net:0")
 
 
 def _net_relationship(nets: tuple[str, ...]) -> str | None:
     """Classify a hole-to-hole finding's net pair as same-net / different-net.
 
-    Returns ``"same-net"`` when both endpoints resolve to the same net name,
-    ``"different-net"`` when they differ, and ``None`` when the finding does
-    not carry exactly two net names (nothing to compare).  Unnamed nets are
-    already resolved to distinct ``net:<n>`` placeholders upstream, so an
-    unconnected pin next to a signal via reads as ``different-net``.
+    Returns ``"same-net"`` when both endpoints resolve to the same *named,
+    non-floating* net, ``"different-net"`` when they differ, and ``None`` when
+    the finding does not carry exactly two net names (nothing to compare).
+
+    Floating/unconnected pins have no net identity to share: every one of them
+    resolves to the *same* ``net:0`` placeholder upstream (net 0 is a single
+    canonical no-net sentinel, not a per-pad unique ID -- see schema/pcb.py).
+    So any pair with a floating endpoint -- including two distinct floating pins
+    that collide on the ``net:0`` string -- is ``different-net``, never
+    ``same-net`` (issue #4127).  A plain string equality would wrongly report
+    ``net:0 == net:0`` as same-net; the floating-aware check below prevents that.
     """
     if len(nets) != 2:
         return None
+    if _is_floating_net(nets[0]) or _is_floating_net(nets[1]):
+        return "different-net"
     return "same-net" if nets[0] == nets[1] else "different-net"
 
 

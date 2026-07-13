@@ -1011,11 +1011,36 @@ class TestDrillClearanceNetRelationship:
 
         assert _net_relationship(("HALL_A", "GND")) == "different-net"
         assert _net_relationship(("HALL_A", "HALL_A")) == "same-net"
-        # Unnamed nets resolve to distinct net:<n> placeholders upstream.
+        # Two *distinct named* nets that happen to look like placeholders --
+        # NOT a floating-pad scenario (floating pads never get distinct
+        # per-pad numbers; they all resolve to the single "net:0" sentinel).
         assert _net_relationship(("net:3", "net:7")) == "different-net"
         # Not a pair -> nothing to compare.
         assert _net_relationship(()) is None
         assert _net_relationship(("only-one",)) is None
+
+    def test_net_relationship_floating_pins(self):
+        """Issue #4127: floating/unconnected pins never read as same-net.
+
+        Every genuinely unconnected pad/via resolves to the *same* ``net:0``
+        placeholder (net 0 is a single canonical no-net sentinel), so a naive
+        string equality would mislabel two distinct floating pins as same-net.
+        Any pair involving a floating endpoint must classify as different-net.
+        """
+        from kicad_tools.cli.check_cmd import _net_relationship
+
+        # Core regression: two distinct floating pins, both resolved to net:0,
+        # must NOT read as same-net.
+        assert _net_relationship(("net:0", "net:0")) == "different-net"
+        # Floating vs named (already correct today; keep it correct).
+        assert _net_relationship(("net:0", "GND")) == "different-net"
+        assert _net_relationship(("GND", "net:0")) == "different-net"
+        # Empty-string spelling of the no-net sentinel is also floating.
+        assert _net_relationship(("", "")) == "different-net"
+        assert _net_relationship(("", "GND")) == "different-net"
+        assert _net_relationship(("GND", "")) == "different-net"
+        # Named/named is unchanged -- the fix does not over-broaden.
+        assert _net_relationship(("GND", "GND")) == "same-net"
 
     def test_different_net_finding_shows_label_and_nets_default(self, capsys):
         """Default (non-verbose) output labels the pair and prints both nets."""
@@ -1076,6 +1101,32 @@ class TestDrillClearanceNetRelationship:
             self._violation(("HALL_A", "GND")),
             self._violation(("SIG", "GND")),
             self._violation(("GND", "GND")),
+        ]
+        for v in violations:
+            results.add(v)
+        results.rules_checked = 1
+
+        output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 2, False)
+        out = capsys.readouterr().out
+        assert "dimension_drill_clearance: 3 errors (2 different-net, 1 same-net)" in out
+
+    def test_by_rule_summary_floating_pair_counts_as_different(self, capsys):
+        """Issue #4127: floating/floating pairs count as different-net in BY RULE.
+
+        The ``diff_n + same_n == errors`` invariant must hold after the fix:
+        1 floating/floating + 1 named-different + 1 named-same ->
+        (2 different-net, 1 same-net).
+        """
+        from pathlib import Path
+
+        from kicad_tools.cli.check_cmd import output_table
+        from kicad_tools.validate import DRCResults
+
+        results = DRCResults()
+        violations = [
+            self._violation(("net:0", "net:0")),  # floating/floating
+            self._violation(("HALL_A", "GND")),  # named-different
+            self._violation(("GND", "GND")),  # named-same
         ]
         for v in violations:
             results.add(v)

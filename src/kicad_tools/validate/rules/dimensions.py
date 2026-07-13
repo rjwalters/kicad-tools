@@ -202,6 +202,12 @@ class DimensionRules(DRCRule):
         # Add vias
         for via in pcb.vias:
             net = pcb.get_net(via.net_number)
+            # Unconnected vias carry net_number == 0, a single canonical no-net
+            # sentinel (schema/pcb.py: self._nets[0] = Net(0, "")), so this
+            # fallback yields the identical "net:0" string for *every* floating
+            # via -- distinct floating endpoints collide on it. The
+            # net-relationship classifier (check_cmd._net_relationship, #4127)
+            # is floating-aware and treats such collisions as different-net.
             net_name = net.name if net else f"net:{via.net_number}"
             drills.append((via.position, via.drill, net_name, "", net_name))
 
@@ -221,6 +227,12 @@ class DimensionRules(DRCRule):
                     )
                     abs_x = fp.position[0] + rotated_x
                     abs_y = fp.position[1] + rotated_y
+                    # As with vias above, every floating pad has net_number == 0
+                    # and net_name == "", so this fallback produces the same
+                    # "net:0" placeholder for all of them (they collide, not
+                    # distinct per-pad IDs). check_cmd._net_relationship is
+                    # floating-aware and classifies any such pair as
+                    # different-net (#4127).
                     net_name = pad.net_name if pad.net_name else f"net:{pad.net_number}"
                     drills.append(
                         (
