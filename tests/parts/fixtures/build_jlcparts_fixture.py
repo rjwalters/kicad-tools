@@ -145,3 +145,53 @@ def build_split_zip_dataset(dir_path: Path, sqlite_path: Path) -> None:
     midpoint = max(1, len(data) // 2)
     (dir_path / "cache.z01").write_bytes(data[:midpoint])
     (dir_path / "cache.zip").write_bytes(data[midpoint:])
+
+
+def build_spanning_split_bytes(sqlite_path: Path, arcname: str = "cache.sqlite3") -> bytes:
+    """Return the concatenated bytes of a *true* ``zip -s`` split archive.
+
+    A genuine split archive produced by ``zip -s`` prepends the 4-byte
+    spanning marker ``PK\\x07\\x08`` to its first segment. After the segments
+    are concatenated in order the reassembled blob therefore begins with that
+    marker, and Python's :mod:`zipfile` refuses to open it
+    (``BadZipFile: zipfiles that span multiple disks are not supported``).
+
+    We synthesize exactly that shape without shelling out to ``zip``: build a
+    single-member *deflate* zip with :mod:`zipfile`, then prepend the spanning
+    marker to its bytes. The streaming extractor under test never reads the
+    central directory, so the multi-disk central-directory difference is
+    irrelevant to it -- the leading marker plus the ``PK\\x03\\x04`` local file
+    header are all that matter.
+
+    Args:
+        sqlite_path: The SQLite database to embed as the single member.
+        arcname: Archive member name (default ``cache.sqlite3``).
+
+    Returns:
+        The reassembled split-archive bytes, beginning with ``PK\\x07\\x08``.
+    """
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(sqlite_path, arcname=arcname)
+    return b"PK\x07\x08" + buf.getvalue()
+
+
+def build_spanning_split_dataset(dir_path: Path, sqlite_path: Path) -> None:
+    """Write a true ``zip -s`` split dataset (leading spanning marker) as segments.
+
+    Mirrors :func:`build_split_zip_dataset` but produces the *real* split shape:
+    the reassembled ``cache.z01`` + ``cache.zip`` concatenation begins with the
+    ``PK\\x07\\x08`` spanning marker, exercising the streaming extraction path.
+
+    Args:
+        dir_path: Directory to write the segment files into.
+        sqlite_path: The SQLite database to embed in the archive.
+    """
+    dir_path.mkdir(parents=True, exist_ok=True)
+    data = build_spanning_split_bytes(sqlite_path)
+    midpoint = max(1, len(data) // 2)
+    (dir_path / "cache.z01").write_bytes(data[:midpoint])
+    (dir_path / "cache.zip").write_bytes(data[midpoint:])

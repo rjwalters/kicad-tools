@@ -40,7 +40,9 @@ import json
 import logging
 import os
 import sqlite3
+import struct
 import zipfile
+import zlib
 from datetime import datetime
 from pathlib import Path
 
@@ -55,6 +57,13 @@ JLCPARTS_DATA_BASE = "https://yaqwsx.github.io/jlcparts/data"
 
 # Filename of the reassembled catalog inside the cache directory.
 CATALOG_FILENAME = "jlcparts.sqlite3"
+
+# Zip signatures (little-endian) relevant to split-archive extraction.
+#   PK\x07\x08 -- "spanning" / split-archive marker prepended to the first
+#                 segment of a ``zip -s`` archive.
+#   PK\x03\x04 -- local file header that begins each archive member.
+_SPANNING_MARKER = b"PK\x07\x08"
+_LOCAL_FILE_HEADER = b"PK\x03\x04"
 
 
 def get_catalog_path() -> Path:
@@ -414,15 +423,63 @@ def sync_catalog(
     return dest
 
 
+def _is_split_archive(archive: Path) -> bool:
+    """Return whether ``archive`` is a ``zip -s`` split (multi-disk) archive.
+
+    A split archive produced by ``zip -s`` begins with the 4-byte spanning
+    marker ``PK\\x07\\x08`` on its first segment. After the segments are
+    concatenated in order the reassembled blob therefore starts with that
+    marker. Python's :mod:`zipfile` refuses these categorically
+    (``BadZipFile: zipfiles that span multiple disks are not supported``)
+    because it consults the multi-disk central directory, so we detect the
+    marker and take a streaming extraction path that never reads the central
+    directory.
+    """
+    with archive.open("rb") as fh:
+        head = fh.read(4)
+    return head[:4] == _SPANNING_MARKER
+
+
 def _extract_catalog(archive: Path, dest: Path) -> None:
     """Extract the SQLite database from a (reassembled) jlcparts zip archive.
 
-    Picks the first ``*.sqlite3``/``*.sqlite``/``*.db`` member, or -- if the
-    archive contains a single member -- that member. Writes it to ``dest``.
+    Two paths are supported:
+
+    * **Single-disk archive** (the CI test fixtures): parsed normally with
+      :mod:`zipfile`; the first ``*.sqlite3``/``*.sqlite``/``*.db`` member (or,
+      failing that, a lone single member) is extracted.
+    * **Split ``zip -s`` archive** (the real yaqwsx/jlcparts dataset): detected
+      by the leading ``PK\\x07\\x08`` spanning marker -- or by ``zipfile``
+      raising the multi-disk ``BadZipFile`` -- and streamed via
+      :func:`_extract_split_archive`, which never consults the multi-disk
+      central directory.
+
+    Both paths write to a sibling temp file and promote it atomically via
+    :func:`os.replace`, so a killed or failed extraction can never leave a
+    truncated catalog that later lookups would silently trust (#4117).
 
     Raises:
-        RuntimeError: If no plausible SQLite member is found.
+        RuntimeError: If no plausible SQLite member is found, or the split
+            archive's first member is not deflate-compressed.
     """
+    if _is_split_archive(archive):
+        _extract_split_archive(archive, dest)
+        return
+
+    try:
+        _extract_single_disk_archive(archive, dest)
+    except zipfile.BadZipFile as e:
+        # Some split archives do not carry the leading spanning marker but
+        # still trip the multi-disk guard once zipfile reads the central
+        # directory. Fall back to the streaming path in that case.
+        if "span multiple disks" in str(e):
+            _extract_split_archive(archive, dest)
+            return
+        raise
+
+
+def _extract_single_disk_archive(archive: Path, dest: Path) -> None:
+    """Extract the SQLite member from a normal single-disk zip archive."""
     with zipfile.ZipFile(archive) as zf:
         names = [n for n in zf.namelist() if not n.endswith("/")]
         sqlite_members = [n for n in names if n.lower().endswith((".sqlite3", ".sqlite", ".db"))]
@@ -435,9 +492,6 @@ def _extract_catalog(archive: Path, dest: Path) -> None:
                 f"Could not locate a SQLite database in the jlcparts archive; members: {names}"
             )
 
-        # Extract to a sibling temp file and promote atomically so a killed
-        # or failed extraction can never leave a truncated catalog that
-        # later lookups would silently trust.
         tmp_dest = dest.with_suffix(".extract.tmp")
         try:
             with zf.open(member) as src, tmp_dest.open("wb") as out:
@@ -449,3 +503,85 @@ def _extract_catalog(archive: Path, dest: Path) -> None:
             os.replace(tmp_dest, dest)
         finally:
             tmp_dest.unlink(missing_ok=True)
+
+
+def _extract_split_archive(archive: Path, dest: Path) -> None:
+    """Stream-extract the first member of a split (``zip -s``) archive.
+
+    The real jlcparts dataset is a true split archive whose multi-disk central
+    directory Python's :mod:`zipfile` refuses to open. This path never consults
+    the central directory: it parses only the leading local file header and
+    streams the single member's deflate payload.
+
+    Steps:
+
+    1. Skip the 4-byte ``PK\\x07\\x08`` spanning marker if present.
+    2. Parse the ``PK\\x03\\x04`` local file header (fixed 30-byte struct):
+       general-purpose flag and compression method live at offset +6/+8, and
+       the file-name / extra-field lengths at offset +26/+28. The method must
+       be 8 (deflate); the name/extra lengths locate the start of the
+       compressed data.
+    3. Feed everything after the header through ``zlib.decompressobj(-15)``
+       (raw deflate, no zlib wrapper) until the decompressor reports EOF. No
+       member sizes are needed, so this works transparently for entries that
+       use a trailing data descriptor and/or zip64 fields.
+
+    The output is written to a sibling temp file and promoted atomically.
+
+    Raises:
+        RuntimeError: If the local file header is missing/truncated or the
+            member is not deflate-compressed.
+    """
+    tmp_dest = dest.with_suffix(".extract.tmp")
+    try:
+        with archive.open("rb") as fh:
+            marker = fh.read(4)
+            if marker[:4] != _SPANNING_MARKER:
+                # No spanning marker: rewind so the local header parse below
+                # sees the full stream from byte 0.
+                fh.seek(0)
+
+            header = fh.read(30)
+            if len(header) < 30 or header[:4] != _LOCAL_FILE_HEADER:
+                raise RuntimeError(
+                    "Split jlcparts archive did not begin with a PK\\x03\\x04 "
+                    "local file header; cannot stream-extract."
+                )
+
+            # Local file header layout (little-endian) after the 4-byte sig:
+            #   +4  version needed (H)   +6  gp flag (H)   +8  method (H)
+            #   +10 mod time (H)  +12 mod date (H)  +14 crc32 (I)
+            #   +18 comp size (I) +22 uncomp size (I)
+            #   +26 name len (H)  +28 extra len (H)
+            method = struct.unpack_from("<H", header, 8)[0]
+            name_len = struct.unpack_from("<H", header, 26)[0]
+            extra_len = struct.unpack_from("<H", header, 28)[0]
+
+            if method != 8:
+                raise RuntimeError(
+                    "Split jlcparts archive member is not deflate-compressed "
+                    f"(compression method {method}, expected 8); cannot "
+                    "stream-extract."
+                )
+
+            # Consume the variable-length file-name and extra fields; the
+            # compressed payload begins immediately after them.
+            fh.read(name_len + extra_len)
+
+            decompressor = zlib.decompressobj(-15)
+            with tmp_dest.open("wb") as out:
+                while not decompressor.eof:
+                    chunk = fh.read(1 << 20)
+                    if not chunk:
+                        # No more input but the stream never reported EOF --
+                        # flush whatever remains and stop.
+                        out.write(decompressor.flush())
+                        break
+                    out.write(decompressor.decompress(chunk))
+                else:
+                    # decompressor.eof reached: flush any buffered tail.
+                    out.write(decompressor.flush())
+
+        os.replace(tmp_dest, dest)
+    finally:
+        tmp_dest.unlink(missing_ok=True)
