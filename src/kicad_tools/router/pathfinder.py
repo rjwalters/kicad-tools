@@ -1446,6 +1446,32 @@ class Router:
         dist_sq = (dy_grid * dy_grid)[:, None] + (dx_grid * dx_grid)[None, :]
         within_disc = dist_sq <= radius_sq
 
+        # Issue #4079: lateral-trace corridor keep-out.  A cell reserved for
+        # a net set that EXCLUDES ``net`` blocks this trace placement -- even
+        # if the cell is not otherwise ``blocked`` -- so a foreign net's A*
+        # cannot route through another net's reserved continuation corridor.
+        # This is the primary defect site: the via-only keep-out in
+        # ``_mark_via`` fenced foreign vias but not foreign lateral traces,
+        # so the A* could pick an illegal lateral path.  Fast-pathed behind
+        # ``bool(self._reserved_for_nets)`` so unreserved boards pay zero
+        # extra cost (byte-identical).  The keep-out is a HARD gate even in
+        # negotiated / relief mode (``allow_sharing``), matching
+        # ``_mark_via``'s unconditional skip -- a reserved corridor is not
+        # soft-negotiable.  Mirrors C++ ``Pathfinder::is_trace_blocked``.
+        reserved_map = self.grid._reserved_for_nets
+        if reserved_map:
+            # Only the (typically few) reserved cells that fall inside this
+            # region's Euclidean disc can contribute; iterate them directly
+            # rather than materialising a full-region mask.
+            for ry in range(y1, y2):
+                row_off = ry - y1
+                for rx in range(x1, x2):
+                    if not within_disc[row_off, rx - x1]:
+                        continue
+                    owners = reserved_map.get((layer, ry, rx))
+                    if owners is not None and net not in owners:
+                        return True
+
         # Issue #2559 / Phase 1C: Build partner-relaxation mask.
         # When the partner branch is active, cells whose net matches
         # partner_net are checked against partner_radius instead of radius.

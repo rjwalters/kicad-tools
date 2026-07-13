@@ -83,11 +83,21 @@ void Grid3D::mark_rect_blocked(int x1, int y1, int x2, int y2, int layer, int ne
 
 void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                           int clearance_cells) {
+    // Issue #4079: fast-path the reservation consult behind the grid-wide
+    // flag so unreserved boards pay zero extra cost (byte-identical).
+    const bool check_reservations = has_reservations_;
     auto mark_with_clearance = [&](int gx, int gy) {
         for (int dy = -clearance_cells; dy <= clearance_cells; ++dy) {
             for (int dx = -clearance_cells; dx <= clearance_cells; ++dx) {
                 int nx = gx + dx, ny = gy + dy;
                 if (is_valid(nx, ny, layer)) {
+                    // Issue #4079: skip cells reserved for a net set that
+                    // EXCLUDES ``net`` (lateral-trace keep-out, mirrors
+                    // Python ``_mark_segment`` and the ``mark_via`` skip).
+                    if (check_reservations &&
+                        is_reserved_excluding(nx, ny, layer, net)) {
+                        continue;
+                    }
                     auto& cell = at(nx, ny, layer);
                     if (!cell.blocked) {
                         cell.net = net;

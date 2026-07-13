@@ -74,7 +74,18 @@ public:
     void mark_rect_blocked(int x1, int y1, int x2, int y2, int layer, int net,
                            bool is_obstacle = false);
 
-    // Route marking with clearance buffer using Bresenham
+    // Route marking with clearance buffer using Bresenham.
+    // Issue #4079: like ``mark_via``, ``mark_segment`` NOW consults the
+    // per-cell corridor reservation owner set (``GridCell::reserved_nets``)
+    // for lateral-trace keep-out, mirroring Python ``_mark_segment``.  A
+    // cell reserved for a net set that EXCLUDES ``net`` is SKIPPED (the
+    // foreign net's trace does not claim/block it), so a foreign lateral
+    // trace cannot colonise a reserved continuation corridor.  Cells
+    // reserved for a set that INCLUDES ``net`` are ordinary blockable
+    // cells.  Fast path: when ``has_reservations_ == false`` the check is
+    // skipped, preserving byte-identical behaviour on boards without
+    // reservations.  See ``cpp/src/grid.cpp`` and
+    // ``tests/test_grid_cpp_parity.py``.
     void mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                       int clearance_cells);
     // Issue #4071: ``mark_via`` NOW consults the per-cell corridor
@@ -127,6 +138,27 @@ public:
             if (cell.reserved_nets[i] == net) return true;
         }
         return false;
+    }
+
+    // Issue #4079: True iff the cell is reserved for a net set that
+    // EXCLUDES ``net`` -- i.e. a foreign net whose lateral trace (or via
+    // halo) must be fenced out of the reserved corridor cell.  Returns
+    // false for an unreserved cell OR a cell reserved for a set that
+    // INCLUDES ``net`` (the owner may use its own reservation).  This is
+    // the lateral-trace keep-out primitive consulted by
+    // ``mark_segment`` and ``Pathfinder::is_trace_blocked`` (parity with
+    // the Python ``_reserved_for_nets`` "owners is not None and net not
+    // in owners" check in ``_mark_via`` / ``_mark_segment`` /
+    // ``_is_trace_blocked``).  Inline for the A* hot path.
+    inline bool is_reserved_excluding(int x, int y, int layer, int net) const {
+        if (!has_reservations_) return false;
+        if (!is_valid(x, y, layer)) return false;
+        const auto& cell = at(x, y, layer);
+        if (cell.reserved_count <= 0) return false;
+        for (int i = 0; i < cell.reserved_count; ++i) {
+            if (cell.reserved_nets[i] == net) return false;  // owner net
+        }
+        return true;  // reserved, but not for this net
     }
 
     // True iff ANY cell is currently reserved (grid-wide fast path).

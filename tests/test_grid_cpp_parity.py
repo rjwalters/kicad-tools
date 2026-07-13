@@ -289,3 +289,202 @@ class TestMarkViaReservationParity:
         assert py_foreign == pytest.approx(cpp_foreign)
         assert py_unreserved == pytest.approx(0.0)
         assert py_unreserved == pytest.approx(cpp_unreserved)
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4079: lateral-trace keep-out parity gate                             #
+# --------------------------------------------------------------------------- #
+
+
+class TestLateralTraceReservationParity:
+    """Pin the Python == C++ *lateral-trace* corridor keep-out (Issue #4079).
+
+    PR #4078 (#4071) fenced foreign VIAS out of reserved corridor cells
+    but not foreign LATERAL traces: neither ``Grid3D::mark_segment`` /
+    ``_mark_segment`` (post-hoc grid painting) nor ``is_trace_blocked`` /
+    ``_is_trace_blocked`` (the A* blocking predicate) consulted the
+    reservation map.  #4079 adds the lateral keep-out on both grids.  These
+    tests assert Python and C++ agree in both directions:
+
+      * A foreign net's trace step into a reserved cell is BLOCKED (the A*
+        predicate) and the cell is SKIPPED (segment painting).
+      * The owning net's trace treats the reserved cell as ordinary (the
+        reservation does not itself block the owner).
+    """
+
+    def _find_inner_layer(self, grid: RoutingGrid) -> int:
+        for idx in range(grid.num_layers):
+            layer_enum = grid.index_to_layer(idx)
+            if layer_enum not in (Layer.F_CU.value, Layer.B_CU.value):
+                return idx
+        raise AssertionError("4-layer stack should expose an inner layer")
+
+    def test_mark_segment_skips_foreign_reserved_cell_python(
+        self, grid_4layer: RoutingGrid
+    ) -> None:
+        """Python ``_mark_segment`` skips a cell reserved for a foreign net.
+
+        Reserves an inner-layer cell for nets {1, 2}, then paints a
+        foreign-net (42) segment through it with zero clearance.  The
+        reserved cell must stay UNBLOCKED (lateral-trace keep-out), while
+        the owning net's segment blocks it -- mirroring the ``_mark_via``
+        keep-out contract.
+        """
+        from kicad_tools.router.primitives import Segment
+
+        gx, gy = 25, 25
+        inner_layer_idx = self._find_inner_layer(grid_4layer)
+        inner_layer = grid_4layer.index_to_layer(inner_layer_idx)
+
+        grid_4layer.reserve_corridor_cells(inner_layer_idx, [(gx, gy)], frozenset({1, 2}))
+        assert not grid_4layer.grid[inner_layer_idx][gy][gx].blocked
+
+        wx, wy = grid_4layer.grid_to_world(gx, gy)
+        foreign_seg = Segment(
+            x1=wx, y1=wy, x2=wx, y2=wy, width=0.2, layer=Layer(inner_layer), net=42
+        )
+        grid_4layer._mark_segment(foreign_seg, clearance_cells=0)
+        assert not grid_4layer.grid[inner_layer_idx][gy][gx].blocked, (
+            "Issue #4079: _mark_segment must skip cells reserved for a foreign net set."
+        )
+
+        # The owning net's segment DOES claim/block the reserved cell.
+        owner_seg = Segment(x1=wx, y1=wy, x2=wx, y2=wy, width=0.2, layer=Layer(inner_layer), net=1)
+        grid_4layer._mark_segment(owner_seg, clearance_cells=0)
+        assert grid_4layer.grid[inner_layer_idx][gy][gx].blocked, (
+            "Owning-net segment must be able to block/claim its own reserved cell."
+        )
+        assert grid_4layer.grid[inner_layer_idx][gy][gx].net == 1
+
+    def test_mark_segment_keepout_parity_cpp(self, grid_4layer: RoutingGrid) -> None:
+        """C++ ``Grid3D::mark_segment`` mirrors the Python lateral keep-out."""
+        if not is_cpp_available():
+            pytest.skip("C++ router backend not built (run: kct build-native)")
+
+        from kicad_tools.router.cpp_backend import CppGrid
+
+        gx, gy = 25, 25
+        inner_layer_idx = self._find_inner_layer(grid_4layer)
+
+        grid_4layer.reserve_corridor_cells(inner_layer_idx, [(gx, gy)], frozenset({1, 2}))
+        cpp_grid = CppGrid.from_routing_grid(grid_4layer)
+        assert cpp_grid._impl.reserved_cell_count() == 1
+        assert not cpp_grid._impl.at(gx, gy, inner_layer_idx).blocked
+
+        # Foreign-net segment (net 42) through the reserved cell, zero clearance.
+        cpp_grid._impl.mark_segment(gx, gy, gx, gy, inner_layer_idx, 42, 0)
+        assert not cpp_grid._impl.at(gx, gy, inner_layer_idx).blocked, (
+            "Issue #4079: C++ mark_segment must skip cells reserved for a foreign net."
+        )
+
+        # Owning-net segment (net 1) blocks/claims the reserved cell.
+        cpp_grid._impl.mark_segment(gx, gy, gx, gy, inner_layer_idx, 1, 0)
+        owner_cell = cpp_grid._impl.at(gx, gy, inner_layer_idx)
+        assert owner_cell.blocked, (
+            "Owning-net segment must be able to block/claim its own reserved cell."
+        )
+        assert owner_cell.net == 1
+
+    def test_is_trace_blocked_reservation_parity(self, grid_4layer: RoutingGrid) -> None:
+        """A* predicate parity: foreign net blocked, owner net passable.
+
+        The reserved cell is otherwise UNBLOCKED, so without the #4079
+        lateral keep-out both predicates would report "not blocked" for the
+        foreign net.  With the fix, ``is_trace_blocked`` /
+        ``_is_trace_blocked`` treat a foreign-reserved cell as a hard block
+        while the owning net still passes -- and the two backends agree.
+        """
+        if not is_cpp_available():
+            pytest.skip("C++ router backend not built (run: kct build-native)")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.pathfinder import Router
+
+        gx, gy = 25, 25
+        inner_layer_idx = self._find_inner_layer(grid_4layer)
+        rules = grid_4layer.rules
+
+        # Reserve for nets {1, 2} BEFORE building the C++ mirror so the bulk
+        # copy carries the reservation into the C++ pathfinder's grid.
+        grid_4layer.reserve_corridor_cells(inner_layer_idx, [(gx, gy)], frozenset({1, 2}))
+
+        cpp_grid = CppGrid.from_routing_grid(grid_4layer)
+        cpp_pf = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+        cpp_pf.set_routable_layers(cpp_grid.get_routable_indices())
+        py_router = Router(grid_4layer, rules, diagonal_routing=True)
+
+        for probe_net, label, expect_blocked in (
+            (1, "owner-net", False),
+            (42, "foreign-net", True),
+        ):
+            cpp_blocked = cpp_pf._impl.is_trace_blocked(gx, gy, inner_layer_idx, probe_net, False)
+            py_blocked = py_router._is_trace_blocked(gx, gy, inner_layer_idx, probe_net, False)
+            assert cpp_blocked == py_blocked, (
+                f"Issue #4079: {label} lateral-trace reservation predicate "
+                f"diverges (cpp={cpp_blocked}, py={py_blocked})"
+            )
+            assert py_blocked == expect_blocked, (
+                f"Issue #4079: {label} expected blocked={expect_blocked}, got {py_blocked}"
+            )
+
+    def test_is_trace_blocked_hard_gate_in_relief_mode(self, grid_4layer: RoutingGrid) -> None:
+        """Reserved keep-out is a HARD gate even in negotiated/relief mode.
+
+        Matches ``_mark_via``'s unconditional skip: a reserved corridor is
+        not soft-negotiable.  With ``allow_sharing=True`` a foreign net's
+        step into a foreign-reserved cell must still be blocked on both
+        backends.
+        """
+        if not is_cpp_available():
+            pytest.skip("C++ router backend not built (run: kct build-native)")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.pathfinder import Router
+
+        gx, gy = 25, 25
+        inner_layer_idx = self._find_inner_layer(grid_4layer)
+        rules = grid_4layer.rules
+
+        grid_4layer.reserve_corridor_cells(inner_layer_idx, [(gx, gy)], frozenset({1, 2}))
+        cpp_grid = CppGrid.from_routing_grid(grid_4layer)
+        cpp_pf = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+        cpp_pf.set_routable_layers(cpp_grid.get_routable_indices())
+        py_router = Router(grid_4layer, rules, diagonal_routing=True)
+
+        cpp_blocked = cpp_pf._impl.is_trace_blocked(gx, gy, inner_layer_idx, 42, True)
+        py_blocked = py_router._is_trace_blocked(gx, gy, inner_layer_idx, 42, True)
+        assert cpp_blocked is True and py_blocked is True, (
+            "Issue #4079: reserved keep-out must remain hard in relief mode "
+            f"(cpp={cpp_blocked}, py={py_blocked})"
+        )
+
+    def test_unreserved_grid_trace_predicate_unaffected(self, grid_4layer: RoutingGrid) -> None:
+        """Fast-path guarantee: with no reservations, the predicate is unchanged.
+
+        A grid with an empty reservation map must report a random empty
+        inner-layer cell as passable for any net on both backends -- the
+        ``has_reservations`` / ``bool(self._reserved_for_nets)`` fast path
+        short-circuits to zero extra work.
+        """
+        if not is_cpp_available():
+            pytest.skip("C++ router backend not built (run: kct build-native)")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.pathfinder import Router
+
+        gx, gy = 25, 25
+        inner_layer_idx = self._find_inner_layer(grid_4layer)
+        rules = grid_4layer.rules
+        assert grid_4layer.reserved_cell_count() == 0
+
+        cpp_grid = CppGrid.from_routing_grid(grid_4layer)
+        assert not cpp_grid._impl.has_reservations()
+        cpp_pf = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+        cpp_pf.set_routable_layers(cpp_grid.get_routable_indices())
+        py_router = Router(grid_4layer, rules, diagonal_routing=True)
+
+        cpp_blocked = cpp_pf._impl.is_trace_blocked(gx, gy, inner_layer_idx, 42, False)
+        py_blocked = py_router._is_trace_blocked(gx, gy, inner_layer_idx, 42, False)
+        assert cpp_blocked == py_blocked == False, (  # noqa: E712
+            "Empty-reservation grid must leave an empty cell passable on both backends."
+        )

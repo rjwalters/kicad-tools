@@ -4048,18 +4048,38 @@ class RoutingGrid:
             self._rtree_insert_route_vias(route)
 
     def _mark_segment(self, seg: Segment, clearance_cells: int = 1) -> None:
-        """Mark cells along a segment as blocked (with clearance buffer)."""
+        """Mark cells along a segment as blocked (with clearance buffer).
+
+        Issue #4079: like ``_mark_via``, this now consults the corridor
+        reservation map (``self._reserved_for_nets``) so a foreign net's
+        trace does not claim/block a cell reserved for a net set that
+        EXCLUDES ``seg.net`` -- the lateral-trace keep-out that mirrors
+        the via keep-out and the C++ ``Grid3D::mark_segment``.  Fast-pathed
+        behind ``bool(self._reserved_for_nets)`` so unreserved boards are
+        byte-identical.
+        """
         gx1, gy1 = self.world_to_grid(seg.x1, seg.y1)
         gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
 
         layer_idx = self.layer_to_index(seg.layer.value)
         marked_cells: set[tuple[int, int]] = set()
 
+        # Issue #4079: fast-path when no reservations exist (byte-identical).
+        has_reservations = bool(self._reserved_for_nets)
+        seg_net = int(seg.net) if seg.net is not None else 0
+
         def mark_with_clearance(gx: int, gy: int) -> None:
             for dy in range(-clearance_cells, clearance_cells + 1):
                 for dx in range(-clearance_cells, clearance_cells + 1):
                     nx, ny = gx + dx, gy + dy
                     if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                        # Issue #4079: skip cells reserved for a net set
+                        # that excludes seg.net (lateral-trace keep-out,
+                        # mirrors _mark_via).
+                        if has_reservations:
+                            owners = self._reserved_for_nets.get((layer_idx, ny, nx))
+                            if owners is not None and seg_net not in owners:
+                                continue
                         cell = self.grid[layer_idx][ny][nx]
                         if not cell.blocked:
                             # First time blocking - this is a route cell
