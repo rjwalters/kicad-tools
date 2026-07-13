@@ -2730,6 +2730,28 @@ class DiffPairRouter:
         # strategy) from a genuine no-path-found exit (where the
         # caller's existing handling is unchanged).
         self._last_pair_budget_exit: bool = False
+        # Issue #4095: names of the differential pairs whose coupled
+        # search budget-exited (per-pair or aggregate) during the most
+        # recent ``route_all_with_diffpairs`` call and were consequently
+        # deferred to the single-ended main strategy.  Local
+        # ``budget_exit_diff_nets`` bookkeeping drives fallback + the
+        # #3270 net-priority promotion but is discarded at function exit;
+        # this attribute surfaces the same information (by human-readable
+        # pair name) so the CLI can warn the operator that
+        # ``--differential-pairs`` fell back to single-ended routing --
+        # which on bundle-dense boards can *regress* completion / DRC
+        # vs. a plain single-ended route (board 07: 34 vs 13 DRC errors,
+        # 22/31 vs 26/31 nets; epic #4049 closeout).  Reset at the start
+        # of every ``route_all_with_diffpairs`` call so it reflects only
+        # the latest invocation.
+        self._last_budget_exit_pair_names: list[str] = []
+        # Issue #4095 instrumentation: monotonic counters for a future
+        # checkpoint-and-compare follow-up to key on.  ``coupled_attempted``
+        # counts pairs that reached the coupled A* (engaged, within
+        # budget); ``budget_exited`` counts pairs deferred to the main
+        # strategy via the budget-exit path (per-pair or aggregate).
+        self._last_coupled_attempted_count: int = 0
+        self._last_budget_exit_count: int = 0
         # Issue #3508: opt-in gate for the geometric shadow
         # constructor (see
         # ``DifferentialPairConfig.enable_shadow_construction`` for
@@ -6645,6 +6667,15 @@ class DiffPairRouter:
             self.enable_shadow_construction = bool(
                 getattr(diffpair_config, "enable_shadow_construction", False)
             )
+        # Issue #4095: reset the budget-exit surface + instrumentation
+        # counters up front (before any early return) so they always
+        # describe only the latest invocation and never leak stale data
+        # from a prior call on the same router (e.g. a coupled-success run
+        # followed by a no-pairs run).
+        self._last_budget_exit_pair_names = []
+        self._last_coupled_attempted_count = 0
+        self._last_budget_exit_count = 0
+
         if diffpair_config is None or not diffpair_config.enabled:
             return self.autorouter.route_all(net_order), []
 
@@ -6674,6 +6705,11 @@ class DiffPairRouter:
         print("\n--- Routing differential pairs first (most constrained) ---")
         all_routes: list[Route] = []
         warnings: list[LengthMismatchWarning] = []
+        # Issue #4095: local collector for the base names of pairs deferred
+        # to the main strategy (per-pair or aggregate budget-exit); copied
+        # onto the instance attribute after the loop for the CLI to read.
+        budget_exit_pair_names: list[str] = []
+        coupled_attempted_count = 0
         # Track diff-pair nets that we successfully routed so the
         # caller can decide which nets to leave for the main strategy.
         coupled_routed_nets: set[int] = set()
@@ -6731,6 +6767,9 @@ class DiffPairRouter:
                     )
                     budget_exit_diff_nets.add(p_id)
                     budget_exit_diff_nets.add(n_id)
+                    # Issue #4095: record the deferred pair by name so the
+                    # CLI can surface the aggregate budget-exit fallback.
+                    budget_exit_pair_names.append(pair.name)
                     aggregate_deferred_pairs += 1
                     continue
                 pair_timeout = (
@@ -6738,6 +6777,9 @@ class DiffPairRouter:
                     if pair_timeout is not None
                     else aggregate_remaining
                 )
+            # Issue #4095: this pair passed the engagement gate and the
+            # aggregate-budget gate, so the coupled A* is about to run.
+            coupled_attempted_count += 1
             if coupled_only:
                 pair_routes, warning = self.route_differential_pair_coupled(
                     pair,
@@ -6764,6 +6806,9 @@ class DiffPairRouter:
             if not pair_routes and self._last_pair_budget_exit:
                 budget_exit_diff_nets.add(p_id)
                 budget_exit_diff_nets.add(n_id)
+                # Issue #4095: record the deferred pair by name so the CLI
+                # can surface the per-pair budget-exit fallback.
+                budget_exit_pair_names.append(pair.name)
             if pair_routes:
                 routed_for_net: dict[int, int] = {}
                 for r in pair_routes:
@@ -6886,6 +6931,39 @@ class DiffPairRouter:
                     # legacy per-net path too -- the priority lift
                     # is meaningful only for this strategy invocation.
                     self.autorouter._budget_exit_diff_nets = set()
+
+        # Issue #4095: surface the budget-exit pair set to the instance so
+        # the CLI can warn that ``--differential-pairs`` fell back to
+        # single-ended routing for these pairs.  De-duplicate while
+        # preserving detection order (a pair can only budget-exit once, but
+        # keep this defensive against future double-counting).  This does
+        # NOT alter routing behavior -- the fallback + #3270 priority
+        # promotion already ran above off the local ``budget_exit_diff_nets``
+        # set; this is a pure visibility hook.
+        seen: set[str] = set()
+        deduped_names = [
+            name for name in budget_exit_pair_names if not (name in seen or seen.add(name))
+        ]
+        self._last_budget_exit_pair_names = deduped_names
+        self._last_coupled_attempted_count = coupled_attempted_count
+        self._last_budget_exit_count = len(deduped_names)
+        if deduped_names:
+            # Instrumentation for a future checkpoint-and-compare follow-up
+            # to key on: a structured, greppable log line naming the pairs
+            # that fell back and the counts.
+            # Denominator: pairs that reached the coupled A* plus pairs
+            # deferred before it by the aggregate budget -- i.e. every pair
+            # for which coupled routing was considered (engagement-refused
+            # pairs are excluded; they were never candidates for coupling).
+            considered = coupled_attempted_count + aggregate_deferred_pairs
+            logger.warning(
+                "DIFFPAIR_BUDGET_EXIT_FALLBACK: %d/%d coupled pair(s) "
+                "budget-exited and fell back to single-ended routing: %s "
+                "(issue #4095)",
+                len(deduped_names),
+                considered,
+                ", ".join(deduped_names),
+            )
 
         print("\n=== Differential Pair Routing Complete ===")
         print(f"  Total routes: {len(all_routes)}")

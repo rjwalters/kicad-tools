@@ -13515,6 +13515,30 @@ class Autorouter:
             return []
         return self._diffpair_router.intra_clearance_violations()
 
+    def diffpair_budget_exit_pair_names(self) -> list[str]:
+        """Names of diff pairs that budget-exited coupled routing (Issue #4095).
+
+        After a ``route_all_with_diffpairs`` /
+        ``route_with_escape_and_diffpairs`` call, returns the base names of
+        every differential pair whose coupled A* hit its per-pair or
+        aggregate budget and was consequently deferred to the single-ended
+        main strategy.  These pairs routed *without* coupling, which on
+        bundle-dense boards can regress completion / DRC vs. a plain
+        single-ended route (board 07: 34 vs 13 DRC errors, 22/31 vs 26/31
+        nets; epic #4049 closeout).  The CLI reads this to emit an
+        unconditional operator warning.
+
+        Returns:
+            A shallow copy of the budget-exit pair names from the most
+            recent ``route_all_with_diffpairs`` call, in detection order.
+            Empty when no diff-pair routing happened, when
+            ``--differential-pairs`` was not enabled, or when every coupled
+            pair converged within budget (e.g. board 06).
+        """
+        if self._diffpair_router is None:
+            return []
+        return list(self._diffpair_router._last_budget_exit_pair_names)
+
     def route_all_with_diffpairs(
         self,
         diffpair_config: DifferentialPairConfig | None = None,
