@@ -1525,12 +1525,19 @@ class CoupledPathfinder:
             # NOT steal the single-ended router's paired back-reference, so
             # snapshot ``grid._cpp_grid`` and restore it afterwards.
             saved_cpp_grid = getattr(self.grid, "_cpp_grid", None)
-            cpp_grid = CppGrid.from_routing_grid(self.grid)
             # Restore the single-ended router's back-reference (or ``None`` if
-            # it had none): the coupled pathfinder keeps ``cpp_grid`` in
-            # ``impl`` below, but the Python grid's ``_cpp_grid`` invalidation
-            # hook must continue to target the single-ended router's grid.
-            self.grid._cpp_grid = saved_cpp_grid
+            # it had none) in a ``finally`` so it is restored even when
+            # ``from_routing_grid`` raises AFTER hijacking ``grid._cpp_grid``
+            # mid-copy (e.g. during the bulk cell copy or the Issue #4071
+            # corridor-reservation marshalling): the coupled pathfinder keeps
+            # ``cpp_grid`` in ``impl`` below, but the Python grid's
+            # ``_cpp_grid`` invalidation hook must continue to target the
+            # single-ended router's grid.  The outer ``try/except Exception``
+            # still routes any raised exception to the Python fallback.
+            try:
+                cpp_grid = CppGrid.from_routing_grid(self.grid)
+            finally:
+                self.grid._cpp_grid = saved_cpp_grid
             impl = CppCoupledPathfinder(
                 cpp_grid,
                 self.rules,
