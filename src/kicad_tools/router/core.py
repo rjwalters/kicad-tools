@@ -921,6 +921,31 @@ class Autorouter:
         # ``_apply_byte_lane_inner_priority``.
         self.enable_monotone_certificate_order = False
 
+        # Issue #4086 (Phase 1, epic #4049): cross-package diff-pair
+        # corridor reservation.  OFF by default, following the #4051 /
+        # ``enable_byte_lane_reorder`` precedent (escape-ordering /
+        # corridor-occupancy changes are measured before default-on).
+        #
+        # The intra-package paired-escape + corridor path (Phase 2F,
+        # #2639/#2677) only fires when BOTH halves of a diff pair sit on
+        # the same package.  When they live on different packages (driver
+        # -> connector, or driver -> receiver on opposite sides), each
+        # leg escapes single-ended and the coupled pathfinder free-searches
+        # the joint state space with no reserved geometry.  When this flag
+        # is True, ``EscapeRouter._generate_paired_escapes`` reserves a
+        # SOFT (attractor-only) continuation corridor from each leg's
+        # escape launch point toward the off-package partner (resolved via
+        # the board-wide ``net_pad_positions`` map), so the coupled search
+        # (via the #4080 attractor) has geometry to follow.  Soft -- not a
+        # hard fence -- because a hard keep-out spanning the board between
+        # two packages would starve unrelated nets (#4087 short-induce
+        # evidence for dense hard fences applies doubly to a long span).
+        #
+        # Flag-off is byte-identical to pre-#4086 main: no board 00-07
+        # fixture has a cross-package diff pair, so the new code path is a
+        # no-op ``continue`` there regardless.  Set True to opt in.
+        self.enable_cross_package_pair_corridor = False
+
         # Issue #4084: records the most recent certificate classification
         # per qualifying byte-lane group (group name -> MonotoneCertificate)
         # so callers/tests can inspect the feasibility decision and failure
@@ -13921,9 +13946,17 @@ class Autorouter:
             # the partner connector (off-package endpoints) instead of
             # blindly outward from the package center.
             net_pad_positions: dict[str, list[tuple[float, float]]] = {}
+            # Issue #4086: parallel net-name -> net-id map so the
+            # cross-package corridor can resolve the off-package partner's
+            # net id for the corridor owner set (both legs get the soft
+            # attractor bonus).  First-writer-wins per net name (all pads
+            # on a net share the id).
+            net_name_to_id: dict[str, int] = {}
             for pad in self.pads.values():
                 if pad.net_name:
                     net_pad_positions.setdefault(pad.net_name, []).append((pad.x, pad.y))
+                    if pad.net is not None and pad.net_name not in net_name_to_id:
+                        net_name_to_id[pad.net_name] = int(pad.net)
             self._escape_router = EscapeRouter(
                 self.grid,
                 self.rules,
@@ -13946,6 +13979,12 @@ class Autorouter:
                 # 27% reach once the BGA-49 detection fix landed.
                 diff_pair_map=(self.get_diff_pair_map() if self.paired_escape_coupling else {}),
                 net_pad_positions=net_pad_positions,
+                # Issue #4086 (Phase 1): cross-package diff-pair corridor
+                # gate (default OFF) + the net-name -> id map its owner-set
+                # resolution needs.  When OFF the escape router's
+                # cross-package branch is a no-op ``continue``.
+                enable_cross_package_pair_corridor=self.enable_cross_package_pair_corridor,
+                net_name_to_id=net_name_to_id,
                 # Issue #3428: board-wide net-id -> pad-position map so the
                 # fine-pitch QFP in-pad rescue can aim its inner stub at
                 # the net's actual routing target instead of the parity-
