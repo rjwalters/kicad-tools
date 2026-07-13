@@ -60,3 +60,8 @@ boards/*/*/output/board.json
 .loom/state.json
 .loom/*.log
 .loom/*.sock
+
+# Local credentials (BYO API keys -- issue #4118). NEVER commit real keys.
+.env
+.env.*
+!.env.example
