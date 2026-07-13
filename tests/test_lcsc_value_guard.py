@@ -14,6 +14,7 @@ the three defense layers:
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -131,6 +132,70 @@ class TestFindValueMismatch:
 
     def test_unknown_candidate_accepts(self):
         assert find_value_mismatch("16nF", "C1", part_value="", part_description="") is None
+
+
+class TestCrossTypeMismatch:
+    """Cross-type rejection (issue #4128): a resistor request validated
+    against a capacitor description must reject, not accept as
+    "cannot validate"."""
+
+    def test_resistor_request_capacitor_description_rejected(self):
+        # The literal chorus v23 repro: 330R -> C1525 (a 100nF cap).
+        m = find_value_mismatch("330R", "R1", part_description=C1525.description)
+        assert m is not None
+        assert "100nF" in m.candidate_value
+        assert "different component type" in m.describe()
+
+    def test_resistor_request_synthetic_capacitor_rejected(self):
+        m = find_value_mismatch("330R", "R1", part_description="100nF X7R ±10% 0402 Capacitor")
+        assert m is not None
+        assert math.isnan(m.candidate_si)
+
+    def test_capacitor_request_resistor_description_rejected(self):
+        m = find_value_mismatch("16nF", "C10", part_description="62kΩ ±1% 0402 Resistor")
+        assert m is not None
+        assert "62k" in m.candidate_value or "62" in m.candidate_value
+
+    def test_capacitor_request_inductor_description_rejected(self):
+        m = find_value_mismatch("16nF", "C10", part_description="10uH ±20% 0805 Inductor")
+        assert m is not None
+        assert math.isnan(m.candidate_si)
+
+    def test_no_units_anywhere_stays_permissive(self):
+        # Genuine cannot-validate: description carries no unit tokens at
+        # all -> accept (unchanged behavior).
+        assert (
+            find_value_mismatch("330R", "R1", part_description="SOT-23 general purpose part")
+            is None
+        )
+
+    def test_same_type_description_not_treated_as_foreign(self):
+        # A resistor description validated against a resistor request:
+        # the ohm extractor handles it directly; not a cross-type reject.
+        assert find_value_mismatch("10k", "R1", part_description="10kΩ ±1% 0402") is None
+
+    def test_mixed_unit_description_does_not_false_reject(self):
+        # A plausible mixed-unit (RC-network-style) description that
+        # carries BOTH the request's own unit (Ω) and a foreign unit (F):
+        # the request's own unit is present, so this is a same-type
+        # comparison, NOT a cross-type reject.  330R matches "330Ω".
+        assert (
+            find_value_mismatch(
+                "330R",
+                "R1",
+                part_description="RC filter network 330Ω 100nF integrated 0402",
+            )
+            is None
+        )
+
+    def test_ambiguous_multi_foreign_description_stays_permissive(self):
+        # A resistor request whose description contains TWO foreign types
+        # (F and H) but not the request's own (Ω) is ambiguous -> stay
+        # permissive rather than guess which one dominates.
+        assert (
+            find_value_mismatch("330R", "R1", part_description="LC module 100nF 10uH combined 0805")
+            is None
+        )
 
 
 class TestMpnCodeFallback:
