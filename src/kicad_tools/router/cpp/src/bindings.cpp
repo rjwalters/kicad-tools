@@ -38,7 +38,11 @@ NB_MODULE(router_cpp, m) {
         // ``unmark_segment`` / ``unmark_via`` so rip-up restores static
         // blockage instead of erasing it.
         .def_rw("static_blocked", &GridCell::static_blocked)
-        .def_rw("avoidance_cost", &GridCell::avoidance_cost);
+        .def_rw("avoidance_cost", &GridCell::avoidance_cost)
+        // Issue #4071: per-cell corridor-reservation owner set count
+        // (read-only surface for parity tests; the owner nets are written
+        // via ``Grid3D::reserve_cell`` / read via ``is_reserved_for``).
+        .def_ro("reserved_count", &GridCell::reserved_count);
 
     // DesignRules struct
     nb::class_<DesignRules>(m, "DesignRules")
@@ -54,7 +58,9 @@ NB_MODULE(router_cpp, m) {
         .def_rw("cost_via", &DesignRules::cost_via)
         .def_rw("cost_congestion", &DesignRules::cost_congestion)
         .def_rw("congestion_threshold", &DesignRules::congestion_threshold)
-        .def_rw("min_drill_clearance", &DesignRules::min_drill_clearance);
+        .def_rw("min_drill_clearance", &DesignRules::min_drill_clearance)
+        // Issue #4071: soft corridor-attractor bonus (Python default 3.0).
+        .def_rw("cost_corridor_attractor", &DesignRules::cost_corridor_attractor);
 
     // ValidationResult struct (Issue #2439)
     nb::class_<ValidationResult>(m, "ValidationResult")
@@ -186,6 +192,18 @@ NB_MODULE(router_cpp, m) {
              "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "clearance_cells"_a)
         .def("unmark_via", &Grid3D::unmark_via,
              "x"_a, "y"_a, "net"_a, "radius_cells"_a)
+        // Issue #4071: corridor-reservation write/read API.  Mirrors
+        // Python ``RoutingGrid.reserve_corridor_cells`` (per-cell),
+        // ``is_reserved_for``, ``clear_corridor_reservations``, and
+        // ``reserved_cell_count``.  ``mark_via`` and the A* cost loop
+        // honour these reservations (keep-out + attractor).
+        .def("reserve_cell", &Grid3D::reserve_cell,
+             "x"_a, "y"_a, "layer"_a, "net_ids"_a)
+        .def("clear_reservations", &Grid3D::clear_reservations)
+        .def("reserved_cell_count", &Grid3D::reserved_cell_count)
+        .def("is_reserved_for", &Grid3D::is_reserved_for,
+             "x"_a, "y"_a, "layer"_a, "net"_a)
+        .def("has_reservations", &Grid3D::has_reservations)
         // DRC avoidance feedback
         .def("boost_region_cost", &Grid3D::boost_region_cost,
              "center_x"_a, "center_y"_a, "layer"_a, "radius_cells"_a, "amount"_a)

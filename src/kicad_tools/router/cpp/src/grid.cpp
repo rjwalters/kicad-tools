@@ -123,31 +123,46 @@ void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
     }
 }
 
-// Issue #2709: Python-only reservation contract.
+// Issue #4071: corridor-reservation keep-out (ported from Python).
 //
 // The Python sibling ``RoutingGrid._mark_via`` (src/kicad_tools/router/grid.py)
 // consults a ``_reserved_for_nets`` map (introduced by Issue #2677 / PR #2686)
 // to skip cells reserved for paired-escape continuation corridors when the
-// via's net is not in the reservation owner set.  This C++ implementation
-// deliberately omits that check because the escape phase is Python-grid-only
-// today: ``EscapeRouter`` calls ``Grid.mark_route`` / ``Grid._mark_via``
-// directly and never reaches this C++ ``mark_via`` during the paired pre-pass
-// when reservations matter.
+// via's net is not in the reservation owner set.  Issue #2709 originally left
+// this C++ implementation WITHOUT that check (a documented deliberate omission
+// with a contract-locking test in ``tests/test_grid_cpp_parity.py``), because
+// no reservation-writing consumer reached the C++ ``mark_via`` at the time.
 //
-// If/when escape routing moves into C++ (likely with Epic #2661 Phase 2's
-// group-of-pairs serpentine), this method MUST grow an equivalent
-// reservation map + skip check or board 06's USB3_TX1+/- escape fix --
-// and DDR-style boards using the same primitive -- will silently regress.
-// A contract-locking regression test lives in
-// ``tests/test_grid_cpp_parity.py`` and is expected to fail (deliberately,
-// signalling the port is needed) at that point.
+// That changed: #2983's inner-corner lane reservations (unconditional on
+// qualifying match groups) and #4053/PR #4070's bundle-river via-hop
+// reservations both write reservations that the production C++ backend was
+// silently ignoring.  Issue #4071 ports the semantics: a cell reserved for a
+// net set that EXCLUDES ``net`` is SKIPPED (the via halo does not claim/block
+// it), so a foreign-net through-hole via cannot colonise a reserved corridor.
+// Cells reserved for a set that INCLUDES ``net`` are treated as ordinary
+// blockable cells (the owning net may still use its own reservation).  When
+// no cell is reserved (``has_reservations_ == false``) the whole check is
+// skipped, preserving byte-identical behaviour on boards without reservations.
 void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
+    const bool check_reservations = has_reservations_;
     for (int layer = 0; layer < layers_; ++layer) {
         for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
             for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
                 int nx = x + dx, ny = y + dy;
                 if (is_valid(nx, ny, layer)) {
                     auto& cell = at(nx, ny, layer);
+                    // Issue #4071: skip cells reserved for a net set that
+                    // excludes ``net`` (matches Python ``_mark_via``).
+                    if (check_reservations && cell.reserved_count > 0) {
+                        bool owned = false;
+                        for (int i = 0; i < cell.reserved_count; ++i) {
+                            if (cell.reserved_nets[i] == net) {
+                                owned = true;
+                                break;
+                            }
+                        }
+                        if (!owned) continue;
+                    }
                     if (!cell.blocked) {
                         update_congestion(nx, ny, layer, 1);
                         cell.net = net;
@@ -157,6 +172,48 @@ void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
             }
         }
     }
+}
+
+// Issue #4071: corridor-reservation write API (mirrors Python
+// ``RoutingGrid.reserve_corridor_cells`` on a per-cell basis).  Owner
+// sets larger than ``RESERVED_NETS_CAP`` are truncated; overlapping
+// reservations REPLACE (last-writer-wins).
+void Grid3D::reserve_cell(int x, int y, int layer,
+                          const std::vector<int>& net_ids) {
+    if (!is_valid(x, y, layer)) return;
+    auto& cell = at(x, y, layer);
+    int n = 0;
+    for (int nid : net_ids) {
+        if (n >= RESERVED_NETS_CAP) break;
+        cell.reserved_nets[n++] = nid;
+    }
+    // Zero the unused slots so a shrinking re-reservation cannot leave a
+    // stale owner behind (defence-in-depth; reads use reserved_count).
+    for (int i = n; i < RESERVED_NETS_CAP; ++i) {
+        cell.reserved_nets[i] = 0;
+    }
+    cell.reserved_count = static_cast<int8_t>(n);
+    if (n > 0) has_reservations_ = true;
+}
+
+void Grid3D::clear_reservations() {
+    for (auto& cell : cells_) {
+        if (cell.reserved_count > 0) {
+            cell.reserved_count = 0;
+            for (int i = 0; i < RESERVED_NETS_CAP; ++i) {
+                cell.reserved_nets[i] = 0;
+            }
+        }
+    }
+    has_reservations_ = false;
+}
+
+int Grid3D::reserved_cell_count() const {
+    int count = 0;
+    for (const auto& cell : cells_) {
+        if (cell.reserved_count > 0) ++count;
+    }
+    return count;
 }
 
 void Grid3D::unmark_segment(int x1, int y1, int x2, int y2, int layer, int net,

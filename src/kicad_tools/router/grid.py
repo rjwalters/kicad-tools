@@ -4100,24 +4100,23 @@ class RoutingGrid:
         non-matching nets are blocked as normal on layers WHERE the cell
         is not reserved, and skipped on layers where it IS reserved.
 
-        Issue #2709 (Python-only reservation contract): the corridor
-        reservation map (``self._reserved_for_nets``) is consulted ONLY by
-        this Python implementation.  The C++ sibling
-        ``router::Grid3D::mark_via`` (``cpp/src/grid.cpp``) deliberately
-        ignores reservations because the escape phase is Python-grid-only
-        today -- ``EscapeRouter`` calls ``Grid.mark_route`` /
-        ``Grid._mark_via`` directly and never routes via marking through
-        the C++ backend during the paired pre-pass.  The C++ grid does
-        receive partner-net vias indirectly (via
-        ``RoutingCore._mark_route_on_cpp_grid`` after the escape pass),
-        but that path runs AFTER the corridor reservation has served its
-        purpose, so cell-block parity does not matter for board 06's
-        USB3_TX1+/- fix today.  If/when the escape pass moves into C++
-        (likely tied to Epic #2661 Phase 2's group-of-pairs serpentine),
-        the C++ ``mark_via`` MUST grow an equivalent reservation check
-        or board 06 (and DDR-style boards using the same primitive) will
-        regress.  See ``tests/test_grid_cpp_parity.py`` for a regression
-        test that pins the current contract.
+        Issue #4071 (ported reservation contract): the corridor
+        reservation map (``self._reserved_for_nets``) is now honoured on
+        BOTH grids.  The C++ sibling ``router::Grid3D::mark_via``
+        (``cpp/src/grid.cpp``) consults a per-cell owner set mirrored from
+        ``_reserved_for_nets`` via ``reserve_corridor_cells`` (which
+        forwards each reservation to the attached C++ grid) and
+        ``CppGrid.from_routing_grid`` (bulk-copy at construction).  This
+        was previously a deliberate Python-only omission (Issue #2709):
+        the C++ grid had no reservation-writing consumer, so the port was
+        deferred behind a contract-locking test.  Once #2983's
+        unconditional inner-corner reservations and #4053/PR #4070's
+        bundle-river reservations started writing through the production
+        C++ path, the gap became a live defect and #4071 ported the
+        keep-out (this method) plus the attractor (the A* cost loop) into
+        the C++ backend.  See ``tests/test_grid_cpp_parity.py`` for the
+        Python-vs-C++ parity tests that now assert AGREEMENT (keep-out and
+        attractor) rather than the old divergence.
 
         Args:
             via: The via to mark.
@@ -4203,10 +4202,22 @@ class RoutingGrid:
         if not owners:
             raise ValueError("reserve_corridor_cells: net_ids must not be empty")
 
+        # Issue #4071: mirror the reservation onto the C++ grid when one is
+        # attached.  ``EscapeRouter``'s reservation helpers run during
+        # net-order preparation, which can be AFTER ``CppGrid.from_routing_grid``
+        # has already built the C++ mirror (the bulk copy there only sees
+        # reservations that exist at construction time).  Without this
+        # incremental mirror, #2983's inner-corner and #4053's bundle-river
+        # reservations would be invisible to the production C++ A*.
+        cpp_grid = getattr(self, "_cpp_grid", None)
+        owner_list = [int(n) for n in owners]
+
         count = 0
         for x, y in cells:
             if 0 <= x < self.cols and 0 <= y < self.rows:
                 self._reserved_for_nets[(layer_idx, y, x)] = owners
+                if cpp_grid is not None:
+                    cpp_grid._impl.reserve_cell(x, y, layer_idx, owner_list)
                 count += 1
         return count
 
@@ -4219,6 +4230,10 @@ class RoutingGrid:
         escape pass has completed.
         """
         self._reserved_for_nets.clear()
+        # Issue #4071: keep the attached C++ grid in lock-step.
+        cpp_grid = getattr(self, "_cpp_grid", None)
+        if cpp_grid is not None:
+            cpp_grid._impl.clear_reservations()
 
     def reserved_cell_count(self) -> int:
         """Return the number of currently reserved cells (instrumentation).

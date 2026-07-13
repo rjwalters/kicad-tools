@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 15
+_REQUIRED_CPP_BUILD_VERSION = 16
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -596,6 +596,17 @@ class CppGrid:
                             bool(py_pad_blocked[layer, y, x]),
                         )
 
+        # Issue #4071: marshal corridor reservations into the C++ grid.
+        # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner
+        # net frozenset, written by ``EscapeRouter``'s reservation helpers
+        # (#2677 pair-continuation, #2983 inner-corner lane, #4053 bundle
+        # river) BEFORE routing begins.  The C++ ``Grid3D::mark_via`` keep-out
+        # skip and the A* corridor attractor both read the per-cell owner set,
+        # so the reservations must be mirrored across the boundary.  Empty
+        # dict => zero iterations (byte-identical to pre-#4071 boards).
+        for (layer_idx, y, x), owners in grid._reserved_for_nets.items():
+            cpp_grid._impl.reserve_cell(x, y, layer_idx, [int(n) for n in owners])
+
         # Issue #2439: Populate pad data for C++ geometric validation.
         # Pre-compute per-component clearance overrides and FNV-1a ref hashes
         # so the C++ side never calls back into Python during validation.
@@ -852,6 +863,8 @@ class CppPathfinder:
         cpp_rules.cost_via = rules.cost_via
         cpp_rules.cost_congestion = rules.cost_congestion
         cpp_rules.congestion_threshold = rules.congestion_threshold
+        # Issue #4071: soft corridor-attractor bonus (default 3.0).
+        cpp_rules.cost_corridor_attractor = rules.cost_corridor_attractor
 
         self._impl = router_cpp.Pathfinder(grid._impl, cpp_rules, diagonal_routing)
         self._grid = grid
@@ -2964,6 +2977,13 @@ class CppCoupledPathfinder:
         cpp_rules.cost_straight = float(rules.cost_straight)
         cpp_rules.cost_turn = float(rules.cost_turn)
         cpp_rules.cost_via = float(rules.cost_via)
+        # Issue #4071: marshal the attractor bonus for struct consistency.
+        # NOTE: the coupled joint-state A* (#4069) does not yet consume the
+        # corridor attractor -- porting it into ``coupled_pathfinder.cpp``'s
+        # cost loop is deferred (single-ended ``Pathfinder`` is the consumer
+        # this issue wires up).  Marshalled here so a future coupled-attractor
+        # port needs no additional plumbing.
+        cpp_rules.cost_corridor_attractor = float(rules.cost_corridor_attractor)
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
             cpp_rules,
