@@ -131,6 +131,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Don't prefer JLCPCB Basic parts",
     )
 
+    # sync-catalog subcommand
+    sync_parser = subparsers.add_parser(
+        "sync-catalog",
+        help="Download the offline jlcparts catalog for offline/rate-limited lookups",
+    )
+    sync_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download even if a catalog already exists",
+    )
+    sync_parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Override dataset base URL (advanced/testing)",
+    )
+
     # cache subcommand
     cache_parser = subparsers.add_parser("cache", help="Cache management")
     cache_subparsers = cache_parser.add_subparsers(dest="cache_action", help="Cache commands")
@@ -157,7 +173,33 @@ def main(argv: list[str] | None = None) -> int:
         return _suggest(args)
     elif args.action == "cache":
         return _cache(args)
+    elif args.action == "sync-catalog":
+        return _sync_catalog(args)
 
+    return 0
+
+
+def _sync_catalog(args) -> int:
+    """Handle the sync-catalog command."""
+    try:
+        from ..parts.jlcparts_catalog import JLCPARTS_DATA_BASE, sync_catalog
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
+        return 1
+
+    base_url = args.base_url or JLCPARTS_DATA_BASE
+    try:
+        dest = sync_catalog(base_url=base_url, force=args.force, progress=True)
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: failed to sync jlcparts catalog: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Offline catalog available at: {dest}")
     return 0
 
 

@@ -14,6 +14,7 @@ import random
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,7 @@ from .models import (
 
 if TYPE_CHECKING:
     from ..schema.bom import BOMItem
+    from .jlcparts_catalog import JlcpartsCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,9 @@ logger = logging.getLogger(__name__)
 PARTS_INSTALL_HINT = (
     "The 'requests' library is required for LCSC API access. "
     "Install it with the 'parts' extra: uv sync --extra parts "
-    '(or: pip install "kicad-tools[parts]").'
+    '(or: pip install "kicad-tools[parts]"). '
+    "Alternatively, sync the offline jlcparts catalog with "
+    "`kct parts sync-catalog` to look up parts without the live API."
 )
 
 
@@ -55,7 +59,7 @@ class LCSCForbiddenError(Exception):
     """
 
 
-class LCSCDependencyMissingError(Exception):
+class LCSCDependencyMissingError(ImportError):
     """Raised when the optional ``parts`` extra (``requests``) is absent.
 
     This is a *capability* failure -- the requested LCSC matcher cannot run
@@ -64,7 +68,15 @@ class LCSCDependencyMissingError(Exception):
     first occurrence and surface it as a hard, actionable failure instead of
     degrading silently to an empty ``LCSC Part #`` column (issue #4104).
 
-    The message is the canonical :data:`PARTS_INSTALL_HINT`.
+    Subclasses :class:`ImportError` so that call sites which historically
+    caught / expected the bare ``ImportError`` (e.g. the live-API-only
+    ``lookup`` no-fallback path, issue #4108) keep working, while newer
+    callers can catch the more specific type. ``suggest_for_component``'s
+    ``isinstance(e, ImportError)`` promotion therefore still fires whether the
+    underlying layer raised a bare ``ImportError`` or this subclass.
+
+    The message is the canonical :data:`PARTS_INSTALL_HINT`, which now also
+    points at the offline ``kct parts sync-catalog`` alternative (issue #4108).
     """
 
 
@@ -112,14 +124,19 @@ PART_LOOKUP_URL = (
 SEARCH_URL = f"{JLCPCB_API_BASE}/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentList"
 
 
+def _requests_installed() -> bool:
+    """Return True if the optional ``requests`` dependency is importable."""
+    import importlib.util
+
+    return importlib.util.find_spec("requests") is not None
+
+
 def _requires_requests(func):
     """Decorator to check if requests is available."""
 
     def wrapper(*args, **kwargs):
-        try:
-            import requests  # noqa: F401
-        except ImportError as exc:
-            raise ImportError(PARTS_INSTALL_HINT) from exc
+        if not _requests_installed():
+            raise LCSCDependencyMissingError(PARTS_INSTALL_HINT)
         return func(*args, **kwargs)
 
     return wrapper
@@ -266,6 +283,8 @@ class LCSCClient:
         rate_limit: float = 3.0,
         max_retries: int = 3,
         base_retry_delay: float = 2.0,
+        use_local_catalog: bool = True,
+        catalog_path: Path | None = None,
     ):
         """
         Initialize the client.
@@ -278,6 +297,13 @@ class LCSCClient:
                 Set to 0 to disable rate limiting.
             max_retries: Maximum retry attempts on rate limit errors (default: 3)
             base_retry_delay: Initial delay in seconds before retry (default: 2.0)
+            use_local_catalog: Whether to fall back to the offline jlcparts
+                catalog (``kct parts sync-catalog``) when the live API is
+                unavailable. If the catalog file does not exist this is a
+                silent no-op, so the live-API path is byte-for-byte unchanged
+                when no catalog has been synced (default: True).
+            catalog_path: Override path to the local jlcparts SQLite catalog
+                (default: ``~/.cache/kicad-tools/jlcparts.sqlite3``).
         """
         self.cache = cache if cache is not None else PartsCache() if use_cache else None
         self.timeout = timeout
@@ -286,6 +312,24 @@ class LCSCClient:
         self._max_retries = max_retries
         self._base_retry_delay = base_retry_delay
         self._api_forbidden = False
+        self._use_local_catalog = use_local_catalog
+        self._catalog_path = catalog_path
+        self._catalog: JlcpartsCatalog | None = None
+
+    def _get_catalog(self) -> JlcpartsCatalog | None:
+        """Return the lazily-constructed offline catalog reader, or None.
+
+        Returns ``None`` when the offline fallback is disabled. The reader
+        itself is a silent no-op when the backing catalog file is absent, so
+        constructing it has no effect on the live-API path.
+        """
+        if not self._use_local_catalog:
+            return None
+        if self._catalog is None:
+            from .jlcparts_catalog import JlcpartsCatalog
+
+            self._catalog = JlcpartsCatalog(self._catalog_path)
+        return self._catalog
 
     def _get_session(self):
         """Get or create requests session."""
@@ -391,10 +435,15 @@ class LCSCClient:
             raise last_exception
         return None
 
-    @_requires_requests
     def lookup(self, lcsc_part: str, bypass_cache: bool = False) -> Part | None:
         """
         Look up a single part by LCSC number.
+
+        Resolution order: local response cache -> live JLCPCB API -> offline
+        jlcparts catalog. The catalog is only consulted when the live API is
+        unavailable (403 circuit breaker, network error, or the ``requests``
+        extra is not installed) and a synced catalog exists; when no catalog
+        is present the live-API path is byte-for-byte unchanged.
 
         Args:
             lcsc_part: LCSC part number (e.g., "C123456")
@@ -402,6 +451,12 @@ class LCSCClient:
 
         Returns:
             Part if found, None otherwise
+
+        Raises:
+            LCSCDependencyMissingError: If the ``requests`` extra is missing
+                *and* no offline catalog is available. Subclasses
+                ``ImportError``, so callers that historically caught the bare
+                ``ImportError`` (no offline fallback configured) still work.
         """
         # Normalize part number
         lcsc_part = lcsc_part.upper()
@@ -415,15 +470,38 @@ class LCSCClient:
                 logger.debug(f"Cache hit for {lcsc_part}")
                 return cached
 
-        # Fetch from API
-        try:
-            part = self._fetch_part(lcsc_part)
-            if part and self.cache:
-                self.cache.put(part)
-            return part
-        except Exception as e:
-            logger.error(f"Failed to lookup {lcsc_part}: {e}")
-            return None
+        catalog = self._get_catalog()
+
+        # If requests is unavailable, the live API cannot be reached. Preserve
+        # the historical (Import)Error only when there is no offline fallback.
+        if not _requests_installed():
+            if catalog is None or not catalog.available:
+                raise LCSCDependencyMissingError(PARTS_INSTALL_HINT)
+        else:
+            # Fetch from live API (authoritative for freshness/pricing).
+            part: Part | None = None
+            try:
+                part = self._fetch_part(lcsc_part)
+            except Exception as e:
+                # 403 circuit breaker (LCSCForbiddenError) or other API failure
+                # -- fall through to the offline catalog rather than giving up.
+                logger.warning(f"Live API lookup failed for {lcsc_part}: {e}")
+
+            if part is not None:
+                if self.cache:
+                    self.cache.put(part)
+                return part
+
+        # Live API unavailable / miss -- try the offline jlcparts catalog.
+        if catalog is not None:
+            catalog_part = catalog.lookup(lcsc_part)
+            if catalog_part is not None:
+                logger.debug(f"Offline catalog hit for {lcsc_part}")
+                if self.cache:
+                    self.cache.put(catalog_part)
+                return catalog_part
+
+        return None
 
     def _fetch_part(self, lcsc_part: str) -> Part | None:
         """Fetch part from JLCPCB API."""
@@ -564,7 +642,6 @@ class LCSCClient:
             page_size=page_size,
         )
 
-    @_requires_requests
     def lookup_many(
         self,
         lcsc_parts: list[str],
@@ -573,7 +650,9 @@ class LCSCClient:
         """
         Look up multiple parts.
 
-        Uses cache where possible, fetches missing parts from API.
+        Uses cache where possible, fetches missing parts from the live API,
+        then fills any still-missing parts from the offline jlcparts catalog
+        (see :meth:`lookup` for the full resolution order).
 
         Args:
             lcsc_parts: List of LCSC part numbers
@@ -581,6 +660,11 @@ class LCSCClient:
 
         Returns:
             Dict mapping part numbers to Parts
+
+        Raises:
+            LCSCDependencyMissingError: If the ``requests`` extra is missing
+                *and* no offline catalog is available. Subclasses
+                ``ImportError`` for backward compatibility.
         """
         if not lcsc_parts:
             return {}
@@ -596,10 +680,30 @@ class LCSCClient:
             result.update(cached)
             parts = [p for p in parts if p not in cached]
 
-        # Fetch remaining from API
-        for part_num in parts:
-            part = self._fetch_part(part_num)
-            if part:
+        catalog = self._get_catalog()
+
+        if not _requests_installed():
+            if catalog is None or not catalog.available:
+                raise LCSCDependencyMissingError(PARTS_INSTALL_HINT)
+        else:
+            # Fetch remaining from the live API (authoritative when reachable).
+            for part_num in parts:
+                try:
+                    part = self._fetch_part(part_num)
+                except Exception as e:
+                    # 403 circuit breaker or other API failure -- stop hammering
+                    # the API and fall back to the offline catalog for the rest.
+                    logger.warning(f"Live API lookup failed for {part_num}: {e}")
+                    break
+                if part:
+                    result[part_num] = part
+                    if self.cache:
+                        self.cache.put(part)
+
+        # Fill any still-missing parts from the offline jlcparts catalog.
+        missing = [p for p in parts if p not in result]
+        if missing and catalog is not None:
+            for part_num, part in catalog.lookup_many(missing).items():
                 result[part_num] = part
                 if self.cache:
                     self.cache.put(part)

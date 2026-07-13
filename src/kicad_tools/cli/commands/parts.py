@@ -13,7 +13,7 @@ def run_parts_command(args) -> int:
     """Handle parts subcommands."""
     if not args.parts_command:
         print("Usage: kicad-tools parts <command> [options]")
-        print("Commands: lookup, search, availability, cache, suggest")
+        print("Commands: lookup, search, availability, cache, suggest, sync-catalog")
         return 1
 
     from ..parts_cmd import main as parts_main
@@ -52,6 +52,14 @@ def run_parts_command(args) -> int:
 
     elif args.parts_command == "cache":
         sub_argv = ["cache", args.cache_action]
+        return parts_main(sub_argv) or 0
+
+    elif args.parts_command == "sync-catalog":
+        sub_argv = ["sync-catalog"]
+        if args.force:
+            sub_argv.append("--force")
+        if args.base_url:
+            sub_argv.extend(["--base-url", args.base_url])
         return parts_main(sub_argv) or 0
 
     elif args.parts_command == "suggest":

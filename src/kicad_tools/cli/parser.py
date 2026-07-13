@@ -4039,6 +4039,18 @@ def _add_parts_parser(subparsers) -> None:
         help="Cache action (default: stats)",
     )
 
+    # parts sync-catalog
+    parts_sync = parts_subparsers.add_parser(
+        "sync-catalog",
+        help="Download the offline jlcparts catalog for offline/rate-limited lookups",
+    )
+    parts_sync.add_argument(
+        "--force", action="store_true", help="Re-download even if a catalog already exists"
+    )
+    parts_sync.add_argument(
+        "--base-url", default=None, help="Override dataset base URL (advanced/testing)"
+    )
+
     # parts suggest
     parts_suggest = parts_subparsers.add_parser(
         "suggest", help="Suggest LCSC part numbers for components without them"
