@@ -285,7 +285,11 @@ def compare_copper_netlist(sch_path: str | Path, pcb_path: str | Path) -> Copper
     with :func:`compare_partitions`.
 
     Args:
-        sch_path: Path to a ``.kicad_sch`` (root sheet for hierarchy).
+        sch_path: Path to a root ``.kicad_sch``.  The full sheet
+            hierarchy is walked via :func:`board_lvs._schematic_pin_to_net`
+            — every ``(sheet ...)`` sub-sheet's pins are bound, not just
+            the root sheet (issue #4099) — so LVS is no longer vacuous on
+            hierarchically-organized designs.
         pcb_path: Path to a routed ``.kicad_pcb``.
 
     Returns:

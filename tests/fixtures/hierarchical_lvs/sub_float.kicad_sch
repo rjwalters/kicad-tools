@@ -1,0 +1,72 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "hlvs-sub-float-uuid")
+	(paper "A4")
+	(title_block
+		(title "Hierarchical LVS - floating-pin sub-sheet")
+		(date "2025-01-01")
+		(rev "1.0")
+	)
+	(lib_symbols
+		(symbol "Device:R"
+			(symbol "R_0_1"
+				(rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none)))
+			)
+			(symbol "R_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+			)
+		)
+		(symbol "power:GND"
+			(symbol "GND_0_1"
+				(polyline (pts (xy 0 0) (xy 0 -1.27)) (stroke (width 0)) (fill (type none)))
+			)
+			(symbol "GND_1_1"
+				(pin power_in line (at 0 0 270) (length 0) (name "GND") (number "1"))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 100 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "hlvs-r3-uuid")
+		(property "Reference" "R3"
+			(at 102 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "0R"
+			(at 102 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 100 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "hlvs-r3-pin1"))
+		(pin "2" (uuid "hlvs-r3-pin2"))
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 100 60 0)
+		(unit 1)
+		(uuid "hlvs-float-gnd-uuid")
+		(property "Reference" "#PWR05"
+			(at 100 66 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Value" "GND"
+			(at 100 64 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "hlvs-float-gnd-pin1"))
+	)
+	(wire (pts (xy 100 53.81) (xy 100 60))
+		(stroke (width 0) (type default))
+		(uuid "hlvs-float-wire-gnd")
+	)
+)
