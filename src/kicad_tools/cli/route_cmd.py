@@ -9406,6 +9406,13 @@ def main(argv: list[str] | None = None) -> int:
     # Configure differential pair routing if enabled
     diffpair_config = None
     diffpair_warnings = []
+    # Issue #4095: names of diff pairs that budget-exited coupled routing
+    # and fell back to single-ended.  Accumulated from
+    # ``router.diffpair_budget_exit_pair_names()`` after each
+    # ``--differential-pairs`` dispatch so the report site can warn the
+    # operator (fallback can regress completion / DRC on bundle-dense
+    # boards; see #4095).  De-duplicated at report time.
+    diffpair_budget_exit_pairs: list[str] = []
     if args.differential_pairs:
         diffpair_config = DifferentialPairConfig(
             enabled=True,
@@ -9542,7 +9549,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Define routing function for profiling
         def do_routing():
-            nonlocal diffpair_warnings, relaxed_nets_report
+            nonlocal diffpair_warnings, relaxed_nets_report, diffpair_budget_exit_pairs
 
             # Adaptive multi-resolution routing (when --grid auto selects it)
             if multi_res_plan is not None and multi_res_plan.is_multi_resolution:
@@ -9625,6 +9632,9 @@ def main(argv: list[str] | None = None) -> int:
                             timeout=_budgeted_timeout(args),
                         )
                         diffpair_warnings.extend(dp_warnings)
+                        # Issue #4095: surface any coupled pairs that
+                        # budget-exited and fell back to single-ended.
+                        diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                         return result
                     if args.strategy == "evolutionary":
                         return router.route_all_evolutionary(
@@ -9707,6 +9717,10 @@ def main(argv: list[str] | None = None) -> int:
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     )
                     diffpair_warnings.extend(dp_warnings)
+                    # Issue #4095: the escape-composed path delegates to the
+                    # same diff-pair orchestrator; surface its budget-exit
+                    # fallback too.
+                    diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                     return routes
                 return router.route_with_escape(
                     use_negotiated=(args.strategy == "negotiated"),
@@ -9784,6 +9798,9 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=_budgeted_timeout(args),
                 )
                 diffpair_warnings.extend(dp_warnings)
+                # Issue #4095: surface coupled pairs that budget-exited to
+                # single-ended on the negotiated dispatch path.
+                diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                 return result
             elif args.strategy == "negotiated":
                 return router.route_all_negotiated(
@@ -9823,6 +9840,9 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=_budgeted_timeout(args),
                 )
                 diffpair_warnings.extend(dp_warnings)
+                # Issue #4095: surface coupled pairs that budget-exited to
+                # single-ended on the basic dispatch path.
+                diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                 return result
             elif args.bus_routing and args.strategy == "basic":
                 return router.route_all_with_buses(bus_config)
@@ -10217,6 +10237,38 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n--- Differential Pair Warnings ({len(diffpair_warnings)}) ---")
         for warning in diffpair_warnings:
             print(f"  {warning}")
+
+    # Issue #4095: report diff pairs that budget-exited coupled routing and
+    # fell back to single-ended.  Printed unconditionally (only gated on
+    # ``not quiet``, mirroring the length-mismatch block above) so the
+    # regression risk is never accidentally hidden behind --verbose.  On
+    # bundle-dense boards the coupled attempts can regress completion / DRC
+    # vs. a plain single-ended route (board 07: 34 vs 13 DRC errors, 22/31
+    # vs 26/31 nets; epic #4049 closeout), so the operator is told which
+    # pairs fell back and advised to compare a single-ended re-route.
+    if diffpair_budget_exit_pairs and not quiet:
+        # De-duplicate while preserving order (a pair can appear once per
+        # dispatch; the escape path can re-enter the orchestrator).
+        _seen: set[str] = set()
+        _exit_pairs: list[str] = []
+        for name in diffpair_budget_exit_pairs:
+            if name not in _seen:
+                _seen.add(name)
+                _exit_pairs.append(name)
+        print("\n--- Differential Pair Budget-Exit Warning ---")
+        print(
+            f"  {len(_exit_pairs)} pair(s) budget-exited coupled routing and "
+            f"fell back to single-ended: {', '.join(_exit_pairs)}"
+        )
+        print(
+            "  WARNING: --differential-pairs can regress completion/DRC vs. a "
+            "plain single-ended route on bundle-dense boards (see #4095)."
+        )
+        print(
+            "  Consider re-routing without --differential-pairs and comparing "
+            "`kct check` results if this board is dense with matched-length "
+            "bundles."
+        )
 
     # Report nets that needed clearance relaxation (--progressive-clearance mode)
     if relaxed_nets_report and not quiet:
