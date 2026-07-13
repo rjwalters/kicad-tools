@@ -62,11 +62,20 @@ def test_backref_restored_when_from_routing_grid_raises_after_hijack(monkeypatch
     assert getattr(pf.grid, "_cpp_grid", None) is None
 
     hijacked = _Sentinel()
+    hijack_reached = {"value": False}
 
-    def _boom(_grid):
+    # NOTE: ``_boom`` MUST take ``(cls, _grid)``.  ``from_routing_grid`` is a
+    # classmethod, so ``CppGrid.from_routing_grid(self.grid)`` injects ``cls``
+    # as the first positional argument.  A one-param ``_boom(_grid)`` would
+    # raise ``TypeError`` at the call boundary -- BEFORE the hijack line runs
+    # -- degenerating this into a raise-*before*-hijack case that the pre-fix
+    # code already handled (so the test would pass even without the fix).  See
+    # Issue #4077 / PR #4082 Judge feedback.
+    def _boom(cls, _grid):
         # Simulate cpp_backend.py:559: from_routing_grid reassigns the
         # Python grid's back-reference to the (partially-built) coupled grid...
         _grid._cpp_grid = hijacked
+        hijack_reached["value"] = True
         # ...then raises before finishing the copy (bulk cell copy / #4071
         # corridor-reservation marshalling on a malformed grid).
         raise RuntimeError("mid-copy failure after grid._cpp_grid was set")
@@ -75,6 +84,14 @@ def test_backref_restored_when_from_routing_grid_raises_after_hijack(monkeypatch
 
     impl = pf._get_cpp_coupled_impl()
 
+    # Guard: the mock body must have actually run past the hijack line.  If
+    # this is False the mock signature is wrong and the test is silently
+    # simulating raise-before-hijack (which the pre-fix code already handled),
+    # providing no protection for the mid-copy gap Issue #4077 targets.
+    assert hijack_reached["value"], (
+        "mock body did not reach the hijack line -- signature mismatch "
+        "(from_routing_grid is a classmethod; _boom must take (cls, _grid))"
+    )
     # Outer try/except routes the failure to the Python fallback.
     assert impl is None
     assert pf._use_cpp_coupled is False
@@ -93,15 +110,25 @@ def test_backref_restored_to_prior_value_when_previously_set(monkeypatch):
     pf.grid._cpp_grid = prior
 
     hijacked = _Sentinel()
+    hijack_reached = {"value": False}
 
-    def _boom(_grid):
+    # ``_boom`` MUST take ``(cls, _grid)`` -- see the note in
+    # ``test_backref_restored_when_from_routing_grid_raises_after_hijack``.
+    def _boom(cls, _grid):
         _grid._cpp_grid = hijacked
+        hijack_reached["value"] = True
         raise RuntimeError("mid-copy failure after grid._cpp_grid was set")
 
     monkeypatch.setattr(cpp_backend.CppGrid, "from_routing_grid", classmethod(_boom))
 
     impl = pf._get_cpp_coupled_impl()
 
+    # Guard: the mock body must have actually run past the hijack line so this
+    # genuinely exercises the raise-after-hijack (mid-copy) path.
+    assert hijack_reached["value"], (
+        "mock body did not reach the hijack line -- signature mismatch "
+        "(from_routing_grid is a classmethod; _boom must take (cls, _grid))"
+    )
     assert impl is None
     assert pf._use_cpp_coupled is False
     # Restored to the exact prior back-reference, not the hijacked partial grid.
