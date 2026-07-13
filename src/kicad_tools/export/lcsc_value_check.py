@@ -113,9 +113,16 @@ class ValueMismatch:
 
     def describe(self) -> str:
         """Human-readable one-line description."""
-        return (
+        base = (
             f"part value {self.candidate_value!r} does not match requested {self.requested_value!r}"
         )
+        # A NaN candidate SI marks a cross-type disagreement (e.g. a
+        # resistor request against a capacitor description, issue #4128):
+        # the two values are not numerically comparable, so flag the
+        # wrong component type explicitly.
+        if math.isnan(self.candidate_si):
+            return f"{base} (different component type)"
+        return base
 
 
 @dataclass(frozen=True)
@@ -361,16 +368,6 @@ def find_package_mismatch(
     )
 
 
-def _parse_requested(value: str, reference: str) -> tuple[float, ComponentType] | None:
-    """Parse the BOM-side requested value to (SI numeric, component type)."""
-    parsed = parse_component_value(value, reference)
-    if parsed.component_type not in _NUMERIC_TYPES:
-        return None
-    if parsed.numeric_value is None:
-        return None
-    return parsed.numeric_value, parsed.component_type
-
-
 def _extract_from_description(
     description: str, component_type: ComponentType
 ) -> tuple[float, str] | None:
@@ -426,6 +423,56 @@ def _extract_from_capacitor_mpn(text: str) -> tuple[float, str] | None:
     return farads, f"{human} (MPN code {m.group(1)}{m.group(2)})"
 
 
+def _description_dominant_type(
+    description: str, request_type: ComponentType
+) -> ComponentType | None:
+    """Detect a *foreign* component type dominating a free-text description.
+
+    Returns a :class:`ComponentType` other than ``request_type`` when the
+    description clearly parses as that type's primary value AND carries no
+    value token of ``request_type``'s own unit; otherwise ``None``.
+
+    This backstops the cross-type gap behind #3590/#3597 (issue #4128):
+    when a resistor-typed request (``330R``) is checked against a
+    capacitor description (``"100nF ... Capacitor"``), the ohm extractor
+    finds nothing -- previously read as "cannot validate, accept".  A
+    description that unambiguously states *another* component's value is
+    a different part, not an unvalidatable one, so it should reject.
+
+    The rule is deliberately conservative to avoid false rejects on
+    genuinely mixed-unit descriptions (RC networks, ferrite beads spec'd
+    in Ω-at-MHz, etc.):
+
+    - If the description matches ``request_type``'s own unit pattern, we
+      do NOT report a foreign type -- the same-type extractor already
+      handles it and any incidental foreign unit is not "dominant".
+    - Only when exactly one foreign numeric type's unit pattern matches
+      (and the request's own does not) is that type treated as dominant.
+      An ambiguous description matching two foreign types resolves to
+      ``None`` (cannot validate -- stay permissive).
+    """
+    if not description:
+        return None
+
+    request_pattern = _DESC_PATTERNS.get(request_type)
+    if request_pattern is not None and request_pattern.search(description):
+        # The description carries the request's own unit -- same-type
+        # comparison applies; do not treat any co-occurring unit as a
+        # dominating foreign type.
+        return None
+
+    foreign_types = [
+        ctype
+        for ctype, pattern in _DESC_PATTERNS.items()
+        if ctype is not request_type and pattern.search(description)
+    ]
+    if len(foreign_types) != 1:
+        # Zero foreign units -> genuinely cannot validate.
+        # Multiple foreign units -> ambiguous; stay permissive.
+        return None
+    return foreign_types[0]
+
+
 def find_value_mismatch(
     requested_value: str,
     reference: str,
@@ -450,10 +497,16 @@ def find_value_mismatch(
         A :class:`ValueMismatch` when both sides parse numerically and
         clearly disagree, otherwise ``None`` (match OR cannot validate).
     """
-    requested = _parse_requested(requested_value, reference)
-    if requested is None:
+    # Resolve the requested component type up front.  The type can be
+    # known even when the numeric value is not (e.g. "330R" parses as a
+    # RESISTOR with no SI value under the canonical parser) -- and the
+    # cross-type reject in issue #4128 only needs the type, since values
+    # of different types are not numerically comparable anyway.
+    parsed_request = parse_component_value(requested_value, reference)
+    if parsed_request.component_type not in _NUMERIC_TYPES:
         return None
-    requested_si, component_type = requested
+    component_type = parsed_request.component_type
+    requested_si: float | None = parsed_request.numeric_value
 
     candidate_si: float | None = None
     candidate_str = ""
@@ -482,7 +535,29 @@ def find_value_mismatch(
                 break
 
     if candidate_si is None:
+        # No same-type value found.  Before accepting as "cannot
+        # validate", check whether the description clearly states a
+        # *different* component type's value (issue #4128: a 330R
+        # resistor request validated against a "100nF ... Capacitor"
+        # description).  A dominating foreign unit means the candidate is
+        # a different part, so reject rather than accept.
+        foreign_type = _description_dominant_type(part_description, component_type)
+        if foreign_type is not None:
+            foreign = _extract_from_description(part_description, foreign_type)
+            candidate_str = foreign[1] if foreign is not None else foreign_type.value
+            return ValueMismatch(
+                requested_value=requested_value,
+                candidate_value=candidate_str,
+                requested_si=math.nan if requested_si is None else requested_si,
+                candidate_si=math.nan,
+            )
         return None  # cannot validate -- accept
+
+    # We have a same-type candidate value.  A numeric comparison needs a
+    # numeric request; if the request value did not parse numerically we
+    # cannot compare magnitudes -- accept (same type, unvalidatable).
+    if requested_si is None:
+        return None
 
     if math.isclose(requested_si, candidate_si, rel_tol=VALUE_REL_TOLERANCE):
         return None
