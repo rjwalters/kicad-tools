@@ -77,17 +77,70 @@ public:
     // Route marking with clearance buffer using Bresenham
     void mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                       int clearance_cells);
-    // Issue #2709: ``mark_via`` does NOT consult the corridor reservation
-    // map that Python's ``RoutingGrid._mark_via`` enforces (Issue #2677).
-    // Safe today because the escape phase never marks vias through the
-    // C++ backend; see ``cpp/src/grid.cpp`` for the full rationale and
-    // ``tests/test_grid_cpp_parity.py`` for the contract-locking test.
+    // Issue #4071: ``mark_via`` NOW consults the per-cell corridor
+    // reservation owner set (``GridCell::reserved_nets``), mirroring
+    // Python's ``RoutingGrid._mark_via`` (Issue #2677).  A cell reserved
+    // for a net set that EXCLUDES ``net`` is SKIPPED (the via halo does
+    // not claim/block it), so partner-net through-hole vias cannot
+    // colonise a reserved continuation corridor.  Cells reserved for a
+    // set that INCLUDES ``net`` are treated as ordinary blockable cells.
+    // Fast path: when no cell is reserved (``has_reservations_ == false``)
+    // the check is skipped entirely, preserving byte-identical behaviour.
+    // See ``cpp/src/grid.cpp`` and ``tests/test_grid_cpp_parity.py``.
     void mark_via(int x, int y, int net, int radius_cells);
 
     // Unmark route (rip-up)
     void unmark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                         int clearance_cells);
     void unmark_via(int x, int y, int net, int radius_cells);
+
+    // -----------------------------------------------------------------------
+    // Issue #4071: corridor-reservation API (mirrors
+    // ``RoutingGrid.reserve_corridor_cells`` / ``is_reserved_for`` /
+    // ``clear_corridor_reservations`` / ``reserved_cell_count``).
+    // -----------------------------------------------------------------------
+
+    // Reserve a single cell on ``layer`` for the given owner net set.
+    // Owner sets larger than ``RESERVED_NETS_CAP`` are truncated to the
+    // first K nets (documented ceiling; no current caller exceeds 2).
+    // Overlapping reservations REPLACE (last-writer-wins), matching the
+    // Python semantics.  A single reserved cell flips the grid-wide
+    // ``has_reservations_`` fast-path flag.
+    void reserve_cell(int x, int y, int layer,
+                      const std::vector<int>& net_ids);
+
+    // Clear every corridor reservation (owner sets + fast-path flag).
+    void clear_reservations();
+
+    // Number of cells with a non-empty owner set (instrumentation /
+    // parity tests, mirrors ``RoutingGrid.reserved_cell_count``).
+    int reserved_cell_count() const;
+
+    // True iff the cell is reserved AND ``net`` is in its owner set.
+    // Mirrors ``RoutingGrid.is_reserved_for``.  Inline for the A* cost
+    // loop and ``mark_via`` hot paths.
+    inline bool is_reserved_for(int x, int y, int layer, int net) const {
+        if (!has_reservations_) return false;
+        if (!is_valid(x, y, layer)) return false;
+        const auto& cell = at(x, y, layer);
+        for (int i = 0; i < cell.reserved_count; ++i) {
+            if (cell.reserved_nets[i] == net) return true;
+        }
+        return false;
+    }
+
+    // True iff ANY cell is currently reserved (grid-wide fast path).
+    inline bool has_reservations() const { return has_reservations_; }
+
+    // Issue #4071: soft corridor-attractor bonus for a single cell.
+    // Returns ``bonus`` when the cell is reserved for ``net``, else 0.0.
+    // Mirrors ``RoutingGrid.get_corridor_attractor_bonus``.  Inline for
+    // the A* cost loop.
+    inline float corridor_attractor_bonus(int x, int y, int layer, int net,
+                                          float bonus) const {
+        if (!has_reservations_ || bonus <= 0.0f) return 0.0f;
+        return is_reserved_for(x, y, layer, net) ? bonus : 0.0f;
+    }
 
     // Congestion tracking
     float get_congestion(int x, int y, int layer) const;
@@ -215,6 +268,11 @@ private:
     }
 
     std::vector<GridCell> cells_;  // Flat array for cache efficiency
+    // Issue #4071: grid-wide fast-path flag -- true once any cell has a
+    // non-empty reservation owner set.  ``mark_via`` and the A* cost loop
+    // skip the per-cell reservation read entirely when this is false, so
+    // boards without active reservations keep byte-identical behaviour.
+    bool has_reservations_ = false;
     int cols_, rows_, layers_;
     float resolution_;
     float origin_x_, origin_y_;

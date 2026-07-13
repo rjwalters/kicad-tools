@@ -2510,10 +2510,20 @@ class EscapeRouter:
         if not cells:
             return 0
 
+        # PR #4078 Path B: keep this #2983 inner-corner reservation Python-only
+        # (mirror_to_cpp=False).  Honouring it on the C++ backend (attractor +
+        # via keep-out) regresses board 07's fully-reversed DDR byte into
+        # copper shorts (DM0<->DQ7, ...): the attractor concentrates each
+        # single-net inner-corner lane while the via-only keep-out cannot fence
+        # off foreign LATERAL traces crossing the corridor.  #4053's DDR A/B
+        # showed honouring buys no reach here (10/11 either way), so gating C++
+        # off loses no measured board-07 capability.  Python behaviour is
+        # unchanged; #2677 pair-continuation (board 06) stays mirrored.
         count = self.grid.reserve_corridor_cells(
             layer_idx=target_idx,
             cells=cells,
             net_ids={net_id},
+            mirror_to_cpp=False,
         )
         if count > 0:
             self.byte_lane_corridor_reservations += 1
@@ -2699,10 +2709,17 @@ class EscapeRouter:
         if not cells:
             return 0
 
+        # PR #4078 Path B: keep this #4053 bundle-river via-hop reservation
+        # Python-only (mirror_to_cpp=False), for the same reason as the #2983
+        # inner-corner sibling above -- honouring single-ended byte-lane
+        # reservations on the C++ backend regresses board 07's reversed DDR
+        # byte into copper shorts.  (This planner is also OFF by default via
+        # ``enable_bundle_river_planner``; the gate keeps it safe if opted in.)
         count = self.grid.reserve_corridor_cells(
             layer_idx=target_idx,
             cells=cells,
             net_ids={net_id},
+            mirror_to_cpp=False,
         )
         if count > 0:
             self.byte_lane_corridor_reservations += 1

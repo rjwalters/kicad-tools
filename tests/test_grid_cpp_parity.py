@@ -1,32 +1,35 @@
 """C++ <-> Python grid parity gates.
 
-Issue #2709: pin the current Python-only contract for the
-corridor-reservation feature added by Issue #2677 / PR #2686.
+Issue #4071: the corridor-reservation feature (Issue #2677 / PR #2686) is
+now ported to the C++ backend, so Python and C++ grids AGREE on both the
+keep-out and the attractor semantics.
 
 The Python ``RoutingGrid._mark_via`` consults
-``RoutingGrid._reserved_for_nets`` (populated by
-``EscapeRouter._reserve_pair_continuation_corridor``) to skip cells that
-have been reserved for paired-escape continuation.  The C++ sibling
-``router::Grid3D::mark_via`` (cpp/src/grid.cpp) deliberately omits that
-check because the escape phase is Python-grid-only today.
+``RoutingGrid._reserved_for_nets`` (populated by ``EscapeRouter``'s
+reservation helpers) to skip cells that have been reserved for a net set
+that excludes the via's net.  The C++ sibling ``router::Grid3D::mark_via``
+(cpp/src/grid.cpp) now mirrors that check against a per-cell owner set
+marshalled across the boundary.
 
-This test pins the CURRENT behaviour:
+This file pins the PORTED (agreement) behaviour:
 
-  * Python ``Grid._mark_via`` with a partner-net via SKIPS reserved
-    cells (the existing diff-pair gate already covers this in
+  * Python ``Grid._mark_via`` with a foreign-net via SKIPS reserved
+    cells (the existing diff-pair gate also covers this in
     ``test_escape_diffpair.py::test_gate_b_partner_vias_do_not_consume_reserved_cells``).
-  * C++ ``Grid3D::mark_via`` with the same partner-net via DOES block
-    the reserved cell (because it ignores the Python reservation map).
+  * C++ ``Grid3D::mark_via`` with the same foreign-net via ALSO skips
+    the reserved cell (it now honours the mirrored reservation map).
+  * The C++ A* attractor discounts a reserved cell's step cost by
+    ``rules.cost_corridor_attractor`` for the OWNING net, matching
+    ``RoutingGrid.get_corridor_attractor_bonus``.
 
-When the escape phase is ported to C++ (e.g. with Epic #2661 Phase 2's
-group-of-pairs serpentine), the C++ ``mark_via`` will need an equivalent
-reservation API.  At that point this test SHOULD be inverted to assert
-the cell remains UNblocked on the C++ side.  A failing test in this
-file is a deliberate signal that the parity gap has been closed (or that
-someone changed the Python contract without the matching C++ port).
+Historical note (Issue #2709): this test previously pinned the OPPOSITE
+divergence -- the C++ grid deliberately ignored reservations because it
+had no reservation-writing consumer.  #4071 inverted that contract when
+#2983 / #4053 started writing reservations through the production C++
+path.
 
-Test is skipped when the C++ backend is not built so it is non-fatal in
-Python-only environments.
+Tests are skipped when the C++ backend is not built so they are non-fatal
+in Python-only environments.
 """
 
 from __future__ import annotations
@@ -72,13 +75,13 @@ def grid_4layer(rules: DesignRules) -> RoutingGrid:
 
 
 class TestMarkViaReservationParity:
-    """Pin the Python-only nature of corridor reservations.
+    """Pin the PORTED (Python == C++) corridor-reservation contract.
 
-    These tests document the CURRENT behaviour described in the
-    docstring of ``RoutingGrid._mark_via`` and the Issue #2709 comment
-    block on ``router::Grid3D::mark_via``.  When the escape phase moves
-    into C++ and the reservation logic is ported, the assertions tagged
-    with ``# CONTRACT: invert when C++ port lands`` must flip.
+    Issue #4071 moved the reservation keep-out into the C++
+    ``Grid3D::mark_via`` and the attractor into the C++ A* cost loop, so
+    the Python and C++ grids now agree.  These tests assert that
+    agreement for both the keep-out (foreign-net via skips a reserved
+    cell) and the attractor (owning-net step cost is discounted).
     """
 
     def test_python_grid_skips_partner_via_at_reserved_cell(
@@ -132,40 +135,38 @@ class TestMarkViaReservationParity:
             "Python _mark_via must skip cells reserved for a different net set (Issue #2677)."
         )
 
-    def test_cpp_grid_ignores_python_reservations(
+    def _find_inner_layer(self, grid: RoutingGrid) -> int:
+        """Return the first SIGNAL inner-layer index in a 4-layer stack."""
+        for idx in range(grid.num_layers):
+            layer_enum = grid.index_to_layer(idx)
+            if layer_enum not in (Layer.F_CU.value, Layer.B_CU.value):
+                return idx
+        raise AssertionError("4-layer stack should expose an inner layer")
+
+    def test_cpp_grid_honours_python_reservations(
         self, grid_4layer: RoutingGrid, rules: DesignRules
     ) -> None:
-        """C++ ``Grid3D::mark_via`` does NOT consult Python reservations.
+        """C++ ``Grid3D::mark_via`` NOW consults reservations (Issue #4071).
 
-        Lock the current behaviour: a foreign-net via marked through the
-        C++ binding DOES block a cell that the Python grid has reserved
-        for a different net set.
+        Ported contract: a foreign-net via marked through the C++ binding
+        SKIPS a cell that has been reserved for a different net set --
+        matching the Python ``_mark_via`` sanity gate above.
 
-        Issue #2709: this test should be INVERTED (assert ``not blocked``)
-        when escape routing is ported to C++ and the reservation logic
-        lands on ``Grid3D``.  A failing assertion below means the parity
-        gap was closed -- update the assertion and remove the
-        contract-locking docstring.
+        This test was INVERTED by #4071 (it previously pinned the opposite
+        divergence under Issue #2709).  A failing assertion here means the
+        C++ reservation port regressed or the marshalling path broke.
         """
         if not is_cpp_available():
             pytest.skip("C++ router backend not built (run: kct build-native)")
 
         from kicad_tools.router.cpp_backend import CppGrid
 
-        # Pick the same inner-layer cell as the Python sanity gate.
         gx, gy = 25, 25
-        inner_layer_idx = None
-        for idx in range(grid_4layer.num_layers):
-            layer_enum = grid_4layer.index_to_layer(idx)
-            if layer_enum not in (Layer.F_CU.value, Layer.B_CU.value):
-                inner_layer_idx = idx
-                break
-        assert inner_layer_idx is not None, "4-layer stack should expose an inner layer"
+        inner_layer_idx = self._find_inner_layer(grid_4layer)
 
         # Reserve the cell on the Python grid BEFORE building the C++
-        # mirror.  ``CppGrid.from_routing_grid`` copies blocked cells but
-        # has no concept of corridor reservations -- which is exactly the
-        # parity gap this test pins.
+        # mirror so ``CppGrid.from_routing_grid``'s bulk copy path is the
+        # one under test (the incremental mirror is covered separately).
         owner_nets = frozenset({1, 2})
         grid_4layer.reserve_corridor_cells(inner_layer_idx, [(gx, gy)], owner_nets)
         assert grid_4layer.reserved_cell_count() == 1
@@ -173,28 +174,118 @@ class TestMarkViaReservationParity:
 
         cpp_grid = CppGrid.from_routing_grid(grid_4layer)
 
-        # Confirm the C++ mirror starts with the cell unblocked
-        # (reservations don't block, only Python ``_mark_via`` does).
-        assert not cpp_grid._impl.at(gx, gy, inner_layer_idx).blocked, (
-            "Cell should start unblocked on the C++ side; reservations alone do not block cells."
+        # The reservation must have been marshalled across the boundary.
+        assert cpp_grid._impl.reserved_cell_count() == 1, (
+            "from_routing_grid must marshal _reserved_for_nets into the C++ grid."
         )
+        assert cpp_grid._impl.is_reserved_for(gx, gy, inner_layer_idx, 1)
+        assert not cpp_grid._impl.is_reserved_for(gx, gy, inner_layer_idx, 42)
 
-        # Place a foreign-net via through the C++ binding.  The radius
-        # of 0 cells targets exactly (gx, gy) on every layer, isolating
-        # the reservation-skip behaviour from clearance geometry.
+        # Confirm the C++ mirror starts with the cell unblocked.
+        assert not cpp_grid._impl.at(gx, gy, inner_layer_idx).blocked
+
+        # Place a foreign-net via (net 42) through the C++ binding.  The
+        # radius of 0 cells targets exactly (gx, gy) on every layer,
+        # isolating the reservation-skip behaviour from clearance geometry.
         cpp_grid._impl.mark_via(gx, gy, 42, 0)
 
-        # CONTRACT: invert when C++ port lands.
-        # Today: C++ ignores the Python reservation map, so the cell IS blocked.
-        # Future: when ``Grid3D`` learns about reservations, this should
-        # become ``assert not cell.blocked`` and the Python parity gate
-        # above will document the symmetric expectation.
+        # Issue #4071 contract: the reserved cell must remain UNBLOCKED --
+        # the foreign-net via's halo skips it, matching Python _mark_via.
         cell = cpp_grid._impl.at(gx, gy, inner_layer_idx)
-        assert cell.blocked, (
-            "Issue #2709 contract: C++ Grid3D::mark_via deliberately ignores "
-            "Python's _reserved_for_nets map.  If this assertion fails, the "
-            "C++ port has likely landed -- invert the assertion and update "
-            "the rationale comments in cpp/src/grid.cpp and "
-            "src/kicad_tools/router/grid.py:_mark_via."
+        assert not cell.blocked, (
+            "Issue #4071: C++ Grid3D::mark_via must skip cells reserved for a "
+            "net set that excludes the via's net (parity with Python _mark_via)."
         )
-        assert cell.net == 42, "Foreign-net via should claim the cell on the C++ side."
+
+        # And the OWNING net's via still blocks the cell (reservation is
+        # advisory for matching-net vias).
+        cpp_grid._impl.mark_via(gx, gy, 1, 0)
+        owner_cell = cpp_grid._impl.at(gx, gy, inner_layer_idx)
+        assert owner_cell.blocked, (
+            "Owning-net via must be able to block/claim its own reserved cell."
+        )
+        assert owner_cell.net == 1
+
+    def test_cpp_reservation_incremental_mirror(
+        self, grid_4layer: RoutingGrid, rules: DesignRules
+    ) -> None:
+        """Reservations made AFTER the C++ mirror is built still propagate.
+
+        Issue #4071: ``EscapeRouter``'s reservation helpers run during
+        net-order preparation, which can be after ``from_routing_grid``.
+        ``reserve_corridor_cells`` mirrors incrementally onto the attached
+        C++ grid; verify a foreign-net via then skips the late reservation.
+        """
+        if not is_cpp_available():
+            pytest.skip("C++ router backend not built (run: kct build-native)")
+
+        from kicad_tools.router.cpp_backend import CppGrid
+
+        gx, gy = 30, 20
+        inner_layer_idx = self._find_inner_layer(grid_4layer)
+
+        # Build the C++ mirror FIRST (no reservations yet), establishing
+        # the grid._cpp_grid back-reference.
+        cpp_grid = CppGrid.from_routing_grid(grid_4layer)
+        assert cpp_grid._impl.reserved_cell_count() == 0
+
+        # Reserve AFTER the mirror exists -- must propagate via the
+        # incremental path in reserve_corridor_cells.
+        grid_4layer.reserve_corridor_cells(inner_layer_idx, [(gx, gy)], frozenset({7, 8}))
+        assert cpp_grid._impl.reserved_cell_count() == 1
+        assert cpp_grid._impl.is_reserved_for(gx, gy, inner_layer_idx, 7)
+
+        cpp_grid._impl.mark_via(gx, gy, 99, 0)
+        assert not cpp_grid._impl.at(gx, gy, inner_layer_idx).blocked, (
+            "Late (post-mirror) reservation must still keep out a foreign-net via."
+        )
+
+        # clear_corridor_reservations must also flow to the C++ grid.
+        grid_4layer.clear_corridor_reservations()
+        assert cpp_grid._impl.reserved_cell_count() == 0
+        assert not cpp_grid._impl.has_reservations()
+
+    def test_cpp_attractor_discounts_owning_net_step_cost(
+        self, grid_4layer: RoutingGrid, rules: DesignRules
+    ) -> None:
+        """C++ A* discounts a reserved cell's step cost for the owner net.
+
+        Issue #4071 parity: the C++ corridor attractor must subtract
+        ``rules.cost_corridor_attractor`` from an owning-net step into a
+        reserved cell (clamped at 0), and return 0.0 for a foreign net or
+        an unreserved cell -- matching
+        ``RoutingGrid.get_corridor_attractor_bonus`` exactly.
+        """
+        if not is_cpp_available():
+            pytest.skip("C++ router backend not built (run: kct build-native)")
+
+        from kicad_tools.router.cpp_backend import CppGrid
+
+        gx, gy = 25, 25
+        inner_layer_idx = self._find_inner_layer(grid_4layer)
+        owner_nets = frozenset({1, 2})
+        grid_4layer.reserve_corridor_cells(inner_layer_idx, [(gx, gy)], owner_nets)
+        cpp_grid = CppGrid.from_routing_grid(grid_4layer)
+
+        bonus = rules.cost_corridor_attractor
+
+        # Python reference contract.
+        py_owner = grid_4layer.get_corridor_attractor_bonus(inner_layer_idx, gx, gy, 1, bonus)
+        py_foreign = grid_4layer.get_corridor_attractor_bonus(inner_layer_idx, gx, gy, 42, bonus)
+        py_unreserved = grid_4layer.get_corridor_attractor_bonus(
+            inner_layer_idx, gx + 5, gy + 5, 1, bonus
+        )
+
+        # C++ mirror of the same query.
+        cpp_owner = cpp_grid._impl.corridor_attractor_bonus(gx, gy, inner_layer_idx, 1, bonus)
+        cpp_foreign = cpp_grid._impl.corridor_attractor_bonus(gx, gy, inner_layer_idx, 42, bonus)
+        cpp_unreserved = cpp_grid._impl.corridor_attractor_bonus(
+            gx + 5, gy + 5, inner_layer_idx, 1, bonus
+        )
+
+        assert py_owner == pytest.approx(bonus)
+        assert py_owner == pytest.approx(cpp_owner)
+        assert py_foreign == pytest.approx(0.0)
+        assert py_foreign == pytest.approx(cpp_foreign)
+        assert py_unreserved == pytest.approx(0.0)
+        assert py_unreserved == pytest.approx(cpp_unreserved)

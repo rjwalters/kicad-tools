@@ -143,7 +143,38 @@ namespace router {
 // rebuild via ``kct build-native``.  The pure-Python ``route_coupled`` is
 // preserved as the fallback for the ``allow_swap_via`` /
 // ``manhattan_sum`` code paths the v1 port intentionally defers.
-constexpr int ROUTER_CPP_BUILD_VERSION = 15;
+// Version 16 (Issue #4071): port the Python ``_reserved_for_nets`` soft
+// corridor-reservation contract (Issue #2677 / PR #2686, previously
+// Python-grid-only per the #2709 deliberate-omission comment) into the
+// C++ grid.  ``GridCell`` gains a small fixed-capacity owner-set
+// (``reserved_nets`` / ``reserved_count``, K=RESERVED_NETS_CAP), and
+// ``Grid3D::mark_via`` now honours the per-cell keep-out skip so a
+// foreign-net through-hole via cannot colonise a reserved continuation
+// corridor -- matching Python ``RoutingGrid._mark_via`` exactly.
+// ``DesignRules`` gains ``cost_corridor_attractor`` (Python default
+// 3.0) and ``pathfinder.cpp``'s neighbour/via cost loops subtract the
+// attractor bonus for cells reserved for the querying net (clamped at 0,
+// A* admissibility preserved), mirroring
+// ``pathfinder.py::get_corridor_attractor_bonus``.  This activates
+// #2983's UNCONDITIONAL inner-corner lane reservations and #4053/PR #4070's
+// bundle-river via-hop reservations on the production C++ backend for the
+// first time.  Old .so files lack the ``reserved_*`` GridCell fields and
+// the ``cost_corridor_attractor`` DesignRules field; the version bump
+// forces a rebuild via ``kct build-native``.
+constexpr int ROUTER_CPP_BUILD_VERSION = 16;
+
+// Issue #4071: fixed-capacity owner-set size for per-cell corridor
+// reservations.  Observed owner sets in practice are tiny: 1 for the
+// single-net #2983 inner-corner / #4053 bundle-river corridors, 2 for a
+// diff-pair continuation corridor (#2677).  K=4 comfortably covers every
+// current caller (and the Epic #2661 Phase 2 group-of-pairs path up to a
+// quad).  A dense-grid GridCell array (cols*rows*layers cells) cannot
+// afford a ``std::set``/``std::vector`` per cell, so the owner set is a
+// flat fixed array + count -- absent-cell fast path is ``reserved_count
+// == 0`` (byte-identical to the pre-#4071 behaviour on boards with no
+// active reservations).  Owner sets larger than K are truncated to the
+// first K nets (documented ceiling; no current caller exceeds 2).
+constexpr int RESERVED_NETS_CAP = 4;
 
 // Grid cell state
 struct GridCell {
@@ -161,6 +192,15 @@ struct GridCell {
     // ``mark_blocked``.  Route marking never sets this; rip-up uses it
     // to restore static blockage instead of freeing the cell.
     bool static_blocked = false;
+    // Issue #4071: corridor-reservation owner set (mirrors the Python
+    // ``RoutingGrid._reserved_for_nets`` per-cell ``frozenset[int]``).
+    // ``reserved_count == 0`` means "not reserved" (fast path).  A
+    // non-empty set makes this cell a keep-out for foreign-net vias in
+    // ``mark_via`` and a soft attractor (cost discount) for the owning
+    // net(s) in the A* cost loop.  Overlapping reservations REPLACE
+    // (last-writer-wins), matching Python ``reserve_corridor_cells``.
+    int8_t reserved_count = 0;
+    int32_t reserved_nets[RESERVED_NETS_CAP] = {0, 0, 0, 0};
 };
 
 // A* node for priority queue
@@ -422,6 +462,12 @@ struct DesignRules {
     float cost_congestion = 5.0f;
     float congestion_threshold = 0.5f;
     float min_drill_clearance = 0.102f;
+    // Issue #4071: soft corridor-attractor bonus (mirrors Python
+    // ``DesignRules.cost_corridor_attractor``, default 3.0).  Subtracted
+    // from a cell's positive step cost when the cell is reserved for the
+    // querying net, clamped at 0 so g_scores stay non-negative (A*
+    // admissibility preserved).  ``0.0`` disables the attractor.
+    float cost_corridor_attractor = 3.0f;
 };
 
 // Pad info for geometric validation (Issue #2439)

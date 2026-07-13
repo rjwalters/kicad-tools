@@ -1178,10 +1178,23 @@ RouteResult Pathfinder::route(
             // so the search prefers less-contested escape paths.
             float pad_channel_cost = get_pad_channel_cost(nx, ny, nlayer);
 
-            float new_g = current.g_score +
-                          cost_mult * rules_.cost_straight +
-                          turn_cost + congestion_cost + negotiated_cost +
-                          avoidance + pad_channel_cost;
+            // Issue #4071: diff-pair / match-group corridor attractor.
+            // Subtract a bonus when this cell is reserved for our net so
+            // the search preferentially uses the reserved channel (mirrors
+            // ``pathfinder.py:2985`` / ``get_corridor_attractor_bonus``).
+            // Clamped below at 0 so g_scores stay non-negative.
+            float attractor_bonus = grid_.corridor_attractor_bonus(
+                nx, ny, nlayer, net, rules_.cost_corridor_attractor);
+
+            float positive_step_cost =
+                cost_mult * rules_.cost_straight +
+                turn_cost + congestion_cost + negotiated_cost +
+                avoidance + pad_channel_cost;
+            if (attractor_bonus > 0.0f) {
+                positive_step_cost =
+                    std::max(0.0f, positive_step_cost - attractor_bonus);
+            }
+            float new_g = current.g_score + positive_step_cost;
 
             auto it = g_scores.find(neighbor_key);
             if (it == g_scores.end() || new_g < it->second) {
@@ -1241,8 +1254,22 @@ RouteResult Pathfinder::route(
             float pad_channel_cost =
                 get_pad_channel_cost(current.x, current.y, new_layer);
 
-            float new_g = current.g_score + rules_.cost_via + congestion_cost +
-                          negotiated_cost + avoidance + pad_channel_cost;
+            // Issue #4071: corridor attractor on the via-drop destination
+            // cell -- the reservation is what makes the router prefer to
+            // actually via-hop INTO the reserved channel (mirrors the
+            // Python attractor's applicability to via drops as well as
+            // trace steps).  Clamped at 0 below.
+            float attractor_bonus = grid_.corridor_attractor_bonus(
+                current.x, current.y, new_layer, net,
+                rules_.cost_corridor_attractor);
+
+            float positive_step_cost = rules_.cost_via + congestion_cost +
+                                       negotiated_cost + avoidance + pad_channel_cost;
+            if (attractor_bonus > 0.0f) {
+                positive_step_cost =
+                    std::max(0.0f, positive_step_cost - attractor_bonus);
+            }
+            float new_g = current.g_score + positive_step_cost;
 
             auto it = g_scores.find(neighbor_key);
             if (it == g_scores.end() || new_g < it->second) {
@@ -1725,10 +1752,21 @@ RouteResult Pathfinder::run_astar_loop() {
             // budget => returns 0.0 (zero overhead).
             float pad_channel_cost = get_pad_channel_cost(nx, ny, nlayer);
 
-            float new_g = current.g_score +
-                          cost_mult * rules_.cost_straight +
-                          turn_cost + congestion_cost + negotiated_cost +
-                          avoidance + pad_channel_cost;
+            // Issue #4071: corridor attractor (resumable / negotiated path).
+            // Mirrors the one-shot ``route()`` contribution above using the
+            // search-local ``search_net_``.  Clamped at 0 below.
+            float attractor_bonus = grid_.corridor_attractor_bonus(
+                nx, ny, nlayer, search_net_, rules_.cost_corridor_attractor);
+
+            float positive_step_cost =
+                cost_mult * rules_.cost_straight +
+                turn_cost + congestion_cost + negotiated_cost +
+                avoidance + pad_channel_cost;
+            if (attractor_bonus > 0.0f) {
+                positive_step_cost =
+                    std::max(0.0f, positive_step_cost - attractor_bonus);
+            }
+            float new_g = current.g_score + positive_step_cost;
 
             // Issue #3309: flat-array g_score relax.  ``g_score_at`` returns
             // +infinity if the cell has not been touched in this generation,
@@ -1793,8 +1831,20 @@ RouteResult Pathfinder::run_astar_loop() {
             float pad_channel_cost =
                 get_pad_channel_cost(current.x, current.y, new_layer);
 
-            float new_g = current.g_score + rules_.cost_via + congestion_cost +
-                          negotiated_cost + avoidance + pad_channel_cost;
+            // Issue #4071: corridor attractor on the via-drop destination
+            // (resumable / negotiated path), mirroring the one-shot via
+            // branch.  Clamped at 0 below.
+            float attractor_bonus = grid_.corridor_attractor_bonus(
+                current.x, current.y, new_layer, search_net_,
+                rules_.cost_corridor_attractor);
+
+            float positive_step_cost = rules_.cost_via + congestion_cost +
+                                       negotiated_cost + avoidance + pad_channel_cost;
+            if (attractor_bonus > 0.0f) {
+                positive_step_cost =
+                    std::max(0.0f, positive_step_cost - attractor_bonus);
+            }
+            float new_g = current.g_score + positive_step_cost;
 
             // Issue #3309: flat-array g_score relax for via expansion.
             if (new_g < g_score_at(via_idx)) {
