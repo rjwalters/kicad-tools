@@ -238,6 +238,101 @@ def run_drc(
         return KiCadCLIResult(success=False, stderr=f"Failed to run DRC: {e}")
 
 
+def run_refill_zones(
+    pcb_path: Path,
+    kicad_cli: Path | None = None,
+) -> KiCadCLIResult:
+    """Refill all copper zones in-place via ``kicad-cli pcb drc --refill-zones``.
+
+    Shells out to ``kicad-cli pcb drc --refill-zones --save-board <pcb>`` so
+    the on-disk ``filled_polygon`` geometry is brought back in sync with the
+    current copper before the pure-Python ``kct check`` pipeline reads it
+    (issue #4096).  This is the authoritative refill: KiCad's own fill engine
+    knocks the pours out around foreign copper, eliminating the phantom
+    ``clearance_*_zone`` findings that stale committed fills produce.
+
+    This **mutates the board file in place** (``--save-board``) — the caller
+    is responsible for surfacing that side effect to the user.
+
+    Graceful degradation: when ``kicad-cli`` is not found on PATH the call
+    returns ``success=False`` with an explanatory ``stderr`` rather than
+    raising, so the caller can warn and continue without refilling.
+
+    A non-zero exit code caused by DRC *violations* (not a fill failure) is
+    treated as success — the zones were still refilled and saved.  When the
+    installed ``kicad-cli`` predates the explicit ``--refill-zones`` /
+    ``--save-board`` flags (KiCad 8/9), DRC refills zones automatically as a
+    side effect and the board is saved by the plain ``drc`` run.
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb`` file to refill (rewritten in place).
+        kicad_cli: Path to kicad-cli (auto-detected when not provided).
+
+    Returns:
+        KiCadCLIResult with ``output_path`` set to ``pcb_path`` on success.
+    """
+    if kicad_cli is None:
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            return KiCadCLIResult(
+                success=False,
+                stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
+            )
+
+    # Snapshot net state so a --save-board that strips the net table on a
+    # kicad-tools-serialized board can be repaired, mirroring the protection
+    # in _run_fill_zones_via_drc.
+    input_net_nodes = _snapshot_net_declarations(pcb_path)
+    input_element_nets = _snapshot_element_nets(pcb_path)
+
+    fd, report_name = tempfile.mkstemp(suffix=".json", prefix="refill_drc_")
+    os.close(fd)
+    report_path = Path(report_name)
+
+    cmd = [
+        str(kicad_cli),
+        "pcb",
+        "drc",
+        "--output",
+        str(report_path),
+        "--format",
+        "json",
+    ]
+
+    # KiCad 10+ requires explicit flags to refill zones and persist changes;
+    # KiCad 8/9 refill + save as a side effect of the plain drc run.
+    if _kicad_drc_supports_refill(kicad_cli):
+        cmd.extend(["--refill-zones", "--save-board"])
+
+    cmd.append(str(pcb_path))
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        # A produced report means the command ran to completion (a non-zero
+        # exit code here signals DRC violations, not a fill failure).
+        if report_path.exists() and report_path.stat().st_size > 0:
+            _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
+            return KiCadCLIResult(
+                success=True,
+                output_path=pcb_path,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+            )
+        return KiCadCLIResult(
+            success=False,
+            stderr=result.stderr or "Zone refill via DRC failed — no report produced",
+            return_code=result.returncode,
+        )
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to refill zones: {e}")
+    finally:
+        report_path.unlink(missing_ok=True)
+
+
 def run_netlist_export(
     schematic_path: Path,
     output_path: Path | None = None,

@@ -728,3 +728,253 @@ class TestCheckMetaCheck:
         assert data["summary"]["passed"] is True
         # ...and meta_checks omitted (OMIT-when-absent convention).
         assert "meta_checks" not in data
+
+
+# ---------------------------------------------------------------------------
+# Issue #4096: stale-zone-fill advisory + opt-in --refill-zones flag
+# ---------------------------------------------------------------------------
+
+
+def _make_zone_clearance_violation(rule_id: str):
+    """Build a synthetic ERROR DRCViolation carrying a zone-clearance rule_id."""
+    from kicad_tools.core.types import Severity
+    from kicad_tools.validate.models import DRCViolation
+
+    return DRCViolation(
+        severity=Severity.ERROR,
+        message=f"synthetic {rule_id} finding",
+        rule_id=rule_id,
+    )
+
+
+class TestStaleZoneFillWarning:
+    """Unit coverage for the _warn_stale_zone_fills advisory (issue #4096)."""
+
+    def test_warns_on_segment_zone_clearance(self, tmp_path: Path, capsys):
+        from kicad_tools.cli.check_cmd import _warn_stale_zone_fills
+
+        pcb = tmp_path / "board.kicad_pcb"
+        violations = [_make_zone_clearance_violation("clearance_segment_zone")]
+
+        _warn_stale_zone_fills(violations, pcb)
+
+        err = capsys.readouterr().err
+        assert "clearance_segment_zone" in err
+        assert "STALE" in err
+        assert "kicad-cli pcb drc --refill-zones --save-board" in err
+        assert str(pcb) in err
+
+    def test_warns_on_via_and_pad_zone_clearance(self, tmp_path: Path, capsys):
+        from kicad_tools.cli.check_cmd import _warn_stale_zone_fills
+
+        pcb = tmp_path / "board.kicad_pcb"
+        violations = [
+            _make_zone_clearance_violation("clearance_via_zone"),
+            _make_zone_clearance_violation("clearance_pad_zone"),
+        ]
+
+        _warn_stale_zone_fills(violations, pcb)
+
+        err = capsys.readouterr().err
+        assert "clearance_via_zone" in err
+        assert "clearance_pad_zone" in err
+
+    def test_no_warning_without_zone_clearance_findings(self, tmp_path: Path, capsys):
+        """A board with only non-zone findings must not emit the advisory."""
+        from kicad_tools.cli.check_cmd import _warn_stale_zone_fills
+        from kicad_tools.core.types import Severity
+        from kicad_tools.validate.models import DRCViolation
+
+        pcb = tmp_path / "board.kicad_pcb"
+        violations = [
+            DRCViolation(
+                severity=Severity.ERROR,
+                message="unrelated clearance",
+                rule_id="clearance_trace_trace",
+            )
+        ]
+
+        _warn_stale_zone_fills(violations, pcb)
+
+        assert "refill-zones" not in capsys.readouterr().err
+
+    def test_no_warning_on_empty_violations(self, tmp_path: Path, capsys):
+        from kicad_tools.cli.check_cmd import _warn_stale_zone_fills
+
+        _warn_stale_zone_fills([], tmp_path / "board.kicad_pcb")
+
+        assert capsys.readouterr().err == ""
+
+    def test_warning_fires_through_main_on_zone_clearance_finding(
+        self, drc_clean_pcb: Path, monkeypatch, capsys
+    ):
+        """End-to-end: a clearance_*_zone finding triggers the advisory via main().
+
+        Injects a synthetic ``clearance_segment_zone`` error into the DRC
+        results so the assertion pins the *wiring* (main -> advisory) rather
+        than a specific committed board's fill staleness, which drifts as
+        artifacts are refilled.  --drc-only confirms the advisory is
+        independent of the meta-check rollup.
+        """
+        import kicad_tools.cli.check_cmd as check_cmd
+        from kicad_tools.cli.check_cmd import main
+        from kicad_tools.validate.violations import DRCResults
+
+        real_run = check_cmd.run_selected_checks
+
+        def _inject(*args, **kwargs) -> DRCResults:
+            results = real_run(*args, **kwargs)
+            results.add(_make_zone_clearance_violation("clearance_segment_zone"))
+            return results
+
+        monkeypatch.setattr(check_cmd, "run_selected_checks", _inject)
+
+        main([str(drc_clean_pcb), "--drc-only"])
+
+        err = capsys.readouterr().err
+        assert "kicad-cli pcb drc --refill-zones --save-board" in err
+        assert "STALE" in err
+
+    def test_no_warning_through_main_on_clean_board(self, drc_clean_pcb: Path, capsys):
+        """A clean board (no zone-clearance findings) emits no advisory."""
+        from kicad_tools.cli.check_cmd import main
+
+        main([str(drc_clean_pcb), "--drc-only"])
+
+        assert "refill-zones" not in capsys.readouterr().err
+
+
+class TestRefillZonesFlag:
+    """Coverage for the opt-in --refill-zones flag (issue #4096)."""
+
+    def test_flag_invokes_kicad_cli_when_available(self, drc_clean_pcb: Path, monkeypatch, capsys):
+        """--refill-zones shells out to run_refill_zones before loading the PCB."""
+        import kicad_tools.cli.runner as runner
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        calls: list[Path] = []
+
+        def _spy(pcb_path, kicad_cli=None):
+            calls.append(Path(pcb_path))
+            return KiCadCLIResult(success=True, output_path=Path(pcb_path))
+
+        monkeypatch.setattr(runner, "run_refill_zones", _spy)
+
+        result = main_(drc_clean_pcb)
+
+        assert result == 0
+        assert len(calls) == 1
+        assert calls[0] == drc_clean_pcb.resolve()
+        assert "refilled zones in place" in capsys.readouterr().err
+
+    def test_flag_degrades_gracefully_when_kicad_cli_absent(
+        self, drc_clean_pcb: Path, monkeypatch, capsys
+    ):
+        """A missing kicad-cli warns and continues rather than crashing."""
+        import kicad_tools.cli.runner as runner
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        def _absent(pcb_path, kicad_cli=None):
+            return KiCadCLIResult(success=False, stderr="kicad-cli not found.")
+
+        monkeypatch.setattr(runner, "run_refill_zones", _absent)
+
+        # Must not raise, and the check itself still runs to a clean exit.
+        result = main_(drc_clean_pcb)
+
+        assert result == 0
+        err = capsys.readouterr().err
+        assert "--refill-zones requested but the refill did not run" in err
+        assert "kicad-cli not found" in err
+
+    def test_no_refill_by_default(self, drc_clean_pcb: Path, monkeypatch):
+        """Without --refill-zones the refill helper is never called."""
+        import kicad_tools.cli.runner as runner
+        from kicad_tools.cli.check_cmd import main
+
+        def _boom(pcb_path, kicad_cli=None):
+            raise AssertionError("run_refill_zones must not run by default")
+
+        monkeypatch.setattr(runner, "run_refill_zones", _boom)
+
+        result = main([str(drc_clean_pcb), "--allow-incomplete"])
+        assert result == 0
+
+    def test_help_text_documents_board_mutation(self, capsys):
+        """The flag help must warn that it mutates the board file."""
+        from kicad_tools.cli.check_cmd import main
+
+        with pytest.raises(SystemExit):
+            main(["--help"])
+
+        out = capsys.readouterr().out
+        assert "--refill-zones" in out
+        # The MUTATES side effect must be surfaced explicitly.
+        assert "MUTATE" in out.upper()
+
+
+class TestRunRefillZonesHelper:
+    """Direct coverage for runner.run_refill_zones (issue #4096)."""
+
+    def test_returns_failure_when_kicad_cli_missing(self, tmp_path: Path, monkeypatch):
+        """No kicad-cli on PATH → success=False with an explanatory message."""
+        import kicad_tools.cli.runner as runner
+
+        monkeypatch.setattr(runner, "find_kicad_cli", lambda: None)
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        result = runner.run_refill_zones(pcb)
+
+        assert result.success is False
+        assert "kicad-cli not found" in result.stderr
+
+    def test_builds_refill_save_board_command(self, tmp_path: Path, monkeypatch):
+        """Invokes `kicad-cli pcb drc --refill-zones --save-board <pcb>`."""
+        import kicad_tools.cli.runner as runner
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        fake_cli = tmp_path / "kicad-cli"
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        captured_cmd: list[list[str]] = []
+
+        class _Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_run(cmd, capture_output=True, text=True, **kwargs):
+            captured_cmd.append(cmd)
+            # Write a non-empty report so the helper reports success.
+            out_idx = cmd.index("--output") + 1
+            Path(cmd[out_idx]).write_text("{}")
+            return _Completed()
+
+        monkeypatch.setattr(runner, "find_kicad_cli", lambda: fake_cli)
+        monkeypatch.setattr(runner, "_kicad_drc_supports_refill", lambda _cli: True)
+        # Skip net-table repair (no real board content to restore).
+        monkeypatch.setattr(runner, "_snapshot_net_declarations", lambda _p: [])
+        monkeypatch.setattr(runner, "_snapshot_element_nets", lambda _p: {})
+        monkeypatch.setattr(runner, "_restore_net_declarations", lambda *a, **k: None)
+        monkeypatch.setattr(runner.subprocess, "run", _fake_run)
+
+        result: KiCadCLIResult = runner.run_refill_zones(pcb)
+
+        assert result.success is True
+        assert result.output_path == pcb
+        assert len(captured_cmd) == 1
+        cmd = captured_cmd[0]
+        assert cmd[1:3] == ["pcb", "drc"]
+        assert "--refill-zones" in cmd
+        assert "--save-board" in cmd
+        assert str(pcb) == cmd[-1]
+
+
+def main_(pcb: Path) -> int:
+    """Invoke `kct check --refill-zones` with the fast/complete-friendly flags."""
+    from kicad_tools.cli.check_cmd import main
+
+    return main([str(pcb), "--refill-zones", "--allow-incomplete"])
