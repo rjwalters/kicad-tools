@@ -6875,6 +6875,54 @@ class DiffPairRouter:
                     )
                 diff_net_ids = diff_net_ids - budget_exit_diff_nets
 
+        # Issue #4107 (tier b of #4095): early-abort the collapsed coupled
+        # pass at the coupled->single-ended boundary.  When EVERY considered
+        # coupled pair budget-exited and NOTHING coupled successfully (the
+        # board-07 "total collapse" signature), the coupled pass left the
+        # grid pristine -- ``route_differential_pair_coupled`` returns
+        # ``[], None`` on budget-exit BEFORE any ``_mark_route`` commit, so
+        # there is no partial coupled copper to unwind.  In that state the
+        # ONLY divergence from a plain single-ended route is the #3270
+        # net-priority promotion below (``_budget_exit_diff_nets`` ->
+        # ``complexity_tier = -1``), which reorders the single-ended pass
+        # away from its natural (better) ordering and is the measured
+        # churn / net-loss driver (board 07: 34/22 vs single-ended 13/26).
+        # Skip the promotion on collapse so the single-ended pass runs with
+        # default ordering == byte-equivalent to a plain single-ended route.
+        #
+        # ``considered`` is every pair for which coupled routing was a
+        # candidate: pairs that reached the coupled A* (``coupled_attempted_
+        # count``) plus pairs deferred before it by the aggregate budget
+        # (``aggregate_deferred_pairs``).  Collapse requires the coupled A*
+        # to have actually run for >=1 pair (``coupled_attempted_count > 0``)
+        # -- an aggregate-timeout-only deferral where no A* ran is NOT the
+        # board-07 pathology.  PARTIAL exit (board 06: some pairs couple, or
+        # only some exit) leaves ``coupled_routed_nets`` non-empty (or not
+        # every considered pair exited) -> ``collapsed`` is False -> the
+        # #3270 promotion runs exactly as today (measured beneficial there).
+        #
+        # Instrumentation is deliberately NOT gated: ``budget_exit_pair_names``
+        # (the CLI warning + ``diffpair_budget_exit_pair_names()``) is a
+        # separate object populated in the loop above and is left intact --
+        # the operator is still told the pairs fell back; only the PROMOTION
+        # is skipped.
+        considered_coupled_pairs = coupled_attempted_count + aggregate_deferred_pairs
+        collapsed = (
+            coupled_attempted_count > 0
+            and not coupled_routed_nets
+            and len(budget_exit_pair_names) == considered_coupled_pairs
+        )
+        if collapsed:
+            budget_exit_diff_nets = set()
+            logger.warning(
+                "DIFFPAIR_COUPLED_COLLAPSE_SKIP_PROMOTION: all %d considered "
+                "coupled pair(s) budget-exited with none coupled; skipping the "
+                "#3270 net-priority promotion so the single-ended pass runs "
+                "with default ordering (pristine single-ended-equivalent "
+                "result; issue #4107)",
+                considered_coupled_pairs,
+            )
+
         # Issue #3270: Surface budget-exit diff-pair nets to the
         # Autorouter so ``_get_net_priority`` can promote them to the
         # head of the non-diff main strategy's net order.  Without this
@@ -6883,7 +6931,9 @@ class DiffPairRouter:
         # bursts the per-net timeout (60s observed vs 30s budget) and
         # exhausts the strategy wall-clock before reaching MIPI_RST.
         # The set is cleared after the strategy returns to keep the
-        # promotion local to this invocation.
+        # promotion local to this invocation.  On the #4107 collapse
+        # signature ``budget_exit_diff_nets`` was emptied above, so this
+        # assigns an empty set (no promotion).
         self.autorouter._budget_exit_diff_nets = set(budget_exit_diff_nets)
 
         non_diff_nets = [n for n in self.autorouter.nets if n not in diff_net_ids and n != 0]
