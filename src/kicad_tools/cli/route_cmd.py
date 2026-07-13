@@ -10250,9 +10250,11 @@ def main(argv: list[str] | None = None) -> int:
         # De-duplicate while preserving order (a pair can appear once per
         # dispatch; the escape path can re-enter the orchestrator).
         _seen: set[str] = set()
-        _exit_pairs = [
-            name for name in diffpair_budget_exit_pairs if not (name in _seen or _seen.add(name))
-        ]
+        _exit_pairs: list[str] = []
+        for name in diffpair_budget_exit_pairs:
+            if name not in _seen:
+                _seen.add(name)
+                _exit_pairs.append(name)
         print("\n--- Differential Pair Budget-Exit Warning ---")
         print(
             f"  {len(_exit_pairs)} pair(s) budget-exited coupled routing and "

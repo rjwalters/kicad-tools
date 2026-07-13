@@ -6941,9 +6941,11 @@ class DiffPairRouter:
         # promotion already ran above off the local ``budget_exit_diff_nets``
         # set; this is a pure visibility hook.
         seen: set[str] = set()
-        deduped_names = [
-            name for name in budget_exit_pair_names if not (name in seen or seen.add(name))
-        ]
+        deduped_names: list[str] = []
+        for name in budget_exit_pair_names:
+            if name not in seen:
+                seen.add(name)
+                deduped_names.append(name)
         self._last_budget_exit_pair_names = deduped_names
         self._last_coupled_attempted_count = coupled_attempted_count
         self._last_budget_exit_count = len(deduped_names)
