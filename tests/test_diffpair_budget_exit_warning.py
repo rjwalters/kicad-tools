@@ -247,3 +247,329 @@ def test_no_pairs_detected_surfaces_no_budget_exit():
 
     assert router._diffpair._last_budget_exit_pair_names == []
     assert router.diffpair_budget_exit_pair_names() == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #4107: collapse skips the #3270 promotion; partial exit keeps it
+#
+# On budget-exit the coupled pass returns ``[], None`` BEFORE any grid
+# commit, so on the all-pairs collapse the grid is pristine and the ONLY
+# divergence from a plain single-ended route is the #3270 net-priority
+# promotion (``_budget_exit_diff_nets`` -> ``complexity_tier = -1``).  The
+# #4107 gate leaves ``_budget_exit_diff_nets`` EMPTY on the collapse
+# signature so the single-ended pass runs with default ordering.  The
+# promotion set is cleared again after the strategy callback returns
+# (#3270 leak guard), so we observe it AT THE STRATEGY-CALL MOMENT via a
+# ``non_diffpair_strategy`` callable that records it -- exactly the vantage
+# point the real negotiated strategy sees.
+# ---------------------------------------------------------------------------
+
+
+def _hard_single_pair_router() -> Autorouter:
+    """One diff pair whose long diagonal span never couples within a
+    microscopic per-pair budget (forces the coupled A* to budget-exit),
+    plus one plain net.  Drives the ALL-PAIRS collapse signature:
+    ``coupled_attempted_count == 1``, ``coupled_routed_nets`` empty, the
+    single considered pair in ``budget_exit_pair_names``.
+    """
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1)
+    router = Autorouter(
+        width=40.0,
+        height=30.0,
+        rules=rules,
+        net_class_map=_opt_in_diffpair_class_map(["DP+", "DP-"]),
+    )
+    router.add_component(
+        "U1",
+        [
+            {
+                "number": "1",
+                "x": 2.0,
+                "y": 2.0,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "DP+",
+            },
+            {
+                "number": "2",
+                "x": 2.0,
+                "y": 2.8,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "DP-",
+            },
+            {
+                "number": "3",
+                "x": 2.0,
+                "y": 15.0,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 3,
+                "net_name": "GPIO1",
+            },
+        ],
+    )
+    router.add_component(
+        "J1",
+        [
+            {
+                "number": "1",
+                "x": 38.0,
+                "y": 28.0,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "DP+",
+            },
+            {
+                "number": "2",
+                "x": 38.0,
+                "y": 28.8,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "DP-",
+            },
+            {
+                "number": "3",
+                "x": 38.0,
+                "y": 15.0,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 3,
+                "net_name": "GPIO1",
+            },
+        ],
+    )
+    return router
+
+
+def _one_easy_one_hard_pair_router() -> Autorouter:
+    """Two diff pairs: an EASY pair with a short straight span that couples
+    fast, and a HARD pair on a long diagonal that budget-exits.  With one
+    pair coupling, ``coupled_routed_nets`` is non-empty -> the collapse
+    signature does NOT hold -> the #3270 promotion still runs for the hard
+    pair's nets.  This is design (4)'s "partial budget-exit does NOT trigger
+    the skip".
+    """
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1)
+    router = Autorouter(
+        width=40.0,
+        height=30.0,
+        rules=rules,
+        net_class_map=_opt_in_diffpair_class_map(["E+", "E-", "H+", "H-"]),
+    )
+    router.add_component(
+        "U1",
+        [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 5.0,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "E+",
+            },
+            {
+                "number": "2",
+                "x": 5.0,
+                "y": 5.8,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "E-",
+            },
+            {
+                "number": "3",
+                "x": 2.0,
+                "y": 2.0,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 3,
+                "net_name": "H+",
+            },
+            {
+                "number": "4",
+                "x": 2.0,
+                "y": 2.8,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 4,
+                "net_name": "H-",
+            },
+        ],
+    )
+    router.add_component(
+        "J1",
+        [
+            {
+                "number": "1",
+                "x": 12.0,
+                "y": 5.0,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "E+",
+            },
+            {
+                "number": "2",
+                "x": 12.0,
+                "y": 5.8,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "E-",
+            },
+            {
+                "number": "3",
+                "x": 38.0,
+                "y": 28.0,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 3,
+                "net_name": "H+",
+            },
+            {
+                "number": "4",
+                "x": 38.0,
+                "y": 28.8,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 4,
+                "net_name": "H-",
+            },
+        ],
+    )
+    return router
+
+
+def test_collapse_skips_budget_exit_promotion():
+    """When ALL considered coupled pairs budget-exit and none couple, the
+    strategy runs with ``_budget_exit_diff_nets`` empty (no #3270 promotion)
+    so the single-ended pass keeps its default ordering."""
+    router = _hard_single_pair_router()
+    config = DifferentialPairConfig(enabled=True, spacing=0.8)
+
+    promotion_at_strategy: dict[str, set[int]] = {}
+
+    def _record_promotion() -> list:
+        # The #3270 promotion set is live only during the strategy call;
+        # snapshot it here (the vantage point the negotiated strategy sees).
+        promotion_at_strategy["nets"] = set(router._budget_exit_diff_nets)
+        return []
+
+    router._diffpair.route_all_with_diffpairs(
+        config,
+        coupled_only=True,
+        per_pair_timeout=0.001,  # microscopic -> the pair's coupled A* budget-exits
+        non_diffpair_strategy=_record_promotion,
+    )
+
+    # The single pair reached the coupled A* and budget-exited (collapse).
+    assert router._diffpair._last_coupled_attempted_count == 1
+    assert router._diffpair._last_budget_exit_pair_names == ["DP"]
+    # THE GUARANTEE: promotion set empty at the strategy call -> pristine
+    # single-ended-equivalent ordering.
+    assert promotion_at_strategy["nets"] == set(), (
+        "On the all-pairs collapse the #3270 promotion must be skipped; "
+        f"strategy saw _budget_exit_diff_nets={promotion_at_strategy['nets']}"
+    )
+
+
+def test_collapse_still_fires_budget_exit_warning(caplog):
+    """Instrumentation is NOT gated by the collapse skip: the operator is
+    still told the pairs fell back (Phase-1 warning + accessor + the
+    ``DIFFPAIR_BUDGET_EXIT_FALLBACK`` log)."""
+    import logging
+
+    router = _hard_single_pair_router()
+    config = DifferentialPairConfig(enabled=True, spacing=0.8)
+
+    with caplog.at_level(logging.WARNING):
+        router._diffpair.route_all_with_diffpairs(
+            config,
+            coupled_only=True,
+            per_pair_timeout=0.001,
+            non_diffpair_strategy=lambda: [],
+        )
+
+    # Phase-1 instrumentation still populated on collapse.
+    assert router._diffpair._last_budget_exit_pair_names == ["DP"]
+    assert router.diffpair_budget_exit_pair_names() == ["DP"]
+    assert router._diffpair._last_budget_exit_count == 1
+
+    msgs = [r.getMessage() for r in caplog.records]
+    # The Phase-1 fallback warning still fires (operator told).
+    assert any("DIFFPAIR_BUDGET_EXIT_FALLBACK" in m and "DP" in m for m in msgs), (
+        f"expected the Phase-1 fallback warning on collapse; saw {msgs}"
+    )
+    # And the new #4107 line records that the promotion was skipped.
+    assert any("DIFFPAIR_COUPLED_COLLAPSE_SKIP_PROMOTION" in m for m in msgs), (
+        f"expected the #4107 collapse-skip log line; saw {msgs}"
+    )
+
+
+def test_partial_exit_keeps_budget_exit_promotion():
+    """When only SOME considered pairs budget-exit (one pair couples), the
+    collapse signature does NOT hold, so the #3270 promotion still runs for
+    the budget-exited pair's nets -- board-06-style behaviour is unchanged."""
+    router = _one_easy_one_hard_pair_router()
+    config = DifferentialPairConfig(enabled=True, spacing=0.8)
+
+    promotion_at_strategy: dict[str, set[int]] = {}
+
+    def _record_promotion() -> list:
+        promotion_at_strategy["nets"] = set(router._budget_exit_diff_nets)
+        return []
+
+    router._diffpair.route_all_with_diffpairs(
+        config,
+        coupled_only=True,
+        per_pair_timeout=0.5,  # easy pair couples; hard pair budget-exits
+        non_diffpair_strategy=_record_promotion,
+    )
+
+    # Two pairs considered; only the HARD pair budget-exited.
+    assert router._diffpair._last_coupled_attempted_count == 2
+    assert router._diffpair._last_budget_exit_pair_names == ["H"]
+    # Partial exit -> promotion KEPT: the hard pair's nets (3, 4) are
+    # promoted for the strategy call.
+    assert promotion_at_strategy["nets"] == {3, 4}, (
+        "Partial budget-exit must keep the #3270 promotion; strategy saw "
+        f"_budget_exit_diff_nets={promotion_at_strategy['nets']}"
+    )
+
+
+def test_aggregate_only_deferral_is_not_a_collapse():
+    """An aggregate-timeout-only deferral where the coupled A* never ran
+    (``coupled_attempted_count == 0``) is NOT the board-07 collapse: the
+    collapse guard requires the coupled A* to have actually attempted at
+    least one pair.  The promotion therefore still runs for the deferred
+    nets (behaviour unchanged from before #4107)."""
+    router = _two_pad_diffpair_router()
+    config = DifferentialPairConfig(enabled=True, spacing=0.8)
+
+    promotion_at_strategy: dict[str, set[int]] = {}
+
+    def _record_promotion() -> list:
+        promotion_at_strategy["nets"] = set(router._budget_exit_diff_nets)
+        return []
+
+    router._diffpair.route_all_with_diffpairs(
+        config,
+        aggregate_timeout=0.001,  # defer before the coupled A* runs
+        non_diffpair_strategy=_record_promotion,
+    )
+
+    # No coupled A* attempted -> not a collapse.
+    assert router._diffpair._last_coupled_attempted_count == 0
+    assert router._diffpair._last_budget_exit_pair_names == ["USB_D"]
+    # Promotion still applied to the deferred pair's nets (1, 2).
+    assert promotion_at_strategy["nets"] == {1, 2}, (
+        "Aggregate-only deferral (no coupled A* attempted) must NOT trigger "
+        "the collapse skip; the #3270 promotion still runs. Strategy saw "
+        f"_budget_exit_diff_nets={promotion_at_strategy['nets']}"
+    )
