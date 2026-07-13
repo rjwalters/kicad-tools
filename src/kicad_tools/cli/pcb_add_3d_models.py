@@ -31,6 +31,8 @@ def run_add_3d_models(
     output_path: Path | None = None,
     lib_path: Path | None = None,
     allow_variants: bool = True,
+    lcsc_models: Path | None = None,
+    fetch_lcsc: bool = False,
     dry_run: bool = False,
     output_format: str = "text",
 ) -> int:
@@ -44,6 +46,12 @@ def run_add_3d_models(
         allow_variants: Accept same-library footprint-name variants when the
             exact name is missing (e.g. ``QFN-24-1EP_4x4mm_P0.5mm`` matches
             the ``..._EP2.6x2.6mm`` variant — the model body is identical).
+        lcsc_models: Optional path to an ``lcsc_models.json`` sidecar mapping
+            ``lib_id -> C-number``, enabling the LCSC/EasyEDA fetch-on-demand
+            tier.
+        fetch_lcsc: When True, fetch a missing LCSC STEP from EasyEDA on a
+            cache miss (default: cache-only; also enabled by
+            ``KCT_LCSC_FETCH``).
         dry_run: Report what would be inserted without writing.
         output_format: ``"text"`` or ``"json"``.
 
@@ -51,10 +59,23 @@ def run_add_3d_models(
         Exit code (0 success, 1 error).
     """
     from kicad_tools.footprints.library_path import detect_kicad_library_path
+    from kicad_tools.pcb.lcsc_models import fetch_enabled, load_lcsc_mapping
     from kicad_tools.pcb.models3d import add_model_refs
 
+    lcsc_mapping: dict[str, str] | None = None
+    if lcsc_models is not None:
+        try:
+            lcsc_mapping = load_lcsc_mapping(lcsc_models)
+        except ValueError as e:
+            if output_format == "json":
+                print(json.dumps({"error": str(e)}))
+            else:
+                print(f"Error: {e}", file=sys.stderr)
+            return 1
+
     library_paths = detect_kicad_library_path(config_override=lib_path)
-    if not library_paths.found:
+    if not library_paths.found and lcsc_mapping is None:
+        # Only the installed-library tiers can help and they're unavailable.
         msg = (
             "KiCad footprint libraries not found (install KiCad or pass "
             "--lib-path / set KICAD_FOOTPRINT_DIR)"
@@ -65,12 +86,18 @@ def run_add_3d_models(
             print(f"Error: {msg}", file=sys.stderr)
         return 1
 
+    def _warn(message: str) -> None:
+        print(f"Warning: {message}", file=sys.stderr)
+
     try:
         report = add_model_refs(
             pcb_path,
             output_path=output_path,
             library_paths=library_paths,
             allow_variants=allow_variants,
+            lcsc_mapping=lcsc_mapping,
+            lcsc_fetch=fetch_enabled(fetch_lcsc),
+            lcsc_warn=_warn,
             dry_run=dry_run,
         )
     except Exception as e:
@@ -92,6 +119,7 @@ def run_add_3d_models(
         "no_model_in_library": report.no_model_in_library,
         "variant_matches": report.variant_matches,
         "substitution_matches": report.substitution_matches,
+        "lcsc_matches": report.lcsc_matches,
     }
 
     if output_format == "json":
@@ -117,6 +145,10 @@ def run_add_3d_models(
             print("  Cross-library substitution models used (curated equivalent):")
             for lib_id, sub in sorted(report.substitution_matches.items()):
                 print(f"    {lib_id} -> {sub}")
+        if report.lcsc_matches:
+            print("  LCSC/EasyEDA fetched models used (cached STEP):")
+            for lib_id, cnum in sorted(report.lcsc_matches.items()):
+                print(f"    {lib_id} -> {cnum}")
         if report.already_present:
             print(f"  Already had models: {len(report.already_present)}")
         if report.no_model_in_library:

@@ -409,6 +409,11 @@ def make_library_resolver(
     allow_substitutions: bool = True,
     variant_log: dict[str, str] | None = None,
     substitution_log: dict[str, str] | None = None,
+    lcsc_mapping: dict[str, str] | None = None,
+    lcsc_fetch: bool = False,
+    lcsc_cache_dir: Path | None = None,
+    lcsc_log: dict[str, str] | None = None,
+    lcsc_warn: Callable[[str], None] | None = None,
 ) -> Resolver:
     """Build a resolver that reads model refs from installed KiCad libraries.
 
@@ -427,6 +432,13 @@ def make_library_resolver(
        curated ``lib_id -> lib_id`` mapping for generic/synthetic lib ids that
        have a body-compatible equivalent in a *different* library, when
        ``allow_substitutions`` is set.
+    4. **LCSC/EasyEDA fetch-on-demand** (``lcsc_models``) — an explicit,
+       committed ``lib_id -> C-number`` sidecar mapping whose STEP body is
+       resolved from a local cache (fetched on demand from EasyEDA when
+       ``lcsc_fetch`` is enabled), when *lcsc_mapping* is supplied.  The
+       synthesized ``(model ...)`` ref points at ``${KCT_LCSC_3D_DIR}`` and is
+       authored as **origin-centered** (``source_anchor=(0.0, 0.0)``) so the
+       shared offset machinery lands the body on the target pad centroid.
 
     Args:
         library_paths: Explicit library location (default: auto-detect).
@@ -439,6 +451,15 @@ def make_library_resolver(
         substitution_log: Optional dict populated with
             ``lib_id -> substitute lib_id`` for every cross-library
             substitution, so callers can report them.
+        lcsc_mapping: Optional ``lib_id -> C-number`` sidecar mapping enabling
+            the LCSC tier (tier 4).  Only lib ids present here are eligible.
+        lcsc_fetch: When True, fetch a missing STEP from EasyEDA on a cache
+            miss; default cache-only (no network).
+        lcsc_cache_dir: Optional LCSC STEP cache directory (default:
+            :func:`kicad_tools.pcb.lcsc_models.lcsc_cache_dir`).
+        lcsc_log: Optional dict populated with ``lib_id -> C-number`` for every
+            resolved LCSC match, so callers can report them.
+        lcsc_warn: Optional ``callable(str)`` invoked on a fetch failure.
     """
     paths = library_paths if library_paths is not None else detect_kicad_library_path()
     cache: dict[str, ResolvedModels | None] = {}
@@ -471,6 +492,34 @@ def make_library_resolver(
                         return mod_path, sub_id
         return None, None
 
+    def _resolve_lcsc(lib_id: str) -> ResolvedModels | None:
+        """Tier 4: LCSC/EasyEDA fetch-on-demand.  Returns None when the lib id
+        has no mapping, or the STEP is neither cached nor fetchable."""
+        if not lcsc_mapping:
+            return None
+        lcsc_id = lcsc_mapping.get(lib_id)
+        if not lcsc_id:
+            return None
+        # Imported lazily so the module (and the three installed-library tiers)
+        # never depend on the LCSC client unless the LCSC tier is actually used.
+        from kicad_tools.pcb.lcsc_models import resolve_lcsc_step, synthesize_model_block
+
+        step_path = resolve_lcsc_step(
+            lcsc_id,
+            cache_dir=lcsc_cache_dir,
+            fetch=lcsc_fetch,
+            warn=lcsc_warn,
+        )
+        if step_path is None:
+            # Skip-on-miss: report unresolved rather than emitting a ref to a
+            # file that is known-absent at patch time.
+            return None
+        if lcsc_log is not None:
+            lcsc_log[lib_id] = lcsc_id
+        # Origin-authored body: explicit (0, 0) source anchor so the shared
+        # offset math shifts by the full target pad centroid.
+        return ResolvedModels(models=[synthesize_model_block(lcsc_id)], source_anchor=(0.0, 0.0))
+
     def resolve(lib_id: str) -> ResolvedModels | None:
         if lib_id in cache:
             return cache[lib_id]
@@ -489,6 +538,8 @@ def make_library_resolver(
                     )
                     if sub_id is not None and substitution_log is not None:
                         substitution_log[lib_id] = sub_id
+        if result is None:
+            result = _resolve_lcsc(lib_id)
         cache[lib_id] = result
         return result
 
@@ -518,6 +569,9 @@ class ModelPatchReport:
     substitution_matches: dict[str, str] = field(default_factory=dict)
     """Lib ids whose model came from a cross-library substitution
     (``lib_id -> substitute lib_id``)."""
+    lcsc_matches: dict[str, str] = field(default_factory=dict)
+    """Lib ids whose model came from the LCSC/EasyEDA fetch tier
+    (``lib_id -> C-number``)."""
 
     @property
     def changed(self) -> bool:
@@ -592,6 +646,10 @@ def add_model_refs(
     resolver: Resolver | None = None,
     allow_variants: bool = True,
     allow_substitutions: bool = True,
+    lcsc_mapping: dict[str, str] | None = None,
+    lcsc_fetch: bool = False,
+    lcsc_cache_dir: Path | None = None,
+    lcsc_warn: Callable[[str], None] | None = None,
     dry_run: bool = False,
 ) -> ModelPatchReport:
     """Patch missing 3D model refs into a ``.kicad_pcb`` file.
@@ -608,6 +666,16 @@ def add_model_refs(
         allow_substitutions: Accept curated cross-library substitutions when
             exact + variant matching both miss (reported in
             ``substitution_matches``). Ignored when *resolver* is supplied.
+        lcsc_mapping: Optional ``lib_id -> C-number`` sidecar enabling the LCSC
+            fetch tier (reported in ``lcsc_matches``). Ignored when *resolver*
+            is supplied.
+        lcsc_fetch: When True, fetch a missing LCSC STEP on a cache miss;
+            default cache-only (no network). Ignored when *resolver* is
+            supplied.
+        lcsc_cache_dir: Optional LCSC STEP cache directory. Ignored when
+            *resolver* is supplied.
+        lcsc_warn: Optional ``callable(str)`` invoked on an LCSC fetch failure.
+            Ignored when *resolver* is supplied.
         dry_run: When True, nothing is written.
 
     Returns:
@@ -617,6 +685,7 @@ def add_model_refs(
     text = pcb_path.read_text()
     variant_log: dict[str, str] = {}
     substitution_log: dict[str, str] = {}
+    lcsc_log: dict[str, str] = {}
     if resolver is None:
         resolver = make_library_resolver(
             library_paths,
@@ -624,6 +693,11 @@ def add_model_refs(
             allow_substitutions=allow_substitutions,
             variant_log=variant_log,
             substitution_log=substitution_log,
+            lcsc_mapping=lcsc_mapping,
+            lcsc_fetch=lcsc_fetch,
+            lcsc_cache_dir=lcsc_cache_dir,
+            lcsc_log=lcsc_log,
+            lcsc_warn=lcsc_warn,
         )
     new_text, report = add_model_refs_to_text(text, resolver)
     # Only surface variants/substitutions that actually got patched in.
@@ -632,6 +706,9 @@ def add_model_refs(
     }
     report.substitution_matches = {
         lib_id: sub for lib_id, sub in substitution_log.items() if lib_id in report.patched
+    }
+    report.lcsc_matches = {
+        lib_id: cnum for lib_id, cnum in lcsc_log.items() if lib_id in report.patched
     }
     if report.changed and not dry_run:
         dest = Path(output_path) if output_path is not None else pcb_path

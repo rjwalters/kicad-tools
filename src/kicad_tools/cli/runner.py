@@ -1669,15 +1669,24 @@ def find_kicad_3dmodel_dir(kicad_cli: Path | None = None) -> Path | None:
 def _render_env(kicad_cli: Path | None) -> dict[str, str] | None:
     """Build a subprocess environment that resolves 3D model path variables.
 
-    Returns None (inherit as-is) when no model directory can be located.
-    Existing environment variables are never overridden.
+    Sets the ``KICADn_3DMODEL_DIR`` variables (when a KiCad model dir is found)
+    and ``KCT_LCSC_3D_DIR`` (the LCSC fetch-on-demand STEP cache) so committed
+    ``(model "${...}/...")`` refs resolve at render time.  Returns None (inherit
+    as-is) only when neither can be supplied.  Existing environment variables
+    are never overridden.
     """
+    from kicad_tools.pcb.lcsc_models import DEFAULT_CACHE_ENV_VAR, lcsc_cache_dir
+
     model_dir = find_kicad_3dmodel_dir(kicad_cli)
-    if model_dir is None:
+    lcsc_dir = lcsc_cache_dir()
+    if model_dir is None and DEFAULT_CACHE_ENV_VAR in os.environ:
+        # Nothing to inject: KiCad libs absent and the LCSC var is already set.
         return None
     env = os.environ.copy()
-    for var in KICAD_3DMODEL_ENV_VARS:
-        env.setdefault(var, str(model_dir))
+    if model_dir is not None:
+        for var in KICAD_3DMODEL_ENV_VARS:
+            env.setdefault(var, str(model_dir))
+    env.setdefault(DEFAULT_CACHE_ENV_VAR, str(lcsc_dir))
     return env
 
 

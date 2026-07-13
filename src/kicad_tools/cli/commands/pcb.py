@@ -668,11 +668,14 @@ def _run_add_3d_models_command(args, pcb_path: Path) -> int:
 
     output = getattr(args, "output", None)
     lib_path = getattr(args, "lib_path", None)
+    lcsc_models = getattr(args, "lcsc_models", None)
     return run_add_3d_models(
         pcb_path=pcb_path,
         output_path=Path(output) if output else None,
         lib_path=Path(lib_path) if lib_path else None,
         allow_variants=not getattr(args, "exact", False),
+        lcsc_models=Path(lcsc_models) if lcsc_models else None,
+        fetch_lcsc=getattr(args, "fetch_lcsc", False),
         dry_run=getattr(args, "dry_run", False),
         output_format=getattr(args, "format", "text"),
     )
