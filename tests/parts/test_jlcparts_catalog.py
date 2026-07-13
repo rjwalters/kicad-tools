@@ -21,6 +21,8 @@ from kicad_tools.parts import Part, PartsCache
 from kicad_tools.parts.jlcparts_catalog import (
     CATALOG_FILENAME,
     JlcpartsCatalog,
+    _extract_catalog,
+    _is_split_archive,
     _normalize_lcsc_id,
     _parse_price_json,
     get_catalog_path,
@@ -478,3 +480,202 @@ def test_cli_dispatch_sync_catalog(catalog_db: Path, tmp_path: Path, monkeypatch
     rc = run_parts_command(args)
     assert rc == 0
     assert JlcpartsCatalog(dest).count() == 4
+
+
+# --------------------------------------------------------------------------
+# Split-archive (true ``zip -s``) extraction path
+# --------------------------------------------------------------------------
+
+
+def test_is_split_archive_detects_spanning_marker(catalog_db: Path, tmp_path: Path):
+    """A blob beginning with PK\\x07\\x08 is recognized as a split archive."""
+    split = tmp_path / "split.zip"
+    split.write_bytes(_builder.build_spanning_split_bytes(catalog_db))
+    assert _is_split_archive(split) is True
+
+
+def test_is_split_archive_rejects_plain_zip(catalog_db: Path, tmp_path: Path):
+    """A normal single-disk zip is not flagged as a split archive."""
+    import zipfile
+
+    plain = tmp_path / "plain.zip"
+    with zipfile.ZipFile(plain, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(catalog_db, arcname="cache.sqlite3")
+    assert _is_split_archive(plain) is False
+
+
+def test_spanning_marker_routes_to_streaming_not_zipfile(
+    catalog_db: Path, tmp_path: Path, monkeypatch
+):
+    """The leading spanning marker forces the streaming path, bypassing zipfile.
+
+    This guards the premise of the fix: the real dataset carries the
+    ``PK\\x07\\x08`` marker, and we must NOT hand such a blob to stdlib
+    ``zipfile`` (which reads the multi-disk central directory the real dataset
+    trips on). We assert the single-disk zipfile path is never entered when the
+    marker is present.
+    """
+    split = tmp_path / "split.zip"
+    split.write_bytes(_builder.build_spanning_split_bytes(catalog_db))
+
+    def _boom(*_a, **_k):
+        raise AssertionError("single-disk zipfile path must not be used for split archives")
+
+    monkeypatch.setattr("kicad_tools.parts.jlcparts_catalog._extract_single_disk_archive", _boom)
+
+    dest = tmp_path / "out.sqlite3"
+    _extract_catalog(split, dest)
+    assert dest.read_bytes() == catalog_db.read_bytes()
+
+
+def test_extract_falls_back_when_zipfile_reports_multidisk(
+    catalog_db: Path, tmp_path: Path, monkeypatch
+):
+    """A markerless archive that trips zipfile's multi-disk guard falls back.
+
+    Some split archives lack the leading spanning marker but still raise
+    ``BadZipFile: ... span multiple disks ...`` once ``zipfile`` reaches the
+    zip64 end-of-central-directory locator. The extractor must catch that and
+    retry via the streaming path. We simulate the guard by building a plain
+    deflate archive (no marker) and forcing the single-disk path to raise the
+    multi-disk error; the fallback streaming path then succeeds because the
+    local file header is intact at byte 0.
+    """
+    import zipfile
+
+    # Markerless plain-deflate archive so the streaming fallback can parse the
+    # PK\x03\x04 header at byte 0.
+    plain = tmp_path / "plain.zip"
+    with zipfile.ZipFile(plain, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(catalog_db, arcname="cache.sqlite3")
+
+    def _raise_multidisk(*_a, **_k):
+        raise zipfile.BadZipFile("zipfiles that span multiple disks are not supported")
+
+    monkeypatch.setattr(
+        "kicad_tools.parts.jlcparts_catalog._extract_single_disk_archive", _raise_multidisk
+    )
+
+    dest = tmp_path / "out.sqlite3"
+    _extract_catalog(plain, dest)
+    assert dest.read_bytes() == catalog_db.read_bytes()
+    assert JlcpartsCatalog(dest).count() == 4
+
+
+def test_extract_split_archive_byte_identical(catalog_db: Path, tmp_path: Path):
+    """Streaming extraction of a split archive yields a byte-identical member."""
+    split = tmp_path / "split.zip"
+    split.write_bytes(_builder.build_spanning_split_bytes(catalog_db))
+
+    dest = tmp_path / "out.sqlite3"
+    _extract_catalog(split, dest)
+
+    assert dest.exists()
+    # Byte-for-byte identical to the embedded SQLite source.
+    assert dest.read_bytes() == catalog_db.read_bytes()
+    # And it is a queryable catalog.
+    assert JlcpartsCatalog(dest).count() == 4
+
+
+def test_extract_plain_zip_still_works(catalog_db: Path, tmp_path: Path):
+    """The single-disk zipfile path is unchanged for plain fixtures."""
+    import zipfile
+
+    plain = tmp_path / "plain.zip"
+    with zipfile.ZipFile(plain, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(catalog_db, arcname="cache.sqlite3")
+
+    dest = tmp_path / "out.sqlite3"
+    _extract_catalog(plain, dest)
+    assert dest.read_bytes() == catalog_db.read_bytes()
+    assert JlcpartsCatalog(dest).count() == 4
+
+
+def test_extract_split_archive_non_deflate_errors(catalog_db: Path, tmp_path: Path):
+    """A stored (method 0) split member raises a clear, actionable error."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    # ZIP_STORED => compression method 0, which the streaming path rejects.
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.write(catalog_db, arcname="cache.sqlite3")
+
+    split = tmp_path / "stored-split.zip"
+    split.write_bytes(b"PK\x07\x08" + buf.getvalue())
+
+    dest = tmp_path / "out.sqlite3"
+    with pytest.raises(RuntimeError, match="not deflate-compressed"):
+        _extract_catalog(split, dest)
+    # Atomicity: no partial catalog is left behind on failure.
+    assert not dest.exists()
+
+
+def test_extract_split_archive_missing_local_header_errors(tmp_path: Path):
+    """A spanning marker not followed by a local header raises a clear error."""
+    split = tmp_path / "bogus-split.zip"
+    split.write_bytes(b"PK\x07\x08" + b"not a local file header, definitely not zip")
+
+    dest = tmp_path / "out.sqlite3"
+    with pytest.raises(RuntimeError, match="local file header"):
+        _extract_catalog(split, dest)
+    assert not dest.exists()
+
+
+def test_sync_catalog_extracts_true_split_dataset(catalog_db: Path, tmp_path: Path, monkeypatch):
+    """sync_catalog assembles and extracts a real split-shaped dataset."""
+    data_dir = tmp_path / "dataset"
+    _builder.build_spanning_split_dataset(data_dir, catalog_db)
+
+    fake_requests = _make_fake_requests(data_dir)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    dest = tmp_path / "out" / "jlcparts.sqlite3"
+    result = sync_catalog(
+        dest=dest,
+        base_url="https://fake.local/data",
+        force=False,
+        progress=False,
+    )
+
+    assert result == dest
+    assert dest.read_bytes() == catalog_db.read_bytes()
+    catalog = JlcpartsCatalog(dest)
+    assert catalog.count() == 4
+    assert catalog.lookup("C25804") is not None
+
+
+def test_cli_surfaces_extraction_error(catalog_db: Path, tmp_path: Path, monkeypatch, capsys):
+    """A sync-catalog extraction failure prints an actionable error (exit 1)."""
+    import io
+    import zipfile
+
+    from kicad_tools.cli import parts_cmd
+
+    # Build a split dataset whose single member is STORED (method 0) so the
+    # streaming extractor raises -- exercising the CLI error surface.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.write(catalog_db, arcname="cache.sqlite3")
+    data = b"PK\x07\x08" + buf.getvalue()
+
+    data_dir = tmp_path / "dataset"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    midpoint = max(1, len(data) // 2)
+    (data_dir / "cache.z01").write_bytes(data[:midpoint])
+    (data_dir / "cache.zip").write_bytes(data[midpoint:])
+
+    dest = tmp_path / "cli-out" / "jlcparts.sqlite3"
+    fake_requests = _make_fake_requests(data_dir)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    monkeypatch.setattr("kicad_tools.parts.jlcparts_catalog.get_catalog_path", lambda: dest)
+
+    rc = parts_cmd.main(["sync-catalog", "--base-url", "https://fake.local/data"])
+    assert rc == 1
+
+    err = capsys.readouterr().err
+    # The actual extraction error text is surfaced -- not a silent exit-1.
+    assert "failed to sync jlcparts catalog" in err
+    assert "not deflate-compressed" in err
+    # No partial catalog left behind.
+    assert not dest.exists()
