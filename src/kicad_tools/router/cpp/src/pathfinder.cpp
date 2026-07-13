@@ -218,6 +218,19 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
     const bool use_cached = (radius_override <= 0);
     const int radius_sq = radius * radius;
 
+    // Issue #4079: lateral-trace corridor keep-out.  A cell reserved for a
+    // net set that EXCLUDES ``net`` blocks this trace placement -- EVEN if
+    // the cell is not otherwise ``blocked`` -- so a foreign net's A* cannot
+    // route through another net's reserved continuation corridor (the via-
+    // only keep-out in ``mark_via`` was insufficient; without this the A*
+    // could pick an illegal lateral path and only be caught after the fact).
+    // Mirrors the Python ``_is_trace_blocked`` reservation consult.  Fast-
+    // pathed behind ``has_reservations()`` so unreserved boards are
+    // byte-identical.  The keep-out is a HARD gate even in negotiated /
+    // relief mode (``allow_sharing``), matching ``mark_via``'s unconditional
+    // skip -- a reserved corridor is not soft-negotiable.
+    const bool check_reservations = grid_.has_reservations();
+
     if (use_cached) {
         for (const auto& [dx_off, dy_off] : circular_kernel_offsets_) {
             const int dx = static_cast<int>(dx_off);
@@ -226,6 +239,12 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
             const int cy = y + dy;
             if (!grid_.is_valid(cx, cy, layer)) {
                 return true;  // Out of bounds
+            }
+
+            // Issue #4079: hard keep-out for foreign-reserved cells.
+            if (check_reservations &&
+                grid_.is_reserved_excluding(cx, cy, layer, net)) {
+                return true;
             }
 
             const auto& cell = grid_.at(cx, cy, layer);
@@ -300,6 +319,13 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
             const int cx = x + dx, cy = y + dy;
             if (!grid_.is_valid(cx, cy, layer)) {
                 return true;  // Out of bounds
+            }
+
+            // Issue #4079: hard keep-out for foreign-reserved cells (see
+            // the fast-path branch above for the full rationale).
+            if (check_reservations &&
+                grid_.is_reserved_excluding(cx, cy, layer, net)) {
+                return true;
             }
 
             const auto& cell = grid_.at(cx, cy, layer);

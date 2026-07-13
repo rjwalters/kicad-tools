@@ -197,8 +197,10 @@ NB_MODULE(router_cpp, m) {
         // ``is_reserved_for``, ``clear_corridor_reservations``, and
         // ``reserved_cell_count``.  ``mark_via`` and the A* cost loop
         // honour these reservations (keep-out + attractor).
+        // Issue #4079: ``soft`` (default False) selects HARD (via + lateral
+        // keep-out) vs SOFT (attractor-only) reservation strength.
         .def("reserve_cell", &Grid3D::reserve_cell,
-             "x"_a, "y"_a, "layer"_a, "net_ids"_a)
+             "x"_a, "y"_a, "layer"_a, "net_ids"_a, "soft"_a = false)
         .def("clear_reservations", &Grid3D::clear_reservations)
         .def("reserved_cell_count", &Grid3D::reserved_cell_count)
         .def("is_reserved_for", &Grid3D::is_reserved_for,

@@ -83,11 +83,21 @@ void Grid3D::mark_rect_blocked(int x1, int y1, int x2, int y2, int layer, int ne
 
 void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                           int clearance_cells) {
+    // Issue #4079: fast-path the reservation consult behind the grid-wide
+    // flag so unreserved boards pay zero extra cost (byte-identical).
+    const bool check_reservations = has_reservations_;
     auto mark_with_clearance = [&](int gx, int gy) {
         for (int dy = -clearance_cells; dy <= clearance_cells; ++dy) {
             for (int dx = -clearance_cells; dx <= clearance_cells; ++dx) {
                 int nx = gx + dx, ny = gy + dy;
                 if (is_valid(nx, ny, layer)) {
+                    // Issue #4079: skip cells reserved for a net set that
+                    // EXCLUDES ``net`` (lateral-trace keep-out, mirrors
+                    // Python ``_mark_segment`` and the ``mark_via`` skip).
+                    if (check_reservations &&
+                        is_reserved_excluding(nx, ny, layer, net)) {
+                        continue;
+                    }
                     auto& cell = at(nx, ny, layer);
                     if (!cell.blocked) {
                         cell.net = net;
@@ -179,7 +189,7 @@ void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
 // sets larger than ``RESERVED_NETS_CAP`` are truncated; overlapping
 // reservations REPLACE (last-writer-wins).
 void Grid3D::reserve_cell(int x, int y, int layer,
-                          const std::vector<int>& net_ids) {
+                          const std::vector<int>& net_ids, bool soft) {
     if (!is_valid(x, y, layer)) return;
     auto& cell = at(x, y, layer);
     int n = 0;
@@ -193,6 +203,9 @@ void Grid3D::reserve_cell(int x, int y, int layer,
         cell.reserved_nets[i] = 0;
     }
     cell.reserved_count = static_cast<int8_t>(n);
+    // Issue #4079: HARD (soft=false) vs SOFT (soft=true) keep-out strength.
+    // Last-writer-wins mirrors the owner-set replace semantics above.
+    cell.reserved_soft = (n > 0) ? soft : false;
     if (n > 0) has_reservations_ = true;
 }
 
@@ -200,6 +213,7 @@ void Grid3D::clear_reservations() {
     for (auto& cell : cells_) {
         if (cell.reserved_count > 0) {
             cell.reserved_count = 0;
+            cell.reserved_soft = false;
             for (int i = 0; i < RESERVED_NETS_CAP; ++i) {
                 cell.reserved_nets[i] = 0;
             }

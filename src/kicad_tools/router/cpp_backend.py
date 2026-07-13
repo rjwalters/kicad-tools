@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 16
+_REQUIRED_CPP_BUILD_VERSION = 17
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -612,10 +612,16 @@ class CppGrid:
         # incremental ``reserve_corridor_cells`` path already skips them; this
         # guard covers any that already existed when the C++ grid was built.
         suppressed = getattr(grid, "_cpp_suppressed_reservations", None) or set()
+        # Issue #4079: mirror the per-reservation HARD vs SOFT strength so the
+        # C++ ``is_reserved_excluding`` keep-out and attractor match Python.
+        soft_reservations = getattr(grid, "_soft_reservations", None) or set()
         for (layer_idx, y, x), owners in grid._reserved_for_nets.items():
-            if (layer_idx, y, x) in suppressed:
+            key = (layer_idx, y, x)
+            if key in suppressed:
                 continue
-            cpp_grid._impl.reserve_cell(x, y, layer_idx, [int(n) for n in owners])
+            cpp_grid._impl.reserve_cell(
+                x, y, layer_idx, [int(n) for n in owners], key in soft_reservations
+            )
 
         # Issue #2439: Populate pad data for C++ geometric validation.
         # Pre-compute per-component clearance overrides and FNV-1a ref hashes
