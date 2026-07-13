@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -71,6 +72,30 @@ _USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 _HTTP_TIMEOUT = 30
+
+# --------------------------------------------------------------------------
+# Untrusted-input validation
+# --------------------------------------------------------------------------
+# The C-number originates from a committed sidecar (``lcsc_models.json``) that
+# must be treated as untrusted: it flows into a cache *filename*
+# (``{lcsc_id}.step``), into a request *URL* (``.format(lcsc_id=...)``), and
+# into a committed ``.kicad_pcb`` *model ref*.  An unvalidated value enables
+# path traversal (``../outside/pwned``), URL injection (``C1/../../evil?x=``),
+# and ref injection.  EasyEDA C-numbers are ``C`` followed by digits, so we pin
+# the value to that shape at every trust boundary.
+_LCSC_ID_RE = re.compile(r"^C\d+$")
+
+# Bounds on a fetched STEP body written to the cache.  A compromised/rogue
+# endpoint can return an arbitrarily large or non-STEP payload; cap the size
+# and require the ISO-10303-21 header before ever writing to disk.  Real LCSC
+# bodies are typically a few MB; 50 MB is generous but bounded.
+_MAX_STEP_BYTES = 50 * 1024 * 1024
+_STEP_MAGIC = b"ISO-10303-21"
+
+
+def _is_valid_lcsc_id(lcsc_id: str) -> bool:
+    """True when *lcsc_id* is a well-formed EasyEDA C-number (``C`` + digits)."""
+    return bool(_LCSC_ID_RE.match(lcsc_id))
 
 
 def lcsc_cache_dir() -> Path:
@@ -120,6 +145,15 @@ def load_lcsc_mapping(sidecar_path: Path | str) -> dict[str, str]:
         if not isinstance(key, str) or not isinstance(value, str):
             raise ValueError(
                 f"LCSC sidecar {path}: entries must be string lib_id -> string C-number"
+            )
+        # The C-number is untrusted and flows into a cache filename, a request
+        # URL, and a committed board ref; a malformed value (path traversal,
+        # URL injection, non-C string) is a build error, matching the
+        # malformed-sidecar posture above.
+        if not _is_valid_lcsc_id(value):
+            raise ValueError(
+                f"LCSC sidecar {path}: invalid C-number {value!r} for {key!r} "
+                "(expected 'C' followed by digits, e.g. 'C50950')"
             )
         mapping[key] = value
     return mapping
@@ -209,6 +243,12 @@ def _fetch_lcsc_step(lcsc_id: str) -> bytes | None:
     step = _http_get(_API_STEP_MODEL.format(uuid=uuid))
     if not step:
         return None
+    # Bound the third-party payload before it can reach the disk: reject an
+    # oversize body or anything that is not a real ISO-10303-21 STEP file.
+    if len(step) > _MAX_STEP_BYTES:
+        return None
+    if not step.lstrip().startswith(_STEP_MAGIC):
+        return None
     return step
 
 
@@ -238,6 +278,14 @@ def resolve_lcsc_step(
         fetch: When True, fetch on a cache miss; when False, cache-only.
         warn: Optional ``callable(str)`` invoked on a fetch failure.
     """
+    # Defense in depth: even though ``load_lcsc_mapping`` rejects a malformed
+    # C-number at the sidecar boundary, never let an unvalidated value reach the
+    # filesystem or network here.  The resolver path stays never-raise, so an
+    # invalid id warns and returns None rather than raising.
+    if not _is_valid_lcsc_id(lcsc_id):
+        if callable(warn):
+            warn(f"LCSC 3D model skipped: invalid C-number {lcsc_id!r} (no model inserted)")
+        return None
     cache = cache_dir if cache_dir is not None else lcsc_cache_dir()
     step_path = cache / f"{lcsc_id}.step"
     if step_path.is_file():

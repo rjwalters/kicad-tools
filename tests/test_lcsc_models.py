@@ -169,6 +169,22 @@ class TestFetchClient:
         with mock.patch("urllib.request.urlopen", fake_urlopen):
             assert _fetch_lcsc_step("C50950") is None
 
+    def test_oversize_step_body_rejected(self):
+        # A rogue endpoint returns a body over the size cap: reject, don't cache.
+        huge = b"ISO-10303-21;" + b"\x00" * (50 * 1024 * 1024 + 1)
+        fake = _urlopen_router({"/api/products/C50950/components": COMPONENT_INFO, FAKE_UUID: huge})
+        with mock.patch("urllib.request.urlopen", fake):
+            assert _fetch_lcsc_step("C50950") is None
+
+    def test_non_step_body_rejected(self):
+        # A body without the ISO-10303-21 header is not a STEP file: reject.
+        not_step = b"<html>totally not a step file</html>"
+        fake = _urlopen_router(
+            {"/api/products/C50950/components": COMPONENT_INFO, FAKE_UUID: not_step}
+        )
+        with mock.patch("urllib.request.urlopen", fake):
+            assert _fetch_lcsc_step("C50950") is None
+
 
 # --------------------------------------------------------------------------
 # Cache-aware resolution
@@ -222,6 +238,33 @@ class TestResolveCache:
             path = resolve_lcsc_step("C50950", cache_dir=tmp_path, fetch=True, warn=warnings.append)
         assert path is None
         assert warnings and "C50950" in warnings[0]
+
+    @pytest.mark.parametrize(
+        "bad_id",
+        [
+            "../outside/pwned",  # path traversal into a sibling dir
+            "C1/../../evil?x=",  # URL/path injection
+            "../../../etc/whatever",  # ref-injection style traversal
+            "not-a-c-number",  # non-C value
+            "C",  # 'C' with no digits
+            "",  # empty
+        ],
+    )
+    def test_invalid_id_never_touches_fs_or_network(self, tmp_path, bad_id):
+        # A malicious/malformed id must warn + return None and never write a
+        # file, format a URL, or escape the cache dir.
+        warnings: list[str] = []
+
+        def forbidden(req, timeout=None):  # noqa: ANN001
+            raise AssertionError("invalid id must not reach the network")
+
+        with mock.patch("urllib.request.urlopen", forbidden):
+            path = resolve_lcsc_step(bad_id, cache_dir=tmp_path, fetch=True, warn=warnings.append)
+        assert path is None
+        assert warnings and "invalid C-number" in warnings[0]
+        # Nothing was written anywhere under (or above) the cache dir.
+        assert not any(tmp_path.rglob("*.step"))
+        assert not (tmp_path.parent / "outside" / "pwned.step").exists()
 
 
 # --------------------------------------------------------------------------
@@ -281,6 +324,24 @@ class TestSidecar:
         sidecar = tmp_path / "num.json"
         sidecar.write_text(json.dumps({"Lib:Name": 123}))
         with pytest.raises(ValueError, match="string"):
+            load_lcsc_mapping(sidecar)
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "../outside/pwned",  # path traversal
+            "C1/../../evil?x=",  # URL injection
+            "not-a-c-number",  # non-C value
+            "C",  # 'C' with no digits
+            "c50950",  # lowercase 'c'
+        ],
+    )
+    def test_invalid_cnumber_is_build_error(self, tmp_path, bad_value):
+        # An untrusted, malformed C-number in a committed sidecar must raise
+        # (build error), never flow silently into the cache/URL/ref sinks.
+        sidecar = tmp_path / "bad_cnumber.json"
+        sidecar.write_text(json.dumps({"Module:Joystick_Analog": bad_value}))
+        with pytest.raises(ValueError, match="invalid C-number"):
             load_lcsc_mapping(sidecar)
 
 
