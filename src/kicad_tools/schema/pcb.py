@@ -2291,6 +2291,41 @@ class PCB:
             return None
         return (min(xs), min(ys), max(xs), max(ys))
 
+    def _edge_cuts_poly_chains_sexp(self) -> list[list[tuple[float, float]]]:
+        """Collect ``gr_poly``/``gr_curve`` Edge.Cuts vertex chains.
+
+        ``gr_poly`` and ``gr_curve`` graphics are not parsed into the in-memory
+        ``_graphic_lines``/``_graphic_arcs``/``_graphics`` collections, so this
+        walks ``self._sexp`` directly (like :meth:`_edge_cuts_bbox_sexp`) and
+        returns each polygon/curve's ordered ``(pts (xy ...))`` vertex list in
+        **sheet-absolute** coordinates.
+
+        Returns:
+            A list of vertex chains; each chain is an ordered list of
+            ``(x, y)`` tuples.  Empty if no ``gr_poly``/``gr_curve`` Edge.Cuts
+            geometry is present.
+        """
+
+        def _on_edge_cuts(node: SExp) -> bool:
+            layer_node = node.find_child("layer")
+            return bool(layer_node and layer_node.get_string(0) == "Edge.Cuts")
+
+        chains: list[list[tuple[float, float]]] = []
+        for child in self._sexp.iter_children():
+            if child.tag not in ("gr_poly", "gr_curve"):
+                continue
+            if not _on_edge_cuts(child):
+                continue
+            chain: list[tuple[float, float]] = []
+            for pts in child.find_all("pts"):
+                for xy in pts.find_children("xy"):
+                    x, y = xy.get_float(0), xy.get_float(1)
+                    if x is not None and y is not None:
+                        chain.append((x, y))
+            if chain:
+                chains.append(chain)
+        return chains
+
     @staticmethod
     def _translate_coord_node(node: SExp, dx_nm: int, dy_nm: int) -> None:
         """Translate the first two atoms (X, Y) of a coordinate node in place.
@@ -2854,8 +2889,18 @@ class PCB:
         """Extract board outline polygon from Edge.Cuts layer.
 
         Returns an ordered list of (x, y) points forming the board outline.
-        Handles gr_line, gr_arc, and gr_rect elements on the Edge.Cuts layer.
-        Arc segments are approximated by their start and end points.
+        Handles ``gr_line``, ``gr_arc``, ``gr_rect``, ``gr_poly``, and
+        ``gr_curve`` elements on the Edge.Cuts layer.  Arc segments are
+        approximated by their start and end points; polygon/curve outlines
+        contribute their vertex chain (``(pts (xy ...))``).
+
+        ``gr_poly``/``gr_curve`` Edge.Cuts geometry is common for rounded
+        corners, chamfers, and any outline drawn with KiCad's polygon tool.
+        Those elements are not surfaced through the in-memory
+        ``_graphic_lines``/``_graphic_arcs``/``_graphics`` collections, so they
+        are recovered by walking ``self._sexp`` directly (mirroring
+        :meth:`_edge_cuts_bbox_sexp`).  Without this, a board whose outline is
+        a single ``gr_poly`` would silently return ``[]``.
 
         Returns:
             List of (x, y) coordinate tuples in mm. Empty list if no outline found.
@@ -2866,8 +2911,11 @@ class PCB:
         edge_rects = [
             g for g in self._graphics if g.layer == "Edge.Cuts" and g.graphic_type == "rect"
         ]
+        # gr_poly / gr_curve are not parsed into the in-memory collections, so
+        # recover their vertex chains straight off the S-expression tree.
+        poly_chains = self._edge_cuts_poly_chains_sexp()
 
-        if not edge_lines and not edge_arcs and not edge_rects:
+        if not edge_lines and not edge_arcs and not edge_rects and not poly_chains:
             return []
 
         # Build a list of all line segments (including arc endpoints)
@@ -2883,6 +2931,15 @@ class PCB:
 
         for rect in edge_rects:
             segments.extend(self._rect_to_segments(rect.start, rect.end))
+
+        # Each gr_poly / gr_curve contributes edges between consecutive
+        # vertices (and a closing edge back to the first vertex) so the shared
+        # segment-stitching logic below can walk them like any other outline.
+        for chain in poly_chains:
+            for i in range(len(chain) - 1):
+                segments.append((chain[i], chain[i + 1]))
+            if len(chain) >= 3:
+                segments.append((chain[-1], chain[0]))
 
         if not segments:
             return []

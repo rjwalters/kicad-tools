@@ -2751,3 +2751,251 @@ class TestBoard05SyncDriftRegression:
         for pad_num, want_net in expected.items():
             got = pad_nets.get(pad_num)
             assert got == want_net, f"U3.{pad_num}: expected net {want_net!r}, got {got!r}"
+
+
+# ---------------------------------------------------------------------------
+# gr_poly / gr_curve Edge.Cuts outline handling (issue #4098, Bug A)
+# ---------------------------------------------------------------------------
+
+# Board whose Edge.Cuts outline is a single gr_poly (chamfered rectangle),
+# offset far from the sheet origin (x in [116.5, 181.5], y in [100, 175]) —
+# mirrors the reporter's 65x75mm board that landed new parts off-board.
+PCB_GR_POLY_OUTLINE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (gr_poly
+    (pts
+      (xy 116.5 105) (xy 176.5 100) (xy 181.5 105)
+      (xy 181.5 175) (xy 116.5 175)
+    )
+    (stroke (width 0.1) (type default))
+    (layer "Edge.Cuts")
+    (uuid "poly-outline-1")
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 150 140)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+# Board with no Edge.Cuts geometry at all (edge case for the loud fallback).
+PCB_NO_OUTLINE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+
+class TestGetBoardOutlineGrPoly:
+    """PCB.get_board_outline() must handle gr_poly / gr_curve outlines (#4098)."""
+
+    def test_gr_poly_outline_returns_nonempty_polygon(self, tmp_path):
+        """A gr_poly Edge.Cuts outline yields a non-empty polygon (not [])."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_path = tmp_path / "poly.kicad_pcb"
+        pcb_path.write_text(PCB_GR_POLY_OUTLINE)
+        pcb = PCB.load(pcb_path)
+
+        outline = pcb.get_board_outline()
+
+        assert outline, "gr_poly outline should not return an empty list"
+        xs = [pt[0] for pt in outline]
+        ys = [pt[1] for pt in outline]
+        assert min(xs) == pytest.approx(116.5)
+        assert max(xs) == pytest.approx(181.5)
+        assert min(ys) == pytest.approx(100.0)
+        assert max(ys) == pytest.approx(175.0)
+
+    def test_gr_curve_outline_returns_nonempty_polygon(self, tmp_path):
+        """A gr_curve Edge.Cuts outline also contributes its vertex chain."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_text = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "")
+  (gr_curve
+    (pts (xy 10 10) (xy 40 5) (xy 70 10) (xy 70 60) (xy 10 60))
+    (stroke (width 0.1) (type default))
+    (layer "Edge.Cuts")
+    (uuid "curve-1")
+  )
+)
+"""
+        pcb_path = tmp_path / "curve.kicad_pcb"
+        pcb_path.write_text(pcb_text)
+        pcb = PCB.load(pcb_path)
+
+        outline = pcb.get_board_outline()
+
+        assert outline, "gr_curve outline should not return an empty list"
+        xs = [pt[0] for pt in outline]
+        assert min(xs) == pytest.approx(10.0)
+        assert max(xs) == pytest.approx(70.0)
+
+    def test_get_board_edge_position_uses_gr_poly_outline(self, tmp_path):
+        """Staging position is derived from the gr_poly outline, not (0, 0)."""
+        from kicad_tools.cli.pcb_sync_netlist import _get_board_edge_position
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_path = tmp_path / "poly.kicad_pcb"
+        pcb_path.write_text(PCB_GR_POLY_OUTLINE)
+        pcb = PCB.load(pcb_path)
+
+        x, y = _get_board_edge_position(pcb)
+
+        # Staged 10mm to the right of the outline's max_x (181.5), not at origin.
+        assert x == pytest.approx(191.5)
+        assert (x, y) != (0.0, 0.0)
+
+
+class TestOutlineBboxHelpers:
+    """Tests for _outline_bbox / _is_outside_bbox (issue #4098)."""
+
+    def test_outline_bbox_from_gr_poly(self, tmp_path):
+        """_outline_bbox returns the correct board-relative bbox for gr_poly."""
+        from kicad_tools.cli.pcb_sync_netlist import _outline_bbox
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_path = tmp_path / "poly.kicad_pcb"
+        pcb_path.write_text(PCB_GR_POLY_OUTLINE)
+        pcb = PCB.load(pcb_path)
+
+        bbox = _outline_bbox(pcb)
+
+        assert bbox is not None
+        min_x, min_y, max_x, max_y = bbox
+        assert (min_x, min_y, max_x, max_y) == pytest.approx((116.5, 100.0, 181.5, 175.0))
+
+    def test_outline_bbox_none_when_no_outline(self, tmp_path):
+        """_outline_bbox returns None when no Edge.Cuts geometry exists."""
+        from kicad_tools.cli.pcb_sync_netlist import _outline_bbox
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_path = tmp_path / "none.kicad_pcb"
+        pcb_path.write_text(PCB_NO_OUTLINE)
+        pcb = PCB.load(pcb_path)
+
+        assert _outline_bbox(pcb) is None
+
+    def test_is_outside_bbox_flags_far_point(self):
+        """A point well beyond the padded bbox is flagged as outside."""
+        from kicad_tools.cli.pcb_sync_netlist import _is_outside_bbox
+
+        bbox = (116.5, 100.0, 181.5, 175.0)
+        # 100mm past max_x — clearly off-board.
+        assert _is_outside_bbox(281.5, 137.5, bbox) is True
+
+    def test_is_outside_bbox_exempts_staging_offset(self):
+        """The deliberate ~10mm staging offset is within the padded bbox."""
+        from kicad_tools.cli.pcb_sync_netlist import _is_outside_bbox
+
+        bbox = (116.5, 100.0, 181.5, 175.0)
+        # max_x + 10 (staging) plus a couple of 5mm spacings — should NOT warn.
+        assert _is_outside_bbox(191.5, 100.0, bbox) is False
+        assert _is_outside_bbox(201.5, 100.0, bbox) is False
+
+
+class TestSyncOffBoardWarnings:
+    """sync_netlist surfaces off-board / no-outline warnings (issue #4098)."""
+
+    def test_no_outline_fallback_emits_warning(self, tmp_path, monkeypatch):
+        """A board with no Edge.Cuts outline emits an explicit fallback warning."""
+        from kicad_tools.cli import pcb_sync_netlist
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb_path = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)  # R1 + C1
+        pcb_path.write_text(PCB_NO_OUTLINE)  # only C1, no outline
+
+        # Avoid depending on KiCad standard libraries: stub the actual add.
+        monkeypatch.setattr(PCB, "add_footprint", lambda self, **kwargs: None)
+
+        result = sync_netlist(sch, pcb_path, output_path=tmp_path / "out.kicad_pcb")
+
+        assert any("No Edge.Cuts outline detected" in w for w in result.warnings), (
+            f"expected fallback warning, got {result.warnings!r}"
+        )
+        # And it must be rendered by both formatters.
+        text = pcb_sync_netlist.format_text(result, dry_run=False, pcb_path=pcb_path)
+        assert "No Edge.Cuts outline detected" in text
+        payload = json.loads(pcb_sync_netlist.format_json(result, dry_run=False, pcb_path=pcb_path))
+        assert any("No Edge.Cuts outline detected" in w for w in payload["warnings"])
+
+    def test_off_board_placement_emits_per_reference_warning(self, tmp_path, monkeypatch):
+        """A footprint placed outside the outline bbox warns naming the ref."""
+        from kicad_tools.cli import pcb_sync_netlist
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb_path = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)  # R1 + C1
+        pcb_path.write_text(PCB_GR_POLY_OUTLINE)  # gr_poly outline, only C1
+
+        # Force placement far outside the outline bbox (simulating Bug A/B).
+        monkeypatch.setattr(
+            pcb_sync_netlist, "_get_board_edge_position", lambda pcb: (500.0, 500.0)
+        )
+        monkeypatch.setattr(PCB, "add_footprint", lambda self, **kwargs: None)
+
+        result = sync_netlist(sch, pcb_path, output_path=tmp_path / "out.kicad_pcb")
+
+        off_board = [w for w in result.warnings if "placed outside board outline" in w]
+        assert off_board, f"expected off-board warning, got {result.warnings!r}"
+        assert any("R1" in w for w in off_board)
+        assert any("(500.000, 500.000)" in w for w in off_board)
+
+        # Rendered in both formatters.
+        text = pcb_sync_netlist.format_text(result, dry_run=False, pcb_path=pcb_path)
+        assert "placed outside board outline" in text
+        payload = json.loads(pcb_sync_netlist.format_json(result, dry_run=False, pcb_path=pcb_path))
+        assert any("placed outside board outline" in w for w in payload["warnings"])
+
+    def test_in_bounds_staging_does_not_warn(self, tmp_path, monkeypatch):
+        """Legitimate outline-derived staging placement produces no new warning."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb_path = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)  # R1 + C1
+        pcb_path.write_text(PCB_GR_POLY_OUTLINE)  # gr_poly outline present, only C1
+
+        monkeypatch.setattr(PCB, "add_footprint", lambda self, **kwargs: None)
+
+        result = sync_netlist(sch, pcb_path, output_path=tmp_path / "out.kicad_pcb")
+
+        assert not any("placed outside board outline" in w for w in result.warnings)
+        assert not any("No Edge.Cuts outline detected" in w for w in result.warnings)
