@@ -604,7 +604,17 @@ class CppGrid:
         # skip and the A* corridor attractor both read the per-cell owner set,
         # so the reservations must be mirrored across the boundary.  Empty
         # dict => zero iterations (byte-identical to pre-#4071 boards).
+        #
+        # PR #4078 Path B: skip cells whose reservation opted out of C++
+        # mirroring (``mirror_to_cpp=False`` -- the single-ended #2983
+        # inner-corner / #4053 bundle-river byte-lane reservations that
+        # regress board 07 into copper shorts when honoured on C++).  The
+        # incremental ``reserve_corridor_cells`` path already skips them; this
+        # guard covers any that already existed when the C++ grid was built.
+        suppressed = getattr(grid, "_cpp_suppressed_reservations", None) or set()
         for (layer_idx, y, x), owners in grid._reserved_for_nets.items():
+            if (layer_idx, y, x) in suppressed:
+                continue
             cpp_grid._impl.reserve_cell(x, y, layer_idx, [int(n) for n in owners])
 
         # Issue #2439: Populate pad data for C++ geometric validation.

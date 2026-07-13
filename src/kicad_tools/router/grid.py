@@ -914,6 +914,16 @@ class RoutingGrid:
         # match the rest of the grid's Via.net / Segment.net typing.
         self._reserved_for_nets: dict[tuple[int, int, int], frozenset[int]] = {}
 
+        # PR #4078 Path B: (layer, y, x) keys reserved with mirror_to_cpp=False
+        # (the single-ended #2983 inner-corner / #4053 bundle-river byte-lane
+        # reservations).  These stay Python-only -- honouring them on the C++
+        # backend regresses board 07's reversed DDR byte into copper shorts.
+        # ``CppGrid.from_routing_grid``'s bulk reservation copy consults this
+        # set so a suppressed reservation that already existed at C++
+        # construction time is NOT mirrored either (the incremental path in
+        # ``reserve_corridor_cells`` already skips it directly).
+        self._cpp_suppressed_reservations: set[tuple[int, int, int]] = set()
+
     def _select_backend(self) -> tuple[BackendType, Any]:
         """Select the appropriate backend based on config and grid size.
 
@@ -4167,6 +4177,8 @@ class RoutingGrid:
         layer_idx: int,
         cells: list[tuple[int, int]] | set[tuple[int, int]],
         net_ids: frozenset[int] | set[int] | list[int] | tuple[int, ...],
+        *,
+        mirror_to_cpp: bool = True,
     ) -> int:
         """Reserve a set of grid cells on a layer for one or more nets.
 
@@ -4189,6 +4201,19 @@ class RoutingGrid:
                 reserved cells.  For a diff pair this is exactly two IDs
                 (P-net and N-net).  For a match group (#2661) this can be
                 three or more.  Must not be empty.
+            mirror_to_cpp: Issue #4071 (PR #4078 Path B).  When ``True``
+                (default) the reservation is also written to the attached
+                C++ grid so the ported keep-out + attractor honour it.
+                Callers pass ``False`` to keep a reservation *Python-only*:
+                the single-ended byte-lane reservations (#2983 inner-corner,
+                #4053 bundle-river) regress board 07's dense reversed DDR
+                bundle into copper shorts when honoured on the C++ backend
+                (the attractor concentrates each single-net corridor while
+                the via-only keep-out cannot fence off foreign lateral
+                traces), so they opt OUT of C++ mirroring until the corridor
+                geometry is fixed.  The #2677 pair-continuation reservation
+                that benefits board 06 keeps the default ``True``.  See the
+                PR #4078 discussion / issues #4071 / #4053.
 
         Returns:
             Number of cells newly reserved (existing reservations
@@ -4207,17 +4232,31 @@ class RoutingGrid:
         # net-order preparation, which can be AFTER ``CppGrid.from_routing_grid``
         # has already built the C++ mirror (the bulk copy there only sees
         # reservations that exist at construction time).  Without this
-        # incremental mirror, #2983's inner-corner and #4053's bundle-river
-        # reservations would be invisible to the production C++ A*.
-        cpp_grid = getattr(self, "_cpp_grid", None)
+        # incremental mirror, #2677's pair-continuation reservations would be
+        # invisible to the production C++ A*.
+        #
+        # PR #4078 Path B: ``mirror_to_cpp=False`` keeps a reservation
+        # Python-only (see the arg docstring).  When mirroring is suppressed
+        # the C++ grid never sets ``has_reservations_``, so its A* stays
+        # byte-identical to the pre-#4071 backend for that reservation --
+        # preserving today's (shorts-free) board-07 route while the port
+        # still lands for #2677 pair-continuation (board 06).
+        cpp_grid = getattr(self, "_cpp_grid", None) if mirror_to_cpp else None
         owner_list = [int(n) for n in owners]
 
         count = 0
         for x, y in cells:
             if 0 <= x < self.cols and 0 <= y < self.rows:
-                self._reserved_for_nets[(layer_idx, y, x)] = owners
+                key = (layer_idx, y, x)
+                self._reserved_for_nets[key] = owners
                 if cpp_grid is not None:
                     cpp_grid._impl.reserve_cell(x, y, layer_idx, owner_list)
+                    # A later mirrored reservation over a previously-suppressed
+                    # cell re-enables C++ honouring for it.
+                    self._cpp_suppressed_reservations.discard(key)
+                elif not mirror_to_cpp:
+                    # Record the suppression so the bulk copy skips it too.
+                    self._cpp_suppressed_reservations.add(key)
                 count += 1
         return count
 
@@ -4230,6 +4269,8 @@ class RoutingGrid:
         escape pass has completed.
         """
         self._reserved_for_nets.clear()
+        # PR #4078 Path B: reset the Python-only suppression tracking too.
+        self._cpp_suppressed_reservations.clear()
         # Issue #4071: keep the attached C++ grid in lock-step.
         cpp_grid = getattr(self, "_cpp_grid", None)
         if cpp_grid is not None:
