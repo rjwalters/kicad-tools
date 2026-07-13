@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kicad-tools"
-version = "0.14.0"
+version = "0.15.0"
 description = "Standalone Python tools for parsing and manipulating KiCad schematic and PCB files"
 readme = "README.md"
 license = "MIT"
@@ -229,6 +229,12 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kicad_tools"]
+
+[tool.hatch.build.targets.sdist]
+# boards/external holds local-only symlinks to sibling repos (chorus,
+# softstart) that point outside the repository; newer uv/hatchling
+# versions hard-fail sdist builds on external symlinks.
+exclude = ["boards/external"]
 
 [tool.ruff]
 line-length = 100

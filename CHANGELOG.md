@@ -5,6 +5,86 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-07-13
+
+### Added
+
+#### Router — Feasibility, Corridors & Coupled Routing
+
+- **Monotonic feasibility certificate + constructive escape ordering** (#4089) — Certify escape feasibility and derive a constructive net ordering from it
+- **Corridor attractor in the coupled joint-state cost loop** (#4088) — Bias the coupled diff-pair A* toward a shared corridor
+- **Soft corridor reservation for cross-package diff pairs at escape** (#4090), plus **slack-budget corridor widening + slack-aware serpentine tuner** (#4092, Phase 1, flag-gated)
+- **C++ port of the coupled diff-pair joint-state A\* loop** (#4069)
+- **Scoped bundle river planner v1** (#4053, #4070) — Plan facing-column bus reversals
+- **Reactive escape-freedom byte-lane reorder** (#4060, opt-in, off by default)
+- **Congestion/escape-driven placement nudge** (#3872) and **joint region re-solve** (#3871) — Escape the 1:1-trade congestion minimum for placement-bound nets
+- **Read-only stuck-net classifier** (#3867) — `kct net-status --why`; POUR_DISCONTINUOUS classification for pour-carried nets (#3905)
+- **Deterministic iteration budgets** (#3879, #3882) — Load-independent `--deterministic-budget` with tuned per-net iteration cap, adopted in the chorus recipe
+- **`--order-method` to wire RoutingOptimizer into `kct route`** (#3898)
+- **45-degree geometry enforced by construction** at the copper-emission choke point (#3975)
+
+#### Diff-Pair Routing
+
+- **Coupled-pair budget-exit warnings** (#4106) — Warn when coupled pairs budget-exit to single-ended; compose escape routing with the diff-pair pre-pass (#3983)
+- **Variable-gap parallel offset within the impedance band** for the shadow constructor (#3991), with **quantized shadow copper by construction + hard per-pair shadow budget** (#3988)
+
+#### Checks, DRC & Validate
+
+- **Stale zone-fill advisory + opt-in `--refill-zones` flag on `kct check`** (#4113) — Warn when copper is measured against possibly-stale stored fills; optionally shell out to `kicad-cli pcb drc --refill-zones --save-board` first
+- **Net-relationship labels on hole-to-hole drill-clearance findings** (#4114) — Same-net/different-net tags, unconditional net display, and a BY RULE sub-count breakdown
+- **Thin-copper sliver detection** via per-layer morphological open (#3853)
+- **`silk_over_copper` / `silk_edge_clearance` DRC rules** (#3849)
+- **Net-0 stray-copper bridge detection** between assigned nets (#3819)
+- **Length-match measurements on default `kct check` output** + via-inclusive diff-pair skew (#3955)
+- **Fail-loud missing-footprint preflight** + heuristic auto-assign (#3868)
+
+#### Copper-LVS Gate (boards 01–07)
+
+- **Label-free zone-pour copper extraction** via hole-aware shapely overlap (#3769); shared `write_lvs_report` helper (#3782)
+- **Copper-LVS gates wired across boards 01–07** (#3782, #3784, #3788, #3798), with a `--lvs-only` e2e asserter and board-03 e2e CI job
+- **Real LVS evidence** — wire boards 06/07 fixture schematics (#4013); emit `lvs.json` for boards 01+02 (#4001)
+- **Hierarchical-schematic LVS** (#4112) — `_schematic_pin_to_net` now recurses `(sheet ...)` references, so LVS is no longer vacuous on multi-sheet designs
+
+#### Parts / LCSC & 3D Models
+
+- **LCSC/EasyEDA fetch-on-demand model resolver tier** (#4072, #4075) and **cross-library substitution tier** for generic footprint model refs (#4033)
+- **LCSC tier applied to fleet-waived parts** (#4076); 3D model refs added to fleet footprints so gallery renders show components (#4012)
+- **Offline JLCPCB parts catalog** (#4117) — `kct parts sync-catalog` downloads the yaqwsx/jlcparts SQLite dataset into the cache dir; `LCSCClient` falls back to it when the live API is unavailable
+- **Official JLCPCB open-platform API backend, BYO access key** (#4119) — HMAC-SHA256 signed client; set `JLCPCB_ACCESS_KEY`/`JLCPCB_SECRET_KEY` to make the official API the preferred parts tier (official → anonymous → offline catalog); keyless behavior unchanged
+
+#### Zones, CLI & Build
+
+- **`zones add --bbox/--region` island-pour flags** (#3813)
+- **`pcb move-footprint --absolute` coordinate mode** (#3809)
+- **`kct route` routing flags** — monotone-certificate / cross-package / slack flags exposed on the CLI (#4103)
+- **Per-step build timings + heartbeat** for silent subprocess steps (#3967)
+
+#### Consumer Tooling / Install
+
+- **Consumer-generic `.claude/commands/kct/` skills** (#4057, #4064) and **vendored portable CI gates into consumer `.kct/ci/`** (#4063)
+- **`/kct:tapeout` skill** (#4115) — Guided workflow producing a complete fab-ready export bundle
+
+### Fixed
+
+- **Router correctness** — C++ grid corridor-reservation keep-out + attractor port (#4071, #4078); lateral-trace keep-out + per-reservation soft/hard flags (#4087); through-via measurement in match-group skew (#4030); min-hole-to-hole drill spacing at via sites (#3857); memory-forced auto-grid refuses to go coarser than clearance/2 (#3945); KiCad-canonical uuid/net ordering + seeded DRC-reroute UUIDs (#3957); budget-bounded negotiated rip-up reroutes (#3992); native-backend guard on the slow DDR reach test (#4093)
+- **Diff-pair** — stop the impedance-coupling gap from freezing the coupled search (#4052, #4061); restore single-ended back-reference on mid-copy failure (#4082); early-abort the collapsed coupled pass so an all-pairs budget-exit ships the single-ended-equivalent result (#4107); via-length-aware match-group tuner (#3985); iteration-vs-wall-clock exit diagnostics (#3954)
+- **Validate / DRC** — rotate pad offsets for solder-mask (#4083) and THT drill-clearance (#4067) violation locations; report DRC locations in sheet-absolute coordinates (#4048); model pads as true roundrect/oval geometry (#3835); dedicated `min_hole_to_hole` drill-to-drill spec (#3846); fail-loud when geometric DRC did not run (#3820, #3832)
+- **Copper-LVS / connectivity** — layer-aware segment chainer drops phantom crossover shorts (#3792); via-into-pour / via-in-pad bonding (#3796); detect via-to-foreign-pour shorts (#3946); model pour nets per fill-island (#3947); union pour pads across all fill islands (#3777)
+- **Zones / stitch** — carve foreign-net track segments out of zone fills (#3778); de-duplicate pour zones for deterministic board-07 fills (#3821); reject connectivity-fallback vias that graze foreign pour (#3930)
+- **Build pipeline** — export before verify, stop misreporting the manifest gate as DRC failure (#3974); reject stale `*_routed.kicad_pcb` via mtime capture (#3982); delete the manufacturing bundle when VERIFY fails after EXPORT (#3980); block shorted-board bundles with a DRC safety floor (#3929)
+- **Parser / schema / schematic** — synthesize the net table for KiCad 10 `--save-board` output (#4039); preserve multi-unit symbol structure on from-scratch save (#3885); multi-unit-aware net-query connectivity (#4038); emit companion sym-lib-table for synthesized power symbols (#3965)
+- **PCB / report / site** — emit absolute pad angles when placing rotated footprints (#3903); cwd-independent pandoc PDF image resolution + dropped-figure detection (#4040); frame the interactive viewer on the board, not the drawing sheet (#4016); center every board on its drawing sheet + `kct pcb center-on-sheet` (#4015)
+- **ERC** — suppress cross-sheet global-label false positives in `kct erc` (#3814)
+- **Placement** — point the cmaes `ImportError` at the placement extra (#4111); score the current layout in `--dry-run` (#3964); contain components within the real Edge.Cuts outline (#3812)
+- **Deps** — make `shapely` a core dependency and fail loud when absent (#3833)
+- **Manufacturing / mfr** — write sibling `.kicad_pro` + Default netclass on `apply-rules` (#4109); read `gr_poly/gr_curve` outlines and warn on off-board placement in sync-netlist (#4110)
+- **Export / BOM** — hard-fail `--auto-lcsc` with an actionable install hint when the `parts` extra is missing, instead of shipping an empty LCSC column at exit 0 (#4116)
+
+### Changed
+
+- **Board fixtures (00–07) hardened for the gallery** — Reconciled schematic↔PCB net drift to single net models (#3771, #3774), re-routed boards to 0 blocking DRC / clean copper-LVS (#4002, #4004, #4005), and added fail-fast route/verify gates (#3854, #4066, #4068). Board-05 phase tree and ISENSE Kelvin sense nets completed artifact-first (#3908, #3997, #3998)
+- **CI gates** — unified the blocking-error counter across the two routed-DRC gates (#4029); activated diff-pair/match-group DRC rules via net-class sidecar in board-06 (#3834); deterministic CI-terminating budgets for board-05/06 re-routes (#3886, #3892)
+
 ## [0.14.0] - 2026-06-16
 
 ### Added
@@ -1540,6 +1620,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.15.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.15.0
 [0.14.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.14.0
 [0.9.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.9.0
 [0.8.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.8.0
