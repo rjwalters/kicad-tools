@@ -66,6 +66,7 @@ from .importer import (
     LayoutStyle,
     PartImporter,
 )
+from .jlcparts_catalog import JlcpartsCatalog, get_catalog_path, sync_catalog
 from .lcsc import LCSCClient, LCSCForbiddenError, RateLimiter
 from .models import (
     BOMAvailability,
@@ -91,6 +92,10 @@ __all__ = [
     # Cache
     "PartsCache",
     "get_default_cache_path",
+    # Offline jlcparts catalog
+    "JlcpartsCatalog",
+    "get_catalog_path",
+    "sync_catalog",
     # Composition
     "ComposedPart",
     "ComposedPartStore",

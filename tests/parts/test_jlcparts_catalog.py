@@ -1,0 +1,480 @@
+"""Tests for the offline jlcparts catalog reader, LCSCClient fallback, and
+the ``sync-catalog`` command.
+
+No test in this file makes a real network request. The offline catalog is
+exercised against a small, hand-built fixture SQLite (see
+``tests/parts/fixtures/build_jlcparts_fixture.py``), and ``sync_catalog`` is
+driven against a mocked ``requests`` module + a local split-zip archive built
+from that same fixture.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+from kicad_tools.parts import Part, PartsCache
+from kicad_tools.parts.jlcparts_catalog import (
+    CATALOG_FILENAME,
+    JlcpartsCatalog,
+    _normalize_lcsc_id,
+    _parse_price_json,
+    get_catalog_path,
+    sync_catalog,
+)
+from kicad_tools.parts.lcsc import LCSCClient, LCSCForbiddenError
+
+# --------------------------------------------------------------------------
+# Load the fixture builder (not an importable package -- load by path)
+# --------------------------------------------------------------------------
+_FIXTURE_DIR = Path(__file__).parent / "fixtures"
+_spec = importlib.util.spec_from_file_location(
+    "build_jlcparts_fixture", _FIXTURE_DIR / "build_jlcparts_fixture.py"
+)
+assert _spec is not None and _spec.loader is not None
+_builder = importlib.util.module_from_spec(_spec)
+sys.modules["build_jlcparts_fixture"] = _builder
+_spec.loader.exec_module(_builder)
+
+
+@pytest.fixture
+def catalog_db(tmp_path: Path) -> Path:
+    """Build a tiny jlcparts-schema fixture SQLite and return its path."""
+    return _builder.build_fixture(tmp_path / "jlcparts_sample.sqlite3")
+
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+
+def test_normalize_lcsc_id():
+    assert _normalize_lcsc_id("C25804") == 25804
+    assert _normalize_lcsc_id("c25804") == 25804
+    assert _normalize_lcsc_id("25804") == 25804
+    assert _normalize_lcsc_id("C0100") == 100
+    assert _normalize_lcsc_id("Cabc") is None
+    assert _normalize_lcsc_id("") is None
+
+
+def test_parse_price_json_variants():
+    prices = _parse_price_json('[{"qFrom": 10, "price": 0.005}, {"qFrom": 100, "price": 0.002}]')
+    assert len(prices) == 2
+    assert prices[0].quantity == 10
+    assert prices[0].unit_price == 0.005
+    # Sorted ascending by quantity
+    assert prices[1].quantity == 100
+
+    # Already-parsed list passes through.
+    assert _parse_price_json([{"qFrom": 5, "price": 1.0}])[0].quantity == 5
+
+    # Bad / empty inputs degrade to empty list, never raise.
+    assert _parse_price_json(None) == []
+    assert _parse_price_json("") == []
+    assert _parse_price_json("not json") == []
+    assert _parse_price_json("{}") == []
+    assert _parse_price_json('[{"qFrom": 0, "price": 0}]') == []
+
+
+# --------------------------------------------------------------------------
+# JlcpartsCatalog reader
+# --------------------------------------------------------------------------
+
+
+def test_get_catalog_path_sits_beside_cache():
+    path = get_catalog_path()
+    assert path.name == CATALOG_FILENAME
+    # Same directory as the per-query parts cache.
+    from kicad_tools.parts.cache import get_default_cache_path
+
+    assert path.parent == get_default_cache_path().parent
+
+
+def test_catalog_absent_is_silent_noop(tmp_path: Path):
+    catalog = JlcpartsCatalog(tmp_path / "does-not-exist.sqlite3")
+    assert catalog.available is False
+    assert catalog.lookup("C25804") is None
+    assert catalog.lookup_many(["C25804", "C1525"]) == {}
+    assert catalog.count() == 0
+
+
+def test_catalog_lookup_translates_row(catalog_db: Path):
+    catalog = JlcpartsCatalog(catalog_db)
+    assert catalog.available is True
+
+    part = catalog.lookup("C25804")
+    assert part is not None
+    assert part.lcsc_part == "C25804"
+    assert part.mfr_part == "RC0402FR-0710KL"
+    assert part.manufacturer == "YAGEO"
+    assert part.package == "0402"
+    assert part.stock == 500000
+    assert part.is_basic is True
+    assert part.is_preferred is False
+    assert part.datasheet_url == "https://example.com/rc0402.pdf"
+    assert part.product_url == "https://jlcpcb.com/partdetail/C25804"
+    # Price breaks parsed and sorted.
+    assert [p.quantity for p in part.prices] == [10, 100]
+    assert part.best_price == 0.002
+
+
+def test_catalog_lookup_normalizes_and_missing(catalog_db: Path):
+    catalog = JlcpartsCatalog(catalog_db)
+    # Numeric / lowercase / bare forms all resolve.
+    assert catalog.lookup("25804") is not None
+    assert catalog.lookup("c25804") is not None
+    # Absent part -> None
+    assert catalog.lookup("C999999") is None
+
+
+def test_catalog_library_type_mapping(catalog_db: Path):
+    catalog = JlcpartsCatalog(catalog_db)
+    preferred = catalog.lookup("C100")
+    assert preferred is not None
+    assert preferred.is_preferred is True
+    assert preferred.is_basic is False
+    # No prices / datasheet on this row.
+    assert preferred.prices == []
+    assert preferred.datasheet_url == ""
+
+    extended = catalog.lookup("C8734")
+    assert extended is not None
+    assert extended.is_basic is False
+    assert extended.is_preferred is False
+
+
+def test_catalog_lookup_many(catalog_db: Path):
+    catalog = JlcpartsCatalog(catalog_db)
+    got = catalog.lookup_many(["C25804", "C1525", "C999999", "cabc"])
+    assert set(got.keys()) == {"C25804", "C1525"}
+    assert got["C25804"].mfr_part == "RC0402FR-0710KL"
+    assert got["C1525"].description.startswith("100nF")
+
+
+def test_catalog_count(catalog_db: Path):
+    catalog = JlcpartsCatalog(catalog_db)
+    assert catalog.count() == 4
+
+
+# --------------------------------------------------------------------------
+# LCSCClient fallback path
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def force_requests_present(monkeypatch):
+    """Pretend the ``requests`` extra is installed so the live-API branch runs.
+
+    The base dev env does not install ``requests`` (it is the ``[parts]``
+    extra), so the live-fetch branch is otherwise skipped. Tests that exercise
+    the *API-failure -> catalog* fallback need the live branch to be entered
+    (and ``_fetch_part`` to be reached) regardless of the local install.
+    """
+    monkeypatch.setattr("kicad_tools.parts.lcsc._requests_installed", lambda: True)
+
+
+def test_lookup_falls_back_to_catalog_on_api_failure(
+    catalog_db: Path, tmp_path: Path, force_requests_present
+):
+    """When the live API 403s, lookup() resolves from the offline catalog."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=catalog_db)
+
+    with mock.patch.object(
+        client, "_fetch_part", side_effect=LCSCForbiddenError("403")
+    ) as mock_fetch:
+        part = client.lookup("C25804")
+
+    mock_fetch.assert_called_once()
+    assert part is not None
+    assert part.lcsc_part == "C25804"
+    assert part.mfr_part == "RC0402FR-0710KL"
+    # Fallback result is cached for subsequent lookups.
+    assert cache.get("C25804") is not None
+
+
+def test_lookup_no_requests_uses_catalog(catalog_db: Path, tmp_path: Path, monkeypatch):
+    """Without the requests extra, lookup() serves directly from the catalog."""
+    monkeypatch.setattr("kicad_tools.parts.lcsc._requests_installed", lambda: False)
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=catalog_db)
+
+    # _fetch_part must NOT be called when requests is unavailable.
+    with mock.patch.object(client, "_fetch_part", side_effect=AssertionError("no live fetch")):
+        part = client.lookup("C25804")
+
+    assert part is not None
+    assert part.mfr_part == "RC0402FR-0710KL"
+
+
+def test_lookup_no_requests_no_catalog_raises(tmp_path: Path, monkeypatch):
+    """Without requests AND without a catalog, the historical ImportError stands."""
+    monkeypatch.setattr("kicad_tools.parts.lcsc._requests_installed", lambda: False)
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=tmp_path / "missing.sqlite3")
+
+    with pytest.raises(ImportError):
+        client.lookup("C25804")
+
+
+def test_lookup_returns_none_when_catalog_absent_and_api_fails(
+    tmp_path: Path, force_requests_present
+):
+    """No catalog + API down = existing 'not found' behavior (None)."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=tmp_path / "missing.sqlite3")
+
+    with mock.patch.object(client, "_fetch_part", side_effect=LCSCForbiddenError("403")):
+        assert client.lookup("C25804") is None
+
+
+def test_lookup_missing_part_falls_through_to_none(
+    catalog_db: Path, tmp_path: Path, force_requests_present
+):
+    """Catalog present but part absent -> None."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=catalog_db)
+
+    with mock.patch.object(client, "_fetch_part", side_effect=LCSCForbiddenError("403")):
+        assert client.lookup("C999999") is None
+
+
+def test_live_api_success_bypasses_catalog(
+    catalog_db: Path, tmp_path: Path, force_requests_present
+):
+    """When the live API returns a part, the catalog is never consulted."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=catalog_db)
+
+    live_part = Part(lcsc_part="C25804", mfr_part="LIVE-API-PART")
+    with mock.patch.object(client, "_fetch_part", return_value=live_part):
+        with mock.patch.object(JlcpartsCatalog, "lookup") as catalog_lookup:
+            part = client.lookup("C25804")
+
+    catalog_lookup.assert_not_called()
+    assert part is not None
+    assert part.mfr_part == "LIVE-API-PART"
+
+
+def test_catalog_disabled_never_constructed(
+    catalog_db: Path, tmp_path: Path, force_requests_present
+):
+    """use_local_catalog=False -> catalog is never consulted even on failure."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, use_local_catalog=False, catalog_path=catalog_db)
+
+    with mock.patch.object(client, "_fetch_part", side_effect=LCSCForbiddenError("403")):
+        assert client.lookup("C25804") is None
+    assert client._get_catalog() is None
+
+
+def test_lookup_many_fallback(catalog_db: Path, tmp_path: Path, force_requests_present):
+    """lookup_many falls back to the catalog for parts the API can't serve."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=catalog_db)
+
+    with mock.patch.object(client, "_fetch_part", side_effect=LCSCForbiddenError("403")):
+        got = client.lookup_many(["C25804", "C1525", "C999999"])
+
+    assert set(got.keys()) == {"C25804", "C1525"}
+    assert got["C25804"].mfr_part == "RC0402FR-0710KL"
+
+
+def test_lookup_many_live_partial_then_catalog(
+    catalog_db: Path, tmp_path: Path, force_requests_present
+):
+    """API serves one part; the catalog fills a second; a third stays missing."""
+    cache = PartsCache(db_path=tmp_path / "cache.db")
+    client = LCSCClient(cache=cache, catalog_path=catalog_db)
+
+    def fake_fetch(part_num: str):
+        if part_num == "C1525":
+            return Part(lcsc_part="C1525", mfr_part="LIVE-CAP")
+        # Everything else "fails" via circuit breaker.
+        raise LCSCForbiddenError("403")
+
+    with mock.patch.object(client, "_fetch_part", side_effect=fake_fetch):
+        got = client.lookup_many(["C1525", "C25804", "C999999"])
+
+    # C1525 from live API, C25804 from catalog, C999999 missing.
+    assert got["C1525"].mfr_part == "LIVE-CAP"
+    assert got["C25804"].mfr_part == "RC0402FR-0710KL"
+    assert "C999999" not in got
+
+
+# --------------------------------------------------------------------------
+# sync_catalog (download mocked -- no real network)
+# --------------------------------------------------------------------------
+
+
+def test_sync_catalog_downloads_and_assembles(catalog_db: Path, tmp_path: Path, monkeypatch):
+    """sync_catalog assembles the split-zip dataset without real network I/O."""
+    data_dir = tmp_path / "dataset"
+    _builder.build_split_zip_dataset(data_dir, catalog_db)
+
+    fake_requests = _make_fake_requests(data_dir)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    dest = tmp_path / "out" / "jlcparts.sqlite3"
+    result = sync_catalog(
+        dest=dest,
+        base_url="https://fake.local/data",
+        force=False,
+        progress=False,
+    )
+
+    assert result == dest
+    assert dest.exists()
+    # The assembled catalog is queryable and matches the fixture contents.
+    catalog = JlcpartsCatalog(dest)
+    assert catalog.count() == 4
+    assert catalog.lookup("C25804") is not None
+
+
+def test_sync_catalog_skips_when_present(tmp_path: Path, monkeypatch):
+    """An existing catalog is not re-downloaded unless --force is given."""
+    dest = tmp_path / "jlcparts.sqlite3"
+    dest.write_bytes(b"existing")
+
+    called = {"get": False}
+
+    class _Boom:
+        @staticmethod
+        def get(*a, **k):
+            called["get"] = True
+            raise AssertionError("should not download")
+
+        @staticmethod
+        def head(*a, **k):
+            called["get"] = True
+            raise AssertionError("should not probe")
+
+    monkeypatch.setitem(sys.modules, "requests", _Boom)
+
+    result = sync_catalog(dest=dest, force=False, progress=False)
+    assert result == dest
+    assert called["get"] is False
+    assert dest.read_bytes() == b"existing"
+
+
+def test_sync_catalog_force_redownloads(catalog_db: Path, tmp_path: Path, monkeypatch):
+    """--force re-downloads even when a catalog file already exists."""
+    data_dir = tmp_path / "dataset"
+    _builder.build_split_zip_dataset(data_dir, catalog_db)
+
+    dest = tmp_path / "jlcparts.sqlite3"
+    dest.write_bytes(b"stale")
+
+    fake_requests = _make_fake_requests(data_dir)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    result = sync_catalog(dest=dest, base_url="https://fake.local/data", force=True, progress=False)
+    assert result == dest
+    assert dest.read_bytes() != b"stale"
+    assert JlcpartsCatalog(dest).count() == 4
+
+
+# --------------------------------------------------------------------------
+# Fake requests module backed by local files (no sockets)
+# --------------------------------------------------------------------------
+
+
+def _make_fake_requests(data_dir: Path):
+    """Build a minimal stand-in for the ``requests`` module.
+
+    ``head`` reports 404 for missing segments (to end split-part discovery)
+    and 200 for present ones; ``get`` streams the local file bytes. No network
+    is touched.
+    """
+
+    class _Resp:
+        def __init__(self, path: Path | None, status: int):
+            self._path = path
+            self.status_code = status
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+        def iter_content(self, chunk_size=1 << 20):
+            assert self._path is not None
+            data = self._path.read_bytes()
+            for i in range(0, len(data), chunk_size):
+                yield data[i : i + chunk_size]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _path_for(url: str) -> Path:
+        return data_dir / url.rsplit("/", 1)[-1]
+
+    class _FakeRequests:
+        @staticmethod
+        def head(url, timeout=None, allow_redirects=True):
+            path = _path_for(url)
+            return _Resp(path if path.exists() else None, 200 if path.exists() else 404)
+
+        @staticmethod
+        def get(url, stream=False, timeout=None):
+            path = _path_for(url)
+            if not path.exists():
+                return _Resp(None, 404)
+            return _Resp(path, 200)
+
+    return _FakeRequests
+
+
+# --------------------------------------------------------------------------
+# CLI: kct parts sync-catalog (download mocked -- no real network)
+# --------------------------------------------------------------------------
+
+
+def test_cli_sync_catalog(catalog_db: Path, tmp_path: Path, monkeypatch):
+    """The `parts sync-catalog` subcommand wires through to sync_catalog."""
+    from kicad_tools.cli import parts_cmd
+
+    data_dir = tmp_path / "dataset"
+    _builder.build_split_zip_dataset(data_dir, catalog_db)
+    dest = tmp_path / "cli-out" / "jlcparts.sqlite3"
+
+    fake_requests = _make_fake_requests(data_dir)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    # Redirect the default catalog path to a tmp location so the test never
+    # touches the real ~/.cache directory.
+    monkeypatch.setattr("kicad_tools.parts.jlcparts_catalog.get_catalog_path", lambda: dest)
+
+    rc = parts_cmd.main(["sync-catalog", "--base-url", "https://fake.local/data"])
+    assert rc == 0
+    assert dest.exists()
+    assert JlcpartsCatalog(dest).count() == 4
+
+
+def test_cli_dispatch_sync_catalog(catalog_db: Path, tmp_path: Path, monkeypatch):
+    """The top-level `kct parts sync-catalog` dispatcher forwards correctly."""
+    import argparse
+
+    from kicad_tools.cli.commands.parts import run_parts_command
+
+    data_dir = tmp_path / "dataset"
+    _builder.build_split_zip_dataset(data_dir, catalog_db)
+    dest = tmp_path / "dispatch-out" / "jlcparts.sqlite3"
+
+    fake_requests = _make_fake_requests(data_dir)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    monkeypatch.setattr("kicad_tools.parts.jlcparts_catalog.get_catalog_path", lambda: dest)
+
+    args = argparse.Namespace(
+        parts_command="sync-catalog",
+        force=False,
+        base_url="https://fake.local/data",
+    )
+    rc = run_parts_command(args)
+    assert rc == 0
+    assert JlcpartsCatalog(dest).count() == 4
