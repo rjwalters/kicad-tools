@@ -913,6 +913,38 @@ class TestSameFootprintDrillClearance:
         assert len(clearance_violations) == 1
         assert clearance_violations[0].severity == "error"
 
+    def test_same_net_via_pair_remains_error_and_carries_nets(self):
+        """Two close vias on the SAME net stay error and carry both net names.
+
+        Issue #4102 / #2976: same-net drill-to-drill proximity is still a
+        manufacturing defect (overlapping drills break the drill file), so the
+        severity must NOT be downgraded for same-net pairs.  This guards against
+        a future accidental downgrade and confirms both endpoints' nets are
+        attached so the report can label the pair as ``same-net``.
+        """
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=1),
+                MockVia((0.4, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            nets={1: MockNet(1, "GND")},
+        )
+        # edge distance = 0.4 - 0.15 - 0.15 = 0.1mm < 0.127
+        rules = MockDesignRules(min_clearance_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        v = clearance_violations[0]
+        # Same-net pairs must remain error (no downgrade).
+        assert v.severity == "error"
+        # Both endpoints carry the same net name -> report labels it same-net.
+        assert v.nets == ("GND", "GND")
+
     def test_single_pad_footprint_no_same_footprint_pair(self):
         """A footprint with only 1 thru-hole pad cannot trigger same-footprint logic."""
         pcb = MockPCB(

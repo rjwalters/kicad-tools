@@ -978,3 +978,109 @@ def main_(pcb: Path) -> int:
     from kicad_tools.cli.check_cmd import main
 
     return main([str(pcb), "--refill-zones", "--allow-incomplete"])
+
+
+class TestDrillClearanceNetRelationship:
+    """Issue #4102: net-relationship enrichment for dimension_drill_clearance.
+
+    The findings already carry both endpoints' nets (``nets=(net1, net2)``,
+    also serialized in ``--format json`` via ``DRCViolation.to_dict``).  These
+    tests exercise the report *formatting* only: net names shown
+    unconditionally with a same-net / different-net qualifier on the finding
+    line, and a same-net / different-net sub-count in the ``BY RULE:`` summary.
+    """
+
+    @staticmethod
+    def _violation(nets, severity="error"):
+        from kicad_tools.validate import DRCViolation
+
+        return DRCViolation(
+            rule_id="dimension_drill_clearance",
+            severity=severity,
+            message="Hole-to-hole clearance 0.113mm < minimum 0.500mm",
+            location=(10.0, 20.0),
+            layer=None,
+            actual_value=0.113,
+            required_value=0.500,
+            items=("V1", "R1-2:GND"),
+            nets=tuple(nets),
+        )
+
+    def test_net_relationship_helper(self):
+        from kicad_tools.cli.check_cmd import _net_relationship
+
+        assert _net_relationship(("HALL_A", "GND")) == "different-net"
+        assert _net_relationship(("HALL_A", "HALL_A")) == "same-net"
+        # Unnamed nets resolve to distinct net:<n> placeholders upstream.
+        assert _net_relationship(("net:3", "net:7")) == "different-net"
+        # Not a pair -> nothing to compare.
+        assert _net_relationship(()) is None
+        assert _net_relationship(("only-one",)) is None
+
+    def test_different_net_finding_shows_label_and_nets_default(self, capsys):
+        """Default (non-verbose) output labels the pair and prints both nets."""
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        _print_violation(self._violation(("HALL_A", "GND")), verbose=False)
+        out = capsys.readouterr().out
+        assert "dimension_drill_clearance (different-net)" in out
+        assert "Nets: HALL_A / GND" in out
+
+    def test_same_net_finding_shows_label_and_nets_default(self, capsys):
+        """Same-net pairs are labeled same-net; still shown without --verbose."""
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        _print_violation(self._violation(("HALL_A", "HALL_A")), verbose=False)
+        out = capsys.readouterr().out
+        assert "dimension_drill_clearance (same-net)" in out
+        assert "Nets: HALL_A / HALL_A" in out
+
+    def test_verbose_keeps_label_and_nets(self, capsys):
+        """--verbose keeps the qualifier and the Nets line (no duplicate)."""
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        _print_violation(self._violation(("HALL_A", "GND")), verbose=True)
+        out = capsys.readouterr().out
+        assert "dimension_drill_clearance (different-net)" in out
+        # Net endpoints rendered exactly once, in the net-relationship form.
+        assert out.count("Nets:") == 1
+        assert "Nets: HALL_A / GND" in out
+
+    def test_other_rules_unaffected(self, capsys):
+        """Non-drill rules keep their plain header and verbose-only Nets line."""
+        from kicad_tools.cli.check_cmd import _print_violation
+        from kicad_tools.validate import DRCViolation
+
+        v = DRCViolation(
+            rule_id="clearance_trace_trace",
+            severity="error",
+            message="clearance too small",
+            nets=("NET_A", "NET_B"),
+        )
+        _print_violation(v, verbose=False)
+        out = capsys.readouterr().out
+        assert "clearance_trace_trace" in out
+        assert "(different-net)" not in out
+        assert "Nets:" not in out  # gated on --verbose for non-drill rules
+
+    def test_by_rule_summary_includes_breakdown(self, capsys):
+        """BY RULE line carries the different-net / same-net sub-count."""
+        from pathlib import Path
+
+        from kicad_tools.cli.check_cmd import output_table
+        from kicad_tools.validate import DRCResults
+
+        results = DRCResults()
+        # 2 different-net + 1 same-net.
+        violations = [
+            self._violation(("HALL_A", "GND")),
+            self._violation(("SIG", "GND")),
+            self._violation(("GND", "GND")),
+        ]
+        for v in violations:
+            results.add(v)
+        results.rules_checked = 1
+
+        output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 2, False)
+        out = capsys.readouterr().out
+        assert "dimension_drill_clearance: 3 errors (2 different-net, 1 same-net)" in out
