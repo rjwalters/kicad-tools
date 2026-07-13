@@ -225,6 +225,7 @@ kct check <pcb_file> [options]
 | `--format {table,json}` | Output format |
 | `--mfr {jlcpcb,oshpark,pcbway}` | Manufacturer rules |
 | `--rules RULES` | Custom rules file |
+| `--refill-zones` | Refill zone fills in-place via `kicad-cli pcb drc --refill-zones --save-board` before checking (mutates the board file; kills stale-fill clearance false positives, #4113) |
 
 **Examples:**
 ```bash
@@ -523,6 +524,7 @@ kct parts <subcommand> [options]
 | `search` | Search for parts |
 | `lookup` | Get part details by LCSC number |
 | `check` | Check part availability |
+| `sync-catalog` | Download the jlcparts dataset (~620 MB) into the cache dir for fully-offline lookups (#4117) |
 
 **Examples:**
 ```bash
@@ -583,6 +585,14 @@ Common flags (the full surface lives in `kct route --help`):
 | `--seed N` | Seed Python `random` for reproducible routing (#2589) |
 | `--auto-fix` / `--auto-fix-passes N` | Run `kct fix-drc` after routing on DRC failure |
 | `--skip-drc` | Skip post-route DRC validation |
+
+#### Feasibility / coupling flags (v0.15.0, all default off)
+
+| Option | Description |
+|--------|-------------|
+| `--monotone-certificate-order` | Certify bundle escape feasibility (monotone-routability) and route bundle nets in the derived constructive order (#4089/#4103) |
+| `--cross-package-pair-corridor` | Reserve a soft corridor between the two legs of a cross-package differential pair at escape time (#4090) |
+| `--slack-corridor-widening` | Widen pair-continuation corridors by an estimated skew budget so length matching has room by construction (#4092) |
 
 #### Strategy escalation flags
 
@@ -1076,3 +1086,15 @@ Source of truth: module docstring at
 | `KICAD_TOOLS_CONFIG` | Config file path |
 | `KICAD_CLI_PATH` | Path to kicad-cli binary |
 | `LCSC_API_KEY` | LCSC API key for parts lookup |
+| `JLCPCB_ACCESS_KEY` / `JLCPCB_SECRET_KEY` | BYO-key official JLCPCB open-platform API — when both are set, becomes the preferred parts-lookup tier (#4119); see README "Using your own JLCPCB API key" |
+| `JLCPCB_APP_ID` | Optional app id for the official JLCPCB API |
+
+## Export / BOM Notes
+
+`kct export` enriches the BOM with LCSC part numbers by default (`--auto-lcsc`,
+on by default for JLCPCB exports). If the `parts` extra is missing, the export
+**fails loudly** with an install hint instead of silently shipping an empty
+LCSC column (#4116); pass `--no-auto-lcsc` to export without enrichment.
+`kct mfr apply-rules` writes a sibling `.kicad_pro` (rules + Default netclass)
+so `kicad-cli pcb drc` uses the applied constraints instead of factory
+defaults (#4109).

@@ -481,9 +481,12 @@ Part lookups resolve through a tiered chain (each tier falls back to the next):
 2. **Official JLCPCB open-platform API** — only when you supply your own API key
    (see below). Off by default; inert without keys.
 3. **Anonymous scrape API** — the public JLCPCB web endpoints (requires the
-   `parts` extra: `pip install "kicad-tools[parts]"`).
+   `parts` extra: `pip install "kicad-tools[parts]"`). **Note:** as of
+   July 2026 JLCPCB's public endpoint returns 404 — treat this tier as
+   best-effort/deprecated and rely on tier 2 (BYO key) or tier 4 (offline).
 4. **Offline jlcparts catalog** — a locally synced mirror
-   (`kct parts sync-catalog`), usable fully offline.
+   (`kct parts sync-catalog`, ~620 MB download, ~5 GB on disk, ~7.1 M
+   components), usable fully offline.
 
 #### Using your own JLCPCB API key
 
@@ -542,6 +545,10 @@ Notes and caveats:
 | `kct route-auto <pcb>` | Orchestrator-based multi-strategy autorouting |
 | `kct optimize-traces <pcb>` | Optimize routed traces |
 | `kct datasheet <subcommand>` | Search, download, parse datasheets |
+| `kct parts <subcommand>` | LCSC/JLCPCB part lookup, cache, offline catalog sync |
+| `kct export <pcb>` | Manufacturing bundle export (gerbers, BOM, CPL) |
+| `kct mfr <subcommand>` | Manufacturer rule profiles (apply-rules, validate) |
+| `kct fleet status` | Routing + manufacturing readiness across all boards |
 | `kct mcp serve` | Start MCP server for AI agent integration |
 
 All commands support `--format json` for machine-readable output.
@@ -585,10 +592,24 @@ All commands support `--format json` for machine-readable output.
 | `mcp` | MCP server for AI agent integration |
 | `layout` | Layout preservation for PCB regeneration |
 
-## What's New (May 2026)
+## What's New (v0.15.0, July 2026)
 
 Recent additions an agent reading these docs cold should know about:
 
+- **Router feasibility & coupling flags on `kct route`** — `--monotone-certificate-order`
+  (certify a bundle's escape feasibility and derive a constructive net order),
+  `--cross-package-pair-corridor`, and `--slack-corridor-widening` (all default
+  off). Coupled diff-pair attempts that all budget-exit now early-abort to a
+  plain single-ended route instead of degrading the result.
+- **JLCPCB parts stack** — `kct parts sync-catalog` mirrors the full jlcparts
+  dataset for offline lookups; set `JLCPCB_ACCESS_KEY`/`JLCPCB_SECRET_KEY` to
+  use the official open-platform API (see Parts Lookup below).
+- **`kct check --refill-zones`** — refill zone fills via kicad-cli before the
+  pure-Python checks, killing stale-fill clearance false positives; a loud
+  advisory now fires when copper is measured against possibly-stale fills.
+- **Hierarchical-schematic LVS** — multi-sheet designs are no longer vacuous.
+- **`/kct:tapeout` skill** — one command that produces a complete, fab-ready
+  export bundle or refuses loudly.
 - **`kct fleet status`** — survey routing + manufacturing readiness across every
   board in `boards/`. The "are we ship-ready?" entry point. See
   [Manufacturing Export → ship-ready check](docs/guides/manufacturing-export.md#are-we-ship-ready-kct-fleet-status).
@@ -724,7 +745,7 @@ uv run ruff format . --check && uv run ruff check . && uv run pytest
 
 ## Agent Skills (`kct` namespace)
 
-kicad-tools ships its own Claude agent skills under `.claude/commands/kct/` (invoked as `/kct:<name>`), a harness-agnostic namespace kept separate from any installed orchestration framework. Currently available: **`/kct:ee-review <issue-or-board>`** — produces an advisory EE decision document (escalating intervention ladder + binding electrical constraints, cited and confidence-graded) for analog/placement-blocked boards; it emits decisions for human ratification, never routes copper.
+kicad-tools ships its own Claude agent skills under `.claude/commands/kct/` (invoked as `/kct:<name>`), a harness-agnostic namespace kept separate from any installed orchestration framework. Five skills ship today — `/kct:tapeout` (complete fab-ready export bundle or loud refusal), `/kct:manufacturing-readiness` (sign-off gates), `/kct:board-recipe-scaffold`, `/kct:layout-journal`, and `/kct:ee-review` (advisory EE decision document for analog/placement-blocked boards). See [.claude/commands/kct/README.md](.claude/commands/kct/README.md) for the full contracts.
 
 ## Related Projects
 
