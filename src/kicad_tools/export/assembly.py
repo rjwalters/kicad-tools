@@ -12,6 +12,7 @@ from pathlib import Path
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 
+from ..parts.lcsc import LCSCDependencyMissingError
 from .bom_enrich import EnrichmentReport, enrich_bom_lcsc
 from .bom_formats import (
     BOMExportConfig,
@@ -275,6 +276,13 @@ class AssemblyPackage:
         if self.config.include_bom:
             try:
                 result.bom_path = self._generate_bom(out_dir, result)
+            except LCSCDependencyMissingError:
+                # A missing ``parts`` extra means --auto-lcsc could not run
+                # at all.  Propagate out of ``export`` so the manufacturing
+                # pipeline aborts BEFORE writing the manifest/bundle, rather
+                # than recording an error and shipping a BOM with an empty
+                # ``LCSC Part #`` column (issue #4104).
+                raise
             except Exception as e:
                 result.errors.append(f"BOM generation failed: {e}")
                 logger.error(f"BOM generation failed: {e}")
@@ -452,6 +460,17 @@ class AssemblyPackage:
                     result.lcsc_enrichment = enrichment
                 for line in enrichment.summary_lines():
                     logger.info(line)
+            except LCSCDependencyMissingError:
+                # The optional ``parts`` extra is missing, so --auto-lcsc
+                # (the CLI default for JLCPCB) cannot populate a single LCSC
+                # part number.  Do NOT swallow this into a warning-and-
+                # continue: propagate it so the BOM CSV is never written and
+                # ``kct export`` exits non-zero with the install hint, before
+                # the manifest/bundle is finalized (issue #4104).  This is
+                # distinct from best-effort degradation (cache-unavailable,
+                # a single API hiccup, a genuine no-match), which must keep
+                # exit 0.
+                raise
             except Exception as e:
                 logger.warning(f"LCSC auto-matching failed (continuing without): {e}")
 

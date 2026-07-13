@@ -562,10 +562,23 @@ class PartSuggester:
         except Exception as e:
             # Re-raise LCSCForbiddenError so callers can detect API-wide
             # unavailability and short-circuit remaining lookups.
-            from ..parts.lcsc import LCSCForbiddenError
+            from ..parts.lcsc import (
+                PARTS_INSTALL_HINT,
+                LCSCDependencyMissingError,
+                LCSCForbiddenError,
+            )
 
             if isinstance(e, LCSCForbiddenError):
                 raise
+
+            # An ImportError here means the optional ``parts`` extra
+            # (``requests``) is absent: the LCSC matcher literally cannot
+            # run.  This is a capability failure, not a genuine no-match --
+            # promote it to a distinct exception so callers can surface a
+            # hard, actionable error instead of recording an empty match
+            # for every BOM group (issue #4104).
+            if isinstance(e, ImportError):
+                raise LCSCDependencyMissingError(PARTS_INSTALL_HINT) from e
 
             logger.warning(f"Search failed for {reference}: {e}")
             suggestion.error = str(e)
