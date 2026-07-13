@@ -449,7 +449,24 @@ def main(argv: list[str] | None = None) -> int:
             "committed artifact is strict-0 (no YAML entry), while the fresh "
             "``generate_design.py`` regen still routes the legacy 0.350mm "
             "drill pair.  Must be a non-negative integer.  The per-invocation "
-            "mfr override still comes from the YAML's ``manufacturers:`` map."
+            "mfr override comes from ``--mfr`` or the YAML's ``manufacturers:`` "
+            "map."
+        ),
+    )
+    parser.add_argument(
+        "--mfr",
+        default=None,
+        metavar="TIER",
+        help=(
+            "Explicit manufacturer profile passed to ``kct check --mfr`` for "
+            "EVERY file in this invocation, overriding both the "
+            f"{DEFAULT_MANUFACTURER!r} default and the YAML's optional "
+            "``manufacturers:`` per-board map.  This is the CLI escape hatch "
+            "for a consumer repo that vendored this gate (Epic #4054) and has "
+            "no ``.github/routed-drc-tolerance.yml``: a board routed to a "
+            "non-default tier (e.g. ``jlcpcb-tier1`` in-pad-via rescue) can be "
+            "gated at its real tier with ``--mfr jlcpcb-tier1`` instead of "
+            "authoring a repo-internal allowlist YAML just to name a profile."
         ),
     )
     args = parser.parse_args(argv)
@@ -498,7 +515,15 @@ def main(argv: list[str] | None = None) -> int:
         # every file in this invocation.  Without it, the per-board YAML value
         # (absent == strict-0) applies -- the committed-artifact ratchet.
         allowed = args.allow if args.allow is not None else allowlist.get(lookup_key, 0)
-        mfr = manufacturers.get(lookup_key, DEFAULT_MANUFACTURER)
+        # Precedence for the manufacturer profile: explicit --mfr (per-invocation
+        # CLI override, mirrors --allow) > YAML per-board manufacturers: map >
+        # DEFAULT_MANUFACTURER.  The CLI flag is the escape hatch for vendored
+        # consumer repos with no allowlist YAML (Epic #4054).
+        mfr = (
+            args.mfr
+            if args.mfr is not None
+            else manufacturers.get(lookup_key, DEFAULT_MANUFACTURER)
+        )
 
         try:
             passed, message, errors = check_file(pcb_path, allowed, mfr=mfr)
