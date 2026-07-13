@@ -2800,6 +2800,51 @@ def _apply_bundle_river_planner(router: "Autorouter", args) -> None:
         router.enable_bundle_river_planner = True
 
 
+def _apply_monotone_certificate_order(router: "Autorouter", args) -> None:
+    """Enable the monotone-certificate escape order when requested (Issue #4089).
+
+    Off by default (mirrors ``enable_bundle_river_planner`` / the #4051
+    precedent).  When ``--monotone-certificate-order`` is passed, set the
+    router's ``enable_monotone_certificate_order`` flag so
+    ``_apply_byte_lane_inner_priority`` runs its certificate pre-stage: the
+    board-07 DDR byte is proven feasible and routes 11/11 in isolation
+    (#4089).  When the certificate finds the bundle infeasible as-pinned the
+    order is left at IDENTITY, so there is no regression vs. flag-off.  A
+    no-op when the flag is absent, so production routing is byte-identical to
+    pre-#4089 main.
+    """
+    if getattr(args, "monotone_certificate_order", False):
+        router.enable_monotone_certificate_order = True
+
+
+def _apply_cross_package_pair_corridor(router: "Autorouter", args) -> None:
+    """Enable the cross-package pair corridor when requested (Issue #4090).
+
+    Off by default (mirrors ``enable_bundle_river_planner`` / the #4051
+    precedent).  When ``--cross-package-pair-corridor`` is passed, set the
+    router's ``enable_cross_package_pair_corridor`` flag so the reservation
+    is threaded into ``EscapeRouter`` for pairs whose members escape from
+    facing packages.  A no-op when the flag is absent, so production routing
+    is byte-identical to pre-#4090 main.
+    """
+    if getattr(args, "cross_package_pair_corridor", False):
+        router.enable_cross_package_pair_corridor = True
+
+
+def _apply_slack_corridor_widening(router: "Autorouter", args) -> None:
+    """Enable slack-corridor widening when requested (Issue #4092).
+
+    Off by default (mirrors ``enable_bundle_river_planner`` / the #4051
+    precedent).  When ``--slack-corridor-widening`` is passed, set the
+    router's ``enable_slack_corridor_widening`` flag so slack-reserved
+    corridors are preferred and threaded into ``EscapeRouter`` and
+    ``apply_diffpair_length_tuning``.  A no-op when the flag is absent, so
+    production routing is byte-identical to pre-#4092 main.
+    """
+    if getattr(args, "slack_corridor_widening", False):
+        router.enable_slack_corridor_widening = True
+
+
 def _targeted_ripup_budget(args) -> int:
     """Resolve ``--max-ripups-per-net`` for the negotiated targeted path.
 
@@ -3574,6 +3619,9 @@ def route_with_layer_escalation(
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
         _apply_bundle_river_planner(router, args)
+        _apply_monotone_certificate_order(router, args)
+        _apply_cross_package_pair_corridor(router, args)
+        _apply_slack_corridor_widening(router, args)
 
         # Issue #3171: inject boosted analog routing class for --analog-nets /
         # --auto-analog selected nets (pour/ground nets are left untouched).
@@ -4474,6 +4522,9 @@ def route_with_rule_relaxation(
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
         _apply_bundle_river_planner(router, args)
+        _apply_monotone_certificate_order(router, args)
+        _apply_cross_package_pair_corridor(router, args)
+        _apply_slack_corridor_widening(router, args)
 
         # Issue #3171: inject boosted analog routing class for --analog-nets /
         # --auto-analog selected nets (pour/ground nets are left untouched).
@@ -6575,6 +6626,9 @@ def route_with_combined_escalation(
             # rip-up budgets (route_all + two-phase stall recovery).
             _apply_ripup_budget_override(router, args)
             _apply_bundle_river_planner(router, args)
+            _apply_monotone_certificate_order(router, args)
+            _apply_cross_package_pair_corridor(router, args)
+            _apply_slack_corridor_widening(router, args)
 
             # Issue #3171: inject boosted analog routing class for --analog-nets
             # / --auto-analog selected nets (pour/ground nets left untouched).
@@ -7306,6 +7360,41 @@ def main(argv: list[str] | None = None) -> int:
             "the losing net can dip under its partner.  Default OFF "
             "(byte-identical to prior behaviour when absent); DDR-bundle "
             "scoped in v1."
+        ),
+    )
+    parser.add_argument(
+        "--monotone-certificate-order",
+        action="store_true",
+        help=(
+            "Enable the monotone-certificate escape order for byte-lane "
+            "buses (Issue #4089, epic #4049).  Board 07's DDR byte is proven "
+            "feasible and routes 11/11 in isolation (#4089) but has not been "
+            "validated end-to-end on the assembled board; when the "
+            "certificate finds the bundle infeasible as-pinned, order is left "
+            "at IDENTITY (no regression vs. flag-off).  Default OFF "
+            "(byte-identical to prior behaviour when absent)."
+        ),
+    )
+    parser.add_argument(
+        "--cross-package-pair-corridor",
+        action="store_true",
+        help=(
+            "Enable the cross-package pair corridor for diff/matched pairs "
+            "whose members escape from facing packages (Issue #4090, epic "
+            "#4049).  Reserves a shared corridor so the pair's two escapes "
+            "stay coupled across the package gap.  Default OFF "
+            "(byte-identical to prior behaviour when absent)."
+        ),
+    )
+    parser.add_argument(
+        "--slack-corridor-widening",
+        action="store_true",
+        help=(
+            "Enable slack-corridor widening (Issue #4092, epic #4049).  "
+            "Prefers slack-reserved corridors and threads the reservation "
+            "into the escape router and diff-pair length tuning so tuned "
+            "nets can widen into reserved slack.  Default OFF "
+            "(byte-identical to prior behaviour when absent)."
         ),
     )
     parser.add_argument(
@@ -8988,6 +9077,9 @@ def main(argv: list[str] | None = None) -> int:
     # rip-up budgets (route_all + two-phase stall recovery).
     _apply_ripup_budget_override(router, args)
     _apply_bundle_river_planner(router, args)
+    _apply_monotone_certificate_order(router, args)
+    _apply_cross_package_pair_corridor(router, args)
+    _apply_slack_corridor_widening(router, args)
 
     # Issue #3171: inject boosted analog routing class for --analog-nets /
     # --auto-analog selected nets (pour/ground nets are left untouched).

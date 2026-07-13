@@ -208,6 +208,16 @@ def run_route_command(args) -> int:
     # it (byte-identical when absent).
     if getattr(args, "bundle_river_planner", False):
         sub_argv.append("--bundle-river-planner")
+    # Issue #4094 (epic #4049): forward the three constructor-only routing
+    # flags (#4089/#4090/#4092).  Both parsers declare each as store_true
+    # defaulting to False, so only forward when the user set it — this is
+    # what makes flag-off byte-identical (sub_argv unchanged when absent).
+    if getattr(args, "monotone_certificate_order", False):
+        sub_argv.append("--monotone-certificate-order")
+    if getattr(args, "cross_package_pair_corridor", False):
+        sub_argv.append("--cross-package-pair-corridor")
+    if getattr(args, "slack_corridor_widening", False):
+        sub_argv.append("--slack-corridor-widening")
     max_ripups_val = getattr(args, "max_ripups_per_net", None)
     if max_ripups_val is not None:
         sub_argv.extend(["--max-ripups-per-net", str(max_ripups_val)])

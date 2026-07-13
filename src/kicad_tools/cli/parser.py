@@ -2778,6 +2778,44 @@ def _add_route_parser(subparsers) -> None:
             "scoped in v1."
         ),
     )
+    route_parser.add_argument(
+        "--monotone-certificate-order",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable the monotone-certificate escape order for byte-lane "
+            "buses (Issue #4089, epic #4049).  Board 07's DDR byte is proven "
+            "feasible and routes 11/11 in isolation (#4089) but has not been "
+            "validated end-to-end on the assembled board; when the "
+            "certificate finds the bundle infeasible as-pinned, order is left "
+            "at IDENTITY (no regression vs. flag-off).  Default OFF "
+            "(byte-identical when absent)."
+        ),
+    )
+    route_parser.add_argument(
+        "--cross-package-pair-corridor",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable the cross-package pair corridor for diff/matched pairs "
+            "whose members escape from facing packages (Issue #4090, epic "
+            "#4049).  Reserves a shared corridor so the pair's two escapes "
+            "stay coupled across the package gap.  Default OFF "
+            "(byte-identical when absent)."
+        ),
+    )
+    route_parser.add_argument(
+        "--slack-corridor-widening",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable slack-corridor widening (Issue #4092, epic #4049).  "
+            "Prefers slack-reserved corridors and threads the reservation "
+            "into the escape router and diff-pair length tuning so tuned "
+            "nets can widen into reserved slack.  Default OFF "
+            "(byte-identical when absent)."
+        ),
+    )
     # Issue #3054 (Phase 2 of #3045): wire region-based parallelism through to
     # ``route_all_negotiated``.  Opt-in (default off) so existing scripts and
     # CI runs see byte-identical routes; when set, the negotiated loop
