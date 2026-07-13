@@ -28,6 +28,7 @@ NEW_SKILLS = (
     "manufacturing-readiness",
     "board-recipe-scaffold",
     "layout-journal",
+    "tapeout",
 )
 
 # The manufacturing-readiness skill is the one that must not enumerate fab tiers.
