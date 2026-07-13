@@ -145,8 +145,6 @@ class SerpentineGenerator:
         if not route.segments:
             return None
 
-        slack_aware = grid is not None and reserved_net_id is not None
-
         best_idx = -1
         best_score = 0.0
         best_segment: Segment | None = None
@@ -178,7 +176,14 @@ class SerpentineGenerator:
             # applied AFTER the geometric factors so it acts as a
             # tie-breaker-plus among otherwise-comparable segments rather
             # than overriding a much longer, unreserved candidate outright.
-            if slack_aware and self._segment_in_reservation(seg, grid, reserved_net_id):
+            # Inline the ``is not None`` narrowing at the call site so mypy
+            # can prove ``grid``/``reserved_net_id`` are non-optional when
+            # passed to ``_segment_in_reservation`` (see PR #4092 review).
+            if (
+                grid is not None
+                and reserved_net_id is not None
+                and self._segment_in_reservation(seg, grid, reserved_net_id)
+            ):
                 score *= 2.0
 
             if score > best_score:
