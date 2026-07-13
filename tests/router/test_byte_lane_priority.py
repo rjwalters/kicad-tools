@@ -171,6 +171,100 @@ def _make_byte_lane_router(
     return router, net_ids, net_names
 
 
+def _make_reversed_byte_lane_router(
+    *,
+    group_name: str = "DDR_DATA_BYTE_0",
+    group_size: int = 9,
+    pitch: float = 0.8,
+    priority: int = 1,
+    swap_inner_pair: bool = False,
+) -> tuple[Autorouter, list[int], list[str]]:
+    """Build a byte-lane fixture whose facing column is a full REVERSAL.
+
+    Like :func:`_make_byte_lane_router` but U2's pads are placed in the
+    reversed row order relative to U1 (net ``i`` on U1 at row ``i`` faces
+    U2 at row ``group_size-1-i``).  This models the board-07 DDR byte's
+    bus reversal so the monotonic certificate can be exercised on an
+    infeasible-style facing topology at the integration level.
+
+    A *clean* reversal is mirror-normalised to feasible by the certificate
+    (it is the planar mirror-facing case).  Set ``swap_inner_pair`` to
+    perturb the reversal (swap the facing rows of two adjacent inner nets)
+    so the permutation is neither identity nor a clean global reverse —
+    the empirically-observed non-monotone case whose witness names the
+    forced crossings.
+
+    Returns:
+        ``(router, net_ids_in_creation_order, net_names)``.  ``net_ids[i]``
+        is the net whose U1 pad is at row ``i``.
+    """
+    cls = NetClassRouting(
+        name=group_name,
+        priority=priority,
+        trace_width=0.15,
+        clearance=0.10,
+        length_critical=True,
+        length_match_group=group_name,
+        length_match_reference=None,
+        length_match_tolerance_mm=0.1,
+    )
+    net_class_map: dict[str, NetClassRouting] = {}
+    router = Autorouter(width=120.0, height=80.0, net_class_map=net_class_map)
+
+    centre_y = 40.0
+    base_y = centre_y - (group_size - 1) * pitch / 2.0
+
+    # U2 row assignment: reversed, optionally perturbed at the inner pair.
+    u2_row_for_net = list(range(group_size - 1, -1, -1))
+    if swap_inner_pair and group_size >= 4:
+        # Swap the facing rows of the two central nets so the reversal is
+        # imperfect (breaks the clean-reverse mirror symmetry).
+        mid = group_size // 2
+        u2_row_for_net[mid - 1], u2_row_for_net[mid] = (
+            u2_row_for_net[mid],
+            u2_row_for_net[mid - 1],
+        )
+
+    net_ids: list[int] = []
+    net_names: list[str] = []
+    for i in range(group_size):
+        net_id = i + 1
+        net_name = f"DQ{i}"
+        net_ids.append(net_id)
+        net_names.append(net_name)
+        u1_y = base_y + i * pitch
+        u2_y = base_y + u2_row_for_net[i] * pitch
+
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": str(25 + i),
+                    "x": 40.0,
+                    "y": u1_y,
+                    "net": net_id,
+                    "net_name": net_name,
+                }
+            ],
+        )
+        router.add_component(
+            "U2",
+            [
+                {
+                    "number": str(1 + i),
+                    "x": 80.0,
+                    "y": u2_y,
+                    "net": net_id,
+                    "net_name": net_name,
+                }
+            ],
+        )
+        net_class_map[net_name] = cls
+
+    router.net_class_map = net_class_map
+    return router, net_ids, net_names
+
+
 # =============================================================================
 # Tests
 # =============================================================================
@@ -530,3 +624,111 @@ class TestScheduleByEscapeFreedom:
             pos = {i: float(i) for i in members}
             sched = Autorouter._schedule_by_escape_freedom(members, pos)
             assert sorted(sched) == sorted(members), f"n={n}"
+
+
+class TestMonotoneCertificateOrdering:
+    """Certificate-driven escape ordering (Issue #4084, Phase 1).
+
+    When ``enable_monotone_certificate_order`` is set, a qualifying
+    byte-lane group's two facing pin sequences are run through the
+    Tomioka & Takahashi monotonic feasibility certificate BEFORE any A*
+    search:
+
+    * feasible  -> group slots follow the constructive (non-crossing) order.
+    * infeasible -> group slots stay at IDENTITY and a failure witness
+      (forced crossing pairs) is recorded on
+      ``router._last_monotone_certificates``.
+
+    The flag is independent of ``enable_byte_lane_reorder`` (the #4051
+    reactive scheduler) and, like it, defaults OFF.
+    """
+
+    def test_default_flag_off_is_identity(self) -> None:
+        """Default (flag OFF): even a reversed facing bundle is identity,
+        and no certificate is evaluated."""
+        router, net_ids, _ = _make_reversed_byte_lane_router(group_size=9, swap_inner_pair=True)
+        out = router._apply_byte_lane_inner_priority(net_ids)
+        assert out == net_ids
+        assert router._last_monotone_certificates == {}
+
+    def test_co_oriented_bundle_feasible_constructive_order(self) -> None:
+        """A co-oriented (non-reversed) byte-lane is monotonically feasible;
+        the constructive order equals the row order (identity here), and the
+        certificate is recorded as feasible."""
+        router, net_ids, _ = _make_byte_lane_router(group_size=9)
+        router.enable_monotone_certificate_order = True
+
+        out = router._apply_byte_lane_inner_priority(net_ids)
+
+        # Permutation invariant.
+        assert sorted(out) == sorted(net_ids)
+        # A certificate was evaluated and holds for this group.
+        assert "DDR_DATA_BYTE_0" in router._last_monotone_certificates
+        cert = router._last_monotone_certificates["DDR_DATA_BYTE_0"]
+        assert cert.feasible is True
+        assert cert.witness == []
+        # Constructive order for a co-oriented, row-sorted bundle is the
+        # row order, which the fixture created in identity order.
+        assert out == net_ids
+
+    def test_clean_reversal_feasible_via_mirror(self) -> None:
+        """A CLEAN facing reversal is the planar mirror case: the certificate
+        holds (mirror orientation) and ordering stays a valid permutation."""
+        router, net_ids, _ = _make_reversed_byte_lane_router(group_size=9, swap_inner_pair=False)
+        router.enable_monotone_certificate_order = True
+
+        out = router._apply_byte_lane_inner_priority(net_ids)
+
+        assert sorted(out) == sorted(net_ids)
+        cert = router._last_monotone_certificates["DDR_DATA_BYTE_0"]
+        assert cert.feasible is True
+        assert cert.mirrored is True
+
+    def test_imperfect_reversal_infeasible_records_witness(self) -> None:
+        """An IMPERFECT facing reversal (swapped inner pair) is NOT
+        monotonically routable: the certificate fails, records a non-empty
+        crossing witness, and the group's order falls back to IDENTITY."""
+        router, net_ids, _ = _make_reversed_byte_lane_router(group_size=9, swap_inner_pair=True)
+        router.enable_monotone_certificate_order = True
+
+        out = router._apply_byte_lane_inner_priority(net_ids)
+
+        # Infeasible -> identity fallback for the group (never drops nets).
+        assert out == net_ids
+        cert = router._last_monotone_certificates["DDR_DATA_BYTE_0"]
+        assert cert.feasible is False
+        assert cert.inversion_count > 0
+        assert len(cert.witness) == cert.inversion_count
+        # Witness pairs are drawn from the group's net ids.
+        witness_nets = {p.net_a for p in cert.witness} | {p.net_b for p in cert.witness}
+        assert witness_nets.issubset(set(net_ids))
+
+    def test_flag_independent_of_reactive_scheduler(self) -> None:
+        """The certificate flag does not require ``enable_byte_lane_reorder``
+        and takes precedence when both are set."""
+        router, net_ids, _ = _make_byte_lane_router(group_size=9)
+        router.enable_byte_lane_reorder = True
+        router.enable_monotone_certificate_order = True
+
+        out = router._apply_byte_lane_inner_priority(net_ids)
+
+        # Certificate path ran (recorded a classification) rather than the
+        # reactive scheduler's corner-first permutation.
+        assert "DDR_DATA_BYTE_0" in router._last_monotone_certificates
+        assert sorted(out) == sorted(net_ids)
+        # Feasible co-oriented bundle -> constructive (identity) order, NOT
+        # the reactive corner-first permutation (which would move net_ids[-1]
+        # to slot 1).
+        assert out == net_ids
+
+    def test_permutation_invariant_on_infeasible(self) -> None:
+        """Even when infeasible, the full net_order is a permutation of the
+        input with non-group nets untouched."""
+        router, group_ids, _ = _make_reversed_byte_lane_router(group_size=9, swap_inner_pair=True)
+        router.enable_monotone_certificate_order = True
+        # Interleave a non-group net id to confirm it is preserved.
+        net_order = [*group_ids[:4], 999, *group_ids[4:]]
+        # 999 is not in any match group; the helper must keep it in place.
+        out = router._apply_byte_lane_inner_priority(net_order)
+        assert sorted(out) == sorted(net_order)
+        assert out.index(999) == 4

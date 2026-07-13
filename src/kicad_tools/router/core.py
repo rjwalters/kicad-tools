@@ -895,6 +895,39 @@ class Autorouter:
         # (see ``_apply_byte_lane_inner_priority`` / ``bundle_river.py``).
         self.enable_bundle_river_planner = False
 
+        # Issue #4084 (Phase 1, epic #4049): monotonic feasibility
+        # certificate + constructive escape ordering (Tomioka & Takahashi,
+        # ASP-DAC 2006).  OFF by default, following the #4051 /
+        # ``enable_byte_lane_reorder`` precedent (three prior heuristics
+        # all regressed the DDR bundle before landing gated-off).
+        #
+        # When enabled, ``_apply_byte_lane_inner_priority`` runs the
+        # certificate on each qualifying byte-lane group's two facing pin
+        # sequences BEFORE any A* search:
+        #   * If the bundle is monotonically feasible as-pinned, the
+        #     group's occupied slots in ``net_order`` are permuted into the
+        #     certificate's constructive (non-crossing) order.
+        #   * If NOT feasible (e.g. board 07's imperfectly-reversed DDR
+        #     byte, whose crossing conflict graph is complete), the order
+        #     is left at IDENTITY and a failure witness (the forced
+        #     crossing pairs) is logged as a diagnostic — the fix class for
+        #     those pairs is via/layer assignment (Phase 2/3), not
+        #     ordering.
+        # Kept independent of ``enable_byte_lane_reorder`` so the
+        # certificate-driven order and the reactive scheduler can be A/B'd
+        # without interfering.  The certificate is a pure-Python pre-stage;
+        # it never forces a Python fallback for the A* core itself.  See
+        # ``monotone_certificate.py`` and
+        # ``_apply_byte_lane_inner_priority``.
+        self.enable_monotone_certificate_order = False
+
+        # Issue #4084: records the most recent certificate classification
+        # per qualifying byte-lane group (group name -> MonotoneCertificate)
+        # so callers/tests can inspect the feasibility decision and failure
+        # witness after a routing pass.  Populated by
+        # ``_apply_byte_lane_inner_priority`` whenever the certificate runs.
+        self._last_monotone_certificates: dict[str, Any] = {}
+
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
         self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
@@ -4905,6 +4938,16 @@ class Autorouter:
         reorder_plans: list[list[int]] = []
         escape_row_positions: dict[int, float] = {}
 
+        # Issue #4084: per-group monotonic-certificate plans.  For each
+        # qualifying byte-lane group we record ``(group_name,
+        # primary_pin_sequence, secondary_pin_sequence)`` — the two facing
+        # columns' net-id orders along the row long axis — so the
+        # certificate can decide monotonic feasibility and (when feasible)
+        # derive the constructive order after the corridor-reservation
+        # pass.  Populated only when ``enable_monotone_certificate_order``
+        # is set, to keep the default path byte-identical.
+        certificate_plans: list[tuple[str, list[int], list[int]]] = []
+
         # Detection scan.  We walk each candidate group, identify its
         # primary component, project pads onto the row axis, and locate
         # the inner-corner indices.  As of Issue #4051 (Phase 1b of epic
@@ -4988,6 +5031,41 @@ class Autorouter:
             for nid_s in sorted_nets:
                 escape_row_positions[nid_s] = net_to_pad[nid_s][proj_index]
             reorder_plans.append(list(sorted_nets))
+
+            # Issue #4084: capture BOTH facing columns' pin sequences for
+            # the monotonic-certificate pre-stage.  ``sorted_nets`` is the
+            # primary column's net-id order along the row long axis; resolve
+            # the secondary (facing) column and sort it the same way so the
+            # certificate can diff the two orders.  Only computed when the
+            # certificate flag is on, so the default path is unchanged.
+            if getattr(self, "enable_monotone_certificate_order", False):
+                secondary_candidates = {
+                    ref: pads for ref, pads in comp_pad_count.items() if ref != primary_ref
+                }
+                if secondary_candidates:
+                    secondary_ref = max(
+                        secondary_candidates.keys(),
+                        key=lambda r: (
+                            len(secondary_candidates[r]),
+                            -ord(r[0]) if r else 0,
+                        ),
+                    )
+                    secondary_net_to_pad: dict[int, tuple[float, float]] = {}
+                    for s_nid, s_px, s_py in secondary_candidates[secondary_ref]:
+                        if s_nid not in secondary_net_to_pad:
+                            secondary_net_to_pad[s_nid] = (s_px, s_py)
+                    # Only nets present on BOTH columns form the matched bus
+                    # the certificate needs; sort the secondary column along
+                    # the SAME projection axis as the primary.
+                    secondary_sorted = sorted(
+                        (nid for nid in secondary_net_to_pad if nid in net_to_pad),
+                        key=lambda n: secondary_net_to_pad[n][proj_index],
+                    )
+                    primary_matched = [nid for nid in sorted_nets if nid in secondary_net_to_pad]
+                    if len(primary_matched) >= MIN_BYTE_LANE_SIZE and set(primary_matched) == set(
+                        secondary_sorted
+                    ):
+                        certificate_plans.append((grp_name, primary_matched, secondary_sorted))
 
             # Inner-corner indices in the sorted row.  Position 1 (one in
             # from the top corner) and position n-2 (one in from the
@@ -5105,6 +5183,29 @@ class Autorouter:
                         exc_info=True,
                     )
 
+        # Issue #4084 (Phase 1, epic #4049): monotonic feasibility
+        # certificate + constructive ordering (Tomioka & Takahashi,
+        # ASP-DAC 2006).  This is the *untried lever* the three prior
+        # heuristics (static monotone/reverse/outside-in and #4051's
+        # reactive scheduler) were not: instead of guessing a permutation,
+        # it DECIDES — before any A* search — whether the bundle can be
+        # planarised by ordering at all, and only reorders when it
+        # provably can.  Takes precedence over the reactive scheduler when
+        # ``enable_monotone_certificate_order`` is set.
+        if getattr(self, "enable_monotone_certificate_order", False) and certificate_plans:
+            reordered = self._apply_monotone_certificate_order(net_order, certificate_plans)
+            # Permutation invariant (defense-in-depth): a bug must degrade
+            # to identity, never corrupt the routing set.
+            if sorted(reordered) != sorted(net_order):
+                logger.error(
+                    "_apply_monotone_certificate_order produced a "
+                    "non-permutation (%d in, %d out); falling back to identity",
+                    len(net_order),
+                    len(reordered),
+                )
+                return net_order
+            return reordered
+
         # Issue #4051 (Phase 1b, epic #4049): apply a reactive
         # escape-freedom reorder on top of the corridor reservation.
         # Each qualifying byte-lane group's members are permuted *within
@@ -5147,6 +5248,107 @@ class Autorouter:
             )
             return net_order
         return reordered
+
+    def _apply_monotone_certificate_order(
+        self,
+        net_order: list[int],
+        certificate_plans: list[tuple[str, list[int], list[int]]],
+    ) -> list[int]:
+        """Reorder byte-lane groups by the monotonic feasibility certificate.
+
+        Issue #4084 (Phase 1, epic #4049).  For each qualifying byte-lane
+        group, ``certificate_plans`` carries the two facing columns' pin
+        sequences (primary and secondary net-id orders along the row).  This
+        method runs the Tomioka & Takahashi certificate
+        (:func:`monotone_certificate`) on each and:
+
+        * **feasible** — permutes the group's occupied slots in
+          ``net_order`` into the certificate's constructive (non-crossing)
+          order, so escape routing follows the order that provably
+          planarises the bundle.  Only the slots the group already occupies
+          are permuted; every non-group net keeps its exact position (same
+          slot-preserving discipline as :meth:`_reactive_escape_freedom_order`).
+        * **infeasible** — leaves the group's slots at IDENTITY and logs a
+          failure witness (the forced crossing pairs).  This is the
+          diagnostic deliverable: ordering alone cannot planarise these
+          pairs, so they must be resolved by via/layer assignment
+          (Phase 2/3).  Board 07's imperfectly-reversed DDR byte lands here.
+
+        The most recent certificate per group is stored on
+        ``self._last_monotone_certificates`` for inspection by callers/tests.
+
+        Args:
+            net_order: The full routing order after corridor reservation.
+            certificate_plans: One ``(group_name, primary_seq,
+                secondary_seq)`` per qualifying group.
+
+        Returns:
+            ``net_order`` with each monotonically-feasible group's occupied
+            slots permuted into the constructive order (identity for
+            infeasible groups).  Always a permutation of the input.
+        """
+        from .monotone_certificate import monotone_certificate
+
+        result = list(net_order)
+        pos_in_order = {nid: i for i, nid in enumerate(net_order)}
+
+        for grp_name, primary_seq, secondary_seq in certificate_plans:
+            # Restrict to members actually present in this routing pass.
+            members = [nid for nid in primary_seq if nid in pos_in_order]
+            if len(members) < 3:
+                continue
+            # The certificate needs the two sequences over the SAME net set.
+            member_set = set(members)
+            seq_a = [nid for nid in primary_seq if nid in member_set]
+            seq_b = [nid for nid in secondary_seq if nid in member_set]
+            if set(seq_a) != set(seq_b) or len(seq_a) != len(seq_b):
+                # Not a clean matched bus for the present nets -> skip
+                # (leave identity for this group).
+                continue
+
+            try:
+                cert = monotone_certificate(seq_a, seq_b)
+            except ValueError:
+                # Ill-formed bundle: fall back to identity for this group.
+                continue
+
+            self._last_monotone_certificates[grp_name] = cert
+
+            if not cert.feasible:
+                # Diagnostic deliverable: name the forced crossings.  These
+                # pin pairs cannot be planarised by ordering; they need
+                # via/layer assignment (Phase 2/3).  Leave identity order.
+                witness_str = ", ".join(f"({p.net_a},{p.net_b})" for p in cert.witness[:16])
+                more = "" if len(cert.witness) <= 16 else f" (+{len(cert.witness) - 16} more)"
+                logger.info(
+                    "Monotone certificate: group %s NOT monotonically routable "
+                    "as-pinned (%d forced crossings%s); leaving identity order. "
+                    "Crossing witness: %s%s",
+                    grp_name,
+                    cert.inversion_count,
+                    " via mirror orientation" if cert.mirrored else "",
+                    witness_str,
+                    more,
+                )
+                continue
+
+            # Feasible: drop the group's members into their occupied slots
+            # following the constructive order.
+            constructive = [nid for nid in cert.order if nid in pos_in_order]
+            if sorted(constructive) != sorted(members):
+                # Defensive: constructive order lost/gained a net -> skip.
+                continue
+            slots = sorted(pos_in_order[nid] for nid in members)
+            for slot, nid in zip(slots, constructive, strict=True):
+                result[slot] = nid
+            logger.info(
+                "Monotone certificate: group %s IS monotonically routable "
+                "as-pinned%s; applying constructive escape order.",
+                grp_name,
+                " (mirror orientation)" if cert.mirrored else "",
+            )
+
+        return result
 
     def _reserve_bundle_river_via_hops(
         self,
