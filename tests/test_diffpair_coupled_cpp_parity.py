@@ -355,3 +355,139 @@ def test_cpp_converging_search_is_deterministic():
         p, n = res
         lengths.append((round(_route_length(p), 6), round(_route_length(n), 6)))
     assert lengths[0] == lengths[1] == lengths[2], f"non-deterministic C++ result: {lengths}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #4080: corridor attractor in the coupled joint-state cost loop
+# ---------------------------------------------------------------------------
+#
+# The single-ended attractor (#4071) discounts a reserved cell's step cost for
+# the owning net.  Issue #4080 wires the same discount into the coupled
+# joint-state loop -- both the pure-Python ``_get_coupled_neighbors`` and the
+# C++ ``CoupledPathfinder``.  These tests prove:
+#   (a) the per-net discount fires through the coupled loop for the owning net
+#       set and NOT for a foreign net / unreserved cell (mirrors
+#       ``test_grid_cpp_parity.py::test_cpp_attractor_discounts_owning_net_step_cost``
+#       but exercised through the joint-state neighbor expansion), and
+#   (b) with a corridor reserved for the pair's net set, both backends still
+#       agree on routed cost (parity is preserved with the attractor active).
+
+
+def _reserve_pair_corridor(grid: RoutingGrid, pads, p_net: int, n_net: int) -> int:
+    """Reserve every cell on the F_CU layer along the pair centerline band
+    for the ``{p_net, n_net}`` owner set.
+
+    The band spans the y-range the P and N heads sweep (their pads plus the
+    coupled channel between them) across the full x-span of the run, so any
+    joint-state move the search takes lands on reserved cells and picks up the
+    attractor discount.
+    """
+    p_start, p_end, n_start, n_end = pads
+    layer_idx = grid.layer_to_index(Layer.F_CU.value)
+    gx_lo, gy_lo = grid.world_to_grid(min(p_start.x, p_end.x), min(p_start.y, p_end.y))
+    gx_hi, gy_hi = grid.world_to_grid(max(n_start.x, n_end.x), max(n_start.y, n_end.y))
+    cells = [(gx, gy) for gx in range(gx_lo, gx_hi + 1) for gy in range(gy_lo, gy_hi + 1)]
+    return grid.reserve_corridor_cells(layer_idx, cells, frozenset({p_net, n_net}))
+
+
+def test_coupled_attractor_discount_fires_only_for_owning_pair():
+    """The coupled attractor discounts a reserved-corridor step for the pair's
+    own nets, and returns 0 for a foreign net / unreserved cell.
+
+    Low-level analogue of ``test_cpp_attractor_discounts_owning_net_step_cost``
+    driven through the joint-state cost sites: a symmetric coupled move that
+    lands both heads on reserved cells must cost ``cost_corridor_attractor``
+    (one per net) less than the same move on an unreserved grid.
+    """
+    from kicad_tools.router.cpp_backend import CppGrid
+    from kicad_tools.router.diffpair_routing import CoupledState, GridPos
+
+    rules = DesignRules()
+    bonus = rules.cost_corridor_attractor
+    p_net, n_net = 1, 2
+    # P and N heads exactly ``target_spacing_cells`` (=2) apart so a symmetric
+    # +x step is spacing-legal and produces a straight coupled continuation.
+    p_gx, p_gy = 30, 40
+    n_gx, n_gy = 30, 42  # 2 cells below P
+    layer_idx = _make_grid().layer_to_index(Layer.F_CU.value)
+
+    def _min_straight_cost(grid: RoutingGrid) -> float:
+        pf = _make_pf(grid, use_cpp=False)
+        state = CoupledState(GridPos(p_gx, p_gy, layer_idx), GridPos(n_gx, n_gy, layer_idx), (1, 0))
+        neighbors = pf._get_coupled_neighbors(state, p_net, n_net)
+        # The straight +x continuation (no turn) is the cheapest non-via move.
+        straight = [cost for st, cost, is_via in neighbors if not is_via and st.direction == (1, 0)]
+        assert straight, "expected a straight +x coupled continuation move"
+        return min(straight)
+
+    # Plain grid: no reservation, no discount.
+    plain = _make_grid()
+    plain_cost = _min_straight_cost(plain)
+
+    # Reserved grid: reserve exactly the two +x landing cells for the pair.
+    reserved = _make_grid()
+    n_reserved = reserved.reserve_corridor_cells(
+        layer_idx, [(p_gx + 1, p_gy), (n_gx + 1, n_gy)], frozenset({p_net, n_net})
+    )
+    assert n_reserved == 2, "fixture must reserve both landing cells"
+    reserved_cost = _min_straight_cost(reserved)
+
+    # Both P and N land on reserved cells => two bonuses subtracted.
+    assert reserved_cost == pytest.approx(max(0.0, plain_cost - 2.0 * bonus))
+
+    # A foreign net must NOT pick up the discount: the same reserved grid,
+    # queried with net ids not in the owner set, yields the plain cost.
+    foreign_pf = _make_pf(reserved, use_cpp=False)
+    foreign_state = CoupledState(
+        GridPos(p_gx, p_gy, layer_idx), GridPos(n_gx, n_gy, layer_idx), (1, 0)
+    )
+    foreign_neighbors = foreign_pf._get_coupled_neighbors(foreign_state, 888, 999)
+    foreign_straight = [
+        c for st, c, is_via in foreign_neighbors if not is_via and st.direction == (1, 0)
+    ]
+    assert foreign_straight, "expected a straight +x move for the foreign query too"
+    assert min(foreign_straight) == pytest.approx(plain_cost)
+
+    # C++ primitive parity: the reserved cells discount for the owning nets
+    # and NOT for a foreign net, matching the Python query the loop makes.
+    cpp = CppGrid.from_routing_grid(reserved)
+    gx, gy = p_gx + 1, p_gy
+    assert cpp._impl.corridor_attractor_bonus(gx, gy, layer_idx, p_net, bonus) == pytest.approx(
+        reserved.get_corridor_attractor_bonus(layer_idx, gx, gy, p_net, bonus)
+    )
+    assert cpp._impl.corridor_attractor_bonus(gx, gy, layer_idx, 999, bonus) == pytest.approx(0.0)
+
+
+def test_cpp_and_python_agree_with_reserved_corridor():
+    """Reservation-fixture parity: with a corridor reserved for the pair's net
+    set, both backends route the pair AND agree on routed cost.
+
+    Guards the Issue #4080 acceptance criterion that the coupled path honors
+    the attractor with Python/C++ parity -- the per-net discount is applied
+    identically on both sides, so the two backends do not diverge when a
+    corridor is active.
+    """
+    pads = _make_simple_pair_pads()
+    p_net, n_net = 1, 2
+
+    py_grid = _make_grid()
+    cpp_grid = _make_grid()
+    py_n = _reserve_pair_corridor(py_grid, pads, p_net, n_net)
+    cpp_n = _reserve_pair_corridor(cpp_grid, pads, p_net, n_net)
+    assert py_n == cpp_n and py_n > 0
+
+    py_pf = _make_pf(py_grid, use_cpp=False)
+    cpp_pf = _make_pf(cpp_grid, use_cpp=True)
+
+    py_res = py_pf.route_coupled(*pads)
+    cpp_res = cpp_pf.route_coupled(*pads)
+
+    assert py_res is not None, "python fallback must route the reserved pair"
+    assert cpp_res is not None, "C++ coupled must route the reserved pair"
+
+    py_p, py_n_route = py_res
+    cpp_p, cpp_n_route = cpp_res
+
+    # Cost-equality with the attractor active on both backends.
+    assert _route_length(cpp_p) == pytest.approx(_route_length(py_p), abs=0.2)
+    assert _route_length(cpp_n_route) == pytest.approx(_route_length(py_n_route), abs=0.2)

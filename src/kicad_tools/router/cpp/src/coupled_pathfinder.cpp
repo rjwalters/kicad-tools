@@ -456,6 +456,17 @@ CoupledRouteResult CoupledPathfinder::route(
             bool dir_changed = !(current.dir_dx == 0 && current.dir_dy == 0) &&
                                !(current.dir_dx == dx && current.dir_dy == dy);
             if (dir_changed) cost += rules_.cost_turn;
+            // Issue #4080: corridor attractor for the coupled joint-state
+            // loop.  A symmetric move advances BOTH nets, so query each
+            // landing cell against its own net (mirrors the single-ended
+            // attractor in ``pathfinder.cpp``).  Clamped at 0 so the joint
+            // step cost stays non-negative and A* admissibility holds.
+            double attractor_bonus =
+                grid_.corridor_attractor_bonus(np_x, np_y, np_l, p_net,
+                                               rules_.cost_corridor_attractor) +
+                grid_.corridor_attractor_bonus(nn_x, nn_y, nn_l, n_net,
+                                               rules_.cost_corridor_attractor);
+            if (attractor_bonus > 0.0) cost = std::max(0.0, cost - attractor_bonus);
             neighbors.push_back({np_x, np_y, np_l, nn_x, nn_y, nn_l, dx, dy, cost, false});
         }
 
@@ -490,6 +501,18 @@ CoupledRouteResult CoupledPathfinder::route(
                                     !(current.dir_dx == 0 && current.dir_dy == 0) &&
                                     !(current.dir_dx == dx && current.dir_dy == dy);
                                 if (dir_changed) cost += rules_.cost_turn;
+                                // Issue #4080: corridor attractor (per-net)
+                                // for the asymmetric P-advance move.  See the
+                                // symmetric-move comment above.
+                                double attractor_bonus =
+                                    grid_.corridor_attractor_bonus(
+                                        cp_x, cp_y, cp_l, p_net,
+                                        rules_.cost_corridor_attractor) +
+                                    grid_.corridor_attractor_bonus(
+                                        cn_x, cn_y, cn_l, n_net,
+                                        rules_.cost_corridor_attractor);
+                                if (attractor_bonus > 0.0)
+                                    cost = std::max(0.0, cost - attractor_bonus);
                                 neighbors.push_back(
                                     {cp_x, cp_y, cp_l, cn_x, cn_y, cn_l, dx, dy, cost, false});
                             }
@@ -521,6 +544,18 @@ CoupledRouteResult CoupledPathfinder::route(
                                     !(current.dir_dx == 0 && current.dir_dy == 0) &&
                                     !(current.dir_dx == dx && current.dir_dy == dy);
                                 if (dir_changed) cost += rules_.cost_turn;
+                                // Issue #4080: corridor attractor (per-net)
+                                // for the asymmetric N-advance move.  See the
+                                // symmetric-move comment above.
+                                double attractor_bonus =
+                                    grid_.corridor_attractor_bonus(
+                                        cp_x, cp_y, cp_l, p_net,
+                                        rules_.cost_corridor_attractor) +
+                                    grid_.corridor_attractor_bonus(
+                                        cn_x, cn_y, cn_l, n_net,
+                                        rules_.cost_corridor_attractor);
+                                if (attractor_bonus > 0.0)
+                                    cost = std::max(0.0, cost - attractor_bonus);
                                 neighbors.push_back(
                                     {cp_x, cp_y, cp_l, cn_x, cn_y, cn_l, dx, dy, cost, false});
                             }
@@ -543,6 +578,18 @@ CoupledRouteResult CoupledPathfinder::route(
                 if (!p_at_ep && is_trace_blocked(current.p_x, current.p_y, new_layer, p_net)) continue;
                 if (!n_at_ep && is_trace_blocked(current.n_x, current.n_y, new_layer, n_net)) continue;
                 double cost = rules_.cost_via * 2.0;
+                // Issue #4080: corridor attractor on the via-drop
+                // destination cells -- the reservation is what makes the
+                // coupled router prefer to actually via-hop INTO the
+                // reserved channel (mirrors the single-ended via-drop
+                // attractor in ``pathfinder.cpp``).  Per-net query,
+                // clamped at 0.
+                double attractor_bonus =
+                    grid_.corridor_attractor_bonus(current.p_x, current.p_y, new_layer,
+                                                   p_net, rules_.cost_corridor_attractor) +
+                    grid_.corridor_attractor_bonus(current.n_x, current.n_y, new_layer,
+                                                   n_net, rules_.cost_corridor_attractor);
+                if (attractor_bonus > 0.0) cost = std::max(0.0, cost - attractor_bonus);
                 neighbors.push_back({current.p_x, current.p_y, new_layer,
                                      current.n_x, current.n_y, new_layer,
                                      current.dir_dx, current.dir_dy, cost, true});
