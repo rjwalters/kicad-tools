@@ -270,29 +270,17 @@ class TestMarkViaReservationParity:
         bonus = rules.cost_corridor_attractor
 
         # Python reference contract.
-        py_owner = grid_4layer.get_corridor_attractor_bonus(
-            inner_layer_idx, gx, gy, 1, bonus
-        )
-        py_foreign = grid_4layer.get_corridor_attractor_bonus(
-            inner_layer_idx, gx, gy, 42, bonus
-        )
+        py_owner = grid_4layer.get_corridor_attractor_bonus(inner_layer_idx, gx, gy, 1, bonus)
+        py_foreign = grid_4layer.get_corridor_attractor_bonus(inner_layer_idx, gx, gy, 42, bonus)
         py_unreserved = grid_4layer.get_corridor_attractor_bonus(
             inner_layer_idx, gx + 5, gy + 5, 1, bonus
         )
 
         # C++ mirror of the same query.
-        cpp_owner = cpp_grid._impl.corridor_attractor_bonus(
-            gx, gy, inner_layer_idx, 1, bonus
-        ) if hasattr(cpp_grid._impl, "corridor_attractor_bonus") else (
-            bonus if cpp_grid._impl.is_reserved_for(gx, gy, inner_layer_idx, 1) else 0.0
-        )
-        cpp_foreign = (
-            bonus if cpp_grid._impl.is_reserved_for(gx, gy, inner_layer_idx, 42) else 0.0
-        )
-        cpp_unreserved = (
-            bonus
-            if cpp_grid._impl.is_reserved_for(gx + 5, gy + 5, inner_layer_idx, 1)
-            else 0.0
+        cpp_owner = cpp_grid._impl.corridor_attractor_bonus(gx, gy, inner_layer_idx, 1, bonus)
+        cpp_foreign = cpp_grid._impl.corridor_attractor_bonus(gx, gy, inner_layer_idx, 42, bonus)
+        cpp_unreserved = cpp_grid._impl.corridor_attractor_bonus(
+            gx + 5, gy + 5, inner_layer_idx, 1, bonus
         )
 
         assert py_owner == pytest.approx(bonus)
