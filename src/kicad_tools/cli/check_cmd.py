@@ -381,6 +381,76 @@ def _lvs_subcheck(sch_path: Path | None, pcb_path: Path) -> SubCheckResult:
     )
 
 
+# Issue #4096: the clearance rule_ids whose truthfulness depends entirely on
+# the freshness of the committed `filled_polygon` geometry.  When any of these
+# fire, the on-disk fills may be stale (board routed/refilled after the fills
+# were last saved) and the findings may be phantom.
+_ZONE_FILL_DEPENDENT_RULE_IDS: frozenset[str] = frozenset(
+    {
+        "clearance_segment_zone",
+        "clearance_via_zone",
+        "clearance_pad_zone",
+    }
+)
+
+
+def _warn_stale_zone_fills(violations: list[DRCViolation], pcb_path: Path) -> None:
+    """Warn loudly when zone-clearance findings may reflect stale fills (issue #4096).
+
+    ``kct check`` measures segment/via/pad-to-zone clearance against the
+    committed ``filled_polygon`` geometry in the ``.kicad_pcb`` — whatever
+    KiCad last wrote to disk.  If the board was routed or refilled after those
+    fills were saved, the clearance_*_zone rules produce phantom shorts that
+    disappear once the fills are refreshed.  This advisory points the user at
+    the authoritative fix so an honest-looking wall of clearance errors is not
+    mistaken for an unmanufacturable board.  No-op when no such findings exist.
+    """
+    present = sorted({v.rule_id for v in violations if v.rule_id in _ZONE_FILL_DEPENDENT_RULE_IDS})
+    if not present:
+        return
+    print(
+        "WARNING: zone-clearance findings present "
+        f"({', '.join(present)}) — kct check measures these against the "
+        "committed zone fills in the .kicad_pcb, which may be STALE if the "
+        "board was routed or refilled after the fills were last saved. "
+        "Cross-gate / fix with:\n"
+        f"    kicad-cli pcb drc --refill-zones --save-board {pcb_path}\n"
+        "then re-run kct check, or pass --refill-zones to do this "
+        "automatically (issue #4096).",
+        file=sys.stderr,
+    )
+
+
+def _refill_zones_in_place(pcb_path: Path) -> None:
+    """Refresh the on-disk zone fills before checking, if possible (issue #4096).
+
+    Shells out to ``kicad-cli pcb drc --refill-zones --save-board`` via
+    :func:`kicad_tools.cli.runner.run_refill_zones` so the pure-Python pipeline
+    reads fills that are in sync with the copper.  This **mutates the board
+    file in place** (the ``--refill-zones`` flag documents that side effect).
+
+    Graceful degradation: a missing kicad-cli — or any refill failure — is
+    reported as a warning and the check continues against the stored fills
+    rather than aborting.  Never raises.
+    """
+    from kicad_tools.cli.runner import run_refill_zones
+
+    result = run_refill_zones(pcb_path)
+    if result.success:
+        print(
+            f"[INFO] refilled zones in place via kicad-cli: {pcb_path}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "WARNING: --refill-zones requested but the refill did not run "
+            f"({result.stderr.strip() or 'unknown error'}); continuing against "
+            "the stored (possibly stale) zone fills.  Install KiCad 8+ so "
+            "kicad-cli is on PATH to enable the pre-check refill (issue #4096).",
+            file=sys.stderr,
+        )
+
+
 def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
     """Compare ``output/manufacturing/manifest.json`` mtime against the PCB.
 
@@ -576,6 +646,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit with error code 2 on warnings",
     )
     parser.add_argument(
+        "--refill-zones",
+        dest="refill_zones",
+        action="store_true",
+        help=(
+            "Before checking, run `kicad-cli pcb drc --refill-zones "
+            "--save-board` to bring the on-disk zone fills back in sync with "
+            "the copper (issue #4096).  WARNING: this MUTATES the board file "
+            "in place (--save-board rewrites <pcb>).  Fixes phantom "
+            "clearance_*_zone findings caused by stale committed fills.  "
+            "Requires kicad-cli (KiCad 8+); degrades gracefully with a "
+            "warning if kicad-cli is not installed (the check still runs "
+            "against the stored fills)."
+        ),
+    )
+    parser.add_argument(
         "--mfr",
         "-m",
         choices=get_manufacturer_ids(),
@@ -769,6 +854,16 @@ def main(argv: list[str] | None = None) -> int:
             strict=args.strict,
         )
 
+    # Optional pre-check zone refill (issue #4096).  When --refill-zones is
+    # set, shell out to `kicad-cli pcb drc --refill-zones --save-board` so the
+    # on-disk fills are refreshed *before* PCB.load reads them — otherwise the
+    # pure-Python clearance rules measure copper against stale committed fills
+    # and report phantom clearance_*_zone shorts.  Degrades gracefully: a
+    # missing kicad-cli (or a failed refill) warns and continues against the
+    # stored fills rather than aborting the check.
+    if getattr(args, "refill_zones", False):
+        _refill_zones_in_place(pcb_path)
+
     try:
         pcb = PCB.load(pcb_path)
     except Exception as e:
@@ -921,6 +1016,18 @@ def main(argv: list[str] | None = None) -> int:
     violations = list(results.violations)
     if args.errors_only:
         violations = [v for v in violations if v.is_error]
+
+    # Fill-freshness advisory (issue #4096).  The clearance_*_zone rules
+    # measure copper against the committed `filled_polygon` geometry, which is
+    # only trustworthy if the on-disk fills are in sync with the copper.  A
+    # board refilled/routed after its fills were last saved produces phantom
+    # clearance_segment_zone / clearance_via_zone / clearance_pad_zone shorts
+    # that vanish once the fills are refreshed.  Warn loudly whenever any of
+    # those findings are present, pointing at the authoritative refill — unless
+    # the user already asked for it via --refill-zones (in which case the fills
+    # are already fresh and any residual findings are real).
+    if not getattr(args, "refill_zones", False):
+        _warn_stale_zone_fills(results.violations, pcb_path)
 
     # Issue #3750: build the DRC SubCheckResult that will feed both the
     # exit-code computation and the meta-check rollup (when not in
