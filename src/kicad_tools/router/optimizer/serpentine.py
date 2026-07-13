@@ -106,22 +106,46 @@ class SerpentineGenerator:
         """
         self.config = config or SerpentineConfig()
 
-    def find_best_segment(self, route: Route) -> tuple[int, Segment] | None:
+    def find_best_segment(
+        self,
+        route: Route,
+        *,
+        grid: RoutingGrid | None = None,
+        reserved_net_id: int | None = None,
+    ) -> tuple[int, Segment] | None:
         """Find the best segment in a route for serpentine insertion.
 
         Prefers:
         - Longest straight segments (more room for serpentine)
         - Horizontal or vertical segments (easier pattern generation)
         - Segments not near route endpoints (avoid pad connections)
+        - (Issue #4085) segments whose midpoint falls in a grid cell
+          reserved for ``reserved_net_id`` -- i.e. already-protected
+          slack space the corridor-widening step carved out for this net.
 
         Args:
             route: Route to analyze
+            grid: Issue #4085 (Phase 1).  Optional routing grid.  When
+                supplied together with ``reserved_net_id``, a candidate
+                segment whose midpoint cell is reserved for that net (via
+                :meth:`RoutingGrid.is_reserved_for`) receives a score
+                bonus, biasing the tuner to meander inside the slack
+                corridor the escape pass reserved for the pair.  When
+                ``None`` (default) segment selection is byte-identical to
+                the pre-#4085 purely-geometric heuristic -- every existing
+                caller (``tune_match_group``, ``apply_length_tuning``,
+                ...) is unaffected.
+            reserved_net_id: Issue #4085.  The net id whose reservation
+                marks the slack corridor.  Ignored when ``grid`` is
+                ``None``.
 
         Returns:
             Tuple of (index, segment) or None if no suitable segment found
         """
         if not route.segments:
             return None
+
+        slack_aware = grid is not None and reserved_net_id is not None
 
         best_idx = -1
         best_score = 0.0
@@ -149,6 +173,14 @@ class SerpentineGenerator:
                 if dx / length > 0.95 or dy / length > 0.95:
                     score *= 1.5
 
+            # Issue #4085: prefer segments sitting inside the net's own
+            # reserved slack corridor.  The bonus is multiplicative and
+            # applied AFTER the geometric factors so it acts as a
+            # tie-breaker-plus among otherwise-comparable segments rather
+            # than overriding a much longer, unreserved candidate outright.
+            if slack_aware and self._segment_in_reservation(seg, grid, reserved_net_id):
+                score *= 2.0
+
             if score > best_score:
                 best_score = score
                 best_idx = i
@@ -157,6 +189,29 @@ class SerpentineGenerator:
         if best_idx >= 0 and best_segment:
             return (best_idx, best_segment)
         return None
+
+    @staticmethod
+    def _segment_in_reservation(
+        seg: Segment,
+        grid: RoutingGrid,
+        net_id: int,
+    ) -> bool:
+        """Return True if ``seg``'s midpoint cell is reserved for ``net_id``.
+
+        Issue #4085 (Phase 1).  Maps the segment midpoint to a grid cell
+        and consults :meth:`RoutingGrid.is_reserved_for` on the segment's
+        own layer.  Defensive: any failure to resolve the layer or map the
+        coordinate returns ``False`` (the segment is simply treated as
+        un-reserved, falling back to the geometric heuristic).
+        """
+        mx = (seg.x1 + seg.x2) / 2.0
+        my = (seg.y1 + seg.y2) / 2.0
+        try:
+            gx, gy = grid.world_to_grid(mx, my)
+            layer_idx = grid.layer_to_index(seg.layer.value)
+        except Exception:
+            return False
+        return grid.is_reserved_for(layer_idx, gx, gy, net_id)
 
     def generate_trombone(
         self,

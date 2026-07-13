@@ -67,6 +67,7 @@ from .optimizer.serpentine import (
 
 if TYPE_CHECKING:
     from .diffpair_detection import DetectedPair
+    from .grid import RoutingGrid
     from .primitives import Route, Segment
 
 
@@ -153,6 +154,8 @@ def tune_diff_pair_skew(
     config: SerpentineConfig | None = None,
     max_inserts: int = MAX_INSERTS_PER_PAIR,
     length_critical: bool = True,
+    grid: RoutingGrid | None = None,
+    prefer_reserved_slack: bool = False,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """Tune the skew of a detected diff pair by serpentining the shorter half.
 
@@ -182,6 +185,18 @@ def tune_diff_pair_skew(
             ``net_class_routing.length_critical`` here -- pairs whose net
             class is not flagged as length-critical are skipped, matching
             the curator's engagement-gate spec on Issue #2648.
+        grid: Issue #4085 (Phase 1).  Optional routing grid.  When supplied
+            together with ``prefer_reserved_slack=True``, the tuner biases
+            its serpentine-insertion segment choice toward segments sitting
+            inside the shorter half's own reserved slack corridor (the one
+            widened by ``EscapeRouter._reserve_pair_continuation_corridor``)
+            so the meander lands in already-protected space.  When ``None``
+            or ``prefer_reserved_slack=False`` (both defaults) segment
+            selection is byte-identical to the pre-#4085 geometric
+            heuristic.
+        prefer_reserved_slack: Issue #4085.  Gate for the slack-aware
+            segment preference above.  Default ``False`` (inert).  Has no
+            effect unless ``grid`` is also supplied.
 
     Returns:
         ``(p_route, n_route, result)`` where ``p_route`` and ``n_route`` are
@@ -301,7 +316,15 @@ def tune_diff_pair_skew(
         # logic in SerpentineGenerator.find_best_segment so the hint is
         # computed for the same segment that the generator will use.
         generator = SerpentineGenerator(base_config)  # provisional
-        best = generator.find_best_segment(current_shorter)
+        # Issue #4085: when a grid is supplied and the slack-preference gate
+        # is on, bias the segment choice toward the shorter half's own
+        # reserved slack corridor.  Otherwise this is byte-identical to the
+        # pre-#4085 geometric-only selection.
+        best = generator.find_best_segment(
+            current_shorter,
+            grid=grid if prefer_reserved_slack else None,
+            reserved_net_id=shorter_id if prefer_reserved_slack else None,
+        )
         if best is None:
             result.reason = "no_suitable_segment"
             result.message = (

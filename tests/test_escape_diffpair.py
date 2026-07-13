@@ -1911,3 +1911,120 @@ class TestPairLaunchDirectionHeuristic:
     def test_default_positions_map_is_empty(self, grid, rules):
         er = EscapeRouter(grid, rules)
         assert er.net_pad_positions == {}
+
+
+# =============================================================================
+# Issue #4085 (Phase 1): slack-corridor widening
+# =============================================================================
+
+
+class TestSlackCorridorWidening:
+    """``_reserve_pair_continuation_corridor`` widens by a slack budget.
+
+    Verifies the Issue #4085 Phase 1 contract:
+
+    * With the ``enable_slack_corridor_widening`` gate OFF, the reserved
+      cell count is byte-identical to today for ANY pin geometry (the
+      regression-safety baseline).
+    * With the gate ON, a pair whose two legs have very different
+      pin-to-pin Manhattan spans (estimated skew > net-class tolerance)
+      reserves strictly MORE cells than the same pair with the gate off.
+    * With the gate ON, a pair whose legs are matched (estimated skew
+      within tolerance) reserves the SAME number of cells as with the
+      gate off (no spurious widening).
+    """
+
+    def _make_members(self, grid_obj, rules_obj, *, span_n: float):
+        """Build a 2-member EAST-launching pair.
+
+        The P leg spans a fixed 8.0 mm; the N leg spans ``span_n`` mm.  A
+        large ``span_n`` mismatch induces a large estimated skew.  Returns
+        ``(escape_router_factory_args, members)`` -- the router is built
+        per-call so its instrumentation counters start clean.
+        """
+        from kicad_tools.router.escape import EscapeDirection, EscapeRoute
+
+        p_pad = Pad(x=0.0, y=0.0, width=0.2, height=0.2, net=1, net_name="TX_P", layer=Layer.F_CU)
+        n_pad = Pad(x=0.0, y=0.4, width=0.2, height=0.2, net=2, net_name="TX_N", layer=Layer.F_CU)
+        members = [
+            EscapeRoute(
+                pad=p_pad,
+                direction=EscapeDirection.EAST,
+                escape_point=(1.0, 0.0),
+                escape_layer=Layer.F_CU,
+                via_pos=None,
+                segments=[],
+                via=None,
+                ring_index=0,
+            ),
+            EscapeRoute(
+                pad=n_pad,
+                direction=EscapeDirection.EAST,
+                escape_point=(1.0, 0.4),
+                escape_layer=Layer.F_CU,
+                via_pos=None,
+                segments=[],
+                via=None,
+                ring_index=0,
+            ),
+        ]
+        # net_pad_positions induces the leg span asymmetry: P spans 8.0mm,
+        # N spans span_n mm (both along +x from origin).
+        net_pad_positions = {
+            "TX_P": [(0.0, 0.0), (8.0, 0.0)],
+            "TX_N": [(0.0, 0.4), (span_n, 0.4)],
+        }
+        return net_pad_positions, members
+
+    def _reserve(self, grid_obj, rules_obj, *, enable, span_n):
+        ncm = {"TX_P": NET_CLASS_HIGH_SPEED, "TX_N": NET_CLASS_HIGH_SPEED}
+        net_pad_positions, members = self._make_members(grid_obj, rules_obj, span_n=span_n)
+        er = EscapeRouter(
+            grid_obj,
+            rules_obj,
+            net_class_map=ncm,
+            net_pad_positions=net_pad_positions,
+            enable_slack_corridor_widening=enable,
+        )
+        count = er._reserve_pair_continuation_corridor(
+            members=members,
+            target_inner_layer=Layer.IN1_CU,
+            intra_pair_clearance=0.075,
+        )
+        return er, count
+
+    def test_gate_off_is_byte_identical_regardless_of_skew(self, grid_4layer, rules):
+        """Flag OFF: cell count is the same for matched vs badly-skewed legs."""
+        # Fresh grid per reservation so counts don't accumulate.
+        stack = _LayerStack.four_layer_all_signal()
+        g1 = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0, layer_stack=stack)
+        g2 = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0, layer_stack=stack)
+        _, matched = self._reserve(g1, rules, enable=False, span_n=8.0)
+        _, skewed = self._reserve(g2, rules, enable=False, span_n=1.0)
+        assert matched == skewed, "Gate OFF must ignore leg-span skew entirely"
+
+    def test_gate_on_widens_for_out_of_tolerance_skew(self, rules):
+        """Flag ON: a 7mm estimated skew reserves MORE cells than gate off."""
+        stack = _LayerStack.four_layer_all_signal()
+        g_off = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0, layer_stack=stack)
+        g_on = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0, layer_stack=stack)
+        # P span 8.0, N span 1.0 -> estimated skew 7.0mm >> 0.5mm tolerance.
+        er_off, off_count = self._reserve(g_off, rules, enable=False, span_n=1.0)
+        er_on, on_count = self._reserve(g_on, rules, enable=True, span_n=1.0)
+        assert on_count > off_count, (
+            f"Widened corridor should reserve more cells (on={on_count} vs off={off_count})"
+        )
+        assert er_on.pair_corridor_slack_widened == 1
+        assert er_on.pair_corridor_slack_budget_mm == pytest.approx(7.0)
+        assert er_off.pair_corridor_slack_widened == 0
+
+    def test_gate_on_no_widen_for_in_tolerance_skew(self, rules):
+        """Flag ON but matched legs: cell count equals the gate-off baseline."""
+        stack = _LayerStack.four_layer_all_signal()
+        g_off = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0, layer_stack=stack)
+        g_on = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0, layer_stack=stack)
+        # Both legs span 8.0mm -> estimated skew 0.0mm < 0.5mm tolerance.
+        _, off_count = self._reserve(g_off, rules, enable=False, span_n=8.0)
+        er_on, on_count = self._reserve(g_on, rules, enable=True, span_n=8.0)
+        assert on_count == off_count, "Matched legs must not trigger widening"
+        assert er_on.pair_corridor_slack_widened == 0
