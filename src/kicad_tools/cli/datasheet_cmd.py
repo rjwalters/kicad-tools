@@ -363,6 +363,19 @@ def _run_search(args) -> int:
         print(json.dumps(output, indent=2))
     else:
         if not results.has_results:
+            # When every source failed because an optional dependency is
+            # missing, the real problem is a missing install, not a lookup
+            # miss — surface install guidance rather than "no datasheets found"
+            # (issue #4139).
+            if results.all_failures_are_import_errors:
+                message = next(iter(set(results.import_errors.values())), "")
+                print(f"Error: {message}", file=sys.stderr)
+                print(
+                    "Install with: pip install kicad-tools[parts]",
+                    file=sys.stderr,
+                )
+                return 1
+
             print(f"No datasheets found for '{args.part}'")
             if results.errors:
                 print("\nSource errors:")
@@ -413,6 +426,17 @@ def _run_download(args) -> int:
 
         return 0
 
+    except ImportError as e:
+        # Every source failed because an optional dependency is missing.
+        # Surface install guidance instead of a misleading "no datasheet found",
+        # mirroring how main()/_info()/_extract_package() already report missing
+        # dependencies (issue #4139).
+        print(f"Error: {e}", file=sys.stderr)
+        print(
+            "Install with: pip install kicad-tools[parts]",
+            file=sys.stderr,
+        )
+        return 1
     except Exception as e:
         print(f"Failed to download datasheet: {e}", file=sys.stderr)
         return 1
@@ -831,24 +855,56 @@ def _info(args) -> int:
     try:
         parser = DatasheetParser(pdf_path)
 
-        # Count images and tables for quick summary
-        images = parser.extract_images(min_width=100, min_height=100)
-        tables = parser.extract_tables()
+        # page_count is the minimal viable info output; it genuinely requires
+        # PyMuPDF (no lighter PDF-metadata path exists in this codebase). If
+        # that dependency is missing the error now names the actual operation
+        # ("reading PDF page count") rather than "image extraction" (#4139).
+        page_count = parser.page_count
+
+        # Image and table counts are best-effort: a caller who only wants page
+        # count/metadata should not have the whole command fail because *one*
+        # of the optional extraction libraries (fitz / pdfplumber) is missing.
+        image_count: int | None
+        table_count: int | None
+        image_error: str | None = None
+        table_error: str | None = None
+
+        try:
+            image_count = len(parser.extract_images(min_width=100, min_height=100))
+        except Exception as e:
+            image_count = None
+            image_error = str(e)
+
+        try:
+            table_count = len(parser.extract_tables())
+        except Exception as e:
+            table_count = None
+            table_error = str(e)
 
         if args.format == "json":
-            data = {
+            data: dict = {
                 "path": str(pdf_path),
                 "filename": pdf_path.name,
-                "page_count": parser.page_count,
-                "image_count": len(images),
-                "table_count": len(tables),
+                "page_count": page_count,
+                "image_count": image_count,
+                "table_count": table_count,
             }
+            if image_error is not None:
+                data["image_error"] = image_error
+            if table_error is not None:
+                data["table_error"] = table_error
             print(json.dumps(data, indent=2))
         else:
             print(f"File:    {pdf_path.name}")
-            print(f"Pages:   {parser.page_count}")
-            print(f"Images:  {len(images)} (>= 100x100 px)")
-            print(f"Tables:  {len(tables)}")
+            print(f"Pages:   {page_count}")
+            if image_count is not None:
+                print(f"Images:  {image_count} (>= 100x100 px)")
+            else:
+                print(f"Images:  unavailable ({image_error})")
+            if table_count is not None:
+                print(f"Tables:  {table_count}")
+            else:
+                print(f"Tables:  unavailable ({table_error})")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

@@ -68,11 +68,27 @@ class DatasheetSearchResult:
     query: str
     results: list[DatasheetResult] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)  # source -> error message
+    # Subset of ``errors`` whose failures were caused by a missing optional
+    # dependency (an ``ImportError`` raised by a source's ``@requires_requests``
+    # guard). Tracked separately so callers can distinguish "no results because
+    # nothing matched" from "no results because every source is missing a
+    # dependency" without string-sniffing ``errors``.
+    import_errors: dict[str, str] = field(default_factory=dict)  # source -> message
 
     @property
     def has_results(self) -> bool:
         """Check if any results were found."""
         return len(self.results) > 0
+
+    @property
+    def all_failures_are_import_errors(self) -> bool:
+        """True when at least one source failed and every failure was an ImportError.
+
+        Used to detect the "no configured datasheet source could even run
+        because an optional dependency is missing" condition, so the CLI can
+        surface install guidance instead of a misleading "no datasheet found".
+        """
+        return bool(self.errors) and set(self.import_errors) == set(self.errors)
 
     @property
     def sources_searched(self) -> list[str]:

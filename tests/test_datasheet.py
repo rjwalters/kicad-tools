@@ -2,7 +2,7 @@
 
 import importlib.util
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -156,6 +156,32 @@ class TestDatasheetSearchResult:
     def test_has_no_results(self):
         result = DatasheetSearchResult(query="NOTFOUND")
         assert result.has_results is False
+
+    def test_all_failures_are_import_errors_true(self):
+        """Every failing source failed with a missing-dependency ImportError."""
+        msg = "The 'requests' library is required for datasheet operations."
+        result = DatasheetSearchResult(
+            query="UCC27211",
+            results=[],
+            errors={"lcsc": msg, "octopart": msg},
+            import_errors={"lcsc": msg, "octopart": msg},
+        )
+        assert result.all_failures_are_import_errors is True
+
+    def test_all_failures_are_import_errors_mixed(self):
+        """A non-import failure alongside an import failure does not trigger."""
+        result = DatasheetSearchResult(
+            query="UCC27211",
+            results=[],
+            errors={"lcsc": "requests is required", "octopart": "network timeout"},
+            import_errors={"lcsc": "requests is required"},
+        )
+        assert result.all_failures_are_import_errors is False
+
+    def test_all_failures_are_import_errors_no_failures(self):
+        """No failures at all should not report an import-error condition."""
+        result = DatasheetSearchResult(query="NOTFOUND", results=[])
+        assert result.all_failures_are_import_errors is False
 
     def test_sources_searched(self):
         result = DatasheetSearchResult(
@@ -893,11 +919,81 @@ class TestDatasheetManager:
 
     def test_download_by_part_not_found(self, manager):
         """Test download_by_part raises error when not found."""
+        from kicad_tools.datasheet.models import DatasheetSearchResult
+
         with patch.object(manager, "search") as mock_search:
-            mock_search.return_value = MagicMock(has_results=False, results=[])
+            mock_search.return_value = DatasheetSearchResult(query="NOTFOUND", results=[])
 
             with pytest.raises(DatasheetSearchError):
                 manager.download_by_part("NOTFOUND")
+
+    def test_search_captures_import_errors_separately(self, manager):
+        """A source raising ImportError is tracked in import_errors, not just errors."""
+        import_msg = (
+            "The 'requests' library is required for datasheet operations. "
+            "Install with: pip install kicad-tools[parts]"
+        )
+        with patch.object(manager.sources[0], "search") as mock_lcsc:
+            with patch.object(manager.sources[1], "search") as mock_octopart:
+                mock_lcsc.side_effect = ImportError(import_msg)
+                mock_octopart.side_effect = ImportError(import_msg)
+
+                results = manager.search("UCC27211")
+
+                assert not results.has_results
+                assert set(results.import_errors) == {"lcsc", "octopart"}
+                assert results.errors == results.import_errors
+                assert results.all_failures_are_import_errors is True
+
+    def test_search_mixed_import_and_search_failure(self, manager):
+        """A non-import failure prevents the all-import-errors condition."""
+        with patch.object(manager.sources[0], "search") as mock_lcsc:
+            with patch.object(manager.sources[1], "search") as mock_octopart:
+                mock_lcsc.side_effect = ImportError("requests is required")
+                mock_octopart.side_effect = RuntimeError("network timeout")
+
+                results = manager.search("UCC27211")
+
+                assert set(results.import_errors) == {"lcsc"}
+                assert set(results.errors) == {"lcsc", "octopart"}
+                assert results.all_failures_are_import_errors is False
+
+    def test_download_by_part_raises_import_error_when_all_deps_missing(self, manager):
+        """download_by_part surfaces install guidance, not 'No datasheet found'."""
+        from kicad_tools.datasheet.models import DatasheetSearchResult
+
+        import_msg = (
+            "The 'requests' library is required for datasheet operations. "
+            "Install with: pip install kicad-tools[parts]"
+        )
+        with patch.object(manager, "search") as mock_search:
+            mock_search.return_value = DatasheetSearchResult(
+                query="UCC27211",
+                results=[],
+                errors={"lcsc": import_msg, "octopart": import_msg},
+                import_errors={"lcsc": import_msg, "octopart": import_msg},
+            )
+
+            with pytest.raises(ImportError) as exc_info:
+                manager.download_by_part("UCC27211")
+
+            assert "requests" in str(exc_info.value)
+            assert "No datasheet found" not in str(exc_info.value)
+
+    def test_download_by_part_mixed_failure_keeps_search_error(self, manager):
+        """Mixed failures still raise the legacy 'No datasheet found' error."""
+        from kicad_tools.datasheet.models import DatasheetSearchResult
+
+        with patch.object(manager, "search") as mock_search:
+            mock_search.return_value = DatasheetSearchResult(
+                query="UCC27211",
+                results=[],
+                errors={"lcsc": "requests is required", "octopart": "network timeout"},
+                import_errors={"lcsc": "requests is required"},
+            )
+
+            with pytest.raises(DatasheetSearchError):
+                manager.download_by_part("UCC27211")
 
     def test_download_by_part_falls_through_to_next_candidate(self, manager):
         """First candidate fails validation; second candidate succeeds."""
@@ -1312,6 +1408,29 @@ class TestDatasheetParserDependencies:
             with pytest.raises(ImportError, match="pdfplumber is required"):
                 _check_pdfplumber()
 
+    def test_pymupdf_import_error_names_context(self, tmp_path):
+        """The check error names the operation passed by the caller."""
+        from kicad_tools.datasheet.parser import _check_pymupdf
+
+        with patch.dict("sys.modules", {"fitz": None}):
+            with pytest.raises(ImportError, match="reading PDF page count"):
+                _check_pymupdf(context="reading PDF page count")
+
+    def test_page_count_import_error_names_page_count(self, tmp_path):
+        """page_count error names page count, not 'image extraction' (#4139)."""
+        from kicad_tools.datasheet.parser import DatasheetParser
+
+        pdf_file = tmp_path / "test.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4")
+        parser = DatasheetParser(pdf_file)
+
+        with patch.dict("sys.modules", {"fitz": None}):
+            with pytest.raises(ImportError) as exc_info:
+                _ = parser.page_count
+
+        assert "page count" in str(exc_info.value)
+        assert "image extraction" not in str(exc_info.value)
+
 
 # ============================================================================
 # CLI Tests
@@ -1391,6 +1510,95 @@ class TestDatasheetCLI:
             assert "lcsc" in captured.err
             assert "octopart" in captured.err
             assert "non-PDF" in captured.err
+
+    def test_download_command_missing_dependency(self, capsys):
+        """download surfaces install guidance when every source lacks a dependency."""
+        from kicad_tools.cli.datasheet_cmd import main
+
+        import_msg = (
+            "The 'requests' library is required for datasheet operations. "
+            "Install with: pip install kicad-tools[parts]"
+        )
+        with patch("kicad_tools.datasheet.manager.DatasheetManager") as MockManager:
+            mock_manager = MagicMock()
+            MockManager.return_value = mock_manager
+            mock_manager.download_by_part.side_effect = ImportError(import_msg)
+
+            result = main(["download", "UCC27211"])
+
+            assert result == 1
+            captured = capsys.readouterr()
+            # Must name the missing dependency / install path, not a lookup miss.
+            assert "requests" in captured.err
+            assert "pip install" in captured.err
+            assert "No datasheet found" not in captured.err
+
+    def test_search_command_missing_dependency(self, capsys):
+        """search surfaces install guidance instead of 'No datasheets found'."""
+        from kicad_tools.cli.datasheet_cmd import main
+        from kicad_tools.datasheet.models import DatasheetSearchResult
+
+        import_msg = (
+            "The 'requests' library is required for datasheet operations. "
+            "Install with: pip install kicad-tools[parts]"
+        )
+        with patch("kicad_tools.datasheet.manager.DatasheetManager") as MockManager:
+            mock_manager = MagicMock()
+            MockManager.return_value = mock_manager
+            mock_manager.search.return_value = DatasheetSearchResult(
+                query="UCC27211",
+                results=[],
+                errors={"lcsc": import_msg, "octopart": import_msg},
+                import_errors={"lcsc": import_msg, "octopart": import_msg},
+            )
+
+            result = main(["search", "UCC27211"])
+
+            assert result == 1
+            captured = capsys.readouterr()
+            combined = captured.out + captured.err
+            assert "requests" in combined
+            assert "pip install" in combined
+            assert "No datasheets found" not in combined
+
+    def test_info_command_missing_pymupdf_names_page_count(self, tmp_path, capsys):
+        """info error names page count, not image extraction, when fitz missing (#4139)."""
+        from kicad_tools.cli.datasheet_cmd import main
+
+        pdf_file = tmp_path / "test.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4")
+
+        with patch.dict("sys.modules", {"fitz": None}):
+            result = main(["info", str(pdf_file)])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "page count" in captured.err
+        assert "image extraction" not in captured.err
+
+    def test_info_command_table_extraction_best_effort(self, tmp_path, capsys):
+        """info still prints page count when only table extraction fails."""
+        from kicad_tools.cli.datasheet_cmd import main
+        from kicad_tools.datasheet.parser import DatasheetParser
+
+        pdf_file = tmp_path / "test.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4")
+
+        with patch.object(DatasheetParser, "page_count", new_callable=PropertyMock) as mock_pages:
+            mock_pages.return_value = 7
+            with patch.object(DatasheetParser, "extract_images", return_value=[]):
+                with patch.object(
+                    DatasheetParser,
+                    "extract_tables",
+                    side_effect=ImportError("pdfplumber is required for table extraction."),
+                ):
+                    result = main(["info", str(pdf_file)])
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "Pages:   7" in captured.out
+        assert "unavailable" in captured.out
+        assert "pdfplumber" in captured.out
 
     def test_list_command_empty(self, capsys):
         """Test list command with no cached datasheets."""
