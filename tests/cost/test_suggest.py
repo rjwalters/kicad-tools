@@ -79,6 +79,69 @@ class TestParseComponentValue:
         assert result.numeric_value == 1_000_000
         assert "1M" in result.search_terms
 
+    def test_resistor_330R(self):
+        """Test parsing sub-1kΩ suffix-R notation (330R -> 330 Ω)."""
+        result = parse_component_value("330R", "R1")
+        assert result.component_type == ComponentType.RESISTOR
+        assert result.numeric_value == 330.0
+        assert result.unit == "Ω"
+        assert "330" in result.search_terms
+
+    def test_resistor_33R(self):
+        """Test parsing sub-1kΩ suffix-R notation (33R -> 33 Ω)."""
+        result = parse_component_value("33R", "R7")
+        assert result.component_type == ComponentType.RESISTOR
+        assert result.numeric_value == 33.0
+        assert "33" in result.search_terms
+
+    def test_resistor_470R(self):
+        """Test parsing sub-1kΩ suffix-R notation (470R -> 470 Ω)."""
+        result = parse_component_value("470R", "R8")
+        assert result.component_type == ComponentType.RESISTOR
+        assert result.numeric_value == 470.0
+        assert "470" in result.search_terms
+
+    def test_resistor_4R7(self):
+        """Test parsing inline-decimal R notation (4R7 -> 4.7 Ω)."""
+        result = parse_component_value("4R7", "R1")
+        assert result.component_type == ComponentType.RESISTOR
+        assert result.numeric_value == pytest.approx(4.7)
+        assert result.unit == "Ω"
+        assert result.search_terms  # non-empty so value bonus can fire
+
+    def test_resistor_0R5(self):
+        """Test parsing sub-1Ω inline-decimal R notation (0R5 -> 0.5 Ω)."""
+        result = parse_component_value("0R5", "R2")
+        assert result.component_type == ComponentType.RESISTOR
+        assert result.numeric_value == pytest.approx(0.5)
+        assert result.search_terms
+
+    def test_resistor_4K7_inline(self):
+        """Test inline-decimal kilo notation (4K7 -> 4700 Ω)."""
+        result = parse_component_value("4K7", "R3")
+        assert result.component_type == ComponentType.RESISTOR
+        assert result.numeric_value == 4700
+        assert "4.7k" in result.search_terms
+
+    def test_resistor_330R_with_tolerance(self):
+        """Test R-notation with a trailing tolerance suffix (330R 1%)."""
+        result = parse_component_value("330R 1%", "R1")
+        assert result.component_type == ComponentType.RESISTOR
+        assert result.numeric_value == 330.0
+        assert result.tolerance == "1%"
+        assert "330" in result.search_terms
+
+    def test_resistor_330R_search_term_not_empty(self):
+        """Regression: sub-kΩ R-notation must yield a non-empty search term.
+
+        Previously ``330R`` failed to parse, leaving ``search_terms`` empty so
+        the ranker fell back to a package-only query and mis-ranked a 10kΩ part
+        (issue #4134).
+        """
+        result = parse_component_value("330R", "R1")
+        assert result.search_terms != []
+        assert result.numeric_value is not None
+
     def test_capacitor_100nF(self):
         """Test parsing 100nF capacitor value."""
         result = parse_component_value("100nF", "C1")
