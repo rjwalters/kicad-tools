@@ -37,6 +37,21 @@ Sibling of ``scripts/ci/check_board_00_e2e.py`` and
 ``::error::`` annotation pattern, deliberately small so the gate's contract
 stays auditable and unit-testable.
 
+Three inverted contracts also exist for boards whose honest verdict is not
+a plain clean pass, each wired into a mutually-exclusive argparse group:
+
+* ``--expect-vacuous`` -- deliberately-unwired fixture schematics (board 06):
+  assert ``clean=false`` with only ``kind='vacuous'`` mismatches (#4005).
+* ``--expect-opens NET[,...]`` -- wired boards that route PARTIAL by design
+  (board 07): assert ``clean=false`` with only ``kind='open'`` mismatches on
+  exactly the named net set (#4012).
+* ``--expect-unrouted`` -- a freshly-created board with a wired schematic but
+  no copper yet (fresh ``kct create-pcb`` output, softstart rev-B): assert
+  ``clean=false`` with zero shorts and zero vacuous mismatches (opens
+  unconstrained in count and net names).  This is the "birth certificate"
+  gate -- "netlist bound, no miswires" -- for a board before any routing
+  exists (#4146).
+
 Exit codes:
     0 -- The copper-LVS result is clean (no shorts / no opens).
     1 -- Tool/usage error (missing arg, file unreadable, JSON parse
@@ -221,6 +236,69 @@ def assert_known_opens(payload: dict[str, Any], expected_nets: set[str]) -> str 
     return None
 
 
+def assert_unrouted(payload: dict[str, Any]) -> str | None:
+    """Assert a copper-LVS payload is the *freshly-unrouted* verdict (#4146).
+
+    Used for a board just created from a wired schematic with no copper yet
+    (fresh ``kct create-pcb`` output, softstart rev-B): the honest
+    expectation is ``clean: false`` with only ``kind="open"`` mismatches and
+    a positive bound-pad count — the netlist is bound, but no routing exists,
+    so every net is open and there are no miswires.  This is the "birth
+    certificate" gate; opens are unconstrained in count and net names (that
+    is the whole point versus ``--expect-opens``, which would require
+    enumerating every net of an unrouted board).
+
+    The gate fails BOTH ways:
+
+    * ``clean: true`` — a freshly-unrouted board should never self-report
+      clean (that only happens with zero schematic nets, which is
+      degenerate); switch to the plain ``clean`` assertion once routing lands.
+    * the vacuity verdict (``kind="vacuous"``) — vacuity means the *schematic*
+      binds zero pins (an unwired fixture, board 06), which is a categorically
+      different — and still-bad — state.  Passing it here would silently
+      defeat the #4006/#4019 vacuity guard for any consumer who reaches for
+      "unrouted mode" as a generic permissive gate, so it MUST keep failing.
+    * any ``kind="short"`` mismatch — the one hard invariant this mode exists
+      to enforce: a fresh unrouted board has no copper, so it cannot have a
+      copper short; if one appears the schematic/board disagree on connectivity.
+
+    Returns:
+        ``None`` on pass (unrouted verdict as expected).  A human-readable
+        error message otherwise (caller maps to exit 2).
+
+    Raises:
+        KeyError: If ``clean`` is absent (caller maps to exit 1).
+    """
+    clean = payload["clean"]
+    mismatches = payload.get("mismatches", [])
+    if not isinstance(mismatches, list):
+        mismatches = []
+    kinds = sorted({m.get("kind") for m in mismatches if isinstance(m, dict)})
+    if clean:
+        return (
+            "expected an UNROUTED copper-LVS verdict (clean=false with opens "
+            "only) but got clean=true -- a freshly-unrouted board should not "
+            "self-report clean; graduate this CI gate to a plain clean "
+            "assertion now that the board appears routed"
+        )
+    if "vacuous" in kinds:
+        return (
+            "expected an UNROUTED copper-LVS verdict but got the vacuity-guard "
+            "verdict (kind='vacuous') -- the schematic binds zero pins, so the "
+            "board is not merely unrouted, it is UNWIRED; switch to "
+            "--expect-vacuous if this fixture is intentionally unwired, or fix "
+            "the schematic binding"
+        )
+    if "short" in kinds:
+        return (
+            "expected an UNROUTED copper-LVS verdict (zero shorts) but got "
+            f"{_summarize_mismatches(mismatches)} -- a copper short on an "
+            "unrouted board means the schematic and board disagree on "
+            "connectivity; this is a hard regression regardless of the opens"
+        )
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="check_copper_lvs.py",
@@ -262,6 +340,19 @@ def main(argv: list[str] | None = None) -> int:
             "verdict, and on any open outside the set."
         ),
     )
+    mode_group.add_argument(
+        "--expect-unrouted",
+        action="store_true",
+        help=(
+            "Birth-certificate contract for a board just created from a wired "
+            "schematic with no copper yet (fresh 'kct create-pcb' output, "
+            "#4146): assert clean=false with zero shorts and zero vacuous "
+            "mismatches (opens unconstrained in count and net names).  Fails "
+            "on clean=true (board appears routed; graduate the gate), on any "
+            "short (schematic/board disagree on connectivity), and on the "
+            "vacuous verdict (schematic is unwired, not merely unrouted)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     raw_path = args.result_json
@@ -300,6 +391,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.expect_vacuous:
             dirty_msg = assert_vacuous(payload)
+        elif args.expect_unrouted:
+            dirty_msg = assert_unrouted(payload)
         elif expected_open_nets:
             dirty_msg = assert_known_opens(payload, expected_open_nets)
         else:
@@ -322,6 +415,11 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "[ok] copper-LVS vacuity guard fired as expected "
             "(clean=false, kind='vacuous'; unwired fixture schematic)"
+        )
+    elif args.expect_unrouted:
+        print(
+            "[ok] copper-LVS reports a freshly-unrouted board "
+            "(clean=false, opens only, zero shorts; netlist bound, no miswires)"
         )
     elif expected_open_nets:
         print(

@@ -396,3 +396,107 @@ def test_expect_opens_mutually_exclusive_with_expect_vacuous(tmp_path: Path) -> 
     p = _write_json(tmp_path, _opens_payload(["DQ3"]))
     with pytest.raises(SystemExit):
         check_copper_lvs.main(["--expect-vacuous", "--expect-opens", "DQ3", str(p)])
+
+
+# --- --expect-unrouted mode (#4146) -----------------------------------------
+#
+# Birth-certificate contract for a board just created from a wired schematic
+# with no copper yet (fresh ``kct create-pcb`` output, softstart rev-B).  The
+# honest verdict is clean=false with opens only (any count, any nets) and a
+# positive bound-pad count -- "netlist bound, no miswires".  The gate passes
+# on opens-only and fails on clean=true (board appears routed), any short
+# (schematic/board disagree), and the vacuous verdict (schematic is unwired,
+# not merely unrouted -- the #4006 vacuity guard must NOT be defeated here).
+
+
+def test_expect_unrouted_passes_on_opens_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A freshly-created board: many opens, positive bound_pad_count, no shorts.
+    p = _write_json(tmp_path, _opens_payload(["NET1", "NET2", "NET3", "NET4"]))
+    assert check_copper_lvs.main(["--expect-unrouted", str(p)]) == 0
+    assert "freshly-unrouted board" in capsys.readouterr().out
+
+
+def test_expect_unrouted_passes_with_zero_mismatches_but_clean_false(tmp_path: Path) -> None:
+    # Edge case: clean=false with an empty mismatches list. Zero shorts is
+    # trivially satisfied, so --expect-unrouted still PASSES (mirrors the
+    # ambiguity noted in the test plan).
+    p = _write_json(tmp_path, {"clean": False, "bound_pad_count": 12, "mismatches": []})
+    assert check_copper_lvs.main(["--expect-unrouted", str(p)]) == 0
+
+
+def test_expect_unrouted_fails_on_clean_true(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A freshly-unrouted board should never self-report clean; the gate must
+    # point the caller at the plain clean assertion.
+    p = _write_json(tmp_path, {"clean": True, "mismatches": []})
+    assert check_copper_lvs.main(["--expect-unrouted", str(p)]) == 2
+    out = capsys.readouterr().out
+    assert "::error" in out
+    assert "graduate" in out
+
+
+def test_expect_unrouted_fails_on_single_short(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # One short mixed with opens is still a hard regression.
+    p = _write_json(
+        tmp_path,
+        _opens_payload(
+            ["NET1", "NET2"],
+            extra=[{"kind": "short", "net_a": "A", "net_b": "B", "pad_a": "U1.1", "pad_b": "U1.2"}],
+        ),
+    )
+    assert check_copper_lvs.main(["--expect-unrouted", str(p)]) == 2
+    out = capsys.readouterr().out
+    assert "::error" in out
+    assert "1 short" in out
+
+
+def test_expect_unrouted_fails_on_vacuous_verdict(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Vacuity means the schematic binds zero pins -- unwired, not merely
+    # unrouted. --expect-unrouted must keep failing (guards #4006/#4019) and
+    # point at --expect-vacuous as the correct mode.
+    p = _write_json(tmp_path, _VACUOUS_PAYLOAD)
+    assert check_copper_lvs.main(["--expect-unrouted", str(p)]) == 2
+    out = capsys.readouterr().out
+    assert "::error" in out
+    assert "UNWIRED" in out
+    assert "--expect-vacuous" in out
+
+
+def test_expect_unrouted_fails_on_mixed_vacuous_and_open(tmp_path: Path) -> None:
+    # Vacuous mixed with real opens is still the unwired-schematic verdict;
+    # trip regardless of the opens.
+    p = _write_json(
+        tmp_path,
+        {
+            "clean": False,
+            "mismatches": [
+                {"kind": "vacuous", "net_a": "x", "net_b": "x", "pad_a": "a", "pad_b": "b"},
+                {"kind": "open", "net_a": "N", "net_b": "N", "pad_a": "R1.1", "pad_b": "R2.1"},
+            ],
+        },
+    )
+    assert check_copper_lvs.main(["--expect-unrouted", str(p)]) == 2
+
+
+def test_expect_unrouted_missing_clean_key_exits_1(tmp_path: Path) -> None:
+    p = _write_json(tmp_path, {"mismatches": []})
+    assert check_copper_lvs.main(["--expect-unrouted", str(p)]) == 1
+
+
+def test_expect_unrouted_mutually_exclusive_with_expect_vacuous(tmp_path: Path) -> None:
+    p = _write_json(tmp_path, _opens_payload(["NET1"]))
+    with pytest.raises(SystemExit):
+        check_copper_lvs.main(["--expect-unrouted", "--expect-vacuous", str(p)])
+
+
+def test_expect_unrouted_mutually_exclusive_with_expect_opens(tmp_path: Path) -> None:
+    p = _write_json(tmp_path, _opens_payload(["NET1"]))
+    with pytest.raises(SystemExit):
+        check_copper_lvs.main(["--expect-unrouted", "--expect-opens", "NET1", str(p)])
