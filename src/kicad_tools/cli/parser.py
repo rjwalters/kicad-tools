@@ -1509,6 +1509,13 @@ def _add_pcb_parser(subparsers) -> None:
         help="Run island detection to find disconnected segments within each net",
     )
 
+    # pcb padmap
+    pcb_padmap = pcb_subparsers.add_parser("padmap", help="Show per-footprint pad-to-net bindings")
+    pcb_padmap.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_padmap.add_argument("--format", choices=["text", "json"], default="text")
+    pcb_padmap.add_argument("--ref", help="Scope to a single footprint reference")
+    pcb_padmap.add_argument("--net", help="Invert to net-owning-pads mode for this net")
+
     # pcb traces
     pcb_traces = pcb_subparsers.add_parser("traces", help="Show trace statistics")
     pcb_traces.add_argument("pcb", help="Path to .kicad_pcb file")

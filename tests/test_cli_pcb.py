@@ -1757,3 +1757,319 @@ class TestPcbReannotate:
 
         captured = capsys.readouterr()
         assert "object" in captured.err.lower() or "dict" in captured.err.lower()
+
+
+# PCB fixture exercising padmap edge cases: NPTH pad (empty number, no net),
+# an unconnected numbered pad (no net child), and two pads sharing a number.
+PADMAP_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (footprint "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "U5" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (property "Value" "UCC27211" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 2 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 1 "GND"))
+    (pad "3" smd roundrect (at 1 0) (size 0.5 0.6)
+      (layers "F.Cu"))
+    (pad "" np_thru_hole circle (at 2 2) (size 1 1) (drill 0.8)
+      (layers "*.Cu"))
+    (pad "MP" smd roundrect (at 3 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 1 "GND"))
+    (pad "MP" smd roundrect (at 4 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 110 100)
+    (property "Reference" "R10" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 2 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000003")
+    (at 120 100)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 2 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 1 "GND"))
+  )
+)
+"""
+
+
+@pytest.fixture
+def padmap_pcb(tmp_path: Path) -> Path:
+    """PCB with NPTH, unconnected, and duplicate-number pads for padmap tests."""
+    pcb_file = tmp_path / "padmap.kicad_pcb"
+    pcb_file.write_text(PADMAP_PCB)
+    return pcb_file
+
+
+class TestPcbPadmap:
+    """Tests for the 'pcb padmap' command."""
+
+    def test_full_dump_text(self, padmap_pcb: Path, capsys, monkeypatch):
+        """Full dump lists every footprint and pad, natural-ref-sorted."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(padmap_pcb), "padmap"])
+        main()
+
+        captured = capsys.readouterr()
+        out = captured.out
+        # All footprints present
+        assert "R2" in out
+        assert "R10" in out
+        assert "U5" in out
+        # Natural-ref sort: R2 before R10, both before U5
+        assert out.index("R2") < out.index("R10") < out.index("U5")
+        # Header includes value + library id
+        assert "UCC27211" in out
+        assert "[Package_SO:SOIC-8_3.9x4.9mm_P1.27mm]" in out
+        # Pad rows
+        assert "pad 1  VCC" in out
+        assert "pad 2  GND" in out
+
+    def test_full_dump_json(self, padmap_pcb: Path, capsys, monkeypatch):
+        """Full dump JSON parses and contains every footprint/pad."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--format", "json"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert isinstance(data, list)
+        refs = [entry["reference"] for entry in data]
+        assert refs == ["R2", "R10", "U5"]
+        u5 = next(e for e in data if e["reference"] == "U5")
+        # U5 has 6 pads (incl NPTH + duplicate MP)
+        assert len(u5["pads"]) == 6
+
+    def test_ref_scopes_to_single_footprint(self, padmap_pcb: Path, capsys, monkeypatch):
+        """--ref limits output to one footprint."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--ref", "R10"])
+        main()
+
+        captured = capsys.readouterr()
+        out = captured.out
+        assert "R10" in out
+        assert "U5" not in out
+        assert "R2\n" not in out
+
+    def test_ref_unknown_exits_1(self, padmap_pcb: Path, capsys, monkeypatch):
+        """Unknown --ref exits 1 with an error on stderr."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--ref", "ZZ99"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower()
+        assert "Available" in captured.err
+
+    def test_net_inversion(self, padmap_pcb: Path, capsys, monkeypatch):
+        """--net inverts to net-owning-pads mode."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--net", "GND"])
+        main()
+
+        captured = capsys.readouterr()
+        lines = {line.strip() for line in captured.out.splitlines() if "." in line}
+        assert lines == {"U5.2", "U5.MP", "R10.2", "R2.2"}
+
+    def test_net_inversion_json(self, padmap_pcb: Path, capsys, monkeypatch):
+        """--net JSON has {net, pads:[{ref, pad}]} shape; NPTH pads excluded."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-query", str(padmap_pcb), "padmap", "--net", "VCC", "--format", "json"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["net"] == "VCC"
+        got = {(p["ref"], p["pad"]) for p in data["pads"]}
+        assert got == {("U5", "1"), ("R10", "1"), ("R2", "1")}
+
+    def test_net_unknown_exits_1(self, padmap_pcb: Path, capsys, monkeypatch):
+        """Unknown --net exits 1 with an error on stderr."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--net", "NOPE"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower()
+        assert "Available" in captured.err
+
+    def test_ref_and_net_mutually_exclusive(self, padmap_pcb: Path, capsys, monkeypatch):
+        """--ref and --net together is a usage error (exit 1)."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-query", str(padmap_pcb), "padmap", "--ref", "U5", "--net", "GND"],
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "mutually exclusive" in captured.err.lower()
+
+    def test_no_net_pad_text(self, padmap_pcb: Path, capsys, monkeypatch):
+        """No-net / NPTH pads render as '(no net)' in text, sorted last."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--ref", "U5"])
+        main()
+
+        captured = capsys.readouterr()
+        out = captured.out
+        # Unconnected numbered pad 3 and NPTH pad both show (no net)
+        assert "pad 3  (no net)" in out
+        assert "(no net)" in out
+        # Empty-number pad string never emitted as an empty net string
+        assert '""' not in out
+
+    def test_no_net_pad_json_null(self, padmap_pcb: Path, capsys, monkeypatch):
+        """No-net pads serialize as JSON null, not empty string."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-query", str(padmap_pcb), "padmap", "--ref", "U5", "--format", "json"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        pads = data[0]["pads"]
+        no_net = [p for p in pads if p["net"] is None]
+        # pad 3 (unconnected) + NPTH pad
+        assert len(no_net) == 2
+        # None of the nets is an empty string
+        assert all(p["net"] is None or p["net"] for p in pads)
+
+    def test_npth_pad_included_and_sorts_last(self, padmap_pcb: Path, capsys, monkeypatch):
+        """NPTH pad (empty number) is included and sorts last without crashing."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-query", str(padmap_pcb), "padmap", "--ref", "U5", "--format", "json"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        numbers = [p["number"] for p in json.loads(captured.out)[0]["pads"]]
+        # Numeric pads first, then non-numeric/empty last
+        assert numbers[0] == "1"
+        assert numbers[1] == "2"
+        assert numbers[2] == "3"
+        assert "" in numbers[3:]
+
+    def test_duplicate_pad_numbers_all_present(self, padmap_pcb: Path, capsys, monkeypatch):
+        """Both pads sharing number 'MP' appear (no silent de-dup)."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-query", str(padmap_pcb), "padmap", "--ref", "U5", "--format", "json"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        numbers = [p["number"] for p in json.loads(captured.out)[0]["pads"]]
+        assert numbers.count("MP") == 2
+
+    def test_json_schema_stability_full_dump(self, padmap_pcb: Path, capsys, monkeypatch):
+        """Full-dump JSON entries have the exact documented key schema."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--format", "json"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        for entry in data:
+            assert set(entry.keys()) == {"reference", "value", "footprint", "pads"}
+            for pad in entry["pads"]:
+                assert set(pad.keys()) == {"number", "net"}
+
+    def test_json_schema_stability_net_mode(self, padmap_pcb: Path, capsys, monkeypatch):
+        """--net JSON has the exact documented {net, pads:[{ref, pad}]} schema."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-query", str(padmap_pcb), "padmap", "--net", "GND", "--format", "json"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert set(data.keys()) == {"net", "pads"}
+        for pad in data["pads"]:
+            assert set(pad.keys()) == {"ref", "pad"}
+
+    def test_dispatch_via_run_pcb_command(self, padmap_pcb: Path, capsys):
+        """padmap is reachable through run_pcb_command dispatch."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        args = Namespace(
+            pcb=str(padmap_pcb),
+            pcb_command="padmap",
+            format="json",
+            ref="R10",
+            net=None,
+        )
+        result = run_pcb_command(args)
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data[0]["reference"] == "R10"
