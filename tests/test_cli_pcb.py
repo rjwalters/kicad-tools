@@ -1012,6 +1012,156 @@ class TestPcbStrip:
         assert "dry run" in captured.out.lower()
         assert "Filtering layers: In1.Cu" in captured.out
 
+    def _region_strip_args(self, input_file, output_file, region, **overrides):
+        """Build a Namespace for a region strip invocation with sane defaults."""
+        from argparse import Namespace
+
+        defaults = {
+            "pcb": str(input_file),
+            "pcb_command": "strip",
+            "output": str(output_file) if output_file is not None else None,
+            "nets": None,
+            "layers": None,
+            "region": region,
+            "include_power": True,
+            "power_pattern": None,
+            "remove_orphan_vias": False,
+            "keep_zones": True,
+            "format": "text",
+            "dry_run": False,
+        }
+        defaults.update(overrides)
+        return Namespace(**defaults)
+
+    def test_strip_region_cli_removes_in_region_only(self, tmp_path, capsys):
+        """--region strips only geometry inside the box."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(20, 20), end=(30, 20), width=0.25, layer="F.Cu", net="SIG_A")
+        pcb.add_trace(start=(60, 60), end=(70, 60), width=0.25, layer="F.Cu", net="SIG_B")
+
+        input_file = tmp_path / "region_cli.kicad_pcb"
+        pcb.save(input_file)
+        output_file = tmp_path / "stripped.kicad_pcb"
+
+        args = self._region_strip_args(input_file, output_file, "10,10,40,40")
+        result = run_pcb_command(args)
+
+        assert result == 0
+        stripped = PCB.load(output_file)
+        assert len(stripped.segments) == 1  # only the in-region SIG_A removed
+
+    def test_strip_region_cli_json_reports_region_stats(self, tmp_path, capsys):
+        """JSON output includes region and clip/skip counts."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        # Crossing segment: clipped at the x=40 boundary.
+        pcb.add_trace(start=(20, 20), end=(60, 20), width=0.25, layer="F.Cu", net="SIG_A")
+
+        input_file = tmp_path / "region_json.kicad_pcb"
+        pcb.save(input_file)
+        output_file = tmp_path / "stripped.kicad_pcb"
+
+        args = self._region_strip_args(input_file, output_file, "10,10,40,40", format="json")
+        result = run_pcb_command(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["region"] == [10.0, 10.0, 40.0, 40.0]
+        assert data["removed"]["segments_clipped"] == 1
+
+    def test_strip_region_cli_dry_run_text(self, tmp_path, capsys):
+        """Dry-run text output mentions the region."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(20, 20), end=(30, 20), width=0.25, layer="F.Cu", net="SIG_A")
+
+        input_file = tmp_path / "region_dry.kicad_pcb"
+        pcb.save(input_file)
+
+        args = self._region_strip_args(input_file, None, "10,10,40,40", dry_run=True)
+        result = run_pcb_command(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "dry run" in captured.out.lower()
+        assert "Region:" in captured.out
+
+    def test_strip_region_cli_and_nets_combined(self, tmp_path, capsys):
+        """--region composes with --nets (ANDed) via the CLI."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(20, 20), end=(30, 20), width=0.25, layer="F.Cu", net="NET_A")
+        pcb.add_trace(start=(20, 30), end=(30, 30), width=0.25, layer="F.Cu", net="NET_B")
+
+        input_file = tmp_path / "region_nets.kicad_pcb"
+        pcb.save(input_file)
+        output_file = tmp_path / "stripped.kicad_pcb"
+
+        args = self._region_strip_args(input_file, output_file, "10,10,40,40", nets="NET_A")
+        result = run_pcb_command(args)
+
+        assert result == 0
+        stripped = PCB.load(output_file)
+        assert len(stripped.segments) == 1  # NET_B in-region survives the net filter
+
+    def test_strip_region_cli_invalid_wrong_count(self, tmp_path, capsys):
+        """A --region with the wrong number of values fails fast."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        input_file = tmp_path / "bad_region.kicad_pcb"
+        pcb.save(input_file)
+
+        args = self._region_strip_args(input_file, None, "10,10,40")
+        result = run_pcb_command(args)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "region" in captured.err.lower()
+
+    def test_strip_region_cli_invalid_non_numeric(self, tmp_path, capsys):
+        """A non-numeric --region value fails fast."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        input_file = tmp_path / "bad_region2.kicad_pcb"
+        pcb.save(input_file)
+
+        args = self._region_strip_args(input_file, None, "10,10,foo,40")
+        result = run_pcb_command(args)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "numeric" in captured.err.lower()
+
+    def test_strip_region_cli_invalid_inverted(self, tmp_path, capsys):
+        """A --region with x1>=x2 or y1>=y2 fails fast (CLI validation)."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        input_file = tmp_path / "bad_region3.kicad_pcb"
+        pcb.save(input_file)
+
+        args = self._region_strip_args(input_file, None, "40,40,10,10")
+        result = run_pcb_command(args)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "x1 < x2" in captured.err or "region" in captured.err.lower()
+
 
 # PCB with multiple footprints for reannotation testing
 MULTI_FOOTPRINT_PCB = """(kicad_pcb
