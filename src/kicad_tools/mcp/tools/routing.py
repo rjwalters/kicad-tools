@@ -403,6 +403,7 @@ def route_net_auto(
     strategy: str = "auto",
     enable_repair: bool = True,
     enable_via_resolution: bool = True,
+    region: str | tuple[float, float, float, float] | None = None,
 ) -> dict:
     """Route a specific net using the RoutingOrchestrator.
 
@@ -420,6 +421,14 @@ def route_net_auto(
                   Use "auto" for smart selection.
         enable_repair: Whether to enable automatic clearance repair after routing
         enable_via_resolution: Whether to enable via conflict resolution
+        region: Optional spatial routing bound (Issue #4148, Phase 2a).  Either
+                a ``"x1,y1,x2,y2"`` string or a ``(x1, y1, x2, y2)`` tuple in
+                BOARD-RELATIVE mm (same convention as ``pcb strip --region``
+                and ``route --region``).  When given, the net is only routed if
+                ALL of its pads lie inside the box; a net with an endpoint
+                outside fails with a clear message (bare-stub reconnection is
+                deferred to Phase 2b).  Any produced segment/via that escapes
+                the box fails the route rather than writing out-of-region copper.
 
     Returns:
         Dictionary with routing result including:
@@ -467,6 +476,59 @@ def route_net_auto(
 
     if net_number is None:
         raise ValueError(f"Net '{net_name}' not found in design")
+
+    # Issue #4148: parse + validate the spatial region bound (board-relative).
+    region_box: tuple[float, float, float, float] | None = None
+    if region is not None:
+        if isinstance(region, str):
+            parts = [p.strip() for p in region.split(",")]
+            if len(parts) != 4:
+                raise ValueError(
+                    f"--region expects 'x1,y1,x2,y2' (four comma-separated numbers), got {region!r}"
+                )
+            try:
+                rx1, ry1, rx2, ry2 = (float(p) for p in parts)
+            except ValueError as _e:
+                raise ValueError(f"--region values must be numeric, got {region!r}") from _e
+        else:
+            rx1, ry1, rx2, ry2 = (float(v) for v in region)
+        if rx1 >= rx2 or ry1 >= ry2:
+            raise ValueError(
+                "--region must satisfy x1 < x2 and y1 < y2 "
+                f"(got x1={rx1}, y1={ry1}, x2={rx2}, y2={ry2})"
+            )
+        region_box = (rx1, ry1, rx2, ry2)
+
+        # Reachability gate: every pad of the routed net must lie inside the box
+        # (board-relative).  A pad outside needs outside access we do not
+        # provide in Phase 2a (bare-stub reconnection is Phase 2b).
+        outside_pads = []
+        for fp_ in pcb.footprints:
+            for pad in fp_.pads:
+                if (getattr(pad, "net_name", "") or "") != net_name:
+                    continue
+                pos = pcb.get_pad_position(fp_.reference, pad.number)
+                if pos is None:
+                    continue
+                if not (rx1 <= pos[0] <= rx2 and ry1 <= pos[1] <= ry2):
+                    outside_pads.append((fp_.reference, pad.number))
+        if outside_pads:
+            preview = ", ".join(f"{r}.{p}" for r, p in outside_pads[:6])
+            return {
+                "success": False,
+                "net_name": net_name,
+                "strategy_used": "region-bounded",
+                "metrics": {},
+                "repair_actions": [],
+                "warnings": [],
+                "performance": {},
+                "error_message": (
+                    f"--region cannot route net '{net_name}': pad(s) {preview} "
+                    "lie outside the region, and Phase 2a does not reconnect to "
+                    "bare boundary stubs (deferred to Phase 2b)."
+                ),
+                "alternative_strategies": [],
+            }
 
     # Import router components
     try:
@@ -558,6 +620,49 @@ def route_net_auto(
 
     # Route the net
     result = orchestrator.route_net(net=net_name, pads=pads)
+
+    # Issue #4148: confine the produced geometry to the region box.  The
+    # orchestrator's grid is not region-marked at cell level in Phase 2a, so we
+    # enforce the bound on its OUTPUT: any routed segment/via endpoint that
+    # escapes the box (world coords = board-relative + board origin) fails the
+    # route rather than writing out-of-region copper.
+    if region_box is not None and result.success:
+        ox, oy = pcb._board_origin
+        wx1 = region_box[0] + ox
+        wy1 = region_box[1] + oy
+        wx2 = region_box[2] + ox
+        wy2 = region_box[3] + oy
+        tol = 1e-3
+
+        def _in_box(px: float, py: float) -> bool:
+            return wx1 - tol <= px <= wx2 + tol and wy1 - tol <= py <= wy2 + tol
+
+        escaped = False
+        for seg in getattr(result, "segments", []) or []:
+            if not (_in_box(seg.x1, seg.y1) and _in_box(seg.x2, seg.y2)):
+                escaped = True
+                break
+        if not escaped:
+            for via in getattr(result, "vias", []) or []:
+                if not _in_box(via.x, via.y):
+                    escaped = True
+                    break
+        if escaped:
+            return {
+                "success": False,
+                "net_name": net_name,
+                "strategy_used": getattr(result.strategy_used, "name", str(result.strategy_used)),
+                "metrics": {},
+                "repair_actions": [],
+                "warnings": [],
+                "performance": {},
+                "error_message": (
+                    f"--region: routing net '{net_name}' produced geometry "
+                    "outside the region box; refusing to write out-of-region "
+                    "copper (Phase 2a confines route-auto output to the region)."
+                ),
+                "alternative_strategies": [],
+            }
 
     # Convert to dict with net_name included
     result_dict = result.to_dict()

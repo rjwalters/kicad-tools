@@ -3344,6 +3344,7 @@ def load_pcb_for_routing(
     load_existing_routes: bool = False,
     max_search_iterations: int = 0,
     per_net_iterations: int = 0,
+    region: tuple[float, float, float, float] | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -3391,6 +3392,18 @@ def load_pcb_for_routing(
                      multi-pass routing where Pass 2 must see Pass 1 geometry
                      to avoid overlapping traces and co-located vias.
                      Default is False for backward compatibility.
+        region: Optional ``(x1, y1, x2, y2)`` bounding box in BOARD-RELATIVE
+                mm coordinates (Issue #4148, region-bounded routing).  Matches
+                ``pcb strip --region``'s convention exactly: the box is
+                board-relative (origin at the Edge.Cuts rect start), so the
+                same ``x1,y1,x2,y2`` string can be reused across both commands.
+                When given, every routable-layer grid cell OUTSIDE the box is
+                marked as a fixed obstacle after existing copper is loaded, so
+                the router confines all new segments/vias to the region while
+                treating everything outside (copper and empty grid alike) as
+                immovable.  Region mode implies preserve-existing semantics --
+                callers should pass ``load_existing_routes=True`` so outside
+                copper is never re-routed.  The box is normalized internally.
 
     Returns:
         Tuple of (Autorouter instance, net_map dict)
@@ -3794,6 +3807,32 @@ def load_pcb_for_routing(
                 total_segs,
                 total_vias,
             )
+
+    # Region-bounded routing (Issue #4148, Phase 2a): confine all new routing
+    # to an axis-aligned box by marking every cell OUTSIDE it as a fixed
+    # obstacle.  The grid always covers the full board, so this is the
+    # complement of a keepout.  MUST run AFTER load_existing_routes so
+    # outside copper is first loaded as obstacles (and the region marking then
+    # blocks the empty gaps between it too).  The ``region`` box is
+    # board-relative (matching ``pcb strip --region``); the grid consumes
+    # sheet-absolute world coords, so add the board origin (== ``origin_x`` /
+    # ``origin_y`` == ``PCB._board_origin``) before marking.
+    if region is not None:
+        rx1, ry1, rx2, ry2 = region
+        wx1 = rx1 + origin_x
+        wy1 = ry1 + origin_y
+        wx2 = rx2 + origin_x
+        wy2 = ry2 + origin_y
+        blocked = router.grid.mark_region_bound(wx1, wy1, wx2, wy2)
+        logger.info(
+            "Region-bounded routing: confined to board-relative box "
+            "(%.3f, %.3f)-(%.3f, %.3f); %d cells outside marked as obstacles",
+            min(rx1, rx2),
+            min(ry1, ry2),
+            max(rx1, rx2),
+            max(ry1, ry2),
+            blocked,
+        )
 
     return router, net_map
 

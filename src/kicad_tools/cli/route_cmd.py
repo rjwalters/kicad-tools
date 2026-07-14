@@ -3593,6 +3593,9 @@ def route_with_layer_escalation(
                     # copper is loaded as grid obstacles + populated into
                     # router.existing_routes so it survives the route pass.
                     load_existing_routes=getattr(args, "preserve_existing", False),
+                    # Issue #4148: region-bounded routing.  When set, cells
+                    # outside the board-relative box are marked as obstacles.
+                    region=getattr(args, "_region_box", None),
                     # Issue #3877: thread the C++ iteration backstop through the
                     # layer-escalation sub-router too.  Without this the
                     # escalation-mode Autorouter (board-01/03 et al.) routes with
@@ -4510,6 +4513,8 @@ def route_with_rule_relaxation(
                     strict_drc=False,
                     # Issue #3155: incremental routing (see route_with_layer_escalation).
                     load_existing_routes=getattr(args, "preserve_existing", False),
+                    # Issue #4148: region-bounded routing (see main()).
+                    region=getattr(args, "_region_box", None),
                 )
         except Exception as e:
             if not quiet:
@@ -6613,6 +6618,8 @@ def route_with_combined_escalation(
                         strict_drc=False,
                         # Issue #3155: incremental routing (see route_with_layer_escalation).
                         load_existing_routes=getattr(args, "preserve_existing", False),
+                        # Issue #4148: region-bounded routing (see main()).
+                        region=getattr(args, "_region_box", None),
                     )
             except Exception as e:
                 if not quiet:
@@ -7184,6 +7191,183 @@ def _should_use_escape_routing(router, escape_flag: bool | None, quiet: bool) ->
             print(f"  Escape routing: auto-enabled (dense packages: {refs})")
         return True
     return False
+
+
+def _parse_region_box(
+    region_arg: str,
+) -> tuple[float, float, float, float] | str:
+    """Parse a ``--region`` string into a normalized board-relative box.
+
+    Issue #4148.  Mirrors the ``pcb strip --region`` CLI validation
+    (``cli/commands/pcb.py``) so both commands accept exactly the same
+    ``x1,y1,x2,y2`` strings and reject the same degenerate inputs.
+
+    Returns the normalized ``(x1, y1, x2, y2)`` tuple (x1<x2, y1<y2) on
+    success, or a human-readable error string on failure.
+    """
+    parts = [p.strip() for p in region_arg.split(",")]
+    if len(parts) != 4:
+        return f"--region expects 'x1,y1,x2,y2' (four comma-separated numbers), got {region_arg!r}"
+    try:
+        x1, y1, x2, y2 = (float(p) for p in parts)
+    except ValueError:
+        return f"--region values must be numeric, got {region_arg!r}"
+    if x1 >= x2 or y1 >= y2:
+        return f"--region must satisfy x1 < x2 and y1 < y2 (got x1={x1}, y1={y1}, x2={x2}, y2={y2})"
+    return (x1, y1, x2, y2)
+
+
+def _parse_and_apply_region(args, pcb_path: Path, region_arg: str) -> int:
+    """Validate --region, stamp ``args._region_box``, and gate unreachable nets.
+
+    Issue #4148 (region-bounded routing, Phase 2a).  On success returns 0 and
+    sets ``args._region_box`` to the normalized board-relative box (plus forces
+    ``args.preserve_existing = True`` so outside copper is preserved).  On any
+    validation / reachability failure prints a clear message to stderr and
+    returns a non-zero exit code so no routing budget is spent.
+
+    Reachability rule: a net can only be routed inside the region when ALL of
+    its pads lie within the box.  A net with a pad outside the region needs
+    outside access we cannot provide in Phase 2a (bare-stub reconnection is
+    deferred to Phase 2b), so it is reported per-net and the run fails fast.
+    Pads / vias that coincide with the boundary work "for free" (inclusive
+    box test).
+    """
+    parsed = _parse_region_box(region_arg)
+    if isinstance(parsed, str):
+        print(f"Error: {parsed}", file=sys.stderr)
+        return 1
+
+    x1, y1, x2, y2 = parsed
+    args._region_box = (x1, y1, x2, y2)
+    # Region mode implies preserve-existing so copper outside the box is loaded
+    # as fixed obstacles and re-emitted unchanged.
+    args.preserve_existing = True
+    # Region mode implies --no-cache: the routing cache key
+    # (``CacheKey.compute(pcb_content, rules, grid)``) does not incorporate the
+    # region box or the derived skip-net set, so a full-board cached result
+    # from a prior non-region run would otherwise be (incorrectly) reused and
+    # re-route nets that must stay outside the region.  A region route is a
+    # distinct operation; skip the cache entirely.
+    args.no_cache = True
+
+    quiet = getattr(args, "quiet", False)
+
+    # Load the board (board-relative pad frame) to check bounds + reachability.
+    try:
+        from kicad_tools.schema.pcb import PCB as _SchemaPCB
+
+        pcb = _SchemaPCB.load(str(pcb_path))
+    except Exception as e:  # pragma: no cover - load errors surface later too
+        print(f"Error loading PCB for --region validation: {e}", file=sys.stderr)
+        return 1
+
+    # A region entirely outside the board's outline is a documented no-op:
+    # there is nothing to route inside it.  Report clearly rather than spend a
+    # routing budget that can only fail.
+    outline = pcb.get_board_outline()
+    if outline:
+        bx1 = min(p[0] for p in outline)
+        by1 = min(p[1] for p in outline)
+        bx2 = max(p[0] for p in outline)
+        by2 = max(p[1] for p in outline)
+        if x2 <= bx1 or x1 >= bx2 or y2 <= by1 or y1 >= by2:
+            print(
+                "Error: --region "
+                f"({x1}, {y1})-({x2}, {y2}) is entirely outside the board "
+                f"bounds ({bx1:.3f}, {by1:.3f})-({bx2:.3f}, {by2:.3f}); "
+                "nothing to route.",
+                file=sys.stderr,
+            )
+            return 1
+
+    # Nets the user explicitly skipped are not candidates for reachability.
+    skip = set()
+    if getattr(args, "skip_nets", None):
+        skip = {n.strip() for n in args.skip_nets.split(",")}
+
+    # Collect board-relative pad positions per net.
+    net_pads: dict[str, list[tuple[float, float]]] = {}
+    for fp in pcb.footprints:
+        ref = fp.reference
+        for pad in fp.pads:
+            net_name = getattr(pad, "net_name", "") or ""
+            if not net_name or net_name in skip:
+                continue
+            pos = pcb.get_pad_position(ref, pad.number)
+            if pos is None:
+                continue
+            net_pads.setdefault(net_name, []).append(pos)
+
+    def _inside(px: float, py: float) -> bool:
+        return x1 <= px <= x2 and y1 <= py <= y2
+
+    # A net is routable in-region only if it has >= 2 pads AND every pad is
+    # inside the box.  Single-pad nets have nothing to route.  Nets with zero
+    # in-region pads are simply not this region's concern (ignored).  Nets
+    # with SOME pads inside and SOME outside need outside access -> fail.
+    unreachable: list[str] = []
+    routable_nets: list[str] = []
+    skip_outside: list[str] = []
+    for net_name, positions in net_pads.items():
+        inside = [p for p in positions if _inside(p[0], p[1])]
+        if not inside:
+            # Net lives entirely outside this region -- do NOT route it (its
+            # pads sit in region-blocked cells).  Skip it so its existing
+            # copper is preserved untouched rather than re-routed.
+            skip_outside.append(net_name)
+            continue
+        if len(inside) != len(positions):
+            unreachable.append(net_name)
+        elif len(positions) >= 2:
+            routable_nets.append(net_name)
+        else:
+            # Single in-region pad -- nothing to route; skip so it is left as-is.
+            skip_outside.append(net_name)
+
+    routable_in_region = len(routable_nets)
+
+    if unreachable:
+        preview = ", ".join(sorted(unreachable)[:10])
+        more = "" if len(unreachable) <= 10 else f" (+{len(unreachable) - 10} more)"
+        print(
+            "Error: --region cannot route the following net(s) because they "
+            "have pad(s) outside the region and Phase 2a does not reconnect to "
+            f"bare boundary stubs (deferred to Phase 2b): {preview}{more}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if routable_in_region == 0:
+        print(
+            "Error: --region "
+            f"({x1}, {y1})-({x2}, {y2}) contains no routable multi-pad net; "
+            "nothing to route inside the region.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Auto-skip every net that has no routable work inside the region (fully
+    # outside, or a single in-region pad).  Their pads sit in region-blocked
+    # cells, so routing them would fail; skipping keeps their existing copper
+    # untouched (region mode implies --preserve-existing).  Merge with any
+    # user-supplied --skip-nets.
+    if skip_outside:
+        existing = (
+            [n.strip() for n in args.skip_nets.split(",") if n.strip()]
+            if getattr(args, "skip_nets", None)
+            else []
+        )
+        merged = existing + [n for n in skip_outside if n not in existing]
+        args.skip_nets = ",".join(merged)
+
+    if not quiet:
+        print(
+            f"[region] Confining routing to board-relative box "
+            f"({x1}, {y1})-({x2}, {y2}); {routable_in_region} net(s) routable "
+            "inside (implies --preserve-existing)."
+        )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -8322,6 +8506,25 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help=("Maximum parallel workers per region group for --region-parallel (default: 4)."),
     )
+    # Issue #4148: region-bounded routing.  SPATIAL routing bound -- confine all
+    # new routing to an axis-aligned box.  Deliberately distinct from
+    # --region-parallel (above), which is a parallelism-partitioning knob, NOT
+    # a spatial bound.  argparse resolves the exact string ``--region`` to THIS
+    # flag even though it is a prefix of ``--region-parallel`` (exact matches
+    # take priority over abbreviation), so there is no ambiguity for the exact
+    # spelling; only a shorter abbreviation like ``--regio`` is ambiguous.
+    parser.add_argument(
+        "--region",
+        metavar="X1,Y1,X2,Y2",
+        default=None,
+        help=(
+            "SPATIAL routing bound (Issue #4148): confine all new routing to "
+            "the axis-aligned box 'x1,y1,x2,y2' (board-relative mm, same "
+            "convention as 'pcb strip --region'). Cells outside the box are "
+            "fixed obstacles; existing copper outside is preserved unchanged "
+            "(implies --preserve-existing). Unrelated to --region-parallel."
+        ),
+    )
 
     # Power plane stitching
     parser.add_argument(
@@ -8495,6 +8698,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
+
+    # Issue #4148: parse + validate --region (SPATIAL routing bound).  Stores a
+    # normalized board-relative box on ``args._region_box`` that the
+    # ``load_pcb_for_routing`` call sites forward.  Region mode implies
+    # --preserve-existing so copper outside the box is loaded as fixed
+    # obstacles and re-emitted unchanged.  Degenerate / non-numeric boxes are
+    # rejected here (mirroring the ``pcb strip --region`` CLI validation) so
+    # no routing budget is spent on an invalid request.
+    args._region_box = None
+    _region_arg = getattr(args, "region", None)
+    if _region_arg:
+        rc = _parse_and_apply_region(args, pcb_path, _region_arg)
+        if rc != 0:
+            return rc
 
     # Issue #3154: advisory schematic/PCB drift banner.  Non-blocking -- the
     # hard gate lives behind 'kct check --netlist-sync'.  Skips silently when
@@ -9055,6 +9272,8 @@ def main(argv: list[str] | None = None) -> int:
                 strict_drc=False,  # Only fail on hard constraint (grid > clearance)
                 # Issue #3155: incremental routing (see route_with_layer_escalation).
                 load_existing_routes=getattr(args, "preserve_existing", False),
+                # Issue #4148: region-bounded routing (see main()).
+                region=getattr(args, "_region_box", None),
                 # Issue #2610: thread --max-search-iterations through.
                 # The inner parser declares this flag with default=0 (Issue
                 # #2819), so the attribute is guaranteed to exist; the
@@ -9107,6 +9326,8 @@ def main(argv: list[str] | None = None) -> int:
                 validate_drc=not args.force,
                 strict_drc=False,
                 load_existing_routes=getattr(args, "preserve_existing", False),
+                # Issue #4148: region-bounded routing (see main()).
+                region=getattr(args, "_region_box", None),
                 max_search_iterations=args.max_search_iterations or 0,
                 per_net_iterations=getattr(args, "per_net_iterations", 0) or 0,
             )
