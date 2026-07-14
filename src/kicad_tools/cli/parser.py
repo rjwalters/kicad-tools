@@ -2737,6 +2737,25 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--region",
+        metavar="X1,Y1,X2,Y2",
+        help=(
+            "SPATIAL routing bound (Issue #4148): confine all new routing to "
+            "the axis-aligned box 'x1,y1,x2,y2' (board-relative mm, same "
+            "convention as 'pcb strip --region'). Every cell outside the box "
+            "is treated as a fixed obstacle, and existing copper outside is "
+            "preserved unchanged (implies --preserve-existing semantics). "
+            "Composable with --nets/--skip-nets. NOTE: unrelated to "
+            "--region-parallel (which partitions the grid for PARALLEL "
+            "routing); --region is a spatial bound, not a parallelism knob. "
+            "Nets whose pads all lie inside the box route normally; a net "
+            "with an endpoint outside fails with a clear per-net message. "
+            "Reconnecting to bare mid-trace stubs left by 'pcb strip --region' "
+            "is NOT supported here (deferred to a Phase 2b follow-up); stubs "
+            "that coincide with a pad/via still work."
+        ),
+    )
+    route_parser.add_argument(
         "--grid",
         type=str,
         default="auto",
@@ -3556,6 +3575,19 @@ def _add_route_auto_parser(subparsers) -> None:
         required=True,
         metavar="NAME",
         help="Net to route (e.g., 'GND', 'SPI_CLK')",
+    )
+    route_auto_parser.add_argument(
+        "--region",
+        metavar="X1,Y1,X2,Y2",
+        help=(
+            "SPATIAL routing bound (Issue #4148): confine routing of --net to "
+            "the axis-aligned box 'x1,y1,x2,y2' (board-relative mm, same "
+            "convention as 'pcb strip --region' and 'route --region'). Every "
+            "cell outside the box is a fixed obstacle and existing copper "
+            "outside is preserved unchanged. If --net has an endpoint outside "
+            "the box the route fails with a clear message. Bare mid-trace "
+            "stub reconnection is deferred to a Phase 2b follow-up."
+        ),
     )
     route_auto_parser.add_argument(
         "--strategy",

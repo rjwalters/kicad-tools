@@ -106,6 +106,9 @@ def run_route_auto_command(args) -> int:
             strategy=args.strategy,
             enable_repair=not args.no_repair,
             enable_via_resolution=not args.no_via_resolution,
+            # Issue #4148: spatial routing bound.  Confines the routed net to the
+            # board-relative box and fails if the net has an endpoint outside it.
+            region=getattr(args, "region", None),
         )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -383,6 +386,11 @@ def run_route_command(args) -> int:
     # tuning flags to the inner parser.  All four flags are opt-in and only
     # forwarded when set to non-default values, so existing scripts using
     # ``kct route`` without these flags produce byte-identical output.
+    # Issue #4148: forward --region (SPATIAL routing bound).  Distinct from
+    # --region-parallel above.  Default None; only forward when the user set
+    # it so byte-identical output is preserved when absent.
+    if getattr(args, "region", None) is not None:
+        sub_argv.extend(["--region", str(args.region)])
     if getattr(args, "region_parallel", False):
         sub_argv.append("--region-parallel")
     if getattr(args, "partition_rows", 2) != 2:

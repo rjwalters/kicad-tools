@@ -2666,6 +2666,88 @@ class RoutingGrid:
                         if 0 <= gx < self.cols and 0 <= gy < self.rows:
                             self.grid[layer_idx][gy][gx].blocked = True
 
+    def mark_region_bound(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+    ) -> int:
+        """Confine routing to an axis-aligned box by blocking everything outside.
+
+        Issue #4148 (region-bounded routing, Phase 2a): the routing grid is
+        always sized to the full board (:meth:`Autorouter._create_grid_and_routers`),
+        so region-bounding is implemented as the COMPLEMENT of a keepout --
+        every routable-layer cell whose world position falls OUTSIDE the box
+        ``(x1, y1, x2, y2)`` is marked ``blocked`` (an obstacle with ``net=0``).
+        The C++ pathfinder hard-blocks any ``blocked`` foreign-net / net-0 cell
+        in both standard and negotiated modes, so no ``router/cpp/`` edits are
+        needed.
+
+        The box is given in WORLD (sheet-absolute) coordinates -- the same
+        frame :meth:`world_to_grid` consumes.  Callers holding a board-relative
+        region (matching ``pcb strip --region``'s convention) must add the
+        board origin before calling.
+
+        A cell inside the box is left untouched (so pads / existing copper
+        already loaded inside the region keep their state).  This is a
+        one-pass ``O(rows*cols*layers)`` scan -- the same order of magnitude as
+        the ``--preserve-existing`` obstacle marking already performed on every
+        route pass -- so it is cheap at typical board sizes.
+
+        When a C++ grid mirror is attached (``self._cpp_grid``, established by
+        ``CppGrid.from_routing_grid`` at router construction, BEFORE this runs),
+        each blocked cell is mirrored to it via ``mark_blocked`` so the
+        production C++ A* sees the bound.  This follows the same incremental
+        mirror pattern as :meth:`reserve_corridor_cells` (#4071).
+
+        Args:
+            x1, y1, x2, y2: World-coordinate box (mm).  Normalized internally
+                so inverted coordinates are tolerated.
+
+        Returns:
+            Number of grid cells newly blocked (summed across layers).
+        """
+        with self._acquire_lock():
+            # Capture the static-blockage snapshot before any region copper is
+            # marked so rip-up restores the region bound rather than erasing it
+            # (parity with mark_route / add_keepout consumers, Issue #3545).
+            self._ensure_static_blockage_snapshot()
+
+            nx1, ny1 = min(x1, x2), min(y1, y2)
+            nx2, ny2 = max(x1, x2), max(y1, y2)
+            gx1, gy1 = self.world_to_grid(nx1, ny1)
+            gx2, gy2 = self.world_to_grid(nx2, ny2)
+
+            layer_indices = self.get_routable_indices()
+            cpp_grid = getattr(self, "_cpp_grid", None)
+
+            blocked_count = 0
+            for layer_idx in layer_indices:
+                for gy in range(self.rows):
+                    inside_y = gy1 <= gy <= gy2
+                    for gx in range(self.cols):
+                        if inside_y and gx1 <= gx <= gx2:
+                            continue  # inside the region -- leave untouched
+                        cell = self.grid[layer_idx][gy][gx]
+                        if cell.blocked:
+                            # Already an obstacle (pad halo / existing copper /
+                            # board edge).  Nothing to add, and mirroring is
+                            # handled by whoever set it.
+                            continue
+                        cell.blocked = True
+                        blocked_count += 1
+                        if cpp_grid is not None:
+                            cpp_grid._impl.mark_blocked(
+                                int(gx),
+                                int(gy),
+                                int(layer_idx),
+                                0,  # net 0 -> hard obstacle for every routing net
+                                False,  # not is_obstacle (a keepout, not pad metal)
+                                False,  # not pad_blocked
+                            )
+            return blocked_count
+
     def is_blocked(self, gx: int, gy: int, layer: Layer, net: int = 0) -> bool:
         """Check if a cell is blocked for routing."""
         if not (0 <= gx < self.cols and 0 <= gy < self.rows):

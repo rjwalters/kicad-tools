@@ -85,7 +85,7 @@ from .parallel import (
 )
 from .path import create_intra_ic_routes, reduce_pads_after_intra_ic
 from .placement_feedback import PlacementFeedbackLoop, PlacementFeedbackResult
-from .primitives import Obstacle, Pad, Route
+from .primitives import Obstacle, Pad, Route, Via
 from .rules import (
     DEFAULT_NET_CLASS_MAP,
     SIMPLE_NET_THRESHOLD_MM,
@@ -676,6 +676,18 @@ class _TraceResolverTransaction:
 
         grid = self._router.grid
 
+        # Issue #4148: drill hole-to-hole (drill-to-drill) floor for NEW vias.
+        # ``validate_via_clearance`` / ``validate_via_to_via_clearance`` above
+        # enforce COPPER edge-to-edge clearance (annular ring vs. copper); they
+        # do NOT enforce the fab's mechanical drill-to-drill minimum.  Escape /
+        # diff-pair routers already apply ``min_hole_to_hole`` (escape.py,
+        # diffpair_routing.py) but the main A* via-placement path never did.
+        # Build the board-wide existing-drill registry once (foreign-net PTH
+        # pad drills + all pre-existing / other newly-committed via drills) so a
+        # via the main router just placed cannot sit within ``min_hole_to_hole``
+        # of another drill and later trip a ``dimension_drill_clearance`` DRC.
+        min_h2h = float(getattr(self._router.rules, "min_hole_to_hole", 0.5))
+
         # Validate against the CURRENT grid state (post-rip, post-
         # reroute).  ``validate_segment_clearance`` walks
         # ``self.routes`` internally and excludes same-net entries
@@ -707,7 +719,64 @@ class _TraceResolverTransaction:
                 )
                 if not is_valid_v2v:
                     return False
+                if not self._via_clears_hole_to_hole(via, min_h2h):
+                    return False
         return True
+
+    def _via_clears_hole_to_hole(self, via: Via, min_hole_to_hole: float) -> bool:
+        """Return True iff ``via``'s drill clears every OTHER drill by the floor.
+
+        Issue #4148: the drill-to-drill (hole-to-hole) mechanical floor for the
+        main A* router.  Compares the candidate via drill against every
+        foreign-net through-hole pad drill and every other via drill (existing
+        + committed) using the canonical edge-to-edge predicate shared with the
+        DRC ``dimension_drill_clearance`` rule and the escape router
+        (:func:`kicad_tools.router.via_clearance.drill_hole_to_hole_clear`).
+
+        Same-drill self-comparison (the via against itself) is excluded by an
+        exact-coordinate skip so a via never conflicts with its own hole.
+        """
+        from .via_clearance import drill_hole_to_hole_clear
+
+        router = self._router
+        via_drill = float(getattr(via, "drill", 0.0)) or float(router.rules.via_drill)
+
+        existing_drills: list[tuple[float, float, float]] = []
+
+        # Foreign-net (and same-net) through-hole PAD drills.  A drill floor is
+        # a mechanical constraint, so it applies regardless of net.
+        for pad in router.pads.values():
+            if getattr(pad, "through_hole", False):
+                d = float(getattr(pad, "drill", 0.0))
+                if d > 0.0:
+                    existing_drills.append((float(pad.x), float(pad.y), d))
+
+        # Pre-existing (preserved / fixed) via drills.
+        for route in router.existing_routes:
+            for ev in route.vias:
+                existing_drills.append((float(ev.x), float(ev.y), float(ev.drill) or via_drill))
+
+        # Other committed via drills (all routes except this via's own hole).
+        for route in router.routes:
+            for ov in route.vias:
+                if ov is via:
+                    continue
+                # Skip the exact same drill center (a via cannot conflict with
+                # itself even across route-object identity).
+                if (
+                    abs(float(ov.x) - float(via.x)) < 1e-9
+                    and abs(float(ov.y) - float(via.y)) < 1e-9
+                ):
+                    continue
+                existing_drills.append((float(ov.x), float(ov.y), float(ov.drill) or via_drill))
+
+        return drill_hole_to_hole_clear(
+            float(via.x),
+            float(via.y),
+            via_drill,
+            existing_drills,
+            min_hole_to_hole,
+        )
 
     def rollback(self, reason: str = "") -> None:
         """Restore the pre-``begin`` state.
