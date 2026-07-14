@@ -815,3 +815,194 @@ class TestMultiUnitNetResolution:
         sch.wires.append(Wire(x1=100, y1=97.46, x2=100, y2=90))
         sch.labels.append(Label(text="VCC", x=100, y=90))
         assert sch.get_net_for_pin("U1", "8") == "VCC"
+
+
+class TestWireToWireCollinearUnion:
+    """Wire-to-wire collinear overlap and T-touch union (issue #4143).
+
+    KiCad merges the nets of any two touching/overlapping collinear wire
+    segments, not only wires that share an exact endpoint.  The connectivity
+    graph historically unioned wires only at their two endpoints, silently
+    diverging from KiCad on the stub-wire+label idiom that generated the
+    softstart rev-B ``+3.3V``/``GND`` short.  These tests lock in the fix.
+
+    NOTE: this is the mirror image of :class:`TestPinEndpointOnlyWireAttach`.
+    Pins still attach to wires endpoint-only (#4020/#4003); only *wire-to-
+    wire* unions gain collinear-overlap / T-touch semantics.
+    """
+
+    def _labeled_nets(self, sch: Schematic, net_a: str, net_b: str):
+        """Return the (net_a pins, net_b pins) sets from a fresh netlist."""
+        netlist = sch.extract_netlist()
+        a = {str(p) for p in netlist.get(net_a, [])}
+        b = {str(p) for p in netlist.get(net_b, [])}
+        return netlist, a, b
+
+    def _two_stub_schematic(
+        self, a_span: tuple[float, float], b_span: tuple[float, float], y: float = 100.0
+    ) -> Schematic:
+        """Two horizontal stub wires on ``y`` with a label on each.
+
+        Each stub carries a symbol pin at its far end plus a net label, so
+        the two labels' merge status is observable in the netlist.
+        """
+        sch = Schematic("Test")
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        # R1 pin 2 lands on the start of stub A; R2 pin 1 on the end of B.
+        r1 = SymbolInstance(
+            symbol_def=r_def, x=a_span[0] - 2.54, y=y, rotation=0, reference="R1", value="10k"
+        )
+        r2 = SymbolInstance(
+            symbol_def=r_def, x=b_span[1] + 2.54, y=y, rotation=0, reference="R2", value="10k"
+        )
+        sch.symbols.extend([r1, r2])
+        sch.wires.append(Wire(x1=a_span[0], y1=y, x2=a_span[1], y2=y))
+        sch.wires.append(Wire(x1=b_span[0], y1=y, x2=b_span[1], y2=y))
+        sch.labels.append(Label(text="NET_A", x=a_span[0], y=y))
+        sch.labels.append(Label(text="NET_B", x=b_span[1], y=y))
+        return sch
+
+    def test_partial_overlap_neither_contains_the_other(self):
+        """A=[100,109], B=[103,112] share [103,109]; must union.
+
+        This is the exact softstart repro geometry and the case the old
+        ``_is_collinear_overlap`` (full-containment only) does NOT catch.
+        """
+        sch = self._two_stub_schematic((100.0, 109.0), (103.0, 112.0))
+        netlist, a, b = self._labeled_nets(sch, "NET_A", "NET_B")
+        # Post-fix: both stubs merge into ONE net — extract_netlist collapses
+        # to a single named net carrying both R1.2 and R2.1.
+        merged = a or b
+        assert "R1.2" in merged and "R2.1" in merged
+        assert sch.are_connected("R1", "2", "R2", "1") is True
+
+    def test_full_containment(self):
+        """A=[100,112] fully contains B=[103,109]; must union."""
+        sch = self._two_stub_schematic((100.0, 112.0), (103.0, 109.0))
+        assert sch.are_connected("R1", "2", "R2", "1") is True
+
+    def test_repro_sketch_r1_r2_collinear_stubs(self):
+        """Issue repro: R1/R2 ~8mm apart, overlapping collinear stubs.
+
+        R1 at x=100, R2 at x=108; stub A reaches x=109, stub B reaches back
+        to x=103 — overlapping on y=100.  Pre-fix NET_A/NET_B were distinct;
+        post-fix they are one net (KiCad merges).
+        """
+        sch = self._two_stub_schematic((100.0, 109.0), (103.0, 112.0))
+        assert sch.are_connected("R1", "2", "R2", "1") is True
+
+    def test_mid_segment_t_touch(self):
+        """B's endpoint lands in the interior of A; must union.
+
+        A runs horizontally [100,112] on y=100.  B is vertical from
+        (106,100) up to (106,90): B's lower endpoint (106,100) sits on A's
+        interior — a T-touch KiCad treats as connected.
+        """
+        sch = Schematic("Test")
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        r1 = SymbolInstance(
+            symbol_def=r_def, x=97.46, y=100, rotation=0, reference="R1", value="10k"
+        )
+        r2 = SymbolInstance(symbol_def=r_def, x=106, y=85, rotation=0, reference="R2", value="10k")
+        sch.symbols.extend([r1, r2])
+        # A: horizontal, R1 pin 2 at (100,100) on its start.
+        sch.wires.append(Wire(x1=100, y1=100, x2=112, y2=100))
+        # B: vertical, lower end T-touches A's interior at (106,100); upper
+        # end (106,90) lands on R2 pin 1 (R2 at (106,85), pin1 y-offset).
+        sch.wires.append(Wire(x1=106, y1=100, x2=106, y2=90))
+        # R2 pin 1 sits at (103.46, 85)?  Recompute: place R2 so pin1 lands
+        # on the wire's free end instead — put R2 pin1 at (106,90).
+        r2b = SymbolInstance(
+            symbol_def=r_def, x=108.54, y=90, rotation=0, reference="R3", value="10k"
+        )
+        sch.symbols.append(r2b)  # R3 pin1 at (106,90)
+        assert sch.symbols[2].pin_position("1") == (106.0, 90.0)
+        assert sch.are_connected("R1", "2", "R3", "1") is True
+
+    def test_same_endpoint_still_connects(self):
+        """The pre-existing shared-endpoint case is unchanged."""
+        sch = Schematic("Test")
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        r1 = SymbolInstance(
+            symbol_def=r_def, x=97.46, y=100, rotation=0, reference="R1", value="10k"
+        )
+        r2 = SymbolInstance(
+            symbol_def=r_def, x=114.54, y=100, rotation=0, reference="R2", value="10k"
+        )
+        sch.symbols.extend([r1, r2])
+        sch.wires.append(Wire(x1=100, y1=100, x2=106, y2=100))
+        sch.wires.append(Wire(x1=106, y1=100, x2=112, y2=100))
+        assert sch.are_connected("R1", "2", "R2", "1") is True
+
+    def test_no_union_when_parallel_but_not_collinear(self):
+        """Two parallel wires on different Y do NOT union."""
+        sch = Schematic("Test")
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        r1 = SymbolInstance(
+            symbol_def=r_def, x=97.46, y=100, rotation=0, reference="R1", value="10k"
+        )
+        r2 = SymbolInstance(
+            symbol_def=r_def, x=97.46, y=110, rotation=0, reference="R2", value="10k"
+        )
+        sch.symbols.extend([r1, r2])
+        sch.wires.append(Wire(x1=100, y1=100, x2=112, y2=100))
+        sch.wires.append(Wire(x1=100, y1=110, x2=112, y2=110))  # 10mm below
+        assert sch.are_connected("R1", "2", "R2", "1") is False
+
+    def test_are_connected_and_get_net_for_pin_reflect_fix(self):
+        """are_connected() and get_net_for_pin() inherit the fix (no patch)."""
+        sch = self._two_stub_schematic((100.0, 109.0), (103.0, 112.0))
+        # Both pins land on the merged net; get_net_for_pin returns the same
+        # named net for both.
+        net1 = sch.get_net_for_pin("R1", "2")
+        net2 = sch.get_net_for_pin("R2", "1")
+        assert net1 == net2
+        assert net1 in ("NET_A", "NET_B")
+
+    def test_softstart_power_vs_power_merge_pattern(self):
+        """Interleaved decoupling-cap stubs merge two power rails (class a).
+
+        Synthetic reproduction of the softstart +3.3V/GND geometric class:
+        two power-symbol stubs on the same Y with different X extents that
+        overlap collinearly.  Post-fix the two power nets are unioned.
+        """
+        from kicad_tools.schematic.models.elements import PowerSymbol
+
+        sch = Schematic("Test")
+        # +3.3V stub [100,108], GND stub [104,112] overlap on [104,108].
+        sch.wires.append(Wire(x1=100, y1=100, x2=108, y2=100))
+        sch.wires.append(Wire(x1=104, y1=100, x2=112, y2=100))
+        sch.power_symbols.append(PowerSymbol(lib_id="power:+3.3V", x=100, y=100, rotation=0))
+        sch.power_symbols.append(PowerSymbol(lib_id="power:GND", x=112, y=100, rotation=0))
+        # Add a pin on each end so the merged component surfaces in netlist.
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        sch.symbols.append(
+            SymbolInstance(symbol_def=r_def, x=97.46, y=100, rotation=0, reference="R1", value="1k")
+        )
+        sch.symbols.append(
+            SymbolInstance(
+                symbol_def=r_def, x=114.54, y=100, rotation=0, reference="R2", value="1k"
+            )
+        )
+        # R1.1 (at 94.92) floats; R1.2 at (100,100) and R2.1 at (112,100)
+        # land on the two overlapping stubs and therefore merge.
+        assert sch.are_connected("R1", "2", "R2", "1") is True
+
+    def test_same_net_overlap_no_conflict(self):
+        """Two overlapping stubs with the SAME label merge uneventfully."""
+        sch = Schematic("Test")
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        r1 = SymbolInstance(
+            symbol_def=r_def, x=97.46, y=100, rotation=0, reference="R1", value="10k"
+        )
+        r2 = SymbolInstance(
+            symbol_def=r_def, x=114.54, y=100, rotation=0, reference="R2", value="10k"
+        )
+        sch.symbols.extend([r1, r2])
+        sch.wires.append(Wire(x1=100, y1=100, x2=109, y2=100))
+        sch.wires.append(Wire(x1=103, y1=100, x2=112, y2=100))
+        sch.labels.append(Label(text="VBUS", x=100, y=100))
+        sch.labels.append(Label(text="VBUS", x=112, y=100))
+        netlist = sch.extract_netlist()
+        assert "VBUS" in netlist
+        assert {str(p) for p in netlist["VBUS"]} == {"R1.2", "R2.1"}

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from ..grid import is_on_grid, snap_to_grid
 from ..logging import _log_debug, _log_info, _log_warning
 from .elements import WireCollision
+from .wire_geometry import wire_segments_connect
 
 if TYPE_CHECKING:
     pass
@@ -131,6 +132,10 @@ class SchematicValidationMixin:
         # Check wire connectivity
         connectivity_issues = self._check_wire_connectivity()
         issues.extend(connectivity_issues)
+
+        # Check for cross-net collinear-overlap / T-touch shorts (issue #4143)
+        conflict_issues = self._check_collinear_net_conflicts()
+        issues.extend(conflict_issues)
 
         # Check for unconnected pins (all types, not just power)
         unconnected_pin_issues = self._check_unconnected_pins()
@@ -529,6 +534,17 @@ class SchematicValidationMixin:
             p2 = (round(wire.x2, 2), round(wire.y2, 2))
             wire_segments.append((p1, p2))
 
+        # Union wires with each other on collinear overlap or mid-segment
+        # T-touch, matching KiCad and mirroring the same fix applied to
+        # _build_connectivity_graph() (issue #4143).  This duplicate
+        # connectivity builder had the identical endpoint-only gap.
+        for i in range(len(wire_segments)):
+            a_start, a_end = wire_segments[i]
+            for j in range(i + 1, len(wire_segments)):
+                b_start, b_end = wire_segments[j]
+                if wire_segments_connect(a_start, a_end, b_start, b_end):
+                    union(a_start, b_start)
+
         for junc in self.junctions:
             junc_pos = (round(junc.x, 2), round(junc.y, 2))
             # Connect junction to any wire segment it's on
@@ -790,6 +806,102 @@ class SchematicValidationMixin:
                 _log_debug(f"  {collision}")
 
         return collisions
+
+    def _wire_net_names(self) -> list[set[str]]:
+        """Map each wire to the set of net names directly labelling it.
+
+        A net name is attributed to a wire when a label / global label /
+        hierarchical label / power symbol sits *on* that wire segment (within
+        ``POINT_TOLERANCE``).  This is intentionally per-wire and independent
+        of Union-Find so that :meth:`_check_collinear_net_conflicts` can tell
+        whether two geometrically-touching wires were *each* independently
+        named with a *different* net — the signature of an unintended short
+        (issue #4143) — rather than merely sharing one net after the union.
+
+        Returns:
+            A list parallel to ``self.wires``; entry *i* is the set of net
+            names attached to ``self.wires[i]``.
+        """
+        named_points: list[tuple[float, float, str]] = []
+        for label in self.labels:  # type: ignore[attr-defined]
+            named_points.append((label.x, label.y, label.text))
+        for gl in self.global_labels:  # type: ignore[attr-defined]
+            named_points.append((gl.x, gl.y, gl.text))
+        for hl in self.hier_labels:  # type: ignore[attr-defined]
+            named_points.append((hl.x, hl.y, hl.text))
+        for pwr in self.power_symbols:  # type: ignore[attr-defined]
+            net_name = pwr.lib_id.split(":")[1] if ":" in pwr.lib_id else pwr.lib_id
+            named_points.append((pwr.x, pwr.y, net_name))
+
+        per_wire: list[set[str]] = []
+        for wire in self.wires:  # type: ignore[attr-defined]
+            names: set[str] = set()
+            for x, y, name in named_points:
+                if self._point_on_wire(x, y, wire):  # type: ignore[attr-defined]
+                    names.add(name)
+            per_wire.append(names)
+        return per_wire
+
+    def _check_collinear_net_conflicts(self) -> list[dict]:
+        """Flag two overlapping/T-touching wires that carry *different* nets.
+
+        Once :meth:`_build_connectivity_graph` unions collinear-overlapping /
+        T-touching wires (issue #4143), two stubs labelled with different net
+        names that overlap geometrically end up merged into one net — almost
+        always an unintended short (the softstart rev-B failure: ``+3.3V``
+        shorted to ``GND`` by interleaved decoupling-cap stubs).  This emits
+        an **error** for each such conflicting pair so the short surfaces in
+        ``validate()`` output instead of hiding as a silent merge.
+
+        Same-net overlaps (both wires labelled with the same net, or one/both
+        unlabelled) are *not* flagged: only a genuine two-different-named-net
+        overlap is reported.
+        """
+        issues: list[dict] = []
+        wire_nets = self._wire_net_names()
+        wires = self.wires  # type: ignore[attr-defined]
+
+        reported: set[tuple[str, str, tuple[float, float]]] = set()
+        for i in range(len(wires)):
+            a = wires[i]
+            a_start = (round(a.x1, 2), round(a.y1, 2))
+            a_end = (round(a.x2, 2), round(a.y2, 2))
+            for j in range(i + 1, len(wires)):
+                b = wires[j]
+                b_start = (round(b.x1, 2), round(b.y1, 2))
+                b_end = (round(b.x2, 2), round(b.y2, 2))
+
+                if not wire_segments_connect(a_start, a_end, b_start, b_end):
+                    continue
+
+                # Only a conflict when each wire independently carries a
+                # named net and those net-name sets are disjoint.
+                names_a = wire_nets[i]
+                names_b = wire_nets[j]
+                if not names_a or not names_b or (names_a & names_b):
+                    continue
+
+                for net_a in sorted(names_a):
+                    for net_b in sorted(names_b):
+                        key = (net_a, net_b, a_start)
+                        if key in reported:
+                            continue
+                        reported.add(key)
+                        issues.append(
+                            {
+                                "severity": "error",
+                                "type": "collinear_net_conflict",
+                                "message": (
+                                    f"Wire segments carrying different nets '{net_a}' and "
+                                    f"'{net_b}' overlap collinearly or T-touch near {a_start}, "
+                                    "merging them into one net (likely an unintended short)."
+                                ),
+                                "location": a_start,
+                                "fix_applied": False,
+                            }
+                        )
+
+        return issues
 
 
 def summarize_issues_by_type(issues: list[dict]) -> dict[str, list[dict]]:
