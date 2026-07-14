@@ -776,6 +776,7 @@ def _run_render_command(args) -> int:
         path=args.render_path,
         no_3d=getattr(args, "render_no_3d", False),
         format=getattr(args, "render_format", "text"),
+        output=getattr(args, "render_output", None),
     )
     return run_render(render_args)
 

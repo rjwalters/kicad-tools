@@ -29,8 +29,16 @@ virtual framebuffer such as ``xvfb-run`` on headless CI).
 Usage:
     kct render boards/01-voltage-divider          # render one board
     kct render boards/                             # render all boards under a root
+    kct render path/to/board.kicad_pcb             # render a single PCB file directly
+    kct render path/to/board.kicad_pcb -o out/dir  # ... to a custom output dir
     kct render boards/01-voltage-divider --no-3d   # skip 3D (headless CI)
     kct render boards/01-voltage-divider --format json
+
+When the positional argument is a ``.kicad_pcb`` file (rather than a board or
+root directory), that PCB is rendered directly and its four artifacts are
+written to ``<pcb-dir>/renders/`` by default, or to the directory given with
+``-o/--output``. Directory/root scanning behavior (and its
+``boards/<id>/output/renders/`` output path) is unchanged.
 """
 
 from __future__ import annotations
@@ -119,42 +127,35 @@ def _discover_boards(root: Path) -> list[Path]:
     return boards
 
 
-def _render_board(
-    board_dir: Path,
+def _render_pcb(
+    pcb_path: Path,
+    renders_dir: Path,
     *,
+    name: str,
     do_3d: bool,
     kicad_cli: Path | None,
     quiet: bool,
 ) -> dict:
-    """Render a single board. Returns a status dict for JSON output.
+    """Write the four render artifacts for *pcb_path* into *renders_dir*.
+
+    Shared by both directory-scanning mode (``_render_board``) and the direct
+    ``.kicad_pcb`` file mode. Returns a status dict for JSON output.
 
     Status entries:
-        board: board directory name
-        pcb: resolved PCB path (or None)
-        status: "ok" | "skipped" | "partial" | "error"
+        board: label used in status output
+        pcb: resolved PCB path
+        status: "ok" | "partial" | "error"
         outputs: {name: path} for files written
         errors: list of error strings
     """
-    name = board_dir.name
     result: dict = {
         "board": name,
-        "pcb": None,
+        "pcb": str(pcb_path),
         "status": "skipped",
         "outputs": {},
         "errors": [],
     }
 
-    output_dir = board_dir / "output"
-    pcb_path = _find_pcb_for_export(output_dir) if output_dir.is_dir() else None
-    if pcb_path is None:
-        # Non-fatal skip — board has no PCB to render yet.
-        result["errors"].append("no .kicad_pcb found")
-        if not quiet:
-            print(f"  {name}: SKIP (no .kicad_pcb found)", file=sys.stderr)
-        return result
-
-    result["pcb"] = str(pcb_path)
-    renders_dir = output_dir / "renders"
     renders_dir.mkdir(parents=True, exist_ok=True)
 
     written: dict[str, str] = {}
@@ -207,6 +208,45 @@ def _render_board(
     return result
 
 
+def _render_board(
+    board_dir: Path,
+    *,
+    do_3d: bool,
+    kicad_cli: Path | None,
+    quiet: bool,
+) -> dict:
+    """Render a single board directory (``boards/<id>/output/`` convention).
+
+    Resolves the PCB inside ``<board_dir>/output/`` and writes artifacts to
+    ``<board_dir>/output/renders/``. Returns a status dict for JSON output.
+    """
+    name = board_dir.name
+
+    output_dir = board_dir / "output"
+    pcb_path = _find_pcb_for_export(output_dir) if output_dir.is_dir() else None
+    if pcb_path is None:
+        # Non-fatal skip — board has no PCB to render yet.
+        result: dict = {
+            "board": name,
+            "pcb": None,
+            "status": "skipped",
+            "outputs": {},
+            "errors": ["no .kicad_pcb found"],
+        }
+        if not quiet:
+            print(f"  {name}: SKIP (no .kicad_pcb found)", file=sys.stderr)
+        return result
+
+    return _render_pcb(
+        pcb_path,
+        output_dir / "renders",
+        name=name,
+        do_3d=do_3d,
+        kicad_cli=kicad_cli,
+        quiet=quiet,
+    )
+
+
 def run_render(args: argparse.Namespace) -> int:
     """Execute the render command. Returns a process exit code."""
     root = Path(args.path)
@@ -236,6 +276,33 @@ def run_render(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+
+    output = getattr(args, "output", None)
+
+    # --- Direct .kicad_pcb file mode ---
+    # When the positional arg is a file, render it directly (no board/output
+    # discovery). Output goes to -o/--output if given, else <pcb-dir>/renders/.
+    if root.is_file():
+        if root.suffix != ".kicad_pcb":
+            print(f"Error: Expected .kicad_pcb file, got: {root.name}", file=sys.stderr)
+            print(
+                "Hint: Provide a .kicad_pcb file or a directory containing one.",
+                file=sys.stderr,
+            )
+            return 1
+
+        renders_dir = Path(output) if output else root.parent / "renders"
+        result = _render_pcb(
+            root,
+            renders_dir,
+            name=root.stem,
+            do_3d=do_3d,
+            kicad_cli=kicad_cli,
+            quiet=args.format == "json",
+        )
+        if args.format == "json":
+            print(json.dumps({"boards": [result]}, indent=2))
+        return 1 if result["status"] == "error" else 0
 
     boards = _discover_boards(root)
     if not boards:
@@ -267,7 +334,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "path",
-        help="Board directory or a root containing board directories",
+        help="Board directory, a root containing board directories, or a .kicad_pcb file",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help=(
+            "Output directory for a single .kicad_pcb file "
+            "(default: <pcb-dir>/renders/). Ignored in directory/root scanning mode."
+        ),
     )
     parser.add_argument(
         "--no-3d",

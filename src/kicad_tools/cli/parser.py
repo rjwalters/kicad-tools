@@ -5473,6 +5473,8 @@ def _add_render_parser(subparsers) -> None:
             "via 'kicad-cli pcb render'. Outputs go to a fixed, documented path "
             "(boards/<id>/output/renders/{pcb-front,pcb-back}.svg and "
             "{3d-front,3d-back}.png). "
+            "A bare .kicad_pcb file may also be given: it is rendered directly "
+            "to <pcb-dir>/renders/ (or -o/--output), skipping directory scanning. "
             "The routed PCB is preferred with graceful fallback to the unrouted "
             "PCB. 3D render requires KiCad 8.0.4+ and a display (xvfb on CI)."
         ),
@@ -5480,7 +5482,17 @@ def _add_render_parser(subparsers) -> None:
     render_parser.add_argument(
         "render_path",
         metavar="path",
-        help="Board directory or a root containing board directories",
+        help="Board directory, a root containing board directories, or a .kicad_pcb file",
+    )
+    render_parser.add_argument(
+        "-o",
+        "--output",
+        dest="render_output",
+        default=None,
+        help=(
+            "Output directory for a single .kicad_pcb file "
+            "(default: <pcb-dir>/renders/). Ignored in directory/root scanning mode."
+        ),
     )
     render_parser.add_argument(
         "--no-3d",
