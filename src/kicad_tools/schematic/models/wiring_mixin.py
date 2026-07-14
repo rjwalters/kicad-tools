@@ -704,13 +704,34 @@ class SchematicWiringMixin:
 
         return wires
 
-    def print_symbol_pins(self, symbol: SymbolInstance, name: str = None):
-        """Debug helper: Print all pin positions for a symbol."""
-        display_name = name or symbol.reference
-        print(f"\n{display_name} pins at ({symbol.x}, {symbol.y}) rot={symbol.rotation}:")
-        for pin in symbol.symbol_def.pins:
+    def print_symbol_pins(self, symbol: str | SymbolInstance, name: str = None):
+        """Debug helper: Print all pin positions for a symbol.
+
+        Args:
+            symbol: Either a placed :class:`SymbolInstance` or a bare
+                reference designator string (e.g. ``"U1"``).  A string is
+                resolved to its instance via ``find_symbol()``.
+            name: Optional display name override for the printed header;
+                defaults to the symbol's reference designator.
+
+        Raises:
+            KeyError: If ``symbol`` is a string that does not match any
+                placed symbol's reference designator.
+        """
+        if isinstance(symbol, str):
+            # find_symbol is provided by SchematicQueryMixin (sibling in the
+            # Schematic MRO); it is not visible on this mixin in isolation.
+            resolved = self.find_symbol(symbol)  # type: ignore[attr-defined]
+            if resolved is None:
+                raise KeyError(f"No symbol with reference {symbol!r} in schematic")
+            instance = resolved
+        else:
+            instance = symbol
+        display_name = name or instance.reference
+        print(f"\n{display_name} pins at ({instance.x}, {instance.y}) rot={instance.rotation}:")
+        for pin in instance.symbol_def.pins:
             # Use pin.number for unique identification (many symbols have pins all named "~")
-            pos = symbol.pin_position(pin.number)
+            pos = instance.pin_position(pin.number)
             pin_display = pin.name if pin.name and pin.name != "~" else pin.number
             print(f"  {pin_display} ({pin.number}): ({pos[0]:.2f}, {pos[1]:.2f})")
 
