@@ -28,6 +28,20 @@ class DRCViolation:
         actual_value: The measured value that violated the rule
         required_value: The minimum/maximum value required by the rule
         items: Tuple of item references involved, e.g., ("D1", "C5")
+        waived: When True, this finding was matched by a pair-level waiver
+            entry (e.g. ``.courtyard_waivers.json``).  Waived findings keep
+            their underlying ``severity`` (typically ``"error"``) but are
+            reported with a distinct ``WAIVED`` status, counted separately
+            in :attr:`DRCResults.waived_count`, and excluded from
+            ``error_count`` / ``warning_count`` / ``info_count`` so they
+            never fail the gate.  This is orthogonal to ``severity`` (Issue
+            #4137): the underlying defect classification is preserved for
+            audit, while the gate treats an intentional, documented
+            exception as non-blocking.
+        waiver_reason: Human-readable justification from the waiver entry
+            (present only when ``waived`` is True).
+        waiver_issue: Tracking reference from the waiver entry, e.g.
+            ``"chorus#13"`` (present only when ``waived`` is True).
     """
 
     rule_id: str
@@ -39,6 +53,9 @@ class DRCViolation:
     required_value: float | None = None
     items: tuple[str, ...] = ()
     nets: tuple[str, ...] = ()
+    waived: bool = False
+    waiver_reason: str | None = None
+    waiver_issue: str | None = None
 
     def __post_init__(self) -> None:
         """Validate severity value."""
@@ -49,18 +66,23 @@ class DRCViolation:
 
     @property
     def is_error(self) -> bool:
-        """Check if this is an error (not a warning or info)."""
-        return self.severity == "error"
+        """Check if this is a blocking error (not waived, warning, or info)."""
+        return self.severity == "error" and not self.waived
 
     @property
     def is_warning(self) -> bool:
-        """Check if this is a warning (not an error or info)."""
-        return self.severity == "warning"
+        """Check if this is a warning (not an error, info, or waived)."""
+        return self.severity == "warning" and not self.waived
 
     @property
     def is_info(self) -> bool:
-        """Check if this is an informational finding (not an error or warning)."""
-        return self.severity == "info"
+        """Check if this is an informational finding (not error/warning/waived)."""
+        return self.severity == "info" and not self.waived
+
+    @property
+    def is_waived(self) -> bool:
+        """Check if this finding was matched by a waiver entry."""
+        return self.waived
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization.
@@ -73,7 +95,7 @@ class DRCViolation:
         from kicad_tools.drc.violation import ViolationType
 
         resolved_type = ViolationType.from_string(self.rule_id)
-        return {
+        data: dict = {
             "rule_id": self.rule_id,
             "type": resolved_type.value,
             "severity": self.severity,
@@ -84,7 +106,17 @@ class DRCViolation:
             "required_value": self.required_value,
             "items": list(self.items),
             "nets": list(self.nets),
+            # Status distinguishes a waived finding from an active one at a
+            # glance for JSON consumers.  Waived findings render as
+            # ``"waived"`` regardless of their underlying ``severity`` (Issue
+            # #4137).
+            "status": "waived" if self.waived else self.severity,
+            "waived": self.waived,
         }
+        if self.waived:
+            data["waiver_reason"] = self.waiver_reason
+            data["waiver_issue"] = self.waiver_issue
+        return data
 
 
 @dataclass
@@ -134,6 +166,16 @@ class DRCResults:
         return sum(1 for v in self.violations if v.is_info)
 
     @property
+    def waived_count(self) -> int:
+        """Count of findings matched by a waiver entry (Issue #4137).
+
+        Waived findings are visible and counted here but excluded from
+        ``error_count`` / ``warning_count`` / ``info_count`` so they never
+        contribute to the gate verdict.
+        """
+        return sum(1 for v in self.violations if v.is_waived)
+
+    @property
     def passed(self) -> bool:
         """True if no errors (warnings and infos are allowed)."""
         return self.error_count == 0
@@ -152,6 +194,11 @@ class DRCResults:
     def infos(self) -> list[DRCViolation]:
         """List of only informational violations."""
         return [v for v in self.violations if v.is_info]
+
+    @property
+    def waived(self) -> list[DRCViolation]:
+        """List of only waived findings (Issue #4137)."""
+        return [v for v in self.violations if v.is_waived]
 
     def __iter__(self):
         """Iterate over all violations."""
@@ -199,6 +246,7 @@ class DRCResults:
             "error_count": self.error_count,
             "warning_count": self.warning_count,
             "info_count": self.info_count,
+            "waived_count": self.waived_count,
             "rules_checked": self.rules_checked,
             "rules_checked_by_rule": dict(self.rules_checked_by_rule),
             "violations": [v.to_dict() for v in self.violations],
@@ -208,8 +256,9 @@ class DRCResults:
         """Generate a human-readable summary."""
         status = "PASSED" if self.passed else "FAILED"
         info_part = f", {self.info_count} infos" if self.info_count else ""
+        waived_part = f", {self.waived_count} waived" if self.waived_count else ""
         return (
             f"DRC {status}: {self.error_count} errors, "
-            f"{self.warning_count} warnings{info_part} "
+            f"{self.warning_count} warnings{info_part}{waived_part} "
             f"({self.rules_checked} rules checked)"
         )

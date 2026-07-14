@@ -408,18 +408,21 @@ class FootprintText:
 
 @dataclass
 class FootprintGraphic:
-    """Graphic element within a footprint (fp_line, fp_rect, fp_circle, fp_arc).
+    """Graphic element within a footprint (fp_line, fp_rect, fp_circle, fp_arc, fp_poly).
 
-    Used for silkscreen outlines and markings on footprints.
+    Used for silkscreen outlines, courtyard outlines, and markings on
+    footprints.  ``fp_poly`` graphics store their vertices in ``points``;
+    all other types leave ``points`` empty.
     """
 
-    graphic_type: str  # line, rect, circle, arc
+    graphic_type: str  # line, rect, circle, arc, poly
     layer: str
     stroke_width: float  # in mm
     start: tuple[float, float] = (0.0, 0.0)
     end: tuple[float, float] = (0.0, 0.0)
     center: tuple[float, float] | None = None
     radius: float | None = None
+    points: list[tuple[float, float]] = field(default_factory=list)
     uuid: str = ""
 
     @classmethod
@@ -452,6 +455,12 @@ class FootprintGraphic:
         if end := sexp.find("end"):
             # For circles, end is a point on the circumference
             pass
+
+        # Polygon vertices (for fp_poly): (pts (xy X Y) ...).
+        if graphic_type == "poly":
+            if pts := sexp.find("pts"):
+                for xy in pts.find_all("xy"):
+                    graphic.points.append((xy.get_float(0) or 0.0, xy.get_float(1) or 0.0))
 
         # UUID
         if uuid := sexp.find("uuid"):
@@ -916,8 +925,8 @@ class Footprint:
             if pad:
                 fp.pads.append(pad)
 
-        # Graphics (fp_line, fp_rect, fp_circle, fp_arc)
-        for graphic_type in ("line", "rect", "circle", "arc"):
+        # Graphics (fp_line, fp_rect, fp_circle, fp_arc, fp_poly)
+        for graphic_type in ("line", "rect", "circle", "arc", "poly"):
             for graphic_sexp in sexp.find_all(f"fp_{graphic_type}"):
                 graphic = FootprintGraphic.from_sexp(graphic_sexp, graphic_type)
                 fp.graphics.append(graphic)

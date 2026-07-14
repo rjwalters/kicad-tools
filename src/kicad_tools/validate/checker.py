@@ -15,6 +15,7 @@ from kicad_tools.manufacturers import DesignRules, get_profile
 from .rules.clearance import ClearanceRule, SegmentZoneClearanceRule, ViaZoneClearanceRule
 from .rules.connectivity import ConnectivityRule
 from .rules.copper_sliver import CopperSliverRule
+from .rules.courtyard import CourtyardOverlapRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.diffpair_length_skew import DiffPairLengthSkewRule
 from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.filters import ViolationFilter
+    from kicad_tools.validate.rules.courtyard_waivers import CourtyardWaivers
 
 
 class DRCChecker:
@@ -71,6 +73,7 @@ class DRCChecker:
         warn_on_inactive_skew_rules: bool = True,
         verbose: bool = False,
         emit_measurements: bool = False,
+        courtyard_waivers: CourtyardWaivers | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -114,6 +117,13 @@ class DRCChecker:
                 #3924 AC1).  The ``kct check`` CLI sets this True so it can
                 render a concise measurement summary after the violation
                 table.
+            courtyard_waivers: Optional loaded
+                :class:`~kicad_tools.validate.rules.courtyard_waivers.CourtyardWaivers`.
+                When provided, ``check_courtyard_overlap`` emits ``waived=True``
+                findings for overlapping courtyard pairs that match a waiver
+                entry (instead of blocking errors), and an ``info`` "unused
+                waiver" finding for entries naming an absent component.  When
+                omitted, every overlap is a blocking error (Issue #4137).
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -124,6 +134,7 @@ class DRCChecker:
         self.copper_oz = copper_oz
         self.suppress_library = suppress_library
         self.net_class_map = net_class_map
+        self.courtyard_waivers = courtyard_waivers
         self.warn_on_inactive_skew_rules = warn_on_inactive_skew_rules
         self.verbose = verbose
         self.emit_measurements = emit_measurements
@@ -157,6 +168,7 @@ class DRCChecker:
         "check_segment_zone_clearances",
         "check_via_zone_clearances",
         "check_copper_slivers",
+        "check_courtyard_overlap",
         "check_diffpair_clearance_intra",
         "check_diffpair_length_skew",
         "check_diffpair_routing_continuity",
@@ -376,6 +388,30 @@ class DRCChecker:
         """
         rule = CopperSliverRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_courtyard_overlap(self) -> DRCResults:
+        """Check that footprint courtyards do not overlap on the same side.
+
+        Reads the true ``F.CrtYd`` / ``B.CrtYd`` polygon geometry from each
+        footprint (not the pads-bbox approximation in
+        :mod:`kicad_tools.placement.analyzer`) and flags pairs of footprints
+        on the same board side whose courtyards intersect with positive area.
+
+        Overlapping pairs matched by a loaded ``.courtyard_waivers.json``
+        entry (passed via the ``courtyard_waivers`` constructor kwarg) are
+        emitted with ``waived=True`` -- visible and counted in
+        ``waived_count`` but excluded from ``error_count`` so the gate passes.
+        A courtyard that cannot be resolved to a polygon emits an ``info``
+        finding rather than being silently skipped, and a waiver naming a
+        component absent from the board emits an ``info`` "unused waiver"
+        finding (Issue #4137).
+
+        Returns:
+            DRCResults containing ``courtyards_overlap`` findings (error or
+            waived) plus advisory info findings.
+        """
+        rule = CourtyardOverlapRule(waivers=self.courtyard_waivers)
+        return self._absolutize(rule.check(self.pcb))
 
     def check_connectivity(self) -> DRCResults:
         """Check that every multi-pad net is fully connected.
