@@ -7,9 +7,11 @@ and grid snapping functionality.
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import TYPE_CHECKING
 
+from ..exceptions import StubPlacementError
 from ..grid import is_on_grid, snap_to_grid
 from ..logging import _log_debug, _log_info
 from .elements import (
@@ -22,9 +24,44 @@ from .elements import (
     Wire,
 )
 from .symbol import SymbolDef, SymbolInstance
+from .wire_geometry import wire_segments_connect
 
 if TYPE_CHECKING:
     pass
+
+
+# Mapping of the four cardinal stub directions to their outward unit vector in
+# schematic (Y-down) coordinates: +x is right, +y is down.
+_DIRECTION_VECTORS: dict[str, tuple[float, float]] = {
+    "right": (1.0, 0.0),
+    "up": (0.0, -1.0),
+    "left": (-1.0, 0.0),
+    "down": (0.0, 1.0),
+}
+
+# Label rotation (degrees) so the label text reads outward along each stub
+# direction, matching KiCad's convention (0=text extends right, 90=up, ...).
+_DIRECTION_LABEL_ROTATION: dict[str, float] = {
+    "right": 0.0,
+    "up": 90.0,
+    "left": 180.0,
+    "down": 270.0,
+}
+
+# Perpendicular jog directions tried when the outward candidate collides.
+_PERPENDICULAR: dict[str, tuple[str, str]] = {
+    "right": ("up", "down"),
+    "left": ("up", "down"),
+    "up": ("right", "left"),
+    "down": ("right", "left"),
+}
+
+_OPPOSITE_DIRECTION: dict[str, str] = {
+    "right": "left",
+    "left": "right",
+    "up": "down",
+    "down": "up",
+}
 
 
 class SchematicElementsMixin:
@@ -884,6 +921,215 @@ class SchematicElementsMixin:
         label = Label(text=text, x=x, y=y, rotation=rotation)
         self.labels.append(label)
         return label
+
+    def _pin_outward_direction(self, symbol: SymbolInstance, pin_name_or_number: str) -> str:
+        """Compute the cardinal outward stub direction for a symbol pin.
+
+        The direction a stub travels *away* from a pin is the opposite of the
+        pin's library ``angle`` (which points *into* the symbol body), rotated
+        by the symbol's placement ``rotation`` and converted from library Y-up
+        to schematic Y-down space -- the exact transform
+        :meth:`SymbolInstance.pin_position` applies to the pin *position*, now
+        applied to the pin's *direction vector* as well (issue #4161).
+
+        Returns one of ``"left"``/``"right"``/``"up"``/``"down"`` (the nearest
+        cardinal, snapped with a +-1 degree tolerance).  KiCad generator code
+        places symbols at 0/90/180/270 rotation, so the rotated outward angle
+        always lands on a cardinal in practice; a non-cardinal result (from an
+        arbitrary-angle rotation) snaps to the nearest cardinal.
+        """
+        pin = symbol.find_pin(pin_name_or_number)
+
+        # Outward direction in library (Y-up) space: opposite of the pin's
+        # into-body angle.
+        outward_lib = math.radians((pin.angle + 180.0) % 360.0)
+        vx = math.cos(outward_lib)
+        vy = math.sin(outward_lib)
+
+        # Apply the symbol rotation (standard CCW matrix, library Y-up).
+        rad = math.radians(symbol.rotation)
+        cos_r = math.cos(rad)
+        sin_r = math.sin(rad)
+        rvx = vx * cos_r - vy * sin_r
+        rvy = vx * sin_r + vy * cos_r
+
+        # Convert library Y-up to schematic Y-down by negating the Y component,
+        # mirroring pin_position()'s ``ry = -ry`` flip.
+        rvy = -rvy
+
+        # Snap to the nearest cardinal direction (schematic Y-down space).
+        best_dir = "right"
+        best_dot = float("-inf")
+        for name, (ux, uy) in _DIRECTION_VECTORS.items():
+            dot = rvx * ux + rvy * uy
+            if dot > best_dot:
+                best_dot = dot
+                best_dir = name
+        return best_dir
+
+    def _stub_would_collide(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        net: str,
+    ) -> bool:
+        """Return True if a stub segment would union with a foreign-net wire.
+
+        A collision is a :func:`wire_segments_connect` overlap or T-touch with
+        an existing wire that independently carries at least one *named* net
+        different from ``net``.  Same-net overlaps (and overlaps with unnamed
+        wires) are allowed -- they merge into the intended net, which is the
+        expected stub-fanout behaviour and NOT the issue #4143 short.
+        """
+        # Collect the net names attached to each existing wire (a label / power
+        # symbol sitting on the wire within POINT_TOLERANCE), mirroring
+        # ``_wire_net_names`` but computed locally so this method does not
+        # depend on the validation mixin's private helper.
+        # ``wires``/``labels``/... live on the concrete ``Schematic`` that mixes
+        # this in, so mypy cannot see them from the mixin body (false positive).
+        named_points: list[tuple[float, float, str]] = []
+        for label in self.labels:  # type: ignore[attr-defined]
+            named_points.append((label.x, label.y, label.text))
+        for gl in self.global_labels:  # type: ignore[attr-defined]
+            named_points.append((gl.x, gl.y, gl.text))
+        for hl in self.hier_labels:  # type: ignore[attr-defined]
+            named_points.append((hl.x, hl.y, hl.text))
+        for pwr in self.power_symbols:  # type: ignore[attr-defined]
+            pwr_net = pwr.lib_id.split(":")[1] if ":" in pwr.lib_id else pwr.lib_id
+            named_points.append((pwr.x, pwr.y, pwr_net))
+
+        for wire in self.wires:  # type: ignore[attr-defined]
+            names = {name for x, y, name in named_points if self._point_on_wire(x, y, wire)}
+            # Only wires carrying a *different* named net matter.  A wire whose
+            # only named net is ``net`` (or that is unnamed) is allowed to
+            # overlap -- that is intended same-net fanout, not a #4143 short.
+            if names <= {net}:
+                continue
+            if wire_segments_connect((wire.x1, wire.y1), (wire.x2, wire.y2), start, end):
+                return True
+        return False
+
+    def add_stub_label(
+        self,
+        symbol: SymbolInstance,
+        pin: str,
+        net: str,
+        *,
+        length: float = 2.54,
+        direction: str | None = None,
+        snap: bool = True,
+    ) -> tuple[Wire, Label]:
+        """Place a collision-aware stub wire + net label at a symbol pin.
+
+        Draws a short stub wire outward from ``symbol``'s ``pin`` and anchors a
+        net label at the stub's far endpoint (KiCad requires labels to sit on a
+        wire endpoint to establish connectivity).  Unlike the hand-rolled
+        stub+label idiom in ``blocks/motor.py`` and ``blocks/_stub_helpers.py``,
+        the stub direction is derived from the pin's ``angle`` rotated by the
+        symbol's ``rotation`` (not a fixed side), and a bounded, deterministic
+        candidate search avoids collinearly overlapping a neighboring stub that
+        carries a *different* net -- the silent net-merge failure mode fixed by
+        issue #4143.
+
+        The candidate search order is deterministic (same input -> same chosen
+        stub, for reproducible generator output):
+
+        1. Outward direction at ``length``.
+        2. Outward direction at ``length * 2`` (reach past the obstruction).
+        3. Outward direction at ``length / 2`` (pull back before it).
+        4. The two perpendicular directions at ``length`` (a small jog).
+        5. The opposite direction at ``length`` (last resort).
+
+        A candidate is rejected when its stub segment would union (via
+        :func:`wire_segments_connect`) with an existing wire that independently
+        carries a different named net.  If *every* candidate collides, a
+        :class:`StubPlacementError` is raised (no wire/label is appended) --
+        silently placing a colliding stub is exactly the bug this helper
+        exists to eliminate.
+
+        Args:
+            symbol: The placed symbol instance owning the pin.
+            pin: Pin name or number (passed through to the symbol's fuzzy pin
+                lookup; raises ``PinNotFoundError`` for an unknown pin).
+            net: Net label text to attach at the stub endpoint.
+            length: Stub length in mm (default ``2.54`` = one KiCad grid step).
+            direction: Optional override (``"left"``/``"right"``/``"up"``/
+                ``"down"``).  When ``None`` (default) the outward direction is
+                computed from the pin angle + symbol rotation.  An explicit
+                direction still runs the collision search.
+            snap: Whether to grid-snap the created wire/label (default True).
+
+        Returns:
+            ``(wire, label)`` -- the created :class:`Wire` and :class:`Label`.
+            Both are appended to ``self.wires`` / ``self.labels``.  Callers who
+            only need the endpoint can read ``label.x, label.y``.
+
+        Raises:
+            StubPlacementError: If no candidate stub avoids collision.
+            PinNotFoundError: If ``pin`` does not exist on ``symbol``.
+            ValueError: If an explicit ``direction`` is not a cardinal name.
+        """
+        if direction is not None and direction not in _DIRECTION_VECTORS:
+            raise ValueError(
+                f"direction must be one of {sorted(_DIRECTION_VECTORS)} or None, got {direction!r}"
+            )
+
+        raw_pin_pos = symbol.pin_position(pin)
+        primary = direction if direction is not None else self._pin_outward_direction(symbol, pin)
+
+        # Snap the stub start once so the collision search and the placed wire
+        # share identical geometry (otherwise ``add_wire``'s own snapping could
+        # shift an endpoint onto a foreign wire the search didn't see).  The
+        # stub start stays coincident with the pin under normal on-grid symbol
+        # placement; we pass ``snap=False`` downstream since we snap here.
+        if snap:
+            pin_pos = self._snap_point(raw_pin_pos, "stub start")
+        else:
+            pin_pos = (round(raw_pin_pos[0], 2), round(raw_pin_pos[1], 2))
+
+        def _endpoint(dir_name: str, dist: float) -> tuple[float, float]:
+            ux, uy = _DIRECTION_VECTORS[dir_name]
+            end = (raw_pin_pos[0] + ux * dist, raw_pin_pos[1] + uy * dist)
+            if snap:
+                return self._snap_point(end, "stub end")
+            return (round(end[0], 2), round(end[1], 2))
+
+        # Bounded, deterministic candidate list: (direction, length).
+        candidates: list[tuple[str, float]] = [
+            (primary, length),
+            (primary, length * 2.0),
+            (primary, length / 2.0),
+        ]
+        for perp in _PERPENDICULAR[primary]:
+            candidates.append((perp, length))
+        candidates.append((_OPPOSITE_DIRECTION[primary], length))
+
+        tried: list[tuple[float, float]] = []
+        for dir_name, dist in candidates:
+            # Floor guard: a stub shorter than the snap tolerance is useless.
+            if dist <= self.POINT_TOLERANCE:
+                continue
+            end = _endpoint(dir_name, dist)
+            # A degenerate stub (endpoint snapped back onto the start) is not a
+            # usable candidate.
+            if end == pin_pos:
+                continue
+            tried.append(end)
+            if self._stub_would_collide(pin_pos, end, net):
+                continue
+
+            wire = self.add_wire(pin_pos, end, snap=False, warn_on_collision=False)
+            label = self.add_label(
+                net,
+                end[0],
+                end[1],
+                rotation=_DIRECTION_LABEL_ROTATION[dir_name],
+                snap=False,
+                validate_connection=False,
+            )
+            return wire, label
+
+        raise StubPlacementError(pin_position=pin_pos, net=net, tried_endpoints=tried)
 
     def add_hier_label(
         self,

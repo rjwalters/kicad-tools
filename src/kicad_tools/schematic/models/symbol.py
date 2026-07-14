@@ -584,18 +584,23 @@ class SymbolInstance:
     footprint: str = ""
     properties: dict[str, str] = field(default_factory=dict)
 
-    def pin_position(self, pin_name_or_number: str) -> tuple[float, float]:
-        """Get absolute position of a pin after placement and rotation.
+    def find_pin(self, pin_name_or_number: str) -> Pin:
+        """Resolve a pin name/number to its :class:`Pin` on this instance.
+
+        Shares the exact-match / unit-aware / case-insensitive / alias /
+        fuzzy-suggestion machinery used by :meth:`pin_position`, so callers
+        that need the pin object itself (e.g. its ``angle`` for outward stub
+        direction, issue #4161) do not reimplement the lookup.
 
         Args:
             pin_name_or_number: Pin name (e.g., "SCK") or number (e.g., "20")
 
         Returns:
-            (x, y) tuple of absolute pin position, rounded to 2 decimal places
+            The matching :class:`Pin`.
 
         Raises:
             PinNotFoundError: If no pin matches the given name/number, with
-                suggestions for similar pin names
+                suggestions for similar pin names.
         """
 
         # Find the pin by exact match on name or number.  For multi-unit
@@ -679,6 +684,23 @@ class SymbolInstance:
                 available_pins=self.symbol_def.pins,
                 suggestions=suggestions,
             )
+
+        return pin
+
+    def pin_position(self, pin_name_or_number: str) -> tuple[float, float]:
+        """Get absolute position of a pin after placement and rotation.
+
+        Args:
+            pin_name_or_number: Pin name (e.g., "SCK") or number (e.g., "20")
+
+        Returns:
+            (x, y) tuple of absolute pin position, rounded to 2 decimal places
+
+        Raises:
+            PinNotFoundError: If no pin matches the given name/number, with
+                suggestions for similar pin names
+        """
+        pin = self.find_pin(pin_name_or_number)
 
         # Get the wire connection point (end of pin) in symbol-local coordinates.
         # KiCad library symbols store pin positions in Y-UP coordinates (math

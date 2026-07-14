@@ -2937,6 +2937,239 @@ class TestCollinearNetConflict:
         assert conflicts == []
 
 
+def _stub_symbol(
+    pins: list[tuple[str, str, float, float, float]],
+    x: float,
+    y: float,
+    ref: str,
+    rotation: float = 0,
+    lib_id: str = "Device:R",
+) -> SymbolInstance:
+    """Build a synthetic SymbolInstance for add_stub_label tests.
+
+    ``pins`` entries are (name, number, x, y, angle) in library Y-up coords.
+    """
+    sd = SymbolDef(
+        lib_id=lib_id,
+        name=lib_id.split(":")[-1],
+        raw_sexp="",
+        pins=[
+            Pin(name=n, number=num, x=px, y=py, angle=a, length=2.54, pin_type="passive")
+            for n, num, px, py, a in pins
+        ],
+    )
+    return SymbolInstance(symbol_def=sd, x=x, y=y, rotation=rotation, reference=ref, value="10k")
+
+
+class TestAddStubLabel:
+    """Tests for the collision-aware ``add_stub_label`` helper (issue #4161)."""
+
+    # A horizontal resistor: pin 1 at library (-2.54, 0) angle=0 (into body =
+    # right, so outward = left); pin 2 at (2.54, 0) angle=180 (outward = right).
+    _R_PINS = [("~", "1", -2.54, 0, 0), ("~", "2", 2.54, 0, 180)]
+
+    def test_happy_path_single_pin(self):
+        """A stub in open space appends a wire+label with the label on the wire end."""
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        r1 = _stub_symbol(self._R_PINS, 100.0, 100.0, "R1")
+        sch.symbols.append(r1)
+
+        wire, label = sch.add_stub_label(r1, "1", "NET_A")
+
+        assert wire in sch.wires
+        assert label in sch.labels
+        # Label sits on the wire's far endpoint.
+        assert (label.x, label.y) == (wire.x2, wire.y2)
+        # Wire starts at the pin.
+        assert (wire.x1, wire.y1) == r1.pin_position("1")
+        conflicts = [i for i in sch.validate() if i["type"] == "collinear_net_conflict"]
+        assert conflicts == []
+
+    def test_default_length_is_one_grid_step(self):
+        """Default stub length is 2.54 mm; overridable via length=."""
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        r1 = _stub_symbol(self._R_PINS, 100.0, 100.0, "R1")
+        sch.symbols.append(r1)
+
+        wire, _ = sch.add_stub_label(r1, "1", "NET_A")
+        length = abs(wire.x2 - wire.x1) + abs(wire.y2 - wire.y1)
+        assert length == pytest.approx(2.54)
+
+        wire2, _ = sch.add_stub_label(r1, "2", "NET_B", length=5.08)
+        length2 = abs(wire2.x2 - wire2.x1) + abs(wire2.y2 - wire2.y1)
+        assert length2 == pytest.approx(5.08)
+
+    def test_direction_from_pin_angle_zero_rotation(self):
+        """Outward direction follows pin angle (not into the symbol body)."""
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        r1 = _stub_symbol(self._R_PINS, 100.0, 100.0, "R1")
+        sch.symbols.append(r1)
+
+        # Pin 1 (angle 0, outward = left): stub extends to smaller x.
+        w1, _ = sch.add_stub_label(r1, "1", "NET_A")
+        assert w1.x2 < w1.x1
+        assert w1.y2 == pytest.approx(w1.y1)
+
+        # Pin 2 (angle 180, outward = right): stub extends to larger x.
+        w2, _ = sch.add_stub_label(r1, "2", "NET_B")
+        assert w2.x2 > w2.x1
+        assert w2.y2 == pytest.approx(w2.y1)
+
+    def test_direction_rotates_with_symbol_90(self):
+        """Rotation-aware: a 90 deg symbol rotation rotates the stub direction.
+
+        This is the critical guard: an implementation that ignores
+        symbol.rotation passes the 0 deg case but fails here.
+        """
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        r0 = _stub_symbol(self._R_PINS, 100.0, 100.0, "R0", rotation=0)
+        r90 = _stub_symbol(self._R_PINS, 130.0, 100.0, "R90", rotation=90)
+        sch.symbols.extend([r0, r90])
+
+        # At 0 deg, pin 1 stubs horizontally (left).
+        assert sch._pin_outward_direction(r0, "1") == "left"
+        # At 90 deg CCW (library) + Y-flip to schematic, that left becomes down.
+        assert sch._pin_outward_direction(r90, "1") == "down"
+
+        w90, _ = sch.add_stub_label(r90, "1", "NET_R90")
+        # Vertical stub (x unchanged, y increases = downward in schematic space).
+        assert w90.x2 == pytest.approx(w90.x1)
+        assert w90.y2 > w90.y1
+
+    def test_4143_repro_via_add_stub_label_no_merge(self):
+        """The #4143 geometry built via add_stub_label yields distinct nets.
+
+        Two resistors ~8 mm apart, each pin stub-labelled with a *different*
+        net. The naive hand-rolled version overlapped collinearly and merged;
+        the helper's collision avoidance keeps them distinct.
+        """
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        # R1 pin 2 at (102.54,100) stubs right toward R2; R2 pin 1 at
+        # (107.46,100) stubs left toward R1 — the naive both-2.54 stubs would
+        # overlap on y=100 across [105.08, 105.08]... place them closer to force
+        # the search only in the dedicated forced-collision test; here assert
+        # the outcome is clean regardless.
+        r1 = _stub_symbol(self._R_PINS, 100.0, 100.0, "R1")
+        r2 = _stub_symbol(self._R_PINS, 108.0, 100.0, "R2")
+        sch.symbols.extend([r1, r2])
+
+        sch.add_stub_label(r1, "2", "NET_A")
+        sch.add_stub_label(r2, "1", "NET_B")
+
+        conflicts = [i for i in sch.validate() if i["type"] == "collinear_net_conflict"]
+        assert conflicts == []
+
+        netlist = sch.extract_netlist()
+        net_a = sch.get_net_for_pin("R1", "2")
+        net_b = sch.get_net_for_pin("R2", "1")
+        assert net_a != net_b
+        assert "NET_A" in netlist
+        assert "NET_B" in netlist
+
+    def test_forced_collision_selects_alternative(self):
+        """When the default candidate collides, the search picks another."""
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        r1 = _stub_symbol(self._R_PINS, 100.0, 100.0, "R1")
+        sch.symbols.append(r1)
+
+        # Pre-place a foreign-net wire+label exactly where R1 pin 2's default
+        # rightward 2.54 stub would land, so the primary candidate collides.
+        pin2 = r1.pin_position("2")  # (102.54, 100)
+        sch.wires.append(Wire(x1=pin2[0], y1=pin2[1], x2=pin2[0] + 2.54, y2=pin2[1]))
+        sch.labels.append(Label(text="FOREIGN", x=pin2[0] + 2.54, y=pin2[1]))
+
+        naive_end = (pin2[0] + 2.54, pin2[1])
+        wire, label = sch.add_stub_label(r1, "2", "NET_B")
+
+        # The chosen candidate differs from the naive primary endpoint.
+        assert (wire.x2, wire.y2) != naive_end
+        conflicts = [i for i in sch.validate() if i["type"] == "collinear_net_conflict"]
+        assert conflicts == []
+
+    def test_no_solution_raises_and_leaves_no_partial_state(self):
+        """Boxing a pin in on all sides raises StubPlacementError, no side effects."""
+        from kicad_tools.schematic.exceptions import StubPlacementError
+
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        r1 = _stub_symbol(self._R_PINS, 100.0, 100.0, "R1")
+        sch.symbols.append(r1)
+        px, py = r1.pin_position("2")  # (102.54, 100)
+
+        # Occupy every candidate direction (default + 2x + perpendiculars +
+        # opposite) with foreign-net wires that pass through the pin so any
+        # stub from it collinearly overlaps or T-touches.
+        for x2, y2 in [
+            (px + 6.0, py),  # right (covers 2.54, 5.08, opposite crossings)
+            (px - 6.0, py),  # left / opposite
+            (px, py + 6.0),  # down
+            (px, py - 6.0),  # up
+        ]:
+            w = Wire(x1=px, y1=py, x2=x2, y2=y2)
+            sch.wires.append(w)
+            sch.labels.append(Label(text=f"F_{x2}_{y2}", x=x2, y=y2))
+
+        n_wires = len(sch.wires)
+        n_labels = len(sch.labels)
+        with pytest.raises(StubPlacementError) as exc:
+            sch.add_stub_label(r1, "2", "NET_B")
+
+        # Message identifies the net and lists tried endpoints.
+        assert "NET_B" in str(exc.value)
+        assert exc.value.net == "NET_B"
+        assert exc.value.tried_endpoints
+        # No partial state appended on the raising path.
+        assert len(sch.wires) == n_wires
+        assert len(sch.labels) == n_labels
+
+    def test_same_net_overlap_is_allowed(self):
+        """A same-net overlap does not trigger the search or raise."""
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        r1 = _stub_symbol(self._R_PINS, 100.0, 100.0, "R1")
+        sch.symbols.append(r1)
+        px, py = r1.pin_position("2")
+
+        # Foreign wire carrying the SAME net right where the default stub lands.
+        sch.wires.append(Wire(x1=px, y1=py, x2=px + 2.54, y2=py))
+        sch.labels.append(Label(text="NET_B", x=px + 2.54, y=py))
+
+        # Default rightward candidate overlaps a SAME-net wire -> allowed, so
+        # the primary candidate is chosen (no jog to an alternative).
+        wire, label = sch.add_stub_label(r1, "2", "NET_B")
+        assert wire.x2 == pytest.approx(px + 2.54)
+        assert wire.y2 == pytest.approx(py)
+        conflicts = [i for i in sch.validate() if i["type"] == "collinear_net_conflict"]
+        assert conflicts == []
+
+    def test_explicit_direction_override(self):
+        """An explicit direction skips angle derivation but still searches."""
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        r1 = _stub_symbol(self._R_PINS, 100.0, 100.0, "R1")
+        sch.symbols.append(r1)
+
+        wire, _ = sch.add_stub_label(r1, "1", "NET_A", direction="up")
+        assert wire.x2 == pytest.approx(wire.x1)
+        assert wire.y2 < wire.y1  # up = smaller y in schematic space
+
+    def test_invalid_direction_raises(self):
+        """A non-cardinal explicit direction is a ValueError."""
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        r1 = _stub_symbol(self._R_PINS, 100.0, 100.0, "R1")
+        sch.symbols.append(r1)
+        with pytest.raises(ValueError, match="direction"):
+            sch.add_stub_label(r1, "1", "NET_A", direction="northeast")
+
+    def test_returns_wire_and_label_types(self):
+        """Return value is (Wire, Label)."""
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        r1 = _stub_symbol(self._R_PINS, 100.0, 100.0, "R1")
+        sch.symbols.append(r1)
+        result = sch.add_stub_label(r1, "1", "NET_A")
+        assert isinstance(result, tuple) and len(result) == 2
+        wire, label = result
+        assert isinstance(wire, Wire)
+        assert isinstance(label, Label)
+
+
 class TestSymbolDefParsing:
     """Tests for SymbolDef parsing methods."""
 
