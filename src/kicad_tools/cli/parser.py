@@ -1453,10 +1453,7 @@ def _add_sch_parser(subparsers) -> None:
     # sch fix-annotation
     sch_fix_annotation = sch_subparsers.add_parser(
         "fix-annotation",
-        help=(
-            "Hierarchy-aware power/flag annotation repair "
-            "(net-neutrality gated)"
-        ),
+        help=("Hierarchy-aware power/flag annotation repair (net-neutrality gated)"),
     )
     sch_fix_annotation.add_argument("schematic", help="Path to root .kicad_sch file")
     sch_fix_annotation.add_argument(
