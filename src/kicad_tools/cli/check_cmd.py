@@ -652,6 +652,7 @@ CHECK_CATEGORIES = [
     "segment_zone",
     "via_zone",
     "copper_sliver",
+    "courtyard_overlap",
     "diffpair_clearance_intra",
     "diffpair_length_skew",
     "diffpair_routing_continuity",
@@ -819,6 +820,19 @@ def main(argv: list[str] | None = None) -> int:
             "When supplied, enables the diff-pair routing_continuity and "
             "length_skew rules to fire on routed boards; without it those "
             "rules degrade to no-ops (Issue #2684)."
+        ),
+    )
+    parser.add_argument(
+        "--courtyard-waivers",
+        dest="courtyard_waivers",
+        default=None,
+        help=(
+            "Path to a .courtyard_waivers.json sidecar waiving specific "
+            "courtyard-overlap pairs (see kicad_tools.validate.rules."
+            "courtyard_waivers). When supplied, overlapping courtyard pairs "
+            "matching a waiver entry report as WAIVED instead of failing the "
+            "gate. Auto-discovered next to the board when this flag is "
+            "omitted (Issue #4137)."
         ),
     )
     # Issue #3061: auto-derive the pad_grid tolerance from each board's
@@ -1019,6 +1033,47 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
 
+    # Load optional courtyard-waivers sidecar (Issue #4137).  An explicit
+    # --courtyard-waivers path always wins and a malformed explicit file is a
+    # hard error; an auto-discovered sidecar that fails to parse degrades
+    # gracefully (warn + zero waivers) -- mirroring the --net-class-map
+    # contract above exactly.
+    from kicad_tools.validate.rules.courtyard_waivers import (
+        discover_courtyard_waivers_sidecar,
+        load_courtyard_waivers,
+    )
+
+    courtyard_waivers = None
+    cw_explicit = args.courtyard_waivers is not None
+    if cw_explicit:
+        cw_path: Path | None = Path(args.courtyard_waivers).resolve()
+    else:
+        cw_path = discover_courtyard_waivers_sidecar(pcb_path)
+
+    if cw_path is not None:
+        if not cw_path.exists():
+            # Only reachable via an explicit flag (the auto-probe returns
+            # existing files only).
+            print(f"Error: courtyard-waivers file not found: {cw_path}", file=sys.stderr)
+            return 1
+        try:
+            courtyard_waivers = load_courtyard_waivers(cw_path)
+        except ValueError as e:
+            if cw_explicit:
+                print(f"Error: {e}", file=sys.stderr)
+                return 1
+            print(
+                f"WARNING: ignoring malformed courtyard-waivers sidecar {cw_path}: {e}",
+                file=sys.stderr,
+            )
+            courtyard_waivers = None
+        else:
+            if not cw_explicit:
+                print(
+                    f"[INFO] auto-loaded courtyard-waivers sidecar: {cw_path}",
+                    file=sys.stderr,
+                )
+
     # Create checker with manufacturer rules
     try:
         checker = DRCChecker(
@@ -1039,6 +1094,7 @@ def main(argv: list[str] | None = None) -> int:
             # sidecar the skew rules produce no info findings, so this is a
             # graceful no-op (AC5).
             emit_measurements=True,
+            courtyard_waivers=courtyard_waivers,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1204,6 +1260,7 @@ def run_selected_checks(
         "segment_zone": checker.check_segment_zone_clearances,
         "via_zone": checker.check_via_zone_clearances,
         "copper_sliver": checker.check_copper_slivers,
+        "courtyard_overlap": checker.check_courtyard_overlap,
         "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
         "diffpair_length_skew": checker.check_diffpair_length_skew,
         "diffpair_routing_continuity": checker.check_diffpair_routing_continuity,
@@ -1313,6 +1370,7 @@ def output_table(
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = sum(1 for v in violations if v.is_warning)
     info_count = sum(1 for v in violations if v.is_info)
+    waived_count = sum(1 for v in violations if v.is_waived)
 
     print(f"\n{'=' * 60}")
     print("PURE PYTHON DRC CHECK")
@@ -1327,6 +1385,8 @@ def output_table(
     print(f"  Warnings:   {warning_count}")
     if info_count > 0:
         print(f"  Infos:      {info_count}")
+    if waived_count > 0:
+        print(f"  Waived:     {waived_count}")
     if results.suppressed_count > 0:
         print(f"  Suppressed: {results.suppressed_count} (standard library footprints)")
 
@@ -1363,8 +1423,10 @@ def output_table(
     by_rule_relationship: dict[str, dict[str, int]] = {}
     for v in by_rule_source:
         if v.rule_id not in by_rule:
-            by_rule[v.rule_id] = {"errors": 0, "warnings": 0, "infos": 0}
-        if v.is_error:
+            by_rule[v.rule_id] = {"errors": 0, "warnings": 0, "infos": 0, "waived": 0}
+        if v.is_waived:
+            by_rule[v.rule_id]["waived"] += 1
+        elif v.is_error:
             by_rule[v.rule_id]["errors"] += 1
         elif v.is_info:
             by_rule[v.rule_id]["infos"] += 1
@@ -1387,7 +1449,7 @@ def output_table(
         print("BY RULE:")
     for rule_id, counts in sorted(
         by_rule.items(),
-        key=lambda x: -(x[1]["errors"] + x[1]["warnings"] + x[1]["infos"]),
+        key=lambda x: -(x[1]["errors"] + x[1]["warnings"] + x[1]["infos"] + x[1].get("waived", 0)),
     ):
         parts = []
         if counts["errors"]:
@@ -1396,6 +1458,8 @@ def output_table(
             parts.append(f"{counts['warnings']} warning{'s' if counts['warnings'] != 1 else ''}")
         if counts["infos"]:
             parts.append(f"{counts['infos']} info{'s' if counts['infos'] != 1 else ''}")
+        if counts.get("waived"):
+            parts.append(f"{counts['waived']} waived")
         line = f"  {rule_id}: {', '.join(parts)}"
         # Issue #4102: append the same-net / different-net breakdown for
         # net-relationship rules, e.g.
@@ -1411,6 +1475,7 @@ def output_table(
     errors = [v for v in violations if v.is_error]
     warnings = [v for v in violations if v.is_warning]
     infos = [v for v in violations if v.is_info]
+    waived = [v for v in violations if v.is_waived]
 
     if errors:
         print(f"\n{'-' * 60}")
@@ -1444,6 +1509,23 @@ def output_table(
             _print_violation(v, verbose)
         if len(display_infos_source) > 10 and not verbose:
             print(f"\n  ... and {len(display_infos_source) - 10} more infos (use --verbose)")
+
+    # Issue #4137: waived findings are visible and counted but non-blocking.
+    # Render them in a dedicated WAIVED section so a reviewer can audit each
+    # documented exception (with its reason / tracking issue).
+    if waived:
+        print(f"\n{'-' * 60}")
+        print("WAIVED (documented exceptions, non-blocking):")
+        for v in waived:
+            print(f"\n  [W] {v.rule_id}")
+            print(f"      {v.message}")
+            if v.waiver_issue:
+                print(f"      Waiver issue: {v.waiver_issue}")
+            if verbose:
+                if v.items:
+                    print(f"      Items: {', '.join(v.items)}")
+                if v.layer:
+                    print(f"      Layer: {v.layer}")
 
     print(f"\n{'=' * 60}")
     if errors:
@@ -1516,11 +1598,15 @@ def output_json(
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = sum(1 for v in violations if v.is_warning)
     info_count = sum(1 for v in violations if v.is_info)
+    waived_count = sum(1 for v in violations if v.is_waived)
 
     summary_data: dict = {
         "errors": error_count,
         "warnings": warning_count,
         "infos": info_count,
+        # Issue #4137: waived findings are counted distinctly and never
+        # contribute to ``passed`` (which keys off ``errors``).
+        "waived": waived_count,
         "rules_checked": results.rules_checked,
         # Issue #2660 / Epic #2556 Phase 4N: per-rule check counter.
         # The single ``rules_checked`` integer cannot tell a CI consumer
@@ -1567,11 +1653,15 @@ def write_json_report(
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = sum(1 for v in violations if v.is_warning)
     info_count = sum(1 for v in violations if v.is_info)
+    waived_count = sum(1 for v in violations if v.is_waived)
 
     summary_data: dict = {
         "errors": error_count,
         "warnings": warning_count,
         "infos": info_count,
+        # Issue #4137: waived findings are counted distinctly and never
+        # contribute to ``passed`` (which keys off ``errors``).
+        "waived": waived_count,
         "rules_checked": results.rules_checked,
         # See ``output_json`` for the rationale on emitting this field
         # alongside the aggregate ``rules_checked`` integer.  Issue

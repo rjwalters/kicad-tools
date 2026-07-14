@@ -79,6 +79,11 @@ class BaseViolation(BaseModel):
         """Check if this is an info severity violation."""
         return self.severity == Severity.INFO
 
+    @property
+    def is_waived(self) -> bool:
+        """Pydantic-model violations are never waiver-matched (Issue #4137)."""
+        return False
+
     def to_dict(self) -> dict:
         """Convert to dictionary for backwards-compatible serialization."""
         return self.model_dump(mode="json")
