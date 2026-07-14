@@ -1647,6 +1647,126 @@ class TestSchematicLoadAndParse:
         assert sch._pwr_counter == 2
 
 
+_LOCAL_LIB_SEXP = """(kicad_symbol_lib
+	(version 20231120)
+	(generator "kicad_symbol_editor")
+	(generator_version "8.0")
+	(symbol "WIDGET"
+		(property "Reference" "U" (at 0 5.08 0) (effects (font (size 1.27 1.27))))
+		(property "Value" "WIDGET" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+		(symbol "WIDGET_1_1"
+			(pin input line (at -7.62 2.54 0) (length 2.54) (name "IN" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+			(pin output line (at 7.62 0 180) (length 2.54) (name "OUT" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+		)
+	)
+)
+"""
+
+
+def _write_local_lib(tmp_path, stem="custom_widgets"):
+    """Write a synthetic project-local .kicad_sym fixture, return its Path."""
+    lib_path = tmp_path / f"{stem}.kicad_sym"
+    lib_path.write_text(_LOCAL_LIB_SEXP)
+    return lib_path
+
+
+class TestSchematicLoadLocalSymbolLibs:
+    """Regression tests for local_symbol_libs on Schematic.load() (issue #4144)."""
+
+    def test_load_accepts_local_symbol_libs(self, tmp_path):
+        """load() accepts local_symbol_libs and populates the attribute."""
+        lib_path = _write_local_lib(tmp_path)
+
+        # Minimal on-disk schematic to reload.
+        src = Schematic(title="RoundTrip", local_symbol_libs=[lib_path])
+        sch_path = tmp_path / "rt.kicad_sch"
+        src.write(sch_path)
+
+        loaded = Schematic.load(sch_path, local_symbol_libs=[lib_path])
+        assert loaded.local_symbol_libs == [lib_path]
+
+    def test_load_local_lib_resolves_via_resolve_lib_path(self, tmp_path):
+        """A reloaded schematic resolves the local lib stem to its file path."""
+        lib_path = _write_local_lib(tmp_path)
+
+        src = Schematic(title="RoundTrip", local_symbol_libs=[lib_path])
+        sch_path = tmp_path / "rt.kicad_sch"
+        src.write(sch_path)
+
+        loaded = Schematic.load(sch_path, local_symbol_libs=[lib_path])
+        assert loaded.resolve_lib_path("custom_widgets") == lib_path
+
+    def test_round_trip_add_symbol_against_local_lib(self, tmp_path):
+        """Generate with a local lib, write, reload, and re-add from the lib.
+
+        Exercises the full round-trip parity path: the reloaded schematic
+        must resolve ``LIBNAME:SYMNAME`` ids against the registered local lib
+        just like the constructor path does.
+        """
+        lib_path = _write_local_lib(tmp_path)
+
+        src = Schematic(title="RoundTrip", local_symbol_libs=[lib_path])
+        src.add_symbol("custom_widgets:WIDGET", 100, 100, "U1", "WIDGET")
+        sch_path = tmp_path / "rt.kicad_sch"
+        src.write(sch_path)
+
+        loaded = Schematic.load(sch_path, local_symbol_libs=[lib_path])
+        # Reloading resolved the placed U1 symbol from embedded lib_symbols.
+        assert loaded.find_symbol("U1") is not None
+        # And a *new* placement resolves against the registered local lib.
+        u2 = loaded.add_symbol("custom_widgets:WIDGET", 150, 100, "U2", "WIDGET")
+        assert u2.reference == "U2"
+        assert {p.number for p in u2.symbol_def.pins} == {"1", "2"}
+
+    def test_load_without_local_symbol_libs_defaults_empty(self, tmp_path):
+        """load() without local_symbol_libs keeps the default empty list."""
+        src = Schematic(title="Plain")
+        sch_path = tmp_path / "plain.kicad_sch"
+        src.write(sch_path)
+
+        loaded = Schematic.load(sch_path)
+        assert loaded.local_symbol_libs == []
+
+
+class TestPrintSymbolPins:
+    """Tests for print_symbol_pins accepting str or SymbolInstance (issue #4144)."""
+
+    @staticmethod
+    def _schematic_with_widget(tmp_path):
+        lib_path = _write_local_lib(tmp_path)
+        sch = Schematic(title="Pins", local_symbol_libs=[lib_path])
+        sch.add_symbol("custom_widgets:WIDGET", 100, 100, "U1", "WIDGET")
+        return sch
+
+    def test_print_symbol_pins_by_string_ref(self, tmp_path, capsys):
+        """Passing a reference string resolves and prints without raising."""
+        sch = self._schematic_with_widget(tmp_path)
+        sch.print_symbol_pins("U1")
+        out = capsys.readouterr().out
+        assert "U1 pins" in out
+        # Both pins printed.
+        assert "IN" in out
+        assert "OUT" in out
+
+    def test_print_symbol_pins_str_matches_instance(self, tmp_path, capsys):
+        """String-ref output is identical to passing the SymbolInstance."""
+        sch = self._schematic_with_widget(tmp_path)
+
+        sch.print_symbol_pins("U1")
+        by_str = capsys.readouterr().out
+
+        sch.print_symbol_pins(sch.find_symbol("U1"))
+        by_instance = capsys.readouterr().out
+
+        assert by_str == by_instance
+
+    def test_print_symbol_pins_unknown_ref_raises_keyerror(self, tmp_path):
+        """An unknown reference raises a clear KeyError, not AttributeError."""
+        sch = self._schematic_with_widget(tmp_path)
+        with pytest.raises(KeyError, match="DOES_NOT_EXIST"):
+            sch.print_symbol_pins("DOES_NOT_EXIST")
+
+
 class TestSchematicSnapModeAdvanced:
     """Advanced tests for snap modes."""
 

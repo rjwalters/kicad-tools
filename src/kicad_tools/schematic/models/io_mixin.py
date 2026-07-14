@@ -39,14 +39,49 @@ class SchematicIOMixin:
         _PWR_SYNTH_LIB_PREFIX: str
         _synthesized_pwr_defs: dict[str, SExp]
 
+        # ``_from_sexp`` constructs the concrete ``Schematic`` via ``cls(...)``.
+        # Declaring the constructor signature here lets mypy validate those
+        # keyword arguments against the real ``Schematic.__init__`` shape
+        # instead of the empty ``object`` init (resolves the spurious
+        # ``call-arg`` errors on the ``cls(...)`` call site).
+        def __init__(
+            self,
+            title: str = "",
+            date: str = "2025-01",
+            revision: str = "A",
+            company: str = "",
+            comment1: str = "",
+            comment2: str = "",
+            paper: str = "A4",
+            project_name: str = "project",
+            sheet_uuid: str | None = None,
+            parent_uuid: str | None = None,
+            page: str = "1",
+            grid: float = ...,
+            snap_mode: object = ...,
+            local_symbol_libs: list[Path] | None = None,
+        ) -> None: ...
+
     @classmethod
-    def load(cls, path: str | Path) -> Schematic:
+    def load(
+        cls,
+        path: str | Path,
+        local_symbol_libs: list[Path] | None = None,
+    ) -> Schematic:
         """Load a schematic from a .kicad_sch file.
 
         This enables round-trip editing: load -> modify -> save.
 
         Args:
             path: Path to the .kicad_sch file
+            local_symbol_libs: Optional list of project-local ``.kicad_sym``
+                files to register on the loaded schematic (mirrors the
+                ``Schematic(...)`` constructor argument).  These are consulted
+                by :meth:`resolve_lib_path` during subsequent ``add_symbol()``
+                calls so a reloaded schematic can resolve ``LIBNAME:SYMNAME``
+                ids against project-local libraries, matching the constructor
+                path.  Default ``None`` preserves prior behavior (stock libs
+                only) for all existing callers.
 
         Returns:
             A Schematic instance populated with all elements from the file
@@ -55,6 +90,12 @@ class SchematicIOMixin:
             sch = Schematic.load("power.kicad_sch")
             sch.add_symbol("Device:R", 100, 100, "R5", "10k")
             sch.write("power.kicad_sch")
+
+            # Reload with a project-local symbol library registered:
+            sch = Schematic.load(
+                "power.kicad_sch",
+                local_symbol_libs=[Path("libs/custom.kicad_sym")],
+            )
         """
         from kicad_tools.sexp import parse_file
 
@@ -63,7 +104,7 @@ class SchematicIOMixin:
             raise FileNotFoundError(f"Schematic file not found: {path}")
 
         doc = parse_file(path)
-        sch = cls._from_sexp(doc)
+        sch = cls._from_sexp(doc, local_symbol_libs=local_symbol_libs)
         # Track the source path so operations that need to walk
         # sub-sheets (e.g., extract_netlist(hierarchical=True), run_erc)
         # can resolve relative sheet references.
@@ -71,10 +112,20 @@ class SchematicIOMixin:
         return sch
 
     @classmethod
-    def _from_sexp(cls, doc: SExp) -> Schematic:
+    def _from_sexp(
+        cls,
+        doc: SExp,
+        local_symbol_libs: list[Path] | None = None,
+    ) -> Schematic:
         """Create a Schematic from a parsed S-expression tree.
 
         This is the internal method that does the actual parsing.
+
+        Args:
+            doc: Parsed S-expression tree for the schematic.
+            local_symbol_libs: Optional project-local ``.kicad_sym`` files to
+                register on the constructed schematic (threaded through from
+                :meth:`load`).  Default ``None`` preserves prior behavior.
         """
         from .schematic import SnapMode
 
@@ -140,6 +191,7 @@ class SchematicIOMixin:
             paper=paper,
             sheet_uuid=sheet_uuid,
             snap_mode=SnapMode.OFF,  # Preserve original coordinates
+            local_symbol_libs=local_symbol_libs,
         )
 
         # Store embedded lib_symbols for round-trip
