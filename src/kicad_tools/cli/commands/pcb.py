@@ -3,6 +3,7 @@
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 __all__ = ["run_pcb_command"]
 
@@ -291,7 +292,7 @@ def _run_strip_command(args, pcb_path: Path) -> int:
     output_format = getattr(args, "format", "text")
     dry_run = getattr(args, "dry_run", False)
 
-    result = {
+    result: dict[str, Any] = {
         "input": str(pcb_path),
         "output": str(output_path) if not dry_run else None,
         "dry_run": dry_run,
