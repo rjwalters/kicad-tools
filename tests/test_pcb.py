@@ -3299,6 +3299,191 @@ class TestStripTraces:
         assert len(reloaded.segments) == 1
         assert reloaded.segments[0].layer == "F.Cu"
 
+    # ------------------------------------------------------------------
+    # Region-scoped stripping (Issue #4136 Phase 1)
+    # ------------------------------------------------------------------
+
+    def test_strip_region_segment_fully_inside_removed(self):
+        """A segment fully inside the region box is removed."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(20, 20), end=(30, 20), width=0.25, layer="F.Cu", net="SIG_A")
+
+        stats = pcb.strip_traces(region=(10, 10, 40, 40))
+
+        assert stats["segments"] == 1
+        assert stats["segments_clipped"] == 0
+        assert len(pcb.segments) == 0
+
+    def test_strip_region_segment_fully_outside_kept(self):
+        """A segment entirely outside the region box is untouched."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(60, 60), end=(80, 60), width=0.25, layer="F.Cu", net="SIG_A")
+
+        stats = pcb.strip_traces(region=(10, 10, 40, 40))
+
+        assert stats["segments"] == 0
+        assert stats["segments_clipped"] == 0
+        assert len(pcb.segments) == 1
+
+    def test_strip_region_crossing_segment_is_clipped(self):
+        """A segment with one endpoint inside is clipped to the outside piece."""
+        pcb = PCB.create(width=100, height=100)
+        # Horizontal segment from (20,20) inside the box to (60,20) outside;
+        # region right edge is x=40, so the kept piece runs (40,20)->(60,20).
+        pcb.add_trace(start=(20, 20), end=(60, 20), width=0.25, layer="F.Cu", net="SIG_A")
+
+        stats = pcb.strip_traces(region=(10, 10, 40, 40))
+
+        assert stats["segments"] == 0  # not a whole-segment removal
+        assert stats["segments_clipped"] == 1
+        assert len(pcb.segments) == 1
+        seg = pcb.segments[0]
+        # The inside endpoint (20,20) moved to the boundary x=40; the outside
+        # endpoint (60,20) is unchanged.
+        xs = {round(seg.start[0], 3), round(seg.end[0], 3)}
+        assert xs == {40.0, 60.0}
+        ys = {round(seg.start[1], 3), round(seg.end[1], 3)}
+        assert ys == {20.0}
+
+    def test_strip_region_clip_roundtrips_through_save(self, tmp_path: Path):
+        """Clipped segment endpoints persist through save/reload."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(20, 20), end=(60, 20), width=0.25, layer="F.Cu", net="SIG_A")
+
+        pcb.strip_traces(region=(10, 10, 40, 40))
+
+        out = tmp_path / "clipped.kicad_pcb"
+        pcb.save(out)
+        reloaded = PCB.load(out)
+        assert len(reloaded.segments) == 1
+        seg = reloaded.segments[0]
+        xs = {round(seg.start[0], 3), round(seg.end[0], 3)}
+        assert xs == {40.0, 60.0}
+
+    def test_strip_region_both_endpoints_outside_spanning_box_skipped(self):
+        """A segment spanning the box with both ends outside is left untouched."""
+        pcb = PCB.create(width=100, height=100)
+        # Runs (5,25) -> (55,25): both endpoints outside the x-range [10,40]
+        # but the span crosses the box horizontally.
+        pcb.add_trace(start=(5, 25), end=(55, 25), width=0.25, layer="F.Cu", net="SIG_A")
+
+        stats = pcb.strip_traces(region=(10, 10, 40, 40))
+
+        assert stats["segments"] == 0
+        assert stats["segments_clipped"] == 0
+        assert stats["segments_boundary_skipped"] == 1
+        assert len(pcb.segments) == 1  # unchanged
+
+    def test_strip_region_via_inside_removed(self):
+        """A via whose point is inside the region is removed."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_via(x=25, y=25, layers=("F.Cu", "B.Cu"), net="SIG_A")
+
+        stats = pcb.strip_traces(region=(10, 10, 40, 40))
+
+        assert stats["vias"] == 1
+        assert len(pcb.vias) == 0
+
+    def test_strip_region_via_outside_kept(self):
+        """A via whose point is outside the region is kept."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_via(x=70, y=70, layers=("F.Cu", "B.Cu"), net="SIG_A")
+
+        stats = pcb.strip_traces(region=(10, 10, 40, 40))
+
+        assert stats["vias"] == 0
+        assert len(pcb.vias) == 1
+
+    def test_strip_region_and_nets_combined(self):
+        """--region ANDed with --nets: only in-region segments of named net go."""
+        pcb = PCB.create(width=100, height=100)
+        # Inside region, net A — should be removed.
+        pcb.add_trace(start=(20, 20), end=(30, 20), width=0.25, layer="F.Cu", net="NET_A")
+        # Inside region, net B — kept (net filter excludes it).
+        pcb.add_trace(start=(20, 30), end=(30, 30), width=0.25, layer="F.Cu", net="NET_B")
+        # Outside region, net A — kept (spatial filter excludes it).
+        pcb.add_trace(start=(60, 60), end=(70, 60), width=0.25, layer="F.Cu", net="NET_A")
+
+        stats = pcb.strip_traces(region=(10, 10, 40, 40), nets=["NET_A"])
+
+        assert stats["segments"] == 1
+        assert len(pcb.segments) == 2
+        remaining_nets = set()
+        for seg in pcb.segments:
+            for num, net in pcb.nets.items():
+                if num == seg.net_number:
+                    remaining_nets.add(net.name)
+        assert remaining_nets == {"NET_A", "NET_B"}
+
+    def test_strip_region_and_layers_combined(self):
+        """--region ANDed with --layers."""
+        pcb = PCB.create(width=100, height=100)
+        # Inside region, In1.Cu — removed.
+        pcb.add_trace(start=(20, 20), end=(30, 20), width=0.25, layer="In1.Cu", net="SIG_A")
+        # Inside region, F.Cu — kept (layer filter excludes it).
+        pcb.add_trace(start=(20, 25), end=(30, 25), width=0.25, layer="F.Cu", net="SIG_B")
+        # Outside region, In1.Cu — kept (spatial filter excludes it).
+        pcb.add_trace(start=(60, 60), end=(70, 60), width=0.25, layer="In1.Cu", net="SIG_C")
+
+        stats = pcb.strip_traces(region=(10, 10, 40, 40), layers=["In1.Cu"])
+
+        assert stats["segments"] == 1
+        assert len(pcb.segments) == 2
+        remaining_layers = {seg.layer for seg in pcb.segments}
+        assert remaining_layers == {"F.Cu", "In1.Cu"}
+
+    def test_strip_region_triple_and_nets_layers(self):
+        """--region + --nets + --layers all ANDed simultaneously."""
+        pcb = PCB.create(width=100, height=100)
+        # The only match: inside region AND In1.Cu AND net TARGET.
+        pcb.add_trace(start=(20, 20), end=(30, 20), width=0.25, layer="In1.Cu", net="TARGET")
+        # Wrong net.
+        pcb.add_trace(start=(20, 22), end=(30, 22), width=0.25, layer="In1.Cu", net="OTHER")
+        # Wrong layer.
+        pcb.add_trace(start=(20, 24), end=(30, 24), width=0.25, layer="F.Cu", net="TARGET")
+        # Wrong region.
+        pcb.add_trace(start=(60, 60), end=(70, 60), width=0.25, layer="In1.Cu", net="TARGET")
+
+        stats = pcb.strip_traces(region=(10, 10, 40, 40), nets=["TARGET"], layers=["In1.Cu"])
+
+        assert stats["segments"] == 1
+        assert len(pcb.segments) == 3
+
+    def test_strip_region_inverted_coords_normalized(self):
+        """Inverted region coords (x1>x2, y1>y2) are normalized by the API."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(20, 20), end=(30, 20), width=0.25, layer="F.Cu", net="SIG_A")
+
+        # Pass the box corners in reversed order — should behave identically.
+        stats = pcb.strip_traces(region=(40, 40, 10, 10))
+
+        assert stats["segments"] == 1
+        assert len(pcb.segments) == 0
+
+    def test_strip_region_no_traces_is_noop(self):
+        """A region containing zero traces removes nothing."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(60, 60), end=(70, 60), width=0.25, layer="F.Cu", net="SIG_A")
+
+        stats = pcb.strip_traces(region=(10, 10, 40, 40))
+
+        assert stats["segments"] == 0
+        assert stats["vias"] == 0
+        assert stats["segments_clipped"] == 0
+        assert stats["segments_boundary_skipped"] == 0
+        assert len(pcb.segments) == 1
+
+    def test_strip_region_default_none_is_unbounded(self):
+        """region=None (default) preserves existing whole-board behavior."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(20, 20), end=(30, 20), width=0.25, layer="F.Cu", net="SIG_A")
+        pcb.add_trace(start=(60, 60), end=(70, 60), width=0.25, layer="F.Cu", net="SIG_B")
+
+        stats = pcb.strip_traces()
+
+        assert stats["segments"] == 2
+        assert len(pcb.segments) == 0
+
 
 # ---------------------------------------------------------------------------
 # KiCad 10 name-only net format: net_number recovery from PCB headers

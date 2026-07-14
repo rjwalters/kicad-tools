@@ -50,6 +50,47 @@ def _is_power_net(name: str, pattern: re.Pattern[str] | None = None) -> bool:
     return pat.search(name) is not None
 
 
+def _segment_span_intersects_region(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    region: tuple[float, float, float, float],
+) -> bool:
+    """Return True if the segment ``start``->``end`` crosses the axis-aligned box.
+
+    All coordinates are board-relative.  ``region`` is a normalized
+    ``(x1, y1, x2, y2)`` box with ``x1 <= x2`` and ``y1 <= y2``.  Uses the
+    Liang-Barsky parametric clip test.  This is only used to decide whether a
+    both-endpoints-outside segment should be *reported* as boundary-skipped
+    (it is never itself modified), so a conservative True on tangency is fine.
+    """
+    x1, y1, x2, y2 = region
+    sx, sy = start
+    ex, ey = end
+    dx = ex - sx
+    dy = ey - sy
+    # Degenerate (zero-length) segment: treat as a point-in-box test.
+    if dx == 0.0 and dy == 0.0:
+        return x1 <= sx <= x2 and y1 <= sy <= y2
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, sx - x1), (dx, x2 - sx), (-dy, sy - y1), (dy, y2 - sy)):
+        if p == 0.0:
+            if q < 0.0:
+                return False  # Parallel to this edge and outside the slab.
+            continue
+        r = q / p
+        if p < 0.0:
+            if r > t1:
+                return False
+            if r > t0:
+                t0 = r
+        else:
+            if r < t0:
+                return False
+            if r < t1:
+                t1 = r
+    return t0 <= t1
+
+
 # ---------------------------------------------------------------------------
 # Power-rail name canonicalisation (issue #3302)
 # ---------------------------------------------------------------------------
@@ -4934,6 +4975,7 @@ class PCB:
         exclude_power: bool = False,
         power_pattern: re.Pattern[str] | None = None,
         remove_orphan_vias: bool = False,
+        region: tuple[float, float, float, float] | None = None,
     ) -> dict[str, int]:
         """Remove trace segments and vias from the PCB.
 
@@ -4964,12 +5006,44 @@ class PCB:
                                 to any remaining segment on either of their
                                 layers after layer-filtered stripping.
                                 Only meaningful when *layers* is specified.
+            region: Optional ``(x1, y1, x2, y2)`` bounding box (board-relative
+                    mm coordinates) that spatially bounds the strip.  When
+                    given, only geometry *inside* the box is removed and the
+                    filter is ANDed with *nets* / *layers* / *exclude_power*:
+
+                    * A **via** is stripped only when its ``(at x y)`` point is
+                      inside the box.
+                    * A **segment** fully inside the box is removed; a segment
+                      fully outside is kept unchanged.  A segment with exactly
+                      one endpoint inside is *clipped* at the box boundary --
+                      the inside portion is removed and the outside portion is
+                      kept as a shortened segment (see ``segments_clipped`` in
+                      the returned stats).  A segment with both endpoints
+                      outside is kept unchanged even if its span happens to
+                      cross the box (a "skip-and-report" fallback -- these are
+                      counted in ``segments_boundary_skipped``), because
+                      splitting a segment into two outside pieces would leave a
+                      dangling gap with no via/pad termination inside the box.
+                    * **Zones** are polygons; region-based zone removal only
+                      triggers (with ``keep_zones=False``) when the zone's
+                      entire polygon is contained in the box (conservative --
+                      no polygon clipping is performed).
+
+                    The box is normalized internally, so inverted/degenerate
+                    coordinates are tolerated by this method; the CLI validates
+                    and rejects ``x1 >= x2`` / ``y1 >= y2`` before calling.
 
         Returns:
             Dictionary with counts of removed elements:
-            - "segments": Number of trace segments removed
+            - "segments": Number of trace segments removed (includes the
+              inside portion of clipped segments)
             - "vias": Number of vias removed
             - "zones": Number of zones removed (0 if keep_zones=True)
+            - "segments_clipped": Number of boundary-crossing segments that
+              were clipped to their outside portion (0 when *region* is None)
+            - "segments_boundary_skipped": Number of segments spanning the box
+              with both endpoints outside that were left untouched (0 when
+              *region* is None)
 
         Example:
             >>> pcb = PCB.load("board.kicad_pcb")
@@ -5001,6 +5075,55 @@ class PCB:
         if layers is not None:
             layer_set = set(layers)
 
+        # Normalize the region bbox (board-relative coords) so x1<x2, y1<y2.
+        # SExp start/end/at nodes store sheet-absolute coords (board-relative +
+        # board_origin), so we convert them to board-relative before comparing.
+        region_box: tuple[float, float, float, float] | None = None
+        if region is not None:
+            rx1, ry1, rx2, ry2 = region
+            region_box = (min(rx1, rx2), min(ry1, ry2), max(rx1, rx2), max(ry1, ry2))
+        ox_region, oy_region = self._board_origin
+
+        def _point_in_region(abs_x: float, abs_y: float) -> bool:
+            """True if a sheet-absolute point falls inside the region box."""
+            if region_box is None:
+                return True
+            rel_x = abs_x - ox_region
+            rel_y = abs_y - oy_region
+            x1, y1, x2, y2 = region_box
+            return x1 <= rel_x <= x2 and y1 <= rel_y <= y2
+
+        def _clip_point_to_region(
+            inside: tuple[float, float], outside: tuple[float, float]
+        ) -> tuple[float, float]:
+            """Intersect the inside->outside segment with the region boundary.
+
+            Both points are sheet-absolute.  Returns the sheet-absolute point
+            on the box boundary (the closest crossing to *inside*).  The
+            returned point becomes the new terminal of the kept outside piece.
+            """
+            assert region_box is not None
+            x1, y1, x2, y2 = region_box
+            ix, iy = inside[0] - ox_region, inside[1] - oy_region
+            oxp, oyp = outside[0] - ox_region, outside[1] - oy_region
+            dx = oxp - ix
+            dy = oyp - iy
+            # Find the smallest t in (0, 1] where the segment exits the box.
+            t_best = 1.0
+            if dx > 0:
+                t_best = min(t_best, (x2 - ix) / dx)
+            elif dx < 0:
+                t_best = min(t_best, (x1 - ix) / dx)
+            if dy > 0:
+                t_best = min(t_best, (y2 - iy) / dy)
+            elif dy < 0:
+                t_best = min(t_best, (y1 - iy) / dy)
+            t_best = max(0.0, min(1.0, t_best))
+            cx = ix + dx * t_best
+            cy = iy + dy * t_best
+            # Convert back to sheet-absolute coordinates.
+            return (cx + ox_region, cy + oy_region)
+
         # Build set of power-net numbers for exclusion
         power_net_numbers: set[int] = set()
         if exclude_power:
@@ -5025,6 +5148,13 @@ class PCB:
         removed_segments = 0
         removed_vias = 0
         removed_zones = 0
+        clipped_segments = 0
+        boundary_skipped_segments = 0
+
+        # Track clipped-segment geometry so the parsed self._segments view can
+        # be updated in lock-step with the S-expression tree below.  Maps the
+        # segment's uuid -> new board-relative (start, end) endpoints.
+        clipped_geometry: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {}
 
         # Filter S-expression children to remove segments, vias, and optionally zones
         new_children = []
@@ -5033,20 +5163,71 @@ class PCB:
 
             if child.name == "segment":
                 net_num = _net_num_from_child(child)
-                if _should_strip_net(net_num):
-                    if layer_set is not None:
-                        # Only remove segments on specified layers
-                        layer_node = child.find("layer")
-                        if layer_node:
-                            seg_layer = layer_node.get_string(0) or ""
-                            if seg_layer in layer_set:
-                                should_remove = True
-                    elif net_numbers_to_strip is not None:
-                        # Net filter only — already passed net check
+                passes_net = _should_strip_net(net_num)
+                passes_layer = True
+                if passes_net and layer_set is not None:
+                    layer_node = child.find("layer")
+                    seg_layer = (layer_node.get_string(0) or "") if layer_node else ""
+                    passes_layer = seg_layer in layer_set
+
+                if passes_net and passes_layer:
+                    if region_box is None:
+                        # No spatial bound: existing whole-segment behavior.
                         should_remove = True
                     else:
-                        # No net or layer filter — remove all (non-power) segments
-                        should_remove = True
+                        # Spatially bounded: classify by endpoint membership.
+                        start_node = child.find("start")
+                        end_node = child.find("end")
+                        if start_node and end_node:
+                            sx = start_node.get_float(0) or 0.0
+                            sy = start_node.get_float(1) or 0.0
+                            ex = end_node.get_float(0) or 0.0
+                            ey = end_node.get_float(1) or 0.0
+                            start_in = _point_in_region(sx, sy)
+                            end_in = _point_in_region(ex, ey)
+                            if start_in and end_in:
+                                # Fully inside the box — remove entirely.
+                                should_remove = True
+                            elif start_in != end_in:
+                                # Boundary-crossing — clip to the outside piece.
+                                inside_pt = (sx, sy) if start_in else (ex, ey)
+                                outside_pt = (ex, ey) if start_in else (sx, sy)
+                                clip_pt = _clip_point_to_region(inside_pt, outside_pt)
+                                # Rewrite the surviving segment: the outside
+                                # endpoint stays, the inside endpoint moves to
+                                # the region boundary.
+                                if start_in:
+                                    start_node.set_value(0, clip_pt[0])
+                                    start_node.set_value(1, clip_pt[1])
+                                    abs_start = clip_pt
+                                    abs_end = (ex, ey)
+                                else:
+                                    end_node.set_value(0, clip_pt[0])
+                                    end_node.set_value(1, clip_pt[1])
+                                    abs_start = (sx, sy)
+                                    abs_end = clip_pt
+                                clipped_segments += 1
+                                uuid_node = child.find("uuid")
+                                seg_uuid = uuid_node.get_string(0) if uuid_node else None
+                                if seg_uuid:
+                                    # Record board-relative endpoints (subtract
+                                    # board origin) for the parsed-view sync.
+                                    clipped_geometry[seg_uuid] = (
+                                        (abs_start[0] - ox_region, abs_start[1] - oy_region),
+                                        (abs_end[0] - ox_region, abs_end[1] - oy_region),
+                                    )
+                            else:
+                                # Both endpoints outside the box.  The span may
+                                # still cross the box, but splitting it would
+                                # leave a dangling gap with no termination
+                                # inside; per the documented policy we skip and
+                                # report it instead of silently mangling copper.
+                                if _segment_span_intersects_region(
+                                    (sx - ox_region, sy - oy_region),
+                                    (ex - ox_region, ey - oy_region),
+                                    region_box,
+                                ):
+                                    boundary_skipped_segments += 1
 
                 if should_remove:
                     removed_segments += 1
@@ -5070,6 +5251,17 @@ class PCB:
                     else:
                         should_remove = True
 
+                # A via is a point: it is only stripped when its (at x y)
+                # position falls inside the region box (ANDed with the above).
+                if should_remove and region_box is not None:
+                    at_node = child.find("at")
+                    if at_node is None:
+                        should_remove = False
+                    else:
+                        vx = at_node.get_float(0) or 0.0
+                        vy = at_node.get_float(1) or 0.0
+                        should_remove = _point_in_region(vx, vy)
+
                 if should_remove:
                     removed_vias += 1
 
@@ -5087,6 +5279,24 @@ class PCB:
                         should_remove = True
                     else:
                         should_remove = True
+
+                # Region: zones are polygons, not lines.  Phase 1 does NOT clip
+                # zone polygons; a zone is only removed when its entire boundary
+                # polygon is contained in the region box (conservative).
+                if should_remove and region_box is not None:
+                    poly_node = child.find("polygon")
+                    pts_node = poly_node.find("pts") if poly_node else None
+                    if pts_node is None:
+                        should_remove = False
+                    else:
+                        xy_nodes = pts_node.find_all("xy")
+                        if not xy_nodes:
+                            should_remove = False
+                        else:
+                            should_remove = all(
+                                _point_in_region(xy.get_float(0) or 0.0, xy.get_float(1) or 0.0)
+                                for xy in xy_nodes
+                            )
 
                 if should_remove:
                     removed_zones += 1
@@ -5160,6 +5370,12 @@ class PCB:
                 return True
             if layer_set is not None and not all(vl in layer_set for vl in via.layers):
                 return True
+            # Region: keep the via if its point is outside the box.
+            if region_box is not None:
+                x1, y1, x2, y2 = region_box
+                vx, vy = via.position
+                if not (x1 <= vx <= x2 and y1 <= vy <= y2):
+                    return True
             return False
 
         def _zone_matches(zone: Zone) -> bool:
@@ -5170,12 +5386,54 @@ class PCB:
                 return True
             if layer_set is not None and zone.layer not in layer_set:
                 return True
+            # Region: keep the zone unless its whole polygon is inside the box.
+            if region_box is not None:
+                x1, y1, x2, y2 = region_box
+                poly = zone.polygon or []
+                if not poly or not all(x1 <= px <= x2 and y1 <= py <= y2 for px, py in poly):
+                    return True
             return False
 
+        def _region_keeps_segment(seg: Segment) -> bool:
+            """Return True if *region* alone would preserve (not fully strip) seg.
+
+            A segment is fully removed only when both endpoints are inside the
+            box.  Crossing segments are clipped (their endpoints are rewritten
+            below), so they are "kept" here in the sense of surviving the list.
+            """
+            if region_box is None:
+                return False
+            x1, y1, x2, y2 = region_box
+            start_in = x1 <= seg.start[0] <= x2 and y1 <= seg.start[1] <= y2
+            end_in = x1 <= seg.end[0] <= x2 and y1 <= seg.end[1] <= y2
+            return not (start_in and end_in)
+
+        def _seg_matches_with_region(seg: Segment) -> bool:
+            """Return True if the segment should be KEPT (region-aware)."""
+            if _seg_matches(seg):
+                return True
+            # Passed the net/layer/power filters — apply the spatial bound.
+            if region_box is not None and _region_keeps_segment(seg):
+                return True
+            return False
+
+        # Rewrite clipped segments' parsed endpoints (board-relative) so the
+        # parsed view matches the S-expression tree.
+        if clipped_geometry:
+            for seg in self._segments:
+                new_geom = clipped_geometry.get(seg.uuid)
+                if new_geom is not None:
+                    seg.start, seg.end = new_geom
+
         # Apply filtering helpers
-        has_any_filter = net_numbers_to_strip is not None or layer_set is not None or exclude_power
+        has_any_filter = (
+            net_numbers_to_strip is not None
+            or layer_set is not None
+            or exclude_power
+            or region_box is not None
+        )
         if has_any_filter:
-            self._segments = [seg for seg in self._segments if _seg_matches(seg)]
+            self._segments = [seg for seg in self._segments if _seg_matches_with_region(seg)]
             self._vias = [via for via in self._vias if _via_matches(via)]
             if not keep_zones:
                 self._zones = [zone for zone in self._zones if _zone_matches(zone)]
@@ -5204,6 +5462,8 @@ class PCB:
             "segments": removed_segments,
             "vias": removed_vias,
             "zones": removed_zones,
+            "segments_clipped": clipped_segments,
+            "segments_boundary_skipped": boundary_skipped_segments,
         }
 
     def save(self, path: str | Path | None = None) -> None:

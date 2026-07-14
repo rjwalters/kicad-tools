@@ -3,6 +3,7 @@
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 __all__ = ["run_pcb_command"]
 
@@ -226,6 +227,35 @@ def _run_strip_command(args, pcb_path: Path) -> int:
 
     remove_orphan_vias = getattr(args, "remove_orphan_vias", False)
 
+    # Parse and validate the optional --region bounding box.
+    region = None
+    region_arg = getattr(args, "region", None)
+    if region_arg:
+        parts = [p.strip() for p in region_arg.split(",")]
+        if len(parts) != 4:
+            print(
+                "Error: --region expects 'x1,y1,x2,y2' (four comma-separated "
+                f"numbers), got {region_arg!r}",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            x1, y1, x2, y2 = (float(p) for p in parts)
+        except ValueError:
+            print(
+                f"Error: --region values must be numeric, got {region_arg!r}",
+                file=sys.stderr,
+            )
+            return 1
+        if x1 >= x2 or y1 >= y2:
+            print(
+                "Error: --region must satisfy x1 < x2 and y1 < y2 "
+                f"(got x1={x1}, y1={y1}, x2={x2}, y2={y2})",
+                file=sys.stderr,
+            )
+            return 1
+        region = (x1, y1, x2, y2)
+
     # Load PCB
     try:
         pcb = PCB.load(pcb_path)
@@ -247,6 +277,7 @@ def _run_strip_command(args, pcb_path: Path) -> int:
         exclude_power=exclude_power,
         power_pattern=power_pattern,
         remove_orphan_vias=remove_orphan_vias,
+        region=region,
     )
 
     # Determine output path
@@ -261,12 +292,13 @@ def _run_strip_command(args, pcb_path: Path) -> int:
     output_format = getattr(args, "format", "text")
     dry_run = getattr(args, "dry_run", False)
 
-    result = {
+    result: dict[str, Any] = {
         "input": str(pcb_path),
         "output": str(output_path) if not dry_run else None,
         "dry_run": dry_run,
         "nets_filtered": nets,
         "layers_filtered": layers,
+        "region": list(region) if region else None,
         "keep_zones": keep_zones,
         "exclude_power": exclude_power,
         "remove_orphan_vias": remove_orphan_vias,
@@ -299,6 +331,8 @@ def _run_strip_command(args, pcb_path: Path) -> int:
             print("  Stripping all nets")
         if layers:
             print(f"  Filtering layers: {', '.join(layers)}")
+        if region:
+            print(f"  Region: ({region[0]}, {region[1]}) to ({region[2]}, {region[3]}) mm")
         print(f"  Exclude power nets: {exclude_power}")
         print(f"  Keep zones: {keep_zones}")
         if remove_orphan_vias:
@@ -310,6 +344,12 @@ def _run_strip_command(args, pcb_path: Path) -> int:
         print(f"    Vias:     {stats['vias']:,}")
         if not keep_zones:
             print(f"    Zones:    {stats['zones']:,}")
+        if region:
+            print(f"    Segments clipped at boundary: {stats['segments_clipped']:,}")
+            print(
+                f"    Segments spanning box (both ends outside) left untouched: "
+                f"{stats['segments_boundary_skipped']:,}"
+            )
         print()
 
         print("  Remaining:")

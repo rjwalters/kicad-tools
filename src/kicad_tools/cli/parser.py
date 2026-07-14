@@ -1563,6 +1563,17 @@ def _add_pcb_parser(subparsers) -> None:
         "on either of their layers (only meaningful with --layers)",
     )
     pcb_strip.add_argument(
+        "--region",
+        help="Spatially bound the strip to an axis-aligned box "
+        "'x1,y1,x2,y2' (board-relative mm). Only geometry inside the box is "
+        "removed, ANDed with --nets/--layers. Vias are stripped when their "
+        "point is inside; segments fully inside are removed; segments crossing "
+        "the boundary are clipped to the outside portion; segments spanning the "
+        "box with both endpoints outside are left untouched and reported as "
+        "'boundary_skipped'. Zones are only removed (with --no-keep-zones) when "
+        "their whole polygon is inside the box (no polygon clipping).",
+    )
+    pcb_strip.add_argument(
         "--no-keep-zones",
         dest="keep_zones",
         action="store_false",
