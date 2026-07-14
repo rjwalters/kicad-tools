@@ -132,6 +132,36 @@ def _requests_installed() -> bool:
     return importlib.util.find_spec("requests") is not None
 
 
+class _RequestsUnavailableSentinel(BaseException):
+    """Stable sentinel exception used when the ``requests`` extra is absent.
+
+    Returned by :func:`_request_exception_type` so an ``except`` clause that
+    references ``requests.RequestException`` degrades to a class that (a) is
+    stable across calls (so tests can construct and raise it) and (b) is never
+    raised by the real code path when ``requests`` is genuinely missing (that
+    path is handled up front).
+    """
+
+
+def _request_exception_type() -> type[BaseException]:
+    """Return ``requests.RequestException`` if importable, else a sentinel.
+
+    Callers use this in an ``except`` clause so a network failure is caught
+    without a hard top-level ``requests`` import. When the ``requests`` extra is
+    absent (or a test stubs ``_requests_installed`` without installing the real
+    module), the returned sentinel is a *stable* module-level class so the
+    ``except`` reference and any test that raises it agree on identity.
+    """
+    try:
+        import requests  # type: ignore[import-untyped]
+    except ImportError:
+        return _RequestsUnavailableSentinel
+    # ``requests`` ships no type stubs here, so ``RequestException`` is ``Any``;
+    # the explicit annotation keeps callers' ``except`` type-safe.
+    exc_type: type[BaseException] = requests.RequestException
+    return exc_type
+
+
 def _requires_requests(func):
     """Decorator to check if requests is available."""
 
@@ -635,7 +665,6 @@ class LCSCClient:
             fetched_at=datetime.now(),
         )
 
-    @_requires_requests
     def search(
         self,
         query: str,
@@ -643,9 +672,22 @@ class LCSCClient:
         page_size: int = 20,
         in_stock: bool = False,
         basic_only: bool = False,
+        package: str | None = None,
     ) -> SearchResult:
         """
-        Search for parts.
+        Search for parts by free-text query (value + optional package).
+
+        Resolution order mirrors :meth:`lookup`: the live JLCPCB scrape API is
+        authoritative when reachable; on a 403 circuit breaker
+        (:class:`LCSCForbiddenError`) or other network failure, and when a
+        synced offline jlcparts catalog is available, results are served from
+        the catalog instead of raising / returning empty. This keeps parametric
+        matching (``kct parts suggest`` / ``kct export --auto-lcsc``, both of
+        which route through :class:`~kicad_tools.cost.suggest.PartMatcher` ->
+        ``search``) working offline. When the offline fallback is disabled
+        (``use_local_catalog=False``) or no catalog is synced, the historical
+        live-API-only behavior is preserved byte-for-byte (403 propagates, other
+        request errors return an empty :class:`SearchResult`).
 
         Args:
             query: Search query string
@@ -653,11 +695,27 @@ class LCSCClient:
             page_size: Results per page (max 100)
             in_stock: Only return in-stock parts
             basic_only: Only return JLCPCB basic parts
+            package: Optional package filter applied to the offline-catalog
+                fallback (e.g. ``"0402"``); ignored by the live API path.
 
         Returns:
             SearchResult with matching parts
+
+        Raises:
+            LCSCForbiddenError: If the live API returns 403 *and* no offline
+                catalog is available to fall back to (unchanged behavior).
+            LCSCDependencyMissingError: If the ``requests`` extra is missing
+                *and* no offline catalog is available.
         """
-        import requests
+        catalog = self._get_catalog()
+
+        # When requests is unavailable the live API cannot be reached at all.
+        # Serve directly from the offline catalog if one is synced; otherwise
+        # preserve the historical dependency error.
+        if not _requests_installed():
+            if catalog is not None and catalog.available:
+                return self._catalog_search(query, page, page_size, in_stock, package, catalog)
+            raise LCSCDependencyMissingError(PARTS_INSTALL_HINT)
 
         payload = {
             "keyword": query,
@@ -673,8 +731,20 @@ class LCSCClient:
 
         try:
             data = self._make_request(SEARCH_URL, payload)
-        except requests.RequestException as e:
+        except LCSCForbiddenError:
+            # 403 circuit breaker -- fall through to the offline catalog rather
+            # than propagating the error, when a catalog is available.
+            if catalog is not None and catalog.available:
+                logger.warning("Live search API 403'd -- falling back to offline catalog")
+                return self._catalog_search(query, page, page_size, in_stock, package, catalog)
+            raise
+        except _request_exception_type() as e:
             logger.error(f"Search request failed: {e}")
+            # Other network failure -- fall through to the offline catalog when
+            # available, else preserve the historical empty-result behavior.
+            if catalog is not None and catalog.available:
+                logger.warning("Live search API failed -- falling back to offline catalog")
+                return self._catalog_search(query, page, page_size, in_stock, package, catalog)
             return SearchResult(query=query)
 
         if data is None or data.get("code") != 200:
@@ -702,6 +772,42 @@ class LCSCClient:
             query=query,
             parts=parts,
             total_count=total,
+            page=page,
+            page_size=page_size,
+        )
+
+    def _catalog_search(
+        self,
+        query: str,
+        page: int,
+        page_size: int,
+        in_stock: bool,
+        package: str | None,
+        catalog: JlcpartsCatalog,
+    ) -> SearchResult:
+        """Serve a :meth:`search` from the offline jlcparts catalog.
+
+        Wraps :meth:`JlcpartsCatalog.search` and packages the resulting
+        candidate pool into a :class:`SearchResult` shaped identically to the
+        live-API path so downstream ranking (``PartMatcher``) is unchanged.
+        Results are capped at ``page_size * 5`` (matching the live API's
+        ``page_size`` cap intent while leaving headroom for the caller's
+        confidence re-ranking).
+        """
+        min_stock = 1 if in_stock else 0
+        parts = catalog.search(
+            query,
+            package=package,
+            min_stock=min_stock,
+            limit=max(page_size * 5, page_size),
+        )
+        if self.cache:
+            for part in parts:
+                self.cache.put(part)
+        return SearchResult(
+            query=query,
+            parts=parts,
+            total_count=len(parts),
             page=page,
             page_size=page_size,
         )

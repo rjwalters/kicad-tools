@@ -787,7 +787,12 @@ class TestLCSCClientExtended:
             assert "C789" in calls
 
     def test_search_error_handling(self, tmp_path):
-        """Test search error handling."""
+        """Test search error handling.
+
+        A generic RequestException with no offline catalog returns an empty
+        result (unchanged). ``use_local_catalog=False`` keeps this deterministic
+        even when a real catalog is synced on the test machine (#4126).
+        """
         with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
             import requests
 
@@ -796,7 +801,7 @@ class TestLCSCClientExtended:
             from kicad_tools.parts import LCSCClient, PartsCache
 
             cache = PartsCache(db_path=tmp_path / "cache.db")
-            client = LCSCClient(cache=cache)
+            client = LCSCClient(cache=cache, use_local_catalog=False)
 
             results = client.search("test")
             assert len(results.parts) == 0
@@ -1481,14 +1486,21 @@ class TestLCSCClientCircuitBreaker:
             assert client._api_forbidden is False
 
     def test_search_raises_forbidden_on_403(self, tmp_path):
-        """LCSCClient.search propagates LCSCForbiddenError from _make_request."""
+        """LCSCClient.search propagates LCSCForbiddenError when no catalog exists.
+
+        With the offline fallback disabled (or no catalog synced), a 403 from
+        ``_make_request`` still propagates unchanged. ``use_local_catalog=False``
+        makes this deterministic regardless of whether a real catalog happens to
+        be synced on the test machine (#4126).
+        """
         from kicad_tools.parts import LCSCClient, PartsCache
         from kicad_tools.parts.lcsc import LCSCForbiddenError
 
         cache = PartsCache(db_path=tmp_path / "cache.db")
-        client = LCSCClient(cache=cache, rate_limit=0)
+        client = LCSCClient(cache=cache, rate_limit=0, use_local_catalog=False)
         client._api_forbidden = True  # Pre-trip
 
-        # search() catches requests.RequestException but not LCSCForbiddenError
+        # search() catches LCSCForbiddenError only to fall back to a catalog;
+        # with the catalog disabled it re-raises as before.
         with pytest.raises(LCSCForbiddenError):
             client.search("100nF 0402")
