@@ -29,7 +29,7 @@ def run_sch_command(args) -> int:
             " add-label, cleanup-wires, remove-wire, insert-inline,"
         )
         print("          disconnect, reconnect-pin, move-component, remove-component, re-annotate,")
-        print("          repair-instances")
+        print("          repair-instances, fix-annotation")
         return 1
 
     schematic_path = Path(args.schematic)
@@ -629,6 +629,17 @@ def run_sch_command(args) -> int:
             per_sheet=getattr(args, "per_sheet", False),
             format=getattr(args, "format", "text"),
             unannotated_only=getattr(args, "unannotated_only", False),
+        )
+
+    elif args.sch_command == "fix-annotation":
+        from ..sch_fix_annotation import run_fix_annotation
+
+        return run_fix_annotation(
+            schematic_path=schematic_path,
+            dry_run=getattr(args, "dry_run", False),
+            backup=getattr(args, "backup", True),
+            format=getattr(args, "format", "text"),
+            skip_net_check=getattr(args, "skip_net_check", False),
         )
 
     return 1
