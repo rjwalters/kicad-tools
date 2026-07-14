@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-07-13
+
+### Summary
+
+Patch release. Restores the `uv`-based install path (broken upstream by the
+removal of `uv add --git` flags), hardens the JLCPCB offline-catalog parts flow,
+and fixes two check/routing net-classification bugs.
+
+### Added
+
+- **Offline-catalog fallback in `LCSCClient.search()`** (#4131) — fall back to
+  the local jlcparts catalog when the official API is unavailable
+
+### Fixed
+
+- **Installation via `uv`** (#4122) — use a `git+URL` direct reference instead
+  of the removed `uv add --git` flags
+- **Split jlcparts archive extraction** (#4125) — stream-extract multi-part
+  archives that Python's `zipfile` rejects
+- **Cross-type LCSC value matching** (#4130) — reject resistor-vs-capacitor
+  value mismatches
+- **Floating-pin hole-pair classification** (#4129) — classify floating-pin
+  hole pairs as different-net, not same-net
+
 ## [0.15.0] - 2026-07-13
 
 ### Added
