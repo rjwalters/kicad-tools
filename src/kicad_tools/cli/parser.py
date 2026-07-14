@@ -1450,6 +1450,37 @@ def _add_sch_parser(subparsers) -> None:
         default="text",
     )
 
+    # sch fix-annotation
+    sch_fix_annotation = sch_subparsers.add_parser(
+        "fix-annotation",
+        help=(
+            "Hierarchy-aware power/flag annotation repair "
+            "(net-neutrality gated)"
+        ),
+    )
+    sch_fix_annotation.add_argument("schematic", help="Path to root .kicad_sch file")
+    sch_fix_annotation.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    sch_fix_annotation.add_argument(
+        "--backup",
+        action="store_true",
+        help="Create backup before modifying",
+    )
+    sch_fix_annotation.add_argument(
+        "--skip-net-check",
+        action="store_true",
+        help="Skip the net-neutrality gate (unsafe; e.g. no kicad-cli)",
+    )
+    sch_fix_annotation.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+    )
+
 
 def _add_pcb_parser(subparsers) -> None:
     """Add PCB subcommand parser with its subcommands."""
