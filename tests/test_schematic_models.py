@@ -2725,6 +2725,98 @@ class TestWireCollisionDetection:
         assert "0" in s and "100" in s  # target wire coordinates
 
 
+class TestCollinearNetConflict:
+    """validate() emits an error when overlapping wires carry different nets.
+
+    Issue #4143: once the connectivity graph unions collinear-overlapping /
+    T-touching wires, two stubs labelled with *different* nets that overlap
+    geometrically get merged into one net — almost always an unintended
+    short.  validate() surfaces this as a new ``collinear_net_conflict``
+    error (distinct from the ``missing_junction`` warning).
+    """
+
+    def test_collinear_overlap_different_nets_is_error(self):
+        """Two overlapping stubs with different labels -> error."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.wires.append(Wire(x1=100, y1=100, x2=109, y2=100))
+        sch.wires.append(Wire(x1=103, y1=100, x2=112, y2=100))
+        sch.labels.append(Label(text="NET_A", x=100, y=100))
+        sch.labels.append(Label(text="NET_B", x=112, y=100))
+
+        issues = sch.validate()
+        conflicts = [i for i in issues if i["type"] == "collinear_net_conflict"]
+        assert len(conflicts) == 1
+        assert conflicts[0]["severity"] == "error"
+        assert "NET_A" in conflicts[0]["message"]
+        assert "NET_B" in conflicts[0]["message"]
+
+    def test_t_touch_different_nets_is_error(self):
+        """A T-touch merging two different nets -> error."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        # Horizontal A [100,112] labelled NET_A; vertical B from interior
+        # point (106,100) up, labelled NET_B at its free end.
+        sch.wires.append(Wire(x1=100, y1=100, x2=112, y2=100))
+        sch.wires.append(Wire(x1=106, y1=100, x2=106, y2=90))
+        sch.labels.append(Label(text="NET_A", x=100, y=100))
+        sch.labels.append(Label(text="NET_B", x=106, y=90))
+
+        issues = sch.validate()
+        conflicts = [i for i in issues if i["type"] == "collinear_net_conflict"]
+        assert len(conflicts) == 1
+        assert conflicts[0]["severity"] == "error"
+
+    def test_same_net_overlap_no_error(self):
+        """Overlapping stubs with the SAME net name are not flagged."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.wires.append(Wire(x1=100, y1=100, x2=109, y2=100))
+        sch.wires.append(Wire(x1=103, y1=100, x2=112, y2=100))
+        sch.labels.append(Label(text="VBUS", x=100, y=100))
+        sch.labels.append(Label(text="VBUS", x=112, y=100))
+
+        issues = sch.validate()
+        conflicts = [i for i in issues if i["type"] == "collinear_net_conflict"]
+        assert conflicts == []
+
+    def test_no_overlap_no_error(self):
+        """Non-overlapping stubs with different nets are not flagged."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.wires.append(Wire(x1=100, y1=100, x2=105, y2=100))
+        sch.wires.append(Wire(x1=110, y1=100, x2=115, y2=100))  # gap [105,110]
+        sch.labels.append(Label(text="NET_A", x=100, y=100))
+        sch.labels.append(Label(text="NET_B", x=115, y=100))
+
+        issues = sch.validate()
+        conflicts = [i for i in issues if i["type"] == "collinear_net_conflict"]
+        assert conflicts == []
+
+    def test_power_vs_power_overlap_is_error(self):
+        """Interleaved power stubs (+3.3V/GND) overlap -> error (softstart)."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.wires.append(Wire(x1=100, y1=100, x2=108, y2=100))
+        sch.wires.append(Wire(x1=104, y1=100, x2=112, y2=100))
+        sch.power_symbols.append(PowerSymbol(lib_id="power:+3.3V", x=100, y=100, rotation=0))
+        sch.power_symbols.append(PowerSymbol(lib_id="power:GND", x=112, y=100, rotation=0))
+
+        issues = sch.validate()
+        conflicts = [i for i in issues if i["type"] == "collinear_net_conflict"]
+        assert len(conflicts) == 1
+        assert conflicts[0]["severity"] == "error"
+        assert "+3.3V" in conflicts[0]["message"]
+        assert "GND" in conflicts[0]["message"]
+
+    def test_one_unlabelled_wire_no_error(self):
+        """Overlap where only one wire is labelled is not a conflict."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.wires.append(Wire(x1=100, y1=100, x2=109, y2=100))
+        sch.wires.append(Wire(x1=103, y1=100, x2=112, y2=100))
+        sch.labels.append(Label(text="NET_A", x=100, y=100))
+        # second wire carries no label
+
+        issues = sch.validate()
+        conflicts = [i for i in issues if i["type"] == "collinear_net_conflict"]
+        assert conflicts == []
+
+
 class TestSymbolDefParsing:
     """Tests for SymbolDef parsing methods."""
 

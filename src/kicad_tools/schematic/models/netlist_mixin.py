@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .wire_geometry import wire_segments_connect
+
 if TYPE_CHECKING:
     pass
 
@@ -92,6 +94,25 @@ class SchematicNetlistMixin:
             wire_segments.append((p1, p2))
             # Connect wire endpoints
             union(p1, p2)
+
+        # Union wires with each other on collinear overlap or mid-segment
+        # T-touch — matching KiCad, which merges the nets of any two touching
+        # or overlapping wire segments, not only those that share an exact
+        # endpoint (issue #4143).  The endpoint case is already handled by the
+        # loop above.  All-pairs O(n^2) is fine at typical schematic sizes
+        # (check_wire_collisions() already scans this way with no reported
+        # slowdown); no spatial index is warranted here.
+        #
+        # NOTE: this is wire-to-wire unioning only.  It deliberately does NOT
+        # relax the pin-to-wire endpoint-only rule from #4020/#4003 — pins
+        # still attach to wires solely at endpoints/junctions (see
+        # connect_to_wire(endpoint_only=True) below).
+        for i in range(len(wire_segments)):
+            a_start, a_end = wire_segments[i]
+            for j in range(i + 1, len(wire_segments)):
+                b_start, b_end = wire_segments[j]
+                if wire_segments_connect(a_start, a_end, b_start, b_end):
+                    union(a_start, b_start)
 
         # Helper to check if point is on a wire segment
         def point_on_segment(point: tuple, seg_start: tuple, seg_end: tuple) -> bool:
