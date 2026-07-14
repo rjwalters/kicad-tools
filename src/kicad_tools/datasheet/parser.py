@@ -22,35 +22,50 @@ if TYPE_CHECKING:
     from fitz import Page as FitzPage
 
 
-def _check_markitdown() -> None:
-    """Check if markitdown is available."""
+def _check_markitdown(context: str = "PDF to markdown conversion") -> None:
+    """Check if markitdown is available.
+
+    Args:
+        context: Name of the operation requiring the dependency, used to make
+            the error message name the actual failing operation.
+    """
     try:
         import markitdown  # noqa: F401
     except ImportError as e:
         raise ImportError(
-            "markitdown is required for PDF to markdown conversion. "
+            f"markitdown is required for {context}. "
             "Install with: pip install kicad-tools[datasheet]"
         ) from e
 
 
-def _check_pymupdf() -> None:
-    """Check if PyMuPDF is available."""
+def _check_pymupdf(context: str = "image extraction") -> None:
+    """Check if PyMuPDF is available.
+
+    Args:
+        context: Name of the operation requiring the dependency, used to make
+            the error message name the actual failing operation (e.g. "reading
+            PDF page count") rather than always saying "image extraction".
+    """
     try:
         import fitz  # noqa: F401
     except ImportError as e:
         raise ImportError(
-            "PyMuPDF is required for image extraction. "
-            "Install with: pip install kicad-tools[datasheet]"
+            f"PyMuPDF is required for {context}. Install with: pip install kicad-tools[datasheet]"
         ) from e
 
 
-def _check_pdfplumber() -> None:
-    """Check if pdfplumber is available."""
+def _check_pdfplumber(context: str = "table extraction") -> None:
+    """Check if pdfplumber is available.
+
+    Args:
+        context: Name of the operation requiring the dependency, used to make
+            the error message name the actual failing operation.
+    """
     try:
         import pdfplumber  # noqa: F401
     except ImportError as e:
         raise ImportError(
-            "pdfplumber is required for table extraction. "
+            f"pdfplumber is required for {context}. "
             "Install with: pip install kicad-tools[datasheet]"
         ) from e
 
@@ -122,7 +137,7 @@ class DatasheetParser:
     def page_count(self) -> int:
         """Get the total number of pages in the PDF."""
         if self._page_count is None:
-            _check_pymupdf()
+            _check_pymupdf(context="reading PDF page count")
             import fitz
 
             with fitz.open(self.path) as doc:

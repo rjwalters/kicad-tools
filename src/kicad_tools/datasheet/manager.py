@@ -24,6 +24,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _missing_dependency_message(import_errors: dict[str, str]) -> str:
+    """Build a single install-guidance message from per-source ImportErrors.
+
+    Every configured datasheet source failed because an optional dependency is
+    missing. The per-source messages are effectively identical (they come from
+    the same ``@requires_requests`` guard), so collapse them into one clear
+    line when they agree, and fall back to listing each source otherwise.
+    """
+    unique = set(import_errors.values())
+    if len(unique) == 1:
+        # All sources reported the same missing dependency.
+        return next(iter(unique))
+    detail = "; ".join(f"{source}: {msg}" for source, msg in import_errors.items())
+    return f"Datasheet operations require an optional dependency that is not installed: {detail}"
+
+
 class DatasheetManager:
     """
     Unified manager for datasheet search and download.
@@ -102,12 +118,21 @@ class DatasheetManager:
         """
         all_results = []
         errors = {}
+        import_errors: dict[str, str] = {}
 
         for source in self.sources:
             try:
                 results = source.search(part_number)
                 all_results.extend(results)
                 logger.debug(f"Source {source.name}: found {len(results)} results")
+            except ImportError as e:
+                # A missing optional dependency (e.g. ``requests`` guarded by
+                # ``@requires_requests``). Track separately from ordinary
+                # search failures so the caller can surface install guidance
+                # instead of a misleading "no datasheet found".
+                logger.warning(f"Source {source.name} failed: {e}")
+                errors[source.name] = str(e)
+                import_errors[source.name] = str(e)
             except Exception as e:
                 logger.warning(f"Source {source.name} failed: {e}")
                 errors[source.name] = str(e)
@@ -127,6 +152,7 @@ class DatasheetManager:
             query=part_number,
             results=unique_results,
             errors=errors,
+            import_errors=import_errors,
         )
 
     def download(
@@ -232,6 +258,13 @@ class DatasheetManager:
         search_result = self.search(part_number)
 
         if not search_result.has_results:
+            # Distinguish "no results because nothing matched" from "no results
+            # because every configured source is missing an optional dependency".
+            # In the latter case the real problem is a missing install, not a
+            # lookup miss, so surface install guidance instead of the misleading
+            # "No datasheet found" (issue #4139).
+            if search_result.all_failures_are_import_errors:
+                raise ImportError(_missing_dependency_message(search_result.import_errors))
             raise DatasheetSearchError(f"No datasheet found for '{part_number}'")
 
         # Try each candidate in confidence order, falling through to the next
