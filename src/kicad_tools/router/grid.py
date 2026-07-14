@@ -2748,6 +2748,71 @@ class RoutingGrid:
                             )
             return blocked_count
 
+    def reopen_stub_terminal(self, x: float, y: float, layer: Layer, net: int) -> tuple[int, int]:
+        """Carve a bare boundary stub endpoint open as a same-net A* target.
+
+        Issue #4170 (region-bounded routing, Phase 2b-1): after
+        ``load_pcb_for_routing`` runs ``mark_route`` on every surviving stub
+        segment, the stub's boundary endpoint cell is ``blocked`` with a
+        per-segment clearance halo.  ``_mark_segment`` sets ``cell.net`` to the
+        stub's net on FIRST block, so a stub sitting alone is already reachable
+        by its own net (the pathfinder passes own-net blocked cells).  But when
+        a FOREIGN net's copper halo paints the tip cell first, ``_mark_segment``
+        leaves ``cell.net`` foreign ("already blocked, don't change net"), and
+        the stub tip is no longer a valid landing for its own net -- A* lands on
+        a nearby own-net cell inside the default pad-approach box instead of the
+        true tip, so the reconnection is geometrically wrong.
+
+        This method makes the exact tip cell a same-net-reachable target by
+        re-asserting ``cell.net = net`` (keeping it ``blocked`` so foreign nets
+        still see it as a hard obstacle -- identical semantics to a pad's own
+        cell).  Only ONE cell (the tip) is touched; the rest of the stub halo
+        stays intact, so this never opens a clearance gap for a different net.
+        Both the Python grid and the paired C++ mirror are updated so the
+        production A* sees the same reachable target.
+
+        Args:
+            x, y: WORLD (sheet-absolute) coordinates of the stub tip.
+            layer: Copper layer the stub is on.
+            net: The stub's net id -- the only net for which the cell becomes
+                reachable.
+
+        Returns:
+            The ``(gx, gy)`` grid cell that was reopened.
+        """
+        with self._acquire_lock():
+            # Capture the static-blockage snapshot before mutating so rip-up
+            # restores the reopened tip rather than re-blocking it mid-route
+            # (parity with mark_route / mark_region_bound, Issue #3545 / #4170).
+            self._ensure_static_blockage_snapshot()
+
+            gx, gy = self.world_to_grid(x, y)
+            layer_idx = self.layer_to_index(layer.value)
+            cell = self.grid[layer_idx][gy][gx]
+            # Keep the cell blocked (it is real stub copper) but own it for the
+            # stub's net so the pathfinder treats it as an own-net -- reachable --
+            # cell while foreign nets still see a hard obstacle.
+            cell.blocked = True
+            cell.net = net
+            cell.original_net = net
+            # Not pad metal, not a keepout: leave is_obstacle/pad_blocked False so
+            # the own-net pathfinder can traverse and land on it.
+            cell.is_obstacle = False
+            cell.pad_blocked = False
+
+            cpp_grid = getattr(self, "_cpp_grid", None)
+            if cpp_grid is not None:
+                # Mirror to the C++ grid: blocked, owned by ``net``, not pad metal.
+                cpp_grid._impl.mark_blocked(
+                    int(gx),
+                    int(gy),
+                    int(layer_idx),
+                    int(net),
+                    False,  # not is_obstacle
+                    False,  # not pad_blocked
+                )
+            return (gx, gy)
+
     def is_blocked(self, gx: int, gy: int, layer: Layer, net: int = 0) -> bool:
         """Check if a cell is blocked for routing."""
         if not (0 <= gx < self.cols and 0 <= gy < self.rows):

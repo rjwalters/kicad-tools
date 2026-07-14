@@ -1257,6 +1257,15 @@ def _finalize_routes(
         source_routes = preserved_routes if preserved_routes is not None else router.existing_routes
         if source_routes:
             routed_net_ids = {r.net for r in router.routes}
+            # Issue #4170 (Phase 2b-1): a stub net IS routed (the in-region
+            # reconnection) but its OUTSIDE boundary-stub copper must still be
+            # preserved -- the new in-region trace joins the stub, it does not
+            # replace it.  The router records its stub net ids in
+            # ``_stub_terminals``; keep those nets' existing copper by removing
+            # them from the exclusion set.
+            stub_net_ids = set(getattr(router, "_stub_terminals", {}) or {})
+            if stub_net_ids:
+                routed_net_ids = routed_net_ids - stub_net_ids
             preserved_sexp = _serialize_preserved_routes(
                 source_routes, exclude_net_ids=routed_net_ids
             )
@@ -3596,6 +3605,10 @@ def route_with_layer_escalation(
                     # Issue #4148: region-bounded routing.  When set, cells
                     # outside the board-relative box are marked as obstacles.
                     region=getattr(args, "_region_box", None),
+                    # Issue #4170 (Phase 2b-1): board-relative boundary stub
+                    # terminals whose tip cells are carved open as same-net
+                    # reconnection targets (None when no --region / no stubs).
+                    stub_terminals=getattr(args, "_stub_terminals", None),
                     # Issue #3877: thread the C++ iteration backstop through the
                     # layer-escalation sub-router too.  Without this the
                     # escalation-mode Autorouter (board-01/03 et al.) routes with
@@ -4515,6 +4528,10 @@ def route_with_rule_relaxation(
                     load_existing_routes=getattr(args, "preserve_existing", False),
                     # Issue #4148: region-bounded routing (see main()).
                     region=getattr(args, "_region_box", None),
+                    # Issue #4170 (Phase 2b-1): board-relative boundary stub
+                    # terminals whose tip cells are carved open as same-net
+                    # reconnection targets (None when no --region / no stubs).
+                    stub_terminals=getattr(args, "_stub_terminals", None),
                 )
         except Exception as e:
             if not quiet:
@@ -6620,6 +6637,10 @@ def route_with_combined_escalation(
                         load_existing_routes=getattr(args, "preserve_existing", False),
                         # Issue #4148: region-bounded routing (see main()).
                         region=getattr(args, "_region_box", None),
+                        # Issue #4170 (Phase 2b-1): board-relative boundary stub
+                        # terminals whose tip cells are carved open as same-net
+                        # reconnection targets (None when no --region / no stubs).
+                        stub_terminals=getattr(args, "_stub_terminals", None),
                     )
             except Exception as e:
                 if not quiet:
@@ -7217,6 +7238,76 @@ def _parse_region_box(
     return (x1, y1, x2, y2)
 
 
+def _detect_region_stub_terminals(pcb, region_box: tuple[float, float, float, float], skip: set):
+    """Run the shared boundary-stub detector against a loaded schema ``PCB``.
+
+    Issue #4170 (Phase 2b-1).  Adapts the board-relative schema geometry
+    (``pcb._segments`` / ``pcb._vias`` / footprint pads -- all rebased to
+    ``pcb._board_origin``) into the pure detector's plain-data shapes and returns
+    ``{net_id: [StubTerminal, ...]}`` in the SAME board-relative frame as
+    ``region_box``.  ``load_pcb_for_routing`` adds the board origin when it
+    carves the tips, so the whole pipeline stays in board-relative coordinates
+    (matching ``pcb strip --region`` / ``route --region``).
+
+    Both ``route`` (this function) and the future ``route-auto`` orchestrator
+    (Phase 2c, #4173) call the SAME ``detect_boundary_stub_terminals`` producer,
+    so stub geometry is never re-derived independently (the #3428 foot-gun).
+    """
+    from kicad_tools.core.types import CopperLayer
+    from kicad_tools.router.stub_terminals import (
+        PadLocation,
+        RegionBox,
+        StubSegment,
+        detect_boundary_stub_terminals,
+    )
+
+    rx1, ry1, rx2, ry2 = region_box
+    region = RegionBox(rx1, ry1, rx2, ry2)
+
+    def _layer(name: str):
+        try:
+            return CopperLayer.from_kicad_name(name)
+        except ValueError:
+            return None
+
+    seg_inputs: list[StubSegment] = []
+    for seg in pcb._segments:
+        if not seg.net_name or seg.net_name in skip:
+            continue
+        layer = _layer(seg.layer)
+        if layer is None:
+            continue
+        seg_inputs.append(
+            StubSegment(
+                net_id=seg.net_number,
+                net_name=seg.net_name,
+                x1=seg.start[0],
+                y1=seg.start[1],
+                x2=seg.end[0],
+                y2=seg.end[1],
+                layer=layer,
+                uuid=getattr(seg, "uuid", "") or None,
+            )
+        )
+
+    pad_inputs: list[PadLocation] = []
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            net_name = getattr(pad, "net_name", "") or ""
+            if not net_name:
+                continue
+            pos = pcb.get_pad_position(fp.reference, pad.number)
+            if pos is None:
+                continue
+            pad_inputs.append(PadLocation(net_id=pad.net_number, x=pos[0], y=pos[1]))
+    # Vias are coincidence-rejection reference points too (a via on the boundary
+    # routes "for free" and must not be double-targeted as a bare stub).
+    for via in pcb._vias:
+        pad_inputs.append(PadLocation(net_id=via.net_number, x=via.position[0], y=via.position[1]))
+
+    return detect_boundary_stub_terminals(seg_inputs, pad_inputs, region)
+
+
 def _parse_and_apply_region(args, pcb_path: Path, region_arg: str) -> int:
     """Validate --region, stamp ``args._region_box``, and gate unreachable nets.
 
@@ -7302,10 +7393,30 @@ def _parse_and_apply_region(args, pcb_path: Path, region_arg: str) -> int:
     def _inside(px: float, py: float) -> bool:
         return x1 <= px <= x2 and y1 <= py <= y2
 
+    # Issue #4170 (Phase 2b-1): run the shared boundary-stub detector so a net
+    # with pad(s) outside the region can still be routed when a bare boundary
+    # stub on the same net provides in-region reconnection access.  The detector
+    # already applies the four-part spec (boundary endpoint, other-end-outside,
+    # not pad-coincident, net straddles the boundary), so a returned terminal
+    # means "this net has a reconnectable stub".
+    try:
+        stub_terminals = _detect_region_stub_terminals(pcb, (x1, y1, x2, y2), skip)
+    except Exception as e:  # pragma: no cover - detector should not raise
+        print(f"Error detecting boundary stub terminals for --region: {e}", file=sys.stderr)
+        return 1
+    # Map net_id -> net_name so we can key stub reachability by name.
+    stub_net_names: set[str] = set()
+    for terminals in stub_terminals.values():
+        for term in terminals:
+            stub_net_names.add(term.net_name)
+    # Stash for the load_pcb_for_routing call sites to forward (board-relative).
+    args._stub_terminals = stub_terminals or None
+
     # A net is routable in-region only if it has >= 2 pads AND every pad is
     # inside the box.  Single-pad nets have nothing to route.  Nets with zero
     # in-region pads are simply not this region's concern (ignored).  Nets
-    # with SOME pads inside and SOME outside need outside access -> fail.
+    # with SOME pads inside and SOME outside need outside access; Phase 2b-1
+    # reconnects them when a same-net boundary stub exists, else they fail.
     unreachable: list[str] = []
     routable_nets: list[str] = []
     skip_outside: list[str] = []
@@ -7318,8 +7429,17 @@ def _parse_and_apply_region(args, pcb_path: Path, region_arg: str) -> int:
             skip_outside.append(net_name)
             continue
         if len(inside) != len(positions):
-            unreachable.append(net_name)
+            # Pad(s) outside the region.  Reachable in Phase 2b-1 iff a same-net
+            # boundary stub gives in-region reconnection access.
+            if net_name in stub_net_names:
+                routable_nets.append(net_name)
+            else:
+                unreachable.append(net_name)
         elif len(positions) >= 2:
+            routable_nets.append(net_name)
+        elif net_name in stub_net_names:
+            # A single in-region pad plus a boundary stub is routable: the stub
+            # tip is the second target.
             routable_nets.append(net_name)
         else:
             # Single in-region pad -- nothing to route; skip so it is left as-is.
@@ -7332,8 +7452,8 @@ def _parse_and_apply_region(args, pcb_path: Path, region_arg: str) -> int:
         more = "" if len(unreachable) <= 10 else f" (+{len(unreachable) - 10} more)"
         print(
             "Error: --region cannot route the following net(s) because they "
-            "have pad(s) outside the region and Phase 2a does not reconnect to "
-            f"bare boundary stubs (deferred to Phase 2b): {preview}{more}",
+            "have pad(s) outside the region with no same-net boundary stub to "
+            f"reconnect to: {preview}{more}",
             file=sys.stderr,
         )
         return 1
@@ -8707,6 +8827,11 @@ def main(argv: list[str] | None = None) -> int:
     # rejected here (mirroring the ``pcb strip --region`` CLI validation) so
     # no routing budget is spent on an invalid request.
     args._region_box = None
+    # Issue #4170 (Phase 2b-1): board-relative boundary stub terminals detected
+    # during region validation, forwarded to load_pcb_for_routing so their tip
+    # cells are carved open as same-net reconnection targets.  None when no
+    # --region or no stubs.
+    args._stub_terminals = None
     _region_arg = getattr(args, "region", None)
     if _region_arg:
         rc = _parse_and_apply_region(args, pcb_path, _region_arg)
@@ -9274,6 +9399,10 @@ def main(argv: list[str] | None = None) -> int:
                 load_existing_routes=getattr(args, "preserve_existing", False),
                 # Issue #4148: region-bounded routing (see main()).
                 region=getattr(args, "_region_box", None),
+                # Issue #4170 (Phase 2b-1): board-relative boundary stub
+                # terminals whose tip cells are carved open as same-net
+                # reconnection targets (None when no --region / no stubs).
+                stub_terminals=getattr(args, "_stub_terminals", None),
                 # Issue #2610: thread --max-search-iterations through.
                 # The inner parser declares this flag with default=0 (Issue
                 # #2819), so the attribute is guaranteed to exist; the
@@ -9328,6 +9457,10 @@ def main(argv: list[str] | None = None) -> int:
                 load_existing_routes=getattr(args, "preserve_existing", False),
                 # Issue #4148: region-bounded routing (see main()).
                 region=getattr(args, "_region_box", None),
+                # Issue #4170 (Phase 2b-1): board-relative boundary stub
+                # terminals whose tip cells are carved open as same-net
+                # reconnection targets (None when no --region / no stubs).
+                stub_terminals=getattr(args, "_stub_terminals", None),
                 max_search_iterations=args.max_search_iterations or 0,
                 per_net_iterations=getattr(args, "per_net_iterations", 0) or 0,
             )

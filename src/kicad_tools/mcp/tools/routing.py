@@ -500,8 +500,7 @@ def route_net_auto(
         region_box = (rx1, ry1, rx2, ry2)
 
         # Reachability gate: every pad of the routed net must lie inside the box
-        # (board-relative).  A pad outside needs outside access we do not
-        # provide in Phase 2a (bare-stub reconnection is Phase 2b).
+        # (board-relative).  A pad outside needs outside access.
         outside_pads = []
         for fp_ in pcb.footprints:
             for pad in fp_.pads:
@@ -513,7 +512,75 @@ def route_net_auto(
                 if not (rx1 <= pos[0] <= rx2 and ry1 <= pos[1] <= ry2):
                     outside_pads.append((fp_.reference, pad.number))
         if outside_pads:
+            # Issue #4170 (Phase 2b-1) deferral gate: bare-stub reconnection is
+            # wired for ``kct route --region`` but NOT for the ``route-auto``
+            # orchestrator surface -- that is Phase 2c (#4173).  Detect whether
+            # this net actually has a same-net boundary stub so the message is
+            # accurate: a stub-endpoint net is explicitly deferred to Phase 2c
+            # (it must NOT silently fall back to pad-only and drop the stub);
+            # a net with no stub is simply unreachable.
+            has_stub = False
+            try:
+                from kicad_tools.core.types import CopperLayer as _CopperLayer
+                from kicad_tools.router.stub_terminals import (
+                    PadLocation as _PadLoc,
+                )
+                from kicad_tools.router.stub_terminals import (
+                    RegionBox as _RegionBox,
+                )
+                from kicad_tools.router.stub_terminals import (
+                    StubSegment as _StubSeg,
+                )
+                from kicad_tools.router.stub_terminals import (
+                    detect_boundary_stub_terminals as _detect,
+                )
+
+                _region = _RegionBox(rx1, ry1, rx2, ry2)
+                _segs = []
+                for _s in pcb._segments:
+                    try:
+                        _layer = _CopperLayer.from_kicad_name(_s.layer)
+                    except ValueError:
+                        continue
+                    _segs.append(
+                        _StubSeg(
+                            net_id=_s.net_number,
+                            net_name=_s.net_name,
+                            x1=_s.start[0],
+                            y1=_s.start[1],
+                            x2=_s.end[0],
+                            y2=_s.end[1],
+                            layer=_layer,
+                            uuid=getattr(_s, "uuid", "") or None,
+                        )
+                    )
+                _pads = []
+                for _fp in pcb.footprints:
+                    for _pad in _fp.pads:
+                        _pos = pcb.get_pad_position(_fp.reference, _pad.number)
+                        if _pos is not None:
+                            _pads.append(_PadLoc(net_id=_pad.net_number, x=_pos[0], y=_pos[1]))
+                _detected = _detect(_segs, _pads, _region)
+                has_stub = any(
+                    t.net_name == net_name for terms in _detected.values() for t in terms
+                )
+            except Exception:
+                has_stub = False
+
             preview = ", ".join(f"{r}.{p}" for r, p in outside_pads[:6])
+            if has_stub:
+                msg = (
+                    f"--region: net '{net_name}' has a same-net boundary stub, but "
+                    "stub reconnection is not yet wired for route-auto "
+                    "(orchestrator parity is deferred to Phase 2c, #4173). Use "
+                    "'kct route --region' for stub reconnection."
+                )
+            else:
+                msg = (
+                    f"--region cannot route net '{net_name}': pad(s) {preview} "
+                    "lie outside the region with no same-net boundary stub to "
+                    "reconnect to."
+                )
             return {
                 "success": False,
                 "net_name": net_name,
@@ -522,11 +589,7 @@ def route_net_auto(
                 "repair_actions": [],
                 "warnings": [],
                 "performance": {},
-                "error_message": (
-                    f"--region cannot route net '{net_name}': pad(s) {preview} "
-                    "lie outside the region, and Phase 2a does not reconnect to "
-                    "bare boundary stubs (deferred to Phase 2b)."
-                ),
+                "error_message": msg,
                 "alternative_strategies": [],
             }
 
