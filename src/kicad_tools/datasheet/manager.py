@@ -234,8 +234,32 @@ class DatasheetManager:
         if not search_result.has_results:
             raise DatasheetSearchError(f"No datasheet found for '{part_number}'")
 
-        # Download the best match
-        return self.download(search_result.results[0], output_dir=output_dir)
+        # Try each candidate in confidence order, falling through to the next
+        # whenever a download fails (e.g. a source returns an HTML wrapper page
+        # instead of a PDF, or a transient network error). Only raise once every
+        # candidate has been exhausted, aggregating a per-candidate reason so the
+        # caller can see why each source failed rather than just the last error.
+        failures: dict[str, str] = {}
+        for index, result in enumerate(search_result.results):
+            try:
+                return self.download(result, output_dir=output_dir, force=force)
+            except DatasheetDownloadError as e:
+                # Key by source; disambiguate multiple candidates from the same
+                # source so one failure does not overwrite another's reason.
+                key = result.source
+                if key in failures:
+                    key = f"{result.source}#{index}"
+                failures[key] = str(e)
+                logger.warning(
+                    f"Download candidate {index} ({result.source}) failed for '{part_number}': {e}"
+                )
+
+        # Every candidate failed — surface all per-source reasons, not just the last.
+        reasons = "; ".join(f"{source}: {reason}" for source, reason in failures.items())
+        raise DatasheetDownloadError(
+            f"Failed to download datasheet for '{part_number}' from any source. "
+            f"Tried {len(search_result.results)} candidate(s): {reasons}"
+        )
 
     def is_cached(self, part_number: str) -> bool:
         """

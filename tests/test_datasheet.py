@@ -512,6 +512,102 @@ class TestLCSCDatasheetSource:
 
             assert downloaded == output_path
             assert output_path.exists()
+            # The written file must actually be a PDF (magic bytes preserved).
+            assert output_path.read_bytes().startswith(b"%PDF-")
+
+    def test_download_rejects_html_payload(self, tmp_path):
+        """An HTML wrapper page (HTTP 200) must fail, not be saved as .pdf."""
+        from kicad_tools.datasheet.models import DatasheetResult
+        from kicad_tools.datasheet.sources import LCSCDatasheetSource
+
+        source = LCSCDatasheetSource()
+
+        with patch.object(source, "_get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.iter_content.return_value = [
+                b'<!doctype html>\n<html data-n-head-ssr lang="en_US">'
+            ]
+            mock_resp.headers = {"Content-Type": "text/html"}
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.get.return_value = mock_resp
+
+            result = DatasheetResult(
+                part_number="TEST",
+                manufacturer="Test",
+                description="Test",
+                datasheet_url="https://example.com/test.pdf",
+                source="lcsc",
+            )
+
+            output_path = tmp_path / "test.pdf"
+            with pytest.raises(DatasheetDownloadError) as exc_info:
+                source.download(result, output_path)
+
+            # The error names the source and includes a reason.
+            assert "lcsc" in str(exc_info.value)
+            # No partial/garbage file left behind.
+            assert not output_path.exists()
+            # No leftover temp files in the target directory either.
+            assert list(tmp_path.iterdir()) == []
+
+    def test_download_rejects_empty_payload(self, tmp_path):
+        """An empty body (no magic bytes) must fail rather than write 0 bytes."""
+        from kicad_tools.datasheet.models import DatasheetResult
+        from kicad_tools.datasheet.sources import LCSCDatasheetSource
+
+        source = LCSCDatasheetSource()
+
+        with patch.object(source, "_get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.iter_content.return_value = []
+            mock_resp.headers = {}
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.get.return_value = mock_resp
+
+            result = DatasheetResult(
+                part_number="TEST",
+                manufacturer="Test",
+                description="Test",
+                datasheet_url="https://example.com/test.pdf",
+                source="lcsc",
+            )
+
+            output_path = tmp_path / "test.pdf"
+            with pytest.raises(DatasheetDownloadError):
+                source.download(result, output_path)
+            assert not output_path.exists()
+
+    def test_download_file_helper_validates_pdf(self, tmp_path):
+        """The shared _download_file helper also guards against non-PDF payloads."""
+        from kicad_tools.datasheet.sources import LCSCDatasheetSource
+
+        source = LCSCDatasheetSource()
+
+        # Valid PDF passes through.
+        good_session = MagicMock()
+        good_resp = MagicMock()
+        good_resp.iter_content.return_value = [b"%PDF-1.5 body"]
+        good_resp.headers = {"Content-Type": "application/pdf"}
+        good_resp.raise_for_status = MagicMock()
+        good_session.get.return_value = good_resp
+
+        good_path = tmp_path / "good.pdf"
+        returned = source._download_file(good_session, "https://x/good.pdf", good_path, 30.0)
+        assert returned == good_path
+        assert good_path.read_bytes().startswith(b"%PDF-")
+
+        # HTML payload is rejected and no file is left behind.
+        bad_session = MagicMock()
+        bad_resp = MagicMock()
+        bad_resp.iter_content.return_value = [b"<!doctype html>"]
+        bad_resp.headers = {"Content-Type": "text/html"}
+        bad_resp.raise_for_status = MagicMock()
+        bad_session.get.return_value = bad_resp
+
+        bad_path = tmp_path / "bad.pdf"
+        with pytest.raises(DatasheetDownloadError):
+            source._download_file(bad_session, "https://x/bad.pdf", bad_path, 30.0)
+        assert not bad_path.exists()
 
     def test_download_failure(self, tmp_path):
         """Test download failure handling."""
@@ -585,6 +681,36 @@ class TestOctopartDatasheetSource:
             assert len(results) == 1
             assert results[0].part_number == "STM32F103C8T6"
             assert results[0].source == "octopart"
+
+    def test_download_rejects_html_payload(self, tmp_path):
+        """Octopart inherits the shared PDF guard via super().download()."""
+        from kicad_tools.datasheet.models import DatasheetResult
+        from kicad_tools.datasheet.sources import OctopartDatasheetSource
+
+        source = OctopartDatasheetSource(api_key="test-key")
+        source._last_request_time = 0.0  # avoid real sleep in _rate_limit
+
+        with patch.object(source, "_get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.iter_content.return_value = [b"<!doctype html><html></html>"]
+            mock_resp.headers = {"Content-Type": "text/html"}
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.get.return_value = mock_resp
+
+            result = DatasheetResult(
+                part_number="TEST",
+                manufacturer="Test",
+                description="Test",
+                datasheet_url="https://example.com/test.pdf",
+                source="octopart",
+            )
+
+            output_path = tmp_path / "test.pdf"
+            with pytest.raises(DatasheetDownloadError) as exc_info:
+                source.download(result, output_path)
+
+            assert "octopart" in str(exc_info.value)
+            assert not output_path.exists()
 
     def test_rate_limiting(self):
         """Test that rate limiting enforces delay."""
@@ -772,6 +898,127 @@ class TestDatasheetManager:
 
             with pytest.raises(DatasheetSearchError):
                 manager.download_by_part("NOTFOUND")
+
+    def test_download_by_part_falls_through_to_next_candidate(self, manager):
+        """First candidate fails validation; second candidate succeeds."""
+        from kicad_tools.datasheet.models import DatasheetResult
+
+        first = DatasheetResult(
+            part_number="STM32",
+            manufacturer="ST",
+            description="MCU",
+            datasheet_url="https://lcsc.example/shell.pdf",
+            source="lcsc",
+            confidence=0.9,
+        )
+        second = DatasheetResult(
+            part_number="STM32",
+            manufacturer="ST",
+            description="MCU",
+            datasheet_url="https://octo.example/real.pdf",
+            source="octopart",
+            confidence=0.8,
+        )
+
+        good = MagicMock(part_number="STM32", source="octopart")
+
+        with patch.object(manager, "search") as mock_search:
+            with patch.object(manager, "download") as mock_download:
+                mock_search.return_value = MagicMock(
+                    has_results=True,
+                    results=[first, second],
+                )
+                mock_download.side_effect = [
+                    DatasheetDownloadError("lcsc returned non-PDF content"),
+                    good,
+                ]
+
+                datasheet = manager.download_by_part("STM32")
+
+                assert datasheet is good
+                assert mock_download.call_count == 2
+
+    def test_download_by_part_all_candidates_fail(self, manager):
+        """When every candidate fails, error aggregates all per-source reasons."""
+        from kicad_tools.datasheet.models import DatasheetResult
+
+        first = DatasheetResult(
+            part_number="STM32",
+            manufacturer="ST",
+            description="MCU",
+            datasheet_url="https://lcsc.example/shell.pdf",
+            source="lcsc",
+            confidence=0.9,
+        )
+        second = DatasheetResult(
+            part_number="STM32",
+            manufacturer="ST",
+            description="MCU",
+            datasheet_url="https://octo.example/broken.pdf",
+            source="octopart",
+            confidence=0.8,
+        )
+
+        with patch.object(manager, "search") as mock_search:
+            with patch.object(manager, "download") as mock_download:
+                mock_search.return_value = MagicMock(
+                    has_results=True,
+                    results=[first, second],
+                )
+                mock_download.side_effect = [
+                    DatasheetDownloadError("lcsc returned non-PDF content"),
+                    DatasheetDownloadError("octopart network timeout"),
+                ]
+
+                with pytest.raises(DatasheetDownloadError) as exc_info:
+                    manager.download_by_part("STM32")
+
+                message = str(exc_info.value)
+                # Both sources' reasons must be present, not just the last.
+                assert "lcsc" in message
+                assert "octopart" in message
+                assert "non-PDF" in message
+                assert "timeout" in message
+                assert mock_download.call_count == 2
+
+    def test_download_by_part_same_source_two_candidates(self, manager):
+        """Two failing candidates from the same source each get a reason."""
+        from kicad_tools.datasheet.models import DatasheetResult
+
+        first = DatasheetResult(
+            part_number="STM32",
+            manufacturer="ST",
+            description="MCU",
+            datasheet_url="https://lcsc.example/a.pdf",
+            source="lcsc",
+            confidence=0.9,
+        )
+        second = DatasheetResult(
+            part_number="STM32",
+            manufacturer="ST",
+            description="MCU",
+            datasheet_url="https://lcsc.example/b.pdf",
+            source="lcsc",
+            confidence=0.8,
+        )
+
+        with patch.object(manager, "search") as mock_search:
+            with patch.object(manager, "download") as mock_download:
+                mock_search.return_value = MagicMock(
+                    has_results=True,
+                    results=[first, second],
+                )
+                mock_download.side_effect = [
+                    DatasheetDownloadError("candidate a failed"),
+                    DatasheetDownloadError("candidate b failed"),
+                ]
+
+                with pytest.raises(DatasheetDownloadError) as exc_info:
+                    manager.download_by_part("STM32")
+
+                message = str(exc_info.value)
+                assert "candidate a failed" in message
+                assert "candidate b failed" in message
 
     def test_list_cached(self, manager, tmp_path):
         """Test list_cached method."""
@@ -1121,6 +1368,29 @@ class TestDatasheetCLI:
             assert result == 1
             captured = capsys.readouterr()
             assert "No datasheets found" in captured.out
+
+    def test_download_command_all_sources_fail(self, capsys):
+        """download exits non-zero and prints per-source reasons on total failure."""
+        from kicad_tools.cli.datasheet_cmd import main
+        from kicad_tools.datasheet.exceptions import DatasheetDownloadError
+
+        with patch("kicad_tools.datasheet.manager.DatasheetManager") as MockManager:
+            mock_manager = MagicMock()
+            MockManager.return_value = mock_manager
+            mock_manager.download_by_part.side_effect = DatasheetDownloadError(
+                "Failed to download datasheet for 'XC6206' from any source. "
+                "Tried 2 candidate(s): lcsc: returned non-PDF content; "
+                "octopart: network timeout"
+            )
+
+            result = main(["download", "XC6206"])
+
+            assert result == 1
+            captured = capsys.readouterr()
+            # Aggregated per-source detail must be legible on stderr.
+            assert "lcsc" in captured.err
+            assert "octopart" in captured.err
+            assert "non-PDF" in captured.err
 
     def test_list_command_empty(self, capsys):
         """Test list command with no cached datasheets."""
