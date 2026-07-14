@@ -80,6 +80,16 @@ from pathlib import Path
 
 import pytest
 
+# Issue #4160: CI runs the suite with `-n auto --timeout=60`. These DRC
+# subprocess tests average ~19s unloaded but comfortably exceed 60s under
+# full-suite xdist CPU contention (concurrent routing-regression jobs share
+# the runner pool). The timeout marker overrides the CLI default with a
+# contention-tolerant budget; it does NOT slow the happy path. 180 stays
+# above the inner `subprocess.run(..., timeout=120)` cap so a genuinely
+# hung `kct check` still trips `TimeoutExpired` first (a clear tool-level
+# signal) rather than the bare outer pytest-timeout reaper.
+pytestmark = pytest.mark.timeout(180)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "05-bldc-motor-controller"
 ROUTED_PCB = BOARD_DIR / "output" / "bldc_controller_routed.kicad_pcb"
