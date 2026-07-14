@@ -33,6 +33,7 @@ import fnmatch
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from kicad_tools.analysis.net_status import NetStatusAnalyzer, build_zone_net_map
 from kicad_tools.schema import PCB
@@ -346,6 +347,98 @@ def cmd_net(pcb: PCB, args):
         print(f"  {ref}.{pad_num}")
 
 
+def _natural_ref_key(reference: str):
+    """Natural-order sort key for reference designators (e.g. R2 < R10)."""
+    return (
+        reference.rstrip("0123456789"),
+        int("".join(c for c in reference if c.isdigit()) or "0"),
+    )
+
+
+def _pad_sort_key(number: str):
+    """Numeric-then-string pad sort key; non-numeric/empty pads sort last."""
+    return (int(number) if number.isdigit() else 999, number)
+
+
+def cmd_padmap(pcb: PCB, args):
+    """Show per-footprint pad-to-net bindings.
+
+    Three modes (``--ref`` and ``--net`` are mutually exclusive):
+      * no filter -> full dump of every footprint's pad->net table
+      * ``--ref REF`` -> single footprint's pad->net table
+      * ``--net NET`` -> inverted view: every ``REF.pad`` bound to that net
+    """
+    ref = getattr(args, "ref", None)
+    net = getattr(args, "net", None)
+
+    if ref and net:
+        print("Error: --ref and --net are mutually exclusive", file=sys.stderr)
+        sys.exit(1)
+
+    # --net inversion mode
+    if net:
+        net_obj = pcb.get_net_by_name(net)
+        if not net_obj:
+            print(f"Error: Net '{net}' not found", file=sys.stderr)
+            available = sorted(n.name for n in pcb.nets.values() if n.name)[:10]
+            print(f"Available: {', '.join(available)}...", file=sys.stderr)
+            sys.exit(1)
+
+        pads = []
+        for fp in sorted(pcb.footprints, key=lambda f: _natural_ref_key(f.reference)):
+            for pad in sorted(fp.pads, key=lambda p: _pad_sort_key(p.number)):
+                if pad.net_number == net_obj.number:
+                    pads.append((fp.reference, pad.number))
+
+        if args.format == "json":
+            print(
+                json.dumps(
+                    {
+                        "net": net_obj.name,
+                        "pads": [{"ref": ref_, "pad": pad_num} for ref_, pad_num in pads],
+                    },
+                    indent=2,
+                )
+            )
+            return
+
+        print(f"Net: {net_obj.name}")
+        for ref_, pad_num in pads:
+            print(f"  {ref_}.{pad_num}")
+        return
+
+    # Full-dump or --ref mode
+    footprints = sorted(pcb.footprints, key=lambda f: _natural_ref_key(f.reference))
+    if ref:
+        selected = pcb.get_footprint(ref)
+        if not selected:
+            print(f"Error: Footprint '{ref}' not found", file=sys.stderr)
+            available = sorted({f.reference for f in pcb.footprints})[:10]
+            print(f"Available: {', '.join(available)}...", file=sys.stderr)
+            sys.exit(1)
+        footprints = [selected]
+
+    def _fp_entry(fp) -> dict[str, Any]:
+        return {
+            "reference": fp.reference,
+            "value": fp.value,
+            "footprint": fp.name,
+            "pads": [
+                {"number": pad.number, "net": pad.net_name or None}
+                for pad in sorted(fp.pads, key=lambda p: _pad_sort_key(p.number))
+            ],
+        }
+
+    if args.format == "json":
+        print(json.dumps([_fp_entry(fp) for fp in footprints], indent=2))
+        return
+
+    for fp in footprints:
+        print(f"{fp.reference}  {fp.value}  [{fp.name}]")
+        for pad in sorted(fp.pads, key=lambda p: _pad_sort_key(p.number)):
+            print(f"  pad {pad.number}  {pad.net_name or '(no net)'}")
+
+
 def cmd_traces(pcb: PCB, args):
     """Show trace statistics."""
     segments = pcb.segments
@@ -516,11 +609,23 @@ def main(argv=None):
         "command",
         nargs="?",
         default="summary",
-        choices=["summary", "footprints", "footprint", "nets", "net", "traces", "vias", "stackup"],
+        choices=[
+            "summary",
+            "footprints",
+            "footprint",
+            "nets",
+            "net",
+            "padmap",
+            "traces",
+            "vias",
+            "stackup",
+        ],
         help="Command to run",
     )
     parser.add_argument("arg", nargs="?", help="Command argument (reference, net name)")
     parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    parser.add_argument("--ref", help="Footprint reference (for padmap)")
+    parser.add_argument("--net", help="Net name (for padmap inversion mode)")
     parser.add_argument("--filter", help="Filter pattern (e.g., 'U*', 'C*')")
     parser.add_argument("--sorted", action="store_true", help="Sort output")
     parser.add_argument("--layer", help="Filter by layer (for traces)")
@@ -563,6 +668,8 @@ def main(argv=None):
             sys.exit(1)
         args.name = args.arg
         cmd_net(pcb, args)
+    elif args.command == "padmap":
+        cmd_padmap(pcb, args)
     elif args.command == "traces":
         cmd_traces(pcb, args)
     elif args.command == "vias":

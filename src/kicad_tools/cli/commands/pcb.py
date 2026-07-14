@@ -116,6 +116,16 @@ def run_pcb_command(args) -> int:
             sub_argv.append("--check-connectivity")
         return pcb_main(sub_argv) or 0
 
+    elif args.pcb_command == "padmap":
+        sub_argv = [str(pcb_path), "padmap"]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        if getattr(args, "ref", None):
+            sub_argv.extend(["--ref", args.ref])
+        if getattr(args, "net", None):
+            sub_argv.extend(["--net", args.net])
+        return pcb_main(sub_argv) or 0
+
     elif args.pcb_command == "traces":
         sub_argv = [str(pcb_path), "traces"]
         if args.format != "text":
