@@ -157,6 +157,44 @@ class SymbolNotFoundError(ValueError):
         super().__init__("".join(msg_parts))
 
 
+class StubPlacementError(ValueError):
+    """Raised when a collision-aware stub+label cannot be placed.
+
+    :meth:`SchematicElementsMixin.add_stub_label` searches a small, bounded
+    set of candidate stub geometries (outward, longer, shorter, perpendicular
+    jogs, opposite) and places the first one that does not collinearly overlap
+    or T-touch an existing wire carrying a *different* named net.  When every
+    candidate would collide it raises this error rather than silently placing
+    a stub that KiCad would merge into a foreign net (the issue #4143 failure
+    mode).  The message identifies the pin's absolute position, the requested
+    net, and every candidate endpoint that was tried so a generator author can
+    see why placement failed and adjust the layout.
+
+    Subclasses ``ValueError`` for continuity with the ``_emit_pin_net_stub``
+    precedent in ``blocks/_stub_helpers.py`` (which raises ``ValueError`` when
+    both of its candidate sides collide).
+    """
+
+    def __init__(
+        self,
+        pin_position: tuple[float, float],
+        net: str,
+        tried_endpoints: list[tuple[float, float]],
+    ):
+        self.pin_position = pin_position
+        self.net = net
+        self.tried_endpoints = tried_endpoints
+
+        candidates = ", ".join(f"({x}, {y})" for x, y in tried_endpoints)
+        super().__init__(
+            f"Cannot place stub+label for net '{net}' at pin "
+            f"{pin_position}: every candidate stub endpoint collinearly "
+            f"overlaps or T-touches an existing wire carrying a different "
+            f"net. Tried endpoints: {candidates}. Move the neighboring "
+            f"symbol/wire or pass an explicit direction=/length= to resolve."
+        )
+
+
 class LibraryNotFoundError(FileNotFoundError):
     """Raised when a KiCad library file cannot be found."""
 
