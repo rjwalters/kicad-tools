@@ -448,7 +448,13 @@ class TestLCSCClient:
             assert len(part.prices) == 2
 
     def test_lookup_not_found(self, tmp_path):
-        """Test part not found."""
+        """Test part not found.
+
+        The live API returns no data, so ``lookup`` yields ``None``.
+        ``use_local_catalog=False`` keeps this deterministic even when a real
+        jlcparts catalog is synced on the test machine (#4132) -- otherwise the
+        offline fallback would resolve the part and break the assertion.
+        """
         with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
             mock_resp = MagicMock()
             mock_resp.json.return_value = {"code": 200, "data": None}
@@ -457,7 +463,7 @@ class TestLCSCClient:
 
             from kicad_tools.parts import LCSCClient
 
-            client = LCSCClient(use_cache=False)
+            client = LCSCClient(use_cache=False, use_local_catalog=False)
             part = client.lookup("C999999")
 
             assert part is None
@@ -687,11 +693,18 @@ class TestLCSCClientExtended:
         assert client.timeout == 60.0
 
     def test_part_number_normalization(self, tmp_path):
-        """Test that part numbers are normalized to uppercase with C prefix."""
+        """Test that part numbers are normalized to uppercase with C prefix.
+
+        ``_fetch_part`` is mocked to return ``None``. ``use_local_catalog=False``
+        keeps this deterministic even when a real jlcparts catalog is synced on
+        the test machine (#4132) -- otherwise the offline fallback would resolve
+        the (real) part before ``_fetch_part`` was reached for the second
+        ``lookup`` call, breaking the ``assert_called_with`` check.
+        """
         from kicad_tools.parts import LCSCClient, PartsCache
 
         cache = PartsCache(db_path=tmp_path / "cache.db")
-        client = LCSCClient(cache=cache)
+        client = LCSCClient(cache=cache, use_local_catalog=False)
 
         with patch("kicad_tools.parts.lcsc.LCSCClient._fetch_part") as mock_fetch:
             mock_fetch.return_value = None
@@ -724,11 +737,18 @@ class TestLCSCClientExtended:
             assert part.mfr_part == "FreshPart"
 
     def test_lookup_api_error(self, tmp_path):
-        """Test handling of API errors."""
+        """Test handling of API errors.
+
+        ``_fetch_part`` raises, so ``lookup`` swallows the error and returns
+        ``None``. ``use_local_catalog=False`` keeps this deterministic even when
+        a real jlcparts catalog is synced on the test machine (#4132) --
+        otherwise the offline fallback would resolve the part and break the
+        assertion.
+        """
         from kicad_tools.parts import LCSCClient, PartsCache
 
         cache = PartsCache(db_path=tmp_path / "cache.db")
-        client = LCSCClient(cache=cache)
+        client = LCSCClient(cache=cache, use_local_catalog=False)
 
         with patch("kicad_tools.parts.lcsc.LCSCClient._fetch_part") as mock_fetch:
             mock_fetch.side_effect = Exception("Network error")
