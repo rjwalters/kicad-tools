@@ -139,6 +139,10 @@ class AlternativePartFinder:
     RESISTOR_VALUE_PATTERN = re.compile(
         r"(\d+(?:\.\d+)?)\s*([kKmMgG]?)\s*(?:ohm|Ω)?", re.IGNORECASE
     )
+    # ``R``-as-decimal-point notation (IEC 60062): ``4R7`` -> 4.7, ``330R`` ->
+    # 330, ``4K7`` -> 4700. Anchored so it only fires on bare value tokens and
+    # never mis-consumes a longer free-text description.
+    RESISTOR_R_NOTATION_PATTERN = re.compile(r"^(\d+)([RKM])(\d*)$", re.IGNORECASE)
     CAPACITOR_VALUE_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*([pnuμmfF]?)\s*[Ff]?", re.IGNORECASE)
     INDUCTOR_VALUE_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*([pnuμmH]?)\s*[Hh]?", re.IGNORECASE)
 
@@ -758,6 +762,18 @@ class AlternativePartFinder:
 
     def _normalize_resistor_value(self, value: str) -> float | None:
         """Normalize resistor value to ohms."""
+        # Handle ``R``-as-decimal-point notation first (4R7 -> 4.7, 330R -> 330,
+        # 4K7 -> 4700). The generic RESISTOR_VALUE_PATTERN below leaves the ``R``
+        # unmatched and would mis-parse ``4R7`` as 4.0.
+        r_match = self.RESISTOR_R_NOTATION_PATTERN.match(value.strip())
+        if r_match:
+            whole = r_match.group(1)
+            unit = r_match.group(2).lower()
+            decimal = r_match.group(3)
+            num = float(f"{whole}.{decimal}") if decimal else float(whole)
+            r_multipliers = {"r": 1, "k": 1e3, "m": 1e6}
+            return num * r_multipliers.get(unit, 1)
+
         match = self.RESISTOR_VALUE_PATTERN.search(value)
         if not match:
             return None

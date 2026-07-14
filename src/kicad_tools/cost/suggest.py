@@ -136,6 +136,15 @@ class SuggestionResult:
 RESISTOR_PATTERN = re.compile(
     r"^(\d+(?:\.\d+)?)\s*([kKmMgG]?)\s*([Ωohm]*)(?:\s+(\d+(?:\.\d+)?%?))?$", re.IGNORECASE
 )
+# ``R``-as-decimal-point notation for resistors, where ``R``/``K``/``M`` acts
+# as both the unit and the decimal separator (IEC 60062). Handles:
+#   - suffix ohms: ``330R`` -> 330, ``33R`` -> 33, ``470R`` -> 470
+#   - inline-decimal ohms: ``4R7`` -> 4.7, ``0R5`` -> 0.5
+#   - inline-decimal kilo/mega: ``4K7`` -> 4700, ``1M2`` -> 1_200_000
+# Optional trailing tolerance (e.g. ``330R 1%``) is captured in group 4.
+RESISTOR_R_NOTATION_PATTERN = re.compile(
+    r"^(\d+)([RKM])(\d*)(?:\s+(\d+(?:\.\d+)?%?))?$", re.IGNORECASE
+)
 CAPACITOR_PATTERN = re.compile(
     r"^(\d+(?:\.\d+)?)\s*([pnuμmµ]?)[fF]?(?:\s+(\d+[Vv]))?(?:\s+(\d+(?:\.\d+)?%?))?$",
     re.IGNORECASE,
@@ -311,23 +320,48 @@ def parse_component_value(value: str, reference: str = "") -> ParsedValue:
 
     # Parse resistor values
     if component_type == ComponentType.RESISTOR:
-        match = RESISTOR_PATTERN.match(value)
-        if match:
-            num = float(match.group(1))
-            multiplier = match.group(2).upper() if match.group(2) else ""
+        num: float | None = None
+        tolerance: str | None = None
 
-            if multiplier == "K":
+        # Try ``R``-as-decimal-point notation first (330R, 4R7, 4K7, ...).
+        # This must precede RESISTOR_PATTERN because the latter cannot match
+        # the trailing ``R`` and would otherwise leave the value unparsed,
+        # producing a package-only search that mis-ranks a generic value.
+        r_match = RESISTOR_R_NOTATION_PATTERN.match(value.strip())
+        if r_match:
+            whole = r_match.group(1)
+            unit = r_match.group(2).upper()
+            decimal = r_match.group(3)
+            # "4R7" -> 4.7, "330R" -> 330.0 (empty decimal treated as ".0")
+            num = float(f"{whole}.{decimal}") if decimal else float(whole)
+
+            if unit == "K":
                 num *= 1000
-            elif multiplier == "M":
+            elif unit == "M":
                 num *= 1_000_000
-            elif multiplier == "G":
-                num *= 1_000_000_000
 
+            tolerance = r_match.group(4)
+        else:
+            match = RESISTOR_PATTERN.match(value)
+            if match:
+                num = float(match.group(1))
+                multiplier = match.group(2).upper() if match.group(2) else ""
+
+                if multiplier == "K":
+                    num *= 1000
+                elif multiplier == "M":
+                    num *= 1_000_000
+                elif multiplier == "G":
+                    num *= 1_000_000_000
+
+                tolerance = match.group(4)
+
+        if num is not None:
             parsed.numeric_value = num
             parsed.unit = "Ω"
 
-            if match.group(4):
-                parsed.tolerance = match.group(4)
+            if tolerance:
+                parsed.tolerance = tolerance
 
             # Build search terms
             if num >= 1_000_000:
