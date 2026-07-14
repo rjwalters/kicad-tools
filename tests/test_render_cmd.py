@@ -462,6 +462,90 @@ class TestRender3DModelEnv:
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# Direct .kicad_pcb file mode (issue #4145)
+# --------------------------------------------------------------------------
+
+
+class TestFilePathMode:
+    """`kct render path/to/board.kicad_pcb` renders a single PCB directly."""
+
+    def _make_pcb(self, root: Path, name: str = "board.kicad_pcb") -> Path:
+        pcb = root / name
+        pcb.write_text("(kicad_pcb)")
+        return pcb
+
+    def test_bare_file_writes_to_sibling_renders_dir(self, tmp_path, fake_kicad):
+        # A .kicad_pcb not inside any output/ dir renders to <pcb-dir>/renders/.
+        pcb = self._make_pcb(tmp_path)
+        rc = render_main([str(pcb)])
+        assert rc == 0
+
+        renders = tmp_path / "renders"
+        for fname in RENDER_OUTPUTS.values():
+            assert (renders / fname).exists(), f"missing {fname}"
+        assert sorted(p.name for p in renders.iterdir()) == sorted(RENDER_OUTPUTS.values())
+        # The exact PCB file passed was rendered (no discovery).
+        assert {call[0] for call in fake_kicad["svg"]} == {pcb}
+
+    def test_output_flag_overrides_default_dir(self, tmp_path, fake_kicad):
+        pcb = self._make_pcb(tmp_path)
+        custom = tmp_path / "custom" / "dir"
+        rc = render_main([str(pcb), "-o", str(custom)])
+        assert rc == 0
+
+        for fname in RENDER_OUTPUTS.values():
+            assert (custom / fname).exists(), f"missing {fname}"
+        # Nothing landed in the default location.
+        assert not (tmp_path / "renders").exists()
+
+    def test_long_output_flag(self, tmp_path, fake_kicad):
+        pcb = self._make_pcb(tmp_path)
+        custom = tmp_path / "out"
+        rc = render_main([str(pcb), "--output", str(custom)])
+        assert rc == 0
+        assert (custom / "pcb-front.svg").exists()
+
+    def test_wrong_extension_errors(self, tmp_path, fake_kicad, capsys):
+        bad = tmp_path / "board.txt"
+        bad.write_text("not a pcb")
+        rc = render_main([str(bad)])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "Expected .kicad_pcb file" in err
+        assert "board.txt" in err
+
+    def test_nonexistent_file_errors(self, tmp_path, fake_kicad, capsys):
+        rc = render_main([str(tmp_path / "missing.kicad_pcb")])
+        assert rc == 1
+        assert "path not found" in capsys.readouterr().err
+
+    def test_no_3d_writes_only_svgs(self, tmp_path, fake_kicad):
+        pcb = self._make_pcb(tmp_path)
+        rc = render_main([str(pcb), "--no-3d"])
+        assert rc == 0
+
+        renders = tmp_path / "renders"
+        assert (renders / "pcb-front.svg").exists()
+        assert (renders / "pcb-back.svg").exists()
+        assert not (renders / "3d-front.png").exists()
+        assert not (renders / "3d-back.png").exists()
+        assert fake_kicad["render"] == []
+
+    def test_json_uses_pcb_stem_as_board_name(self, tmp_path, fake_kicad, capsys):
+        pcb = self._make_pcb(tmp_path, "softstart_revb.kicad_pcb")
+        rc = render_main([str(pcb), "--format", "json"])
+        assert rc == 0
+
+        payload = json.loads(capsys.readouterr().out)
+        assert "boards" in payload
+        assert len(payload["boards"]) == 1
+        entry = payload["boards"][0]
+        assert entry["board"] == "softstart_revb"
+        assert entry["status"] == "ok"
+        assert set(entry["outputs"]) == set(RENDER_OUTPUTS)
+
+
 class TestEdgeCases:
     def test_board_without_pcb_is_non_fatal(self, tmp_path, fake_kicad, capsys):
         # output/ exists but contains no .kicad_pcb at all.
