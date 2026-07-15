@@ -605,3 +605,63 @@ class TestConnectivityRuleRegistry:
         from kicad_tools.drc.violation import ViolationType
 
         assert ViolationType.from_string("connectivity") is ViolationType.CONNECTIVITY
+
+
+class TestConnectivityRuleStrict:
+    """Issue #4176: ``ConnectivityRule(strict=True)`` uses real geometric
+    copper contact, so a net the default tolerance model over-connects fires."""
+
+    # Two pads joined by two thin segments whose inner endpoints are 0.009mm
+    # apart (< 0.01 tolerance) on perpendicular headings.  At 0.001mm width the
+    # buffered copper does NOT bridge the gap, so KiCad (and strict mode) see
+    # the net as incomplete while the default tolerance model unions it.
+    _OVER_CONNECT_PCB = (
+        _PCB_HEADER
+        + """
+  (net 0 "")
+  (net 1 "SIG")
+  (footprint "R" (layer "F.Cu") (uuid "fp1") (at 100 100)
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (uuid "r1"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG")))
+  (footprint "R" (layer "F.Cu") (uuid "fp2") (at 105 105)
+    (property "Reference" "R2" (at 0 0 0) (layer "F.SilkS") (uuid "r2"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG")))
+  (segment (start 100 100) (end 105 100) (width 0.001) (layer "F.Cu") (net 1) (uuid "sa"))
+  (segment (start 105 100.009) (end 105 105) (width 0.001) (layer "F.Cu") (net 1) (uuid "sb"))
+)
+"""
+    )
+
+    def test_default_passes_strict_fires(self, tmp_path: Path) -> None:
+        import pytest
+
+        pytest.importorskip("shapely")
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.connectivity import ConnectivityRule
+
+        pcb_path = tmp_path / "over_connect.kicad_pcb"
+        pcb_path.write_text(self._OVER_CONNECT_PCB)
+        pcb = PCB.load(pcb_path)
+        rules = get_profile("jlcpcb").get_design_rules(2, 1.0)
+
+        # Default (tolerance) model over-connects: no error.
+        assert ConnectivityRule().check(pcb, rules).error_count == 0
+        # Strict (real geometry) model: the pads are on separate copper -> error.
+        strict = ConnectivityRule(strict=True).check(pcb, rules)
+        assert strict.error_count == 1
+        assert strict.errors[0].nets == ("SIG",)
+
+    def test_checker_forwards_strict_connectivity(self, tmp_path: Path) -> None:
+        import pytest
+
+        pytest.importorskip("shapely")
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb_path = tmp_path / "over_connect.kicad_pcb"
+        pcb_path.write_text(self._OVER_CONNECT_PCB)
+        pcb = PCB.load(pcb_path)
+
+        assert DRCChecker(pcb).check_connectivity().error_count == 0
+        assert DRCChecker(pcb, strict_connectivity=True).check_connectivity().error_count == 1

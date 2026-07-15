@@ -428,6 +428,17 @@ def _add_check_parser(subparsers) -> None:
     check_parser.add_argument("--errors-only", action="store_true")
     check_parser.add_argument("--strict", action="store_true", help="Exit with code 2 on warnings")
     check_parser.add_argument(
+        "--strict-connectivity",
+        dest="strict_connectivity",
+        action="store_true",
+        help=(
+            "Decide the connectivity DRC rule by REAL geometric copper contact "
+            "(shapely polygon intersection) instead of the default 0.01mm "
+            "endpoint-proximity tolerance, matching KiCad (issue #4176). "
+            "Requires shapely. Distinct from --strict (warnings fatal)."
+        ),
+    )
+    check_parser.add_argument(
         "--mfr",
         "-m",
         choices=get_all_manufacturer_names(),
@@ -5363,6 +5374,21 @@ def _add_net_status_parser(subparsers) -> None:
             "(ESCAPE_BLOCKED / CONGESTION_SATURATED / BUDGET_STARVED / "
             "PLACEMENT_BOUND) with supporting evidence. Read-only diagnostic "
             "(issue #3863)."
+        ),
+    )
+    net_status_parser.add_argument(
+        "--strict",
+        dest="net_status_strict",
+        action="store_true",
+        help=(
+            "Decide connectivity by REAL geometric copper contact (shapely "
+            "polygon intersection) instead of the default 0.01mm endpoint "
+            "proximity tolerance. The default model unions a segment endpoint "
+            "with a pad/via/segment whenever their reference points land "
+            "within 0.01mm even if the actual copper (segment width, pad "
+            "shape) does not touch -- so it can report a net 'complete' that "
+            "'kicad-cli pcb drc' reports as unconnected. --strict matches "
+            "KiCad's connectivity semantics (issue #4176). Requires shapely."
         ),
     )
 
