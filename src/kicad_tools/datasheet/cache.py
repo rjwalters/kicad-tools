@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .models import Datasheet
+from .utils import sanitize_filename_component
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +171,10 @@ class DatasheetCache:
 
     def get_datasheet_path(self, part_number: str) -> Path:
         """Get the expected path for a datasheet file."""
-        # Normalize part number for filesystem
-        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in part_number)
+        # Normalize part number for filesystem using the shared sanitizer so
+        # the '-o'/output-dir branch in DatasheetManager.download() and the
+        # cache path stay consistent (both reject path separators / traversal).
+        safe_name = sanitize_filename_component(part_number)
         return self.cache_dir / safe_name / "datasheet.pdf"
 
     def is_cached(self, part_number: str, ignore_expiry: bool = False) -> bool:

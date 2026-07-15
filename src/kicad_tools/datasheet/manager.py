@@ -17,6 +17,7 @@ from .cache import DatasheetCache
 from .exceptions import DatasheetDownloadError, DatasheetSearchError
 from .models import Datasheet, DatasheetResult, DatasheetSearchResult
 from .sources import DatasheetSource, LCSCDatasheetSource, OctopartDatasheetSource
+from .utils import sanitize_filename_component
 
 if TYPE_CHECKING:
     pass
@@ -186,7 +187,22 @@ class DatasheetManager:
         if output_dir:
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = output_dir / f"{result.part_number}.pdf"
+            # Sanitize the resolved part number before using it as a filename:
+            # source-resolved names commonly contain '/' (e.g. Microchip
+            # "MCP6001UT-I/OT"), which would otherwise silently create a
+            # subdirectory, and a hostile/buggy source could return a
+            # traversal-shaped name that escapes output_dir.
+            safe_name = sanitize_filename_component(result.part_number)
+            output_path = output_dir / f"{safe_name}.pdf"
+            # Belt-and-suspenders: confirm the constructed path stays inside
+            # output_dir. Redundant given the allowlist sanitizer above, but
+            # guards against a future regression that loosens it.
+            resolved = output_path.resolve()
+            output_dir_resolved = output_dir.resolve()
+            if output_dir_resolved not in resolved.parents and resolved != output_dir_resolved:
+                raise DatasheetDownloadError(
+                    f"Refusing to write outside output directory: {output_path}"
+                )
         else:
             output_path = self.cache.get_datasheet_path(result.part_number)
 
