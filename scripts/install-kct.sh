@@ -214,12 +214,14 @@ ok "source_mode=$SOURCE_MODE"
 info "Stage 4: enumerate source skills"
 # Glob *.md under the source skills dir at install time (Curator: never
 # hardcode the file list — Child 3 additions must be picked up automatically).
-# README.md documents the namespace and is always vendored; the remaining *.md
-# files are the selectable skills.
+# README.md documents the namespace and help.md is the introspective meta-skill;
+# both are always vendored (see Stage 6) and are NOT selectable skills. The
+# remaining *.md files are the selectable per-board skills.
 ALL_SKILLS=()
 while IFS= read -r -d '' md; do
   base="$(basename "$md" .md)"
   [[ "$base" == "README" ]] && continue
+  [[ "$base" == "help" ]] && continue
   ALL_SKILLS+=("$base")
 done < <(find "$SKILLS_SRC" -maxdepth 1 -name '*.md' -type f -print0 | LC_ALL=C sort -z)
 
@@ -357,8 +359,8 @@ else
 fi
 
 # ----- Stage 6: vendor .claude/commands/kct/ skills -------------------------
-# Copy README.md (always) plus each selected skill's <name>.md. NEVER touch
-# .claude/commands/loom/ (coexist additively with Loom).
+# Copy README.md and help.md (both always) plus each selected skill's <name>.md.
+# NEVER touch .claude/commands/loom/ (coexist additively with Loom).
 info "Stage 6: vendor .claude/commands/kct/ skills"
 DST_SKILLS_DIR="$TARGET/.claude/commands/kct"
 VENDORED_FILES=()  # target-relative paths, for the metadata manifest.
@@ -370,10 +372,17 @@ vendor_file() {
   chmod 0644 "$dst"
 }
 
-# README.md is always vendored (documents the namespace convention).
+# README.md and help.md are always vendored, regardless of --skills= filtering.
+# README.md documents the namespace convention; help.md is the introspective
+# meta-skill (/kct:help) that describes whatever skills are present, so it must
+# exist for every install exactly like README.md (not opt-in via --skills=).
 do_action "vendor .claude/commands/kct/README.md" \
   vendor_file "$SKILLS_SRC/README.md" "$DST_SKILLS_DIR/README.md"
 VENDORED_FILES+=(".claude/commands/kct/README.md")
+
+do_action "vendor .claude/commands/kct/help.md" \
+  vendor_file "$SKILLS_SRC/help.md" "$DST_SKILLS_DIR/help.md"
+VENDORED_FILES+=(".claude/commands/kct/help.md")
 
 for s in "${SELECTED_SKILLS[@]}"; do
   do_action "vendor .claude/commands/kct/$s.md" \
