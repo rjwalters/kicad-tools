@@ -2879,16 +2879,96 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
     wrappers) calls this helper to merge the rich per-pair / per-group
     fields onto the router's name-pattern-classified map.
 
+    Issue #4149: board nets carry KiCad's hierarchical sheet prefix
+    (``/FUSED_LINE``) for label-derived nets while power-symbol nets stay
+    bare (``GND``).  Sidecar keys are almost always written bare, so a raw
+    ``.update()`` silently keyed the overrides by names that
+    ``self.net_class_map.get(net_name)`` never looks up.  We now resolve
+    each bare key against the board's actual net names (matching on the
+    suffix after the last ``/``), rekey the overrides to the board net
+    name, and emit an aggregate stderr diagnostic for keys that matched no
+    board net or matched ambiguously.  Ambiguous keys are applied to
+    *neither* candidate — silently picking one would just relocate the bug.
+
     Idempotent and a no-op when the flag was not supplied.
     """
     loaded = getattr(args, "_loaded_net_class_map", None)
     if not loaded:
         return
-    router.net_class_map.update(loaded)
+
+    from kicad_tools.router.net_names import (
+        nearest_net_names,
+        resolve_net_class_map_keys,
+    )
+
+    board_net_names = list(router.net_names.values())
+    resolution = resolve_net_class_map_keys(loaded.keys(), board_net_names)
+
+    # Apply overrides rekeyed to the board's actual net names so
+    # ``self.net_class_map.get(net_name)`` finds them at routing time.
+    for board_net, user_key in resolution.resolved.items():
+        router.net_class_map[board_net] = loaded[user_key]
+
+    _warn_unresolved_net_class_map(resolution, board_net_names, nearest_net_names)
+
     if not quiet:
         from kicad_tools.cli.progress import flush_print
 
-        flush_print(f"  Net-class map: merged {len(loaded)} sidecar entries")
+        flush_print(
+            f"  Net-class map: merged {len(resolution.resolved)}/{resolution.total} sidecar entries"
+        )
+
+
+def _warn_unresolved_net_class_map(resolution, board_net_names, nearest_fn) -> None:
+    """Emit the Issue #4149 misconfiguration diagnostic to stderr.
+
+    Prints an aggregate summary line plus per-key hints when any
+    ``--net-class-map`` key failed to resolve to a board net (zero-match)
+    or matched more than one distinct board net (ambiguous).  A no-op when
+    every key resolved.
+
+    This is always printed (never suppressed by ``--quiet``): the
+    softstart-rev-B incident showed a fully-inert class map runs to exit 0
+    with no signal, so the misconfiguration warning must survive
+    ``--quiet``.  Exit code is unchanged (advisory, not a hard gate).
+    """
+    if not resolution.unmatched and not resolution.ambiguous:
+        return
+
+    import sys
+
+    matched = len(resolution.resolved)
+    total = resolution.total
+    lines: list[str] = [
+        f"WARNING: net-class-map: {matched}/{total} entries matched a board net "
+        f"after normalization."
+    ]
+
+    max_hints = 12
+    shown = 0
+    for key in resolution.unmatched:
+        if shown >= max_hints:
+            break
+        hints = nearest_fn(key, board_net_names)
+        if hints:
+            lines.append(f"    {key!r} -> nearest board net(s): {', '.join(hints)}")
+        else:
+            lines.append(f"    {key!r} -> no similar board net found")
+        shown += 1
+    for key, candidates in resolution.ambiguous.items():
+        if shown >= max_hints:
+            break
+        lines.append(
+            f"    {key!r} -> AMBIGUOUS, matches {len(candidates)} board nets "
+            f"({', '.join(candidates)}); skipped, use the fully-qualified name"
+        )
+        shown += 1
+
+    remaining = (len(resolution.unmatched) + len(resolution.ambiguous)) - shown
+    if remaining > 0:
+        lines.append(f"    ... +{remaining} more")
+
+    print("\n".join(lines), file=sys.stderr)
 
 
 def _resolve_analog_net_names(router: "Autorouter", args) -> set[str]:
@@ -7964,7 +8044,13 @@ def main(argv: list[str] | None = None) -> int:
             "fields (intra_pair_clearance, coupled_routing, "
             "coupled_continuity_threshold, target_diff_impedance, "
             "length_match_group) project through to the routing-time "
-            "pathfinder.  Mirrors the kct check --net-class-map flag."
+            "pathfinder.  Mirrors the kct check --net-class-map flag.  "
+            "Keys are matched against the board net's sheet-local suffix "
+            "(the segment after the last '/'), so a bare key FUSED_LINE "
+            "matches KiCad's '/'-prefixed label net /FUSED_LINE while "
+            "global power nets (GND, +3.3V) stay bare; keys that match no "
+            "board net or match ambiguously are reported on stderr and "
+            "skipped (Issue #4149)."
         ),
     )
     parser.add_argument(
