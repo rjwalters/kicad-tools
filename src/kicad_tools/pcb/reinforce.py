@@ -65,7 +65,7 @@ DEFAULT_ANCHOR_SPACING_MM = 15.0
 # JLCPCB-tier-typical values; the annular-ring floor is what actually sizes
 # the anchor pad. The reinforce pass NEVER hardcodes the annular ring at a
 # call site -- it always reads it from these rules (real or fallback).
-_FALLBACK_DESIGN_RULES = DesignRules(
+_FALLBACK_DESIGN_RULES = DesignRules(  # noqa: MFR001 reason="intentional manufacturer-agnostic fallback: reinforce is a post-route pass that runs when no manufacturer profile is supplied; a real profile overrides these JLCPCB-tier-typical defaults when threaded in"
     min_trace_width_mm=0.127,
     min_clearance_mm=0.2,
     min_via_drill_mm=0.3,
