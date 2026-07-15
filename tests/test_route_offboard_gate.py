@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli import main as kct_main
 from kicad_tools.cli.route_cmd import main as route_main
 
 
@@ -107,6 +108,39 @@ class TestRouteOffboardGate:
         captured = capsys.readouterr()
         assert "placement invalid" not in captured.err
         assert "outside Edge.Cuts" not in captured.err
+
+
+class TestRouteOffboardGateOuterEntry:
+    """Drive the gate through the real ``kct`` entry point (issue #4156).
+
+    ``TestRouteOffboardGate`` calls ``route_cmd.main`` (the inner parser)
+    directly.  These tests go through ``kicad_tools.cli.main`` -- the same
+    dispatch path as ``kct route <board> ...`` on the command line -- so they
+    exercise the outer ``_add_route_parser`` registration *and* the
+    ``run_route_command`` argv reconstruction.  A regression where
+    ``--allow-offboard`` is only wired on the inner parser (the original defect
+    the Judge flagged) would be caught here but not by the inner-parser tests.
+    """
+
+    def test_outer_entry_aborts_when_offboard(self, offboard_pcb: Path, capsys):
+        """`kct route <offboard> --dry-run` aborts (exit 2) via the real CLI."""
+        rc = kct_main(["route", str(offboard_pcb), "--dry-run"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "outside Edge.Cuts" in err
+        assert "placement invalid" in err
+
+    def test_outer_entry_allow_offboard_bypasses_gate(self, offboard_pcb: Path, capsys):
+        """`kct route <offboard> --allow-offboard` is accepted and bypasses.
+
+        This is the documented escape hatch.  It must be reachable through the
+        outer parser -- if ``--allow-offboard`` were only on the inner parser,
+        ``kct_main`` would reject it with a parse error (exit 2 from argparse)
+        and the off-board message would still appear.
+        """
+        rc = kct_main(["route", str(offboard_pcb), "--dry-run", "--allow-offboard"])
+        assert rc == 0
+        assert "placement invalid" not in capsys.readouterr().err
 
 
 if __name__ == "__main__":

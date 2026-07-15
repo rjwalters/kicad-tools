@@ -325,6 +325,11 @@ def run_route_command(args) -> int:
         sub_argv.append("--no-sync-check")
     if getattr(args, "schematic", None):
         sub_argv.extend(["--schematic", args.schematic])
+    # Issue #4156: forward the off-board placement preflight escape hatch.
+    # --allow-offboard defaults off; forward only when the user set it so the
+    # flag-off path stays byte-identical.
+    if getattr(args, "allow_offboard", False):
+        sub_argv.append("--allow-offboard")
     if getattr(args, "auto_fix", False):
         sub_argv.append("--auto-fix")
     if getattr(args, "auto_fix_passes", None) is not None:
