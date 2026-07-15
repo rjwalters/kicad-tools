@@ -817,11 +817,26 @@ def route_net_auto(
     # before saving, and surface a clear failure when the orchestrator
     # reports success but produced no physical segments.
     if output_path and should_persist:
-        segments_written, vias_written = _persist_routing_result_to_pcb(pcb, result, net_name)
+        (
+            segments_written,
+            vias_written,
+            segments_deduplicated,
+            vias_deduplicated,
+        ) = _persist_routing_result_to_pcb(pcb, result, net_name)
         result_dict["segments_written"] = segments_written
         result_dict["vias_written"] = vias_written
+        # Issue #4175: report how much copper was skipped as an exact duplicate
+        # already present on the board, so a fully-duplicate retry prints an
+        # honest "0 written / N deduplicated" instead of implying new copper.
+        result_dict["segments_deduplicated"] = segments_deduplicated
+        result_dict["vias_deduplicated"] = vias_deduplicated
 
-        if segments_written == 0 and vias_written == 0:
+        # A retry that reproduces geometry already fully present on the board
+        # writes nothing new but is NOT a failure -- the net is already routed.
+        produced_or_deduped = (
+            segments_written + vias_written + segments_deduplicated + vias_deduplicated
+        )
+        if segments_written == 0 and vias_written == 0 and produced_or_deduped == 0:
             # Orchestrator claimed success but produced nothing physical.
             # Refuse to silently save an empty PCB -- mark the call as a
             # failure with a clear error message instead.
@@ -844,7 +859,7 @@ def route_net_auto(
     return result_dict
 
 
-def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int, int]:
+def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int, int, int, int]:
     """Persist orchestrator result segments + vias into the PCB object.
 
     Issue #2913: the orchestrator returns segments/vias on the
@@ -852,16 +867,24 @@ def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int
     materialises them via ``pcb.add_trace`` / ``pcb.add_via`` so a
     subsequent ``pcb.save`` writes the physical traces to disk.
 
+    Issue #4175: ``add_trace``/``add_via`` now deduplicate against copper
+    already on the board, so a completion-loop retry that re-solves the same
+    corridor appends nothing new.  This helper distinguishes genuinely-written
+    copper from skipped duplicates and returns both counts.
+
     Args:
         pcb: Loaded PCB object (will be mutated).
         result: Orchestrator ``RoutingResult`` (carries ``segments``/``vias``).
         net_name: Net name to associate with the new traces.
 
     Returns:
-        Tuple of ``(segments_written, vias_written)``.
+        Tuple of ``(segments_written, vias_written, segments_deduplicated,
+        vias_deduplicated)``.
     """
     segments_written = 0
     vias_written = 0
+    segments_deduplicated = 0
+    vias_deduplicated = 0
 
     # Persist segments.  The orchestrator's Segment uses router.layers.Layer
     # (KiCad name accessor: ``layer.kicad_name``).  ``add_trace`` accepts
@@ -871,14 +894,18 @@ def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int
             layer_name = (
                 seg.layer.kicad_name if hasattr(seg.layer, "kicad_name") else str(seg.layer)
             )
-            pcb.add_trace(
+            added = pcb.add_trace(
                 start=(float(seg.x1), float(seg.y1)),
                 end=(float(seg.x2), float(seg.y2)),
                 width=float(getattr(seg, "width", 0.2)),
                 layer=layer_name,
                 net=net_name,
             )
-            segments_written += 1
+            if added:
+                segments_written += 1
+            else:
+                # add_trace returned an empty list -> exact-duplicate skipped.
+                segments_deduplicated += 1
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("Failed to persist segment for net %s: %s", net_name, e)
 
@@ -893,7 +920,7 @@ def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int
                 )
             else:
                 layer_pair = ("F.Cu", "B.Cu")
-            pcb.add_via(
+            added_via = pcb.add_via(
                 x=float(via.x),
                 y=float(via.y),
                 size=float(getattr(via, "diameter", 0.6)),
@@ -901,11 +928,15 @@ def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int
                 layers=layer_pair,
                 net=net_name,
             )
-            vias_written += 1
+            if added_via is not None:
+                vias_written += 1
+            else:
+                # add_via returned None -> exact-duplicate skipped.
+                vias_deduplicated += 1
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("Failed to persist via for net %s: %s", net_name, e)
 
-    return segments_written, vias_written
+    return segments_written, vias_written, segments_deduplicated, vias_deduplicated
 
 
 def _build_pad_positions(pcb: PCB) -> dict[int, list[tuple[float, float]]]:

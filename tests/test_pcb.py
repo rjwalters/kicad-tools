@@ -4105,3 +4105,176 @@ class TestAddFootprintNumericPropertyQuoting:
         assert "(size 1 1)" in contents or "(size " in contents
         assert '(size "1" "1")' not in contents
         assert '(thickness "0.15")' not in contents
+
+
+class TestCopperDedup:
+    """Issue #4175: emission-time copper dedup + dedupe_copper() cleanup.
+
+    ``route-auto`` retries re-solve the same corridor and previously appended
+    an exact-duplicate, uuid-distinct copy of the same copper on every call
+    (717 duplicates observed on one board).  ``add_trace``/``add_via`` now skip
+    exact duplicates by default, and ``dedupe_copper()`` cleans up boards that
+    were already bloated.
+    """
+
+    def _seg_kwargs(self, **overrides):
+        base = {
+            "start": (10.0, 10.0),
+            "end": (50.0, 10.0),
+            "width": 0.25,
+            "layer": "F.Cu",
+            "net": "Sig1",
+        }
+        base.update(overrides)
+        return base
+
+    def test_add_trace_skips_exact_duplicate(self):
+        """A second identical add_trace is a no-op (skipped, not appended)."""
+        pcb = PCB.create(width=100, height=100)
+        first = pcb.add_trace(**self._seg_kwargs())
+        assert len(first) == 1
+        assert len(pcb.segments) == 1
+
+        # Identical geometry -> skipped, returns empty list, count unchanged.
+        second = pcb.add_trace(**self._seg_kwargs())
+        assert second == []
+        assert len(pcb.segments) == 1
+
+    def test_add_trace_dedup_is_order_insensitive(self):
+        """Reversed start/end is treated as the same segment (duplicate)."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(**self._seg_kwargs())
+        reversed_seg = pcb.add_trace(**self._seg_kwargs(start=(50.0, 10.0), end=(10.0, 10.0)))
+        assert reversed_seg == []
+        assert len(pcb.segments) == 1
+
+    def test_add_trace_different_layer_not_deduped(self):
+        """Same endpoints on a different layer are distinct (via transition)."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(**self._seg_kwargs(layer="F.Cu"))
+        pcb.add_trace(**self._seg_kwargs(layer="B.Cu"))
+        assert len(pcb.segments) == 2
+
+    def test_add_trace_different_net_not_deduped(self):
+        """Identical geometry on different nets is not deduped."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(**self._seg_kwargs(net="Sig1"))
+        pcb.add_trace(**self._seg_kwargs(net="Sig2"))
+        assert len(pcb.segments) == 2
+
+    def test_add_trace_different_width_not_deduped(self):
+        """Same endpoints but different width is a distinct segment (neck-down)."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(**self._seg_kwargs(width=0.25))
+        pcb.add_trace(**self._seg_kwargs(width=0.5))
+        assert len(pcb.segments) == 2
+
+    def test_add_trace_shared_endpoint_not_deduped(self):
+        """Two segments sharing one endpoint (different other end) are distinct."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10.0, 10.0), end=(50.0, 10.0), net="Sig1")
+        pcb.add_trace(start=(50.0, 10.0), end=(50.0, 40.0), net="Sig1")
+        assert len(pcb.segments) == 2
+
+    def test_add_trace_dedup_can_be_disabled(self):
+        """dedupe=False preserves the historical always-append behavior."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(**self._seg_kwargs())
+        pcb.add_trace(**self._seg_kwargs(dedupe=False))
+        assert len(pcb.segments) == 2
+
+    def test_add_via_skips_exact_duplicate(self):
+        """A second identical add_via is skipped and returns None."""
+        pcb = PCB.create(width=100, height=100)
+        via1 = pcb.add_via(x=50.0, y=30.0, net="GND")
+        assert via1 is not None
+        assert len(pcb.vias) == 1
+
+        via2 = pcb.add_via(x=50.0, y=30.0, net="GND")
+        assert via2 is None
+        assert len(pcb.vias) == 1
+
+    def test_add_via_different_net_not_deduped(self):
+        """Same position on a different net is not a duplicate."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_via(x=50.0, y=30.0, net="GND")
+        pcb.add_via(x=50.0, y=30.0, net="VCC")
+        assert len(pcb.vias) == 2
+
+    def test_add_via_different_position_not_deduped(self):
+        """Different positions are distinct vias."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_via(x=50.0, y=30.0, net="GND")
+        pcb.add_via(x=50.0, y=31.0, net="GND")
+        assert len(pcb.vias) == 2
+
+    def test_dedup_persists_across_save_reload(self, tmp_path):
+        """Dedup at emission time leaves exactly one instance after save."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(**self._seg_kwargs())
+        pcb.add_trace(**self._seg_kwargs())  # duplicate, skipped
+        pcb.add_via(x=50.0, y=30.0, net="GND")
+        pcb.add_via(x=50.0, y=30.0, net="GND")  # duplicate, skipped
+
+        out = tmp_path / "deduped.kicad_pcb"
+        pcb.save(out)
+        reloaded = PCB.load(out)
+        assert len(reloaded.segments) == 1
+        assert len(reloaded.vias) == 1
+
+    def test_dedupe_copper_removes_preexisting_duplicates(self, tmp_path):
+        """dedupe_copper() cleans up a board bloated with exact duplicates."""
+        pcb = PCB.create(width=100, height=100)
+        # Seed exact-duplicate copper using dedupe=False so the bloat exists.
+        for _ in range(4):
+            pcb.add_trace(**self._seg_kwargs(dedupe=False))
+        for _ in range(3):
+            pcb.add_via(x=50.0, y=30.0, net="GND", dedupe=False)
+        # A genuinely-distinct segment/via must survive.
+        pcb.add_trace(**self._seg_kwargs(end=(50.0, 40.0), dedupe=False))
+        pcb.add_via(x=60.0, y=30.0, net="GND", dedupe=False)
+
+        assert len(pcb.segments) == 5
+        assert len(pcb.vias) == 4
+
+        stats = pcb.dedupe_copper()
+        assert stats["segments"] == 3  # 4 identical -> 1 kept
+        assert stats["vias"] == 2  # 3 identical -> 1 kept
+        assert len(pcb.segments) == 2
+        assert len(pcb.vias) == 2
+
+        # Cleanup persists across save/reload (sexp nodes removed too).
+        out = tmp_path / "cleaned.kicad_pcb"
+        pcb.save(out)
+        reloaded = PCB.load(out)
+        assert len(reloaded.segments) == 2
+        assert len(reloaded.vias) == 2
+
+    def test_dedupe_copper_noop_on_clean_board(self):
+        """dedupe_copper() reports zero removed on a board with no duplicates."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(**self._seg_kwargs())
+        pcb.add_via(x=50.0, y=30.0, net="GND")
+        stats = pcb.dedupe_copper()
+        assert stats == {"segments": 0, "vias": 0}
+        assert len(pcb.segments) == 1
+        assert len(pcb.vias) == 1
+
+    def test_dedupe_preserves_net_connectivity(self):
+        """Removing a duplicate keeps an identical copy, so nets stay linked."""
+        pcb = PCB.create(width=100, height=100)
+        net_num = pcb.add_net("Sig1").number
+        for _ in range(3):
+            pcb.add_trace(**self._seg_kwargs(dedupe=False))
+
+        before = {
+            (round(s.start[0], 3), round(s.start[1], 3), round(s.end[0], 3), round(s.end[1], 3))
+            for s in pcb.segments_in_net(net_num)
+        }
+        pcb.dedupe_copper()
+        after = {
+            (round(s.start[0], 3), round(s.start[1], 3), round(s.end[0], 3), round(s.end[1], 3))
+            for s in pcb.segments_in_net(net_num)
+        }
+        # The set of distinct segment geometries is unchanged: no net edge lost.
+        assert before == after

@@ -13,7 +13,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, dedupe, reannotate, sync-netlist, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses"
         )
         return 1
 
@@ -29,6 +29,10 @@ def run_pcb_command(args) -> int:
     # Handle strip command separately (doesn't use pcb_query)
     if args.pcb_command == "strip":
         return _run_strip_command(args, pcb_path)
+
+    # Handle dedupe command (remove exact-duplicate copper; issue #4175)
+    if args.pcb_command == "dedupe":
+        return _run_dedupe_command(args, pcb_path)
 
     # Handle reannotate command separately (doesn't use pcb_query)
     if args.pcb_command == "reannotate":
@@ -369,6 +373,73 @@ def _run_strip_command(args, pcb_path: Path) -> int:
 
     # Save unless dry-run
     if not dry_run:
+        try:
+            pcb.save(output_path)
+            if output_format == "text":
+                print()
+                print(f"  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
+def _run_dedupe_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb dedupe' command (issue #4175).
+
+    Removes pre-existing exact-duplicate copper (segments + vias with the same
+    net/geometry/layer, differing only in uuid) from an already-bloated board.
+    In-place by default (consistent with the in-place convention established by
+    #4166/#4195); ``-o`` writes to a separate file instead.
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    before_segments = len(pcb.segments)
+    before_vias = len(pcb.vias)
+
+    stats = pcb.dedupe_copper()
+
+    output_format = getattr(args, "format", "text")
+    dry_run = getattr(args, "dry_run", False)
+    output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
+
+    result: dict[str, Any] = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+        "before": {"segments": before_segments, "vias": before_vias},
+        "removed": stats,
+        "after": {
+            "segments": before_segments - stats["segments"],
+            "vias": before_vias - stats["vias"],
+        },
+    }
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"PCB Dedupe {'(dry run)' if dry_run else ''}")
+        print(f"  Input:  {pcb_path}")
+        if not dry_run:
+            print(f"  Output: {output_path}")
+        print()
+        print("  Removed exact-duplicate copper:")
+        print(f"    Segments: {stats['segments']:,}")
+        print(f"    Vias:     {stats['vias']:,}")
+        print()
+        print("  Remaining:")
+        print(f"    Segments: {result['after']['segments']:,}")
+        print(f"    Vias:     {result['after']['vias']:,}")
+
+    # Save only when something changed and not a dry-run.
+    if not dry_run and (stats["segments"] or stats["vias"]):
         try:
             pcb.save(output_path)
             if output_format == "text":
