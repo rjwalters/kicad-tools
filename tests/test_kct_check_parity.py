@@ -439,29 +439,42 @@ class TestCiGateCountsGatedFamilies:
         diff-pair/match-group measurement) and physically connects the
         formerly-floating pads (advisory connectivity 5 -> 1).
 
-        Previous re-baselines: 2026-06-13 pass 1 (Issue #3617: 60 blocking);
-        2026-06-10 (Issue #3440: 14 blocking); 2026-06-09 (issue #3458
-        inventory, PR #3462: 16); 2026-06-06 (Issue #3263: 17).
+        Previous re-baselines: 2026-07-08 (fix/board07-gallery-ready fresh
+        re-route: 9 blocking = 4+4+1); 2026-06-13 pass 1 (Issue #3617: 60
+        blocking); 2026-06-10 (Issue #3440: 14 blocking); 2026-06-09 (issue
+        #3458 inventory, PR #3462: 16); 2026-06-06 (Issue #3263: 17).
         """
         if not BOARD_07_PCB.is_file():
             pytest.skip("board 07 routed PCB not present")
         gate = self._load_gate()
         blocking, advisory = gate.count_errors(BOARD_07_PCB)
-        # Re-baselined 2026-07-08 (fix/board07-gallery-ready fresh re-route):
-        # the committed artifact is regenerated end-to-end on the post-#3919
-        # pipeline (sibling .kicad_pro/.kicad_dru DRC-constraint sidecars,
-        # sibling-stitch-net pad obstacles, edge-based repair-via drill
-        # spacing).  kicad-cli pcb drc --refill-zones now reports ZERO
-        # violations; kct check's remaining blocking errors are exactly the
-        # sidecar-gated families: 4 diffpair_length_skew +
-        # 4 diffpair_routing_continuity + 1 match_group_length_skew = 9.
-        # Advisory connectivity is 5 (the DQ3/DQ4/MIPI_DAT0_N/TMDS_D0_N/
-        # TMDS_D1_N #3438 negotiated-reach residual).  The tolerance floor in
-        # .github/routed-drc-tolerance.yml tightens 35 -> 14 (raw count; the
-        # match-group gate compares the UNFILTERED kct-check summary.errors,
-        # 9 blocking + 5 advisory -- see the counter-semantics note there).
-        assert blocking == 9, (
-            f"expected 9 blocking errors (4+4+1 gated families) on the "
-            f"2026-07-08 re-routed artifact, got {blocking}"
+        # Re-baselined 2026-07-15 (Issue #4207): 9 -> 8 blocking.  This is an
+        # honest shift, NOT a masked short.  PR #4030 (commit de0d91ec, closes
+        # #4007, "measure standard vias as through-vias in match-group skew")
+        # re-routed/re-generated the board-07 artifact after fixing a
+        # via-length measurement inconsistency: the router-side tuner measured
+        # ADDR_BUS escape vias by their transient partial layer span while the
+        # file-based checker measured KiCad's actual post-save through-hole
+        # promotion (this board's stackup has no blind/buried support).  That
+        # inconsistency produced a spurious "Match group 'ADDR_BUS' (8 members)
+        # length-skew 1.069 mm exceeds tolerance 0.500 mm" violation.  With
+        # both sides now measuring the same via-inclusive length, the true
+        # ADDR_BUS skew collapses to ~0.0015 mm (well within 0.500 mm), so the
+        # lone match_group_length_skew violation is legitimately eliminated.
+        # The rule still RUNS (summary.rules_checked_by_rule.match_group_length_skew
+        # = 1) and simply finds nothing.  #4030 already updated
+        # .github/routed-drc-tolerance.yml, tests/test_board_07_matchgroup_test.py,
+        # and tests/test_match_group_length.py for the 9 -> 8 shift but MISSED
+        # this assertion.  The remaining 8 blocking errors are the sidecar-gated
+        # diff-pair families ONLY: 4 diffpair_length_skew +
+        # 4 diffpair_routing_continuity + 0 match_group_length_skew = 8.  These
+        # diffpair families (and clearance, which is zero) are byte-identical
+        # before/after #4030, so no clearance/short violation vanished.
+        # Advisory connectivity is unchanged at 5 (the DQ3/DQ4/MIPI_DAT0_N/
+        # TMDS_D0_N/TMDS_D1_N #3438 negotiated-reach residual).
+        assert blocking == 8, (
+            f"expected 8 blocking errors (4 diffpair_length_skew + "
+            f"4 diffpair_routing_continuity + 0 match_group_length_skew) on "
+            f"the post-#4030/#4007 re-routed artifact, got {blocking}"
         )
         assert advisory.get("connectivity", 0) == 5
