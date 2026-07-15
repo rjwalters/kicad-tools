@@ -52,30 +52,80 @@ _HEADER = """(kicad_pcb
 """
 
 
+def _placement_bound_ring(
+    cx: float,
+    cy: float,
+    radius: float = 1.5,
+    count: int = 10,
+    gap: int = 4,
+    start_net: int = 100,
+) -> str:
+    """``count`` foreign single-pad nets around (cx, cy), leaving a ``gap``-slot arc.
+
+    Mirrors ``test_stuck_classifier._placement_bound_ring``: pads sit at
+    *radius* mm (outside the 1.0mm escape ring, inside the 2.0mm congestion
+    ring) so they raise local_congestion without closing the escape lane.  Each
+    pad is its own single-pad net (never fully connected => never a strict
+    rippable blocker), and the angular gap keeps a wide-open escape arc.  This
+    is what makes the stranded pad classify PLACEMENT_BOUND (6 <=
+    local_congestion < 20, open lane >= 45 deg, no rippable blocker) rather than
+    BUDGET_STARVED (0 foreign obstructions).
+
+    ``start_net`` offsets the generated net numbers so two rings on one board do
+    not collide.
+    """
+    out = []
+    slots = count + gap
+    for i in range(count):
+        ang = 2 * math.pi * i / slots
+        px = cx + radius * math.cos(ang)
+        py = cy + radius * math.sin(ang)
+        net = start_net + i
+        out.append(
+            f'  (net {net} "OBS{net}")\n'
+            f'  (footprint "obs{net}" (layer "F.Cu") (at {px:.4f} {py:.4f})\n'
+            f'    (property "Reference" "O{net}")\n'
+            f'    (pad "1" smd circle (at 0 0) (size 0.2 0.2) '
+            f'(layers "F.Cu") (net {net} "OBS{net}"))\n'
+            f"  )\n"
+        )
+    return "".join(out)
+
+
 def _placement_bound_board(stranded_at: tuple[float, float] = (80, 80)) -> str:
     """A PLACEMENT_BOUND net: connected island at (10,10), stranded pad far out.
 
-    The stranded pad sits alone in open space (open escape lane, no rippable
-    copper nearby) so the classifier labels it PLACEMENT_BOUND -- exactly the
-    M3 target.  ``stranded_at`` lets a test push the pad near the outline edge.
+    The stranded pad has an OPEN escape lane and no rippable copper nearby, but
+    a moderate-congestion ring of foreign single-pad nets packs the congestion
+    radius (leaving a > 45 deg gap so the pad still escapes) so the classifier
+    labels it PLACEMENT_BOUND -- exactly the M3 target.  Without the ring the
+    lone pad in open space now classifies BUDGET_STARVED (issue #4158), so the
+    ring is what keeps the nudge proposer exercising a genuinely placement-bound
+    net.  ``stranded_at`` lets a test push the pad near the outline edge; the
+    ring follows it.
     """
     sx, sy = stranded_at
-    return _HEADER + (
-        '  (net 0 "")\n'
-        '  (net 1 "TGT")\n'
-        # connected island for TGT (R1.1 <-> R1.2 routed)
-        '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
-        '    (property "Reference" "R1")\n'
-        '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
-        '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
-        "  )\n"
-        # stranded TGT pad on U1, alone in open space
-        f'  (footprint "U_SOT" (layer "F.Cu") (at {sx} {sy})\n'
-        '    (property "Reference" "U1")\n'
-        '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "TGT"))\n'
-        "  )\n"
-        '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
-        ")\n"
+    return (
+        _HEADER
+        + (
+            '  (net 0 "")\n'
+            '  (net 1 "TGT")\n'
+            # connected island for TGT (R1.1 <-> R1.2 routed)
+            '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
+            '    (property "Reference" "R1")\n'
+            '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
+            '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
+            "  )\n"
+            # stranded TGT pad on U1, with a busy-but-passable neighbourhood
+            f'  (footprint "U_SOT" (layer "F.Cu") (at {sx} {sy})\n'
+            '    (property "Reference" "U1")\n'
+            '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "TGT"))\n'
+            "  )\n"
+            # moderate-congestion ring at 1.5mm, leaving a 4-slot (~103 deg) open arc
+            + _placement_bound_ring(sx, sy)
+            + '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
+            ")\n"
+        )
     )
 
 
@@ -174,31 +224,38 @@ class TestProposeGeometry:
 
     def test_max_components_caps_nudges(self, tmp_path: Path):
         # Two independent placement-bound nets; max_components=1 -> one nudge.
-        body = _HEADER + (
-            '  (net 0 "")\n'
-            '  (net 1 "TGT1")\n'
-            '  (net 2 "TGT2")\n'
-            '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
-            '    (property "Reference" "R1")\n'
-            '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT1"))\n'
-            '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT1"))\n'
-            "  )\n"
-            '  (footprint "U_SOT" (layer "F.Cu") (at 80 80)\n'
-            '    (property "Reference" "U1")\n'
-            '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "TGT1"))\n'
-            "  )\n"
-            '  (footprint "R_0402" (layer "F.Cu") (at 30 30)\n'
-            '    (property "Reference" "R2")\n'
-            '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "TGT2"))\n'
-            '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "TGT2"))\n'
-            "  )\n"
-            '  (footprint "U_SOT" (layer "F.Cu") (at 70 70)\n'
-            '    (property "Reference" "U2")\n'
-            '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 2 "TGT2"))\n'
-            "  )\n"
-            '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
-            '  (segment (start 29.5 30) (end 30.5 30) (width 0.25) (layer "F.Cu") (net 2))\n'
-            ")\n"
+        body = (
+            _HEADER
+            + (
+                '  (net 0 "")\n'
+                '  (net 1 "TGT1")\n'
+                '  (net 2 "TGT2")\n'
+                '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
+                '    (property "Reference" "R1")\n'
+                '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT1"))\n'
+                '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT1"))\n'
+                "  )\n"
+                '  (footprint "U_SOT" (layer "F.Cu") (at 80 80)\n'
+                '    (property "Reference" "U1")\n'
+                '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "TGT1"))\n'
+                "  )\n"
+                '  (footprint "R_0402" (layer "F.Cu") (at 30 30)\n'
+                '    (property "Reference" "R2")\n'
+                '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "TGT2"))\n'
+                '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "TGT2"))\n'
+                "  )\n"
+                '  (footprint "U_SOT" (layer "F.Cu") (at 70 70)\n'
+                '    (property "Reference" "U2")\n'
+                '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 2 "TGT2"))\n'
+                "  )\n"
+                # A moderate-congestion ring around each stranded pad so BOTH nets
+                # classify PLACEMENT_BOUND (not BUDGET_STARVED); disjoint net ranges.
+                + _placement_bound_ring(80, 80, start_net=100)
+                + _placement_bound_ring(70, 70, start_net=200)
+                + '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
+                + '  (segment (start 29.5 30) (end 30.5 30) (width 0.25) (layer "F.Cu") (net 2))\n'
+                ")\n"
+            )
         )
         p = tmp_path / "two.kicad_pcb"
         p.write_text(body)

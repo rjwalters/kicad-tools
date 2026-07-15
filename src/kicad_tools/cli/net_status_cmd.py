@@ -65,8 +65,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "Classify each incomplete signal net by WHY it is stuck "
-            "(ESCAPE_BLOCKED / CONGESTION_SATURATED / PLACEMENT_BOUND) with "
-            "supporting evidence. Read-only diagnostic (issue #3863)."
+            "(ESCAPE_BLOCKED / CONGESTION_SATURATED / BUDGET_STARVED / "
+            "PLACEMENT_BOUND) with supporting evidence. Read-only diagnostic "
+            "(issue #3863)."
         ),
     )
 
@@ -303,6 +304,7 @@ def output_why(pcb_path: Path, fmt: str) -> int:
     print(f"Stuck signal nets: {len(result.diagnoses)}")
     print(f"  ESCAPE_BLOCKED:       {counts['escape_blocked']}")
     print(f"  CONGESTION_SATURATED: {counts['congestion_saturated']}")
+    print(f"  BUDGET_STARVED:       {counts['budget_starved']}")
     print(f"  PLACEMENT_BOUND:      {counts['placement_bound']}")
     print(f"  POUR_DISCONTINUOUS:   {counts['pour_discontinuous']}")
     print()
@@ -316,8 +318,9 @@ def output_why(pcb_path: Path, fmt: str) -> int:
     order = {
         "escape_blocked": 0,
         "congestion_saturated": 1,
-        "placement_bound": 2,
-        "pour_discontinuous": 3,
+        "budget_starved": 2,
+        "placement_bound": 3,
+        "pour_discontinuous": 4,
     }
     for diag in sorted(result.diagnoses, key=lambda d: order[d.classification_value]):
         pads = ", ".join(diag.unconnected_pads) or "(none)"

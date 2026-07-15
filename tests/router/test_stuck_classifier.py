@@ -5,7 +5,8 @@ mode and asserts the classifier labels it correctly:
 
 * ESCAPE_BLOCKED      -- a stranded pad walled in by foreign copper on all sides
 * CONGESTION_SATURATED -- a reachable pad boxed in by committed strict-net copper
-* PLACEMENT_BOUND     -- a reachable pad with no rippable copper nearby
+* PLACEMENT_BOUND     -- a reachable pad, no rippable copper, MODERATE congestion
+* BUDGET_STARVED      -- a reachable pad, no rippable copper, SPARSE neighbourhood
 
 The classifier is pure geometry, so these synthetic boards exercise the real
 decision tree without needing the router.
@@ -132,12 +133,17 @@ def _congestion_saturated_board() -> str:
     return body
 
 
-# --- PLACEMENT_BOUND --------------------------------------------------------
+# --- BUDGET_STARVED ---------------------------------------------------------
 # Net TGT has a connected island and one stranded pad (U1.1) far out in open
-# space: open escape lane, NO strict copper anywhere near, sparse neighbourhood.
+# space: open escape lane, NO strict copper anywhere near, ZERO foreign
+# obstructions.  Geometrically nothing is in the way -- the batch router simply
+# never committed it.  This is the exact "0 foreign obstructions -- ripping
+# cannot help, a part must move" false positive from the bug report (issue
+# #4158): it looks routable on current copper, so it must NOT be escalated to a
+# placement problem.
 
 
-def _placement_bound_board() -> str:
+def _budget_starved_board() -> str:
     body = _HEADER + (
         '  (net 0 "")\n'
         '  (net 1 "TGT")\n'
@@ -147,12 +153,77 @@ def _placement_bound_board() -> str:
         '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
         '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
         "  )\n"
-        # stranded TGT pad alone in open space
+        # stranded TGT pad alone in open space -- 0 foreign obstructions
         '  (footprint "U_SOT" (layer "F.Cu") (at 80 80)\n'
         '    (property "Reference" "U1")\n'
         '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "TGT"))\n'
         "  )\n" + '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
         ")\n"
+    )
+    return body
+
+
+# --- PLACEMENT_BOUND --------------------------------------------------------
+# Net TGT has a connected island and one stranded pad (U1.1) with an OPEN escape
+# lane (nothing within the escape ring), NO rippable strict copper, but a
+# genuinely busy neighbourhood: a partial ring of foreign single-pad nets at
+# ~1.5mm packs the 2.0mm congestion radius (moderate, >= congestion_threshold
+# but below the dense-cluster line) while leaving a > 45 deg gap so the pad
+# still escapes.  Reachable but locally busy enough that a solo route is not a
+# safe default -- a part must move.  These foreign pads are on distinct
+# single-pad (unrouted, non-strict) nets so none is a rippable blocker.
+
+
+def _placement_bound_ring(cx: float, cy: float, radius: float, count: int, gap: int) -> str:
+    """`count` foreign single-pad nets around (cx, cy), leaving a `gap`-slot arc.
+
+    Pads sit at *radius* mm (outside the 1.0mm escape ring, inside the 2.0mm
+    congestion ring) so they raise local_congestion without closing the escape
+    lane.  Each pad is its own single-pad net (never fully connected => never a
+    strict rippable blocker).  The angular gap keeps a wide-open escape arc.
+    """
+    import math
+
+    out = []
+    slots = count + gap
+    for i in range(count):
+        ang = 2 * math.pi * i / slots
+        px = cx + radius * math.cos(ang)
+        py = cy + radius * math.sin(ang)
+        net = 100 + i
+        out.append(
+            f'  (net {net} "OBS{i}")\n'
+            f'  (footprint "obs{i}" (layer "F.Cu") (at {px:.4f} {py:.4f})\n'
+            f'    (property "Reference" "O{i}")\n'
+            f'    (pad "1" smd circle (at 0 0) (size 0.2 0.2) '
+            f'(layers "F.Cu") (net {net} "OBS{i}"))\n'
+            f"  )\n"
+        )
+    return "".join(out)
+
+
+def _placement_bound_board() -> str:
+    body = (
+        _HEADER
+        + (
+            '  (net 0 "")\n'
+            '  (net 1 "TGT")\n'
+            # TGT island
+            '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
+            '    (property "Reference" "R1")\n'
+            '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
+            '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
+            "  )\n"
+            # stranded TGT pad with a busy-but-passable neighbourhood
+            '  (footprint "U_SOT" (layer "F.Cu") (at 80 80)\n'
+            '    (property "Reference" "U1")\n'
+            '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "TGT"))\n'
+            "  )\n"
+            # 10 foreign obstructions at 1.5mm, leaving a 4-slot (~103 deg) open arc
+            + _placement_bound_ring(80, 80, 1.5, count=10, gap=4)
+            + '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
+            ")\n"
+        )
     )
     return body
 
@@ -175,6 +246,13 @@ def congestion_pcb(tmp_path: Path) -> Path:
 def placement_pcb(tmp_path: Path) -> Path:
     p = tmp_path / "placement.kicad_pcb"
     p.write_text(_placement_bound_board())
+    return p
+
+
+@pytest.fixture
+def budget_starved_pcb(tmp_path: Path) -> Path:
+    p = tmp_path / "budget.kicad_pcb"
+    p.write_text(_budget_starved_board())
     return p
 
 
@@ -210,14 +288,51 @@ class TestCongestionSaturated:
 
 
 class TestPlacementBound:
-    def test_reachable_pad_no_rippable_copper(self, placement_pcb: Path):
+    def test_reachable_pad_no_rippable_copper_but_congested(self, placement_pcb: Path):
+        """Moderate congestion, no blocker, open lane -> PLACEMENT_BOUND (not
+        budget-starved): reachable but locally busy enough that a solo route is
+        not a safe default assumption."""
         result = classify_stuck_nets(placement_pcb)
         tgt = [d for d in result.diagnoses if d.net_name == "TGT"]
         assert len(tgt) == 1
         d = tgt[0]
         assert d.classification is StuckClass.PLACEMENT_BOUND
         assert d.blocking_nets == []
+        # neighbourhood must be moderately congested (>= congestion_threshold=6)
+        # but below the dense-cluster line (20), and the lane must still be open.
+        assert 6 <= d.local_congestion < 20
+        assert d.escape_lane_deg >= 45.0
         assert "a part must move" in d.evidence
+
+
+class TestBudgetStarved:
+    def test_sparse_open_lane_no_blocker_is_budget_starved(self, budget_starved_pcb: Path):
+        """The bug-report false positive: a stranded pad with an open lane, no
+        rippable copper, and 0 foreign obstructions must be BUDGET_STARVED, not
+        PLACEMENT_BOUND -- it looks routable on current copper and just needs a
+        re-route / bigger budget (issue #4158)."""
+        result = classify_stuck_nets(budget_starved_pcb)
+        tgt = [d for d in result.diagnoses if d.net_name == "TGT"]
+        assert len(tgt) == 1
+        d = tgt[0]
+        assert d.classification is StuckClass.BUDGET_STARVED
+        assert d.blocking_nets == []
+        assert d.local_congestion < 6
+        assert d.escape_lane_deg >= 45.0
+        # evidence must disclaim confidence (no route was attempted) and must NOT
+        # claim a part must move.
+        assert "not confirmed" in d.evidence
+        assert "a part must move" not in d.evidence
+        assert "re-route" in d.evidence.lower()
+
+    def test_failure_cause_is_routing_order(self, budget_starved_pcb: Path):
+        result = classify_stuck_nets(budget_starved_pcb)
+        d = next(x for x in result.diagnoses if x.net_name == "TGT")
+        data = d.to_dict()
+        assert data["classification"] == "budget_starved"
+        # same FailureCause bucket as PLACEMENT_BOUND: a negotiation/ordering
+        # artifact, not congestion or pin access.
+        assert data["failure_cause"] == "routing_order"
 
 
 def _pour_discontinuous_board() -> str:
@@ -262,6 +377,7 @@ class TestPourDiscontinuous:
             StuckClass.ESCAPE_BLOCKED,
             StuckClass.CONGESTION_SATURATED,
             StuckClass.PLACEMENT_BOUND,
+            StuckClass.BUDGET_STARVED,
         }
         for d in result.diagnoses:
             if d.net_name == "VCC":
@@ -283,6 +399,7 @@ class TestClassifierAggregate:
             "escape_blocked",
             "congestion_saturated",
             "placement_bound",
+            "budget_starved",
             "pour_discontinuous",
         }
         assert counts["congestion_saturated"] == 1

@@ -5338,8 +5338,9 @@ def _add_net_status_parser(subparsers) -> None:
         action="store_true",
         help=(
             "Classify each incomplete signal net by WHY it is stuck "
-            "(ESCAPE_BLOCKED / CONGESTION_SATURATED / PLACEMENT_BOUND) with "
-            "supporting evidence. Read-only diagnostic (issue #3863)."
+            "(ESCAPE_BLOCKED / CONGESTION_SATURATED / BUDGET_STARVED / "
+            "PLACEMENT_BOUND) with supporting evidence. Read-only diagnostic "
+            "(issue #3863)."
         ),
     )
 
