@@ -452,6 +452,87 @@ class TestSExpSerialization:
             )
             assert f"(mirror {axis})" == result
 
+    def test_parsed_bare_keepout_enum_stays_bare(self):
+        """Keepout rule-area enum tokens parsed bare must re-emit bare.
+
+        KiCad emits `(tracks not_allowed)` (bare symbol) in footprint keepout
+        rule areas, and pcbnew's parser hard-rejects the quoted form
+        `(tracks "not_allowed")` — a board containing it fails to load. The
+        tokens `not_allowed`/`allowed` are absent from the unquoted-keyword
+        allowlist, so before issue #4185 the serializer wrongly quoted them on
+        round-trip. An atom parsed as a bare symbol must stay bare.
+        """
+        text = (
+            "(keepout (tracks not_allowed) (vias not_allowed) (pads not_allowed) "
+            "(copperpour not_allowed) (footprints not_allowed))"
+        )
+        result = parse_string(text).to_string()
+        assert '"not_allowed"' not in result, f"keepout enum must not be quoted, got: {result}"
+        assert '"allowed"' not in result
+        for field in ("tracks", "vias", "pads", "copperpour", "footprints"):
+            assert f"({field} not_allowed)" in result, (
+                f"expected bare ({field} not_allowed) in: {result}"
+            )
+
+    def test_parsed_bare_sibling_enum_tokens_stay_bare(self):
+        """Sibling bare enum tokens must also round-trip bare.
+
+        These KiCad zone/pad enum symbols share the identical latent gap with
+        the keepout tokens: they are absent from the unquoted-keyword allowlist,
+        so the symmetric bare/quoted fix (issue #4185) must keep them bare when
+        they were parsed bare, rather than requiring a token-by-token allowlist
+        patch.
+        """
+        for token in [
+            "chamfer_rect",
+            "chamfer",
+            "fillet",
+            "poly",
+            "castellated",
+            "heatsink",
+            "bga",
+        ]:
+            result = parse_string(f"(field {token})").to_string()
+            assert f'"{token}"' not in result, (
+                f"bare token '{token}' should not be quoted, got: {result}"
+            )
+            assert f"(field {token})" == result
+
+    def test_parsed_quoted_string_stays_quoted(self):
+        """An originally-quoted string must stay quoted on round-trip.
+
+        The bare/quoted distinction is symmetric: a value parsed from a quoted
+        token (e.g. a strict-typed field that looks numeric) must not be
+        downgraded to a bare atom by the bare-handling path (issue #4185).
+        """
+        result = parse_string('(generator_version "9.0")').to_string()
+        assert '"9.0"' in result, f"quoted value must stay quoted, got: {result}"
+
+    def test_parsed_bare_value_requiring_quotes_still_quoted(self):
+        """Values that structurally require quotes are always quoted.
+
+        Whitespace, parentheses, and empty strings cannot be represented as
+        bare tokens, so they must always be quoted regardless of parse-time
+        bare/quoted state (issue #4185). Such values only ever reach the parser
+        as quoted tokens, but the serializer must not emit them bare even if the
+        bare flag were somehow set.
+        """
+        # Quoted-source values containing structural characters stay quoted.
+        for value in ["has space", "with(paren", ""]:
+            node = SExp("field")
+            node.add(SExp.quoted_atom(value))
+            result = serialize_sexp(node)
+            assert f'"{value}"' in result, (
+                f"value {value!r} requiring quotes must stay quoted, got: {result}"
+            )
+
+        # A bare-flagged atom whose value structurally requires quoting must
+        # still be quoted (the bare path defers to _must_quote()).
+        bare = SExp(value="has space", _originally_bare=True)
+        assert bare._format_atom() == '"has space"'
+        empty = SExp(value="", _originally_bare=True)
+        assert empty._format_atom() == '""'
+
 
 class TestSExpFileIO:
     """Tests for file I/O functions."""

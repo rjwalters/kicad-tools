@@ -69,6 +69,7 @@ class SExp:
         "_inline",
         "_original_str",
         "_originally_quoted",
+        "_originally_bare",
         "_line",
         "_column",
     )
@@ -81,6 +82,7 @@ class SExp:
         _inline: bool = False,
         _original_str: str | None = None,
         _originally_quoted: bool = False,
+        _originally_bare: bool = False,
         _line: int = 0,
         _column: int = 0,
     ):
@@ -98,6 +100,16 @@ class SExp:
         # constructed atoms default to False so existing keyword/round-trip
         # behavior is unchanged.
         self._originally_quoted = _originally_quoted
+        # Tracks whether a string atom was parsed from a *bare* (unquoted) token.
+        # When True, the serializer preserves the bare form as long as the value
+        # does not *structurally* require quoting (whitespace, parens, quote
+        # chars, empty). This is the symmetric counterpart to _originally_quoted:
+        # it lets bare KiCad enum symbols that are absent from the unquoted
+        # keyword allowlist (e.g. `not_allowed`, `chamfer_rect`) round-trip bare
+        # rather than being wrongly quoted (issue #4185). Programmatically
+        # constructed atoms default to False so they still go through the
+        # allowlist heuristic in _needs_quoting().
+        self._originally_bare = _originally_bare
         self._line = _line
         self._column = _column
 
@@ -490,7 +502,21 @@ class SExp:
             # preserves the type distinction between (field "9.0") and
             # (field 9.0) on round-trip — KiCad strict-typed string fields
             # like generator_version would otherwise be silently downgraded.
-            if self._originally_quoted or self._needs_quoting(self.value):
+            #
+            # Symmetric bare handling (issue #4185): an atom parsed as a *bare*
+            # symbol must stay bare unless it *structurally* requires quoting
+            # (whitespace, parens, quote chars, empty). This preserves KiCad enum
+            # symbols like `not_allowed`/`chamfer_rect` that are absent from the
+            # unquoted-keyword allowlist and would otherwise be wrongly quoted by
+            # the "quote everything else" fallback in _needs_quoting(). Values
+            # that structurally require quotes are still always quoted, for
+            # correctness. _originally_quoted always wins (a value parsed quoted
+            # stays quoted), so the two flags never conflict.
+            if self._originally_bare and not self._must_quote(self.value):
+                needs_quote = False
+            else:
+                needs_quote = self._originally_quoted or self._needs_quoting(self.value)
+            if needs_quote:
                 escaped = self.value.replace("\\", "\\\\").replace('"', '\\"')
                 escaped = escaped.replace("\n", "\\n").replace("\t", "\\t")
                 return f'"{escaped}"'
@@ -504,6 +530,22 @@ class SExp:
                 return str(int(self.value))
             return f"{self.value:.6g}"
         return str(self.value)
+
+    @staticmethod
+    def _must_quote(s: str) -> bool:
+        """Whether a string atom *structurally* requires quoting.
+
+        These are values that cannot be represented as a bare S-expression
+        token at all — an empty string, or one containing whitespace, parens,
+        or a double-quote character. Such values must always be quoted for
+        correctness, regardless of parse-time bare/quoted state. This is the
+        narrow "genuinely requires quotes" test used by the symmetric bare
+        handling in _format_atom() (issue #4185); it is intentionally distinct
+        from the KiCad-keyword allowlist heuristic in _needs_quoting().
+        """
+        if not s:
+            return True
+        return any(c in s for c in ' \t\n\r"()')
 
     @staticmethod
     def _is_valid_name(s: str) -> bool:
@@ -1243,7 +1285,10 @@ class Parser:
                 return node
             except ValueError:
                 pass
-        return SExp(value=token)
+        # A bare (unquoted) string token: record that it was parsed bare so the
+        # serializer can keep it bare on round-trip rather than re-quoting it via
+        # the keyword allowlist heuristic (issue #4185).
+        return SExp(value=token, _originally_bare=True)
 
     def _skip_whitespace(self):
         """Skip whitespace and comments."""
