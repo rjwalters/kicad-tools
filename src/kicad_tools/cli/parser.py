@@ -3297,6 +3297,23 @@ def _add_route_parser(subparsers) -> None:
             "footprints)."
         ),
     )
+    # Issue #4178: hard-gate on native (kicad-cli) DRC actually running.
+    # Mirror of the inner route_cmd.py flag; both sites must stay in sync per
+    # ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--strict-drc",
+        action="store_true",
+        default=False,
+        help=(
+            "Treat 'native kicad-cli DRC did not run' (kicad-cli absent, "
+            "timed out, crashed, or produced no report) as a HARD FAILURE "
+            "(non-zero exit) instead of a soft NOTE. By default the post-route "
+            "gate degrades gracefully to an internal-engine-only PASS when "
+            "kicad-cli is unavailable, which is not authoritative. Use this in "
+            "CI / manufacturing pipelines that require the native DRC to have "
+            "actually run and passed."
+        ),
+    )
     route_parser.add_argument(
         "--auto-fix",
         action="store_true",

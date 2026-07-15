@@ -19,6 +19,9 @@ shells out to kicad-cli is gated behind a skipif.
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+
 import pytest
 
 from kicad_tools.cli import route_cmd
@@ -163,6 +166,169 @@ def test_combined_error_count_sums_both_engines(monkeypatch, tmp_path):
     )
 
     assert errors == 5  # 2 internal + 3 native
+
+
+# ---------------------------------------------------------------------------
+# Issue #4178: --strict-drc turns "kicad-cli DRC did not run" into a HARD
+# failure (non-zero exit) instead of a soft NOTE.  Without the flag, today's
+# graceful-degradation soft PASS is preserved for KiCad-less environments.
+# ---------------------------------------------------------------------------
+
+
+class TestStrictDrc:
+    """run_post_route_drc(strict_drc=...) behaviour (Issue #4178)."""
+
+    def test_strict_drc_hard_fails_when_kicad_cli_absent(self, monkeypatch, tmp_path, capsys):
+        """--strict-drc + kicad-cli absent (ran=False) -> non-zero error count."""
+        _patch_internal(monkeypatch, _FakeResults())  # internal engine clean
+        _patch_geometric(
+            monkeypatch,
+            GeometricDRCResult(ran=False, note="kicad-cli not found; geometric DRC skipped"),
+        )
+
+        errors, _ = route_cmd.run_post_route_drc(
+            output_path=tmp_path / "b.kicad_pcb",
+            manufacturer="jlcpcb",
+            layers=2,
+            strict_drc=True,
+        )
+
+        # A clean internal verdict must NOT bless the route: strict mode
+        # bumps the error count so the caller exits non-zero.
+        assert errors >= 1
+        out = capsys.readouterr().out
+        assert "STRICT DRC FAILURE" in out
+        assert "authoritative" in out
+        # The specific reason (kicad-cli absent) is surfaced.
+        assert "kicad-cli not found" in out
+        # The soft-PASS banner must NOT appear under strict failure.
+        assert "DRC PASSED" not in out
+
+    def test_strict_drc_hard_fails_on_timeout(self, monkeypatch, tmp_path, capsys):
+        """--strict-drc + kicad-cli timeout (ran=False) -> non-zero error count."""
+        _patch_internal(monkeypatch, _FakeResults())
+        _patch_geometric(
+            monkeypatch,
+            GeometricDRCResult(ran=False, note="kicad-cli DRC timed out (geometric DRC skipped)"),
+        )
+
+        errors, _ = route_cmd.run_post_route_drc(
+            output_path=tmp_path / "b.kicad_pcb",
+            manufacturer="jlcpcb",
+            layers=4,
+            strict_drc=True,
+        )
+
+        assert errors >= 1
+        out = capsys.readouterr().out
+        assert "STRICT DRC FAILURE" in out
+        assert "timed out" in out
+
+    def test_without_strict_drc_absent_stays_soft_pass(self, monkeypatch, tmp_path, capsys):
+        """No --strict-drc + kicad-cli absent -> soft NOTE, exit unchanged (0)."""
+        _patch_internal(monkeypatch, _FakeResults())
+        _patch_geometric(
+            monkeypatch,
+            GeometricDRCResult(ran=False, note="kicad-cli not found; geometric DRC skipped"),
+        )
+
+        errors, _ = route_cmd.run_post_route_drc(
+            output_path=tmp_path / "b.kicad_pcb",
+            manufacturer="jlcpcb",
+            layers=2,
+            # strict_drc defaults to False -> graceful degradation preserved.
+        )
+
+        assert errors == 0
+        out = capsys.readouterr().out
+        assert "STRICT DRC FAILURE" not in out
+        assert "DRC PASSED" in out
+        assert "internal-engine-only PASS" in out
+
+    def test_strict_drc_clean_native_run_still_passes(self, monkeypatch, tmp_path, capsys):
+        """--strict-drc + kicad-cli ran clean (ran=True) -> unchanged PASS."""
+        _patch_internal(monkeypatch, _FakeResults())
+        _patch_geometric(monkeypatch, GeometricDRCResult(ran=True, error_count=0))
+
+        errors, _ = route_cmd.run_post_route_drc(
+            output_path=tmp_path / "b.kicad_pcb",
+            manufacturer="jlcpcb",
+            layers=2,
+            strict_drc=True,
+        )
+
+        # Native DRC actually ran and was clean -> no strict failure.
+        assert errors == 0
+        out = capsys.readouterr().out
+        assert "STRICT DRC FAILURE" not in out
+        assert "DRC PASSED" in out
+
+
+def test_strict_drc_reaches_inner_through_outer_kct_route(monkeypatch):
+    """`kct route --strict-drc` forwards the flag to route_cmd.main (Issue #4178).
+
+    Regression guard for the #4187 inner/outer lesson: a flag registered
+    only on the inner parser would be dropped by the outer `kct route`
+    shim.  This parses via the OUTER parser (parser.create_parser), runs
+    the forwarding shim (run_route_command), and asserts the inner
+    route_cmd.main receives --strict-drc in its argv AND parses it onto
+    the namespace as strict_drc=True.
+    """
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.cli.commands.routing import run_route_command
+    from kicad_tools.cli.parser import create_parser
+
+    parser = create_parser()
+    args = parser.parse_args(["route", "board.kicad_pcb", "--strict-drc"])
+
+    captured: dict[str, object] = {}
+    real_main = route_cmd.main
+    real_parse = argparse.ArgumentParser.parse_args
+
+    def _fake_route_main(sub_argv):
+        captured["sub_argv"] = sub_argv
+
+        # The inner parser must ALSO accept --strict-drc onto the namespace.
+        def _grab(self, *a, **k):
+            ns = real_parse(self, *a, **k)
+            if getattr(self, "prog", "") == "kicad-tools route":
+                captured["strict_drc"] = getattr(ns, "strict_drc", None)
+                raise SystemExit(0)
+            return ns
+
+        with monkeypatch.context() as m:
+            m.setattr(argparse.ArgumentParser, "parse_args", _grab)
+            with contextlib.suppress(SystemExit):
+                real_main(sub_argv)
+        return 0
+
+    monkeypatch.setattr(route_cmd, "main", _fake_route_main)
+
+    run_route_command(args)
+
+    assert "sub_argv" in captured, "outer shim never invoked route_cmd.main"
+    assert "--strict-drc" in captured["sub_argv"], (
+        "outer `kct route` shim dropped --strict-drc (regresses the #4187 "
+        "inner/outer forwarding lesson)"
+    )
+    assert captured.get("strict_drc") is True, (
+        "inner route_cmd.py parser must parse --strict-drc onto the namespace as strict_drc=True"
+    )
+
+
+def test_geometric_result_reason_distinguishes_outcomes():
+    """GeometricDRCResult.reason distinguishes absent / timeout / crash (Issue #4178)."""
+    from kicad_tools.drc.geometric import (
+        REASON_ABSENT,
+        REASON_CRASH,
+        REASON_OK,
+        REASON_TIMEOUT,
+    )
+
+    # Default (constructed clean) is OK.
+    assert GeometricDRCResult(ran=True).reason == REASON_OK
+    # The named reasons are distinct machine-readable codes.
+    assert len({REASON_OK, REASON_ABSENT, REASON_TIMEOUT, REASON_CRASH}) == 4
 
 
 # ---------------------------------------------------------------------------

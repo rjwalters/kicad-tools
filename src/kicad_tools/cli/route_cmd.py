@@ -1712,6 +1712,7 @@ def run_post_route_drc(
     quiet: bool = False,
     net_class_map: dict | None = None,
     copper_oz: float = 1.0,
+    strict_drc: bool = False,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -1731,6 +1732,14 @@ def run_post_route_drc(
             correct value for all 8 demo boards).  Threaded into both the
             internal :class:`DRCChecker` and the emitted ``.kicad_pro`` /
             ``.kicad_dru`` sidecars so both engines judge consistently.
+        strict_drc: When ``True`` (``kct route --strict-drc``), a native
+            geometric DRC that did NOT actually run (kicad-cli absent,
+            timed out, crashed, produced no report) is treated as a HARD
+            FAILURE -- the returned ``error_count`` is bumped by 1 so the
+            route command exits non-zero, and a prominent message states
+            that the PASS is not authoritative.  Default ``False``
+            preserves the graceful-degradation soft NOTE for KiCad-less
+            environments (Issue #4178).
 
     Returns:
         Tuple of (error_count, warning_count)
@@ -1792,7 +1801,34 @@ def run_post_route_drc(
             # the verdict so PASS requires BOTH engines clean.
             error_count += geo.error_count
 
-        if not quiet:
+        # Issue #4178: under --strict-drc, "kicad-cli DRC did not actually
+        # run" is a HARD FAILURE, not a soft NOTE.  A clean internal verdict
+        # is not authoritative when the native engine never ran, so bump the
+        # error count to force a non-zero exit.  The soft-degradation default
+        # (strict_drc=False) preserves the internal-only PASS for KiCad-less
+        # environments.
+        strict_drc_failed = strict_drc and not geo.ran
+        if strict_drc_failed:
+            error_count += 1
+
+        if not quiet and strict_drc_failed:
+            print("\n--- DRC Validation ---")
+            reason_text = geo.note or "native geometric DRC did not run"
+            print(f"  STRICT DRC FAILURE: native kicad-cli DRC did not run ({reason_text}).")
+            print(
+                "    The internal-engine verdict is NOT authoritative; "
+                "--strict-drc requires kicad-cli DRC to run and pass."
+            )
+            print(
+                "    Re-run without --strict-drc to allow a soft internal-only "
+                "PASS, or install/repair kicad-cli."
+            )
+            if results.error_count > 0 or warning_count > 0:
+                # Also surface any internal findings below the strict banner.
+                print(f"  Internal errors: {results.error_count}")
+                if warning_count > 0:
+                    print(f"  Internal warnings: {warning_count}")
+        elif not quiet:
             print("\n--- DRC Validation ---")
             if error_count == 0 and warning_count == 0:
                 if geo.ran:
@@ -4473,6 +4509,9 @@ def route_with_layer_escalation(
             # net_class_map into the post-route DRC so the diff-pair
             # routing-continuity rule can re-derive its engagement state.
             net_class_map=getattr(final_result.router, "net_class_map", None),
+            # Issue #4178: forward --strict-drc so a native DRC that did
+            # not run becomes a hard failure instead of a soft NOTE.
+            strict_drc=getattr(args, "strict_drc", False),
         )
 
         # Auto-fix DRC violations if requested
@@ -5131,6 +5170,9 @@ def route_with_rule_relaxation(
             # net_class_map into the post-route DRC so the diff-pair
             # routing-continuity rule can re-derive its engagement state.
             net_class_map=getattr(final_result.router, "net_class_map", None),
+            # Issue #4178: forward --strict-drc so a native DRC that did
+            # not run becomes a hard failure instead of a soft NOTE.
+            strict_drc=getattr(args, "strict_drc", False),
         )
 
         # Auto-fix DRC violations if requested
@@ -7310,6 +7352,9 @@ def route_with_combined_escalation(
             # net_class_map into the post-route DRC so the diff-pair
             # routing-continuity rule can re-derive its engagement state.
             net_class_map=getattr(final_result.router, "net_class_map", None),
+            # Issue #4178: forward --strict-drc so a native DRC that did
+            # not run becomes a hard failure instead of a soft NOTE.
+            strict_drc=getattr(args, "strict_drc", False),
         )
 
         # Auto-fix DRC violations if requested
@@ -8402,6 +8447,23 @@ def main(argv: list[str] | None = None) -> int:
             "Skip post-routing DRC validation. By default, the router runs "
             "a DRC check after routing and warns about violations. Use this "
             "flag for performance-critical use or when running separate validation."
+        ),
+    )
+    # Issue #4178: hard-gate on native (kicad-cli) DRC actually running.
+    # Mirror of the outer parser.py flag; both sites must stay in sync per
+    # ``tests/test_cli_parser_drift.py``.
+    parser.add_argument(
+        "--strict-drc",
+        action="store_true",
+        default=False,
+        help=(
+            "Treat 'native kicad-cli DRC did not run' (kicad-cli absent, "
+            "timed out, crashed, or produced no report) as a HARD FAILURE "
+            "(non-zero exit) instead of a soft NOTE. By default the post-route "
+            "gate degrades gracefully to an internal-engine-only PASS when "
+            "kicad-cli is unavailable, which is not authoritative. Use this in "
+            "CI / manufacturing pipelines that require the native DRC to have "
+            "actually run and passed."
         ),
     )
     # Issue #3154: advisory schematic/PCB drift banner.  When a schematic is
@@ -11185,6 +11247,8 @@ def main(argv: list[str] | None = None) -> int:
             quiet=quiet,
             # Issue #2652, Epic #2556 Phase 2.5b: see other call sites.
             net_class_map=getattr(router, "net_class_map", None),
+            # Issue #4178: forward --strict-drc (see other call sites).
+            strict_drc=getattr(args, "strict_drc", False),
         )
 
         # Auto-fix DRC violations if requested
