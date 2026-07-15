@@ -47,6 +47,7 @@ from .algorithms import (
     calculate_congestion_tuned_params,
     calculate_history_increment,
     calculate_present_cost,
+    demote_seg_seg_finalize,
     derive_iter_per_net_cap,
     derive_per_net_cap,
     detect_oscillation,
@@ -362,6 +363,7 @@ def _format_pad_ref(pad: Pad) -> str:
 # so the two-phase detailed loop can share it without a circular import;
 # re-bound here for the Autorouter call sites and existing tests.
 _select_seg_seg_demotion_nets = select_seg_seg_demotion_nets
+_demote_seg_seg_finalize = demote_seg_seg_finalize
 
 
 def _should_flush_oscillation_msgs(
@@ -11258,27 +11260,34 @@ class Autorouter:
             already overlap-free, the common case).
         """
         extra = self._collect_extra_routes_for_revalidation(net_routes)
-        overlap_pairs = neg_router.find_segment_segment_violation_pairs(
+        # Issue #4208 (Unit 2): delegate to the single shared seg-seg
+        # finalize gate so ``core`` and ``two_phase`` cannot drift apart.
+        victims, non_rippable_pairs = _demote_seg_seg_finalize(
             net_routes,
+            neg_router,
+            self.grid,
+            self.routes,
             trace_clearance=self.rules.trace_clearance,
             extra_routes=extra,
             copper_overlap_only=not finalize,
         )
-        if not overlap_pairs:
-            return []
-
-        demotable = {net for net, routes in net_routes.items() if routes}
-        victims = _select_seg_seg_demotion_nets(overlap_pairs, demotable)
-        if not victims:
-            return []
-
-        for net in victims:
-            for route in net_routes.get(net, []):
-                self.grid.unmark_route_usage(route)
-                self.grid.unmark_route(route)
-                if route in self.routes:
-                    self.routes.remove(route)
-            net_routes[net] = []
+        # M3: a cross-net crossing between two non-rippable escape stubs
+        # has no demotable victim (the greedy cover skips it) -- surface
+        # it as a routing-quality failure instead of shipping a silent
+        # short.  Only meaningful at finalize (the wide threshold).
+        # Exclude diff-pair partners: a legitimately-coupled pair runs
+        # sub-clearance by design and is adjudicated by the intra-pair
+        # clearance path, not treated as a cross-net short.
+        if finalize and non_rippable_pairs:
+            for a, b in non_rippable_pairs:
+                if self._diff_pair_partner_net(a) == b:
+                    continue
+                flush_print(
+                    f"\n  ⚠ Cross-net crossing between non-rippable escape "
+                    f"infra: {self.net_names.get(a, f'Net_{a}')} vs "
+                    f"{self.net_names.get(b, f'Net_{b}')} -- neither net is "
+                    f"demotable; reported as a routing failure (M3, #4208)"
+                )
         return victims
 
     def _demote_pad_clearance_violation_nets(
@@ -11954,12 +11963,14 @@ class Autorouter:
         already trusts as "blocking":
 
         * :meth:`NegotiatedRouter.find_segment_segment_violation_pairs`
-          (``copper_overlap_only=True``) -- the rescued net's copper
-          physically overlaps a FOREIGN net's copper (unmanufacturable
-          short; mirrors :meth:`_demote_seg_seg_overlap_nets`).  A negative
-          within-pair coupling clearance (the board-07 mode) is a physical
-          overlap between the two diff-pair legs -- distinct nets -- so it
-          is caught here.
+          (``copper_overlap_only=False`` -- Issue #4208 widened this from
+          the old overlap-only threshold, closing the live gap where a
+          sub-clearance short shipped through the rescue gate) -- the
+          rescued net's copper shorts a FOREIGN net's copper at the FULL
+          DRC threshold, mirroring the Unit-1 finalize demote in
+          :meth:`_demote_seg_seg_overlap_nets`.  The rescued leg vs its
+          own diff-pair partner is excluded here (they run close by
+          design) and adjudicated by the intra-pair check below instead.
         * :meth:`RoutingGrid.worst_segment_pad_deficit` /
           :meth:`RoutingGrid.worst_via_pad_deficit` -- copper vs a foreign
           pad beyond nudge reach (mirrors
@@ -11999,21 +12010,37 @@ class Autorouter:
         pitches = self.component_pitches
         own_refs = {ref for ref, _pin in self.nets.get(net, [])}
 
-        # --- Segment-vs-foreign-copper physical overlap (mirrors #3433) ---
-        # Restrict the seg-seg pair scan to the rescued net vs the rest of the
-        # committed universe.  ``copper_overlap_only=True`` fires only on
-        # physical overlap (negative edge-to-edge clearance), so it never
-        # false-positives on a legitimately-coupled diff-pair near-miss; a
-        # NEGATIVE within-pair coupling clearance (board-07) IS an overlap and
-        # is caught here.
+        # --- Segment-vs-foreign-copper clearance short (mirrors #3433) ---
+        # Restrict the seg-seg pair scan to the rescued net vs the rest of
+        # the committed universe.  Issue #4208 (Unit 2, the live gap): this
+        # gate historically used ``copper_overlap_only=True`` (polygon
+        # overlap only), so a rescued net that shipped a sub-clearance
+        # short (positive edge gap but ``< trace_clearance`` -- a real
+        # ``kicad-cli SHORT``) passed the rescue gate uncaught, even after
+        # Unit-1 widened the finalize demote to the FULL DRC threshold.
+        # Use ``copper_overlap_only=False`` here so the rescue gate is at
+        # least as strict as the finalize demote it mirrors.
+        #
+        # Diff-pair carve-out: the wide threshold would flag a legitimately
+        # coupled diff-pair pair (the rescued leg vs its partner, which run
+        # close by design) as a cross-net short.  The dedicated per-pair
+        # intra-clearance check below (``_rescued_leg_breaks_intra_pair_clearance``)
+        # is the authority for that exact pair with the correct
+        # ``effective_intra_pair_clearance()`` threshold, so exclude the
+        # ``(net, partner)`` pair here and let that check adjudicate it.
         extra = self._collect_extra_routes_for_revalidation(net_routes)
         overlap_pairs = neg_router.find_segment_segment_violation_pairs(
             net_routes,
             trace_clearance=self.rules.trace_clearance,
             extra_routes=extra,
-            copper_overlap_only=True,
+            copper_overlap_only=False,
         )
-        if any(net in pair for pair in overlap_pairs):
+        partner_net = self._diff_pair_partner_net(net)
+        for pair in overlap_pairs:
+            if net not in pair:
+                continue
+            if partner_net is not None and partner_net in pair:
+                continue  # Partner leg: adjudicated by the intra-pair check.
             return True
 
         # --- Copper-vs-foreign-pad clearance beyond nudge reach (#3545/#3566) ---
@@ -12058,6 +12085,26 @@ class Autorouter:
 
         return False
 
+    def _diff_pair_partner_net(self, net: int) -> int | None:
+        """Return the diff-pair partner net id of ``net``, or ``None``.
+
+        Issue #4208 (Unit 2): shared partner-resolution used by both the
+        rescue gate's diff-pair carve-out (excluding the partner pair from
+        the widened seg-seg short scan) and
+        :meth:`_rescued_leg_breaks_intra_pair_clearance` (adjudicating that
+        exact pair with the per-pair intra-clearance threshold).
+        """
+        net_name = self.net_names.get(net)
+        if not net_name:
+            return None
+        partner_name = self.get_diff_pair_map().get(net_name)
+        if not partner_name:
+            return None
+        for nid, nname in self.net_names.items():
+            if nname == partner_name:
+                return nid
+        return None
+
     def _rescued_leg_breaks_intra_pair_clearance(
         self,
         net: int,
@@ -12079,17 +12126,7 @@ class Autorouter:
         if not net_name:
             return False
 
-        pair_map = self.get_diff_pair_map()
-        partner_name = pair_map.get(net_name)
-        if not partner_name:
-            return False
-
-        # Resolve the partner net id (reverse the net_names map).
-        partner_net: int | None = None
-        for nid, nname in self.net_names.items():
-            if nname == partner_name:
-                partner_net = nid
-                break
+        partner_net = self._diff_pair_partner_net(net)
         if partner_net is None:
             return False
 
@@ -12874,6 +12911,46 @@ class Autorouter:
         for route in self.routes:
             net_routes.setdefault(route.net, []).append(route)
         return net_routes
+
+    def revalidate_committed_copper_or_demote(self) -> list[int]:
+        """Post-optimize/post-nudge finalize backstop (Issue #4208 / Unit 3).
+
+        The trace optimizer and DRC-nudge passes run in ``route_cmd.py``
+        AFTER the negotiated finalize demote (Unit 1/2) has already run.
+        They mutate committed copper, and in an **rtree-less** environment
+        the optimizer's :class:`GridCollisionChecker` fallback permits a
+        route through an already-overused foreign cell
+        (``collision.py`` ``ignore_overflow`` branch), so optimize can
+        introduce a cross-net crossing that the pre-optimize finalize gate
+        never saw.  With ``rtree`` present the exact
+        :class:`VectorCollisionChecker` prevents this, but it can itself
+        fall back to the grid checker per-layer -- so this backstop is
+        genuine belt-and-suspenders, not purely an rtree-less concern.
+
+        Reconstructs ``net_routes`` from :attr:`routes` via
+        :meth:`_build_net_routes_map` (the Autorouter does not persist
+        ``net_routes`` on ``self`` after routing) and re-runs the SAME
+        Unit-2 seg-seg finalize gate (``finalize=True``, full DRC SHORT
+        threshold).  Any net whose copper became a cross-net short after
+        optimize/nudge is demoted (grid unmarked, routes removed) rather
+        than shipped.  A no-op in the common case (clean state / rtree
+        present), matching the architect's cost model (O(segments),
+        negligible vs. a multi-second route).
+
+        Returns:
+            Sorted list of demoted net ids (empty in the common case).
+        """
+        if not self.routes:
+            return []
+        net_routes = self._build_net_routes_map()
+        neg_router = NegotiatedRouter(
+            self.grid,
+            self.router,  # type: ignore[arg-type]
+            self.rules,
+            self.net_class_map,
+            congestion_estimator=self._ensure_congestion_estimator(),
+        )
+        return self._demote_seg_seg_overlap_nets(net_routes, neg_router, finalize=True)
 
     def route_all_advanced(
         self,

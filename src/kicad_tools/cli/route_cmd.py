@@ -936,6 +936,41 @@ def _enforce_connectivity_invariant_or_exit(
         sys.exit(6)
 
 
+def _finalize_committed_copper_or_demote(
+    router: "Autorouter",
+    *,
+    quiet: bool = False,
+) -> None:
+    """Post-optimize/post-nudge different-net-short backstop (Issue #4208 / Unit 3).
+
+    The trace optimizer and DRC-nudge passes run AFTER the negotiated
+    finalize demote (Unit 1/2).  In an **rtree-less** environment the
+    optimizer's :class:`GridCollisionChecker` fallback permits crossing an
+    already-overused foreign cell, so optimize can introduce a cross-net
+    crossing the pre-optimize finalize gate never saw.  This re-runs the
+    Unit-2 seg-seg finalize gate over the CURRENT committed copper
+    (reconstructed from ``router.routes``) and demotes any net that became
+    a short.  A no-op in the common case (clean state / rtree present) --
+    run unconditionally (no ``has_overflow`` / rtree probe) because the
+    whole point is defense-in-depth that does not need to know which
+    collision checker ran.
+
+    Factored into one shared helper called from all four optimize+nudge
+    call sites (``route_with_layer_escalation``,
+    ``route_with_rule_relaxation``, ``route_with_combined_escalation``, and
+    the base ``main()`` path) rather than copy-pasted, mirroring the
+    existing ``_enforce_connectivity_invariant_or_exit`` shared-helper
+    pattern.
+    """
+    demoted = router.revalidate_committed_copper_or_demote()
+    if demoted and not quiet:
+        print(
+            f"  ⚠ Post-optimize backstop demoted {len(demoted)} net(s) whose "
+            f"copper became a cross-net short after optimize/nudge: "
+            f"{sorted(demoted)}"
+        )
+
+
 def _make_checkpoint_callback(
     pcb_path: Path,
     output_path: Path,
@@ -4442,6 +4477,12 @@ def route_with_layer_escalation(
             quiet=quiet,
         )
 
+        # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
+        # over the post-optimize/post-nudge copper.  An rtree-less
+        # optimizer can introduce a cross-net crossing the pre-optimize
+        # finalize gate never saw; demote it before the canonical write.
+        _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
+
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
     route_sexp, final_stats, _cleanup_stats = _finalize_routes(
@@ -5104,6 +5145,12 @@ def route_with_rule_relaxation(
             args=args,
             quiet=quiet,
         )
+
+        # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
+        # over the post-optimize/post-nudge copper.  An rtree-less
+        # optimizer can introduce a cross-net crossing the pre-optimize
+        # finalize gate never saw; demote it before the canonical write.
+        _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -7287,6 +7334,12 @@ def route_with_combined_escalation(
             args=args,
             quiet=quiet,
         )
+
+        # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
+        # over the post-optimize/post-nudge copper.  An rtree-less
+        # optimizer can introduce a cross-net crossing the pre-optimize
+        # finalize gate never saw; demote it before the canonical write.
+        _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -10795,6 +10848,12 @@ def main(argv: list[str] | None = None) -> int:
             args=args,
             quiet=quiet,
         )
+
+        # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
+        # over the post-optimize/post-nudge copper.  An rtree-less
+        # optimizer can introduce a cross-net crossing the pre-optimize
+        # finalize gate never saw; demote it before the canonical write.
+        _finalize_committed_copper_or_demote(router, quiet=quiet)
 
         # Get post-optimization statistics
         post_segments = sum(len(r.segments) for r in router.routes)
