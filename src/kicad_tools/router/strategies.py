@@ -173,7 +173,8 @@ class RoutingResult:
         pads_connected: Number of the net's pads reached by the produced
             copper (unioned with pre-existing same-net copper).  ``None`` when
             no per-pad connectivity check was performed (e.g. hierarchical,
-            which completes by construction, or an early hard failure).
+            which is trusted to iterate toward completion internally, or an
+            early hard failure).
         pads_total: Total number of the net's pads considered by the check.
     """
 

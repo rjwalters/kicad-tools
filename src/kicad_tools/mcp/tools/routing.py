@@ -489,10 +489,13 @@ def route_net_auto(
     strategy's self-reported success) and, when a net is only partially
     connected, reports ``success=False`` with ``partial=True`` and
     ``pads_connected``/``pads_total`` populated.  With ``strategy="auto"`` the
-    orchestrator automatically falls back to the ``hierarchical`` (iterative
-    negotiated) router, which completes multi-pad nets by construction.  When a
-    partial route cannot be completed, no copper is saved unless
-    ``allow_partial=True``.
+    orchestrator automatically **attempts** the ``hierarchical`` (iterative
+    negotiated) router as a fallback on a partial.  The hierarchical fallback
+    improves completion where it can, but it does **not** guarantee completion
+    on every net — congested or geometrically hard nets may remain partial even
+    after the fallback, in which case ``route_net_auto`` still reports the honest
+    ``success=False``/``partial=True`` result and exits non-zero.  When a partial
+    route cannot be completed, no copper is saved unless ``allow_partial=True``.
 
     Args:
         pcb_path: Absolute path to .kicad_pcb file

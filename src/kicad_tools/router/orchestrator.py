@@ -528,7 +528,8 @@ class RoutingOrchestrator:
                     strategy=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
                     reason=(
                         "Global-family corridor left pads unconnected; the "
-                        "iterative negotiated router completes multi-pad nets"
+                        "iterative negotiated router aims to complete multi-pad "
+                        "nets (not guaranteed on congested/hard nets)"
                     ),
                     estimated_cost=1.5,
                     success_probability=0.7,

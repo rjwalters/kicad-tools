@@ -172,8 +172,9 @@ def run_route_auto_command(args) -> int:
         print(f"  Strategy: {result.get('strategy_used', 'unknown')}", file=sys.stderr)
         print(
             "  A single two-terminal corridor left pad(s) unconnected. "
-            "Retry with --strategy hierarchical (or --strategy auto, which now "
-            "falls back to hierarchical) to complete the net.",
+            "Try --strategy hierarchical (or --strategy auto, which attempts a "
+            "hierarchical fallback) to improve completion; note that congested "
+            "or geometrically hard nets may remain partial even then.",
             file=sys.stderr,
         )
         segs_written = result.get("segments_written")

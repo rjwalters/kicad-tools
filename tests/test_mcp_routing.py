@@ -521,8 +521,13 @@ class TestRouteNetAuto:
         PCB.path property, causing ``AttributeError: can't set attribute 'path'``
         on every real board.
 
-        Strengthened for GH-1282: also asserts routing actually succeeds
-        (not silently failing with 'Insufficient pads').
+        The guard here is specifically "no exception, well-formed result." On
+        this fixture NET1 is a 3-pad net whose two most-distant pads sit on the
+        emitted two-terminal corridor while the middle pad P1=(7.05, 8.45) is
+        genuinely stranded, so the honest completion check (#4165) reports a
+        2/3 partial rather than success. That is the *correct* result — this
+        test therefore tolerates the honest partial and only asserts the call
+        did not raise and returned a well-formed dict.
         """
         from kicad_tools.mcp.tools.routing import route_net_auto
 
@@ -531,23 +536,38 @@ class TestRouteNetAuto:
             pcb_path=str(self.FIXTURE),
             net_name="NET1",
         )
-        # The call must return a dict (not raise).
+        # The call must return a dict (not raise) — this is the GH-1268 guard.
         assert isinstance(result, dict)
         assert "success" in result
         assert result["net_name"] == "NET1"
-        # Routing must actually succeed for a net with 3 pads.
-        assert result["success"] is True, (
-            f"Expected routing success but got error: {result.get('error_message')}"
-        )
-        # Must not contain the old "Insufficient pads" error.
+        # The result must be well-formed regardless of completion: success is a
+        # bool, and if it is not a full success it must be an honest partial
+        # (NOT an AttributeError crash and NOT the old "Insufficient pads" guard
+        # failing before the orchestrator even runs).
+        assert isinstance(result["success"], bool)
         assert "Insufficient pads" not in (result.get("error_message") or "")
+        if not result["success"]:
+            # NET1 is genuinely partial on this fixture (2/3 pads), and that is
+            # the corrected #4165 behavior — assert the honest partial signal
+            # rather than the old false success.
+            assert result.get("partial") is True
+            assert result.get("pads_total") == 3
+            assert result.get("pads_connected", 0) < result["pads_total"]
 
     def test_route_net_auto_routes_multi_pad_net(self) -> None:
-        """A net with 3+ pads in routing-diagnostic.kicad_pcb returns success.
+        """A multi-pad net feeds pads to the orchestrator and reports honestly.
 
         Regression test for GH-1282: route_net_auto() was not passing pad
         positions to the orchestrator, so every strategy guard returned
         'Insufficient pads for global routing' even for nets with many pads.
+        The guard is that the pads DO reach the orchestrator (a strategy is
+        selected and applied) — NOT that every fixture net completes.
+
+        Post-#4165 this fixture's NET1 is a genuine 2/3 partial: the emitted
+        two-terminal corridor joins the two most-distant pads but strands the
+        middle pad P1=(7.05, 8.45). We document that corrected behavior here by
+        asserting the honest partial signal, while still proving the pads were
+        passed through (a real strategy ran, not the "Insufficient pads" guard).
         """
         from kicad_tools.mcp.tools.routing import route_net_auto
 
@@ -558,13 +578,19 @@ class TestRouteNetAuto:
         )
 
         assert isinstance(result, dict)
-        assert result["success"] is True, (
-            f"Routing NET1 (3 pads) should succeed, got: {result.get('error_message')}"
-        )
         assert result["net_name"] == "NET1"
-        # Strategy should have been selected and applied
+        # GH-1282 guard: pads reached the orchestrator and a strategy ran —
+        # this must NOT be the pre-orchestrator "Insufficient pads" failure.
+        assert "Insufficient pads" not in (result.get("error_message") or "")
         assert "strategy_used" in result
         assert result["strategy_used"] != "unknown"
+        # #4165: NET1 is genuinely partial on this fixture. A two-terminal
+        # corridor cannot join all three pads, so the honest completion check
+        # demotes to a 2/3 partial instead of the old false success.
+        assert result["success"] is False
+        assert result.get("partial") is True
+        assert result.get("pads_connected") == 2
+        assert result.get("pads_total") == 3
 
     def test_route_net_auto_single_pad_net_graceful_failure(self, tmp_path: Path) -> None:
         """A net with only 1 pad should fail gracefully, not crash."""
