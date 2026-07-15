@@ -5,6 +5,100 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-07-15
+
+### Summary
+
+Feature release. Adds a large batch of user-facing commands and flags: a
+region-bounded routing pipeline (with boundary-stub reconnection), an
+ampacity-aware net-class / DRC path, copper deduplication, anchor-PTH
+reinforcement, new schematic/PCB inspection commands, and several new
+strict-validation modes. Also hardens datasheet fetching, zone-editing
+defaults, S-expression quoting, and the router's different-net short
+guards, and reworks the vendored skills / conventions install layout.
+
+### Added
+
+- **`kct pcb padmap`** (#4155) — inspect per-footprint pad-to-net bindings
+- **`kct sch fix-annotation`** (#4142, closes #4135) — hierarchy-aware
+  power/flag-symbol annotation repair gated on net neutrality
+- **`pcb strip --region`** (#4147, Phase 1 of #4136) — spatial bound on
+  trace/via stripping
+- **Region-bounded routing** (#4169, #4179, #4180) — `--region` spatial
+  routing bound on `route`/`route-auto`, plus a boundary stub-terminal
+  detector (#4174) and stub reconnection on both the router and
+  orchestrator paths
+- **`kct pcb dedupe` + emission-time copper dedup** (#4204, #4175) — remove
+  coincident duplicate copper, and dedupe automatically at emission
+- **`pcb reinforce`** (#4224) — add an anchor-PTH row along a named net
+- **`/kct:help`** (#4214) — introspective meta-skill, vendored unconditionally
+- **`net-status --strict`** (#4201, #4176) — real-geometry connectivity mode
+- **`check --strict-connectivity` / `route --strict-drc`** (#4205) —
+  require coupling evidence before skipping diff-pair clearance
+- **Ampacity-aware net class + DRC** (#4221, #4223) — derive net-class
+  minimum width from a target current via IPC-2221, and add an ampacity
+  DRC check for routed copper width
+- **Courtyard-overlap check with waivers** (#4150) — new sub-check with a
+  pair-level waiver file
+- **Off-board preflight** (#4187) — flag off-board footprints in the
+  placement check and route preflight
+- **Zones batch auto-prioritize / carve** (#4199) — auto-prioritize and
+  carve overlapping zones in the batch path
+- **`--expect-unrouted` copper-LVS mode** (#4164) — in the
+  `check_copper_lvs` asserter
+- **`BUDGET_STARVED` stuck-net verdict** (#4188) — split out of
+  `PLACEMENT_BOUND` in the `--why` classifier
+- **`add_stub_label` schematic helper** (#4171) — collision-aware stub-label
+  placement
+- **`render` accepts a direct `.kicad_pcb` path** with `-o/--output` (#4163)
+- **Vendored `.kct/CONVENTIONS.md` + slimmed CLAUDE.md block** (#4209)
+
+### Changed
+
+- **Hierarchy-aware annotation repair** now recurses `(sheet ...)`
+  references so LVS/connectivity see nested sheets (#4162, #4157)
+- **Test baselines re-tuned** for board-02 segment count (#4198) and
+  board-07 diff-pair/match-group gate count 9 → 8 (#4211)
+
+### Fixed
+
+- **`--net-class-map` `/`-prefix matching** (#4181) — match bare keys
+  against `/`-prefixed board nets
+- **`--placement-feedback` silent no-op** (#4184) — wire it into the
+  rule-relaxation and combined-escalation paths
+- **Courtyard / placement-check polygons** (#4194) — use real courtyard
+  polygons for overlap detection
+- **Datasheet fetching** (#4153, #4154, #4191) — validate the PDF payload
+  and fall through to the next source, surface install guidance when
+  optional deps are missing, and sanitize the resolved part number before
+  using it as a filename
+- **Zone-editing defaults** (#4193, #4197) — default `zones add`/`batch`
+  and `pcb add-zone` to in-place output, matching `zones fill`
+- **Stitch via occupancy** (#4200) — reject stitch vias coincident with
+  different-net drills
+- **`route-auto` false success** (#4203) — report partial completion
+  instead of a false success
+- **Different-net short hardening** (#4192, #4206, #4222) — rescue
+  budget-starved stranded nets after negotiation, widen the finalize-demote
+  gate to the full DRC SHORT threshold, and unify the seg-seg finalize gate
+  with a post-optimize backstop
+- **`create-pcb` multi-pad nets** (#4210) — net every same-numbered pad in
+  `assign_net_to_footprint_pad`
+- **S-expression quoting** (#4219, #4212) — treat backslash as structurally
+  requiring quotes, and preserve bare atoms symmetrically so keepout enums
+  round-trip unquoted
+- **Sub-kΩ resistor value tokens** (#4141) — parse R-notation values
+  (`330R`/`4R7`) so sub-kΩ parts rank correctly
+- **Junction-dot-gated wire union** (#4226) — only union touching/overlapping
+  wire segments where a junction dot is present, fixing the #4157 over-merge
+  that produced false copper-LVS shorts on stub-label schematics (board-05)
+- **Pad-bbox-fallback courtyard annotation** (#4227) — label courtyard
+  overlaps derived from a pad bounding box (no `F.CrtYd` artwork) so they are
+  distinguishable from real-polygon overlaps
+- **Zone-pour plane-pad connectivity** (#4229) — count pour copper contact
+  (cross-layer via chains and pad-adjacent stitching vias) so a pour-bonded
+  plane pad is no longer a false-incomplete, without unioning disjoint fills
+
 ## [0.15.1] - 2026-07-13
 
 ### Summary
