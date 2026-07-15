@@ -50,6 +50,9 @@ Note:
     electromagnetic simulation, use dedicated tools like openEMS or HFSS.
 """
 
+from .ampacity import (
+    width_for_current,
+)
 from .constants import (
     COPPER_1OZ,
     COPPER_2OZ,
@@ -101,6 +104,8 @@ __all__ = [
     "COPPER_1OZ",
     "COPPER_2OZ",
     "copper_thickness_from_oz",
+    # Ampacity (IPC-2221)
+    "width_for_current",
     # Materials
     "DielectricMaterial",
     "FR4_STANDARD",

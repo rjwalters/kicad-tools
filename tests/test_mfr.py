@@ -907,3 +907,184 @@ class TestDruGenerator:
 
         actual = (rules_dir / "jlcpcb-2layer-1oz.kicad_dru").read_text()
         assert actual == expected, "Static DRU file does not match dynamic generation"
+
+
+class TestDruGeneratorAmpacity:
+    """Net-scoped ampacity min-width rule emission (#4216, Part 1 of #4215)."""
+
+    def _rules_2oz(self) -> DesignRules:
+        """A 4-layer JLCPCB profile with 2 oz outer copper for a ~6.3 mm width."""
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=4, copper_oz=2.0)
+        # Force known copper weights so the derived widths are deterministic.
+        rules.outer_copper_oz = 2.0
+        rules.inner_copper_oz = 0.5
+        return rules
+
+    def _fused_net_class(self):
+        from kicad_tools.router.rules import NetClassRouting
+
+        return NetClassRouting(name="FUSED_LINE", target_ampacity=15.0)
+
+    def test_pass_through_when_net_classes_none(self):
+        """net_classes=None -> byte-for-byte identical to the board-wide output."""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        rules = self._rules_2oz()
+        without = generate_dru(rules, manufacturer_name="JLCPCB")
+        with_none = generate_dru(rules, manufacturer_name="JLCPCB", net_classes=None)
+        assert with_none == without
+
+    def test_pass_through_when_no_target_ampacity(self):
+        """A class with target_ampacity=None emits no ampacity rule (pass-through)."""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+        from kicad_tools.router.rules import NetClassRouting
+
+        rules = self._rules_2oz()
+        baseline = generate_dru(rules, manufacturer_name="JLCPCB")
+        nc = NetClassRouting(name="PLAIN", target_ampacity=None)
+        with_plain = generate_dru(rules, manufacturer_name="JLCPCB", net_classes=[nc])
+        assert with_plain == baseline
+        assert "Ampacity Min Width" not in with_plain
+
+    def test_ampacity_rules_emitted_external_and_internal(self):
+        """A target_ampacity class emits both external and internal net-scoped rules."""
+        import re
+
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+        from kicad_tools.physics.ampacity import width_for_current
+
+        rules = self._rules_2oz()
+        nc = self._fused_net_class()
+        content = generate_dru(rules, manufacturer_name="JLCPCB", net_classes=[nc])
+
+        # Two new rules exist, both net-scoped to FUSED_LINE.
+        assert '"Ampacity Min Width (FUSED_LINE, external) - JLCPCB"' in content
+        assert '"Ampacity Min Width (FUSED_LINE, internal) - JLCPCB"' in content
+        assert "A.NetClass == 'FUSED_LINE'" in content
+
+        # External condition scopes to the two outer copper layers.
+        assert "(A.Layer == 'F.Cu' || A.Layer == 'B.Cu')" in content
+        # Internal condition excludes the outer copper layers.
+        assert "A.Layer != 'F.Cu' && A.Layer != 'B.Cu'" in content
+
+        # Widths derive from IPC-2221 against the board copper weights.
+        expected_ext = width_for_current(15.0, copper_weight_oz=2.0, layer="external")
+        expected_int = width_for_current(15.0, copper_weight_oz=0.5, layer="internal")
+
+        ext_block = content.split("external) - JLCPCB", 1)[1]
+        ext_match = re.search(r"track_width \(min ([\d.]+)mm\)", ext_block)
+        assert ext_match
+        assert float(ext_match.group(1)) == pytest.approx(expected_ext, abs=0.01)
+
+        int_block = content.split("internal) - JLCPCB", 1)[1]
+        int_match = re.search(r"track_width \(min ([\d.]+)mm\)", int_block)
+        assert int_match
+        assert float(int_match.group(1)) == pytest.approx(expected_int, abs=0.01)
+
+        # The external golden value (2 oz, 15 A, 10 C) is ~6.29 mm.
+        assert float(ext_match.group(1)) == pytest.approx(6.29, abs=0.05)
+
+    def test_ampacity_and_impedance_emit_separate_rules(self):
+        """A class with both target_ampacity and target_single_impedance keeps
+        the ampacity rules separate (not merged) -- per the Out-of-Scope note.
+        """
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+        from kicad_tools.router.rules import NetClassRouting
+
+        rules = self._rules_2oz()
+        nc = NetClassRouting(
+            name="FUSED_LINE",
+            target_ampacity=15.0,
+            target_single_impedance=50.0,
+        )
+        content = generate_dru(rules, manufacturer_name="JLCPCB", net_classes=[nc])
+        # Two (and only two) ampacity rules; the DRU generator does not emit
+        # impedance rules (that lives in the router sizing path), so we only
+        # assert the ampacity pair is present and distinct.
+        assert content.count("Ampacity Min Width (FUSED_LINE") == 2
+
+    def test_multiple_net_classes(self):
+        """Only classes with target_ampacity set produce rules."""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+        from kicad_tools.router.rules import NetClassRouting
+
+        rules = self._rules_2oz()
+        classes = [
+            NetClassRouting(name="FUSED_LINE", target_ampacity=15.0),
+            NetClassRouting(name="SIGNAL", target_ampacity=None),
+            NetClassRouting(name="MOTOR", target_ampacity=8.0),
+        ]
+        content = generate_dru(rules, manufacturer_name="JLCPCB", net_classes=classes)
+        assert content.count("Ampacity Min Width (FUSED_LINE") == 2
+        assert content.count("Ampacity Min Width (MOTOR") == 2
+        assert "SIGNAL" not in content
+
+    def test_ampacity_dru_accepted_by_kicad_cli(self, tmp_path):
+        """Synthetic round-trip: the net-scoped DRU is accepted by kicad-cli DRC.
+
+        Verifies the ``A.NetClass`` condition token is valid KiCad custom-rule
+        syntax by running ``kicad-cli pcb drc`` against a minimal board with
+        the generated .kicad_dru.  If kicad-cli is unavailable, falls back to
+        asserting the DRU text is well-formed.
+        """
+        import shutil
+        import subprocess
+
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        rules = self._rules_2oz()
+        nc = self._fused_net_class()
+        dru_content = generate_dru(rules, manufacturer_name="JLCPCB", net_classes=[nc])
+
+        kicad_cli = shutil.which("kicad-cli")
+        if kicad_cli is None:
+            # Fallback: assert the rule is well-formed KiCad DRU syntax.
+            assert dru_content.startswith("(version 1)")
+            assert "A.NetClass == 'FUSED_LINE'" in dru_content
+            assert dru_content.count("(rule ") >= 13
+            # Balanced parentheses per rule line group.
+            assert dru_content.count("(") == dru_content.count(")")
+            pytest.skip("kicad-cli not available; asserted DRU text structure only")
+
+        # Minimal 2-layer board with one FUSED_LINE net and a short track so
+        # the DRC engine actually parses and evaluates the rule condition.
+        board = tmp_path / "amp.kicad_pcb"
+        board.write_text(
+            "(kicad_pcb (version 20240108) (generator test)\n"
+            '  (net 0 "")\n'
+            '  (net 1 "FUSED_LINE")\n'
+            '  (net_class FUSED_LINE "" (clearance 0.2) (trace_width 0.25)\n'
+            '    (add_net "FUSED_LINE"))\n'
+            '  (segment (start 10 10) (end 20 10) (width 0.25) (layer "F.Cu") (net 1))\n'
+            ")\n"
+        )
+
+        dru_path = tmp_path / "amp.kicad_dru"
+        dru_path.write_text(dru_content)
+
+        report = tmp_path / "drc.json"
+        result = subprocess.run(
+            [
+                kicad_cli,
+                "pcb",
+                "drc",
+                "--format",
+                "json",
+                "-o",
+                str(report),
+                str(board),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        combined = (result.stdout + result.stdout + result.stderr).lower()
+        # The rule condition must PARSE cleanly -- KiCad reports malformed
+        # rule syntax on stderr/stdout.  A rule violation is fine (exit != 0);
+        # a syntax error is not.
+        for bad in ("unexpected", "syntax error", "expecting", "unrecognized"):
+            assert bad not in combined, (
+                f"kicad-cli reported a rule-syntax problem ({bad!r}) for the "
+                f"net-scoped ampacity DRU:\n{result.stdout}\n{result.stderr}"
+            )

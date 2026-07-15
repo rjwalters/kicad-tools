@@ -903,6 +903,27 @@ class NetClassRouting:
     literal is used.
     """
 
+    target_ampacity: float | None = None
+    """Target current-carrying capacity in amps (e.g. 15.0 for a 15 A fused line).
+
+    When set, DRU generation (see
+    :func:`kicad_tools.manufacturers.dru_generator.generate_dru`) derives a
+    net-scoped minimum trace-width rule via
+    :func:`kicad_tools.physics.ampacity.width_for_current`, using the board's
+    :attr:`~kicad_tools.manufacturers.base.DesignRules.outer_copper_oz` /
+    ``inner_copper_oz`` and a default 10 C temperature rise (see
+    ``physics/ampacity.py``).  When ``None`` (the default), no net-scoped
+    width rule is emitted for this class -- byte-for-byte pass-through,
+    matching :attr:`target_single_impedance`'s drift-prevention contract.
+
+    Independent of :attr:`target_single_impedance` /
+    :attr:`target_diff_impedance` -- a class may combine an ampacity floor
+    with an impedance target (e.g. a 15 A single-ended power net with a soft
+    impedance target); the DRU generator emits both rules as separate named
+    rules and lets KiCad's rule engine enforce the tightest (max) width where
+    they overlap.
+    """
+
     impedance_tolerance_percent: float = 10.0
     """Allowed deviation (in percent) from the target impedance that the
     DRC :class:`~kicad_tools.validate.rules.impedance.ImpedanceRule` fires
@@ -1143,6 +1164,7 @@ class NetClassRouting:
         - ``diffpair_partner`` (Phase 1B / #2558)
         - ``target_diff_impedance`` (Phase 3K / #2650)
         - ``target_single_impedance`` (Phase 3K / #2650)
+        - ``target_ampacity`` (#4216, Part 1 of #4215)
         - ``intra_pair_clearance`` (Phase 1A / #2557)
         - ``escape_clearance`` (Issue #3371 / P_FP1)
         - ``length_match_group`` / ``length_match_reference`` /
@@ -1189,6 +1211,7 @@ class NetClassRouting:
             "coupled_routing": self.coupled_routing,
             "target_diff_impedance": self.target_diff_impedance,
             "target_single_impedance": self.target_single_impedance,
+            "target_ampacity": self.target_ampacity,
             "impedance_tolerance_percent": self.impedance_tolerance_percent,
             "coupled_continuity_threshold": self.coupled_continuity_threshold,
             "skew_tolerance_mm": self.skew_tolerance_mm,
@@ -1241,6 +1264,7 @@ class NetClassRouting:
             coupled_routing=data.get("coupled_routing", False),
             target_diff_impedance=data.get("target_diff_impedance"),
             target_single_impedance=data.get("target_single_impedance"),
+            target_ampacity=data.get("target_ampacity"),
             impedance_tolerance_percent=data.get("impedance_tolerance_percent", 10.0),
             coupled_continuity_threshold=data.get("coupled_continuity_threshold"),
             skew_tolerance_mm=data.get("skew_tolerance_mm"),

@@ -16,12 +16,18 @@ Usage:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Sequence
+
 from .base import DesignRules
+
+if TYPE_CHECKING:
+    from kicad_tools.router.rules import NetClassRouting
 
 
 def generate_dru(
     rules: DesignRules,
     manufacturer_name: str = "",
+    net_classes: Sequence[NetClassRouting] | None = None,
 ) -> str:
     """
     Generate KiCad .kicad_dru file content from a DesignRules instance.
@@ -33,6 +39,15 @@ def generate_dru(
     Args:
         rules: DesignRules instance containing manufacturer constraints.
         manufacturer_name: Optional manufacturer name for rule labels.
+        net_classes: Optional sequence of net-class routing configs.  For
+            each class whose ``target_ampacity`` is set, two net-scoped
+            minimum-width rules (external + internal layers) are appended,
+            with the widths derived via IPC-2221 from ``rules.outer_copper_oz``
+            / ``rules.inner_copper_oz`` (see
+            :func:`kicad_tools.physics.ampacity.width_for_current`).  When
+            ``None`` (or when no class sets ``target_ampacity``), the output
+            is byte-for-byte identical to the board-wide rule set --
+            preserving the drift-prevention pass-through contract.
 
     Returns:
         String content of a valid .kicad_dru file.
@@ -123,5 +138,51 @@ def generate_dru(
         f'(rule "Solder Mask Dam{label_suffix}"\n'
         f"  (constraint physical_hole_clearance (min {rules.min_solder_mask_dam_mm}mm)))"
     )
+
+    # --- Ampacity-derived net-scoped minimum trace widths (#4216) ---
+    #
+    # For each net class carrying a target current, emit two net-scoped
+    # min-width rules: one for external copper (F.Cu / B.Cu, k=0.048) and
+    # one for internal copper (all other copper layers, k=0.024).  The
+    # widths come from the IPC-2221 closed-form inversion using the board's
+    # copper weights (outer for external, inner for internal).
+    #
+    # KiCad's custom-rule condition grammar scopes to a net class via the
+    # ``A.NetClass`` token (KiCad 7/8/9 "Custom Design Rules" reference).
+    # These rules are appended only when at least one class sets
+    # ``target_ampacity``; otherwise the output is byte-for-byte identical to
+    # the board-wide rule set above (drift-prevention pass-through).
+    if net_classes:
+        from kicad_tools.physics.ampacity import width_for_current
+
+        for nc in net_classes:
+            if nc.target_ampacity is None:
+                continue
+
+            external_width_mm = width_for_current(
+                nc.target_ampacity,
+                copper_weight_oz=rules.outer_copper_oz,
+                layer="external",
+            )
+            internal_width_mm = width_for_current(
+                nc.target_ampacity,
+                copper_weight_oz=rules.inner_copper_oz,
+                layer="internal",
+            )
+
+            # External copper: front and back layers.
+            lines.append(
+                f'(rule "Ampacity Min Width ({nc.name}, external){label_suffix}"\n'
+                f"  (condition \"A.NetClass == '{nc.name}' && A.Type == 'track'"
+                f" && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')\")\n"
+                f"  (constraint track_width (min {external_width_mm:.4f}mm)))"
+            )
+            # Internal copper: any track that is not on an external layer.
+            lines.append(
+                f'(rule "Ampacity Min Width ({nc.name}, internal){label_suffix}"\n'
+                f"  (condition \"A.NetClass == '{nc.name}' && A.Type == 'track'"
+                f" && A.Layer != 'F.Cu' && A.Layer != 'B.Cu'\")\n"
+                f"  (constraint track_width (min {internal_width_mm:.4f}mm)))"
+            )
 
     return "\n".join(lines) + "\n"
