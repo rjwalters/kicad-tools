@@ -17,7 +17,7 @@ surface measures, why they differ, and which one to trust for which purpose.
 
 | Surface | Command | Overlap metric | DRC metric | Layout scored |
 |---------|---------|----------------|------------|---------------|
-| Diagnostics | `kct placement check` | courtyard-expanded polygon (margin, default 0.25 mm) — boolean/severity per pair | real KiCad DRC violations | **actual on-disk placement** |
+| Diagnostics | `kct placement check` | real `F.CrtYd`/`B.CrtYd` polygon (positive-area intersection); pads-bbox + margin (default 0.25 mm) fallback when no courtyard artwork — boolean/severity per pair | real KiCad DRC violations | **actual on-disk placement** |
 | Optimizer objective (dry-run) | `kct optimize-placement --dry-run` | AABB overlap *area* (mm²), no margin | bbox clearance *count* | **actual on-disk placement** (fixed in #3940) |
 | Optimizer objective (search) | `kct optimize-placement` initial/seed eval | AABB overlap *area* (mm²), no margin | bbox clearance *count* | seed / candidate populations during the search |
 | Interactive energy | `kct placement refine` session | none (spacing energy proxy) | none explicit | live positions in the session |
@@ -29,11 +29,18 @@ There are **two independent axes** of difference:
 ### 1. Different geometry (courtyard vs. raw bounding box)
 
 - `kct placement check`
-  ([`PlacementAnalyzer`](../src/kicad_tools/placement/analyzer.py)) expands
-  each footprint's pad bounding box by `courtyard_margin` before testing for
-  overlap, and reports each conflicting pair as a human-readable
-  warning/error. A pair that merely *touches* (0 mm gap) is flagged because
-  the courtyard margins overlap.
+  ([`PlacementAnalyzer`](../src/kicad_tools/placement/analyzer.py)) reads each
+  footprint's **real** `F.CrtYd`/`B.CrtYd` courtyard polygon (via the shared
+  [`geometry.courtyard`](../src/kicad_tools/geometry/courtyard.py) helpers, the
+  same geometry `kct check`'s courtyard-overlap DRC rule and KiCad use) and
+  flags a pair when their courtyard polygons intersect with strictly positive
+  area, so `kct placement check` and `kct check` agree on courtyard overlaps
+  (issue #4182). For footprints with **no** resolvable courtyard artwork it
+  falls back to the legacy approximation: the pad bounding box expanded by
+  `courtyard_margin`, tested as an axis-aligned rectangle overlap. Under that
+  fallback a pair that merely *touches* (0 mm gap) is flagged because the
+  courtyard margins overlap; under the real-polygon path exactly-touching
+  courtyards (zero-area intersection) do **not** conflict, matching KiCad.
 - The optimizer objective
   ([`evaluate_placement`](../src/kicad_tools/placement/cost.py)) measures the
   raw axis-aligned bounding-box overlap **area** in mm², with **no** margin.

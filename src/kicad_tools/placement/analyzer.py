@@ -52,17 +52,24 @@ class PlacementAnalyzer:
         conflicts = analyzer.find_conflicts("board.kicad_pcb", rules=rules)
 
     .. note::
-        This analyzer powers ``kct placement check``. Its overlap metric
-        expands each footprint's pad bounding box by ``courtyard_margin``
-        (default 0.25 mm) and yields per-violation, human-readable
-        diagnostics. It is a **different metric** from the optimizer
-        objective in :func:`kicad_tools.placement.cost.evaluate_placement`,
-        which uses raw axis-aligned bounding-box overlap area with no
-        courtyard margin. The courtyard expansion means this check can flag
-        a "touching" pair that the optimizer objective scores as zero
-        overlap. Keeping the two separate is intentional (actionable
-        diagnostics vs. a smooth optimizer search space); see
-        ``docs/placement-scoring.md`` for the full comparison (issue #3940).
+        This analyzer powers ``kct placement check``. Its courtyard-overlap
+        metric reads each footprint's **real** ``F.CrtYd`` / ``B.CrtYd``
+        polygon (via the shared helpers in
+        :mod:`kicad_tools.geometry.courtyard`, the same geometry ``kct
+        check``'s ``CourtyardOverlapRule`` and KiCad's DRC use) and tests for a
+        positive-area polygon intersection, so ``kct placement check`` and
+        ``kct check`` agree on courtyard overlaps (issue #4182). For
+        footprints with no resolvable courtyard artwork it falls back to the
+        legacy approximation: the footprint's pad bounding box expanded by
+        ``courtyard_margin`` (default 0.25 mm), tested as an axis-aligned
+        rectangle overlap.
+
+        This is a **different metric** from the optimizer objective in
+        :func:`kicad_tools.placement.cost.evaluate_placement`, which uses raw
+        axis-aligned bounding-box overlap area with no courtyard margin.
+        Keeping the two separate is intentional (actionable diagnostics vs. a
+        smooth optimizer search space); see ``docs/placement-scoring.md`` for
+        the full comparison (issues #3940, #4182).
     """
 
     def __init__(self, verbose: bool = False):
@@ -306,8 +313,20 @@ class PlacementAnalyzer:
             max_y = max(p.position.y + p.size[1] / 2 for p in pads)
             pads_bbox = Rectangle(min_x, min_y, max_x, max_y)
 
-            # Courtyard is pads bbox + margin
+            # Courtyard fallback: pads bbox + margin (used when the footprint
+            # has no resolvable F.CrtYd/B.CrtYd geometry).
             courtyard = pads_bbox.expand(courtyard_margin)
+
+        # Prefer the real courtyard polygon (issue #4182): read the actual
+        # F.CrtYd / B.CrtYd graphics so `kct placement check` agrees with
+        # `kct check` (and KiCad's DRC) on courtyard overlaps rather than using
+        # the coarse pads-bbox approximation, which only ever finds a strict
+        # subset.  Fall back to the pads-bbox+margin courtyard above when a
+        # footprint has no resolvable courtyard artwork.
+        courtyard_polygon = self._resolve_courtyard_polygon(fp)
+        if courtyard_polygon is not None:
+            min_x, min_y, max_x, max_y = courtyard_polygon.bounds
+            courtyard = Rectangle(min_x, min_y, max_x, max_y)
 
         return ComponentInfo(
             reference=fp.reference,
@@ -319,7 +338,36 @@ class PlacementAnalyzer:
             pads_bbox=pads_bbox,
             pads=pads,
             holes=holes,
+            courtyard_polygon=courtyard_polygon,
         )
+
+    def _resolve_courtyard_polygon(self, fp):
+        """Build the footprint's real courtyard polygon, or None.
+
+        Uses the shared courtyard-geometry helpers (also used by
+        ``kct check``'s ``CourtyardOverlapRule``) to read the true F.CrtYd /
+        B.CrtYd outline, honoring the footprint's position and rotation.  The
+        component's own board side (F/B) selects which courtyard layer to read;
+        a footprint carrying courtyards on both sides (tall/THT parts) uses the
+        courtyard on the side it is placed on.  Returns ``None`` when shapely is
+        unavailable or no courtyard outline can be resolved, so the caller falls
+        back to the pads-bbox+margin approximation.
+        """
+        try:
+            from kicad_tools._shapely import has_shapely
+        except Exception:
+            return None
+        if not has_shapely():
+            return None
+
+        from shapely.geometry import Polygon  # type: ignore[import-untyped]
+
+        from kicad_tools.geometry.courtyard import _courtyard_polygon, _side_has_geometry
+
+        side = "B" if str(fp.layer).startswith("B") else "F"
+        if not _side_has_geometry(fp, side):
+            return None
+        return _courtyard_polygon(fp, side, Polygon)
 
     def _rotate_point(self, point: Point, angle_deg: float, origin: Point) -> Point:
         """Rotate a point around an origin."""
@@ -353,7 +401,17 @@ class PlacementAnalyzer:
         ) == c2.layer.startswith("B")
 
     def _check_courtyard_overlap(self, c1: ComponentInfo, c2: ComponentInfo) -> Conflict | None:
-        """Check if courtyards of two components overlap."""
+        """Check if courtyards of two components overlap.
+
+        When both components have a resolved real courtyard polygon (issue
+        #4182), use a positive-area polygon intersection — the same test
+        ``kct check``'s ``CourtyardOverlapRule`` and KiCad's DRC perform — so
+        the two checkers agree.  Otherwise fall back to the coarse axis-aligned
+        bounding-box test on the pads-bbox+margin courtyard.
+        """
+        if c1.courtyard_polygon is not None and c2.courtyard_polygon is not None:
+            return self._check_courtyard_overlap_polygon(c1, c2)
+
         if not c1.courtyard or not c2.courtyard:
             return None
 
@@ -384,6 +442,42 @@ class PlacementAnalyzer:
             component2=c2.reference,
             message=f"courtyards overlap by {overlap_amount:.3f}mm",
             location=Point(overlap_x, overlap_y),
+            overlap_amount=overlap_amount,
+        )
+
+    def _check_courtyard_overlap_polygon(
+        self, c1: ComponentInfo, c2: ComponentInfo
+    ) -> Conflict | None:
+        """Positive-area courtyard-polygon overlap test (issue #4182).
+
+        Mirrors ``CourtyardOverlapRule``: two courtyards conflict only when
+        their real polygons intersect with strictly positive area (exactly
+        touching, i.e. zero-area, does not conflict).  The reported overlap
+        amount is the square root of the intersection area, keeping the same
+        millimetre-scaled ``overlap_amount`` units the bbox path emits.
+        """
+        poly_a = c1.courtyard_polygon
+        poly_b = c2.courtyard_polygon
+        if poly_a is None or poly_b is None:
+            return None
+
+        if not poly_a.intersects(poly_b):
+            return None
+        inter = poly_a.intersection(poly_b)
+        if inter.is_empty or inter.area <= 0:
+            # Exactly-touching (zero-area) courtyards do not conflict.
+            return None
+
+        overlap_amount = math.sqrt(inter.area)
+        centroid = inter.centroid
+
+        return Conflict(
+            type=ConflictType.COURTYARD_OVERLAP,
+            severity=ConflictSeverity.WARNING,
+            component1=c1.reference,
+            component2=c2.reference,
+            message=f"courtyards overlap by {inter.area:.3f}mm^2",
+            location=Point(centroid.x, centroid.y),
             overlap_amount=overlap_amount,
         )
 
