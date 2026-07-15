@@ -286,6 +286,7 @@ class TestDriftPrevention:
             "coupled_routing": True,
             "target_diff_impedance": 87.5,
             "target_single_impedance": 47.5,
+            "target_ampacity": 15.0,
             "impedance_tolerance_percent": 7.5,
             "coupled_continuity_threshold": 0.65,
             "skew_tolerance_mm": 0.35,
