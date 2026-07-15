@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.manufacturers import DesignRules, get_profile
 
+from .rules.ampacity import AmpacityRule
 from .rules.clearance import ClearanceRule, SegmentZoneClearanceRule, ViaZoneClearanceRule
 from .rules.connectivity import ConnectivityRule
 from .rules.copper_sliver import CopperSliverRule
@@ -179,6 +180,7 @@ class DRCChecker:
     # dict in ``cli/check_cmd.py``.  The regression test in
     # ``tests/test_check_cmd_coverage.py`` enforces the second half.
     CHECK_ALL_METHODS: tuple[str, ...] = (
+        "check_ampacity",
         "check_clearances",
         "check_connectivity",
         "check_segment_zone_clearances",
@@ -642,6 +644,44 @@ class DRCChecker:
             DRCResults containing edge clearance violations
         """
         rule = EdgeClearanceRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_ampacity(self) -> DRCResults:
+        """Check routed trace widths against per-net ampacity targets.
+
+        Wires :class:`~kicad_tools.validate.rules.ampacity.AmpacityRule`
+        into the standalone DRC pipeline (Issue #4217, Part 3 of #4215).
+        For each net whose class declares a
+        :attr:`~kicad_tools.router.rules.NetClassRouting.target_ampacity`,
+        the rule derives the IPC-2221 minimum trace width via
+        :func:`kicad_tools.physics.ampacity.width_for_current` — the same
+        function and copper-weight / layer split
+        :func:`kicad_tools.manufacturers.dru_generator.generate_dru` uses,
+        so the check and the emitted ``.kicad_dru`` rule agree — and
+        flags any routed segment narrower than that floor.
+
+        Ampacity targets are **declarative**: they come from the
+        ``kct check --net-class-map`` sidecar (the same mechanism
+        :meth:`check_impedance` and :meth:`check_match_group_length_skew`
+        consume).  When ``self.net_class_map is None`` (standalone
+        ``kct check`` with no sidecar), the derived spec map is empty and
+        the rule is a clean no-op — matching the graceful-degradation
+        contract those sibling checks already establish.
+
+        This rule is intentionally NOT in
+        :attr:`ADVISORY_RULE_IDS`: an under-width high-current trace is a
+        real thermal/fire hazard and MUST block gating consumers
+        (``ManufacturingAudit``, ``kct export`` preflight), unlike
+        ``connectivity``.
+
+        Returns:
+            DRCResults containing per-segment ampacity errors.  Empty when
+            no net declares a target (the standalone-CLI common case).
+        """
+        from .ampacity_specs import derive_ampacity_specs
+
+        specs = derive_ampacity_specs(self.net_class_map)
+        rule = AmpacityRule(specs=specs)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_impedance(self) -> DRCResults:
