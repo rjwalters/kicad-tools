@@ -510,6 +510,144 @@ class TestDemoteSegSegOverlapNets:
         assert net_routes[1] == [r1] and net_routes[2] == [r2]
 
 
+class TestDemoteSegSegFinalizeThreshold:
+    """Issue #4202: at FINALIZE (``finalize=True``) the demote widens to
+    the full ``kicad-cli`` SHORT threshold ``(w_a+w_b)/2 + trace_clearance``.
+
+    The negotiated/two-phase loops grid-snap different-net traces one
+    quantum inside ``trace_clearance`` on ``--allow-unsafe-grid`` boards:
+    a POSITIVE edge-to-edge gap ``0 < g < trace_clearance`` is a real
+    ``clearance_segment_segment: SHORT`` that the polygon-intersection
+    (``copper_overlap_only=True``) threshold misses -- so it shipped a
+    short today.  The finalize demote strips it to honestly-unrouted
+    instead.  The default (in-loop) mode is unchanged: it must NOT
+    demote such a repairable near-miss, since the correction/nudge
+    passes get first chance.
+    """
+
+    def _make_autorouter(self) -> Autorouter:
+        ar = Autorouter(
+            width=20.0,
+            height=20.0,
+            origin_x=0.0,
+            origin_y=0.0,
+            rules=_make_rules(),
+            layer_stack=LayerStack.two_layer(),
+        )
+        return ar
+
+    def _sub_clearance_pair(self):
+        """A different-net pair with edge gap 0 < g < trace_clearance.
+
+        trace_width=0.2 -> half-widths sum 0.2; trace_clearance=0.15.
+        Centerline dy = 0.306 -> edge gap = 0.306 - 0.2 = 0.106 mm,
+        which is POSITIVE (no polygon overlap) but below the 0.15 mm
+        clearance: a real kicad-cli SHORT that copper_overlap_only misses.
+        """
+        r1 = _route(1, [_seg(2.0, 5.0, 12.0, 5.0, 1)], "NETA")
+        r2 = _route(2, [_seg(2.0, 5.306, 12.0, 5.306, 2)], "NETB")
+        return r1, r2
+
+    def test_sub_clearance_short_demoted_at_finalize(self):
+        """The core gap: a committed sub-clearance different-net pair is
+        REJECTED (demoted) at finalize, where it shipped before."""
+        ar = self._make_autorouter()
+        neg = _make_neg_router(ar.grid, ar.rules)
+        r1, r2 = self._sub_clearance_pair()
+        for r in (r1, r2):
+            ar.grid.mark_route(r)
+            ar.grid.mark_route_usage(r)
+            ar.routes.append(r)
+        net_routes = {1: [r1], 2: [r2]}
+
+        # In-loop mode (default): NOT demoted -- correction gets first shot.
+        assert ar._demote_seg_seg_overlap_nets(net_routes, neg) == []
+        assert net_routes[1] == [r1] and net_routes[2] == [r2]
+
+        # Finalize mode: the SHORT is stripped to honestly-unrouted.
+        demoted = ar._demote_seg_seg_overlap_nets(net_routes, neg, finalize=True)
+        assert demoted == [1]
+        assert net_routes[1] == []  # honestly-unrouted, not silently dropped
+        assert net_routes[2] == [r2]  # partner survives
+        assert r1 not in ar.routes
+        assert r2 in ar.routes
+        # Post-demotion: no full-threshold violation remains.
+        assert (
+            neg.find_segment_segment_violation_pairs(
+                net_routes,
+                trace_clearance=ar.rules.trace_clearance,
+                copper_overlap_only=False,
+            )
+            == []
+        )
+
+    def test_clean_gap_not_demoted_at_finalize(self):
+        """Edge gap >= trace_clearance (genuinely clean) is NOT demoted:
+        no over-demotion of clean routes at finalize."""
+        ar = self._make_autorouter()
+        neg = _make_neg_router(ar.grid, ar.rules)
+        # Centerline dy = 0.35 -> edge gap = 0.15 == trace_clearance: clean.
+        r1 = _route(1, [_seg(2.0, 5.0, 12.0, 5.0, 1)])
+        r2 = _route(2, [_seg(2.0, 5.35, 12.0, 5.35, 2)])
+        for r in (r1, r2):
+            ar.grid.mark_route(r)
+            ar.grid.mark_route_usage(r)
+            ar.routes.append(r)
+        net_routes = {1: [r1], 2: [r2]}
+
+        assert ar._demote_seg_seg_overlap_nets(net_routes, neg, finalize=True) == []
+        assert net_routes[1] == [r1] and net_routes[2] == [r2]
+
+    def test_hard_overlap_still_demoted_at_finalize(self):
+        """The finalize threshold is a superset of copper-overlap-only,
+        so a full physical overlap (g < 0, board-04 mode) is still
+        demoted -- Unit 1 must not regress the existing #3433 catch."""
+        ar = self._make_autorouter()
+        neg = _make_neg_router(ar.grid, ar.rules)
+        r1 = _route(1, [_seg(2.0, 5.0, 12.0, 5.0, 1)], "SWCLK")
+        r2 = _route(2, [_seg(4.0, 5.0, 10.0, 5.0, 2)], "SWO")
+        r3 = _route(3, [_seg(2.0, 10.0, 12.0, 10.0, 3)], "CLEAN")
+        for r in (r1, r2, r3):
+            ar.grid.mark_route(r)
+            ar.grid.mark_route_usage(r)
+            ar.routes.append(r)
+        net_routes = {1: [r1], 2: [r2], 3: [r3]}
+
+        demoted = ar._demote_seg_seg_overlap_nets(net_routes, neg, finalize=True)
+        assert demoted == [1]
+        assert net_routes[1] == []
+        assert net_routes[2] == [r2] and net_routes[3] == [r3]
+
+    def test_coupled_diffpair_legs_not_over_demoted(self):
+        """A tightly-coupled diff pair (both legs PREROUTED -> both enter
+        the foreign universe as non-rippable ``extra_routes``) is NOT
+        flagged by the finalize threshold, even though its intra spacing
+        is below ``trace_clearance``.  The ``extra``-vs-``extra`` skip in
+        ``find_segment_segment_violation_pairs`` is what prevents Unit 1
+        from over-demoting legitimately-coupled pairs -- both legs live
+        in ``self.routes`` (prerouted), never in the demotable
+        ``net_routes``.
+        """
+        rules = _make_rules()
+        neg = _make_neg_router(None, rules)
+        # Coupled: centerline dy 0.25 -> edge gap 0.05 mm < 0.15 clearance.
+        # Both legs are extra (prerouted diff-pair infra), so no pair fires.
+        net_routes: dict[int, list[Route]] = {}
+        extra = [
+            _route(1, [_seg(0.0, 5.0, 10.0, 5.0, 1)], "USB_D+"),
+            _route(2, [_seg(0.0, 5.25, 10.0, 5.25, 2)], "USB_D-"),
+        ]
+        assert (
+            neg.find_segment_segment_violation_pairs(
+                net_routes,
+                trace_clearance=rules.trace_clearance,
+                extra_routes=extra,
+                copper_overlap_only=False,
+            )
+            == []
+        )
+
+
 # ---------------------------------------------------------------------------
 # Issue #3413: correction pass must run BEFORE demotion on the timeout exit
 # ---------------------------------------------------------------------------
@@ -556,8 +694,8 @@ class TestCorrectionBeforeDemotionOnTimeout:
             calls.append(("correction", kwargs.get("max_correction_passes")))
             return 0
 
-        def _fake_demotion(self, net_routes, neg_router):
-            calls.append(("demotion", None))
+        def _fake_demotion(self, net_routes, neg_router, finalize=False):
+            calls.append(("demotion", finalize))
             return []
 
         monkeypatch.setattr(Autorouter, "_post_route_clearance_correction", _fake_correction)
@@ -605,6 +743,13 @@ class TestCorrectionBeforeDemotionOnTimeout:
         assert correction_passes == 1, (
             f"Timed-out exit must bound the correction to a single pass, "
             f"got max_correction_passes={correction_passes}"
+        )
+        # Issue #4202: the post-loop seg-seg demote runs in FINALIZE mode
+        # (full DRC SHORT threshold), i.e. after the repair pass.
+        demotion_flag = dict(calls)["demotion"]
+        assert demotion_flag is True, (
+            "The post-correction seg-seg demote must run at the finalize "
+            "(full-clearance) threshold, not the in-loop overlap-only one"
         )
 
     def test_correction_unbounded_on_clean_exit(self, monkeypatch):

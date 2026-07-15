@@ -10557,18 +10557,24 @@ class Autorouter:
                     f"({total_elapsed:.1f}s)"
                 )
 
-        # Issue #3433 (safety net): never commit physically-overlapping
-        # copper.  Even with seg-seg violators in the lex tuple, the
-        # loop can exit (stall patience, stagnation, timeout) with a
-        # best snapshot that still contains cross-net same-layer
-        # full overlaps (board-04 SWCLK/SWO, actual -0.200 mm).  Those
-        # are unmanufacturable hard-gate failures, whereas an unrouted
-        # net is an advisory connectivity finding -- the trade is
-        # strictly better.  Runs AFTER the correction pass (which gets
-        # first chance to actually fix the geometry; since issue #3413
-        # the correction pass also runs -- single-pass bounded -- on the
-        # ``timed_out`` exit).
-        demoted = self._demote_seg_seg_overlap_nets(net_routes, neg_router)
+        # Issue #3433 / #4202 (safety net): never commit copper that
+        # would be a cross-net DRC short.  Even with seg-seg violators in
+        # the lex tuple, the loop can exit (stall patience, stagnation,
+        # timeout) with a best snapshot that still contains cross-net
+        # same-layer full overlaps (board-04 SWCLK/SWO, actual -0.200 mm)
+        # OR sub-clearance grazing pairs (positive edge gap but
+        # ``< trace_clearance`` -- a real ``kicad-cli SHORT`` that
+        # polygon-intersection misses; board-05 grid-snap marginals sat
+        # exactly on this 0.1000-vs-0.1016 mm boundary).  Both are
+        # hard-gate DRC failures the post-route gate rejects, whereas an
+        # unrouted net is an advisory connectivity finding -- the trade
+        # is strictly better.  ``finalize=True`` widens the threshold to
+        # the FULL DRC SHORT class (``copper_overlap_only=False``).  Runs
+        # AFTER the correction pass (which gets first chance to actually
+        # fix repairable near-misses; since issue #3413 the correction
+        # pass also runs -- single-pass bounded -- on the ``timed_out``
+        # exit), so what remains at finalize is unrepaired-and-shipping.
+        demoted = self._demote_seg_seg_overlap_nets(net_routes, neg_router, finalize=True)
         if demoted:
             successful_nets = sum(1 for routes in net_routes.values() if routes)
             flush_print(
@@ -11198,6 +11204,7 @@ class Autorouter:
         self,
         net_routes: dict[int, list[Route]],
         neg_router: NegotiatedRouter,
+        finalize: bool = False,
     ) -> list[int]:
         """Strip nets whose committed copper physically overlaps a foreign net.
 
@@ -11212,16 +11219,39 @@ class Autorouter:
         the greedy cover over copper-overlap pairs is demoted to
         unrouted (grid unmarked, routes removed) rather than committed.
 
-        Only fires for PHYSICAL overlap (``copper_overlap_only=True``),
-        never for positive-clearance near-misses -- those remain the
-        province of ``_post_route_clearance_correction`` and the DRC
-        nudge pass, which can actually repair them.
+        Two thresholds, keyed on ``finalize``:
+
+        * ``finalize=False`` (default -- the in-loop / pre-repair
+          position): ``copper_overlap_only=True`` -- only the
+          unmanufacturable PHYSICAL overlaps (negative edge-to-edge)
+          fire, never positive-clearance near-misses, which remain the
+          province of ``_post_route_clearance_correction`` and the DRC
+          nudge pass, which can actually repair them.
+        * ``finalize=True`` (Issue #4202, the FINALIZE position -- runs
+          AFTER ``_post_route_clearance_correction`` has had its repair
+          opportunity): ``copper_overlap_only=False`` -- the FULL DRC
+          SHORT threshold ``(w_a+w_b)/2 + trace_clearance``.  The
+          overlap-only threshold ``(w_a+w_b)/2`` is polygon-intersection
+          only, but ``kicad-cli`` fires ``clearance_segment_segment:
+          SHORT`` at ``(w_a+w_b)/2 + trace_clearance``.  A different-net
+          pair whose edge-to-edge gap is POSITIVE but ``< trace_clearance``
+          is a REAL DRC short that falls below the overlap-only
+          threshold and ships.  Running the WIDE threshold at finalize --
+          after the repair passes have already fixed genuinely-nudgeable
+          near-misses -- means any still-violating pair is
+          unrepaired-and-shipping copper: demote it to honestly-unrouted
+          rather than emit a short the DRC gate will later reject.  MUST
+          NOT run inside the negotiation loop, where transient
+          sub-clearance is expected and is repaired by iteration.
 
         Args:
             net_routes: Mapping of net ID to committed routes (mutated:
                 demoted nets are reset to ``[]``).
             neg_router: Negotiated router (pair detection + grid unmark
                 conventions live there).
+            finalize: When True, use the full DRC SHORT threshold
+                (``copper_overlap_only=False``); see above.  Only pass
+                this AFTER the repair passes have run.
 
         Returns:
             Sorted list of demoted net ids (empty when the result is
@@ -11232,7 +11262,7 @@ class Autorouter:
             net_routes,
             trace_clearance=self.rules.trace_clearance,
             extra_routes=extra,
-            copper_overlap_only=True,
+            copper_overlap_only=not finalize,
         )
         if not overlap_pairs:
             return []

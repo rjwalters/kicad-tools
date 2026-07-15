@@ -1226,20 +1226,29 @@ class TwoPhaseRouter:
             net_routes.clear()
             net_routes.update(best_net_routes)
 
-        # Issue #3433 (safety net): never commit physically-overlapping
-        # copper.  Even with seg-seg violators in the comparator and the
-        # mid-iteration rip-up feed, the loop can exit (stagnation,
-        # early-stop, timeout) with every observed snapshot containing
-        # cross-net same-layer FULL overlaps.  Overlapping copper is an
-        # unmanufacturable hard-gate DRC failure; an unrouted net is an
-        # advisory connectivity finding -- enforce the trade in the
-        # right direction by demoting the greedy-cover victims to
-        # unrouted rather than committing them.
+        # Issue #3433 / #4202 (safety net): never commit copper that
+        # would be a cross-net DRC short.  Even with seg-seg violators in
+        # the comparator and the mid-iteration rip-up feed, the loop can
+        # exit (stagnation, early-stop, timeout) with every observed
+        # snapshot containing cross-net same-layer FULL overlaps OR
+        # sub-clearance grazing pairs (positive edge gap but
+        # ``< trace_clearance`` -- a real ``kicad-cli SHORT`` that
+        # polygon-intersection misses).  Both are hard-gate DRC failures
+        # the post-route gate rejects; an unrouted net is an advisory
+        # connectivity finding -- enforce the trade in the right
+        # direction by demoting the greedy-cover victims to unrouted
+        # rather than committing them.  This is the FINALIZE position
+        # (loop has exited, negotiation's iterative repair is done), so
+        # ``copper_overlap_only=False`` widens the threshold to the FULL
+        # DRC SHORT class ``(w_a+w_b)/2 + trace_clearance`` -- mirroring
+        # the ``finalize=True`` path in ``core._demote_seg_seg_overlap_nets``.
+        # The wide threshold MUST stay out of the negotiation loop, where
+        # transient sub-clearance is expected and repaired by iteration.
         _overlap_pairs = neg_router.find_segment_segment_violation_pairs(
             net_routes,
             trace_clearance=self.rules.trace_clearance,
             extra_routes=self._collect_extra_routes_for_revalidation(net_routes),
-            copper_overlap_only=True,
+            copper_overlap_only=False,
         )
         if _overlap_pairs:
             _demotable = {n for n, r in net_routes.items() if r}
@@ -1254,8 +1263,8 @@ class TwoPhaseRouter:
                     net_routes[_net] = []
                 _victim_names = [self.net_names.get(n, f"Net_{n}") for n in _victims]
                 flush_print(
-                    f"  ⚠ Demoted {len(_victims)} net(s) with physically "
-                    f"overlapping copper to unrouted: {', '.join(_victim_names)}"
+                    f"  ⚠ Demoted {len(_victims)} net(s) with cross-net "
+                    f"shorting copper to unrouted: {', '.join(_victim_names)}"
                 )
 
         # Issue #2597: Surface the iteration-loop exit reason to the caller
