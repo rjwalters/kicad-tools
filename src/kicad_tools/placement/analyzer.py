@@ -440,9 +440,13 @@ class PlacementAnalyzer:
             severity=ConflictSeverity.WARNING,
             component1=c1.reference,
             component2=c2.reference,
-            message=f"courtyards overlap by {overlap_amount:.3f}mm",
+            message=(
+                f"courtyards overlap by {overlap_amount:.3f}mm "
+                "(pad-bbox fallback — no F.CrtYd artwork)"
+            ),
             location=Point(overlap_x, overlap_y),
             overlap_amount=overlap_amount,
+            is_bbox_fallback=True,
         )
 
     def _check_courtyard_overlap_polygon(

@@ -163,6 +163,12 @@ class TestRealCourtyardOverlap:
         assert len(overlaps) == 1
         assert {overlaps[0].component1, overlaps[0].component2} == {"U1", "U2"}
 
+        # Real-polygon path (issue #4182) is NOT a fallback: it must not be
+        # flagged or annotated (issue #4227). Message stays area-based.
+        assert overlaps[0].is_bbox_fallback is False
+        assert "pad-bbox fallback" not in overlaps[0].message
+        assert "mm^2" in overlaps[0].message
+
         # And it agrees with kct check's courtyard rule.
         assert len(_drc_overlaps(pcb)) == 1
 
@@ -302,6 +308,11 @@ class TestFallbackAndResolution:
         pcb = _pcb_with(a, b)
         overlaps = _courtyard_conflicts(_analyze(pcb))
         assert len(overlaps) == 1
+        # Fallback-derived finding is labeled (issue #4227) so it is not
+        # mistaken for a real-polygon courtyard violation.
+        assert overlaps[0].is_bbox_fallback is True
+        assert "pad-bbox fallback" in overlaps[0].message
+        assert overlaps[0].to_dict()["is_bbox_fallback"] is True
 
     def test_mixed_real_and_fallback(self):
         """One footprint with real courtyard, one pads-only -> the pair falls
@@ -322,6 +333,10 @@ class TestFallbackAndResolution:
         # No crash; bbox-fallback comparison used because R1 has no polygon.
         overlaps = _courtyard_conflicts(_analyze(pcb))
         assert len(overlaps) == 1
+        # Only one footprint resolved a real polygon, so this pair still uses
+        # the bbox fallback and must be labeled accordingly (issue #4227).
+        assert overlaps[0].is_bbox_fallback is True
+        assert "pad-bbox fallback" in overlaps[0].message
 
     def test_line_chain_courtyard_resolves(self):
         """A courtyard authored as an fp_line loop resolves and overlaps are

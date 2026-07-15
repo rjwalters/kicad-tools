@@ -343,6 +343,9 @@ class TestConflictTypes:
         assert d["component1"] == "R1"
         assert d["component2"] == "R2"
         assert d["overlap_amount"] == 0.5
+        # New field defaults to False and serializes for JSON consumers (#4227).
+        assert conflict.is_bbox_fallback is False
+        assert d["is_bbox_fallback"] is False
 
 
 class TestPlacementAnalyzer:
@@ -360,6 +363,10 @@ class TestPlacementAnalyzer:
         conflict = overlap_conflicts[0]
         assert {conflict.component1, conflict.component2} == {"R1", "R2"}
         assert conflict.severity == ConflictSeverity.WARNING
+        # These footprints carry no F.CrtYd artwork, so the finding comes from
+        # the pad-bbox fallback and must be labeled as such (#4227).
+        assert conflict.is_bbox_fallback is True
+        assert "pad-bbox fallback" in conflict.message
 
     def test_find_pad_clearance_violations(self, overlapping_pcb: Path):
         """Test detecting pad clearance violations."""
