@@ -3647,8 +3647,26 @@ def _add_route_auto_parser(subparsers) -> None:
         default="auto",
         help=(
             "Strategy override (default: auto). "
-            "'auto' lets the orchestrator select the best strategy. "
-            "Other values force a specific strategy."
+            "'auto' lets the orchestrator select the best strategy and, on a "
+            "partially-connected multi-pad net, automatically ATTEMPTS the "
+            "'hierarchical' fallback to complete it (Issue #4165); the fallback "
+            "improves completion when it can but does not guarantee it, so a "
+            "hard net may stay partial and route-auto still exits non-zero. "
+            "'global'/'escape'/'subgrid' route a SINGLE two-terminal corridor "
+            "and may leave intermediate pads of a multi-pad net unconnected "
+            "even when they report success (route-auto then reports "
+            "'partially routed: k/n pads connected' and exits non-zero). "
+            "'hierarchical' iterates toward full net completion but may still "
+            "leave a congested net partial."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help=(
+            "Persist a partially-routed multi-pad net's copper instead of "
+            "refusing to write incomplete copper. Exit code stays non-zero and "
+            "the k/n partial report is still printed (Issue #4165)."
         ),
     )
     route_auto_parser.add_argument(

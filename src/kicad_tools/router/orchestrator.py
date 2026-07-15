@@ -354,10 +354,25 @@ class RoutingOrchestrator:
         routing_start = time.time()
         result = self._execute_strategy(net, strategy, intent, pads)
 
-        # Phase 2b: Automatic strategy retry on failure
+        # Phase 2a: Truth-in-exit-condition (Issue #4165).
+        # The global-family strategies (global/escape/subgrid) route a single
+        # two-terminal corridor and report unconditional success even when a
+        # multi-pad net has stranded pads.  Verify actual per-pad copper
+        # reachability; if incomplete, demote to a PARTIAL result (success=
+        # False, partial=True) so the retry loop below can fall through to a
+        # completing strategy (hierarchical) instead of blessing a half-routed
+        # net.
+        self._verify_completion(result, pads)
+
+        # Phase 2b: Automatic strategy retry on failure OR partial completion.
         if not result.success and result.alternative_strategies and self.max_strategy_retries > 0:
             retries = result.alternative_strategies[: self.max_strategy_retries]
             strategies_attempted = [strategy.name]
+
+            # Track the best partial result seen (initial or any retry) so that
+            # if nothing fully completes the net we still surface the most-
+            # connected honest partial rather than a bare failure (Issue #4165).
+            best_partial = result if result.partial else None
 
             for alt in retries:
                 logger.info(
@@ -370,6 +385,10 @@ class RoutingOrchestrator:
                 retry_result = self._execute_strategy(net, alt.strategy, intent, pads)
                 strategies_attempted.append(alt.strategy.name)
 
+                # Re-verify per-pad completion on the retry as well: a global-
+                # family retry can itself be partial and must not be blessed.
+                self._verify_completion(retry_result, pads)
+
                 if retry_result.success:
                     retry_result.warnings.append(
                         f"Succeeded on retry with {alt.strategy.name} "
@@ -379,9 +398,20 @@ class RoutingOrchestrator:
                     )
                     result = retry_result
                     break
+
+                # Keep the retry with the most pads connected as the fallback
+                # partial if no later strategy fully completes.
+                if retry_result.partial and (
+                    best_partial is None
+                    or (retry_result.pads_connected or 0) > (best_partial.pads_connected or 0)
+                ):
+                    best_partial = retry_result
             else:
-                # All retries exhausted without success — keep the last
-                # failure result but note what was tried
+                # All retries exhausted without full completion.  Prefer the
+                # best honest partial over a bare no-copper failure so callers
+                # get "k/n pads connected" instead of an opaque failure.
+                if best_partial is not None:
+                    result = best_partial
                 result.warnings.append(
                     f"All strategy retries exhausted (attempted: {', '.join(strategies_attempted)})"
                 )
@@ -405,6 +435,149 @@ class RoutingOrchestrator:
         )
 
         return result
+
+    # Strategies whose "success" is a single two-terminal corridor and thus may
+    # leave a multi-pad net's intermediate pads stranded (Issue #4165).  The
+    # negotiated/hierarchical family completes the net by construction and is
+    # trusted without a post-route reachability check.
+    _GLOBAL_FAMILY_STRATEGIES = frozenset(
+        {
+            RoutingStrategy.GLOBAL_WITH_REPAIR,
+            RoutingStrategy.ESCAPE_THEN_GLOBAL,
+            RoutingStrategy.SUBGRID_ADAPTIVE,
+            RoutingStrategy.MULTI_RESOLUTION,
+        }
+    )
+
+    def _verify_completion(self, result: RoutingResult, pads: list[Pad] | None) -> None:
+        """Verify real per-pad copper reachability and demote partials.
+
+        Issue #4165: the global-family strategies report ``success=True`` once
+        they emit ANY corridor, with no check that every pad of a multi-pad net
+        is actually reached.  This runs a real reachability walk over the
+        produced copper (segments + vias) unioned with pre-existing same-net
+        copper on the PCB.  When fewer than all pads connect, the result is
+        demoted to ``success=False, partial=True`` with ``pads_connected`` /
+        ``pads_total`` populated and ``hierarchical`` injected as an
+        alternative so the retry loop can complete the net.
+
+        The check is a genuine geometric-adjacency walk (see
+        :mod:`kicad_tools.router.connectivity`) -- it does NOT reuse
+        ``NetStatusAnalyzer``'s tolerance-based union (Issue #4176), and errs
+        toward reporting incomplete rather than over-connecting.
+
+        Mutates ``result`` in place; no-op for non-global strategies, failures,
+        or nets with fewer than two pads.
+        """
+        if result.strategy_used not in self._GLOBAL_FAMILY_STRATEGIES:
+            return
+        if not result.success:
+            return
+        if not pads or len(pads) < 2:
+            return
+        # No produced geometry means there is no corridor to under-reach: a
+        # segment-less "success" is the #2913 concern (persistence surfaces it),
+        # not #4165's stranded-pad concern.  Only demote when copper was
+        # actually emitted that fails to reach every pad.
+        if not result.segments and not result.vias:
+            return
+
+        from .connectivity import check_net_pad_connectivity
+
+        pad_positions = [(p.x, p.y) for p in pads]
+
+        # Gather pre-existing same-net copper so pads already joined by earlier
+        # routing (or partial prior calls) count toward completion.
+        existing_segments, existing_vias = self._existing_net_copper(pads)
+
+        try:
+            pads_connected, pads_total = check_net_pad_connectivity(
+                pad_positions=pad_positions,
+                segments=list(result.segments),
+                vias=list(result.vias),
+                existing_segments=existing_segments,
+                existing_vias=existing_vias,
+            )
+        except Exception:  # pragma: no cover - defensive; never mask a route
+            logger.debug("Per-pad connectivity check failed; leaving result unchanged")
+            return
+
+        result.pads_connected = pads_connected
+        result.pads_total = pads_total
+
+        if pads_connected >= pads_total:
+            return  # fully connected — genuine success
+
+        # Incomplete: demote to a partial result.
+        result.partial = True
+        result.success = False
+        result.warnings.append(
+            f"Partial route: {pads_connected}/{pads_total} pads connected by the "
+            f"{result.strategy_used.name} corridor; remaining pad(s) left "
+            "unconnected. This strategy routes a single two-terminal corridor "
+            "and does not complete multi-pad nets (Issue #4165)."
+        )
+        # Steer the retry loop toward a completing strategy.
+        if not any(
+            a.strategy == RoutingStrategy.HIERARCHICAL_DIFF_PAIR
+            for a in result.alternative_strategies
+        ):
+            result.alternative_strategies.insert(
+                0,
+                AlternativeStrategy(
+                    strategy=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
+                    reason=(
+                        "Global-family corridor left pads unconnected; the "
+                        "iterative negotiated router aims to complete multi-pad "
+                        "nets (not guaranteed on congested/hard nets)"
+                    ),
+                    estimated_cost=1.5,
+                    success_probability=0.7,
+                ),
+            )
+
+    def _existing_net_copper(self, pads: list[Pad]) -> tuple[list, list]:
+        """Collect pre-existing same-net segments + vias from the PCB.
+
+        Returns ``([], [])`` when the attached PCB does not expose copper
+        accessors (e.g. the lightweight mock PCBs used in some tests).
+        """
+        net_numbers = {p.net for p in pads if getattr(p, "net", 0)}
+        net_names = {p.net_name for p in pads if getattr(p, "net_name", "")}
+        pcb = self.pcb
+        segments: list = []
+        vias: list = []
+
+        seg_in_net = getattr(pcb, "segments_in_net", None)
+        via_in_net = getattr(pcb, "vias_in_net", None)
+        if callable(seg_in_net) and callable(via_in_net):
+            for num in net_numbers:
+                try:
+                    segments.extend(seg_in_net(num))
+                    vias.extend(via_in_net(num))
+                except Exception:  # pragma: no cover - defensive
+                    continue
+            return segments, vias
+
+        # Fallback: filter the full segment/via lists by net name when the PCB
+        # only exposes flat accessors.
+        all_segs = getattr(pcb, "segments", None)
+        all_vias = getattr(pcb, "vias", None)
+        if isinstance(all_segs, list):
+            for s in all_segs:
+                if (
+                    getattr(s, "net_name", "") in net_names
+                    or getattr(s, "net_number", -1) in net_numbers
+                ):
+                    segments.append(s)
+        if isinstance(all_vias, list):
+            for v in all_vias:
+                if (
+                    getattr(v, "net_name", "") in net_names
+                    or getattr(v, "net_number", -1) in net_numbers
+                ):
+                    vias.append(v)
+        return segments, vias
 
     def _select_strategy(
         self,

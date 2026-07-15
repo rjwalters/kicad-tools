@@ -165,6 +165,17 @@ class RoutingResult:
         alternative_strategies: Alternative strategies to try if this failed
         error_message: Error description if success=False
         warnings: Non-fatal warnings about the routing
+        partial: True when routing produced copper but did NOT connect every
+            pad of a multi-pad net (Issue #4165).  A partial result reports
+            ``success=False`` so callers/retry-logic treat it as incomplete,
+            but is distinguished from a hard failure (no copper at all) by
+            this flag plus ``pads_connected``/``pads_total``.
+        pads_connected: Number of the net's pads reached by the produced
+            copper (unioned with pre-existing same-net copper).  ``None`` when
+            no per-pad connectivity check was performed (e.g. hierarchical,
+            which is trusted to iterate toward completion internally, or an
+            early hard failure).
+        pads_total: Total number of the net's pads considered by the check.
     """
 
     success: bool
@@ -179,6 +190,9 @@ class RoutingResult:
     alternative_strategies: list[AlternativeStrategy] = field(default_factory=list)
     error_message: str = ""
     warnings: list[str] = field(default_factory=list)
+    partial: bool = False
+    pads_connected: int | None = None
+    pads_total: int | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization (e.g., MCP tools).
@@ -241,4 +255,7 @@ class RoutingResult:
             "warnings": self.warnings,
             "segment_count": len(self.segments),
             "via_count": len(self.vias),
+            "partial": self.partial,
+            "pads_connected": self.pads_connected,
+            "pads_total": self.pads_total,
         }
