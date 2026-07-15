@@ -534,15 +534,23 @@ class SchematicValidationMixin:
             p2 = (round(wire.x2, 2), round(wire.y2, 2))
             wire_segments.append((p1, p2))
 
+        # Junction-dot positions gate wire-to-wire union (issue #4226) — must
+        # match _build_connectivity_graph() so the two builders don't drift.
+        junction_points = [(round(j.x, 2), round(j.y, 2)) for j in self.junctions]  # type: ignore[attr-defined]
+
         # Union wires with each other on collinear overlap or mid-segment
-        # T-touch, matching KiCad and mirroring the same fix applied to
-        # _build_connectivity_graph() (issue #4143).  This duplicate
-        # connectivity builder had the identical endpoint-only gap.
+        # T-touch, but ONLY where a junction dot is present, matching KiCad
+        # and mirroring the junction-gated fix in _build_connectivity_graph()
+        # (issue #4226; the underlying #4143 dotted-merge detection is
+        # preserved).  This duplicate connectivity builder must not drift from
+        # the netlist builder.
         for i in range(len(wire_segments)):
             a_start, a_end = wire_segments[i]
             for j in range(i + 1, len(wire_segments)):
                 b_start, b_end = wire_segments[j]
-                if wire_segments_connect(a_start, a_end, b_start, b_end):
+                if wire_segments_connect(
+                    a_start, a_end, b_start, b_end, junction_points=junction_points
+                ):
                     union(a_start, b_start)
 
         for junc in self.junctions:
@@ -856,6 +864,16 @@ class SchematicValidationMixin:
         Same-net overlaps (both wires labelled with the same net, or one/both
         unlabelled) are *not* flagged: only a genuine two-different-named-net
         overlap is reported.
+
+        Deliberate warn-vs-union asymmetry (issue #4226): this check calls
+        :func:`wire_segments_connect` with the **ungated** (pure-geometry)
+        predicate — i.e. *without* passing ``junction_points`` — so a
+        differently-labelled graze that lacks a junction dot is still flagged
+        as a suspicious potential-short here, even though
+        :meth:`_build_connectivity_graph` (which *does* pass the junction set)
+        will correctly NOT merge it.  Tighten what *merges* to match KiCad;
+        keep loose what *warns* — better to surface a suspicious dot-less
+        graze than hide it.
         """
         issues: list[dict] = []
         wire_nets = self._wire_net_names()
