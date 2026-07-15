@@ -93,6 +93,15 @@ from .transmission_line import (
     ImpedanceResult,
     TransmissionLine,
 )
+from .wire_gauge import (
+    DEFAULT_SLIP_FIT_CLEARANCE_MM,
+    DEFAULT_WIRE_GAUGE_AWG,
+    anchor_drill_for_awg,
+    anchor_pad_for_drill,
+    bare_copper_diameter_mm,
+    supported_gauges,
+    wire_ampacity,
+)
 
 __all__ = [
     # Constants
@@ -106,6 +115,14 @@ __all__ = [
     "copper_thickness_from_oz",
     # Ampacity (IPC-2221)
     "width_for_current",
+    # Wire gauge (AWG) / buttress-wire reinforcement
+    "DEFAULT_SLIP_FIT_CLEARANCE_MM",
+    "DEFAULT_WIRE_GAUGE_AWG",
+    "bare_copper_diameter_mm",
+    "anchor_drill_for_awg",
+    "anchor_pad_for_drill",
+    "supported_gauges",
+    "wire_ampacity",
     # Materials
     "DielectricMaterial",
     "FR4_STANDARD",
