@@ -31,6 +31,13 @@ NEW_SKILLS = (
     "tapeout",
 )
 
+# Meta-skills (#4189): they describe the *other* skills and take no <board-path>
+# argument, so they are exempt from the per-board-skill contract
+# (test_board_path_is_a_parameter). The consumer-generic gates that DO apply to
+# any vendored .md — frontmatter house style, no repo-internal path literals, no
+# CI-workflow assumptions — still run against them via META_SKILLS below.
+META_SKILLS = ("help",)
+
 # The manufacturing-readiness skill is the one that must not enumerate fab tiers.
 MFR_SKILL = "manufacturing-readiness"
 
@@ -60,7 +67,7 @@ def _lines(name: str) -> list[str]:
     return _skill_path(name).read_text(encoding="utf-8").splitlines()
 
 
-@pytest.mark.parametrize("skill", NEW_SKILLS)
+@pytest.mark.parametrize("skill", NEW_SKILLS + META_SKILLS)
 def test_no_repo_internal_path_literals(skill: str) -> None:
     """Gate 1: no boards/0N-, hardware/board-0N, scripts/ci/board0N, chorus, softstart."""
     hits = [
@@ -111,7 +118,7 @@ def test_mfr_skill_defers_to_registry() -> None:
     )
 
 
-@pytest.mark.parametrize("skill", NEW_SKILLS)
+@pytest.mark.parametrize("skill", NEW_SKILLS + META_SKILLS)
 def test_no_ci_workflow_assumptions(skill: str) -> None:
     """Gate 4: no directive reference to .github/workflows/* or scripts/ci/*.
 
@@ -125,7 +132,7 @@ def test_no_ci_workflow_assumptions(skill: str) -> None:
     assert not hits, "CI-workflow assumption found:\n" + "\n".join(hits)
 
 
-@pytest.mark.parametrize("skill", NEW_SKILLS)
+@pytest.mark.parametrize("skill", NEW_SKILLS + META_SKILLS)
 def test_frontmatter_matches_house_style(skill: str) -> None:
     """Every skill carries the ee-review.md frontmatter block."""
     text = _skill_path(skill).read_text(encoding="utf-8")
@@ -148,11 +155,33 @@ def test_mfr_skill_states_cross_gate_is_mandatory() -> None:
     )
 
 
-@pytest.mark.parametrize("skill", NEW_SKILLS)
+@pytest.mark.parametrize("skill", NEW_SKILLS + META_SKILLS)
 def test_readme_indexes_every_new_skill(skill: str) -> None:
     """Gate: README table lists every new skill in the same table as ee-review."""
     readme = (KCT_DIR / "README.md").read_text(encoding="utf-8")
     assert f"/kct:{skill}" in readme, f"README.md does not index /kct:{skill}"
+
+
+@pytest.mark.parametrize("skill", META_SKILLS)
+def test_meta_skill_has_no_board_path_contract(skill: str) -> None:
+    """Meta-skills describe other skills and must NOT take a <board-path>.
+
+    This is the explicit carve-out from test_board_path_is_a_parameter: help.md
+    (and any future meta-skill) operates on the skill *files*, never on a board,
+    so it deliberately does not define a <board-path> token. Asserting its
+    absence keeps the meta-skill honest (a meta-skill that grew a board argument
+    would be a design regression).
+    """
+    text = _skill_path(skill).read_text(encoding="utf-8")
+    assert "<board-path>" not in text, (
+        f"{skill}.md is a meta-skill and must not take a <board-path> argument"
+    )
+
+
+def test_meta_skill_is_read_only(skill: str = "help") -> None:
+    """help.md must declare itself strictly read-only (never touches a board)."""
+    text = _skill_path(skill).read_text(encoding="utf-8").lower()
+    assert "read-only" in text, f"{skill}.md must state it is read-only"
 
 
 def test_manufacturer_registry_is_the_authoritative_source() -> None:

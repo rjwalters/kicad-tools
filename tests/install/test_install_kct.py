@@ -197,8 +197,9 @@ def test_path_install_produces_all_artifacts(
     assert "[tool.uv.sources]" in pyproject
     assert "path" in pyproject.split("[tool.uv.sources]", 1)[1]
 
-    # Vendored skills byte-identical to source.
-    for name in ("README.md", "ee-review.md"):
+    # Vendored skills byte-identical to source. README.md and help.md are the
+    # always-vendored meta files (help.md is the introspective /kct:help skill).
+    for name in ("README.md", "help.md", "ee-review.md"):
         dst = target_repo / ".claude" / "commands" / "kct" / name
         assert dst.exists()
         assert dst.read_bytes() == (SKILLS_SRC / name).read_bytes()
@@ -229,7 +230,11 @@ def test_path_install_produces_all_artifacts(
     assert "ee-review" in meta["skills_selected"]
     assert ".claude/commands/kct/ee-review.md" in meta["installed_files"]
     assert ".claude/commands/kct/README.md" in meta["installed_files"]
+    assert ".claude/commands/kct/help.md" in meta["installed_files"]
     assert ".kct/CONVENTIONS.md" in meta["installed_files"]
+    # help.md is a meta-skill, not a per-board skill: it is always vendored, so
+    # it must NOT appear in skills_selected (like README.md, it is not selectable).
+    assert "help" not in meta["skills_selected"]
 
 
 # --- idempotent re-run -------------------------------------------------------
@@ -348,16 +353,37 @@ def test_skills_filter_selects_named_skill(target_repo: Path, fake_uv_env: dict[
     assert result.returncode == 0, result.stderr
     kct_dir = target_repo / ".claude" / "commands" / "kct"
     assert (kct_dir / "ee-review.md").exists()
-    # README is always vendored (documents the namespace).
+    # README and help are always vendored regardless of --skills= filtering:
+    # README documents the namespace; help.md is the introspective /kct:help
+    # meta-skill that must exist even when only one per-board skill was selected.
     assert (kct_dir / "README.md").exists()
+    assert (kct_dir / "help.md").exists()
+    # A per-board skill NOT named in --skills= must be absent — proves help.md's
+    # presence is unconditional, not just a side effect of vendoring everything.
+    assert not (kct_dir / "tapeout.md").exists()
     meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
     assert meta["skills_selected"] == ["ee-review"]
+    assert "help" not in meta["skills_selected"]
+    # help.md is still recorded in installed_files (always-vendored, like README).
+    assert ".claude/commands/kct/help.md" in meta["installed_files"]
 
 
 def test_unknown_skill_errors(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
     result = run_installer(
         target_repo, "--skills=does-not-exist", "--path", str(REPO_ROOT), env=fake_uv_env
     )
+    assert result.returncode != 0
+    assert "unknown skill" in result.stderr
+
+
+def test_help_is_not_a_selectable_skill(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """--skills=help must be rejected, exactly like --skills=README today.
+
+    help.md is always vendored (a meta-skill), never opt-in via --skills=. It is
+    excluded from ALL_SKILLS the same way README.md is, so requesting it by name
+    is an unknown-skill error, not a way to select it.
+    """
+    result = run_installer(target_repo, "--skills=help", "--path", str(REPO_ROOT), env=fake_uv_env)
     assert result.returncode != 0
     assert "unknown skill" in result.stderr
 
