@@ -2029,7 +2029,7 @@ def _auto_detect_anchored_refs(pcb) -> set[str]:
     return anchored
 
 
-def _resolve_placement_feedback_anchors(pcb, args) -> set[str]:
+def _resolve_placement_feedback_anchors(pcb, args, quiet: bool = False) -> set[str]:
     """Compute the final set of anchored refs for the feedback loop.
 
     Combines auto-detected anchors (connectors, locked footprints) with
@@ -2037,16 +2037,40 @@ def _resolve_placement_feedback_anchors(pcb, args) -> set[str]:
     any refs the user explicitly opted out via
     ``--placement-feedback-no-anchor``.
 
+    Issue #4151: user-supplied ``--placement-feedback-anchor`` /
+    ``--placement-feedback-no-anchor`` refs are validated against the
+    board's actual footprint references.  A typo'd ref that matches no
+    footprint used to be silently absorbed into the set with no signal;
+    we now emit a tolerant warning naming the unmatched ref(s) (same
+    silently-inert-configuration failure class as #4149).
+
     Args:
         pcb: Loaded PCB object.
         args: Parsed CLI args.
+        quiet: When True, suppress the unmatched-ref warning.
 
     Returns:
         Set of refs to anchor.
     """
+    board_refs = {
+        (getattr(fp, "reference", "") or "") for fp in getattr(pcb, "footprints", []) or []
+    }
+    board_refs.discard("")
+
+    requested_anchor = _parse_ref_list(getattr(args, "placement_feedback_anchor", None))
+    requested_no_anchor = _parse_ref_list(getattr(args, "placement_feedback_no_anchor", None))
+
+    if not quiet:
+        unknown = sorted((requested_anchor | requested_no_anchor) - board_refs)
+        if unknown:
+            print(
+                "Warning: --placement-feedback-anchor/--placement-feedback-no-anchor "
+                f"ref(s) not found on board: {', '.join(unknown)}"
+            )
+
     anchors = _auto_detect_anchored_refs(pcb)
-    anchors |= _parse_ref_list(getattr(args, "placement_feedback_anchor", None))
-    anchors -= _parse_ref_list(getattr(args, "placement_feedback_no_anchor", None))
+    anchors |= requested_anchor
+    anchors -= requested_no_anchor
     return anchors
 
 
@@ -2112,7 +2136,7 @@ def _run_placement_feedback(
             print(f"  Warning: could not load PCB for feedback ({exc}); skipping")
         return None
 
-    anchored = _resolve_placement_feedback_anchors(pcb, args)
+    anchored = _resolve_placement_feedback_anchors(pcb, args, quiet=quiet)
     if not quiet and anchored:
         print(f"  Anchored refs ({len(anchored)}): {', '.join(sorted(anchored))}")
 
@@ -2142,12 +2166,21 @@ def _run_placement_feedback(
     if _remaining is not None:
         outer_timeout = _remaining if outer_timeout is None else min(outer_timeout, _remaining)
 
+    # Issue #4151: gate the per-iteration firehose (candidate breakdowns,
+    # per-move deltas emitted by ``PlacementFeedbackLoop`` under
+    # ``self.verbose``) on ``-v``/``--verbose`` specifically, rather than
+    # on ``not quiet``.  The always-on one-line summary below
+    # (iterations / exit reason / components moved / final failed nets)
+    # is emitted independently whenever ``not quiet``, so a default run
+    # still gets telemetry -- just without the noisy per-iteration detail.
+    loop_verbose = (not quiet) and bool(getattr(args, "verbose", False))
+
     try:
         result = router.route_with_placement_feedback(
             pcb=pcb,
             max_adjustments=budget,
             use_negotiated=use_negotiated,
-            verbose=not quiet,
+            verbose=loop_verbose,
             fixed_refs=anchored,
             max_movement=max_movement,
             timeout=timeout,
@@ -2185,6 +2218,107 @@ def _run_placement_feedback(
             print(f"  Warning: could not write placement diff ({exc})")
 
     return diff_data
+
+
+def _maybe_run_placement_feedback_escalation(
+    final_result,
+    successful_result,
+    pcb_path: Path,
+    args,
+    quiet: bool,
+    *,
+    stall_label: str,
+) -> None:
+    """Engage placement-routing feedback at the tail of an escalation loop.
+
+    This is the shared hook used by ``route_with_layer_escalation`` and,
+    via this helper, by ``route_with_rule_relaxation`` and
+    ``route_with_combined_escalation`` (issue #4151).  Before this helper
+    existed, the latter two dispatch paths never referenced
+    ``_run_placement_feedback`` at all, so ``--placement-feedback`` was
+    parsed, forwarded, and silently dropped on the floor.
+
+    Behaviour:
+
+    * When ``--placement-feedback`` is not requested, this is a no-op
+      (byte-identical routing preserved).
+    * When requested and the escalation already fully succeeded
+      (``successful_result is not None``), the loop is not needed -- we
+      stay silent (this is the "not needed" state, distinct from the
+      "not supported" DISABLED state).
+    * When requested and there are still failed nets on a partial result,
+      the feedback loop runs and ``_run_placement_feedback`` emits its
+      one-line summary; ``final_result``'s completion stats are refreshed
+      from the post-feedback router state so optimize/save/summary all see
+      the correct numbers.
+    * When requested but the router produced no routes at all (nothing to
+      feed back into), emit an explicit
+      ``placement-feedback: DISABLED (...)`` line so the request is never
+      silently swallowed.
+
+    Args:
+        final_result: The chosen result object (mutated in place on run).
+        successful_result: The fully-successful result, or None.
+        pcb_path: Path to the (staged) input PCB.
+        args: Parsed CLI args.
+        quiet: Suppress output when True.
+        stall_label: Human-readable name of the escalation strategy for
+            the "Engaging" banner (e.g. "rule relaxation").
+    """
+    if not getattr(args, "placement_feedback", False):
+        return
+
+    # Fully-succeeded escalation: feedback is simply not needed.  Stay
+    # silent so "not needed" remains textually distinguishable from the
+    # "not supported / disabled" state below.
+    if successful_result is not None:
+        return
+
+    router = final_result.router
+
+    # No routes at all -> nothing to feed placement changes back into.
+    # Make the (previously silent) drop explicit rather than swallowing it.
+    if router.routes is None:
+        if not quiet:
+            print(
+                "placement-feedback: DISABLED (no routes produced by "
+                f"{stall_label}; nothing to feed back)"
+            )
+        return
+
+    if not router.get_failed_nets():
+        # All nets already routed on this partial-but-complete result; the
+        # loop has nothing to improve.  Not a DISABLED case.
+        return
+
+    if not quiet:
+        print(
+            f"\n--- Engaging placement-routing feedback "
+            f"({stall_label} stalled at {final_result.completion * 100:.0f}%) ---"
+        )
+    _run_placement_feedback(
+        router=router,
+        pcb_path=pcb_path,
+        args=args,
+        quiet=quiet,
+    )
+    # Refresh completion stats from the post-feedback router state so
+    # optimize/save/summary all see the correct numbers.
+    _refreshed_multi_pad_ids = {n for n, p in router.nets.items() if n > 0 and len(p) >= 2}
+    _refreshed = router.get_statistics(nets_to_route_ids=_refreshed_multi_pad_ids)
+    final_result.nets_routed = _refreshed["nets_routed"]
+    final_result.completion = (
+        final_result.nets_routed / final_result.nets_to_route
+        if final_result.nets_to_route > 0
+        else 1.0
+    )
+    final_result.success = final_result.completion >= args.min_completion
+    if not quiet:
+        print(
+            f"  Post-feedback: {final_result.nets_routed}/"
+            f"{final_result.nets_to_route} "
+            f"({final_result.completion * 100:.0f}%)"
+        )
 
 
 def _fill_zones_after_route(output_path: Path, quiet: bool = False) -> None:
@@ -4178,42 +4312,14 @@ def route_with_layer_escalation(
     #   * only when there are still failed nets to address.
     # The loop mutates ``final_result.router.routes`` in place, so we
     # refresh ``final_result``'s stats afterwards before optimize/save.
-    if (
-        successful_result is None
-        and getattr(args, "placement_feedback", False)
-        and final_result.router.routes is not None
-        and final_result.router.get_failed_nets()
-    ):
-        if not quiet:
-            print(
-                f"\n--- Engaging placement-routing feedback "
-                f"(escalation stalled at {final_result.completion * 100:.0f}%) ---"
-            )
-        _run_placement_feedback(
-            router=final_result.router,
-            pcb_path=pcb_path,
-            args=args,
-            quiet=quiet,
-        )
-        # Refresh completion stats from the post-feedback router state so
-        # optimize/save/summary all see the correct numbers.
-        _refreshed_multi_pad_ids = {
-            n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2
-        }
-        _refreshed = final_result.router.get_statistics(nets_to_route_ids=_refreshed_multi_pad_ids)
-        final_result.nets_routed = _refreshed["nets_routed"]
-        final_result.completion = (
-            final_result.nets_routed / final_result.nets_to_route
-            if final_result.nets_to_route > 0
-            else 1.0
-        )
-        final_result.success = final_result.completion >= args.min_completion
-        if not quiet:
-            print(
-                f"  Post-feedback: {final_result.nets_routed}/"
-                f"{final_result.nets_to_route} "
-                f"({final_result.completion * 100:.0f}%)"
-            )
+    _maybe_run_placement_feedback_escalation(
+        final_result,
+        successful_result,
+        pcb_path,
+        args,
+        quiet,
+        stall_label="layer escalation",
+    )
 
     # Optimize traces
     if not args.no_optimize and final_result.router.routes:
@@ -4853,6 +4959,19 @@ def route_with_rule_relaxation(
         if not quiet:
             print("Error: No routing attempts succeeded")
         return 1
+
+    # Issue #4151: engage placement-routing feedback when --placement-feedback
+    # is set and rule relaxation stalled with unrouted nets.  Before this
+    # hook, --placement-feedback was silently dropped on the rule-relaxation
+    # dispatch path (--adaptive-rules without effective --auto-layers).
+    _maybe_run_placement_feedback_escalation(
+        final_result,
+        successful_result,
+        pcb_path,
+        args,
+        quiet,
+        stall_label="rule relaxation",
+    )
 
     # Check if at manufacturer minimum
     from kicad_tools.router import get_mfr_limits
@@ -7018,6 +7137,20 @@ def route_with_combined_escalation(
         if not quiet:
             print("Error: No routing attempts succeeded")
         return 1
+
+    # Issue #4151: engage placement-routing feedback when --placement-feedback
+    # is set and the combined layer x rule-tier search stalled with unrouted
+    # nets.  Before this hook, --placement-feedback was silently dropped on
+    # the combined-escalation dispatch path (--auto-layers --adaptive-rules
+    # together).
+    _maybe_run_placement_feedback_escalation(
+        final_result,
+        successful_result,
+        pcb_path,
+        args,
+        quiet,
+        stall_label="combined escalation",
+    )
 
     # Check if at manufacturer minimum
     from kicad_tools.router import get_mfr_limits
