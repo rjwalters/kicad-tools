@@ -1699,7 +1699,7 @@ def assign_batch_zone_priorities_and_outlines(
     board_outline: list[tuple[float, float]],
     net_layer_pairs: list[tuple[str, str]],
     margin_mm: float = DEFAULT_POUR_BBOX_MARGIN_MM,
-) -> dict[str, tuple[int, list[tuple[float, float]] | None]]:
+) -> dict[tuple[str, str], tuple[int, list[tuple[float, float]] | None]]:
     """Assign priorities + carved outlines for explicit ``(net, layer)`` pairs.
 
     This is the ``zones batch`` counterpart to
@@ -1732,9 +1732,14 @@ def assign_batch_zone_priorities_and_outlines(
         margin_mm: Margin around each pad bbox, in mm.
 
     Returns:
-        Dict mapping ``net_name`` -> ``(priority, outline)`` where
+        Dict mapping ``(net_name, layer)`` -> ``(priority, outline)`` where
         ``outline`` is ``None`` for sole-zone layers (caller falls back to
-        the board outline) or a carved polygon for shared-layer zones.
+        the board outline) or a carved polygon for shared-layer zones.  The
+        key is the ``(net, layer)`` pair -- *not* the net name alone -- so a
+        net appearing on multiple layers (e.g. a GND plane shared on
+        ``F.Cu`` and sole on ``B.Cu``) gets the correct per-layer outline:
+        full board on the layer where it is sole, carved on the layer where
+        it overlaps siblings (issue #4167 regression fix).
 
     Raises:
         ZonePartitionError: If carving cannot produce disjoint copper for
@@ -1754,9 +1759,14 @@ def assign_batch_zone_priorities_and_outlines(
     def _legacy_priority(net_name: str) -> int:
         return 1 if net_name.upper() in ("GND", "GNDA", "GNDD") else 0
 
-    # Build (net, layer, priority) assignments feeding _compute_pour_outlines.
-    assignments: list[tuple[str, str, int]] = []
-    result: dict[str, tuple[int, list[tuple[float, float]] | None]] = {}
+    # Build the result keyed by (net, layer) -- NOT net name alone.  A net
+    # can legitimately appear on multiple layers (e.g. a GND plane shared on
+    # F.Cu and sole on B.Cu); keying by net name alone made the two layers
+    # collide on one dict entry, so the last-written (priority, outline) was
+    # wrongly applied to both add_zone calls -- silently giving the
+    # sole-layer instance a carved strip instead of the full board outline
+    # (issue #4167 regression).
+    result: dict[tuple[str, str], tuple[int, list[tuple[float, float]] | None]] = {}
 
     for layer, nets in layer_groups.items():
         if len(nets) < 2:
@@ -1764,8 +1774,7 @@ def assign_batch_zone_priorities_and_outlines(
             # outline, legacy priority, no carve.
             net_name = nets[0]
             priority = _legacy_priority(net_name)
-            assignments.append((net_name, layer, priority))
-            result[net_name] = (priority, None)
+            result[(net_name, layer)] = (priority, None)
             continue
 
         # >= 2 nets share this layer.  Compute each net's pad-cluster bbox
@@ -1782,19 +1791,22 @@ def assign_batch_zone_priorities_and_outlines(
         # are distinct and strictly descending by area.
         ordered = sorted(nets, key=lambda n: (areas[n], n))
         n = len(ordered)
+        priorities: dict[str, int] = {}
         for rank, net_name in enumerate(ordered):
             # rank 0 = smallest area => highest priority.
-            priority = n - rank
-            assignments.append((net_name, layer, priority))
-            # Outline filled in below from _compute_pour_outlines.
-            result[net_name] = (priority, None)
+            priorities[net_name] = n - rank
 
-    # Carve outlines for shared-layer groups.  Sole-zone layers return
-    # None (handled above) -- _compute_pour_outlines also returns None for
-    # them, so this is consistent.
-    outlines = _compute_pour_outlines(pcb, assignments, board_outline, margin_mm)
-    for net_name, (priority, _) in list(result.items()):
-        result[net_name] = (priority, outlines.get(net_name))
+        # Carve outlines for THIS layer group only.  Because the group is a
+        # single layer, its net names are unique, so _compute_pour_outlines'
+        # net-name-keyed return dict cannot collide across layers even when
+        # the same net also lives on a different layer's group.
+        assignments = [(net_name, layer, priorities[net_name]) for net_name in nets]
+        outlines = _compute_pour_outlines(pcb, assignments, board_outline, margin_mm)
+        for net_name in nets:
+            result[(net_name, layer)] = (
+                priorities[net_name],
+                outlines.get(net_name),
+            )
 
     return result
 

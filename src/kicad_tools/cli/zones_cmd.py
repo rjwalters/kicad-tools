@@ -518,7 +518,10 @@ def _run_batch(args) -> int:
 
     errors = []
     for net_name, layer in power_nets:
-        priority, boundary = allocation.get(net_name, (0, None))
+        # Keyed by (net, layer): a net on multiple layers must get the
+        # correct per-layer outline (full board where it is sole, carved
+        # where it overlaps siblings) -- issue #4167.
+        priority, boundary = allocation.get((net_name, layer), (0, None))
 
         try:
             gen.add_zone(
