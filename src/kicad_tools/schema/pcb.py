@@ -1499,6 +1499,21 @@ class PCB:
             center: If True, center the board on the drawing sheet (default True).
                     If False, place the board at origin (0, 0).
 
+        .. note::
+            When ``center=True`` the outline is *plain-centered* on the paper —
+            ``origin = ((paper_w - width) / 2, (paper_h - height) / 2)`` — and
+            does **not** account for the title-block band at the bottom of the
+            sheet. This differs from
+            :func:`kicad_tools.pcb.center_sheet.centered_origin`, which insets
+            for the title block first and therefore returns a different
+            (higher) origin for the same board. A placement script that anchors
+            positions to ``centered_origin()`` but applies them to a
+            ``create-pcb`` board lands everything shifted by the title-block
+            inset (issue #4156). These two conventions are intentionally left
+            un-reconciled here; anchor to the board's actual Edge.Cuts outline
+            (e.g. ``PCB.get_board_outline()``) if you need convention-agnostic
+            positions.
+
         Returns:
             A new PCB instance ready for adding footprints and traces.
 

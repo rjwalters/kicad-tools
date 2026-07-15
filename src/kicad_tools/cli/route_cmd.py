@@ -7703,6 +7703,49 @@ def _parse_and_apply_region(args, pcb_path: Path, region_arg: str) -> int:
     return 0
 
 
+def _offboard_preflight(pcb_path: Path) -> int:
+    """Abort routing when any footprint is placed outside the Edge.Cuts outline.
+
+    Off-board placement (the whole board shifted N mm off the outline, or a
+    stray footprint dropped outside it) makes routing pointless — the affected
+    nets can never complete, and the resulting low completion percentage is
+    indistinguishable from routing congestion.  This preflight surfaces the
+    real cause up front (issue #4156).
+
+    Returns 0 when the placement is on-board (or the board has no outline, or
+    the check cannot run), and 2 (matching the blocking netlist-sync gate's
+    exit convention) when off-board footprints are found.
+    """
+    try:
+        from kicad_tools.placement import ConflictType, PlacementAnalyzer
+
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(pcb_path)
+    except Exception:
+        # A preflight that cannot run must never block routing outright.
+        return 0
+
+    offboard = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+    if not offboard:
+        return 0
+
+    refs = sorted({c.component1 for c in offboard})
+    pad_count = sum(
+        len(comp.pads) for comp in analyzer.get_components() if comp.reference in set(refs)
+    )
+    print(
+        f"ERROR: {len(refs)} footprint(s) / {pad_count} pad(s) outside "
+        "Edge.Cuts — placement invalid",
+        file=sys.stderr,
+    )
+    print(f"       Off-board: {', '.join(refs)}", file=sys.stderr)
+    print(
+        "       Run `kct placement check` for details, or `--allow-offboard` to route anyway.",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for route command."""
     parser = argparse.ArgumentParser(
@@ -8351,6 +8394,23 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Explicit .kicad_sch path for the advisory drift banner "
             "(default: auto-discover from project.kct or sibling file)."
+        ),
+    )
+    # Issue #4156: hard off-board preflight.  Unlike the advisory drift banner,
+    # a footprint placed outside the Edge.Cuts outline makes routing pointless
+    # (its nets can never complete), so kct route aborts by default before any
+    # router work.  --allow-offboard is the explicit escape hatch for boards
+    # that intentionally stage footprints outside the outline.
+    parser.add_argument(
+        "--allow-offboard",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the off-board placement preflight. By default kct route "
+            "aborts (exit 2) when any footprint's courtyard falls outside the "
+            "Edge.Cuts outline, since routing an off-board net always fails. "
+            "Use this to proceed anyway (e.g. intentional staging/reference "
+            "footprints)."
         ),
     )
     parser.add_argument(
@@ -9072,6 +9132,19 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             # Drift detection is advisory; never let it block routing.
             pass
+
+    # Issue #4156: hard off-board placement preflight.  A footprint whose
+    # courtyard falls outside the Edge.Cuts outline can never route (its nets
+    # fail outright), and the failure signature is indistinguishable from
+    # congestion — which is exactly what cost multiple wasted routing passes in
+    # the field.  Abort before any router/component loading unless the user
+    # opted out with --allow-offboard.  The check is O(footprints), computed
+    # once, and reuses the same get_board_outline()-based analysis as
+    # 'kct placement check'.
+    if not getattr(args, "allow_offboard", False):
+        rc = _offboard_preflight(pcb_path)
+        if rc != 0:
+            return rc
 
     # Issue #2996: Validate and load the optional --net-class-map sidecar
     # early -- before dispatching to any of the route_with_* sub-flows --

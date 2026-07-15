@@ -13,6 +13,7 @@ class ConflictType(Enum):
     HOLE_TO_HOLE = "hole_to_hole"  # Drill holes too close or overlapping
     SILKSCREEN_PAD = "silkscreen_pad"  # Silkscreen over copper pads
     EDGE_CLEARANCE = "edge_clearance"  # Components too close to board edge
+    OFF_BOARD = "off_board"  # Component courtyard/pads outside the board outline
 
     @classmethod
     def from_string(cls, s: str) -> "ConflictType":
@@ -32,6 +33,8 @@ class ConflictType(Enum):
             return cls.PAD_CLEARANCE
         if "silk" in s_lower:
             return cls.SILKSCREEN_PAD
+        if "off" in s_lower and "board" in s_lower:
+            return cls.OFF_BOARD
         if "edge" in s_lower:
             return cls.EDGE_CLEARANCE
         return cls.PAD_CLEARANCE  # Default

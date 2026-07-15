@@ -117,14 +117,10 @@ EDGE_CONFLICT_PCB = """(kicad_pcb
     (fill none)
     (layer "Edge.Cuts")
   )
-  (segment (start 100 100) (end 110 100) (width 0.1) (layer "Edge.Cuts") (net 0))
-  (segment (start 110 100) (end 110 110) (width 0.1) (layer "Edge.Cuts") (net 0))
-  (segment (start 110 110) (end 100 110) (width 0.1) (layer "Edge.Cuts") (net 0))
-  (segment (start 100 110) (end 100 100) (width 0.1) (layer "Edge.Cuts") (net 0))
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
     (uuid "00000000-0000-0000-0000-000000000001")
-    (at 100.1 105)
+    (at 101.5 105)
     (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
     (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
     (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
@@ -171,6 +167,86 @@ CLEAN_PCB = """(kicad_pcb
   )
 )
 """
+
+
+# --- Off-board fixtures (issue #4156) -----------------------------------------
+#
+# These deliberately draw the Edge.Cuts outline as a *graphics* ``gr_rect``
+# ONLY -- with NO hand-injected copper ``(segment ... Edge.Cuts)`` elements.
+# That is exactly the shape ``kct create-pcb`` and KiCad itself emit, and it is
+# the path the original bug hid behind: ``_extract_board_edge`` read the outline
+# via ``segments_on_layer("Edge.Cuts")`` (copper segments only), which is always
+# empty on a real board, so the off-board / edge-clearance checks never ran.
+# The pre-fix ``EDGE_CONFLICT_PCB`` masked this by adding fake ``segment``
+# elements alongside the ``gr_rect``; these fixtures must not.
+#
+# Board outline is (100,100)-(120,110) in sheet coordinates. With the detected
+# board origin at (100,100), that is board-relative (0,0)-(20,10).
+
+
+def _offboard_pcb(footprint_at: tuple[float, float]) -> str:
+    """Build a synthetic board (graphics outline + one R_0402) as S-expression.
+
+    ``footprint_at`` is the sheet-absolute ``(x, y)`` of the single footprint.
+    """
+    fx, fy = footprint_at
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (gr_rect (start 100 100) (end 120 110)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at {fx} {fy})
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+)
+"""
+
+
+@pytest.fixture
+def offboard_inside_pcb(tmp_path: Path) -> Path:
+    """Footprint fully inside a graphics-drawn outline (no conflicts)."""
+    pcb_file = tmp_path / "offboard_inside.kicad_pcb"
+    pcb_file.write_text(_offboard_pcb((110, 105)))
+    return pcb_file
+
+
+@pytest.fixture
+def offboard_fully_outside_pcb(tmp_path: Path) -> Path:
+    """Footprint shifted +20mm beyond the north edge -- fully off the board."""
+    pcb_file = tmp_path / "offboard_fully.kicad_pcb"
+    pcb_file.write_text(_offboard_pcb((110, 130)))
+    return pcb_file
+
+
+@pytest.fixture
+def offboard_partial_pcb(tmp_path: Path) -> Path:
+    """Footprint straddling the south edge -- courtyard partially off the board."""
+    pcb_file = tmp_path / "offboard_partial.kicad_pcb"
+    pcb_file.write_text(_offboard_pcb((110, 109.9)))
+    return pcb_file
 
 
 @pytest.fixture
@@ -315,8 +391,56 @@ class TestPlacementAnalyzer:
         conflicts = analyzer.find_conflicts(edge_conflict_pcb, rules)
 
         edge_conflicts = [c for c in conflicts if c.type == ConflictType.EDGE_CLEARANCE]
-        # Component at 100.1 with board edge at 100 should trigger
+        # Component courtyard sits within min_edge_clearance of the (graphics-
+        # drawn) outline -- and is NOT off-board -- so it is an EDGE_CLEARANCE
+        # conflict.  This fixture draws Edge.Cuts as a bare ``gr_rect`` with no
+        # fake copper segments, so it exercises the real ``get_board_outline``
+        # path that the original bug hid behind (issue #4156).
         assert len(edge_conflicts) >= 1
+        # It must NOT be misclassified as off-board (courtyard is fully inside).
+        assert not [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+
+    # --- Off-board detection (issue #4156) ---------------------------------
+    #
+    # The critical property: these boards draw Edge.Cuts as a graphics
+    # ``gr_rect`` (as ``create-pcb``/KiCad do), NOT as copper ``segment``
+    # elements.  Before the fix, ``_extract_board_edge`` read the outline via
+    # ``segments_on_layer`` (copper only), returned ``None`` on every real
+    # board, and silently skipped the off-board / edge checks -- so
+    # ``find_conflicts`` reported zero conflicts no matter how far off-board a
+    # footprint sat.  These tests fail against that pre-fix behaviour.
+
+    def test_offboard_fully_outside_reports_error(self, offboard_fully_outside_pcb: Path):
+        """Footprint fully outside a graphics outline -> OFF_BOARD error."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(offboard_fully_outside_pcb)
+
+        off = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert len(off) == 1
+        assert off[0].severity == ConflictSeverity.ERROR
+        assert off[0].component1 == "R1"
+        assert "fully outside" in off[0].message
+        # At least one error, so `kct placement check` exits non-zero.
+        assert any(c.severity == ConflictSeverity.ERROR for c in conflicts)
+
+    def test_offboard_partial_reports_error(self, offboard_partial_pcb: Path):
+        """Footprint straddling the outline edge -> OFF_BOARD error."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(offboard_partial_pcb)
+
+        off = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert len(off) == 1
+        assert off[0].severity == ConflictSeverity.ERROR
+        assert "partially outside" in off[0].message
+
+    def test_offboard_all_inside_is_clean(self, offboard_inside_pcb: Path):
+        """Footprint fully inside a graphics outline -> no off-board/edge error."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(offboard_inside_pcb)
+
+        assert not [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert not [c for c in conflicts if c.type == ConflictType.EDGE_CLEARANCE]
+        assert conflicts == []
 
     def test_no_conflicts_in_clean_pcb(self, clean_pcb: Path):
         """Test that clean PCB has no conflicts."""

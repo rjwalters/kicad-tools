@@ -3218,6 +3218,21 @@ def _add_route_parser(subparsers) -> None:
             "(default: auto-discover from project.kct or sibling file)."
         ),
     )
+    # Issue #4156: off-board placement preflight escape hatch.  Mirror of the
+    # inner route_cmd.py flag; both sites must stay in sync per
+    # ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--allow-offboard",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the off-board placement preflight. By default kct route "
+            "aborts (exit 2) when any footprint's courtyard falls outside the "
+            "Edge.Cuts outline, since routing an off-board net always fails. "
+            "Use this to proceed anyway (e.g. intentional staging/reference "
+            "footprints)."
+        ),
+    )
     route_parser.add_argument(
         "--auto-fix",
         action="store_true",
