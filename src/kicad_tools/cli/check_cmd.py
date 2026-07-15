@@ -647,6 +647,7 @@ def print_meta_check_stanza(result: MetaCheckResult) -> None:
 
 
 CHECK_CATEGORIES = [
+    "ampacity",
     "clearance",
     "connectivity",
     "segment_zone",
@@ -1272,6 +1273,7 @@ def run_selected_checks(
     # ``tests/test_check_cmd_coverage.py`` enforces the invariant for
     # Issue #3046.
     check_methods = {
+        "ampacity": checker.check_ampacity,
         "clearance": checker.check_clearances,
         "connectivity": checker.check_connectivity,
         "segment_zone": checker.check_segment_zone_clearances,
