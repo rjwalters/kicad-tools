@@ -24,6 +24,18 @@ The three architecturally-distinct failure modes (per #3862):
   chorus AUDIO_R / U5 analog cluster class).  This is the M3 placement-nudge
   target.
 
+* ``BUDGET_STARVED`` -- the stranded pad can escape, there is no rippable strict
+  copper nearby, AND the local neighbourhood is *sparse* (few or no foreign
+  obstructions).  Geometrically nothing is in the way: the net looks routable on
+  current copper, but the batch negotiation simply never committed it (the
+  cross-board long-haul that starves the negotiated per-net budget, #4159).
+  Distinguished from ``PLACEMENT_BOUND`` because the remedy is a zero-cost
+  re-route (route this net first / raise the per-net budget), NOT a part move.
+  A sparse open-lane no-blocker net is close to self-contradictory as a
+  placement problem, so it is split out here rather than escalated to M3.
+  (Verdict reached by geometry alone -- no route is attempted -- so the evidence
+  says "looks routable ... not confirmed".)
+
 Design notes
 ------------
 This is a *pure-geometry* analysis built entirely on
@@ -125,6 +137,7 @@ class StuckClass(Enum):
     ESCAPE_BLOCKED = "escape_blocked"
     CONGESTION_SATURATED = "congestion_saturated"
     PLACEMENT_BOUND = "placement_bound"
+    BUDGET_STARVED = "budget_starved"
     POUR_DISCONTINUOUS = "pour_discontinuous"
 
     @property
@@ -145,6 +158,13 @@ class StuckClass(Enum):
                 "congestion -- no routing order closes it. Fix: placement "
                 "nudge (M3)."
             ),
+            "budget_starved": (
+                "Pad reachable with no rippable copper nearby and a sparse "
+                "neighbourhood -- looks routable on current copper but the batch "
+                "negotiation never committed it. Fix: re-route this net first "
+                "(kct route-auto --net '<name>') or raise the per-net search "
+                "budget; not a placement problem."
+            ),
             "pour_discontinuous": (
                 "Pour-carried net has stranded pads -- copper zone does not reach "
                 "all pads on this net. Fix: re-pour, add stitching vias, or bridge "
@@ -159,6 +179,7 @@ class StuckClass(Enum):
             "escape_blocked": FailureCause.PIN_ACCESS,
             "congestion_saturated": FailureCause.CONGESTION,
             "placement_bound": FailureCause.ROUTING_ORDER,
+            "budget_starved": FailureCause.ROUTING_ORDER,
             "pour_discontinuous": FailureCause.BLOCKED_PATH,
         }[self.value]
 
@@ -644,9 +665,22 @@ def _decide(
        adjacent (a blocker the M2 rip-up could try) AND the neighbourhood is not
        cluster-dense.  This is the 1:1-trade class.
 
-    4. PLACEMENT_BOUND (no rippable copper) -- the pad escapes and there is no
-       adjacent rippable strict copper.  Nothing to rip, so only a placement
-       change can help.
+    4. PLACEMENT_BOUND (no rippable copper, moderate congestion) -- the pad
+       escapes, there is no adjacent rippable strict copper, but the local
+       neighbourhood is moderately congested (``local_congestion >=
+       congestion_threshold``, below the dense-cluster line).  Reachable, but
+       locally busy enough that a solo route is not a safe default assumption --
+       nothing to rip, so only a placement change can help.
+
+    5. BUDGET_STARVED (no rippable copper, sparse neighbourhood) -- the pad
+       escapes, there is no adjacent rippable strict copper, AND the local
+       neighbourhood is sparse (``local_congestion < congestion_threshold``).
+       Geometrically nothing is in the way: the net looks routable on current
+       copper and the batch negotiation simply never committed it (#4159).  The
+       remedy is a zero-cost re-route / budget bump, not a part move, so this is
+       split out of PLACEMENT_BOUND.  Reached by geometry alone (no route is
+       attempted), so the evidence explicitly disclaims confidence
+       ("looks routable ... not confirmed").
     """
     open_deg = worst_open_arc * (360.0 / ESCAPE_SECTORS)
 
@@ -715,15 +749,37 @@ def _decide(
         if nearest_blocker_mm is not None
         else "no strict copper nearby"
     )
-    dense = local_congestion >= congestion_threshold
-    density_note = (
-        f"dense local congestion ({local_congestion} foreign obstructions)"
-        if dense
-        else f"sparse neighbourhood ({local_congestion} foreign obstructions)"
-    )
+
+    if local_congestion < congestion_threshold:
+        # Sparse neighbourhood, open lane, nothing rippable: geometrically
+        # nothing is in the way.  This is indistinguishable, under pure geometry,
+        # from "the batch router never committed this net" -- so we do NOT
+        # overclaim a placement problem.  No route is attempted here (that would
+        # break --why's cheap read-only contract), so the evidence disclaims
+        # confidence.
+        evidence = (
+            f"pad reachable ({open_deg:.0f} deg lane), no adjacent rippable "
+            f"strict copper ({nb}); sparse neighbourhood ({local_congestion} "
+            f"foreign obstructions) -- looks routable on current copper (not "
+            f"confirmed); the batch negotiation likely never committed it. "
+            f"Re-route this net first or raise the per-net budget."
+        )
+        return StuckNetDiagnosis(
+            net_name=net_name,
+            net_number=net_number,
+            classification=StuckClass.BUDGET_STARVED,
+            unconnected_pads=pad_names,
+            blocking_nets=[],
+            evidence=evidence,
+            escape_lane_deg=open_deg,
+            local_congestion=local_congestion,
+            nearest_blocker_mm=nearest_blocker_mm,
+        )
+
     evidence = (
         f"pad reachable ({open_deg:.0f} deg lane), no adjacent rippable strict "
-        f"copper ({nb}); {density_note} -- ripping cannot help, a part must move"
+        f"copper ({nb}); moderate local congestion ({local_congestion} foreign "
+        f"obstructions) -- ripping cannot help, a part must move"
     )
     return StuckNetDiagnosis(
         net_name=net_name,

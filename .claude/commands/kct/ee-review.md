@@ -40,7 +40,7 @@ Model resolves through the harness's normal precedence chain (explicit dispatch 
 The reviewer gathers these before writing anything. All are read-only; the skill mutates nothing except the single output comment/file.
 
 1. **The board artifact** — the committed `*.kicad_pcb` (e.g. `boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb`). This is the shipping truth for artifact-first work.
-2. **`kct net-status <pcb> --incomplete --why`** — the `PLACEMENT_BOUND` / `CONGESTION_SATURATED` classification and per-net nearest-blocker geometry. **This is the measured ground truth** the decision reasons over. Every measured claim in the output must trace to a value here.
+2. **`kct net-status <pcb> --incomplete --why`** — the `ESCAPE_BLOCKED` / `CONGESTION_SATURATED` / `BUDGET_STARVED` / `PLACEMENT_BOUND` classification and per-net nearest-blocker geometry. **This is the measured ground truth** the decision reasons over. Every measured claim in the output must trace to a value here. Note: `BUDGET_STARVED` is NOT a placement-ladder rung — it means the net looks routable on current copper and the batch negotiation never committed it, so its remedy is a zero-cost re-route (`kct route-auto --net '<name>'`) or a per-net budget bump, not a part move (issue #4158).
 3. **The board `README.md`** — net classes, per-class trace widths / current ratings, layer stack.
 4. **The issue thread** (issue mode) — prior build attempts, prior EE guidance, the pending question, and standing memory constraints ("analog parts need manual care").
 5. **`kct check` / committed `drc_report.json`** — the current referee baseline the builder must not regress.
