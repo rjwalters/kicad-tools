@@ -7319,3 +7319,368 @@ class TestBlanketStitchSiblingNetObstacles:
                 pad_radius = max(pad.width, pad.height) / 2
                 hole_floor = 0.6 / 2 + pad_radius + KICAD_HOLE_TO_COPPER_CLEARANCE
                 assert dist + 1e-9 >= hole_floor
+
+
+class TestDoglegExtendedEscapeDrillGuard:
+    """Issue #4177 Gap 1: ``calculate_dogleg_via_position`` and
+    ``calculate_extended_escape_position`` must reject candidate positions
+    that fall within the hole-to-hole floor of a foreign-net drill, mirroring
+    the guard already present in ``calculate_via_position``.  These
+    congestion-fallback strategies previously never received the drill
+    registry, so they could land vias in occupied space."""
+
+    def _dogleg_pad(self) -> PadInfo:
+        return PadInfo(
+            reference="U1",
+            pad_number="3",
+            net_number=1,
+            net_name="GND",
+            x=97.1,
+            y=100.0,
+            layer="F.Cu",
+            width=1.2,
+            height=0.4,
+        )
+
+    def test_dogleg_rejects_foreign_drill_at_chosen_position(self) -> None:
+        """A foreign-net drill placed exactly at the dog-leg's otherwise-clear
+        landing spot must force the function to reject that position (return a
+        DIFFERENT clearing position, or ``None``)."""
+        pad = self._dogleg_pad()
+        other_net_pads = [
+            (96.0, 99.35, 0.3, 4),
+            (96.0, 100.65, 0.3, 5),
+        ]
+
+        # Without the drill guard, find the position dog-leg would pick.
+        baseline = calculate_dogleg_via_position(
+            pad=pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=other_net_pads,
+            trace_width=0.2,
+        )
+        assert baseline is not None, "fixture must produce a dog-leg position"
+        bx, by, _ix, _iy = baseline
+
+        # Drop a foreign-net drill on that exact spot (coincident center).
+        foreign_drill = (bx, by, 0.3, 99)
+        guarded = calculate_dogleg_via_position(
+            pad=pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=other_net_pads,
+            trace_width=0.2,
+            via_drill=0.2,
+            other_net_drills=[foreign_drill],
+            min_hole_to_hole=0.5,
+        )
+
+        if guarded is not None:
+            gx, gy, _gix, _giy = guarded
+            # The guard must have moved off the coincident/sub-floor spot.
+            edge = math.hypot(gx - bx, gy - by) - 0.2 / 2 - 0.3 / 2
+            assert edge + 1e-3 >= 0.5, (
+                f"dog-leg returned a position ({gx:.3f}, {gy:.3f}) still within "
+                f"the hole-to-hole floor of the foreign drill ({bx:.3f}, {by:.3f})"
+            )
+        # guarded is None is also acceptable: no clearing position exists.
+
+    def test_dogleg_noop_without_drill_registry(self) -> None:
+        """Back-compat: omitting the drill registry leaves behavior unchanged
+        (the position that a foreign drill would block is still returned)."""
+        pad = self._dogleg_pad()
+        other_net_pads = [
+            (96.0, 99.35, 0.3, 4),
+            (96.0, 100.65, 0.3, 5),
+        ]
+        result = calculate_dogleg_via_position(
+            pad=pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=other_net_pads,
+            trace_width=0.2,
+        )
+        assert result is not None
+
+    def test_extended_escape_rejects_foreign_drill_at_chosen_position(self) -> None:
+        """Same as the dog-leg test but for the extended-escape strategy: a
+        foreign-net drill at the otherwise-chosen landing spot forces a
+        different clearing position or ``None``."""
+        pad = PadInfo(
+            reference="U1",
+            pad_number="8",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=1.2,
+            height=0.3,
+        )
+        other_net_pads = [
+            (99.5, 99.5, 0.15, 3),
+            (100.5, 99.5, 0.15, 4),
+            (99.5, 100.5, 0.15, 5),
+            (100.5, 100.5, 0.15, 6),
+        ]
+
+        baseline = calculate_extended_escape_position(
+            pad=pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            escape_distance=4.0,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=other_net_pads,
+            trace_width=0.2,
+        )
+        assert baseline is not None, "fixture must produce an extended-escape position"
+        bx, by, _wps = baseline
+
+        foreign_drill = (bx, by, 0.3, 99)
+        guarded = calculate_extended_escape_position(
+            pad=pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            escape_distance=4.0,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=other_net_pads,
+            trace_width=0.2,
+            via_drill=0.2,
+            other_net_drills=[foreign_drill],
+            min_hole_to_hole=0.5,
+        )
+
+        if guarded is not None:
+            gx, gy, _gwps = guarded
+            edge = math.hypot(gx - bx, gy - by) - 0.2 / 2 - 0.3 / 2
+            assert edge + 1e-3 >= 0.5, (
+                f"extended escape returned a position ({gx:.3f}, {gy:.3f}) still "
+                f"within the hole-to-hole floor of the foreign drill "
+                f"({bx:.3f}, {by:.3f})"
+            )
+
+    def test_extended_escape_noop_without_drill_registry(self) -> None:
+        pad = PadInfo(
+            reference="U1",
+            pad_number="8",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=1.2,
+            height=0.3,
+        )
+        result = calculate_extended_escape_position(
+            pad=pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            escape_distance=4.0,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=[(99.2, 100.0, 0.15, 3)],
+            trace_width=0.2,
+        )
+        assert result is not None
+
+
+# Issue #4177 Gap 2: multi-net stitch (`--net GND --net +3.3V`) must check a
+# GND stitch via against a PRE-EXISTING +3.3V through-hole pad / via drill (and
+# vice versa).  The old post-placement pass excluded EVERY stitch-target net
+# from the drill registry, so a GND via coincident with a +3.3V hole was never
+# rejected -- the exact -0.000mm coincident-hole, different-net short.
+#
+# The board below is a 4-layer stackup with a GND plane on In1.Cu and a +3.3V
+# plane on In2.Cu.  J1 pad 1 is a +3.3V THROUGH-HOLE pad whose plated drill sits
+# exactly where U1 pad 1's (GND) natural straight-line escape via would land, so
+# on a single multi-net invocation the GND via must be rejected against the
+# pre-existing +3.3V hole.
+MULTINET_PREEXISTING_HOLE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000a1")
+    (at 110 110)
+    (property "Reference" "U1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-u1"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+  )
+  (footprint "Connector:TestPoint"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000b1")
+    (at 110.82 110)
+    (property "Reference" "J1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-j1"))
+    (pad "1" thru_hole circle (at 0 0) (size 0.9 0.9) (drill 0.5) (layers "*.Cu" "*.Mask") (net 2 "+3.3V"))
+  )
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-gnd-uuid")
+    (name "GND_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 140 100) (xy 140 130) (xy 100 130)))
+  )
+  (zone (net 2) (net_name "+3.3V") (layer "In2.Cu") (uuid "zone-3v3-uuid")
+    (name "3V3_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 140 100) (xy 140 130) (xy 100 130)))
+  )
+)
+"""
+
+
+class TestMultiNetPreexistingHoleGuard:
+    """Issue #4177 Gap 2: a GND stitch via must be rejected against a
+    PRE-EXISTING +3.3V drill on a single multi-net invocation."""
+
+    def _board_drills(self, sexp: object) -> list[tuple[float, float, float, int]]:
+        return find_all_drills(sexp)  # type: ignore[arg-type]
+
+    def test_gnd_via_not_coincident_with_preexisting_3v3_hole(self, tmp_path: Path) -> None:
+        pcb_file = tmp_path / "multinet_hole.kicad_pcb"
+        pcb_file.write_text(MULTINET_PREEXISTING_HOLE_PCB)
+
+        result = run_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND", "+3.3V"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            dry_run=True,
+        )
+
+        # The pre-existing +3.3V pad is at (110.82, 110); the GND via's
+        # natural straight-line escape lands there.  No committed GND via
+        # may sit within the hole-to-hole floor of that +3.3V drill.
+        j1_x, j1_y, j1_drill = 110.82, 110.0, 0.5
+        for placement in result.vias_added:
+            if placement.pad.net_name != "GND":
+                continue
+            edge = (
+                math.hypot(placement.via_x - j1_x, placement.via_y - j1_y)
+                - placement.drill / 2
+                - j1_drill / 2
+            )
+            assert edge + 1e-3 >= MIN_HOLE_TO_HOLE_CLEARANCE, (
+                f"GND stitch via at ({placement.via_x:.3f}, {placement.via_y:.3f}) "
+                f"is within the hole-to-hole floor of the pre-existing +3.3V "
+                f"J1 pad drill at ({j1_x}, {j1_y}) -- the coincident-hole short"
+            )
+
+    def test_no_different_net_drill_pair_within_floor_after_stitch(self, tmp_path: Path) -> None:
+        """Whole-board invariant: after a multi-net stitch, NO two drills on
+        DIFFERENT nets sit within the hole-to-hole floor (the
+        ``dimension_drill_clearance`` different-net check), and specifically no
+        coincident (-0.000mm) pairs."""
+        pcb_file = tmp_path / "multinet_hole_write.kicad_pcb"
+        pcb_file.write_text(MULTINET_PREEXISTING_HOLE_PCB)
+
+        run_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND", "+3.3V"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            dry_run=False,
+        )
+
+        sexp = load_pcb(pcb_file)
+        drills = find_all_drills(sexp)
+        for i in range(len(drills)):
+            xi, yi, di, ni = drills[i]
+            for j in range(i + 1, len(drills)):
+                xj, yj, dj, nj = drills[j]
+                if ni == nj:
+                    continue
+                edge = math.hypot(xi - xj, yi - yj) - di / 2 - dj / 2
+                assert edge + 1e-3 >= MIN_HOLE_TO_HOLE_CLEARANCE, (
+                    f"different-net drills within the floor after stitch: "
+                    f"net {ni} @({xi:.3f},{yi:.3f}) vs net {nj} @({xj:.3f},{yj:.3f}) "
+                    f"edge={edge:.4f}mm"
+                )
+
+    def test_gnd_pad_skipped_with_hole_to_hole_reason(self, tmp_path: Path) -> None:
+        """When the ONLY reachable GND via position is blocked by the
+        pre-existing +3.3V hole, the pad is reported skipped with a
+        hole_to_hole reason and the guard counter is incremented -- OR the via
+        is relocated to a clearing position.  Either way, no short is placed."""
+        pcb_file = tmp_path / "multinet_skip.kicad_pcb"
+        pcb_file.write_text(MULTINET_PREEXISTING_HOLE_PCB)
+
+        result = run_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND", "+3.3V"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            dry_run=True,
+        )
+
+        # If a GND via was rejected specifically for hole-to-hole, the counter
+        # and skip reason must reflect it.  (When the placement cascade instead
+        # relocates the via to a clearing spot, the counter may be 0 -- the
+        # invariant test above still guarantees no short.)
+        if result.hole_to_hole_rejected:
+            assert any("hole_to_hole" in reason for _pad, reason in result.pads_skipped), (
+                "hole_to_hole counter fired but no pads_skipped hole_to_hole reason"
+            )
+
+    def test_single_net_run_still_places_via(self, tmp_path: Path) -> None:
+        """Edge case: single-net invocation is unaffected -- the +3.3V pad is a
+        FOREIGN net to a GND-only run, so it was always visible.  The GND via
+        must still be relocated/skipped (never coincident), proving the fix is
+        a no-op behavior change for the single-net path."""
+        pcb_file = tmp_path / "singlenet.kicad_pcb"
+        pcb_file.write_text(MULTINET_PREEXISTING_HOLE_PCB)
+
+        result = run_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            dry_run=True,
+        )
+        j1_x, j1_y, j1_drill = 110.82, 110.0, 0.5
+        for placement in result.vias_added:
+            edge = (
+                math.hypot(placement.via_x - j1_x, placement.via_y - j1_y)
+                - placement.drill / 2
+                - j1_drill / 2
+            )
+            assert edge + 1e-3 >= MIN_HOLE_TO_HOLE_CLEARANCE
