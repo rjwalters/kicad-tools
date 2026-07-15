@@ -39,7 +39,6 @@ Detailed reference documentation:
 
 ### For Contributors
 - [Development Guide](contributing/development.md) - Setup, testing, code style
-- [Architecture Deep Dive](contributing/architecture-internals.md) - Internal design decisions
 
 ---
 
