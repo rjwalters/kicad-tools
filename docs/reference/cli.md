@@ -670,6 +670,23 @@ reads its own prior output, chaining `zones add` calls against one file
 accumulates zones instead of silently discarding earlier ones. Pass an
 explicit `-o <path>` to write a side file and leave the input untouched.
 
+**`batch` auto-prioritization (issue #4167):** when two or more of the
+`--power-nets` entries land on the **same layer**, `zones batch` no longer
+emits full-board zones that all overlap at equal priority (which silently gave
+the lower-priority zones zero copper). Instead, within each user-specified
+layer group it (1) auto-assigns fill **priority by ascending pad-cluster bbox
+area** — the smallest net gets the highest priority, the KiCad idiom where a
+small/nested zone must fill on top of the larger zones it sits inside (equal
+areas break deterministically, alphabetical by net name) — and (2) **carves the
+per-net outlines** to each net's own pad cluster minus any higher-priority
+sibling, so the zones are geometrically disjoint and every net receives real
+copper. Nets that are **sole on their layer are unaffected**: they keep the
+full board outline and their prior priority (1 for GND-named nets, else 0). If
+carving genuinely cannot produce disjoint copper for some net (fully-coincident
+pad clusters), the command exits non-zero with an actionable error rather than
+writing zero-copper zones. The final summary reports how many zones still cede
+copper via an overlap warning.
+
 | Option | Description |
 |--------|-------------|
 | `-o`, `--output PATH` | Output PCB (default: overwrite input) |

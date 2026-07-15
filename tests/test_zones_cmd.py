@@ -77,8 +77,17 @@ class TestAddOverlapWarnings:
 class TestBatchOverlapWarnings:
     """Verify overlap warnings are surfaced in zones batch."""
 
-    def test_batch_warns_same_layer_overlap(self, tmp_pcb, capsys):
-        """zones batch emits overlap warning for same-layer full-board zones."""
+    def test_batch_carves_same_layer_zones_and_promotes_warning_count(self, tmp_pcb, capsys):
+        """zones batch carves same-layer batch zones and surfaces warning count.
+
+        Post-#4167: the two batch nets (GND, +3V3) both on F.Cu no longer
+        100%-overlap -- they receive area-based descending priorities and
+        carved, geometrically-disjoint outlines.  The residual overlap
+        warning here is against a *pre-existing* +5V zone already in the
+        fixture (not a batch-internal conflict), and the warning count is
+        promoted into the final summary line rather than only appearing in
+        scrolled-back stderr.
+        """
         ret = main(
             [
                 "batch",
@@ -89,10 +98,20 @@ class TestBatchOverlapWarnings:
                 str(tmp_pcb),
             ]
         )
+        # Non-zero only on hard ValueError; a residual overlap warning
+        # against a pre-existing zone is not fatal.
         assert ret == 0
         captured = capsys.readouterr()
-        assert "overlap warning" in captured.err
-        assert "zero copper" in captured.err
+
+        # The two batch zones are carved (bounded to their pad clusters),
+        # so the batch summary reports the count of remaining zero-copper
+        # warnings -- the failure is now non-silent.
+        assert "with zero-copper overlap warning" in captured.out
+
+        # Both batch zones were carved (bounded), not full-board rectangles.
+        assert "GND on F.Cu" in captured.out
+        assert "+3V3 on F.Cu" in captured.out
+        assert "(carved)" in captured.out
 
 
 # ---------------------------------------------------------------------------

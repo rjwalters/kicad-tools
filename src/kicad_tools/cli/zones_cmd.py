@@ -449,8 +449,22 @@ def _run_list(args) -> int:
 
 
 def _run_batch(args) -> int:
-    """Add multiple zones from a power-nets specification."""
-    from kicad_tools.zones import ZoneGenerator, parse_power_nets
+    """Add multiple zones from a power-nets specification.
+
+    Priorities and per-net boundaries are auto-derived (issue #4167):
+    within each user-specified layer group, zones are prioritized by
+    ascending pad-cluster bbox area (smallest area => highest priority,
+    the KiCad idiom) and given carved, geometrically-disjoint outlines so
+    overlapping same-layer zones do not zero each other out.  Nets that
+    are sole on their layer keep the full board outline and their legacy
+    priority (1 for GND-named nets, 0 otherwise) unchanged.
+    """
+    from kicad_tools.zones import (
+        ZoneGenerator,
+        ZonePartitionError,
+        assign_batch_zone_priorities_and_outlines,
+        parse_power_nets,
+    )
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
@@ -483,14 +497,28 @@ def _run_batch(args) -> int:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
 
-    # Add zones with priorities (GND gets highest priority)
+    # Auto-assign priorities (by pad-cluster bbox area) and carve outlines
+    # for same-layer groups so overlapping zones receive disjoint copper
+    # instead of full-board rectangles that zero each other out (#4167).
+    try:
+        allocation = assign_batch_zone_priorities_and_outlines(
+            gen.pcb,
+            gen.board_outline,
+            power_nets,
+        )
+    except ZonePartitionError as e:
+        # Carving genuinely cannot produce disjoint copper for some net
+        # (fully-coincident pad clusters).  Refuse rather than silently
+        # writing zero-copper zones.
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
     if not quiet:
         print(f"\nAdding {len(power_nets)} zone(s):")
 
     errors = []
     for net_name, layer in power_nets:
-        # GND typically gets higher priority (fills last, on top)
-        priority = 1 if net_name.upper() in ("GND", "GNDA", "GNDD") else 0
+        priority, boundary = allocation.get(net_name, (0, None))
 
         try:
             gen.add_zone(
@@ -498,9 +526,11 @@ def _run_batch(args) -> int:
                 layer=layer,
                 priority=priority,
                 clearance=args.clearance,
+                boundary=boundary,
             )
             if not quiet:
-                print(f"  {net_name} on {layer} (priority {priority})")
+                carved = " (carved)" if boundary is not None else ""
+                print(f"  {net_name} on {layer} (priority {priority}){carved}")
         except ValueError as e:
             errors.append(f"  {net_name}: {e}")
 
@@ -518,6 +548,7 @@ def _run_batch(args) -> int:
     if args.dry_run:
         if not quiet:
             print("\n--- Dry run - not saving ---")
+            _print_batch_summary(gen, quiet)
             if args.verbose:
                 print("\nGenerated S-expression:")
                 print(gen.generate_sexp())
@@ -534,10 +565,30 @@ def _run_batch(args) -> int:
         return 1
 
     if not quiet:
-        stats = gen.get_statistics()
-        print(f"\nCreated {stats['zone_count']} zone(s)")
+        _print_batch_summary(gen, quiet)
 
     return 0 if not errors else 1
+
+
+def _print_batch_summary(gen, quiet: bool) -> None:
+    """Print the batch summary, promoting any zero-copper warning count.
+
+    Surfaces ``len(gen.warnings)`` (zones that still cede area / would get
+    zero copper) into the final summary line so the failure is non-silent
+    (issue #4167), rather than only being visible in scrolled-back stderr.
+    """
+    if quiet:
+        return
+    stats = gen.get_statistics()
+    zone_count = stats["zone_count"]
+    warn_count = len(gen.warnings)
+    if warn_count:
+        print(
+            f"\nCreated {zone_count} zone(s) "
+            f"({warn_count} with zero-copper overlap warning(s) -- see above)"
+        )
+    else:
+        print(f"\nCreated {zone_count} zone(s)")
 
 
 def _run_fill(args) -> int:
