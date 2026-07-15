@@ -60,6 +60,18 @@ GRACE_PASS_BUDGET_S = 60.0
 # that reason about the upper bound of any single grace attempt.
 GRACE_PASS_PER_NET_S = GRACE_PASS_TIER_CAPS_S[-1]
 
+# Issue #4159: post-negotiation rescue-sweep bounds.  After the negotiated
+# batch loop converges/stalls/times out, one bounded pass re-attempts every
+# still-stranded net SOLO on the live grid (existing committed copper is
+# already present as obstacles).  The issue's own evidence is that each such
+# net routes in <1s alone, so a generous but hard wall-clock ceiling plus a
+# per-net cap keeps the whole sweep bounded even when a genuinely-impossible
+# net is in the stranded set.  The overall ceiling mirrors GRACE_PASS_BUDGET_S
+# (they are the same shape of bounded post-loop sweep); the per-net cap is
+# clamped so one pathological solo search cannot eat the whole sweep.
+POST_NEGOTIATION_SWEEP_BUDGET_S = 60.0
+POST_NEGOTIATION_SWEEP_PER_NET_S = 10.0
+
 # Issue #3474 R1: abort threshold for a single grace attempt that grossly
 # overruns its cap.  ``route_fn`` legally spends a small multiple of the
 # per-call cap (see the ~15x note above), but a 100x+ overrun means a

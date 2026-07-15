@@ -148,6 +148,13 @@ class TestPartialNetBlocksCompletion:
         ``converged`` while a net is stranded at overflow == 0.
         """
         ar = _build_two_net_router_with_three_pad_net2()
+        # Issue #4159: disable the post-negotiation rescue sweep here.  The
+        # sweep re-attempts NET2 SOLO via the REAL ``route_net`` (all three
+        # pads, not the patched partial ``_route_net_negotiated``) and would
+        # legitimately rescue it -- flipping the terminal status to
+        # ``converged`` and defeating this test's purpose, which is to pin the
+        # RAW negotiated status-string logic for a genuinely stranded net.
+        ar._post_negotiation_rescue = False
         _patch_net2(ar, fail_after=10_000)
         messages: list[str] = []
 

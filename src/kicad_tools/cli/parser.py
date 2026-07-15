@@ -2866,6 +2866,20 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--no-rescue-pass",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable the post-negotiation rescue sweep (Issue #4159).  ON by "
+            "default: after the negotiated batch loop converges/stalls/times "
+            "out, each still-stranded net is re-attempted SOLO on the live "
+            "grid, recovering long-haul nets the batch loop starved on per-net "
+            "search budget.  Bounded and strictly additive (failed attempts "
+            "roll back), so it can only raise the routed count.  Pass this "
+            "flag for the raw negotiated result (e.g. A/B comparison)."
+        ),
+    )
+    route_parser.add_argument(
         "--cross-package-pair-corridor",
         action="store_true",
         default=False,

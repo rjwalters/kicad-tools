@@ -2928,6 +2928,21 @@ def _apply_ripup_budget_override(router: "Autorouter", args) -> None:
     router.stall_ripup_budget = budget
 
 
+def _apply_rescue_pass_override(router: "Autorouter", args) -> None:
+    """Disable the post-negotiation rescue sweep when requested (Issue #4159).
+
+    ON by default (``router._post_negotiation_rescue`` initialised True): after
+    the negotiated batch loop converges/stalls/times out, each still-stranded
+    net is re-attempted SOLO on the live grid, recovering long-hauls the batch
+    loop starved on per-net budget.  The pass is bounded and strictly additive
+    (failed attempts roll back), so it only raises the routed count.
+    ``--no-rescue-pass`` sets the flag False for A/B comparison or when a caller
+    wants the raw negotiated result.  A no-op when the flag is absent.
+    """
+    if getattr(args, "no_rescue_pass", False):
+        router._post_negotiation_rescue = False
+
+
 def _apply_bundle_river_planner(router: "Autorouter", args) -> None:
     """Enable the scoped bundle river planner when requested (Issue #4053).
 
@@ -3848,6 +3863,7 @@ def route_with_layer_escalation(
         # Issue #3470: thread --max-ripups-per-net into the destructive
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
+        _apply_rescue_pass_override(router, args)
         _apply_bundle_river_planner(router, args)
         _apply_monotone_certificate_order(router, args)
         _apply_cross_package_pair_corridor(router, args)
@@ -4729,6 +4745,7 @@ def route_with_rule_relaxation(
         # Issue #3470: thread --max-ripups-per-net into the destructive
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
+        _apply_rescue_pass_override(router, args)
         _apply_bundle_river_planner(router, args)
         _apply_monotone_certificate_order(router, args)
         _apply_cross_package_pair_corridor(router, args)
@@ -6852,6 +6869,7 @@ def route_with_combined_escalation(
             # Issue #3470: thread --max-ripups-per-net into the destructive
             # rip-up budgets (route_all + two-phase stall recovery).
             _apply_ripup_budget_override(router, args)
+            _apply_rescue_pass_override(router, args)
             _apply_bundle_river_planner(router, args)
             _apply_monotone_certificate_order(router, args)
             _apply_cross_package_pair_corridor(router, args)
@@ -7933,6 +7951,20 @@ def main(argv: list[str] | None = None) -> int:
             "certificate finds the bundle infeasible as-pinned, order is left "
             "at IDENTITY (no regression vs. flag-off).  Default OFF "
             "(byte-identical to prior behaviour when absent)."
+        ),
+    )
+    parser.add_argument(
+        "--no-rescue-pass",
+        action="store_true",
+        help=(
+            "Disable the post-negotiation rescue sweep (Issue #4159).  ON by "
+            "default: after the negotiated batch loop converges/stalls/times "
+            "out, each still-stranded net is re-attempted SOLO on the live "
+            "grid, recovering long-haul nets the batch loop starved on per-net "
+            "search budget (each such net routes in <1s alone).  The pass is "
+            "bounded and strictly additive (failed attempts roll back), so it "
+            "can only raise the routed count.  Pass this flag to get the raw "
+            "negotiated result (e.g. for A/B comparison)."
         ),
     )
     parser.add_argument(
@@ -9716,6 +9748,7 @@ def main(argv: list[str] | None = None) -> int:
     # Issue #3470: thread --max-ripups-per-net into the destructive
     # rip-up budgets (route_all + two-phase stall recovery).
     _apply_ripup_budget_override(router, args)
+    _apply_rescue_pass_override(router, args)
     _apply_bundle_river_planner(router, args)
     _apply_monotone_certificate_order(router, args)
     _apply_cross_package_pair_corridor(router, args)

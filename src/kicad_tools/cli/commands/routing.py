@@ -217,6 +217,11 @@ def run_route_command(args) -> int:
     # what makes flag-off byte-identical (sub_argv unchanged when absent).
     if getattr(args, "monotone_certificate_order", False):
         sub_argv.append("--monotone-certificate-order")
+    # Issue #4159: forward --no-rescue-pass.  Both parsers declare it as
+    # store_true defaulting to False (rescue sweep ON by default), so only
+    # forward when the user set it (byte-identical when absent).
+    if getattr(args, "no_rescue_pass", False):
+        sub_argv.append("--no-rescue-pass")
     if getattr(args, "cross_package_pair_corridor", False):
         sub_argv.append("--cross-package-pair-corridor")
     if getattr(args, "slack_corridor_widening", False):
