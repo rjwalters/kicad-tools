@@ -4,6 +4,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ---
 
+### 2026-07-15
+
+- **Release**: v0.16.0 — feature release cutting a ~46-issue sweep since v0.15.1. Region-bounded routing (`--region` on `route`/`route-auto` + boundary stub-terminal detection & reconnection), ampacity-aware net-class min-width via IPC-2221 + ampacity DRC check, copper dedupe (`pcb dedupe` + emission-time), `pcb reinforce` anchor-PTH rows, `pcb padmap` / `sch fix-annotation` / `pcb strip --region` inspection & repair commands, `net-status --strict` real-geometry connectivity, off-board preflight, and hardened datasheet fetching / zone-edit defaults / S-expression quoting / different-net short guards. Pre-tag fleet validation (boards 00–07 against 0.16.0) surfaced and fixed three regressions before shipping: #4226 (junction-dot-gated wire union — fixed the #4157 over-merge that produced false copper-LVS shorts on board-05), #4227 (pad-bbox-fallback courtyard annotation), #4229 (zone-pour plane-pad connectivity). Version bumped 0.15.1 → 0.16.0; all 16 CI gate jobs green on the tagged tree. Tag `v0.16.0` pushed → `publish.yml` (`uv build && uv publish`) to PyPI. Closes release-request #4152 (chorus#24 unblocked via `sch fix-annotation` #4142 + `pcb strip --region` #4147).
+
 ### 2026-07-13
 
 - **Release**: v0.15.0 — router feasibility certificates + constructive escape ordering, coupled diff-pair corridor attractors, C++ coupled joint-state A\* port, slack-budget corridor widening + lateral-trace reservation keep-out, hierarchical-schematic LVS, copper-LVS gates wired across boards 01–07, JLCPCB parts stack (offline jlcparts catalog + BYO-key official API tier), /kct:tapeout skill, LCSC/EasyEDA fetch-on-demand + cross-library 3D model resolver tiers, thin-copper sliver / silk-clearance / net-0 bridge DRC rules, and gallery-hardened board fixtures (00–07 at 0 blocking DRC + clean copper-LVS). Version bumped 0.14.0 → 0.15.0; CHANGELOG `[0.15.0]` entry synthesized from `git log v0.14.0..main` (~200 commits), grouped by subsystem. Tag/publish per operator (push `v0.15.0` triggers `publish.yml`).
