@@ -537,15 +537,22 @@ class SExp:
 
         These are values that cannot be represented as a bare S-expression
         token at all — an empty string, or one containing whitespace, parens,
-        or a double-quote character. Such values must always be quoted for
-        correctness, regardless of parse-time bare/quoted state. This is the
-        narrow "genuinely requires quotes" test used by the symmetric bare
-        handling in _format_atom() (issue #4185); it is intentionally distinct
-        from the KiCad-keyword allowlist heuristic in _needs_quoting().
+        a double-quote character, or a backslash. Such values must always be
+        quoted for correctness, regardless of parse-time bare/quoted state.
+        This is the narrow "genuinely requires quotes" test used by the
+        symmetric bare handling in _format_atom() (issue #4185); it is
+        intentionally distinct from the KiCad-keyword allowlist heuristic in
+        _needs_quoting().
+
+        Backslash is included (issue #4213, defense-in-depth follow-on to
+        #4185): a bare token containing a raw backslash is routed into the
+        quoting branch of _format_atom(), whose unconditional
+        ``.replace("\\", "\\\\")`` step doubles it correctly so the emitted
+        quoted form round-trips byte-exact.
         """
         if not s:
             return True
-        return any(c in s for c in ' \t\n\r"()')
+        return any(c in s for c in ' \t\n\r"()\\')
 
     @staticmethod
     def _is_valid_name(s: str) -> bool:

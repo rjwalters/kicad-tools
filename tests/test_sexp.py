@@ -533,6 +533,32 @@ class TestSExpSerialization:
         empty = SExp(value="", _originally_bare=True)
         assert empty._format_atom() == '""'
 
+    def test_parsed_bare_backslash_value_forced_quoted(self):
+        """A bare atom containing a raw backslash is forced quoted+escaped.
+
+        Backslash cannot be safely represented as a bare token (issue #4213,
+        defense-in-depth follow-on to #4185): a bare-flagged atom whose value
+        contains a literal backslash must be routed into the quoting branch of
+        _format_atom(), whose unconditional ``.replace("\\", "\\\\")`` step
+        doubles the backslash so the emitted quoted form round-trips byte-exact.
+        Forward slash is intentionally *not* a trigger and stays bare.
+        """
+        # _must_quote() flags any value containing a literal backslash.
+        assert SExp._must_quote("abc\\def") is True
+        assert SExp._must_quote("a\\b\\c") is True
+        # Forward slash is intentionally excluded and must stay bare (#4185).
+        assert SExp._must_quote("my/path") is False
+
+        # A bare-flagged atom with a backslash serializes quoted + escaped.
+        node = SExp(value="abc\\def", _originally_bare=True)
+        assert node._format_atom() == '"abc\\\\def"'
+        # Parsing that emitted form back yields the exact original value.
+        assert parse_string("(field " + node._format_atom() + ")").get_string(0) == "abc\\def"
+
+        # Forward-slash bare atoms remain bare (no over-quoting regression).
+        slash = SExp(value="my/path", _originally_bare=True)
+        assert slash._format_atom() == "my/path"
+
 
 class TestSExpFileIO:
     """Tests for file I/O functions."""

@@ -140,6 +140,34 @@ class TestSExpRoundTripWithKiCad:
                 f"expected bare ({field} not_allowed) in: {output}"
             )
 
+    def test_bare_backslash_token_roundtrips_quoted_and_escaped(self):
+        """A bare token containing a raw backslash round-trips byte-exact.
+
+        Parsing `(field abc\\def)` yields a bare atom whose value contains a
+        literal backslash. Before issue #4213 the serializer re-emitted it bare
+        and unescaped; with backslash added to _must_quote() it is now forced
+        into the quoting branch, whose unconditional escaping doubles the
+        backslash. The emitted form (`(field "abc\\\\def")`) must re-parse to
+        the identical value, and a second serialize/parse cycle must be a fixed
+        point (byte-exact round-trip).
+        """
+        # Source text: (field abc\def) — a single, unescaped, bare backslash.
+        doc = parse_string("(field abc\\def)")
+        assert doc.get_string(0) == "abc\\def"
+
+        # Serialized output forces quoting and doubles the backslash.
+        output = doc.to_string()
+        assert '(field "abc\\\\def")' in output, (
+            f"bare backslash token must serialize quoted+escaped, got: {output}"
+        )
+
+        # Re-parsing the emitted form yields the exact original value.
+        reparsed = parse_string(output)
+        assert reparsed.get_string(0) == "abc\\def"
+
+        # A second serialize cycle is a fixed point (stable byte-exact).
+        assert reparsed.to_string() == output
+
     @pytest.mark.skipif(KICAD_CLI is None, reason="kicad-cli not installed")
     def test_keepout_board_loads_in_kicad(self, tmp_path):
         """A board carrying a keepout footprint must load after round-trip.
