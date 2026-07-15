@@ -18,7 +18,10 @@ from kicad_tools.datasheet.models import (
     DatasheetSearchResult,
 )
 from kicad_tools.datasheet.tables import ExtractedTable
-from kicad_tools.datasheet.utils import calculate_part_confidence
+from kicad_tools.datasheet.utils import (
+    calculate_part_confidence,
+    sanitize_filename_component,
+)
 
 
 class TestCalculatePartConfidence:
@@ -54,6 +57,43 @@ class TestCalculatePartConfidence:
         """Test None part number is handled gracefully as empty string."""
         # None is converted to empty string, which is a substring of any string
         assert calculate_part_confidence("STM32", None) == 0.9
+
+
+class TestSanitizeFilenameComponent:
+    """Tests for sanitize_filename_component utility function."""
+
+    def test_normal_part_number_passthrough(self):
+        """A part number with only safe characters is unchanged."""
+        assert sanitize_filename_component("STM32F103C8T6") == "STM32F103C8T6"
+
+    def test_allows_dot_dash_underscore(self):
+        """Dots, dashes, and underscores are preserved (readable names)."""
+        assert sanitize_filename_component("ATmega328P-PU") == "ATmega328P-PU"
+        assert sanitize_filename_component("part_v1.2") == "part_v1.2"
+
+    def test_replaces_forward_slash(self):
+        """Forward slashes are replaced with '_' (no subdirectory)."""
+        assert sanitize_filename_component("MCP6001UT-I/OT") == "MCP6001UT-I_OT"
+
+    def test_replaces_backslash(self):
+        """Backslashes are replaced with '_'."""
+        assert sanitize_filename_component("foo\\bar") == "foo_bar"
+
+    def test_replaces_other_unsafe_chars(self):
+        """Whitespace, colons, and other unsafe characters become '_'."""
+        assert sanitize_filename_component("a b:c") == "a_b_c"
+
+    def test_strips_leading_dots_traversal(self):
+        """Leading-dot traversal payloads cannot escape via the result."""
+        # '/' is replaced first, then leading dots are stripped.
+        assert sanitize_filename_component("../../something") == "_.._something"
+        assert sanitize_filename_component("..secrets") == "secrets"
+        assert sanitize_filename_component(".hidden") == "hidden"
+
+    def test_empty_after_sanitization_fallback(self):
+        """An all-dots (or empty) input falls back to a safe name."""
+        assert sanitize_filename_component("...") == "unnamed_part"
+        assert sanitize_filename_component("") == "unnamed_part"
 
 
 class TestDatasheetResult:
@@ -891,6 +931,91 @@ class TestDatasheetManager:
             # Should not have called download
             mock_download.assert_not_called()
             assert datasheet.part_number == "CACHED"
+
+    def test_download_sanitizes_slash_in_part_number(self, manager, tmp_path):
+        """A '/' in the resolved part number is sanitized to a single file.
+
+        Part numbers like Microchip's "MCP6001UT-I/OT" must not silently
+        create a subdirectory under the output directory.
+        """
+        from kicad_tools.datasheet.models import DatasheetResult
+
+        output_dir = tmp_path / "out"
+        result = DatasheetResult(
+            part_number="MCP6001UT-I/OT",
+            manufacturer="Microchip",
+            description="Op-amp",
+            datasheet_url="https://example.com/mcp6001.pdf",
+            source="lcsc",
+        )
+
+        def fake_download(res, output_path):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"%PDF content")
+            return output_path
+
+        with patch.object(manager.sources[0], "download", side_effect=fake_download):
+            datasheet = manager.download(result, output_dir=output_dir, force=True)
+
+        assert datasheet.local_path == output_dir / "MCP6001UT-I_OT.pdf"
+        assert datasheet.local_path.suffix == ".pdf"
+        assert datasheet.local_path.exists()
+        # No unintended subdirectory was created.
+        assert not (output_dir / "MCP6001UT-I").exists()
+
+    def test_download_rejects_path_traversal_in_part_number(self, manager, tmp_path):
+        """A traversal-shaped part number is confined to the output directory."""
+        from kicad_tools.datasheet.models import DatasheetResult
+
+        output_dir = tmp_path / "out"
+        result = DatasheetResult(
+            part_number="../../escape",
+            manufacturer="Evil",
+            description="Malicious",
+            datasheet_url="https://example.com/evil.pdf",
+            source="lcsc",
+        )
+
+        def fake_download(res, output_path):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"%PDF content")
+            return output_path
+
+        with patch.object(manager.sources[0], "download", side_effect=fake_download):
+            datasheet = manager.download(result, output_dir=output_dir, force=True)
+
+        # The file lives directly inside output_dir, never above/outside it.
+        assert datasheet.local_path.resolve().parent == output_dir.resolve()
+        assert datasheet.local_path.suffix == ".pdf"
+        assert datasheet.local_path.exists()
+        # Nothing was written outside output_dir.
+        assert not (tmp_path / "escape.pdf").exists()
+        assert not (tmp_path.parent / "escape.pdf").exists()
+
+    def test_download_normal_part_number_unaffected(self, manager, tmp_path):
+        """A part number with no unsafe characters keeps its exact filename."""
+        from kicad_tools.datasheet.models import DatasheetResult
+
+        output_dir = tmp_path / "out"
+        result = DatasheetResult(
+            part_number="STM32F103C8T6",
+            manufacturer="ST",
+            description="MCU",
+            datasheet_url="https://example.com/stm32.pdf",
+            source="lcsc",
+        )
+
+        def fake_download(res, output_path):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"%PDF content")
+            return output_path
+
+        with patch.object(manager.sources[0], "download", side_effect=fake_download):
+            datasheet = manager.download(result, output_dir=output_dir, force=True)
+
+        assert datasheet.local_path == output_dir / "STM32F103C8T6.pdf"
+        assert datasheet.local_path.suffix == ".pdf"
+        assert datasheet.local_path.exists()
 
     def test_download_by_part(self, manager):
         """Test download_by_part convenience method."""
