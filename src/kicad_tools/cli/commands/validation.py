@@ -211,6 +211,9 @@ def run_check_command(args) -> int:
         sub_argv.append("--errors-only")
     if args.strict:
         sub_argv.append("--strict")
+    # Issue #4176: forward the connectivity real-geometry opt-in.
+    if getattr(args, "strict_connectivity", False):
+        sub_argv.append("--strict-connectivity")
     if args.mfr != "jlcpcb":
         sub_argv.extend(["--mfr", args.mfr])
     if args.layers != 2:

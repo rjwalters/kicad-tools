@@ -700,6 +700,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit with error code 2 on warnings",
     )
     parser.add_argument(
+        "--strict-connectivity",
+        dest="strict_connectivity",
+        action="store_true",
+        help=(
+            "Decide the connectivity DRC rule by REAL geometric copper contact "
+            "(shapely polygon intersection) instead of the default 0.01mm "
+            "endpoint-proximity tolerance. The default model unions a segment "
+            "endpoint with a pad/via/segment whenever their reference points "
+            "land within 0.01mm, even when the actual copper (segment width, "
+            "pad shape) does not touch -- so it can pass a net that "
+            "'kicad-cli pcb drc' reports as unconnected. --strict-connectivity "
+            "matches KiCad's connectivity semantics (issue #4176). Requires "
+            "shapely. (Distinct from --strict, which makes warnings fatal.)"
+        ),
+    )
+    parser.add_argument(
         "--refill-zones",
         dest="refill_zones",
         action="store_true",
@@ -1095,6 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
             # graceful no-op (AC5).
             emit_measurements=True,
             courtyard_waivers=courtyard_waivers,
+            strict_connectivity=args.strict_connectivity,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)

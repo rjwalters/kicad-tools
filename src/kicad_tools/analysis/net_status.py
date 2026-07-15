@@ -369,14 +369,35 @@ class NetStatusAnalyzer:
         >>> print(result.summary())
     """
 
-    # Tolerance for matching point positions (in mm)
+    # Tolerance for matching point positions (in mm).
+    #
+    # This is an endpoint-proximity radius, NOT a geometric-contact test:
+    # in the default (non-strict) mode, two copper elements (segment
+    # endpoints, pad centers, via centers) are unioned whenever their
+    # reference points land within this radius, even if their actual copper
+    # shapes (segment width, pad size) do not touch.  KiCad's connectivity
+    # engine instead requires real geometric overlap, so the default model
+    # can report a net "complete" that KiCad (``kicad-cli pcb drc``) reports
+    # as having unconnected items (Issue #4176).  Pass ``strict=True`` to use
+    # real shapely copper-shape intersection and match KiCad.
     POSITION_TOLERANCE = 0.01
 
-    def __init__(self, pcb: str | Path | PCB) -> None:
+    def __init__(self, pcb: str | Path | PCB, *, strict: bool = False) -> None:
         """Initialize the analyzer.
 
         Args:
-            pcb: Path to PCB file or loaded PCB object
+            pcb: Path to PCB file or loaded PCB object.
+            strict: When ``True``, segment↔segment, segment↔pad, and
+                segment↔via connectivity is decided by real geometric copper
+                contact (shapely polygon intersection: a segment is its
+                centerline buffered by ``width / 2``; a pad/via is its copper
+                shape) instead of the ``POSITION_TOLERANCE`` endpoint-proximity
+                radius.  This matches KiCad's connectivity semantics
+                (Issue #4176).  The default (``False``) preserves the legacy
+                tolerance-based behavior so existing consumers are unaffected.
+                Requires ``shapely``; strict mode fails loud (rather than
+                silently degrading to the tolerance model) if it is
+                unavailable.
         """
         from kicad_tools.schema.pcb import PCB as PCBClass
 
@@ -384,6 +405,17 @@ class NetStatusAnalyzer:
             self.pcb = PCBClass.load(str(pcb))
         else:
             self.pcb = pcb
+        self.strict = strict
+        # Strict-mode geometry caches (Issue #4176), keyed by object id.
+        self._segment_poly_cache: dict[int, Any] = {}
+        self._via_geom_cache: dict[int, Any] = {}
+        # Per-analyzer pad copper polygon cache (keyed ``REF.PAD``); ``None``
+        # until first built lazily in :meth:`_pad_polys`.
+        self._pad_poly_cache: dict[str, Any] | None = None
+        if strict:
+            from kicad_tools._shapely import require_shapely
+
+            require_shapely("net-status --strict real-geometry connectivity")
 
     def analyze(self) -> NetStatusResult:
         """Analyze all nets and return status result.
@@ -648,13 +680,24 @@ class NetStatusAnalyzer:
         # Build segment components for reuse
         segment_components = self._build_segment_components(segments)
 
-        # Connect pads through segment chains
+        # Connect pads through segment chains.
+        #
+        # Default mode: a pad joins the chain when its center is within
+        # POSITION_TOLERANCE of a segment endpoint.  Strict mode (Issue #4176):
+        # a pad joins the chain when its real copper polygon intersects any
+        # segment's copper polygon in the chain — an endpoint landing merely
+        # *near* a pad's copper edge no longer bonds.
         for component in segment_components:
             component_pads: set[str] = set()
             for seg_idx in component:
                 seg = segments[seg_idx]
-                component_pads.update(self._find_pads_at_point(seg.start, pad_positions))
-                component_pads.update(self._find_pads_at_point(seg.end, pad_positions))
+                if self.strict:
+                    component_pads.update(
+                        self._find_pads_touching_geom(self._segment_poly(seg), pad_positions)
+                    )
+                else:
+                    component_pads.update(self._find_pads_at_point(seg.start, pad_positions))
+                    component_pads.update(self._find_pads_at_point(seg.end, pad_positions))
 
             pad_list = list(component_pads)
             for i, pad in enumerate(pad_list):
@@ -662,9 +705,14 @@ class NetStatusAnalyzer:
                     graph[pad].add(other)
                     graph[other].add(pad)
 
-        # Connect pads through vias (pads at same via position)
+        # Connect pads through vias (pads whose copper the via barrel pierces).
+        # Default: pad center within POSITION_TOLERANCE of the via center.
+        # Strict (Issue #4176): pad copper polygon intersects the via copper.
         for via in vias:
-            via_pads = self._find_pads_at_point(via.position, pad_positions)
+            if self.strict:
+                via_pads = self._find_pads_touching_geom(self._via_geom(via), pad_positions)
+            else:
+                via_pads = self._find_pads_at_point(via.position, pad_positions)
             for pad in via_pads:
                 for other in via_pads:
                     if pad != other:
@@ -684,20 +732,42 @@ class NetStatusAnalyzer:
                 component_endpoints.append(seg.start)
                 component_endpoints.append(seg.end)
 
-            # Check if any endpoint of this segment chain touches a via
+            # Check if this segment chain's copper touches a via.
+            # Default: an endpoint within POSITION_TOLERANCE of the via center.
+            # Strict (Issue #4176): a segment copper polygon in the chain
+            # intersects the via copper geometry.
             for via in vias:
-                touches_via = any(
-                    self._points_close(ep, via.position) for ep in component_endpoints
-                )
+                if self.strict:
+                    via_geom = self._via_geom(via)
+                    touches_via = any(
+                        self._geoms_touch(self._segment_poly(segments[seg_idx]), via_geom)
+                        for seg_idx in component
+                    )
+                else:
+                    touches_via = any(
+                        self._points_close(ep, via.position) for ep in component_endpoints
+                    )
                 if touches_via:
                     # Collect all pads in this segment chain
                     chain_pads: set[str] = set()
                     for seg_idx in component:
                         seg = segments[seg_idx]
-                        chain_pads.update(self._find_pads_at_point(seg.start, pad_positions))
-                        chain_pads.update(self._find_pads_at_point(seg.end, pad_positions))
+                        if self.strict:
+                            chain_pads.update(
+                                self._find_pads_touching_geom(
+                                    self._segment_poly(seg), pad_positions
+                                )
+                            )
+                        else:
+                            chain_pads.update(self._find_pads_at_point(seg.start, pad_positions))
+                            chain_pads.update(self._find_pads_at_point(seg.end, pad_positions))
                     # Also include any pads at the via position itself
-                    chain_pads.update(self._find_pads_at_point(via.position, pad_positions))
+                    if self.strict:
+                        chain_pads.update(
+                            self._find_pads_touching_geom(self._via_geom(via), pad_positions)
+                        )
+                    else:
+                        chain_pads.update(self._find_pads_at_point(via.position, pad_positions))
                     # Connect all pads in this chain through the via
                     chain_list = list(chain_pads)
                     for i, pad in enumerate(chain_list):
@@ -730,23 +800,38 @@ class NetStatusAnalyzer:
             zone_boundaries,
         )
 
-        # Connect pads at same copper positions (segments and vias only).
+        # Connect pads that share a piece of copper (segments and vias only).
         # Zone polygon vertices are NOT sampled here because the pad-to-zone
         # and via-to-zone polygon containment checks above already handle zone
         # connectivity properly.  The previous zone_points[:1000] sampling cap
         # caused false-positive incomplete reports on boards with many filled
         # polygons (Issue #2035).
-        all_copper = [seg.start for seg in segments] + [seg.end for seg in segments]
-        all_copper.extend([via.position for via in vias])
+        #
+        # Default: two pads bond when both centers land within
+        # POSITION_TOLERANCE of the same segment endpoint / via center.
+        # Strict (Issue #4176): two pads bond when both copper polygons
+        # intersect the same segment / via copper geometry.
+        if self.strict:
+            copper_geoms = [self._segment_poly(seg) for seg in segments]
+            copper_geoms.extend(self._via_geom(via) for via in vias)
+            for geom in copper_geoms:
+                touching = self._find_pads_touching_geom(geom, pad_positions)
+                for i, pad_id in enumerate(touching):
+                    for other_id in touching[i + 1 :]:
+                        graph[pad_id].add(other_id)
+                        graph[other_id].add(pad_id)
+        else:
+            all_copper = [seg.start for seg in segments] + [seg.end for seg in segments]
+            all_copper.extend([via.position for via in vias])
 
-        for pad_id, pad_pos in pad_positions.items():
-            for copper_pos in all_copper:
-                if self._points_close(pad_pos, copper_pos):
-                    # Find other pads at this copper point
-                    for other_id, other_pos in pad_positions.items():
-                        if other_id != pad_id and self._points_close(copper_pos, other_pos):
-                            graph[pad_id].add(other_id)
-                            graph[other_id].add(pad_id)
+            for pad_id, pad_pos in pad_positions.items():
+                for copper_pos in all_copper:
+                    if self._points_close(pad_pos, copper_pos):
+                        # Find other pads at this copper point
+                        for other_id, other_pos in pad_positions.items():
+                            if other_id != pad_id and self._points_close(copper_pos, other_pos):
+                                graph[pad_id].add(other_id)
+                                graph[other_id].add(pad_id)
 
         return graph
 
@@ -1030,21 +1115,36 @@ class NetStatusAnalyzer:
 
         Returns:
             List of sets, each containing segment indices in a connected component
+
+        In the default mode two segments are chained when any of their
+        endpoints land within ``POSITION_TOLERANCE`` of each other.  In
+        ``strict`` mode (Issue #4176) they are chained iff their real copper
+        polygons (each segment's centerline buffered by ``width / 2``)
+        intersect — matching KiCad, which does not bond two traces whose
+        copper does not physically touch even when their endpoints are within
+        the snap tolerance.
         """
         if not segments:
             return []
+
+        if self.strict:
+            polys = [self._segment_poly(seg) for seg in segments]
 
         # Build segment adjacency graph
         segment_graph: dict[int, set[int]] = defaultdict(set)
         for i, seg_a in enumerate(segments):
             for j, seg_b in enumerate(segments):
                 if i != j:
-                    if (
-                        self._points_close(seg_a.start, seg_b.start)
-                        or self._points_close(seg_a.start, seg_b.end)
-                        or self._points_close(seg_a.end, seg_b.start)
-                        or self._points_close(seg_a.end, seg_b.end)
-                    ):
+                    if self.strict:
+                        connected = self._geoms_touch(polys[i], polys[j])
+                    else:
+                        connected = (
+                            self._points_close(seg_a.start, seg_b.start)
+                            or self._points_close(seg_a.start, seg_b.end)
+                            or self._points_close(seg_a.end, seg_b.start)
+                            or self._points_close(seg_a.end, seg_b.end)
+                        )
+                    if connected:
                         segment_graph[i].add(j)
                         segment_graph[j].add(i)
 
@@ -1097,6 +1197,96 @@ class NetStatusAnalyzer:
         dx = p1[0] - p2[0]
         dy = p1[1] - p2[1]
         return (dx * dx + dy * dy) < (self.POSITION_TOLERANCE * self.POSITION_TOLERANCE)
+
+    # ------------------------------------------------------------------
+    # Strict-mode real-geometry copper contact (Issue #4176)
+    # ------------------------------------------------------------------
+    # These helpers back ``strict=True`` connectivity: segment↔segment,
+    # segment↔pad, and segment↔via unions require the copper *shapes* to
+    # actually intersect (KiCad semantics) rather than the endpoint-proximity
+    # radius the default model uses.  Pad and via copper polygons are reused
+    # from ``ConnectivityValidator`` (``_pad_copper_polygon`` / ``_via_copper_geom``)
+    # via ``_connectivity_geometry()``; the trace-segment polygon is the one
+    # missing primitive, provided by ``geometry.copper.segment_copper_polygon``.
+    # All caches are keyed off the object ``id`` of the segment/via so repeated
+    # per-net calls do not rebuild the same polygon.
+
+    @staticmethod
+    def _geoms_touch(a: Any, b: Any) -> bool:
+        """Return ``True`` when two shapely geometries intersect/touch.
+
+        ``None`` (a degenerate/unbuildable geometry) never touches anything.
+        """
+        if a is None or b is None:
+            return False
+        return bool(a.intersects(b))
+
+    def _segment_poly(self, seg: Any) -> Any:
+        """Cached real copper polygon for a trace segment (strict mode)."""
+        cache = self._segment_poly_cache
+        key = id(seg)
+        poly = cache.get(key)
+        if poly is None and key not in cache:
+            from kicad_tools.geometry.copper import segment_copper_polygon
+
+            poly = segment_copper_polygon(seg.start, seg.end, seg.width)
+            cache[key] = poly
+        return poly
+
+    def _via_geom(self, via: Any) -> Any:
+        """Cached real copper geometry for a via (strict mode).
+
+        Reuses :meth:`ConnectivityValidator._via_copper_geom` so the via copper
+        model stays consistent with the reference partition extractor.
+        """
+        cache = self._via_geom_cache
+        key = id(via)
+        geom = cache.get(key)
+        if geom is None and key not in cache:
+            cv = self._connectivity_geometry()
+            radius = max(getattr(via, "size", 0.0) or 0.0, 0.0) / 2.0
+            geom = cv._via_copper_geom(via.position, radius)
+            cache[key] = geom
+        return geom
+
+    def _pad_polys(self) -> dict[str, Any]:
+        """Board-frame copper polygon per pad, keyed by ``REF.PAD`` (strict).
+
+        Built once per analyzer over every footprint pad, reusing
+        :meth:`ConnectivityValidator._pad_copper_polygon` for shape/rotation
+        parity with the reference partition extractor.  Pads with unbuildable
+        geometry are stored as ``None`` and simply never match.
+        """
+        if self._pad_poly_cache is not None:
+            return self._pad_poly_cache
+        cache: dict[str, Any] = {}
+        cv = self._connectivity_geometry()
+        for fp in self.pcb.footprints:
+            if not fp.reference or fp.reference.startswith("#"):
+                continue
+            for pad in fp.pads:
+                if pad.number is None or pad.number == "":
+                    continue
+                cache[f"{fp.reference}.{pad.number}"] = cv._pad_copper_polygon(fp, pad)
+        self._pad_poly_cache = cache
+        return cache
+
+    def _find_pads_touching_geom(
+        self,
+        geom: Any,
+        pad_positions: dict[str, tuple[float, float]],
+    ) -> list[str]:
+        """Strict analogue of ``_find_pads_at_point``: pads whose copper touches ``geom``.
+
+        Only pads present in ``pad_positions`` (i.e. on the net being analyzed)
+        are considered, matching the point-based helper's contract.
+        """
+        if geom is None:
+            return []
+        pad_polys = self._pad_polys()
+        return [
+            pad_id for pad_id in pad_positions if self._geoms_touch(geom, pad_polys.get(pad_id))
+        ]
 
     # Canonical copper layer ordering from top to bottom.
     # Promoted to ``kicad_tools.core.layers`` in Issue #3487 so the DRC

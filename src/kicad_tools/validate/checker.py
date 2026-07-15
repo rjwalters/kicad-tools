@@ -74,6 +74,7 @@ class DRCChecker:
         verbose: bool = False,
         emit_measurements: bool = False,
         courtyard_waivers: CourtyardWaivers | None = None,
+        strict_connectivity: bool = False,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -124,6 +125,16 @@ class DRCChecker:
                 entry (instead of blocking errors), and an ``info`` "unused
                 waiver" finding for entries naming an absent component.  When
                 omitted, every overlap is a blocking error (Issue #4137).
+            strict_connectivity: When True, ``check_connectivity`` decides
+                segment↔segment / segment↔pad / segment↔via unions by real
+                geometric copper contact (shapely polygon intersection)
+                instead of the default 0.01mm endpoint-proximity tolerance,
+                matching KiCad's connectivity semantics (Issue #4176).  A net
+                whose copper the default model over-connects (reported
+                "complete" while ``kicad-cli pcb drc`` finds it unconnected)
+                then correctly fires the connectivity rule.  Default False
+                preserves the legacy tolerance model so existing ``kct check``
+                output is unchanged.
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -135,6 +146,11 @@ class DRCChecker:
         self.suppress_library = suppress_library
         self.net_class_map = net_class_map
         self.courtyard_waivers = courtyard_waivers
+        # Issue #4176: when True, the connectivity rule decides segment /
+        # pad / via unions by real geometric copper contact (shapely polygon
+        # intersection) instead of the default 0.01mm endpoint-proximity
+        # tolerance, matching KiCad.  Default False preserves legacy behavior.
+        self.strict_connectivity = strict_connectivity
         self.warn_on_inactive_skew_rules = warn_on_inactive_skew_rules
         self.verbose = verbose
         self.emit_measurements = emit_measurements
@@ -432,7 +448,7 @@ class DRCChecker:
             DRCResults containing one error per incomplete or unrouted
             multi-pad net (severity error).
         """
-        rule = ConnectivityRule()
+        rule = ConnectivityRule(strict=self.strict_connectivity)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_diffpair_clearance_intra(self) -> DRCResults:

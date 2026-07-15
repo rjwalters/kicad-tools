@@ -71,6 +71,22 @@ class ConnectivityRule(DRCRule):
     name = "Net Connectivity"
     description = "Detects multi-pad nets that are not fully connected by traces, vias, or zones"
 
+    def __init__(self, *, strict: bool = False) -> None:
+        """Create the connectivity rule.
+
+        Args:
+            strict: Forwarded to :class:`NetStatusAnalyzer` as its ``strict``
+                flag (Issue #4176).  When ``True``, segment↔segment /
+                segment↔pad / segment↔via connectivity is decided by real
+                geometric copper contact (shapely polygon intersection)
+                instead of the default 0.01mm endpoint-proximity tolerance, so
+                a net kct's default model over-connects (reported "complete"
+                while ``kicad-cli pcb drc`` finds it unconnected) correctly
+                fires here.  The default (``False``) preserves the legacy
+                tolerance model so existing ``kct check`` output is unchanged.
+        """
+        self.strict = strict
+
     def check(
         self,
         pcb: PCB,
@@ -93,7 +109,7 @@ class ConnectivityRule(DRCRule):
         results.rules_checked = 1
         results.rules_checked_by_rule[self.rule_id] = 1
 
-        analyzer = NetStatusAnalyzer(pcb)
+        analyzer = NetStatusAnalyzer(pcb, strict=self.strict)
         analysis = analyzer.analyze()
 
         for net_status in analysis.nets:

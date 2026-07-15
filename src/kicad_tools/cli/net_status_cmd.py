@@ -9,6 +9,17 @@ Usage:
     kicad-net-status board.kicad_pcb --net GND
     kicad-net-status board.kicad_pcb --by-class
     kicad-net-status board.kicad_pcb --format json
+    kicad-net-status board.kicad_pcb --strict
+
+Connectivity model:
+    By default, connectivity is decided by a 0.01mm endpoint-proximity
+    tolerance: a segment endpoint is unioned with a pad / via / other segment
+    whenever their reference points land within 0.01mm, without testing
+    whether the real copper (segment width, pad shape) actually touches. This
+    can over-connect relative to KiCad, reporting a net "complete" that
+    ``kicad-cli pcb drc`` reports as having unconnected items (issue #4176).
+    Pass ``--strict`` to decide connectivity by real geometric copper contact
+    (shapely polygon intersection), which matches KiCad's semantics.
 
 Exit Codes:
     0 - No incomplete nets
@@ -61,6 +72,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Show all pads with coordinates",
     )
     parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Decide connectivity by REAL geometric copper contact (shapely "
+            "polygon intersection) instead of the default 0.01mm endpoint "
+            "proximity tolerance. The default model unions a segment endpoint "
+            "with a pad/via/segment whenever their reference points land "
+            "within 0.01mm, even if the actual copper (segment width, pad "
+            "shape) does not touch -- so it can report a net 'complete' that "
+            "'kicad-cli pcb drc' reports as unconnected. --strict matches "
+            "KiCad's connectivity semantics (issue #4176). Requires shapely."
+        ),
+    )
+    parser.add_argument(
         "--why",
         action="store_true",
         help=(
@@ -81,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Run analysis
     try:
-        analyzer = NetStatusAnalyzer(pcb_path)
+        analyzer = NetStatusAnalyzer(pcb_path, strict=args.strict)
         result = analyzer.analyze()
     except Exception as e:
         print(f"Error during analysis: {e}", file=sys.stderr)
