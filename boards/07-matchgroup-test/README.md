@@ -130,6 +130,111 @@ empirical: route the board, count errors, add ~20% headroom, then
 record in `.github/routed-drc-tolerance.yml`.  Phase 3N (#2726) will
 tighten iteratively as upstream router improvements land.
 
+## Routing Plateau (5 seed-invariant opens)
+
+**Status: intentional, evidence-backed plateau.**  Board 07 routes
+**26/31 signal nets** (~83.9% by net count); the committed
+`output/lvs.json` honestly records `clean: false` with exactly **5 open
+copper mismatches**.  This is a genuine placement/topology limit, not an
+untracked gap and not a router-knob that has been left unturned.  The
+gallery renders board 07 as `partial`/`lvs` for exactly this reason, and
+that chip is the intended honest state (the audit is real:
+`copper_bound_pad_count: 244`, `copper_vacuous: false` --- cf. #4011).
+
+### The 5 opens
+
+| Net | Pad A | Pad B | Bundle |
+|-----|-------|-------|--------|
+| `DQ3`         | U1.28 | U2.4  | DDR data byte |
+| `DQ4`         | U1.32 | U2.8  | DDR data byte |
+| `MIPI_DAT0_N` | J1.4  | U3.4  | MIPI CSI |
+| `TMDS_D0_N`   | J2.2  | U4.B2 | HDMI TMDS |
+| `TMDS_D1_N`   | J2.5  | U4.B4 | HDMI TMDS |
+
+This is the same set re-measured by the #4049 epic dossier; the older
+#3438 thread cited a 3-net subset before the board was re-spun.  Three
+verifiers agree on this exact set: `kct net-status --why`,
+`output/lvs.json` (`copper_mismatches`), and the KiCad cross-gate
+`kicad-cli pcb drc --refill-zones` (5 unconnected pads at the same five
+pads).
+
+### Fresh per-net verdict (`kct net-status --incomplete --why`)
+
+Measured on the committed routed PCB and reproduced by a from-scratch
+seed-42 re-route (`PYTHONHASHSEED=42 generate_design.py --step route
+--seed 42`), which lands on the **identical** 5-open set and the same
+classification:
+
+```
+Stuck signal nets: 5
+  ESCAPE_BLOCKED:       0
+  CONGESTION_SATURATED: 2
+  BUDGET_STARVED:       0
+  PLACEMENT_BOUND:      3
+  POUR_DISCONTINUOUS:   0
+```
+
+| Net | Verdict | Evidence |
+|-----|---------|----------|
+| `TMDS_D0_N`   | `CONGESTION_SATURATED` | pad reachable (360 deg lane) but boxed in by committed strict copper (nearest blocker 1.000mm); ripping it would strand `TMDS_D0_P`, `TMDS_D1_P` (1:1 trade) |
+| `TMDS_D1_N`   | `CONGESTION_SATURATED` | boxed in (nearest blocker 0.975mm); rip would strand `TMDS_D1_P`, `TMDS_D2_P` (1:1 trade) |
+| `DQ3`         | `PLACEMENT_BOUND` | dense cluster (24 foreign obstructions, nearest strict blocker 0.800mm) --- a part must move |
+| `DQ4`         | `PLACEMENT_BOUND` | dense cluster (30 foreign obstructions, nearest strict blocker 0.047mm) --- a part must move |
+| `MIPI_DAT0_N` | `PLACEMENT_BOUND` | dense cluster (39 foreign obstructions, nearest strict blocker 0.800mm) --- a part must move |
+
+The key signal: **0** nets are `BUDGET_STARVED` (which more router
+iterations/wall-clock would fix) or `ESCAPE_BLOCKED` (which corridor
+reservation would fix).  Every stuck net is either the diagnostic's own
+"a part must move" `PLACEMENT_BOUND` verdict (3/5) or a
+`CONGESTION_SATURATED` 1:1 trade (2/5) where ripping the stuck net simply
+strands its diff-pair partner --- the N-1 invariant #3438 first
+documented.
+
+### What was attempted this pass (v0.16.0 router)
+
+A fresh seed-42 route with the current v0.16.0 router (region-bounded
+routing, ampacity net-class, and the post-#4049 hardening all now on
+`main`, C++ backend built) was run end-to-end.  The negotiated router's
+relief-rescue phase explicitly reported **`Relief rescue resolved 0/5
+net(s)`**: for each stuck net it either found no relief path, or found a
+path that displaced victims it could not re-land (rolled back under the
+no-net-loss guarantee).  The best-so-far routed state (26/31, 0 clearance
+violations, 0 overflow) is identical in open-set to the committed
+artifact, so the committed artifact remains the shipping truth and is
+left unchanged (regen diverges only in trace geometry/UUIDs, not in which
+nets close).
+
+### Required class of fix (follow-up, out of scope here)
+
+None of the four gaps is a knob the single-ended negotiated router can
+turn today:
+
+- **`PLACEMENT_BOUND` (DQ3, DQ4, MIPI_DAT0_N)** --- the diagnostic's
+  verdict is literally "a part must move."  Resolving these requires a
+  **placement rework** of the U1/U2/U3/U4/J1/J2 cluster, a separate and
+  larger design change (out of scope per this board's charter; see
+  #4049).
+- **`CONGESTION_SATURATED` 1:1 trades (TMDS_D0_N, TMDS_D1_N)** ---
+  ripping the stuck net strands its pair partner.  The genuine fix is
+  **joint bundle corridor allocation** (route the whole HDMI/DDR/MIPI
+  bundle's escape channel as a coupled group rather than net-by-net),
+  the crossing-aware river-routing planner explored and deferred in
+  **#3673**, and the CoupledPathfinder budget rework noted under #4049.
+
+The exhaustive knob matrix (iterations, seed, monte-carlo,
+differential-pairs, micro-via-in-pad, grid 0.1, two-pass pre-route,
+targeted-ripup) was already swept to exhaustion in **#3438** without
+reaching 31/31; the 11-net DDR bundle fails 2/11 *alone* on an empty
+board.  The board-07 router epic **#4049** re-confirmed this and closed
+at plateau.  This pass (#4235) re-validates that verdict against
+v0.16.0.  The joint-corridor + placement-rework follow-up is tracked in
+**#4243**.
+
+Gap 2 (diff-pair length-skew / routing-continuity quality errors on the
+pairs that *are* routed --- DQS/MIPI_CLK/MIPI_DAT1/TMDS_D2) is a
+different root cause (pairs routed as independent single-ended traces),
+tracked under #4049, and is deliberately **not** touched here.
+
 ## Phase 3 Dependency: #2723 (`--length-match-groups`)
 
 The `apply_match_group_tuning` orchestrator + `--length-match-groups`
