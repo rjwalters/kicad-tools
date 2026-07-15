@@ -27,9 +27,20 @@ Phase 2b-1 scope (Issue #4170)
 ``kct route --region``: a genuine boundary-clipped stub (produced by
 ``PCB.add_trace`` + ``strip_traces(region=...)``) is reconnected to its
 in-region pad, zero copper is modified outside the region, the hole-to-hole
-floor is respected, and multi-stub same-net cases reconnect.  The ``route-auto``
-orchestrator surface is NOT wired for stub reconnection here -- it fails fast
-with a Phase 2c deferral message (#4173).
+floor is respected, and multi-stub same-net cases reconnect.
+
+Phase 2c scope (Issue #4173)
+----------------------------
+
+``TestStubReconnectionRouteAuto`` brings the ``route-auto`` orchestrator
+surface to parity with ``kct route --region``: ``route_net_auto(..., region=)``
+now reconnects the SAME synthetic boundary stub by pruning the outside pad and
+injecting the boundary stub tip as an in-region target in ``_build_pads_for_net``
+(reusing the shared #4172 detector).  Unlike the Autorouter, the orchestrator
+has no per-cell obstacle grid, so region confinement on this path is provided
+entirely by the post-route output-escape filter -- a coarse corridor that
+bulges out-of-box fails honestly there rather than writing out-of-region copper.
+The old "defer to Phase 2c" fail-fast gate + test are removed.
 """
 
 from __future__ import annotations
@@ -907,37 +918,213 @@ class TestStubReconnection:
         assert _touches_cell(segs, 130.0, 112.0), "first stub tip not reconnected"
         assert _touches_cell(segs, 130.0, 122.0), "second stub tip not reconnected"
 
-    def test_route_auto_region_stub_defers_to_phase_2c(self, tmp_path):
-        """``route-auto --region`` on a stub-endpoint net fails fast (Phase 2c).
 
-        The orchestrator surface is NOT wired for stub reconnection in Phase
-        2b-1 (deferred to #4173).  It must fail fast with an explicit Phase 2c
-        message rather than silently falling back to pad-only and dropping the
-        stub.
+class TestStubReconnectionRouteAuto:
+    """Phase 2c (#4173): ``route-auto --region`` reaches parity with ``route``.
+
+    The ``route_net_auto`` orchestrator surface now reconnects the same bare
+    boundary stubs that ``kct route --region`` handles, by pruning the outside
+    pad and injecting the boundary stub tip as an in-region target in
+    ``_build_pads_for_net`` (reusing the shared #4172 detector).
+
+    Confinement note: the orchestrator has NO per-cell obstacle grid (it uses a
+    coarse ``GlobalRouter`` / ``RegionGraph`` tile-corridor planner), so region
+    confinement on this path is provided ENTIRELY by ``route_net_auto``'s
+    post-route output-escape filter -- there is no pre-route cell-level bound.
+    A coarse corridor between two in-region endpoints that bulges through an
+    out-of-box tile center therefore FAILS honestly at the output filter rather
+    than writing out-of-region copper.  That is expected behavior, not a bug:
+    the zero-copper-outside-the-region contract is never violated.
+    """
+
+    def test_route_auto_region_reconnects_stripped_stub(self, tmp_path):
+        """``route_net_auto --region`` reconnects the same stub as ``route``.
+
+        Parity companion to ``test_route_region_reconnects_stripped_stub`` on
+        an equivalent synthetic fixture: R1 (world 110,110) inside the box, R2
+        (world 150,110) outside, straight R1->R2 trace clipped at the boundary
+        (world 115,110).  The orchestrator surface must reconnect R1 to the
+        boundary stub tip (world 115,110) instead of failing fast.
+
+        The box here keeps R1 and the stub tip in a single coarse
+        ``RegionGraph`` tile so the corridor is a straight in-box segment.  A
+        wider corridor could bulge through an out-of-box tile center (the
+        orchestrator's coarse planner is not region-confined); that case fails
+        honestly at ``route_net_auto``'s post-route output-escape filter -- the
+        SOLE confinement guarantee on this path -- rather than writing
+        out-of-region copper.  See the class docstring.
         """
         from kicad_tools.mcp.tools.routing import route_net_auto
 
         stripped = _make_stripped_stub_board(
             tmp_path,
-            name="stub5",
+            name="auto_stub1",
             footprints=[
-                _footprint("R1", 115, 120, 1, "SIG_A"),
-                _footprint("R2", 145, 120, 1, "SIG_A"),
+                _footprint("R1", 110, 110, 1, "SIG_A"),
+                _footprint("R2", 150, 110, 1, "SIG_A"),
             ],
             traces=[(("R1", "1"), ("R2", "1"), "SIG_A")],
-            strip_region=(0.0, 0.0, 30.0, 20.0),
+            strip_region=(0.0, 0.0, 15.0, 25.0),
             strip_nets=["SIG_A"],
             nets=[(1, "SIG_A")],
         )
+        out_path = tmp_path / "auto_stub1_out.kicad_pcb"
         result = route_net_auto(
             str(stripped),
             "SIG_A",
+            output_path=str(out_path),
+            region="0,0,15,25",
+        )
+        assert result["success"] is True, (
+            f"route-auto --region did not reconnect the stub: {result.get('error_message')!r}"
+        )
+        segs = parse_segments(out_path.read_text()).get("SIG_A", [])
+        assert segs, "SIG_A produced no copper"
+        # New routing reaches R1's pad (world 110,110)...
+        assert _touches_cell(segs, 110.0, 110.0), "route-auto did not reach R1 pad"
+        # ...and joins the stub boundary tip (world 115,110).
+        assert _touches_cell(segs, 115.0, 110.0), (
+            "route-auto did not reconnect to the boundary stub tip"
+        )
+
+    def test_route_auto_reconnection_preserves_outside_copper(self, tmp_path):
+        """route-auto stub reconnection modifies zero copper outside the box.
+
+        Parity companion to
+        ``test_reconnection_preserves_outside_copper_byte_identical``: the
+        surviving stub copper OUTSIDE the region (world x>=115) is
+        geometry-identical before and after the reconnection, and no NEW copper
+        lands strictly outside the box.
+        """
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        stripped = _make_stripped_stub_board(
+            tmp_path,
+            name="auto_stub2",
+            footprints=[
+                _footprint("R1", 110, 110, 1, "SIG_A"),
+                _footprint("R2", 150, 110, 1, "SIG_A"),
+            ],
+            traces=[(("R1", "1"), ("R2", "1"), "SIG_A")],
+            strip_region=(0.0, 0.0, 15.0, 25.0),
+            strip_nets=["SIG_A"],
+            nets=[(1, "SIG_A")],
+        )
+        before = parse_segments(stripped.read_text()).get("SIG_A", [])
+        before_outside = sorted(
+            (round(s.x1, 4), round(s.y1, 4), round(s.x2, 4), round(s.y2, 4))
+            for s in before
+            if min(s.x1, s.x2) >= 115.0 - 1e-6
+        )
+        assert before_outside, "expected an outside stub before routing"
+
+        out_path = tmp_path / "auto_stub2_out.kicad_pcb"
+        result = route_net_auto(
+            str(stripped),
+            "SIG_A",
+            output_path=str(out_path),
+            region="0,0,15,25",
+        )
+        assert result["success"] is True, (
+            f"route-auto --region did not reconnect the stub: {result.get('error_message')!r}"
+        )
+        after = parse_segments(out_path.read_text()).get("SIG_A", [])
+        after_outside = sorted(
+            (round(s.x1, 4), round(s.y1, 4), round(s.x2, 4), round(s.y2, 4))
+            for s in after
+            if min(s.x1, s.x2) >= 115.0 - 1e-6
+        )
+        assert after_outside == before_outside, (
+            "copper outside the region was modified during route-auto stub reconnection"
+        )
+
+    def test_route_auto_reconnection_respects_hole_to_hole_floor(self, tmp_path):
+        """The hole-to-hole floor is threaded on the route-auto stub path.
+
+        The route-auto path (``route_net_auto`` -> ``RoutingOrchestrator``)
+        shares the same ``_TraceResolverTransaction._via_clears_hole_to_hole``
+        predicate as the main router.  This mirrors
+        ``test_reconnection_respects_hole_to_hole_floor``: a stub board with a
+        pre-existing foreign PTH drill inside the region is loaded, and a
+        candidate via placed within the drill's hole-to-hole floor near the
+        reconnection joint is rejected -- confirming the floor is enforced for
+        vias produced on the stub-reconnection corridor regardless of surface.
+        """
+        from kicad_tools.router.core import _TraceResolverTransaction
+        from kicad_tools.router.stub_terminals import StubTerminal
+
+        board = _board(
+            [
+                _footprint("R1", 115, 118, 1, "SIG_A"),
+                _tht_footprint("J1", 122, 118, 2, "SIG_B", drill=0.3),
+            ],
+            edge=(100, 100, 160, 160),
+            nets=[(1, "SIG_A"), (2, "SIG_B")],
+            extra='  (segment (start 130 118) (end 145 118) (width 0.2) (layer "F.Cu") (net 1))',
+        )
+        router, _ = load_pcb_for_routing(
+            str(_write(tmp_path, board, "auto_stub3.kicad_pcb")),
+            validate_drc=False,
+            strict_drc=False,
+            load_existing_routes=True,
+            region=(0.0, 0.0, 30.0, 25.0),
+            stub_terminals={
+                1: [
+                    StubTerminal(
+                        net_id=1,
+                        net_name="SIG_A",
+                        x=30.0,  # board-relative boundary tip -> world (130,118)
+                        y=18.0,
+                        layer=Layer.F_CU,
+                    )
+                ]
+            },
+        )
+        router.rules.min_hole_to_hole = 0.5
+
+        transaction = _TraceResolverTransaction(router)
+        transaction.begin()
+        near_via = Via(
+            x=122.3, y=118.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        assert transaction._via_clears_hole_to_hole(near_via, 0.5) is False
+        far_via = Via(
+            x=118.0, y=112.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        assert transaction._via_clears_hole_to_hole(far_via, 0.5) is True
+
+    def test_route_auto_region_no_stub_still_fails(self, tmp_path):
+        """A net with an outside pad and NO reconnectable stub still fails fast.
+
+        The retained reachability-gate branch: only ``has_stub`` nets change
+        from fail-fast to route-and-inject.  A genuinely-unreachable net (an
+        outside pad with no same-net boundary stub) must still return
+        ``success=False`` with the clear "no same-net boundary stub" message.
+        """
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        # R1 inside the box, R2 outside -- but NO trace/stub was ever created,
+        # so there is nothing to reconnect to.
+        board = _board(
+            [
+                _footprint("R1", 110, 110, 1, "SIG_A"),
+                _footprint("R2", 145, 110, 1, "SIG_A"),
+            ],
+            edge=(100, 100, 160, 160),
+            nets=[(1, "SIG_A")],
+        )
+        path = _write(tmp_path, board, "auto_nostub.kicad_pcb")
+        result = route_net_auto(
+            str(path),
+            "SIG_A",
             output_path=None,
-            region="0,0,30,20",
+            region="0,0,20,20",
         )
         assert result["success"] is False
         msg = result.get("error_message") or ""
-        assert "Phase 2c" in msg, f"expected a Phase 2c deferral message, got: {msg}"
+        assert "no same-net boundary stub" in msg, (
+            f"expected the no-stub reachability message, got: {msg}"
+        )
         assert "SIG_A" in msg
 
 

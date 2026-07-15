@@ -396,6 +396,72 @@ def route_net(
         )
 
 
+def _detect_stub_terminals_for_pcb(pcb: PCB, region_box: tuple[float, float, float, float]) -> dict:
+    """Detect boundary stub terminals for every straddling net on ``pcb``.
+
+    Thin adapter over the shared #4172 producer
+    :func:`kicad_tools.router.stub_terminals.detect_boundary_stub_terminals`:
+    it reduces the PCB's loaded segments/pads into the detector's pure
+    board-relative :class:`StubSegment` / :class:`PadLocation` inputs and
+    returns its ``{net_id: [StubTerminal, ...]}`` mapping.  Stub geometry is
+    NEVER re-derived here -- this is the single reuse point on the route-auto
+    path (shared by both the reachability gate's has-stub check and the
+    ``_build_pads_for_net`` target injection), mirroring the Autorouter side's
+    single call from ``io.py::load_pcb_for_routing``.
+
+    ``region_box`` is board-relative ``(x1, y1, x2, y2)`` mm (same convention as
+    ``pcb strip --region``).  Returns an empty dict on any adaptation failure so
+    callers can treat "no detectable stub" uniformly.
+
+    Note: :class:`StubTerminal` objects are route-scoped and ephemeral -- they
+    are never persisted as a ``Pad`` on the PCB.
+    """
+    try:
+        from kicad_tools.core.types import CopperLayer
+        from kicad_tools.router.stub_terminals import (
+            PadLocation,
+            RegionBox,
+            StubSegment,
+            detect_boundary_stub_terminals,
+        )
+    except Exception:  # pragma: no cover - defensive import guard
+        return {}
+
+    rx1, ry1, rx2, ry2 = region_box
+    region = RegionBox(rx1, ry1, rx2, ry2)
+
+    segments: list = []
+    for seg in pcb._segments:
+        try:
+            layer = CopperLayer.from_kicad_name(seg.layer)
+        except ValueError:
+            continue
+        segments.append(
+            StubSegment(
+                net_id=seg.net_number,
+                net_name=seg.net_name,
+                x1=seg.start[0],
+                y1=seg.start[1],
+                x2=seg.end[0],
+                y2=seg.end[1],
+                layer=layer,
+                uuid=getattr(seg, "uuid", "") or None,
+            )
+        )
+
+    pad_locs: list = []
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            pos = pcb.get_pad_position(fp.reference, pad.number)
+            if pos is not None:
+                pad_locs.append(PadLocation(net_id=pad.net_number, x=pos[0], y=pos[1]))
+
+    try:
+        return detect_boundary_stub_terminals(segments, pad_locs, region)
+    except Exception:  # pragma: no cover - defensive
+        return {}
+
+
 def route_net_auto(
     pcb_path: str,
     net_name: str,
@@ -512,86 +578,35 @@ def route_net_auto(
                 if not (rx1 <= pos[0] <= rx2 and ry1 <= pos[1] <= ry2):
                     outside_pads.append((fp_.reference, pad.number))
         if outside_pads:
-            # Issue #4170 (Phase 2b-1) deferral gate: bare-stub reconnection is
-            # wired for ``kct route --region`` but NOT for the ``route-auto``
-            # orchestrator surface -- that is Phase 2c (#4173).  Detect whether
-            # this net actually has a same-net boundary stub so the message is
-            # accurate: a stub-endpoint net is explicitly deferred to Phase 2c
-            # (it must NOT silently fall back to pad-only and drop the stub);
-            # a net with no stub is simply unreachable.
-            has_stub = False
-            try:
-                from kicad_tools.core.types import CopperLayer as _CopperLayer
-                from kicad_tools.router.stub_terminals import (
-                    PadLocation as _PadLoc,
-                )
-                from kicad_tools.router.stub_terminals import (
-                    RegionBox as _RegionBox,
-                )
-                from kicad_tools.router.stub_terminals import (
-                    StubSegment as _StubSeg,
-                )
-                from kicad_tools.router.stub_terminals import (
-                    detect_boundary_stub_terminals as _detect,
-                )
-
-                _region = _RegionBox(rx1, ry1, rx2, ry2)
-                _segs = []
-                for _s in pcb._segments:
-                    try:
-                        _layer = _CopperLayer.from_kicad_name(_s.layer)
-                    except ValueError:
-                        continue
-                    _segs.append(
-                        _StubSeg(
-                            net_id=_s.net_number,
-                            net_name=_s.net_name,
-                            x1=_s.start[0],
-                            y1=_s.start[1],
-                            x2=_s.end[0],
-                            y2=_s.end[1],
-                            layer=_layer,
-                            uuid=getattr(_s, "uuid", "") or None,
-                        )
-                    )
-                _pads = []
-                for _fp in pcb.footprints:
-                    for _pad in _fp.pads:
-                        _pos = pcb.get_pad_position(_fp.reference, _pad.number)
-                        if _pos is not None:
-                            _pads.append(_PadLoc(net_id=_pad.net_number, x=_pos[0], y=_pos[1]))
-                _detected = _detect(_segs, _pads, _region)
-                has_stub = any(
-                    t.net_name == net_name for terms in _detected.values() for t in terms
-                )
-            except Exception:
-                has_stub = False
-
-            preview = ", ".join(f"{r}.{p}" for r, p in outside_pads[:6])
-            if has_stub:
-                msg = (
-                    f"--region: net '{net_name}' has a same-net boundary stub, but "
-                    "stub reconnection is not yet wired for route-auto "
-                    "(orchestrator parity is deferred to Phase 2c, #4173). Use "
-                    "'kct route --region' for stub reconnection."
-                )
-            else:
+            # Issue #4173 (Phase 2c): a net with pad(s) outside the box is only
+            # reachable if it owns a same-net BOUNDARY STUB -- a bare clipped
+            # copper endpoint on the region edge left by ``pcb strip --region``.
+            # If such a stub exists, the outside pad is already electrically
+            # connected via the preserved stub copper, so we reconnect the
+            # in-region island to the boundary tip instead of failing (the
+            # actual injection happens later, in ``_build_pads_for_net``, via
+            # ``region_stub_terminals``).  A net with an outside pad and NO
+            # reconnectable stub is genuinely unreachable and still fails fast.
+            detected = _detect_stub_terminals_for_pcb(pcb, region_box)
+            has_stub = any(t.net_name == net_name for terms in detected.values() for t in terms)
+            if not has_stub:
+                preview = ", ".join(f"{r}.{p}" for r, p in outside_pads[:6])
                 msg = (
                     f"--region cannot route net '{net_name}': pad(s) {preview} "
                     "lie outside the region with no same-net boundary stub to "
                     "reconnect to."
                 )
-            return {
-                "success": False,
-                "net_name": net_name,
-                "strategy_used": "region-bounded",
-                "metrics": {},
-                "repair_actions": [],
-                "warnings": [],
-                "performance": {},
-                "error_message": msg,
-                "alternative_strategies": [],
-            }
+                return {
+                    "success": False,
+                    "net_name": net_name,
+                    "strategy_used": "region-bounded",
+                    "metrics": {},
+                    "repair_actions": [],
+                    "warnings": [],
+                    "performance": {},
+                    "error_message": msg,
+                    "alternative_strategies": [],
+                }
 
     # Import router components
     try:
@@ -679,26 +694,43 @@ def route_net_auto(
     # Build pad list from PCB footprints so the orchestrator can
     # perform strategy selection and routing (without pads every
     # strategy returns "Insufficient pads").
-    pads = _build_pads_for_net(pcb, net_number, net_name)
+    #
+    # Issue #4173 (Phase 2c): when a region box is set, augment the pad list
+    # with boundary stub terminals so a straddling net reconnects its in-region
+    # island to the preserved outside stub, at parity with ``kct route
+    # --region``.  ``_build_pads_for_net`` is the SINGLE producer of the ``pads``
+    # list read by every orchestrator strategy (``_route_global``,
+    # ``_route_escape_then_global``, ...), so augmenting it here confines the
+    # fix to one upstream site (mirroring the Autorouter's single ``self.nets``
+    # prune at ``io.py::load_pcb_for_routing``).
+    pads = _build_pads_for_net(pcb, net_number, net_name, region_box=region_box)
 
     # Route the net
     result = orchestrator.route_net(net=net_name, pads=pads)
 
-    # Issue #4148: confine the produced geometry to the region box.  The
-    # orchestrator's grid is not region-marked at cell level in Phase 2a, so we
-    # enforce the bound on its OUTPUT: any routed segment/via endpoint that
-    # escapes the box (world coords = board-relative + board origin) fails the
-    # route rather than writing out-of-region copper.
+    # Issue #4148 / #4173: confine the produced geometry to the region box.  The
+    # orchestrator has no per-cell obstacle grid, so we enforce the bound on its
+    # OUTPUT: any routed segment/via endpoint that escapes the box fails the
+    # route rather than writing out-of-region copper.  This post-route
+    # output-escape filter is the ONLY confinement guarantee on the route-auto
+    # path (the coarse GlobalRouter/RegionGraph corridor planner is not
+    # region-confined), so it does real work on #4173's stub-reconnection
+    # geometry -- e.g. a coarse corridor that bulges through an out-of-box tile
+    # center fails here honestly instead of emitting out-of-region copper.
+    #
+    # Frame: the orchestrator routes in the SAME frame as its input pads, and
+    # ``_build_pads_for_net`` builds pads in the BOARD-RELATIVE frame (footprint
+    # positions are stored origin-shifted; ``pcb.save`` re-adds the origin on
+    # serialization).  ``region_box`` is board-relative too, so the box and the
+    # ``result.segments`` are compared directly with no origin shift.
     if region_box is not None and result.success:
-        ox, oy = pcb._board_origin
-        wx1 = region_box[0] + ox
-        wy1 = region_box[1] + oy
-        wx2 = region_box[2] + ox
-        wy2 = region_box[3] + oy
+        bx1, by1, bx2, by2 = region_box
+        rlo_x, rhi_x = min(bx1, bx2), max(bx1, bx2)
+        rlo_y, rhi_y = min(by1, by2), max(by1, by2)
         tol = 1e-3
 
         def _in_box(px: float, py: float) -> bool:
-            return wx1 - tol <= px <= wx2 + tol and wy1 - tol <= py <= wy2 + tol
+            return rlo_x - tol <= px <= rhi_x + tol and rlo_y - tol <= py <= rhi_y + tol
 
         escaped = False
         for seg in getattr(result, "segments", []) or []:
@@ -867,23 +899,79 @@ def _build_pad_positions(pcb: PCB) -> dict[int, list[tuple[float, float]]]:
     return positions
 
 
-def _build_pads_for_net(pcb: PCB, net_number: int, net_name: str) -> list:
+def _build_pads_for_net(
+    pcb: PCB,
+    net_number: int,
+    net_name: str,
+    region_box: tuple[float, float, float, float] | None = None,
+) -> list:
     """Build a list of router Pad objects for a specific net.
 
     Extracts pad positions from the loaded PCB footprints and converts
     them to the router's Pad primitive type, which the RoutingOrchestrator
     needs for strategy selection and routing execution.
 
+    Region-bounded reconnection (Issue #4173, Phase 2c)
+    ---------------------------------------------------
+    When ``region_box`` is given (board-relative ``(x1, y1, x2, y2)`` mm) and the
+    net owns a same-net boundary stub, this augments the pad list with the
+    "prune the outside pad, substitute the boundary stub tip" shape that ``kct
+    route --region`` applies to ``Autorouter.nets`` (io.py:3889-3928):
+
+    * Pads whose world position lies OUTSIDE the box are dropped.  Such a pad is
+      the far end of a clipped boundary stub -- it is already electrically
+      connected through the preserved stub copper and sits outside the routable
+      region, so routing to it would both duplicate the connection and emit
+      out-of-region copper.
+    * Each detected :class:`StubTerminal` tip is added as a synthetic,
+      route-scoped ``Pad`` at the tip's WORLD position (board-relative tip +
+      ``pcb._board_origin``), giving the orchestrator an in-region reconnection
+      target.  These synthetic pads are ephemeral: they are never persisted onto
+      the PCB (matching the ``StubTerminal`` "never a Pad" contract).
+
+    Confinement note (Issue #4173): unlike the Autorouter path, the
+    orchestrator has NO per-cell obstacle grid -- its ``GlobalRouter`` /
+    ``RegionGraph`` corridor planner routes through coarse board-tile centers
+    that are not region-confined.  Region confinement on the route-auto path is
+    therefore provided ENTIRELY by the post-route output-escape filter in
+    ``route_net_auto`` (which fails any route whose geometry leaves the box),
+    NOT by a pre-route cell-level bound.  A consequence: a coarse corridor
+    between two in-region endpoints can bulge through an out-of-box tile center;
+    that route then fails honestly via the output filter rather than writing
+    out-of-region copper.  This is expected behavior, not a bug -- it never
+    violates the zero-copper-outside-the-region contract.
+
     Args:
         pcb: Loaded PCB object
         net_number: Numeric net ID to filter pads
         net_name: Name of the net (stored on each Pad)
+        region_box: Optional board-relative ``(x1, y1, x2, y2)`` routing box.
+            When set, enables stub-terminal injection + outside-pad pruning.
 
     Returns:
         List of router Pad objects for the given net
     """
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.primitives import Pad as RouterPad
+
+    # The pad coordinates computed below (``fp.position`` + rotated offset) are
+    # BOARD-RELATIVE -- ``PCB`` stores footprint positions already shifted by the
+    # board origin (verified: ``pcb.get_pad_position`` == ``fp.position`` for a
+    # centered pad).  ``region_box`` and the detected ``StubTerminal`` tips are
+    # ALSO board-relative, so pruning + injection stay in the board-relative
+    # frame with no origin shift here.  (The board-origin shift lives in
+    # ``route_net_auto``'s output-escape filter, which operates on the
+    # orchestrator's world-frame result geometry.)
+    stub_terminals: list = []
+    if region_box is not None:
+        detected = _detect_stub_terminals_for_pcb(pcb, region_box)
+        stub_terminals = [t for terms in detected.values() for t in terms if t.net_name == net_name]
+
+    def _in_region(px: float, py: float) -> bool:
+        assert region_box is not None
+        lo_x, hi_x = min(region_box[0], region_box[2]), max(region_box[0], region_box[2])
+        lo_y, hi_y = min(region_box[1], region_box[3]), max(region_box[1], region_box[3])
+        return lo_x <= px <= hi_x and lo_y <= py <= hi_y
 
     pads: list[RouterPad] = []
     for fp in pcb.footprints:
@@ -903,6 +991,13 @@ def _build_pads_for_net(pcb: PCB, net_number: int, net_name: str) -> list:
             px, py = pad.position
             abs_x = fp_x + px * cos_r - py * sin_r
             abs_y = fp_y + px * sin_r + py * cos_r
+
+            # Issue #4173: prune outside-region pads when reconnecting via a
+            # boundary stub (only when a stub actually exists -- otherwise the
+            # net's normal pad set is untouched and the reachability gate has
+            # already handled genuinely-unreachable nets).
+            if region_box is not None and stub_terminals and not _in_region(abs_x, abs_y):
+                continue
 
             # Determine layer
             pad_layer = Layer.F_CU
@@ -925,6 +1020,25 @@ def _build_pads_for_net(pcb: PCB, net_number: int, net_name: str) -> list:
                     pin=pad.number,
                     through_hole=is_through_hole,
                     drill=pad.drill,
+                )
+            )
+
+    # Issue #4173: append synthetic in-region stub-tip targets.  ``StubTerminal``
+    # coords are board-relative (same frame as the pads above), so no origin
+    # shift is applied.  Route-scoped only -- never persisted onto the PCB.
+    if stub_terminals:
+        for term in stub_terminals:
+            pads.append(
+                RouterPad(
+                    x=term.x,
+                    y=term.y,
+                    width=0.2,
+                    height=0.2,
+                    net=net_number,
+                    net_name=net_name,
+                    layer=term.layer,
+                    ref="",
+                    pin="stub",
                 )
             )
 
