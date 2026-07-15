@@ -1694,6 +1694,123 @@ def _polygon_overlap_area(
         return 0.0
 
 
+def assign_batch_zone_priorities_and_outlines(
+    pcb: PCB,
+    board_outline: list[tuple[float, float]],
+    net_layer_pairs: list[tuple[str, str]],
+    margin_mm: float = DEFAULT_POUR_BBOX_MARGIN_MM,
+) -> dict[tuple[str, str], tuple[int, list[tuple[float, float]] | None]]:
+    """Assign priorities + carved outlines for explicit ``(net, layer)`` pairs.
+
+    This is the ``zones batch`` counterpart to
+    :func:`_assign_layers_for_pour_nets` + :func:`_compute_pour_outlines`.
+    Unlike the auto-pour path, the caller supplies an explicit layer per
+    net (the whole point of ``--power-nets 'A:F.Cu,B:F.Cu,...'``), so this
+    function does **not** derive layers from :class:`NetClass`.  It only
+    derives, *within each user-specified layer group*:
+
+    * **Priority** -- by ascending pad-cluster bbox area (smallest area =>
+      highest priority, the KiCad idiom where small/nested zones must fill
+      on top of the larger zones they sit inside, or they get zero copper).
+      Ties (equal area, e.g. two single-pad nets) break deterministically
+      by net name (alphabetical) so output is stable across runs/platforms.
+    * **Outline** -- via the existing :func:`_compute_pour_outlines` carve
+      machinery (issue #3043/#3240), so overlapping same-layer zones receive
+      geometrically disjoint outlines instead of full-board rectangles that
+      100%-overlap and zero each other out.
+
+    Behavior is a **no-op** for any layer hosting exactly one net: that net
+    keeps the full board outline (``None``) and its legacy priority (1 for
+    GND-named nets, 0 otherwise), so existing non-overlapping ``zones batch``
+    usages are byte-identical to pre-fix behavior (issue #4167).
+
+    Args:
+        pcb: Loaded PCB object (used to look up pad positions).
+        board_outline: Sheet-absolute board outline polygon (clip mask).
+        net_layer_pairs: The user-specified ``(net_name, layer)`` pairs, in
+            input order.  Duplicate ``(net, layer)`` entries are de-duped.
+        margin_mm: Margin around each pad bbox, in mm.
+
+    Returns:
+        Dict mapping ``(net_name, layer)`` -> ``(priority, outline)`` where
+        ``outline`` is ``None`` for sole-zone layers (caller falls back to
+        the board outline) or a carved polygon for shared-layer zones.  The
+        key is the ``(net, layer)`` pair -- *not* the net name alone -- so a
+        net appearing on multiple layers (e.g. a GND plane shared on
+        ``F.Cu`` and sole on ``B.Cu``) gets the correct per-layer outline:
+        full board on the layer where it is sole, carved on the layer where
+        it overlaps siblings (issue #4167 regression fix).
+
+    Raises:
+        ZonePartitionError: If carving cannot produce disjoint copper for
+            some net on a shared layer (fully-coincident pad clusters).
+    """
+    # Group nets by their user-specified layer, preserving input order and
+    # de-duplicating exact (net, layer) repeats.
+    seen: set[tuple[str, str]] = set()
+    layer_groups: dict[str, list[str]] = {}
+    for net_name, layer in net_layer_pairs:
+        key = (net_name, layer)
+        if key in seen:
+            continue
+        seen.add(key)
+        layer_groups.setdefault(layer, []).append(net_name)
+
+    def _legacy_priority(net_name: str) -> int:
+        return 1 if net_name.upper() in ("GND", "GNDA", "GNDD") else 0
+
+    # Build the result keyed by (net, layer) -- NOT net name alone.  A net
+    # can legitimately appear on multiple layers (e.g. a GND plane shared on
+    # F.Cu and sole on B.Cu); keying by net name alone made the two layers
+    # collide on one dict entry, so the last-written (priority, outline) was
+    # wrongly applied to both add_zone calls -- silently giving the
+    # sole-layer instance a carved strip instead of the full board outline
+    # (issue #4167 regression).
+    result: dict[tuple[str, str], tuple[int, list[tuple[float, float]] | None]] = {}
+
+    for layer, nets in layer_groups.items():
+        if len(nets) < 2:
+            # Sole zone on this layer: unchanged behavior -- full board
+            # outline, legacy priority, no carve.
+            net_name = nets[0]
+            priority = _legacy_priority(net_name)
+            result[(net_name, layer)] = (priority, None)
+            continue
+
+        # >= 2 nets share this layer.  Compute each net's pad-cluster bbox
+        # area, then assign descending priority by ascending area (smallest
+        # area => highest priority).  Deterministic alphabetical tiebreak.
+        areas: dict[str, float] = {}
+        for net_name in nets:
+            positions = _net_pad_positions_absolute(pcb, net_name)
+            bbox = _bbox_polygon(positions, margin_mm)
+            areas[net_name] = _polygon_area_simple(bbox)
+
+        # Sort by (area ascending, name ascending); smallest area gets the
+        # highest priority number.  Assign priorities len(nets)..1 so they
+        # are distinct and strictly descending by area.
+        ordered = sorted(nets, key=lambda n: (areas[n], n))
+        n = len(ordered)
+        priorities: dict[str, int] = {}
+        for rank, net_name in enumerate(ordered):
+            # rank 0 = smallest area => highest priority.
+            priorities[net_name] = n - rank
+
+        # Carve outlines for THIS layer group only.  Because the group is a
+        # single layer, its net names are unique, so _compute_pour_outlines'
+        # net-name-keyed return dict cannot collide across layers even when
+        # the same net also lives on a different layer's group.
+        assignments = [(net_name, layer, priorities[net_name]) for net_name in nets]
+        outlines = _compute_pour_outlines(pcb, assignments, board_outline, margin_mm)
+        for net_name in nets:
+            result[(net_name, layer)] = (
+                priorities[net_name],
+                outlines.get(net_name),
+            )
+
+    return result
+
+
 def auto_create_zones_for_pour_nets(
     pcb_path: str | Path,
     pour_nets: list[tuple[str, NetClass]],
