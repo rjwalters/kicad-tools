@@ -1625,3 +1625,191 @@ class TestAddRegionBoundary:
         out = capsys.readouterr().out
         assert "--bbox" in out
         assert "sheet-absolute" in out
+
+
+# ---------------------------------------------------------------------------
+# Test: default output is in-place (issue #4166)
+# ---------------------------------------------------------------------------
+
+
+def _zone_keys(pcb_path: Path) -> set[tuple[str, str]]:
+    """Return the set of (net_name, layer) tuples for all zones in a PCB."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(str(pcb_path))
+    return {(z.net_name, z.layer) for z in pcb.zones}
+
+
+class TestAddInPlaceDefault:
+    """`zones add` with no -o overwrites the input in place (issue #4166)."""
+
+    def test_add_no_output_modifies_input(self, tmp_pcb):
+        """No -o writes the new zone back into the input file itself."""
+        before = _zone_keys(tmp_pcb)
+        assert ("SDA", "F.Cu") not in before
+
+        ret = main(["add", str(tmp_pcb), "--net", "SDA", "--layer", "F.Cu"])
+        assert ret == 0
+
+        after = _zone_keys(tmp_pcb)
+        assert ("SDA", "F.Cu") in after
+
+    def test_add_no_output_does_not_create_side_file(self, tmp_pcb):
+        """No <stem>_zones.kicad_pcb side file is created (old behavior)."""
+        ret = main(["add", str(tmp_pcb), "--net", "SDA", "--layer", "F.Cu"])
+        assert ret == 0
+
+        side_file = tmp_pcb.with_stem(tmp_pcb.stem + "_zones")
+        assert not side_file.exists()
+
+
+class TestAddChainedAccumulates:
+    """Two sequential in-place `zones add` calls accumulate both zones.
+
+    Regression test for the compounding data-loss bug: previously each call
+    read the pristine input and wrote the same side file, so the second call
+    silently discarded the first zone.
+    """
+
+    def test_two_sequential_adds_keep_both_zones(self, tmp_pcb):
+        ret1 = main(["add", str(tmp_pcb), "--net", "SDA", "--layer", "F.Cu"])
+        assert ret1 == 0
+        ret2 = main(["add", str(tmp_pcb), "--net", "SCL", "--layer", "In1.Cu"])
+        assert ret2 == 0
+
+        keys = _zone_keys(tmp_pcb)
+        assert ("SDA", "F.Cu") in keys  # first add survived the second
+        assert ("SCL", "In1.Cu") in keys  # second add landed too
+
+
+class TestAddExplicitOutputUnaffected:
+    """Explicit -o still writes the side file and leaves the input untouched."""
+
+    def test_explicit_output_writes_target_leaves_input_unchanged(self, tmp_pcb, tmp_path):
+        out = tmp_path / "with_zones.kicad_pcb"
+        original_bytes = tmp_pcb.read_bytes()
+        before = _zone_keys(tmp_pcb)
+        assert ("SDA", "F.Cu") not in before
+
+        ret = main(["add", str(tmp_pcb), "--net", "SDA", "--layer", "F.Cu", "-o", str(out)])
+        assert ret == 0
+
+        # Input is byte-for-byte unchanged.
+        assert tmp_pcb.read_bytes() == original_bytes
+        # Target got the new zone.
+        assert ("SDA", "F.Cu") in _zone_keys(out)
+
+
+class TestBatchInPlaceDefault:
+    """`zones batch` with no -o overwrites the input in place (issue #4166)."""
+
+    def test_batch_no_output_modifies_input(self, tmp_pcb):
+        before = _zone_keys(tmp_pcb)
+        assert ("SDA", "F.Cu") not in before
+
+        ret = main(["batch", str(tmp_pcb), "--power-nets", "SDA:F.Cu"])
+        assert ret == 0
+
+        assert ("SDA", "F.Cu") in _zone_keys(tmp_pcb)
+
+    def test_batch_no_output_does_not_create_side_file(self, tmp_pcb):
+        ret = main(["batch", str(tmp_pcb), "--power-nets", "SDA:F.Cu"])
+        assert ret == 0
+
+        side_file = tmp_pcb.with_stem(tmp_pcb.stem + "_zones")
+        assert not side_file.exists()
+
+    def test_batch_explicit_output_leaves_input_unchanged(self, tmp_pcb, tmp_path):
+        out = tmp_path / "batched.kicad_pcb"
+        original_bytes = tmp_pcb.read_bytes()
+
+        ret = main(["batch", str(tmp_pcb), "--power-nets", "SDA:F.Cu", "-o", str(out)])
+        assert ret == 0
+
+        assert tmp_pcb.read_bytes() == original_bytes
+        assert ("SDA", "F.Cu") in _zone_keys(out)
+
+
+class TestBatchChainedWithAdd:
+    """Cross-subcommand accumulation: batch (in place) then add (in place)."""
+
+    def test_batch_then_add_accumulates(self, tmp_pcb):
+        ret1 = main(["batch", str(tmp_pcb), "--power-nets", "SDA:F.Cu"])
+        assert ret1 == 0
+        ret2 = main(["add", str(tmp_pcb), "--net", "SCL", "--layer", "In1.Cu"])
+        assert ret2 == 0
+
+        keys = _zone_keys(tmp_pcb)
+        assert ("SDA", "F.Cu") in keys  # from batch, survived the add
+        assert ("SCL", "In1.Cu") in keys  # from add
+
+
+class TestAddFillPipeline:
+    """The pipeline hole from issue #4166: add (in place) then fill (in place)
+    operate on the same file, so fill sees the zones add just wrote."""
+
+    def test_fill_targets_the_same_file_add_wrote(self, tmp_pcb):
+        ret = main(["add", str(tmp_pcb), "--net", "SDA", "--layer", "F.Cu"])
+        assert ret == 0
+        assert ("SDA", "F.Cu") in _zone_keys(tmp_pcb)
+
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        mock_result = KiCadCLIResult(success=True, output_path=tmp_pcb, return_code=0)
+        with (
+            patch(_FIND_CLI, return_value=Path("/usr/bin/kicad-cli")),
+            patch(_RUN_FILL, return_value=mock_result) as mock_fill,
+        ):
+            fill_ret = main(["fill", str(tmp_pcb)])
+        assert fill_ret == 0
+        # fill operated on the same file the (in-place) add wrote to, and
+        # no side output path was passed (None => overwrite input).
+        call_args = mock_fill.call_args
+        assert call_args[0][0] == tmp_pcb
+        assert call_args[0][1] is None
+
+
+class TestZonesParserHelpConsistency:
+    """Both parser definitions document the in-place default for add/batch."""
+
+    def test_zones_cmd_add_help_documents_in_place(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["add", "--help"])
+        out = capsys.readouterr().out
+        assert "overwrite input" in out
+        assert "_zones" not in out  # old side-file suffix removed
+
+    def test_zones_cmd_batch_help_documents_in_place(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["batch", "--help"])
+        out = capsys.readouterr().out
+        assert "overwrite input" in out
+
+    def test_top_level_parser_add_batch_help_documents_in_place(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        help_text = parser.format_help()  # smoke: parser builds without error
+        assert isinstance(help_text, str)
+
+        # Inspect the add/batch -o help strings directly on the built parser.
+        for sub in ("add", "batch"):
+            found = False
+            for action in _iter_zones_subparser_actions(parser, sub):
+                if action.option_strings and "-o" in action.option_strings:
+                    assert "overwrite input" in (action.help or "")
+                    assert "_zones" not in (action.help or "")
+                    found = True
+            assert found, f"no -o option found for zones {sub}"
+
+
+def _iter_zones_subparser_actions(parser, sub_name):
+    """Yield argparse actions for the `zones <sub_name>` subparser."""
+    import argparse
+
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction) and "zones" in action.choices:
+            zones = action.choices["zones"]
+            for zaction in zones._actions:
+                if isinstance(zaction, argparse._SubParsersAction) and sub_name in zaction.choices:
+                    yield from zaction.choices[sub_name]._actions

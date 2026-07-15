@@ -2452,7 +2452,11 @@ def _add_zones_parser(subparsers) -> None:
     # zones add
     zones_add = zones_subparsers.add_parser("add", help="Add a copper zone")
     zones_add.add_argument("pcb", help="Path to .kicad_pcb file")
-    zones_add.add_argument("-o", "--output", help="Output file path")
+    zones_add.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input, consistent with 'zones fill')",
+    )
     zones_add.add_argument("--net", required=True, help="Net name (e.g., GND, +3.3V)")
     zones_add.add_argument("--layer", required=True, help="Copper layer (e.g., B.Cu, F.Cu)")
     zones_add.add_argument("--priority", type=int, default=0, help="Zone fill priority")
@@ -2473,7 +2477,11 @@ def _add_zones_parser(subparsers) -> None:
     # zones batch
     zones_batch = zones_subparsers.add_parser("batch", help="Add multiple zones from spec")
     zones_batch.add_argument("pcb", help="Path to .kicad_pcb file")
-    zones_batch.add_argument("-o", "--output", help="Output file path")
+    zones_batch.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input, consistent with 'zones fill')",
+    )
     zones_batch.add_argument(
         "--power-nets",
         required=True,

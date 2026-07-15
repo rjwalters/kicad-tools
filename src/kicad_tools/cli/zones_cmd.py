@@ -113,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     add_parser.add_argument(
         "-o",
         "--output",
-        help="Output file path (default: <input>_zones.kicad_pcb)",
+        help="Output file path (default: overwrite input, consistent with 'zones fill')",
     )
     add_parser.add_argument(
         "--net",
@@ -211,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     batch_parser.add_argument(
         "-o",
         "--output",
-        help="Output file path",
+        help="Output file path (default: overwrite input, consistent with 'zones fill')",
     )
     batch_parser.add_argument(
         "--power-nets",
@@ -299,11 +299,11 @@ def _run_add(args) -> int:
         print(f"Error: File not found: {pcb_path}", file=sys.stderr)
         return 1
 
-    # Determine output path
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        output_path = pcb_path.with_stem(pcb_path.stem + "_zones")
+    # Determine output path. No -o means overwrite the input in place,
+    # consistent with `zones fill` and `optimize-placement`. This makes a
+    # chained `zones add ... && zones add ...` accumulate zones, since each
+    # call reads its own prior output instead of the pristine input.
+    output_path = Path(args.output) if args.output else pcb_path
 
     quiet = args.quiet
 
@@ -468,11 +468,9 @@ def _run_batch(args) -> int:
         print("Error: No power nets specified", file=sys.stderr)
         return 1
 
-    # Determine output path
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        output_path = pcb_path.with_stem(pcb_path.stem + "_zones")
+    # Determine output path. No -o means overwrite the input in place,
+    # consistent with `zones fill` and `optimize-placement`.
+    output_path = Path(args.output) if args.output else pcb_path
 
     quiet = args.quiet
 
