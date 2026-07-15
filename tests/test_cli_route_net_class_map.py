@@ -337,3 +337,184 @@ class TestRouterNetClassMapMerge:
         assert router.net_class_map["USB_D-"].intra_pair_clearance == pytest.approx(0.10)
         assert router.net_class_map["USB_D+"].diffpair_partner == "USB_D-"
         assert router.net_class_map["USB_D-"].diffpair_partner == "USB_D+"
+
+
+# =============================================================================
+# Issue #4149: hierarchical '/' prefix normalization + zero-match diagnostic
+# =============================================================================
+
+
+def _stub_router(net_names: dict[int, str]) -> SimpleNamespace:
+    """A lightweight router stand-in for ``_apply_net_class_map_sidecar``.
+
+    The helper only touches ``router.net_names`` (board net names) and
+    ``router.net_class_map`` (the mutable overrides dict), so we avoid
+    constructing a full Autorouter for these fast, deterministic tests.
+    """
+    return SimpleNamespace(net_names=dict(net_names), net_class_map={})
+
+
+def _sidecar_entry(name: str, **fields):
+    """Build a ``NetClassRouting`` for a synthetic sidecar entry."""
+    from kicad_tools.router.rules import NetClassRouting
+
+    return NetClassRouting.from_dict({"name": name, **fields})
+
+
+class TestHierarchicalPrefixNormalization:
+    """Bare sidecar keys must resolve against '/'-prefixed board nets.
+
+    Mirrors the softstart-rev-B incident: label-derived nets carry KiCad's
+    root-sheet prefix (``/FUSED_LINE``) while power-symbol nets stay bare
+    (``GND``).  A bare-keyed sidecar previously matched zero prefixed nets
+    silently; the fix normalizes on the sheet-local suffix and warns on
+    genuine misconfiguration.
+    """
+
+    def test_bare_key_matches_prefixed_net(self, capsys):
+        """AC #1: a bare key resolves to the '/'-prefixed board net, no warning."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE", 2: "/PGND", 3: "GND", 4: "+3.3V"})
+        loaded = {
+            "FUSED_LINE": _sidecar_entry("Heavy", priority=5),
+            "PGND": _sidecar_entry("Heavy", priority=5),
+            "GND": _sidecar_entry("Power", priority=4),
+        }
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        # Overrides landed under the board's actual (prefixed) net names,
+        # which is what core.py's ``net_class_map.get(net_name)`` looks up.
+        assert router.net_class_map["/FUSED_LINE"].priority == 5
+        assert router.net_class_map["/PGND"].priority == 5
+        assert router.net_class_map["GND"].priority == 4
+        # Bare keys must NOT leak into the map when a prefixed net matched.
+        assert "FUSED_LINE" not in router.net_class_map
+        assert "PGND" not in router.net_class_map
+
+        # No misconfiguration warning when everything resolves.
+        err = capsys.readouterr().err
+        assert "WARNING" not in err
+
+    def test_exact_bare_match_unchanged(self, capsys):
+        """AC #5: bare key vs bare board net still resolves (no regression)."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "GND", 2: "+3.3V"})
+        loaded = {"GND": _sidecar_entry("Power", priority=4)}
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map["GND"].priority == 4
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_zero_match_warns_with_nearest_hint(self, capsys):
+        """AC #2: a typo key warns with a nearest-name hint; others stay silent."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE", 2: "GND"})
+        loaded = {
+            "FUSED_LINE": _sidecar_entry("Heavy", priority=5),
+            "FUSED_LIN": _sidecar_entry("Heavy", priority=5),  # typo
+        }
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        # The good key still applied.
+        assert router.net_class_map["/FUSED_LINE"].priority == 5
+        # The typo did not.
+        assert "FUSED_LIN" not in router.net_class_map
+
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "1/2 entries matched" in err
+        assert "FUSED_LIN" in err
+        assert "/FUSED_LINE" in err  # nearest-name hint
+
+    def test_full_zero_match_aggregate_warning(self, capsys):
+        """AC #3: all-bare keys vs all-prefixed nets -> aggregate warning line."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        # Simulate a genuinely unresolvable sidecar: bare keys with no
+        # matching suffix on the board at all.
+        router = _stub_router({1: "/SHEET/OTHER_A", 2: "/SHEET/OTHER_B"})
+        loaded = {
+            "MISSING_A": _sidecar_entry("Heavy", priority=5),
+            "MISSING_B": _sidecar_entry("Heavy", priority=5),
+        }
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map == {}
+        err = capsys.readouterr().err
+        assert "0/2 entries matched" in err
+
+    def test_ambiguous_key_applied_to_neither(self, capsys):
+        """AC #4: bare key matching both /A and A -> ambiguous warning, no apply."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/A", 2: "A", 3: "GND"})
+        loaded = {
+            "A": _sidecar_entry("Heavy", priority=5),
+            "GND": _sidecar_entry("Power", priority=4),
+        }
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        # Neither candidate for the ambiguous key gets the override.
+        assert "A" not in router.net_class_map
+        assert "/A" not in router.net_class_map
+        # The unambiguous key still resolves.
+        assert router.net_class_map["GND"].priority == 4
+
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "AMBIGUOUS" in err
+        assert "/A" in err and "A" in err
+
+    def test_warning_not_suppressed_by_quiet(self, capsys):
+        """AC: --quiet must NOT suppress the misconfiguration warning."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE"})
+        loaded = {"TYPO_KEY": _sidecar_entry("Heavy", priority=5)}
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        # quiet=True is the softstart-rev-B condition; the warning must
+        # still reach stderr.
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "TYPO_KEY" in err
+
+    def test_no_op_when_flag_absent(self, capsys):
+        """No sidecar loaded -> no changes, no output."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE"})
+        args = SimpleNamespace(_loaded_net_class_map=None)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map == {}
+        assert capsys.readouterr().err == ""
+
+    def test_user_supplied_prefix_still_matches(self, capsys):
+        """A user who writes the full '/'-prefixed key still resolves exactly."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE"})
+        loaded = {"/FUSED_LINE": _sidecar_entry("Heavy", priority=5)}
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map["/FUSED_LINE"].priority == 5
+        assert "WARNING" not in capsys.readouterr().err

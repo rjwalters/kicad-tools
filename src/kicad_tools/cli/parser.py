@@ -3533,7 +3533,11 @@ def _add_route_parser(subparsers) -> None:
             "length_match_group) project through to the routing-time "
             "pathfinder.  Without this flag, --differential-pairs falls "
             "back to NetClassRouting defaults and can produce overlapping "
-            "diff-pair sibling traces under tight mfr profiles."
+            "diff-pair sibling traces under tight mfr profiles.  Keys are "
+            "matched against the board net's sheet-local suffix (the "
+            "segment after the last '/'), so a bare key FUSED_LINE matches "
+            "KiCad's '/'-prefixed label net /FUSED_LINE while global power "
+            "nets (GND, +3.3V) stay bare (Issue #4149)."
         ),
     )
     route_parser.add_argument(
