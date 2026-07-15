@@ -4836,6 +4836,55 @@ class PCB:
 
         return via
 
+    def reinforce_net(
+        self,
+        net_name: str,
+        *,
+        wire_gauge_awg: int = 16,
+        spacing_mm: float = 15.0,
+        design_rules: object | None = None,
+        layer: str | None = None,
+        dry_run: bool = False,
+    ) -> object:
+        """Emit a spaced same-net PTH anchor row along a routed net.
+
+        Thin wrapper around
+        :func:`kicad_tools.pcb.reinforce.reinforce_net` (Unit A of the
+        #4218 buttress-wire reinforcement design). Chains the target net's
+        routed segments into ordered polylines, selects the longest run,
+        and places gauge-sized plated-PTH anchor vias at both endpoints and
+        every ``spacing_mm`` along it. Anchors are same-net (no shorts); a
+        candidate that would collide with a different net is refused and
+        reported rather than placed.
+
+        Args:
+            net_name: Target net name (must have routed copper).
+            wire_gauge_awg: Buttress-wire gauge in AWG (default 16).
+            spacing_mm: Arc-length spacing between mid-run anchors (mm).
+            design_rules: Manufacturer ``DesignRules`` supplying the
+                annular-ring / clearance / hole-to-hole floors. ``None``
+                uses JLCPCB-tier-typical fallback values.
+            layer: Restrict to a copper layer; ``None`` picks the layer with
+                the most cumulative routed length for the net.
+            dry_run: Compute the placement plan without adding vias.
+
+        Returns:
+            A ``kicad_tools.pcb.reinforce.ReinforceResult``.
+        """
+        from kicad_tools.manufacturers.base import DesignRules
+        from kicad_tools.pcb.reinforce import reinforce_net as _reinforce_net
+
+        rules = design_rules if isinstance(design_rules, DesignRules) else None
+        return _reinforce_net(
+            self,
+            net_name,
+            wire_gauge_awg=wire_gauge_awg,
+            spacing_mm=spacing_mm,
+            design_rules=rules,
+            layer=layer,
+            dry_run=dry_run,
+        )
+
     def dedupe_copper(self) -> dict[str, int]:
         """Remove pre-existing exact-duplicate copper (issue #4175).
 

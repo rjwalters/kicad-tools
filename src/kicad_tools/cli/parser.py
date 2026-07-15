@@ -1610,6 +1610,63 @@ def _add_pcb_parser(subparsers) -> None:
         help="Show what would be removed without modifying files",
     )
 
+    # pcb reinforce (issue #4220 -- Unit A of #4218)
+    pcb_reinforce = pcb_subparsers.add_parser(
+        "reinforce",
+        help="Emit a spaced same-net PTH anchor row along a routed net",
+        description="Post-route buttress-wire reinforcement (Unit A of #4218). "
+        "Walks a routed net's segments into ordered polylines and emits a "
+        "spaced row of same-net plated through-hole (PTH) anchor vias along the "
+        "longest run, sized to a wire gauge and respecting the annular-ring "
+        "floor. A solid-core wire is later soldered through the anchor row to "
+        "carry additional current. Anchors are same-net (no shorts); a candidate "
+        "that would collide with a DIFFERENT net is refused and reported, not "
+        "placed. NOTE: anchors are same-net vias -- existing zone pours must be "
+        "refilled afterward (e.g. `kicad-cli pcb drc --refill-zones`) so the "
+        "pours knock out around them. In-place by default; use -o to write "
+        "elsewhere.",
+    )
+    pcb_reinforce.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_reinforce.add_argument(
+        "--net",
+        required=True,
+        help="Net name to reinforce (must have routed copper)",
+    )
+    pcb_reinforce.add_argument(
+        "--wire-gauge",
+        type=int,
+        default=16,
+        help="Buttress-wire gauge in AWG (default: 16; also supports 14, 12)",
+    )
+    pcb_reinforce.add_argument(
+        "--spacing",
+        type=float,
+        default=15.0,
+        help="Arc-length spacing between mid-run anchors, in mm (default: 15.0)",
+    )
+    pcb_reinforce.add_argument(
+        "--layer",
+        help="Restrict to a copper layer (default: layer with the most "
+        "cumulative routed length for the net)",
+    )
+    pcb_reinforce.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: modify in place)",
+    )
+    pcb_reinforce.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_reinforce.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report anchors that would be placed/refused without writing files",
+    )
+
     # pcb dedupe (issue #4175)
     pcb_dedupe = pcb_subparsers.add_parser(
         "dedupe",

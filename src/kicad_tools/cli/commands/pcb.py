@@ -13,7 +13,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, dedupe, reannotate, sync-netlist, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, reannotate, sync-netlist, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses"
         )
         return 1
 
@@ -29,6 +29,10 @@ def run_pcb_command(args) -> int:
     # Handle strip command separately (doesn't use pcb_query)
     if args.pcb_command == "strip":
         return _run_strip_command(args, pcb_path)
+
+    # Handle reinforce command (Unit A of #4218; issue #4220)
+    if args.pcb_command == "reinforce":
+        return _run_reinforce_command(args, pcb_path)
 
     # Handle dedupe command (remove exact-duplicate copper; issue #4175)
     if args.pcb_command == "dedupe":
@@ -440,6 +444,120 @@ def _run_dedupe_command(args, pcb_path: Path) -> int:
 
     # Save only when something changed and not a dry-run.
     if not dry_run and (stats["segments"] or stats["vias"]):
+        try:
+            pcb.save(output_path)
+            if output_format == "text":
+                print()
+                print(f"  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
+def _run_reinforce_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb reinforce' command (Unit A of #4218; issue #4220).
+
+    Post-route pass that walks a routed net's segments into ordered
+    polylines and emits a spaced row of same-net plated-PTH anchor vias
+    along the longest run, sized to a wire gauge. Anchors that would
+    collide with a different net are refused and reported, never placed.
+    In-place by default; ``-o`` writes elsewhere; ``--dry-run`` reports
+    without writing.
+    """
+    from kicad_tools.pcb.reinforce import ReinforceError, reinforce_net
+    from kicad_tools.schema.pcb import PCB
+
+    net_name = getattr(args, "net", None)
+    if not net_name:
+        print("Error: --net is required", file=sys.stderr)
+        return 1
+
+    wire_gauge = getattr(args, "wire_gauge", 16)
+    spacing = getattr(args, "spacing", 15.0)
+    layer = getattr(args, "layer", None)
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+    output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        outcome = reinforce_net(
+            pcb,
+            net_name,
+            wire_gauge_awg=wire_gauge,
+            spacing_mm=spacing,
+            layer=layer,
+            dry_run=dry_run,
+        )
+    except ReinforceError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    result: dict[str, Any] = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+        "net": outcome.net_name,
+        "layer": outcome.layer,
+        "wire_gauge_awg": outcome.wire_gauge_awg,
+        "anchor_drill_mm": round(outcome.anchor_drill_mm, 4),
+        "anchor_pad_mm": round(outcome.anchor_pad_mm, 4),
+        "spacing_mm": outcome.spacing_mm,
+        "run_segment_count": outcome.run_segment_count,
+        "run_length_mm": round(outcome.run_length_mm, 4),
+        "unhandled_runs": outcome.unhandled_runs,
+        "anchors_placed": outcome.placed_count,
+        "anchors_refused": outcome.refused_count,
+        "refused": [
+            {"x": round(r.x, 4), "y": round(r.y, 4), "reason": r.reason} for r in outcome.refused
+        ],
+    }
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        label = " (dry run)" if dry_run else ""
+        print(f"PCB Reinforce{label}")
+        print(f"  Input:  {pcb_path}")
+        if not dry_run:
+            print(f"  Output: {output_path}")
+        print()
+        print(f"  Net:            {outcome.net_name}")
+        print(f"  Layer:          {outcome.layer}")
+        print(f"  Wire gauge:     {outcome.wire_gauge_awg} AWG")
+        print(f"  Anchor drill:   {outcome.anchor_drill_mm:.3f} mm")
+        print(f"  Anchor pad:     {outcome.anchor_pad_mm:.3f} mm")
+        print(f"  Spacing:        {outcome.spacing_mm:.1f} mm")
+        print(
+            f"  Anchored run:   {outcome.run_segment_count} segment(s), "
+            f"{outcome.run_length_mm:.1f} mm"
+        )
+        if outcome.unhandled_runs:
+            print(
+                f"  Unhandled runs: {outcome.unhandled_runs} "
+                "(branch/disconnected run(s) on this net NOT anchored)"
+            )
+        print()
+        print(f"  Anchors placed:  {outcome.placed_count}")
+        print(f"  Anchors refused: {outcome.refused_count}")
+        for r in outcome.refused:
+            print(f"    refused at ({r.x:.2f}, {r.y:.2f}): {r.reason}")
+        if not dry_run and outcome.placed_count:
+            print()
+            print(
+                "  NOTE: anchors are same-net vias -- refill zone pours "
+                "afterward (e.g. `kicad-cli pcb drc --refill-zones`)."
+            )
+
+    # Save unless dry-run and at least one anchor was placed.
+    if not dry_run and outcome.placed_count:
         try:
             pcb.save(output_path)
             if output_format == "text":
