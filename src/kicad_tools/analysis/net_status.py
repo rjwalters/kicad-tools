@@ -930,6 +930,17 @@ class NetStatusAnalyzer:
         through them (directly, or via a segment chain ending at the via) into
         that island, closing the ``pad -> trace -> stitch via -> pour`` path.
 
+        Segment chains whose copper *touches* a fill island bond their pads to
+        it too, and chains are unified transitively through shared vias so a
+        cross-layer path bonds correctly (Issue #4229): the common real-world
+        shape is a signal pad on F.Cu that reaches a plane on B.Cu through
+        ``pad -> F.Cu trace -> through-via -> B.Cu trace -> pour`` where the via
+        itself sits in a thermal antipad (its copper does NOT penetrate the
+        pour) and only the far B.Cu trace endpoint lands on the poured copper.
+        The per-via penetration test alone misses that pad; bonding via the
+        chain-touches-fill path recovers it, matching KiCad's zone-aware
+        connectivity (kicad-cli reports 0 unconnected for exactly this case).
+
         Returns ``None`` when ``shapely`` is unavailable (the caller then uses
         the legacy boundary-based fallback); otherwise a list of pad-id groups,
         one per bonded fill island.
@@ -960,16 +971,48 @@ class NetStatusAnalyzer:
                 if poly is not None:
                     pad_polys[pad_id] = poly
 
-        # Copper-circle geometry per via (radius = size / 2, eroded like a pad
-        # box).  A via whose copper penetrates a pour's solid region ties any
-        # pad reachable through it into that island.
-        via_geoms = [
-            (
-                via,
-                cv._via_copper_geom(via.position, max(getattr(via, "size", 0.0) or 0.0, 0.0) / 2.0),
-            )
-            for via in vias
-        ]
+        # Copper-circle geometry per via.  Two variants:
+        #  * ``via_geom`` (eroded, ``POUR_PAD_ERODE`` inset) is used for the
+        #    fill-*penetration* test so a via merely grazing the pour edge does
+        #    not spuriously bond -- matching ``ConnectivityValidator``.
+        #  * ``via_raw`` (un-eroded, real copper radius) is used only to bond a
+        #    *same-net* pad to a via that already penetrates the pour.  The
+        #    erosion inset on both the pad box and the via disc otherwise opens
+        #    a sub-``2*POUR_PAD_ERODE`` false gap between a stitching via and an
+        #    adjacent same-net pad whose copper genuinely overlaps it (the
+        #    board-06 U1.32 case, Issue #4229).  Using the raw radius here is
+        #    safe: the group is single-net, so a looser pad<->via bond can only
+        #    unify pads that are already the same net -- it can never manufacture
+        #    a cross-net short (that is what the eroded penetration test guards).
+        from shapely.geometry import Point as _ShapelyPoint  # type: ignore[import-untyped]
+
+        via_geoms = []
+        for via in vias:
+            radius = max(getattr(via, "size", 0.0) or 0.0, 0.0) / 2.0
+            eroded = cv._via_copper_geom(via.position, radius)
+            raw = _ShapelyPoint(*via.position).buffer(radius) if radius > 0 else None
+            via_geoms.append((via, eroded, raw))
+
+        # Unify segment components that share a via into "extended chains"
+        # (Issue #4229).  ``_build_segment_components`` chains segments only
+        # when their own copper touches, so a through-via joining an F.Cu trace
+        # to a B.Cu trace leaves them in separate components even though they
+        # are one electrical net.  Merging components that both touch the same
+        # via recovers the cross-layer ``pad -> trace -> via -> trace -> pour``
+        # path so a pad on one layer bonds to a pour on another.
+        extended_chains = self._merge_chains_via_vias(segments, segment_components, vias)
+
+        # Pre-compute, per extended chain, the pads it reaches and the copper
+        # layers/geometry it presents to the pour tests.
+        chain_pads: list[set[str]] = []
+        chain_seg_indices: list[set[int]] = []
+        for chain in extended_chains:
+            pads_in_chain: set[str] = set()
+            for s in chain:
+                pads_in_chain.update(self._find_pads_at_point(segments[s].start, pad_positions))
+                pads_in_chain.update(self._find_pads_at_point(segments[s].end, pad_positions))
+            chain_pads.append(pads_in_chain)
+            chain_seg_indices.append(chain)
 
         groups: list[set[str]] = []
         for zone in self.pcb.zones:
@@ -990,31 +1033,115 @@ class NetStatusAnalyzer:
                         bonded.add(pad_id)
 
                 # Via bonds: a via whose copper penetrates this fill island ties
-                # the pads reached through it (directly or via a segment chain
-                # ending at the via) into the same island.
-                for via, via_geom in via_geoms:
+                # the pads reached through it (directly, through a same-net pad
+                # whose copper overlaps the via, or via a segment chain ending
+                # at the via) into the same island.
+                for via, via_geom, via_raw in via_geoms:
                     if not self._via_spans_layer(via.layers, fill_layer):
                         continue
                     if not region.intersects(via_geom):
                         continue
                     bonded.update(self._find_pads_at_point(via.position, pad_positions))
-                    for component in segment_components:
+                    # Same-net pad whose real copper overlaps this pour-bonded
+                    # via (raw radius -- see via_geoms note): the stitching via
+                    # sits beside the pad, not dead-centre (board-06 U1.32).
+                    if via_raw is not None:
+                        for pad_id, pad_geom in pad_polys.items():
+                            if pad_id in bonded:
+                                continue
+                            if via_raw.intersects(pad_geom):
+                                bonded.add(pad_id)
+                    for chain, pads_in_chain in zip(chain_seg_indices, chain_pads, strict=True):
                         touches = any(
-                            self._points_close(segments[s].start, via.position)
-                            or self._points_close(segments[s].end, via.position)
-                            for s in component
+                            self._segment_touches_via(segments[s], via, via_geom) for s in chain
                         )
-                        if not touches:
-                            continue
-                        for s in component:
-                            bonded.update(
-                                self._find_pads_at_point(segments[s].start, pad_positions)
-                            )
-                            bonded.update(self._find_pads_at_point(segments[s].end, pad_positions))
+                        if touches:
+                            bonded.update(pads_in_chain)
+
+                # Segment-chain bonds: an extended chain whose own copper touches
+                # this fill island (a trace endpoint lands on the poured copper)
+                # ties every pad reachable through the chain into the island.
+                # This recovers the board-06/board-05 plane-pad case where the
+                # via sits in an antipad and only the far trace reaches the pour
+                # (Issue #4229).
+                for chain, pads_in_chain in zip(chain_seg_indices, chain_pads, strict=True):
+                    if not pads_in_chain:
+                        continue
+                    if any(
+                        self._via_spans_layer([segments[s].layer], fill_layer)
+                        and region.intersects(self._segment_poly(segments[s]))
+                        for s in chain
+                    ):
+                        bonded.update(pads_in_chain)
 
             if bonded:
                 groups.append(bonded)
         return groups
+
+    def _merge_chains_via_vias(
+        self,
+        segments: list,
+        segment_components: list[set[int]],
+        vias: list,
+    ) -> list[set[int]]:
+        """Merge segment components that share a via into extended chains.
+
+        ``_build_segment_components`` only chains segments whose own copper
+        touches, so two traces on different layers joined solely by a
+        through-via land in separate components.  KiCad treats them as one
+        electrical chain; this union-find over "components that both touch the
+        same via" reproduces that so a cross-layer ``pad -> trace -> via ->
+        trace -> pour`` path is recognised as connected (Issue #4229).
+
+        The merge is purely additive connectivity: it never fuses two chains
+        that don't share a via, so genuinely separate copper stays separate and
+        the #3914 "don't union disjoint fills" guarantee is unaffected.
+        """
+        n = len(segment_components)
+        parent = list(range(n))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for via in vias:
+            via_geom = self._via_geom(via)
+            touching: list[int] = []
+            for ci, component in enumerate(segment_components):
+                if any(self._segment_touches_via(segments[s], via, via_geom) for s in component):
+                    touching.append(ci)
+            for other in touching[1:]:
+                union(touching[0], other)
+
+        merged: dict[int, set[int]] = defaultdict(set)
+        for ci, component in enumerate(segment_components):
+            merged[find(ci)].update(component)
+        return list(merged.values())
+
+    def _segment_touches_via(self, seg: Any, via: Any, via_geom: Any) -> bool:
+        """Return ``True`` when a segment is electrically joined to a via.
+
+        A segment endpoint within ``POSITION_TOLERANCE`` of the via centre is a
+        clean join, but a real board frequently lands a trace endpoint on the
+        via *annular ring* rather than dead-centre (Issue #4229): the endpoint
+        may sit >tolerance from the centre yet still be covered by the via's
+        copper.  When shapely geometry is available we additionally treat the
+        via as joined to the segment when the via copper disc intersects the
+        segment copper, which matches KiCad's connectivity.
+        """
+        if self._points_close(seg.start, via.position) or self._points_close(seg.end, via.position):
+            return True
+        if via_geom is None:
+            return False
+        seg_poly = self._segment_poly(seg)
+        return self._geoms_touch(seg_poly, via_geom)
 
     def _legacy_zone_connected_pads(
         self,

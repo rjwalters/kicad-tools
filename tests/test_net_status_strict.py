@@ -200,3 +200,180 @@ def test_strict_requires_shapely(monkeypatch, tmp_path: Path):
     path.write_text(_pad_seg_board(seg_end_x=109.9))
     with pytest.raises(ModuleNotFoundError):
         NetStatusAnalyzer(path, strict=True)
+
+
+# ---------------------------------------------------------------------------
+# Issue #4229: zone-pour copper contact must count for connectivity.
+#
+# A plane pad connected to its net purely through pad-in-pour contact (or a
+# cross-layer ``pad -> trace -> via -> trace -> pour`` path where the via sits
+# in a thermal antipad) was false-flagged incomplete.  kicad-cli's zone-aware
+# engine reports these as fully connected.  The root cause was NOT
+# strict-specific -- the zone-fill geometry runs in both modes -- so every
+# fixture below is asserted in BOTH ``strict=False`` and ``strict=True``.
+# ---------------------------------------------------------------------------
+
+
+def _lone_pour_pad_board(*, filled: bool = True, pad_in_pour: bool = True) -> str:
+    """Synthetic board reproducing the board-06 plane-pad shape.
+
+    ``R1``/``R2`` are joined by a B.Cu trace (island A).  ``U1.17`` sits alone
+    on the same GND net with no trace or via to it; it connects to the net
+    solely through its copper overlapping the poured GND plane on B.Cu -- the
+    plane is one continuous pour covering the whole net.
+
+    * ``filled=False`` drops the ``filled_polygon`` (an unfilled zone), so the
+      pour provides no copper.
+    * ``pad_in_pour=False`` moves ``U1.17`` outside the pour outline entirely.
+    """
+    u1_pos = "30 20" if pad_in_pour else "90 90"
+    filled_clause = (
+        '    (filled_polygon (layer "B.Cu") (pts (xy 5 5) (xy 40 5) (xy 40 30) (xy 5 30)))\n'
+        if filled
+        else ""
+    )
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402_1005Metric" (layer "B.Cu") (uuid "fp1") (at 12 12)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "B.SilkS") (uuid "ref1"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6)
+      (layers "B.Cu" "B.Paste" "B.Mask") (roundrect_rratio 0.25) (net 1 "GND")))
+  (footprint "Resistor_SMD:R_0402_1005Metric" (layer "B.Cu") (uuid "fp2") (at 20 12)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "B.SilkS") (uuid "ref2"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6)
+      (layers "B.Cu" "B.Paste" "B.Mask") (roundrect_rratio 0.25) (net 1 "GND")))
+  (footprint "Package_QFP:LQFP-48" (layer "B.Cu") (uuid "fp3") (at {u1_pos})
+    (property "Reference" "U1" (at 0 -1.5 0) (layer "B.SilkS") (uuid "ref3"))
+    (pad "17" smd roundrect (at 0 0) (size 0.6 0.6)
+      (layers "B.Cu" "B.Paste" "B.Mask") (roundrect_rratio 0.25) (net 1 "GND")))
+  (segment (start 12 12) (end 20 12) (width 0.25) (layer "B.Cu") (net 1) (uuid "seg1"))
+  (zone (net 1) (net_name "GND") (layer "B.Cu") (uuid "zone1")
+    (connect_pads (clearance 0.3))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 5 5) (xy 40 5) (xy 40 30) (xy 5 30)))
+{filled_clause}  )
+)
+"""
+
+
+def _two_disjoint_fills_board() -> str:
+    """Two SEPARATE filled GND zones with no bridge (#3914 regression guard).
+
+    ``R1.1`` sits on fill island A; ``R2.1`` sits on a physically disjoint
+    fill island B.  No trace or via bridges them, so KiCad reports a real open
+    between the two islands.  The #4229 pad-in-pour fix must NOT falsely union
+    the two islands -- the open must stay visible.
+    """
+    return """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402_1005Metric" (layer "F.Cu") (uuid "fp1") (at 12 12)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND")))
+  (footprint "Resistor_SMD:R_0402_1005Metric" (layer "F.Cu") (uuid "fp2") (at 32 12)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND")))
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zA")
+    (connect_pads (clearance 0.3)) (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 10 10) (xy 14 10) (xy 14 14) (xy 10 14)))
+    (filled_polygon (layer "F.Cu") (pts (xy 10 10) (xy 14 10) (xy 14 14) (xy 10 14))))
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zB")
+    (connect_pads (clearance 0.3)) (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 30 10) (xy 34 10) (xy 34 14) (xy 30 14)))
+    (filled_polygon (layer "F.Cu") (pts (xy 30 10) (xy 34 10) (xy 34 14) (xy 30 14))))
+)
+"""
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_lone_pour_pad_reports_complete(strict: bool):
+    """A pad alone in a filled zone of its net reads COMPLETE (#4229).
+
+    ``U1.17`` has no trace and no via -- it connects to the net solely by its
+    copper overlapping the poured GND plane.  Before the fix this pad formed a
+    singleton graph island that lost the "largest island wins" vote to the
+    R1/R2 trace island and was false-flagged incomplete.  This is the direct
+    board-05/board-06 plane-pad case.
+    """
+    result = _analyze(_lone_pour_pad_board(), strict=strict)
+    gnd = result.get_net("GND")
+    assert gnd is not None
+    assert gnd.status == "complete", (
+        f"lone pour pad must read complete (strict={strict}); got {gnd.status}, "
+        f"unconnected={[p.full_name for p in gnd.unconnected_pads]}"
+    )
+    assert "U1.17" in {p.full_name for p in gnd.connected_pads}
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_pad_off_pour_still_incomplete(strict: bool):
+    """A pad NOT in any fill and with no trace/via stays INCOMPLETE (#4229).
+
+    Regression guard: the fix must not become a rubber-stamp "always complete".
+    ``U1.17`` sits far outside the pour with no copper reaching it, so it is
+    genuinely stranded.
+    """
+    result = _analyze(_lone_pour_pad_board(pad_in_pour=False), strict=strict)
+    gnd = result.get_net("GND")
+    assert gnd is not None
+    assert gnd.status == "incomplete", (
+        f"a pad off the pour with no trace/via must stay incomplete "
+        f"(strict={strict}); got {gnd.status}"
+    )
+    assert "U1.17" in {p.full_name for p in gnd.unconnected_pads}
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_unfilled_zone_still_incomplete(strict: bool):
+    """A pad in an UNFILLED zone stays INCOMPLETE (#4229 fill-currency).
+
+    The zone outline covers ``U1.17`` but the zone has no ``filled_polygon``
+    (fill disabled/stale), so it produces no copper -- matching KiCad's
+    "unfilled zone = no connectivity".  Confirms the fix only counts committed
+    fill copper and does not regress the #3482 fill-currency behavior.
+    """
+    result = _analyze(_lone_pour_pad_board(filled=False), strict=strict)
+    gnd = result.get_net("GND")
+    assert gnd is not None
+    assert gnd.status == "incomplete", (
+        f"an unfilled zone must not provide connectivity (strict={strict}); got {gnd.status}"
+    )
+    assert "U1.17" in {p.full_name for p in gnd.unconnected_pads}
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_two_disjoint_fills_not_unioned(strict: bool):
+    """Two disjoint filled zones of a net stay separate (#3914 regression).
+
+    The #4229 pad-in-pour fix connects a pad to the fill island it actually
+    touches, NOT to every fill of the net.  Two physically separate GND pours
+    with no bridge must therefore still report a real open between them.
+    """
+    result = _analyze(_two_disjoint_fills_board(), strict=strict)
+    gnd = result.get_net("GND")
+    assert gnd is not None
+    assert gnd.status == "incomplete", (
+        f"two disjoint fills must not be falsely unioned (strict={strict}); got {gnd.status}"
+    )
+    assert gnd.connected_count == 1
+    assert gnd.unconnected_count == 1
