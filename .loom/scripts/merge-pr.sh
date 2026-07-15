@@ -534,7 +534,15 @@ done
 VERIFY_JSON=$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')
 VERIFY_MERGED=$(echo "$VERIFY_JSON" | jq -r '.merged // false')
 if [[ "$VERIFY_MERGED" != "true" ]]; then
-  error "Merge API call returned but PR #$PR_NUMBER is not merged"
+  # Defense-in-depth: a transient API error (empty/{} response) must not turn a
+  # successful merge into a hard failure. Retry the verify once before failing
+  # (issue #3547).
+  sleep 2
+  VERIFY_JSON=$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')
+  VERIFY_MERGED=$(echo "$VERIFY_JSON" | jq -r '.merged // false')
+  if [[ "$VERIFY_MERGED" != "true" ]]; then
+    error "Merge API call returned but PR #$PR_NUMBER is not merged"
+  fi
 fi
 
 success "PR #$PR_NUMBER merged successfully"

@@ -323,7 +323,16 @@ forge_get_pr_nocache() {
   if [[ "$FORGE_TYPE" == "gitea" ]]; then
     # Gitea has no caching layer like gh-cached
     forge_get_pr "$nwo" "$pr_number"
+  elif [[ "$(basename "$gh_cmd")" == "gh" ]]; then
+    # Plain `gh` has no --no-cache flag (it's a gh-cached wrapper flag). Plain
+    # `gh api` is already uncached, so calling it without --no-cache preserves
+    # the no-cache intent. Passing --no-cache to plain gh fails on the unknown
+    # flag, and with 2>/dev/null the error is swallowed and callers substitute
+    # '{}', silently breaking merge verification and race-condition rechecks
+    # whenever gh-cached is absent (issue #3547).
+    "$gh_cmd" api "repos/$nwo/pulls/$pr_number" 2>/dev/null
   else
+    # gh-cached wrapper: --no-cache bypasses its cache layer as intended.
     "$gh_cmd" --no-cache api "repos/$nwo/pulls/$pr_number" 2>/dev/null
   fi
 }

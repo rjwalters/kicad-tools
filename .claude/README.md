@@ -110,6 +110,7 @@ The `commands/` directory contains slash commands that define Loom roles. Each c
 | `/doctor` | Doctor | Addresses PR feedback and resolves conflicts |
 | `/guide` | Guide | Triages issues and applies `loom:urgent` to top 3 |
 | `/champion` | Champion | Auto-merges approved PRs with `loom:pr` label |
+| `/loom:help` | Help | Read-only overview of the installed `/loom:*` commands; `/loom:help <command>` describes one |
 | `/loom help` | Help | Comprehensive help guide with sub-topics (roles, workflow, commands, etc.) |
 
 ### How Slash Commands Work

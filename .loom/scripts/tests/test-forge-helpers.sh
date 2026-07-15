@@ -199,6 +199,67 @@ assert_eq "123 456" "$result" "GitHub path delegates to gh pr view --json closin
 
 rm -rf "$STUB_DIR"
 
+# --- Test forge_get_pr_nocache does not pass --no-cache to plain gh (issue #3547) ---
+# Regression: `--no-cache` is a gh-cached WRAPPER flag, not a real `gh` flag.
+# When gh-cached is absent and the plain `gh` fallback is used, passing
+# --no-cache made `gh api` fail on the unknown flag; the error was swallowed by
+# 2>/dev/null and callers substituted '{}', silently breaking merge verification
+# and race-condition rechecks. forge_get_pr_nocache must therefore NOT pass
+# --no-cache when the command basename is plain `gh` (plain `gh api` is already
+# uncached), while still passing it for the gh-cached wrapper.
+echo ""
+echo "Testing forge_get_pr_nocache --no-cache handling (issue #3547)..."
+
+NC_STUB_DIR=$(mktemp -d)
+
+# Stub named exactly `gh`: emits valid PR JSON for `api ...`, but exits non-zero
+# (as real gh does) if the unknown `--no-cache` flag is present. This proves the
+# helper reaches the api call cleanly only when --no-cache is omitted.
+cat > "$NC_STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do
+  if [[ "$a" == "--no-cache" ]]; then
+    echo "unknown flag: --no-cache" >&2
+    exit 1
+  fi
+done
+if [[ "$1" == "api" ]]; then
+  printf '{"merged":true,"state":"closed"}\n'
+  exit 0
+fi
+exit 1
+STUB
+chmod +x "$NC_STUB_DIR/gh"
+
+# Stub named `gh-cached`: REQUIRES --no-cache to be present (proves the wrapper
+# still receives the cache-bypass flag). Emits valid JSON when it is.
+cat > "$NC_STUB_DIR/gh-cached" <<'STUB'
+#!/usr/bin/env bash
+has_no_cache=0
+for a in "$@"; do
+  [[ "$a" == "--no-cache" ]] && has_no_cache=1
+done
+if [[ "$has_no_cache" -ne 1 ]]; then
+  echo "expected --no-cache" >&2
+  exit 1
+fi
+printf '{"merged":true,"state":"closed"}\n'
+exit 0
+STUB
+chmod +x "$NC_STUB_DIR/gh-cached"
+
+FORGE_TYPE="github"
+
+# Plain-gh path: helper must omit --no-cache and return real JSON.
+nc_result=$(forge_get_pr_nocache "owner/repo" "123" "$NC_STUB_DIR/gh" 2>/dev/null | jq -r '.merged' 2>/dev/null || echo "")
+assert_eq "true" "$nc_result" "forge_get_pr_nocache with plain gh omits --no-cache and returns real JSON"
+
+# gh-cached path: helper must still pass --no-cache to the wrapper.
+nc_cached_result=$(forge_get_pr_nocache "owner/repo" "123" "$NC_STUB_DIR/gh-cached" 2>/dev/null | jq -r '.merged' 2>/dev/null || echo "")
+assert_eq "true" "$nc_cached_result" "forge_get_pr_nocache with gh-cached wrapper still passes --no-cache"
+
+rm -rf "$NC_STUB_DIR"
+
 # --- Test gitea_api auth-mode selection (issue #3297) ---
 # Use a `curl` shim on PATH that records its argv and returns a fake 200.
 echo ""

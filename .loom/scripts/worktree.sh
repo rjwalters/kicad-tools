@@ -34,6 +34,12 @@ LOOM_WORKTREE_ALWAYS_INCLUDE_DEFAULT=(.claude .loom .githooks scripts)
 # shellcheck source=lib/worktree-root.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree-root.sh"
 
+# Shared default-branch resolver (env var / symbolic-ref / ls-remote / probe).
+# Sourced so worktree base operations work on repos whose default branch is not
+# `main` (e.g. `master`) without hardcoding `origin/main` everywhere (#3549).
+# shellcheck source=lib/default-branch.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/default-branch.sh"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -56,6 +62,39 @@ print_info() {
 
 print_warning() {
     echo -e "${YELLOW}⚠ $1${NC}"
+}
+
+# --------------------------------------------------------------------------
+# Loom-managed sentinel (issue #3548)
+# --------------------------------------------------------------------------
+#
+# Write the `.loom-managed` marker that authorizes cleanup tooling
+# (merge-pr.sh, agent-destroy.sh, loom-clean) to remove this worktree. A
+# worktree lacking this file is treated as user-owned and never touched by
+# Loom (see issue #3334).
+#
+# This MUST be called on every code path that leaves a usable Loom worktree
+# behind — not just first-creation. Historically the write lived inline in the
+# `_try_worktree_add` success block only, so any re-invocation against an
+# existing worktree (preserve-work, stale-reset, --sparse/--full re-config)
+# exited before writing the sentinel and stranded the worktree: merge-pr.sh
+# then refused to clean it up. See issue #3548.
+#
+# The write is a plain overwrite (`>`), so it is idempotent and self-heals a
+# worktree whose sentinel was deleted. It reads the global $ISSUE_NUMBER and
+# $BRANCH_NAME at call time. Do NOT call this for directories that are not
+# registered git worktrees (the orphan-debris case) — those must be left
+# sentinel-less so cleanup tooling keeps refusing them.
+write_loom_sentinel() {
+    local wt="$1"
+    cat > "$wt/.loom-managed" <<EOF
+# Loom-managed worktree marker
+# Created by .loom/scripts/worktree.sh
+# Issue: $ISSUE_NUMBER
+# Branch: $BRANCH_NAME
+# Removing this file makes Loom treat the worktree as user-owned and refuse
+# to clean it up automatically.
+EOF
 }
 
 # --------------------------------------------------------------------------
@@ -340,20 +379,22 @@ log_worktree_size() {
     fi
 }
 
-# Function to fetch latest changes from origin/main
-# Uses fetch-only approach to avoid conflicts with worktrees that have main checked out
+# Function to fetch latest changes from the default branch
+# Uses fetch-only approach to avoid conflicts with worktrees that have the
+# default branch checked out. Relies on the global DEFAULT_BRANCH (resolved via
+# loom_default_branch before this is called).
 fetch_latest_main() {
     if [[ "$JSON_OUTPUT" != "true" ]]; then
-        print_info "Fetching latest changes from origin/main..."
+        print_info "Fetching latest changes from origin/$DEFAULT_BRANCH..."
     fi
 
-    if git fetch origin main 2>/dev/null; then
+    if git fetch origin "$DEFAULT_BRANCH" 2>/dev/null; then
         if [[ "$JSON_OUTPUT" != "true" ]]; then
-            print_success "Fetched latest origin/main"
+            print_success "Fetched latest origin/$DEFAULT_BRANCH"
         fi
     else
         if [[ "$JSON_OUTPUT" != "true" ]]; then
-            print_warning "Could not fetch origin/main (continuing with local state)"
+            print_warning "Could not fetch origin/$DEFAULT_BRANCH (continuing with local state)"
         fi
     fi
 }
@@ -531,6 +572,30 @@ if [[ "$1" == "--json" ]]; then
     shift
 fi
 
+# JSON stdout-purity contract (#3546).
+#
+# `git worktree add` and `git submodule update` write some of their feedback
+# lines to *stdout*, not stderr — e.g. "branch '...' set up to track '...'",
+# "HEAD is now at <sha> <subject>", "Submodule path '...': checked out '<sha>'".
+# In --json mode those lines would prefix the JSON document, so a consumer
+# piping into `jq` hits `parse error ... line 1` AND (because the noise precedes
+# the JSON) closes the pipe on the first bad line, SIGPIPE-killing this script
+# mid-creation and leaving an orphan branch with no registered worktree.
+#
+# Fix the whole class rather than one call: in --json mode save the real stdout
+# on fd 3 and redirect fd 1 to stderr, so *only* the final JSON document (which
+# we emit explicitly to >&3) can reach the caller's stdout. Any stray git stdout
+# now lands harmlessly on stderr. `trap '' PIPE` makes a consumer that closes
+# early survive as a clean write failure instead of a fatal signal. In human
+# mode fd 3 is just an alias for stdout, so the `>&3` JSON writes below are a
+# no-op there and git progress stays visible on stdout as before.
+if [[ "$JSON_OUTPUT" == "true" ]]; then
+    exec 3>&1 1>&2
+    trap '' PIPE
+else
+    exec 3>&1
+fi
+
 # Check for --return-to flag
 if [[ "$1" == "--return-to" ]]; then
     RETURN_TO_DIR="$2"
@@ -538,7 +603,7 @@ if [[ "$1" == "--return-to" ]]; then
     # Validate return directory exists
     if [[ ! -d "$RETURN_TO_DIR" ]]; then
         if [[ "$JSON_OUTPUT" == "true" ]]; then
-            echo '{"error": "Return directory does not exist", "returnTo": "'"$RETURN_TO_DIR"'"}'
+            echo '{"error": "Return directory does not exist", "returnTo": "'"$RETURN_TO_DIR"'"}' >&3
         else
             print_error "Return directory does not exist: $RETURN_TO_DIR"
         fi
@@ -603,7 +668,7 @@ done
 # Validate flag combinations
 if [[ "$SPARSE_MODE" == "true" && "$FULL_MODE" == "true" ]]; then
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        echo '{"success": false, "error": "--sparse and --full are mutually exclusive"}'
+        echo '{"success": false, "error": "--sparse and --full are mutually exclusive"}' >&3
     else
         print_error "--sparse and --full are mutually exclusive"
     fi
@@ -612,7 +677,7 @@ fi
 
 if [[ "$SPARSE_MODE" == "true" && ${#SPARSE_PATHS[@]} -eq 0 ]]; then
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        echo '{"success": false, "error": "--sparse requires at least one path"}'
+        echo '{"success": false, "error": "--sparse requires at least one path"}' >&3
     else
         print_error "--sparse requires at least one path"
         echo ""
@@ -643,7 +708,7 @@ if check_if_in_worktree; then
     GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
     if [[ -z "$GIT_COMMON_DIR" ]]; then
         if [[ "$JSON_OUTPUT" == "true" ]]; then
-            echo '{"error": "Failed to find git common directory"}'
+            echo '{"error": "Failed to find git common directory"}' >&3
         else
             print_error "Failed to find git common directory"
         fi
@@ -663,7 +728,7 @@ if check_if_in_worktree; then
         fi
     else
         if [[ "$JSON_OUTPUT" == "true" ]]; then
-            echo '{"error": "Failed to change to main workspace", "mainWorkspace": "'"$MAIN_WORKSPACE"'"}'
+            echo '{"error": "Failed to change to main workspace", "mainWorkspace": "'"$MAIN_WORKSPACE"'"}' >&3
         else
             print_error "Failed to change to main workspace: $MAIN_WORKSPACE"
             print_info "Please manually run: cd $MAIN_WORKSPACE"
@@ -687,7 +752,7 @@ cleanup_partial_worktree_state "$ISSUE_NUMBER" || true
 
 if ! acquire_worktree_lock "$ISSUE_NUMBER"; then
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        echo '{"success": false, "error": "worktree-lock-timeout", "issueNumber": '"$ISSUE_NUMBER"', "holderPid": "'"${WORKTREE_LOCK_HOLDER_PID:-}"'", "timeoutSeconds": '"$LOOM_WORKTREE_LOCK_TIMEOUT"'}'
+        echo '{"success": false, "error": "worktree-lock-timeout", "issueNumber": '"$ISSUE_NUMBER"', "holderPid": "'"${WORKTREE_LOCK_HOLDER_PID:-}"'", "timeoutSeconds": '"$LOOM_WORKTREE_LOCK_TIMEOUT"'}' >&3
     else
         print_error "Timed out waiting for worktree lock after ${LOOM_WORKTREE_LOCK_TIMEOUT}s"
         if [[ -n "${WORKTREE_LOCK_HOLDER_PID:-}" ]]; then
@@ -728,8 +793,21 @@ if [[ -n "$PRUNE_OUTPUT" ]]; then
     fi
 fi
 
-# Fetch latest changes from origin/main before creating the worktree
-# Uses fetch-only to avoid conflicts with worktrees that have main checked out
+# Resolve the repo's default branch once (cwd is now the main workspace, so
+# git symbolic-ref sees refs/remotes/origin/HEAD). Hard-fail rather than proceed
+# with an empty/wrong branch — an empty `origin/` refspec is worse than the
+# original bug (#3549).
+if ! DEFAULT_BRANCH="$(loom_default_branch)"; then
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo '{"success": false, "error": "Could not determine the default branch (see stderr; set LOOM_DEFAULT_BRANCH or run: git remote set-head origin -a)"}' >&3
+    else
+        print_error "Could not determine the default branch. Set LOOM_DEFAULT_BRANCH or run: git remote set-head origin -a"
+    fi
+    exit 1
+fi
+
+# Fetch latest changes from origin/$DEFAULT_BRANCH before creating the worktree
+# Uses fetch-only to avoid conflicts with worktrees that have it checked out
 fetch_latest_main
 
 # Determine branch name
@@ -759,7 +837,7 @@ if [[ -d "$WORKTREE_PATH" ]]; then
     if [[ "$SPARSE_MODE" == "true" || "$FULL_MODE" == "true" ]]; then
         if ! git worktree list | grep -q "$WORKTREE_PATH"; then
             if [[ "$JSON_OUTPUT" == "true" ]]; then
-                echo '{"success": false, "error": "Directory exists but is not a registered worktree"}'
+                echo '{"success": false, "error": "Directory exists but is not a registered worktree"}' >&3
             else
                 print_error "Directory exists but is not a registered worktree: $WORKTREE_PATH"
             fi
@@ -769,9 +847,12 @@ if [[ -d "$WORKTREE_PATH" ]]; then
         if [[ "$FULL_MODE" == "true" ]]; then
             disable_sparse_checkout "$WORKTREE_PATH"
             log_worktree_size "$WORKTREE_PATH" "Worktree size (full)"
+            # Back-fill/refresh the Loom sentinel so re-config of an existing
+            # (possibly sentinel-less) worktree stays cleanup-eligible (#3548).
+            write_loom_sentinel "$WORKTREE_PATH"
             if [[ "$JSON_OUTPUT" == "true" ]]; then
                 ABS_WT=$(cd "$WORKTREE_PATH" && pwd)
-                echo '{"success": true, "worktreePath": "'"$ABS_WT"'", "branchName": "'"$BRANCH_NAME"'", "issueNumber": '"$ISSUE_NUMBER"', "sparse": false, "cone": []}'
+                echo '{"success": true, "worktreePath": "'"$ABS_WT"'", "branchName": "'"$BRANCH_NAME"'", "issueNumber": '"$ISSUE_NUMBER"', "sparse": false, "cone": []}' >&3
             else
                 print_success "Worktree converted to full checkout"
                 print_info "To use this worktree: cd $WORKTREE_PATH"
@@ -784,10 +865,13 @@ if [[ -d "$WORKTREE_PATH" ]]; then
         apply_sparse_cone "$WORKTREE_PATH" "${CONE_PATHS[@]}"
         materialize_sparse_cone "$WORKTREE_PATH"
         log_worktree_size "$WORKTREE_PATH" "Worktree size (sparse)"
+        # Back-fill/refresh the Loom sentinel so re-config of an existing
+        # (possibly sentinel-less) worktree stays cleanup-eligible (#3548).
+        write_loom_sentinel "$WORKTREE_PATH"
         if [[ "$JSON_OUTPUT" == "true" ]]; then
             ABS_WT=$(cd "$WORKTREE_PATH" && pwd)
             CONE_JSON=$(printf '%s\n' "${CONE_PATHS[@]}" | awk 'BEGIN{printf "["} {if(NR>1)printf ","; printf "\"%s\"", $0} END{printf "]"}')
-            echo '{"success": true, "worktreePath": "'"$ABS_WT"'", "branchName": "'"$BRANCH_NAME"'", "issueNumber": '"$ISSUE_NUMBER"', "sparse": true, "cone": '"$CONE_JSON"'}'
+            echo '{"success": true, "worktreePath": "'"$ABS_WT"'", "branchName": "'"$BRANCH_NAME"'", "issueNumber": '"$ISSUE_NUMBER"', "sparse": true, "cone": '"$CONE_JSON"'}' >&3
         else
             print_success "Sparse-checkout cone applied"
             print_info "To use this worktree: cd $WORKTREE_PATH"
@@ -800,12 +884,15 @@ if [[ -d "$WORKTREE_PATH" ]]; then
     # Check if it's registered with git
     if git worktree list | grep -q "$WORKTREE_PATH"; then
         # Check if worktree is stale: no commits ahead of main and behind main
-        local_commits_ahead=$(git -C "$WORKTREE_PATH" rev-list --count "origin/main..HEAD" 2>/dev/null) || local_commits_ahead="0"
-        local_commits_behind=$(git -C "$WORKTREE_PATH" rev-list --count "HEAD..origin/main" 2>/dev/null) || local_commits_behind="0"
+        local_commits_ahead=$(git -C "$WORKTREE_PATH" rev-list --count "origin/$DEFAULT_BRANCH..HEAD" 2>/dev/null) || local_commits_ahead="0"
+        local_commits_behind=$(git -C "$WORKTREE_PATH" rev-list --count "HEAD..origin/$DEFAULT_BRANCH" 2>/dev/null) || local_commits_behind="0"
         local_uncommitted=$(git -C "$WORKTREE_PATH" status --porcelain 2>/dev/null) || local_uncommitted=""
 
         if [[ "$local_commits_ahead" -gt 0 || -n "$local_uncommitted" ]]; then
             # Worktree has real work - preserve it
+            # Back-fill/refresh the Loom sentinel so a resumed worktree that
+            # lost its marker stays cleanup-eligible (#3548).
+            write_loom_sentinel "$WORKTREE_PATH"
             if [[ "$JSON_OUTPUT" != "true" ]]; then
                 print_info "Worktree is registered with git"
                 if [[ "$local_commits_ahead" -gt 0 ]]; then
@@ -821,14 +908,18 @@ if [[ -d "$WORKTREE_PATH" ]]; then
             # Stale worktree: no commits ahead, no uncommitted changes
             # Reset in place instead of removing (avoids CWD corruption)
             if [[ "$JSON_OUTPUT" != "true" ]]; then
-                print_warning "Stale worktree detected (0 commits ahead, $local_commits_behind behind main, no uncommitted changes)"
-                print_info "Resetting worktree in place to origin/main..."
+                print_warning "Stale worktree detected (0 commits ahead, $local_commits_behind behind $DEFAULT_BRANCH, no uncommitted changes)"
+                print_info "Resetting worktree in place to origin/$DEFAULT_BRANCH..."
             fi
 
-            if git -C "$WORKTREE_PATH" fetch origin main 2>/dev/null && \
-               git -C "$WORKTREE_PATH" reset --hard origin/main 2>/dev/null; then
+            # Back-fill/refresh the Loom sentinel on both reset outcomes: the
+            # worktree remains usable either way, so keep it cleanup-eligible
+            # (#3548).
+            write_loom_sentinel "$WORKTREE_PATH"
+            if git -C "$WORKTREE_PATH" fetch origin "$DEFAULT_BRANCH" 2>/dev/null && \
+               git -C "$WORKTREE_PATH" reset --hard "origin/$DEFAULT_BRANCH" 2>/dev/null; then
                 if [[ "$JSON_OUTPUT" != "true" ]]; then
-                    print_success "Stale worktree reset to origin/main"
+                    print_success "Stale worktree reset to origin/$DEFAULT_BRANCH"
                     echo ""
                     print_info "To use this worktree: cd $WORKTREE_PATH"
                 fi
@@ -863,11 +954,11 @@ if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
 
     CREATE_ARGS=("$WORKTREE_PATH" "$BRANCH_NAME")
 else
-    # Create new branch from main
+    # Create new branch from the default branch
     if [[ "$JSON_OUTPUT" != "true" ]]; then
-        print_info "Creating new branch from main"
+        print_info "Creating new branch from $DEFAULT_BRANCH"
     fi
-    CREATE_ARGS=("$WORKTREE_PATH" "-b" "$BRANCH_NAME" "origin/main")
+    CREATE_ARGS=("$WORKTREE_PATH" "-b" "$BRANCH_NAME" "origin/$DEFAULT_BRANCH")
 fi
 
 # In sparse mode, defer file materialization until after we configure the cone.
@@ -917,8 +1008,8 @@ _handle_feature_branch_in_main_worktree() {
             echo ""
             echo "  The branch is in use elsewhere. To free it, find the worktree with:"
             echo "    git worktree list"
-            echo "  Then switch that worktree to main:"
-            echo "    cd <worktree-path> && git checkout main"
+            echo "  Then switch that worktree to $DEFAULT_BRANCH:"
+            echo "    cd <worktree-path> && git checkout $DEFAULT_BRANCH"
         fi
         return 0  # Handled (with human-readable message), no retry possible
     fi
@@ -941,7 +1032,7 @@ _handle_feature_branch_in_main_worktree() {
             echo "  Branch is already checked out at: $conflict_path"
             echo ""
             echo "  To fix:"
-            echo "    cd $conflict_path && git checkout main"
+            echo "    cd $conflict_path && git checkout $DEFAULT_BRANCH"
         fi
         return 0  # Handled (with error message), no retry
     fi
@@ -960,28 +1051,29 @@ _handle_feature_branch_in_main_worktree() {
             echo "  To fix manually:"
             echo "    cd $abs_conflict"
             echo "    git stash  # or commit your changes"
-            echo "    git checkout main"
+            echo "    git checkout $DEFAULT_BRANCH"
             echo "  Then rerun: ./.loom/scripts/worktree.sh $ISSUE_NUMBER"
         fi
         return 0  # Handled (with error message), no retry
     fi
 
-    # Main workspace is clean — auto-switch to main and signal caller to retry
+    # Main workspace is clean — auto-switch to the default branch and signal
+    # caller to retry.
     if [[ "$JSON_OUTPUT" != "true" ]]; then
         print_warning "Branch '$branch' is checked out in the main worktree."
-        print_info "Main worktree is clean — auto-switching to main branch..."
+        print_info "Main worktree is clean — auto-switching to $DEFAULT_BRANCH branch..."
     fi
 
-    if git -C "$abs_conflict" checkout main 2>/dev/null; then
+    if git -C "$abs_conflict" checkout "$DEFAULT_BRANCH" 2>/dev/null; then
         if [[ "$JSON_OUTPUT" != "true" ]]; then
-            print_success "Main worktree switched to main branch"
+            print_success "Main worktree switched to $DEFAULT_BRANCH branch"
         fi
         return 2  # Signal: auto-recovered, caller should retry
     else
         if [[ "$JSON_OUTPUT" != "true" ]]; then
-            print_error "Failed to switch main worktree to main branch."
+            print_error "Failed to switch main worktree to $DEFAULT_BRANCH branch."
             echo "  To fix manually:"
-            echo "    cd $abs_conflict && git checkout main"
+            echo "    cd $abs_conflict && git checkout $DEFAULT_BRANCH"
             echo "  Then rerun: ./.loom/scripts/worktree.sh $ISSUE_NUMBER"
         fi
         return 0  # Handled (with error message), no retry
@@ -1038,15 +1130,10 @@ if _try_worktree_add; then
     # Write a sentinel marker identifying this worktree as Loom-managed.
     # Cleanup tooling (merge-pr.sh, agent-destroy.sh, loom-clean) refuses to
     # remove worktrees lacking this marker, so user-provisioned worktrees at
-    # arbitrary paths are never touched by Loom. See issue #3334.
-    cat > "$ABS_WORKTREE_PATH/.loom-managed" <<EOF
-# Loom-managed worktree marker
-# Created by .loom/scripts/worktree.sh
-# Issue: $ISSUE_NUMBER
-# Branch: $BRANCH_NAME
-# Removing this file makes Loom treat the worktree as user-owned and refuse
-# to clean it up automatically.
-EOF
+    # arbitrary paths are never touched by Loom. See issue #3334. The write is
+    # factored into write_loom_sentinel() so every re-invocation path can
+    # back-fill it too (#3548).
+    write_loom_sentinel "$ABS_WORKTREE_PATH"
 
     # Sparse-mode: configure cone and materialize tracked files.
     # This must run before submodule init / symlinking so the working tree
@@ -1301,9 +1388,9 @@ EOF
         # "cone": [...] fields; full mode keeps "sparse": false with an empty cone.
         if [[ "$SPARSE_MODE" == "true" ]]; then
             CONE_JSON=$(printf '%s\n' "${SPARSE_CONE_PATHS[@]}" | awk 'BEGIN{printf "["} {if(NR>1)printf ","; printf "\"%s\"", $0} END{printf "]"}')
-            echo '{"success": true, "worktreePath": "'"$ABS_WORKTREE_PATH"'", "branchName": "'"$BRANCH_NAME"'", "issueNumber": '"$ISSUE_NUMBER"', "returnTo": "'"${ABS_RETURN_TO:-}"'", "sparse": true, "cone": '"$CONE_JSON"'}'
+            echo '{"success": true, "worktreePath": "'"$ABS_WORKTREE_PATH"'", "branchName": "'"$BRANCH_NAME"'", "issueNumber": '"$ISSUE_NUMBER"', "returnTo": "'"${ABS_RETURN_TO:-}"'", "sparse": true, "cone": '"$CONE_JSON"'}' >&3
         else
-            echo '{"success": true, "worktreePath": "'"$ABS_WORKTREE_PATH"'", "branchName": "'"$BRANCH_NAME"'", "issueNumber": '"$ISSUE_NUMBER"', "returnTo": "'"${ABS_RETURN_TO:-}"'", "sparse": false, "cone": []}'
+            echo '{"success": true, "worktreePath": "'"$ABS_WORKTREE_PATH"'", "branchName": "'"$BRANCH_NAME"'", "issueNumber": '"$ISSUE_NUMBER"', "returnTo": "'"${ABS_RETURN_TO:-}"'", "sparse": false, "cone": []}' >&3
         fi
     else
         # Human-readable output
@@ -1319,7 +1406,7 @@ EOF
     fi
 else
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        echo '{"success": false, "error": "Failed to create worktree"}'
+        echo '{"success": false, "error": "Failed to create worktree"}' >&3
     fi
     # Human-readable error already printed by _try_worktree_add / _handle_feature_branch_in_main_worktree
     exit 1

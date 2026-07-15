@@ -1,10 +1,14 @@
 # Release topic: kicad-tools specifics
 
-This note tailors the generic Release Manager skill
-(`.claude/commands/loom/release.md`) to this repository. It is injected
-alongside the skill via the methodology-injection hook — it does **not**
-fork or replace the skill. See the skill's "Operator extension points"
-section for the seam contract.
+This note records the kicad-tools-specific release facts (CI gate jobs,
+version-bearing files, the PyPI publish trigger) and is injected as
+additional context by the methodology-injection hook whenever you work on
+a release. Release management uses the general-purpose **`/repo:release`**
+command (from [rjwalters/repo](https://github.com/rjwalters/repo));
+Loom's own `/loom:release` was retired in Loom 0.10.7. `/repo:release`
+discovers the version-bearing files itself (it honors `scripts/version.sh`
+first, then `pyproject.toml`) — the sections below are the authoritative
+repo-specific values it should confirm against, not a fork of the command.
 
 ## CI green-gate jobs (Phase 1)
 
