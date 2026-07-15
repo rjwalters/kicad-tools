@@ -911,12 +911,14 @@ def _run_add_zone_command(args, pcb_path: Path) -> int:
             (x0, y0 + h),
         ]
 
-    # Determine output path
+    # Determine output path. No -o means overwrite the input in place,
+    # consistent with `zones add`, `zones fill`, and `optimize-placement`.
+    # ZoneGenerator.from_pcb() fully loads/parses the PCB into memory before
+    # any save(), so self-overwrite is safe. This makes a chained
+    # `pcb add-zone ... && pcb add-zone ...` accumulate zones, since each call
+    # reads its own prior output instead of the pristine input.
     output = getattr(args, "output", None)
-    if output:
-        output_path = Path(output)
-    else:
-        output_path = pcb_path.with_stem(pcb_path.stem + "_zones")
+    output_path = Path(output) if output else pcb_path
 
     dry_run = getattr(args, "dry_run", False)
     output_format = getattr(args, "format", "text")

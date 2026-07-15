@@ -67,6 +67,14 @@ def _make_args(pcb_path, **kwargs):
     return Namespace(**defaults)
 
 
+def _zone_keys(pcb_path):
+    """Return the set of (net_name, layer) tuples for all zones in a PCB."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(str(pcb_path))
+    return {(z.net_name, z.layer) for z in pcb.zones}
+
+
 class TestPcbAddZoneDryRun:
     """Test pcb add-zone in dry-run mode (no file writes)."""
 
@@ -230,13 +238,21 @@ class TestPcbAddZoneWrite:
         assert '"GND"' in content
 
     def test_default_output_path(self, sample_pcb, capsys):
-        """Default output path adds _zones suffix."""
+        """Default output overwrites the input in place; no _zones side file."""
+        original_bytes = sample_pcb.read_bytes()
+        assert ("GND", "B.Cu") not in _zone_keys(sample_pcb)
+
         args = _make_args(sample_pcb)
         rc = run_pcb_command(args)
         assert rc == 0
 
-        expected = sample_pcb.with_stem(sample_pcb.stem + "_zones")
-        assert expected.exists()
+        # Input was mutated in place with the new zone.
+        assert sample_pcb.read_bytes() != original_bytes
+        assert ("GND", "B.Cu") in _zone_keys(sample_pcb)
+
+        # No <stem>_zones.kicad_pcb side file was created (old behavior).
+        side_file = sample_pcb.with_stem(sample_pcb.stem + "_zones")
+        assert not side_file.exists()
 
     def test_custom_thermal_params(self, sample_pcb, tmp_path, capsys):
         """Custom thermal relief parameters are passed through."""
@@ -280,3 +296,77 @@ class TestPcbAddZoneErrors:
 
         captured = capsys.readouterr()
         assert "not found" in captured.err or "Error" in captured.err
+
+
+class TestPcbAddZoneInPlaceDefault:
+    """`pcb add-zone` with no -o overwrites the input in place (issue #4195)."""
+
+    def test_add_no_output_modifies_input(self, sample_pcb):
+        """No -o writes the new zone back into the input file itself."""
+        assert ("GND", "B.Cu") not in _zone_keys(sample_pcb)
+
+        rc = run_pcb_command(_make_args(sample_pcb, net="GND", layer="B.Cu"))
+        assert rc == 0
+
+        assert ("GND", "B.Cu") in _zone_keys(sample_pcb)
+
+    def test_add_no_output_does_not_create_side_file(self, sample_pcb):
+        """No <stem>_zones.kicad_pcb side file is created (old behavior)."""
+        rc = run_pcb_command(_make_args(sample_pcb, net="GND", layer="B.Cu"))
+        assert rc == 0
+
+        side_file = sample_pcb.with_stem(sample_pcb.stem + "_zones")
+        assert not side_file.exists()
+
+    def test_dry_run_reports_in_place_target_and_writes_nothing(self, sample_pcb, capsys):
+        """--dry-run names the in-place target and creates no files."""
+        original_bytes = sample_pcb.read_bytes()
+        rc = run_pcb_command(
+            _make_args(sample_pcb, net="GND", layer="B.Cu", dry_run=True, format="json")
+        )
+        assert rc == 0
+
+        # Nothing written: input unchanged, no side file.
+        assert sample_pcb.read_bytes() == original_bytes
+        side_file = sample_pcb.with_stem(sample_pcb.stem + "_zones")
+        assert not side_file.exists()
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["dry_run"] is True
+        assert data["output"] is None
+
+
+class TestPcbAddZoneChainedAccumulates:
+    """Two sequential in-place `pcb add-zone` calls accumulate both zones.
+
+    Regression test for the compounding data-loss bug (issue #4195): previously
+    each call read the pristine input and wrote the same <stem>_zones side file,
+    so the second call silently discarded the first zone.
+    """
+
+    def test_two_sequential_adds_keep_both_zones(self, sample_pcb):
+        rc1 = run_pcb_command(_make_args(sample_pcb, net="GND", layer="B.Cu"))
+        assert rc1 == 0
+        rc2 = run_pcb_command(_make_args(sample_pcb, net="+3.3V", layer="F.Cu"))
+        assert rc2 == 0
+
+        keys = _zone_keys(sample_pcb)
+        assert ("GND", "B.Cu") in keys  # first add survived the second
+        assert ("+3.3V", "F.Cu") in keys  # second add landed too
+
+
+class TestPcbAddZoneExplicitOutputUnaffected:
+    """Explicit -o still writes the target and leaves the input untouched."""
+
+    def test_explicit_output_writes_target_leaves_input_unchanged(self, sample_pcb, tmp_path):
+        out = tmp_path / "with_zones.kicad_pcb"
+        original_bytes = sample_pcb.read_bytes()
+        assert ("GND", "B.Cu") not in _zone_keys(sample_pcb)
+
+        rc = run_pcb_command(_make_args(sample_pcb, net="GND", layer="B.Cu", output=str(out)))
+        assert rc == 0
+
+        # Input is byte-for-byte unchanged.
+        assert sample_pcb.read_bytes() == original_bytes
+        # Target got the new zone.
+        assert ("GND", "B.Cu") in _zone_keys(out)
