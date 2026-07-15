@@ -11,9 +11,40 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.sexp import parse_file
+from kicad_tools.sexp.parser import parse_string
 
 # Check if kicad-cli is available
 KICAD_CLI = shutil.which("kicad-cli")
+
+
+# Synthetic minimal footprint carrying an embedded keepout rule area, matching
+# the shape KiCad emits for footprints like RF_Module:ESP32-C3-WROOM-02. Used
+# instead of a stock-library fixture so the test has no dependency on a specific
+# KiCad library install being present (issue #4185).
+SYNTHETIC_KEEPOUT_FOOTPRINT = """(footprint "TEST:Keepout"
+	(layer "F.Cu")
+	(uuid "00000000-0000-0000-0000-000000000abc")
+	(at 5 5)
+	(zone
+		(net 0)
+		(net_name "")
+		(layers "F&B.Cu")
+		(hatch full 0.508)
+		(keepout
+			(tracks not_allowed)
+			(vias not_allowed)
+			(pads not_allowed)
+			(copperpour not_allowed)
+			(footprints not_allowed)
+		)
+		(polygon
+			(pts
+				(xy 0 0) (xy 1 0) (xy 1 1) (xy 0 1)
+			)
+		)
+	)
+)
+"""
 
 
 @pytest.fixture
@@ -87,6 +118,64 @@ class TestSExpRoundTripWithKiCad:
 
         assert "Failed to load board" not in result.stderr, (
             f"KiCad failed to load serialized file.\n"
+            f"stdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+
+    def test_keepout_footprint_roundtrips_bare(self):
+        """A footprint keepout rule area must round-trip with bare enum tokens.
+
+        KiCad emits `(tracks not_allowed)` as bare symbols; the quoted form
+        `(tracks "not_allowed")` is a hard parse error that makes the board
+        unloadable. Before issue #4185 the serializer quoted these tokens
+        because they were absent from the unquoted-keyword allowlist. This test
+        uses a synthetic footprint fixture (no stock-library dependency).
+        """
+        output = parse_string(SYNTHETIC_KEEPOUT_FOOTPRINT).to_string()
+        assert '"not_allowed"' not in output, (
+            f"keepout enum tokens must round-trip bare, got: {output}"
+        )
+        for field in ("tracks", "vias", "pads", "copperpour", "footprints"):
+            assert f"({field} not_allowed)" in output, (
+                f"expected bare ({field} not_allowed) in: {output}"
+            )
+
+    @pytest.mark.skipif(KICAD_CLI is None, reason="kicad-cli not installed")
+    def test_keepout_board_loads_in_kicad(self, tmp_path):
+        """A board carrying a keepout footprint must load after round-trip.
+
+        Injects a synthetic footprint with an embedded keepout rule area into a
+        real demo board, serializes it, and asserts kicad-cli can load it. Before
+        issue #4185 the keepout tokens were quoted, causing "Failed to load
+        board" (verified: the quoted form is a hard pcbnew parse error).
+        """
+        demo = (
+            Path(__file__).parent.parent
+            / "boards"
+            / "00-simple-led"
+            / "output"
+            / "simple_led.kicad_pcb"
+        )
+        if not demo.exists():
+            pytest.skip(f"Demo board not found: {demo}")
+
+        doc = parse_file(demo)
+        # The synthetic footprint already carries a uuid so KiCad accepts it.
+        doc.children.append(parse_string(SYNTHETIC_KEEPOUT_FOOTPRINT))
+
+        output = doc.to_string()
+        assert '"not_allowed"' not in output, "keepout tokens must be bare before load"
+
+        output_path = tmp_path / "keepout_board.kicad_pcb"
+        output_path.write_text(output)
+
+        result = subprocess.run(
+            [KICAD_CLI, "pcb", "drc", str(output_path), "-o", str(tmp_path / "drc.json")],
+            capture_output=True,
+            text=True,
+        )
+        assert "Failed to load board" not in result.stderr, (
+            f"KiCad failed to load board with keepout footprint.\n"
             f"stdout: {result.stdout}\n"
             f"stderr: {result.stderr}"
         )
