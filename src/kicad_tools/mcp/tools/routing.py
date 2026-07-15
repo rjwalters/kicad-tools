@@ -470,6 +470,7 @@ def route_net_auto(
     enable_repair: bool = True,
     enable_via_resolution: bool = True,
     region: str | tuple[float, float, float, float] | None = None,
+    allow_partial: bool = False,
 ) -> dict:
     """Route a specific net using the RoutingOrchestrator.
 
@@ -478,15 +479,38 @@ def route_net_auto(
     characteristics (pin pitch, differential pairs, density, via conflicts)
     and automatically selects the optimal routing strategy.
 
+    Per-strategy completion semantics (Issue #4165)
+    -----------------------------------------------
+    The ``global``, ``escape``, and ``subgrid`` strategies route a **single
+    two-terminal corridor** between the two most distant pads of a net.  For a
+    multi-pad net this can leave intermediate pads unconnected even though the
+    strategy's own internal status is "success".  ``route_net_auto`` now runs a
+    real per-pad copper-reachability check after routing (independent of the
+    strategy's self-reported success) and, when a net is only partially
+    connected, reports ``success=False`` with ``partial=True`` and
+    ``pads_connected``/``pads_total`` populated.  With ``strategy="auto"`` the
+    orchestrator automatically falls back to the ``hierarchical`` (iterative
+    negotiated) router, which completes multi-pad nets by construction.  When a
+    partial route cannot be completed, no copper is saved unless
+    ``allow_partial=True``.
+
     Args:
         pcb_path: Absolute path to .kicad_pcb file
         net_name: Name of the net to route (e.g., "GND", "SPI_CLK")
         output_path: Path for output file. If None, result is not saved.
         strategy: Strategy override ("auto", "global", "escape", "hierarchical",
                   "subgrid", "via_resolution", or "multi_resolution").
-                  Use "auto" for smart selection.
+                  Use "auto" for smart selection.  Note: "global"/"escape"/
+                  "subgrid" route a single two-terminal corridor and may leave
+                  a multi-pad net partially connected; "hierarchical" iterates
+                  to full net completion (Issue #4165).
         enable_repair: Whether to enable automatic clearance repair after routing
         enable_via_resolution: Whether to enable via conflict resolution
+        allow_partial: When True, a partially-routed multi-pad net (some pads
+                  still unconnected) is still saved to ``output_path`` instead
+                  of refusing to write incomplete copper.  ``success`` remains
+                  False and ``partial`` True either way; this only controls
+                  whether the partial copper is persisted (Issue #4165).
         region: Optional spatial routing bound (Issue #4148, Phase 2a).  Either
                 a ``"x1,y1,x2,y2"`` string or a ``(x1, y1, x2, y2)`` tuple in
                 BOARD-RELATIVE mm (same convention as ``pcb strip --region``
@@ -691,6 +715,15 @@ def route_net_auto(
 
         orchestrator._select_strategy = _forced_select  # type: ignore[method-assign]
 
+        # Issue #4165: honor the user's explicit strategy choice.  When a
+        # strategy is forced we DO NOT silently fall back to hierarchical on a
+        # partial route -- the caller asked for exactly this strategy, so a
+        # multi-pad net stranded by a single two-terminal corridor is reported
+        # honestly as ``partial`` (k/n) and exits non-zero.  Disabling the
+        # retry loop is what preserves that honest partial; the automatic
+        # hierarchical fallback is reserved for ``strategy="auto"``.
+        orchestrator.max_strategy_retries = 0
+
     # Build pad list from PCB footprints so the orchestrator can
     # perform strategy selection and routing (without pads every
     # strategy returns "Insufficient pads").
@@ -763,6 +796,12 @@ def route_net_auto(
     result_dict = result.to_dict()
     result_dict["net_name"] = net_name
 
+    # Issue #4165: decide whether the produced copper is persistable.  A fully
+    # successful route always persists; a PARTIAL route (multi-pad net with
+    # stranded pads) persists only when the caller opts in via ``allow_partial``
+    # so incomplete copper is not written silently.
+    should_persist = result.success or (getattr(result, "partial", False) and allow_partial)
+
     # Save output if requested and routing succeeded.
     #
     # Issue #2913: the orchestrator's RoutingResult carries the produced
@@ -774,7 +813,7 @@ def route_net_auto(
     # and vias via the PCB schema's ``add_trace`` / ``add_via`` helpers
     # before saving, and surface a clear failure when the orchestrator
     # reports success but produced no physical segments.
-    if output_path and result.success:
+    if output_path and should_persist:
         segments_written, vias_written = _persist_routing_result_to_pcb(pcb, result, net_name)
         result_dict["segments_written"] = segments_written
         result_dict["vias_written"] = vias_written

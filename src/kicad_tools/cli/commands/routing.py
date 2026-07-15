@@ -109,6 +109,8 @@ def run_route_auto_command(args) -> int:
             # Issue #4148: spatial routing bound.  Confines the routed net to the
             # board-relative box and fails if the net has an endpoint outside it.
             region=getattr(args, "region", None),
+            # Issue #4165: persist partial multi-pad copper only when opted in.
+            allow_partial=getattr(args, "allow_partial", False),
         )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -152,6 +154,39 @@ def run_route_auto_command(args) -> int:
         if result.get("output_path"):
             print(f"  Saved to: {result['output_path']}")
         return 0
+    elif result.get("partial"):
+        # Issue #4165: routing produced copper but left some pads of a
+        # multi-pad net unconnected.  Report the honest k/n and exit non-zero;
+        # the copper is only saved when --allow-partial was given.
+        pads_connected = result.get("pads_connected")
+        pads_total = result.get("pads_total")
+        kn = (
+            f"{pads_connected}/{pads_total}"
+            if pads_connected is not None and pads_total is not None
+            else "some"
+        )
+        print(
+            f"partially routed net '{result['net_name']}': {kn} pads connected",
+            file=sys.stderr,
+        )
+        print(f"  Strategy: {result.get('strategy_used', 'unknown')}", file=sys.stderr)
+        print(
+            "  A single two-terminal corridor left pad(s) unconnected. "
+            "Retry with --strategy hierarchical (or --strategy auto, which now "
+            "falls back to hierarchical) to complete the net.",
+            file=sys.stderr,
+        )
+        segs_written = result.get("segments_written")
+        if segs_written is not None:
+            print(f"  Partial copper saved: {segs_written} segments", file=sys.stderr)
+        elif not getattr(args, "allow_partial", False):
+            print(
+                "  Partial copper NOT saved (pass --allow-partial to persist it).",
+                file=sys.stderr,
+            )
+        for warning in result.get("warnings", []):
+            print(f"  Warning: {warning}", file=sys.stderr)
+        return 1
     else:
         print(f"Routing failed for net '{result['net_name']}'", file=sys.stderr)
         if result.get("error_message"):
