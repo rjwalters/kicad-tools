@@ -1265,7 +1265,13 @@ class TwoPhaseRouter:
             )
         # M3: cross-net crossing between two non-rippable escape stubs has
         # no demotable victim -- surface it rather than ship a silent short.
+        # Exclude diff-pair partners: a legitimately-coupled pair runs
+        # sub-clearance by design and is adjudicated by the intra-pair
+        # clearance path, not treated as a cross-net short (mirrors core.py).
+        _partner_of = getattr(self.router, "_diff_pair_partner_net", None)
         for _a, _b in _non_rippable_pairs:
+            if _partner_of is not None and _partner_of(_a) == _b:
+                continue
             flush_print(
                 f"  ⚠ Cross-net crossing between non-rippable escape infra: "
                 f"{self.net_names.get(_a, f'Net_{_a}')} vs "

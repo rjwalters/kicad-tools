@@ -114,7 +114,12 @@ class FakeNegotiatedRouter:
         return []
 
     def find_segment_segment_violation_pairs(
-        self, net_routes, trace_clearance, extra_routes=None, copper_overlap_only=False
+        self,
+        net_routes,
+        trace_clearance,
+        extra_routes=None,
+        copper_overlap_only=False,
+        report_non_rippable_pairs=False,
     ):
         return []
 
