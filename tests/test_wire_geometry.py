@@ -70,3 +70,117 @@ class TestWireSegmentsConnect:
 
     def test_disjoint_no_connect(self):
         assert wire_segments_connect((100, 100), (105, 100), (110, 100), (115, 100)) is False
+
+
+class TestJunctionGatedUnion:
+    """Junction-dot gating of wire-to-wire union (issue #4226).
+
+    KiCad merges the nets of two touching/overlapping wires only where a
+    junction dot is present; #4157's pure-geometry union over-merged
+    dot-less grazes (board-05: 85/205 pins on +24V).  When
+    ``junction_points`` is supplied, ``wire_segments_connect`` must union a
+    T-touch / collinear overlap only if a junction dot sits at the
+    touch/overlap point; the identical geometry WITHOUT a dot must NOT
+    union.  Passing ``junction_points=None`` (the default) keeps the
+    ungated pure-geometry predicate for the lint checker.
+    """
+
+    def test_t_touch_with_junction_unions(self):
+        # B's endpoint (106,100) on A's interior WITH a dot at the touch.
+        assert (
+            wire_segments_connect(
+                (100, 100),
+                (112, 100),
+                (106, 100),
+                (106, 90),
+                junction_points={(106, 100)},
+            )
+            is True
+        )
+
+    def test_t_touch_without_junction_does_not_union(self):
+        # Same T-touch geometry, but no dot at (106,100) -> KiCad does NOT
+        # merge (the board-05 dot-less graze that caused the false shorts).
+        assert (
+            wire_segments_connect(
+                (100, 100),
+                (112, 100),
+                (106, 100),
+                (106, 90),
+                junction_points=set(),
+            )
+            is False
+        )
+
+    def test_t_touch_junction_at_wrong_point_does_not_union(self):
+        # A dot exists, but at the far (non-touch) endpoint of B, not at the
+        # touch coordinate -> must NOT union (issue #4226 edge case).
+        assert (
+            wire_segments_connect(
+                (100, 100),
+                (112, 100),
+                (106, 100),
+                (106, 90),
+                junction_points={(106, 90)},
+            )
+            is False
+        )
+
+    def test_collinear_overlap_with_junction_in_range_unions(self):
+        # A=[100,109], B=[103,112] share [103,109]; dot at (105,100) inside
+        # the shared sub-segment -> unions.
+        assert (
+            wire_segments_connect(
+                (100, 100),
+                (109, 100),
+                (103, 100),
+                (112, 100),
+                junction_points={(105, 100)},
+            )
+            is True
+        )
+
+    def test_collinear_overlap_without_junction_does_not_union(self):
+        assert (
+            wire_segments_connect(
+                (100, 100),
+                (109, 100),
+                (103, 100),
+                (112, 100),
+                junction_points=set(),
+            )
+            is False
+        )
+
+    def test_collinear_overlap_junction_at_far_endpoint_does_not_union(self):
+        # The exact board-05 wires-15/16 failure: two rail-drop stubs share
+        # an X column and overlap by coincidence; each has a junction at its
+        # OWN far end (outside the shared sub-segment), but none inside the
+        # overlap -> must NOT union.  A=[100,109], B=[103,112] share
+        # [103,109]; dots only at (100,100) (A's far end) and (112,100)
+        # (B's far end).
+        assert (
+            wire_segments_connect(
+                (100, 100),
+                (109, 100),
+                (103, 100),
+                (112, 100),
+                junction_points={(100, 100), (112, 100)},
+            )
+            is False
+        )
+
+    def test_shared_endpoint_never_needs_junction(self):
+        # Endpoint-only touch is handled by endpoint Union-Find, so it
+        # returns False here regardless of junction gating (no dot required
+        # for legitimate endpoint connections).
+        assert (
+            wire_segments_connect(
+                (100, 100),
+                (106, 100),
+                (106, 100),
+                (112, 100),
+                junction_points=set(),
+            )
+            is False
+        )

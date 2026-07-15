@@ -839,12 +839,22 @@ class TestWireToWireCollinearUnion:
         return netlist, a, b
 
     def _two_stub_schematic(
-        self, a_span: tuple[float, float], b_span: tuple[float, float], y: float = 100.0
+        self,
+        a_span: tuple[float, float],
+        b_span: tuple[float, float],
+        y: float = 100.0,
+        junction: bool = True,
     ) -> Schematic:
         """Two horizontal stub wires on ``y`` with a label on each.
 
         Each stub carries a symbol pin at its far end plus a net label, so
         the two labels' merge status is observable in the netlist.
+
+        When ``junction`` is True (default) a junction dot is placed inside
+        the collinear-overlap sub-segment, representing the *intentional*
+        merge a real generator would emit (KiCad requires a dot to merge two
+        overlapping wires — issue #4226).  Pass ``junction=False`` to model a
+        dot-less incidental graze, which KiCad does NOT merge.
         """
         sch = Schematic("Test")
         r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
@@ -860,6 +870,12 @@ class TestWireToWireCollinearUnion:
         sch.wires.append(Wire(x1=b_span[0], y1=y, x2=b_span[1], y2=y))
         sch.labels.append(Label(text="NET_A", x=a_span[0], y=y))
         sch.labels.append(Label(text="NET_B", x=b_span[1], y=y))
+        if junction:
+            # Junction dot at the midpoint of the shared overlap sub-segment,
+            # marking the intended wire-to-wire merge (issue #4226/#4143).
+            lo = max(a_span[0], b_span[0])
+            hi = min(a_span[1], b_span[1])
+            sch.junctions.append(Junction(x=(lo + hi) / 2.0, y=y))
         return sch
 
     def test_partial_overlap_neither_contains_the_other(self):
@@ -910,6 +926,9 @@ class TestWireToWireCollinearUnion:
         # B: vertical, lower end T-touches A's interior at (106,100); upper
         # end (106,90) lands on R2 pin 1 (R2 at (106,85), pin1 y-offset).
         sch.wires.append(Wire(x1=106, y1=100, x2=106, y2=90))
+        # Junction dot at the T-touch point marks the intentional connection
+        # (KiCad merges a mid-segment T-touch only where a dot sits — #4226).
+        sch.junctions.append(Junction(x=106, y=100))
         # R2 pin 1 sits at (103.46, 85)?  Recompute: place R2 so pin1 lands
         # on the wire's free end instead — put R2 pin1 at (106,90).
         r2b = SymbolInstance(
@@ -972,6 +991,9 @@ class TestWireToWireCollinearUnion:
         # +3.3V stub [100,108], GND stub [104,112] overlap on [104,108].
         sch.wires.append(Wire(x1=100, y1=100, x2=108, y2=100))
         sch.wires.append(Wire(x1=104, y1=100, x2=112, y2=100))
+        # Junction dot inside the [104,108] overlap marks the intended merge
+        # (KiCad requires a dot to union two overlapping wires — #4226).
+        sch.junctions.append(Junction(x=106, y=100))
         sch.power_symbols.append(PowerSymbol(lib_id="power:+3.3V", x=100, y=100, rotation=0))
         sch.power_symbols.append(PowerSymbol(lib_id="power:GND", x=112, y=100, rotation=0))
         # Add a pin on each end so the merged component surfaces in netlist.
@@ -1001,8 +1023,41 @@ class TestWireToWireCollinearUnion:
         sch.symbols.extend([r1, r2])
         sch.wires.append(Wire(x1=100, y1=100, x2=109, y2=100))
         sch.wires.append(Wire(x1=103, y1=100, x2=112, y2=100))
+        # Junction inside the [103,109] overlap marks the intended merge.
+        sch.junctions.append(Junction(x=106, y=100))
         sch.labels.append(Label(text="VBUS", x=100, y=100))
         sch.labels.append(Label(text="VBUS", x=112, y=100))
         netlist = sch.extract_netlist()
         assert "VBUS" in netlist
         assert {str(p) for p in netlist["VBUS"]} == {"R1.2", "R2.1"}
+
+    def test_dotless_collinear_overlap_does_not_merge(self):
+        """A dot-less collinear graze must NOT merge nets (issue #4226).
+
+        This is the board-05 false-short pattern: two differently-labelled
+        stubs overlap collinearly with NO junction dot at the overlap.
+        KiCad keeps them separate; the junction-gated predicate must too.
+        """
+        sch = self._two_stub_schematic((100.0, 109.0), (103.0, 112.0), junction=False)
+        assert sch.are_connected("R1", "2", "R2", "1") is False
+        net1 = sch.get_net_for_pin("R1", "2")
+        net2 = sch.get_net_for_pin("R2", "1")
+        assert {net1, net2} == {"NET_A", "NET_B"}
+
+    def test_dotless_t_touch_does_not_merge(self):
+        """A dot-less mid-segment T-touch must NOT merge nets (issue #4226)."""
+        sch = Schematic("Test")
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        r1 = SymbolInstance(
+            symbol_def=r_def, x=97.46, y=100, rotation=0, reference="R1", value="10k"
+        )
+        r3 = SymbolInstance(
+            symbol_def=r_def, x=108.54, y=90, rotation=0, reference="R3", value="10k"
+        )
+        sch.symbols.extend([r1, r3])
+        sch.wires.append(Wire(x1=100, y1=100, x2=112, y2=100))
+        # B's lower end (106,100) T-touches A's interior, but NO junction dot.
+        sch.wires.append(Wire(x1=106, y1=100, x2=106, y2=90))
+        sch.labels.append(Label(text="NET_A", x=100, y=100))
+        sch.labels.append(Label(text="NET_B", x=106, y=90))
+        assert sch.are_connected("R1", "2", "R3", "1") is False

@@ -95,13 +95,22 @@ class SchematicNetlistMixin:
             # Connect wire endpoints
             union(p1, p2)
 
+        # Junction-dot positions gate wire-to-wire union (issue #4226).
+        junction_points = [(round(j.x, 2), round(j.y, 2)) for j in self.junctions]  # type: ignore[attr-defined]
+
         # Union wires with each other on collinear overlap or mid-segment
-        # T-touch — matching KiCad, which merges the nets of any two touching
-        # or overlapping wire segments, not only those that share an exact
-        # endpoint (issue #4143).  The endpoint case is already handled by the
-        # loop above.  All-pairs O(n^2) is fine at typical schematic sizes
-        # (check_wire_collisions() already scans this way with no reported
-        # slowdown); no spatial index is warranted here.
+        # T-touch — but ONLY where a junction dot is present, matching KiCad
+        # (issue #4226).  KiCad merges the nets of two touching/overlapping
+        # wire segments only when a junction dot sits at the touch/overlap
+        # point; a dot-less graze renders as crossing, unconnected wires.
+        # #4157 unioned on pure geometry and over-merged board-05's
+        # stub-label schematic (85/205 pins on +24V); gating on the junction
+        # set restores KiCad's real connectivity while preserving the #4143
+        # dotted-merge detection.  The exact-shared-endpoint case is already
+        # handled by the endpoint loop above and needs no dot.  All-pairs
+        # O(n^2) is fine at typical schematic sizes (check_wire_collisions()
+        # already scans this way with no reported slowdown); no spatial index
+        # is warranted here.
         #
         # NOTE: this is wire-to-wire unioning only.  It deliberately does NOT
         # relax the pin-to-wire endpoint-only rule from #4020/#4003 — pins
@@ -111,7 +120,9 @@ class SchematicNetlistMixin:
             a_start, a_end = wire_segments[i]
             for j in range(i + 1, len(wire_segments)):
                 b_start, b_end = wire_segments[j]
-                if wire_segments_connect(a_start, a_end, b_start, b_end):
+                if wire_segments_connect(
+                    a_start, a_end, b_start, b_end, junction_points=junction_points
+                ):
                     union(a_start, b_start)
 
         # Helper to check if point is on a wire segment
