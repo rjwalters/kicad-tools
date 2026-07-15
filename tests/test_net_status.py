@@ -897,3 +897,135 @@ class TestNetStatusCorruptionDefense:
             assert net_status.total_pads == 0
             assert net_status.status == "unrouted"
             assert net_status.connection_percentage == 0.0
+
+
+class TestZonePourContactConnectivity:
+    """Issue #4229: pad-in-pour copper contact must count for connectivity.
+
+    A plane pad connected to its net purely through pad-in-pour contact (no
+    stitching via) was false-flagged incomplete because a lone pour-connected
+    pad formed a singleton graph island that lost the "largest island wins"
+    vote to a separately-routed trace island on the same net.  kicad-cli's
+    zone-aware engine reports these as fully connected.  The bug reproduces in
+    the DEFAULT (tolerance) path as well as ``--strict``; these tests mirror
+    ``test_net_status_strict.py`` for the default analyzer.
+    """
+
+    def _lone_pour_pad_board(self, *, filled: bool = True, pad_in_pour: bool = True) -> str:
+        u1_pos = "30 20" if pad_in_pour else "90 90"
+        filled_clause = (
+            '    (filled_polygon (layer "B.Cu") (pts (xy 5 5) (xy 40 5) (xy 40 30) (xy 5 30)))\n'
+            if filled
+            else ""
+        )
+        return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402_1005Metric" (layer "B.Cu") (uuid "fp1") (at 12 12)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "B.SilkS") (uuid "ref1"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6)
+      (layers "B.Cu" "B.Paste" "B.Mask") (roundrect_rratio 0.25) (net 1 "GND")))
+  (footprint "Resistor_SMD:R_0402_1005Metric" (layer "B.Cu") (uuid "fp2") (at 20 12)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "B.SilkS") (uuid "ref2"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6)
+      (layers "B.Cu" "B.Paste" "B.Mask") (roundrect_rratio 0.25) (net 1 "GND")))
+  (footprint "Package_QFP:LQFP-48" (layer "B.Cu") (uuid "fp3") (at {u1_pos})
+    (property "Reference" "U1" (at 0 -1.5 0) (layer "B.SilkS") (uuid "ref3"))
+    (pad "17" smd roundrect (at 0 0) (size 0.6 0.6)
+      (layers "B.Cu" "B.Paste" "B.Mask") (roundrect_rratio 0.25) (net 1 "GND")))
+  (segment (start 12 12) (end 20 12) (width 0.25) (layer "B.Cu") (net 1) (uuid "seg1"))
+  (zone (net 1) (net_name "GND") (layer "B.Cu") (uuid "zone1")
+    (connect_pads (clearance 0.3))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 5 5) (xy 40 5) (xy 40 30) (xy 5 30)))
+{filled_clause}  )
+)
+"""
+
+    def _two_disjoint_fills_board(self) -> str:
+        return """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402_1005Metric" (layer "F.Cu") (uuid "fp1") (at 12 12)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND")))
+  (footprint "Resistor_SMD:R_0402_1005Metric" (layer "F.Cu") (uuid "fp2") (at 32 12)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND")))
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zA")
+    (connect_pads (clearance 0.3)) (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 10 10) (xy 14 10) (xy 14 14) (xy 10 14)))
+    (filled_polygon (layer "F.Cu") (pts (xy 10 10) (xy 14 10) (xy 14 14) (xy 10 14))))
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zB")
+    (connect_pads (clearance 0.3)) (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 30 10) (xy 34 10) (xy 34 14) (xy 30 14)))
+    (filled_polygon (layer "F.Cu") (pts (xy 30 10) (xy 34 10) (xy 34 14) (xy 30 14))))
+)
+"""
+
+    def test_lone_pour_pad_reports_complete(self, tmp_path: Path):
+        """A pad alone in a filled zone of its net reads complete (default mode)."""
+        pytest.importorskip("shapely")
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(self._lone_pour_pad_board())
+        result = NetStatusAnalyzer(path).analyze()
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status == "complete", (
+            f"lone pour pad must read complete; got {gnd.status}, "
+            f"unconnected={[p.full_name for p in gnd.unconnected_pads]}"
+        )
+        assert "U1.17" in {p.full_name for p in gnd.connected_pads}
+
+    def test_pad_off_pour_still_incomplete(self, tmp_path: Path):
+        """A pad off the pour with no trace/via stays incomplete (default mode)."""
+        pytest.importorskip("shapely")
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(self._lone_pour_pad_board(pad_in_pour=False))
+        result = NetStatusAnalyzer(path).analyze()
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status == "incomplete"
+        assert "U1.17" in {p.full_name for p in gnd.unconnected_pads}
+
+    def test_unfilled_zone_still_incomplete(self, tmp_path: Path):
+        """A pad in an unfilled zone stays incomplete (fill-currency, default mode)."""
+        pytest.importorskip("shapely")
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(self._lone_pour_pad_board(filled=False))
+        result = NetStatusAnalyzer(path).analyze()
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status == "incomplete"
+        assert "U1.17" in {p.full_name for p in gnd.unconnected_pads}
+
+    def test_two_disjoint_fills_not_unioned(self, tmp_path: Path):
+        """Two disjoint fills of a net stay separate (#3914 regression, default mode)."""
+        pytest.importorskip("shapely")
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(self._two_disjoint_fills_board())
+        result = NetStatusAnalyzer(path).analyze()
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status == "incomplete"
+        assert gnd.connected_count == 1
+        assert gnd.unconnected_count == 1
