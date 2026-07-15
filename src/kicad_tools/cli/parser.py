@@ -2072,7 +2072,7 @@ def _add_pcb_parser(subparsers) -> None:
         "-o",
         "--output",
         dest="output",
-        help="Output file path (default: <input>_zones.kicad_pcb)",
+        help="Output file path (default: overwrite input, consistent with 'zones add')",
     )
     pcb_add_zone.add_argument(
         "--dry-run",

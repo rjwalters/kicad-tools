@@ -150,11 +150,26 @@ kct pcb <subcommand> <pcb_file> [options]
 |------------|-------------|
 | `query` | Query footprints and tracks |
 | `modify` | Modify PCB elements |
+| `add-zone` | Add a copper pour zone |
+
+**`add-zone` output-path behavior:** `-o`/`--output` is optional and
+**defaults to overwriting the input in place** — consistent with `zones add`,
+`zones fill`, and `optimize-placement`. Because each in-place `add-zone` reads
+its own prior output, chaining `pcb add-zone` calls against one file
+accumulates zones instead of silently discarding earlier ones. Pass an
+explicit `-o <path>` to write a side file and leave the input untouched.
+
+| Option | Description |
+|--------|-------------|
+| `-o`, `--output PATH` | Output PCB (default: overwrite input) |
 
 **Examples:**
 ```bash
 kct pcb query board.kicad_pcb --footprints
 kct pcb query board.kicad_pcb --tracks --net GND
+kct pcb add-zone board.kicad_pcb --net GND --layer B.Cu     # modifies board.kicad_pcb in place
+kct pcb add-zone board.kicad_pcb --net +3.3V --layer In2.Cu # accumulates onto the GND zone
+kct pcb add-zone board.kicad_pcb --net GND --layer B.Cu -o with_zones.kicad_pcb  # side file
 ```
 
 ---
