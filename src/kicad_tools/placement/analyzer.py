@@ -117,6 +117,7 @@ class PlacementAnalyzer:
 
         # Check edge clearance (sequential, typically small)
         if self._board_edge:
+            conflicts.extend(self._check_off_board())
             conflicts.extend(self._check_edge_clearance(rules.min_edge_clearance))
 
         # Sort by severity then location
@@ -250,6 +251,7 @@ class PlacementAnalyzer:
 
         # Check edge clearance
         if self._board_edge:
+            conflicts.extend(self._check_off_board())
             conflicts.extend(self._check_edge_clearance(rules.min_edge_clearance))
 
         # Sort by severity then location
@@ -483,8 +485,24 @@ class PlacementAnalyzer:
                         required_clearance=min_distance,
                     )
 
-    def _check_edge_clearance(self, min_clearance: float) -> Iterator[Conflict]:
-        """Check clearance from components to board edge."""
+    def _check_off_board(self) -> Iterator[Conflict]:
+        """Flag components whose courtyard falls outside the board outline.
+
+        This is a hard-invalid placement, qualitatively different from the
+        "inside but too close to the edge" case handled by
+        :meth:`_check_edge_clearance`.  A footprint whose courtyard is
+        *fully* outside the outline (the common "everything shifted N mm off
+        the board" incident, issue #4156) or *partially* straddling the edge
+        cannot be manufactured or routed as placed, so both are unconditional
+        ``ERROR`` severity, independent of ``min_edge_clearance``.
+
+        Uses an axis-aligned bounding-box test against the outline bbox — the
+        same cheap approach as ``place_unplaced._get_board_bounds``.  A true
+        polygon test for non-rectangular outlines (cutouts, rounded corners)
+        is a future refinement (see issue #4182); the bbox test covers the
+        reported incident and never false-negatives on a shifted-off-board
+        row.
+        """
         if not self._board_edge:
             return
 
@@ -495,6 +513,67 @@ class PlacementAnalyzer:
                 continue
 
             cy = comp.courtyard
+
+            fully_outside = (
+                cy.max_x <= edge.min_x
+                or cy.min_x >= edge.max_x
+                or cy.max_y <= edge.min_y
+                or cy.min_y >= edge.max_y
+            )
+            partially_outside = (
+                cy.min_x < edge.min_x
+                or cy.max_x > edge.max_x
+                or cy.min_y < edge.min_y
+                or cy.max_y > edge.max_y
+            )
+
+            if not fully_outside and not partially_outside:
+                continue
+
+            descriptor = "fully outside" if fully_outside else "partially outside"
+            yield Conflict(
+                type=ConflictType.OFF_BOARD,
+                severity=ConflictSeverity.ERROR,
+                component1=comp.reference,
+                component2="board_outline",
+                message=(
+                    f"courtyard {descriptor} Edge.Cuts outline "
+                    f"(board {edge.min_x:.1f},{edge.min_y:.1f} to "
+                    f"{edge.max_x:.1f},{edge.max_y:.1f}) — placement invalid"
+                ),
+                location=cy.center,
+            )
+
+    def _check_edge_clearance(self, min_clearance: float) -> Iterator[Conflict]:
+        """Check clearance from components to board edge.
+
+        This reports components that are *inside* the outline but closer to an
+        edge than ``min_clearance`` (a tightness warning/error).  Components
+        that fall outside the outline entirely are handled separately by
+        :meth:`_check_off_board`, which reports a distinct ``OFF_BOARD``
+        error; skip them here so a single off-board footprint is not
+        double-reported as four edge violations.
+        """
+        if not self._board_edge:
+            return
+
+        edge = self._board_edge
+
+        for comp in self._components:
+            if not comp.courtyard:
+                continue
+
+            cy = comp.courtyard
+
+            # Skip components handled by _check_off_board (outside the outline).
+            outside = (
+                cy.min_x < edge.min_x
+                or cy.max_x > edge.max_x
+                or cy.min_y < edge.min_y
+                or cy.max_y > edge.max_y
+            )
+            if outside:
+                continue
 
             # Check each edge
             violations: list[tuple[str, float, Point]] = []
@@ -558,22 +637,33 @@ class PlacementAnalyzer:
                 )
 
     def _extract_board_edge(self, pcb) -> Rectangle | None:
-        """Extract board outline from Edge.Cuts layer.
+        """Extract board outline bounding box from the Edge.Cuts layer.
 
-        Returns bounding box of the board edge.
+        Real board outlines — including every board produced by
+        ``kct create-pcb`` (``PCB.create``) and every board KiCad itself
+        writes — are drawn as ``gr_line`` / ``gr_arc`` / ``gr_rect`` /
+        ``gr_poly`` graphics, **not** copper ``(segment ...)`` elements.  An
+        earlier implementation read the outline via
+        ``pcb.segments_on_layer("Edge.Cuts")``, which only ever returns copper
+        segments, so it returned ``None`` on every normally-produced board.
+        That silently disabled the edge-clearance / off-board checks (issue
+        #4156).
+
+        This now delegates to :meth:`PCB.get_board_outline`, which correctly
+        assembles the outline from graphics and returns board-relative
+        coordinates — the same reusable, already-correct path used by
+        ``placement/place_unplaced.py::_get_board_bounds``.
+
+        Returns bounding box of the board edge, or ``None`` when the board has
+        no Edge.Cuts outline at all.
         """
-        edge_segments = list(pcb.segments_on_layer("Edge.Cuts"))
-
-        if not edge_segments:
+        outline = pcb.get_board_outline()
+        if not outline:
             return None
 
-        # Find bounding box of all edge segments
-        all_x = []
-        all_y = []
-
-        for seg in edge_segments:
-            all_x.extend([seg.start[0], seg.end[0]])
-            all_y.extend([seg.start[1], seg.end[1]])
+        # get_board_outline() already returns board-relative coordinates.
+        all_x = [p[0] for p in outline]
+        all_y = [p[1] for p in outline]
 
         if not all_x:
             return None
