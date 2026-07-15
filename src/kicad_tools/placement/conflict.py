@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 
 class ConflictType(Enum):
@@ -161,8 +162,16 @@ class ComponentInfo:
     layer: str = "F.Cu"  # Component layer
 
     # Bounding boxes (calculated from footprint)
-    courtyard: Rectangle | None = None  # Courtyard boundary
+    courtyard: Rectangle | None = None  # Courtyard boundary (axis-aligned bbox)
     pads_bbox: Rectangle | None = None  # Bounding box of all pads
+
+    # Real courtyard polygon (shapely) built from F.CrtYd/B.CrtYd graphics when
+    # resolvable (issue #4182).  When present, ``courtyard`` is this polygon's
+    # axis-aligned bounds (so off-board / edge-clearance bbox checks stay
+    # consistent), and ``_check_courtyard_overlap`` uses the true polygon
+    # intersection instead of the coarse bbox test.  ``None`` for footprints
+    # with no resolvable courtyard graphics (pads-bbox+margin fallback).
+    courtyard_polygon: Any | None = None
 
     # Lists of features
     pads: list["PadInfo"] = field(default_factory=list)
