@@ -226,6 +226,12 @@ class Conflict:
     actual_clearance: float | None = None  # Current clearance in mm
     required_clearance: float | None = None  # Required clearance in mm
     overlap_amount: float | None = None  # Overlap in mm (for courtyard)
+    # True when a courtyard-overlap finding was derived from the coarse
+    # pads-bbox+margin fallback (at least one footprint had no resolvable
+    # F.CrtYd/B.CrtYd artwork) rather than the real-polygon path (issue #4182).
+    # Fallback findings approximate; KiCad DRC skips courtyard-less footprints
+    # entirely, so the two engines diverge by design here (issue #4227).
+    is_bbox_fallback: bool = False
 
     def __str__(self) -> str:
         if self.actual_clearance is not None and self.required_clearance is not None:
@@ -252,6 +258,7 @@ class Conflict:
             "actual_clearance": self.actual_clearance,
             "required_clearance": self.required_clearance,
             "overlap_amount": self.overlap_amount,
+            "is_bbox_fallback": self.is_bbox_fallback,
         }
 
 
