@@ -249,3 +249,104 @@ class TestRouteAutoPersistsToPCB:
         assert a0_status.status == "complete", (
             f"Issue #2913: A0 is {a0_status.status} after route-auto success"
         )
+
+
+class _FakeSeg:
+    """Minimal stand-in for an orchestrator RoutingResult segment."""
+
+    def __init__(self, x1, y1, x2, y2, width=0.2, layer="F.Cu"):
+        self.x1 = x1
+        self.y1 = y1
+        self.x2 = x2
+        self.y2 = y2
+        self.width = width
+        self.layer = layer  # plain KiCad string; add_trace accepts str
+
+
+class _FakeVia:
+    """Minimal stand-in for an orchestrator RoutingResult via."""
+
+    def __init__(self, x, y, diameter=0.6, drill=0.3, layers=("F.Cu", "B.Cu")):
+        self.x = x
+        self.y = y
+        self.diameter = diameter
+        self.drill = drill
+        self.layers = layers
+
+
+class _FakeResult:
+    def __init__(self, segments, vias=None):
+        self.segments = segments
+        self.vias = vias or []
+
+
+class TestPersistIsIdempotent:
+    """Issue #4175: persisting an identical route twice must not double copper.
+
+    A completion-loop caller re-invokes ``route_net_auto`` per attempt; each
+    call re-solves the same corridor and previously appended an exact-duplicate
+    copy of the same copper.  ``_persist_routing_result_to_pcb`` now relies on
+    the schema-level dedup in ``add_trace``/``add_via`` so the second persist is
+    a no-op for copper while surfacing the dedup counts.
+    """
+
+    def _fresh_pcb(self):
+        from kicad_tools.schema.pcb import PCB
+
+        return PCB.create(width=100, height=100)
+
+    def test_second_persist_does_not_double_segments(self):
+        from kicad_tools.mcp.tools.routing import _persist_routing_result_to_pcb
+
+        pcb = self._fresh_pcb()
+        result = _FakeResult(
+            segments=[
+                _FakeSeg(10.0, 10.0, 50.0, 10.0),
+                _FakeSeg(50.0, 10.0, 50.0, 40.0),
+            ],
+            vias=[_FakeVia(50.0, 10.0)],
+        )
+
+        segs1, vias1, dsegs1, dvias1 = _persist_routing_result_to_pcb(pcb, result, "NetA")
+        assert (segs1, vias1) == (2, 1)
+        assert (dsegs1, dvias1) == (0, 0)
+        net_num = pcb.add_net("NetA").number
+        assert len(list(pcb.segments_in_net(net_num))) == 2
+        assert len(list(pcb.vias_in_net(net_num))) == 1
+
+        # Second identical persist: nothing new written, all deduplicated.
+        segs2, vias2, dsegs2, dvias2 = _persist_routing_result_to_pcb(pcb, result, "NetA")
+        assert (segs2, vias2) == (0, 0)
+        assert (dsegs2, dvias2) == (2, 1)
+        # Copper counts are unchanged -> emission is idempotent.
+        assert len(list(pcb.segments_in_net(net_num))) == 2
+        assert len(list(pcb.vias_in_net(net_num))) == 1
+
+    def test_route_net_auto_twice_is_idempotent(self, tmp_path):
+        """route_net_auto on the same net twice does not increase copper."""
+        from kicad_tools.mcp.tools.routing import (
+            _persist_routing_result_to_pcb,
+            route_net_auto,  # noqa: F401  (import guards the public entrypoint)
+        )
+        from kicad_tools.schema.pcb import PCB
+
+        # Build a board, persist a route once, save.
+        pcb = self._fresh_pcb()
+        result = _FakeResult(segments=[_FakeSeg(5.0, 5.0, 45.0, 5.0)])
+        _persist_routing_result_to_pcb(pcb, result, "V_TH_HI")
+        out = tmp_path / "board.kicad_pcb"
+        pcb.save(out)
+
+        first = out.read_text().count("(segment")
+        assert first >= 1
+
+        # Reload and persist the identical route again (simulating a retry).
+        pcb2 = PCB.load(out)
+        segs, vias, dsegs, dvias = _persist_routing_result_to_pcb(pcb2, result, "V_TH_HI")
+        assert segs == 0 and dsegs == 1
+        pcb2.save(out)
+
+        second = out.read_text().count("(segment")
+        assert second == first, (
+            f"Issue #4175: route-auto retry doubled copper ({first} -> {second} segments)"
+        )

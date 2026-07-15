@@ -1313,6 +1313,203 @@ def kicad7_multi_fp_pcb(tmp_path: Path) -> Path:
     return pcb_file
 
 
+class TestPcbDedupe:
+    """Tests for 'kicad-tools pcb dedupe' command (issue #4175)."""
+
+    def _bloated_board(self, path: Path):
+        """Create a board with pre-seeded exact-duplicate segments + vias."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        # 4 identical segments (route-auto retry pattern) + 1 distinct one.
+        for _ in range(4):
+            pcb.add_trace(
+                start=(10.0, 10.0),
+                end=(50.0, 10.0),
+                width=0.25,
+                layer="F.Cu",
+                net="Sig1",
+                dedupe=False,
+            )
+        pcb.add_trace(
+            start=(50.0, 10.0),
+            end=(50.0, 40.0),
+            width=0.25,
+            layer="F.Cu",
+            net="Sig1",
+            dedupe=False,
+        )
+        # 3 identical vias + 1 distinct via.
+        for _ in range(3):
+            pcb.add_via(x=50.0, y=10.0, net="Sig1", dedupe=False)
+        pcb.add_via(x=60.0, y=30.0, net="Sig1", dedupe=False)
+        pcb.save(path)
+        return pcb
+
+    def test_dedupe_removes_duplicates_in_place(self, tmp_path, capsys):
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        board = tmp_path / "bloated.kicad_pcb"
+        self._bloated_board(board)
+
+        # Sanity: the seeded board is genuinely bloated.
+        seeded = PCB.load(board)
+        assert len(seeded.segments) == 5
+        assert len(seeded.vias) == 4
+
+        args = Namespace(
+            pcb=str(board),
+            pcb_command="dedupe",
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+        assert run_pcb_command(args) == 0
+
+        captured = capsys.readouterr()
+        assert "Segments: 3" in captured.out  # 3 duplicate segments removed
+        assert "Vias:     2" in captured.out  # 2 duplicate vias removed
+
+        # In-place: the input file now has one instance per geometry.
+        cleaned = PCB.load(board)
+        assert len(cleaned.segments) == 2
+        assert len(cleaned.vias) == 2
+
+    def test_dedupe_output_override(self, tmp_path):
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        board = tmp_path / "bloated.kicad_pcb"
+        self._bloated_board(board)
+        out = tmp_path / "cleaned.kicad_pcb"
+
+        args = Namespace(
+            pcb=str(board),
+            pcb_command="dedupe",
+            output=str(out),
+            format="text",
+            dry_run=False,
+        )
+        assert run_pcb_command(args) == 0
+
+        # Input untouched, output deduplicated.
+        assert len(PCB.load(board).segments) == 5
+        assert len(PCB.load(out).segments) == 2
+        assert len(PCB.load(out).vias) == 2
+
+    def test_dedupe_json_reports_counts(self, tmp_path, capsys):
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        board = tmp_path / "bloated.kicad_pcb"
+        self._bloated_board(board)
+
+        args = Namespace(
+            pcb=str(board),
+            pcb_command="dedupe",
+            output=None,
+            format="json",
+            dry_run=False,
+        )
+        assert run_pcb_command(args) == 0
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["removed"]["segments"] == 3
+        assert data["removed"]["vias"] == 2
+        assert data["after"]["segments"] == 2
+        assert data["after"]["vias"] == 2
+
+    def test_dedupe_noop_on_clean_board(self, tmp_path, capsys):
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10.0, 10.0), end=(50.0, 10.0), net="Sig1")
+        pcb.add_via(x=30.0, y=20.0, net="Sig1")
+        board = tmp_path / "clean.kicad_pcb"
+        pcb.save(board)
+
+        args = Namespace(
+            pcb=str(board),
+            pcb_command="dedupe",
+            output=None,
+            format="json",
+            dry_run=False,
+        )
+        assert run_pcb_command(args) == 0
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["removed"] == {"segments": 0, "vias": 0}
+        # Board is unchanged.
+        reloaded = PCB.load(board)
+        assert len(reloaded.segments) == 1
+        assert len(reloaded.vias) == 1
+
+    def test_dedupe_preserves_connectivity(self, tmp_path):
+        """Deduping keeps one copy of each distinct geometry, so nets stay wired."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        board = tmp_path / "bloated.kicad_pcb"
+        self._bloated_board(board)
+        before = PCB.load(board)
+        net_num = next(n.number for n in before.nets.values() if n.name == "Sig1")
+        before_geom = {
+            (round(s.start[0], 3), round(s.start[1], 3), round(s.end[0], 3), round(s.end[1], 3))
+            for s in before.segments_in_net(net_num)
+        }
+
+        args = Namespace(
+            pcb=str(board),
+            pcb_command="dedupe",
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+        assert run_pcb_command(args) == 0
+
+        after = PCB.load(board)
+        after_geom = {
+            (round(s.start[0], 3), round(s.start[1], 3), round(s.end[0], 3), round(s.end[1], 3))
+            for s in after.segments_in_net(net_num)
+        }
+        # No distinct segment geometry lost -> connectivity unchanged.
+        assert before_geom == after_geom
+
+    def test_dedupe_dry_run_does_not_modify(self, tmp_path, capsys):
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        board = tmp_path / "bloated.kicad_pcb"
+        self._bloated_board(board)
+
+        args = Namespace(
+            pcb=str(board),
+            pcb_command="dedupe",
+            output=None,
+            format="text",
+            dry_run=True,
+        )
+        assert run_pcb_command(args) == 0
+        assert "dry run" in capsys.readouterr().out.lower()
+
+        # File untouched.
+        assert len(PCB.load(board).segments) == 5
+        assert len(PCB.load(board).vias) == 4
+
+
 class TestPcbReannotate:
     """Tests for pcb reannotate command."""
 

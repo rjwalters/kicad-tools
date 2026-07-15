@@ -1610,6 +1610,37 @@ def _add_pcb_parser(subparsers) -> None:
         help="Show what would be removed without modifying files",
     )
 
+    # pcb dedupe (issue #4175)
+    pcb_dedupe = pcb_subparsers.add_parser(
+        "dedupe",
+        help="Remove exact-duplicate copper (segments + vias)",
+        description="Remove pre-existing exact-duplicate copper from a board: "
+        "segments and vias that share the same net, geometry, and layer(s) "
+        "(differing only in uuid). Such duplicates are invisible to netlist "
+        "connectivity but silently bloat the file and slow later DRC/optimize "
+        "passes. One instance of each distinct geometry is kept, so net "
+        "connectivity is unchanged. In-place by default; use -o to write "
+        "elsewhere.",
+    )
+    pcb_dedupe.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_dedupe.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input in place)",
+    )
+    pcb_dedupe.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_dedupe.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report duplicates without modifying files",
+    )
+
     # pcb reannotate
     pcb_reannotate = pcb_subparsers.add_parser(
         "reannotate",

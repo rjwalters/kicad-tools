@@ -50,6 +50,59 @@ def _is_power_net(name: str, pattern: re.Pattern[str] | None = None) -> bool:
     return pat.search(name) is not None
 
 
+# Copper-deduplication support (issue #4175).
+#
+# ``route-auto`` (and any completion-loop caller) re-solves the same corridor
+# on every external retry and appends a geometrically-identical, uuid-distinct
+# copy of the same copper.  ``add_trace``/``add_via`` deduplicate against an
+# incrementally-maintained key set so the same net-geometry is never appended
+# twice; ``dedupe_copper`` cleans up boards that were already bloated.
+#
+# ``_DEDUP_QUANT`` = 3 decimal places rounds coordinates/widths to ~1 micron at
+# mm scale, matching the ``EPS = 1e-3`` mm coincidence tolerance established by
+# ``router/connectivity.py`` (#4165) rather than inventing a second epsilon.
+_DEDUP_QUANT = 3
+
+# Type aliases for the dedup keys.
+_SegmentKey = tuple[int, str, tuple[tuple[float, float], tuple[float, float]], float]
+_ViaKey = tuple[int, float, float, tuple[str, ...]]
+
+
+def _segment_dedup_key(
+    net_number: int,
+    layer: str,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    width: float,
+) -> _SegmentKey:
+    """Order-insensitive dedup key for a trace segment.
+
+    Two segments are duplicates only when they share net, layer, width, and the
+    same *unordered* pair of endpoints (a re-solved corridor may walk the same
+    two points in either direction).  Segments that merely share one endpoint,
+    or that differ in layer/width/net, are NOT duplicates.
+    """
+    p1 = (round(start[0], _DEDUP_QUANT), round(start[1], _DEDUP_QUANT))
+    p2 = (round(end[0], _DEDUP_QUANT), round(end[1], _DEDUP_QUANT))
+    endpoints = (p1, p2) if p1 <= p2 else (p2, p1)
+    return (net_number, layer, endpoints, round(width, _DEDUP_QUANT))
+
+
+def _via_dedup_key(
+    net_number: int,
+    x: float,
+    y: float,
+    layers: tuple[str, ...] | list[str],
+) -> _ViaKey:
+    """Dedup key for a via: net + rounded position + order-insensitive layers."""
+    return (
+        net_number,
+        round(x, _DEDUP_QUANT),
+        round(y, _DEDUP_QUANT),
+        tuple(sorted(layers)),
+    )
+
+
 def _segment_span_intersects_region(
     start: tuple[float, float],
     end: tuple[float, float],
@@ -1439,6 +1492,12 @@ class PCB:
         self._footprints: list[Footprint] = []
         self._segments: list[Segment] = []
         self._vias: list[Via] = []
+        # Incrementally-maintained dedup key sets (issue #4175).  Built lazily
+        # from _segments/_vias on first add_trace/add_via, then updated on each
+        # append.  Reset to None whenever the underlying lists are bulk-mutated
+        # (strip_traces, dedupe_copper, segments/vias reload) so they rebuild.
+        self._segment_keys: set[_SegmentKey] | None = None
+        self._via_keys: set[_ViaKey] | None = None
         self._zones: list[Zone] = []
         self._graphic_lines: list[GraphicLine] = []
         self._graphic_arcs: list[GraphicArc] = []
@@ -2560,6 +2619,7 @@ class PCB:
         self._footprints = []
         self._segments = []
         self._vias = []
+        self._invalidate_dedup_keys()
         self._zones = []
         self._graphic_lines = []
         self._graphic_arcs = []
@@ -2813,6 +2873,7 @@ class PCB:
             if not should_remove:
                 remaining.append(seg)
         self._segments = remaining
+        self._invalidate_dedup_keys()
 
         return removed_count
 
@@ -4541,6 +4602,33 @@ class PCB:
 
         return None
 
+    def _invalidate_dedup_keys(self) -> None:
+        """Drop the cached copper dedup key sets (issue #4175).
+
+        Call after any bulk mutation of ``_segments``/``_vias`` (strip,
+        dedupe, reload) so the next ``add_trace``/``add_via`` rebuilds them.
+        """
+        self._segment_keys = None
+        self._via_keys = None
+
+    def _ensure_segment_keys(self) -> set[_SegmentKey]:
+        """Return the segment dedup key set, building it lazily if needed."""
+        if self._segment_keys is None:
+            self._segment_keys = {
+                _segment_dedup_key(seg.net_number, seg.layer, seg.start, seg.end, seg.width)
+                for seg in self._segments
+            }
+        return self._segment_keys
+
+    def _ensure_via_keys(self) -> set[_ViaKey]:
+        """Return the via dedup key set, building it lazily if needed."""
+        if self._via_keys is None:
+            self._via_keys = {
+                _via_dedup_key(via.net_number, via.position[0], via.position[1], via.layers)
+                for via in self._vias
+            }
+        return self._via_keys
+
     def add_trace(
         self,
         start: tuple[float, float] | tuple[str, str],
@@ -4549,6 +4637,7 @@ class PCB:
         layer: str = "F.Cu",
         net: str | None = None,
         waypoints: list[tuple[float, float]] | None = None,
+        dedupe: bool = True,
     ) -> list[Segment]:
         """
         Add a trace (one or more segments) between two points or pads.
@@ -4563,9 +4652,15 @@ class PCB:
             layer: Copper layer name (default "F.Cu")
             net: Net name for the trace. Auto-detected from pads if not specified.
             waypoints: Optional list of (x, y) intermediate points
+            dedupe: When True (default, issue #4175), skip appending any
+                segment whose (net, layer, unordered endpoints, width) key
+                already exists on the board.  Prevents route-auto retries from
+                accumulating exact-duplicate copper.  Set False only if you
+                deliberately need identical-geometry duplicates.
 
         Returns:
-            List of Segment objects that were created
+            List of Segment objects that were created (skipped duplicates are
+            excluded, so this may be shorter than the number of point-pairs).
 
         Raises:
             ValueError: If pad references are invalid or positions cannot be determined
@@ -4630,7 +4725,16 @@ class PCB:
         # we add the board origin offset when constructing the sexp node.
         ox, oy = self._board_origin
         segments = []
+        seg_keys = self._ensure_segment_keys() if dedupe else None
         for i in range(len(points) - 1):
+            if seg_keys is not None:
+                key = _segment_dedup_key(net_number, layer, points[i], points[i + 1], width)
+                if key in seg_keys:
+                    # Exact-duplicate copper already on the board (issue #4175):
+                    # skip appending rather than accumulating a uuid-distinct
+                    # copy.  Connectivity is unaffected (identical geometry).
+                    continue
+                seg_keys.add(key)
             seg = Segment(
                 start=points[i],
                 end=points[i + 1],
@@ -4664,7 +4768,8 @@ class PCB:
         drill: float = 0.3,
         layers: tuple[str, str] = ("F.Cu", "B.Cu"),
         net: str | None = None,
-    ) -> Via:
+        dedupe: bool = True,
+    ) -> Via | None:
         """
         Add a via at the specified position.
 
@@ -4678,9 +4783,13 @@ class PCB:
             drill: Via drill diameter in mm (default 0.3)
             layers: Tuple of layer names to connect (default ("F.Cu", "B.Cu"))
             net: Net name for the via (optional)
+            dedupe: When True (default, issue #4175), skip appending a via
+                whose (net, rounded position, unordered layers) key already
+                exists on the board.
 
         Returns:
-            The Via object that was created
+            The Via object that was created, or None if an identical via was
+            already present and was skipped as a duplicate.
 
         Example:
             >>> pcb = PCB.load("board.kicad_pcb")
@@ -4691,6 +4800,14 @@ class PCB:
         if net:
             net_obj = self.add_net(net)
             net_number = net_obj.number
+
+        if dedupe:
+            via_keys = self._ensure_via_keys()
+            key = _via_dedup_key(net_number, x, y, layers)
+            if key in via_keys:
+                # Exact-duplicate via already on the board (issue #4175): skip.
+                return None
+            via_keys.add(key)
 
         via = Via(
             position=(x, y),
@@ -4718,6 +4835,72 @@ class PCB:
             self._sexp.append(via.to_sexp())
 
         return via
+
+    def dedupe_copper(self) -> dict[str, int]:
+        """Remove pre-existing exact-duplicate copper (issue #4175).
+
+        Scans existing segments and vias, groups them by the same dedup keys
+        used by ``add_trace``/``add_via`` (net + geometry + layer/width, with
+        order-insensitive endpoints and ~1 micron rounding), keeps the first
+        element of each group, and drops the rest from both the in-memory
+        lists and the S-expression tree (so ``save()`` persists the cleanup).
+
+        Because every removed element is geometrically and electrically
+        identical to a copy that remains, net connectivity is unchanged.
+
+        Returns:
+            ``{"segments": n_seg_removed, "vias": n_via_removed}``.
+        """
+        # Determine which segment/via uuids to drop (keep first per key).
+        seg_uuids_to_remove: set[str] = set()
+        seen_seg_keys: set[_SegmentKey] = set()
+        kept_segments: list[Segment] = []
+        for seg in self._segments:
+            skey = _segment_dedup_key(seg.net_number, seg.layer, seg.start, seg.end, seg.width)
+            if skey in seen_seg_keys:
+                if seg.uuid:
+                    seg_uuids_to_remove.add(seg.uuid)
+            else:
+                seen_seg_keys.add(skey)
+                kept_segments.append(seg)
+
+        via_uuids_to_remove: set[str] = set()
+        seen_via_keys: set[_ViaKey] = set()
+        kept_vias: list[Via] = []
+        for via in self._vias:
+            vkey = _via_dedup_key(via.net_number, via.position[0], via.position[1], via.layers)
+            if vkey in seen_via_keys:
+                if via.uuid:
+                    via_uuids_to_remove.add(via.uuid)
+            else:
+                seen_via_keys.add(vkey)
+                kept_vias.append(via)
+
+        n_seg_removed = len(self._segments) - len(kept_segments)
+        n_via_removed = len(self._vias) - len(kept_vias)
+
+        # Remove duplicate S-expression nodes by uuid.
+        if seg_uuids_to_remove or via_uuids_to_remove:
+            sexp_to_remove = []
+            for child in self._sexp.children:
+                if child.is_atom:
+                    continue
+                if child.name == "segment":
+                    uuid_node = child.find("uuid")
+                    if uuid_node and (uuid_node.get_string(0) or "") in seg_uuids_to_remove:
+                        sexp_to_remove.append(child)
+                elif child.name == "via":
+                    uuid_node = child.find("uuid")
+                    if uuid_node and (uuid_node.get_string(0) or "") in via_uuids_to_remove:
+                        sexp_to_remove.append(child)
+            for node in sexp_to_remove:
+                self._sexp.remove(node)
+
+        self._segments = kept_segments
+        self._vias = kept_vias
+        self._invalidate_dedup_keys()
+
+        return {"segments": n_seg_removed, "vias": n_via_removed}
 
     def routing_status(self) -> dict:
         """
@@ -5481,6 +5664,10 @@ class PCB:
                     for vl in v.layers
                 )
             ]
+
+        # Copper lists were bulk-mutated: drop cached dedup keys (issue #4175)
+        # so a later add_trace/add_via rebuilds them from the surviving copper.
+        self._invalidate_dedup_keys()
 
         return {
             "segments": removed_segments,
