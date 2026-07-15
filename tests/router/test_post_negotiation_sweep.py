@@ -34,7 +34,8 @@ from kicad_tools.router.algorithms import (
 )
 from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.primitives import Route
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.primitives import Route, Segment
 
 
 def _build_two_net_router() -> Autorouter:
@@ -196,6 +197,191 @@ class TestSweepMechanism:
         assert net_routes[2] == net2_before, "other nets must be untouched"
         assert len(ar.routes) == routes_len_before, "no orphan copper committed"
         assert len(ar.routing_failures) == failures_before, "no orphan failure records"
+
+    def test_drc_dirty_rescue_rolls_back(self, monkeypatch):
+        """Issue #4159 (Judge #4192): a rescue that CONNECTS the net but
+        commits copper physically overlapping a FOREIGN net's committed
+        trace is DRC-dirty (a net-new blocking clearance violation) and must
+        be rolled back verbatim -- the sweep is additive for the DRC-error
+        count, not only the net-completion count.
+
+        Repro: net 2 routes as a vertical trace at x=10 on F_CU.  Strand net
+        1, then patch its solo ``route_net`` to return a horizontal trace at
+        y=10 that CONNECTS net 1's two pads (2,10)->(38,10) but crosses net
+        2's copper at (10,10) with zero edge-to-edge clearance -- a physical
+        overlap the ``copper_overlap_only`` seg-seg gate flags as blocking.
+        The sweep must detect the net-new violation and leave net 1 stranded.
+        """
+        ar = _build_two_net_router()
+        ar.route_all_negotiated(max_iterations=2, timeout=30.0, adaptive=False, perturbation=False)
+        net_routes, pads_by_net = _snapshot_net_state(ar)
+
+        neg = NegotiatedRouter(
+            ar.grid,
+            ar.router,
+            ar.rules,
+            ar.net_class_map,
+            congestion_estimator=ar._ensure_congestion_estimator(),
+        )
+        neg.rip_up_nets([1], net_routes, ar.routes)
+        assert net_routes[1] == []
+        net2_before = list(net_routes[2])
+        routes_len_before = len(ar.routes)
+
+        # A connected-BUT-overlapping solo route for net 1: one horizontal
+        # segment joining both net-1 pads that lies on top of net 2's
+        # vertical trace at the (10,10) crossing (same layer, physical
+        # overlap => net-new blocking seg-seg violation).
+        def dirty_route_net(net, per_net_timeout=None):
+            seg = Segment(
+                x1=2.0,
+                y1=10.0,
+                x2=38.0,
+                y2=10.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=net,
+                net_name="LONGHAUL",
+            )
+            route = Route(net=net, net_name="LONGHAUL", segments=[seg], vias=[])
+            ar._mark_route(route)
+            ar.routes.append(route)
+            net_routes.setdefault(net, []).append(route)
+            return [route]
+
+        monkeypatch.setattr(ar, "route_net", dirty_route_net)
+
+        rescued = ar._post_negotiation_sweep(
+            stranded_nets=[1],
+            net_routes=net_routes,
+            pads_by_net=pads_by_net,
+            per_net_timeout=POST_NEGOTIATION_SWEEP_PER_NET_S,
+            deadline=time.time() + POST_NEGOTIATION_SWEEP_BUDGET_S,
+        )
+        assert rescued == [], "DRC-dirty rescue must NOT be committed"
+        assert net_routes[1] == [], "DRC-dirty rescue must leave the net stranded"
+        assert net_routes[2] == net2_before, "foreign net must be untouched"
+        assert len(ar.routes) == routes_len_before, "no DRC-dirty copper committed"
+
+    def test_drc_clean_rescue_is_committed(self, monkeypatch):
+        """Control for ``test_drc_dirty_rescue_rolls_back``: a rescue that
+        connects the net WITHOUT overlapping foreign copper is committed --
+        the DRC gate must not reject a clean solo route.
+
+        Net 1's solo route runs along y=19.5 (clear of net 2's x=10 vertical
+        trace, which spans y=2..18), then drops to its pads: connected AND
+        clean, so the sweep commits it.
+        """
+        ar = _build_two_net_router()
+        ar.route_all_negotiated(max_iterations=2, timeout=30.0, adaptive=False, perturbation=False)
+        net_routes, pads_by_net = _snapshot_net_state(ar)
+
+        neg = NegotiatedRouter(
+            ar.grid,
+            ar.router,
+            ar.rules,
+            ar.net_class_map,
+            congestion_estimator=ar._ensure_congestion_estimator(),
+        )
+        neg.rip_up_nets([1], net_routes, ar.routes)
+
+        def clean_route_net(net, per_net_timeout=None):
+            # Detour below net 2's trace: (2,10)->(2,19.5)->(38,19.5)->(38,10).
+            segs = [
+                Segment(
+                    x1=2.0,
+                    y1=10.0,
+                    x2=2.0,
+                    y2=19.5,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net,
+                    net_name="LONGHAUL",
+                ),
+                Segment(
+                    x1=2.0,
+                    y1=19.5,
+                    x2=38.0,
+                    y2=19.5,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net,
+                    net_name="LONGHAUL",
+                ),
+                Segment(
+                    x1=38.0,
+                    y1=19.5,
+                    x2=38.0,
+                    y2=10.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net,
+                    net_name="LONGHAUL",
+                ),
+            ]
+            route = Route(net=net, net_name="LONGHAUL", segments=segs, vias=[])
+            ar._mark_route(route)
+            ar.routes.append(route)
+            net_routes.setdefault(net, []).append(route)
+            return [route]
+
+        monkeypatch.setattr(ar, "route_net", clean_route_net)
+
+        rescued = ar._post_negotiation_sweep(
+            stranded_nets=[1],
+            net_routes=net_routes,
+            pads_by_net=pads_by_net,
+            per_net_timeout=POST_NEGOTIATION_SWEEP_PER_NET_S,
+            deadline=time.time() + POST_NEGOTIATION_SWEEP_BUDGET_S,
+        )
+        assert rescued == [1], "a clean, connected rescue must be committed"
+        assert net_routes[1], "rescued net must have committed routes"
+
+    def test_diffpair_leg_is_skipped(self, monkeypatch):
+        """Issue #4159 (Judge #4192): a stranded DIFFERENTIAL-PAIR LEG must
+        NOT be solo-rescued.  ``route_net`` is single-ended -- it ignores the
+        pair's coupled length-matching / within-pair spacing -- so rescuing
+        one leg produces the board-07 regression (a connected leg that then
+        fails ``diffpair_length_skew`` / ``diffpair_routing_continuity``,
+        raising the blocking-DRC count).  The sweep must skip the leg and
+        never call ``route_net`` for it.
+        """
+        ar = Autorouter(width=40.0, height=20.0)
+        # DAT_P / DAT_N are suffix-detected as a differential pair.
+        ar.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 2.0, "y": 9.0, "net": 1, "net_name": "DAT_P"},
+                {"number": "2", "x": 38.0, "y": 9.0, "net": 1, "net_name": "DAT_P"},
+                {"number": "3", "x": 2.0, "y": 11.0, "net": 2, "net_name": "DAT_N"},
+                {"number": "4", "x": 38.0, "y": 11.0, "net": 2, "net_name": "DAT_N"},
+            ],
+        )
+        assert "DAT_P" in ar.get_diff_pair_map(), "test setup: DAT_P must be a diff-pair leg"
+
+        attempts: list[int] = []
+        orig = ar.route_net
+
+        def counting_route_net(net, per_net_timeout=None):
+            attempts.append(net)
+            return orig(net, per_net_timeout=per_net_timeout)
+
+        monkeypatch.setattr(ar, "route_net", counting_route_net)
+
+        # Net 1 (DAT_P) is stranded (no committed copper) and is a diff-pair
+        # leg; the sweep must skip it without ever invoking ``route_net``.
+        rescued = ar._post_negotiation_sweep(
+            stranded_nets=[1],
+            net_routes={1: [], 2: []},
+            pads_by_net={
+                1: [ar.pads[k] for k in ar.nets[1]],
+                2: [ar.pads[k] for k in ar.nets[2]],
+            },
+            per_net_timeout=POST_NEGOTIATION_SWEEP_PER_NET_S,
+            deadline=time.time() + POST_NEGOTIATION_SWEEP_BUDGET_S,
+        )
+        assert rescued == [], "a diff-pair leg must not be rescued"
+        assert attempts == [], "the sweep must not solo-route a diff-pair leg"
 
     def test_bounded_by_deadline(self):
         """A deadline already in the past terminates the sweep immediately

@@ -11813,11 +11813,29 @@ class Autorouter:
             congestion_estimator=self._ensure_congestion_estimator(),
         )
 
+        # Issue #4159 (Judge #4192): a differential-pair LEG must never be
+        # rescued by this SOLO ``route_net`` pass.  ``route_net`` is
+        # single-ended -- it ignores the pair's coupled length-matching and
+        # within-pair spacing -- so solo-routing one leg of a stranded pair
+        # produces exactly the board-07 regression: a leg that connects but
+        # then fails ``diffpair_length_skew`` / ``diffpair_routing_continuity``
+        # (and, when it drifts onto its partner, ``diffpair_clearance_intra``),
+        # raising the blocking-DRC count 8 -> 13.  A stranded diff-pair leg is
+        # the coupled router's job, not this sweep's; skipping legs keeps the
+        # sweep additive-for-DRC while still rescuing the single-ended
+        # power/long-haul nets it targets (the softstart motivating case).
+        diffpair_leg_names = set(self.get_diff_pair_map().keys())
+
         for net in stranded_nets:
             if deadline is not None and _time.time() >= deadline:
                 break
             pads = pads_by_net.get(net)
             if not pads or len(pads) < 2:
+                continue
+
+            # Skip differential-pair legs (see above): a solo re-route cannot
+            # honour the pair's coupling and would inject diff-pair DRC errors.
+            if self.net_names.get(net, "") in diffpair_leg_names:
                 continue
 
             # Snapshot the pre-attempt state so a failed solo route unwinds
@@ -11838,7 +11856,27 @@ class Autorouter:
             conn = _validate_conn(candidate, {net: pads})
             connected = bool(conn.get(net, {}).get("connected", False))
 
+            # Issue #4159 (Judge #4192): the sweep must be additive for the
+            # DRC-error count too, not only the net-completion count.  A solo
+            # ``route_net`` re-route skips the negotiated loop's clearance
+            # scrubbing (the ``_demote_*`` safety nets ran BEFORE the sweep),
+            # so a connected rescue can still commit copper that violates a
+            # foreign net's / partner leg's clearance -- exactly the board-07
+            # regression (within-pair coupling clearance -0.375mm < 0.100mm).
+            # A stranded net contributes ZERO copper pre-rescue, so any
+            # blocking clearance violation attributable to its freshly-marked
+            # copper is NET-NEW; if it introduces one, roll the net back
+            # verbatim (same path as a connectivity failure) and leave it
+            # stranded.  This restores the invariant: the sweep can raise the
+            # routed count AND never increases the blocking-DRC-error count.
+            drc_clean = True
             if connected and candidate:
+                candidate_new = [r for r in candidate if r not in pre_routes]
+                drc_clean = not self._rescued_net_adds_blocking_drc(
+                    net, candidate_new, net_routes, neg_router
+                )
+
+            if connected and candidate and drc_clean:
                 net_routes[net] = candidate
                 # Clear this net's stale failure records (it is routed now).
                 self.routing_failures = [f for f in self.routing_failures if f.net != net]
@@ -11847,7 +11885,9 @@ class Autorouter:
                 # Roll back: rip up everything ``route_net`` just marked for
                 # this net (grid unmark + remove from self.routes), restore
                 # the pre-attempt net_routes entry, and drop the fresh failure
-                # diagnostics so the sweep leaves no residue.
+                # diagnostics so the sweep leaves no residue.  Fires for a
+                # partial route (not connected) OR a connected-but-DRC-dirty
+                # rescue (net-new blocking clearance violation).
                 to_unwind = list(net_routes.get(net, []))
                 to_unwind.extend(r for r in new_routes if r not in to_unwind)
                 temp_map = {net: to_unwind}
@@ -11861,6 +11901,188 @@ class Autorouter:
                 del self.routing_failures[failures_len:]
 
         return rescued
+
+    def _rescued_net_adds_blocking_drc(
+        self,
+        net: int,
+        new_routes: list[Route],
+        net_routes: dict[int, list[Route]],
+        neg_router: NegotiatedRouter,
+    ) -> bool:
+        """Return True if a rescued net's fresh copper adds a blocking DRC error.
+
+        Issue #4159 (Judge #4192): the post-negotiation sweep re-routes a
+        stranded net SOLO via :meth:`route_net`, which does NOT run the
+        negotiated loop's clearance-scrubbing ``_demote_*`` safety nets (they
+        executed BEFORE the sweep).  A connected-but-DRC-dirty rescue would
+        raise the board's blocking-DRC-error count -- exactly the board-07
+        regression (within-pair coupling clearance ``-0.375mm < 0.100mm``).
+
+        This gate reuses the SAME per-net clearance validators the three
+        ``_demote_*`` finalization safety nets use, so the sweep's commit
+        decision agrees bit-for-bit with the checks the negotiated path
+        already trusts as "blocking":
+
+        * :meth:`NegotiatedRouter.find_segment_segment_violation_pairs`
+          (``copper_overlap_only=True``) -- the rescued net's copper
+          physically overlaps a FOREIGN net's copper (unmanufacturable
+          short; mirrors :meth:`_demote_seg_seg_overlap_nets`).  A negative
+          within-pair coupling clearance (the board-07 mode) is a physical
+          overlap between the two diff-pair legs -- distinct nets -- so it
+          is caught here.
+        * :meth:`RoutingGrid.worst_segment_pad_deficit` /
+          :meth:`RoutingGrid.worst_via_pad_deficit` -- copper vs a foreign
+          pad beyond nudge reach (mirrors
+          :meth:`_demote_pad_clearance_violation_nets`).
+        * :meth:`RoutingGrid.worst_via_segment_deficit` -- a via barrel
+          shorting a foreign-net trace (mirrors
+          :meth:`_demote_via_segment_violation_nets`).
+        * :func:`diffpair_routing.find_intra_pair_clearance_violations` --
+          the rescued net is one leg of a differential pair and its solo
+          re-route violated the per-pair intra-pair clearance floor against
+          its partner leg (catches positive-but-sub-floor within-pair gaps
+          the physical-overlap seg-seg check would miss).
+
+        A stranded net contributes ZERO copper before the rescue, so any
+        blocking violation attributable to ``new_routes`` is NET-NEW: the
+        caller rolls the net back rather than commit it, keeping the sweep's
+        additive guarantee true for the DRC-error count as well as the
+        net-completion count.
+
+        Args:
+            net: The rescued net id.
+            new_routes: The routes ``route_net`` freshly marked for ``net``
+                (the pre-existing routes are excluded by the caller).
+            net_routes: The current committed routes (the rescued copper is
+                already present in ``net_routes[net]`` and on the grid).
+            neg_router: A :class:`NegotiatedRouter` for the seg-seg
+                pair-detection engine (the same helper the demote passes use).
+
+        Returns:
+            ``True`` when the fresh copper introduces at least one net-new
+            blocking clearance violation; ``False`` when it is clean.
+        """
+        if not new_routes:
+            return False
+
+        nudge_reach = self.grid.resolution
+        pitches = self.component_pitches
+        own_refs = {ref for ref, _pin in self.nets.get(net, [])}
+
+        # --- Segment-vs-foreign-copper physical overlap (mirrors #3433) ---
+        # Restrict the seg-seg pair scan to the rescued net vs the rest of the
+        # committed universe.  ``copper_overlap_only=True`` fires only on
+        # physical overlap (negative edge-to-edge clearance), so it never
+        # false-positives on a legitimately-coupled diff-pair near-miss; a
+        # NEGATIVE within-pair coupling clearance (board-07) IS an overlap and
+        # is caught here.
+        extra = self._collect_extra_routes_for_revalidation(net_routes)
+        overlap_pairs = neg_router.find_segment_segment_violation_pairs(
+            net_routes,
+            trace_clearance=self.rules.trace_clearance,
+            extra_routes=extra,
+            copper_overlap_only=True,
+        )
+        if any(net in pair for pair in overlap_pairs):
+            return True
+
+        # --- Copper-vs-foreign-pad clearance beyond nudge reach (#3545/#3566) ---
+        for route in new_routes:
+            for seg in route.segments:
+                deficit, _loc = self.grid.worst_segment_pad_deficit(
+                    seg,
+                    exclude_net=net,
+                    component_pitches=pitches,
+                    exclude_refs=own_refs or None,
+                )
+                if deficit > nudge_reach:
+                    return True
+            for via in route.vias:
+                deficit, _loc = self.grid.worst_via_pad_deficit(
+                    via,
+                    exclude_net=net,
+                    component_pitches=pitches,
+                    exclude_refs=own_refs or None,
+                )
+                if deficit > nudge_reach:
+                    return True
+
+        # --- Via barrel shorting a foreign-net trace (#3486) ---
+        committed = [r for routes in net_routes.values() for r in routes]
+        for route in new_routes:
+            for via in route.vias:
+                deficit, _loc = self.grid.worst_via_segment_deficit(
+                    via,
+                    exclude_net=net,
+                    extra_routes=extra,
+                    foreign_routes=committed,
+                )
+                if deficit > nudge_reach:
+                    return True
+
+        # --- Differential-pair intra-pair clearance (#3023 / board-07) ---
+        # A solo ``route_net`` re-route of a diff-pair leg ignores the coupled
+        # within-pair spacing floor; check the rescued leg against its partner.
+        if self._rescued_leg_breaks_intra_pair_clearance(net, net_routes):
+            return True
+
+        return False
+
+    def _rescued_leg_breaks_intra_pair_clearance(
+        self,
+        net: int,
+        net_routes: dict[int, list[Route]],
+    ) -> bool:
+        """Return True if ``net`` is a diff-pair leg whose copper breaks the
+        per-pair intra-pair clearance floor against its partner leg.
+
+        Issue #4159 (Judge #4192): the board-07 rescue regression was a
+        within-pair coupling clearance violation -- a solo-rerouted diff-pair
+        leg drifting too close to (or overlapping) its partner.  This reuses
+        :func:`diffpair_routing.find_intra_pair_clearance_violations` with the
+        per-pair ``effective_intra_pair_clearance()`` threshold, the same
+        detector :meth:`diffpair_intra_clearance_violations` surfaces.
+        """
+        from .diffpair_routing import find_intra_pair_clearance_violations
+
+        net_name = self.net_names.get(net)
+        if not net_name:
+            return False
+
+        pair_map = self.get_diff_pair_map()
+        partner_name = pair_map.get(net_name)
+        if not partner_name:
+            return False
+
+        # Resolve the partner net id (reverse the net_names map).
+        partner_net: int | None = None
+        for nid, nname in self.net_names.items():
+            if nname == partner_name:
+                partner_net = nid
+                break
+        if partner_net is None:
+            return False
+
+        my_routes = net_routes.get(net, [])
+        partner_routes = net_routes.get(partner_net, [])
+        if not my_routes or not partner_routes:
+            return False
+
+        net_class = self.net_class_map.get(net_name)
+        if net_class is None:
+            return False
+        threshold = float(net_class.effective_intra_pair_clearance())
+        if threshold <= 0.0:
+            return False
+
+        for p_route in my_routes:
+            for n_route in partner_routes:
+                violation = find_intra_pair_clearance_violations(
+                    p_route, n_route, threshold, pair_name=net_name
+                )
+                if violation is not None:
+                    return True
+        return False
 
     # =========================================================================
     # TWO-PHASE ROUTING (GLOBAL + DETAILED)
