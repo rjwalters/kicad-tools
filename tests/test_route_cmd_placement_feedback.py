@@ -572,6 +572,65 @@ class TestResolvePlacementFeedbackAnchors:
         assert anchors == set()
 
 
+class TestAnchorRefValidation:
+    """Issue #4151: warn on --placement-feedback-anchor refs that match
+    no footprint on the board (same silently-inert-configuration failure
+    class as #4149)."""
+
+    def test_unknown_anchor_ref_warns(self, capsys):
+        from kicad_tools.cli.route_cmd import _resolve_placement_feedback_anchors
+
+        pcb = _MockPCB([_MockFootprint("U1"), _MockFootprint("J1")])
+        args = SimpleNamespace(
+            placement_feedback_anchor="U1,NOTAREALREF",
+            placement_feedback_no_anchor=None,
+        )
+        anchors = _resolve_placement_feedback_anchors(pcb, args)
+        # Matched ref still anchors correctly.
+        assert "U1" in anchors
+        assert "NOTAREALREF" in anchors  # still absorbed (tolerant, non-fatal)
+        out = capsys.readouterr().out
+        assert "not found on board" in out
+        assert "NOTAREALREF" in out
+
+    def test_unknown_no_anchor_ref_warns(self, capsys):
+        from kicad_tools.cli.route_cmd import _resolve_placement_feedback_anchors
+
+        pcb = _MockPCB([_MockFootprint("J1")])
+        args = SimpleNamespace(
+            placement_feedback_anchor=None,
+            placement_feedback_no_anchor="TYPO9",
+        )
+        _resolve_placement_feedback_anchors(pcb, args)
+        out = capsys.readouterr().out
+        assert "not found on board" in out
+        assert "TYPO9" in out
+
+    def test_all_known_refs_no_warning(self, capsys):
+        from kicad_tools.cli.route_cmd import _resolve_placement_feedback_anchors
+
+        pcb = _MockPCB([_MockFootprint("U1"), _MockFootprint("U2")])
+        args = SimpleNamespace(
+            placement_feedback_anchor="U1",
+            placement_feedback_no_anchor="U2",
+        )
+        _resolve_placement_feedback_anchors(pcb, args)
+        out = capsys.readouterr().out
+        assert "not found on board" not in out
+
+    def test_quiet_suppresses_warning(self, capsys):
+        from kicad_tools.cli.route_cmd import _resolve_placement_feedback_anchors
+
+        pcb = _MockPCB([_MockFootprint("U1")])
+        args = SimpleNamespace(
+            placement_feedback_anchor="GHOST1",
+            placement_feedback_no_anchor=None,
+        )
+        _resolve_placement_feedback_anchors(pcb, args, quiet=True)
+        out = capsys.readouterr().out
+        assert out == ""
+
+
 class TestPlacementDiffPath:
     def test_explicit_output(self, tmp_path: Path):
         from kicad_tools.cli.route_cmd import _placement_diff_path
@@ -992,3 +1051,303 @@ class TestInnerParserPlacementFeedbackFlags:
         assert isinstance(call_kwargs["stagnation_patience"], int)
         assert call_kwargs["outer_timeout"] == 42.5
         assert isinstance(call_kwargs["outer_timeout"], float)
+
+
+# ---------------------------------------------------------------------------
+# Issue #4151: escalation-path wiring + -v gating
+# ---------------------------------------------------------------------------
+
+
+def _pf_args(**overrides):
+    """Args namespace sufficient for _run_placement_feedback / the
+    escalation hook helper."""
+    defaults = {
+        "placement_feedback": True,
+        "placement_feedback_budget": 3,
+        "placement_feedback_max_movement": 5.0,
+        "placement_feedback_anchor": None,
+        "placement_feedback_no_anchor": None,
+        "placement_feedback_stagnation_patience": 3,
+        "placement_feedback_outer_timeout": None,
+        "strategy": "negotiated",
+        "timeout": None,
+        "per_net_timeout": None,
+        "output": None,
+        "verbose": False,
+        "min_completion": 0.95,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _pf_result(**overrides):
+    """A minimal stand-in for RuleRelaxationResult / EscalationResult that
+    the shared hook mutates in place."""
+    defaults = {
+        "router": None,
+        "nets_routed": 10,
+        "nets_to_route": 20,
+        "completion": 0.5,
+        "success": False,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+class TestPlacementFeedbackEscalationHook:
+    """Issue #4151: the shared hook drives placement feedback on the
+    rule-relaxation and combined-escalation dispatch paths, which
+    previously dropped ``--placement-feedback`` on the floor silently."""
+
+    def _mock_router(self, failed_nets, routes="__default__"):
+        from unittest.mock import MagicMock
+
+        router = MagicMock()
+        router.routes = object() if routes == "__default__" else routes
+        router.get_failed_nets.return_value = list(failed_nets)
+        router.nets = {1: [object(), object()], 2: [object(), object()]}
+        router.get_statistics.return_value = {"nets_routed": 15}
+        return router
+
+    def test_runs_and_emits_summary_on_partial(self, capsys, tmp_path):
+        """Partial result with failed nets -> loop runs, one-line summary
+        (iterations / exit reason / components moved / final failed nets)
+        is emitted, and the result's completion stats are refreshed."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.cli.route_cmd import (
+            _maybe_run_placement_feedback_escalation,
+        )
+
+        router = self._mock_router(failed_nets=[5, 6])
+        router.route_with_placement_feedback.return_value = MagicMock(
+            iterations=2,
+            exit_reason="pf_stagnated",
+            total_components_moved=3,
+            failed_nets=[6],
+            placement_diff=[],
+        )
+        result = _pf_result(router=router)
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb),
+            patch("pathlib.Path.write_text", return_value=None),
+        ):
+            _maybe_run_placement_feedback_escalation(
+                result,
+                None,  # successful_result -> partial
+                tmp_path / "board.kicad_pcb",
+                _pf_args(),
+                quiet=False,
+                stall_label="rule relaxation",
+            )
+
+        out = capsys.readouterr().out
+        assert "Engaging placement-routing feedback" in out
+        assert "rule relaxation stalled" in out
+        assert "Feedback iterations: 2" in out
+        assert "Exit reason:" in out
+        assert "Components moved:   3" in out
+        assert "Final failed nets:" in out
+        # The loop actually ran (not just reported).
+        assert router.route_with_placement_feedback.called
+        # Completion stats refreshed from post-feedback router state.
+        assert result.nets_routed == 15
+        assert result.completion == 15 / 20
+
+    def test_combined_label_runs(self, capsys, tmp_path):
+        """Same hook, combined-escalation label -> loop runs."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.cli.route_cmd import (
+            _maybe_run_placement_feedback_escalation,
+        )
+
+        router = self._mock_router(failed_nets=[7])
+        router.route_with_placement_feedback.return_value = MagicMock(
+            iterations=1,
+            exit_reason="pf_converged",
+            total_components_moved=1,
+            failed_nets=[],
+            placement_diff=[],
+        )
+        result = _pf_result(router=router)
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb),
+            patch("pathlib.Path.write_text", return_value=None),
+        ):
+            _maybe_run_placement_feedback_escalation(
+                result,
+                None,
+                tmp_path / "board.kicad_pcb",
+                _pf_args(),
+                quiet=False,
+                stall_label="combined escalation",
+            )
+
+        out = capsys.readouterr().out
+        assert "combined escalation stalled" in out
+        assert router.route_with_placement_feedback.called
+
+    def test_disabled_line_when_no_routes(self, capsys, tmp_path):
+        """Requested but no routes produced -> explicit DISABLED line,
+        never silent."""
+        from kicad_tools.cli.route_cmd import (
+            _maybe_run_placement_feedback_escalation,
+        )
+
+        router = self._mock_router(failed_nets=[1], routes=None)
+        result = _pf_result(router=router)
+
+        _maybe_run_placement_feedback_escalation(
+            result,
+            None,
+            tmp_path / "board.kicad_pcb",
+            _pf_args(),
+            quiet=False,
+            stall_label="rule relaxation",
+        )
+
+        out = capsys.readouterr().out
+        assert "placement-feedback: DISABLED" in out
+        assert not router.route_with_placement_feedback.called
+
+    def test_silent_when_not_requested(self, capsys, tmp_path):
+        """--placement-feedback not set -> byte-identical no-op, no output."""
+        from kicad_tools.cli.route_cmd import (
+            _maybe_run_placement_feedback_escalation,
+        )
+
+        router = self._mock_router(failed_nets=[1])
+        result = _pf_result(router=router)
+
+        _maybe_run_placement_feedback_escalation(
+            result,
+            None,
+            tmp_path / "board.kicad_pcb",
+            _pf_args(placement_feedback=False),
+            quiet=False,
+            stall_label="rule relaxation",
+        )
+
+        assert capsys.readouterr().out == ""
+        assert not router.route_with_placement_feedback.called
+
+    def test_silent_when_fully_succeeded(self, capsys, tmp_path):
+        """Escalation fully succeeded -> feedback not needed; no DISABLED
+        line (distinct from the not-supported state)."""
+        from kicad_tools.cli.route_cmd import (
+            _maybe_run_placement_feedback_escalation,
+        )
+
+        router = self._mock_router(failed_nets=[])
+        result = _pf_result(router=router)
+        successful = _pf_result(router=router, completion=1.0, success=True)
+
+        _maybe_run_placement_feedback_escalation(
+            result,
+            successful,
+            tmp_path / "board.kicad_pcb",
+            _pf_args(),
+            quiet=False,
+            stall_label="rule relaxation",
+        )
+
+        out = capsys.readouterr().out
+        assert "DISABLED" not in out
+        assert not router.route_with_placement_feedback.called
+
+    def test_silent_when_no_failed_nets(self, capsys, tmp_path):
+        """Partial result but zero failed nets -> nothing to improve; the
+        loop does not run and no DISABLED line prints (not-needed state)."""
+        from kicad_tools.cli.route_cmd import (
+            _maybe_run_placement_feedback_escalation,
+        )
+
+        router = self._mock_router(failed_nets=[])
+        result = _pf_result(router=router)
+
+        _maybe_run_placement_feedback_escalation(
+            result,
+            None,
+            tmp_path / "board.kicad_pcb",
+            _pf_args(),
+            quiet=False,
+            stall_label="rule relaxation",
+        )
+
+        out = capsys.readouterr().out
+        assert "DISABLED" not in out
+        assert not router.route_with_placement_feedback.called
+
+    def test_escalation_functions_call_the_hook(self):
+        """Guard against a future regression that removes the hook call
+        from either previously-silent dispatch path."""
+        import inspect
+
+        from kicad_tools.cli import route_cmd
+
+        for fn_name in (
+            "route_with_rule_relaxation",
+            "route_with_combined_escalation",
+            "route_with_layer_escalation",
+        ):
+            src = inspect.getsource(getattr(route_cmd, fn_name))
+            assert "_maybe_run_placement_feedback_escalation(" in src, (
+                f"{fn_name} must invoke the placement-feedback hook"
+            )
+
+
+class TestPlacementFeedbackVerboseGating:
+    """Issue #4151: per-iteration firehose is gated on -v; the always-on
+    summary line is independent of -v."""
+
+    def _run(self, verbose):
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.cli.route_cmd import _run_placement_feedback
+
+        args = _pf_args(verbose=verbose)
+        router = MagicMock()
+        router.get_failed_nets.return_value = [1]
+        router.route_with_placement_feedback.return_value = MagicMock(
+            iterations=1,
+            exit_reason="pf_converged",
+            total_components_moved=0,
+            failed_nets=[],
+            placement_diff=[],
+        )
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb),
+            patch("pathlib.Path.write_text", return_value=None),
+        ):
+            _run_placement_feedback(
+                router=router,
+                pcb_path=Path("/tmp/does_not_matter.kicad_pcb"),
+                args=args,
+                quiet=False,
+            )
+        return router.route_with_placement_feedback.call_args.kwargs
+
+    def test_loop_verbose_false_without_v(self):
+        kwargs = self._run(verbose=False)
+        assert kwargs["verbose"] is False
+
+    def test_loop_verbose_true_with_v(self):
+        kwargs = self._run(verbose=True)
+        assert kwargs["verbose"] is True
+
+    def test_summary_present_regardless_of_v(self, capsys):
+        """The one-line summary is emitted whether or not -v is passed."""
+        self._run(verbose=False)
+        out = capsys.readouterr().out
+        assert "Feedback iterations: 1" in out
+        assert "Exit reason:" in out
