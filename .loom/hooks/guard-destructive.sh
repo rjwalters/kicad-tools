@@ -20,7 +20,11 @@
 #   - Allow: Everything else (exit 0, no output)
 #
 # Output format (Claude Code hooks spec):
-#   { "hookSpecificOutput": { "permissionDecision": "deny|ask", "permissionDecisionReason": "..." } }
+#   { "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny|ask", "permissionDecisionReason": "..." } }
+#
+# NOTE: The "hookEventName": "PreToolUse" field is REQUIRED by Claude Code's
+# PreToolUse hook schema. Without it, Claude Code silently discards the
+# decision and the guard becomes inert (see issue #3550).
 #
 # Error handling: This script MUST never exit with a non-zero code or produce
 # invalid output. Any internal error is caught by the trap, logged for
@@ -70,11 +74,55 @@ elif [[ -n "$CWD" ]]; then
     log_hook_error "cwd does not exist: $CWD — skipping repo root resolution"
 fi
 
+# =============================================================================
+# SQL DDL/DML guard toggle — default ON.
+#
+# The SQL DDL/DML blocks (DROP DATABASE/TABLE/SCHEMA, TRUNCATE TABLE, and
+# DELETE FROM without WHERE) are a category error for repos that are themselves
+# database engines, where those statements are the product's own dev/test
+# vocabulary. Such repos opt out; everyone else keeps the guard on.
+#
+# Resolution order (highest precedence first):
+#   1. LOOM_GUARD_SQL env var (0/false/no disables, 1/true/yes forces on)
+#   2. .loom/config.json  ->  guards.sqlDdl  (default true when absent)
+#   3. Default: true (guard on)
+#
+# The resolution runs LAZILY — sql_guard_enabled() is only invoked once a
+# command has already matched a SQL DDL/DML pattern, so the jq config read never
+# touches the hot path for the ~99% of commands that are not SQL. The result is
+# cached so a command matching multiple SQL patterns pays for at most one read.
+#
+# The config read is best-effort: any parse failure falls through to guard-ON
+# and never trips the ERR trap or produces a non-zero exit.
+# =============================================================================
+_SQL_GUARD_CACHE=""
+sql_guard_enabled() {
+    if [[ -z "$_SQL_GUARD_CACHE" ]]; then
+        local enabled=true
+        if [[ -n "$REPO_ROOT" && -f "$REPO_ROOT/.loom/config.json" ]]; then
+            # jq // is alternative-on-null, not default-on-missing, so use
+            # if/then/else to treat only an explicit `false` as disabled (a
+            # missing guards.sqlDdl key stays on). On malformed JSON jq exits
+            # non-zero and the `||` fallback restores the guard-ON default.
+            enabled=$(jq -r 'if .guards.sqlDdl == false then "false" else "true" end' "$REPO_ROOT/.loom/config.json" 2>/dev/null) || enabled=true
+            [[ -n "$enabled" ]] || enabled=true
+        fi
+        # Env override wins over config.
+        case "${LOOM_GUARD_SQL:-}" in
+            0|false|no)  enabled=false ;;
+            1|true|yes)  enabled=true ;;
+        esac
+        _SQL_GUARD_CACHE="$enabled"
+    fi
+    [[ "$_SQL_GUARD_CACHE" == "true" ]]
+}
+
 # Helper: output a deny decision and exit
 deny() {
     local reason="$1"
     if jq -n --arg reason "$reason" '{
         hookSpecificOutput: {
+            hookEventName: "PreToolUse",
             permissionDecision: "deny",
             permissionDecisionReason: $reason
         }
@@ -84,7 +132,7 @@ deny() {
     # jq failed — emit raw JSON as fallback
     local escaped_reason
     escaped_reason=$(echo "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\n/\\n/g')
-    echo "{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"${escaped_reason}\"}}"
+    echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"${escaped_reason}\"}}"
     exit 0
 }
 
@@ -93,6 +141,7 @@ ask() {
     local reason="$1"
     if jq -n --arg reason "$reason" '{
         hookSpecificOutput: {
+            hookEventName: "PreToolUse",
             permissionDecision: "ask",
             permissionDecisionReason: $reason
         }
@@ -102,7 +151,7 @@ ask() {
     # jq failed — emit raw JSON as fallback
     local escaped_reason
     escaped_reason=$(echo "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\n/\\n/g')
-    echo "{\"hookSpecificOutput\":{\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"${escaped_reason}\"}}"
+    echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"${escaped_reason}\"}}"
     exit 0
 }
 
@@ -111,9 +160,14 @@ ask() {
 # =============================================================================
 
 ALWAYS_BLOCK_PATTERNS=(
-    # GitHub destructive operations
-    'gh repo delete'
-    'gh repo archive'
+    # GitHub destructive operations — command-position anchored (start-of-line
+    # or a shell separator must precede the verb) so the phrase inside a flag
+    # value no longer trips. NOTE: the catastrophic scan still runs over the
+    # full raw command, including quoted/heredoc text, so a `gh repo delete`
+    # that a shell would actually execute (leading, sudo-prefixed, or after a
+    # separator) still denies (#3553).
+    '(^|[;&|[:space:]])gh repo delete'
+    '(^|[;&|[:space:]])gh repo archive'
 
     # Force push to main/master (various flag forms)
     'git push --force origin main'
@@ -123,11 +177,16 @@ ALWAYS_BLOCK_PATTERNS=(
     'git push --force-with-lease origin main'
     'git push --force-with-lease origin master'
 
-    # Filesystem destruction
-    'rm -rf /'
-    'rm -rf /\*'
-    'rm -rf ~'
-    'rm -rf \$HOME'
+    # Filesystem destruction — anchored to a *real* root/home target so that a
+    # scoped path like `rm -rf /tmp/x` no longer trips the catastrophic rule,
+    # while root / home obliteration still denies. The left side of `rm` is
+    # deliberately NOT anchored, so a quoted payload such as `bash -c 'rm -rf /'`
+    # (root followed by a closing quote) still matches (#3553). The trailing
+    # class matches anything that is not a path-continuation character (so `/`,
+    # `/ `, `/*`, `/;`, `/'` all count as "root itself" but `/tmp` does not).
+    'rm[[:space:]]+-[a-zA-Z]*[rf][a-zA-Z]*[[:space:]]+/([^[:alnum:]._~/-]|$)'
+    'rm[[:space:]]+-[a-zA-Z]*[rf][a-zA-Z]*[[:space:]]+~([^[:alnum:]._~/-]|$)'
+    'rm[[:space:]]+-[a-zA-Z]*[rf][a-zA-Z]*[[:space:]]+\$HOME([^[:alnum:]._~/-]|$)'
 
     # Fork bombs
     ':\(\)\{ :\|:& \};:'
@@ -151,19 +210,16 @@ ALWAYS_BLOCK_PATTERNS=(
     # Docker mass destruction
     'docker system prune'
 
-    # System reboot/shutdown
-    'reboot'
-    'shutdown'
-    'halt'
-    'poweroff'
-    'init 0'
-    'init 6'
-
-    # Database destruction
-    'DROP DATABASE'
-    'DROP TABLE'
-    'DROP SCHEMA'
-    'TRUNCATE TABLE'
+    # System reboot/shutdown — command-position + trailing-boundary anchored so
+    # a flag name (e.g. --instance-initiated-shutdown-behavior) or the word in a
+    # comment/message ("this reboots the box") no longer trips them, while the
+    # bare command (optionally sudo-prefixed, or after a separator) still denies.
+    '(^|[;&|[:space:]])reboot([;&|[:space:]]|$)'
+    '(^|[;&|[:space:]])shutdown([;&|[:space:]]|$)'
+    '(^|[;&|[:space:]])halt([;&|[:space:]]|$)'
+    '(^|[;&|[:space:]])poweroff([;&|[:space:]]|$)'
+    '(^|[;&|[:space:]])init[[:space:]]+0([;&|[:space:]]|$)'
+    '(^|[;&|[:space:]])init[[:space:]]+6([;&|[:space:]]|$)'
 )
 
 for pattern in "${ALWAYS_BLOCK_PATTERNS[@]}"; do
@@ -173,18 +229,133 @@ for pattern in "${ALWAYS_BLOCK_PATTERNS[@]}"; do
 done
 
 # =============================================================================
-# rm -rf SCOPE CHECK - Block rm with recursive/force flags outside repo
+# COMMENT-STRIPPED WORKING COPY - used ONLY for the ASK-word and SQL DDL/DML
+# matches below, never for the catastrophic ALWAYS_BLOCK scan.
+#
+# Strips a `#…EOL` shell comment when the `#` is at start-of-line or preceded
+# by whitespace (the common comment shape), so a pattern word that appears only
+# in a trailing comment ("# drop database first", "# git push --force") no
+# longer trips the ASK/DDL gates. This is best-effort: a `#` inside a quoted
+# string that happens to be whitespace-preceded is also stripped, but since the
+# stripped copy is used only for the *narrowing* ASK/DDL matches (never the
+# catastrophic scan) the worst case is a missed ask on quoted data, never a
+# missed catastrophic block. The sed only runs when a `#` is actually present,
+# keeping it off the hot path (#3553).
+# =============================================================================
+if [[ "$COMMAND" == *"#"* ]]; then
+    COMMAND_NO_COMMENT=$(printf '%s\n' "$COMMAND" | sed -E 's/(^|[[:space:]])#.*$//')
+else
+    COMMAND_NO_COMMENT="$COMMAND"
+fi
+
+# =============================================================================
+# DATABASE DESTRUCTION - Gated by the SQL DDL/DML guard toggle
+#
+# Kept separate from ALWAYS_BLOCK_PATTERNS so DB-engine repos can opt out
+# (guards.sqlDdl:false / LOOM_GUARD_SQL=0). A single alternation grep matches
+# all four DDL statements in one pass (cheaper than a per-pattern loop), and
+# sql_guard_enabled() is consulted only after a match, so the config read stays
+# off the hot path.
+# =============================================================================
+SQL_DDL_PATTERN='DROP DATABASE|DROP TABLE|DROP SCHEMA|TRUNCATE TABLE'
+if echo "$COMMAND_NO_COMMENT" | grep -qiE "$SQL_DDL_PATTERN" && sql_guard_enabled; then
+    matched=$(echo "$COMMAND_NO_COMMENT" | grep -oiE "$SQL_DDL_PATTERN" | head -1)
+    deny "BLOCKED: Command matches dangerous pattern: ${matched:-SQL DDL statement}"
+fi
+
+# =============================================================================
+# rm -rf SCOPE CHECK - Block rm with recursive/force flags on protected paths
+#
+# Only *actual local* `rm` command words are inspected. `extract_rm_targets`
+# splits the command on ; | & && || and, for each simple-command segment whose
+# command word is `rm` (optionally sudo-prefixed) AND which carries a
+# recursive/force flag, emits the non-flag argument tokens. Consequences (#3553):
+#   - A token from an earlier command in the same line (e.g. the `host-ip.txt`
+#     in `HOST=$(cat host-ip.txt); ssh $HOST rm -rf …`) is never mis-read as an
+#     rm target — only tokens of a real `rm` segment are considered.
+#   - An `rm` inside a remote payload (`ssh host 'rm -rf /home/ubuntu/foo'`) is
+#     NOT treated as a local rm: the wrapper's command word is `ssh`/`scp`, not
+#     `rm`, so no local target is emitted and the local scope check is skipped.
+#     The ALWAYS_BLOCK catastrophic patterns above still scan the whole string,
+#     so a remote or quoted `rm -rf /` still denies.
+#   - Only root, the user's $HOME, and *top-level* directories (/tmp, /var, /etc,
+#     /usr, /home, /opt, /bin, …) are blocked. A scoped subpath such as
+#     `rm -rf /tmp/whatever` or `rm -rf /var/foo` is allowed — the guard stops
+#     obliteration of a whole system/root directory, not cleanup of a subpath.
 # =============================================================================
 
-# Match rm commands with -r or -f flags (in any combination: -rf, -r -f, -fr, etc.)
-if echo "$COMMAND" | grep -qE 'rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+' || \
-   echo "$COMMAND" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*\s' || \
-   echo "$COMMAND" | grep -qE 'rm\s+-[a-zA-Z]*f[a-zA-Z]*\s+-[a-zA-Z]*r[a-zA-Z]*\s'; then
+extract_rm_targets() {
+    # Emit one rm-target token per line for every local `rm -r/-f` invocation.
+    # Portable awk only (no GNU/BSD-specific escapes); replaces the shell
+    # separators with newlines, then inspects each simple command.
+    printf '%s' "$1" | awk '
+    {
+        gsub(/&&|\|\||[;|&]/, "\n")
+        n = split($0, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t]+/, "", seg)
+            sub(/^sudo[ \t]+/, "", seg)
+            sub(/^[ \t]+/, "", seg)
+            if (seg !~ /^rm([ \t]|$)/) continue
+            m = split(seg, toks, /[ \t]+/)
+            has_rf = 0
+            for (j = 2; j <= m; j++)
+                if (toks[j] ~ /^-/ && toks[j] ~ /[rRfF]/) has_rf = 1
+            if (!has_rf) continue
+            for (j = 2; j <= m; j++) {
+                if (toks[j] == "") continue
+                if (toks[j] ~ /^-/) continue
+                print toks[j]
+            }
+        }
+    }'
+}
 
-    # Extract target paths from the rm command (skip flags)
-    TARGETS=$(echo "$COMMAND" | sed 's/rm\s\+//' | tr ' ' '\n' | grep -v '^-' | head -20)
+normalize_abs_path() {
+    # Lexically normalize an ABSOLUTE path without touching the filesystem:
+    #   - collapse duplicate slashes    (//etc        -> /etc)
+    #   - drop "." segments             (/usr/./      -> /usr)
+    #   - resolve ".." segments         (/tmp/..      -> /,   /tmp/../etc -> /etc)
+    #   - ".." at or above root stays at root (/a/../../../etc -> /etc)
+    #   - strip trailing slash except bare root (/tmp/ -> /tmp)
+    # Pure-bash and portable: `realpath -m` is GNU-only and silently no-ops on
+    # macOS, so this MUST NOT rely on it. Without this normalization any
+    # `..`/`//`/`.` traversal (e.g. `rm -rf /tmp/..` -> `/`) would slip past the
+    # protected-path check below and wrongly ALLOW root/system-dir deletion.
+    local path="$1"
+    local seg
+    local -a parts=() out=()
+    local oldIFS="$IFS"
+    IFS='/'
+    read -r -a parts <<< "$path"
+    IFS="$oldIFS"
+    for seg in "${parts[@]}"; do
+        case "$seg" in
+            ''|'.')
+                : ;;                                    # skip empties (// or leading /) and "."
+            '..')
+                if [[ ${#out[@]} -gt 0 ]]; then
+                    out=("${out[@]:0:$(( ${#out[@]} - 1 ))}")   # pop last segment
+                fi
+                ;;                                       # ".." at/above root: stay at root
+            *)
+                out+=("$seg") ;;
+        esac
+    done
+    if [[ ${#out[@]} -eq 0 ]]; then
+        printf '/'
+    else
+        printf '/%s' "${out[@]}"
+    fi
+}
 
-    for target in $TARGETS; do
+# Cheap pre-check keeps awk off the hot path for the ~99% of commands that have
+# no recursive/force rm at all.
+if echo "$COMMAND" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
+    RM_TARGETS=$(extract_rm_targets "$COMMAND" | head -20)
+
+    for target in $RM_TARGETS; do
         # Skip empty targets
         [[ -z "$target" ]] && continue
 
@@ -210,26 +381,33 @@ if echo "$COMMAND" | grep -qE 'rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+' || \
                 continue ;;
         esac
 
-        # Resolve path to absolute
+        # Resolve path to absolute (raw — normalization happens next).
         ABS_PATH=""
         if [[ "$target" = /* ]]; then
             ABS_PATH="$target"
         elif [[ -n "$CWD" ]]; then
-            ABS_PATH=$(cd "$CWD" 2>/dev/null && realpath -m "$target" 2>/dev/null || echo "$CWD/$target")
+            ABS_PATH="$CWD/$target"
         fi
 
-        # Block dangerous absolute paths
-        if [[ "$ABS_PATH" == "/" ]] || [[ "$ABS_PATH" == "/home" ]] || \
-           [[ "$ABS_PATH" == "$HOME" ]] || [[ "$ABS_PATH" == "/tmp" ]] || \
-           [[ "$ABS_PATH" == "/usr" ]] || [[ "$ABS_PATH" == "/var" ]] || \
-           [[ "$ABS_PATH" == "/etc" ]] || [[ "$ABS_PATH" == "/opt" ]]; then
-            deny "BLOCKED: rm on protected system path: $ABS_PATH"
+        # Lexically normalize the absolute target BEFORE the protected-path
+        # check. This collapses //, resolves . and .., and strips trailing
+        # slashes, so traversal/normalization tricks cannot smuggle a
+        # root/system-dir deletion past the check below:
+        #   /tmp/..  -> /        //etc     -> /etc
+        #   /usr/./  -> /usr      /a/../../../etc -> /etc
+        # Done in pure shell because `realpath -m` is GNU-only (no-ops on macOS).
+        if [[ "$ABS_PATH" = /* ]]; then
+            ABS_PATH=$(normalize_abs_path "$ABS_PATH")
         fi
 
-        # Block if outside repo root (when we know the repo root)
-        if [[ -n "$REPO_ROOT" ]] && [[ -n "$ABS_PATH" ]]; then
-            if [[ "$ABS_PATH" != "$REPO_ROOT"* ]]; then
-                deny "BLOCKED: rm target outside repository: $ABS_PATH (repo: $REPO_ROOT)"
+        # Block catastrophic targets only: root, the user's home directory, and
+        # any top-level directory (^/<one-segment>$ — covers /tmp, /home, /usr,
+        # /var, /etc, /opt, /bin, /lib, …). Deeper paths are allowed.
+        if [[ -n "$ABS_PATH" ]]; then
+            if [[ "$ABS_PATH" == "/" ]] || \
+               [[ -n "$HOME" && "$ABS_PATH" == "$HOME" ]] || \
+               [[ "$ABS_PATH" =~ ^/[^/]+$ ]]; then
+                deny "BLOCKED: rm on protected system path: $ABS_PATH"
             fi
         fi
     done
@@ -239,9 +417,13 @@ fi
 # DELETE without WHERE - Database safety
 # =============================================================================
 
-if echo "$COMMAND" | grep -qiE 'DELETE\s+FROM\s+' && \
-   ! echo "$COMMAND" | grep -qiE 'WHERE\s+'; then
-    deny "BLOCKED: DELETE FROM without WHERE clause"
+# Gated by the SQL DDL/DML guard toggle. DB-engine repos opt out via
+# guards.sqlDdl:false or LOOM_GUARD_SQL=0. sql_guard_enabled() is consulted only
+# after the DELETE-FROM-without-WHERE match, keeping the config read off the hot
+# path for non-SQL commands.
+if echo "$COMMAND_NO_COMMENT" | grep -qiE 'DELETE[[:space:]]+FROM[[:space:]]+' && \
+   ! echo "$COMMAND_NO_COMMENT" | grep -qiE 'WHERE[[:space:]]+'; then
+    sql_guard_enabled && deny "BLOCKED: DELETE FROM without WHERE clause"
 fi
 
 # =============================================================================
@@ -298,7 +480,7 @@ ASK_PATTERNS=(
 )
 
 for pattern in "${ASK_PATTERNS[@]}"; do
-    if echo "$COMMAND" | grep -qE "$pattern"; then
+    if echo "$COMMAND_NO_COMMENT" | grep -qE "$pattern"; then
         ask "Command requires confirmation: $COMMAND"
     fi
 done
@@ -308,7 +490,19 @@ done
 # =============================================================================
 
 if echo "$COMMAND" | grep -qE 'gh\s+pr\s+merge'; then
-    deny "Use ./.loom/scripts/merge-pr.sh <PR_NUMBER> instead of 'gh pr merge'. The script merges via the GitHub API without local checkout, which avoids worktree errors."
+    # Resolve the merge-pr.sh path for the current repo context. Prefer an
+    # in-repo installed copy (./.loom/scripts/merge-pr.sh); fall back to the
+    # loom-checkout copy under defaults/scripts/ (via $LOOM_HOME) when the repo
+    # runs scripts directly from the checkout rather than an installed copy.
+    MERGE_SCRIPT="./.loom/scripts/merge-pr.sh"
+    if [[ -n "$REPO_ROOT" ]] && [[ ! -x "$REPO_ROOT/.loom/scripts/merge-pr.sh" ]]; then
+        if [[ -n "${LOOM_HOME:-}" ]] && [[ -x "$LOOM_HOME/defaults/scripts/merge-pr.sh" ]]; then
+            MERGE_SCRIPT="$LOOM_HOME/defaults/scripts/merge-pr.sh"
+        elif [[ -x "$REPO_ROOT/defaults/scripts/merge-pr.sh" ]]; then
+            MERGE_SCRIPT="$REPO_ROOT/defaults/scripts/merge-pr.sh"
+        fi
+    fi
+    deny "Use $MERGE_SCRIPT <PR_NUMBER> instead of 'gh pr merge'. The script merges via the GitHub API without local checkout, which avoids worktree errors."
 fi
 
 # =============================================================================

@@ -5,10 +5,10 @@ You are bumping the version of {{workspace}} — a **generic project**, not nece
 ## When to use this skill
 
 - The operator wants to release a new version of **their project**.
-- This is the **generic counterpart** to `/loom:release` (which is Loom-internal and ships from a separate skill file that consumers never see).
+- This is a lightweight, no-CHANGELOG quick-bump. For a full versioned release with CHANGELOG gates, semver decision, and GitHub Release, use `/repo:release` from [rjwalters/repo](https://github.com/rjwalters/repo).
 - Works for any project shape: an npm package, a Cargo crate, a Python package, a single-script shell project, an npm+cargo monorepo, etc.
 
-If the operator is releasing **Loom itself** (from a checkout of `rjwalters/loom`), they should use `/loom:release` instead — that skill is wired to Loom's specific 5-file + `Cargo.lock` layout and knows about the release-workflow trigger. `/loom:bump` is for everyone else.
+If the operator wants the full release methodology (pre-flight/CI gate, CHANGELOG completeness + version-drift gates, tag, GitHub Release), they should install [repo](https://github.com/rjwalters/repo) and use `/repo:release` — it detects and honors `scripts/version.sh` as its first-priority version tool. `/loom:bump` is the quick-bump for when that full flow is overkill.
 
 **Do not rush.** Each phase requires explicit confirmation before proceeding to the next.
 
@@ -428,7 +428,7 @@ Release v$NEW_VERSION complete
 
 - **Do not auto-generate CHANGELOG content from commits.** The `## [Unreleased]` content comes from the operator. The skill only *promotes* the existing `[Unreleased]` heading to `[X.Y.Z] - DATE`.
 - **Do not publish to package registries.** Tag + GitHub Release only.
-- **Do not modify `/loom:release`.** That skill is Loom-internal and ships from a separate file consumers never see. `/loom:bump` is the generic counterpart.
+- **For the full release methodology, defer to `/repo:release`.** That command (from [rjwalters/repo](https://github.com/rjwalters/repo)) owns the CHANGELOG/version-drift gates and GitHub Release flow, and honors `scripts/version.sh`. `/loom:bump` is the lightweight quick-bump counterpart.
 - **Do not overwrite an existing `scripts/version.sh` without confirmation.** The operator may have customized it; offer a diff first.
 - **`scripts/version.sh` is the source of truth on subsequent runs.** Phase 1's short-circuit step ensures the skill defers to the generated script after the first run.
 - **Multiple shapes can coexist.** An npm+cargo monorepo (Loom's own shape) needs updates across `package.json`, `Cargo.toml`, `Cargo.lock`, and possibly `CLAUDE.md`. Emit writers for every detected shape.

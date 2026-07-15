@@ -10,15 +10,20 @@ Process an explicit list of issues — **or an explicit/NL-described set of open
 
 **Arguments**: $ARGUMENTS
 
-`$ARGUMENTS` is interpreted in one of **three modes**, chosen by inspection of the non-flag tokens and the presence of a `--prs` flag. Before classifying, **strip all recognized flag tokens** (`--builders-per-wave N`, `--dry-run`, `--prs`, `--no-daemon`) from the token list — flags are honoured in their respective modes.
+`$ARGUMENTS` is interpreted in one of **three modes** (A/B/C), chosen by inspection of the non-flag tokens and the presence of a `--prs` flag — plus a dedicated **actionable-backlog sentinel** for the bare, sole token `all`. Before classifying, **strip all recognized flag tokens** (`--builders-per-wave N`, `--dry-run`, `--prs`, `--no-daemon`) from the token list — flags are honoured in their respective modes.
+
+**`/sweep all` (the actionable-backlog sentinel).** When the non-flag token list is exactly `["all"]` (case-insensitive), `/sweep` takes a dedicated, deterministic path that resolves the **actionable open backlog** — open issues carrying `loom:issue` or `loom:curated`, minus in-flight / held / container labels — via a single fixed `gh issue list` query (no Mode B NL translation), then hands the set to the same confirmation gate and wave machinery every other mode uses. `/sweep all --prs` resolves the actionable open **PR** set and drives Mode C. Only the bare, sole `all` token triggers this; `all open loom:issue items` and every other multi-token `all …` phrase still route to Mode B (or Mode C for PR phrases) exactly as before. See "Actionable-backlog sentinel (`all`)" and "Actionable candidate taxonomy" under Validation rules.
 
 **Mode selection summary** (full rules below):
 
 | Trigger | Mode | Subject |
 |---------|------|---------|
+| Non-flag tokens == `["all"]` (case-insensitive, single token) | **Actionable backlog** (evaluated first — new step 0) | Actionable open issues (or actionable open PRs with `--prs`, via Mode C) |
 | `--prs` flag present | **Mode C** (PR-set) | Open PRs, routed per their current label |
 | No `--prs`, all non-flag tokens match `^#?\d+$` | **Mode A** (numeric issue list) | Issues, full lifecycle |
 | No `--prs`, any non-flag token does not match `^#?\d+$` | **Mode B** (NL) | Issues (default) **or** PRs (if NL clearly indicates PRs — see Mode C NL triggers below) |
+
+> **Actionable-backlog sentinel (bare `all`).** The row above fires **only** when the non-flag token list is exactly `["all"]` (case-insensitive — `all`, `ALL`, `All`). Any multi-token phrase that merely begins with `all` (`all open loom:issue items`, `all merge-ready PRs`) has length > 1 and falls through to Mode B / Mode C **unchanged**. See "Actionable-backlog sentinel" under Validation rules for the deterministic query and taxonomy.
 
 ### Mode A — Explicit numeric list (fast path, regression guard)
 
@@ -111,32 +116,72 @@ Combine flags as needed. Always pass `--state open` explicitly (Mode C operates 
 
 ### Optional flags
 
-- **`--builders-per-wave N`** — dispatch up to `N` builders in parallel per wave. Default `1` (fully sequential, matching the MVP behaviour). `N` must be an integer `>= 1`. Honoured in Modes A and B (issue-side); **silently ignored in Mode C** (PR-set mode has no Builder phase — see Mode C validation rules above). Flag tokens are stripped before classification.
+- **`--builders-per-wave N`** — dispatch up to `N` builders in parallel per wave. When **omitted**, the wave size is `auto` — resolved at Stage -1 from the chosen backend and scratch-volume disk headroom (see "Resolve auto wave size"): the daemon detached-process path targets up to 10 concurrent sweeps, while the in-session subagent path stays at the #3289-safe ceiling of 3. When **present**, `N` must be an integer `>= 1` and the explicit value overrides auto entirely (operator wins). Honoured in Modes A and B (issue-side); **silently ignored in Mode C** (PR-set mode has no Builder phase — see Mode C validation rules above). Flag tokens are stripped before classification.
 - **`--dry-run`** — print the planned candidate list (with wave grouping) and EXIT without performing any mutation. Recognized as a bare flag token (no value). May appear anywhere in `$ARGUMENTS`. Default is off. Honoured in **all three** modes — stripped before classification along with other flags. Mode C dry-run prints the PR-set plan (per-PR routing) instead of the issue-set plan.
 - **`--prs`** — switch into Mode C (PR-set mode). Recognized as a bare flag token (no value). May appear anywhere in `$ARGUMENTS`. Default is off. When present, non-flag tokens are interpreted as **PR numbers** (numeric tokens) or as a **PR-list description** (NL tokens). When absent, an NL trigger phrase listed in the Mode C section can still select Mode C. See "Mode C" above for full semantics.
 - **`--no-daemon`** — force in-process subagent dispatch even when the daemon is running with a multi-account token pool. Recognized as a bare flag token (no value). May appear anywhere in `$ARGUMENTS`. Default is off. When present, **Stage -1 (Backend detection) skips the `PROBE_DAEMON` step entirely** and the skill always falls through to the existing Mode A/B/C subagent dispatch path. Honoured in **all three** modes — stripped before classification along with other flags. Use this when you want the predictable single-process behaviour even though daemon dispatch is available (e.g., debugging, demoing the subagent path, or running under a token configuration that you don't want shared with daemon-spawned sweeps). See "Stage -1: Backend detection" below.
 
 ### Validation rules
 
-- Recognize `--dry-run`, `--prs`, `--no-daemon`, and `--builders-per-wave N` as flag tokens anywhere in `$ARGUMENTS`, strip them from the candidate list before validation, and store them as flags / parameters (`DRY_RUN=true|false`, `PRS_MODE=true|false`, `NO_DAEMON=true|false`, `BUILDERS_PER_WAVE=N`).
+- Recognize `--dry-run`, `--prs`, `--no-daemon`, and `--builders-per-wave N` as flag tokens anywhere in `$ARGUMENTS`, strip them from the candidate list before validation, and store them as flags / parameters (`DRY_RUN=true|false`, `PRS_MODE=true|false`, `NO_DAEMON=true|false`, `BUILDERS_PER_WAVE=N`). When `--builders-per-wave` is **absent**, set the sentinel `BUILDERS_PER_WAVE=auto` (not `1`) — Stage -1 resolves the concrete wave size from the backend + disk headroom. An explicit integer is stored verbatim and overrides auto.
 - At least one candidate (numeric token or NL description) must be supplied. If `$ARGUMENTS` (after stripping flag tokens) is empty, display:
   ```
   Usage: /sweep <issue-number> [<issue-number> ...] [--builders-per-wave N] [--dry-run] [--no-daemon]
          /sweep <natural-language description>     [--builders-per-wave N] [--dry-run] [--no-daemon]
+         /sweep all                                [--builders-per-wave N] [--dry-run] [--no-daemon]   # actionable open backlog
+         /sweep all --prs                          [--dry-run]                                         # actionable open PRs (Mode C)
          /sweep --prs <pr-number> [<pr-number> ...] [--dry-run]
          /sweep --prs <natural-language PR description> [--dry-run]
          /sweep <natural-language PR description>       [--dry-run]   # PR NL triggers select Mode C
 
-  See #3298, #3384, and #3454 for the full design.
+  See #3298, #3384, #3454, and #3568 for the full design.
   ```
   and EXIT.
 - **Mode-selection precedence** (apply in order):
+  0. **Actionable-backlog sentinel.** If the non-flag token list (after flag-stripping) is **exactly `["all"]`** — a single token, case-insensitive (`all`, `ALL`, `All`) — take the dedicated **actionable-backlog** path (see "Actionable-backlog sentinel (`all`)" below). This step is evaluated **before** every other step so the bare `all` token can never be swallowed by the Mode B NL classifier (step 4):
+     - `--prs` **absent** → resolve the deterministic **actionable open issues** set, then hand off **unchanged** to the Mode A/B issue-set wave machinery (confirmation gate, Stage -1 backend detection, wave partition — all as today).
+     - `--prs` **present** → resolve the deterministic **actionable open PRs** set and drive the existing **Mode C** PR-set lifecycle (subagent path).
+
+     The guard is `lowercased(non_flag_tokens) == ["all"]` — length exactly 1. Any additional non-flag token (`all open loom:issue items`, `all my agent-filed ...`, `all merge-ready PRs`) has length > 1 and falls straight through to steps 1–4 unchanged. This is the backward-compatibility contract.
   1. If `--prs` is present, classify as **Mode C** (numeric → explicit PR list; NL → translated `gh pr list`).
   2. Else if any non-flag token does not match `^#?\d+$` AND the description contains a PR-side NL trigger phrase (see Mode C "PR-side NL trigger phrases"), classify as **Mode C** (NL-inferred).
   3. Else if every non-flag token matches `^#?\d+$`, classify as **Mode A** (numeric issue list).
   4. Else classify as **Mode B** (NL issue list).
 
-  This ordering is deliberate: an explicit `--prs` flag is the strongest signal, an unambiguous NL trigger is the next, and the existing Mode A/B classifier (regression-guarded) handles everything else.
+  This ordering is deliberate: the bare `all` sentinel is intercepted first (else it would land in step 4), an explicit `--prs` flag is the next strongest signal, an unambiguous NL trigger is next, and the existing Mode A/B classifier (regression-guarded) handles everything else.
+
+- **Actionable-backlog sentinel (`all`)** — the deterministic path taken by step 0 above:
+  - **Trigger**: non-flag tokens exactly `["all"]` (case-insensitive). Flags (`--dry-run`, `--builders-per-wave N`, `--prs`, `--no-daemon`) are stripped first and compose normally, so `all --dry-run` and `all --builders-per-wave 2` still trigger the sentinel.
+  - **Candidate resolution (issues, `--prs` absent)** — one deterministic `gh issue list` call, no LLM/NL translation:
+    ```bash
+    gh issue list --state open --limit 100 \
+      --search 'label:loom:issue,loom:curated \
+                -label:loom:building -label:loom:curating -label:loom:treating -label:loom:reviewing \
+                -label:loom:blocked -label:loom:abort -label:loom:operator-only -label:loom:triage \
+                -label:loom:epic -label:loom:epic-phase' \
+      --json number,title,labels
+    ```
+    This is the single source of truth for the **"actionable" taxonomy** — see "Actionable candidate taxonomy" immediately below. Pass `--limit 100` explicitly (never rely on gh's default of 30) and apply the existing **edge-case rules**: zero matches → print the resolved query + empty result and EXIT cleanly (edge case #1, do **not** fall through to any other mode); 100 candidates returned → warn about truncation and ask the operator to narrow before proceeding (edge case #2). An equivalent two-call union (`--label loom:issue` ∪ `--label loom:curated`, deduped client-side, then drop any candidate whose labels intersect the exclude set) is acceptable — it matches the Mode B mixed-mode union pattern — but the single `--search` call above is preferred.
+  - **Candidate resolution (PRs, `--prs` present)** — the symmetric deterministic `gh pr list` call, handed to the Mode C PR-set lifecycle (subagent path):
+    ```bash
+    gh pr list --state open --limit 100 \
+      --label loom:review-requested,loom:changes-requested,loom:pr \
+      --json number,title,labels
+    ```
+    Excluded PR labels (`loom:blocked`, `loom:operator-only`) are dropped client-side. Same zero-match / truncation edge-case rules apply.
+  - **Existing-PR routing (issues path)**: the sentinel adds **no** new PR-detection logic. Issues with an open linked PR are **not** filtered out of the `gh issue list` query — they are handed to the wave machinery, which already routes an issue with one open linked PR to Judge (or Merge if the PR is already `loom:pr`) via the existing #3359 per-issue existing-PR probe (Wave Lifecycle §1, `closedByPullRequestsReferences` filtered to `state == OPEN`). This keeps a single source of truth for existing-PR routing.
+  - **Mandatory confirmation gate**: the sentinel path **always** displays the resolved candidate set and awaits operator confirmation before spawning any agent — identical to Mode B/C's "display candidate set before spawning any agents" rule. A large machine-derived backlog must never auto-dispatch silently. Declining EXITs cleanly.
+  - **Flag composition**: `--dry-run` resolves the candidate set, prints the standard issue-set (or PR-set) dry-run plan with wave grouping + skip annotations, and EXITs with no mutation (the Stage-0 dry-run contract is backend-independent). `--builders-per-wave N` and `--no-daemon` compose with the wave / Stage -1 machinery exactly as for Mode A/B. Stage -1 backend detection is unchanged: after `all` resolves the issue set, the normal strict-AND daemon/pool probe decides daemon-dispatch vs subagent fallthrough; `all --prs` (Mode C) always routes to the subagent path per the existing Mode C short-circuit.
+
+- **Actionable candidate taxonomy** (the single source of truth for what `all` resolves — lives here beside the Mode B label logic so there is one definition):
+  - **Include** open issues carrying a ready-to-build label (comma = OR in the `--search` `label:` qualifier): `loom:issue`, `loom:curated`.
+  - **Exclude** (skipped by the `-label:` NOT qualifiers; still listed in `--dry-run` for transparency, matching sweep's skip-transparency rule):
+    - In-flight: `loom:building`, `loom:curating`, `loom:treating`, `loom:reviewing`
+    - Held / not-yet-ready: `loom:blocked`, `loom:abort`, `loom:operator-only`, `loom:triage`
+    - Orchestration containers (not directly buildable): `loom:epic`, `loom:epic-phase`
+    - Issues with an **open** linked PR — NOT filtered in the query; routed by the existing #3359 per-issue existing-PR probe (see "Existing-PR routing" above).
+  - **PR variant (`--prs`)**: include `loom:review-requested`, `loom:changes-requested`, `loom:pr`; exclude `loom:blocked`, `loom:operator-only`.
+  - All named labels already exist on the repo — the sentinel invents no labels.
 - **Mode A** (every non-flag token matches `^#?\d+$`, `--prs` absent, no PR NL trigger):
   - Strip leading `#` from each token, parse as a positive integer.
   - Reject any token that fails to parse as a positive integer (after stripping). Display an error showing the offending token and EXIT.
@@ -151,6 +196,7 @@ Combine flags as needed. Always pass `--state open` explicitly (Mode C operates 
   - If the description is ambiguous between issues and PRs (e.g., `loom:review-requested` is PR-only but the description omits "PRs" / "pull requests"), ask the user to clarify before proceeding. Do not guess.
   - If `--builders-per-wave N` was supplied, print a one-line note that the flag has no effect in Mode C and proceed without it (Mode C waves are size-1; see Mode C section).
 - **`--builders-per-wave N` validation:**
+  - **Absent flag → `auto`.** When the operator did not pass `--builders-per-wave`, `BUILDERS_PER_WAVE=auto`; skip the integer validation below and resolve the concrete size at Stage -1 ("Resolve auto wave size"). The rules below apply **only** when an explicit value was passed — an explicit integer always overrides auto and is validated verbatim as before.
   - Parse `N` as an integer. Reject non-integer values with a clear error and EXIT.
   - Reject `N < 1` (including `0` and negative values) with: `Error: --builders-per-wave must be >= 1 (got: <N>)` and EXIT. Do **not** silently default to `1`.
   - If `N > 3`, print a warning and continue: `WARNING: --builders-per-wave=<N> is unvalidated. N<=3 is recommended; N>=4 may exhaust context or hit rate limits. Proceeding at your own risk.`
@@ -164,12 +210,13 @@ Combine flags as needed. Always pass `--state open` explicitly (Mode C operates 
 
 | `N` | Status |
 |-----|--------|
-| `1` | Default. Fully sequential (MVP-compatible). |
-| `2` | **Recommended** starting point for parallel waves. |
-| `3` | Tested and validated. Fine for routine use. |
-| `>= 4` | Unvalidated. Warns at parse time. Operator discretion. |
+| `auto` | **Default** (flag omitted). Resolved at Stage -1 from the backend + scratch-volume disk headroom: daemon detached-process path targets up to 10; in-session subagent path caps at 3. Clamped by candidate count and disk, floor 1. See "Resolve auto wave size". |
+| `1` | Fully sequential (MVP-compatible). Explicit override of `auto`. |
+| `2` | **Recommended** explicit starting point for parallel subagent waves. |
+| `3` | Tested and validated. The #3289-safe ceiling for the **subagent** path. |
+| `>= 4` | Unvalidated **for the subagent path**. Warns at parse time. Operator discretion. |
 
-The cap is **soft** — there is no hard upper bound. The warning is the only guard.
+The subagent-path cap is **soft** — there is no hard upper bound and the warning is the only guard. It is capped at 3 because the subagent path dispatches builders one level deep and is bounded by the #3289 nested-dispatch stall (see "CRITICAL: One level deep"). High parallelism toward 10 is reached **only** via the daemon detached-process path (`mcp__loom__dispatch_sweep`), where each sweep is an isolated OS process — not a nested subagent — so #3289 does not apply. Never raise the subagent number toward 10; route through the daemon instead.
 
 ## Examples
 
@@ -185,6 +232,32 @@ The cap is **soft** — there is no hard upper bound. The warning is the only gu
 /sweep 123 456 789 --dry-run                  # Print plan and EXIT without mutating
 /sweep 1 2 3 4 5 --dry-run --builders-per-wave 2  # Preview with wave grouping
 /sweep 123 456 --no-daemon                    # Force in-process subagent dispatch even when daemon is up (#3454)
+```
+
+### Actionable backlog — the `all` sentinel
+
+```bash
+# Deterministic actionable open-issue set (loom:issue + loom:curated, minus in-flight /
+# held / container labels and issues with an open linked PR). No Mode B NL translation.
+# Displays the resolved candidate set and awaits confirmation before dispatching.
+/sweep all
+
+# Case-insensitive — ALL / All also trigger the sentinel
+/sweep ALL
+
+# Preview the actionable set + wave plan without mutating anything
+/sweep all --dry-run
+
+# Same actionable set, two builders per wave
+/sweep all --builders-per-wave 2
+
+# Actionable open PRs (Mode C: Judge / Doctor → Judge / Merge per PR's current label)
+/sweep all --prs
+/sweep all --prs --dry-run
+
+# NOT the sentinel — >1 non-flag token, still routes to Mode B exactly as before
+/sweep all open loom:issue items
+/sweep all my agent-filed loom:issue items --builders-per-wave 2
 ```
 
 ### Mode B — Natural-language description
@@ -274,7 +347,7 @@ The cap is **soft** — there is no hard upper bound. The warning is the only gu
 
 `/sweep` processes the candidate list in **waves**:
 
-- **Mode A/B (issue-set)**: the candidate list is partitioned into waves of up to `N = --builders-per-wave` issues (default `1`). Issues are picked into waves in order. Within a wave, builders are dispatched in parallel; across waves, processing is sequential. Each wave fully settles (all builders → per-PR Judge → optional Doctor → merge) before the next wave starts.
+- **Mode A/B (issue-set)**: the candidate list is partitioned into waves of up to `N = --builders-per-wave` issues, where an omitted flag resolves to the Stage -1 auto wave size (see "Resolve auto wave size" — up to 10 on the daemon path, capped at 3 on the subagent path, disk-clamped). Issues are picked into waves in order. Within a wave, builders are dispatched in parallel; across waves, processing is sequential. Each wave fully settles (all builders → per-PR Judge → optional Doctor → merge) before the next wave starts.
 - **Mode C (PR-set)**: the candidate list is processed in **size-1 waves** (one PR per wave). `--builders-per-wave` is ignored because there is no Builder phase. Each PR is routed per its current label (Judge / Doctor→Judge / Merge — see "PR-set Wave Lifecycle" below) and fully settles before the next PR is touched. Sequential per-PR processing matches the load-bearing #3289 sequencing rule and parallels the issue-side "per-PR Judge is sequential within a wave" policy.
 
 ### CRITICAL: One level deep — never spawn `/shepherd` as a subagent
@@ -428,6 +501,49 @@ A single-token configuration (`TOKEN_FILE_COUNT == 1` and `ENV_KEY_COUNT <= 1`) 
 
 > **Why >= 2 and not >= 1?** A pool of one is not a pool — it is a single token, and rotation requires alternatives. The daemon's dispatch advantage (per-sweep token selection, weekly-quota recovery) only materializes once two-or-more accounts are configured. Single-token operators see no degradation in the subagent path; this preserves the existing solo-token experience.
 
+### Resolve auto wave size (when `BUILDERS_PER_WAVE = auto`)
+
+Run this **after `DECIDE` is known** (both probes done) and **before** taking the daemon-dispatch or subagent-fallthrough branch below. If `BUILDERS_PER_WAVE` is a concrete integer (the operator passed `--builders-per-wave N`), **skip this entire block** — the explicit value wins and flows into the wave-partition consumers unchanged. Mode C also never reaches this block: Mode C is size-1 and ignores `--builders-per-wave` (the `DECIDE` precedence already routed it to the subagent path).
+
+The disk math lives in a small sourceable helper so it is deterministic and unit-tested (`defaults/scripts/lib/disk-headroom.sh`, tested by `defaults/scripts/tests/test-disk-headroom.sh`). The skill sources it and calls two functions; it does not do the arithmetic inline:
+
+```bash
+source ./.loom/scripts/lib/disk-headroom.sh
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+FREE_GB="$(loom_worktree_root_free_gb "$REPO_ROOT")"   # df's the RESOLVED worktree root (scratch volume), not the repo drive
+```
+
+Then resolve by branch (`CAND` = number of surviving candidate issues):
+
+```bash
+if [[ "$DECIDE" == use_daemon ]]; then
+    # Detached-process path: each sweep is its own OS process with its own
+    # rotated token. NOT nested subagents, so #3289 does not apply — scale to 10.
+    MECH=daemon;   MECHANISM="daemon detached-process"
+else  # use_subagent (no daemon, single-token pool, --no-daemon, or Mode C)
+    # In-session Task subagents, one level deep. Bounded by #3289 — cap 3.
+    MECH=subagent; MECHANISM="in-session subagent"
+fi
+# The helper prints two lines: size on line 1, reason token on line 2.
+mapfile -t _WS < <(loom_wave_size_from_disk "$MECH" "$CAND" "$FREE_GB")
+WAVE_SIZE="${_WS[0]}"; REASON="${_WS[1]}"
+```
+
+`loom_wave_size_from_disk` prints two lines — the clamped size `K = min(target, floor(free_gb / LOOM_PER_WORKTREE_GB), CAND)` with a floor of 1 (never 0, even on a full disk) on line 1, and a machine reason token (`target` / `candidates` / `disk` / `floor`) on line 2. `LOOM_PER_WORKTREE_GB` defaults to a conservative 2 GB and is env-overridable for large-repo operators. The target is **10** for the daemon path and **3** for the subagent path.
+
+**Emit a one-line reason** so the operator understands any reduction. Map the reason token to a human sentence, adding the backend-specific context:
+
+| `DECIDE` / reason | One-line log |
+|-------------------|--------------|
+| `use_daemon`, `target` | `wave size 10, mechanism=daemon: daemon + multi-account pool → detached-process path (target 10)` |
+| `use_subagent`, `target`, daemon not reachable | `wave size 3, mechanism=subagent: daemon not reachable → subagent path (cap 3)` |
+| `use_subagent`, `target`, no pool | `wave size 3, mechanism=subagent: single-token pool → subagent path (cap 3)` |
+| any, `candidates` | `wave size K, mechanism=<m>: reduced to K (only K candidate issues)` |
+| any, `disk` | `wave size K, mechanism=<m>: reduced to K (only <FREE_GB> GB free on <worktree-root>)` |
+| any, `floor` | `wave size 1, mechanism=<m>: reduced to 1 (only <FREE_GB> GB free on <worktree-root>)` |
+
+The resolved `WAVE_SIZE` replaces `--builders-per-wave` everywhere the wave-partition consumers below reference it. On the **daemon path** `WAVE_SIZE` is the concurrency **target** the operator should expect (and that `--dry-run` reports) — the daemon runs each candidate as an independent detached process, so it is not a hard in-session partition. On the **subagent path** `WAVE_SIZE` is the literal wave partition size feeding the `min(...)` dispatch expression in the Wave Lifecycle. In both cases, **never raise the subagent number toward 10** — that is the #3289 line the daemon path exists to route around.
+
 ### The daemon-dispatch path (when `DECIDE = use_daemon`)
 
 When `DECIDE` lands on `use_daemon`, the skill **dispatches each candidate issue** to the daemon and **exits sub-2-second**. There is no in-session orchestration after dispatch — operators monitor with `mcp__loom__list_sweeps` (Phase A) or the richer Phase C tools once they land.
@@ -488,9 +604,11 @@ These are the AC #3 and AC #4 contracts, written for the operator.
 # Expected:
 #   1. Stage -1 runs: PROBE_MODE=A, PROBE_DAEMON or PROBE_POOL is false.
 #   2. DECIDE = use_subagent.
-#   3. Skill continues to "0. Dry-run gate" → "Wave Lifecycle" → ... exactly as today.
-#   4. Issue 123 runs Curator→Builder→Judge→Doctor→Merge in-session.
-#   5. Issue 456 runs the same way in the next wave (default --builders-per-wave=1).
+#   3. Skill continues to "0. Dry-run gate" → "Resolve auto wave size" → "Wave Lifecycle".
+#   4. Auto wave size resolves to the subagent path (cap 3, disk-clamped): both
+#      issues land in one wave of 2 (or fewer if the scratch volume is tight).
+#   5. Each issue runs Curator→Builder→Judge→Doctor→Merge in-session.
+#      (Pass an explicit --builders-per-wave 1 to force the old fully-sequential behaviour.)
 #   6. Skill exits when both issues have settled (potentially many minutes).
 ```
 
@@ -541,7 +659,7 @@ If `--dry-run` was supplied, **this stage runs before any mutation** and EXITs a
    ```
    This is a `gh issue view` read — it does not mutate anything. (If `gh` is unauthenticated or the issue is unreachable, log the error against that candidate and continue surveying the rest.)
 
-2. **Compute wave partition.** Partition the candidate list into waves of size `--builders-per-wave` (default `1`), preserving input order. Record `(issue, wave_index, total_waves)` for each candidate. Apply the same silent-clamp and pre-flight-skip rules that the live path uses (closed / `loom:building` / `loom:blocked` issues are tagged as "would skip" in the plan but still appear in the output for transparency).
+2. **Compute wave partition.** Partition the candidate list into waves of size `--builders-per-wave`, or the Stage -1 resolved auto wave size when the flag was omitted (see "Resolve auto wave size"), preserving input order. Record `(issue, wave_index, total_waves)` for each candidate. Apply the same silent-clamp and pre-flight-skip rules that the live path uses (closed / `loom:building` / `loom:blocked` issues are tagged as "would skip" in the plan but still appear in the output for transparency).
 
 3. **Print the plan.** Emit a table or block per the issue-set format below.
 
@@ -550,7 +668,8 @@ If `--dry-run` was supplied, **this stage runs before any mutation** and EXITs a
 **Issue-set output spec** (Modes A and B; minimum useful — do **not** add token-pool selection or agent dispatch internals):
 
 ```
-/sweep --dry-run plan: M candidate(s) across W wave(s) (--builders-per-wave=N)
+/sweep --dry-run plan: M candidate(s) across W wave(s) (wave size 10, auto; mechanism=daemon detached-process)
+  Wave sizing: daemon + multi-account pool → detached-process path (target 10)
 
   Wave 1:
     #123  "Add foo widget"                labels: loom:issue                    → would build
@@ -564,6 +683,8 @@ If `--dry-run` was supplied, **this stage runs before any mutation** and EXITs a
 Total: 3 would-build, 1 would-route-to-judge, 1 would-merge, 1 would-skip. No issues were modified.
 ```
 
+When `--builders-per-wave` was passed explicitly, the header shows the number without `auto` and the "Wave sizing" line reads `explicit --builders-per-wave=N` (no mechanism/disk reason). A disk- or candidate-clamped auto run reads e.g. `(wave size 3, auto; mechanism=in-session subagent)` with `Wave sizing: reduced to 3 (only 6 GB free on /Volumes/scratch/loom)`.
+
 **Per-candidate fields (required):**
 - Issue number
 - Title (truncated reasonably if very long)
@@ -571,7 +692,7 @@ Total: 3 would-build, 1 would-route-to-judge, 1 would-merge, 1 would-skip. No is
 - Planned action (`would build`, `would curate, build`, `would skip (<reason>)`, `would route to Judge (existing PR #X in flight)`, `would merge (existing PR #X already loom:pr)`)
 - Wave assignment (shown via the `Wave N:` group header)
 
-**Footer (required):** total candidates, total waves, count of `would-build` vs `would-skip`, and an explicit confirmation that nothing was modified.
+**Header/footer (required):** the header states the resolved wave size (and whether it is `auto` or explicit), the chosen **mechanism** (`daemon detached-process` vs `in-session subagent`), and — on the second line — the one-line **gating reason** from "Resolve auto wave size". The footer states total candidates, total waves, count of `would-build` vs `would-skip`, and an explicit confirmation that nothing was modified. (Dry-run resolves the auto wave size via the same Stage -1 helper but performs no dispatch — it prints the plan and EXITs.)
 
 ### Procedure — Mode C (PR-set)
 
@@ -877,7 +998,7 @@ If `CHECKPOINT_PHASE` is `judge-done` or `doctor-done`, see the corresponding sk
 
 For issues without `builder-done`-or-later checkpoints, proceed with the normal Builder dispatch:
 
-Dispatch up to `min(--builders-per-wave, surviving-candidates-in-wave-needing-builder)` `loom-builder` subagents **in a single tool-call block** from this orchestrator session. **Do NOT invoke `/shepherd` as a subagent here** — see the "One level deep" rule in Execution Model above.
+Dispatch up to `min(resolved-wave-size, surviving-candidates-in-wave-needing-builder)` `loom-builder` subagents **in a single tool-call block** from this orchestrator session, where `resolved-wave-size` is the explicit `--builders-per-wave` value or, when the flag was omitted, the Stage -1 auto wave size ("Resolve auto wave size"). Note this Wave Lifecycle is the **subagent** path, so the auto size here is capped at 3 (#3289-safe) — the daemon path never runs this section (it dispatches detached processes and exits at Stage -1). **Do NOT invoke `/shepherd` as a subagent here** — see the "One level deep" rule in Execution Model above.
 
 Each builder is responsible for:
 
@@ -1008,7 +1129,7 @@ Stop processing and print the summary when any of these conditions hold:
 - The user interrupts (Ctrl-C or explicit stop).
 - An unrecoverable error occurs (e.g., `gh` is not authenticated, repository state is broken). Log the error and exit.
 
-This skill does **not** implement disk-pressure checks, max-waves caps, or doctor-cycle global limits — those are deferred (see Limitations).
+This skill does **not** implement a disk-pressure *stop* condition (aborting an in-flight sweep when the disk fills), max-waves caps, or doctor-cycle global limits — those are deferred (see Limitations). It **does** apply a disk-headroom *gate* when resolving the auto wave size at Stage -1 (see "Resolve auto wave size"): the scratch-volume free space clamps the initial wave size down, but does not stop a running sweep.
 
 ## Host Sleep Readiness (#3350)
 
@@ -1066,8 +1187,9 @@ The full `/sweep` design in #3298 includes many features that are intentionally 
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Parallel waves (`--builders-per-wave N`) | **Implemented (#3316)** | Soft cap at N=3 (warns above). One level deep — no `/shepherd` subagent. Issue-side only; ignored in Mode C. |
+| Parallel waves (`--builders-per-wave N`) | **Implemented (#3316, auto default #3566)** | Omitted flag resolves to an auto wave size at Stage -1 (#3566): up to 10 on the daemon detached-process path, capped at 3 on the in-session subagent path. The N=3 soft cap is **subagent-path-specific** (the #3289 nested-dispatch ceiling — warns above on explicit override); the daemon path scales to 10 because each sweep is an isolated process, not a nested subagent. One level deep — no `/shepherd` subagent. Issue-side only; ignored in Mode C. |
 | Natural-language selectors (label/author/title/time-window filters via NL description) | **Implemented (#3318)** | Mode B in Arguments. Out-of-band queries (body/diff inspection, file-touch filters) still trigger clarification. |
+| Actionable-backlog sentinel (`/sweep all`) | **Implemented (#3568)** | Bare, sole `all` token (case-insensitive) takes a deterministic actionable-open-issues path (`loom:issue` + `loom:curated`, minus in-flight / held / `loom:epic`(-`phase`) labels) via a single fixed `gh issue list` query — no Mode B NL translation. `all --prs` resolves actionable open PRs (Mode C). Mandatory confirmation gate; `--dry-run` / `--builders-per-wave` / `--no-daemon` compose unchanged. Multi-token `all …` phrases still route to Mode B/C. Existing linked-PR routing deferred to the #3359 per-issue probe. |
 | `--dry-run` | **Implemented (#3319, extended in #3384)** | Prints the candidate plan (with wave grouping) and exits without mutating labels, worktrees, or PRs. Issue-set (Modes A/B) and PR-set (Mode C) output formats. |
 | Existing-PR detection in pre-flight | **Implemented (#3359)** | Pre-flight probes `closedByPullRequestsReferences`; routes existing open linked PRs to Judge (or Merge if already `loom:pr`) instead of dispatching a duplicate Builder. Multi-PR ambiguity skips with a log. |
 | `loom:operator-only` enforcement | **Implemented (#3360)** | Pre-flight skips issues with `loom:operator-only` (human action required: credentials, infra, hardware). Champion `--merge` mode also refuses to auto-promote them. |
@@ -1079,7 +1201,8 @@ The full `/sweep` design in #3298 includes many features that are intentionally 
 | `--include-blocked` (unblock pass) | Deferred | Currently `/sweep` skips `loom:blocked` issues outright. |
 | `--curator-also` (parallel curators on `loom:triage`) | Deferred | Parallel triage is a separate orchestration question. |
 | Config-driven defaults (`.loom/config.json` keys `sweep.*`) | Deferred | No knobs to configure yet. |
-| Disk-pressure stop condition | Deferred | Wave sequencing limits disk usage; revisit if waves grow large. |
+| Disk-pressure *gate* on auto wave size | **Implemented (#3566)** | Stage -1 resolves the auto wave size against free space on the **worktree-root filesystem** (via `loom_worktree_root`, so it measures the dedicated scratch volume when `LOOM_WORKTREE_ROOT` / `worktree.root` is set — #3539/#3541), clamping the target down and logging the reason. `LOOM_PER_WORKTREE_GB` (default 2) is the per-worktree estimate. |
+| Disk-pressure *stop* condition (abort a running sweep on low disk) | Deferred | Only the initial auto wave size is gated (above); no mid-sweep abort. Wave sequencing limits disk usage; revisit if waves grow large. |
 | Doctor-cycle counting across PRs | Deferred | Single Doctor→Judge cycle limit per PR is enforced inline. |
 | Parallel Judges within a wave | Deferred | Sequential per-PR Judge today; needs benchmarking before parallelizing. Mode C is also strictly sequential per PR (size-1 waves). |
 | Parallel PRs in Mode C | Deferred | Mode C uses size-1 waves. Multi-PR-per-wave is feasible (one judge per PR in parallel) but inherits the same #3289 risk that gated parallel issue-side Judges. |
