@@ -281,24 +281,166 @@ def _pad_polygon(pad: Pad, footprint: Footprint):
 # from kicad_tools.core.geometry (consolidated in #2349).
 
 
-def _build_diff_pair_set(pcb: PCB) -> set[tuple[int, int]]:
-    """Return ``{(min_net_id, max_net_id)}`` for every detected diff pair.
+# Geometric-coupling corroboration thresholds for the diff-pair
+# clearance-skip exemption (Issue #4178).
+#
+# A pair suffix-inferred as differential (``FOO+``/``FOO-``) is only
+# exempted from the generic same-layer ClearanceRule when there is
+# CORROBORATING evidence it was actually routed *as* a coupled
+# differential pair -- i.e. its two nets run parallel and closely spaced
+# over a meaningful length.  Bare name-suffix inference is NOT sufficient:
+# current-sense Kelvin pairs (``ISENSE_A+``/``ISENSE_A-``) and indicator
+# pairs carry ``+``/``-`` names but route to separate destinations and are
+# NOT intentionally coupled, so a genuine same-layer short between them
+# must still be flagged (kicad-cli has no diff-pair heuristic and would
+# flag it).  See Issue #4178.
+#
+# ``_COUPLING_MAX_GAP_MM``: the maximum edge-to-edge gap at which two
+# opposite-net segments count as "coupled" at a sample point.  A real
+# controlled-impedance diff pair couples at ~0.1-0.3 mm; we allow a
+# generous ceiling so tighter-than-inter-clearance pairs (the whole point
+# of the exemption) still qualify while a Kelvin pair fanned out to
+# separate pads does not.
+_COUPLING_MAX_GAP_MM = 0.5
+# ``_COUPLING_MIN_PARALLEL_LEN_MM``: the two nets must run parallel (within
+# ``_COUPLING_ANGLE_TOL_DEG``) and within ``_COUPLING_MAX_GAP_MM`` for at
+# least this cumulative length before the pair is treated as coupled.  A
+# Kelvin sense pair may briefly parallel near a shared connector but does
+# not maintain coupling; a routed diff pair does.
+_COUPLING_MIN_PARALLEL_LEN_MM = 1.0
+# ``_COUPLING_ANGLE_TOL_DEG``: two segments count as parallel when their
+# direction vectors differ by at most this angle (mod 180 deg).
+_COUPLING_ANGLE_TOL_DEG = 20.0
+
+
+def _segments_are_coupled(
+    seg_a: Segment,
+    seg_b: Segment,
+    max_gap_mm: float,
+    angle_tol_deg: float,
+) -> float:
+    """Return the coupled overlap length (mm) of two opposite-net segments.
+
+    Two segments are "coupled" over the portion where they run parallel
+    (direction vectors within ``angle_tol_deg``) and their edge-to-edge
+    gap stays below ``max_gap_mm``.  The returned value approximates the
+    length of that coupled run -- 0.0 when the segments are not parallel
+    or never come within ``max_gap_mm``.
+
+    The parallel-overlap length is estimated by projecting ``seg_b``'s
+    endpoints onto ``seg_a`` and measuring the overlap of the two
+    endpoint spans along ``seg_a``'s axis; the gap gate uses the
+    minimum edge-to-edge distance between the segments (a conservative
+    proxy -- a real coupled pair keeps a roughly constant small gap).
+    """
+    ax1, ay1 = seg_a.start
+    ax2, ay2 = seg_a.end
+    bx1, by1 = seg_b.start
+    bx2, by2 = seg_b.end
+
+    adx, ady = ax2 - ax1, ay2 - ay1
+    bdx, bdy = bx2 - bx1, by2 - by1
+    a_len = math.hypot(adx, ady)
+    b_len = math.hypot(bdx, bdy)
+    if a_len < 1e-9 or b_len < 1e-9:
+        return 0.0
+
+    # Parallelism: angle between direction vectors (mod 180 deg).
+    cos_theta = abs(adx * bdx + ady * bdy) / (a_len * b_len)
+    cos_theta = max(-1.0, min(1.0, cos_theta))
+    angle = math.degrees(math.acos(cos_theta))
+    if angle > angle_tol_deg:
+        return 0.0
+
+    # Edge-to-edge gap gate (center-line distance minus both half-widths).
+    center_dist = _segment_to_segment_distance(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2)
+    half_w = (seg_a.width + seg_b.width) / 2.0
+    gap = center_dist - half_w
+    if gap > max_gap_mm:
+        return 0.0
+
+    # Parallel-overlap length: project seg_b endpoints onto seg_a's axis.
+    ux, uy = adx / a_len, ady / a_len
+    t_b1 = (bx1 - ax1) * ux + (by1 - ay1) * uy
+    t_b2 = (bx2 - ax1) * ux + (by2 - ay1) * uy
+    lo = max(0.0, min(t_b1, t_b2))
+    hi = min(a_len, max(t_b1, t_b2))
+    overlap = hi - lo
+    return overlap if overlap > 0.0 else 0.0
+
+
+def _pair_is_geometrically_coupled(pcb: PCB, net_a: int, net_b: int) -> bool:
+    """Return ``True`` when two nets are routed as a coupled diff pair.
+
+    Corroborating evidence for the diff-pair clearance-skip exemption
+    (Issue #4178): the two nets must have segments that run parallel and
+    closely spaced (< ``_COUPLING_MAX_GAP_MM``) for a cumulative length of
+    at least ``_COUPLING_MIN_PARALLEL_LEN_MM`` on a shared copper layer.
+
+    Distinguishes a genuine routed differential pair (intentionally
+    coupled, must stay exempt) from a coincidentally ``+``/``-``-named
+    single-ended pair such as a Kelvin current-sense pair (routes to
+    separate destinations, must be clearance-checked).
+    """
+    coupled_len = 0.0
+    for layer in pcb.copper_layers:
+        segs_a: list[Segment] = []
+        segs_b: list[Segment] = []
+        for seg in pcb.segments_on_layer(layer.name):
+            if seg.net_number == net_a:
+                segs_a.append(seg)
+            elif seg.net_number == net_b:
+                segs_b.append(seg)
+        if not segs_a or not segs_b:
+            continue
+        for sa in segs_a:
+            for sb in segs_b:
+                coupled_len += _segments_are_coupled(
+                    sa,
+                    sb,
+                    _COUPLING_MAX_GAP_MM,
+                    _COUPLING_ANGLE_TOL_DEG,
+                )
+                if coupled_len >= _COUPLING_MIN_PARALLEL_LEN_MM:
+                    return True
+    return False
+
+
+def _build_diff_pair_set(
+    pcb: PCB,
+    declared_pairs: set[tuple[int, int]] | None = None,
+) -> set[tuple[int, int]]:
+    """Return ``{(min_net_id, max_net_id)}`` for pairs safe to exempt.
 
     Used by :class:`ClearanceRule` to skip same-pair segment-segment edges
     that are instead validated by ``DiffPairClearanceIntraRule`` against
     the per-class ``intra_pair_clearance`` threshold (see Issue #2560 /
     Epic #2556 Phase 1D).
 
-    Detection currently uses the suffix-inference matcher in
-    ``router/diffpair`` -- this matches what the autorouter sees when no
-    explicit declarations or KiCad-group sources are present, and the
-    refusal patterns (``USB_CC1``/``USB_CC2``, ``SBU1``/``SBU2``) are
-    correctly excluded.  When the upstream rule consumer (the autorouter
-    in #2559) gains the explicit-declaration plumbing, this helper can be
-    extended to honor those sources too without a public API change.
+    Issue #4178 hardening: bare name-suffix inference (``FOO+``/``FOO-``)
+    is NO LONGER sufficient on its own to exempt a pair from the generic
+    same-layer clearance check.  Current-sense Kelvin pairs
+    (``ISENSE_A+``/``ISENSE_A-``) and indicator pairs are ``+``/``-``-named
+    but are NOT differential signals -- they route to separate
+    destinations and a genuine same-layer short between them must be
+    flagged (``kicad-cli`` has no diff-pair heuristic and would flag it).
+    A suffix-inferred pair is therefore only exempted when there is
+    CORROBORATING evidence it was actually routed/declared as a coupled
+    differential pair:
+
+    * an explicit declaration in ``declared_pairs`` (net-class-map /
+      router ``DifferentialPairConfig`` engagement, resolved by the
+      caller to net-number tuples), OR
+    * geometric coupling: the two nets run parallel and closely spaced
+      over a meaningful length (see :func:`_pair_is_geometrically_coupled`).
+
+    Legitimate coupled diff pairs (real ``USB_D+``/``USB_D-`` routed close
+    together) still satisfy the geometric test and stay exempt, so no
+    false positives are introduced for real differential pairs.
     """
     from kicad_tools.router.diffpair import detect_differential_pairs
 
+    declared = declared_pairs or set()
     pairs: set[tuple[int, int]] = set()
     net_names = {net.number: net.name for net in pcb.nets.values()}
     for diff_pair in detect_differential_pairs(net_names):
@@ -307,7 +449,10 @@ def _build_diff_pair_set(pcb: PCB) -> set[tuple[int, int]]:
         if p_id == 0 or n_id == 0:
             continue
         key = (p_id, n_id) if p_id <= n_id else (n_id, p_id)
-        pairs.add(key)
+        # Require corroborating evidence beyond the name suffix before
+        # exempting the pair from the generic clearance check (#4178).
+        if key in declared or _pair_is_geometrically_coupled(pcb, p_id, n_id):
+            pairs.add(key)
     return pairs
 
 

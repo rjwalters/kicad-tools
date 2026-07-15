@@ -451,3 +451,180 @@ class TestDiffPairClearanceIntraRule:
         results = rule.check(pcb, _design_rules())
         assert len(results.violations) == 0
         assert results.rules_checked == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #4178: diff-pair clearance-skip false-exemption regression.
+#
+# ClearanceRule._build_diff_pair_set() previously exempted ANY suffix-inferred
+# +/- pair from same-layer segment-segment clearance checking.  That silently
+# skipped genuine short detection between current-sense Kelvin pairs
+# (ISENSE_A+/ISENSE_A-) -- +/- named but NOT differential signals -- while
+# kicad-cli, which has no such heuristic, would flag them.  The fix requires
+# CORROBORATING evidence (geometric coupling or an explicit declaration)
+# before exempting a pair, so a Kelvin pair with a real same-layer short is
+# now flagged while a genuinely coupled diff pair stays exempt.
+# ---------------------------------------------------------------------------
+
+
+def _crossing_segments(
+    *,
+    net_a: int,
+    name_a: str,
+    net_b: int,
+    name_b: str,
+    width_mm: float = 0.2,
+) -> list[_StubSegment]:
+    """Two DIFFERENT-net segments that physically cross (a genuine short).
+
+    The two segments intersect near (1, 1) at ~90 degrees, so they are NOT
+    parallel and NOT coupled -- the pattern of a real ``tracks_crossing``
+    short between two nets that route to separate destinations (a Kelvin
+    sense pair), the opposite of an intentionally-coupled diff pair.
+    """
+    return [
+        _StubSegment(
+            start=(0.0, 0.0),
+            end=(2.0, 2.0),
+            width=width_mm,
+            net_number=net_a,
+            net_name=name_a,
+            uuid=f"seg-{name_a}",
+        ),
+        _StubSegment(
+            start=(0.0, 2.0),
+            end=(2.0, 0.0),
+            width=width_mm,
+            net_number=net_b,
+            net_name=name_b,
+            uuid=f"seg-{name_b}",
+        ),
+    ]
+
+
+class TestClearanceRuleDiffPairFalseExemption:
+    """ClearanceRule must NOT exempt suffix-only +/- pairs (Issue #4178)."""
+
+    def test_kelvin_sense_pair_short_is_flagged(self):
+        """A crossing ISENSE_A+/ISENSE_A- short is a real short, not exempt.
+
+        The two segments cross (clearance 0) and are NOT geometrically
+        coupled, so the suffix-only diff-pair inference must not exempt
+        them from ClearanceRule -- the short is flagged.
+        """
+        pcb = _StubPCB(
+            _nets={
+                0: _StubNet(0, ""),
+                19: _StubNet(19, "/ISENSE_A+"),
+                20: _StubNet(20, "/ISENSE_A-"),
+            },
+            _segments=_crossing_segments(
+                net_a=19, name_a="/ISENSE_A+", net_b=20, name_b="/ISENSE_A-"
+            ),
+        )
+        clearance_rule = ClearanceRule()
+        results = clearance_rule.check(pcb, _design_rules(min_clearance_mm=0.127))
+        assert len(results.violations) >= 1, (
+            "A crossing Kelvin-sense (ISENSE_A+/ISENSE_A-) short must be "
+            "flagged -- suffix-only +/- naming is not sufficient to exempt "
+            "it from the generic clearance rule (Issue #4178)."
+        )
+        v = results.violations[0]
+        assert v.rule_id.startswith("clearance")
+        assert "/ISENSE_A+" in v.nets
+        assert "/ISENSE_A-" in v.nets
+
+    def test_kelvin_sense_pair_close_parallel_short_is_flagged(self):
+        """A short parallel Kelvin run below the coupling-length floor fires.
+
+        Two ISENSE segments that briefly parallel at a tight gap (0.05 mm)
+        but only for 0.5 mm -- below the 1.0 mm coupling-length floor -- are
+        NOT a coupled diff pair, so the sub-clearance gap is flagged.
+        """
+        pcb = _StubPCB(
+            _nets={
+                0: _StubNet(0, ""),
+                21: _StubNet(21, "/ISENSE_B+"),
+                22: _StubNet(22, "/ISENSE_B-"),
+            },
+            _segments=[
+                _StubSegment(
+                    start=(0.0, 0.0),
+                    end=(0.5, 0.0),  # only 0.5 mm long -> below 1.0 mm floor
+                    width=0.2,
+                    net_number=21,
+                    net_name="/ISENSE_B+",
+                    uuid="seg-isb-p",
+                ),
+                _StubSegment(
+                    start=(0.0, 0.25),  # gap = 0.05 mm (< 0.127 inter-clearance)
+                    end=(0.5, 0.25),
+                    width=0.2,
+                    net_number=22,
+                    net_name="/ISENSE_B-",
+                    uuid="seg-isb-n",
+                ),
+            ],
+        )
+        clearance_rule = ClearanceRule()
+        results = clearance_rule.check(pcb, _design_rules(min_clearance_mm=0.127))
+        assert len(results.violations) >= 1, (
+            "A short (below coupling-length floor) parallel Kelvin run at a "
+            "sub-clearance gap must be flagged -- it is not a coupled diff "
+            "pair (Issue #4178)."
+        )
+
+    def test_real_coupled_diffpair_stays_exempt(self):
+        """A genuinely coupled USB_D+/USB_D- run remains exempt (no regression).
+
+        The two segments run parallel and closely spaced for 2 mm (well
+        above the coupling-length floor), so ClearanceRule still skips the
+        same-pair edge and delegates to DiffPairClearanceIntraRule -- no
+        false positive introduced for real differential pairs.
+        """
+        pcb = _StubPCB(
+            _nets={
+                0: _StubNet(0, ""),
+                3: _StubNet(3, "USB_D+"),
+                4: _StubNet(4, "USB_D-"),
+            },
+            _segments=_parallel_segments(
+                net_a=3, name_a="USB_D+", net_b=4, name_b="USB_D-", gap_mm=0.090
+            ),
+        )
+        clearance_rule = ClearanceRule()
+        results = clearance_rule.check(pcb, _design_rules(min_clearance_mm=0.127))
+        assert len(results.violations) == 0, (
+            "A genuinely coupled diff pair (USB_D+/USB_D- parallel, tightly "
+            "coupled) must stay exempt from the generic clearance rule "
+            "(delegated to DiffPairClearanceIntraRule) -- Issue #4178 must "
+            "not introduce a false positive for real diff pairs."
+        )
+
+    def test_declared_pair_stays_exempt_even_without_coupling(self):
+        """An explicitly-declared pair is exempt even if not coupled geometry.
+
+        When a pair is corroborated by an explicit declaration (net-class /
+        router diffpair engagement, passed as ``declared_pairs``), it is
+        exempt regardless of geometric coupling -- the declaration is
+        itself the corroborating evidence.
+        """
+        from kicad_tools.validate.rules.clearance import _build_diff_pair_set
+
+        pcb = _StubPCB(
+            _nets={
+                0: _StubNet(0, ""),
+                7: _StubNet(7, "CLK_POS"),
+                8: _StubNet(8, "CLK_NEG"),
+            },
+            # Crossing (uncoupled) geometry -- would NOT be corroborated by
+            # coupling alone.
+            _segments=_crossing_segments(net_a=7, name_a="CLK_POS", net_b=8, name_b="CLK_NEG"),
+        )
+        # Without a declaration and without coupling: NOT exempt.
+        auto = _build_diff_pair_set(pcb)
+        assert (7, 8) not in auto
+
+        # With an explicit declaration: exempt.
+        declared = _build_diff_pair_set(pcb, declared_pairs={(7, 8)})
+        assert (7, 8) in declared

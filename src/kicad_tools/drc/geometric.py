@@ -30,6 +30,15 @@ logger = logging.getLogger(__name__)
 __all__ = ["GeometricDRCResult", "run_geometric_drc"]
 
 
+# Machine-readable skip reasons (Issue #4178).  ``--strict-drc`` uses these
+# to emit an actionable message distinguishing WHY the native DRC did not run.
+REASON_OK = "ok"  # kicad-cli ran and produced a report
+REASON_ABSENT = "kicad_cli_absent"  # kicad-cli not found on PATH
+REASON_TIMEOUT = "kicad_cli_timeout"  # kicad-cli exceeded the timeout budget
+REASON_NO_REPORT = "kicad_cli_no_report"  # kicad-cli ran but wrote no report
+REASON_CRASH = "kicad_cli_crash"  # kicad-cli raised/crashed
+
+
 @dataclass
 class GeometricDRCResult:
     """Outcome of a native ``kicad-cli pcb drc`` reconciliation run.
@@ -48,12 +57,17 @@ class GeometricDRCResult:
         note: A human-readable note describing the outcome -- always set
             for skip paths (e.g. the "kicad-cli not found" fallback) and
             ``None`` on a clean successful run.
+        reason: A machine-readable outcome code (one of ``REASON_*``)
+            distinguishing "kicad-cli not found" from "kicad-cli timed
+            out" from "kicad-cli crashed" so ``kct route --strict-drc``
+            can emit an actionable failure message (Issue #4178).
     """
 
     ran: bool = False
     error_count: int = 0
     by_type: dict[str, int] = field(default_factory=dict)
     note: str | None = None
+    reason: str = REASON_OK
 
     @property
     def has_errors(self) -> bool:
@@ -116,7 +130,7 @@ def run_geometric_drc(
     if kicad_cli is None:
         kicad_cli = find_kicad_cli()
     if kicad_cli is None:
-        return GeometricDRCResult(ran=False, note=KICAD_CLI_ABSENT_NOTE)
+        return GeometricDRCResult(ran=False, note=KICAD_CLI_ABSENT_NOTE, reason=REASON_ABSENT)
 
     report_path: Path | None = None
     try:
@@ -147,6 +161,7 @@ def run_geometric_drc(
             return GeometricDRCResult(
                 ran=False,
                 note="kicad-cli produced no DRC report (geometric DRC skipped)",
+                reason=REASON_NO_REPORT,
             )
 
         from kicad_tools.drc import DRCReport
@@ -166,15 +181,17 @@ def run_geometric_drc(
             error_count=len(cli_errors),
             by_type=by_type,
             note=None,
+            reason=REASON_OK,
         )
     except subprocess.TimeoutExpired:
         return GeometricDRCResult(
             ran=False,
             note="kicad-cli DRC timed out (geometric DRC skipped)",
+            reason=REASON_TIMEOUT,
         )
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("Geometric DRC (kicad-cli) failed: %s", e)
-        return GeometricDRCResult(ran=False, note=f"geometric DRC failed: {e}")
+        return GeometricDRCResult(ran=False, note=f"geometric DRC failed: {e}", reason=REASON_CRASH)
     finally:
         if report_path is not None:
             report_path.unlink(missing_ok=True)
