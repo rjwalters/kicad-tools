@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from .io import FineZone
     from .pathfinder import Router
+    from .stub_terminals import StubTerminal
 
 from kicad_tools.cli.progress import flush_print
 
@@ -1047,6 +1048,20 @@ class Autorouter:
 
         self.pads: dict[tuple[str, str], Pad] = {}
         self.nets: dict[int, list[tuple[str, str]]] = {}
+        # Issue #4170 (Phase 2b-1): route-scoped bare boundary stub endpoints to
+        # reconnect, keyed by net id.  Populated by ``set_stub_terminals`` from
+        # ``load_pcb_for_routing(stub_terminals=...)``.  These are an ADDITIVE
+        # source of per-net routing targets merged in via ``_stub_target_pads``;
+        # they are NEVER inserted into ``self.pads`` / ``self.nets`` (they are
+        # not real pads -- no footprint, no metal, no drill).
+        self._stub_terminals: dict[int, list[StubTerminal]] = {}
+        # Issue #4170: the WORLD-coordinate region box for stub-reconnection
+        # routing.  When set, per-net target expansion for a stub net drops pads
+        # that fall OUTSIDE the box -- those pads are already electrically the
+        # far end of the boundary stub, so routing to them directly would both
+        # duplicate the connection AND escape the region.  The reachable target
+        # is the stub tip, not the outside pad.
+        self._stub_region_world: tuple[float, float, float, float] | None = None
         self.net_names: dict[int, str] = {}
         self.routes: list[Route] = []
         # Issue #3002 (PR #3006 perf): single-slot cache for the
@@ -1633,6 +1648,95 @@ class Autorouter:
 
             self.grid.add_pad(pad, pin_pitch=pin_pitch)
 
+    def set_stub_terminals(
+        self,
+        stub_terminals: dict[int, list[StubTerminal]],
+        region_world: tuple[float, float, float, float] | None = None,
+    ) -> None:
+        """Register route-scoped bare boundary stub terminals (Issue #4170).
+
+        Called by ``load_pcb_for_routing(stub_terminals=...)`` after the stub
+        tip cells have been carved open on the grid.  The stored map is an
+        ADDITIVE source of per-net routing targets consumed by
+        :meth:`_stub_target_pads`; it is never turned into a :class:`Pad` and
+        never inserted into ``self.pads`` / ``self.nets``.  A shallow copy is
+        kept so later mutation of the caller's dict does not leak in.
+
+        Args:
+            stub_terminals: ``{net_id: [StubTerminal, ...]}`` in WORLD coords.
+            region_world: WORLD-coordinate ``(x1, y1, x2, y2)`` region box.  When
+                given, per-net target expansion for a stub net drops pads outside
+                the box (see :meth:`_region_filtered_pad_keys`).
+        """
+        self._stub_terminals = {net_id: list(terms) for net_id, terms in stub_terminals.items()}
+        self._stub_region_world = region_world
+
+    def _region_filtered_pad_keys(
+        self, net: int, pad_keys: list[tuple[str, str]]
+    ) -> list[tuple[str, str]]:
+        """Drop outside-region pad keys for a stub net (Issue #4170).
+
+        Only filters when BOTH a region box is set AND ``net`` has registered
+        stub terminals -- otherwise returns ``pad_keys`` unchanged (byte-for-byte
+        the non-region behaviour).  For a stub net, a pad OUTSIDE the region is
+        the far end of the boundary stub already; the reachable target is the
+        stub tip, so routing to the outside pad directly would duplicate the
+        connection and escape the region.  A pad exactly on the boundary counts
+        as inside (inclusive box, matching Phase 2a).
+        """
+        region = self._stub_region_world
+        if region is None or net not in self._stub_terminals:
+            return pad_keys
+        x1, y1, x2, y2 = region
+        lo_x, hi_x = (x1, x2) if x1 <= x2 else (x2, x1)
+        lo_y, hi_y = (y1, y2) if y1 <= y2 else (y2, y1)
+        filtered: list[tuple[str, str]] = []
+        for key in pad_keys:
+            pad = self.pads.get(key)
+            if pad is None:
+                filtered.append(key)
+                continue
+            if lo_x <= pad.x <= hi_x and lo_y <= pad.y <= hi_y:
+                filtered.append(key)
+        return filtered
+
+    def _stub_target_pads(self, net: int) -> list[Pad]:
+        """Build route-scoped target :class:`Pad` objects for a net's stubs.
+
+        Issue #4170 (Phase 2b-1): each bare boundary stub endpoint is exposed to
+        the A* router as an additional target position.  A tiny transient
+        :class:`Pad` (SMD, ~one grid cell) is synthesized at the stub tip PURELY
+        to feed the MST/A* target list -- it is created fresh on each call, is
+        never stored in ``self.pads`` / ``self.nets``, and carries a ``_stub``
+        ref so it is distinguishable in diagnostics.  The tip cell itself was
+        already carved open as a same-net-reachable target by
+        :meth:`RoutingGrid.reopen_stub_terminal`, so A* can actually land on it.
+
+        Returns an empty list when the net has no registered stub terminals
+        (the common case), so callers can unconditionally extend their pad list.
+        """
+        terminals = self._stub_terminals.get(net)
+        if not terminals:
+            return []
+        pads: list[Pad] = []
+        for i, term in enumerate(terminals):
+            pads.append(
+                Pad(
+                    x=term.x,
+                    y=term.y,
+                    # A ~single-cell footprint so the A* pad-approach box hugs
+                    # the carved tip cell rather than a wide metal rectangle.
+                    width=self.grid.resolution,
+                    height=self.grid.resolution,
+                    net=term.net_id,
+                    net_name=term.net_name,
+                    layer=term.layer,
+                    ref="_stub",
+                    pin=f"{term.net_name}_{i}",
+                )
+            )
+        return pads
+
     @staticmethod
     def _compute_component_pitch(pads: list[dict]) -> float | None:
         """Compute minimum pin pitch from a component's pad list.
@@ -2178,11 +2282,19 @@ class Autorouter:
         Returns:
             List of Route objects for this net
         """
-        if net not in self.nets:
+        # Issue #4170 (Phase 2b-1): bare boundary stub terminals are an additive
+        # source of per-net targets.  A net may have only ONE in-region pad plus
+        # a boundary stub (or even zero pads registered here but a stub target),
+        # so the pad-count gate must include stub targets.
+        stub_targets = self._stub_target_pads(net)
+        if net not in self.nets and not stub_targets:
             return []
 
-        pads = self.nets[net]
-        if len(pads) < 2:
+        # Issue #4170: for a stub net, drop pads outside the region -- the stub
+        # tip (added via stub_targets) is the reachable target, not the outside
+        # pad it terminates at.
+        pads = self._region_filtered_pad_keys(net, self.nets.get(net, []))
+        if len(pads) + len(stub_targets) < 2:
             return []
 
         # Issue #1019: Update router with unrouted pad info for via impact scoring
@@ -2225,13 +2337,19 @@ class Autorouter:
 
         # Build reduced pad list for inter-IC routing
         pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices, pad_lookup=self.pads)
-        if len(pads_for_routing) < 2:
+        # Issue #4170 (Phase 2b-1): bare boundary stub terminals count toward the
+        # inter-IC target list, so a single in-region pad plus a stub still has
+        # >= 2 targets to connect.
+        if len(pads_for_routing) + len(stub_targets) < 2:
             return routes
 
         # Issue #2401: Substitute escaped pads with virtual pads at escape
         # endpoints so RSMT + A* route between escape endpoints, not original
         # pad centers.
+        # Issue #4170: merge in the route-scoped stub-terminal target pads as an
+        # ADDITIVE source of per-net targets (never stored in self.pads).
         pad_objs = [self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing]
+        pad_objs.extend(stub_targets)
 
         # Issue #2336: Try sub-problem pattern cache before A* search.
         # Compute a position/rotation-invariant signature and check for a
@@ -7800,13 +7918,19 @@ class Autorouter:
         hard_fail_rescue_threshold = 2
         for net in net_order:
             if net in self.nets:
-                pads_for_routing = self.nets[net]
-                if len(pads_for_routing) >= 2:
+                # Issue #4170 (Phase 2b-1): drop outside-region pads for stub
+                # nets (the stub tip is the reachable target, not the outside
+                # pad) and add the stub tips as additive targets, so a single
+                # in-region pad plus a stub still has >= 2 targets and is not
+                # treated as a single-pad (unroutable) net.
+                pads_for_routing = self._region_filtered_pad_keys(net, self.nets[net])
+                stub_targets = self._stub_target_pads(net)
+                if len(pads_for_routing) + len(stub_targets) >= 2:
                     # Issue #2401: Substitute escaped pads with virtual pads
                     # at escape endpoints.
                     pads_by_net[net] = [
                         self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing
-                    ]
+                    ] + stub_targets
                 else:
                     single_pad_nets.add(net)
             else:
@@ -10945,11 +11069,14 @@ class Autorouter:
             per_net_timeout: Optional wall-clock timeout in seconds for each
                 A* search within this net (Issue #1605)
         """
-        if net not in self.nets:
+        # Issue #4170 (Phase 2b-1): bare boundary stub terminals are additive
+        # per-net targets on the negotiated per-net chokepoint too.
+        stub_targets = self._stub_target_pads(net)
+        if net not in self.nets and not stub_targets:
             return []
 
-        pads = self.nets[net]
-        if len(pads) < 2:
+        pads = self._region_filtered_pad_keys(net, self.nets.get(net, []))
+        if len(pads) + len(stub_targets) < 2:
             return []
 
         # Issue #2953: push foreign-net pad / track context so
@@ -10977,13 +11104,16 @@ class Autorouter:
         connected_indices |= block_connected
 
         pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices, pad_lookup=self.pads)
-        if len(pads_for_routing) < 2:
+        # Issue #4170: stub tips count toward the inter-IC target list.
+        if len(pads_for_routing) + len(stub_targets) < 2:
             return routes
 
         # Issue #2401: Substitute escaped pads with virtual pads at escape
         # endpoints so RSMT + A* route between escape endpoints, not original
         # pad centers.
+        # Issue #4170: merge in the route-scoped stub-terminal target pads.
         pad_objs = [self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing]
+        pad_objs.extend(stub_targets)
         neg_router = NegotiatedRouter(
             self.grid,
             self.router,

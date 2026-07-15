@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
     from .primitives import Pad
+    from .stub_terminals import StubTerminal
 
 from .core import Autorouter
 from .geometry import (
@@ -3345,6 +3346,7 @@ def load_pcb_for_routing(
     max_search_iterations: int = 0,
     per_net_iterations: int = 0,
     region: tuple[float, float, float, float] | None = None,
+    stub_terminals: dict[int, list[StubTerminal]] | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -3404,6 +3406,20 @@ def load_pcb_for_routing(
                 immovable.  Region mode implies preserve-existing semantics --
                 callers should pass ``load_existing_routes=True`` so outside
                 copper is never re-routed.  The box is normalized internally.
+        stub_terminals: Optional ``{net_id: [StubTerminal, ...]}`` map of bare
+                boundary stub endpoints to reconnect (Issue #4170, Phase 2b-1).
+                Produced once by
+                :func:`~kicad_tools.router.stub_terminals.detect_boundary_stub_terminals`
+                (the shared detector) and threaded here alongside ``region``.
+                For each terminal the tip cell is carved open as a same-net A*
+                target (:meth:`RoutingGrid.reopen_stub_terminal`) AFTER existing
+                copper and the region bound are marked, and the map is stored on
+                ``router._stub_terminals`` so the Autorouter target-merge shim
+                can add each tip as an additional per-net routing target.  These
+                terminals are route-scoped and ephemeral: they never become a
+                :class:`Pad` and are never inserted into ``router.pads`` /
+                ``router.nets``.  Requires ``load_existing_routes=True`` (the
+                stub copper must be loaded first).
 
     Returns:
         Tuple of (Autorouter instance, net_map dict)
@@ -3832,6 +3848,89 @@ def load_pcb_for_routing(
             max(rx1, rx2),
             max(ry1, ry2),
             blocked,
+        )
+
+    # Issue #4170 (Phase 2b-1): carve bare boundary stub endpoints open as
+    # same-net A* targets and store them for the Autorouter target-merge shim.
+    # MUST run AFTER both load_existing_routes (the stub copper's own halo) and
+    # mark_region_bound, so the re-asserted tip cell is not re-blocked by a
+    # later marking pass.  StubTerminal coordinates are BOARD-RELATIVE (matching
+    # the ``region`` convention), so the board origin is added to reach the
+    # sheet-absolute world frame the grid consumes -- exactly as ``region`` does
+    # above.  StubTerminals are route-scoped/ephemeral: they are never turned
+    # into Pads or inserted into router.pads / router.nets.
+    if stub_terminals:
+        import dataclasses as _dc
+
+        world_terminals: dict[int, list[StubTerminal]] = {}
+        carved = 0
+        for net_id, terminals in stub_terminals.items():
+            world_list = []
+            for term in terminals:
+                wx = term.x + origin_x
+                wy = term.y + origin_y
+                router.grid.reopen_stub_terminal(wx, wy, term.layer, term.net_id)
+                world_list.append(_dc.replace(term, x=wx, y=wy))
+                carved += 1
+            world_terminals[net_id] = world_list
+        # Region box in WORLD coords (add origin, matching the region marking
+        # above) so the Autorouter can drop outside-region pads for stub nets.
+        region_world = None
+        if region is not None:
+            rx1, ry1, rx2, ry2 = region
+            region_world = (
+                rx1 + origin_x,
+                ry1 + origin_y,
+                rx2 + origin_x,
+                ry2 + origin_y,
+            )
+        router.set_stub_terminals(world_terminals, region_world=region_world)
+
+        # Issue #4170: prune outside-region pads from ``router.nets`` for stub
+        # nets.  An outside pad is the far end of a boundary stub -- it is
+        # already electrically connected via the preserved stub copper, and it
+        # sits in a region-blocked cell.  Routing to it would BOTH duplicate the
+        # connection AND emit new copper outside the region (breaking the
+        # zero-copper-modified-outside contract).  ``self.nets`` is the single
+        # source every route variant reads, so pruning here confines all
+        # variants at once; the stub tip (added as a synthetic target by
+        # ``_stub_target_pads``) is the in-region reconnection target instead.
+        # The pruned pads' copper is preserved untouched (it is loaded as an
+        # existing route / boundary stub, never re-routed).
+        if region_world is not None:
+            lo_x, hi_x = (
+                min(region_world[0], region_world[2]),
+                max(region_world[0], region_world[2]),
+            )
+            lo_y, hi_y = (
+                min(region_world[1], region_world[3]),
+                max(region_world[1], region_world[3]),
+            )
+            pruned = 0
+            for net_id in world_terminals:
+                keys = router.nets.get(net_id)
+                if not keys:
+                    continue
+                kept = []
+                for key in keys:
+                    pad = router.pads.get(key)
+                    if pad is None or (lo_x <= pad.x <= hi_x and lo_y <= pad.y <= hi_y):
+                        kept.append(key)
+                    else:
+                        pruned += 1
+                router.nets[net_id] = kept
+            if pruned:
+                logger.info(
+                    "Region-bounded routing: pruned %d outside-region pad(s) from "
+                    "%d stub net(s); reconnection targets the boundary stub tip",
+                    pruned,
+                    len(world_terminals),
+                )
+
+        logger.info(
+            "Region-bounded routing: carved %d bare stub terminal(s) open as "
+            "same-net reconnection targets (Phase 2b-1)",
+            carved,
         )
 
     return router, net_map

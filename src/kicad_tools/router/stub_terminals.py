@@ -80,17 +80,6 @@ class RegionBox:
         """Inclusive membership test (matches Phase 2a's inclusive box)."""
         return self.x1 <= x <= self.x2 and self.y1 <= y <= self.y2
 
-    def contains_strict(self, x: float, y: float, epsilon: float = EPSILON) -> bool:
-        """Strictly-inside test: inside the box and not on/near any edge.
-
-        Used to decide whether the *other* endpoint of a stub segment is
-        strictly OUTSIDE the region. An endpoint sitting on the boundary line
-        (within ``epsilon``) is treated as on-boundary, not strictly inside.
-        """
-        return (
-            self.x1 + epsilon < x < self.x2 - epsilon and self.y1 + epsilon < y < self.y2 - epsilon
-        )
-
 
 @dataclass(frozen=True)
 class StubSegment:
@@ -126,7 +115,7 @@ class PadLocation:
     y: float
 
 
-@dataclass
+@dataclass(frozen=True)
 class StubTerminal:
     """A bare copper stub endpoint on the region boundary to be reconnected.
 
@@ -134,6 +123,10 @@ class StubTerminal:
     ``Autorouter.pads`` / ``nets``. ``source_segment_uuid`` and
     ``boundary_edge`` are provenance for the detector's own correctness checks
     and downstream diagnostics.
+
+    Frozen to match its frozen input dataclasses (``StubSegment`` /
+    ``PadLocation`` / ``RegionBox``) so terminals are safely hashable and cannot
+    be mutated after detection.
     """
 
     net_id: int

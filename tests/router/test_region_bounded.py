@@ -20,8 +20,16 @@ These tests follow ``tests/router/test_preserve_existing.py`` conventions
 the spirit of ``tests/test_pcb.py``'s ``test_strip_region_*`` since the router
 API takes a ``.kicad_pcb`` path and the chorus fixture is NOT available in CI.
 
-Phase 2b (bare mid-trace stub reconnection) is explicitly OUT of scope here
-and is deferred to a follow-up issue.
+Phase 2b-1 scope (Issue #4170)
+------------------------------
+
+``TestStubReconnection`` covers bare mid-trace stub-endpoint reconnection for
+``kct route --region``: a genuine boundary-clipped stub (produced by
+``PCB.add_trace`` + ``strip_traces(region=...)``) is reconnected to its
+in-region pad, zero copper is modified outside the region, the hole-to-hole
+floor is respected, and multi-stub same-net cases reconnect.  The ``route-auto``
+orchestrator surface is NOT wired for stub reconnection here -- it fails fast
+with a Phase 2c deferral message (#4173).
 """
 
 from __future__ import annotations
@@ -626,6 +634,311 @@ class TestRouteAutoRegion:
             # any failure here must be the output-confinement or a normal
             # routing failure, not the reachability rejection.
             assert "lie outside the region" not in msg
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b-1: bare boundary stub-endpoint reconnection (Issue #4170)
+# ---------------------------------------------------------------------------
+
+
+def _make_stripped_stub_board(
+    tmp_path: Path,
+    *,
+    name: str,
+    footprints: list[str],
+    traces: list[tuple[tuple[str, str], tuple[str, str], str]],
+    strip_region: tuple[float, float, float, float],
+    strip_nets: list[str],
+    edge: tuple[float, float, float, float] = (100, 100, 160, 160),
+    nets: list[tuple[int, str]] | None = None,
+) -> Path:
+    """Build a board, route ``traces``, then ``strip_traces(region=...)``.
+
+    Produces a GENUINE boundary-clipped stub (the surviving outside portion of
+    each clipped trace, its inside endpoint moved onto the region boundary) --
+    exactly what Phase 2b-1 must reconnect.  Returns the path to the stripped
+    ``.kicad_pcb`` on disk.
+    """
+    board = _board(footprints, edge=edge, nets=nets)
+    src = _write(tmp_path, board, name + "_src.kicad_pcb")
+    pcb = PCB.load(str(src))
+    for start, end, net_name in traces:
+        pcb.add_trace(start, end, width=0.2, layer="F.Cu", net=net_name)
+    stats = pcb.strip_traces(region=strip_region, nets=strip_nets)
+    assert stats["segments_clipped"] >= 1, f"expected a boundary-clipped stub, got stats={stats}"
+    stripped = tmp_path / (name + ".kicad_pcb")
+    pcb.save(str(stripped))
+    return stripped
+
+
+def _touches_cell(segs, x: float, y: float, tol: float = 0.30) -> bool:
+    """True if any segment endpoint is within ``tol`` mm of ``(x, y)``.
+
+    The A* joint lands on the reopened tip GRID CELL, so its emitted vertex is
+    within roughly one grid cell of the world tip -- assert cell-level, not
+    exact-vertex, coincidence.
+    """
+    for s in segs:
+        for px, py in ((s.x1, s.y1), (s.x2, s.y2)):
+            if abs(px - x) <= tol and abs(py - y) <= tol:
+                return True
+    return False
+
+
+class TestStubReconnection:
+    """Phase 2b-1: ``route --region`` reconnects bare boundary stubs."""
+
+    def test_route_region_reconnects_stripped_stub(self, tmp_path):
+        """A genuine stripped stub is reconnected to the in-region pad.
+
+        R1 (world 115,120) inside the box; R2 (world 145,120) outside.  A
+        straight R1->R2 trace clipped by ``strip_traces(region=(0,0,30,20))``
+        leaves a stub running boundary (world 130,120) -> outside (145,120).
+        ``route --region 0,0,30,20`` must reconnect R1 to that boundary tip.
+        """
+        stripped = _make_stripped_stub_board(
+            tmp_path,
+            name="stub1",
+            footprints=[
+                _footprint("R1", 115, 120, 1, "SIG_A"),
+                _footprint("R2", 145, 120, 1, "SIG_A"),
+            ],
+            traces=[(("R1", "1"), ("R2", "1"), "SIG_A")],
+            strip_region=(0.0, 0.0, 30.0, 20.0),
+            strip_nets=["SIG_A"],
+            nets=[(1, "SIG_A")],
+        )
+        out_path = tmp_path / "stub1_out.kicad_pcb"
+        rc = route_main(
+            [
+                str(stripped),
+                "--output",
+                str(out_path),
+                "--no-optimize",
+                "--force",
+                "--quiet",
+                "--no-auto-layers",
+                "--backend",
+                "cpp",
+                "--skip-drc",
+                "--region",
+                "0,0,30,20",
+            ]
+        )
+        assert rc == 0, f"route --region exited {rc}"
+        segs = parse_segments(out_path.read_text()).get("SIG_A", [])
+        assert segs, "SIG_A produced no copper"
+        # New routing reaches R1's pad (world 115,120)...
+        assert _touches_cell(segs, 115.0, 120.0), "route did not reach R1 pad"
+        # ...and joins the stub boundary tip cell (world 130,120).
+        assert _touches_cell(segs, 130.0, 120.0), "route did not reconnect to the boundary stub tip"
+
+    def test_reconnection_preserves_outside_copper_byte_identical(self, tmp_path):
+        """Region-bounded stub reconnection modifies zero copper outside the box.
+
+        Mirrors ``test_region_confines_routing_and_preserves_outside``: the
+        surviving stub copper OUTSIDE the region (world x>130) must be
+        byte/geometry-identical before and after the reconnection route.
+        """
+        stripped = _make_stripped_stub_board(
+            tmp_path,
+            name="stub2",
+            footprints=[
+                _footprint("R1", 115, 120, 1, "SIG_A"),
+                _footprint("R2", 145, 120, 1, "SIG_A"),
+            ],
+            traces=[(("R1", "1"), ("R2", "1"), "SIG_A")],
+            strip_region=(0.0, 0.0, 30.0, 20.0),
+            strip_nets=["SIG_A"],
+            nets=[(1, "SIG_A")],
+        )
+        # Snapshot the OUTSIDE portion of the stub before routing (world x>=130).
+        before = parse_segments(stripped.read_text()).get("SIG_A", [])
+        before_outside = sorted(
+            (round(s.x1, 4), round(s.y1, 4), round(s.x2, 4), round(s.y2, 4))
+            for s in before
+            if min(s.x1, s.x2) >= 130.0 - 1e-6
+        )
+        assert before_outside, "expected an outside stub before routing"
+
+        out_path = tmp_path / "stub2_out.kicad_pcb"
+        rc = route_main(
+            [
+                str(stripped),
+                "--output",
+                str(out_path),
+                "--no-optimize",
+                "--force",
+                "--quiet",
+                "--no-auto-layers",
+                "--backend",
+                "cpp",
+                "--skip-drc",
+                "--region",
+                "0,0,30,20",
+            ]
+        )
+        assert rc == 0, f"route --region exited {rc}"
+        after = parse_segments(out_path.read_text()).get("SIG_A", [])
+        after_outside = sorted(
+            (round(s.x1, 4), round(s.y1, 4), round(s.x2, 4), round(s.y2, 4))
+            for s in after
+            if min(s.x1, s.x2) >= 130.0 - 1e-6
+        )
+        # The outside stub survives geometry-identically; no NEW copper landed
+        # strictly outside the box (all new routing stays at x<=130).
+        assert after_outside == before_outside, (
+            "copper outside the region was modified during stub reconnection"
+        )
+
+    def test_reconnection_respects_hole_to_hole_floor(self, tmp_path):
+        """The hole-to-hole floor is threaded on the stub-reconnection path.
+
+        Loads a stripped-stub board (a SIG_A boundary stub + a pre-existing PTH
+        drill inside the region on a foreign net) with ``stub_terminals=`` set,
+        routes the stub net, then asserts -- via the same
+        ``_TraceResolverTransaction._via_clears_hole_to_hole`` predicate the
+        Phase 2a main router uses -- that a candidate via placed at the stub
+        joint within the floor of the pre-existing drill is REJECTED.  This
+        confirms the floor is enforced on the region/stub path, not just the
+        plain route path (mirrors ``test_via_too_close_to_pth_drill_is_rejected``).
+        """
+        from kicad_tools.router.core import _TraceResolverTransaction
+        from kicad_tools.router.stub_terminals import StubTerminal
+
+        # SIG_A stub running world (130,118)->(145,118); R1 the in-region pad;
+        # J1 a foreign PTH drill inside the region near the reconnection corridor.
+        board = _board(
+            [
+                _footprint("R1", 115, 118, 1, "SIG_A"),
+                _tht_footprint("J1", 122, 118, 2, "SIG_B", drill=0.3),
+            ],
+            edge=(100, 100, 160, 160),
+            nets=[(1, "SIG_A"), (2, "SIG_B")],
+            extra='  (segment (start 130 118) (end 145 118) (width 0.2) (layer "F.Cu") (net 1))',
+        )
+        router, _ = load_pcb_for_routing(
+            str(_write(tmp_path, board, "stub3.kicad_pcb")),
+            validate_drc=False,
+            strict_drc=False,
+            load_existing_routes=True,
+            region=(0.0, 0.0, 30.0, 25.0),
+            stub_terminals={
+                1: [
+                    StubTerminal(
+                        net_id=1,
+                        net_name="SIG_A",
+                        x=30.0,  # board-relative boundary tip -> world (130,118)
+                        y=18.0,
+                        layer=Layer.F_CU,
+                    )
+                ]
+            },
+        )
+        router.rules.min_hole_to_hole = 0.5
+
+        # Route the stub net -- confirms the reconnection succeeds end-to-end.
+        result = router.route_net(1)
+        assert result, "stub net did not reconnect"
+
+        # The Phase 2a hole-to-hole predicate still gates vias on this path: a
+        # candidate via 0.3mm from J1's drill (edge gap 0.0 << 0.5) is rejected.
+        transaction = _TraceResolverTransaction(router)
+        transaction.begin()
+        near_via = Via(
+            x=122.3, y=118.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        assert transaction._via_clears_hole_to_hole(near_via, 0.5) is False
+        # A via comfortably clear of every drill passes.
+        far_via = Via(
+            x=118.0, y=112.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        assert transaction._via_clears_hole_to_hole(far_via, 0.5) is True
+
+    def test_multi_stub_same_net_reconnects(self, tmp_path):
+        """2+ simultaneous stub endpoints on the SAME net are all reconnected.
+
+        SIG_A fans out from an in-region pad R1 to TWO outside pads (R2, R3),
+        both clipped at the boundary.  The detector returns two StubTerminals
+        for SIG_A; the Autorouter must add BOTH as targets so both boundary tips
+        are reconnected into the net island.
+        """
+        # Two SEPARATE in-region source pads (R1a, R1b) each fan out to an
+        # outside pad along a horizontal line, so each clip lands the boundary
+        # tip at a predictable axis-aligned point (world 130, y).
+        stripped = _make_stripped_stub_board(
+            tmp_path,
+            name="stub4",
+            footprints=[
+                _footprint("R1a", 115, 112, 1, "SIG_A"),
+                _footprint("R1b", 115, 122, 1, "SIG_A"),
+                _footprint("R2", 145, 112, 1, "SIG_A"),
+                _footprint("R3", 145, 122, 1, "SIG_A"),
+            ],
+            traces=[
+                (("R1a", "1"), ("R2", "1"), "SIG_A"),
+                (("R1b", "1"), ("R3", "1"), "SIG_A"),
+            ],
+            strip_region=(0.0, 0.0, 30.0, 30.0),
+            strip_nets=["SIG_A"],
+            nets=[(1, "SIG_A")],
+        )
+        # Two horizontal clips -> two boundary tips at world (130,112),(130,122).
+        out_path = tmp_path / "stub4_out.kicad_pcb"
+        rc = route_main(
+            [
+                str(stripped),
+                "--output",
+                str(out_path),
+                "--no-optimize",
+                "--force",
+                "--quiet",
+                "--no-auto-layers",
+                "--backend",
+                "cpp",
+                "--skip-drc",
+                "--region",
+                "0,0,30,30",
+            ]
+        )
+        assert rc == 0, f"route --region exited {rc}"
+        segs = parse_segments(out_path.read_text()).get("SIG_A", [])
+        assert segs, "SIG_A produced no copper"
+        assert _touches_cell(segs, 130.0, 112.0), "first stub tip not reconnected"
+        assert _touches_cell(segs, 130.0, 122.0), "second stub tip not reconnected"
+
+    def test_route_auto_region_stub_defers_to_phase_2c(self, tmp_path):
+        """``route-auto --region`` on a stub-endpoint net fails fast (Phase 2c).
+
+        The orchestrator surface is NOT wired for stub reconnection in Phase
+        2b-1 (deferred to #4173).  It must fail fast with an explicit Phase 2c
+        message rather than silently falling back to pad-only and dropping the
+        stub.
+        """
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        stripped = _make_stripped_stub_board(
+            tmp_path,
+            name="stub5",
+            footprints=[
+                _footprint("R1", 115, 120, 1, "SIG_A"),
+                _footprint("R2", 145, 120, 1, "SIG_A"),
+            ],
+            traces=[(("R1", "1"), ("R2", "1"), "SIG_A")],
+            strip_region=(0.0, 0.0, 30.0, 20.0),
+            strip_nets=["SIG_A"],
+            nets=[(1, "SIG_A")],
+        )
+        result = route_net_auto(
+            str(stripped),
+            "SIG_A",
+            output_path=None,
+            region="0,0,30,20",
+        )
+        assert result["success"] is False
+        msg = result.get("error_message") or ""
+        assert "Phase 2c" in msg, f"expected a Phase 2c deferral message, got: {msg}"
+        assert "SIG_A" in msg
 
 
 if __name__ == "__main__":  # pragma: no cover
