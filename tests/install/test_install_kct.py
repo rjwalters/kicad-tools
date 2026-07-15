@@ -203,14 +203,23 @@ def test_path_install_produces_all_artifacts(
         assert dst.exists()
         assert dst.read_bytes() == (SKILLS_SRC / name).read_bytes()
 
-    # Exactly one guarded CLAUDE.md block, all three conventions present.
+    # Exactly one guarded CLAUDE.md block, slimmed to a pointer (the
+    # load-bearing conventions now live in .kct/CONVENTIONS.md, not inlined).
     claude = (target_repo / "CLAUDE.md").read_text()
     assert claude.count("<!-- BEGIN KICAD-TOOLS -->") == 1
     assert claude.count("<!-- END KICAD-TOOLS -->") == 1
-    assert "build-native" in claude
-    assert "refill-zones" in claude
-    assert "Artifact-first" in claude
+    assert ".kct/CONVENTIONS.md" in claude  # slim pointer references the vendored file
+    assert ".claude/commands/kct/README.md" in claude  # pointer references the skills README
+    # The numbered convention list must NOT be inlined into CLAUDE.md anymore.
+    assert "### Conventions (load-bearing" not in claude
+    assert "refill-zones" not in claude
     assert "Existing content stays." in claude  # pre-existing content preserved
+
+    # The three conventions live verbatim in the vendored .kct/CONVENTIONS.md.
+    conventions = (target_repo / ".kct" / "CONVENTIONS.md").read_text()
+    assert "build-native" in conventions
+    assert "refill-zones" in conventions
+    assert "Artifact-first" in conventions
 
     # Metadata is valid JSON with the schema fields.
     meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
@@ -220,6 +229,7 @@ def test_path_install_produces_all_artifacts(
     assert "ee-review" in meta["skills_selected"]
     assert ".claude/commands/kct/ee-review.md" in meta["installed_files"]
     assert ".claude/commands/kct/README.md" in meta["installed_files"]
+    assert ".kct/CONVENTIONS.md" in meta["installed_files"]
 
 
 # --- idempotent re-run -------------------------------------------------------
@@ -512,3 +522,49 @@ def test_vendored_gates_run_standalone_from_consumer(
         text=True,
     )
     assert dirty_run.returncode == 2, dirty_run.stdout
+
+
+# --- .kct/CONVENTIONS.md vendoring (#4190) -----------------------------------
+
+
+def test_conventions_vendored_with_verbatim_conventions(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """The three load-bearing Epic #4054 conventions are vendored verbatim."""
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+
+    conventions = target_repo / ".kct" / "CONVENTIONS.md"
+    assert conventions.exists()
+    text = conventions.read_text()
+    # (1) native backend build, (2) cross-gate DRC, (3) artifact-first.
+    assert "build-native" in text
+    assert "refill-zones" in text
+    assert "Artifact-first" in text
+
+    # Recorded in the metadata manifest alongside the other vendored artifacts.
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert meta["installed_files"].count(".kct/CONVENTIONS.md") == 1
+
+
+def test_conventions_dry_run_writes_nothing(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """--dry-run reports the planned .kct/CONVENTIONS.md write without creating it."""
+    result = run_installer(target_repo, "--dry-run", "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert not (target_repo / ".kct" / "CONVENTIONS.md").exists()
+    assert "write .kct/CONVENTIONS.md" in result.stdout
+
+
+def test_conventions_rerun_idempotent(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """A second install refreshes .kct/CONVENTIONS.md in place, no duplication."""
+    first = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert first.returncode == 0, first.stderr
+    conventions = target_repo / ".kct" / "CONVENTIONS.md"
+    first_text = conventions.read_text()
+
+    second = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert second.returncode == 0, second.stderr
+    assert conventions.read_text() == first_text  # refreshed in place, identical
+
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert meta["installed_files"].count(".kct/CONVENTIONS.md") == 1

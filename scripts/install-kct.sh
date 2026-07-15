@@ -473,34 +473,62 @@ do_action "write .kct/ci/README.md" write_ci_readme
 VENDORED_FILES+=(".kct/ci/README.md")
 ok "vendored ${#CI_GATE_FILES[@]} CI gate script(s) + README into .kct/ci/"
 
+# ----- Stage 6c: vendor load-bearing conventions into .kct/CONVENTIONS.md ----
+# The three load-bearing Epic #4054 conventions live here verbatim. This file
+# is the "guaranteed-present, survives CLAUDE.md divergence" artifact: the
+# installer owns it outright and overwrites it on every run (same refresh
+# semantics as .kct/ci/README.md and .kct/install-metadata.json). Moving the
+# substance out of the CLAUDE.md marker block — a file a consumer may hand-edit
+# — into this installer-owned file preserves the divergence guarantee by
+# construction while keeping the root CLAUDE.md block a lightweight pointer.
+info "Stage 6c: vendor load-bearing conventions into .kct/CONVENTIONS.md"
+CONVENTIONS_DST="$TARGET/.kct/CONVENTIONS.md"
+
+write_conventions() {
+  mkdir -p "$TARGET/.kct"
+  cat > "$CONVENTIONS_DST" <<'CONVENTIONS_EOF'
+# kicad-tools load-bearing conventions (`.kct/CONVENTIONS.md`)
+
+These conventions are vendored by `install-kct.sh` (kicad-tools Epic #4054) and
+**installer-managed**: re-running the installer overwrites this file. Edit the
+upstream originals, not this copy. Read these before routing or manufacturing
+sign-off.
+
+1. **Build the C++ router backend after every fresh checkout/worktree.** Run
+   `uv run kct build-native` (verify with `--check`). `uv sync` alone does
+   NOT build the native extension; a missing backend makes routing 10-100x
+   slower (multi-minute-per-net).
+2. **Cross-gate DRC for manufacturing sign-off.** `kct check` alone is
+   insufficient — always also run `kicad-cli pcb drc --refill-zones`. `kct check`
+   can miss marginals (e.g. 0.1000 vs 0.1016 mm) and read stale zone fills.
+3. **Artifact-first.** The committed board artifact is shipping truth. A
+   `generate_design.py`/regeneration may diverge by design and is NOT
+   authoritative over a committed board.
+CONVENTIONS_EOF
+}
+do_action "write .kct/CONVENTIONS.md" write_conventions
+VENDORED_FILES+=(".kct/CONVENTIONS.md")
+ok "vendored load-bearing conventions into .kct/CONVENTIONS.md"
+
 # ----- Stage 7: guarded CLAUDE.md block -------------------------------------
 info "Stage 7: CLAUDE.md guarded block"
 CLAUDE_MD="$TARGET/CLAUDE.md"
 
-# The block literally carries the three load-bearing Epic #4054 conventions.
-# It must survive even if the target's CLAUDE.md diverges from ours, so the
-# substance is inlined, not linked.
+# The block is a lightweight pointer (matching the Loom/Repo-Skills pattern):
+# it references the vendored files rather than inlining their substance. The
+# load-bearing conventions live verbatim in .kct/CONVENTIONS.md — a file the
+# installer owns outright and rewrites on every run (see Stage 6c) — so they
+# survive CLAUDE.md drift by construction, without needing to be inlined into a
+# file the consumer may hand-edit.
 NEW_BLOCK="$KCT_MARK_BEGIN
 ## kicad-tools ($KCT_VERSION)
 
 This repo uses [kicad-tools](https://github.com/rjwalters/kicad-tools) (\`kct\`)
-for PCB design/routing/DRC. Skills live under \`.claude/commands/kct/\` and are
-invoked as \`/kct:<name>\`. Portable CI gates (copper-LVS, routed-DRC) live under
-\`.kct/ci/\` — see \`.kct/ci/README.md\` for consumer-side invocation. This block
-is managed by \`install-kct.sh\` — edit outside the markers only; re-running the
-installer replaces it in place.
-
-### Conventions (load-bearing — do not drop)
-1. **Build the C++ router backend after every fresh checkout/worktree.** Run
-   \`uv run kct build-native\` (verify with \`--check\`). \`uv sync\` alone does
-   NOT build the native extension; a missing backend makes routing 10-100x
-   slower (multi-minute-per-net).
-2. **Cross-gate DRC for manufacturing sign-off.** \`kct check\` alone is
-   insufficient — always also run \`kicad-cli pcb drc --refill-zones\`. \`kct check\`
-   can miss marginals (e.g. 0.1000 vs 0.1016 mm) and read stale zone fills.
-3. **Artifact-first.** The committed board artifact is shipping truth. A
-   \`generate_design.py\`/regeneration may diverge by design and is NOT
-   authoritative over a committed board.
+for PCB design/routing/DRC. Skills: \`/kct:<name>\` (see
+\`.claude/commands/kct/README.md\`). **Load-bearing conventions (native backend
+build, cross-gate DRC, artifact-first): \`.kct/CONVENTIONS.md\` — read before
+routing or sign-off.** Managed by \`install-kct.sh\` — edit outside the markers
+only; re-running the installer replaces it in place.
 $KCT_MARK_END"
 
 # Validate the kicad-tools marker structure of a CLAUDE.md. Echoes a
