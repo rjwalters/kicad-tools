@@ -37,6 +37,8 @@ from .algorithms import (
     GRACE_PASS_BUDGET_S,
     GRACE_PASS_TIER_CAPS_S,
     PER_NET_CAP_STAGE_FRACTION,
+    POST_NEGOTIATION_SWEEP_BUDGET_S,
+    POST_NEGOTIATION_SWEEP_PER_NET_S,
     HierarchicalRouter,
     MonteCarloRouter,
     MSTRouter,
@@ -1300,6 +1302,15 @@ class Autorouter:
         # (``route_with_escape`` -> ``route_all_two_phase``).
         self._route_all_max_ripups_per_net: int = 2
         self.stall_ripup_budget: int | None = None
+
+        # Issue #4159: post-negotiation rescue sweep.  After the negotiated
+        # batch loop converges/stalls/times out, re-attempt each still-
+        # stranded net SOLO on the live grid (a long-haul the batch loop
+        # starved on budget routes in <1s alone).  ON by default -- the
+        # pass is bounded and strictly additive (failed attempts roll back)
+        # so it can only raise the routed count.  ``--no-rescue-pass`` sets
+        # this to False.
+        self._post_negotiation_rescue: bool = True
 
         # Pre-route congestion estimator (Issue #2278)
         # Computed lazily before net ordering; provides RUDY-based
@@ -10603,6 +10614,55 @@ class Autorouter:
                 f"(now {successful_nets}/{total_nets} routed)"
             )
 
+        # Issue #4159: post-negotiation rescue sweep.  On a sparse board the
+        # negotiated batch loop can exhaust a long-haul net's per-net search
+        # budget under negotiation pressure and strand it, even though the
+        # net routes solo in <1s on the identical copper.  After the loop
+        # converges/stalls/times out AND the demote safety nets above have
+        # run, re-attempt each still-stranded net SOLO on the LIVE grid (every
+        # committed route is already an obstacle) via ``route_net``.  The pass
+        # is strictly additive and bounded (one attempt per net, per-net cap,
+        # overall wall-clock ceiling) and rolls back any failed attempt, so it
+        # can only ever raise the routed count -- never regress it.  On by
+        # default (it is a strict improvement); ``--no-rescue-pass`` disables
+        # it.  Runs AFTER the demotes so it never re-attempts a net that was
+        # just demoted for an unrepairable clearance violation.
+        if self._post_negotiation_rescue:
+            sweep_stranded = _stranded_nets()
+            if sweep_stranded:
+                # Bound the whole sweep.  Solo long-hauls are sub-second (the
+                # issue's evidence), so a generous ceiling is ample; when the
+                # loop already timed out the remaining budget is spent, so the
+                # sweep runs on its own contained allowance.  The per-net cap
+                # keeps one genuinely-impossible net from eating the sweep.
+                sweep_remaining: float | None = None
+                if timeout is not None:
+                    sweep_remaining = timeout - (time.time() - start_time)
+                if sweep_remaining is not None and sweep_remaining > 0 and not timed_out:
+                    sweep_budget = min(POST_NEGOTIATION_SWEEP_BUDGET_S, sweep_remaining)
+                else:
+                    sweep_budget = POST_NEGOTIATION_SWEEP_BUDGET_S
+                sweep_deadline = time.time() + max(0.0, sweep_budget)
+                sweep_per_net = per_net_timeout
+                if sweep_per_net is None:
+                    sweep_per_net = POST_NEGOTIATION_SWEEP_PER_NET_S
+                else:
+                    sweep_per_net = min(sweep_per_net, POST_NEGOTIATION_SWEEP_PER_NET_S)
+                sweep_rescued = self._post_negotiation_sweep(
+                    stranded_nets=sweep_stranded,
+                    net_routes=net_routes,
+                    pads_by_net=pads_by_net,
+                    per_net_timeout=sweep_per_net,
+                    deadline=sweep_deadline,
+                )
+                if sweep_rescued:
+                    successful_nets = sum(1 for routes in net_routes.values() if routes)
+                    flush_print(
+                        f"\n  ✓ Post-negotiation rescue recovered "
+                        f"{len(sweep_rescued)} stranded net(s): {sorted(sweep_rescued)} "
+                        f"(now {successful_nets}/{total_nets} routed)"
+                    )
+
         if progress_callback is not None:
             # Issue #2597: Distinguish ``stagnated`` from ``timeout`` and
             # bare ``f"overflow={N}"`` so callers (and CI) can pick the
@@ -11680,6 +11740,127 @@ class Autorouter:
                 break
 
         return total_corrected
+
+    def _post_negotiation_sweep(
+        self,
+        stranded_nets: list[int],
+        net_routes: dict[int, list[Route]],
+        pads_by_net: dict[int, list[Pad]],
+        per_net_timeout: float | None,
+        deadline: float | None,
+    ) -> list[int]:
+        """Rescue stranded nets solo on the live grid after negotiation.
+
+        Issue #4159: on a sparse board the negotiated batch loop can exhaust
+        a long-haul net's per-net search budget under negotiation pressure
+        and leave it stranded even though the geometry is trivial -- the same
+        net routes solo in <1s on the identical copper.  After the loop
+        converges/stalls/times out (and the demote safety nets above have
+        run), this bounded pass re-attempts every still-stranded net SOLO via
+        :meth:`route_net` on the **current** grid: every other net's
+        committed copper is already marked as an obstacle, so a solo attempt
+        settles into the free space the batch loop never committed.
+
+        The pass is strictly additive and bounded:
+
+        * Each net gets ONE attempt, capped by ``per_net_timeout`` (a solo
+          long-haul is sub-second per the issue's evidence).
+        * The whole pass respects ``deadline`` -- a genuinely-impossible net
+          that also fails solo cannot make the sweep hang.
+        * On success the net's routes are committed into ``net_routes`` and
+          its stale :class:`RoutingFailure` records are cleared.
+        * On failure the attempt is rolled back verbatim -- any partial
+          copper :meth:`route_net` marked for this net is ripped up and the
+          ``routing_failures`` list is truncated to its pre-attempt length --
+          so a failed rescue can never regress already-routed copper or leave
+          orphan geometry on the grid.  This mirrors the all-or-nothing
+          rollback discipline of :meth:`_post_route_clearance_correction`.
+
+        Args:
+            stranded_nets: Net IDs the loop left disconnected (from the
+                ``_stranded_nets`` closure in ``route_all_negotiated``).
+            net_routes: Mapping of net ID to its current routes (mutated on
+                a successful rescue).
+            pads_by_net: Mapping of net ID to its pads (used to verify a
+                rescued net is fully connected before committing).
+            per_net_timeout: Per-net A* budget for each solo attempt.
+            deadline: Optional absolute ``time.time()`` ceiling for the
+                whole sweep.  Checked before each net.
+
+        Returns:
+            The list of net IDs successfully rescued (committed).
+        """
+        import time as _time
+
+        from .observability import validate_net_connectivity as _validate_conn
+
+        rescued: list[int] = []
+        if not stranded_nets:
+            return rescued
+
+        # A NegotiatedRouter is only used here for its transactional
+        # ``rip_up_nets`` helper (grid unmark + routes_list removal), so a
+        # failed solo attempt unwinds exactly what it marked.
+        # ``self.router`` is ``CppPathfinder | Router`` at the type level but
+        # a concrete ``Router``/``CppPathfinder`` at runtime; every sibling
+        # ``NegotiatedRouter(self.grid, self.router, ...)`` construction in
+        # this file carries the same accepted-debt arg-type mismatch.
+        neg_router = NegotiatedRouter(
+            self.grid,
+            self.router,  # type: ignore[arg-type]
+            self.rules,
+            self.net_class_map,
+            congestion_estimator=self._ensure_congestion_estimator(),
+        )
+
+        for net in stranded_nets:
+            if deadline is not None and _time.time() >= deadline:
+                break
+            pads = pads_by_net.get(net)
+            if not pads or len(pads) < 2:
+                continue
+
+            # Snapshot the pre-attempt state so a failed solo route unwinds
+            # verbatim.  ``route_net`` marks any routes it produces onto the
+            # grid AND appends them to ``self.routes``; it also appends fresh
+            # RoutingFailure diagnostics on failure.  Both are reverted below
+            # when the net does not come back fully connected.
+            pre_routes = list(net_routes.get(net, []))
+            failures_len = len(self.routing_failures)
+
+            new_routes = self.route_net(net, per_net_timeout=per_net_timeout)
+
+            # ``route_net`` returns this net's routes (existing + new) and has
+            # marked the new ones on the grid.  Verify the net is now fully
+            # connected before committing -- a partial route is NOT a rescue.
+            candidate = list(net_routes.get(net, []))
+            candidate.extend(r for r in new_routes if r not in candidate)
+            conn = _validate_conn(candidate, {net: pads})
+            connected = bool(conn.get(net, {}).get("connected", False))
+
+            if connected and candidate:
+                net_routes[net] = candidate
+                # Clear this net's stale failure records (it is routed now).
+                self.routing_failures = [f for f in self.routing_failures if f.net != net]
+                rescued.append(net)
+            else:
+                # Roll back: rip up everything ``route_net`` just marked for
+                # this net (grid unmark + remove from self.routes), restore
+                # the pre-attempt net_routes entry, and drop the fresh failure
+                # diagnostics so the sweep leaves no residue.
+                to_unwind = list(net_routes.get(net, []))
+                to_unwind.extend(r for r in new_routes if r not in to_unwind)
+                temp_map = {net: to_unwind}
+                neg_router.rip_up_nets([net], temp_map, self.routes)
+                net_routes[net] = pre_routes
+                for route in pre_routes:
+                    # Re-mark any pre-existing copper the rip-up cleared.
+                    self._mark_route(route)
+                    if route not in self.routes:
+                        self.routes.append(route)
+                del self.routing_failures[failures_len:]
+
+        return rescued
 
     # =========================================================================
     # TWO-PHASE ROUTING (GLOBAL + DETAILED)
