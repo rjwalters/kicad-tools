@@ -440,5 +440,5 @@ for symbol in sch.symbols.order_by("reference"):
 ## Next Steps
 
 - **[Schematic Analysis](schematic-analysis.md)** - More schematic operations
-- **[DRC with Manufacturer Rules](drc-manufacturer-rules.md)** - Design validation
+- **[DRC with Manufacturer Rules](drc-and-validation.md)** - Design validation
 - **[Manufacturing Export](manufacturing-export.md)** - Generate production files

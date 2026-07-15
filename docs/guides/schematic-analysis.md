@@ -353,6 +353,6 @@ if __name__ == "__main__":
 
 ## Next Steps
 
-- **[DRC with Manufacturer Rules](drc-manufacturer-rules.md)** - Validate your PCB design
+- **[DRC with Manufacturer Rules](drc-and-validation.md)** - Validate your PCB design
 - **[Manufacturing Export](manufacturing-export.md)** - Export for fabrication
 - **[Query API](query-api.md)** - Advanced filtering techniques
