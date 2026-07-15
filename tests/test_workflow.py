@@ -107,6 +107,158 @@ class TestPCBNetAssignment:
         assert "U1" in result["missing_footprints"]
         assert len(result["assigned"]) == 0
 
+    @staticmethod
+    def _write_multipad_footprint(tmp_path: Path) -> Path:
+        """Write a synthetic footprint with a same-numbered multi-pad group.
+
+        Models the EP/thermal-via pattern (issue #4186):
+        - pad "1": a single unique SMD pad
+        - pad "19": a thermal group of 3 pads sharing the number, mixing
+          smd (paste) and thru_hole (PTH via) types like a real paste+PTH EP
+        - pad "": a mechanical / no-connect pad with an empty number that must
+          never be netted
+        """
+        footprint = """\
+(footprint "Multipad_Test"
+	(version 20240108)
+	(generator "pcbnew")
+	(layer "F.Cu")
+	(attr smd)
+	(pad "1" smd roundrect
+		(at -2 0)
+		(size 1 1)
+		(layers "F.Cu" "F.Paste" "F.Mask")
+		(roundrect_rratio 0.25)
+	)
+	(pad "19" smd rect
+		(at 0 0)
+		(size 2 2)
+		(layers "F.Cu" "F.Paste" "F.Mask")
+	)
+	(pad "19" thru_hole circle
+		(at -0.5 -0.5)
+		(size 0.6 0.6)
+		(drill 0.3)
+		(layers "*.Cu")
+	)
+	(pad "19" thru_hole circle
+		(at 0.5 0.5)
+		(size 0.6 0.6)
+		(drill 0.3)
+		(layers "*.Cu")
+	)
+	(pad "" np_thru_hole circle
+		(at 3 0)
+		(size 1.5 1.5)
+		(drill 1.5)
+		(layers "*.Cu" "*.Mask")
+	)
+)
+"""
+        mod_path = tmp_path / "Multipad_Test.kicad_mod"
+        mod_path.write_text(footprint)
+        return mod_path
+
+    def test_multipad_group_all_pads_get_net_in_memory(self, tmp_path: Path):
+        """Every same-numbered pad carries the net on the in-memory objects."""
+        pcb = PCB.create(width=100, height=100)
+        mod_path = self._write_multipad_footprint(tmp_path)
+        pcb.add_footprint_from_file(str(mod_path), reference="U1", x=50, y=50)
+
+        result = pcb.assign_net_to_footprint_pad("U1", "19", "GND")
+        assert result is True
+
+        fp = pcb.get_footprint("U1")
+        assert fp is not None
+        gnd = pcb.get_net_by_name("GND")
+        assert gnd is not None
+
+        pads_19 = [p for p in fp.pads if p.number == "19"]
+        # The fixture defines three pads numbered "19".
+        assert len(pads_19) == 3
+        # ALL of them must carry the same net after assignment.
+        for pad in pads_19:
+            assert pad.net_number == gnd.number
+            assert pad.net_name == "GND"
+
+    def test_multipad_group_all_pads_get_net_in_sexp(self, tmp_path: Path):
+        """Every serialized (pad "19") block carries the same net node."""
+        pcb = PCB.create(width=100, height=100)
+        mod_path = self._write_multipad_footprint(tmp_path)
+        pcb.add_footprint_from_file(str(mod_path), reference="U1", x=50, y=50)
+
+        pcb.assign_net_to_footprint_pad("U1", "19", "GND")
+        gnd = pcb.get_net_by_name("GND")
+        assert gnd is not None
+
+        # Re-serialize the board and inspect the S-expression tree directly:
+        # every (pad "19" ...) node must contain the same (net N "GND").
+        fp_sexp = None
+        for candidate in pcb._sexp.find_all("footprint"):
+            for prop in candidate.find_all("property"):
+                if prop.get_string(0) == "Reference" and prop.get_string(1) == "U1":
+                    fp_sexp = candidate
+            for fp_text in candidate.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference" and fp_text.get_string(1) == "U1":
+                    fp_sexp = candidate
+        assert fp_sexp is not None
+
+        pad_19_sexps = [pad for pad in fp_sexp.find_all("pad") if pad.get_string(0) == "19"]
+        assert len(pad_19_sexps) == 3
+        for pad_sexp in pad_19_sexps:
+            net_node = pad_sexp.find("net")
+            assert net_node is not None, "same-numbered pad left with no net node"
+            assert net_node.get_int(0) == gnd.number
+            assert net_node.get_string(1) == "GND"
+
+    def test_multipad_unique_pad_unaffected(self, tmp_path: Path):
+        """A unique-numbered pad is assigned once and not touched by the group."""
+        pcb = PCB.create(width=100, height=100)
+        mod_path = self._write_multipad_footprint(tmp_path)
+        pcb.add_footprint_from_file(str(mod_path), reference="U1", x=50, y=50)
+
+        assert pcb.assign_net_to_footprint_pad("U1", "1", "SIG") is True
+        pcb.assign_net_to_footprint_pad("U1", "19", "GND")
+
+        fp = pcb.get_footprint("U1")
+        assert fp is not None
+        sig = pcb.get_net_by_name("SIG")
+        assert sig is not None
+
+        pads_1 = [p for p in fp.pads if p.number == "1"]
+        assert len(pads_1) == 1
+        assert pads_1[0].net_name == "SIG"
+        assert pads_1[0].net_number == sig.number
+
+    def test_multipad_empty_number_pad_stays_unnetted(self, tmp_path: Path):
+        """The empty-number NC / mechanical pad is never netted."""
+        pcb = PCB.create(width=100, height=100)
+        mod_path = self._write_multipad_footprint(tmp_path)
+        pcb.add_footprint_from_file(str(mod_path), reference="U1", x=50, y=50)
+
+        pcb.assign_net_to_footprint_pad("U1", "1", "SIG")
+        pcb.assign_net_to_footprint_pad("U1", "19", "GND")
+
+        fp = pcb.get_footprint("U1")
+        assert fp is not None
+        nc_pads = [p for p in fp.pads if p.number == ""]
+        assert len(nc_pads) == 1
+        assert nc_pads[0].net_number == 0
+
+        # And its serialized form carries no (net ...) node.
+        fp_sexp = None
+        for candidate in pcb._sexp.find_all("footprint"):
+            for prop in candidate.find_all("property"):
+                if prop.get_string(0) == "Reference" and prop.get_string(1) == "U1":
+                    fp_sexp = candidate
+            for fp_text in candidate.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference" and fp_text.get_string(1) == "U1":
+                    fp_sexp = candidate
+        assert fp_sexp is not None
+        empty_pad_sexps = [pad for pad in fp_sexp.find_all("pad") if pad.get_string(0) == ""]
+        assert len(empty_pad_sexps) == 1
+        assert empty_pad_sexps[0].find("net") is None
+
 
 class TestComponentInfo:
     """Tests for ComponentInfo dataclass."""

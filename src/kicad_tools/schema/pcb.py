@@ -5036,14 +5036,22 @@ class PCB:
         # Ensure net exists and get its number
         net = self.add_net(net_name)
 
-        # Update the in-memory pad
+        # Update every in-memory pad sharing this number.
+        #
+        # KiCad models EP/thermal groups (QFN exposed pads, RF-module
+        # heatsink grids, DPAK tabs) as many pads that share a single pad
+        # number. All pads with the same number are one logical pin and must
+        # carry the same net, so we assign to every match rather than stopping
+        # at the first (see issue #4186). Empty/blank pad numbers are never
+        # passed here for a real schematic pin, and grouping only ever keys on
+        # a specific non-empty number, so unrelated unnumbered mechanical pads
+        # are never netted together.
         pad_found = False
         for pad in fp.pads:
             if pad.number == pad_number:
                 pad.net_number = net.number
                 pad.net_name = net.name
                 pad_found = True
-                break
 
         if not pad_found:
             return False
@@ -5069,7 +5077,12 @@ class PCB:
             if ref_value != reference:
                 continue
 
-            # Found the footprint, now find the pad
+            # Found the footprint, now update every pad sharing this number.
+            # Same rationale as the in-memory loop above (issue #4186): all
+            # pads with a given number are one logical pin and must all carry
+            # the net, so we visit every match instead of returning on the
+            # first one.
+            sexp_pad_found = False
             for pad_sexp in fp_sexp.find_all("pad"):
                 if pad_sexp.get_string(0) == pad_number:
                     # Remove existing net node if present
@@ -5080,7 +5093,9 @@ class PCB:
                     # Add new net node
                     new_net_node = SExp.list("net", net.number, net.name)
                     pad_sexp.append(new_net_node)
-                    return True
+                    sexp_pad_found = True
+
+            return sexp_pad_found
 
         return False
 
