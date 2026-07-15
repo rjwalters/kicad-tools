@@ -660,10 +660,27 @@ kct zones <subcommand> <pcb_file> [options]
 |------------|-------------|
 | `add` | Add a copper zone |
 | `list` | List existing zones |
+| `batch` | Add multiple zones from a `NET:LAYER,...` spec |
+| `fill` | Fill all zones in a PCB (via `kicad-cli`) |
+
+**Output-path behavior:** for the mutating subcommands (`add`, `batch`,
+`fill`), `-o`/`--output` is optional and **defaults to overwriting the input
+in place** — consistent with `optimize-placement`. Because each in-place `add`
+reads its own prior output, chaining `zones add` calls against one file
+accumulates zones instead of silently discarding earlier ones. Pass an
+explicit `-o <path>` to write a side file and leave the input untouched.
+
+| Option | Description |
+|--------|-------------|
+| `-o`, `--output PATH` | Output PCB (default: overwrite input) |
 
 **Examples:**
 ```bash
-kct zones add board.kicad_pcb --net GND --layer B.Cu
+kct zones add board.kicad_pcb --net GND --layer B.Cu     # modifies board.kicad_pcb in place
+kct zones add board.kicad_pcb --net +3.3V --layer In2.Cu # accumulates onto the GND zone
+kct zones batch board.kicad_pcb --power-nets GND:B.Cu,+3.3V:F.Cu
+kct zones fill board.kicad_pcb                           # fills all zones in place
+kct zones add board.kicad_pcb --net GND --layer B.Cu -o with_zones.kicad_pcb  # side file
 kct zones list board.kicad_pcb
 ```
 
