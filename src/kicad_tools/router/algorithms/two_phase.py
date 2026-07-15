@@ -517,8 +517,8 @@ class TwoPhaseRouter:
         """
         from ..algorithms import NegotiatedRouter
         from ..algorithms.negotiated import (
+            demote_seg_seg_finalize,
             detect_ripup_stagnation,
-            select_seg_seg_demotion_nets,
             should_terminate_early,
         )
 
@@ -1244,28 +1244,40 @@ class TwoPhaseRouter:
         # the ``finalize=True`` path in ``core._demote_seg_seg_overlap_nets``.
         # The wide threshold MUST stay out of the negotiation loop, where
         # transient sub-clearance is expected and repaired by iteration.
-        _overlap_pairs = neg_router.find_segment_segment_violation_pairs(
+        # Issue #4208 (Unit 2): delegate to the single shared seg-seg
+        # finalize gate so this inline block and ``core``'s finalize demote
+        # cannot drift apart (the drift is exactly how the rescue gate was
+        # left on the old overlap-only threshold across Unit 1).
+        _victims, _non_rippable_pairs = demote_seg_seg_finalize(
             net_routes,
+            neg_router,
+            self.grid,
+            self.routes,
             trace_clearance=self.rules.trace_clearance,
             extra_routes=self._collect_extra_routes_for_revalidation(net_routes),
             copper_overlap_only=False,
         )
-        if _overlap_pairs:
-            _demotable = {n for n, r in net_routes.items() if r}
-            _victims = select_seg_seg_demotion_nets(_overlap_pairs, _demotable)
-            if _victims:
-                for _net in _victims:
-                    for _route in net_routes.get(_net, []):
-                        self.grid.unmark_route_usage(_route)
-                        self.grid.unmark_route(_route)
-                        if _route in self.routes:
-                            self.routes.remove(_route)
-                    net_routes[_net] = []
-                _victim_names = [self.net_names.get(n, f"Net_{n}") for n in _victims]
-                flush_print(
-                    f"  ⚠ Demoted {len(_victims)} net(s) with cross-net "
-                    f"shorting copper to unrouted: {', '.join(_victim_names)}"
-                )
+        if _victims:
+            _victim_names = [self.net_names.get(n, f"Net_{n}") for n in _victims]
+            flush_print(
+                f"  ⚠ Demoted {len(_victims)} net(s) with cross-net "
+                f"shorting copper to unrouted: {', '.join(_victim_names)}"
+            )
+        # M3: cross-net crossing between two non-rippable escape stubs has
+        # no demotable victim -- surface it rather than ship a silent short.
+        # Exclude diff-pair partners: a legitimately-coupled pair runs
+        # sub-clearance by design and is adjudicated by the intra-pair
+        # clearance path, not treated as a cross-net short (mirrors core.py).
+        _partner_of = getattr(self.router, "_diff_pair_partner_net", None)
+        for _a, _b in _non_rippable_pairs:
+            if _partner_of is not None and _partner_of(_a) == _b:
+                continue
+            flush_print(
+                f"  ⚠ Cross-net crossing between non-rippable escape infra: "
+                f"{self.net_names.get(_a, f'Net_{_a}')} vs "
+                f"{self.net_names.get(_b, f'Net_{_b}')} -- neither net "
+                f"demotable; reported as a routing failure (M3, #4208)"
+            )
 
         # Issue #2597: Surface the iteration-loop exit reason to the caller
         # so the progress-callback status string can distinguish between

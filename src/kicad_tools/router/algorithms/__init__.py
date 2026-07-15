@@ -29,6 +29,7 @@ from .negotiated import (
     calculate_congestion_tuned_params,
     calculate_history_increment,
     calculate_present_cost,
+    demote_seg_seg_finalize,
     derive_iter_per_net_cap,
     derive_per_net_cap,
     detect_oscillation,
@@ -70,5 +71,6 @@ __all__ = [
     "detect_oscillation",
     "detect_ripup_stagnation",
     "select_seg_seg_demotion_nets",
+    "demote_seg_seg_finalize",
     "should_terminate_early",
 ]

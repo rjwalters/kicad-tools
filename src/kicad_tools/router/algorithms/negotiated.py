@@ -334,6 +334,89 @@ def select_seg_seg_demotion_nets(
     return sorted(demoted)
 
 
+def demote_seg_seg_finalize(
+    net_routes: dict[int, list[Route]],
+    neg_router: NegotiatedRouter,
+    grid: RoutingGrid,
+    self_routes: list[Route],
+    *,
+    trace_clearance: float,
+    extra_routes: list[Route] | None = None,
+    copper_overlap_only: bool = False,
+) -> tuple[list[int], list[tuple[int, int]]]:
+    """Detect + demote nets whose committed copper is a cross-net seg-seg short.
+
+    Issue #4208 (Unit 2): the single shared seg-seg finalize gate used by
+    BOTH :meth:`core.Autorouter._demote_seg_seg_overlap_nets` and
+    :meth:`two_phase.TwoPhaseRouter._detailed_negotiated`, replacing the
+    two hand-synced copies that previously drifted apart (the rescue gate
+    was never widened to the Unit-1 full threshold; this consolidation
+    prevents that class of drift).
+
+    Runs :meth:`NegotiatedRouter.find_segment_segment_violation_pairs`
+    over the committed ``net_routes`` (plus non-rippable ``extra_routes``
+    as foreign obstacles), selects the greedy vertex-cover victim set over
+    the demotable (committed) nets, and demotes each victim in place:
+    every route is unmarked from ``grid`` (usage + envelope) and removed
+    from ``self_routes``, and ``net_routes[victim]`` is reset to ``[]``.
+
+    The M3 escape-infra case is surfaced separately: pairs where BOTH
+    sides are non-rippable escape stubs are collected via
+    ``report_non_rippable_pairs=True`` but are NOT demotable (neither net
+    is in ``demotable``), so they are returned to the caller as a
+    routing-quality signal rather than silently shipped as a short.
+
+    Args:
+        net_routes: Mapping of net id -> committed routes (mutated:
+            demoted nets reset to ``[]``).
+        neg_router: Negotiated router owning the pair-detection engine.
+        grid: The routing grid the victims' copper is unmarked from.
+        self_routes: The owner's ``self.routes`` list (mutated: victim
+            routes removed).
+        trace_clearance: Manufacturer minimum copper-to-copper clearance.
+        extra_routes: Non-rippable escape-phase routes joined into the
+            foreign universe.
+        copper_overlap_only: When ``False`` (the finalize default) use the
+            FULL DRC SHORT threshold; when ``True`` use the polygon-overlap
+            threshold (the in-loop / pre-repair position).
+
+    Returns:
+        ``(victims, non_rippable_pairs)`` where ``victims`` is the sorted
+        list of demoted net ids (empty in the common clean case) and
+        ``non_rippable_pairs`` is the sorted list of both-non-rippable
+        crossing pairs the greedy cover could not resolve (M3 signal;
+        empty in the common case).
+    """
+    all_pairs = neg_router.find_segment_segment_violation_pairs(
+        net_routes,
+        trace_clearance=trace_clearance,
+        extra_routes=extra_routes,
+        copper_overlap_only=copper_overlap_only,
+        report_non_rippable_pairs=True,
+    )
+    if not all_pairs:
+        return [], []
+
+    demotable = {net for net, routes in net_routes.items() if routes}
+    # M3: pairs where neither side is demotable (both non-rippable escape
+    # infra) survive the greedy cover; surface them as a signal.
+    non_rippable_pairs = [
+        pair for pair in all_pairs if pair[0] not in demotable and pair[1] not in demotable
+    ]
+    victims = select_seg_seg_demotion_nets(all_pairs, demotable)
+    if not victims:
+        return [], non_rippable_pairs
+
+    for net in victims:
+        for route in net_routes.get(net, []):
+            grid.unmark_route_usage(route)
+            grid.unmark_route(route)
+            if route in self_routes:
+                self_routes.remove(route)
+        net_routes[net] = []
+    return victims, non_rippable_pairs
+
+
 # =========================================================================
 # Adaptive Parameter Functions (Issue #633)
 # =========================================================================
@@ -1966,6 +2049,7 @@ class NegotiatedRouter:
         trace_clearance: float,
         extra_routes: list[Route] | None = None,
         copper_overlap_only: bool = False,
+        report_non_rippable_pairs: bool = False,
     ) -> list[tuple[int, int]]:
         """Find cross-net same-layer segment pairs that violate clearance.
 
@@ -1996,6 +2080,19 @@ class NegotiatedRouter:
         segments is skipped (escape infra is non-rippable; nothing the
         negotiated loop can do about it here).
 
+        Issue #4208 (Unit 2 -- M3): the both-non-rippable skip means a
+        genuine cross-net crossing between two escape stubs (both
+        ``rippable=False``) never enters the ``pairs`` set, so it is
+        invisible to the demote/rescue consumers and ships as a silent
+        short.  ``report_non_rippable_pairs=True`` includes such pairs
+        in the result so the unified finalize gate can SURFACE them as a
+        routing-quality failure (there is no demotable victim -- the net
+        is honestly reported unrouted rather than committed as a short).
+        The greedy vertex cover naturally skips them (neither member is
+        in the ``demotable`` set), so callers that do not want the
+        signal leave the flag at its ``False`` default and observe no
+        behaviour change.
+
         Performance: segments are bucketed per layer, sorted by
         ``min_x`` and swept -- the inner loop breaks as soon as the
         partner's ``min_x`` exceeds the current segment's reach
@@ -2010,6 +2107,10 @@ class NegotiatedRouter:
                 join the foreign universe but are not rippable.
             copper_overlap_only: When True, only report pairs whose
                 copper physically overlaps (see above).
+            report_non_rippable_pairs: When True, also report pairs
+                where BOTH sides are non-rippable escape infra (Issue
+                #4208 / M3); default False preserves the historical
+                skip.
 
         Returns:
             Sorted list of unique ``(net_lo, net_hi)`` tuples with
@@ -2074,8 +2175,8 @@ class NegotiatedRouter:
                         break  # Sorted by min_x -- no later partner can hit.
                     if a[5] == b[5]:
                         continue  # Same net.
-                    if not a[7] and not b[7]:
-                        continue  # Both non-rippable escape infra.
+                    if not a[7] and not b[7] and not report_non_rippable_pairs:
+                        continue  # Both non-rippable escape infra (M3 skip).
                     pair_key = (a[5], b[5]) if a[5] < b[5] else (b[5], a[5])
                     if pair_key in pairs:
                         continue

@@ -337,6 +337,100 @@ class TestSweepMechanism:
         assert rescued == [1], "a clean, connected rescue must be committed"
         assert net_routes[1], "rescued net must have committed routes"
 
+    def test_sub_clearance_short_rescue_rolls_back(self, monkeypatch):
+        """Issue #4208 (Unit 2, the live gap): the rescue gate historically
+        scanned seg-seg pairs with ``copper_overlap_only=True``, so a rescued
+        net whose copper is a POSITIVE-gap-but-sub-clearance short against a
+        foreign net (a real ``kicad-cli SHORT`` that polygon intersection
+        misses) passed the gate uncaught and SHIPPED -- even after Unit 1
+        widened the finalize demote.  Unit 2 widened the rescue gate to the
+        FULL DRC threshold, so such a rescue is now rolled back.
+
+        Repro: net 2 is a vertical trace at x=10 on F_CU.  Net 1's solo
+        rescue routes as a vertical trace parallel to it at x=10.106 --
+        edge-to-edge gap 0.106mm > 0 (no overlap) but < trace_clearance
+        0.15mm: a sub-clearance short the old overlap-only gate MISSED.
+        """
+        ar = _build_two_net_router()
+        ar.route_all_negotiated(max_iterations=2, timeout=30.0, adaptive=False, perturbation=False)
+        net_routes, pads_by_net = _snapshot_net_state(ar)
+
+        # Force net 2 into a known vertical trace at x=10 on F_CU so we can
+        # position net 1's rescue at a precise sub-clearance offset.
+        neg = NegotiatedRouter(
+            ar.grid,
+            ar.router,
+            ar.rules,
+            ar.net_class_map,
+            congestion_estimator=ar._ensure_congestion_estimator(),
+        )
+        neg.rip_up_nets([1, 2], net_routes, ar.routes)
+        net2_seg = Segment(
+            x1=10.0, y1=2.0, x2=10.0, y2=18.0, width=0.2, layer=Layer.F_CU, net=2, net_name="NET2"
+        )
+        net2_route = Route(net=2, net_name="NET2", segments=[net2_seg], vias=[])
+        ar._mark_route(net2_route)
+        ar.routes.append(net2_route)
+        net_routes[2] = [net2_route]
+        net2_before = list(net_routes[2])
+        routes_len_before = len(ar.routes)
+
+        # Sub-clearance parallel rescue for net 1: vertical trace at
+        # x=10.106, connecting net 1's pads via a short dogleg.  Edge gap to
+        # net 2 is 0.106mm (positive) but below the 0.15mm clearance.
+        def sub_clearance_route_net(net, per_net_timeout=None):
+            segs = [
+                Segment(
+                    x1=2.0,
+                    y1=10.0,
+                    x2=10.106,
+                    y2=10.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net,
+                    net_name="LONGHAUL",
+                ),
+                Segment(
+                    x1=10.106,
+                    y1=2.0,
+                    x2=10.106,
+                    y2=18.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net,
+                    net_name="LONGHAUL",
+                ),
+                Segment(
+                    x1=10.106,
+                    y1=10.0,
+                    x2=38.0,
+                    y2=10.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net,
+                    net_name="LONGHAUL",
+                ),
+            ]
+            route = Route(net=net, net_name="LONGHAUL", segments=segs, vias=[])
+            ar._mark_route(route)
+            ar.routes.append(route)
+            net_routes.setdefault(net, []).append(route)
+            return [route]
+
+        monkeypatch.setattr(ar, "route_net", sub_clearance_route_net)
+
+        rescued = ar._post_negotiation_sweep(
+            stranded_nets=[1],
+            net_routes=net_routes,
+            pads_by_net=pads_by_net,
+            per_net_timeout=POST_NEGOTIATION_SWEEP_PER_NET_S,
+            deadline=time.time() + POST_NEGOTIATION_SWEEP_BUDGET_S,
+        )
+        assert rescued == [], "sub-clearance short rescue must NOT be committed"
+        assert net_routes[1] == [], "sub-clearance short rescue must leave net stranded"
+        assert net_routes[2] == net2_before, "foreign net must be untouched"
+        assert len(ar.routes) == routes_len_before, "no sub-clearance short copper committed"
+
     def test_diffpair_leg_is_skipped(self, monkeypatch):
         """Issue #4159 (Judge #4192): a stranded DIFFERENTIAL-PAIR LEG must
         NOT be solo-rescued.  ``route_net`` is single-ended -- it ignores the

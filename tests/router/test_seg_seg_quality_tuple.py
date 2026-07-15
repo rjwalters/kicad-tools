@@ -648,6 +648,113 @@ class TestDemoteSegSegFinalizeThreshold:
         )
 
 
+class TestM3EscapeInfraCrossing:
+    """Issue #4208 (Unit 2 / M3): a genuine cross-net crossing between two
+    NON-RIPPABLE escape stubs (both supplied via ``extra_routes``) has no
+    demotable victim -- the greedy vertex cover skips it because neither
+    net is in the committed ``net_routes`` demotable set.  Before Unit 2 it
+    survived every safety net and shipped as a silent short.  The unified
+    finalize gate surfaces it (``report_non_rippable_pairs=True``) so it is
+    reported as a routing failure rather than committed.
+    """
+
+    def _make_autorouter(self) -> Autorouter:
+        return Autorouter(
+            width=20.0,
+            height=20.0,
+            origin_x=0.0,
+            origin_y=0.0,
+            rules=_make_rules(),
+            layer_stack=LayerStack.two_layer(),
+        )
+
+    def test_both_non_rippable_crossing_surfaced_not_skipped(self):
+        """Two crossing escape stubs of different nets, both non-rippable,
+        are reported by the pair engine when ``report_non_rippable_pairs``
+        is set (the M3 signal) but skipped by default (historical)."""
+        rules = _make_rules()
+        neg = _make_neg_router(None, rules)
+        # Two different-net stubs physically overlapping on F_CU.
+        extra = [
+            _route(1, [_seg(2.0, 5.0, 12.0, 5.0, 1)], "ESC_A"),
+            _route(2, [_seg(4.0, 5.0, 10.0, 5.0, 2)], "ESC_B"),
+        ]
+        net_routes: dict[int, list[Route]] = {}
+
+        # Historical default: both-non-rippable pair skipped.
+        assert (
+            neg.find_segment_segment_violation_pairs(
+                net_routes,
+                trace_clearance=rules.trace_clearance,
+                extra_routes=extra,
+                copper_overlap_only=False,
+            )
+            == []
+        )
+        # M3 signal: the crossing is surfaced.
+        assert neg.find_segment_segment_violation_pairs(
+            net_routes,
+            trace_clearance=rules.trace_clearance,
+            extra_routes=extra,
+            copper_overlap_only=False,
+            report_non_rippable_pairs=True,
+        ) == [(1, 2)]
+
+    def test_shared_gate_returns_non_rippable_pair_no_victim(self):
+        """The shared ``demote_seg_seg_finalize`` returns the M3 pair as a
+        signal with NO demotable victim (both stubs are non-rippable)."""
+        from kicad_tools.router.algorithms.negotiated import demote_seg_seg_finalize
+
+        ar = self._make_autorouter()
+        neg = _make_neg_router(ar.grid, ar.rules)
+        # Both stubs are escape infra: on self.routes but NOT in net_routes,
+        # so _collect_extra_routes_for_revalidation folds them in as extra.
+        e1 = _route(1, [_seg(2.0, 5.0, 12.0, 5.0, 1)], "ESC_A")
+        e2 = _route(2, [_seg(4.0, 5.0, 10.0, 5.0, 2)], "ESC_B")
+        for r in (e1, e2):
+            ar.grid.mark_route(r)
+            ar.grid.mark_route_usage(r)
+            ar.routes.append(r)
+        net_routes: dict[int, list[Route]] = {}
+        extra = ar._collect_extra_routes_for_revalidation(net_routes)
+
+        victims, non_rippable = demote_seg_seg_finalize(
+            net_routes,
+            neg,
+            ar.grid,
+            ar.routes,
+            trace_clearance=ar.rules.trace_clearance,
+            extra_routes=extra,
+            copper_overlap_only=False,
+        )
+        assert victims == []  # nothing demotable (both non-rippable)
+        assert non_rippable == [(1, 2)]  # surfaced as the M3 signal
+        # Copper is untouched (nothing to demote), but it is NOT silently
+        # accepted -- the caller has the signal to report it unrouted.
+        assert e1 in ar.routes and e2 in ar.routes
+
+    def test_mixed_rippable_pair_demotes_the_committed_net(self):
+        """When exactly one side of the crossing IS a committed (rippable)
+        net, the greedy cover demotes it -- the M3 skip only fires when
+        BOTH sides are non-rippable."""
+        ar = self._make_autorouter()
+        neg = _make_neg_router(ar.grid, ar.rules)
+        # Committed net 1 (rippable) crosses non-rippable escape stub net 2.
+        r1 = _route(1, [_seg(2.0, 5.0, 12.0, 5.0, 1)], "NETA")
+        e2 = _route(2, [_seg(4.0, 5.0, 10.0, 5.0, 2)], "ESC_B")
+        for r in (r1, e2):
+            ar.grid.mark_route(r)
+            ar.grid.mark_route_usage(r)
+            ar.routes.append(r)
+        net_routes = {1: [r1]}  # only net 1 is committed/demotable
+
+        demoted = ar._demote_seg_seg_overlap_nets(net_routes, neg, finalize=True)
+        assert demoted == [1]
+        assert net_routes[1] == []
+        assert r1 not in ar.routes
+        assert e2 in ar.routes  # escape stub survives (non-rippable)
+
+
 # ---------------------------------------------------------------------------
 # Issue #3413: correction pass must run BEFORE demotion on the timeout exit
 # ---------------------------------------------------------------------------
