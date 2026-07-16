@@ -7928,6 +7928,21 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--max-cells",
+        type=int,
+        default=500_000,
+        help=(
+            "Maximum grid cells to allow for --grid auto (default: 500,000). "
+            "Raise this on large boards when auto-grid selects a coarse, "
+            "unsafe grid because of the memory budget cap (this is the "
+            "caller-facing override for the budget named in the 'Increase "
+            "max_cells' warning/error text). Values below the default are "
+            "honored too, making the memory cap bind harder. Threaded to both "
+            "the uniform and adaptive (multi-resolution) grid-selection paths. "
+            "No effect when --grid is an explicit value rather than 'auto'."
+        ),
+    )
+    parser.add_argument(
         "--trace-width",
         type=float,
         default=0.2,
@@ -9441,11 +9456,13 @@ def main(argv: list[str] | None = None) -> int:
         board_dims = extract_board_dimensions(pcb_path)
         board_width = board_dims[0] if board_dims else None
         board_height = board_dims[1] if board_dims else None
+        max_cells = getattr(args, "max_cells", 500_000)
         grid_auto_result = auto_select_grid_resolution(
             pads=pad_positions,
             clearance=args.clearance,
             board_width=board_width,
             board_height=board_height,
+            max_cells=max_cells,
         )
 
         # When grid_strategy is adaptive (default), attempt multi-resolution
@@ -9462,6 +9479,7 @@ def main(argv: list[str] | None = None) -> int:
                     clearance=args.clearance,
                     board_width=board_width,
                     board_height=board_height,
+                    max_cells=max_cells,
                 )
             except Exception:
                 # Fall back: try with pad positions (won't have ref info)
@@ -9470,6 +9488,7 @@ def main(argv: list[str] | None = None) -> int:
                     clearance=args.clearance,
                     board_width=board_width,
                     board_height=board_height,
+                    max_cells=max_cells,
                 )
 
         if multi_res_plan is not None and multi_res_plan.is_multi_resolution:
