@@ -2868,6 +2868,19 @@ def _add_route_parser(subparsers) -> None:
         default="auto",
         help="Grid resolution in mm or 'auto' for automatic selection (default: auto)",
     )
+    route_parser.add_argument(
+        "--max-cells",
+        type=int,
+        default=500_000,
+        help=(
+            "Maximum grid cells to allow for --grid auto (default: 500,000). "
+            "Raise this on large boards when auto-grid selects a coarse, unsafe "
+            "grid because of the memory budget cap (the caller-facing override "
+            "for the budget named in the 'Increase max_cells' warning/error). "
+            "Threaded to both the uniform and adaptive grid-selection paths; no "
+            "effect when --grid is an explicit value."
+        ),
+    )
     route_parser.add_argument("--trace-width", type=float, default=0.2, help="Trace width in mm")
     route_parser.add_argument("--clearance", type=float, default=0.15, help="Clearance in mm")
     route_parser.add_argument(

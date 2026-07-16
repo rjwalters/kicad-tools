@@ -1477,7 +1477,7 @@ def compute_multi_resolution_plan(
     clearance: float,
     board_width: float | None = None,
     board_height: float | None = None,
-    max_cells: int = 2_000_000,
+    max_cells: int = 500_000,
     zone_padding: float = 2.0,
     min_fine_resolution: float = 0.05,
     fine_pitch_threshold: float = 0.8,
@@ -1538,12 +1538,17 @@ def compute_multi_resolution_plan(
     if not pad_list:
         return None
 
-    # Run uniform selection first to get coarse resolution
+    # Run uniform selection first to get coarse resolution.  Forward the
+    # caller-supplied ``max_cells`` budget so it actually constrains grid
+    # selection under the adaptive strategy (previously this parameter was
+    # accepted but never used — a silent no-op that made ``--max-cells``
+    # ineffective on the default ``--grid-strategy adaptive`` path).
     uniform_result = auto_select_grid_resolution(
         pads=pad_list,
         clearance=clearance,
         board_width=board_width,
         board_height=board_height,
+        max_cells=max_cells,
     )
     coarse_resolution = uniform_result.resolution
 

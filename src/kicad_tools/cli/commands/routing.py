@@ -218,6 +218,12 @@ def run_route_command(args) -> int:
     grid_val = str(args.grid)
     if grid_val.lower() != "auto":
         sub_argv.extend(["--grid", grid_val])
+    # Issue #4242: forward --max-cells (auto-grid memory budget override) only
+    # when the user changed it from the shared 500,000 default, keeping
+    # flag-off argv byte-identical.  Both parsers declare it; see
+    # tests/test_cli_parser_drift.py.
+    if getattr(args, "max_cells", 500_000) != 500_000:
+        sub_argv.extend(["--max-cells", str(args.max_cells)])
     if args.trace_width != 0.2:
         sub_argv.extend(["--trace-width", str(args.trace_width)])
     if args.clearance != 0.15:
