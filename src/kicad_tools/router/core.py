@@ -1062,6 +1062,13 @@ class Autorouter:
         # the pathfinder itself is built lazily on first mesh route.
         self._strategy = strategy
         self._mesh_pathfinder: Any = None
+        # Issue #4269 (mesh-router P2): the whole net set is negotiated once on
+        # the first mesh route (static mesh + per-portal congestion / rip-up)
+        # and the per-net results are cached here so ``route_net`` can serve
+        # them net-by-net while the outer ``route_all`` loop iterates.
+        self._mesh_net_routes: dict[int, list[Route]] | None = None
+        self._mesh_served: set[int] = set()
+        self._mesh_negotiation_stats: Any = None
 
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
@@ -2286,15 +2293,30 @@ class Autorouter:
         return [r for r in self.routes if id(r) not in tracked_ids]
 
     def _route_net_mesh(self, net: int) -> list[Route]:
-        """Route a net with the mesh strategy (issue #4268, single-net P1).
+        """Route a net with the mesh strategy (issue #4268 P1 / #4269 P2).
 
         Builds (once, lazily) a :class:`~kicad_tools.router.mesh.MeshPathfinder`
-        from the board outline + pads + rules, then routes each connection of
-        the net star-wise from its first pad.  Each successful route is a normal
-        45-legal :class:`Route` committed to ``self.routes`` -- the emission /
-        DRC tail is identical to the grid path.  Multi-net negotiation,
-        capacity, vias and matched routing are explicitly out of P1 scope.
+        from the board outline + pads + rules and negotiates the WHOLE net set
+        through the shared navmesh a single time (issue #4269: static mesh +
+        per-portal congestion / rip-up, so nets compete for shared corridors
+        instead of committing first-come).  The negotiated per-net results are
+        cached; each ``route_net(net)`` call then serves that net's routes and
+        commits them to ``self.routes`` exactly once.  The emission / DRC tail
+        is identical to the grid path.
         """
+        if self._mesh_net_routes is None:
+            self._mesh_net_routes = self._negotiate_mesh_netset()
+
+        routes = self._mesh_net_routes.get(net, [])
+        if net not in self._mesh_served:
+            self._mesh_served.add(net)
+            for route in routes:
+                if route.segments:
+                    self.routes.append(route)
+        return [r for r in routes if r.segments]
+
+    def _ensure_mesh_pathfinder(self) -> Any:
+        """Lazily construct the per-board :class:`MeshPathfinder` (built once)."""
         from .mesh.pathfinder import MeshPathfinder
 
         if self._mesh_pathfinder is None:
@@ -2313,22 +2335,44 @@ class Autorouter:
                 by1 = self.grid.origin_y + self.grid.height
             outline = [(bx0, by0), (bx1, by0), (bx1, by1), (bx0, by1)]
             self._mesh_pathfinder = MeshPathfinder(outline, list(self.pads.values()), self.rules)
+        return self._mesh_pathfinder
 
-        pad_keys = self.nets.get(net, [])
-        pads = [self.pads[k] for k in pad_keys if k in self.pads]
-        if len(pads) < 2:
-            return []
+    def _negotiate_mesh_netset(self) -> dict[int, list[Route]]:
+        """Negotiate every routable net through the shared navmesh (issue #4269).
 
-        routes: list[Route] = []
-        anchor = pads[0]
-        for other in pads[1:]:
-            if anchor.layer != other.layer:
-                continue  # single-layer P1: skip cross-layer connections
-            route = self._mesh_pathfinder.route(anchor, other)
-            if route is not None and route.segments:
-                self.routes.append(route)
-                routes.append(route)
-        return routes
+        Gathers a star-wise, single-layer connection per net (matching P1's
+        per-net topology), runs the PathFinder/VPR portal negotiation once, and
+        buckets the winning routes by net id.  Mesh triangulation happens once
+        for the whole board inside :meth:`MeshPathfinder.route_netset`.
+        """
+        pf = self._ensure_mesh_pathfinder()
+
+        connections: list[tuple[object, Pad, Pad, object]] = []
+        for net, pad_keys in self.nets.items():
+            if net == 0:
+                continue
+            pads = [self.pads[k] for k in pad_keys if k in self.pads]
+            if len(pads) < 2:
+                continue
+            anchor = pads[0]
+            for seq, other in enumerate(pads[1:]):
+                if anchor.layer != other.layer:
+                    continue  # single-layer: skip cross-layer connections
+                connections.append(((net, seq), anchor, other, None))
+
+        if not connections:
+            return {}
+
+        routes_by_key, stats = pf.route_netset(connections)
+        self._mesh_negotiation_stats = stats
+
+        by_net: dict[int, list[Route]] = {}
+        for key, route in routes_by_key.items():
+            assert isinstance(key, tuple)
+            net_id = int(key[0])
+            if route.segments:
+                by_net.setdefault(net_id, []).append(route)
+        return by_net
 
     def route_net(
         self,

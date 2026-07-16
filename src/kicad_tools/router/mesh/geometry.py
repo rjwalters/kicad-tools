@@ -120,6 +120,25 @@ def segments_intersect(a1: Pt, a2: Pt, b1: Pt, b2: Pt) -> bool:
     return False
 
 
+def segment_intersects_polygon(p1: Pt, p2: Pt, poly: list[Pt]) -> bool:
+    """True if segment ``p1-p2`` intersects (or lies within) a simple polygon.
+
+    Used as the clearance predicate against pour keep-outs (issue #4269): a
+    trace leg that enters a filled copper pour is a clearance violation, the
+    polygon analogue of :func:`segment_intersects_rect`.  ``poly`` is a closed
+    ring given WITHOUT a repeated final vertex.  Any endpoint inside the pour,
+    or any leg that crosses a pour boundary edge, counts as a hit.
+    """
+    n = len(poly)
+    if n < 3:
+        return False
+    # Either endpoint inside the pour (boundary counts as inside).
+    if point_in_polygon(p1, poly) or point_in_polygon(p2, poly):
+        return True
+    # Otherwise the leg must cross a boundary edge to enter/exit.
+    return any(segments_intersect(p1, p2, poly[i], poly[(i + 1) % n]) for i in range(n))
+
+
 def segment_intersects_rect(
     p1: Pt, p2: Pt, xmin: float, ymin: float, xmax: float, ymax: float
 ) -> bool:
