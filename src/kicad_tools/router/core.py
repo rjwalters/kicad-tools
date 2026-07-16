@@ -10917,6 +10917,34 @@ class Autorouter:
         ripped: list[int] = []
         failed_name = self.net_names.get(failed_net, f"Net_{failed_net}")
 
+        # Issue #4255 (Track A / A2): a diff pair is an ATOMIC unit.  When the
+        # failing net belongs to a diff pair whose partner is ALREADY routed,
+        # fold the partner into this transaction so a committed
+        # "P-routed / N-stranded" state becomes structurally unrepresentable
+        # -- the N-1 corridor-contention trade the classifier reports for
+        # TMDS_D0_N / TMDS_D1_N.  Three additive effects, all reusing the
+        # existing snapshot / rip / re-land machinery:
+        #   * snapshot_nets + original_routes cover the partner, so the
+        #     verbatim rollback restores the partner's exact Route objects too;
+        #   * the partner is ripped alongside the failed net at the clean-slate
+        #     below, so the probe explores the corridor with the partner
+        #     absent (otherwise the partner's own copper re-boxes the failed
+        #     leg -- the whole point of the fix);
+        #   * the partner joins ``ripped``, making it a MANDATORY member of the
+        #     commit gate -- the transaction commits only if BOTH legs re-land,
+        #     else it rolls back all copper verbatim.
+        # No-op when the net has no diff-pair partner (partner is None) OR the
+        # partner is not yet routed: snapshot_nets stays {failed_net}, ``ripped``
+        # is untouched, and every downstream loop is byte-identical to today
+        # (protects the per-net byte-lane identity / reservation-count tests).
+        pair_partner: int | None = self._diff_pair_partner_net(failed_net)
+        if pair_partner is not None and net_routes.get(pair_partner):
+            snapshot_nets.add(pair_partner)
+            original_routes[pair_partner] = list(net_routes.get(pair_partner, []))
+            ripped.append(pair_partner)
+        else:
+            pair_partner = None
+
         def _rollback() -> None:
             for net in snapshot_nets:
                 for route in list(net_routes.get(net, [])):
@@ -10936,8 +10964,14 @@ class Autorouter:
 
         # Clear any stale partial copper the failed net is holding so the
         # probe starts from a clean slate (mirrors targeted_ripup #3470).
-        if original_routes.get(failed_net):
-            neg_router.rip_up_nets([failed_net], net_routes, self.routes)
+        # Issue #4255: rip the diff-pair partner alongside it (when folded in
+        # above) so the probe explores the freed corridor with the partner's
+        # copper absent -- otherwise the partner re-boxes the failed leg.
+        clean_slate_nets = [
+            n for n in (failed_net, pair_partner) if n is not None and original_routes.get(n)
+        ]
+        if clean_slate_nets:
+            neg_router.rip_up_nets(clean_slate_nets, net_routes, self.routes)
 
         # Probes that succeed do so in well under a second (the relief
         # graph always has SOME path unless foreign pad metal seals the
