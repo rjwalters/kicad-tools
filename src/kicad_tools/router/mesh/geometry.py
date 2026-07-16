@@ -139,6 +139,72 @@ def segment_intersects_polygon(p1: Pt, p2: Pt, poly: list[Pt]) -> bool:
     return any(segments_intersect(p1, p2, poly[i], poly[(i + 1) % n]) for i in range(n))
 
 
+def _seg_crossing_param(a: Pt, b: Pt, c: Pt, d: Pt) -> float | None:
+    """Parametric ``t`` in ``[0, 1]`` along ``a->b`` where it crosses ``c->d``.
+
+    Returns ``None`` when the two segments are parallel or do not cross within
+    both spans.  Used by :func:`segment_polygon_interval` to clip a portal edge
+    against a committed-copper capsule (issue #4274 in-corridor lane assignment).
+    """
+    rx, ry = b[0] - a[0], b[1] - a[1]
+    sx, sy = d[0] - c[0], d[1] - c[1]
+    denom = rx * sy - ry * sx
+    if abs(denom) < 1e-15:
+        return None
+    qx, qy = c[0] - a[0], c[1] - a[1]
+    t = (qx * sy - qy * sx) / denom
+    u = (qx * ry - qy * rx) / denom
+    if -1e-12 <= t <= 1.0 + 1e-12 and -1e-12 <= u <= 1.0 + 1e-12:
+        return min(1.0, max(0.0, t))
+    return None
+
+
+def segment_polygon_interval(a: Pt, b: Pt, poly: list[Pt]) -> tuple[float, float] | None:
+    """Parametric ``[t0, t1]`` of the part of segment ``a->b`` inside ``poly``.
+
+    Winding-agnostic; ``poly`` is a closed convex ring (the committed-copper
+    capsules are convex quads) given WITHOUT a repeated final vertex.  Returns
+    ``None`` when the segment never enters the polygon.  For a convex polygon the
+    interior span of a segment is contiguous, so a single ``(t0, t1)`` describes
+    the consumed opening a committed trace carves out of a portal edge.
+    """
+    n = len(poly)
+    if n < 3:
+        return None
+    cuts = {0.0, 1.0}
+    for i in range(n):
+        t = _seg_crossing_param(a, b, poly[i], poly[(i + 1) % n])
+        if t is not None:
+            cuts.add(t)
+    ts = sorted(cuts)
+    lo: float | None = None
+    hi = 0.0
+    for j in range(len(ts) - 1):
+        tm = 0.5 * (ts[j] + ts[j + 1])
+        pm = (a[0] + tm * (b[0] - a[0]), a[1] + tm * (b[1] - a[1]))
+        if point_in_polygon(pm, poly):
+            if lo is None:
+                lo = ts[j]
+            hi = ts[j + 1]
+    if lo is None:
+        return None
+    return (lo, hi)
+
+
+def merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Union a set of ``[t0, t1]`` intervals into disjoint, sorted spans."""
+    if not intervals:
+        return []
+    ordered = sorted(intervals)
+    out: list[list[float]] = [list(ordered[0])]
+    for lo, hi in ordered[1:]:
+        if lo <= out[-1][1] + 1e-9:
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    return [(lo, hi) for lo, hi in out]
+
+
 def segment_intersects_rect(
     p1: Pt, p2: Pt, xmin: float, ymin: float, xmax: float, ymax: float
 ) -> bool:

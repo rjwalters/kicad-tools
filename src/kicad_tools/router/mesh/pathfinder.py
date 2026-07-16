@@ -31,7 +31,7 @@ from pathlib import Path
 
 from ..primitives import Pad, Route, Segment
 from ..rules import DesignRules
-from .geometry import Pt
+from .geometry import Pt, merge_intervals, segment_polygon_interval
 from .navmesh import NavMesh
 from .obstacles import ObstacleModel, Rect
 from .octilinear import octilinear_fit
@@ -215,6 +215,7 @@ class MeshPathfinder:
         negotiated_mode: bool,
         present_cost_factor: float,
         committed: list[list[Pt]] | None = None,
+        consumed: dict[tuple[int, int], list[tuple[float, float]]] | None = None,
     ) -> tuple[Route, list[tuple[int, int]]] | None:
         """Route + report the portal keys the route crosses (for occupancy).
 
@@ -224,6 +225,15 @@ class MeshPathfinder:
         than shipped as a short (the #3906 "never ship a short" invariant, now
         enforced net-vs-net).  The static mesh is untouched -- committed copper
         only narrows the per-net obstacle model, never re-triangulates.
+
+        ``consumed`` (issue #4274) maps each portal edge to the parametric
+        intervals already occupied by committed copper; it narrows this net's
+        portal openings to their residual sub-segments so the funnel yields a
+        *parallel* geodesic (an actual lane) instead of the same taut path a
+        prior net already claimed.  When ``None`` it is derived from
+        ``committed`` for this net's own corridor (each portal edge intersected
+        with every committed capsule); an empty/absent model reproduces the P2
+        full-opening funnel exactly.
         """
         navmesh = self.build()
         if not navmesh.triangles:
@@ -260,13 +270,58 @@ class MeshPathfinder:
         if corridor is None:
             return None
 
-        geodesic = _pull(navmesh, corridor, start_pt, end_pt)
-        fitted = octilinear_fit(geodesic, obstacles.is_clear)
+        # First try the full-opening funnel (the P2 geodesic).  When no copper
+        # is committed yet -- the first net, and every net on ``--route-engine``
+        # paths that never narrow -- this is the only attempt and the result is
+        # byte-identical to P2.
+        fitted = self._fit_corridor(navmesh, corridor, start_pt, end_pt, obstacles, consumed)
+
+        # Issue #4274 re-funnel: if the taut geodesic collides with copper a
+        # prior net committed this pass, narrow this net's portals to their
+        # residual openings and re-run the funnel.  Narrowing only *adds* a lane
+        # candidate -- the straight geodesic was already tried -- so completion
+        # can only rise, never regress, and a lane that still cannot clear
+        # declines (``None``) rather than crossing.
+        if fitted is None and consumed is None and committed:
+            derived: dict[tuple[int, int], list[tuple[float, float]]] = {}
+            for edge in navmesh.corridor_portals(corridor):
+                bands = _edge_consumed_bands(navmesh, edge, committed)
+                if bands:
+                    derived[edge] = bands
+            if derived:
+                # Re-funnel with a small family of parallel-lane candidates
+                # (widest gap, then each one-wall packing); accept the first
+                # that clears.  Every candidate is validated against the true
+                # obstacle model, so a lane that cannot clear still declines.
+                for pack in ("largest", "left", "right"):
+                    fitted = self._fit_corridor(
+                        navmesh, corridor, start_pt, end_pt, obstacles, derived, pack
+                    )
+                    if fitted is not None:
+                        break
+
         if fitted is None or len(fitted) < 2:
             return None
 
         route = self._build_route(start, net, trace_w, fitted)
         return route, navmesh.corridor_portals(corridor)
+
+    def _fit_corridor(
+        self,
+        navmesh: NavMesh,
+        corridor: list[int],
+        start_pt: Pt,
+        end_pt: Pt,
+        obstacles: ObstacleModel,
+        consumed: dict[tuple[int, int], list[tuple[float, float]]] | None,
+        pack: str = "largest",
+    ) -> list[Pt] | None:
+        """Funnel + clearance-clean 45-fit for one corridor (optionally narrowed)."""
+        geodesic = _pull(navmesh, corridor, start_pt, end_pt, consumed, pack)
+        fitted = octilinear_fit(geodesic, obstacles.is_clear)
+        if fitted is None or len(fitted) < 2:
+            return None
+        return fitted
 
     # -- multi-net negotiation (issue #4269) ------------------------------
 
@@ -324,6 +379,12 @@ class MeshPathfinder:
             # rip-up genuinely frees the corridor.
             committed: list[list[Pt]] = []
             for key, start, end, net_class in ordered:
+                # Issue #4274: ``committed`` doubles as the lane-assignment
+                # model -- ``_route_with_portals`` narrows this net's portals by
+                # the copper already committed this pass so its funnel produces a
+                # parallel lane rather than the geodesic a prior net occupies.
+                # Reset each pass so a rip-up frees the lane as well as the
+                # copper.
                 result = self._route_with_portals(
                     start,
                     end,
@@ -492,10 +553,38 @@ def _inflate_polygon(poly: list[Pt], margin: float) -> list[Pt]:
     return out
 
 
-def _pull(navmesh: NavMesh, corridor: list[int], start: Pt, end: Pt) -> list[Pt]:
+def _edge_consumed_bands(
+    navmesh: NavMesh, edge: tuple[int, int], capsules: list[list[Pt]]
+) -> list[tuple[float, float]]:
+    """Parametric ``[t0, t1]`` intervals a route's copper carves out of a portal.
+
+    Intersects each committed capsule (inflated by ``trace_width + clearance``,
+    the same width the octilinear fit clears against) with the portal edge
+    ``vertices[edge[0]] -> vertices[edge[1]]`` and unions the covered spans.
+    These are the openings :func:`NavMesh.corridor_to_portals` subtracts so the
+    next net funnels through the residual sub-segment (issue #4274).
+    """
+    a = navmesh.vertices[edge[0]]
+    b = navmesh.vertices[edge[1]]
+    ivals: list[tuple[float, float]] = []
+    for poly in capsules:
+        iv = segment_polygon_interval(a, b, poly)
+        if iv is not None:
+            ivals.append(iv)
+    return merge_intervals(ivals)
+
+
+def _pull(
+    navmesh: NavMesh,
+    corridor: list[int],
+    start: Pt,
+    end: Pt,
+    consumed: dict[tuple[int, int], list[tuple[float, float]]] | None = None,
+    pack: str = "largest",
+) -> list[Pt]:
     from .funnel import string_pull
 
-    return string_pull(navmesh.corridor_to_portals(corridor, start, end))
+    return string_pull(navmesh.corridor_to_portals(corridor, start, end, consumed, pack))
 
 
 def _outline_from_edges(
