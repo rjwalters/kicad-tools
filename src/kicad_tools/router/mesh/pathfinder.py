@@ -29,9 +29,15 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..primitives import Pad, Route, Segment
+from ..layers import LayerStack
+from ..primitives import Pad, Route, Segment, Via
 from ..rules import DesignRules
-from .geometry import Pt, merge_intervals, segment_polygon_interval
+from .geometry import (
+    Pt,
+    merge_intervals,
+    point_in_polygon,
+    segment_polygon_interval,
+)
 from .navmesh import NavMesh
 from .obstacles import ObstacleModel, Rect
 from .octilinear import octilinear_fit
@@ -76,10 +82,19 @@ class MeshPathfinder:
         pads: list[Pad],
         rules: DesignRules | None = None,
         pours: list[list[Pt]] | None = None,
+        layer_stack: LayerStack | None = None,
     ) -> None:
         self.outline = outline
         self.pads = pads
         self.rules = rules or DesignRules()
+        # Copper stack the 2.5D via injection replicates the mesh across
+        # (issue #4276).  Consumed from the board's real routing-layer count --
+        # NOT hardcoded to 2 -- so via edges span any number of adjacent layers.
+        self.layer_stack = layer_stack or LayerStack.two_layer()
+        # Per-via-hop layer-change cost (mm-equivalent).  Kept well above a
+        # typical in-layer portal step so the search only dips when a layer is
+        # actually blocked, never gratuitously (the via-soup guard, risk 3).
+        self.via_cost = 5.0
         # Filled-copper pour outlines (issue #4269).  Modeled BOTH as poly2tri
         # mesh holes (so corridors route around them) and as obstacle-model
         # polygons (so the 45-fit declines any leg entering a pour).
@@ -101,6 +116,7 @@ class MeshPathfinder:
         pcb_path_or_text: str | Path,
         rules: DesignRules | None = None,
         pours: list[list[Pt]] | None = None,
+        layer_stack: LayerStack | None = None,
     ) -> MeshPathfinder:
         """Build a pathfinder from a ``.kicad_pcb`` file or text."""
         from ..io import _extract_edge_segments, load_pads_for_analysis
@@ -115,7 +131,7 @@ class MeshPathfinder:
         pads = load_pads_for_analysis(text)
         segments = _extract_edge_segments(text)
         outline = _outline_from_edges(segments)
-        return cls(outline, pads, rules, pours)
+        return cls(outline, pads, rules, pours, layer_stack)
 
     # -- static mesh ------------------------------------------------------
 
@@ -374,25 +390,39 @@ class MeshPathfinder:
             navmesh.reset_occupancy()
             routes: dict[object, Route] = {}
             failed: list[Connection] = []
-            # Inflated copper committed by earlier nets THIS pass -- later nets
-            # must clear it (net-vs-net short avoidance).  Reset each pass so a
+            # Inflated copper committed by earlier nets THIS pass, bucketed by
+            # routing-graph layer index (issue #4276) -- later nets must clear
+            # it (net-vs-net short avoidance).  Per-layer so an F.Cu net is not
+            # blocked by another net's B.Cu cross-under.  Reset each pass so a
             # rip-up genuinely frees the corridor.
-            committed: list[list[Pt]] = []
+            committed_by_layer: dict[int, list[list[Pt]]] = {}
             for key, start, end, net_class in ordered:
-                # Issue #4274: ``committed`` doubles as the lane-assignment
-                # model -- ``_route_with_portals`` narrows this net's portals by
-                # the copper already committed this pass so its funnel produces a
+                start_L = self._layer_index(start.layer) or 0
+                # Issue #4274: the net's own-layer committed copper doubles as
+                # the lane-assignment model -- ``_route_with_portals`` narrows
+                # this net's portals by that copper so its funnel produces a
                 # parallel lane rather than the geodesic a prior net occupies.
-                # Reset each pass so a rip-up frees the lane as well as the
-                # copper.
                 result = self._route_with_portals(
                     start,
                     end,
                     net_class,
                     negotiated_mode=True,
                     present_cost_factor=present,
-                    committed=committed,
+                    committed=committed_by_layer.get(start_L, []),
                 )
+                # Issue #4276: when the in-layer attempt declines (a transverse
+                # crossing the lane allocator cannot resolve), retry by dipping
+                # layers -- via down, cross under, via up.  Additive: the
+                # single-layer geodesic was already tried, so completion can only
+                # rise and a dip that still cannot clear declines, never crosses.
+                if result is None:
+                    result = self._route_via_injection(
+                        start,
+                        end,
+                        net_class,
+                        committed_by_layer,
+                        present_cost_factor=present,
+                    )
                 if result is None:
                     failed.append((key, start, end, net_class))
                     continue
@@ -400,7 +430,8 @@ class MeshPathfinder:
                 routes[key] = route
                 for edge in portals:
                     navmesh.commit_portal(edge)
-                committed.extend(self._route_obstacles(route))
+                for lidx, polys in self._route_obstacles_by_layer(route).items():
+                    committed_by_layer.setdefault(lidx, []).extend(polys)
 
             if len(routes) > best_count:
                 best_count = len(routes)
@@ -468,6 +499,339 @@ class MeshPathfinder:
 
         return merge_overlapping(raw)
 
+    # -- 2.5D via injection (issue #4276) ---------------------------------
+
+    @property
+    def _via_in_pad_allowed(self) -> bool:
+        """Whether the configured fab tier permits via-in-pad (else OFF).
+
+        Read from the real fab model exactly as the grid escape router does:
+        ``rules.manufacturer`` -> ``MfrLimits.via_in_pad_supported`` (base
+        ``jlcpcb`` = False, ``jlcpcb-tier1`` = True).  With no manufacturer
+        configured the conservative default is False, so pad-site vias are
+        pruned and only free-space portal-midpoint through-vias are injected.
+        """
+        mfr = self.rules.manufacturer
+        if not mfr:
+            return False
+        try:
+            from ..mfr_limits import get_mfr_limits
+
+            return bool(get_mfr_limits(mfr).via_in_pad_supported)
+        except Exception:
+            return False
+
+    def _layer_index(self, layer: object) -> int | None:
+        """Routing-graph layer index for a KiCad layer enum (None if off-stack)."""
+        try:
+            return self.layer_stack.layer_enum_to_index(layer)  # type: ignore[arg-type]
+        except Exception:
+            return None
+
+    def _keepouts_layer(self, net: int, agent_radius: float, layer_idx: int) -> list[Rect]:
+        """Per-layer inflated pad keep-outs (issue #4276 section 3).
+
+        An SMD pad blocks only its own copper layer; a through-hole pad blocks
+        EVERY layer.  Same-net copper is never an obstacle.  The triangulation
+        is shared across layers -- only this obstacle mask is per-layer.
+        """
+        from .obstacles import merge_overlapping
+
+        try:
+            layer_enum = self.layer_stack.index_to_layer_enum(layer_idx)
+        except Exception:
+            layer_enum = None
+
+        raw: list[Rect] = []
+        bx0, by0, bx1, by1 = self._bbox
+        margin = 1e-3
+        for pad in self.pads:
+            if pad.net == net:
+                continue
+            # SMD pad on another layer does not block this one; PTH blocks all.
+            if not pad.through_hole and layer_enum is not None and pad.layer != layer_enum:
+                continue
+            hx = pad.width / 2.0 + agent_radius
+            hy = pad.height / 2.0 + agent_radius
+            r = (
+                max(pad.x - hx, bx0 + margin),
+                max(pad.y - hy, by0 + margin),
+                min(pad.x + hx, bx1 - margin),
+                min(pad.y + hy, by1 - margin),
+            )
+            if r[2] - r[0] < margin or r[3] - r[1] < margin:
+                continue
+            raw.append(r)
+        return merge_overlapping(raw)
+
+    def _via_allowed_at(
+        self,
+        site: Pt,
+        net: int,
+        via_radius: float,
+        layers: tuple[int, int],
+        committed_by_layer: dict[int, list[list[Pt]]],
+    ) -> bool:
+        """Obstacle-aware via placement test (issue #4276 section 5, #3906).
+
+        A via at ``site`` joining ``layers`` is admitted only when its body is
+        DRC-legal on BOTH layers it spans:
+
+        * inside a DIFFERENT net's pad -> a short, never allowed;
+        * inside its OWN net's pad -> via-in-pad, allowed only when the fab tier
+          permits it (default OFF -> pruned, so pad-site vias never ship);
+        * over copper another net committed on either spanned layer -> declined.
+
+        Portal midpoints are free-space by construction, so the default result
+        is "allowed"; this gate exists to prune the pathological sites.
+        """
+        for pad in self.pads:
+            hx = pad.width / 2.0 + via_radius
+            hy = pad.height / 2.0 + via_radius
+            if abs(site[0] - pad.x) <= hx and abs(site[1] - pad.y) <= hy:
+                if pad.net == net:
+                    if not self._via_in_pad_allowed:
+                        return False
+                else:
+                    return False
+        # A through-via spans every copper layer, so its body must clear
+        # committed cross-net copper on ALL layers -- not just the two the A*
+        # hop nominally joins.  Check every layer with committed copper.
+        for caps in committed_by_layer.values():
+            for poly in caps:
+                if point_in_polygon(site, poly):
+                    return False
+        return True
+
+    def _route_via_injection(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: object | None,
+        committed_by_layer: dict[int, list[list[Pt]]],
+        *,
+        present_cost_factor: float,
+    ) -> tuple[Route, list[tuple[int, int]]] | None:
+        """Route by dipping layers when the in-layer geodesic is blocked (#4276).
+
+        This is the 2.5D fallback the negotiator reaches for only after the
+        single-layer attempt declines: it runs the ``(triangle, layer)`` A*
+        (mesh replicated across ``layer_stack.num_layers``), splits the returned
+        multi-layer corridor at its via sites, funnels + 45-fits EACH per-layer
+        run against that layer's own obstacle model, and stitches the runs with
+        through-vias.  If ANY run cannot be made clearance-clean the whole route
+        declines (``None``) -- never a short (the authoritative octilinear gate
+        stays in force per layer).
+        """
+        navmesh = self.build()
+        num_layers = self.layer_stack.num_layers
+        if not navmesh.triangles or num_layers < 2:
+            return None
+
+        start_layer = self._layer_index(start.layer)
+        goal_layer = self._layer_index(end.layer)
+        if start_layer is None or goal_layer is None:
+            return None
+
+        trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
+        clearance = self.rules.trace_clearance
+        agent_radius = trace_w / 2.0 + clearance
+        via_radius = self.rules.via_diameter / 2.0 + clearance
+        net = start.net
+        start_pt: Pt = (start.x, start.y)
+        end_pt: Pt = (end.x, end.y)
+
+        # Per-layer obstacle model for the authoritative octilinear fit.
+        obstacles_by_layer: dict[int, ObstacleModel] = {}
+        for lidx in range(num_layers):
+            keepouts = self._keepouts_layer(net, agent_radius, lidx)
+            pour_obstacles = self.pours + committed_by_layer.get(lidx, [])
+            obstacles_by_layer[lidx] = ObstacleModel(self.outline, keepouts, pour_obstacles)
+
+        # Per-layer portal blocking (issue #4276 section 3): a portal is blocked
+        # on a layer when a trace cannot thread it there -- tested with the SAME
+        # per-layer obstacle model the octilinear fit uses, on the segment
+        # joining the two incident triangle centroids.  This gives A* a cost
+        # reason to DIP where a layer is obstructed (by committed copper OR an
+        # other-net pad on that layer) to a clear layer, rather than ploughing on
+        # and declining at the fit.  Same-net pads are not obstacles, so a net's
+        # own pad-escape portals stay open.  The authoritative per-layer fit
+        # still gates every emitted leg, so this heuristic can only steer, never
+        # ship a short.
+        centroids = navmesh._centroids
+
+        def portal_blocked(edge: tuple[int, int], layer: int) -> bool:
+            tris = navmesh._edge_tris.get(edge)
+            if not tris or len(tris) < 2:
+                return False
+            return not obstacles_by_layer[layer].is_clear(centroids[tris[0]], centroids[tris[1]])
+
+        def via_allowed(site: Pt, layer_a: int, layer_b: int) -> bool:
+            return self._via_allowed_at(
+                site, net, via_radius, (layer_a, layer_b), committed_by_layer
+            )
+
+        pcf = present_cost_factor
+        corridor = navmesh.astar_layered(
+            start_pt,
+            end_pt,
+            start_layer,
+            goal_layer,
+            num_layers,
+            portal_blocked,
+            via_allowed,
+            self.via_cost,
+            present_cost_factor=pcf,
+            cost_congestion=self.rules.cost_congestion if pcf else 0.0,
+            congestion_threshold=self.rules.congestion_threshold,
+        )
+        if corridor is None:
+            return None
+
+        route = self._build_multilayer_route(
+            navmesh, corridor, start, end, net, trace_w, obstacles_by_layer, committed_by_layer
+        )
+        if route is None:
+            return None
+
+        portals = [
+            edge
+            for i in range(len(corridor) - 1)
+            if not corridor[i + 1][3]
+            and (edge := navmesh._shared_edge(corridor[i][0], corridor[i + 1][0])) is not None
+        ]
+        return route, portals
+
+    def _fit_layer_run(
+        self,
+        navmesh: NavMesh,
+        tris: list[int],
+        s_pt: Pt,
+        e_pt: Pt,
+        obstacles: ObstacleModel,
+        committed_on_layer: list[list[Pt]],
+    ) -> list[Pt] | None:
+        """Funnel + 45-fit one per-layer run, with the P2.5 lane-narrowing retry.
+
+        Mirrors the single-layer re-funnel (``_route_with_portals``): try the
+        taut geodesic first, and if it collides copper committed on THIS layer,
+        narrow the run's portals to their residual openings and retry the widest
+        gap then each one-wall packing.  Every candidate is validated against the
+        authoritative per-layer obstacle model, so a run that still cannot clear
+        declines (``None``) rather than shipping a short.
+        """
+        fitted = self._fit_corridor(navmesh, tris, s_pt, e_pt, obstacles, None)
+        if fitted is not None:
+            return fitted
+        if not committed_on_layer:
+            return None
+        derived: dict[tuple[int, int], list[tuple[float, float]]] = {}
+        for edge in navmesh.corridor_portals(tris):
+            bands = _edge_consumed_bands(navmesh, edge, committed_on_layer)
+            if bands:
+                derived[edge] = bands
+        if not derived:
+            return None
+        for pack in ("largest", "left", "right"):
+            fitted = self._fit_corridor(navmesh, tris, s_pt, e_pt, obstacles, derived, pack)
+            if fitted is not None:
+                return fitted
+        return None
+
+    def _build_multilayer_route(
+        self,
+        navmesh: NavMesh,
+        corridor: list[tuple[int, int, Pt, bool]],
+        start: Pad,
+        end: Pad,
+        net: int,
+        trace_w: float,
+        obstacles_by_layer: dict[int, ObstacleModel],
+        committed_by_layer: dict[int, list[list[Pt]]],
+    ) -> Route | None:
+        """Split a layered corridor into per-layer runs; funnel/fit/stitch (#4276)."""
+        start_pt: Pt = (start.x, start.y)
+        end_pt: Pt = (end.x, end.y)
+
+        # Break the corridor into maximal same-layer runs, recording the
+        # portal-midpoint via site at each layer change.
+        runs: list[tuple[int, list[int], Pt, Pt]] = []
+        via_sites: list[Pt] = []
+        cur_layer = corridor[0][1]
+        cur_tris = [corridor[0][0]]
+        run_start = start_pt
+        for k in range(1, len(corridor)):
+            tri, layer, entry, via_into = corridor[k]
+            if via_into:
+                runs.append((cur_layer, cur_tris, run_start, entry))
+                via_sites.append(entry)
+                cur_layer = layer
+                cur_tris = [tri]
+                run_start = entry
+            else:
+                cur_tris.append(tri)
+        runs.append((cur_layer, cur_tris, run_start, end_pt))
+
+        route = Route(net=net, net_name=start.net_name)
+        for layer_idx, tris, s_pt, e_pt in runs:
+            if math.hypot(e_pt[0] - s_pt[0], e_pt[1] - s_pt[1]) < 1e-6:
+                continue  # degenerate run (through-via passing this layer)
+            try:
+                layer_enum = self.layer_stack.index_to_layer_enum(layer_idx)
+            except Exception:
+                return None
+            fitted = self._fit_layer_run(
+                navmesh,
+                tris,
+                s_pt,
+                e_pt,
+                obstacles_by_layer[layer_idx],
+                committed_by_layer.get(layer_idx, []),
+            )
+            if fitted is None or len(fitted) < 2:
+                return None
+            for i in range(len(fitted) - 1):
+                a, b = fitted[i], fitted[i + 1]
+                route.segments.append(
+                    Segment(
+                        x1=a[0],
+                        y1=a[1],
+                        x2=b[0],
+                        y2=b[1],
+                        width=trace_w,
+                        layer=layer_enum,
+                        net=net,
+                        net_name=start.net_name,
+                    )
+                )
+
+        if not route.segments or not via_sites:
+            return None
+
+        # Through-via per distinct site (default manufacturable via).  Blind /
+        # buried are tier-gated and out of scope -- a placed via spans the whole
+        # copper stack, so one Via joins the top and bottom outer layers.
+        top = self.layer_stack.index_to_layer_enum(0)
+        bottom = self.layer_stack.index_to_layer_enum(self.layer_stack.num_layers - 1)
+        seen: set[tuple[float, float]] = set()
+        for site in via_sites:
+            key = (round(site[0], 4), round(site[1], 4))
+            if key in seen:
+                continue
+            seen.add(key)
+            route.vias.append(
+                Via(
+                    x=site[0],
+                    y=site[1],
+                    drill=self.rules.via_drill,
+                    diameter=self.rules.via_diameter,
+                    layers=(top, bottom),
+                    net=net,
+                    net_name=start.net_name,
+                )
+            )
+        return route
+
     def _route_obstacles(self, route: Route) -> list[list[Pt]]:
         """Inflated capsule polygons for each segment of a committed route.
 
@@ -482,6 +846,24 @@ class MeshPathfinder:
             if poly is not None:
                 polys.append(poly)
         return polys
+
+    def _route_obstacles_by_layer(self, route: Route) -> dict[int, list[list[Pt]]]:
+        """Committed-copper capsules bucketed by routing-graph layer index (#4276).
+
+        A via-injected route lays copper on several layers; committed copper
+        must be tracked per layer so later nets see it only where it actually
+        sits (an F.Cu net is not blocked by another net's B.Cu cross-under).
+        """
+        half = self.rules.trace_width + self.rules.trace_clearance
+        out: dict[int, list[list[Pt]]] = {}
+        for seg in route.segments:
+            lidx = self._layer_index(seg.layer)
+            if lidx is None:
+                continue
+            poly = _segment_capsule((seg.x1, seg.y1), (seg.x2, seg.y2), half)
+            if poly is not None:
+                out.setdefault(lidx, []).append(poly)
+        return out
 
     def _build_route(self, start: Pad, net: int, trace_w: float, fitted: list[Pt]) -> Route:
         route = Route(net=net, net_name=start.net_name)

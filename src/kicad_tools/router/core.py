@@ -2334,7 +2334,15 @@ class Autorouter:
                 bx1 = self.grid.origin_x + self.grid.width
                 by1 = self.grid.origin_y + self.grid.height
             outline = [(bx0, by0), (bx1, by0), (bx1, by1), (bx0, by1)]
-            self._mesh_pathfinder = MeshPathfinder(outline, list(self.pads.values()), self.rules)
+            # Issue #4276: hand the mesh the board's real copper stack so the
+            # 2.5D via injection replicates the mesh across the actual routing
+            # layer count instead of assuming 2.
+            self._mesh_pathfinder = MeshPathfinder(
+                outline,
+                list(self.pads.values()),
+                self.rules,
+                layer_stack=self.layer_stack,
+            )
         return self._mesh_pathfinder
 
     def _negotiate_mesh_netset(self) -> dict[int, list[Route]]:
