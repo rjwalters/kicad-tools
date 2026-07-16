@@ -27,12 +27,18 @@ Exit Codes:
     2 - Incomplete nets found
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kicad_tools.analysis.net_status import NetStatus, NetStatusAnalyzer, NetStatusResult
+
+if TYPE_CHECKING:
+    from kicad_tools.router.stuck_classifier import StuckNetDiagnosis
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -307,6 +313,33 @@ def output_json(
     print(json.dumps(data, indent=2))
 
 
+_ACTION_LABELS = {
+    "de_reverse_bundle": "de-reverse the bundle",
+    "reorder_pins": "re-order pins",
+    "widen_channel": "widen the channel",
+    "move_part": "move a part",
+    "accept_plateau": "accept plateau",
+}
+
+
+def _print_recommendation(diag: StuckNetDiagnosis) -> None:
+    """Render the additive ranked fix ladder for one stuck net (issue #4261).
+
+    Only called when ``diag`` has a non-empty ``recommendation``.
+    """
+    confidence = diag.recommendation[0].confidence.value.upper()
+    if diag.topology == "self_crossing_bundle":
+        group = diag.match_group or "bundle"
+        headline = f"self-crossing {group} bundle"
+    else:
+        headline = "foreign-cluster congestion"
+    print(f"  recommendation:   [{confidence}] {headline}")
+    for i, ranked in enumerate(diag.recommendation, start=1):
+        label = _ACTION_LABELS.get(ranked.action.value, ranked.action.value)
+        preferred = "  [preferred]" if i == 1 else ""
+        print(f"                    {i}. {label} ({ranked.rationale}){preferred}")
+
+
 def output_why(pcb_path: Path, fmt: str) -> int:
     """Classify incomplete signal nets by why they are stuck and print them.
 
@@ -352,8 +385,18 @@ def output_why(pcb_path: Path, fmt: str) -> int:
         print(f"[{diag.classification.value.upper()}] {diag.net_name}")
         print(f"  unconnected pads: {pads}")
         if diag.blocking_nets:
-            print(f"  blocking nets:    {', '.join(diag.blocking_nets)}")
+            # Defect 2 (#4261): flag which blockers are the net's OWN match-group
+            # siblings rather than foreign copper.
+            note = ""
+            if diag.same_group_blockers and diag.match_group:
+                note = (
+                    f"        (same match-group {diag.match_group}: "
+                    f"{', '.join(diag.same_group_blockers)})"
+                )
+            print(f"  blocking nets:    {', '.join(diag.blocking_nets)}{note}")
         print(f"  evidence:         {diag.evidence}")
+        if diag.recommendation:
+            _print_recommendation(diag)
         print()
 
     return 2

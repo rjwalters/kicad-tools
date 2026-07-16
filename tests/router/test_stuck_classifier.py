@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.router.stuck_classifier import (
+    Confidence,
+    RecommendedAction,
     StuckClass,
     classify_stuck_nets,
 )
@@ -228,6 +230,129 @@ def _placement_bound_board() -> str:
     return body
 
 
+# --- DENSE CLUSTER (Defect 1 negative test) ---------------------------------
+# An all-digital dense cluster: a stranded pad surrounded by >= 20 foreign
+# single-pad nets (dense-cluster PLACEMENT_BOUND) with an open escape gap.  No
+# net on this board carries any analog/codec signal, so the classifier must not
+# emit the old hardcoded "(analog/codec cluster)" parenthetical (issue #4261
+# Defect 1).
+
+
+def _dense_cluster_board() -> str:
+    body = (
+        _HEADER
+        + (
+            '  (net 0 "")\n'
+            '  (net 1 "TGT")\n'
+            # TGT island
+            '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
+            '    (property "Reference" "R1")\n'
+            '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
+            '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
+            "  )\n"
+            # stranded TGT pad in a very busy neighbourhood
+            '  (footprint "U_SOT" (layer "F.Cu") (at 80 80)\n'
+            '    (property "Reference" "U1")\n'
+            '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "TGT"))\n'
+            "  )\n"
+            # 24 foreign single-pad nets at 1.5mm packing the congestion radius
+            # (dense, >= dense_cluster_threshold=20), leaving a small open arc so
+            # the pad still escapes.
+            + _placement_bound_ring(80, 80, 1.5, count=24, gap=2)
+            + '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
+            ")\n"
+        )
+    )
+    return body
+
+
+@pytest.fixture
+def dense_cluster_pcb(tmp_path: Path) -> Path:
+    p = tmp_path / "dense.kicad_pcb"
+    p.write_text(_dense_cluster_board())
+    return p
+
+
+# --- REVERSED BUNDLE (Defect 2 + 3 self-crossing path) ----------------------
+# DQ0/DQ1/DQ2 form a DDR_DATA match group (suffix inference). The stranded DQ2
+# pad is crowded by a dense ring of its OWN DDR siblings' copper (DQ0 pads) plus
+# a strict DQ1 blocker -- a self-crossing/reversed bundle. The classifier must
+# label the crowding copper as same-group (NOT foreign) and recommend
+# de-reversal / re-order OVER a channel-widen (which never appears here).
+
+
+def _same_group_ring(cx: float, cy: float, radius: float, count: int, gap: int) -> str:
+    """`count` DQ0 pads around (cx, cy) -- same-match-group siblings of DQ2.
+
+    All pads share net 2 (DQ0) so they are DDR_DATA siblings of the stranded
+    DQ2 pad, not foreign copper. Placed at *radius* mm (outside the 1.0mm escape
+    ring, inside the 2.0mm congestion ring) with an angular gap so the pad still
+    escapes.
+    """
+    import math
+
+    out = []
+    slots = count + gap
+    for i in range(count):
+        ang = 2 * math.pi * i / slots
+        px = cx + radius * math.cos(ang)
+        py = cy + radius * math.sin(ang)
+        out.append(
+            f'  (footprint "dq0_{i}" (layer "F.Cu") (at {px:.4f} {py:.4f})\n'
+            f'    (property "Reference" "S{i}")\n'
+            f'    (pad "1" smd circle (at 0 0) (size 0.2 0.2) '
+            f'(layers "F.Cu") (net 2 "DQ0"))\n'
+            f"  )\n"
+        )
+    return "".join(out)
+
+
+def _reversed_bundle_board() -> str:
+    body = (
+        _HEADER
+        + (
+            '  (net 0 "")\n'
+            '  (net 1 "DQ2")\n'
+            '  (net 2 "DQ0")\n'
+            '  (net 3 "DQ1")\n'
+            # DQ2 island (routed) far from the stranded pad
+            '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
+            '    (property "Reference" "R1")\n'
+            '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "DQ2"))\n'
+            '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "DQ2"))\n'
+            "  )\n"
+            # stranded DQ2 pad, surrounded by DDR siblings
+            '  (footprint "U_SOT" (layer "F.Cu") (at 80 80)\n'
+            '    (property "Reference" "U1")\n'
+            '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "DQ2"))\n'
+            "  )\n"
+            # 22 same-group (DQ0) obstruction pads -> dense, all same-match-group
+            + _same_group_ring(80, 80, 1.5, count=22, gap=2)
+            # DQ1: a complete (strict) 2-pad DDR sibling whose committed copper
+            # passes ~0.2mm from the stranded DQ2 pad -> a same-group strict blocker.
+            + '  (footprint "R_0402" (layer "F.Cu") (at 78 80.2)\n'
+            '    (property "Reference" "R2")\n'
+            '    (pad "1" smd rect (at 0 0) (size 0.3 0.3) (layers "F.Cu") (net 3 "DQ1"))\n'
+            "  )\n"
+            '  (footprint "R_0402" (layer "F.Cu") (at 82 80.2)\n'
+            '    (property "Reference" "R3")\n'
+            '    (pad "1" smd rect (at 0 0) (size 0.3 0.3) (layers "F.Cu") (net 3 "DQ1"))\n'
+            "  )\n"
+            + '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
+            + '  (segment (start 78 80.2) (end 82 80.2) (width 0.25) (layer "F.Cu") (net 3))\n'
+            ")\n"
+        )
+    )
+    return body
+
+
+@pytest.fixture
+def reversed_bundle_pcb(tmp_path: Path) -> Path:
+    p = tmp_path / "reversed.kicad_pcb"
+    p.write_text(_reversed_bundle_board())
+    return p
+
+
 @pytest.fixture
 def escape_blocked_pcb(tmp_path: Path) -> Path:
     p = tmp_path / "escape.kicad_pcb"
@@ -303,6 +428,86 @@ class TestPlacementBound:
         assert 6 <= d.local_congestion < 20
         assert d.escape_lane_deg >= 45.0
         assert "a part must move" in d.evidence
+
+
+class TestDefect1NoAnalogCodecString:
+    def test_dense_cluster_evidence_has_no_analog_codec(self, dense_cluster_pcb: Path):
+        """Defect 1 (#4261): the dense-cluster PLACEMENT_BOUND branch must NOT
+        append the hardcoded "(analog/codec cluster)" parenthetical.  This board
+        is all-digital, so an analog cause is factually wrong."""
+        result = classify_stuck_nets(dense_cluster_pcb)
+        tgt = next(d for d in result.diagnoses if d.net_name == "TGT")
+        assert tgt.classification is StuckClass.PLACEMENT_BOUND
+        assert tgt.local_congestion >= 20
+        assert "analog" not in tgt.evidence.lower()
+        assert "codec" not in tgt.evidence.lower()
+
+
+class TestReversedBundleSelfCrossing:
+    """Defect 2 + 3 (#4261): a stuck net crowded by its OWN match-group siblings
+    is a self-crossing/reversed bundle -- same-group copper must NOT be called
+    'foreign', and the fix ladder must recommend de-reversal / re-order and
+    NEVER a channel-widen (which regresses a reversed bus)."""
+
+    def test_self_crossing_topology_and_recommendation(self, reversed_bundle_pcb: Path):
+        result = classify_stuck_nets(reversed_bundle_pcb)
+        d = next(x for x in result.diagnoses if x.net_name == "DQ2")
+
+        assert d.classification is StuckClass.PLACEMENT_BOUND
+        assert d.topology == "self_crossing_bundle"
+        assert d.match_group == "DDR_DATA"
+
+        # Defect 2: the surrounding copper is same-group, not foreign.
+        assert d.same_group_congestion >= 3
+        assert d.same_group_congestion > d.foreign_congestion
+        # The strict blocker is a named DDR sibling, flagged as same-group.
+        assert "DQ1" in d.same_group_blockers
+
+        # Defect 3: ranked ladder de-reverses/re-orders, WIDEN_CHANNEL omitted.
+        actions = [a.action for a in d.recommendation]
+        assert actions[0] is RecommendedAction.DE_REVERSE_BUNDLE
+        assert RecommendedAction.REORDER_PINS in actions
+        assert RecommendedAction.WIDEN_CHANNEL not in actions
+        # suffix-inferred group with no crossing proxy -> MEDIUM.
+        assert d.recommendation[0].confidence is Confidence.MEDIUM
+
+        # Defect 1: no analog/codec claim on this all-digital board.
+        assert "analog" not in d.evidence.lower()
+        assert "codec" not in d.evidence.lower()
+
+    def test_json_serializes_recommendation(self, reversed_bundle_pcb: Path):
+        result = classify_stuck_nets(reversed_bundle_pcb)
+        d = next(x for x in result.diagnoses if x.net_name == "DQ2")
+        data = d.to_dict()
+        assert data["topology"] == "self_crossing_bundle"
+        assert data["match_group"] == "DDR_DATA"
+        assert data["same_group_congestion"] >= 3
+        rec = data["recommendation"]
+        assert rec[0]["action"] == "de_reverse_bundle"
+        assert rec[0]["confidence"] == "medium"
+        assert all(a["action"] != "widen_channel" for a in rec)
+
+
+class TestGenuinelyForeignCluster:
+    """Defect 3 (#4261): a stuck net surrounded by UNRELATED foreign nets (no
+    same-suffix siblings) is a foreign cluster -- recommend MOVE_PART, never a
+    de-reversal, and same_group_congestion must be 0."""
+
+    def test_foreign_cluster_topology_and_recommendation(self, dense_cluster_pcb: Path):
+        result = classify_stuck_nets(dense_cluster_pcb)
+        d = next(x for x in result.diagnoses if x.net_name == "TGT")
+
+        assert d.classification is StuckClass.PLACEMENT_BOUND
+        assert d.topology == "foreign_cluster"
+        # No siblings -> nothing same-group.
+        assert d.same_group_congestion == 0
+        assert d.foreign_congestion >= 20
+        assert d.match_group == ""
+
+        actions = [a.action for a in d.recommendation]
+        assert actions[0] is RecommendedAction.MOVE_PART
+        assert RecommendedAction.WIDEN_CHANNEL in actions
+        assert RecommendedAction.DE_REVERSE_BUNDLE not in actions
 
 
 class TestBudgetStarved:

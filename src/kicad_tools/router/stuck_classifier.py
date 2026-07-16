@@ -72,6 +72,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "StuckClass",
+    "RecommendedAction",
+    "Confidence",
+    "RankedAction",
     "StuckNetDiagnosis",
     "StuckClassifierResult",
     "classify_stuck_nets",
@@ -124,6 +127,20 @@ DEFAULT_CONGESTION_THRESHOLD = 6
 # 29-118 obstructions while the genuinely copper-boxed (M2-tractable) nets sit
 # at 2-15, so 20 lands in the natural gap between the two populations.
 DEFAULT_DENSE_CLUSTER_THRESHOLD = 20
+
+# --- match-group topology (issue #4261 Defect 2 & 3) ------------------------
+#
+# A stuck net is flagged SELF_CROSSING_BUNDLE when the copper crowding its
+# stranded pad is predominantly its OWN length-match-group siblings (a reversed
+# / self-crossing bus), rather than genuinely foreign copper.  The share is the
+# fraction of same-group obstruction copper (or the fraction of same-group
+# strict blockers) around the pad; at or above this threshold the topology is
+# self-crossing.  0.5 == "the majority of what boxes the pad in is its own bus".
+SELF_CROSS_THRESHOLD = 0.5
+
+# Topology labels attached to a diagnosis (empty string == not applicable).
+TOPOLOGY_SELF_CROSSING = "self_crossing_bundle"
+TOPOLOGY_FOREIGN_CLUSTER = "foreign_cluster"
 
 
 class StuckClass(Enum):
@@ -184,6 +201,56 @@ class StuckClass(Enum):
         }[self.value]
 
 
+class RecommendedAction(Enum):
+    """Closed taxonomy of fix moves the recommendation engine may rank.
+
+    READ-ONLY advice to a human/agent -- the classifier never performs any of
+    these; it only ranks them.  ``DE_REVERSE_BUNDLE`` / ``REORDER_PINS`` are the
+    topology remedies for a self-crossing bus; ``MOVE_PART`` / ``WIDEN_CHANNEL``
+    address genuinely foreign congestion; ``ACCEPT_PLATEAU`` acknowledges a
+    topological limit no placement lever removes.
+    """
+
+    DE_REVERSE_BUNDLE = "de_reverse_bundle"
+    REORDER_PINS = "reorder_pins"
+    WIDEN_CHANNEL = "widen_channel"
+    MOVE_PART = "move_part"
+    ACCEPT_PLATEAU = "accept_plateau"
+
+
+class Confidence(Enum):
+    """How much trust to place in a recommendation.
+
+    * ``HIGH``   -- match group from an explicit source, or a confirmed
+      pad-order crossing proxy (neither available from a bare ``.kicad_pcb``
+      today, so reserved for a future config-threaded caller).
+    * ``MEDIUM`` -- match group inferred from a bus-suffix pattern and the share
+      test fired; the geometry is a heuristic (board-07 lands here).
+    * ``LOW``    -- group inferred from a borderline / high-false-positive suffix
+      pattern (e.g. the generic ``A\\d+`` address bus).
+    """
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+@dataclass
+class RankedAction:
+    """One entry in a ranked fix ladder."""
+
+    action: RecommendedAction
+    rationale: str
+    confidence: Confidence
+
+    def to_dict(self) -> dict:
+        return {
+            "action": self.action.value,
+            "rationale": self.rationale,
+            "confidence": self.confidence.value,
+        }
+
+
 @dataclass
 class StuckNetDiagnosis:
     """Per-net classification result with supporting evidence."""
@@ -198,6 +265,24 @@ class StuckNetDiagnosis:
     escape_lane_deg: float = 0.0
     local_congestion: int = 0
     nearest_blocker_mm: float | None = None
+    # Defect 2 (#4261): the local-congestion count split by match-group identity.
+    # ``same_group_congestion`` counts obstruction copper belonging to the target
+    # net's own length-match group (e.g. its DDR data-byte siblings); the rest is
+    # genuinely ``foreign_congestion``.  ``same_group_congestion +
+    # foreign_congestion == local_congestion``.
+    same_group_congestion: int = 0
+    foreign_congestion: int = 0
+    # Name of the target net's inferred match group ("" when it belongs to none).
+    match_group: str = ""
+    # Subset of ``blocking_nets`` that are members of ``match_group`` -- these are
+    # the net's own siblings, NOT foreign copper (Defect 2 relabel).
+    same_group_blockers: list[str] = field(default_factory=list)
+    # Defect 3 (#4261): detected obstruction topology and the ranked fix ladder.
+    # ``topology`` is ``TOPOLOGY_SELF_CROSSING`` | ``TOPOLOGY_FOREIGN_CLUSTER`` |
+    # "" (not applicable).  ``recommendation`` is empty unless a recommendation
+    # is warranted (PLACEMENT_BOUND / CONGESTION_SATURATED).
+    topology: str = ""
+    recommendation: list[RankedAction] = field(default_factory=list)
 
     @property
     def classification_value(self) -> str:
@@ -217,6 +302,11 @@ class StuckNetDiagnosis:
             "nearest_blocker_mm": (
                 round(self.nearest_blocker_mm, 4) if self.nearest_blocker_mm is not None else None
             ),
+            "same_group_congestion": self.same_group_congestion,
+            "foreign_congestion": self.foreign_congestion,
+            "match_group": self.match_group,
+            "topology": self.topology,
+            "recommendation": [a.to_dict() for a in self.recommendation],
         }
 
     def one_line(self) -> str:
@@ -375,24 +465,28 @@ def _foreign_obstructions(
     target_net: int,
     point: tuple[float, float],
     radius_mm: float,
-) -> list[tuple[float, float, float]]:
+) -> list[tuple[float, float, float, int]]:
     """Foreign obstructions within *radius_mm* of *point*.
 
-    Returns a list of ``(x, y, dist)`` for foreign-net pad centres and foreign
-    copper segment closest-points near *point*.  Used both for escape-sector
-    analysis and for the local-congestion count.  "Foreign" == any net other
-    than *target_net* (net 0 / unassigned copper counts as an obstruction too,
-    since it still occupies the lane).
+    Returns a list of ``(x, y, dist, obstruction_net_number)`` for foreign-net
+    pad centres and foreign copper segment closest-points near *point*.  Used
+    both for escape-sector analysis and for the local-congestion count.
+    "Foreign" == any net other than *target_net* (net 0 / unassigned copper
+    counts as an obstruction too, since it still occupies the lane).
+
+    The trailing ``obstruction_net_number`` is carried so callers can split the
+    congestion count into same-match-group vs genuinely-foreign copper (issue
+    #4261 Defect 2).  ``_widest_open_arc`` ignores the field.
     """
     px, py = point
-    obstructions: list[tuple[float, float, float]] = []
+    obstructions: list[tuple[float, float, float, int]] = []
 
     for net_number, (bx, by), _size in _iter_board_pads(pcb):
         if net_number == target_net:
             continue
         d = math.hypot(bx - px, by - py)
         if d <= radius_mm:
-            obstructions.append((bx, by, d))
+            obstructions.append((bx, by, d, net_number))
 
     for seg in pcb.segments:
         if seg.net_number == target_net:
@@ -405,7 +499,7 @@ def _foreign_obstructions(
             # is the true point-to-segment distance.
             mx = (ax + ex) / 2.0
             my = (ay + ey) / 2.0
-            obstructions.append((mx, my, d))
+            obstructions.append((mx, my, d, seg.net_number))
 
     for via in pcb.vias:
         if via.net_number == target_net:
@@ -413,13 +507,13 @@ def _foreign_obstructions(
         vx, vy = via.position
         d = math.hypot(vx - px, vy - py)
         if d <= radius_mm:
-            obstructions.append((vx, vy, d))
+            obstructions.append((vx, vy, d, via.net_number))
 
     return obstructions
 
 
 def _widest_open_arc(
-    obstructions: list[tuple[float, float, float]],
+    obstructions: list[tuple[float, float, float, int]],
     point: tuple[float, float],
     sectors: int,
     escape_clearance_mm: float,
@@ -436,7 +530,7 @@ def _widest_open_arc(
     """
     px, py = point
     blocked = [False] * sectors
-    for ox, oy, d in obstructions:
+    for ox, oy, d, _net in obstructions:
         if d > escape_clearance_mm:
             continue
         ang = math.atan2(oy - py, ox - px)
@@ -458,6 +552,39 @@ def _widest_open_arc(
             run += 1
             best = max(best, run)
     return min(best, sectors)
+
+
+def _resolve_match_groups(
+    pcb: PCB,
+) -> tuple[dict[int, str], dict[str, set[int]]]:
+    """Infer length-match groups from a bare PCB (issue #4261 Defect 2 & 3).
+
+    Returns ``(net_number -> group_name, group_name -> {member net_numbers})``.
+
+    Uses the in-tree suffix-inference detector
+    (:func:`kicad_tools.router.match_group_detection.detect_match_groups` with
+    ``enable_suffix_inference=True``): board-07's ``DQ\\d+`` nets group as
+    ``DDR_DATA``, TMDS lanes as ``HDMI_TMDS_DATA``, etc.  Explicit
+    ``NetClassRouting`` groups are NOT available here (a raw ``.kicad_pcb`` has
+    no router config), so this is a MEDIUM-confidence signal by construction --
+    see the confidence grading in :func:`_grade_confidence`.
+    """
+    from kicad_tools.router.match_group_detection import detect_match_groups
+
+    net_names = {nid: net.name for nid, net in pcb.nets.items() if net.name}
+    groups = detect_match_groups(net_names, enable_suffix_inference=True)
+
+    net_to_group: dict[int, str] = {}
+    group_members: dict[str, set[int]] = {}
+    for group in groups:
+        members = set(group.net_ids)
+        for p_id, n_id in group.pair_ids:
+            members.add(p_id)
+            members.add(n_id)
+        group_members[group.name] = members
+        for member in members:
+            net_to_group[member] = group.name
+    return net_to_group, group_members
 
 
 def classify_stuck_nets_from_pcb(
@@ -495,6 +622,11 @@ def classify_stuck_nets_from_pcb(
 
     # Map net name -> net number for richer output.
     number_by_name = {net.name: nid for nid, net in pcb.nets.items() if net.name}
+
+    # Match-group membership (issue #4261 Defect 2 & 3): resolve once per board.
+    # Feeds BOTH the same-group-vs-foreign congestion split and the self-crossing
+    # topology detection that drives the fix recommendation.
+    net_to_group, group_members = _resolve_match_groups(pcb)
 
     # Pour-carried incomplete nets: connectivity is expected to be closed by
     # copper fill (zone/pour), so a signal-geometry analysis would misclassify
@@ -548,11 +680,23 @@ def classify_stuck_nets_from_pcb(
         )
 
         # 3) Local congestion = densest foreign-obstruction count over the
-        #    stranded pads (wider radius than the escape ring).
+        #    stranded pads (wider radius than the escape ring).  Defect 2
+        #    (#4261): at the densest pad, split the count by match-group
+        #    identity so same-bundle siblings are not mislabelled "foreign".
+        target_group = net_to_group.get(net_number, "")
+        group_ids = group_members.get(target_group, set())
         local_congestion = 0
+        same_group_congestion = 0
+        foreign_congestion = 0
         for pt in pad_points:
             obstr = _foreign_obstructions(pcb, net_number, pt, congestion_radius_mm)
-            local_congestion = max(local_congestion, len(obstr))
+            if len(obstr) >= local_congestion:
+                local_congestion = len(obstr)
+                same_group_congestion = sum(1 for o in obstr if o[3] in group_ids)
+                foreign_congestion = local_congestion - same_group_congestion
+
+        # Which ranked strict blockers are the net's OWN match-group siblings.
+        same_group_blockers = [b for b in blockers if number_by_name.get(b) in group_ids]
 
         # nearest blocker distance for evidence
         nearest_blocker_mm = _nearest_blocker_distance(
@@ -569,7 +713,36 @@ def classify_stuck_nets_from_pcb(
             nearest_blocker_mm=nearest_blocker_mm,
             congestion_threshold=congestion_threshold,
             dense_cluster_threshold=dense_cluster_threshold,
+            same_group_congestion=same_group_congestion,
+            foreign_congestion=foreign_congestion,
         )
+        # Attach match-group identity (Defect 2): same-group vs foreign split and
+        # which blockers are the net's own bundle siblings.
+        diag.match_group = target_group
+        diag.same_group_blockers = same_group_blockers
+
+        # Defect 3: detect self-crossing-bundle vs foreign-cluster topology and
+        # emit the ranked fix ladder (only for the two placement/congestion
+        # classes; other classes keep topology="" and recommendation=[]).
+        if diag.classification in (
+            StuckClass.PLACEMENT_BOUND,
+            StuckClass.CONGESTION_SATURATED,
+        ):
+            diag.topology = _detect_topology(
+                match_group=target_group,
+                group_size=len(group_ids),
+                same_group_congestion=same_group_congestion,
+                foreign_congestion=foreign_congestion,
+                blockers=blockers,
+                same_group_blockers=same_group_blockers,
+            )
+            confidence = _grade_confidence(target_group)
+            diag.recommendation = _build_recommendation(
+                classification=diag.classification,
+                topology=diag.topology,
+                match_group=target_group,
+                confidence=confidence,
+            )
         diagnoses.append(diag)
 
     # Second pass: pour-carried incomplete nets.  Their connectivity is closed
@@ -632,6 +805,136 @@ def _nearest_blocker_distance(
     return None if best is math.inf else best
 
 
+def _grade_confidence(match_group: str) -> Confidence:
+    """Grade a suffix-inferred self-crossing detection.
+
+    HIGH is reserved for an explicit match-group source or a confirmed pad-order
+    crossing proxy -- neither is reachable from a bare ``.kicad_pcb`` in v1, so
+    this returns MEDIUM for a normal bus-suffix group and LOW for the generic
+    ``ADDR_BUS`` pattern (``A\\d+``), documented as the highest-false-positive
+    inference in ``match_group_detection``.
+    """
+    if match_group == "ADDR_BUS":
+        return Confidence.LOW
+    return Confidence.MEDIUM
+
+
+def _detect_topology(
+    *,
+    match_group: str,
+    group_size: int,
+    same_group_congestion: int,
+    foreign_congestion: int,
+    blockers: list[str],
+    same_group_blockers: list[str],
+) -> str:
+    """Return the obstruction topology of a stuck net (issue #4261 Defect 3).
+
+    ``TOPOLOGY_SELF_CROSSING`` when the copper crowding the pad is predominantly
+    the net's OWN match-group siblings -- either the same-group share of nearby
+    obstruction copper OR the same-group share of ranked strict blockers reaches
+    :data:`SELF_CROSS_THRESHOLD`, and the group has at least three members
+    (``detect_match_groups`` already refuses smaller groups).  Otherwise
+    ``TOPOLOGY_FOREIGN_CLUSTER``.
+    """
+    if not match_group or group_size < 3:
+        return TOPOLOGY_FOREIGN_CLUSTER
+    total_congestion = same_group_congestion + foreign_congestion
+    same_group_share = same_group_congestion / total_congestion if total_congestion else 0.0
+    blocking_share = len(same_group_blockers) / len(blockers) if blockers else 0.0
+    if same_group_share >= SELF_CROSS_THRESHOLD or blocking_share >= SELF_CROSS_THRESHOLD:
+        return TOPOLOGY_SELF_CROSSING
+    return TOPOLOGY_FOREIGN_CLUSTER
+
+
+def _build_recommendation(
+    *,
+    classification: StuckClass,
+    topology: str,
+    match_group: str,
+    confidence: Confidence,
+) -> list[RankedAction]:
+    """Rank the fix ladder for one stuck net (issue #4261 Defect 3).
+
+    Policy table keyed on ``(stuck_class x topology)`` -- see the architect
+    design on #4261.  A recommendation is emitted only for PLACEMENT_BOUND and
+    CONGESTION_SATURATED; every other class returns ``[]``.
+
+    Board-07 hard evidence: for PLACEMENT_BOUND + SELF_CROSSING_BUNDLE,
+    ``WIDEN_CHANNEL`` is DELIBERATELY OMITTED -- widening the U1/U2 channel
+    regressed that board 28->27/31, so the engine must never suggest the move
+    known to backfire on a reversed bundle.
+    """
+    grp = match_group or "the bundle"
+
+    if classification is StuckClass.PLACEMENT_BOUND:
+        if topology == TOPOLOGY_SELF_CROSSING:
+            # NOTE: WIDEN_CHANNEL intentionally absent (regresses a reversed bus).
+            return [
+                RankedAction(
+                    RecommendedAction.DE_REVERSE_BUNDLE,
+                    f"the {grp} bus is reversed at the facing part -- co-orient "
+                    f"(flip/re-order) its pad column so the bundle stops "
+                    f"self-crossing",
+                    confidence,
+                ),
+                RankedAction(
+                    RecommendedAction.REORDER_PINS,
+                    "re-order pins to un-cross the byte",
+                    confidence,
+                ),
+                RankedAction(
+                    RecommendedAction.ACCEPT_PLATEAU,
+                    "topological limit; do NOT widen the channel -- widening "
+                    "regressed board-07 28->27/31",
+                    confidence,
+                ),
+            ]
+        return [
+            RankedAction(
+                RecommendedAction.MOVE_PART,
+                "genuinely foreign copper walls the pad -- relocate the crowded part",
+                confidence,
+            ),
+            RankedAction(
+                RecommendedAction.WIDEN_CHANNEL,
+                "open the routing corridor around the pad",
+                confidence,
+            ),
+            RankedAction(
+                RecommendedAction.ACCEPT_PLATEAU,
+                "if no placement lever helps, this is a plateau",
+                confidence,
+            ),
+        ]
+
+    if classification is StuckClass.CONGESTION_SATURATED:
+        if topology == TOPOLOGY_SELF_CROSSING:
+            return [
+                RankedAction(
+                    RecommendedAction.REORDER_PINS,
+                    f"{grp} siblings box each other in a 1:1 trade -- re-order "
+                    f"pins to remove the trade",
+                    confidence,
+                ),
+                RankedAction(
+                    RecommendedAction.DE_REVERSE_BUNDLE,
+                    f"co-orient the {grp} bundle so siblings stop crossing",
+                    confidence,
+                ),
+            ]
+        return [
+            RankedAction(
+                RecommendedAction.WIDEN_CHANNEL,
+                "foreign strict blocker -- widen the corridor (region "
+                "rip-up-and-reroute is the primary existing remedy)",
+                confidence,
+            ),
+        ]
+
+    return []
+
+
 def _decide(
     *,
     net_name: str,
@@ -643,6 +946,8 @@ def _decide(
     nearest_blocker_mm: float | None,
     congestion_threshold: int,
     dense_cluster_threshold: int,
+    same_group_congestion: int = 0,
+    foreign_congestion: int = 0,
 ) -> StuckNetDiagnosis:
     """Apply the decision tree to one net's diagnostics.
 
@@ -699,6 +1004,8 @@ def _decide(
             escape_lane_deg=open_deg,
             local_congestion=local_congestion,
             nearest_blocker_mm=nearest_blocker_mm,
+            same_group_congestion=same_group_congestion,
+            foreign_congestion=foreign_congestion,
         )
 
     if local_congestion >= dense_cluster_threshold:
@@ -709,9 +1016,9 @@ def _decide(
         )
         evidence = (
             f"pad reachable ({open_deg:.0f} deg lane) but in a dense cluster "
-            f"({local_congestion} foreign obstructions, {nb}); ripping the few "
-            f"strict blockers cannot clear the surrounding copper -- a part "
-            f"must move (analog/codec cluster)"
+            f"({same_group_congestion} same-group + {foreign_congestion} foreign "
+            f"obstructions, {nb}); ripping the few strict blockers cannot clear "
+            f"the surrounding copper"
         )
         return StuckNetDiagnosis(
             net_name=net_name,
@@ -723,6 +1030,8 @@ def _decide(
             escape_lane_deg=open_deg,
             local_congestion=local_congestion,
             nearest_blocker_mm=nearest_blocker_mm,
+            same_group_congestion=same_group_congestion,
+            foreign_congestion=foreign_congestion,
         )
 
     if blockers:
@@ -742,6 +1051,8 @@ def _decide(
             escape_lane_deg=open_deg,
             local_congestion=local_congestion,
             nearest_blocker_mm=nearest_blocker_mm,
+            same_group_congestion=same_group_congestion,
+            foreign_congestion=foreign_congestion,
         )
 
     nb = (
@@ -774,12 +1085,15 @@ def _decide(
             escape_lane_deg=open_deg,
             local_congestion=local_congestion,
             nearest_blocker_mm=nearest_blocker_mm,
+            same_group_congestion=same_group_congestion,
+            foreign_congestion=foreign_congestion,
         )
 
     evidence = (
         f"pad reachable ({open_deg:.0f} deg lane), no adjacent rippable strict "
-        f"copper ({nb}); moderate local congestion ({local_congestion} foreign "
-        f"obstructions) -- ripping cannot help, a part must move"
+        f"copper ({nb}); moderate local congestion ({same_group_congestion} "
+        f"same-group + {foreign_congestion} foreign obstructions) -- ripping "
+        f"cannot help, a part must move"
     )
     return StuckNetDiagnosis(
         net_name=net_name,
@@ -791,6 +1105,8 @@ def _decide(
         escape_lane_deg=open_deg,
         local_congestion=local_congestion,
         nearest_blocker_mm=nearest_blocker_mm,
+        same_group_congestion=same_group_congestion,
+        foreign_congestion=foreign_congestion,
     )
 
 
