@@ -471,6 +471,8 @@ def route_net_auto(
     enable_via_resolution: bool = True,
     region: str | tuple[float, float, float, float] | None = None,
     allow_partial: bool = False,
+    via_drill: float | None = None,
+    via_diameter: float | None = None,
 ) -> dict:
     """Route a specific net using the RoutingOrchestrator.
 
@@ -522,6 +524,13 @@ def route_net_auto(
                 outside fails with a clear message (bare-stub reconnection is
                 deferred to Phase 2b).  Any produced segment/via that escapes
                 the box fails the route rather than writing out-of-region copper.
+        via_drill: Optional via drill override in mm (Issue #4247).  When given,
+                overrides the via drill derived from the board's net-class via
+                constraints.  When None, the board-derived value is used.
+        via_diameter: Optional via pad diameter override in mm (Issue #4247).
+                When given, overrides the via diameter derived from the board's
+                net-class via constraints.  When None, the board-derived value
+                is used.
 
     Returns:
         Dictionary with routing result including:
@@ -657,6 +666,14 @@ def route_net_auto(
     pcb_text = path.read_text()
     pcb_rules = parse_pcb_design_rules(pcb_text)
     design_rules = pcb_rules.to_design_rules()
+
+    # Apply explicit via-geometry overrides (Issue #4247).  Only the fields the
+    # caller explicitly passes are overridden; the rest still derive from the
+    # board's net-class via constraints.
+    if via_drill is not None:
+        design_rules.via_drill = via_drill
+    if via_diameter is not None:
+        design_rules.via_diameter = via_diameter
 
     # Build a lightweight PCB-like object for the orchestrator
     # The orchestrator needs pcb.width, pcb.height, and optionally pcb.grid

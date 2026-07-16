@@ -770,6 +770,185 @@ class TestRouteAutoCommandErrorHandling:
 
 
 # ---------------------------------------------------------------------------
+# Tests: route_net_auto via-geometry override + board-derived aggregation (#4247)
+# ---------------------------------------------------------------------------
+
+
+def _two_pad_pcb_text(extra_net_classes: str = "") -> str:
+    """A minimal 2-pad net PCB that reaches the RoutingOrchestrator.
+
+    ``extra_net_classes`` is injected verbatim so a test can add net-class
+    blocks that drive ``parse_pcb_design_rules`` via-geometry aggregation.
+    """
+    return f"""\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+{extra_net_classes}
+  (net 0 "")
+  (net 1 "NET1")
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "NET1"))
+  )
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 30 10)
+    (attr smd)
+    (property "Reference" "R2")
+    (property "Value" "10k")
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "NET1"))
+  )
+)
+"""
+
+
+class _FakeVia:
+    """Stand-in orchestrator via carrying the design-rule via geometry."""
+
+    def __init__(self, x: float, y: float, diameter: float, drill: float) -> None:
+        self.x = x
+        self.y = y
+        self.diameter = diameter
+        self.drill = drill
+        self.layers = None  # persist path falls back to ("F.Cu", "B.Cu")
+
+
+class _FakeResult:
+    """Minimal RoutingResult stand-in that emits a single via from the rules."""
+
+    def __init__(self, diameter: float, drill: float) -> None:
+        self.success = True
+        self.partial = False
+        self.strategy_used = "global"
+        self.segments: list = []
+        self.vias = [_FakeVia(20.0, 10.0, diameter, drill)]
+
+    def to_dict(self) -> dict:
+        return {
+            "success": True,
+            "strategy_used": self.strategy_used,
+            "metrics": {"via_count": 1},
+            "repair_actions": [],
+            "warnings": [],
+            "performance": {},
+        }
+
+
+def _install_capturing_orchestrator(monkeypatch):
+    """Patch RoutingOrchestrator to record the rules it receives.
+
+    The fake emits one via whose geometry mirrors the (possibly overridden)
+    ``rules`` so we can verify both the plumbing and that the geometry lands
+    on the persisted via.
+    """
+    captured: dict = {}
+
+    class _FakeOrchestrator:
+        max_strategy_retries = 3
+
+        def __init__(self, pcb, rules, **kwargs):
+            captured["rules"] = rules
+            self._select_strategy = None
+
+        def route_net(self, net, pads):
+            return _FakeResult(captured["rules"].via_diameter, captured["rules"].via_drill)
+
+    import kicad_tools.router.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod, "RoutingOrchestrator", _FakeOrchestrator)
+    return captured
+
+
+class TestRouteNetAutoViaOverride:
+    """route_net_auto via-drill/diameter override + max()-aggregation (#4247)."""
+
+    def test_explicit_override_reaches_orchestrator_and_via(self, tmp_path, monkeypatch):
+        """Explicit via_drill/via_diameter override board-derived geometry."""
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        captured = _install_capturing_orchestrator(monkeypatch)
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(_two_pad_pcb_text())
+        out_file = tmp_path / "out.kicad_pcb"
+
+        result = route_net_auto(
+            pcb_path=str(pcb_file),
+            net_name="NET1",
+            output_path=str(out_file),
+            via_drill=0.4,
+            via_diameter=0.8,
+        )
+
+        # Plumbing: the override reached the DesignRules handed to the orchestrator.
+        assert captured["rules"].via_drill == 0.4
+        assert captured["rules"].via_diameter == 0.8
+
+        # Landed on a persisted via.
+        assert result["success"] is True
+        assert result.get("vias_written", 0) == 1
+        saved = out_file.read_text()
+        assert "(size 0.8)" in saved
+        assert "(drill 0.4)" in saved
+
+    def test_partial_override_only_touches_given_field(self, tmp_path, monkeypatch):
+        """Passing only via_drill leaves the diameter board-derived."""
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        captured = _install_capturing_orchestrator(monkeypatch)
+
+        # Board Default net class => via_dia 0.6 / via_drill 0.3.
+        nc = '  (net_class "Default" (via_dia 0.6) (via_drill 0.3))\n'
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(_two_pad_pcb_text(extra_net_classes=nc))
+
+        route_net_auto(
+            pcb_path=str(pcb_file),
+            net_name="NET1",
+            via_drill=0.35,  # only drill overridden
+        )
+
+        assert captured["rules"].via_drill == 0.35
+        # Diameter still derives from the board's Default net class.
+        assert captured["rules"].via_diameter == 0.6
+
+    def test_board_derived_via_uses_max_aggregation(self, tmp_path, monkeypatch):
+        """With no override, a small-via class does not shrink the derived via (#4247)."""
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        captured = _install_capturing_orchestrator(monkeypatch)
+
+        nc = (
+            '  (net_class "Default" (via_dia 0.6) (via_drill 0.3))\n'
+            '  (net_class "Micro" (via_dia 0.45) (via_drill 0.2))\n'
+        )
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(_two_pad_pcb_text(extra_net_classes=nc))
+
+        route_net_auto(pcb_path=str(pcb_file), net_name="NET1")
+
+        # max() aggregation: the larger (spec-compliant) geometry wins, not the
+        # 0.45/0.20 that reproduced the original board-wide DRC violation.
+        assert captured["rules"].via_diameter == 0.6
+        assert captured["rules"].via_drill == 0.3
+
+
+# ---------------------------------------------------------------------------
 # Tests: _build_pads_for_net forward-rotation sign convention (issue #2788)
 # ---------------------------------------------------------------------------
 

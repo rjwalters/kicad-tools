@@ -3784,6 +3784,28 @@ def _add_route_auto_parser(subparsers) -> None:
         action="store_true",
         help="Disable via conflict resolution (enabled by default)",
     )
+    route_auto_parser.add_argument(
+        "--via-drill",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Via drill size in mm. Overrides the board-derived via drill "
+            "(Issue #4247). When omitted, route-auto derives the drill from "
+            "the board's net-class via constraints."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--via-diameter",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Via pad diameter in mm. Overrides the board-derived via diameter "
+            "(Issue #4247). When omitted, route-auto derives the diameter from "
+            "the board's net-class via constraints."
+        ),
+    )
     route_auto_parser.add_argument("-o", "--output", help="Output PCB file path")
     route_auto_parser.add_argument(
         "--dry-run",
