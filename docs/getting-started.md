@@ -176,7 +176,7 @@ Now that you have kicad-tools installed, explore these guides:
 - **[Placement Optimization](guides/placement-optimization.md)** - Optimize component placement
 - **[Routing](guides/routing.md)** - Autoroute PCBs with the A* router
 
-See the [Documentation Index](index.md) for the complete list.
+See the [Documentation Index](README.md) for the complete list.
 
 ## Getting Help
 

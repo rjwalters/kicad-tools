@@ -23,40 +23,67 @@ kct [--help] [--version] <command> [options]
 |----------|---------|-------------|
 | **Analysis** | `symbols` | List and query schematic symbols |
 | | `nets` | Trace and analyze nets |
+| | `netlist` | Netlist analysis and comparison tools |
 | | `sch` | Schematic analysis tools |
 | | `pcb` | PCB query tools |
-| **Validation** | `erc` | Parse ERC reports |
+| **Validation** | `erc` | ERC validation and analysis |
 | | `drc` | Parse DRC reports with manufacturer rules |
 | | `check` | Pure Python DRC (no kicad-cli) |
-| | `validate` | Schematic-to-PCB sync validation |
+| | `validate` | Validation tools (schematic-to-PCB sync) |
+| | `validate-footprints` | Validate footprints for pad spacing issues |
+| | `net-status` | Report net connectivity status for a PCB |
+| | `constraints` | Constraint conflict detection and management |
+| | `detect-mistakes` | Detect common PCB design mistakes |
+| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill) |
+| | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
+| | `fix-vias` | Fix vias to meet manufacturer specifications |
+| | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs |
+| | `fix-footprints` | Fix footprint pad spacing issues |
+| | `repair-clearance` | Repair clearance violations by nudging traces |
+| | `pipeline` | End-to-end repair pipeline for existing PCBs |
+| | `sync` | Reconcile schematic and PCB references |
 | **Manufacturing** | `bom` | Generate bill of materials |
 | | `mfr` | Manufacturer tools and rules |
-| | `fleet status` | Fleet-wide routing + manufacturing readiness survey |
+| | `audit` | Manufacturing readiness audit (ERC, DRC, connectivity) |
+| | `export` | Generate a complete manufacturing package (BOM, CPL, Gerbers) |
+| | `panel` | Create manufacturing panels from board PCBs |
+| | `estimate` | Manufacturing cost estimation |
+| | `impedance` | Transmission line impedance calculations |
+| | `ipc` | Interact with a running KiCad instance via IPC API (KiCad 9.0+) |
+| | `fleet` | Fleet-wide PCB status and operations |
 | | `stitch` | Add via stitching to power planes |
-| | `build` | One-shot pipeline (schematic → PCB → manufacturing) |
-| **Libraries** | `lib` | Symbol library tools |
-| | `footprint` | Footprint generation tools |
+| | `build` | Build from spec to manufacturable design |
+| | `create-pcb` | Create a PCB from a KiCad schematic |
+| | `init` | Initialize a project with manufacturer design rules |
+| | `spec` | Project specification (`.kct`) management |
+| | `clean` | Clean up old/orphaned files from KiCad projects |
+| **Libraries** | `lib` | Symbol and footprint library tools |
+| | `footprint` | Footprint generation and tools |
 | | `parts` | LCSC parts lookup and search |
 | | `datasheet` | Datasheet search and PDF parsing |
 | **PCB Operations** | `route` | Autoroute a PCB |
+| | `route-auto` | Route a net with smart strategy selection |
 | | `zones` | Add copper pour zones |
 | | `placement` | Detect and fix placement conflicts |
 | | `optimize-placement` | CMA-ES placement optimizer (anchor-aware) |
 | | `optimize-traces` | Optimize PCB traces |
+| | `optim` | Placement / routing figure-of-merit tools |
 | **AI Integration** | `reason` | LLM-driven PCB layout reasoning |
 | | `mcp` | MCP server for AI agent integration |
-| **Analysis (v0.7)** | `analyze congestion` | Routing congestion hotspots |
-| | `analyze trace-lengths` | Timing-critical trace analysis |
-| | `analyze thermal` | Thermal hotspot detection |
-| | `analyze signal-integrity` | Crosstalk and impedance analysis |
-| | `erc explain` | ERC root cause analysis |
-| | `constraints check` | Constraint conflict detection |
-| | `net-status` | Net connectivity validation |
-| **Cost (v0.7)** | `estimate cost` | Manufacturing cost estimation |
-| | `parts availability` | LCSC stock checking |
-| | `suggest alternatives` | Alternative part suggestions |
+| | `decisions` | Query design decisions (placement/routing rationale) |
+| | `explain` | Explain design rules and DRC violations |
+| | `suggest` | Part suggestions and recommendations |
+| **Advanced Analysis** | `analyze` | PCB analysis (congestion, thermal, signal integrity) |
+| | `board-metrics` | Emit a normalized `board.json` per board |
+| | `benchmark` | Run routing benchmarks and regression tests |
+| | `calibrate` | Calibrate routing performance settings |
+| **Reporting** | `render` | Render per-board 2D SVGs + 3D PNGs |
+| | `screenshot` | Capture a PNG of a KiCad board or schematic |
+| | `report` | Generate a Markdown design report |
 | **Utilities** | `config` | View/manage configuration |
 | | `interactive` | Launch interactive REPL mode |
+| | `run` | Run a Python script with the kicad-tools interpreter |
+| | `build-native` | Build the C++ router backend (10-100x faster routing) |
 
 ---
 
@@ -868,7 +895,7 @@ See [MCP Documentation](../mcp/README.md) for configuration details.
 
 ---
 
-## Analysis Commands (v0.7)
+## Advanced Analysis Commands
 
 ### `analyze congestion`
 
@@ -986,7 +1013,7 @@ kct net-status board.kicad_pcb --by-class
 
 ---
 
-## Cost Commands (v0.7)
+## Cost Commands
 
 ### `estimate cost`
 
