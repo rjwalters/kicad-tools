@@ -128,7 +128,13 @@ Complete working examples are organized into two directories:
 | `02-bom-generation/` | Generate bills of materials |
 | `03-drc-checking/` | Design rule checking |
 | `04-autorouter/` | Routing strategy comparisons |
+| `05-schematic-to-pcb-workflow/` | End-to-end schematic-to-manufacturing workflow |
 | `06-intelligent-placement/` | Smart component placement |
+| `07-design-feedback/` | Design feedback and rich error reporting |
+| `08-label-based-schematic/` | Build schematics from net labels |
+| `09-manufacturing-export/` | Generate manufacturing packages via the Python API |
+| `10-complete-kct-workflow/` | Complete `.kct` project to manufacturing files |
+| `patterns/` | Reusable circuit-block pattern definitions |
 | `agent-integration/` | Integration with AI agents |
 | `llm-routing/` | LLM-driven routing decisions |
 
@@ -136,10 +142,14 @@ Complete working examples are organized into two directories:
 
 | Board | Complexity | Description |
 |-------|------------|-------------|
+| `00-simple-led/` | Simple | Smallest end-to-end example |
 | `01-voltage-divider/` | Simple | Minimal workflow validation |
 | `02-charlieplex-led/` | Medium | Dense topology, Monte Carlo routing |
 | `03-usb-joystick/` | Complex | Mixed signals, USB differential pairs |
 | `04-stm32-devboard/` | Complex | Programmatic schematic generation |
+| `05-bldc-motor-controller/` | Complex | Three-phase motor drive, thermal + high-current routing |
+| `06-diffpair-test/` | Medium | Differential-pair routing regression testbench |
+| `07-matchgroup-test/` | Medium | N-trace match-group routing regression testbench |
 
 ---
 
