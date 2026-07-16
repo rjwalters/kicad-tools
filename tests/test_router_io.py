@@ -746,6 +746,54 @@ class TestParsePcbDesignRules:
         assert rules.min_clearance == 0.1
         assert rules.min_track_width == 0.15
 
+    def test_uses_maximum_via_geometry_across_net_classes(self):
+        """Via geometry aggregates with max(), not min() (Issue #4247).
+
+        A smaller-via net class must NOT poison the derived via size for the
+        whole board.  Regression test for route-auto emitting sub-spec vias.
+        """
+        pcb_text = """(kicad_pcb
+  (version 20240108)
+  (net_class "Default"
+    (clearance 0.2)
+    (trace_width 0.25)
+    (via_dia 0.6)
+    (via_drill 0.3)
+  )
+  (net_class "Micro"
+    (clearance 0.1)
+    (trace_width 0.1)
+    (via_dia 0.45)
+    (via_drill 0.2)
+    (add_net "SOME_UNRELATED_NET")
+  )
+)"""
+        rules = parse_pcb_design_rules(pcb_text)
+
+        # Via geometry must take the LARGER (safe) value so no net is
+        # under-sized below any class's stated minimum.
+        assert rules.min_via_diameter == 0.6
+        assert rules.min_via_drill == 0.3
+
+        # Clearance/track width still aggregate with min() (unchanged policy).
+        assert rules.min_clearance == 0.1
+        assert rules.min_track_width == 0.1
+
+    def test_via_geometry_max_independent_of_net_class_order(self):
+        """max() via aggregation is order-independent (Issue #4247)."""
+        smaller_first = """(kicad_pcb
+  (net_class "Micro" (via_dia 0.45) (via_drill 0.2))
+  (net_class "Default" (via_dia 0.6) (via_drill 0.3))
+)"""
+        larger_first = """(kicad_pcb
+  (net_class "Default" (via_dia 0.6) (via_drill 0.3))
+  (net_class "Micro" (via_dia 0.45) (via_drill 0.2))
+)"""
+        for pcb_text in (smaller_first, larger_first):
+            rules = parse_pcb_design_rules(pcb_text)
+            assert rules.min_via_diameter == 0.6
+            assert rules.min_via_drill == 0.3
+
     def test_to_design_rules_conversion(self):
         """Test converting PCBDesignRules to DesignRules."""
         pcb_rules = PCBDesignRules(

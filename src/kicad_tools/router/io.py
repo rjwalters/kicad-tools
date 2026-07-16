@@ -392,12 +392,21 @@ def parse_pcb_design_rules(pcb_text: str) -> PCBDesignRules:
                     rules.min_track_width = trace_width
                     found_track_width = True
 
+        # Via geometry aggregation uses max(), NOT min() (Issue #4247).
+        # For clearance/trace_width (above) "tightest wins" is conservative:
+        # a smaller value is never a DRC violation.  For via geometry the
+        # opposite is true — a via SMALLER than a net class's stated minimum
+        # is a DRC violation, so taking the global min across net classes
+        # would let a single small-via class (e.g. an unused fine-pitch or
+        # differential-pair class) poison the derived via size for every net.
+        # Taking the max() guarantees the derived default is never smaller
+        # than any net class's stated minimum.
         via_dia_match = re.search(r"\(via_dia\s+([\d.]+)\)", nc_block)
         if via_dia_match:
             via_dia = float(via_dia_match.group(1))
             if via_dia > 0:
                 if found_via_diameter:
-                    rules.min_via_diameter = min(rules.min_via_diameter, via_dia)
+                    rules.min_via_diameter = max(rules.min_via_diameter, via_dia)
                 else:
                     rules.min_via_diameter = via_dia
                     found_via_diameter = True
@@ -407,7 +416,7 @@ def parse_pcb_design_rules(pcb_text: str) -> PCBDesignRules:
             via_drill = float(via_drill_match.group(1))
             if via_drill > 0:
                 if found_via_drill:
-                    rules.min_via_drill = min(rules.min_via_drill, via_drill)
+                    rules.min_via_drill = max(rules.min_via_drill, via_drill)
                 else:
                     rules.min_via_drill = via_drill
                     found_via_drill = True

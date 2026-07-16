@@ -82,9 +82,63 @@ def run_zones_command(args) -> int:
     return 1
 
 
+def _effective_via_geometry(
+    pcb_path: str,
+    via_drill: float | None,
+    via_diameter: float | None,
+) -> tuple[float | None, float | None]:
+    """Resolve the via drill/diameter route-auto would actually use.
+
+    An explicit CLI override wins; otherwise the value is derived from the
+    board's net-class via constraints (Issue #4247).  Returns ``(None, None)``
+    for any field that can be neither overridden nor derived (e.g. the board
+    file is unreadable during a dry-run preview).
+    """
+    eff_drill = via_drill
+    eff_diameter = via_diameter
+    if eff_drill is not None and eff_diameter is not None:
+        return eff_drill, eff_diameter
+    try:
+        from pathlib import Path
+
+        from kicad_tools.router.io import parse_pcb_design_rules
+
+        pcb_rules = parse_pcb_design_rules(Path(pcb_path).read_text())
+        if eff_drill is None:
+            eff_drill = pcb_rules.min_via_drill
+        if eff_diameter is None:
+            eff_diameter = pcb_rules.min_via_diameter
+    except Exception:
+        # Dry-run preview must never fail on a missing/unreadable board file;
+        # fall back to reporting only the explicit overrides (possibly None).
+        pass
+    return eff_drill, eff_diameter
+
+
+def _print_effective_via_geometry(
+    eff_drill: float | None,
+    override_drill: float | None,
+    eff_diameter: float | None,
+    override_diameter: float | None,
+) -> None:
+    """Print the effective via geometry for the dry-run preview (Issue #4247)."""
+
+    def _fmt(value: float | None, override: float | None) -> str:
+        if value is None:
+            return "board-derived (unavailable)"
+        source = "explicit override" if override is not None else "board-derived"
+        return f"{value:.4g}mm ({source})"
+
+    print(f"  Via drill: {_fmt(eff_drill, override_drill)}")
+    print(f"  Via diameter: {_fmt(eff_diameter, override_diameter)}")
+
+
 def run_route_auto_command(args) -> int:
     """Handle route-auto command using RoutingOrchestrator."""
     import sys
+
+    via_drill = getattr(args, "via_drill", None)
+    via_diameter = getattr(args, "via_diameter", None)
 
     # Dry-run: preview strategy selection without routing
     if args.dry_run:
@@ -92,6 +146,11 @@ def run_route_auto_command(args) -> int:
         print(f"  Strategy override: {args.strategy}")
         print(f"  Repair enabled: {not args.no_repair}")
         print(f"  Via resolution enabled: {not args.no_via_resolution}")
+        # Report the effective via geometry that would be used (Issue #4247):
+        # an explicit CLI override, or the value derived from the board's
+        # net-class via constraints.
+        eff_drill, eff_diameter = _effective_via_geometry(args.pcb, via_drill, via_diameter)
+        _print_effective_via_geometry(eff_drill, via_drill, eff_diameter, via_diameter)
         if args.output:
             print(f"  Output: {args.output}")
         return 0
@@ -111,6 +170,9 @@ def run_route_auto_command(args) -> int:
             region=getattr(args, "region", None),
             # Issue #4165: persist partial multi-pad copper only when opted in.
             allow_partial=getattr(args, "allow_partial", False),
+            # Issue #4247: explicit via-geometry overrides (None => board-derived).
+            via_drill=via_drill,
+            via_diameter=via_diameter,
         )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
