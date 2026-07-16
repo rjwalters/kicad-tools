@@ -27,6 +27,8 @@ Exit Codes:
     2 - Incomplete nets found
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
