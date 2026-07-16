@@ -18,7 +18,7 @@ import heapq
 import math
 
 from .funnel import Portal
-from .geometry import EPS, Pt, centroid, point_in_triangle
+from .geometry import EPS, Pt, centroid, merge_intervals, point_in_triangle
 
 Triangle = tuple[int, int, int]
 
@@ -272,13 +272,29 @@ class NavMesh:
 
     # -- corridor -> oriented portals -------------------------------------
 
-    def corridor_to_portals(self, corridor: list[int], start: Pt, goal: Pt) -> list[Portal]:
+    def corridor_to_portals(
+        self,
+        corridor: list[int],
+        start: Pt,
+        goal: Pt,
+        consumed: dict[tuple[int, int], list[tuple[float, float]]] | None = None,
+        pack: str = "largest",
+    ) -> list[Portal]:
         """Convert a triangle corridor into oriented ``(left, right)`` portals.
 
         Each portal is the shared edge between consecutive corridor triangles,
         oriented so ``left`` sits on the left-hand side of travel (the funnel's
         sign convention).  The near-triangle centroid is the orientation
         reference: it always lies on the traveling-from side of the edge.
+
+        Issue #4274 (in-corridor lane assignment): ``consumed`` maps each portal
+        edge key to the parametric ``[t0, t1]`` intervals (along
+        ``vertices[edge[0]] -> vertices[edge[1]]``) already occupied by committed
+        copper.  When supplied, each crossed portal's opening is narrowed to the
+        residual sub-segment so the funnel yields a *parallel* geodesic for the
+        next net instead of the same taut path.  ``consumed`` defaults to
+        ``None``, so the single-net P1/P2 contract (full openings) is unchanged
+        byte-for-byte.
         """
         portals: list[Portal] = [(start, start)]
         for i in range(len(corridor) - 1):
@@ -291,10 +307,17 @@ class NavMesh:
             q = self.vertices[edge[1]]
             ref = self._centroids[cur]
             # Mononen sign: _area(ref, left, right) > 0 for correct orientation.
+            # ``reversed_`` records whether ``left`` is ``q`` (edge[1]) so the
+            # consumed intervals (parametric p->q) map into the left->right frame.
             if _mononen_area(ref, p, q) > 0.0:
-                portals.append((p, q))
+                left, right, reversed_ = p, q, False
             else:
-                portals.append((q, p))
+                left, right, reversed_ = q, p, True
+            if consumed:
+                bands = consumed.get(edge)
+                if bands:
+                    left, right = _narrow_portal(left, right, reversed_, bands, pack)
+            portals.append((left, right))
         portals.append((goal, goal))
         return portals
 
@@ -305,6 +328,73 @@ class NavMesh:
         if len(common) == 2:
             return (common[0], common[1])
         return None
+
+
+def _narrow_portal(
+    left: Pt,
+    right: Pt,
+    reversed_: bool,
+    bands: list[tuple[float, float]],
+    pack: str = "largest",
+) -> Portal:
+    """Clip an oriented portal ``(left, right)`` to a residual free opening (#4274).
+
+    ``bands`` are the consumed ``[t0, t1]`` intervals in the *edge* frame
+    (``vertices[edge[0]] -> vertices[edge[1]]``); ``reversed_`` says whether the
+    oriented ``left`` is ``edge[1]`` (so ``s = 1 - t``).  Work in the oriented
+    ``s`` frame (``s = 0`` at ``left``, ``s = 1`` at ``right``): subtract the
+    consumed bands from ``[0, 1]`` to get the free gaps and hand the funnel one
+    of them (still oriented left/right).  ``pack`` selects which gap, giving the
+    re-funnel a small family of parallel-lane candidates:
+
+    * ``"largest"`` -- the widest free gap (the roomiest lane);
+    * ``"left"`` -- the free gap nearest the ``left`` wall (``s = 0``);
+    * ``"right"`` -- the free gap nearest the ``right`` wall (``s = 1``).
+
+    ``"left"`` / ``"right"`` are the **monotone one-wall** disciplines: every
+    portal along the corridor packs against the *same* wall, so the funnel is
+    forced consistently to one side of the committed copper and successive lanes
+    stack in parallel rather than weaving across each other.  A fully-consumed
+    portal collapses to a near-degenerate opening whose funnel path the
+    octilinear fit declines rather than a short.
+    """
+    # Consumed bands -> oriented s-frame, then merged.
+    s_bands: list[tuple[float, float]] = []
+    for t0, t1 in bands:
+        if reversed_:
+            s0, s1 = 1.0 - t1, 1.0 - t0
+        else:
+            s0, s1 = t0, t1
+        s_bands.append((max(0.0, min(1.0, s0)), max(0.0, min(1.0, s1))))
+    consumed = merge_intervals(s_bands)
+    if not consumed:
+        return left, right
+
+    # Complement of the consumed bands within [0, 1] -> free gaps.
+    gaps: list[tuple[float, float]] = []
+    cursor = 0.0
+    for c0, c1 in consumed:
+        if c0 > cursor:
+            gaps.append((cursor, c0))
+        cursor = max(cursor, c1)
+    if cursor < 1.0:
+        gaps.append((cursor, 1.0))
+    if not gaps:
+        # Portal fully consumed: collapse toward the right wall so the funnel
+        # yields a path the octilinear fit declines (never a short).
+        return right, right
+
+    if pack == "left":
+        lo, hi = gaps[0]
+    elif pack == "right":
+        lo, hi = gaps[-1]
+    else:
+        lo, hi = max(gaps, key=lambda g: g[1] - g[0])
+    lx = left[0] + lo * (right[0] - left[0])
+    ly = left[1] + lo * (right[1] - left[1])
+    rx = left[0] + hi * (right[0] - left[0])
+    ry = left[1] + hi * (right[1] - left[1])
+    return (lx, ly), (rx, ry)
 
 
 def _mononen_area(a: Pt, b: Pt, c: Pt) -> float:
