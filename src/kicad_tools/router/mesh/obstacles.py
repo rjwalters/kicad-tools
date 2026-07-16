@@ -13,7 +13,12 @@ narrowing" the ADR names, and composes cleanly with poly2tri holes.
 
 from __future__ import annotations
 
-from .geometry import Pt, point_in_polygon, segment_intersects_rect
+from .geometry import (
+    Pt,
+    point_in_polygon,
+    segment_intersects_polygon,
+    segment_intersects_rect,
+)
 
 Rect = tuple[float, float, float, float]  # (xmin, ymin, xmax, ymax)
 
@@ -81,11 +86,25 @@ def _cluster_boxes(rects: list[Rect], parent: list[int], find, n: int) -> dict[i
 
 
 class ObstacleModel:
-    """Board outline plus inflated pad keep-out rectangles."""
+    """Board outline plus inflated pad keep-out rectangles and pour polygons.
 
-    def __init__(self, outline: list[Pt], keepouts: list[Rect]) -> None:
+    Issue #4269 (mesh-router P2) adds ``pours`` -- filled-copper zone outlines
+    a signal leg must clear, the polygon analogue of the rectangular pad
+    keep-outs.  A leg entering a pour is a short to the pour net, so the 45-fit
+    declines it exactly as it does a leg entering a pad keep-out.  Pours default
+    to empty, so every P1 call site (`ObstacleModel(outline, keepouts)`) is
+    byte-identical.
+    """
+
+    def __init__(
+        self,
+        outline: list[Pt],
+        keepouts: list[Rect],
+        pours: list[list[Pt]] | None = None,
+    ) -> None:
         self.outline = outline
         self.keepouts = keepouts
+        self.pours = pours or []
 
     def is_clear(self, a: Pt, b: Pt) -> bool:
         """True if straight leg ``a-b`` is inside the board and clears keep-outs.
@@ -97,4 +116,6 @@ class ObstacleModel:
             point_in_polygon(a, self.outline) and point_in_polygon(b, self.outline)
         ):
             return False
-        return not any(segment_intersects_rect(a, b, r[0], r[1], r[2], r[3]) for r in self.keepouts)
+        if any(segment_intersects_rect(a, b, r[0], r[1], r[2], r[3]) for r in self.keepouts):
+            return False
+        return not any(segment_intersects_polygon(a, b, poly) for poly in self.pours)

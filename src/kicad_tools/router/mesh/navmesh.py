@@ -26,9 +26,26 @@ Triangle = tuple[int, int, int]
 class NavMesh:
     """Triangle-dual navmesh over a constrained-Delaunay triangulation."""
 
-    def __init__(self, vertices: list[Pt], triangles: list[Triangle]) -> None:
+    def __init__(
+        self,
+        vertices: list[Pt],
+        triangles: list[Triangle],
+        channel: float = 0.0,
+    ) -> None:
         self.vertices = vertices
         self.triangles = triangles
+        # Issue #4269: ``channel`` = trace width + 2*clearance, the lane pitch a
+        # portal (shared triangle edge) must fit an integer number of nets into.
+        # ``capacity = floor(edge_len / channel)`` (P0.5 measured 2/12/64 lanes
+        # across a test corridor).  ``channel <= 0`` disables the capacity model
+        # (portals are treated as effectively unbounded), preserving the P1
+        # single-net contract for callers that never negotiate.
+        self.channel = channel
+        # Per-portal (shared-edge key) occupancy + history congestion tables.
+        # Keyed by the same sorted vertex-index pairs used in ``_adj`` so the
+        # A* step and the negotiation bookkeeping speak the same portal id.
+        self._occupancy: dict[tuple[int, int], int] = {}
+        self._history: dict[tuple[int, int], float] = {}
         self._centroids: list[Pt] = [
             centroid(vertices[a], vertices[b], vertices[c]) for (a, b, c) in triangles
         ]
@@ -81,18 +98,125 @@ class NavMesh:
         ]
         return hits
 
+    # -- portal capacity / occupancy / congestion (issue #4269) -----------
+
+    def edge_length(self, edge: tuple[int, int]) -> float:
+        """Euclidean length of a portal (shared triangle edge)."""
+        a = self.vertices[edge[0]]
+        b = self.vertices[edge[1]]
+        return math.hypot(a[0] - b[0], a[1] - b[1])
+
+    def capacity(self, edge: tuple[int, int]) -> int:
+        """Integer lane count of a portal: ``floor(edge_len / channel)``.
+
+        ``channel <= 0`` (capacity model disabled) reports a very large
+        capacity so no portal is ever congested -- the single-net P1 default.
+        """
+        if self.channel <= 0.0:
+            return 1_000_000_000
+        return int(self.edge_length(edge) / self.channel)
+
+    def occupancy(self, edge: tuple[int, int]) -> int:
+        """Number of nets currently routed across a portal."""
+        return self._occupancy.get(edge, 0)
+
+    def history(self, edge: tuple[int, int]) -> float:
+        """Accumulated cross-iteration history congestion for a portal."""
+        return self._history.get(edge, 0.0)
+
+    def commit_portal(self, edge: tuple[int, int]) -> None:
+        """Record one more net crossing this portal (a committed route)."""
+        self._occupancy[edge] = self._occupancy.get(edge, 0) + 1
+
+    def release_portal(self, edge: tuple[int, int]) -> None:
+        """Undo one net crossing (rip-up)."""
+        cur = self._occupancy.get(edge, 0)
+        if cur > 0:
+            self._occupancy[edge] = cur - 1
+
+    def reset_occupancy(self) -> None:
+        """Clear all present occupancy (start of a fresh negotiation pass).
+
+        History is deliberately preserved -- it is the persistent memory that
+        drives PathFinder/VPR convergence across iterations.
+        """
+        self._occupancy.clear()
+
+    def add_history(self, edge: tuple[int, int], increment: float) -> None:
+        """Bump a portal's persistent history congestion (over-capacity penalty)."""
+        self._history[edge] = self._history.get(edge, 0.0) + increment
+
+    def occupied_portals(self) -> list[tuple[int, int]]:
+        """Portal keys with non-zero present occupancy."""
+        return [e for e, occ in self._occupancy.items() if occ > 0]
+
+    def portal_penalty(
+        self,
+        edge: tuple[int, int],
+        present_cost_factor: float,
+        cost_congestion: float,
+        congestion_threshold: float,
+    ) -> float:
+        """Unitless congestion multiplier for a portal (PathFinder present+history).
+
+        Density is ``(occupancy + 1) / capacity`` -- the ``+1`` prices the
+        portal as if *this* net also used it, so a route steers away from lanes
+        already at capacity.  When density exceeds ``congestion_threshold`` the
+        present term grows linearly (mirrors the grid ``cost_congestion`` /
+        ``congestion_threshold`` semantics, ``rules.py:164-165``); the history
+        term is added unscaled so persistently-overused portals ratchet up
+        across iterations and the negotiation converges.
+        """
+        cap = self.capacity(edge)
+        occ = self.occupancy(edge)
+        if cap <= 0:
+            # A portal too narrow for even one net: any use is over capacity.
+            density = float(occ + 1)
+        else:
+            density = (occ + 1) / cap
+        present = 0.0
+        if density > congestion_threshold:
+            present = cost_congestion * (density - congestion_threshold)
+        return present_cost_factor * present + self.history(edge)
+
+    def corridor_portals(self, corridor: list[int]) -> list[tuple[int, int]]:
+        """Portal (shared-edge) keys crossed by a triangle corridor."""
+        portals: list[tuple[int, int]] = []
+        for i in range(len(corridor) - 1):
+            edge = self._shared_edge(corridor[i], corridor[i + 1])
+            if edge is not None:
+                portals.append(edge)
+        return portals
+
     # -- A* over the triangle dual ----------------------------------------
 
-    def astar(self, start: Pt, goal: Pt) -> list[int] | None:
+    def astar(
+        self,
+        start: Pt,
+        goal: Pt,
+        *,
+        present_cost_factor: float = 0.0,
+        cost_congestion: float = 0.0,
+        congestion_threshold: float = 0.0,
+    ) -> list[int] | None:
         """Return a corridor (triangle-index sequence) from ``start`` to ``goal``.
 
         Portal-midpoint step cost with a straight-line-to-goal heuristic.
         Returns ``None`` if the two points are in disconnected mesh regions.
+
+        Issue #4269: when ``present_cost_factor`` is non-zero (or any history
+        has accumulated) the per-portal congestion penalty multiplies the step
+        cost, so committed copper raises the price of a shared corridor and the
+        next net is steered elsewhere.  With the defaults (``present_cost_factor
+        == 0`` and no history) the arithmetic reduces to the P1 portal-midpoint
+        distance exactly -- the single-net path is unchanged.
         """
         start_tris = self.locate(start)
         goal_tris = set(self.locate(goal))
         if not start_tris or not goal_tris:
             return None
+
+        negotiating = present_cost_factor != 0.0 or bool(self._history)
 
         def edge_mid(edge: tuple[int, int]) -> Pt:
             a = self.vertices[edge[0]]
@@ -123,6 +247,11 @@ class NavMesh:
             for nbr, edge in self._adj[tri]:
                 mid = edge_mid(edge)
                 step = math.hypot(mid[0] - entry[0], mid[1] - entry[1])
+                if negotiating:
+                    penalty = self.portal_penalty(
+                        edge, present_cost_factor, cost_congestion, congestion_threshold
+                    )
+                    step = step * (1.0 + penalty)
                 tentative = g + step
                 if tentative < g_score.get(nbr, math.inf) - 1e-9:
                     g_score[nbr] = tentative
