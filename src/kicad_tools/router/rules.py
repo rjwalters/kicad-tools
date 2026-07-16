@@ -1460,18 +1460,30 @@ def net_class_map_from_dict(
     Round-trip companion to :func:`net_class_map_to_dict`.  Each entry
     is deserialized via :meth:`NetClassRouting.from_dict`.
 
+    Top-level keys whose name starts with an underscore (``_``) are
+    reserved for in-band documentation/provenance and are skipped: they
+    are never turned into routed nets.  This lets a hand-authored sidecar
+    self-document without a sibling README, e.g. a ``_comment`` string or
+    a ``_meta`` dict block (issue #4248).  Because KiCad net names do not
+    start with ``_`` in practice, this cannot shadow a real net entry.
+
     Args:
         data: Mapping of ``net_name -> NetClassRouting-dict``.  Must be a
-            dict-of-dicts.
+            dict; non-``_``-prefixed values must each be a dict.  Any
+            ``_``-prefixed key is ignored regardless of its value type.
 
     Raises:
-        ValueError: If any entry is malformed (missing 'name' field).
-        TypeError: If ``data`` is not a dict-of-dicts.
+        ValueError: If any (non-``_``-prefixed) entry is malformed
+            (missing 'name' field).
+        TypeError: If ``data`` is not a dict, or if a non-``_``-prefixed
+            entry is not a dict.
     """
     if not isinstance(data, dict):
         raise TypeError(f"net_class_map_from_dict expects a dict, got {type(data).__name__}")
     result: dict[str, NetClassRouting] = {}
     for net_name, entry in data.items():
+        if isinstance(net_name, str) and net_name.startswith("_"):
+            continue  # reserved for in-band documentation (_comment, _meta, ...)
         if not isinstance(entry, dict):
             raise TypeError(
                 f"net_class_map entry for {net_name!r} must be a dict, got {type(entry).__name__}"

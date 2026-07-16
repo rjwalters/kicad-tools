@@ -343,3 +343,31 @@ class TestNetClassMapHelpers:
     def test_from_dict_rejects_missing_name(self):
         with pytest.raises(ValueError, match="requires a 'name' field"):
             net_class_map_from_dict({"USB_D+": {"priority": 1}})
+
+    def test_from_dict_skips_underscore_comment_key(self):
+        """A ``_comment`` string key is in-band documentation, not a net (#4248)."""
+        m = create_net_class_map(power_nets=["GND"])
+        wire = net_class_map_to_dict(m)
+        wire["_comment"] = "rev-C board, 2026-07"
+        result = net_class_map_from_dict(wire)
+        # The comment key is excluded; the real net survives unchanged.
+        assert "_comment" not in result
+        assert set(result) == {"GND"}
+        assert result == m
+
+    def test_from_dict_skips_underscore_meta_dict(self):
+        """A ``_meta`` dict block is in-band provenance, not a net (#4248)."""
+        m = create_net_class_map(power_nets=["GND"])
+        wire = net_class_map_to_dict(m)
+        wire["_meta"] = {"board": "rev-C", "date": "2026-07-15"}
+        result = net_class_map_from_dict(wire)
+        # The _meta dict is skipped even though it *is* a dict.
+        assert "_meta" not in result
+        assert set(result) == {"GND"}
+        assert result == m
+
+    def test_from_dict_skips_underscore_key_regardless_of_value_type(self):
+        """Any ``_``-prefixed key is ignored uniformly (str, list, None, dict)."""
+        for reserved_value in ("a string", ["a", "list"], None, {"nested": 1}):
+            result = net_class_map_from_dict({"_reserved": reserved_value})
+            assert result == {}
