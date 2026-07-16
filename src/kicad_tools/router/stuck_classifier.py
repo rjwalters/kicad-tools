@@ -711,7 +711,7 @@ def _decide(
             f"pad reachable ({open_deg:.0f} deg lane) but in a dense cluster "
             f"({local_congestion} foreign obstructions, {nb}); ripping the few "
             f"strict blockers cannot clear the surrounding copper -- a part "
-            f"must move (analog/codec cluster)"
+            f"must move"
         )
         return StuckNetDiagnosis(
             net_name=net_name,

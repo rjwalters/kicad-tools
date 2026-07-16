@@ -228,6 +228,49 @@ def _placement_bound_board() -> str:
     return body
 
 
+# --- DENSE CLUSTER (Defect 1 negative test) ---------------------------------
+# An all-digital dense cluster: a stranded pad surrounded by >= 20 foreign
+# single-pad nets (dense-cluster PLACEMENT_BOUND) with an open escape gap.  No
+# net on this board carries any analog/codec signal, so the classifier must not
+# emit the old hardcoded "(analog/codec cluster)" parenthetical (issue #4261
+# Defect 1).
+
+
+def _dense_cluster_board() -> str:
+    body = (
+        _HEADER
+        + (
+            '  (net 0 "")\n'
+            '  (net 1 "TGT")\n'
+            # TGT island
+            '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
+            '    (property "Reference" "R1")\n'
+            '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
+            '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
+            "  )\n"
+            # stranded TGT pad in a very busy neighbourhood
+            '  (footprint "U_SOT" (layer "F.Cu") (at 80 80)\n'
+            '    (property "Reference" "U1")\n'
+            '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "TGT"))\n'
+            "  )\n"
+            # 24 foreign single-pad nets at 1.5mm packing the congestion radius
+            # (dense, >= dense_cluster_threshold=20), leaving a small open arc so
+            # the pad still escapes.
+            + _placement_bound_ring(80, 80, 1.5, count=24, gap=2)
+            + '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
+            ")\n"
+        )
+    )
+    return body
+
+
+@pytest.fixture
+def dense_cluster_pcb(tmp_path: Path) -> Path:
+    p = tmp_path / "dense.kicad_pcb"
+    p.write_text(_dense_cluster_board())
+    return p
+
+
 @pytest.fixture
 def escape_blocked_pcb(tmp_path: Path) -> Path:
     p = tmp_path / "escape.kicad_pcb"
@@ -303,6 +346,19 @@ class TestPlacementBound:
         assert 6 <= d.local_congestion < 20
         assert d.escape_lane_deg >= 45.0
         assert "a part must move" in d.evidence
+
+
+class TestDefect1NoAnalogCodecString:
+    def test_dense_cluster_evidence_has_no_analog_codec(self, dense_cluster_pcb: Path):
+        """Defect 1 (#4261): the dense-cluster PLACEMENT_BOUND branch must NOT
+        append the hardcoded "(analog/codec cluster)" parenthetical.  This board
+        is all-digital, so an analog cause is factually wrong."""
+        result = classify_stuck_nets(dense_cluster_pcb)
+        tgt = next(d for d in result.diagnoses if d.net_name == "TGT")
+        assert tgt.classification is StuckClass.PLACEMENT_BOUND
+        assert tgt.local_congestion >= 20
+        assert "analog" not in tgt.evidence.lower()
+        assert "codec" not in tgt.evidence.lower()
 
 
 class TestBudgetStarved:
