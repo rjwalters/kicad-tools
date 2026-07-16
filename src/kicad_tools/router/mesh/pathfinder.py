@@ -91,7 +91,7 @@ class MeshPathfinder:
         parity with ``CppPathfinder.route`` but only the trace width is read
         (single-net P1 does no congestion negotiation).
         """
-        import kicad_tools.router.router_cpp as router_cpp
+        import kicad_tools.router.router_cpp as router_cpp  # type: ignore[import-not-found]
 
         trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clearance = self.rules.trace_clearance
