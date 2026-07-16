@@ -121,13 +121,35 @@ def _assert_flag_on_feasible_reserved(router: Autorouter) -> None:
 class TestRouteAllDrivesAllocator:
     def test_route_all_flag_off_no_hard_lanes(self) -> None:
         router, net_ids = _make_planar_tmds_router()
-        router.route_all(net_order=list(net_ids), suppress_no_timeout_warning=True)
+        # Bound each net's A* (per_net_timeout) plus an outer wall-clock cap.
+        # This entry point asserts only the allocator seam, which runs in the
+        # pre-pass *before* the per-net loop; the loop itself just exercises
+        # the seam.  Unbounded, the coupled ``_N`` partners fail C++ clearance
+        # validation and fall back to the slow pure-Python A* (~19s locally,
+        # over CI's 60s cap).  A tight per-net deadline keeps the test fast and
+        # bounded (~1.5s) without touching what it verifies (#4257).
+        router.route_all(
+            net_order=list(net_ids),
+            per_net_timeout=1.0,
+            timeout=15.0,
+            suppress_no_timeout_warning=True,
+        )
         _assert_flag_off_no_reservation(router)
 
     def test_route_all_flag_on_reserves_hard_lanes(self) -> None:
         router, net_ids = _make_planar_tmds_router()
         router.enable_bundle_river_planner = True
-        router.route_all(net_order=list(net_ids), suppress_no_timeout_warning=True)
+        # Bounded per-net + outer budget (see flag-off sibling): the FEASIBLE
+        # plan is stored and the HARD lanes are reserved by the allocator
+        # pre-pass ahead of the per-net loop, so bounding the loop does not
+        # touch the reservation assertions -- it only caps the unbounded A*
+        # fallback time so the test passes under CI's ``--timeout=60``.
+        router.route_all(
+            net_order=list(net_ids),
+            per_net_timeout=1.0,
+            timeout=15.0,
+            suppress_no_timeout_warning=True,
+        )
         _assert_flag_on_feasible_reserved(router)
 
 
