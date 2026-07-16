@@ -46,9 +46,20 @@ endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 file(GLOB_RECURSE SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 
+# Vendored poly2tri (BSD-3) constrained-Delaunay mesher (issue #4268).
+# poly2tri sources are ``.cc`` (not picked up by the ``src/*.cpp`` glob), so
+# they are added explicitly.  Its headers include each other relative to the
+# ``poly2tri/`` directory (e.g. ``#include "common/shapes.h"``), so that
+# directory is the include root.  ``P2T_STATIC_EXPORTS`` neutralises the
+# DLL import/export decoration for a static in-module link.
+set(POLY2TRI_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/poly2tri/poly2tri)
+include_directories(${POLY2TRI_ROOT})
+file(GLOB_RECURSE POLY2TRI_SOURCES "${POLY2TRI_ROOT}/*.cc")
+
 # Build nanobind module
-nanobind_add_module(${PROJECT_NAME} ${SOURCE_FILES})
+nanobind_add_module(${PROJECT_NAME} ${SOURCE_FILES} ${POLY2TRI_SOURCES})
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_20)
+target_compile_definitions(${PROJECT_NAME} PRIVATE P2T_STATIC_EXPORTS)
 
 install(TARGETS ${PROJECT_NAME} DESTINATION kicad_tools/router)
 

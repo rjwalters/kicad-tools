@@ -90,6 +90,17 @@ _ALLOWLIST: dict[str, dict[str, tuple[int, str]]] = {
     "router/adaptive.py": {
         "AdaptiveAutorouter.__init__": (1, "AdaptiveAutorouter.__init__ default fallback"),
     },
+    # Mesh-router single-net pathfinder (#4268) — same constructor rules-arg
+    # default fallback shape as Autorouter.__init__.  The sole caller,
+    # ``Autorouter._route_net_mesh`` in router/core.py, always passes
+    # ``self.rules`` (manufacturer already propagated from the Autorouter),
+    # so this bare default is only reached when a caller constructs the
+    # pathfinder with no rules (direct unit-test construction or
+    # ``MeshPathfinder.from_board(rules=None)``), where no manufacturer
+    # context exists to thread.
+    "router/mesh/pathfinder.py": {
+        "MeshPathfinder.__init__": (1, "MeshPathfinder.__init__ rules-arg default fallback"),
+    },
     # Library API: ``route_pcb()`` synthesises default rules only when
     # the caller explicitly passes ``rules=None`` (no PCB rules either).
     # The CLI always supplies its own rules with manufacturer wired in.

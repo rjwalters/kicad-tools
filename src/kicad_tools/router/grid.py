@@ -157,7 +157,7 @@ def _sync_pad_to_cpp_grid(
     # Avoid hard dependency on cpp_backend at import time (cpp_backend
     # imports grid.py).  Defer the router_cpp import to call time.
     try:
-        from . import router_cpp  # type: ignore[attr-defined]
+        from . import router_cpp
     except ImportError:
         return
 
@@ -253,7 +253,7 @@ def _sync_pad_cells_to_cpp_grid(
             caller's ``_add_pad_unsafe`` loop.
     """
     try:
-        from . import router_cpp  # type: ignore[attr-defined]  # noqa: F401
+        from . import router_cpp  # noqa: F401
     except ImportError:
         return
 

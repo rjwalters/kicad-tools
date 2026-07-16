@@ -3515,6 +3515,20 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--route-engine",
+        choices=["grid", "mesh"],
+        default="grid",
+        help=(
+            "Routing substrate (issue #4268), orthogonal to --backend and "
+            "--strategy: 'grid' = uniform-grid A* (default, unchanged); "
+            "'mesh' = navmesh single-net router (poly2tri CDT + funnel + "
+            "clearance-aware 45deg fit). Mesh is P1/experimental: single-net "
+            "only, no multi-net negotiation, capacity, vias or matched routing. "
+            "(The name 'strategy' was already taken by the negotiation-algorithm "
+            "flag above, so the substrate selector is --route-engine.)"
+        ),
+    )
+    route_parser.add_argument(
         "--seed",
         type=int,
         default=None,

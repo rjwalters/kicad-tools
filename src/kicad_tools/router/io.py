@@ -3361,6 +3361,7 @@ def load_pcb_for_routing(
     per_net_iterations: int = 0,
     region: tuple[float, float, float, float] | None = None,
     stub_terminals: dict[int, list[StubTerminal]] | None = None,
+    strategy: str = "grid",
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -3739,6 +3740,8 @@ def load_pcb_for_routing(
         max_search_iterations=max_search_iterations,
         # Issue #3881: thread the tuned per-net iteration cap through too.
         per_net_iterations=per_net_iterations,
+        # Issue #4268: mesh-router strategy selector (default "grid").
+        strategy=strategy,
     )
 
     # Issue #3371 / P_FP3 -- fine-pitch escape region detection.  Must run

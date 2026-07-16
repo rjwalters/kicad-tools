@@ -894,6 +894,7 @@ class Autorouter:
         record_decisions: bool = False,
         max_search_iterations: int = 0,
         per_net_iterations: int = 0,
+        strategy: str = "grid",
     ):
         """Initialize the autorouter.
 
@@ -1050,6 +1051,17 @@ class Autorouter:
         # witness after a routing pass.  Populated by
         # ``_apply_byte_lane_inner_priority`` whenever the certificate runs.
         self._last_monotone_certificates: dict[str, Any] = {}
+
+        # Issue #4268 (mesh-router P1): routing strategy selector, orthogonal
+        # to ``force_python`` (which picks the GRID engine).  ``"grid"`` (the
+        # default) is byte-identical to the pre-mesh router; ``"mesh"`` routes
+        # each net through the navmesh single-net pathfinder (``route_net``
+        # dispatches to ``_route_net_mesh``).  The mesh pathfinder's outer
+        # boundary comes from ``self._board_bbox`` (the edge-cuts bbox when
+        # available, else a grid-derived fallback -- see ``_route_net_mesh``);
+        # the pathfinder itself is built lazily on first mesh route.
+        self._strategy = strategy
+        self._mesh_pathfinder: Any = None
 
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
@@ -2273,6 +2285,51 @@ class Autorouter:
                 tracked_ids.add(id(r))
         return [r for r in self.routes if id(r) not in tracked_ids]
 
+    def _route_net_mesh(self, net: int) -> list[Route]:
+        """Route a net with the mesh strategy (issue #4268, single-net P1).
+
+        Builds (once, lazily) a :class:`~kicad_tools.router.mesh.MeshPathfinder`
+        from the board outline + pads + rules, then routes each connection of
+        the net star-wise from its first pad.  Each successful route is a normal
+        45-legal :class:`Route` committed to ``self.routes`` -- the emission /
+        DRC tail is identical to the grid path.  Multi-net negotiation,
+        capacity, vias and matched routing are explicitly out of P1 scope.
+        """
+        from .mesh.pathfinder import MeshPathfinder
+
+        if self._mesh_pathfinder is None:
+            # ``_board_bbox`` is only populated from Edge.Cuts (io.py) when the
+            # board actually has an outline; a board routed under
+            # ``--route-engine mesh`` with no edge cuts leaves it ``None``.
+            # Fall back to the grid origin/dimensions so the navmesh still gets
+            # a valid outer boundary instead of crashing on a ``None`` unpack
+            # (mirrors the guarded reader in ``cleanup_artifacts``).
+            if self._board_bbox is not None:
+                bx0, by0, bx1, by1 = self._board_bbox
+            else:
+                bx0 = self.grid.origin_x
+                by0 = self.grid.origin_y
+                bx1 = self.grid.origin_x + self.grid.width
+                by1 = self.grid.origin_y + self.grid.height
+            outline = [(bx0, by0), (bx1, by0), (bx1, by1), (bx0, by1)]
+            self._mesh_pathfinder = MeshPathfinder(outline, list(self.pads.values()), self.rules)
+
+        pad_keys = self.nets.get(net, [])
+        pads = [self.pads[k] for k in pad_keys if k in self.pads]
+        if len(pads) < 2:
+            return []
+
+        routes: list[Route] = []
+        anchor = pads[0]
+        for other in pads[1:]:
+            if anchor.layer != other.layer:
+                continue  # single-layer P1: skip cross-layer connections
+            route = self._mesh_pathfinder.route(anchor, other)
+            if route is not None and route.segments:
+                self.routes.append(route)
+                routes.append(route)
+        return routes
+
     def route_net(
         self,
         net: int,
@@ -2302,6 +2359,12 @@ class Autorouter:
         Returns:
             List of Route objects for this net
         """
+        # Issue #4268 (mesh-router P1): under ``--strategy mesh`` the net is
+        # routed by the navmesh single-net pathfinder instead of the grid A*.
+        # Default ``"grid"`` skips this branch entirely (byte-identical).
+        if getattr(self, "_strategy", "grid") == "mesh":
+            return self._route_net_mesh(net)
+
         # Issue #4170 (Phase 2b-1): bare boundary stub terminals are an additive
         # source of per-net targets.  A net may have only ONE in-region pad plus
         # a boundary stub (or even zero pads registered here but a stub target),
