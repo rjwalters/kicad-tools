@@ -1269,6 +1269,17 @@ class EscapeRouter:
         self.byte_lane_corridor_reservations: int = 0
         self.byte_lane_corridor_reserved_cells: int = 0
 
+        # Issue #4256 (A3): instrumentation for the discrete BundlePlan
+        # allocator's per-member HARD lanes.  These are the generalisation of
+        # the #2983 single-ended inner-corner corridor to one HARD
+        # (foreign-net keep-out, C++-mirrored) lane per ``CoupledGroup``
+        # member.  Tracked separately from ``byte_lane_corridor_*`` (which
+        # counts the SOFT, Python-only single-ended default) so the flag-off
+        # identity tests stay byte-identical while the new HARD path has its
+        # own asserts.
+        self.bundle_plan_corridor_reservations: int = 0
+        self.bundle_plan_corridor_reserved_cells: int = 0
+
         # Issue #3900: set by ``_escape_sop_staggered`` when it takes the
         # rescue-only-band path with the rescue cap disabled
         # (``_sop_rescue_row_cap() == 0``).  ``generate_escapes`` reads it to
@@ -2748,6 +2759,9 @@ class EscapeRouter:
         target_inner_layer: Layer | None = None,
         corridor_length: float | None = None,
         corridor_half_width: float | None = None,
+        *,
+        soft: bool = True,
+        mirror_to_cpp: bool = False,
     ) -> int:
         """Reserve an inner-layer lateral corridor for a single-ended pad.
 
@@ -2807,11 +2821,34 @@ class EscapeRouter:
                 Defaults to ``3 * (escape_clearance + 2 * trace_w)``.
             corridor_half_width: Optional override for lateral
                 half-width.  Defaults to ``escape_clearance + trace_w``.
+            soft: Issue #4256.  Keep-out STRENGTH for the reservation.
+                Defaults to ``True`` (SOFT, attractor-only) — the
+                byte-identical #2983 single-ended default, whose C++
+                honouring #4079 measured to regress board 07's reversed DDR
+                byte.  The discrete ``BundlePlan`` allocator (A3) passes
+                ``soft=False`` to make a member's lane a HARD keep-out that
+                foreign nets are fenced out of (``is_reserved_excluding``).
+            mirror_to_cpp: Issue #4256.  Whether the reservation is mirrored
+                onto the production C++ grid.  Defaults to ``False`` (the
+                #2983 single-ended default stays Python-only, per #4079).
+                The A3 bundle-plan lanes pass ``mirror_to_cpp=True`` so the
+                HARD keep-out actually fences foreign nets out on the C++
+                A* — a SOFT/unmirrored reservation cannot meet the
+                "foreign net provably excluded" acceptance bar.
 
         Returns:
             Number of grid cells reserved.  Returns 0 if the helper is
             a no-op (e.g. zero net id, layer not in stack, 2-layer
             board, zero launch vector).
+
+        Note:
+            The two defaults (``soft=True, mirror_to_cpp=False``) are
+            load-bearing: they keep the existing single-ended byte-lane call
+            site (``_apply_byte_lane_inner_priority``) byte-identical to
+            pre-#4256 ``main``.  Only the new HARD bundle-plan callers flip
+            them — #4079 measured that honouring the single-ended default on
+            C++ (hard OR soft) regresses board 07, so the default must NOT
+            change.
         """
         # Skip no-op cases up front.
         net_id = int(pad.net) if pad.net else 0
@@ -2904,10 +2941,20 @@ class EscapeRouter:
         if not cells:
             return 0
 
-        # Issue #4079: this #2983 inner-corner reservation stays Python-only
-        # (``mirror_to_cpp=False``, PR #4078's "Path B").  #4079 investigated
-        # honouring it on the C++ backend two ways and MEASURED both to
-        # regress board 07's fully-reversed DDR byte on the CI recipe
+        # Issue #4256: this method is now parameterised on ``soft`` /
+        # ``mirror_to_cpp``.  The DEFAULTS below (``soft=True,
+        # mirror_to_cpp=False``) keep the #2983 single-ended inner-corner
+        # reservation Python-only and byte-identical, for the reason #4079
+        # measured; the A3 discrete BundlePlan lanes override both to
+        # ``soft=False, mirror_to_cpp=True`` (HARD, C++-mirrored) via a
+        # DIFFERENT topology (coupled diff-pair bundle, not the reversed DDR
+        # byte), so the regression below does not apply to them.
+        #
+        # Issue #4079 (the single-ended DEFAULT rationale): keeping this
+        # reservation Python-only (``mirror_to_cpp=False``, PR #4078's
+        # "Path B").  #4079 investigated honouring it on the C++ backend two
+        # ways and MEASURED both to regress board 07's fully-reversed DDR
+        # byte on the CI recipe
         # (`generate_design.py ... --step all --seed 42`, out-of-process
         # copper-LVS re-check):
         #
@@ -2938,16 +2985,26 @@ class EscapeRouter:
             layer_idx=target_idx,
             cells=cells,
             net_ids={net_id},
-            soft=True,
-            mirror_to_cpp=False,
+            soft=soft,
+            mirror_to_cpp=mirror_to_cpp,
         )
         if count > 0:
-            self.byte_lane_corridor_reservations += 1
-            self.byte_lane_corridor_reserved_cells += count
+            # Issue #4256: the SOFT single-ended default (#2983) and the new
+            # HARD bundle-plan lanes (A3) track separate counters so the
+            # flag-off identity tests keep asserting exactly 2 on the SOFT
+            # counter while the HARD path exposes its own instrumentation.
+            if soft:
+                self.byte_lane_corridor_reservations += 1
+                self.byte_lane_corridor_reserved_cells += count
+            else:
+                self.bundle_plan_corridor_reservations += 1
+                self.bundle_plan_corridor_reserved_cells += count
             logger.debug(
-                "Byte-lane inner-corner corridor reserved: "
+                "Inner-corner lane corridor reserved (%s%s): "
                 "layer=%s cells=%d net=%d pad=%s.%s launch=(%.2f,%.2f) "
                 "length=%.2fmm half_width=%.2fmm",
+                "soft" if soft else "HARD",
+                ", C++-mirrored" if mirror_to_cpp else "",
                 target_inner_layer.name,
                 count,
                 net_id,
