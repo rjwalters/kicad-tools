@@ -324,4 +324,4 @@ After generating files:
 
 - [API Documentation](../../docs/)
 - [CLI Reference](../../README.md#command-line-usage)
-- [Project Specification Format](../../docs/spec-format.md)
+- [Project Specification Format](#understanding-the-kct-file)
