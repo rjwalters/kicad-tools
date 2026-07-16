@@ -352,7 +352,15 @@ def output_why(pcb_path: Path, fmt: str) -> int:
         print(f"[{diag.classification.value.upper()}] {diag.net_name}")
         print(f"  unconnected pads: {pads}")
         if diag.blocking_nets:
-            print(f"  blocking nets:    {', '.join(diag.blocking_nets)}")
+            # Defect 2 (#4261): flag which blockers are the net's OWN match-group
+            # siblings rather than foreign copper.
+            note = ""
+            if diag.same_group_blockers and diag.match_group:
+                note = (
+                    f"        (same match-group {diag.match_group}: "
+                    f"{', '.join(diag.same_group_blockers)})"
+                )
+            print(f"  blocking nets:    {', '.join(diag.blocking_nets)}{note}")
         print(f"  evidence:         {diag.evidence}")
         print()
 
