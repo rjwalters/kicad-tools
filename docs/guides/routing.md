@@ -691,10 +691,97 @@ result = router.route_all(progress=create_print_callback())
 router.set_parallel(threads=4)
 ```
 
+### Region routing: trunk-first, then tile-refine
+
+On a large board a single *safe fine grid* over the whole area can blow the
+memory budget. The grid cell count is roughly:
+
+```
+cells ≈ (width / grid) × (height / grid)
+```
+
+For a 160×100mm board at a 0.03175mm (1.25 mil) fine grid that is
+`(160/0.03175) × (100/0.03175) ≈ 5040 × 3150 ≈ 15.9M cells` — far above the
+`--max-cells` default of 500,000 (see [#4249](https://github.com/rjwalters/kicad-tools/issues/4249)).
+`--grid auto` reacts by selecting a coarse, less-safe grid, and forcing the
+fine grid with an explicit `--grid` would need a 16M-cell budget and the
+memory to match.
+
+The fix is to route the board in **tiles** with `--region X1,Y1,X2,Y2`, which
+confines all new routing to an axis-aligned box (board-relative mm) and treats
+everything outside as a fixed obstacle. A single 32×20mm tile at the same
+0.03175mm grid is `(32/0.03175) × (20/0.03175) ≈ 1008 × 630 ≈ 635k cells` —
+affordable with a modest `--max-cells` bump, where the whole board is not.
+
+#### The boundary-stub problem
+
+`--region` deliberately **refuses** any net that has a pad *outside* the tile
+unless that net already has a *same-net boundary stub* — a piece of its own
+copper crossing into the tile that the in-region router can reconnect to. A
+cross-region net with no such stub fails with (from
+`src/kicad_tools/cli/route_cmd.py`):
+
+```
+Error: --region cannot route the following net(s) because they have pad(s)
+outside the region with no same-net boundary stub to reconnect to: +3.3V,
+/+12V, /AC_NEUTRAL, /I_SENSE_OUT, ... (+N more)
+```
+
+(Boundary-stub detection is the pure detector in
+`src/kicad_tools/router/stub_terminals.py`.) This is correct behavior, not a
+bug: a tile pass has no visibility outside its box, so a net with no in-tile
+copper simply cannot be reconnected there.
+
+#### The recipe
+
+Avoid the refusal *by construction*: give every cross-region net a boundary
+stub **before** you tile, by routing the long "trunk" nets (power rails, long
+buses — the `+3.3V / +12V / AC_NEUTRAL / I_SENSE_OUT` class above) across the
+whole board **first**, at a cheap coarse grid. Their copper then crosses every
+future tile boundary, so each tile pass finds a same-net stub to reconnect to.
+
+Worked example — a softstart-shape **160×100mm** board (motivating case from
+[#4242](https://github.com/rjwalters/kicad-tools/issues/4242)), tiled into a
+5×5 grid of 32×20mm boxes:
+
+```bash
+# 1. TRUNK PASS — route the whole board at a cheap coarse grid so the long
+#    cross-region nets lay down copper that crosses every tile boundary.
+#    160x100 @ 0.2mm ≈ 800 x 500 ≈ 400k cells — under the 500k default.
+#    (Use --skip-nets to defer purely-local nets to the tile passes, or
+#    hand-place the trunk traces if you prefer manual control.)
+kct route board.kicad_pcb --grid 0.2 -o trunk.kicad_pcb
+
+# 2. TILE-REFINE PASSES — refine each 32x20mm tile at the fine grid, chaining
+#    the output so every pass preserves prior copper (--region implies
+#    --preserve-existing). Cross-region nets now have a boundary stub from the
+#    trunk pass, so they reconnect instead of being refused. Each tile is
+#    ~635k cells, so raise --max-cells above the 500k default.
+kct route trunk.kicad_pcb --region 0,0,32,20    --grid 0.03175 --max-cells 700000 -o t00.kicad_pcb
+kct route t00.kicad_pcb   --region 32,0,64,20   --grid 0.03175 --max-cells 700000 -o t01.kicad_pcb
+kct route t01.kicad_pcb   --region 64,0,96,20   --grid 0.03175 --max-cells 700000 -o t02.kicad_pcb
+# ... continue across the row (x = 96..128, 128..160), then the next row
+#     (y = 20..40, 40..60, 60..80, 80..100), chaining -o each time.
+```
+
+The full box list is the 5×5 lattice with column edges at
+`x ∈ {0, 32, 64, 96, 128, 160}` and row edges at
+`y ∈ {0, 20, 40, 60, 80, 100}`. Because the trunk pass already crossed every
+one of those cut lines, no tile hits the boundary-stub refusal.
+
+If a tile *does* report the refusal, it means a straddling net had no trunk
+copper crossing that boundary — extend the trunk pass (or hand-route that net)
+so it does, then re-run the tile.
+
+> **Coming soon:** `route --auto-partition` — a planned follow-up that tiles
+> the board, plants the cross-region boundary stubs, and routes the tiles in
+> sequence automatically, making this recipe a single command.
+
 ---
 
 ## See Also
 
+- [Region routing: trunk-first, then tile-refine](#region-routing-trunk-first-then-tile-refine) — large-board tiling with `--region`
 - [Placement Optimization Guide](placement-optimization.md)
 - [DRC & Validation Guide](drc-and-validation.md)
 - [Example: Autorouter](https://github.com/rjwalters/kicad-tools/tree/main/examples/04-autorouter)
