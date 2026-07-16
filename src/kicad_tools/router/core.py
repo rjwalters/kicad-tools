@@ -10967,7 +10967,9 @@ class Autorouter:
         # Issue #4255: rip the diff-pair partner alongside it (when folded in
         # above) so the probe explores the freed corridor with the partner's
         # copper absent -- otherwise the partner re-boxes the failed leg.
-        clean_slate_nets = [n for n in (failed_net, pair_partner) if original_routes.get(n)]
+        clean_slate_nets = [
+            n for n in (failed_net, pair_partner) if n is not None and original_routes.get(n)
+        ]
         if clean_slate_nets:
             neg_router.rip_up_nets(clean_slate_nets, net_routes, self.routes)
 
