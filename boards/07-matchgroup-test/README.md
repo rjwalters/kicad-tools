@@ -204,6 +204,52 @@ artifact, so the committed artifact remains the shipping truth and is
 left unchanged (regen diverges only in trace geometry/UUIDs, not in which
 nets close).
 
+### Track A bundle-plan allocator — measured seed-42 verdict (#4257, A4)
+
+Track A (#4252) built the "joint bundle corridor allocation" fix named
+below as the genuine remedy for the `CONGESTION_SATURATED` TMDS 1:1
+trades: an **atomic diff-pair rip-up/relief transaction** (A2, #4255) so a
+committed "P-routed / N-stranded" state is unrepresentable, plus a
+**discrete `BundlePlan` allocator with HARD (foreign-net keep-out) per-member
+lane reservation** (A3, #4256).  A4 (#4257) wired both through all three
+negotiated entry points (`route_all`, `route_all_negotiated`,
+`TwoPhaseRouter`) behind the default-OFF `--bundle-river-planner`
+(`enable_bundle_river_planner`) flag and ran the board-07 acceptance gate.
+
+**Honest outcome: the TMDS opens do NOT close; the residual is
+placement-bound.**  A solo seed-42 A/B on one host (C++ backend built,
+`--deterministic-budget`, `PYTHONHASHSEED=42`) measured:
+
+| Run | Reach | Open set |
+|-----|-------|----------|
+| flag **OFF** (default / shipping) | **26/31** | `DQ3`, `DQ4`, `MIPI_DAT0_N`, `TMDS_D0_N`, `TMDS_D1_N` |
+| flag **ON** (`--bundle-river-planner`) | **23/31** | the 5 above **+** `MIPI_CLK_N`, `TMDS_D0_P`, `TMDS_D1_P` |
+
+The reason is the load-bearing A3 finding, now re-confirmed against the
+committed placement: the allocator returns the HDMI TMDS bundle
+**FEASIBLE with 6 trivial in-order OUTER lanes and 0 via-hops** — the two
+facing rows (J2 / U4) carry `D0..D2` co-oriented, so there is **no
+forced-crossing contention for the allocator to resolve**.  Reserving the
+resulting HARD lanes (12 keep-out lanes / 3780 grid cells across the TMDS
+and MIPI bundles) therefore does not open the stuck TMDS N-legs; it only
+walls off cells the congested single-ended negotiator needed, stranding
+the *partners* (`TMDS_D0_P`, `TMDS_D1_P`, `MIPI_CLK_N`) — a **regression**,
+not a gain.
+
+Conclusion: `TMDS_D0_N` / `TMDS_D1_N` are **`PLACEMENT_BOUND`**, not
+coupling-contention-bound.  No HARD-lane reservation closes them; the
+residual is the same "a part must move" limit as `DQ3` / `DQ4` /
+`MIPI_DAT0_N`, tracked under **Track B / #4253** (placement rework).  The
+board-07 reach is therefore **unchanged at 26/31** and **the committed
+routed artifact is not refreshed** (the flag stays OFF by default and
+flag-off is byte-identical to pre-A4 `main`).  Track A still ships its
+real deliverable — the general, verified coupled-bundle capability (atomic
+pair transaction + discrete allocator + HARD lane reservation, exercised
+end-to-end from all three negotiated entry points in
+`tests/router/test_bundle_plan_three_path_integration.py`) — available for
+future geometries where a bundle *is* crossing-contended, behind the
+default-OFF flag so production routing is unperturbed.
+
 ### Required class of fix (follow-up, out of scope here)
 
 None of the four gaps is a knob the single-ended negotiated router can
