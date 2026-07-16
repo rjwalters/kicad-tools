@@ -969,6 +969,13 @@ class Autorouter:
         # (see ``_apply_byte_lane_inner_priority`` / ``bundle_river.py``).
         self.enable_bundle_river_planner = False
 
+        # Issue #4256 (A3, Track A): the most recent discrete ``BundlePlan``
+        # per coupled group (keyed by group name), populated by
+        # ``_reserve_bundle_plan_lanes`` when ``enable_bundle_river_planner``
+        # is set.  Exposed for A4 wiring + the board-07 feasibility
+        # measurement (feasible vs explicit "infeasible" verdict).
+        self._last_bundle_plans: dict[str, Any] = {}
+
         # Issue #4084 (Phase 1, epic #4049): monotonic feasibility
         # certificate + constructive escape ordering (Tomioka & Takahashi,
         # ASP-DAC 2006).  OFF by default, following the #4051 /
@@ -5425,6 +5432,32 @@ class Autorouter:
                         exc_info=True,
                     )
 
+                # Issue #4256 (A3): the discrete BundlePlan allocator + HARD
+                # per-member lane reservation.  Scoped TMDS-only-first: it
+                # only fires for a coupled (diff-pair-bearing) group so the
+                # single-ended DDR byte — whose C++ corridor honouring #4079
+                # measured to regress — is untouched.  Advisory: any failure
+                # degrades to the via-hop-only behaviour above.
+                try:
+                    self._reserve_bundle_plan_lanes(
+                        escape=escape,
+                        primary_ref=primary_ref,
+                        comp_pad_count=comp_pad_count,
+                        primary_net_to_pad=net_to_pad,
+                        sorted_nets=sorted_nets,
+                        vertical_row=(y_span >= x_span),
+                        cx=cx,
+                        cy=cy,
+                        grp_name=grp_name,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Bundle-plan allocator failed for group %s; "
+                        "continuing without HARD per-member lanes",
+                        grp_name,
+                        exc_info=True,
+                    )
+
         # Issue #4084 (Phase 1, epic #4049): monotonic feasibility
         # certificate + constructive ordering (Tomioka & Takahashi,
         # ASP-DAC 2006).  This is the *untried lever* the three prior
@@ -5733,6 +5766,202 @@ class Autorouter:
             grp_name,
             len(inversions),
             len(losers),
+            reserved,
+        )
+        return reserved
+
+    def _build_coupled_group(
+        self,
+        *,
+        primary_ref: str,
+        comp_pad_count: dict[str, list[tuple[int, float, float]]],
+        primary_net_to_pad: dict[int, tuple[float, float]],
+        sorted_nets: list[int],
+        vertical_row: bool,
+        grp_name: str,
+    ) -> Any:
+        """Assemble a ``CoupledGroup`` from a detected byte-lane group.
+
+        Issue #4256 (A3).  Resolves the secondary facing component (same rule
+        as ``_reserve_bundle_river_via_hops``), matches each net's primary +
+        secondary projections, and links diff-pair partners by the ``_P`` /
+        ``_N`` net-name convention among the group's members (TMDS
+        ``TMDS_D0_P`` <-> ``TMDS_D0_N``).  Only nets present on BOTH facing
+        columns are included, so the result is the clean matched bus the
+        allocator requires.
+
+        Returns ``None`` when there is no secondary row, or when the group
+        carries no diff-pair partner (the TMDS-only-first scope guard: a
+        single-ended byte lane such as the DDR DQ byte is left to the
+        Python-only via-hop path and never gets HARD C++-mirrored lanes,
+        preserving #4079's measured board-07 result).
+        """
+        from .bundle_river import CoupledGroup, CoupledMember
+
+        proj_index = 1 if vertical_row else 0
+
+        secondary_candidates = {
+            ref: pads for ref, pads in comp_pad_count.items() if ref != primary_ref
+        }
+        if not secondary_candidates:
+            return None
+        secondary_ref = max(
+            secondary_candidates.keys(),
+            key=lambda r: (len(secondary_candidates[r]), -ord(r[0]) if r else 0),
+        )
+        secondary_net_to_pad: dict[int, tuple[float, float]] = {}
+        for nid, px, py in secondary_candidates[secondary_ref]:
+            if nid not in secondary_net_to_pad:
+                secondary_net_to_pad[nid] = (px, py)
+
+        # Nets present on BOTH rows (the matched bus), in primary order.
+        matched = [
+            nid for nid in sorted_nets if nid in primary_net_to_pad and nid in secondary_net_to_pad
+        ]
+        if not matched:
+            return None
+
+        # Resolve diff-pair partners by the _P/_N convention among members.
+        name_by_id = {nid: self.net_names.get(nid, str(nid)) for nid in matched}
+        id_by_name = {name: nid for nid, name in name_by_id.items()}
+
+        def _partner_id(nid: int) -> int | None:
+            name = name_by_id[nid]
+            if name.endswith("_P"):
+                cand = name[:-2] + "_N"
+            elif name.endswith("_N"):
+                cand = name[:-2] + "_P"
+            else:
+                return None
+            return id_by_name.get(cand)
+
+        members: list[Any] = []
+        has_pair = False
+        for nid in matched:
+            partner = _partner_id(nid)
+            if partner is not None:
+                has_pair = True
+            members.append(
+                CoupledMember(
+                    net_id=nid,
+                    net_name=name_by_id[nid],
+                    primary_projection=primary_net_to_pad[nid][proj_index],
+                    secondary_projection=secondary_net_to_pad[nid][proj_index],
+                    pair_partner_id=partner,
+                )
+            )
+
+        # TMDS-only-first scope guard: require at least one diff pair.
+        if not has_pair:
+            return None
+
+        return CoupledGroup(group_name=grp_name, members=tuple(members))
+
+    def _reserve_bundle_plan_lanes(
+        self,
+        *,
+        escape: Any,
+        primary_ref: str,
+        comp_pad_count: dict[str, list[tuple[int, float, float]]],
+        primary_net_to_pad: dict[int, tuple[float, float]],
+        sorted_nets: list[int],
+        vertical_row: bool,
+        cx: float,
+        cy: float,
+        grp_name: str,
+    ) -> int:
+        """Allocate a ``BundlePlan`` and reserve its per-member HARD lanes.
+
+        Issue #4256 (A3).  Builds the coupled group, runs the discrete
+        allocator (:func:`bundle_river.allocate_bundle_plan`), stores the
+        verdict on ``self._last_bundle_plans[grp_name]`` (feasible or an
+        explicit "infeasible" result — never a silent partial), and, when
+        feasible, reserves one **HARD** (foreign-net keep-out, C++-mirrored)
+        inner-layer lane per member via
+        ``escape.reserve_inner_corner_lane_corridor(soft=False,
+        mirror_to_cpp=True)``.
+
+        The HARD flip (vs the SOFT single-ended default) is the load-bearing
+        A3 change: a bundle-plan lane must be a keep-out foreign nets cannot
+        colonise (``is_reserved_excluding`` on the C++ grid), which is what
+        removes the greedy N-1 contention by construction.  The existing
+        single-ended ``reserve_inner_corner_lane_corridor`` call in the
+        detection scan stays ``soft=True, mirror_to_cpp=False`` — untouched.
+
+        Returns the number of HARD lanes reserved (0 when the group is not a
+        coupled diff-pair bundle, or the plan is infeasible).
+        """
+        from .bundle_river import allocate_bundle_plan
+
+        group = self._build_coupled_group(
+            primary_ref=primary_ref,
+            comp_pad_count=comp_pad_count,
+            primary_net_to_pad=primary_net_to_pad,
+            sorted_nets=sorted_nets,
+            vertical_row=vertical_row,
+            grp_name=grp_name,
+        )
+        if group is None:
+            return 0
+
+        # Inner via-hop budget: on board 07's 4-layer tier-1 stack the inner
+        # copper layers are PLANES, so B.Cu is the only alternate routing
+        # surface -> a realistic budget of 1.
+        plan = allocate_bundle_plan(group, inner_lane_budget=1)
+        self._last_bundle_plans[grp_name] = plan
+
+        if plan.infeasible:
+            logger.info(
+                "Bundle-plan allocator (group %s): INFEASIBLE - %s",
+                grp_name,
+                plan.reason,
+            )
+            return 0
+
+        # Feasible: reserve one HARD lane per member.  Launch outward from
+        # the primary centroid, perpendicular to the row (same convention as
+        # the single-ended inner-corner reservation).
+        reserved = 0
+        for lane in plan.lanes:
+            pad_obj = None
+            for _pkey, p in self.pads.items():
+                if p.ref == primary_ref and p.net is not None and int(p.net) == lane.net_id:
+                    pad_obj = p
+                    break
+            if pad_obj is None:
+                continue
+            px, py = primary_net_to_pad.get(lane.net_id, (pad_obj.x, pad_obj.y))
+            if vertical_row:
+                launch_dx = 1.0 if px >= cx else -1.0
+                launch_dy = 0.0
+            else:
+                launch_dx = 0.0
+                launch_dy = 1.0 if py >= cy else -1.0
+            try:
+                count = escape.reserve_inner_corner_lane_corridor(
+                    pad=pad_obj,
+                    launch_dx=launch_dx,
+                    launch_dy=launch_dy,
+                    soft=False,
+                    mirror_to_cpp=True,
+                )
+            except Exception:
+                logger.debug(
+                    "Bundle-plan HARD lane reservation failed for net %d (group %s); continuing",
+                    lane.net_id,
+                    grp_name,
+                    exc_info=True,
+                )
+                continue
+            if count > 0:
+                reserved += 1
+
+        logger.debug(
+            "Bundle-plan allocator (group %s): FEASIBLE, %d member lanes, "
+            "%d inner via-hop lane(s); reserved %d HARD lanes",
+            grp_name,
+            len(plan.lanes),
+            plan.inner_lanes_required,
             reserved,
         )
         return reserved

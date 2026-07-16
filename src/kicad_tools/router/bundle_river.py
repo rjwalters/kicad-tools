@@ -218,3 +218,377 @@ def via_hop_loser_nets(inversions: list[InvertedPair]) -> list[int]:
             seen.add(pair.loser_net_id)
             out.append(pair.loser_net_id)
     return out
+
+
+# ===========================================================================
+# Issue #4256 (A3, Track A / epic #4243): the discrete BundlePlan allocator.
+#
+# A2 (#4255, merged) made a diff-pair rip-up/relief transaction atomic so a
+# committed "P-routed / N-stranded" state is unrepresentable.  A3 adds the
+# multi-net half: a DISCRETE, combinatorial corridor allocator that assigns
+# simultaneously-feasible escape lanes to a whole ``CoupledGroup`` (the TMDS
+# D0/D1/D2 bundle = 6 nets) BEFORE any A* search, so greedy N-1 contention is
+# removed by construction.
+#
+# Why discrete, not joint A*: #4065 proved even the 2-net coupled joint
+# search basin-floods identically in Python and C++; a 6-net joint search is
+# exponentially worse.  The multi-net reasoning is ordered interval packing
+# over the shared escape strip + an inner-layer via-hop budget for the
+# crossing ("losing") nets, solved by exact graph colouring with
+# backtracking over the tiny (~6) member set — NOT grid A*.
+#
+# The allocator emits either a simultaneously-feasible ``BundlePlan`` (every
+# member gets a lane; no two lanes share a cell on a layer) OR an explicit
+# ``infeasible`` verdict — NEVER a silent partial.  Infeasibility is a
+# first-class output: if the committed placement over-subscribes the inner
+# via-hop budget, the honest answer is "no feasible joint assignment exists
+# at this placement," which is exactly the signal A4 needs before it chases a
+# topological impossibility.
+# ===========================================================================
+
+# Lane layer tags.  A lane lives either on the shared outer escape strip
+# (F.Cu) or on a reserved inner-layer via-hop channel (a "losing" net that
+# dips under its crossing partner).
+LANE_LAYER_OUTER = "outer"
+LANE_LAYER_INNER = "inner"
+
+
+@dataclass(frozen=True)
+class CoupledMember:
+    """One net of a ``CoupledGroup`` (a length-match / diff-pair bundle).
+
+    Attributes:
+        net_id: The net's integer id.
+        net_name: The net's name (used to match the two facing rows and to
+            break projection ties deterministically).
+        primary_projection: The member's 1-D coordinate along the primary
+            facing column's long axis (only relative order matters).
+        secondary_projection: The same net's 1-D coordinate on the mirrored
+            (secondary) facing column.  A member whose relative order flips
+            between the two columns must cross its partner (an inversion).
+        pair_partner_id: For a diff-pair member, the net id of its partner
+            leg (``None`` for a single-ended member).  The allocator carries
+            this so a plan assigns lanes to BOTH legs or NEITHER — the
+            coupling constraint that, together with A2's atomic transaction,
+            makes a committed "P-routed / N-stranded" state unrepresentable.
+    """
+
+    net_id: int
+    net_name: str
+    primary_projection: float
+    secondary_projection: float
+    pair_partner_id: int | None = None
+
+
+@dataclass(frozen=True)
+class CoupledGroup:
+    """The set of nets allocated together (e.g. TMDS D0/D1/D2 = 6 nets).
+
+    A ``CoupledGroup`` is the unit the discrete allocator reasons over: its
+    members' primary/secondary projections determine the inversion set, and
+    its diff-pair links determine the atomic coupling constraint.
+    """
+
+    group_name: str
+    members: tuple[CoupledMember, ...]
+
+    def primary_row(self) -> list[RowMember]:
+        """The primary facing column as ``RowMember`` projections."""
+        return [RowMember(m.net_id, m.net_name, m.primary_projection) for m in self.members]
+
+    def secondary_row(self) -> list[RowMember]:
+        """The mirrored (secondary) facing column as ``RowMember`` projections."""
+        return [RowMember(m.net_id, m.net_name, m.secondary_projection) for m in self.members]
+
+
+@dataclass(frozen=True)
+class EscapeLane:
+    """One member's assigned escape lane in a ``BundlePlan``.
+
+    Attributes:
+        net_id: The owning net's id.
+        net_name: The owning net's name.
+        layer: ``LANE_LAYER_OUTER`` (shared F.Cu escape strip) or
+            ``LANE_LAYER_INNER`` (a reserved inner-layer via-hop channel for
+            a crossing/losing net).
+        order_index: The lane's ordered slot WITHIN its layer (the interval
+            packing position).  Slots are unique per layer, so no two lanes
+            share a cell on the same layer — the feasibility invariant.
+        via_hop: ``True`` iff this is a losing net that dips to the inner
+            layer to pass under its crossing partner.
+        pair_partner_id: The diff-pair partner leg (``None`` if single-ended).
+    """
+
+    net_id: int
+    net_name: str
+    layer: str
+    order_index: int
+    via_hop: bool
+    pair_partner_id: int | None = None
+
+
+@dataclass(frozen=True)
+class BundlePlan:
+    """The allocator's verdict for one ``CoupledGroup``.
+
+    Either ``feasible`` (every member carries an ``EscapeLane`` and no two
+    lanes share a cell on a layer) or infeasible (``lanes`` empty, ``reason``
+    explains the over-subscription).  There is no partial state: a feasible
+    plan lanes EVERY member; an infeasible plan lanes NONE — this is the
+    "both legs or neither" guarantee at plan granularity.
+    """
+
+    group_name: str
+    feasible: bool
+    lanes: tuple[EscapeLane, ...] = ()
+    reason: str = ""
+    inner_lanes_required: int = 0
+    inner_lane_budget: int = 0
+
+    @property
+    def infeasible(self) -> bool:
+        """Convenience inverse of ``feasible``."""
+        return not self.feasible
+
+    def lane_for(self, net_id: int) -> EscapeLane | None:
+        """Return the lane assigned to ``net_id`` (``None`` if unassigned)."""
+        for lane in self.lanes:
+            if lane.net_id == net_id:
+                return lane
+        return None
+
+    def via_hop_lanes(self) -> list[EscapeLane]:
+        """The lanes that dip to the inner layer (losing nets)."""
+        return [lane for lane in self.lanes if lane.via_hop]
+
+    @classmethod
+    def infeasible_plan(
+        cls,
+        group_name: str,
+        reason: str,
+        *,
+        inner_lanes_required: int = 0,
+        inner_lane_budget: int = 0,
+    ) -> BundlePlan:
+        """Build an explicit infeasibility verdict (no lanes)."""
+        return cls(
+            group_name=group_name,
+            feasible=False,
+            lanes=(),
+            reason=reason,
+            inner_lanes_required=inner_lanes_required,
+            inner_lane_budget=inner_lane_budget,
+        )
+
+
+def _min_graph_colouring(
+    nodes: list[int],
+    edges: list[tuple[int, int]],
+) -> dict[int, int]:
+    """Exact minimum vertex colouring by backtracking (tiny N only).
+
+    Assigns each node a colour in ``0..k-1`` such that no edge joins two
+    same-coloured nodes, using the MINIMUM number of colours ``k``.  For the
+    coupled-group allocator the node set is a handful of "losing" nets and
+    the edges are their mutual crossings, so an exact backtracking search
+    (iterative deepening on ``k``) is instant and gives an HONEST inner-layer
+    lane count for the feasibility verdict — a greedy upper bound could
+    over-report and declare a feasible bundle infeasible.
+
+    ``nodes`` order is respected (callers pass a deterministic order), so the
+    colouring is reproducible.
+    """
+    if not nodes:
+        return {}
+    adj: dict[int, set[int]] = {n: set() for n in nodes}
+    for a, b in edges:
+        if a in adj and b in adj and a != b:
+            adj[a].add(b)
+            adj[b].add(a)
+
+    def _try(i: int, k: int, colouring: dict[int, int]) -> bool:
+        if i == len(nodes):
+            return True
+        node = nodes[i]
+        for colour in range(k):
+            if all(colouring.get(nb) != colour for nb in adj[node]):
+                colouring[node] = colour
+                if _try(i + 1, k, colouring):
+                    return True
+                del colouring[node]
+        return False
+
+    for k in range(1, len(nodes) + 1):
+        colouring: dict[int, int] = {}
+        if _try(0, k, colouring):
+            return colouring
+    # Unreachable (k == len(nodes) always succeeds), but keep the type total.
+    return {n: i for i, n in enumerate(nodes)}
+
+
+def allocate_bundle_plan(
+    group: CoupledGroup,
+    *,
+    inner_lane_budget: int = 1,
+) -> BundlePlan:
+    """Discretely allocate simultaneously-feasible escape lanes for a group.
+
+    This is the multi-net half of Track A (#4256): a combinatorial corridor
+    allocator that runs ONCE per coupled group (not a hot A* loop).  It
+    formulates escape-lane assignment as ordered interval packing over the
+    shared outer escape strip plus an inner-layer via-hop budget for the
+    crossing ("losing") nets, and reasons over the tiny member set exactly.
+
+    Algorithm:
+
+    1. **Clean-bus guard.**  If the two facing rows are not a clean
+       one-to-one name-matched bus (``compute_row_permutation`` is ``None``),
+       return an explicit infeasible verdict — the same #4053 non-goal
+       discipline (partial / non-matched buses belong to the shelved #3673
+       general planner, not here).
+    2. **Coupling guard.**  Every referenced diff-pair partner must be a
+       member of the group; otherwise the group cannot be allocated
+       atomically (a leg would be routed elsewhere) — infeasible.
+    3. **Planar case.**  When the inversion set is empty (a co-oriented
+       bundle), assign trivial in-order lanes on the outer strip — no via
+       hops.  This is the over-trigger guard: a planar bundle must not
+       reserve inner-layer channels.
+    4. **Reversal case.**  Each crossing pair's ``loser`` (``choose_via_hop_loser``)
+       must dip to the inner layer.  Two losing nets that ALSO cross each
+       other cannot share one inner lane, so the losers' mutual-crossing
+       graph is coloured exactly: the colour count is the number of inner
+       via-hop lanes the plan needs.  If that exceeds ``inner_lane_budget``
+       the bundle is genuinely over-subscribed at this placement →
+       **infeasible** (a first-class output, NOT a silent partial).  The
+       non-losing nets keep the outer strip in projection order (they no
+       longer cross anything, so the interval packing is trivially conflict
+       free), and each losing net takes its coloured inner lane.
+
+    Args:
+        group: The coupled group (TMDS bundle, etc.) to allocate.
+        inner_lane_budget: How many independent inner-layer via-hop channels
+            are available at this placement.  On board 07's 4-layer tier-1
+            stack the inner copper layers are PLANES, so the only alternate
+            routing surface is B.Cu → a realistic budget of ``1``.
+
+    Returns:
+        A feasible ``BundlePlan`` (every member laned, no two lanes sharing a
+        cell on a layer) or an explicit infeasible ``BundlePlan``.
+    """
+    members = list(group.members)
+    if len(members) < 2:
+        return BundlePlan.infeasible_plan(
+            group.group_name,
+            f"coupled group has {len(members)} member(s); nothing to allocate",
+        )
+
+    primary_row = group.primary_row()
+    secondary_row = group.secondary_row()
+
+    perm = compute_row_permutation(primary_row, secondary_row)
+    if perm is None:
+        return BundlePlan.infeasible_plan(
+            group.group_name,
+            "coupled group is not a clean one-to-one name-matched bus "
+            "(partial / non-matched reversals are out of scope for A3)",
+        )
+
+    ids = {m.net_id for m in members}
+    for m in members:
+        if m.pair_partner_id is not None and m.pair_partner_id not in ids:
+            return BundlePlan.infeasible_plan(
+                group.group_name,
+                f"diff-pair partner {m.pair_partner_id} of net {m.net_id} "
+                "is not a member of the coupled group; cannot allocate atomically",
+            )
+
+    # Interval-packing order on the shared strip = primary projection order.
+    primary_sorted = sorted(members, key=lambda m: (m.primary_projection, m.net_name))
+
+    inversions = compute_facing_row_inversions(primary_row, secondary_row)
+
+    if not inversions:
+        # Planar bundle: trivial in-order lanes, no inner via hops.
+        lanes = tuple(
+            EscapeLane(
+                net_id=m.net_id,
+                net_name=m.net_name,
+                layer=LANE_LAYER_OUTER,
+                order_index=i,
+                via_hop=False,
+                pair_partner_id=m.pair_partner_id,
+            )
+            for i, m in enumerate(primary_sorted)
+        )
+        return BundlePlan(
+            group_name=group.group_name,
+            feasible=True,
+            lanes=lanes,
+            inner_lanes_required=0,
+            inner_lane_budget=inner_lane_budget,
+        )
+
+    # Reversal: the loser of each crossing dips to an inner via-hop lane.
+    losers = set(via_hop_loser_nets(inversions))
+
+    # Inner-layer conflict graph: two losers that ALSO cross each other
+    # cannot share one inner lane.
+    inner_conflicts = [
+        (p.net_a_id, p.net_b_id)
+        for p in inversions
+        if p.net_a_id in losers and p.net_b_id in losers
+    ]
+    # Colour the losers in a deterministic (primary-projection) order.
+    loser_order = [m.net_id for m in primary_sorted if m.net_id in losers]
+    colouring = _min_graph_colouring(loser_order, inner_conflicts)
+    inner_lanes_required = (max(colouring.values()) + 1) if colouring else 0
+
+    if inner_lanes_required > inner_lane_budget:
+        return BundlePlan.infeasible_plan(
+            group.group_name,
+            f"{inner_lanes_required} inner via-hop lane(s) required to resolve "
+            f"{len(inner_conflicts)} mutual crossing(s) among {len(losers)} "
+            f"losing net(s), but the inner-layer via-hop budget is "
+            f"{inner_lane_budget}: no simultaneously-feasible single-strip "
+            "assignment exists at this placement",
+            inner_lanes_required=inner_lanes_required,
+            inner_lane_budget=inner_lane_budget,
+        )
+
+    # Feasible.  Non-losers hold the outer strip in projection order (they
+    # no longer cross anything); losers take their coloured inner lane.
+    partner_of = {m.net_id: m.pair_partner_id for m in members}
+    lanes_list: list[EscapeLane] = []
+    outer_index = 0
+    for m in primary_sorted:
+        if m.net_id in losers:
+            lanes_list.append(
+                EscapeLane(
+                    net_id=m.net_id,
+                    net_name=m.net_name,
+                    layer=LANE_LAYER_INNER,
+                    order_index=colouring[m.net_id],
+                    via_hop=True,
+                    pair_partner_id=partner_of.get(m.net_id),
+                )
+            )
+        else:
+            lanes_list.append(
+                EscapeLane(
+                    net_id=m.net_id,
+                    net_name=m.net_name,
+                    layer=LANE_LAYER_OUTER,
+                    order_index=outer_index,
+                    via_hop=False,
+                    pair_partner_id=partner_of.get(m.net_id),
+                )
+            )
+            outer_index += 1
+
+    return BundlePlan(
+        group_name=group.group_name,
+        feasible=True,
+        lanes=tuple(lanes_list),
+        inner_lanes_required=inner_lanes_required,
+        inner_lane_budget=inner_lane_budget,
+    )
