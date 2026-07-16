@@ -7862,6 +7862,237 @@ def _offboard_preflight(pcb_path: Path) -> int:
     return 2
 
 
+# ---------------------------------------------------------------------------
+# Issue #4263: analytical --dry-run grid/cell/budget plan.
+#
+# A plain ``route --dry-run`` used to *construct* the full RoutingGrid (inside
+# ``load_pcb_for_routing``) before it could report anything, so on a large
+# board it ran >45s and got OOM-killed -- exactly when the user is trying to
+# discover whether the board even fits the budget.  These helpers compute the
+# same plan the user wants (selected grid, cell count, memory estimate, budget
+# verdict, finer/coarser lattice candidates) using pure selection arithmetic
+# (``auto_select_grid_resolution`` + ``estimate_memory_bytes``), allocating NO
+# grid, so the answer returns in well under a second regardless of board size.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DryRunGridCandidate:
+    """One lattice-aligned candidate grid in the analytical dry-run plan.
+
+    All fields are derived analytically -- no RoutingGrid is allocated.
+    """
+
+    resolution: float
+    cols: int
+    rows: int
+    cells: int
+    est_memory_bytes: int
+    fits: bool
+    off_grid_pads: int
+
+
+@dataclass
+class DryRunGridPlan:
+    """Analytical grid/cell/budget plan for ``route --dry-run`` (issue #4263).
+
+    Every field is computed from board dimensions + pad positions + the
+    grid-selection arithmetic, without constructing a ``RoutingGrid``.
+    """
+
+    board_width: float
+    board_height: float
+    resolution: float
+    num_layers: int
+    cols: int
+    rows: int
+    cells: int
+    est_memory_bytes: int
+    max_cells: int
+    fits: bool
+    auto_resolution: float
+    grid_explicit: bool
+    memory_capped: bool
+    memory_forced_unsafe_grid: bool
+    candidates: list[DryRunGridCandidate]
+
+
+def _grid_dims_for(width: float, height: float, resolution: float) -> tuple[int, int]:
+    """Canonical grid dimensions for a board (``grid.py:739-740`` formula).
+
+    ``cols = int(width / res) + 1``, ``rows = int(height / res) + 1``.  Kept
+    in one place so the analytical dry-run plan matches the real grid exactly.
+    """
+    cols = int(width / resolution) + 1
+    rows = int(height / resolution) + 1
+    return cols, rows
+
+
+def compute_dry_run_grid_plan(
+    pcb_path: Path,
+    selected_grid: float,
+    clearance: float,
+    num_layers: int,
+    max_cells: int,
+) -> DryRunGridPlan | None:
+    """Compute the analytical grid/cell/budget plan for ``--dry-run``.
+
+    Reuses the allocation-free selection math (``auto_select_grid_resolution``)
+    and the canonical cells/memory formulas.  Constructs **no** RoutingGrid, so
+    it returns in well under a second and cannot OOM on large boards.
+
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+        selected_grid: The resolved grid resolution in mm (explicit ``--grid``
+            value or the auto-selected float).
+        clearance: Trace clearance in mm (feeds the candidate DRC filter).
+        num_layers: Number of routing layers (``layer_stack.num_layers``).
+        max_cells: Cell budget from ``--max-cells``.
+
+    Returns:
+        A ``DryRunGridPlan``, or ``None`` if the board has no detectable
+        outline (in which case the caller should fall through to the normal
+        load path rather than guess dimensions).
+    """
+    from kicad_tools.acceleration.backend import estimate_memory_bytes
+    from kicad_tools.router.io import (
+        auto_select_grid_resolution,
+        extract_board_dimensions,
+        extract_pad_positions,
+    )
+
+    dims = extract_board_dimensions(pcb_path)
+    if dims is None:
+        return None
+    board_width, board_height = dims
+
+    pads = extract_pad_positions(pcb_path)
+
+    # Pure pad + area arithmetic -- allocates NO grid (io.py:1097).  Used both
+    # for the finer/coarser candidate lattice and to report what "auto" would
+    # pick alongside an explicit --grid.
+    selection = auto_select_grid_resolution(
+        pads=pads,
+        clearance=clearance,
+        board_width=board_width,
+        board_height=board_height,
+        max_cells=max_cells,
+    )
+
+    # Off-grid counts keyed by resolution, from the selector's candidate trials.
+    off_grid_by_res = dict(selection.candidates_tried)
+
+    def _make_candidate(resolution: float) -> DryRunGridCandidate:
+        cols, rows = _grid_dims_for(board_width, board_height, resolution)
+        cells = cols * rows * num_layers
+        return DryRunGridCandidate(
+            resolution=resolution,
+            cols=cols,
+            rows=rows,
+            cells=cells,
+            est_memory_bytes=estimate_memory_bytes(cols, rows, num_layers),
+            fits=cells <= max_cells,
+            off_grid_pads=off_grid_by_res.get(resolution, -1),
+        )
+
+    # Candidate lattice: the canonical PCB grid lattice (io.py:1158) restricted
+    # to DRC-compliant resolutions (``<= clearance``, the selector's own
+    # ``valid_candidates`` filter at io.py:1186), unioned with the selected and
+    # auto-recommended resolutions so the report always brackets the selection
+    # with its finer/coarser neighbours.  The memory filter is intentionally
+    # NOT applied here -- showing coarser grids that *do* fit the budget is the
+    # whole point of the finer/coarser candidate list.
+    canonical_lattice = [0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508]
+    candidate_set = {res for res in canonical_lattice if res <= clearance}
+    candidate_set.add(selected_grid)
+    candidate_set.add(selection.resolution)
+    candidate_resolutions = sorted(candidate_set, reverse=True)
+    candidates = [_make_candidate(res) for res in candidate_resolutions]
+
+    selected = _make_candidate(selected_grid)
+
+    return DryRunGridPlan(
+        board_width=board_width,
+        board_height=board_height,
+        resolution=selected_grid,
+        num_layers=num_layers,
+        cols=selected.cols,
+        rows=selected.rows,
+        cells=selected.cells,
+        est_memory_bytes=selected.est_memory_bytes,
+        max_cells=max_cells,
+        fits=selected.fits,
+        auto_resolution=selection.resolution,
+        grid_explicit=abs(selected_grid - selection.resolution) > 1e-9,
+        memory_capped=selection.memory_capped,
+        memory_forced_unsafe_grid=selection.memory_forced_unsafe_grid,
+        candidates=candidates,
+    )
+
+
+def format_dry_run_grid_plan(plan: DryRunGridPlan) -> str:
+    """Render a ``DryRunGridPlan`` as the human-readable dry-run report."""
+    bar = "=" * 60
+
+    def _mb(nbytes: int) -> str:
+        return f"{nbytes / 1e6:,.1f} MB"
+
+    verdict = "FITS" if plan.fits else "EXCEEDS"
+    if plan.fits:
+        budget_line = (
+            f"Budget:         max-cells={plan.max_cells:,} -> FITS "
+            f"({plan.max_cells - plan.cells:,} cells to spare)"
+        )
+    else:
+        budget_line = (
+            f"Budget:         max-cells={plan.max_cells:,} -> EXCEEDS "
+            f"by {plan.cells - plan.max_cells:,} cells"
+        )
+
+    if plan.grid_explicit:
+        auto_line = f"Auto would use: {plan.auto_resolution}mm"
+    else:
+        cap = " (memory-capped)" if plan.memory_capped else ""
+        auto_line = f"Grid source:    auto-selected{cap}"
+
+    lines = [
+        bar,
+        "Dry Run - Analytical Grid Plan (no grid allocated)",
+        bar,
+        f"Board:          {plan.board_width:g}mm x {plan.board_height:g}mm",
+        f"Selected grid:  {plan.resolution}mm",
+        f"Grid cells:     {plan.cols:,} x {plan.rows:,} x {plan.num_layers} = {plan.cells:,} cells",
+        f"Est. memory:    {_mb(plan.est_memory_bytes)} (18 bytes/cell)",
+        budget_line,
+        auto_line,
+    ]
+
+    if plan.memory_forced_unsafe_grid:
+        lines.append(
+            "Warning:        memory cap forced a grid coarser than "
+            "clearance/2 (DRC-short risk; see --allow-unsafe-grid)"
+        )
+
+    lines.append("")
+    lines.append("Lattice-aligned candidates (coarse -> fine):")
+    for cand in plan.candidates:
+        marker = " <- selected" if abs(cand.resolution - plan.resolution) <= 1e-9 else ""
+        rel = ""
+        if not marker:
+            rel = "finer " if cand.resolution < plan.resolution else "coarser"
+        tag = "FITS   " if cand.fits else "EXCEEDS"
+        lines.append(
+            f"  {rel:7s} {cand.resolution:<8g}mm  "
+            f"{cand.cols:,} x {cand.rows:,} x {plan.num_layers} = {cand.cells:,} cells  "
+            f"({_mb(cand.est_memory_bytes)})  {tag}{marker}"
+        )
+
+    lines.append(bar)
+    lines.append(f"Verdict: {plan.resolution}mm grid {verdict} the {plan.max_cells:,}-cell budget.")
+    lines.append(bar)
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for route command."""
     parser = argparse.ArgumentParser(
@@ -9838,6 +10069,34 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  Signal layers:  {', '.join(signal_layers)}")
             if plane_layers:
                 print(f"  Plane layers:   {', '.join(plane_layers)}")
+
+    # Issue #4263: analytical --dry-run short-circuit.
+    #
+    # A plain ``--dry-run`` only needs the strategy/grid selection verdict, so
+    # report it analytically and return BEFORE ``load_pcb_for_routing`` (which
+    # allocates the full RoutingGrid at route_cmd's load site and, on a large
+    # board, is the >45s / OOM step).  ``args.grid`` is already a float here
+    # (explicit value, or resolved from ``--grid auto`` above) and
+    # ``layer_stack`` is known, so the plan reuses the allocation-free
+    # selection math without touching the router.
+    #
+    # ``--analyze --dry-run`` is intentionally left to the downstream
+    # complexity/routability path (route_cmd:~10183), which needs a loaded
+    # ``router``; only the plain dry run short-circuits here.
+    if args.dry_run and not args.analyze:
+        dry_run_plan = compute_dry_run_grid_plan(
+            pcb_path=pcb_path,
+            selected_grid=args.grid,
+            clearance=args.clearance,
+            num_layers=layer_stack.num_layers,
+            max_cells=getattr(args, "max_cells", 500_000),
+        )
+        if dry_run_plan is not None:
+            if not quiet:
+                print(format_dry_run_grid_plan(dry_run_plan))
+            return 0
+        # No detectable board outline: fall through to the normal load path
+        # rather than guess dimensions (the pre-#4263 dry-run behavior).
 
     # Load PCB
     if not quiet:
