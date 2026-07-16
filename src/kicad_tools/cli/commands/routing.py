@@ -492,6 +492,10 @@ def run_route_command(args) -> int:
         sub_argv.append("--no-cache")
     if getattr(args, "backend", "auto") != "auto":
         sub_argv.extend(["--backend", args.backend])
+    # Issue #4268: forward --route-engine only when non-default so a default
+    # (grid) run stays byte-identical to the pre-mesh sub-invocation.
+    if getattr(args, "route_engine", "grid") != "grid":
+        sub_argv.extend(["--route-engine", args.route_engine])
     # Issue #2589: forward --seed for deterministic runs.  Default is None
     # (router uses os.urandom-derived state, existing behaviour).
     if getattr(args, "seed", None) is not None:

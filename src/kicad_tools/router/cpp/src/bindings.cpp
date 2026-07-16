@@ -19,6 +19,11 @@ namespace nb = nanobind;
 using namespace nb::literals;
 using namespace router;
 
+// Defined in mesh.cpp (issue #4268): registers the poly2tri constrained-
+// Delaunay mesh binding onto the module. Kept in its own translation unit so
+// the vendored poly2tri headers stay out of the main bindings compile.
+void register_mesh(nb::module_& m);
+
 NB_MODULE(router_cpp, m) {
     m.doc() = "C++ router core for high-performance PCB routing";
 
@@ -451,4 +456,8 @@ NB_MODULE(router_cpp, m) {
     // "kct build-native" hint.
     m.attr("BUILD_VERSION") = router::ROUTER_CPP_BUILD_VERSION;
     m.def("build_version", []() { return router::ROUTER_CPP_BUILD_VERSION; });
+
+    // Issue #4268: poly2tri constrained-Delaunay mesh binding for the
+    // mesh-router navigation substrate.
+    register_mesh(m);
 }

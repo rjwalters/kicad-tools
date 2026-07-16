@@ -3896,6 +3896,8 @@ def route_with_layer_escalation(
                     edge_clearance=args.edge_clearance,
                     layer_stack=layer_stack,
                     force_python=force_python,
+                    # Issue #4268: thread the mesh-router strategy selector through.
+                    strategy=getattr(args, "route_engine", "grid"),
                     validate_drc=not args.force,
                     strict_drc=False,
                     # Issue #3155: incremental routing.  When set, existing
@@ -4804,6 +4806,8 @@ def route_with_rule_relaxation(
                     edge_clearance=args.edge_clearance,
                     layer_stack=layer_stack,
                     force_python=force_python,
+                    # Issue #4268: thread the mesh-router strategy selector through.
+                    strategy=getattr(args, "route_engine", "grid"),
                     validate_drc=not args.force,
                     strict_drc=False,
                     # Issue #3155: incremental routing (see route_with_layer_escalation).
@@ -6936,6 +6940,8 @@ def route_with_combined_escalation(
                         edge_clearance=args.edge_clearance,
                         layer_stack=layer_stack,
                         force_python=force_python,
+                        # Issue #4268: thread the mesh-router strategy selector through.
+                        strategy=getattr(args, "route_engine", "grid"),
                         validate_drc=not args.force,
                         strict_drc=False,
                         # Issue #3155: incremental routing (see route_with_layer_escalation).
@@ -8728,6 +8734,18 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--route-engine",
+        choices=["grid", "mesh"],
+        default="grid",
+        help=(
+            "Routing substrate (issue #4268), orthogonal to --backend and "
+            "--strategy: 'grid' = uniform-grid A* (default, unchanged); "
+            "'mesh' = navmesh single-net router (poly2tri CDT + funnel + "
+            "clearance-aware 45deg fit). Mesh is P1/experimental: single-net "
+            "only, no multi-net negotiation, capacity, vias or matched routing."
+        ),
+    )
+    parser.add_argument(
         "--no-auto-build-native",
         action="store_true",
         help=(
@@ -10110,6 +10128,8 @@ def main(argv: list[str] | None = None) -> int:
                 edge_clearance=args.edge_clearance,
                 layer_stack=layer_stack,
                 force_python=force_python,
+                # Issue #4268: thread the mesh-router strategy selector through.
+                strategy=getattr(args, "route_engine", "grid"),
                 validate_drc=not args.force,
                 strict_drc=False,  # Only fail on hard constraint (grid > clearance)
                 # Issue #3155: incremental routing (see route_with_layer_escalation).
@@ -10170,6 +10190,8 @@ def main(argv: list[str] | None = None) -> int:
                 edge_clearance=args.edge_clearance,
                 layer_stack=layer_stack,
                 force_python=force_python,
+                # Issue #4268: thread the mesh-router strategy selector through.
+                strategy=getattr(args, "route_engine", "grid"),
                 validate_drc=not args.force,
                 strict_drc=False,
                 load_existing_routes=getattr(args, "preserve_existing", False),
