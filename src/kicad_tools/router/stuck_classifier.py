@@ -72,6 +72,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "StuckClass",
+    "RecommendedAction",
+    "Confidence",
+    "RankedAction",
     "StuckNetDiagnosis",
     "StuckClassifierResult",
     "classify_stuck_nets",
@@ -198,6 +201,56 @@ class StuckClass(Enum):
         }[self.value]
 
 
+class RecommendedAction(Enum):
+    """Closed taxonomy of fix moves the recommendation engine may rank.
+
+    READ-ONLY advice to a human/agent -- the classifier never performs any of
+    these; it only ranks them.  ``DE_REVERSE_BUNDLE`` / ``REORDER_PINS`` are the
+    topology remedies for a self-crossing bus; ``MOVE_PART`` / ``WIDEN_CHANNEL``
+    address genuinely foreign congestion; ``ACCEPT_PLATEAU`` acknowledges a
+    topological limit no placement lever removes.
+    """
+
+    DE_REVERSE_BUNDLE = "de_reverse_bundle"
+    REORDER_PINS = "reorder_pins"
+    WIDEN_CHANNEL = "widen_channel"
+    MOVE_PART = "move_part"
+    ACCEPT_PLATEAU = "accept_plateau"
+
+
+class Confidence(Enum):
+    """How much trust to place in a recommendation.
+
+    * ``HIGH``   -- match group from an explicit source, or a confirmed
+      pad-order crossing proxy (neither available from a bare ``.kicad_pcb``
+      today, so reserved for a future config-threaded caller).
+    * ``MEDIUM`` -- match group inferred from a bus-suffix pattern and the share
+      test fired; the geometry is a heuristic (board-07 lands here).
+    * ``LOW``    -- group inferred from a borderline / high-false-positive suffix
+      pattern (e.g. the generic ``A\\d+`` address bus).
+    """
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+@dataclass
+class RankedAction:
+    """One entry in a ranked fix ladder."""
+
+    action: RecommendedAction
+    rationale: str
+    confidence: Confidence
+
+    def to_dict(self) -> dict:
+        return {
+            "action": self.action.value,
+            "rationale": self.rationale,
+            "confidence": self.confidence.value,
+        }
+
+
 @dataclass
 class StuckNetDiagnosis:
     """Per-net classification result with supporting evidence."""
@@ -224,6 +277,12 @@ class StuckNetDiagnosis:
     # Subset of ``blocking_nets`` that are members of ``match_group`` -- these are
     # the net's own siblings, NOT foreign copper (Defect 2 relabel).
     same_group_blockers: list[str] = field(default_factory=list)
+    # Defect 3 (#4261): detected obstruction topology and the ranked fix ladder.
+    # ``topology`` is ``TOPOLOGY_SELF_CROSSING`` | ``TOPOLOGY_FOREIGN_CLUSTER`` |
+    # "" (not applicable).  ``recommendation`` is empty unless a recommendation
+    # is warranted (PLACEMENT_BOUND / CONGESTION_SATURATED).
+    topology: str = ""
+    recommendation: list[RankedAction] = field(default_factory=list)
 
     @property
     def classification_value(self) -> str:
@@ -246,6 +305,8 @@ class StuckNetDiagnosis:
             "same_group_congestion": self.same_group_congestion,
             "foreign_congestion": self.foreign_congestion,
             "match_group": self.match_group,
+            "topology": self.topology,
+            "recommendation": [a.to_dict() for a in self.recommendation],
         }
 
     def one_line(self) -> str:
@@ -659,6 +720,29 @@ def classify_stuck_nets_from_pcb(
         # which blockers are the net's own bundle siblings.
         diag.match_group = target_group
         diag.same_group_blockers = same_group_blockers
+
+        # Defect 3: detect self-crossing-bundle vs foreign-cluster topology and
+        # emit the ranked fix ladder (only for the two placement/congestion
+        # classes; other classes keep topology="" and recommendation=[]).
+        if diag.classification in (
+            StuckClass.PLACEMENT_BOUND,
+            StuckClass.CONGESTION_SATURATED,
+        ):
+            diag.topology = _detect_topology(
+                match_group=target_group,
+                group_size=len(group_ids),
+                same_group_congestion=same_group_congestion,
+                foreign_congestion=foreign_congestion,
+                blockers=blockers,
+                same_group_blockers=same_group_blockers,
+            )
+            confidence = _grade_confidence(target_group)
+            diag.recommendation = _build_recommendation(
+                classification=diag.classification,
+                topology=diag.topology,
+                match_group=target_group,
+                confidence=confidence,
+            )
         diagnoses.append(diag)
 
     # Second pass: pour-carried incomplete nets.  Their connectivity is closed
@@ -719,6 +803,136 @@ def _nearest_blocker_distance(
             if d <= window and d < best:
                 best = d
     return None if best is math.inf else best
+
+
+def _grade_confidence(match_group: str) -> Confidence:
+    """Grade a suffix-inferred self-crossing detection.
+
+    HIGH is reserved for an explicit match-group source or a confirmed pad-order
+    crossing proxy -- neither is reachable from a bare ``.kicad_pcb`` in v1, so
+    this returns MEDIUM for a normal bus-suffix group and LOW for the generic
+    ``ADDR_BUS`` pattern (``A\\d+``), documented as the highest-false-positive
+    inference in ``match_group_detection``.
+    """
+    if match_group == "ADDR_BUS":
+        return Confidence.LOW
+    return Confidence.MEDIUM
+
+
+def _detect_topology(
+    *,
+    match_group: str,
+    group_size: int,
+    same_group_congestion: int,
+    foreign_congestion: int,
+    blockers: list[str],
+    same_group_blockers: list[str],
+) -> str:
+    """Return the obstruction topology of a stuck net (issue #4261 Defect 3).
+
+    ``TOPOLOGY_SELF_CROSSING`` when the copper crowding the pad is predominantly
+    the net's OWN match-group siblings -- either the same-group share of nearby
+    obstruction copper OR the same-group share of ranked strict blockers reaches
+    :data:`SELF_CROSS_THRESHOLD`, and the group has at least three members
+    (``detect_match_groups`` already refuses smaller groups).  Otherwise
+    ``TOPOLOGY_FOREIGN_CLUSTER``.
+    """
+    if not match_group or group_size < 3:
+        return TOPOLOGY_FOREIGN_CLUSTER
+    total_congestion = same_group_congestion + foreign_congestion
+    same_group_share = same_group_congestion / total_congestion if total_congestion else 0.0
+    blocking_share = len(same_group_blockers) / len(blockers) if blockers else 0.0
+    if same_group_share >= SELF_CROSS_THRESHOLD or blocking_share >= SELF_CROSS_THRESHOLD:
+        return TOPOLOGY_SELF_CROSSING
+    return TOPOLOGY_FOREIGN_CLUSTER
+
+
+def _build_recommendation(
+    *,
+    classification: StuckClass,
+    topology: str,
+    match_group: str,
+    confidence: Confidence,
+) -> list[RankedAction]:
+    """Rank the fix ladder for one stuck net (issue #4261 Defect 3).
+
+    Policy table keyed on ``(stuck_class x topology)`` -- see the architect
+    design on #4261.  A recommendation is emitted only for PLACEMENT_BOUND and
+    CONGESTION_SATURATED; every other class returns ``[]``.
+
+    Board-07 hard evidence: for PLACEMENT_BOUND + SELF_CROSSING_BUNDLE,
+    ``WIDEN_CHANNEL`` is DELIBERATELY OMITTED -- widening the U1/U2 channel
+    regressed that board 28->27/31, so the engine must never suggest the move
+    known to backfire on a reversed bundle.
+    """
+    grp = match_group or "the bundle"
+
+    if classification is StuckClass.PLACEMENT_BOUND:
+        if topology == TOPOLOGY_SELF_CROSSING:
+            # NOTE: WIDEN_CHANNEL intentionally absent (regresses a reversed bus).
+            return [
+                RankedAction(
+                    RecommendedAction.DE_REVERSE_BUNDLE,
+                    f"the {grp} bus is reversed at the facing part -- co-orient "
+                    f"(flip/re-order) its pad column so the bundle stops "
+                    f"self-crossing",
+                    confidence,
+                ),
+                RankedAction(
+                    RecommendedAction.REORDER_PINS,
+                    "re-order pins to un-cross the byte",
+                    confidence,
+                ),
+                RankedAction(
+                    RecommendedAction.ACCEPT_PLATEAU,
+                    "topological limit; do NOT widen the channel -- widening "
+                    "regressed board-07 28->27/31",
+                    confidence,
+                ),
+            ]
+        return [
+            RankedAction(
+                RecommendedAction.MOVE_PART,
+                "genuinely foreign copper walls the pad -- relocate the crowded part",
+                confidence,
+            ),
+            RankedAction(
+                RecommendedAction.WIDEN_CHANNEL,
+                "open the routing corridor around the pad",
+                confidence,
+            ),
+            RankedAction(
+                RecommendedAction.ACCEPT_PLATEAU,
+                "if no placement lever helps, this is a plateau",
+                confidence,
+            ),
+        ]
+
+    if classification is StuckClass.CONGESTION_SATURATED:
+        if topology == TOPOLOGY_SELF_CROSSING:
+            return [
+                RankedAction(
+                    RecommendedAction.REORDER_PINS,
+                    f"{grp} siblings box each other in a 1:1 trade -- re-order "
+                    f"pins to remove the trade",
+                    confidence,
+                ),
+                RankedAction(
+                    RecommendedAction.DE_REVERSE_BUNDLE,
+                    f"co-orient the {grp} bundle so siblings stop crossing",
+                    confidence,
+                ),
+            ]
+        return [
+            RankedAction(
+                RecommendedAction.WIDEN_CHANNEL,
+                "foreign strict blocker -- widen the corridor (region "
+                "rip-up-and-reroute is the primary existing remedy)",
+                confidence,
+            ),
+        ]
+
+    return []
 
 
 def _decide(
