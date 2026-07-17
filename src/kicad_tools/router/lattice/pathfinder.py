@@ -66,6 +66,16 @@ Resource = tuple[object, ...]
 _State = tuple[NodeKey, int]
 _GOAL: _State = (("GOAL",), -1)  # type: ignore[assignment]
 
+# Escape-fan size for the oversize neck-down retry (issue #4293): a thin neck
+# escapes the pad, but the WIDENED body must then egress at full width, so the
+# useful escape node often sits at the edge of the congested field rather than
+# hugging the pad.  A nearest-first count cap fills up on dead-end near nodes
+# and never reaches that egress node, so the neck retry collects a large
+# radius-bounded fan instead (the count-capped-in-a-pocket failure the pair
+# path also avoids).  A search-tuning knob, not a geometric constant -- it only
+# widens the candidate set, never the copper.
+_OVERSIZE_STUB_KMAX = 4096
+
 
 @dataclass(frozen=True)
 class LatticeNegotiationStats:
@@ -87,7 +97,10 @@ class _RouteResult:
     """Internal per-connection result: emitted route + commit geometry."""
 
     route: Route
-    runs: list[tuple[int, list[Pt]]]  # (layer_index, polyline) per copper run
+    # (layer_index, polyline, per-segment widths) per copper run.  The escape
+    # legs may be a narrower neck than the lattice body (issue #4293), so each
+    # segment carries the width it was emitted at.
+    runs: list[tuple[int, list[Pt], list[float]]]
     via_points: list[Pt]
     resources: set[Resource]  # lattice edges/via-nodes consumed (history keys)
 
@@ -409,6 +422,43 @@ class LatticePathfinder:
         by the surcharge over the global agent radius (single-ended path;
         the fat-agent path carries its own grown envelope).
         """
+        half, clr = self._conn_geometry(net_class)
+        return self._scan_stubs(
+            pad,
+            net,
+            committed,
+            half,
+            clr,
+            kmax=kmax,
+            search_radius=search_radius,
+            extra_clearance=extra_clearance,
+            partner_net=partner_net,
+            layers=layers,
+            exempt_pads=exempt_pads,
+        )
+
+    def _scan_stubs(
+        self,
+        pad: Pad,
+        net: int,
+        committed: CommittedCopper | None,
+        half: float,
+        clr: float,
+        *,
+        kmax: int = 4,
+        search_radius: float | None = None,
+        extra_clearance: float = 0.0,
+        partner_net: int | None = None,
+        layers: tuple[int, ...] | None = None,
+        exempt_pads: frozenset[int] | None = None,
+    ) -> list[tuple[NodeKey, int, list[Pt], float]]:
+        """Candidate scan for :meth:`pad_stubs` at an EXPLICIT ``(half, clr)``.
+
+        Factored out so the tapered pad-escape fallback (issue #4293) can
+        re-run the identical clearance-checked dogleg search at a narrower
+        neck half-width and a wider fan without duplicating the reject-and-
+        retry body.
+        """
         lattice = self.build()
         obstacles = self.obstacles
         if committed is None:
@@ -432,7 +482,6 @@ class LatticePathfinder:
                 pads_block_point_grown,
                 pads_block_segment_grown,
             )
-        half, clr = self._conn_geometry(net_class)
         extra = max(0.0, half + clr - self._agent_radius)
 
         candidates: list[tuple[float, NodeKey, Pt]] = []
@@ -494,6 +543,102 @@ class LatticePathfinder:
             if len(out) >= kmax * len(layers):
                 break
         return out
+
+    # -- tapered pad escape (issue #4293) --------------------------------------
+
+    def _neck_width(self, net_class: object | None) -> float:
+        """Principled neck width for a tapered pad escape (issue #4293).
+
+        Oversize copper cannot always clear a dense pad field at its full
+        class width.  The neck floor is the fab minimum track
+        (``DesignRules.min_trace_width`` if configured, else the board default
+        ``trace_width`` -- both DRC-legal, manufacturable widths), which a
+        class may raise with ``NetClassRouting.neck_trace_width`` for
+        ampacity.  It is never a magic constant and never below the fab min.
+        """
+        dru_min = self.rules.min_trace_width or self.rules.trace_width
+        override = getattr(net_class, "neck_trace_width", None)
+        neck = override if override else dru_min
+        return max(dru_min, float(neck))
+
+    def _escape_stubs(
+        self,
+        pad: Pad,
+        net: int,
+        committed: CommittedCopper | None,
+        *,
+        kmax: int,
+        extra_clearance: float,
+        partner_net: int | None,
+        layers: tuple[int, ...] | None,
+        exempt_pads: frozenset[int] | None,
+        net_class: object | None,
+    ) -> tuple[list[tuple[NodeKey, int, list[Pt], float]], float]:
+        """Escape stubs for one pad, with an oversize neck-down fallback.
+
+        Returns ``(stubs, emitted_width)`` -- the width the returned legs are
+        emitted (and spaced) at.  The FULL-width escape is tried first and,
+        when it yields ANY stub, is returned unchanged: every connection that
+        already escapes is byte-identical to the pre-#4293 behavior.  Only
+        when the oversize keep-out surcharge blocks EVERY full-width dogleg
+        (the honest ``pad-escape-*`` decline of record) does a narrower legal
+        neck retry -- with a WIDER escape fan (grown ``search_radius`` +
+        ``kmax``) so the thin neck can thread past the full-width keep-out
+        ring the oversize body could not clear, then widen back to the class
+        width at the first lattice node.  Never-ship-a-short holds absolutely:
+        the neck legs are clearance-checked at the neck width, exactly as the
+        full-width legs are checked at the full width (#3906).
+        """
+        body_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
+        full_half, clr = self._conn_geometry(net_class)
+        fat = extra_clearance > 0.0 or partner_net is not None
+
+        stubs = self.pad_stubs(
+            pad,
+            net,
+            committed,
+            kmax=kmax,
+            extra_clearance=extra_clearance,
+            partner_net=partner_net,
+            layers=layers,
+            exempt_pads=exempt_pads,
+            net_class=net_class,
+        )
+        # A successful full-width escape, or a fat coupled agent (whose grown
+        # envelope has its own escape discipline), is returned as-is.
+        if stubs or fat:
+            return stubs, body_w
+
+        neck_w = self._neck_width(net_class)
+        neck_half = neck_w / 2.0
+        if neck_half >= full_half - 1e-9:
+            # Not oversize: the neck would not be narrower than the body, so
+            # there is nothing to taper -- the honest decline stands.
+            return stubs, body_w
+
+        lattice = self.build()
+        base_sr = max(3.0 * lattice.fine + max(pad.width, pad.height), 2.0)
+        # Reach past the full-width keep-out ring that blocked the body escape:
+        # a thin neck can clear a node close to the pad, but the widened body
+        # must then EGRESS at full width, so the useful escape node is often
+        # one that sits at the edge of the congested field.  Grow the radius by
+        # the full-width surcharge and collect EVERY clearing node in it (a
+        # radius-bounded fan, not a nearest-first count cap that would exhaust
+        # itself on dead-end near nodes with no full-width egress -- the
+        # count-capped-in-a-pocket failure the pair path also avoids).
+        grown_sr = base_sr + max(0.0, full_half + clr - self._agent_radius)
+        neck_stubs = self._scan_stubs(
+            pad,
+            net,
+            committed,
+            neck_half,
+            clr,
+            kmax=_OVERSIZE_STUB_KMAX,
+            search_radius=grown_sr,
+            layers=layers,
+            exempt_pads=exempt_pads,
+        )
+        return neck_stubs, neck_w
 
     # -- via legality -----------------------------------------------------------
 
@@ -651,11 +796,15 @@ class LatticePathfinder:
 
             pair_nets = {net} if partner_net is None else {net, partner_net}
 
+        # The lattice body is emitted (and spaced) at the full class width;
+        # the pad-escape legs may taper to a narrower neck (issue #4293).
+        body_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         if stubs_override is not None:
             stubs_a, stubs_b = stubs_override
+            width_a = width_b = body_w
         else:
             stub_kmax = 24 if fat else 4
-            stubs_a = self.pad_stubs(
+            stubs_a, width_a = self._escape_stubs(
                 start,
                 net,
                 committed,
@@ -666,7 +815,7 @@ class LatticePathfinder:
                 exempt_pads=exempt_pads,
                 net_class=net_class,
             )
-            stubs_b = self.pad_stubs(
+            stubs_b, width_b = self._escape_stubs(
                 end,
                 net,
                 committed,
@@ -834,26 +983,35 @@ class LatticePathfinder:
         start_state = chain[0]
 
         resources: set[Resource] = set()
-        runs: list[tuple[int, list[Pt]]] = []
+        runs: list[tuple[int, list[Pt], list[float]]] = []
         via_points: list[Pt] = []
         cur_layer = start_state[1]
-        cur_pts: list[Pt] = list(start_stub[start_state])  # pad -> first node
+        start_poly = list(start_stub[start_state])  # pad -> first node
+        cur_pts: list[Pt] = start_poly
+        # The start escape legs carry ``width_a`` (neck or full); the lattice
+        # body carries ``body_w``; the end escape legs carry ``width_b``.  Each
+        # segment is spaced at the width it is EMITTED at (issue #4293).
+        cur_ws: list[float] = [width_a] * (len(start_poly) - 1)
         for idx in range(1, len(chain)):
             key, layer = chain[idx]
             move = moves[idx - 1]
             if move == "via":
-                runs.append((cur_layer, cur_pts))
+                runs.append((cur_layer, cur_pts, cur_ws))
                 via_points.append(lattice.node_point(key))
                 resources.add(("v", key))
                 cur_layer = layer
                 cur_pts = [lattice.node_point(key)]
+                cur_ws = []
             else:
                 prev_key = chain[idx - 1][0]
                 resources.add(("e", (min(prev_key, key), max(prev_key, key)), layer))
                 cur_pts.append(lattice.node_point(key))
+                cur_ws.append(body_w)
         _stub_len, stub_b_poly = goal[end_state]
-        cur_pts.extend(reversed(stub_b_poly[:-1]))  # last node -> pad (exact)
-        runs.append((cur_layer, cur_pts))
+        tail = list(reversed(stub_b_poly[:-1]))  # last node -> pad (exact)
+        cur_pts.extend(tail)
+        cur_ws.extend([width_b] * len(tail))
+        runs.append((cur_layer, cur_pts, cur_ws))
 
         route = self._emit(start, net, net_class, runs, via_points)
         if route is None:
@@ -867,7 +1025,7 @@ class LatticePathfinder:
         start: Pad,
         net: int,
         net_class: object | None,
-        runs: list[tuple[int, list[Pt]]],
+        runs: list[tuple[int, list[Pt], list[float]]],
         via_points: list[Pt],
     ) -> Route | None:
         """Lattice path + stubs -> ``Segment`` / ``Via`` (path IS copper).
@@ -876,35 +1034,46 @@ class LatticePathfinder:
         (``Segment.to_sexp`` 45-degree enforcement) with
         :func:`~kicad_tools.router.optimizer.algorithms.merge_collinear`
         fusing the node-by-node steps; there is no post-fit stage.
+
+        Each segment is emitted at its own width (issue #4293): the escape
+        legs may be a narrower neck than the widened lattice body.  Collinear
+        merging is done PER contiguous equal-width group so a neck leg and a
+        body segment never fuse into one width -- a uniform-width run (the
+        pre-#4293 case) is one group and merges exactly as before.
         """
         from ..optimizer.algorithms import merge_collinear
         from ..optimizer.config import OptimizationConfig
 
-        trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         config = OptimizationConfig()
         route = Route(net=net, net_name=start.net_name)
-        for layer_idx, points in runs:
+        for layer_idx, points, widths in runs:
             try:
                 layer_enum = self.layer_stack.index_to_layer_enum(layer_idx)
             except Exception:
                 return None
-            segments = [
+            raw = [
                 Segment(
                     x1=a[0],
                     y1=a[1],
                     x2=b[0],
                     y2=b[1],
-                    width=trace_w,
+                    width=w,
                     layer=layer_enum,
                     net=net,
                     net_name=start.net_name,
                 )
-                for a, b in zip(points, points[1:], strict=False)
+                for (a, b), w in zip(zip(points, points[1:], strict=False), widths, strict=False)
                 if dist(a, b) > 1e-9
             ]
-            # Collinear merging is geometry-preserving (same centreline), so
-            # no clearance re-check is needed.
-            route.segments.extend(merge_collinear(segments, config))
+            # Merge only within contiguous equal-width groups (collinear
+            # merging is geometry-preserving, so no clearance re-check).
+            i = 0
+            while i < len(raw):
+                j = i + 1
+                while j < len(raw) and abs(raw[j].width - raw[i].width) < 1e-12:
+                    j += 1
+                route.segments.extend(merge_collinear(raw[i:j], config))
+                i = j
 
         if not route.segments:
             return None
@@ -1165,7 +1334,7 @@ class LatticePathfinder:
             if len(result.runs) != 1 or result.via_points:
                 return None, "pair-not-planar"  # defensive: vias are off
 
-            layer, raw_pts = result.runs[0]
+            layer, raw_pts, _widths = result.runs[0]
             center = merge_collinear_points(raw_pts)
             if len(center) < 2:
                 return None, "pair-degenerate-centerline"
@@ -1390,12 +1559,16 @@ class LatticePathfinder:
                     continue
                 routed_items += 1
                 routes[key] = result.route
-                # Commit at the connection's TRUE half-width + class
-                # clearance (issue #4271) so later nets are spaced against
-                # 2.6 mm copper as 2.6 mm copper, never the global default.
-                half, clr = self._conn_geometry(net_class)
-                for layer_idx, points in result.runs:
-                    committed.add_run(layer_idx, points, start.net, half, clr)
+                # Commit each segment at the width it was EMITTED at (issue
+                # #4293): the widened lattice body is spaced against 2.6 mm
+                # copper as 2.6 mm copper, and a tapered escape neck is spaced
+                # honestly as neck copper -- never the taper cheating the
+                # spacing model.  Clearance stays the class clearance (#4271).
+                _half, clr = self._conn_geometry(net_class)
+                for layer_idx, points, widths in result.runs:
+                    committed.add_run_widths(
+                        layer_idx, points, start.net, [w / 2.0 for w in widths], clr
+                    )
                 for via_pt in result.via_points:
                     committed.add_via(via_pt, start.net)
 
