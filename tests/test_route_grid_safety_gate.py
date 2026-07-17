@@ -127,3 +127,41 @@ def test_safe_grid_never_triggers_gate(tmp_path):
     code, gate_reached = _run_main_to_gate(tmp_path, _safe_selection(), [])
     assert gate_reached is True, "A safe grid must not be gated"
     assert code is None
+
+
+def test_lattice_engine_bypasses_gate(tmp_path):
+    """--route-engine lattice must NOT be refused by the unsafe-grid gate.
+
+    Issue #4271: the lattice engine never emits copper from the grid (the
+    grid object is a coordinate substrate only), so the #3911 refusal is
+    grid-engine-only.  Softstart rev-C falls in the #4242 grid gap -- the
+    gate used to block exactly the boards the lattice engine exists for.
+    """
+    code, gate_reached = _run_main_to_gate(
+        tmp_path,
+        _unsafe_selection(),
+        ["--route-engine", "lattice", "--strategy", "basic"],
+    )
+    assert gate_reached is True, "lattice engine must bypass the grid safety gate"
+    assert code is None
+
+
+def test_mesh_engine_bypasses_gate(tmp_path):
+    """--route-engine mesh equally never routes on the grid (issue #4271)."""
+    code, gate_reached = _run_main_to_gate(
+        tmp_path,
+        _unsafe_selection(),
+        ["--route-engine", "mesh", "--strategy", "basic"],
+    )
+    assert gate_reached is True, "mesh engine must bypass the grid safety gate"
+    assert code is None
+
+
+def test_grid_engine_gate_unchanged_by_engine_bypass(tmp_path, capsys):
+    """The explicit grid engine still refuses -- #3911 behavior intact."""
+    code, gate_reached = _run_main_to_gate(
+        tmp_path, _unsafe_selection(), ["--route-engine", "grid"]
+    )
+    assert code == 1
+    assert gate_reached is False
+    assert "--allow-unsafe-grid" in capsys.readouterr().err
