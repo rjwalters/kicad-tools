@@ -611,8 +611,23 @@ class LCSCClient:
 
         return None
 
-    def _fetch_part(self, lcsc_part: str) -> Part | None:
-        """Fetch part from JLCPCB API."""
+    def _fetch_part(
+        self,
+        lcsc_part: str,
+        _failures: list[tuple[str, str]] | None = None,
+    ) -> Part | None:
+        """Fetch part from JLCPCB API.
+
+        Args:
+            lcsc_part: LCSC part number to fetch.
+            _failures: Optional collector for deferred live-API failures. When a
+                list is supplied, a transport-level failure (e.g. a 404 from a
+                drifted endpoint) appends ``(part, reason)`` here instead of
+                emitting a per-part warning, so the caller can summarize the
+                situation once after the offline-catalog fallback runs. The log
+                is demoted to ``debug`` because the failure is transparently
+                handled by that fallback (see issue #4299).
+        """
         import requests
 
         payload = {"componentCode": lcsc_part}
@@ -620,7 +635,9 @@ class LCSCClient:
         try:
             data = self._make_request(PART_LOOKUP_URL, payload)
         except requests.RequestException as e:
-            logger.warning(f"API request failed for {lcsc_part}: {e}")
+            logger.debug(f"API request failed for {lcsc_part}: {e}")
+            if _failures is not None:
+                _failures.append((lcsc_part, str(e)))
             return None
 
         if data is None:
@@ -885,18 +902,27 @@ class LCSCClient:
                             self.cache.put(official_part)
                 parts = [p for p in parts if p not in result]
 
+        # Live-API failures are deferred here and summarized once below, rather
+        # than logged per-part: when the offline catalog then resolves the part
+        # (the common case for a drifted 404 endpoint or a 403 geo-block) the
+        # per-part warnings are pure noise (issue #4299).
+        live_failures: list[tuple[str, str]] = []
+
         if not _requests_installed():
             if catalog is None or not catalog.available:
                 raise LCSCDependencyMissingError(PARTS_INSTALL_HINT)
         else:
             # Fetch remaining from the live API (authoritative when reachable).
-            for part_num in parts:
+            for i, part_num in enumerate(parts):
                 try:
-                    part = self._fetch_part(part_num)
+                    part = self._fetch_part(part_num, _failures=live_failures)
                 except Exception as e:
-                    # 403 circuit breaker or other API failure -- stop hammering
-                    # the API and fall back to the offline catalog for the rest.
-                    logger.warning(f"Live API lookup failed for {part_num}: {e}")
+                    # 403 circuit breaker or other hard API failure -- stop
+                    # hammering the API and fall back to the offline catalog for
+                    # the rest. Every remaining part would hit the same wall, so
+                    # record them all and defer the log to the summary below.
+                    logger.debug(f"Live API lookup failed for {part_num}: {e}")
+                    live_failures.extend((p, str(e)) for p in parts[i:])
                     break
                 if part:
                     result[part_num] = part
@@ -910,6 +936,23 @@ class LCSCClient:
                 result[part_num] = part
                 if self.cache:
                     self.cache.put(part)
+
+        # Summarize any live-API failures in a single line. If the catalog
+        # covered them the failure is transparently handled (one WARNING so the
+        # condition is still visible once, not N times); parts resolved by
+        # neither the live API nor the catalog stay explicitly visible.
+        if live_failures:
+            reason = live_failures[0][1]
+            failed = [p for p, _ in live_failures]
+            resolved = [p for p in failed if p in result]
+            unresolved = [p for p in failed if p not in result]
+            details: list[str] = []
+            if resolved:
+                details.append(f"{len(resolved)} resolved from the offline catalog")
+            if unresolved:
+                preview = ", ".join(sorted(unresolved)[:10])
+                details.append(f"{len(unresolved)} unresolved ({preview})")
+            logger.warning(f"Live JLC API unavailable ({reason}); " + "; ".join(details))
 
         return result
 

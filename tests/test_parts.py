@@ -1524,3 +1524,183 @@ class TestLCSCClientCircuitBreaker:
         # with the catalog disabled it re-raises as before.
         with pytest.raises(LCSCForbiddenError):
             client.search("100nF 0402")
+
+
+class _FakeCatalog:
+    """Minimal offline-catalog stand-in for live-API-failure tests.
+
+    Resolves whatever part numbers it was seeded with, mirroring the subset of
+    the :class:`JlcpartsCatalog` surface that ``lookup_many`` touches.
+    """
+
+    available = True
+
+    def __init__(self, parts: dict[str, Part]):
+        self._parts = parts
+
+    def lookup(self, lcsc_part: str):
+        return self._parts.get(lcsc_part)
+
+    def lookup_many(self, lcsc_parts):
+        return {p: self._parts[p] for p in lcsc_parts if p in self._parts}
+
+    def search(self, *args, **kwargs):
+        return []
+
+
+class TestLCSCLiveApiFailureNoise:
+    """Live-API failures must fall back to the synced catalog *quietly* (#4299).
+
+    When the live JLC endpoint 404s (drifted endpoint) or 403s (geo-block) but
+    the offline catalog resolves the parts, the user should see a single summary
+    line -- not one WARNING per part. When there is no catalog to fall back to,
+    the failure stays visible.
+    """
+
+    @staticmethod
+    def _per_part_warnings(records):
+        """WARNING records that are the old per-part live-failure noise."""
+        return [
+            r
+            for r in records
+            if r.levelname == "WARNING"
+            and (
+                "API request failed for " in r.message or "Live API lookup failed for " in r.message
+            )
+        ]
+
+    @staticmethod
+    def _summary_warnings(records):
+        return [
+            r
+            for r in records
+            if r.levelname == "WARNING" and "Live JLC API unavailable" in r.message
+        ]
+
+    def _client_with_catalog(self, tmp_path, parts):
+        from kicad_tools.parts import LCSCClient
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(
+            cache=cache,
+            rate_limit=0,
+            use_official_api=False,
+            use_local_catalog=True,
+        )
+        catalog = _FakeCatalog(parts)
+        # Route the offline fallback through our seeded fake.
+        client._catalog = catalog
+        return client, catalog
+
+    def test_404_falls_back_quietly_with_catalog(self, tmp_path, caplog):
+        """A drifted-endpoint 404 with a synced catalog: no per-part noise."""
+        import logging
+
+        import requests
+
+        from kicad_tools.parts import LCSCClient  # noqa: F401 (re-exported)
+
+        part_nums = ["C1", "C2", "C3"]
+        catalog_parts = {p: Part(lcsc_part=p, mfr_part=f"CatalogPart{p}") for p in part_nums}
+        client, _ = self._client_with_catalog(tmp_path, catalog_parts)
+
+        # Real _fetch_part runs; _make_request raises the 404 RequestException
+        # for every part (simulating selectSmtComponentDetail returning 404).
+        err = requests.RequestException("C232604: 404 Client Error for selectSmtComponentDetail")
+        with patch.object(client, "_make_request", side_effect=err):
+            with caplog.at_level(logging.DEBUG, logger="kicad_tools.parts.lcsc"):
+                result = client.lookup_many(part_nums)
+
+        # Availability RESULT unchanged: every part resolved from the catalog.
+        assert set(result) == set(part_nums)
+        for p in part_nums:
+            assert result[p].mfr_part == f"CatalogPart{p}"
+
+        # No per-part WARNING noise -- at most one summary line.
+        assert self._per_part_warnings(caplog.records) == []
+        summaries = self._summary_warnings(caplog.records)
+        assert len(summaries) == 1
+        assert "resolved from the offline catalog" in summaries[0].message
+        # The old per-part message is demoted to DEBUG, not gone entirely.
+        assert any(
+            r.levelname == "DEBUG" and "API request failed for" in r.message for r in caplog.records
+        )
+
+    def test_403_falls_back_quietly_with_catalog(self, tmp_path, caplog):
+        """A 403 geo-block with a synced catalog: single summary, no per-part."""
+        import logging
+
+        from kicad_tools.parts import LCSCClient  # noqa: F401
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        part_nums = ["C10", "C20", "C30"]
+        catalog_parts = {p: Part(lcsc_part=p, mfr_part=f"CatalogPart{p}") for p in part_nums}
+        client, _ = self._client_with_catalog(tmp_path, catalog_parts)
+
+        err = LCSCForbiddenError("JLCPCB API returned 403 Forbidden -- geo-blocked")
+        with patch.object(client, "_make_request", side_effect=err):
+            with caplog.at_level(logging.DEBUG, logger="kicad_tools.parts.lcsc"):
+                result = client.lookup_many(part_nums)
+
+        assert set(result) == set(part_nums)
+        assert self._per_part_warnings(caplog.records) == []
+        summaries = self._summary_warnings(caplog.records)
+        assert len(summaries) == 1
+        assert "resolved from the offline catalog" in summaries[0].message
+
+    def test_failure_stays_visible_without_catalog(self, tmp_path, caplog):
+        """No catalog to fall back to: the live-API failure remains visible."""
+        import logging
+
+        import requests
+
+        from kicad_tools.parts import LCSCClient, PartsCache
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(
+            cache=cache,
+            rate_limit=0,
+            use_official_api=False,
+            use_local_catalog=False,  # no offline fallback
+        )
+
+        err = requests.RequestException("C232604: 404 Client Error for selectSmtComponentDetail")
+        with patch.object(client, "_make_request", side_effect=err):
+            with caplog.at_level(logging.DEBUG, logger="kicad_tools.parts.lcsc"):
+                result = client.lookup_many(["C1"])
+
+        # Nothing resolved -- and the user is told, once, with the part visible.
+        assert result == {}
+        summaries = self._summary_warnings(caplog.records)
+        assert len(summaries) == 1
+        assert "unresolved" in summaries[0].message
+        assert "C1" in summaries[0].message
+        # Still no per-part duplicate of the old noisy message.
+        assert self._per_part_warnings(caplog.records) == []
+
+    def test_legit_miss_emits_no_summary(self, tmp_path, caplog):
+        """An API that responds but lacks the part is a miss, not a failure.
+
+        Guards against the summary firing for ordinary not-found results (the
+        API transport succeeded), which would be a false 'API unavailable'.
+        """
+        import logging
+
+        from kicad_tools.parts import LCSCClient, PartsCache
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(
+            cache=cache,
+            rate_limit=0,
+            use_official_api=False,
+            use_local_catalog=False,
+        )
+
+        # code 200 + empty data => _fetch_part returns None (a clean miss).
+        with patch.object(client, "_make_request", return_value={"code": 200, "data": None}):
+            with caplog.at_level(logging.DEBUG, logger="kicad_tools.parts.lcsc"):
+                result = client.lookup_many(["C999"])
+
+        assert result == {}
+        assert self._summary_warnings(caplog.records) == []
+        assert self._per_part_warnings(caplog.records) == []
