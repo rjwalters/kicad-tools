@@ -7490,6 +7490,83 @@ def _resolve_escape_routing_flag(args) -> bool | None:
     return None
 
 
+def _validate_route_engine_strategy(args) -> int:
+    """Hard compatibility gate for ``--route-engine mesh|lattice`` (#4280).
+
+    The mesh/lattice engines dispatch through ``Autorouter.route_net`` --
+    the ONLY seam that consults the engine selector (``core.py``
+    ``route_net``).  Every other stock strategy/modifier bypasses that seam:
+
+    - ``--strategy negotiated`` (the DEFAULT) goes ``route_all_negotiated``
+      -> ``_route_net_negotiated``, which builds a grid ``NegotiatedRouter``
+      directly and never calls ``route_net`` -- the engine flag is silently
+      inert and the run ships grid copper labeled as mesh/lattice output.
+    - ``--strategy monte-carlo`` / ``evolutionary`` reach the seam but the
+      engines negotiate the whole netset ONCE and cache; per-trial resets
+      never clear that cache, so every trial after the first is vacuous.
+    - ``--two-phase`` and ``--multi-resolution`` wrap or bypass the seam.
+    - Escape routing commits grid escape stubs the engines' whole-netset
+      negotiation cannot see (mixed/incoherent copper).
+
+    Rather than silently shipping grid copper (or silently swapping the
+    user's negotiation algorithm), any such combination is rejected loudly
+    BEFORE any board loading or output writing.  ``--strategy basic`` is
+    the supported combination.
+
+    Escape AUTO-detect (dense packages, no flag) is not an error -- the
+    user didn't ask for it -- so it is forced off with a printed notice by
+    stamping ``args.no_escape_routing``; every dispatch site resolves the
+    tri-state via :func:`_resolve_escape_routing_flag`, so one stamp covers
+    all of them.
+
+    Returns 0 when the combination is valid (ALWAYS for ``--route-engine
+    grid`` -- this gate is a strict no-op on the production default), or 2
+    (usage error) with a message on stderr naming the remedy.
+    """
+    engine = getattr(args, "route_engine", "grid")
+    if engine == "grid":
+        return 0
+
+    conflicts: list[str] = []
+    if args.strategy != "basic":
+        default_note = " (the default)" if args.strategy == "negotiated" else ""
+        conflicts.append(f"--strategy {args.strategy}{default_note}")
+    if getattr(args, "two_phase", False):
+        conflicts.append("--two-phase")
+    if getattr(args, "multi_resolution", False):
+        conflicts.append("--multi-resolution")
+    if _resolve_escape_routing_flag(args) is True:
+        conflicts.append("--escape-routing")
+
+    if conflicts:
+        print(
+            f"Error: --route-engine {engine} is incompatible with "
+            f"{', '.join(conflicts)}.\n"
+            f"The {engine} engine runs its own whole-netset negotiation and "
+            "dispatches only through the basic per-net routing path; the "
+            "negotiated/monte-carlo/evolutionary strategies and the "
+            "--two-phase/--multi-resolution/--escape-routing modifiers "
+            "bypass that path, so the engine selection would be silently "
+            "ignored and grid copper shipped (issue #4280).\n"
+            "Supported combination:\n"
+            f"    kct route <board> --route-engine {engine} --strategy basic",
+            file=sys.stderr,
+        )
+        return 2
+
+    # engine != grid with --strategy basic: suppress escape auto-detect
+    # (tri-state None -> forced off).  Explicit --no-escape-routing needs
+    # no notice; explicit --escape-routing was rejected above.
+    if _resolve_escape_routing_flag(args) is None:
+        args.no_escape_routing = True
+        if not getattr(args, "quiet", False):
+            print(
+                f"  Escape routing: auto-detect disabled (--route-engine {engine} "
+                "performs whole-netset negotiation that cannot see grid escape stubs)"
+            )
+    return 0
+
+
 def _build_diffpair_config(args):
     """Build a ``DifferentialPairConfig`` from parsed CLI args, or ``None``.
 
@@ -8738,14 +8815,18 @@ def main(argv: list[str] | None = None) -> int:
         choices=["grid", "mesh", "lattice"],
         default="grid",
         help=(
-            "Routing substrate (issues #4268/#4278), orthogonal to --backend "
-            "and --strategy: 'grid' = uniform-grid A* (default, unchanged); "
+            "Routing substrate (issues #4268/#4278), orthogonal to --backend: "
+            "'grid' = uniform-grid A* (default, unchanged); "
             "'mesh' = navmesh router (poly2tri CDT + funnel + clearance-aware "
             "45deg fit, multi-net portal negotiation); 'lattice' = adaptive "
             "octilinear lattice (balanced quadtree, paths are 45deg-legal by "
             "construction, negotiated multi-net, through-vias at free-space "
-            "lattice nodes). Mesh and lattice are experimental engines; grid "
-            "remains the production default."
+            "lattice nodes). Mesh and lattice are experimental engines that "
+            "run their own whole-netset negotiation and REQUIRE --strategy "
+            "basic; combining them with the default negotiated strategy, "
+            "monte-carlo, evolutionary, --two-phase, --multi-resolution, or "
+            "--escape-routing is rejected (issue #4280). Grid remains the "
+            "production default and works with every strategy."
         ),
     )
     parser.add_argument(
@@ -9452,6 +9533,16 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    # Issue #4280: hard compatibility gate for --route-engine mesh|lattice.
+    # Runs before ANY other work (env stamping, board loading, escalation
+    # dispatch) so an inert engine flag can never silently ship grid copper.
+    # This single chokepoint covers every routing path -- all five
+    # load_pcb_for_routing sites and the escalation wrappers are reached
+    # from main().  Strict no-op for --route-engine grid (the default).
+    _engine_gate_rc = _validate_route_engine_strategy(args)
+    if _engine_gate_rc != 0:
+        return _engine_gate_rc
 
     # Issue #3033 / #3062: When --strict-in-pad-clearance is set, stamp the
     # env var so EscapeRouter (lazily constructed several layers below the

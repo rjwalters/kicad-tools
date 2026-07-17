@@ -3519,16 +3519,20 @@ def _add_route_parser(subparsers) -> None:
         choices=["grid", "mesh", "lattice"],
         default="grid",
         help=(
-            "Routing substrate (issues #4268/#4278), orthogonal to --backend "
-            "and --strategy: 'grid' = uniform-grid A* (default, unchanged); "
+            "Routing substrate (issues #4268/#4278), orthogonal to --backend: "
+            "'grid' = uniform-grid A* (default, unchanged); "
             "'mesh' = navmesh router (poly2tri CDT + funnel + clearance-aware "
             "45deg fit, multi-net portal negotiation); 'lattice' = adaptive "
             "octilinear lattice (balanced quadtree, paths are 45deg-legal by "
             "construction, negotiated multi-net, through-vias at free-space "
-            "lattice nodes). Mesh and lattice are experimental engines; grid "
-            "remains the production default. (The name 'strategy' was already "
-            "taken by the negotiation-algorithm flag above, so the substrate "
-            "selector is --route-engine.)"
+            "lattice nodes). Mesh and lattice are experimental engines that "
+            "run their own whole-netset negotiation and REQUIRE --strategy "
+            "basic; combining them with the default negotiated strategy, "
+            "monte-carlo, evolutionary, --two-phase, --multi-resolution, or "
+            "--escape-routing is rejected (issue #4280). Grid remains the "
+            "production default and works with every strategy. (The name "
+            "'strategy' was already taken by the negotiation-algorithm flag "
+            "above, so the substrate selector is --route-engine.)"
         ),
     )
     route_parser.add_argument(
