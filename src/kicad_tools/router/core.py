@@ -2584,6 +2584,12 @@ class Autorouter:
             keyed = [(k, self.pads[k]) for k in pad_keys if k in self.pads]
             if len(keyed) < 2:
                 continue
+            # Issue #4271: thread the net's class (name-pattern classified +
+            # --net-class-map sidecar overrides) into every connection so the
+            # lattice emits AND spaces its copper at the class width/clearance
+            # (a 2.6 mm HV_HICUR net must be 2.6 mm copper, spaced as such).
+            net_name = self.net_names.get(net) or keyed[0][1].net_name
+            net_class = self.net_class_map.get(net_name) if net_name else None
             res_keys = reserved.get(net)
             if res_keys:
                 # Main run handled by the coupled connection; each extra pad
@@ -2595,12 +2601,12 @@ class Autorouter:
                         res_pads,
                         key=lambda rp: math.hypot(rp.x - other.x, rp.y - other.y),
                     )
-                    connections.append(((net, seq), anchor, other, None))
+                    connections.append(((net, seq), anchor, other, net_class))
                 continue
             pads = [p for _k, p in keyed]
             anchor = pads[0]
             for seq, other in enumerate(pads[1:]):
-                connections.append(((net, seq), anchor, other, None))
+                connections.append(((net, seq), anchor, other, net_class))
 
         if not connections and not coupled:
             return {}

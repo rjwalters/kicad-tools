@@ -211,14 +211,16 @@ class LatticePathfinder:
         ys = [p[1] for p in outline]
         self._bbox: Rect = (min(xs), min(ys), max(xs), max(ys))
 
-        # Derived clearance gaps (centreline distances).
+        # Derived clearance gaps (centreline distances).  These are the
+        # BOARD-GLOBAL defaults; per-connection widths/clearances from a
+        # threaded net class (issue #4271) are resolved by
+        # :meth:`_conn_geometry` and carried through the committed-copper
+        # model per segment.
         tw = self.rules.trace_width
         clr = self.rules.trace_clearance
         via_r = self.rules.via_diameter / 2.0
         self._trace_half = tw / 2.0
         self._agent_radius = tw / 2.0 + clr
-        self._copper_gap = tw + clr
-        self._via_copper_gap = via_r + clr + tw / 2.0
         self._via_via_gap = self.rules.via_diameter + clr
         self._same_net_via_gap = self.rules.via_drill + self.rules.min_hole_to_hole
         self._via_pad_grow = via_r + clr - self._agent_radius
@@ -333,11 +335,25 @@ class LatticePathfinder:
     def _fresh_committed(self) -> CommittedCopper:
         return CommittedCopper(
             self.num_layers,
-            copper_gap=self._copper_gap,
-            via_copper_gap=self._via_copper_gap,
+            trace_half=self._trace_half,
+            clearance=self.rules.trace_clearance,
+            via_radius=self.rules.via_diameter / 2.0,
             via_via_gap=self._via_via_gap,
             same_net_via_gap=self._same_net_via_gap,
         )
+
+    def _conn_geometry(self, net_class: object | None) -> tuple[float, float]:
+        """Per-connection ``(trace half-width, clearance)`` (issue #4271).
+
+        Width follows the class exactly as :meth:`_emit` does (the copper is
+        spaced at the SAME width it is emitted at -- the #4271 invariant);
+        clearance takes ``max(class, rules)`` so a class can only GROW the
+        gap, never shrink below the design rules.  ``None`` -> global
+        geometry, preserving the single-width pre-#4271 behavior exactly.
+        """
+        tw = getattr(net_class, "trace_width", None) or self.rules.trace_width
+        clr = getattr(net_class, "clearance", None) or 0.0
+        return tw / 2.0, max(clr, self.rules.trace_clearance)
 
     # -- pad stubs ------------------------------------------------------------
 
@@ -353,6 +369,7 @@ class LatticePathfinder:
         partner_net: int | None = None,
         layers: tuple[int, ...] | None = None,
         exempt_pads: frozenset[int] | None = None,
+        net_class: object | None = None,
     ) -> list[tuple[NodeKey, int, list[Pt], float]]:
         """Legal dogleg stubs ``(node_key, layer, polyline pad->node, length)``.
 
@@ -371,6 +388,12 @@ class LatticePathfinder:
         grown pad rects (no second mask build -- ``lattice_builds`` stays 1)
         and ``layers`` restricts candidates to layers every pair endpoint
         pad owns (the v1 coupled run is planar).
+
+        ``net_class`` (issue #4271) sizes every clearance check at the
+        connection's TRUE half-width/clearance: committed-copper predicates
+        take the per-class geometry, and the static pad checks are inflated
+        by the surcharge over the global agent radius (single-ended path;
+        the fat-agent path carries its own grown envelope).
         """
         lattice = self.build()
         obstacles = self.obstacles
@@ -395,6 +418,8 @@ class LatticePathfinder:
                 pads_block_point_grown,
                 pads_block_segment_grown,
             )
+        half, clr = self._conn_geometry(net_class)
+        extra = max(0.0, half + clr - self._agent_radius)
 
         candidates: list[tuple[float, NodeKey, Pt]] = []
         pad_pt = (pad.x, pad.y)
@@ -419,7 +444,9 @@ class LatticePathfinder:
                 else:
                     if obstacles.node_blocked(key, layer, net):
                         continue
-                    if not committed.node_clear(point, layer, net):
+                    if extra > 0.0 and obstacles.segment_blocked(point, point, layer, net, extra):
+                        continue
+                    if not committed.node_clear(point, layer, net, half, clr):
                         continue
                 accepted: list[Pt] | None = None
                 # Fat mode prefers the axis-first dogleg: its first leg is
@@ -438,10 +465,10 @@ class LatticePathfinder:
                                 ok = False
                                 break
                         else:
-                            if obstacles.segment_blocked(a, b, layer, net):
+                            if obstacles.segment_blocked(a, b, layer, net, extra):
                                 ok = False
                                 break
-                            if not committed.seg_clear(a, b, layer, net):
+                            if not committed.seg_clear(a, b, layer, net, half, clr):
                                 ok = False
                                 break
                     if ok:
@@ -581,6 +608,12 @@ class LatticePathfinder:
         lattice = self.build()
         obstacles = self.obstacles
         net = start.net
+        # Per-connection copper geometry (issue #4271): the class half-width
+        # and clearance size EVERY legality check below, and ``extra`` is the
+        # keep-out surcharge over the global agent radius for the static pad
+        # masks (0.0 for default-width nets -> pre-#4271 behavior exactly).
+        half, clr = self._conn_geometry(net_class)
+        extra = max(0.0, half + clr - self._agent_radius)
 
         fat = extra_clearance > 0.0 or partner_net is not None
         if fat:
@@ -608,6 +641,7 @@ class LatticePathfinder:
                 partner_net=partner_net,
                 layers=stub_layers,
                 exempt_pads=exempt_pads,
+                net_class=net_class,
             )
             stubs_b = self.pad_stubs(
                 end,
@@ -618,6 +652,7 @@ class LatticePathfinder:
                 partner_net=partner_net,
                 layers=stub_layers,
                 exempt_pads=exempt_pads,
+                net_class=net_class,
             )
         if not stubs_a:
             return None, "pad-escape-start"
@@ -682,8 +717,14 @@ class LatticePathfinder:
                             committed, pa, pb, layer, pair_nets, extra_clearance
                         )
                     else:
-                        ok = not obstacles.edge_blocked(edge, layer, net) and committed.seg_clear(
-                            lattice.node_point(edge[0]), lattice.node_point(edge[1]), layer, net
+                        ea = lattice.node_point(edge[0])
+                        eb = lattice.node_point(edge[1])
+                        ok = (
+                            not obstacles.edge_blocked(edge, layer, net)
+                            and not (
+                                extra > 0.0 and obstacles.segment_blocked(ea, eb, layer, net, extra)
+                            )
+                            and committed.seg_clear(ea, eb, layer, net, half, clr)
                         )
                     edge_ok[ek] = ok
                 if not ok:
@@ -699,8 +740,14 @@ class LatticePathfinder:
                             committed, npt, layer, pair_nets, extra_clearance
                         )
                     else:
-                        nok = not obstacles.node_blocked(nbr, layer, net) and committed.node_clear(
-                            lattice.node_point(nbr), layer, net
+                        npt = lattice.node_point(nbr)
+                        nok = (
+                            not obstacles.node_blocked(nbr, layer, net)
+                            and not (
+                                extra > 0.0
+                                and obstacles.segment_blocked(npt, npt, layer, net, extra)
+                            )
+                            and committed.node_clear(npt, layer, net, half, clr)
                         )
                     node_ok[nstate] = nok
                 if not nok:
@@ -727,8 +774,14 @@ class LatticePathfinder:
                         nstate = (key, nl)
                         nok = node_ok.get(nstate)
                         if nok is None:
-                            nok = not obstacles.node_blocked(key, nl, net) and committed.node_clear(
-                                lattice.node_point(key), nl, net
+                            kpt = lattice.node_point(key)
+                            nok = (
+                                not obstacles.node_blocked(key, nl, net)
+                                and not (
+                                    extra > 0.0
+                                    and obstacles.segment_blocked(kpt, kpt, nl, net, extra)
+                                )
+                                and committed.node_clear(kpt, nl, net, half, clr)
                             )
                             node_ok[nstate] = nok
                         if not nok:
@@ -1297,9 +1350,12 @@ class LatticePathfinder:
                     routed_items += 1
                     routes[(item.key, "P")] = pres.routes[0]
                     routes[(item.key, "N")] = pres.routes[1]
-                    half = self._trace_half
+                    # Legs are EMITTED at the pair class width (#4270), so
+                    # commit them at the same width + clearance (#4271) --
+                    # emission and spacing must agree.
+                    half, clr = self._conn_geometry(item.net_class)
                     for leg_net, layer_idx, points in pres.runs:
-                        committed.add_run(layer_idx, points, leg_net, half)
+                        committed.add_run(layer_idx, points, leg_net, half, clr)
                     continue
                 key, start, end, net_class = item
                 result, reason = self._route_impl(
@@ -1311,9 +1367,12 @@ class LatticePathfinder:
                     continue
                 routed_items += 1
                 routes[key] = result.route
-                half = self._trace_half
+                # Commit at the connection's TRUE half-width + class
+                # clearance (issue #4271) so later nets are spaced against
+                # 2.6 mm copper as 2.6 mm copper, never the global default.
+                half, clr = self._conn_geometry(net_class)
                 for layer_idx, points in result.runs:
-                    committed.add_run(layer_idx, points, start.net, half)
+                    committed.add_run(layer_idx, points, start.net, half, clr)
                 for via_pt in result.via_points:
                     committed.add_via(via_pt, start.net)
 
