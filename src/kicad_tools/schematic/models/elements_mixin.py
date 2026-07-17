@@ -305,6 +305,8 @@ class SchematicElementsMixin:
         auto_footprint: bool = False,
         properties: dict[str, str] = None,
         unit: int = 1,
+        in_bom: bool = True,
+        dnp: bool = False,
     ) -> SymbolInstance:
         """Add a symbol to the schematic.
 
@@ -330,6 +332,14 @@ class SchematicElementsMixin:
                 resolve to the unit-local coordinates so that pin 4
                 (LM393 V-, on unit 3) returns the unit-3 position
                 instead of a phantom unit-1 fallback (issue #3346).
+            in_bom: Whether the symbol appears in the BOM (default True ->
+                ``(in_bom yes)``).  Set False for bare pads that must not
+                be sourced — test points, fiducials, mounting holes,
+                logos, mechanical-only parts — so ``kct parts
+                availability`` does not flag them as unsourced (#4303).
+            dnp: Do-not-populate flag (default False -> ``(dnp no)``).  Set
+                True to emit ``(dnp yes)`` for footprints that should be
+                placed on the board but not populated.
 
         Returns:
             SymbolInstance with pin_position() method
@@ -401,6 +411,8 @@ class SchematicElementsMixin:
             footprint=effective_footprint,
             properties=properties or {},
             unit=unit,
+            in_bom=in_bom,
+            dnp=dnp,
         )
 
         self.symbols.append(instance)
@@ -459,6 +471,8 @@ class SchematicElementsMixin:
         y: float,
         rotation: float = 0,
         snap: bool = True,
+        in_bom: bool = True,
+        dnp: bool = False,
     ) -> PowerSymbol:
         """Add a power symbol whose net name is set by the caller.
 
@@ -488,6 +502,14 @@ class SchematicElementsMixin:
             rotation: Rotation in degrees (0 = arrow up, 180 = arrow
                 down, typical for GND).
             snap: Whether to apply grid snapping (default: True).
+            in_bom: Whether the symbol appears in the BOM (default True ->
+                ``(in_bom yes)``, matching KiCad's stock power symbols).
+                The value is baked into the synthesized ``lib_symbols``
+                entry the first time a given ``net_name`` is used (the
+                entry is cached per net) as well as the placed instance
+                (issue #4303).
+            dnp: Do-not-populate flag for the placed instance (default
+                False -> ``(dnp no)``).
 
         Returns:
             The :class:`PowerSymbol` instance placed in the schematic.
@@ -521,7 +543,7 @@ class SchematicElementsMixin:
 
         # Build (or fetch from cache) the synthesized lib_symbol entry.
         if net_name not in self._synthesized_pwr_defs:
-            sym_node = self._build_synth_pwr_lib_symbol(net_name)
+            sym_node = self._build_synth_pwr_lib_symbol(net_name, in_bom=in_bom)
             self._synthesized_pwr_defs[net_name] = sym_node
             # Register in _embedded_lib_symbols so _build_lib_symbols_node
             # emits the entry on save.  Keyed by lib_id (full prefixed
@@ -535,12 +557,14 @@ class SchematicElementsMixin:
             y=y,
             rotation=rotation,
             reference=ref,
+            in_bom=in_bom,
+            dnp=dnp,
         )
         self.power_symbols.append(pwr)
         _log_info(f"Added synthesized power symbol '{net_name}' at ({x}, {y})")
         return pwr
 
-    def _build_synth_pwr_lib_symbol(self, net_name: str):
+    def _build_synth_pwr_lib_symbol(self, net_name: str, in_bom: bool = True):
         """Construct a synthesized power-symbol lib_symbol S-expression.
 
         The structure mirrors KiCad's stock ``power:+5V`` entry exactly,
@@ -582,7 +606,7 @@ class SchematicElementsMixin:
             (pin_numbers (hide yes))
             (pin_names (offset 0) (hide yes))
             (exclude_from_sim no)
-            (in_bom yes)
+            (in_bom {in_bom_tok})
             (on_board yes)
             (duplicate_pin_numbers_are_jumpers no)
             (property "Reference" "#PWR"
@@ -636,6 +660,7 @@ class SchematicElementsMixin:
             lib_id=f"{self._PWR_SYNTH_LIB_PREFIX}:{net_name}",
             nn=net_name,
             desc_nn=desc_net,
+            in_bom_tok="yes" if in_bom else "no",
         )
 
         # parse_string returns a single top-level node when the input

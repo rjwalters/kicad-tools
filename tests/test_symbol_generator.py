@@ -525,6 +525,28 @@ class TestGenerateSymbolSexp:
         assert "(pin input" in sexp
         assert "(pin output" in sexp
 
+    def test_generate_default_in_bom_yes(self):
+        """Default SymbolDef emits (in_bom yes) — byte-identity guard (#4303)."""
+        sym = SymbolDef(
+            name="TestIC",
+            pins=[PinDef(number="1", name="P1", side=PinSide.LEFT)],
+        )
+        assert sym.in_bom is True
+        sexp = generate_symbol_sexp(sym)
+        assert "(in_bom yes)" in sexp
+        assert "(in_bom no)" not in sexp
+
+    def test_generate_exclude_from_bom(self):
+        """in_bom=False emits (in_bom no) in the generated library symbol (#4303)."""
+        sym = SymbolDef(
+            name="TestPoint",
+            pins=[PinDef(number="1", name="P1", side=PinSide.LEFT)],
+            in_bom=False,
+        )
+        sexp = generate_symbol_sexp(sym)
+        assert "(in_bom no)" in sexp
+        assert "(in_bom yes)" not in sexp
+
     def test_generate_with_properties(self):
         """Test generating symbol with properties."""
         sym = SymbolDef(

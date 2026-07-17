@@ -583,6 +583,14 @@ class SymbolInstance:
     uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
     footprint: str = ""
     properties: dict[str, str] = field(default_factory=dict)
+    # BOM / DNP flags emitted into the placed symbol.  Defaults preserve
+    # historical output exactly: in_bom=True -> "(in_bom yes)",
+    # dnp=False -> "(dnp no)".  Set in_bom=False for bare pads that must
+    # not appear in the BOM (test points, fiducials, mounting holes,
+    # logos, mechanical-only parts); set dnp=True for do-not-populate
+    # parts (issue #4303).
+    in_bom: bool = True
+    dnp: bool = False
 
     def find_pin(self, pin_name_or_number: str) -> Pin:
         """Resolve a pin name/number to its :class:`Pin` on this instance.
@@ -808,9 +816,9 @@ class SymbolInstance:
             at(self.x, self.y, self.rotation),
             SExp.list("unit", self.unit),
             SExp.list("exclude_from_sim", "no"),
-            SExp.list("in_bom", "yes"),
+            SExp.list("in_bom", "yes" if self.in_bom else "no"),
             SExp.list("on_board", "yes"),
-            SExp.list("dnp", "no"),
+            SExp.list("dnp", "yes" if self.dnp else "no"),
             uuid_node(self.uuid_str),
         )
 
@@ -845,6 +853,8 @@ class SymbolInstance:
         y = _fmt_coord(self.y)
         ref_y = _fmt_coord(self.y - 5.08)
         val_y = _fmt_coord(self.y - 2.54)
+        in_bom_tok = "yes" if self.in_bom else "no"
+        dnp_tok = "yes" if self.dnp else "no"
 
         # Generate custom properties (hidden by default)
         custom_props = ""
@@ -865,9 +875,9 @@ class SymbolInstance:
 \t\t(at {x} {y} {int(self.rotation)})
 \t\t(unit {self.unit})
 \t\t(exclude_from_sim no)
-\t\t(in_bom yes)
+\t\t(in_bom {in_bom_tok})
 \t\t(on_board yes)
-\t\t(dnp no)
+\t\t(dnp {dnp_tok})
 \t\t(uuid "{self.uuid_str}")
 \t\t(property "Reference" "{self.reference}"
 \t\t\t(at {x} {ref_y} 0)
@@ -961,6 +971,14 @@ class SymbolInstance:
         uuid_node_elem = node.get("uuid")
         uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else str(uuid.uuid4())
 
+        # Get BOM / DNP flags (issue #4303).  KiCad omits or uses "yes"/"no"
+        # tokens; default to the historical in_bom=True / dnp=False when the
+        # token is absent so older schematics round-trip unchanged.
+        in_bom_node = node.get("in_bom")
+        in_bom = str(in_bom_node.get_first_atom()).lower() != "no" if in_bom_node else True
+        dnp_node = node.get("dnp")
+        dnp = str(dnp_node.get_first_atom()).lower() == "yes" if dnp_node else False
+
         # Get properties
         reference = ""
         value = ""
@@ -1021,4 +1039,6 @@ class SymbolInstance:
             unit=unit,
             uuid_str=uuid_str,
             footprint=footprint,
+            in_bom=in_bom,
+            dnp=dnp,
         )

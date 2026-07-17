@@ -3862,3 +3862,168 @@ class TestValidationSummaryHelpers:
         assert "ERROR: Wire endpoint floating" in result
         # Errors are always shown in detail, warnings need verbose
         assert "Wire off grid" not in result
+
+
+class TestSymbolBomDnp:
+    """Exclude-from-BOM / DNP support across every emit path (issue #4303).
+
+    The generated ``(in_bom ...)`` / ``(dnp ...)`` tokens must be driven by
+    the model instead of hardcoded, so recipes can emit test points,
+    fiducials, mounting holes and DNP parts.  Defaults MUST stay
+    byte-identical to the historical ``(in_bom yes)`` / ``(dnp no)`` output.
+    """
+
+    @pytest.fixture
+    def mock_symbol_def(self):
+        pins = [
+            Pin(name="1", number="1", x=-2.54, y=0, angle=0, length=2.54, pin_type="passive"),
+            Pin(name="2", number="2", x=2.54, y=0, angle=180, length=2.54, pin_type="passive"),
+        ]
+        return SymbolDef(lib_id="Device:R", name="R", raw_sexp="(symbol ...)", pins=pins)
+
+    def _tok(self, node, key):
+        child = node.get(key)
+        return str(child.get_first_atom()) if child else None
+
+    # -- SymbolInstance: node emit path (symbol.py to_sexp_node) -----------
+
+    def test_instance_node_default_byte_identity(self, mock_symbol_def):
+        """Default instance node emits (in_bom yes) / (dnp no)."""
+        inst = SymbolInstance(
+            symbol_def=mock_symbol_def, x=0, y=0, rotation=0, reference="R1", value="10k"
+        )
+        assert inst.in_bom is True and inst.dnp is False
+        node = inst.to_sexp_node("proj", "/sheet")
+        assert self._tok(node, "in_bom") == "yes"
+        assert self._tok(node, "dnp") == "no"
+
+    def test_instance_node_exclude_and_dnp(self, mock_symbol_def):
+        """in_bom=False / dnp=True flow through the node emit path."""
+        inst = SymbolInstance(
+            symbol_def=mock_symbol_def,
+            x=0,
+            y=0,
+            rotation=0,
+            reference="TP1",
+            value="TestPoint",
+            in_bom=False,
+            dnp=True,
+        )
+        node = inst.to_sexp_node("proj", "/sheet")
+        assert self._tok(node, "in_bom") == "no"
+        assert self._tok(node, "dnp") == "yes"
+
+    # -- SymbolInstance: template-string emit path (symbol.py to_sexp) -----
+
+    def test_instance_str_default_byte_identity(self, mock_symbol_def):
+        """Default instance template string emits (in_bom yes) / (dnp no)."""
+        inst = SymbolInstance(
+            symbol_def=mock_symbol_def, x=0, y=0, rotation=0, reference="R1", value="10k"
+        )
+        text = inst.to_sexp("proj", "/sheet")
+        assert "(in_bom yes)" in text
+        assert "(dnp no)" in text
+
+    def test_instance_str_exclude_and_dnp(self, mock_symbol_def):
+        """in_bom=False / dnp=True flow through the template-string path."""
+        inst = SymbolInstance(
+            symbol_def=mock_symbol_def,
+            x=0,
+            y=0,
+            rotation=0,
+            reference="TP1",
+            value="TestPoint",
+            in_bom=False,
+            dnp=True,
+        )
+        text = inst.to_sexp("proj", "/sheet")
+        assert "(in_bom no)" in text
+        assert "(dnp yes)" in text
+        assert "(in_bom yes)" not in text
+        assert "(dnp no)" not in text
+
+    def test_instance_roundtrip_reads_back_flags(self, mock_symbol_def):
+        """Serialize -> re-parse recovers the in_bom / dnp flags."""
+        inst = SymbolInstance(
+            symbol_def=mock_symbol_def,
+            x=10,
+            y=20,
+            rotation=0,
+            reference="TP1",
+            value="TestPoint",
+            in_bom=False,
+            dnp=True,
+        )
+        node = inst.to_sexp_node("proj", "/sheet")
+        parsed = SymbolInstance.from_sexp(node, symbol_defs={"Device:R": mock_symbol_def})
+        assert parsed.in_bom is False
+        assert parsed.dnp is True
+
+    def test_instance_from_sexp_defaults_when_tokens_absent(self, mock_symbol_def):
+        """Missing tokens parse as historical defaults (in_bom True, dnp False)."""
+        node = SExp.list(
+            "symbol",
+            SExp.list("lib_id", "Device:R"),
+            SExp.list("at", 0.0, 0.0, 0),
+            SExp.list("uuid", "u"),
+            SExp.list("property", "Reference", "R1"),
+            SExp.list("property", "Value", "10k"),
+        )
+        parsed = SymbolInstance.from_sexp(node, symbol_defs={"Device:R": mock_symbol_def})
+        assert parsed.in_bom is True
+        assert parsed.dnp is False
+
+    # -- PowerSymbol emit paths (elements.py) ------------------------------
+
+    def test_power_node_default_byte_identity(self):
+        pwr = PowerSymbol(lib_id="power:GND", x=0, y=0)
+        assert pwr.in_bom is True and pwr.dnp is False
+        node = pwr.to_sexp_node("proj", "/sheet")
+        assert self._tok(node, "in_bom") == "yes"
+        assert self._tok(node, "dnp") == "no"
+
+    def test_power_node_exclude_and_dnp(self):
+        pwr = PowerSymbol(lib_id="power:GND", x=0, y=0, in_bom=False, dnp=True)
+        node = pwr.to_sexp_node("proj", "/sheet")
+        assert self._tok(node, "in_bom") == "no"
+        assert self._tok(node, "dnp") == "yes"
+
+    def test_power_roundtrip_reads_back_flags(self):
+        pwr = PowerSymbol(lib_id="power:GND", x=0, y=0, in_bom=False, dnp=True)
+        parsed = PowerSymbol.from_sexp(pwr.to_sexp_node("proj", "/sheet"))
+        assert parsed.in_bom is False
+        assert parsed.dnp is True
+
+    # -- Public add_symbol API (elements_mixin.py) -------------------------
+
+    def test_add_symbol_api_default_byte_identity(self, mock_symbol_def):
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        sch._symbol_defs["Device:R"] = mock_symbol_def
+        inst = sch.add_symbol("Device:R", x=0, y=0, ref="R1", value="10k")
+        assert inst.in_bom is True and inst.dnp is False
+        text = inst.to_sexp("proj", "/sheet")
+        assert "(in_bom yes)" in text and "(dnp no)" in text
+
+    def test_add_symbol_api_exclude_and_dnp(self, mock_symbol_def):
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        sch._symbol_defs["Device:R"] = mock_symbol_def
+        inst = sch.add_symbol("Device:R", x=0, y=0, ref="TP1", value="TP", in_bom=False, dnp=True)
+        assert inst.in_bom is False and inst.dnp is True
+        text = inst.to_sexp("proj", "/sheet")
+        assert "(in_bom no)" in text and "(dnp yes)" in text
+
+    # -- Synthesized power lib symbol (elements_mixin.py template) ---------
+
+    def test_add_pwr_symbol_default_lib_in_bom_yes(self):
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        pwr = sch.add_pwr_symbol("VMOTOR", x=0, y=0)
+        assert pwr.in_bom is True
+        lib_node = sch._embedded_lib_symbols["kicad_tools_pwr:VMOTOR"]
+        assert str(lib_node.get("in_bom").get_first_atom()) == "yes"
+
+    def test_add_pwr_symbol_exclude_from_bom(self):
+        sch = Schematic(title="T", snap_mode=SnapMode.OFF)
+        pwr = sch.add_pwr_symbol("VMOTOR", x=0, y=0, in_bom=False, dnp=True)
+        assert pwr.in_bom is False and pwr.dnp is True
+        lib_node = sch._embedded_lib_symbols["kicad_tools_pwr:VMOTOR"]
+        assert str(lib_node.get("in_bom").get_first_atom()) == "no"
