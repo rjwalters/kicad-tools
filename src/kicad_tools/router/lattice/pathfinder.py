@@ -324,8 +324,16 @@ class LatticePathfinder:
         SMD pads mask only their own layer; through-hole pads mask every
         layer.  A pad whose layer is off the stack is treated conservatively
         as through-blocking (never under-mask -- the #3906 direction).
+
+        ``drill > 0`` also blocks every layer regardless of the
+        ``through_hole`` flag (issue #4271): NPTH mounting holes load as
+        ``np_thru_hole`` pads with ``through_hole=False`` on a single
+        copper layer, but the DRILLED BARREL physically exists on every
+        layer -- softstart rev-C shipped an inner-layer track through the
+        fuse holder's 2.7 mm NPTH hole (kicad-cli ``hole_clearance``)
+        before this.
         """
-        if pad.through_hole:
+        if pad.through_hole or pad.drill > 0:
             return tuple(range(self.num_layers))
         try:
             return (self.layer_stack.layer_enum_to_index(pad.layer),)
@@ -529,8 +537,9 @@ class LatticePathfinder:
             point[0] - window, point[1] - window, point[0] + window, point[1] + window
         ):
             pad = self.pads[idx]
-            if pad.through_hole:
-                # Hole-to-hole floor applies regardless of net.
+            if pad.through_hole or pad.drill > 0:
+                # Hole-to-hole floor applies regardless of net (and to NPTH
+                # holes, whose through_hole flag is False -- issue #4271).
                 min_cc = self.rules.via_drill / 2.0 + pad.drill / 2.0 + self.rules.min_hole_to_hole
                 if dist(point, (pad.x, pad.y)) < min_cc - 1e-9:
                     return False
