@@ -727,6 +727,15 @@ class NetClassRouting:
     priority: int = 5  # 1=highest, 10=lowest
     trace_width: float = 0.2  # Override trace width
     clearance: float = 0.2  # Override clearance
+    # Pad-escape neck-down floor (Issue #4293).  Oversize copper (e.g. 2.6mm
+    # HV_HICUR) carries a large keep-out surcharge that can prevent ANY escape
+    # dogleg from clearing a dense pad field.  When the full-width escape
+    # declines, the lattice engine retries the pad-escape legs at this narrower
+    # legal width and widens back to ``trace_width`` at the first lattice node
+    # (standard heavy-copper neck-down).  ``None`` -> the design-rule floor
+    # (``DesignRules.min_trace_width`` if set, else ``trace_width``); a class
+    # may override with a wider ampacity-driven neck.  Never below the fab min.
+    neck_trace_width: float | None = None
     via_size: float = 0.6  # Override via diameter
     cost_multiplier: float = 1.0  # Cost multiplier (lower = prefer this net)
     length_critical: bool = False  # Must minimize length

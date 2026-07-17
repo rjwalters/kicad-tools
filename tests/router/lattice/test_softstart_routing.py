@@ -16,8 +16,9 @@ Assertions (pinned to the measured 2026-07-16 P4 verdict; see #4271):
 2. Zero cross-net short in the emitted copper (the #3906 invariant checked
    pairwise at the per-class copper gap).
 3. Completion >= the measured floor.
-4. Net-class honesty: every HV_HICUR connection that routes is emitted at
-   its 2.6mm class width.
+4. Net-class honesty: every HV_HICUR connection that routes carries its
+   2.6mm class width on the widened lattice body; any narrower segment is a
+   legal pad-escape neck at the DRU floor (the #4293 taper).
 
 NOTE: this test runs the REAL whole-netset negotiation (minutes of wall
 clock, local-only).  ``max_iterations`` is capped to keep it bounded; the
@@ -43,14 +44,18 @@ _SOFTSTART_DIR = _REPO / "boards/external/softstart/output_revc"
 _SOFTSTART = _SOFTSTART_DIR / "softstart_revc.kicad_pcb"
 _SIDECAR = _SOFTSTART_DIR / "net_class_map.json"
 
-# Measured floors -- pinned from the 2026-07-17 #4271 P4 measurement
-# (deterministic negotiation; measured 267/287 connections and 63/79 nets
+# Measured floors -- pinned from the 2026-07-17 #4293 P4 re-measurement
+# (deterministic negotiation; measured 273/287 connections and 66/79 nets
 # fully connected at max_iterations=2, declines {no-path: 13,
-# pad-escape-end: 7}).  Floors sit below the measurement for stability but
-# above the epic acceptance floor (>= 40/79 nets), so a regression to the
-# pre-#4271 behavior (or below the epic floor) fails loudly.
-_CONNECTION_FLOOR = 255
-_NET_FLOOR = 55
+# pad-escape-end: 1}).  RAISED from the #4271 floors (255/55, measured
+# 267/63) because the oversize neck-down escape (#4293) converted 6 of the 7
+# pad-escape-end declines: the 2.6 mm HV_HICUR nets that could not exit the
+# dense fuse/terminal pad fields now escape at a legal neck and widen back to
+# the class width at the first lattice node.  Floors sit below the new
+# measurement for stability but above the #4271 reality, so a regression to
+# either the pre-#4293 or the epic floor (>= 40/79 nets) fails loudly.
+_CONNECTION_FLOOR = 265
+_NET_FLOOR = 60
 
 pytestmark = pytest.mark.skipif(
     not _SOFTSTART.exists(), reason="local-only softstart fixture absent"
@@ -132,13 +137,25 @@ def test_softstart_lattice_routing_proof() -> None:
     print(f"[softstart proof] nets fully connected: {len(full)}/{len(keys_by_net)}")
     assert len(full) >= _NET_FLOOR, f"nets fully connected {len(full)} below floor"
 
-    # 4. Net-class honesty: routed HV_HICUR connections carry 2.6mm copper.
+    # 4. Net-class honesty WITH the #4293 taper: routed HV_HICUR connections
+    # carry 2.6mm copper on the widened lattice body, and any narrower segment
+    # is a legal pad-escape neck (== the DRU neck floor, never an arbitrary
+    # width).  Every routed HV connection must show the full class width
+    # somewhere (the body is never all-neck).
+    neck_w = pf._neck_width(class_by_name.get("HV_HICUR"))
     hv_checked = 0
     for key, route in routes.items():
         nc = class_by_name.get(name_by_net[key[0]])
         if nc is not None and nc.name == "HV_HICUR":
             hv_checked += 1
-            assert all(abs(s.width - nc.trace_width) < 1e-9 for s in route.segments)
+            widths = {round(s.width, 6) for s in route.segments}
+            assert widths <= {round(nc.trace_width, 6), round(neck_w, 6)}, (
+                f"HV net {key} has off-class widths {widths} "
+                f"(expected only {nc.trace_width}mm body or {neck_w}mm neck)"
+            )
+            assert any(abs(s.width - nc.trace_width) < 1e-9 for s in route.segments), (
+                f"HV net {key} widened body missing (all-neck emission)"
+            )
 
     # 2. Zero cross-net short: pairwise per-class copper gap on same layer.
     flat: list[tuple[int, object, tuple, tuple, float, float]] = []

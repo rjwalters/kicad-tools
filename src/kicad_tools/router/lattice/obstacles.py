@@ -200,6 +200,28 @@ class CommittedCopper:
             if dist(a, b) > 1e-9:
                 self.copper[layer].add(a, b, net, half_width, clr)
 
+    def add_run_widths(
+        self,
+        layer: int,
+        points: list[Pt],
+        net: int,
+        seg_halves: list[float],
+        clearance: float | None = None,
+    ) -> None:
+        """Commit a polyline whose segments carry PER-SEGMENT half-widths.
+
+        The tapered pad-escape mechanism (issue #4293) emits the escape legs
+        at a narrower neck width than the widened lattice body, so the spacing
+        model must record each segment at the width it was ACTUALLY emitted
+        at -- a neck leg spaced as neck copper, the body spaced at the full
+        class width.  ``seg_halves[i]`` is the half-width of the segment from
+        ``points[i]`` to ``points[i + 1]``.
+        """
+        clr = self.clearance if clearance is None else clearance
+        for (a, b), hw in zip(zip(points, points[1:], strict=False), seg_halves, strict=False):
+            if dist(a, b) > 1e-9:
+                self.copper[layer].add(a, b, net, hw, clr)
+
     def add_via(self, point: Pt, net: int) -> None:
         """Commit a through-via (blocks the site on ALL layers)."""
         self.vias.append((point, net))
