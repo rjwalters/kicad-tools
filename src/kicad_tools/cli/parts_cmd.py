@@ -265,18 +265,26 @@ def _search(args) -> int:
     """Handle parts search command."""
     try:
         from ..parts import LCSCClient
+        from ..parts.lcsc import LCSCDependencyMissingError
     except ImportError as e:
         print(f"Error: {e}", file=sys.stderr)
         print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
         return 1
 
     client = LCSCClient()
-    results = client.search(
-        args.query,
-        page_size=args.limit,
-        in_stock=args.in_stock,
-        basic_only=args.basic,
-    )
+    try:
+        results = client.search(
+            args.query,
+            page_size=args.limit,
+            in_stock=args.in_stock,
+            basic_only=args.basic,
+        )
+    except LCSCDependencyMissingError as e:
+        # Backend genuinely unavailable (no ``requests`` extra AND no synced
+        # offline catalog).  Surface this distinctly from a legitimate empty
+        # result so the user isn't misled by a bare "No parts found" (#4296).
+        print(f"Error: parts search backend unavailable: {e}", file=sys.stderr)
+        return 1
 
     if not results.parts:
         print(f"No parts found for: {args.query}", file=sys.stderr)

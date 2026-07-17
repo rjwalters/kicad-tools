@@ -308,6 +308,37 @@ def test_catalog_search_escapes_like_wildcards(catalog_db: Path):
     assert catalog.search("_") == []
 
 
+def test_catalog_search_matches_mfr_mpn(catalog_db: Path):
+    """Search resolves parts by MPN via the ``mfr`` column (#4296).
+
+    The MPN lives in ``mfr`` and never appears in ``description``; before the
+    fix these queries returned zero hits (description-only matching).
+    """
+    catalog = JlcpartsCatalog(catalog_db)
+
+    # Full MPN -- present only in `mfr`, absent from the description string.
+    results = catalog.search("STM32F103C8T6")
+    assert [p.lcsc_part for p in results] == ["C8734"]
+    assert results[0].mfr_part == "STM32F103C8T6"
+
+    # A partial MPN prefix also matches (LIKE %term%), still only via `mfr`.
+    results = catalog.search("RC0402FR")
+    assert [p.lcsc_part for p in results] == ["C25804"]
+
+
+def test_catalog_search_mpn_and_description_terms(catalog_db: Path):
+    """Multi-term queries keep AND semantics across the mfr/description OR (#4296)."""
+    catalog = JlcpartsCatalog(catalog_db)
+
+    # "STM32F103C8T6" matches only via `mfr`; "Microcontroller" only via
+    # `description`. Both must be present (AND) -> the single MCU row.
+    results = catalog.search("STM32F103C8T6 Microcontroller")
+    assert [p.lcsc_part for p in results] == ["C8734"]
+
+    # A second term matching neither column on that row excludes it entirely.
+    assert catalog.search("STM32F103C8T6 Resistor") == []
+
+
 # --------------------------------------------------------------------------
 # LCSCClient fallback path
 # --------------------------------------------------------------------------
@@ -776,6 +807,59 @@ def test_cli_dispatch_sync_catalog(catalog_db: Path, tmp_path: Path, monkeypatch
     rc = run_parts_command(args)
     assert rc == 0
     assert JlcpartsCatalog(dest).count() == 4
+
+
+def test_cli_sync_catalog_missing_requests_non_circular(tmp_path: Path, monkeypatch, capsys):
+    """sync-catalog without requests exits non-zero with NON-circular advice (#4295).
+
+    The failure must not recommend running ``kct parts sync-catalog`` -- that is
+    the very command failing on the missing dependency. It should name only the
+    actionable ``parts``-extra install incantation.
+    """
+    from kicad_tools.cli import parts_cmd
+
+    dest = tmp_path / "out" / "jlcparts.sqlite3"
+    monkeypatch.setattr("kicad_tools.parts.jlcparts_catalog.get_catalog_path", lambda: dest)
+    # Block `import requests` at import time inside sync_catalog.
+    monkeypatch.setitem(sys.modules, "requests", None)
+
+    rc = parts_cmd.main(["sync-catalog"])
+    # Regression lock: a fatal missing-dep must NOT exit 0.
+    assert rc != 0
+
+    err = capsys.readouterr().err
+    # Advice is actionable (names the extra + an install command)...
+    assert "parts" in err
+    assert ("pip install" in err) or ("uv sync" in err)
+    # ...and NOT circular: never tells the user to run the failing command.
+    assert "sync-catalog" not in err
+    assert "sync the offline jlcparts catalog" not in err
+    # And no partial catalog was written.
+    assert not dest.exists()
+
+
+def test_cli_search_missing_backend_is_loud(tmp_path: Path, monkeypatch, capsys):
+    """search with no requests AND no catalog fails loudly, not silent-empty (#4296a).
+
+    A genuinely-unavailable backend must be surfaced distinctly from a
+    legitimate zero-match result (bare "No parts found").
+    """
+    from kicad_tools.cli import parts_cmd
+
+    monkeypatch.setattr("kicad_tools.parts.lcsc._requests_installed", lambda: False)
+    # Point the default catalog path at a nonexistent file: no offline fallback.
+    monkeypatch.setattr(
+        "kicad_tools.parts.jlcparts_catalog.get_catalog_path",
+        lambda: tmp_path / "missing.sqlite3",
+    )
+
+    rc = parts_cmd.main(["search", "UCC27524"])
+    assert rc != 0
+
+    err = capsys.readouterr().err
+    assert "backend unavailable" in err
+    # Must NOT masquerade as an ordinary empty result.
+    assert "No parts found" not in err
 
 
 # --------------------------------------------------------------------------

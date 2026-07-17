@@ -51,7 +51,11 @@ from datetime import datetime
 from pathlib import Path
 
 from .cache import get_default_cache_path
-from .lcsc import PARTS_INSTALL_HINT, _categorize_part, _guess_package_type
+from .lcsc import (
+    PARTS_DOWNLOAD_INSTALL_HINT,
+    _categorize_part,
+    _guess_package_type,
+)
 from .models import Part, PartPrice
 
 logger = logging.getLogger(__name__)
@@ -198,12 +202,16 @@ class JlcpartsCatalog:
     ) -> list[Part]:
         """Parametrically search the catalog by free-text value + package.
 
-        The jlcparts schema has *no* dedicated value column, so the query terms
-        are matched against the free-text ``description`` column (the same field
-        the live-API path scores against). Each whitespace-separated term must
-        appear in ``description`` (AND-combined, case-insensitive), optionally
-        constrained to a known ``package``. Filtering is pushed into SQL rather
-        than post-filtered in Python because the real catalog is ~600k+ rows.
+        The jlcparts schema has *no* dedicated value column, so each
+        whitespace-separated term is matched against the free-text
+        ``description`` column *or* the ``mfr`` (manufacturer part number)
+        column -- ``description LIKE ? OR mfr LIKE ?`` per term. Matching
+        ``mfr`` lets MPN queries (e.g. ``"UCC27524"``, ``"IRFB4110"``) resolve
+        even though the MPN never appears in ``description`` (issue #4296);
+        description matching is retained so value/spec queries still work.
+        Terms are AND-combined (case-insensitive), optionally constrained to a
+        known ``package``. Filtering is pushed into SQL rather than
+        post-filtered in Python because the real catalog is ~600k+ rows.
 
         Results are ordered ``library_type`` basic > preferred > extended (the
         JLCPCB assembly tier, matching the downstream
@@ -213,9 +221,10 @@ class JlcpartsCatalog:
         only returns a *candidate pool* shaped like the live-API path.
 
         Args:
-            query: Free-text search string (e.g. ``"10k 0402"``). Split on
-                whitespace into AND-combined ``description LIKE`` terms. An
-                empty/blank query yields an empty list (no unbounded scan).
+            query: Free-text search string (e.g. ``"10k 0402"`` or an MPN like
+                ``"UCC27524"``). Split on whitespace into AND-combined terms,
+                each matched against ``description`` OR ``mfr``. An empty/blank
+                query yields an empty list (no unbounded scan).
             package: Optional exact package filter (e.g. ``"0402"``,
                 ``"LQFP-48"``), matched case-insensitively against ``package``.
             min_stock: Minimum ``stock`` to include (pushed into SQL). Default
@@ -234,8 +243,20 @@ class JlcpartsCatalog:
         if not terms:
             return []
 
-        conditions = ["description LIKE ? ESCAPE '\\' COLLATE NOCASE"] * len(terms)
-        params: list[object] = [f"%{_escape_like(t)}%" for t in terms]
+        # Each term must match the free-text ``description`` *or* the ``mfr``
+        # (manufacturer part number) column.  jlcparts' ``description`` is a
+        # spec string with no MPN, so an MPN query (the most common
+        # BOM-resolution shape, e.g. ``UCC27524``) only resolves via ``mfr``
+        # (issue #4296).  AND-across-terms semantics are preserved; the OR is
+        # per-term.  ``_escape_like`` wildcard escaping is applied to both.
+        conditions = [
+            "(description LIKE ? ESCAPE '\\' COLLATE NOCASE "
+            "OR mfr LIKE ? ESCAPE '\\' COLLATE NOCASE)"
+        ] * len(terms)
+        params: list[object] = []
+        for t in terms:
+            like = f"%{_escape_like(t)}%"
+            params.extend((like, like))
 
         if package:
             conditions.append("package = ? COLLATE NOCASE")
@@ -472,7 +493,7 @@ def sync_catalog(
     except ImportError as e:
         raise ImportError(
             f"Downloading the jlcparts catalog requires the 'requests' library. "
-            f"{PARTS_INSTALL_HINT}"
+            f"{PARTS_DOWNLOAD_INSTALL_HINT}"
         ) from e
 
     dest = dest or get_catalog_path()
