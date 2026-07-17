@@ -1403,3 +1403,197 @@ class TestFpTextReferenceFormat:
         original = fp_text_format_pcb.read_text()
         modified = output_path.read_text()
         assert original != modified, "Fix command should modify the file with fp_text format"
+
+
+# --- Offset-origin boards and courtyard edge overhang (issue #4290) -----------
+#
+# Softstart rev-C's Edge.Cuts spans (68.5, 55) -> (228.5, 155): a 160x100 board
+# whose min corner is NOT the sheet origin.  #4290 reported U14 (an
+# ESP32-C3-WROOM-02 whose antenna-keepout courtyard intentionally protrudes
+# past the edge) as a blocking OFF_BOARD error, forcing `kct route
+# --allow-offboard`.  Two guarantees are pinned here:
+#
+# 1. Pads and outline are compared in ONE coordinate frame, so a footprint
+#    fully inside an offset outline is never flagged (and a genuinely
+#    off-board footprint on the same offset board still errors).
+# 2. Courtyard-artwork-only edge overhang with every pad on-board is a
+#    WARNING (probable intentional overhang: antenna/connector), not a
+#    placement-invalidating ERROR.
+
+# 160x100 outline with min corner (50, 40) -> (210, 140), drawn as chained
+# gr_line segments exactly like the softstart board (exercises the
+# _detect_board_origin gr_line fallback path, not the gr_rect path).
+_OFFSET_OUTLINE = """  (gr_line (start 50 40) (end 210 40)
+    (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 210 40) (end 210 140)
+    (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 210 140) (end 50 140)
+    (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 50 140) (end 50 40)
+    (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+"""
+
+
+def _offset_board_pcb(footprints: str) -> str:
+    """Synthetic offset-origin board (Edge.Cuts min corner at (50, 40))."""
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+    (47 "F.CrtYd" user "F.Courtyard")
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+{_OFFSET_OUTLINE}{footprints})
+"""
+
+
+def _r0402_at(ref: str, x: float, y: float, uuid_n: int) -> str:
+    """R_0402 footprint at sheet-absolute (x, y); no courtyard artwork."""
+    return f"""  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000{uuid_n:02d}")
+    (at {x} {y})
+    (property "Reference" "{ref}" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+"""
+
+
+def _antenna_module_at(ref: str, x: float, y: float) -> str:
+    """Footprint whose real F.CrtYd artwork extends 2mm above its pads.
+
+    Models an antenna module: pads sit at (x, y) but the courtyard rectangle
+    spans y-7 .. y+2 relative to the anchor, so placing it near the top edge
+    leaves every pad on-board while the courtyard overhangs the outline.
+    """
+    return f"""  (footprint "RF_Module:Fake_Antenna_Module"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000099")
+    (at {x} {y})
+    (property "Reference" "{ref}" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "ANT" (at 0 1.5 0) (layer "F.Fab"))
+    (fp_rect (start -2 -7) (end 2 2)
+      (stroke (width 0.05) (type default)) (fill none) (layer "F.CrtYd"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+"""
+
+
+class TestOffsetOriginOffBoard:
+    """Off-board detection on boards whose Edge.Cuts min corner is not (0,0)."""
+
+    def _conflicts(self, tmp_path: Path, footprints: str):
+        pcb_file = tmp_path / "offset_board.kicad_pcb"
+        pcb_file.write_text(_offset_board_pcb(footprints))
+        return PlacementAnalyzer().find_conflicts(pcb_file)
+
+    def test_inside_far_corner_is_clean(self, tmp_path: Path):
+        """Footprint near the far corner but fully inside -> no OFF_BOARD.
+
+        Sheet (205, 135) is board-relative (155, 95) on the 160x100 outline.
+        A checker that normalized the outline to the origin while leaving pad
+        coordinates sheet-absolute (the #4290 mis-diagnosis scenario) would
+        flag this footprint (205 > 160); comparing both in one frame must not.
+        """
+        conflicts = self._conflicts(tmp_path, _r0402_at("R1", 205, 135, 10))
+        assert not [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+
+    def test_fully_offboard_still_errors(self, tmp_path: Path):
+        """Genuinely off-board footprint on the offset board -> ERROR."""
+        conflicts = self._conflicts(tmp_path, _r0402_at("R1", 230, 150, 10))
+        off = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert len(off) == 1
+        assert off[0].severity == ConflictSeverity.ERROR
+        assert "fully outside" in off[0].message
+        # The message reports the outline in both frames so offset boards do
+        # not read as origin-normalized (the confusion that produced #4290).
+        assert "sheet 50.0,40.0 to 210.0,140.0" in off[0].message
+
+    def test_straddling_pads_still_errors(self, tmp_path: Path):
+        """Footprint whose pads cross the offset outline edge -> ERROR."""
+        # At sheet x=209.9 the right pad spans 210.14..210.68 -> past 210.
+        conflicts = self._conflicts(tmp_path, _r0402_at("R1", 209.9, 90, 10))
+        off = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert len(off) == 1
+        assert off[0].severity == ConflictSeverity.ERROR
+        assert "partially outside" in off[0].message
+
+    def test_pads_inside_margin_overhang_is_warning(self, tmp_path: Path):
+        """Pads on-board, only the courtyard margin overhangs -> WARNING.
+
+        The fallback courtyard is the pads bbox expanded by 0.25mm; a pad
+        0.1mm from the edge keeps all copper on-board while the margin pokes
+        out.  This must warn (it routes and fabs fine), not invalidate.
+        """
+        # Right pad extent: 209.0 + 0.51 + 0.27 = 209.78 (inside the 210
+        # edge); the fallback courtyard adds 0.25 -> 210.03 (0.03mm overhang).
+        conflicts = self._conflicts(tmp_path, _r0402_at("R1", 209.0, 90, 10))
+        off = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert len(off) == 1
+        assert off[0].severity == ConflictSeverity.WARNING
+        assert "all pads are on-board" in off[0].message
+        # Warnings alone must not fail `kct placement check` (exit code is
+        # driven by ERROR-severity conflicts only).
+        assert not [c for c in off if c.severity == ConflictSeverity.ERROR]
+
+    def test_real_courtyard_overhang_pads_inside_is_warning(self, tmp_path: Path):
+        """Antenna-style F.CrtYd artwork past the edge, pads inside -> WARNING.
+
+        This is the exact softstart rev-C U14 shape: every pad on-board, the
+        module's courtyard protruding past the outline by design.
+        """
+        pytest.importorskip("shapely")
+        # Anchor at sheet (100, 45): pads at y=45 (board-relative 5, inside);
+        # courtyard spans sheet y 38..47 -> 2mm past the top edge (40).
+        conflicts = self._conflicts(tmp_path, _antenna_module_at("U14", 100, 45))
+        off = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert len(off) == 1
+        assert off[0].severity == ConflictSeverity.WARNING
+        assert off[0].component1 == "U14"
+        assert "top 2.00mm" in off[0].message
+        assert "all pads are on-board" in off[0].message
+
+
+class TestSoftstartRevCOffBoard:
+    """Live check against the local-only softstart rev-C fixture (#4290)."""
+
+    _SOFTSTART_REVC = (
+        Path(__file__).resolve().parent.parent
+        / "boards"
+        / "external"
+        / "softstart"
+        / "output_revc"
+        / "softstart_revc.kicad_pcb"
+    )
+
+    def test_u14_antenna_overhang_is_not_an_error(self):
+        """U14's antenna courtyard overhang must not invalidate the placement."""
+        board = self._SOFTSTART_REVC
+        try:
+            available = board.exists()
+        except OSError:
+            available = False
+        if not available:
+            pytest.skip("softstart fixture not available on this host (local-only symlink)")
+
+        conflicts = PlacementAnalyzer().find_conflicts(board)
+        off_errors = [
+            c
+            for c in conflicts
+            if c.type == ConflictType.OFF_BOARD and c.severity == ConflictSeverity.ERROR
+        ]
+        assert off_errors == []

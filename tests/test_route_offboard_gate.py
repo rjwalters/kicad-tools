@@ -143,5 +143,98 @@ class TestRouteOffboardGateOuterEntry:
         assert "placement invalid" not in capsys.readouterr().err
 
 
+class TestRouteOffboardGateOffsetOrigin:
+    """Gate behavior on offset-origin boards and edge-overhang parts (#4290).
+
+    Softstart rev-C (Edge.Cuts min corner at (68.5, 55), an ESP32-C3-WROOM-02
+    whose antenna courtyard protrudes past the edge by design) was blocked by
+    the gate, forcing ``--allow-offboard`` -- which also disables the gate for
+    genuinely off-board parts.  WARNING-severity OFF_BOARD findings (courtyard
+    artwork overhanging while every pad is on-board) must not block; ERROR
+    findings on the same offset board still must.
+    """
+
+    def _offset_board(self, footprint: str) -> str:
+        """Offset-origin board: gr_line outline (50,40)-(210,140)."""
+        return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+    (47 "F.CrtYd" user "F.Courtyard")
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (gr_line (start 50 40) (end 210 40)
+    (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 210 40) (end 210 140)
+    (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 210 140) (end 50 140)
+    (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 50 140) (end 50 40)
+    (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+{footprint})
+"""
+
+    def _r0402(self, x: float, y: float, crtyd: str = "") -> str:
+        return f"""  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at {x} {y})
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+{crtyd}    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+  )
+"""
+
+    def test_inside_offset_board_routes_without_allow_offboard(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """Footprint near the far corner of an offset board -> gate passes."""
+        pcb = tmp_path / "offset_inside.kicad_pcb"
+        # Sheet (205, 135) = board-relative (155, 95) on the 160x100 outline:
+        # fully inside, but flagged by any absolute-vs-normalized frame mixup.
+        pcb.write_text(self._offset_board(self._r0402(205, 135)))
+        rc = route_main([str(pcb), "--dry-run"])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "placement invalid" not in err
+
+    def test_courtyard_overhang_warning_does_not_block(self, tmp_path: Path, capsys) -> None:
+        """Antenna-style courtyard overhang (pads on-board) -> gate passes."""
+        pytest.importorskip("shapely")
+        pcb = tmp_path / "offset_overhang.kicad_pcb"
+        # Real F.CrtYd artwork spanning sheet y 38..47 (2mm past the top edge
+        # at 40) while the pads sit at y=45, fully on-board.
+        crtyd = """    (fp_rect (start -2 -7) (end 2 2)
+      (stroke (width 0.05) (type default)) (fill none) (layer "F.CrtYd"))
+"""
+        pcb.write_text(self._offset_board(self._r0402(100, 45, crtyd)))
+        rc = route_main([str(pcb), "--dry-run"])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "placement invalid" not in err
+
+    def test_genuinely_offboard_on_offset_board_still_aborts(self, tmp_path: Path, capsys) -> None:
+        """Fully off-board footprint on the same offset board -> exit 2."""
+        pcb = tmp_path / "offset_offboard.kicad_pcb"
+        pcb.write_text(self._offset_board(self._r0402(230, 150)))
+        rc = route_main([str(pcb), "--dry-run"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "outside Edge.Cuts" in err
+        assert "placement invalid" in err
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
