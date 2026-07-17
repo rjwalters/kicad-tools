@@ -1082,6 +1082,9 @@ class Autorouter:
         self._lattice_net_routes: dict[int, list[Route]] | None = None
         self._lattice_served: set[int] = set()
         self._lattice_negotiation_stats: Any = None
+        # Issue #4270: per-diff-pair coupled-routing outcomes for the lattice
+        # engine ("coupled" or a decline reason), keyed by pair base name.
+        self._lattice_pair_outcomes: dict[str, str] = {}
 
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
@@ -2443,6 +2446,115 @@ class Autorouter:
             )
         return self._lattice_pathfinder
 
+    def _lattice_coupled_connections(
+        self,
+    ) -> tuple[list[Any], dict[int, list[tuple[str, str]]]]:
+        """Engaged diff pairs as lattice coupled connections (issue #4270).
+
+        Reuses the layered detector (:func:`detect_diff_pairs`, exactly the
+        :meth:`get_diff_pair_map` wiring) and the grid pre-pass engagement
+        gate (:func:`should_engage_coupled` -- ``coupled_routing`` opt-in +
+        the #2527 single-ended refusal).  For each engaged pair the main-run
+        endpoints are chosen by proximity pairing
+        (:func:`choose_pair_endpoints`); extra same-net pads are left to the
+        caller to route as ordinary single-ended connections anchored on the
+        reserved endpoints.
+
+        Returns ``(coupled, reserved)`` where ``reserved`` maps each pair
+        net id to its two reserved main-run pad keys.  Pairs whose pad
+        topology cannot form a coupled main run are recorded in
+        :attr:`_lattice_pair_outcomes` as declined and fall back to the
+        ordinary single-ended star (no coupled attempt was possible).
+        """
+        from .lattice.coupled import CoupledConnection, choose_pair_endpoints
+
+        coupled: list[Any] = []
+        reserved: dict[int, list[tuple[str, str]]] = {}
+        self._lattice_pair_outcomes = {}
+        if not self.net_names:
+            return coupled, reserved
+        try:
+            from .diffpair import should_engage_coupled
+            from .diffpair_detection import detect_diff_pairs
+        except ImportError:
+            return coupled, reserved
+
+        # Both net-name and class-name keyed views (the synth_routing idiom
+        # -- see get_diff_pair_map / Issue #3098).
+        net_to_class: dict[str, str] = {}
+        synth_routing: dict = dict(self.net_class_map)
+        for net_name, net_class in self.net_class_map.items():
+            net_to_class[net_name] = net_class.name
+            synth_routing.setdefault(net_class.name, net_class)
+
+        try:
+            detected = detect_diff_pairs(
+                self.net_names,
+                net_class_routing=synth_routing,
+                net_to_class=net_to_class,
+                kicad_groups=getattr(self, "kicad_diff_pair_groups", None),
+            )
+        except Exception:
+            # Defensive: detection must never break routing.
+            return coupled, reserved
+
+        for d in detected:
+            p_name = d.pair.positive.net_name
+            n_name = d.pair.negative.net_name
+            pair_name = d.pair.name or p_name
+            engaged, _reason = should_engage_coupled(d.pair, synth_routing, net_to_class)
+            if not engaged:
+                continue
+            p_id = d.pair.positive.net_id
+            n_id = d.pair.negative.net_id
+            keyed_p = [(k, self.pads[k]) for k in self.nets.get(p_id, []) if k in self.pads]
+            keyed_n = [(k, self.pads[k]) for k in self.nets.get(n_id, []) if k in self.pads]
+            chosen = choose_pair_endpoints([p for _, p in keyed_p], [p for _, p in keyed_n])
+            if chosen is None:
+                # Degenerate pad topology: no coupled main run is possible,
+                # so the nets stay on the ordinary single-ended star.
+                self._lattice_pair_outcomes[pair_name] = "no-endpoint-couples"
+                continue
+            (ip_a, in_a), (ip_b, in_b) = chosen
+            nc = self.net_class_map.get(p_name) or self.net_class_map.get(n_name)
+            if nc is None:
+                nc = synth_routing.get(net_to_class.get(p_name, ""), None)
+            if nc is None:
+                self._lattice_pair_outcomes[pair_name] = "no-net-class"
+                continue
+            trace_w = nc.trace_width or self.rules.trace_width
+            intra = nc.effective_intra_pair_clearance()
+            # Fab floor (issue #4270): an intra-pair air gap below the
+            # configured manufacturer's minimum copper clearance is
+            # unmanufacturable and would fail the exact kicad-cli DRC gate
+            # the committed board-06 output passes (its grid-quantized
+            # gaps sit above the floor).  Clamp the emitted gap up to the
+            # floor; the class value is honored when it already clears it.
+            mfr = self.rules.manufacturer
+            if mfr:
+                try:
+                    from .mfr_limits import get_mfr_limits
+
+                    intra = max(intra, get_mfr_limits(mfr).min_clearance)
+                except Exception:
+                    pass
+            pitch = trace_w + intra
+            coupled.append(
+                CoupledConnection(
+                    key=("pair", p_id, n_id),
+                    pair_name=pair_name,
+                    pad_p_a=keyed_p[ip_a][1],
+                    pad_n_a=keyed_n[in_a][1],
+                    pad_p_b=keyed_p[ip_b][1],
+                    pad_n_b=keyed_n[in_b][1],
+                    net_class=nc,
+                    pitch=pitch,
+                )
+            )
+            reserved[p_id] = [keyed_p[ip_a][0], keyed_p[ip_b][0]]
+            reserved[n_id] = [keyed_n[in_a][0], keyed_n[in_b][0]]
+        return coupled, reserved
+
     def _negotiate_lattice_netset(self) -> dict[int, list[Route]]:
         """Negotiate every routable net through the shared lattice (#4278).
 
@@ -2452,32 +2564,72 @@ class Autorouter:
         :meth:`LatticePathfinder.route_netset` (``lattice_builds == 1``).
         Unlike the mesh path, cross-layer connections are NOT skipped -- the
         lattice's (node, layer) graph handles layer transitions natively.
+
+        Diff pairs (issue #4270): engaged pairs become coupled fat-agent
+        connections (one per pair main run); their extra same-net pads
+        attach to the nearest reserved endpoint as ordinary single-ended
+        connections.  A pair that cannot complete a coupled planar run
+        DECLINES with a reason (reported below and in
+        :attr:`_lattice_pair_outcomes`) -- it is never split into uncoupled
+        legs.
         """
         pf = self._ensure_lattice_pathfinder()
+
+        coupled, reserved = self._lattice_coupled_connections()
 
         connections: list[tuple[object, Pad, Pad, object]] = []
         for net, pad_keys in self.nets.items():
             if net == 0:
                 continue
-            pads = [self.pads[k] for k in pad_keys if k in self.pads]
-            if len(pads) < 2:
+            keyed = [(k, self.pads[k]) for k in pad_keys if k in self.pads]
+            if len(keyed) < 2:
                 continue
+            res_keys = reserved.get(net)
+            if res_keys:
+                # Main run handled by the coupled connection; each extra pad
+                # attaches single-ended to its nearest reserved endpoint.
+                res_pads = [p for k, p in keyed if k in res_keys]
+                extras = [p for k, p in keyed if k not in res_keys]
+                for seq, other in enumerate(extras):
+                    anchor = min(
+                        res_pads,
+                        key=lambda rp: math.hypot(rp.x - other.x, rp.y - other.y),
+                    )
+                    connections.append(((net, seq), anchor, other, None))
+                continue
+            pads = [p for _k, p in keyed]
             anchor = pads[0]
             for seq, other in enumerate(pads[1:]):
                 connections.append(((net, seq), anchor, other, None))
 
-        if not connections:
+        if not connections and not coupled:
             return {}
 
-        routes_by_key, stats = pf.route_netset(connections)
+        # Pairs consume roughly double the corridor capacity of a single
+        # net, so give the negotiation more rip-up pressure headroom when
+        # coupled connections are present (issue #4270).  The default 8
+        # is preserved exactly for pair-free boards.
+        max_iterations = 12 if coupled else 8
+        routes_by_key, stats = pf.route_netset(
+            connections, coupled=coupled, max_iterations=max_iterations
+        )
         self._lattice_negotiation_stats = stats
 
+        # Honest per-pair reporting (issue #4270 acceptance): engaged /
+        # coupled / declined-with-reason, mirroring failure_reasons.
+        if coupled or self._lattice_pair_outcomes:
+            outcomes = getattr(pf, "pair_outcomes", {})
+            for pc in coupled:
+                self._lattice_pair_outcomes[pc.pair_name] = outcomes.get(pc.key, "not-attempted")
+            n_coupled = sum(1 for v in self._lattice_pair_outcomes.values() if v == "coupled")
+            print(f"  Diff pairs (lattice): {n_coupled}/{len(self._lattice_pair_outcomes)} coupled")
+            for name, outcome in sorted(self._lattice_pair_outcomes.items()):
+                print(f"    {name}: {outcome}")
+
         by_net: dict[int, list[Route]] = {}
-        for key, route in routes_by_key.items():
-            assert isinstance(key, tuple)
-            net_id = int(key[0])
+        for route in routes_by_key.values():
             if route.segments:
-                by_net.setdefault(net_id, []).append(route)
+                by_net.setdefault(route.net, []).append(route)
         return by_net
 
     def route_net(
@@ -11740,6 +11892,35 @@ class Autorouter:
             already overlap-free, the common case).
         """
         extra = self._collect_extra_routes_for_revalidation(net_routes)
+        # Issue #4270: a legitimately-coupled diff pair runs sub-clearance
+        # BY DESIGN (leg-to-leg gap = the per-class intra-pair clearance,
+        # below the global trace clearance), so the wide finalize threshold
+        # would demote one leg as a cross-net short.  Exempt exactly the
+        # partner pairs whose copper VERIFIABLY honors their intra-pair
+        # floor -- the same adjudication split the M3 reporting below uses.
+        # Only the finalize (wide) threshold is exempted: a physically
+        # overlapping pair is a real short regardless of pairing.
+        exempt_pairs: set[tuple[int, int]] = set()
+        if finalize and net_routes:
+            # One detection pass for the whole revalidation (the per-net
+            # _diff_pair_partner_net helper would re-run detection N times).
+            pair_map = self.get_diff_pair_map()
+            if pair_map:
+                name_to_id: dict[str, int] = {}
+                for nid, nname in self.net_names.items():
+                    name_to_id.setdefault(nname, nid)
+                for name_a, name_b in pair_map.items():
+                    net_a = name_to_id.get(name_a)
+                    net_b = name_to_id.get(name_b)
+                    if net_a is None or net_b is None:
+                        continue
+                    if not net_routes.get(net_a) or not net_routes.get(net_b):
+                        continue
+                    key = (net_a, net_b) if net_a < net_b else (net_b, net_a)
+                    if key in exempt_pairs:
+                        continue
+                    if self._coupled_pair_honors_intra_floor(net_a, net_b, net_routes):
+                        exempt_pairs.add(key)
         # Issue #4208 (Unit 2): delegate to the single shared seg-seg
         # finalize gate so ``core`` and ``two_phase`` cannot drift apart.
         victims, non_rippable_pairs = _demote_seg_seg_finalize(
@@ -11750,6 +11931,7 @@ class Autorouter:
             trace_clearance=self.rules.trace_clearance,
             extra_routes=extra,
             copper_overlap_only=not finalize,
+            exempt_pairs=exempt_pairs,
         )
         # M3: a cross-net crossing between two non-rippable escape stubs
         # has no demotable victim (the greedy cover skips it) -- surface
@@ -12584,6 +12766,49 @@ class Autorouter:
             if nname == partner_name:
                 return nid
         return None
+
+    def _coupled_pair_honors_intra_floor(
+        self,
+        net_a: int,
+        net_b: int,
+        net_routes: dict[int, list[Route]],
+    ) -> bool:
+        """True when diff-pair nets ``a``/``b`` honor their intra-pair floor.
+
+        Issue #4270: used by :meth:`_demote_seg_seg_overlap_nets` to decide
+        whether a partner pair's sub-clearance proximity is legitimate
+        coupled routing (exempt from the wide finalize short gate) or a
+        real violation (demotable as usual).  Deliberately conservative:
+        the pair's net class must carry an EXPLICIT ``intra_pair_clearance``
+        (an accidental suffix-detected pair without a coupled design intent
+        never qualifies), and every route-pair combination must pass
+        :func:`diffpair_routing.find_intra_pair_clearance_violations` at
+        that threshold.
+        """
+        from .diffpair_routing import find_intra_pair_clearance_violations
+
+        name_a = self.net_names.get(net_a)
+        name_b = self.net_names.get(net_b)
+        if not name_a or not name_b:
+            return False
+        net_class = self.net_class_map.get(name_a) or self.net_class_map.get(name_b)
+        if net_class is None or net_class.intra_pair_clearance is None:
+            return False
+        threshold = float(net_class.effective_intra_pair_clearance())
+        if threshold <= 0.0:
+            return False
+        routes_a = net_routes.get(net_a, [])
+        routes_b = net_routes.get(net_b, [])
+        if not routes_a or not routes_b:
+            return False
+        for route_a in routes_a:
+            for route_b in routes_b:
+                violation = find_intra_pair_clearance_violations(
+                    route_a, route_b, threshold, pair_name=name_a
+                )
+                if violation is not None:
+                    return False
+        return True
 
     def _rescued_leg_breaks_intra_pair_clearance(
         self,

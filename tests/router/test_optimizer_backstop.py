@@ -153,3 +153,67 @@ class TestCliBackstopHelper:
         # No demotion -> no backstop message.
         assert "Post-optimize backstop demoted" not in capsys.readouterr().out
         assert r1 in ar.routes and r2 in ar.routes
+
+
+class TestCoupledDiffPairExemption:
+    """Issue #4270: a legitimately-coupled diff pair (leg-to-leg gap = the
+    per-class intra-pair clearance, deliberately below the global trace
+    clearance) must NOT be demoted by the wide finalize threshold.  The
+    exemption is verified, not assumed: a pair whose copper breaks its own
+    intra floor is still demoted."""
+
+    @staticmethod
+    def _pair_autorouter(gap: float) -> Autorouter:
+        from kicad_tools.router.rules import NetClassRouting
+
+        ar = _make_autorouter()
+        hs = NetClassRouting(
+            name="HS",
+            trace_width=0.2,
+            clearance=0.15,
+            intra_pair_clearance=0.1,
+            coupled_routing=True,
+        )
+        ar.net_class_map["D+"] = hs
+        ar.net_class_map["D-"] = hs
+        ar.net_names[1] = "D+"
+        ar.net_names[2] = "D-"
+        # Two parallel legs 'gap' apart edge-to-edge (centreline 0.2 + gap).
+        sep = 0.2 + gap
+        r_p = _route(1, [_seg(2.0, 5.0, 12.0, 5.0, 1)], "D+")
+        r_n = _route(2, [_seg(2.0, 5.0 + sep, 12.0, 5.0 + sep, 2)], "D-")
+        for r in (r_p, r_n):
+            _commit(ar, r)
+        return ar
+
+    def test_coupled_pair_honoring_intra_floor_is_exempt(self):
+        # Edge gap 0.1 == intra_pair_clearance floor, below the global
+        # 0.15 clearance: the pre-#4270 gate demoted one leg as a short.
+        ar = self._pair_autorouter(gap=0.11)
+        assert ar.revalidate_committed_copper_or_demote() == []
+        assert len(ar.routes) == 2
+
+    def test_pair_breaking_its_own_intra_floor_is_still_demoted(self):
+        # Edge gap 0.05 < intra_pair_clearance 0.1: a REAL violation --
+        # the exemption must not fire.
+        ar = self._pair_autorouter(gap=0.05)
+        demoted = ar.revalidate_committed_copper_or_demote()
+        assert demoted, "sub-intra-floor pair must still be demoted"
+
+    def test_pair_without_explicit_intra_clearance_is_not_exempt(self):
+        from kicad_tools.router.rules import NetClassRouting
+
+        ar = _make_autorouter()
+        nc = NetClassRouting(name="HS", trace_width=0.2, clearance=0.15)
+        ar.net_class_map["D+"] = nc
+        ar.net_class_map["D-"] = nc
+        ar.net_names[1] = "D+"
+        ar.net_names[2] = "D-"
+        r_p = _route(1, [_seg(2.0, 5.0, 12.0, 5.0, 1)], "D+")
+        r_n = _route(2, [_seg(2.0, 5.31, 12.0, 5.31, 2)], "D-")
+        for r in (r_p, r_n):
+            _commit(ar, r)
+        # 0.11 edge gap without a declared intra clearance: an accidental
+        # suffix-detected pair never qualifies for the exemption.
+        demoted = ar.revalidate_committed_copper_or_demote()
+        assert demoted

@@ -44,12 +44,14 @@ import heapq
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ..layers import LayerStack
 from ..primitives import Pad, Route, Segment, Via
 from ..quantize import dogleg_points
 from ..rules import DesignRules
-from .geometry import Pt, Rect, dist, pt_in_rect
+from .coupled import CoupledConnection
+from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
 from .obstacles import CommittedCopper, LatticeObstacleModel
 from .quadtree import EdgeKey, NodeKey, OctilinearLattice, RefineRegion
 
@@ -88,6 +90,84 @@ class _RouteResult:
     runs: list[tuple[int, list[Pt]]]  # (layer_index, polyline) per copper run
     via_points: list[Pt]
     resources: set[Resource]  # lattice edges/via-nodes consumed (history keys)
+
+
+@dataclass
+class _PairResult:
+    """Internal per-pair result: both emitted legs + commit geometry (#4270)."""
+
+    routes: list[Route]  # [P route, N route]
+    runs: list[tuple[int, int, list[Pt]]]  # (net, layer_index, polyline) per leg
+    resources: set[Resource]  # the fat centerline's lattice resources
+
+
+def _diverse_pair_stubs(
+    stubs: list[tuple[NodeKey, int, list[Pt], float]],
+    mid: Pt,
+    pair_pads: tuple[Pad, Pad],
+    *,
+    max_axis_dot: float = 0.5,
+    per_bucket: int = 2,
+    cap: int = 48,
+) -> list[tuple[NodeKey, int, list[Pt], float]]:
+    """Downselect fat pair stubs for direction + distance diversity (#4270).
+
+    Two filters, then a diversity cap:
+
+    * **Perpendicular gate**: the stub's first segment must leave the pad
+      midpoint roughly THROUGH the pair gate, i.e. not nearly parallel to
+      the P-N pad axis (``|dir . axis| <= max_axis_dot`` keeps the first
+      leg within 30 degrees of perpendicular).  An along-axis approach lays one
+      offset leg straight along the partner's endpoint pad -- the emitted
+      geometry then fails the partner-pad floor anyway, so pruning it here
+      lets the A* try approaches that can actually be emitted.  Zero-length
+      stubs (midpoint exactly on a node) are dropped for the same reason:
+      they carry no direction for the parity mechanism.
+    * **Octant x distance-shell diversity**: keep the ``per_bucket``
+      shortest stubs per (direction octant, shell of node distance in
+      {<1 mm, <2 mm, >=2 mm}) so enclosed pockets cannot crowd out the far
+      stubs that escape them.
+    """
+    import math as _math
+
+    px = pair_pads[0].x - pair_pads[1].x
+    py = pair_pads[0].y - pair_pads[1].y
+    axis_len = _math.hypot(px, py)
+    axis = (px / axis_len, py / axis_len) if axis_len > 1e-9 else None
+
+    def first_dir(poly: list[Pt]) -> Pt | None:
+        for a, b in zip(poly, poly[1:], strict=False):
+            d = dist(a, b)
+            if d > 1e-9:
+                return ((b[0] - a[0]) / d, (b[1] - a[1]) / d)
+        return None
+
+    gated: list[tuple[NodeKey, int, list[Pt], float]] = []
+    for stub in stubs:
+        d = first_dir(stub[2])
+        if d is None:
+            continue
+        if axis is not None and abs(d[0] * axis[0] + d[1] * axis[1]) > max_axis_dot:
+            continue
+        gated.append(stub)
+
+    gated.sort(key=lambda s: s[3])
+    buckets: dict[tuple[int, int, int], int] = {}
+    out: list[tuple[NodeKey, int, list[Pt], float]] = []
+    for stub in gated:
+        node_pt = stub[2][-1]
+        dx, dy = node_pt[0] - mid[0], node_pt[1] - mid[1]
+        r = _math.hypot(dx, dy)
+        octant = int(((_math.atan2(dy, dx) + _math.tau) % _math.tau) // (_math.tau / 8))
+        shell = 0 if r < 1.0 else (1 if r < 2.0 else 2)
+        key = (stub[1], octant, shell)
+        if buckets.get(key, 0) >= per_bucket:
+            continue
+        buckets[key] = buckets.get(key, 0) + 1
+        out.append(stub)
+        if len(out) >= cap:
+            break
+    return out
 
 
 class LatticePathfinder:
@@ -150,6 +230,9 @@ class LatticePathfinder:
         # Per-connection decline reasons for the best negotiation pass
         # (honest shortfall diagnosis; reset by :meth:`route_netset`).
         self.failure_reasons: dict[object, str] = {}
+        # Per-diff-pair outcome for the best pass: "coupled" or a decline
+        # reason, keyed by ``CoupledConnection.key`` (issue #4270).
+        self.pair_outcomes: dict[object, str] = {}
 
     # -- construction from a board ----------------------------------------
 
@@ -266,6 +349,10 @@ class LatticePathfinder:
         *,
         kmax: int = 4,
         search_radius: float | None = None,
+        extra_clearance: float = 0.0,
+        partner_net: int | None = None,
+        layers: tuple[int, ...] | None = None,
+        exempt_pads: frozenset[int] | None = None,
     ) -> list[tuple[NodeKey, int, list[Pt], float]]:
         """Legal dogleg stubs ``(node_key, layer, polyline pad->node, length)``.
 
@@ -276,15 +363,39 @@ class LatticePathfinder:
         pad masks AND committed copper (the ``subgrid.py`` reject-and-retry
         discipline -- the standing #3906 lesson).  A pad none of whose
         candidate stubs clears yields ``[]`` -> the connection declines.
+
+        Fat-agent mode (issue #4270 diff pairs): ``extra_clearance`` grows
+        every gap by the pair half-envelope and ``partner_net`` joins the
+        "self" net set, so a pair *centerline* stub reserves room for both
+        offset legs.  The static check becomes a geometric query against the
+        grown pad rects (no second mask build -- ``lattice_builds`` stays 1)
+        and ``layers`` restricts candidates to layers every pair endpoint
+        pad owns (the v1 coupled run is planar).
         """
         lattice = self.build()
         obstacles = self.obstacles
         if committed is None:
             committed = self._fresh_committed()
+        fat = extra_clearance > 0.0 or partner_net is not None
         if search_radius is None:
             search_radius = max(3.0 * lattice.fine + max(pad.width, pad.height), 2.0)
+            if fat:
+                # A fat agent may need to gather farther out of a dense pad
+                # cluster.  The stub is part of the coupled centerline, so a
+                # longer dogleg costs length, not coupling quality.
+                search_radius = max(search_radius, 4.0)
 
-        layers = self._pad_layer_indices(pad)
+        if layers is None:
+            layers = self._pad_layer_indices(pad)
+        pair_nets = {net} if partner_net is None else {net, partner_net}
+        if fat:
+            from .coupled import (
+                committed_point_clear_grown,
+                committed_seg_clear_grown,
+                pads_block_point_grown,
+                pads_block_segment_grown,
+            )
+
         candidates: list[tuple[float, NodeKey, Pt]] = []
         pad_pt = (pad.x, pad.y)
         for key, point in lattice.nodes.items():
@@ -296,21 +407,43 @@ class LatticePathfinder:
         out: list[tuple[NodeKey, int, list[Pt], float]] = []
         for _d, key, point in candidates:
             for layer in layers:
-                if obstacles.node_blocked(key, layer, net):
-                    continue
-                if not committed.node_clear(point, layer, net):
-                    continue
+                if fat:
+                    if pads_block_point_grown(
+                        obstacles, point, layer, pair_nets, extra_clearance, exempt_pads
+                    ):
+                        continue
+                    if not committed_point_clear_grown(
+                        committed, point, layer, pair_nets, extra_clearance
+                    ):
+                        continue
+                else:
+                    if obstacles.node_blocked(key, layer, net):
+                        continue
+                    if not committed.node_clear(point, layer, net):
+                        continue
                 accepted: list[Pt] | None = None
-                for axis_first in (False, True):
+                # Fat mode prefers the axis-first dogleg: its first leg is
+                # axis-aligned, which is what the pair perpendicular gate
+                # (:func:`_diverse_pair_stubs`) needs to see (#4270).
+                for axis_first in (True, False) if fat else (False, True):
                     poly = dogleg_points(pad.x, pad.y, point[0], point[1], axis_first=axis_first)
                     ok = True
                     for a, b in zip(poly, poly[1:], strict=False):
-                        if obstacles.segment_blocked(a, b, layer, net):
-                            ok = False
-                            break
-                        if not committed.seg_clear(a, b, layer, net):
-                            ok = False
-                            break
+                        if fat:
+                            if pads_block_segment_grown(
+                                obstacles, a, b, layer, pair_nets, extra_clearance, exempt_pads
+                            ) or not committed_seg_clear_grown(
+                                committed, a, b, layer, pair_nets, extra_clearance
+                            ):
+                                ok = False
+                                break
+                        else:
+                            if obstacles.segment_blocked(a, b, layer, net):
+                                ok = False
+                                break
+                            if not committed.seg_clear(a, b, layer, net):
+                                ok = False
+                                break
                     if ok:
                         accepted = poly
                         break
@@ -423,6 +556,11 @@ class LatticePathfinder:
         history: dict[Resource, float],
         present: float,
         allow_vias: bool = True,
+        extra_clearance: float = 0.0,
+        partner_net: int | None = None,
+        stub_layers: tuple[int, ...] | None = None,
+        stubs_override: tuple[list, list] | None = None,
+        exempt_pads: frozenset[int] | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """A* over the (node, layer) graph; returns ``(result, reason)``.
 
@@ -431,15 +569,58 @@ class LatticePathfinder:
         lattice resources.  Hard legality (static masks + geometric committed
         copper) is never traded against cost: an illegal resource is simply
         not expanded, so the search can only DECLINE, never ship a short.
+
+        Fat-agent mode (issue #4270): ``extra_clearance`` / ``partner_net``
+        switch every legality check to the grown geometric predicates from
+        :mod:`.coupled`, so the path reserves the whole pair envelope.  Fat
+        agents are planar in v1 -- ``allow_vias`` is forced off (a coupled
+        run that cannot complete on one layer declines honestly).
+        ``stubs_override`` lets :meth:`_route_pair_impl` supply parity-
+        filtered stub sets (``(stubs_a, stubs_b)``) instead of recomputing.
         """
         lattice = self.build()
         obstacles = self.obstacles
         net = start.net
 
-        stubs_a = self.pad_stubs(start, net, committed)
+        fat = extra_clearance > 0.0 or partner_net is not None
+        if fat:
+            # v1 coupled runs are planar; there is no fat via legality.
+            allow_vias = False
+            from .coupled import (
+                committed_point_clear_grown,
+                committed_seg_clear_grown,
+                pads_block_point_grown,
+                pads_block_segment_grown,
+            )
+
+            pair_nets = {net} if partner_net is None else {net, partner_net}
+
+        if stubs_override is not None:
+            stubs_a, stubs_b = stubs_override
+        else:
+            stub_kmax = 24 if fat else 4
+            stubs_a = self.pad_stubs(
+                start,
+                net,
+                committed,
+                kmax=stub_kmax,
+                extra_clearance=extra_clearance,
+                partner_net=partner_net,
+                layers=stub_layers,
+                exempt_pads=exempt_pads,
+            )
+            stubs_b = self.pad_stubs(
+                end,
+                net,
+                committed,
+                kmax=stub_kmax,
+                extra_clearance=extra_clearance,
+                partner_net=partner_net,
+                layers=stub_layers,
+                exempt_pads=exempt_pads,
+            )
         if not stubs_a:
             return None, "pad-escape-start"
-        stubs_b = self.pad_stubs(end, net, committed)
         if not stubs_b:
             return None, "pad-escape-end"
 
@@ -492,18 +673,35 @@ class LatticePathfinder:
                 ek = (edge, layer)
                 ok = edge_ok.get(ek)
                 if ok is None:
-                    ok = not obstacles.edge_blocked(edge, layer, net) and committed.seg_clear(
-                        lattice.node_point(edge[0]), lattice.node_point(edge[1]), layer, net
-                    )
+                    if fat:
+                        pa = lattice.node_point(edge[0])
+                        pb = lattice.node_point(edge[1])
+                        ok = not pads_block_segment_grown(
+                            obstacles, pa, pb, layer, pair_nets, extra_clearance, exempt_pads
+                        ) and committed_seg_clear_grown(
+                            committed, pa, pb, layer, pair_nets, extra_clearance
+                        )
+                    else:
+                        ok = not obstacles.edge_blocked(edge, layer, net) and committed.seg_clear(
+                            lattice.node_point(edge[0]), lattice.node_point(edge[1]), layer, net
+                        )
                     edge_ok[ek] = ok
                 if not ok:
                     continue
                 nstate = (nbr, layer)
                 nok = node_ok.get(nstate)
                 if nok is None:
-                    nok = not obstacles.node_blocked(nbr, layer, net) and committed.node_clear(
-                        lattice.node_point(nbr), layer, net
-                    )
+                    if fat:
+                        npt = lattice.node_point(nbr)
+                        nok = not pads_block_point_grown(
+                            obstacles, npt, layer, pair_nets, extra_clearance, exempt_pads
+                        ) and committed_point_clear_grown(
+                            committed, npt, layer, pair_nets, extra_clearance
+                        )
+                    else:
+                        nok = not obstacles.node_blocked(nbr, layer, net) and committed.node_clear(
+                            lattice.node_point(nbr), layer, net
+                        )
                     node_ok[nstate] = nok
                 if not nok:
                     continue
@@ -658,12 +856,365 @@ class LatticePathfinder:
             )
         return route
 
+    # -- diff-pair coupled routing (issue #4270) --------------------------------
+
+    def _pair_attach(
+        self,
+        pad: Pad,
+        target: Pt,
+        layer: int,
+        net: int,
+        pair_nets: set[int],
+        committed: CommittedCopper,
+    ) -> list[Pt] | None:
+        """Dogleg from the exact pad position to an emitted leg endpoint.
+
+        Ordinary single-trace clearance (``extra = 0``) but with BOTH pair
+        nets as "self" -- the attach necessarily runs between the pair's own
+        pads.  Returns the accepted polyline (pad first) or ``None``.
+        """
+        from .coupled import pads_block_segment_grown
+
+        if dist((pad.x, pad.y), target) <= 1e-9:
+            return [(pad.x, pad.y)]
+        for axis_first in (False, True):
+            poly = dogleg_points(pad.x, pad.y, target[0], target[1], axis_first=axis_first)
+            ok = True
+            for a, b in zip(poly, poly[1:], strict=False):
+                if dist(a, b) <= 1e-9:
+                    continue
+                if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, 0.0):
+                    ok = False
+                    break
+                if not committed.seg_clear(a, b, layer, net):
+                    ok = False
+                    break
+            if ok:
+                return poly
+        return None
+
+    def _emit_leg(
+        self, net: int, net_name: str, points: list[Pt], layer_idx: int, trace_w: float
+    ) -> Route | None:
+        """One offset leg -> a via-free ``Route`` (same #3907 choke as _emit)."""
+        from ..optimizer.algorithms import merge_collinear
+        from ..optimizer.config import OptimizationConfig
+
+        try:
+            layer_enum = self.layer_stack.index_to_layer_enum(layer_idx)
+        except Exception:
+            return None
+        segments = [
+            Segment(
+                x1=a[0],
+                y1=a[1],
+                x2=b[0],
+                y2=b[1],
+                width=trace_w,
+                layer=layer_enum,
+                net=net,
+                net_name=net_name,
+            )
+            for a, b in zip(points, points[1:], strict=False)
+            if dist(a, b) > 1e-9
+        ]
+        route = Route(net=net, net_name=net_name)
+        route.segments.extend(merge_collinear(segments, OptimizationConfig()))
+        return route if route.segments else None
+
+    def _route_pair_impl(
+        self,
+        pc: CoupledConnection,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+    ) -> tuple[_PairResult | None, str]:
+        """Route one engaged diff pair as a fat centerline agent (#4270).
+
+        Pipeline: virtual midpoint pads -> parity-filtered fat stubs ->
+        planar fat A* -> collinear merge -> geometric ``+/- pitch/2`` offset
+        emission -> polarity assignment -> pad-attach doglegs -> full
+        geometric re-verification of both legs (masks + committed copper +
+        intra-pair floor + partner-pad floor) -> emit.  ANY failure declines
+        with a reason; nothing partial is ever committed (#3906).
+
+        Parity filtering: the polarity a coupled run can serve is fixed by
+        the travel direction of its first/last stub segment (offsetting is
+        continuous, so "P on the left" propagates end to end).  Stubs are
+        therefore partitioned by which side P would land on and the A* runs
+        once per consistent parity -- this lets a pair whose direct approach
+        would need a polarity twist hook around an endpoint and approach
+        from the reverse direction instead of declining outright.
+        """
+        from .coupled import (
+            assign_polarity,
+            merge_collinear_points,
+            offset_polyline,
+            seg_rect_dist,
+            side_bit,
+        )
+
+        net_p = pc.pad_p_a.net
+        net_n = pc.pad_n_a.net
+        pair_nets = {net_p, net_n}
+        half_pitch = pc.pitch / 2.0
+
+        layer_sets = [
+            set(self._pad_layer_indices(p))
+            for p in (pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b)
+        ]
+        common = tuple(sorted(set.intersection(*layer_sets)))
+        if not common:
+            return None, "pair-no-common-layer"
+
+        mid_a, mid_b = pc.mid_a, pc.mid_b
+        v_a = Pad(
+            x=mid_a[0],
+            y=mid_a[1],
+            width=0.0,
+            height=0.0,
+            net=net_p,
+            net_name=pc.pad_p_a.net_name,
+            layer=pc.pad_p_a.layer,
+            ref=pc.pad_p_a.ref,
+            pin=pc.pad_p_a.pin,
+        )
+        v_b = Pad(
+            x=mid_b[0],
+            y=mid_b[1],
+            width=0.0,
+            height=0.0,
+            net=net_p,
+            net_name=pc.pad_p_b.net_name,
+            layer=pc.pad_p_b.layer,
+            ref=pc.pad_p_b.ref,
+            pin=pc.pad_p_b.pin,
+        )
+
+        # The four main-run endpoint pads are the ONLY pads the fat
+        # centerline may overlap; every other pad -- including non-endpoint
+        # pads of the pair's own nets -- is an obstacle, because the leg of
+        # the opposite polarity would otherwise land on it (board-06 USB2
+        # B-row lesson).
+        endpoint_sites = {
+            (round(pad.x, 6), round(pad.y, 6), pad.net)
+            for pad in (pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b)
+        }
+        exempt = frozenset(
+            idx
+            for idx, pad in enumerate(self.pads)
+            if (round(pad.x, 6), round(pad.y, 6), pad.net) in endpoint_sites
+        )
+
+        # Collect EVERY legal fat stub in the search radius, then downselect
+        # for geometric diversity.  A count-capped nearest-first scan can
+        # exhaust itself inside an enclosed pocket (the board-06 BGA guard
+        # ring) and never reach the one dogleg that threads the way out.
+        raw_a = self.pad_stubs(
+            v_a,
+            net_p,
+            committed,
+            kmax=10_000,
+            extra_clearance=half_pitch,
+            partner_net=net_n,
+            layers=common,
+            exempt_pads=exempt,
+        )
+        stubs_a = _diverse_pair_stubs(raw_a, pc.mid_a, (pc.pad_p_a, pc.pad_n_a))
+        if not stubs_a:
+            return None, "pair-escape-a"
+        raw_b = self.pad_stubs(
+            v_b,
+            net_p,
+            committed,
+            kmax=10_000,
+            extra_clearance=half_pitch,
+            partner_net=net_n,
+            layers=common,
+            exempt_pads=exempt,
+        )
+        stubs_b = _diverse_pair_stubs(raw_b, pc.mid_b, (pc.pad_p_b, pc.pad_n_b))
+        if not stubs_b:
+            return None, "pair-escape-b"
+
+        def first_dir(poly: list[Pt]) -> Pt | None:
+            for a, b in zip(poly, poly[1:], strict=False):
+                if dist(a, b) > 1e-9:
+                    length = dist(a, b)
+                    return ((b[0] - a[0]) / length, (b[1] - a[1]) / length)
+            return None
+
+        def stub_bit(stub: tuple[NodeKey, int, list[Pt], float], *, at_goal: bool) -> bool | None:
+            d = first_dir(stub[2])
+            if d is None:
+                return None
+            if at_goal:
+                # The goal stub is traversed node -> pad, so the centerline's
+                # final travel direction is the REVERSE of the stub polyline.
+                d = (-d[0], -d[1])
+                return side_bit(d, pc.pad_p_b, pc.pad_n_b)
+            return side_bit(d, pc.pad_p_a, pc.pad_n_a)
+
+        # A zero-length stub (a lattice node exactly at the midpoint) has no
+        # direction of its own, so its polarity side is set by whatever
+        # lattice edge the search takes first -- outside the parity
+        # mechanism's control.  It is EXCLUDED (already dropped by the
+        # perpendicular gate in :func:`_diverse_pair_stubs`); directed
+        # doglegs to the surrounding nodes cover the same connectivity.
+        by_bit_a: dict[bool, list] = {True: [], False: []}
+        for stub in stubs_a:
+            bit = stub_bit(stub, at_goal=False)
+            if bit is not None:
+                by_bit_a[bit].append(stub)
+        by_bit_b: dict[bool, list] = {True: [], False: []}
+        for stub in stubs_b:
+            bit = stub_bit(stub, at_goal=True)
+            if bit is not None:
+                by_bit_b[bit].append(stub)
+
+        # Try the parity with the shortest direct stubs first.
+        def parity_rank(bit: bool) -> float:
+            sa = min((s[3] for s in by_bit_a[bit]), default=math.inf)
+            sb = min((s[3] for s in by_bit_b[bit]), default=math.inf)
+            return sa + sb
+
+        from .coupled import pads_block_segment_grown
+
+        trace_w = getattr(pc.net_class, "trace_width", None) or self.rules.trace_width
+        intra_clearance = pc.pitch - trace_w
+
+        def finish(result: _RouteResult) -> tuple[_PairResult | None, str]:
+            """Offset emission + verification of one fat centerline."""
+            if len(result.runs) != 1 or result.via_points:
+                return None, "pair-not-planar"  # defensive: vias are off
+
+            layer, raw_pts = result.runs[0]
+            center = merge_collinear_points(raw_pts)
+            if len(center) < 2:
+                return None, "pair-degenerate-centerline"
+            plus = offset_polyline(center, +half_pitch)
+            minus = offset_polyline(center, -half_pitch)
+            if plus is None or minus is None:
+                return None, "pair-offset-degenerate"
+            assigned = assign_polarity(plus, minus, pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b)
+            if assigned is None:
+                return None, "pair-polarity-twist"
+            leg_p, leg_n = assigned
+
+            legs: list[tuple[int, str, list[Pt]]] = []
+            for net, pad_a, pad_b, leg in (
+                (net_p, pc.pad_p_a, pc.pad_p_b, leg_p),
+                (net_n, pc.pad_n_a, pc.pad_n_b, leg_n),
+            ):
+                attach_a = self._pair_attach(pad_a, leg[0], layer, net, pair_nets, committed)
+                if attach_a is None:
+                    return None, "pair-pad-attach"
+                attach_b = self._pair_attach(pad_b, leg[-1], layer, net, pair_nets, committed)
+                if attach_b is None:
+                    return None, "pair-pad-attach"
+                full = attach_a[:-1] + leg + list(reversed(attach_b))[1:]
+
+                # Never-ship-a-short re-verification of the emitted leg:
+                # static masks (pair pads are "self") + committed copper at
+                # NORMAL single-trace clearance.  The fat centerline
+                # guarantees the parallel body; this catches miter pokes at
+                # sharp turns and the attach doglegs.
+                for a, b in zip(full, full[1:], strict=False):
+                    if dist(a, b) <= 1e-9:
+                        continue
+                    if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, 0.0):
+                        return None, "pair-leg-blocked"
+                    if not committed.seg_clear(a, b, layer, net):
+                        return None, "pair-leg-blocked"
+                legs.append((net, pad_a.net_name, full))
+
+            # Intra-pair floor: leg-to-leg centreline separation must never
+            # dip below the pitch (== trace_width + intra-pair clearance).
+            # The offset body is at exactly the pitch by construction; this
+            # guards the attach doglegs and miter joints.  1e-4 mm slop.
+            full_p, full_n = legs[0][2], legs[1][2]
+            segs_p = [(a, b) for a, b in zip(full_p, full_p[1:], strict=False) if dist(a, b) > 1e-9]
+            segs_n = [(a, b) for a, b in zip(full_n, full_n[1:], strict=False) if dist(a, b) > 1e-9]
+            for a, b in segs_p:
+                for c, d in segs_n:
+                    if seg_seg_dist(a, b, c, d) < pc.pitch - 1e-4:
+                        return None, "pair-intra-clearance"
+
+            # Partner-pad floor: each leg must keep the intra-pair clearance
+            # to the OTHER net's raw pad copper (the pads sit inside the
+            # pair envelope, so the static mask deliberately skipped them).
+            for (net, _nn, full), other_net in ((legs[0], net_n), (legs[1], net_p)):
+                need = intra_clearance + trace_w / 2.0 - 1e-4
+                for idx, pad in enumerate(self.pads):
+                    if pad.net != other_net:
+                        continue
+                    if layer not in self.obstacles.pad_layer_indices[idx]:
+                        continue
+                    rect = (
+                        pad.x - pad.width / 2.0,
+                        pad.y - pad.height / 2.0,
+                        pad.x + pad.width / 2.0,
+                        pad.y + pad.height / 2.0,
+                    )
+                    for a, b in zip(full, full[1:], strict=False):
+                        if dist(a, b) <= 1e-9:
+                            continue
+                        if seg_rect_dist(a, b, rect) < need:
+                            return None, "pair-partner-pad"
+
+            routes: list[Route] = []
+            for net, net_name, full in legs:
+                route = self._emit_leg(net, net_name, full, layer, trace_w)
+                if route is None:
+                    return None, "pair-empty-route"
+                routes.append(route)
+            runs = [(net, layer, full) for net, _nn, full in legs]
+            return _PairResult(routes=routes, runs=runs, resources=result.resources), "ok"
+
+        # Attempt each consistent parity through the FULL pipeline: a parity
+        # whose shortest path emits degenerate/blocked legs must not doom the
+        # pair when the other parity works.
+        reason = "pair-no-path"
+        for bit in sorted((True, False), key=parity_rank):
+            if not by_bit_a[bit] or not by_bit_b[bit]:
+                continue
+            result, search_reason = self._route_impl(
+                v_a,
+                v_b,
+                pc.net_class,
+                committed=committed,
+                history=history,
+                present=present,
+                allow_vias=False,
+                extra_clearance=half_pitch,
+                partner_net=net_n,
+                stubs_override=(by_bit_a[bit], by_bit_b[bit]),
+                # The exemption is for the perpendicular-gated stub doglegs
+                # ONLY: the A* body sees every pad -- including the pair's
+                # own -- as an obstacle, else the shortest fat path hugs an
+                # endpoint pad row and the emitted legs land on the
+                # partner's copper (board-06 MIPI lesson).
+                exempt_pads=frozenset(),
+            )
+            if result is None:
+                reason = (
+                    search_reason if search_reason.startswith("pair-") else f"pair-{search_reason}"
+                )
+                continue
+            pres, finish_reason = finish(result)
+            if pres is not None:
+                return pres, "ok"
+            reason = finish_reason
+        return None, reason
+
     # -- multi-net negotiation ------------------------------------------------
 
     def route_netset(
         self,
         connections: list[Connection],
         *,
+        coupled: list[CoupledConnection] | None = None,
         max_iterations: int = 8,
         present_cost_initial: float = 1.0,
         present_cost_growth: float = 1.6,
@@ -683,6 +1234,16 @@ class LatticePathfinder:
         degenerate here: lattice resources have capacity 1, so ANY sharing is
         over-threshold and blocking is hard rather than cost-mediated.
 
+        Diff pairs (issue #4270): ``coupled`` carries
+        :class:`~kicad_tools.router.lattice.coupled.CoupledConnection`
+        entries, each negotiated as ONE fat centerline agent, all pairs
+        before all singles (shortest-first within each group).  A successful pair contributes two
+        routes keyed ``(pc.key, "P")`` / ``(pc.key, "N")``; both legs commit
+        under their own net ids so every other net sees them at full copper
+        gap while the pair's internal gap stays by-construction.  Per-pair
+        outcomes ("coupled" or a decline reason) land in
+        :attr:`pair_outcomes` for the best pass.
+
         The lattice is built **once** (:attr:`lattice_builds` == 1 across the
         whole negotiation); rip-up resets only the committed-copper model.
         Returns ``(routes_by_key, stats)`` for the best pass seen;
@@ -690,15 +1251,25 @@ class LatticePathfinder:
         for that pass.
         """
         self.build()
+        pairs = list(coupled or [])
 
-        ordered = sorted(
-            connections,
-            key=lambda c: math.hypot(c[1].x - c[2].x, c[1].y - c[2].y),
-        )
+        # Interleave singles and pairs shortest-first (pair length = the
+        # midpoint-to-midpoint distance of its main run).  The sort is
+        # stable, so with no pairs the ordering is exactly the pre-#4270 one.
+        items: list[tuple[float, int, Any]] = [
+            (math.hypot(c[1].x - c[2].x, c[1].y - c[2].y), 0, c) for c in connections
+        ]
+        items.extend((pc.length, 1, pc) for pc in pairs)
+        # Pairs first (kind 1 before kind 0), each group shortest-first: the
+        # fat coupled agents are by far the most constrained, and a pair's
+        # own extra-pad singles must never pre-block its corridor.  With no
+        # pairs this is exactly the pre-#4270 shortest-first ordering.
+        items.sort(key=lambda t: (-t[1], t[0]))
 
         history: dict[Resource, float] = {}
         best_routes: dict[object, Route] = {}
         best_reasons: dict[object, str] = {}
+        best_pair_outcomes: dict[object, str] = {}
         best_count = -1
         converged = False
         iterations_run = 0
@@ -709,15 +1280,36 @@ class LatticePathfinder:
             committed = self._fresh_committed()
             routes: dict[object, Route] = {}
             reasons: dict[object, str] = {}
-            failed: list[Connection] = []
-            for key, start, end, net_class in ordered:
+            pair_outcomes: dict[object, str] = {}
+            routed_items = 0
+            failed: list[tuple[int, Any]] = []
+            for _length, kind, item in items:
+                if kind == 1:
+                    pres, preason = self._route_pair_impl(
+                        item, committed=committed, history=history, present=present
+                    )
+                    if pres is None:
+                        reasons[item.key] = preason
+                        pair_outcomes[item.key] = preason
+                        failed.append((kind, item))
+                        continue
+                    pair_outcomes[item.key] = "coupled"
+                    routed_items += 1
+                    routes[(item.key, "P")] = pres.routes[0]
+                    routes[(item.key, "N")] = pres.routes[1]
+                    half = self._trace_half
+                    for leg_net, layer_idx, points in pres.runs:
+                        committed.add_run(layer_idx, points, leg_net, half)
+                    continue
+                key, start, end, net_class = item
                 result, reason = self._route_impl(
                     start, end, net_class, committed=committed, history=history, present=present
                 )
                 if result is None:
                     reasons[key] = reason
-                    failed.append((key, start, end, net_class))
+                    failed.append((kind, item))
                     continue
+                routed_items += 1
                 routes[key] = result.route
                 half = self._trace_half
                 for layer_idx, points in result.runs:
@@ -725,10 +1317,11 @@ class LatticePathfinder:
                 for via_pt in result.via_points:
                     committed.add_via(via_pt, start.net)
 
-            if len(routes) > best_count:
-                best_count = len(routes)
+            if routed_items > best_count:
+                best_count = routed_items
                 best_routes = routes
                 best_reasons = reasons
+                best_pair_outcomes = pair_outcomes
 
             if not failed:
                 converged = True
@@ -740,27 +1333,36 @@ class LatticePathfinder:
             # net WANTS (its corridor with no committed copper in the way) so
             # the occupying nets are pressured to detour next pass.
             increment = history_increment_factor * self.rules.cost_congestion * present
-            for _key, start, end, net_class in failed:
-                desired, _reason = self._route_impl(
-                    start,
-                    end,
-                    net_class,
-                    committed=self._fresh_committed(),
-                    history=history,
-                    present=present,
-                )
-                if desired is None:
+            for kind, item in failed:
+                if kind == 1:
+                    desired_pair, _r = self._route_pair_impl(
+                        item, committed=self._fresh_committed(), history=history, present=present
+                    )
+                    desired_resources = desired_pair.resources if desired_pair is not None else None
+                else:
+                    key, start, end, net_class = item
+                    desired, _reason = self._route_impl(
+                        start,
+                        end,
+                        net_class,
+                        committed=self._fresh_committed(),
+                        history=history,
+                        present=present,
+                    )
+                    desired_resources = desired.resources if desired is not None else None
+                if desired_resources is None:
                     continue
-                for resource in desired.resources:
+                for resource in desired_resources:
                     history[resource] = history.get(resource, 0.0) + increment
             present *= present_cost_growth
 
         self.failure_reasons = best_reasons
+        self.pair_outcomes = best_pair_outcomes
         stats = LatticeNegotiationStats(
             iterations=iterations_run,
             converged=converged,
-            routed=len(best_routes),
-            total=len(connections),
+            routed=best_count if best_count >= 0 else 0,
+            total=len(connections) + len(pairs),
             lattice_builds=self.lattice_builds,
         )
         return best_routes, stats

@@ -15,6 +15,8 @@ Package layout:
   committed-copper model (the #3906 never-blind-fit discipline).
 * :mod:`.pathfinder` -- pad dogleg stubs, negotiated (node, layer) A*,
   emission to ordinary :class:`~kicad_tools.router.primitives.Route`.
+* :mod:`.coupled` -- diff-pair coupled routing (issue #4270): fat-agent
+  centerline legality + geometric ``+/- pitch/2`` offset emission.
 
 Via gating documentation (issue #4278 acceptance 7, revised by #4284):
 only **through-vias** are ever generated (blind/buried are
@@ -27,12 +29,14 @@ holds for the configured ``DesignRules.manufacturer`` (default OFF).
 Other-net pad sites are always rejected.
 """
 
+from .coupled import CoupledConnection
 from .obstacles import CommittedCopper, LatticeObstacleModel
 from .pathfinder import LatticeNegotiationStats, LatticePathfinder
 from .quadtree import OctilinearLattice, RefineRegion
 
 __all__ = [
     "CommittedCopper",
+    "CoupledConnection",
     "LatticeNegotiationStats",
     "LatticeObstacleModel",
     "LatticePathfinder",
