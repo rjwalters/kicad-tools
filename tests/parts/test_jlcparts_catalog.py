@@ -24,7 +24,7 @@ from kicad_tools.parts.jlcparts_catalog import (
     _extract_catalog,
     _is_split_archive,
     _normalize_lcsc_id,
-    _parse_price_json,
+    _parse_price_column,
     get_catalog_path,
     sync_catalog,
 )
@@ -64,7 +64,7 @@ def test_normalize_lcsc_id():
 
 
 def test_parse_price_json_variants():
-    prices = _parse_price_json('[{"qFrom": 10, "price": 0.005}, {"qFrom": 100, "price": 0.002}]')
+    prices = _parse_price_column('[{"qFrom": 10, "price": 0.005}, {"qFrom": 100, "price": 0.002}]')
     assert len(prices) == 2
     assert prices[0].quantity == 10
     assert prices[0].unit_price == 0.005
@@ -72,14 +72,55 @@ def test_parse_price_json_variants():
     assert prices[1].quantity == 100
 
     # Already-parsed list passes through.
-    assert _parse_price_json([{"qFrom": 5, "price": 1.0}])[0].quantity == 5
+    assert _parse_price_column([{"qFrom": 5, "price": 1.0}])[0].quantity == 5
 
     # Bad / empty inputs degrade to empty list, never raise.
-    assert _parse_price_json(None) == []
-    assert _parse_price_json("") == []
-    assert _parse_price_json("not json") == []
-    assert _parse_price_json("{}") == []
-    assert _parse_price_json('[{"qFrom": 0, "price": 0}]') == []
+    assert _parse_price_column(None) == []
+    assert _parse_price_column("") == []
+    assert _parse_price_column("{}") == []
+    assert _parse_price_column('[{"qFrom": 0, "price": 0}]') == []
+
+
+def test_parse_price_column_delimited():
+    """The published jlcparts dataset ships tiers as a delimited string."""
+    # Curator's real C185857 catalog value.
+    raw = "1-49:0.2776,50-149:0.2161,150-499:0.1897,500-2499:0.1629,2500-4999:0.1483,5000-:0.1395"
+    prices = _parse_price_column(raw)
+    assert [(p.quantity, p.unit_price) for p in prices] == [
+        (1, 0.2776),
+        (50, 0.2161),
+        (150, 0.1897),
+        (500, 0.1629),
+        (2500, 0.1483),
+        (5000, 0.1395),  # open-ended top tier ("5000-:...")
+    ]
+
+
+def test_parse_price_column_edge_cases():
+    # Single tier.
+    single = _parse_price_column("1-49:0.2776")
+    assert [(p.quantity, p.unit_price) for p in single] == [(1, 0.2776)]
+
+    # Open-ended top tier expressed with a trailing '+'.
+    plus = _parse_price_column("500+:0.15")
+    assert [(p.quantity, p.unit_price) for p in plus] == [(500, 0.15)]
+
+    # Open-ended top tier expressed with a trailing '-'.
+    dash = _parse_price_column("5000-:0.1395")
+    assert [(p.quantity, p.unit_price) for p in dash] == [(5000, 0.1395)]
+
+    # Unsorted input is returned ascending by quantity.
+    unsorted = _parse_price_column("100-499:0.002,1-99:0.005")
+    assert [p.quantity for p in unsorted] == [1, 100]
+
+    # Empty / malformed segments degrade to an empty list, never raise.
+    assert _parse_price_column("") == []
+    assert _parse_price_column("not a price") == []
+    assert _parse_price_column("1-49:notaprice") == []
+    assert _parse_price_column("garbage,:,,") == []
+    # Zero quantity or zero price segments are dropped.
+    assert _parse_price_column("0-49:0.5") == []
+    assert _parse_price_column("1-49:0") == []
 
 
 # --------------------------------------------------------------------------
@@ -122,6 +163,47 @@ def test_catalog_lookup_translates_row(catalog_db: Path):
     # Price breaks parsed and sorted.
     assert [p.quantity for p in part.prices] == [10, 100]
     assert part.best_price == 0.002
+
+
+def test_catalog_lookup_surfaces_delimited_prices(tmp_path: Path):
+    """A synced-catalog row with the delimited price string surfaces tiers.
+
+    Regression for #4297: the published jlcparts ``price`` column is a
+    delimited ``"lo-hi:price,..."`` string, not JSON. ``lookup`` must expose
+    the full tier list instead of an empty ``prices``.
+    """
+    rows = [
+        {
+            "lcsc": 185857,  # -> C185857
+            "mfr": "GRM155R71C104KA88D",
+            "package": "0402",
+            "manufacturer": "muRata",
+            "library_type": "basic",
+            "description": "100nF 16V X7R 0402 MLCC",
+            "datasheet": "https://example.com/grm155.pdf",
+            "stock": 300000,
+            # Real on-disk delimited format (curator-verified), open-ended top tier.
+            "price": (
+                "1-49:0.2776,50-149:0.2161,150-499:0.1897,"
+                "500-2499:0.1629,2500-4999:0.1483,5000-:0.1395"
+            ),
+        },
+    ]
+    db = _builder.build_fixture(tmp_path / "delimited.sqlite3", rows=rows)
+
+    catalog = JlcpartsCatalog(db)
+    part = catalog.lookup("C185857")
+    assert part is not None
+    assert [(p.quantity, p.unit_price) for p in part.prices] == [
+        (1, 0.2776),
+        (50, 0.2161),
+        (150, 0.1897),
+        (500, 0.1629),
+        (2500, 0.1483),
+        (5000, 0.1395),
+    ]
+    # Cheapest break is the open-ended top tier.
+    assert part.best_price == 0.1395
 
 
 def test_catalog_lookup_normalizes_and_missing(catalog_db: Path):

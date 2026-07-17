@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import struct
 import zipfile
@@ -337,9 +338,11 @@ def _row_to_part(row: sqlite3.Row) -> Part:
     """Translate a ``jlc_components`` row into a :class:`Part`.
 
     Maps the stable jlcparts schema columns onto the existing ``Part``
-    dataclass. The ``price`` column is a JSON array of price breaks
-    (``[{"qFrom": n, "price": p}, ...]``); ``library_type`` distinguishes
-    JLCPCB Basic/Preferred parts.
+    dataclass. The ``price`` column holds tier pricing -- in the published
+    dataset a delimited ``"<qFrom>-<qTo>:<unitPrice>,..."`` string, though
+    older datasets ship a JSON array (both forms parse, see
+    :func:`_parse_price_column`). ``library_type`` distinguishes JLCPCB
+    Basic/Preferred parts.
     """
     keys = set(row.keys())
 
@@ -366,7 +369,7 @@ def _row_to_part(row: sqlite3.Row) -> Part:
     package = col_str("package")
     library_type = col_str("library_type").lower()
 
-    prices = _parse_price_json(col("price"))
+    prices = _parse_price_column(col("price"))
 
     return Part(
         lcsc_part=lcsc_part,
@@ -387,24 +390,75 @@ def _row_to_part(row: sqlite3.Row) -> Part:
     )
 
 
-def _parse_price_json(raw: object) -> list[PartPrice]:
-    """Parse the jlcparts ``price`` JSON column into price breaks.
+def _parse_price_column(raw: object) -> list[PartPrice]:
+    """Parse the jlcparts ``price`` column into price breaks.
 
-    The column holds a JSON array of ``{"qFrom": <int>, "price": <float>}``
-    objects (``qTo`` may also be present). Malformed or empty values yield an
-    empty list.
+    The published ``yaqwsx/jlcparts`` dataset stores this column as a
+    **delimited string** of ``<qFrom>-<qTo>:<unitPrice>`` tiers joined by
+    commas, e.g. ``"1-49:0.2776,50-149:0.2161,5000-:0.1395"`` -- the final
+    tier is open-ended (``"5000-:..."`` or ``"5000+:..."``). Older/alternate
+    datasets ship a JSON array of ``{"qFrom": <int>, "price": <float>}``
+    objects instead; both forms are accepted. Malformed, empty, or absent
+    values yield an empty list (this never raises).
     """
     if not raw:
         return []
 
-    try:
-        data = json.loads(raw) if isinstance(raw, str | bytes | bytearray) else raw
-    except (json.JSONDecodeError, TypeError):
-        return []
+    # Already-parsed list (JSON decoded upstream) passes straight through.
+    if isinstance(raw, list):
+        return _parse_price_list(raw)
 
-    if not isinstance(data, list):
-        return []
+    if isinstance(raw, str | bytes | bytearray):
+        text = raw.decode() if isinstance(raw, bytes | bytearray) else raw
+        text = text.strip()
+        if not text:
+            return []
+        # JSON array form (legacy / alternate datasets).
+        if text.startswith("["):
+            try:
+                data = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                return []
+            return _parse_price_list(data) if isinstance(data, list) else []
+        # Delimited tier form (the current published dataset).
+        return _parse_price_tiers(text)
 
+    return []
+
+
+def _parse_price_tiers(text: str) -> list[PartPrice]:
+    """Parse the delimited ``"<qFrom>-<qTo>:<unitPrice>,..."`` tier form.
+
+    Each comma-separated segment carries a quantity range and a per-unit
+    price. Only the lower bound (``qFrom``) is retained as the price break's
+    quantity; the upper bound may be a number (``"1-49"``), open-ended
+    (``"5000-"``), or absent (``"5000+"``). Malformed segments are skipped.
+    """
+    prices: list[PartPrice] = []
+    for segment in text.split(","):
+        segment = segment.strip()
+        if not segment or ":" not in segment:
+            continue
+        qty_range, _, price_str = segment.rpartition(":")
+        # Lower bound = leading integer of the range ("1-49" -> 1,
+        # "5000-" -> 5000, "500+" -> 500).
+        lo_match = re.match(r"\s*(\d+)", qty_range)
+        if lo_match is None:
+            continue
+        try:
+            qty_i = int(lo_match.group(1))
+            price_f = float(price_str.strip())
+        except (TypeError, ValueError):
+            continue
+        if qty_i > 0 and price_f > 0:
+            prices.append(PartPrice(quantity=qty_i, unit_price=price_f))
+
+    prices.sort(key=lambda p: p.quantity)
+    return prices
+
+
+def _parse_price_list(data: list[object]) -> list[PartPrice]:
+    """Parse a JSON-array style list of price-break dicts into tiers."""
     prices: list[PartPrice] = []
     for entry in data:
         if not isinstance(entry, dict):
