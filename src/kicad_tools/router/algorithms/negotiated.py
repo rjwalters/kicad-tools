@@ -343,6 +343,7 @@ def demote_seg_seg_finalize(
     trace_clearance: float,
     extra_routes: list[Route] | None = None,
     copper_overlap_only: bool = False,
+    exempt_pairs: set[tuple[int, int]] | None = None,
 ) -> tuple[list[int], list[tuple[int, int]]]:
     """Detect + demote nets whose committed copper is a cross-net seg-seg short.
 
@@ -379,6 +380,14 @@ def demote_seg_seg_finalize(
         copper_overlap_only: When ``False`` (the finalize default) use the
             FULL DRC SHORT threshold; when ``True`` use the polygon-overlap
             threshold (the in-loop / pre-repair position).
+        exempt_pairs: Ordered ``(min_net, max_net)`` id pairs whose
+            sub-clearance proximity is legitimate BY DESIGN and already
+            adjudicated elsewhere -- concretely, coupled differential
+            pairs whose copper honors the per-class intra-pair clearance
+            floor (issue #4270; the caller verifies the floor before
+            exempting).  Violation pairs in this set are dropped before
+            victim selection so the wide finalize threshold cannot demote
+            a legitimately-coupled pair as a cross-net short.
 
     Returns:
         ``(victims, non_rippable_pairs)`` where ``victims`` is the sorted
@@ -394,6 +403,8 @@ def demote_seg_seg_finalize(
         copper_overlap_only=copper_overlap_only,
         report_non_rippable_pairs=True,
     )
+    if exempt_pairs:
+        all_pairs = [pair for pair in all_pairs if pair not in exempt_pairs]
     if not all_pairs:
         return [], []
 
