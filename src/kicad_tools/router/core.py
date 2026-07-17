@@ -2621,6 +2621,31 @@ class Autorouter:
         )
         self._lattice_negotiation_stats = stats
 
+        # Issue #4271: the shortfall must be DIAGNOSABLE from the run output
+        # (honest decline census), not buried on the pathfinder object.
+        print(
+            f"  Lattice negotiation: {stats.routed}/{stats.total} connections "
+            f"(iterations={stats.iterations}, converged={stats.converged}, "
+            f"lattice_builds={stats.lattice_builds})"
+        )
+        if pf.failure_reasons:
+            by_reason: dict[str, list[str]] = {}
+            for key, reason in pf.failure_reasons.items():
+                # Single-ended keys are (net_id, seq); pair keys (#4270) are
+                # ("pair", p_net, n_net) and are named by their pair below.
+                net_id = key[0] if isinstance(key, tuple) else None
+                if isinstance(net_id, int):
+                    name = self.net_names.get(net_id, str(net_id))
+                else:
+                    name = str(key)
+                by_reason.setdefault(reason, []).append(name)
+            for reason, names in sorted(by_reason.items()):
+                uniq = sorted(set(names))
+                print(
+                    f"    decline[{reason}]: {len(names)} connection(s) "
+                    f"on {len(uniq)} net(s): {', '.join(uniq)}"
+                )
+
         # Honest per-pair reporting (issue #4270 acceptance): engaged /
         # coupled / declined-with-reason, mirroring failure_reasons.
         if coupled or self._lattice_pair_outcomes:
@@ -16539,6 +16564,21 @@ class Autorouter:
         # C++ backend (no waypoint support) it returns False and the
         # pre-pass runs for genuinely unreachable pads.
         if self.use_waypoint_injection:
+            return []
+
+        # Issue #4271: the pre-pass is GRID copper -- direct escape stubs
+        # committed into ``self.routes`` before routing.  The mesh/lattice
+        # engines negotiate the whole netset on their own exact-geometry
+        # substrates and CANNOT see these stubs (the same seam as the
+        # #4280 escape-routing gate and the #4281 post-pass gate), so the
+        # stubs ship as cross-net shorts against engine copper and drag
+        # whole nets into the #4208 demotion backstop.  Measured on
+        # softstart rev-C: every DRC error in the P4 run (12 shorts, 3
+        # clearance, 16 mask bridges) was pre-pass stub copper, and 34
+        # clean lattice nets were demoted for conflicting with it.  The
+        # engines attach pads by exact dogleg stubs instead; grid-engine
+        # behavior is unchanged.
+        if getattr(self, "_strategy", "grid") in ("mesh", "lattice"):
             return []
 
         uncovered = [p for p in self.pads.values() if not self._pad_metal_covers_grid_cell(p)]

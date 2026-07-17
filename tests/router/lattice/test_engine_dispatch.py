@@ -153,3 +153,19 @@ def test_route_cmd_mirror_parser_accepts_lattice(monkeypatch: pytest.MonkeyPatch
     assert args.route_engine == "lattice"
     args = parser.parse_args(["board.kicad_pcb"])
     assert args.route_engine == "grid"
+
+
+def test_subgrid_prepass_dormant_for_non_grid_engines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sub-grid escape pre-pass is GRID copper the mesh/lattice netset
+    negotiation cannot see (issue #4271): on softstart rev-C its stubs were
+    every DRC error in the P4 run and demoted 34 clean lattice nets.  It
+    must return [] before analyzing a single pad under non-grid engines."""
+    from kicad_tools.router.core import Autorouter as _A
+
+    def _boom(self: object, pad: object) -> bool:
+        raise AssertionError("sub-grid pre-pass must not analyze pads for non-grid engines")
+
+    monkeypatch.setattr(_A, "_pad_metal_covers_grid_cell", _boom)
+    for strategy in ("lattice", "mesh"):
+        router = _two_pad_router(strategy)
+        assert router._run_subgrid_prepass() == []
