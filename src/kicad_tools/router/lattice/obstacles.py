@@ -117,17 +117,27 @@ class LatticeObstacleModel:
         """True if the edge crosses an OTHER-net pad keep-out on ``layer``."""
         return any(self.pads[idx].net != net for idx in self.edge_pads[layer].get(edge, ()))
 
-    def segment_blocked(self, a: Pt, b: Pt, layer: int, net: int) -> bool:
+    def segment_blocked(self, a: Pt, b: Pt, layer: int, net: int, extra: float = 0.0) -> bool:
         """True if free segment ``a-b`` (e.g. a stub leg) enters an other-net
-        pad keep-out on ``layer`` (geometric, not lattice-resource, check)."""
+        pad keep-out on ``layer`` (geometric, not lattice-resource, check).
+
+        ``extra`` (issue #4271) inflates every pad keep-out beyond the
+        global ``agent_radius`` -- the per-connection surcharge for a net
+        class wider (or more cleared) than the board default, so oversize
+        copper is spaced from other-net pads at its TRUE half-width.  The
+        degenerate ``a == b`` form doubles as a point (lattice-node) probe.
+        """
         x0, x1 = min(a[0], b[0]), max(a[0], b[0])
         y0, y1 = min(a[1], b[1]), max(a[1], b[1])
-        for idx in self.pads_near(x0, y0, x1, y1):
+        for idx in self.pads_near(x0 - extra, y0 - extra, x1 + extra, y1 + extra):
             if self.pads[idx].net == net:
                 continue
             if layer not in self.pad_layer_indices[idx]:
                 continue
-            if seg_rect_intersect(a, b, self.pad_rects[idx]):
+            rect = self.pad_rects[idx]
+            if extra > 0.0:
+                rect = (rect[0] - extra, rect[1] - extra, rect[2] + extra, rect[3] + extra)
+            if seg_rect_intersect(a, b, rect):
                 return True
         return False
 
@@ -139,20 +149,35 @@ class CommittedCopper:
     structures, vias in a flat list (a through-via blocks EVERY layer).
     All clearance predicates are centreline distances against the real
     gaps supplied by the pathfinder.
+
+    Issue #4271 (net-class widths): every committed segment carries its TRUE
+    ``half_width`` and its class ``clearance``, and every predicate takes the
+    querying connection's own ``half`` / ``clearance``.  The required
+    centreline gap between two traces is::
+
+        own_half + stored_half + max(own_clearance, stored_clearance)
+
+    so 2.6 mm HV_HICUR copper is spaced as 2.6 mm copper and a 0.3 mm HV
+    class clearance is honored from EITHER side of the pair (mirroring
+    KiCad's conditional-rule semantics, where the wider constraint governs
+    when either net is in the class).  ``None`` arguments fall back to the
+    board-global trace geometry -- the pre-#4271 behavior, byte-for-byte.
     """
 
     def __init__(
         self,
         num_layers: int,
         *,
-        copper_gap: float,
-        via_copper_gap: float,
+        trace_half: float,
+        clearance: float,
+        via_radius: float,
         via_via_gap: float,
         same_net_via_gap: float,
     ) -> None:
         self.num_layers = num_layers
-        self.copper_gap = copper_gap  # min trace centre-to-centre (w + clr)
-        self.via_copper_gap = via_copper_gap  # via centre to trace centre
+        self.trace_half = trace_half  # global default copper half-width
+        self.clearance = clearance  # global default (floor) clearance
+        self.via_radius = via_radius  # via body radius
         self.via_via_gap = via_via_gap  # via centre to via centre (cross-net)
         self.same_net_via_gap = same_net_via_gap  # hole-to-hole floor
         self.copper: list[SegHash] = [SegHash() for _ in range(num_layers)]
@@ -160,11 +185,20 @@ class CommittedCopper:
 
     # -- mutation --------------------------------------------------------
 
-    def add_run(self, layer: int, points: list[Pt], net: int, half_width: float) -> None:
-        """Commit a polyline of copper on ``layer``."""
+    def add_run(
+        self,
+        layer: int,
+        points: list[Pt],
+        net: int,
+        half_width: float,
+        clearance: float | None = None,
+    ) -> None:
+        """Commit a polyline of copper on ``layer`` at its TRUE half-width
+        and class clearance (``None`` -> the board-global clearance)."""
+        clr = self.clearance if clearance is None else clearance
         for a, b in zip(points, points[1:], strict=False):
             if dist(a, b) > 1e-9:
-                self.copper[layer].add(a, b, net, half_width)
+                self.copper[layer].add(a, b, net, half_width, clr)
 
     def add_via(self, point: Pt, net: int) -> None:
         """Commit a through-via (blocks the site on ALL layers)."""
@@ -172,34 +206,68 @@ class CommittedCopper:
 
     # -- predicates --------------------------------------------------------
 
-    def seg_clear(self, a: Pt, b: Pt, layer: int, net: int) -> bool:
+    def _own(self, half: float | None, clearance: float | None) -> tuple[float, float]:
+        """Resolve the querying connection's (half-width, clearance)."""
+        own_half = self.trace_half if half is None else half
+        own_clr = self.clearance if clearance is None else clearance
+        return own_half, own_clr
+
+    def seg_clear(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        net: int,
+        half: float | None = None,
+        clearance: float | None = None,
+    ) -> bool:
         """True if segment ``a-b`` on ``layer`` clears other-net copper + vias."""
-        for c, d, cnet, _hw in self.copper[layer].query_seg(a, b, pad=self.copper_gap):
-            if cnet != net and seg_seg_dist(a, b, c, d) < self.copper_gap - 1e-9:
+        own_half, own_clr = self._own(half, clearance)
+        pad = own_half + own_clr + 0.5
+        for c, d, cnet, hw, iclr in self.copper[layer].query_seg(a, b, pad=pad):
+            gap = own_half + hw + max(own_clr, iclr)
+            if cnet != net and seg_seg_dist(a, b, c, d) < gap - 1e-9:
                 return False
+        via_gap = self.via_radius + own_clr + own_half
         for point, vnet in self.vias:
-            if vnet != net and seg_pt_dist(a, b, point) < self.via_copper_gap - 1e-9:
+            if vnet != net and seg_pt_dist(a, b, point) < via_gap - 1e-9:
                 return False
         return True
 
-    def node_clear(self, point: Pt, layer: int, net: int) -> bool:
+    def node_clear(
+        self,
+        point: Pt,
+        layer: int,
+        net: int,
+        half: float | None = None,
+        clearance: float | None = None,
+    ) -> bool:
         """True if a node site on ``layer`` clears other-net copper + vias."""
-        for c, d, cnet, _hw in self.copper[layer].query_seg(point, point, pad=self.copper_gap):
-            if cnet != net and seg_pt_dist(c, d, point) < self.copper_gap - 1e-9:
+        own_half, own_clr = self._own(half, clearance)
+        pad = own_half + own_clr + 0.5
+        for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
+            gap = own_half + hw + max(own_clr, iclr)
+            if cnet != net and seg_pt_dist(c, d, point) < gap - 1e-9:
                 return False
+        via_gap = self.via_radius + own_clr + own_half
         for vpt, vnet in self.vias:
-            if vnet != net and dist(point, vpt) < self.via_copper_gap - 1e-9:
+            if vnet != net and dist(point, vpt) < via_gap - 1e-9:
                 return False
         return True
 
     def via_clear(self, point: Pt, net: int) -> bool:
         """True if a through-via at ``point`` clears committed copper (ALL
-        layers) and committed vias (cross-net body gap, same-net hole gap)."""
+        layers) and committed vias (cross-net body gap, same-net hole gap).
+
+        The via-to-trace gap honors each stored segment's TRUE half-width
+        and class clearance (#4271): ``via_radius + stored_half +
+        max(global_clearance, stored_clearance)``.
+        """
+        pad = self.via_radius + self.clearance + self.trace_half + 2.0
         for layer in range(self.num_layers):
-            for c, d, cnet, _hw in self.copper[layer].query_seg(
-                point, point, pad=self.via_copper_gap
-            ):
-                if cnet != net and seg_pt_dist(c, d, point) < self.via_copper_gap - 1e-9:
+            for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
+                gap = self.via_radius + hw + max(self.clearance, iclr)
+                if cnet != net and seg_pt_dist(c, d, point) < gap - 1e-9:
                     return False
         for vpt, vnet in self.vias:
             gap = self.via_via_gap if vnet != net else self.same_net_via_gap

@@ -174,12 +174,19 @@ def committed_seg_clear_grown(
     extra: float,
 ) -> bool:
     """``CommittedCopper.seg_clear`` with gaps grown by ``extra`` and the
-    whole pair-net set treated as "self"."""
-    gap = committed.copper_gap + extra
-    for c, d, cnet, _hw in committed.copper[layer].query_seg(a, b, pad=gap):
+    whole pair-net set treated as "self".
+
+    Issue #4271: committed segments carry their TRUE per-class half-width
+    and clearance, so the per-item gap is ``trace_half + stored_half +
+    max(clearance, stored_clearance) + extra`` -- the fat envelope is
+    spaced honestly even against oversize (e.g. 2.6 mm HV) copper.
+    """
+    pad = committed.trace_half + committed.clearance + extra + 0.5
+    for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(a, b, pad=pad):
+        gap = committed.trace_half + hw + max(committed.clearance, iclr) + extra
         if cnet not in nets and seg_seg_dist(a, b, c, d) < gap - _EPS:
             return False
-    vgap = committed.via_copper_gap + extra
+    vgap = committed.via_radius + committed.clearance + committed.trace_half + extra
     for point, vnet in committed.vias:
         if vnet not in nets and seg_pt_dist(a, b, point) < vgap - _EPS:
             return False
@@ -194,11 +201,12 @@ def committed_point_clear_grown(
     extra: float,
 ) -> bool:
     """``CommittedCopper.node_clear`` with gaps grown by ``extra``."""
-    gap = committed.copper_gap + extra
-    for c, d, cnet, _hw in committed.copper[layer].query_seg(point, point, pad=gap):
+    pad = committed.trace_half + committed.clearance + extra + 0.5
+    for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(point, point, pad=pad):
+        gap = committed.trace_half + hw + max(committed.clearance, iclr) + extra
         if cnet not in nets and seg_pt_dist(c, d, point) < gap - _EPS:
             return False
-    vgap = committed.via_copper_gap + extra
+    vgap = committed.via_radius + committed.clearance + committed.trace_half + extra
     for vpt, vnet in committed.vias:
         if vnet not in nets and dist(point, vpt) < vgap - _EPS:
             return False

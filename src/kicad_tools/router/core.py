@@ -1093,6 +1093,11 @@ class Autorouter:
         )
 
         self.pads: dict[tuple[str, str], Pad] = {}
+        # Issue #4271: every pad, DUPLICATE pad numbers included (thermal-via
+        # arrays / EP paddles share a number and collapse in the (ref, pin)
+        # dict above).  Obstacle input for the exact-geometry engines
+        # (lattice/mesh); the grid marks pads directly and never reads this.
+        self.all_pads: list[Pad] = []
         self.nets: dict[int, list[tuple[str, str]]] = {}
         # Issue #4170 (Phase 2b-1): route-scoped bare boundary stub endpoints to
         # reconnect, keyed by net id.  Populated by ``set_stub_terminals`` from
@@ -1692,6 +1697,18 @@ class Autorouter:
                 drill=pad_info.get("drill", 0.0),
             )
             key = (ref, pin)
+            # Issue #4271: ``self.pads`` is keyed (ref, pin), so a footprint
+            # with DUPLICATE pad numbers (thermal-via arrays / EP paddles --
+            # softstart's ESP32-C3 module has 13 pads named "19" and 9 named
+            # "") keeps only ONE of them.  The grid engine is unaffected
+            # (every pad is marked on the grid below, before the dict
+            # overwrite), but the exact-geometry engines build their
+            # obstacle models from the pad OBJECTS, so the collapsed
+            # duplicates were invisible and copper routed straight through
+            # them (measured: every remaining short in the P4 run).
+            # ``all_pads`` preserves every pad for those engines; the
+            # (ref, pin) dict keeps its historical semantics for topology.
+            self.all_pads.append(pad)
             self.pads[key] = pad
 
             if pad.net > 0:
@@ -2438,9 +2455,14 @@ class Autorouter:
             outline = [(bx0, by0), (bx1, by0), (bx1, by1), (bx0, by1)]
             # The lattice is replicated across the board's REAL copper stack
             # (issue #4278 acceptance 6) -- never hardcoded to 2 layers.
+            # Obstacles come from ``all_pads`` (issue #4271): duplicate pad
+            # numbers collapse in the (ref, pin) dict, and the collapsed
+            # thermal/EP pads shipped as shorts on softstart rev-C.  The
+            # fallback covers routers assembled without add_component
+            # (tests, deserialization).
             self._lattice_pathfinder = LatticePathfinder(
                 outline,
-                list(self.pads.values()),
+                self.all_pads or list(self.pads.values()),
                 self.rules,
                 layer_stack=self.layer_stack,
             )
@@ -2581,9 +2603,19 @@ class Autorouter:
         for net, pad_keys in self.nets.items():
             if net == 0:
                 continue
-            keyed = [(k, self.pads[k]) for k in pad_keys if k in self.pads]
+            # ``dict.fromkeys``: nets whose footprint repeats a pad number
+            # (thermal-via arrays) append the same (ref, pin) key once per
+            # copy -- without dedup the star topology would route the same
+            # pad pair repeatedly (issue #4271).
+            keyed = [(k, self.pads[k]) for k in dict.fromkeys(pad_keys) if k in self.pads]
             if len(keyed) < 2:
                 continue
+            # Issue #4271: thread the net's class (name-pattern classified +
+            # --net-class-map sidecar overrides) into every connection so the
+            # lattice emits AND spaces its copper at the class width/clearance
+            # (a 2.6 mm HV_HICUR net must be 2.6 mm copper, spaced as such).
+            net_name = self.net_names.get(net) or keyed[0][1].net_name
+            net_class = self.net_class_map.get(net_name) if net_name else None
             res_keys = reserved.get(net)
             if res_keys:
                 # Main run handled by the coupled connection; each extra pad
@@ -2595,12 +2627,12 @@ class Autorouter:
                         res_pads,
                         key=lambda rp: math.hypot(rp.x - other.x, rp.y - other.y),
                     )
-                    connections.append(((net, seq), anchor, other, None))
+                    connections.append(((net, seq), anchor, other, net_class))
                 continue
             pads = [p for _k, p in keyed]
             anchor = pads[0]
             for seq, other in enumerate(pads[1:]):
-                connections.append(((net, seq), anchor, other, None))
+                connections.append(((net, seq), anchor, other, net_class))
 
         if not connections and not coupled:
             return {}
@@ -2614,6 +2646,31 @@ class Autorouter:
             connections, coupled=coupled, max_iterations=max_iterations
         )
         self._lattice_negotiation_stats = stats
+
+        # Issue #4271: the shortfall must be DIAGNOSABLE from the run output
+        # (honest decline census), not buried on the pathfinder object.
+        print(
+            f"  Lattice negotiation: {stats.routed}/{stats.total} connections "
+            f"(iterations={stats.iterations}, converged={stats.converged}, "
+            f"lattice_builds={stats.lattice_builds})"
+        )
+        if pf.failure_reasons:
+            by_reason: dict[str, list[str]] = {}
+            for key, reason in pf.failure_reasons.items():
+                # Single-ended keys are (net_id, seq); pair keys (#4270) are
+                # ("pair", p_net, n_net) and are named by their pair below.
+                net_id = key[0] if isinstance(key, tuple) else None
+                if isinstance(net_id, int):
+                    name = self.net_names.get(net_id, str(net_id))
+                else:
+                    name = str(key)
+                by_reason.setdefault(reason, []).append(name)
+            for reason, names in sorted(by_reason.items()):
+                uniq = sorted(set(names))
+                print(
+                    f"    decline[{reason}]: {len(names)} connection(s) "
+                    f"on {len(uniq)} net(s): {', '.join(uniq)}"
+                )
 
         # Honest per-pair reporting (issue #4270 acceptance): engaged /
         # coupled / declined-with-reason, mirroring failure_reasons.
@@ -16533,6 +16590,21 @@ class Autorouter:
         # C++ backend (no waypoint support) it returns False and the
         # pre-pass runs for genuinely unreachable pads.
         if self.use_waypoint_injection:
+            return []
+
+        # Issue #4271: the pre-pass is GRID copper -- direct escape stubs
+        # committed into ``self.routes`` before routing.  The mesh/lattice
+        # engines negotiate the whole netset on their own exact-geometry
+        # substrates and CANNOT see these stubs (the same seam as the
+        # #4280 escape-routing gate and the #4281 post-pass gate), so the
+        # stubs ship as cross-net shorts against engine copper and drag
+        # whole nets into the #4208 demotion backstop.  Measured on
+        # softstart rev-C: every DRC error in the P4 run (12 shorts, 3
+        # clearance, 16 mask bridges) was pre-pass stub copper, and 34
+        # clean lattice nets were demoted for conflicting with it.  The
+        # engines attach pads by exact dogleg stubs instead; grid-engine
+        # behavior is unchanged.
+        if getattr(self, "_strategy", "grid") in ("mesh", "lattice"):
             return []
 
         uncovered = [p for p in self.pads.values() if not self._pad_metal_covers_grid_cell(p)]

@@ -9922,7 +9922,24 @@ def main(argv: list[str] | None = None) -> int:
         # the grid and routing reliably produces cross-net clearance shorts.
         # Refuse to route rather than silently ship shorts; require an explicit
         # opt-in (--allow-unsafe-grid or --force) to override.
-        if grid_auto_result.memory_forced_unsafe_grid and not (
+        #
+        # Issue #4271: the gate is grid-engine-only.  Under --route-engine
+        # mesh/lattice NO copper is ever emitted from the grid -- the grid
+        # object is a coordinate substrate (bbox fallback), the engines route
+        # on their own exact-geometry structures, and the optimize/DRC-nudge
+        # grid post-passes are already gated off (#4283).  Hard-erroring here
+        # blocked exactly the boards those engines exist for (softstart rev-C
+        # falls in the #4242 grid gap: safe grid 0.0635mm exceeds every cell
+        # budget).  The #3911 refusal stays fully intact for the grid engine.
+        _route_engine = getattr(args, "route_engine", "grid")
+        if grid_auto_result.memory_forced_unsafe_grid and _route_engine != "grid":
+            if not args.quiet:
+                print(
+                    f"  Auto-grid safety gate: skipped for --route-engine "
+                    f"{_route_engine} (no copper is routed on the grid; the "
+                    f"{_route_engine} engine uses exact geometry)"
+                )
+        elif grid_auto_result.memory_forced_unsafe_grid and not (
             args.force or getattr(args, "allow_unsafe_grid", False)
         ):
             recommended = args.clearance / 2

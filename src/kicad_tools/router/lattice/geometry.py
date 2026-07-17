@@ -92,13 +92,17 @@ class SegHash:
     """Uniform-bucket spatial hash over committed copper segments.
 
     Buckets are keyed by integer cells of ``cell`` mm.  Each stored item is
-    ``(a, b, net, half_width)``; queries return every item whose inflated
+    ``(a, b, net, half_width, clearance)`` -- the copper half-width AND the
+    clearance the owning net class requires (issue #4271: per-net-class
+    widths/clearances) -- and queries return every item whose inflated
     bounding box touches the query segment's cells, deduplicated by identity.
     """
 
     def __init__(self, cell: float = 2.0) -> None:
         self.cell = cell
-        self.buckets: dict[tuple[int, int], list[tuple[Pt, Pt, int, float]]] = defaultdict(list)
+        self.buckets: dict[tuple[int, int], list[tuple[Pt, Pt, int, float, float]]] = defaultdict(
+            list
+        )
 
     def _cells_for_seg(self, a: Pt, b: Pt, pad: float = 0.0) -> Iterator[tuple[int, int]]:
         x0 = min(a[0], b[0]) - pad
@@ -110,12 +114,15 @@ class SegHash:
             for iy in range(int(math.floor(y0 / c)), int(math.floor(y1 / c)) + 1):
                 yield (ix, iy)
 
-    def add(self, a: Pt, b: Pt, net: int, half_width: float) -> None:
-        """Insert segment ``a-b`` of net ``net`` with copper ``half_width``."""
-        for key in self._cells_for_seg(a, b, pad=half_width + 0.5):
-            self.buckets[key].append((a, b, net, half_width))
+    def add(self, a: Pt, b: Pt, net: int, half_width: float, clearance: float = 0.0) -> None:
+        """Insert segment ``a-b`` of net ``net`` with copper ``half_width``
+        and the clearance its net class requires around that copper."""
+        for key in self._cells_for_seg(a, b, pad=half_width + clearance + 0.5):
+            self.buckets[key].append((a, b, net, half_width, clearance))
 
-    def query_seg(self, a: Pt, b: Pt, pad: float = 1.0) -> Iterator[tuple[Pt, Pt, int, float]]:
+    def query_seg(
+        self, a: Pt, b: Pt, pad: float = 1.0
+    ) -> Iterator[tuple[Pt, Pt, int, float, float]]:
         """Yield stored segments near ``a-b`` (each item exactly once)."""
         seen: set[int] = set()
         for key in self._cells_for_seg(a, b, pad=pad):

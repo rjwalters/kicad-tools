@@ -118,3 +118,30 @@ def test_stub_blocked_by_committed_copper_declines_never_blind_fits() -> None:
     # Without the committed copper the same pad attaches fine (the decline
     # above is the obstacle consult, not a general inability).
     assert pf.pad_stubs(pad, net=1)
+
+
+def test_npth_drilled_pad_blocks_every_layer() -> None:
+    """NPTH mounting holes load as np_thru_hole pads with
+    ``through_hole=False`` on one copper layer, but the drilled barrel
+    exists on EVERY layer (issue #4271: softstart shipped an In1.Cu track
+    through a 2.7mm fuse-holder hole).  ``drill > 0`` must through-block."""
+    from kicad_tools.router.lattice.pathfinder import LatticePathfinder
+    from kicad_tools.router.layers import Layer, LayerStack
+    from kicad_tools.router.primitives import Pad
+
+    npth = Pad(
+        x=10.0,
+        y=5.0,
+        width=2.7,
+        height=2.7,
+        net=0,
+        net_name="",
+        layer=Layer.F_CU,
+        ref="F1",
+        pin="",
+        through_hole=False,
+        drill=2.7,
+    )
+    outline = [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0)]
+    pf = LatticePathfinder(outline, [npth], layer_stack=LayerStack.four_layer_all_signal())
+    assert pf._pad_layer_indices(npth) == (0, 1, 2, 3)

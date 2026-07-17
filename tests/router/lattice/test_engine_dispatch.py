@@ -153,3 +153,43 @@ def test_route_cmd_mirror_parser_accepts_lattice(monkeypatch: pytest.MonkeyPatch
     assert args.route_engine == "lattice"
     args = parser.parse_args(["board.kicad_pcb"])
     assert args.route_engine == "grid"
+
+
+def test_subgrid_prepass_dormant_for_non_grid_engines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sub-grid escape pre-pass is GRID copper the mesh/lattice netset
+    negotiation cannot see (issue #4271): on softstart rev-C its stubs were
+    every DRC error in the P4 run and demoted 34 clean lattice nets.  It
+    must return [] before analyzing a single pad under non-grid engines."""
+    from kicad_tools.router.core import Autorouter as _A
+
+    def _boom(self: object, pad: object) -> bool:
+        raise AssertionError("sub-grid pre-pass must not analyze pads for non-grid engines")
+
+    monkeypatch.setattr(_A, "_pad_metal_covers_grid_cell", _boom)
+    for strategy in ("lattice", "mesh"):
+        router = _two_pad_router(strategy)
+        assert router._run_subgrid_prepass() == []
+
+
+def test_all_pads_preserves_duplicate_pad_numbers_for_lattice_obstacles() -> None:
+    """Footprints with REPEATED pad numbers (thermal-via arrays, EP paddles)
+    collapse in the (ref, pin) ``router.pads`` dict; the lattice obstacle
+    model must still see every copy (issue #4271: the collapsed ESP32-C3
+    "19" pads shipped as every remaining short on softstart rev-C)."""
+    router = Autorouter(50, 40, strategy="lattice")
+    router.add_component(
+        "U9",
+        [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "N1"},
+            {"number": "19", "x": 20.0, "y": 20.0, "net": 2, "net_name": "GNDX"},
+            {"number": "19", "x": 24.0, "y": 20.0, "net": 2, "net_name": "GNDX"},
+            {"number": "19", "x": 28.0, "y": 20.0, "net": 2, "net_name": "GNDX"},
+        ],
+    )
+    # The dict collapses the duplicates ...
+    assert len(router.pads) == 2
+    # ... but all_pads keeps every physical pad, and the lattice engine
+    # builds its obstacle model from it.
+    assert len(router.all_pads) == 4
+    pf = router._ensure_lattice_pathfinder()
+    assert len(pf.pads) == 4
