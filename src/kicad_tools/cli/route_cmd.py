@@ -8735,14 +8735,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--route-engine",
-        choices=["grid", "mesh"],
+        choices=["grid", "mesh", "lattice"],
         default="grid",
         help=(
-            "Routing substrate (issue #4268), orthogonal to --backend and "
-            "--strategy: 'grid' = uniform-grid A* (default, unchanged); "
-            "'mesh' = navmesh single-net router (poly2tri CDT + funnel + "
-            "clearance-aware 45deg fit). Mesh is P1/experimental: single-net "
-            "only, no multi-net negotiation, capacity, vias or matched routing."
+            "Routing substrate (issues #4268/#4278), orthogonal to --backend "
+            "and --strategy: 'grid' = uniform-grid A* (default, unchanged); "
+            "'mesh' = navmesh router (poly2tri CDT + funnel + clearance-aware "
+            "45deg fit, multi-net portal negotiation); 'lattice' = adaptive "
+            "octilinear lattice (balanced quadtree, paths are 45deg-legal by "
+            "construction, negotiated multi-net, through-vias at free-space "
+            "lattice nodes). Mesh and lattice are experimental engines; grid "
+            "remains the production default."
         ),
     )
     parser.add_argument(

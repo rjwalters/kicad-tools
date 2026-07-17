@@ -101,6 +101,20 @@ _ALLOWLIST: dict[str, dict[str, tuple[int, str]]] = {
     "router/mesh/pathfinder.py": {
         "MeshPathfinder.__init__": (1, "MeshPathfinder.__init__ rules-arg default fallback"),
     },
+    # Lattice-engine pathfinder (#4278) -- identical constructor rules-arg
+    # default fallback shape as MeshPathfinder/Autorouter.  The dispatch
+    # caller, ``Autorouter._ensure_lattice_pathfinder`` in router/core.py,
+    # always passes ``self.rules`` (manufacturer already propagated); the
+    # bare default is only reached by direct unit-test construction or
+    # ``LatticePathfinder.from_board(rules=None)``, where no manufacturer
+    # context exists to thread.  Via-in-pad is additionally moot for this
+    # engine (vias land only on free-space lattice nodes, never in pads).
+    "router/lattice/pathfinder.py": {
+        "LatticePathfinder.__init__": (
+            1,
+            "LatticePathfinder.__init__ rules-arg default fallback",
+        ),
+    },
     # Library API: ``route_pcb()`` synthesises default rules only when
     # the caller explicitly passes ``rules=None`` (no PCB rules either).
     # The CLI always supplies its own rules with manufacturer wired in.

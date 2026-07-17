@@ -922,6 +922,10 @@ class Autorouter:
                 cannot monopolise the budget, and a capped net's Python fallback
                 is skipped.  Plumbed via the ``--per-net-iterations`` CLI flag
                 (defaulted by ``--deterministic-budget``).
+            strategy: Routing substrate selector (``--route-engine``):
+                ``"grid"`` (default, uniform-grid A*), ``"mesh"`` (navmesh,
+                #4268/#4269), or ``"lattice"`` (adaptive octilinear lattice,
+                #4278).
         """
         self.rules = rules or DesignRules()
         # Issue #3524: copy the default map instead of aliasing it.  The
@@ -1069,6 +1073,15 @@ class Autorouter:
         self._mesh_net_routes: dict[int, list[Route]] | None = None
         self._mesh_served: set[int] = set()
         self._mesh_negotiation_stats: Any = None
+        # Issue #4278 (mesh-router P2.7): the adaptive octilinear lattice
+        # engine (``--route-engine lattice``), the third substrate beside
+        # ``grid`` and ``mesh``.  Same caching discipline as the mesh: the
+        # whole net set is negotiated once on the first lattice route and
+        # the per-net results are served net-by-net from this cache.
+        self._lattice_pathfinder: Any = None
+        self._lattice_net_routes: dict[int, list[Route]] | None = None
+        self._lattice_served: set[int] = set()
+        self._lattice_negotiation_stats: Any = None
 
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
@@ -2382,6 +2395,91 @@ class Autorouter:
                 by_net.setdefault(net_id, []).append(route)
         return by_net
 
+    def _route_net_lattice(self, net: int) -> list[Route]:
+        """Route a net with the lattice engine (issue #4278, mesh-router P2.7).
+
+        Mirrors :meth:`_route_net_mesh`: builds (once, lazily) a
+        :class:`~kicad_tools.router.lattice.LatticePathfinder`, negotiates the
+        WHOLE net set through the shared static lattice a single time, caches
+        the per-net results, and serves + commits each net's routes exactly
+        once.  The emission / DRC tail is identical to the grid path.
+        """
+        if self._lattice_net_routes is None:
+            self._lattice_net_routes = self._negotiate_lattice_netset()
+
+        routes = self._lattice_net_routes.get(net, [])
+        if net not in self._lattice_served:
+            self._lattice_served.add(net)
+            for route in routes:
+                if route.segments:
+                    self.routes.append(route)
+        return [r for r in routes if r.segments]
+
+    def _ensure_lattice_pathfinder(self) -> Any:
+        """Lazily construct the per-board :class:`LatticePathfinder` (built once).
+
+        Outer boundary resolution is identical to
+        :meth:`_ensure_mesh_pathfinder`: the Edge.Cuts bbox when the board has
+        an outline, else the grid origin/dimensions fallback.
+        """
+        from .lattice.pathfinder import LatticePathfinder
+
+        if self._lattice_pathfinder is None:
+            if self._board_bbox is not None:
+                bx0, by0, bx1, by1 = self._board_bbox
+            else:
+                bx0 = self.grid.origin_x
+                by0 = self.grid.origin_y
+                bx1 = self.grid.origin_x + self.grid.width
+                by1 = self.grid.origin_y + self.grid.height
+            outline = [(bx0, by0), (bx1, by0), (bx1, by1), (bx0, by1)]
+            # The lattice is replicated across the board's REAL copper stack
+            # (issue #4278 acceptance 6) -- never hardcoded to 2 layers.
+            self._lattice_pathfinder = LatticePathfinder(
+                outline,
+                list(self.pads.values()),
+                self.rules,
+                layer_stack=self.layer_stack,
+            )
+        return self._lattice_pathfinder
+
+    def _negotiate_lattice_netset(self) -> dict[int, list[Route]]:
+        """Negotiate every routable net through the shared lattice (#4278).
+
+        Gathers a star-wise 2-pad connection per net (the same topology the
+        mesh negotiation uses) and runs the capacity-1 lattice negotiation
+        once; the lattice is built a single time for the whole board inside
+        :meth:`LatticePathfinder.route_netset` (``lattice_builds == 1``).
+        Unlike the mesh path, cross-layer connections are NOT skipped -- the
+        lattice's (node, layer) graph handles layer transitions natively.
+        """
+        pf = self._ensure_lattice_pathfinder()
+
+        connections: list[tuple[object, Pad, Pad, object]] = []
+        for net, pad_keys in self.nets.items():
+            if net == 0:
+                continue
+            pads = [self.pads[k] for k in pad_keys if k in self.pads]
+            if len(pads) < 2:
+                continue
+            anchor = pads[0]
+            for seq, other in enumerate(pads[1:]):
+                connections.append(((net, seq), anchor, other, None))
+
+        if not connections:
+            return {}
+
+        routes_by_key, stats = pf.route_netset(connections)
+        self._lattice_negotiation_stats = stats
+
+        by_net: dict[int, list[Route]] = {}
+        for key, route in routes_by_key.items():
+            assert isinstance(key, tuple)
+            net_id = int(key[0])
+            if route.segments:
+                by_net.setdefault(net_id, []).append(route)
+        return by_net
+
     def route_net(
         self,
         net: int,
@@ -2416,6 +2514,10 @@ class Autorouter:
         # Default ``"grid"`` skips this branch entirely (byte-identical).
         if getattr(self, "_strategy", "grid") == "mesh":
             return self._route_net_mesh(net)
+        # Issue #4278 (mesh-router P2.7): the adaptive octilinear lattice
+        # engine.  Same dispatch seam; ``grid`` and ``mesh`` are untouched.
+        if getattr(self, "_strategy", "grid") == "lattice":
+            return self._route_net_lattice(net)
 
         # Issue #4170 (Phase 2b-1): bare boundary stub terminals are an additive
         # source of per-net targets.  A net may have only ONE in-region pad plus
