@@ -56,16 +56,24 @@ def _pad(x: float, y: float, net: int, ref: str, w: float = 0.6, h: float = 0.6)
 
 
 def _cross_net_intersections(routes: dict[object, object]) -> int:
-    """Count intersecting segments belonging to DIFFERENT nets (net-vs-net shorts)."""
-    segs: list[tuple[object, tuple[float, float], tuple[float, float]]] = []
+    """Count intersecting DIFFERENT-net segments **on the same layer** (shorts).
+
+    Layer-aware (issue #4276): with 2.5D via injection two nets may cross in the
+    XY projection when they sit on different copper layers -- that is the whole
+    point of dipping, not a short.  Only a same-layer crossing is a net-vs-net
+    short, so the count keys on ``(net, layer)`` and compares within a layer.
+    """
+    segs: list[tuple[object, object, tuple[float, float], tuple[float, float]]] = []
     for key, route in routes.items():
         for s in route.segments:  # type: ignore[attr-defined]
-            segs.append((key, (s.x1, s.y1), (s.x2, s.y2)))
+            segs.append((key, s.layer, (s.x1, s.y1), (s.x2, s.y2)))
     count = 0
     for i in range(len(segs)):
         for j in range(i + 1, len(segs)):
-            if segs[i][0] != segs[j][0] and segments_intersect(
-                segs[i][1], segs[i][2], segs[j][1], segs[j][2]
+            if (
+                segs[i][0] != segs[j][0]
+                and segs[i][1] == segs[j][1]
+                and segments_intersect(segs[i][2], segs[i][3], segs[j][2], segs[j][3])
             ):
                 count += 1
     return count

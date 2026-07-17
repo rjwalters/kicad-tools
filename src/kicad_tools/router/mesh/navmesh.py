@@ -16,11 +16,29 @@ from __future__ import annotations
 
 import heapq
 import math
+from collections.abc import Callable
 
 from .funnel import Portal
 from .geometry import EPS, Pt, centroid, merge_intervals, point_in_triangle
 
 Triangle = tuple[int, int, int]
+
+# A step of a multi-layer corridor (issue #4276): the triangle, the copper
+# layer index it is traversed on, the point at which the corridor entered that
+# ``(triangle, layer)`` node, and whether the entering edge was a via (a
+# layer-change hop) rather than an in-layer portal crossing.
+LayeredStep = tuple[int, int, Pt, bool]
+
+# Callables the 2.5D A* consults so the navmesh stays geometry-only and the
+# per-layer obstacle / manufacturability policy lives in the pathfinder:
+#   * ``PortalBlockedFn(edge, layer)`` -> True if committed copper on ``layer``
+#     crosses that portal (the per-layer analogue of P2's committed copper, so
+#     A* has a cost reason to dip to a clear layer, issue #4276 section 3).
+#   * ``ViaAllowedFn(site, layer_a, layer_b)`` -> True if a via at ``site`` is
+#     DRC-legal on BOTH layers it joins (obstacle-aware placement at *search*
+#     time -- the #3906 lesson, issue #4276 section 5).
+PortalBlockedFn = Callable[[tuple[int, int], int], bool]
+ViaAllowedFn = Callable[[Pt, int, int], bool]
 
 
 class NavMesh:
@@ -269,6 +287,135 @@ class NavMesh:
             corridor.append(tri)
         corridor.reverse()
         return corridor
+
+    # -- multi-layer A* over identically-meshed layers (issue #4276) -------
+
+    def astar_layered(
+        self,
+        start: Pt,
+        goal: Pt,
+        start_layer: int,
+        goal_layer: int,
+        num_layers: int,
+        portal_blocked: PortalBlockedFn,
+        via_allowed: ViaAllowedFn,
+        via_cost: float,
+        *,
+        present_cost_factor: float = 0.0,
+        cost_congestion: float = 0.0,
+        congestion_threshold: float = 0.0,
+    ) -> list[LayeredStep] | None:
+        """A* over the ``(triangle, layer)`` graph -- the 2.5D via-injection core.
+
+        The single static triangulation is *replicated* across ``num_layers``
+        identically-meshed copper layers (no per-layer re-triangulation -- the
+        static-mesh-once invariant holds).  A* nodes are ``(triangle, layer)``;
+        edges are:
+
+        * **in-layer** triangle adjacency, skipped when ``portal_blocked(edge,
+          layer)`` reports committed copper crosses that portal on that layer
+          (this is what gives the search a cost reason to *dip* rather than
+          plough through the blocked corridor); and
+        * **via** hops connecting ``(tri, L) <-> (tri, L+/-1)`` at the current
+          **portal-midpoint** site, cost ``via_cost``, admitted only when
+          ``via_allowed(site, L, L')`` proves the via DRC-legal on both layers.
+
+        Vias are only taken at portal midpoints (never at the start pad), so an
+        injected via is a free-space through-via by construction.  Returns the
+        corridor as a list of :data:`LayeredStep` (``(tri, layer, entry, via)``)
+        from ``start`` to ``goal``, or ``None`` if disconnected.  With a single
+        layer (``num_layers == 1``) no via edge is ever generated and the result
+        reduces to a same-layer corridor.
+        """
+        start_tris = self.locate(start)
+        goal_tris = set(self.locate(goal))
+        if not start_tris or not goal_tris:
+            return None
+
+        negotiating = present_cost_factor != 0.0 or bool(self._history)
+
+        def edge_mid(edge: tuple[int, int]) -> Pt:
+            a = self.vertices[edge[0]]
+            b = self.vertices[edge[1]]
+            return ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+
+        def h(point: Pt) -> float:
+            return math.hypot(goal[0] - point[0], goal[1] - point[1])
+
+        State = tuple[int, int]  # (triangle, layer)
+        g_score: dict[State, float] = {}
+        # came_from[state] = (prev_state, entry_point_at_state, via_into_state)
+        came_from: dict[State, tuple[State, Pt, bool]] = {}
+        counter = 0
+        # heap item: (f, unique, tri, layer, entry, at_portal)
+        open_heap: list[tuple[float, int, int, int, Pt, bool]] = []
+        for t in start_tris:
+            g_score[(t, start_layer)] = 0.0
+            heapq.heappush(open_heap, (h(start), counter, t, start_layer, start, False))
+            counter += 1
+
+        while open_heap:
+            f, _cnt, tri, layer, entry, at_portal = heapq.heappop(open_heap)
+            st: State = (tri, layer)
+            g = g_score.get(st, math.inf)
+            if f - h(entry) > g + 1e-6:
+                continue
+            if tri in goal_tris and layer == goal_layer:
+                return self._reconstruct_layered(came_from, st, start)
+
+            # In-layer triangle adjacency (masked per layer by committed copper).
+            for nbr, edge in self._adj[tri]:
+                if portal_blocked(edge, layer):
+                    continue
+                mid = edge_mid(edge)
+                step = math.hypot(mid[0] - entry[0], mid[1] - entry[1])
+                if negotiating:
+                    penalty = self.portal_penalty(
+                        edge, present_cost_factor, cost_congestion, congestion_threshold
+                    )
+                    step = step * (1.0 + penalty)
+                tentative = g + step
+                nst: State = (nbr, layer)
+                if tentative < g_score.get(nst, math.inf) - 1e-9:
+                    g_score[nst] = tentative
+                    came_from[nst] = (st, mid, False)
+                    heapq.heappush(open_heap, (tentative + h(mid), counter, nbr, layer, mid, True))
+                    counter += 1
+
+            # Via hops: only at a genuine portal-midpoint site (never the pad).
+            if at_portal and num_layers > 1:
+                for target in (layer - 1, layer + 1):
+                    if target < 0 or target >= num_layers:
+                        continue
+                    if not via_allowed(entry, layer, target):
+                        continue
+                    tentative = g + via_cost
+                    nst = (tri, target)
+                    if tentative < g_score.get(nst, math.inf) - 1e-9:
+                        g_score[nst] = tentative
+                        came_from[nst] = (st, entry, True)
+                        heapq.heappush(
+                            open_heap, (tentative + h(entry), counter, tri, target, entry, True)
+                        )
+                        counter += 1
+        return None
+
+    @staticmethod
+    def _reconstruct_layered(
+        came_from: dict[tuple[int, int], tuple[tuple[int, int], Pt, bool]],
+        goal_st: tuple[int, int],
+        start_pt: Pt,
+    ) -> list[LayeredStep]:
+        chain: list[LayeredStep] = []
+        st = goal_st
+        while st in came_from:
+            prev_st, entry_at_st, via_into = came_from[st]
+            chain.append((st[0], st[1], entry_at_st, via_into))
+            st = prev_st
+        # ``st`` is now a start node: its entry point is the start pad.
+        chain.append((st[0], st[1], start_pt, False))
+        chain.reverse()
+        return chain
 
     # -- corridor -> oriented portals -------------------------------------
 
