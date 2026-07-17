@@ -52,6 +52,11 @@ src/kicad_tools/cli/bom_cmd.py	operator	Unsupported operand types for + ("object
 src/kicad_tools/cli/build_cmd.py	assignment	Incompatible types in assignment (expression has type "Path | None", variable has type "Path")
 src/kicad_tools/cli/build_cmd.py	union-attr	Item "None" of "ProjectArtifacts | Any | None" has no attribute "schematic"
 src/kicad_tools/cli/build_cmd.py	union-attr	Item "None" of "ProjectSpec | None" has no attribute "project"
+# Pre-existing drift (PR #3879 / issue #3877): the nanobind import error text
+# changed across mypy/nanobind versions (import-not-found -> import-untyped when
+# nanobind is installed). Both signatures are kept so the gate is green on any
+# env; not introduced by this PR (build_native_cmd.py is untouched here).
+src/kicad_tools/cli/build_native_cmd.py	import-not-found	Cannot find implementation or library stub for module named "nanobind"
 src/kicad_tools/cli/build_native_cmd.py	import-untyped	Skipping analyzing "nanobind": module is installed, but missing library stubs or py.typed marker
 src/kicad_tools/cli/clean_cmd.py	assignment	Incompatible types in assignment (expression has type "ProtectedFile", variable has type "CleanableFile")
 src/kicad_tools/cli/commands/benchmark.py	var-annotated	Need type annotation for "by_case" (hint: "by_case: dict[<type>, <type>] = ...")
