@@ -16,11 +16,15 @@ Package layout:
 * :mod:`.pathfinder` -- pad dogleg stubs, negotiated (node, layer) A*,
   emission to ordinary :class:`~kicad_tools.router.primitives.Route`.
 
-Via gating documentation (issue #4278 acceptance 7): vias land only on
-free-space lattice nodes, so **via-in-pad is N/A-by-construction** (not a
-disabled feature -- it cannot occur), and only **through-vias** are ever
-generated (blind/buried are likewise N/A; a committed through-via masks its
-node on ALL layers).
+Via gating documentation (issue #4278 acceptance 7, revised by #4284):
+only **through-vias** are ever generated (blind/buried are
+N/A-by-construction; a committed through-via masks its node on ALL
+layers).  **Via-in-pad is tier-gated exactly like the mesh engine** -- the
+static masks exclude only other-net pads, so a node under a same-net SMD
+pad is reachable; the via-legality gate rejects a via whose barrel would
+intersect a same-net SMD pad rect unless ``MfrLimits.via_in_pad_supported``
+holds for the configured ``DesignRules.manufacturer`` (default OFF).
+Other-net pad sites are always rejected.
 """
 
 from .obstacles import CommittedCopper, LatticeObstacleModel
