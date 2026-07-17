@@ -169,3 +169,27 @@ def test_subgrid_prepass_dormant_for_non_grid_engines(monkeypatch: pytest.Monkey
     for strategy in ("lattice", "mesh"):
         router = _two_pad_router(strategy)
         assert router._run_subgrid_prepass() == []
+
+
+def test_all_pads_preserves_duplicate_pad_numbers_for_lattice_obstacles() -> None:
+    """Footprints with REPEATED pad numbers (thermal-via arrays, EP paddles)
+    collapse in the (ref, pin) ``router.pads`` dict; the lattice obstacle
+    model must still see every copy (issue #4271: the collapsed ESP32-C3
+    "19" pads shipped as every remaining short on softstart rev-C)."""
+    router = Autorouter(50, 40, strategy="lattice")
+    router.add_component(
+        "U9",
+        [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "N1"},
+            {"number": "19", "x": 20.0, "y": 20.0, "net": 2, "net_name": "GNDX"},
+            {"number": "19", "x": 24.0, "y": 20.0, "net": 2, "net_name": "GNDX"},
+            {"number": "19", "x": 28.0, "y": 20.0, "net": 2, "net_name": "GNDX"},
+        ],
+    )
+    # The dict collapses the duplicates ...
+    assert len(router.pads) == 2
+    # ... but all_pads keeps every physical pad, and the lattice engine
+    # builds its obstacle model from it.
+    assert len(router.all_pads) == 4
+    pf = router._ensure_lattice_pathfinder()
+    assert len(pf.pads) == 4

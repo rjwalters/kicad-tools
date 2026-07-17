@@ -1093,6 +1093,11 @@ class Autorouter:
         )
 
         self.pads: dict[tuple[str, str], Pad] = {}
+        # Issue #4271: every pad, DUPLICATE pad numbers included (thermal-via
+        # arrays / EP paddles share a number and collapse in the (ref, pin)
+        # dict above).  Obstacle input for the exact-geometry engines
+        # (lattice/mesh); the grid marks pads directly and never reads this.
+        self.all_pads: list[Pad] = []
         self.nets: dict[int, list[tuple[str, str]]] = {}
         # Issue #4170 (Phase 2b-1): route-scoped bare boundary stub endpoints to
         # reconnect, keyed by net id.  Populated by ``set_stub_terminals`` from
@@ -1692,6 +1697,18 @@ class Autorouter:
                 drill=pad_info.get("drill", 0.0),
             )
             key = (ref, pin)
+            # Issue #4271: ``self.pads`` is keyed (ref, pin), so a footprint
+            # with DUPLICATE pad numbers (thermal-via arrays / EP paddles --
+            # softstart's ESP32-C3 module has 13 pads named "19" and 9 named
+            # "") keeps only ONE of them.  The grid engine is unaffected
+            # (every pad is marked on the grid below, before the dict
+            # overwrite), but the exact-geometry engines build their
+            # obstacle models from the pad OBJECTS, so the collapsed
+            # duplicates were invisible and copper routed straight through
+            # them (measured: every remaining short in the P4 run).
+            # ``all_pads`` preserves every pad for those engines; the
+            # (ref, pin) dict keeps its historical semantics for topology.
+            self.all_pads.append(pad)
             self.pads[key] = pad
 
             if pad.net > 0:
@@ -2438,9 +2455,14 @@ class Autorouter:
             outline = [(bx0, by0), (bx1, by0), (bx1, by1), (bx0, by1)]
             # The lattice is replicated across the board's REAL copper stack
             # (issue #4278 acceptance 6) -- never hardcoded to 2 layers.
+            # Obstacles come from ``all_pads`` (issue #4271): duplicate pad
+            # numbers collapse in the (ref, pin) dict, and the collapsed
+            # thermal/EP pads shipped as shorts on softstart rev-C.  The
+            # fallback covers routers assembled without add_component
+            # (tests, deserialization).
             self._lattice_pathfinder = LatticePathfinder(
                 outline,
-                list(self.pads.values()),
+                self.all_pads or list(self.pads.values()),
                 self.rules,
                 layer_stack=self.layer_stack,
             )
@@ -2581,7 +2603,11 @@ class Autorouter:
         for net, pad_keys in self.nets.items():
             if net == 0:
                 continue
-            keyed = [(k, self.pads[k]) for k in pad_keys if k in self.pads]
+            # ``dict.fromkeys``: nets whose footprint repeats a pad number
+            # (thermal-via arrays) append the same (ref, pin) key once per
+            # copy -- without dedup the star topology would route the same
+            # pad pair repeatedly (issue #4271).
+            keyed = [(k, self.pads[k]) for k in dict.fromkeys(pad_keys) if k in self.pads]
             if len(keyed) < 2:
                 continue
             # Issue #4271: thread the net's class (name-pattern classified +
