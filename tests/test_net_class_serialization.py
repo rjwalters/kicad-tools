@@ -261,6 +261,7 @@ class TestDriftPrevention:
             "name": "DriftSentinel",
             "priority": 99,
             "trace_width": 0.123,
+            "neck_trace_width": 0.15,
             "clearance": 0.456,
             "via_size": 0.789,
             "cost_multiplier": 1.23,
