@@ -470,7 +470,7 @@ def test_lookup_many_live_partial_then_catalog(
     cache = PartsCache(db_path=tmp_path / "cache.db")
     client = LCSCClient(cache=cache, catalog_path=catalog_db)
 
-    def fake_fetch(part_num: str):
+    def fake_fetch(part_num: str, _failures=None):
         if part_num == "C1525":
             return Part(lcsc_part="C1525", mfr_part="LIVE-CAP")
         # Everything else "fails" via circuit breaker.
