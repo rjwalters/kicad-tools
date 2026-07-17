@@ -43,13 +43,27 @@ logger = logging.getLogger(__name__)
 # ``uv sync`` and ``pip install`` incantations so a base-install failure is
 # actionable rather than a silent degrade.  Unlike ``cmaes``, ``parts`` is
 # NOT pulled in transitively by the ``dev`` or ``all`` extras.
-PARTS_INSTALL_HINT = (
+# Base install incantation shared by every parts-extra error.  Kept separate so
+# download-context callers (``sync-catalog``) can surface *only* the actionable
+# install advice without the self-referential "run sync-catalog" clause below
+# (issue #4295 -- that command is the very one failing on missing ``requests``).
+PARTS_EXTRA_INSTALL_HINT = (
     "The 'requests' library is required for LCSC API access. "
     "Install it with the 'parts' extra: uv sync --extra parts "
-    '(or: pip install "kicad-tools[parts]"). '
-    "Alternatively, sync the offline jlcparts catalog with "
-    "`kct parts sync-catalog` to look up parts without the live API."
+    '(or: pip install "kicad-tools[parts]").'
 )
+
+# General hint for lookup/search, where the offline jlcparts catalog *is* a
+# valid fallback, so pointing the user at ``kct parts sync-catalog`` is helpful.
+PARTS_INSTALL_HINT = (
+    PARTS_EXTRA_INSTALL_HINT + " Alternatively, sync the offline jlcparts catalog "
+    "with `kct parts sync-catalog` to look up parts without the live API."
+)
+
+# Hint for the *downloader* itself (``sync_catalog``).  ``requests`` is required
+# unconditionally to run it, so the offline-catalog suggestion would be circular
+# (issue #4295): it cannot recommend the command that is currently failing.
+PARTS_DOWNLOAD_INSTALL_HINT = PARTS_EXTRA_INSTALL_HINT
 
 
 class LCSCForbiddenError(Exception):
