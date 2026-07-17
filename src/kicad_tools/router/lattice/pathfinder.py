@@ -224,6 +224,12 @@ class LatticePathfinder:
         self._via_via_gap = self.rules.via_diameter + clr
         self._same_net_via_gap = self.rules.via_drill + self.rules.min_hole_to_hole
         self._via_pad_grow = via_r + clr - self._agent_radius
+        # Largest drilled hole on the board (PTH or NPTH), computed once:
+        # the _via_ok pad query window must reach via_drill/2 + pad_drill/2
+        # + min_hole_to_hole or large-drill pads silently escape the
+        # hole-to-hole check (issue #4291 -- softstart's 1.3mm terminal
+        # drills sat beyond the old ~0.8mm window).
+        self._max_pad_drill = max((p.drill for p in pads), default=0.0)
 
         # Static substrate, built lazily ONCE (the #4278 acceptance counter).
         self._lattice: OctilinearLattice | None = None
@@ -532,7 +538,15 @@ class LatticePathfinder:
         point = lattice.node_point(key)
         via_radius = self.rules.via_diameter / 2.0
         grow = max(self._via_pad_grow, 0.0)
-        window = max(grow, via_radius) + 0.5
+        # The query window must cover the farthest centre distance any check
+        # below can reject at.  The hole-to-hole floor against the board's
+        # largest drill needs via_drill/2 + max_drill/2 + min_hole_to_hole
+        # -- beyond the copper-derived window for large-drill PTH/NPTH pads
+        # (issue #4291), which the old window silently left unchecked.
+        hole_window = (
+            self.rules.via_drill / 2.0 + self._max_pad_drill / 2.0 + self.rules.min_hole_to_hole
+        )
+        window = max(max(grow, via_radius) + 0.5, hole_window)
         for idx in obstacles.pads_near(
             point[0] - window, point[1] - window, point[0] + window, point[1] + window
         ):
