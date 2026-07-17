@@ -7975,12 +7975,18 @@ def _offboard_preflight(pcb_path: Path) -> int:
     indistinguishable from routing congestion.  This preflight surfaces the
     real cause up front (issue #4156).
 
+    Only ERROR-severity off-board conflicts block.  WARNING-severity
+    ``OFF_BOARD`` findings (courtyard artwork overhanging the edge while every
+    pad is on-board — antenna modules, edge connectors; issue #4290) are
+    routable by construction and must not force ``--allow-offboard``, which
+    would also disable this gate for genuinely off-board parts.
+
     Returns 0 when the placement is on-board (or the board has no outline, or
     the check cannot run), and 2 (matching the blocking netlist-sync gate's
     exit convention) when off-board footprints are found.
     """
     try:
-        from kicad_tools.placement import ConflictType, PlacementAnalyzer
+        from kicad_tools.placement import ConflictSeverity, ConflictType, PlacementAnalyzer
 
         analyzer = PlacementAnalyzer()
         conflicts = analyzer.find_conflicts(pcb_path)
@@ -7988,7 +7994,11 @@ def _offboard_preflight(pcb_path: Path) -> int:
         # A preflight that cannot run must never block routing outright.
         return 0
 
-    offboard = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+    offboard = [
+        c
+        for c in conflicts
+        if c.type == ConflictType.OFF_BOARD and c.severity == ConflictSeverity.ERROR
+    ]
     if not offboard:
         return 0
 

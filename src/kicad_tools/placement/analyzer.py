@@ -81,6 +81,10 @@ class PlacementAnalyzer:
         self.verbose = verbose
         self._components: list[ComponentInfo] = []
         self._board_edge: Rectangle | None = None
+        # Sheet-absolute position of the board-relative frame's origin (the
+        # PCB's detected board origin).  Used only to echo sheet coordinates
+        # in off-board messages on offset boards (issue #4290).
+        self._board_origin_offset: tuple[float, float] = (0.0, 0.0)
 
     def find_conflicts(
         self,
@@ -586,13 +590,21 @@ class PlacementAnalyzer:
     def _check_off_board(self) -> Iterator[Conflict]:
         """Flag components whose courtyard falls outside the board outline.
 
-        This is a hard-invalid placement, qualitatively different from the
-        "inside but too close to the edge" case handled by
-        :meth:`_check_edge_clearance`.  A footprint whose courtyard is
-        *fully* outside the outline (the common "everything shifted N mm off
-        the board" incident, issue #4156) or *partially* straddling the edge
-        cannot be manufactured or routed as placed, so both are unconditional
-        ``ERROR`` severity, independent of ``min_edge_clearance``.
+        A footprint whose courtyard is *fully* outside the outline (the common
+        "everything shifted N mm off the board" incident, issue #4156), or
+        whose **pads** extend past the edge, cannot be manufactured or routed
+        as placed — those are unconditional ``ERROR`` severity, independent of
+        ``min_edge_clearance``.
+
+        A footprint whose courtyard *artwork* overhangs the edge while every
+        pad sits on the board is different (issue #4290): edge-overhang parts
+        — chip-antenna / RF modules (e.g. ESP32-C3-WROOM-02, whose antenna
+        keepout courtyard is *supposed* to protrude past Edge.Cuts per the
+        datasheet), card-edge USB, and overhanging connectors — do this by
+        design.  Those are reported as ``WARNING`` so ``kct placement check``
+        still surfaces them without invalidating the placement (and without
+        forcing ``kct route --allow-offboard``, which would also disable the
+        real off-board gate).
 
         Uses an axis-aligned bounding-box test against the outline bbox — the
         same cheap approach as ``place_unplaced._get_board_bounds``.  A true
@@ -600,11 +612,23 @@ class PlacementAnalyzer:
         is a future refinement (see issue #4182); the bbox test covers the
         reported incident and never false-negatives on a shifted-off-board
         row.
+
+        All comparisons happen in a single coordinate frame: both the outline
+        bbox (:meth:`_extract_board_edge`) and every pad/courtyard coordinate
+        come from the same board-relative frame that ``schema.PCB`` normalizes
+        on load.  The message additionally reports the outline in
+        sheet-absolute coordinates when the board origin is non-zero, so the
+        printed bounds match what KiCad displays for offset boards instead of
+        the misleading-looking ``0.0,0.0 to W,H``.
         """
         if not self._board_edge:
             return
 
         edge = self._board_edge
+        # Float-noise tolerance for the pads-on-board containment test (the
+        # board-relative frame is produced by subtraction, so exact equality
+        # at the edge is not guaranteed).
+        eps = 1e-6
 
         for comp in self._components:
             if not comp.courtyard:
@@ -628,6 +652,46 @@ class PlacementAnalyzer:
             if not fully_outside and not partially_outside:
                 continue
 
+            # Which side(s) overhang, and by how much — makes the real cause
+            # (e.g. a 2.35 mm antenna-courtyard overhang) instantly visible.
+            overhangs: list[str] = []
+            if cy.min_x < edge.min_x:
+                overhangs.append(f"left {edge.min_x - cy.min_x:.2f}mm")
+            if cy.max_x > edge.max_x:
+                overhangs.append(f"right {cy.max_x - edge.max_x:.2f}mm")
+            if cy.min_y < edge.min_y:
+                overhangs.append(f"top {edge.min_y - cy.min_y:.2f}mm")
+            if cy.max_y > edge.max_y:
+                overhangs.append(f"bottom {cy.max_y - edge.max_y:.2f}mm")
+            overhang_txt = ", ".join(overhangs)
+
+            board_txt = self._board_bounds_text(edge)
+
+            pads_on_board = comp.pads_bbox is not None and (
+                comp.pads_bbox.min_x >= edge.min_x - eps
+                and comp.pads_bbox.max_x <= edge.max_x + eps
+                and comp.pads_bbox.min_y >= edge.min_y - eps
+                and comp.pads_bbox.max_y <= edge.max_y + eps
+            )
+
+            if not fully_outside and pads_on_board:
+                # Courtyard-artwork-only edge overhang with every pad on the
+                # board: probable intentional overhang (issue #4290).
+                yield Conflict(
+                    type=ConflictType.OFF_BOARD,
+                    severity=ConflictSeverity.WARNING,
+                    component1=comp.reference,
+                    component2="board_outline",
+                    message=(
+                        f"courtyard overhangs Edge.Cuts outline ({overhang_txt}; "
+                        f"{board_txt}) but all pads are on-board — probable "
+                        "intentional edge overhang (antenna/connector); verify "
+                        "mechanical fit"
+                    ),
+                    location=cy.center,
+                )
+                continue
+
             descriptor = "fully outside" if fully_outside else "partially outside"
             yield Conflict(
                 type=ConflictType.OFF_BOARD,
@@ -636,11 +700,29 @@ class PlacementAnalyzer:
                 component2="board_outline",
                 message=(
                     f"courtyard {descriptor} Edge.Cuts outline "
-                    f"(board {edge.min_x:.1f},{edge.min_y:.1f} to "
-                    f"{edge.max_x:.1f},{edge.max_y:.1f}) — placement invalid"
+                    f"({overhang_txt}; {board_txt}) — placement invalid"
                 ),
                 location=cy.center,
             )
+
+    def _board_bounds_text(self, edge: Rectangle) -> str:
+        """Human-readable outline bounds for off-board messages.
+
+        Reports the board-relative bbox, plus the sheet-absolute bbox when the
+        detected board origin is non-zero.  On an offset board (Edge.Cuts min
+        corner not at the sheet origin) a bare ``board 0.0,0.0 to 160.0,100.0``
+        reads as if the checker normalized the outline while leaving pads
+        absolute (issue #4290); echoing the sheet coordinates KiCad displays
+        removes that ambiguity.
+        """
+        ox, oy = self._board_origin_offset
+        text = f"board {edge.min_x:.1f},{edge.min_y:.1f} to {edge.max_x:.1f},{edge.max_y:.1f}"
+        if ox != 0.0 or oy != 0.0:
+            text += (
+                f" board-relative = sheet {edge.min_x + ox:.1f},{edge.min_y + oy:.1f}"
+                f" to {edge.max_x + ox:.1f},{edge.max_y + oy:.1f}"
+            )
+        return text
 
     def _check_edge_clearance(self, min_clearance: float) -> Iterator[Conflict]:
         """Check clearance from components to board edge.
@@ -758,6 +840,14 @@ class PlacementAnalyzer:
         outline = pcb.get_board_outline()
         if not outline:
             return None
+
+        # Remember where the board-relative frame sits on the sheet so
+        # off-board messages can echo sheet-absolute coordinates (#4290).
+        try:
+            origin = pcb.board_origin
+            self._board_origin_offset = (float(origin[0]), float(origin[1]))
+        except Exception:
+            self._board_origin_offset = (0.0, 0.0)
 
         # get_board_outline() already returns board-relative coordinates.
         all_x = [p[0] for p in outline]
