@@ -270,7 +270,17 @@ class CommittedCopper:
                 if cnet != net and seg_pt_dist(c, d, point) < gap - 1e-9:
                     return False
         for vpt, vnet in self.vias:
-            gap = self.via_via_gap if vnet != net else self.same_net_via_gap
+            # Cross-net vias must honor BOTH the copper gap (via_via_gap =
+            # via diameter + clearance, centre-to-centre) AND the drill
+            # hole-to-hole floor (same_net_via_gap = via_drill +
+            # min_hole_to_hole).  At JLC defaults the copper gap alone puts
+            # two 0.3mm drills only 0.45mm hole-edge-to-edge -- under the
+            # 0.5mm floor (issue #4291: 16 hole_to_hole DRC warnings on the
+            # softstart P4 run of record).
+            if vnet != net:
+                gap = max(self.via_via_gap, self.same_net_via_gap)
+            else:
+                gap = self.same_net_via_gap
             if dist(point, vpt) < gap - 1e-9:
                 return False
         return True
