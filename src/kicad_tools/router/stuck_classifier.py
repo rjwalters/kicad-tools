@@ -141,6 +141,44 @@ SELF_CROSS_THRESHOLD = 0.5
 # Topology labels attached to a diagnosis (empty string == not applicable).
 TOPOLOGY_SELF_CROSSING = "self_crossing_bundle"
 TOPOLOGY_FOREIGN_CLUSTER = "foreign_cluster"
+# Issue #4286: a bundle whose facing pad rows carry the nets in the SAME order.
+# Same-group blocker share fires for this topology too (co-oriented siblings
+# saturate the corridor without crossing), but de-reversal would CREATE the
+# crossing pathology instead of fixing it, so it gets its own label + ladder.
+TOPOLOGY_CO_ORIENTED = "co_oriented_bundle"
+
+# --- pin-order (inversion) verification (issue #4286) -----------------------
+#
+# Same-match-group blocker share alone cannot distinguish a genuinely REVERSED
+# bundle (board-07's DDR byte: the facing pin columns carry the nets in
+# opposite order, so every pair must cross) from a CO-ORIENTED bundle in a
+# saturated corridor (board-07's TMDS lanes: both facing rows carry the nets in
+# the SAME order; siblings compete for lanes without crossing).  Before
+# recommending DE_REVERSE_BUNDLE the engine therefore measures the actual
+# pad-order inversion count between the two facing components, reusing the
+# ``bundle_river`` projection/inversion machinery (#4053).
+#
+# The verdict thresholds on the *inversion fraction* f = inversions / C(n, 2):
+# a full reversal yields f == 1.0 and a co-oriented bundle f == 0.0.  The
+# break-even point is exactly 0.5 -- de-reversing one row maps f -> 1 - f, so
+# the move can only REDUCE crossings when f > 0.5.  We treat f >=
+# REVERSAL_INVERSION_THRESHOLD as "reversed" (keep the de-reversal
+# recommendation) and anything below as "co-oriented" (suppress it: at f < 0.5
+# de-reversal adds more crossings than it removes).  Board-07 measures f = 1.0
+# for DQ0..DQ7 (U1<->U2) and f = 0.0 for the TMDS lanes (J2<->U4), so both
+# populations sit far from the boundary.
+REVERSAL_INVERSION_THRESHOLD = 0.5
+
+# Facing rows are only comparable when the two components share at least this
+# many of the group's nets: below 3 the inversion fraction is degenerate
+# (C(2,2)=1 pair -> f is 0 or 1 on a single coin flip) and
+# ``detect_match_groups`` refuses groups smaller than 3 anyway.
+MIN_FACING_ROW_NETS = 3
+
+# Orientation verdicts (issue #4286).
+ORIENT_REVERSED = "reversed"
+ORIENT_CO_ORIENTED = "co_oriented"
+ORIENT_UNRESOLVED = "unresolved"
 
 
 class StuckClass(Enum):
@@ -249,6 +287,30 @@ class RankedAction:
             "rationale": self.rationale,
             "confidence": self.confidence.value,
         }
+
+
+@dataclass
+class BundleOrientation:
+    """Measured pad-order orientation of a match-group bundle (issue #4286).
+
+    Produced by :func:`_resolve_bundle_orientation`; consumed by the
+    recommendation stage to verify a self-crossing claim before recommending
+    DE_REVERSE_BUNDLE.  ``verdict`` is one of :data:`ORIENT_REVERSED`,
+    :data:`ORIENT_CO_ORIENTED` or :data:`ORIENT_UNRESOLVED`; the remaining
+    fields carry the evidence (``inverted_pairs`` of ``total_pairs`` facing pad
+    pairs flip order between ``primary_ref`` and ``secondary_ref``).  When the
+    facing rows cannot be resolved the verdict is UNRESOLVED and ``detail``
+    explains why -- the caller then makes NO pin-order claim either way.
+    """
+
+    verdict: str
+    inverted_pairs: int = 0
+    total_pairs: int = 0
+    member_count: int = 0
+    inversion_fraction: float = 0.0
+    primary_ref: str = ""
+    secondary_ref: str = ""
+    detail: str = ""
 
 
 @dataclass
@@ -440,11 +502,13 @@ def _find_blocking_strict_nets_from_pcb(
 
 
 def _iter_board_pads(pcb: PCB):
-    """Yield ``(net_number, (x, y), (w, h))`` for every real pad in board frame.
+    """Yield ``(reference, net_number, (x, y), (w, h))`` for every real pad.
 
-    Mirrors the footprint->board transform used by
-    :class:`kicad_tools.analysis.net_status.NetStatusAnalyzer` (KiCad negates
-    the footprint orientation vs standard CCW math, issue #3739).
+    Positions are in the board frame.  Mirrors the footprint->board transform
+    used by :class:`kicad_tools.analysis.net_status.NetStatusAnalyzer` (KiCad
+    negates the footprint orientation vs standard CCW math, issue #3739).  The
+    leading footprint reference lets the facing-row resolver (#4286) group a
+    bundle's pads by component.
     """
     for fp in pcb.footprints:
         if not fp.reference or fp.reference.startswith("#"):
@@ -457,7 +521,7 @@ def _iter_board_pads(pcb: PCB):
             px, py = pad.position
             bx = fp_x + (px * cos_a - py * sin_a)
             by = fp_y + (px * sin_a + py * cos_a)
-            yield pad.net_number, (bx, by), pad.size
+            yield fp.reference, pad.net_number, (bx, by), pad.size
 
 
 def _foreign_obstructions(
@@ -481,7 +545,7 @@ def _foreign_obstructions(
     px, py = point
     obstructions: list[tuple[float, float, float, int]] = []
 
-    for net_number, (bx, by), _size in _iter_board_pads(pcb):
+    for _ref, net_number, (bx, by), _size in _iter_board_pads(pcb):
         if net_number == target_net:
             continue
         d = math.hypot(bx - px, by - py)
@@ -585,6 +649,132 @@ def _resolve_match_groups(
         for member in members:
             net_to_group[member] = group.name
     return net_to_group, group_members
+
+
+def _resolve_bundle_orientation(
+    pcb: PCB,
+    group_ids: set[int],
+) -> BundleOrientation:
+    """Measure the pad-order orientation of a match-group bundle (issue #4286).
+
+    Resolves the group's two facing pad rows and computes the inversion count
+    between their net orders, REUSING the ``bundle_river`` projection/inversion
+    primitives (:class:`~kicad_tools.router.bundle_river.RowMember` /
+    :func:`~kicad_tools.router.bundle_river.compute_facing_row_inversions`,
+    #4053) rather than reinventing them.
+
+    Row resolution: the two components hosting the most *distinct* group nets
+    are taken as the facing rows (deterministic: count desc, reference asc).
+    A net with several pads on one component contributes its pad centroid.
+    Each row is projected onto its own long axis (the axis with the larger
+    coordinate spread -- y for a vertical pin column, x for a horizontal row);
+    only relative order matters, so the absolute frame is irrelevant.
+
+    Verdict (see :data:`REVERSAL_INVERSION_THRESHOLD` for the break-even
+    rationale): inversion fraction ``>= 0.5`` -> :data:`ORIENT_REVERSED`,
+    below -> :data:`ORIENT_CO_ORIENTED`.
+
+    Returns :data:`ORIENT_UNRESOLVED` (with ``detail``) instead of guessing
+    when the rows are not comparable: fewer than two host components, fewer
+    than :data:`MIN_FACING_ROW_NETS` shared nets, rows with different long
+    axes (an L-shaped bundle, where crossing depends on chirality the 1-D
+    projection cannot see), or a degenerate row with no spread.  Never raises.
+    """
+    from kicad_tools.router.bundle_river import RowMember, compute_facing_row_inversions
+
+    name_by_id = {nid: net.name for nid, net in pcb.nets.items() if net.name}
+
+    # (reference -> net_id -> pad positions) for the group's nets only.
+    by_ref: dict[str, dict[int, list[tuple[float, float]]]] = {}
+    for ref, net_number, (bx, by), _size in _iter_board_pads(pcb):
+        if net_number not in group_ids:
+            continue
+        by_ref.setdefault(ref, {}).setdefault(net_number, []).append((bx, by))
+
+    if len(by_ref) < 2:
+        return BundleOrientation(
+            ORIENT_UNRESOLVED,
+            detail=(
+                f"group pads found on {len(by_ref)} component(s); two facing rows are required"
+            ),
+        )
+
+    # The two components hosting the most distinct group nets are the facing
+    # rows (reference-name tiebreak keeps the choice deterministic).
+    ranked = sorted(by_ref.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    (ref_a, pads_a), (ref_b, pads_b) = ranked[0], ranked[1]
+    shared = set(pads_a) & set(pads_b)
+    if len(shared) < MIN_FACING_ROW_NETS:
+        return BundleOrientation(
+            ORIENT_UNRESOLVED,
+            detail=(
+                f"components {ref_a}/{ref_b} share only {len(shared)} group "
+                f"net(s); need >= {MIN_FACING_ROW_NETS} for a pin-order verdict"
+            ),
+        )
+
+    def _row(pads: dict[int, list[tuple[float, float]]]) -> tuple[list[RowMember], str] | None:
+        """Project one component's shared-net pad centroids onto its long axis."""
+        centroids: dict[int, tuple[float, float]] = {}
+        for nid in shared:
+            pts = pads[nid]
+            centroids[nid] = (
+                sum(p[0] for p in pts) / len(pts),
+                sum(p[1] for p in pts) / len(pts),
+            )
+        xs = [c[0] for c in centroids.values()]
+        ys = [c[1] for c in centroids.values()]
+        spread_x = max(xs) - min(xs)
+        spread_y = max(ys) - min(ys)
+        if max(spread_x, spread_y) < 1e-6:
+            return None  # degenerate row: all pads coincide, no order exists
+        axis = "x" if spread_x >= spread_y else "y"
+        members = [
+            RowMember(
+                net_id=nid,
+                net_name=name_by_id.get(nid, str(nid)),
+                projection=c[0] if axis == "x" else c[1],
+            )
+            for nid, c in centroids.items()
+        ]
+        return members, axis
+
+    row_a = _row(pads_a)
+    row_b = _row(pads_b)
+    if row_a is None or row_b is None:
+        return BundleOrientation(
+            ORIENT_UNRESOLVED,
+            primary_ref=ref_a,
+            secondary_ref=ref_b,
+            detail=f"a facing row on {ref_a}/{ref_b} has no spatial spread",
+        )
+    members_a, axis_a = row_a
+    members_b, axis_b = row_b
+    if axis_a != axis_b:
+        return BundleOrientation(
+            ORIENT_UNRESOLVED,
+            primary_ref=ref_a,
+            secondary_ref=ref_b,
+            detail=(
+                f"facing rows on {ref_a}/{ref_b} run along different axes "
+                f"({axis_a} vs {axis_b}); pin order is not 1-D comparable"
+            ),
+        )
+
+    inversions = compute_facing_row_inversions(members_a, members_b)
+    n = len(shared)
+    total_pairs = n * (n - 1) // 2
+    fraction = len(inversions) / total_pairs if total_pairs else 0.0
+    verdict = ORIENT_REVERSED if fraction >= REVERSAL_INVERSION_THRESHOLD else ORIENT_CO_ORIENTED
+    return BundleOrientation(
+        verdict=verdict,
+        inverted_pairs=len(inversions),
+        total_pairs=total_pairs,
+        member_count=n,
+        inversion_fraction=fraction,
+        primary_ref=ref_a,
+        secondary_ref=ref_b,
+    )
 
 
 def classify_stuck_nets_from_pcb(
@@ -736,12 +926,31 @@ def classify_stuck_nets_from_pcb(
                 blockers=blockers,
                 same_group_blockers=same_group_blockers,
             )
+            # Pin-order verification (issue #4286): same-group blocker share
+            # alone fires on BOTH a reversed bundle and a co-oriented bundle in
+            # a saturated corridor.  Measure the actual facing-row inversion
+            # count before letting the ladder recommend de-reversal; a measured
+            # co-oriented bundle gets its own topology + ladder instead.  An
+            # UNRESOLVED measurement keeps the share-based ladder unchanged (no
+            # pin-order claim either way) -- and never crashes the diagnostic.
+            orientation: BundleOrientation | None = None
+            if diag.topology == TOPOLOGY_SELF_CROSSING:
+                try:
+                    orientation = _resolve_bundle_orientation(pcb, group_ids)
+                except Exception as exc:  # pragma: no cover - defensive only
+                    orientation = BundleOrientation(
+                        ORIENT_UNRESOLVED,
+                        detail=f"orientation resolution failed: {exc}",
+                    )
+                if orientation.verdict == ORIENT_CO_ORIENTED:
+                    diag.topology = TOPOLOGY_CO_ORIENTED
             confidence = _grade_confidence(target_group)
             diag.recommendation = _build_recommendation(
                 classification=diag.classification,
                 topology=diag.topology,
                 match_group=target_group,
                 confidence=confidence,
+                orientation=orientation,
             )
         diagnoses.append(diag)
 
@@ -847,12 +1056,70 @@ def _detect_topology(
     return TOPOLOGY_FOREIGN_CLUSTER
 
 
+def _orientation_note(orientation: BundleOrientation | None) -> str:
+    """Evidence suffix describing the measured pin order (issue #4286).
+
+    Appended to the DE_REVERSE_BUNDLE rationale so a human can see whether the
+    reversal claim was actually verified against the facing pad rows or merely
+    inherited from the same-group-share heuristic (unresolved rows).
+    """
+    if orientation is None:
+        return ""
+    if orientation.verdict == ORIENT_REVERSED:
+        return (
+            f" (pin order verified: {orientation.inverted_pairs}/"
+            f"{orientation.total_pairs} facing pad pairs invert between "
+            f"{orientation.primary_ref} and {orientation.secondary_ref})"
+        )
+    if orientation.verdict == ORIENT_UNRESOLVED:
+        return f" (pin order not verified: {orientation.detail})"
+    return ""
+
+
+def _co_oriented_ladder(
+    grp: str,
+    confidence: Confidence,
+    orientation: BundleOrientation,
+) -> list[RankedAction]:
+    """The fix ladder for a measured co-oriented saturated bundle (#4286).
+
+    De-reversal / pin re-ordering are DELIBERATELY ABSENT: the facing rows
+    already carry the nets in the same order, so flipping one row would CREATE
+    the crossing pathology (board-07 TMDS evidence, #4252 A3 / #4253).
+    WIDEN_CHANNEL stays absent too -- same-group congestion did not respond to
+    widening on board-07 (28->27/31 regression).
+    """
+    measured = (
+        f"{orientation.inverted_pairs}/{orientation.total_pairs} facing pad "
+        f"pairs invert between {orientation.primary_ref} and "
+        f"{orientation.secondary_ref}"
+    )
+    return [
+        RankedAction(
+            RecommendedAction.MOVE_PART,
+            f"the {grp} bundle is already co-oriented ({measured}) -- "
+            f"de-reversing it would CREATE crossings, not remove them; the "
+            f"corridor is saturated by co-oriented siblings, so relocate a "
+            f"part to open more lanes",
+            confidence,
+        ),
+        RankedAction(
+            RecommendedAction.ACCEPT_PLATEAU,
+            "if no placement lever helps, this is a topological plateau; do "
+            "NOT widen the channel -- same-group congestion does not respond "
+            "to widening (board-07 evidence, 28->27/31)",
+            confidence,
+        ),
+    ]
+
+
 def _build_recommendation(
     *,
     classification: StuckClass,
     topology: str,
     match_group: str,
     confidence: Confidence,
+    orientation: BundleOrientation | None = None,
 ) -> list[RankedAction]:
     """Rank the fix ladder for one stuck net (issue #4261 Defect 3).
 
@@ -864,8 +1131,20 @@ def _build_recommendation(
     ``WIDEN_CHANNEL`` is DELIBERATELY OMITTED -- widening the U1/U2 channel
     regressed that board 28->27/31, so the engine must never suggest the move
     known to backfire on a reversed bundle.
+
+    Issue #4286: *orientation* carries the measured facing-row pin order.  The
+    caller has already re-labelled a measured co-oriented bundle as
+    :data:`TOPOLOGY_CO_ORIENTED`, which routes to :func:`_co_oriented_ladder`
+    (no de-reversal -- it would create crossings).  For a still-SELF_CROSSING
+    topology the measurement (verified reversal, or unresolved rows) is folded
+    into the DE_REVERSE_BUNDLE rationale via :func:`_orientation_note`.
     """
     grp = match_group or "the bundle"
+
+    if topology == TOPOLOGY_CO_ORIENTED and orientation is not None:
+        if classification in (StuckClass.PLACEMENT_BOUND, StuckClass.CONGESTION_SATURATED):
+            return _co_oriented_ladder(grp, confidence, orientation)
+        return []
 
     if classification is StuckClass.PLACEMENT_BOUND:
         if topology == TOPOLOGY_SELF_CROSSING:
@@ -875,7 +1154,7 @@ def _build_recommendation(
                     RecommendedAction.DE_REVERSE_BUNDLE,
                     f"the {grp} bus is reversed at the facing part -- co-orient "
                     f"(flip/re-order) its pad column so the bundle stops "
-                    f"self-crossing",
+                    f"self-crossing" + _orientation_note(orientation),
                     confidence,
                 ),
                 RankedAction(
@@ -919,7 +1198,8 @@ def _build_recommendation(
                 ),
                 RankedAction(
                     RecommendedAction.DE_REVERSE_BUNDLE,
-                    f"co-orient the {grp} bundle so siblings stop crossing",
+                    f"co-orient the {grp} bundle so siblings stop crossing"
+                    + _orientation_note(orientation),
                     confidence,
                 ),
             ]
