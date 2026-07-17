@@ -19,15 +19,18 @@ discipline):** the lattice + its per-layer static masks are built **once per
 board** (:meth:`build`, counted by :attr:`lattice_builds`); negotiation only
 mutates committed-copper state and history costs -- never the lattice.
 
-**Via model -- N/A-by-construction gates:** via edges join *matching
-free-space lattice nodes on adjacent layers* and every emitted via is a
-through-via spanning the whole stack.  Because vias can only land on
-free-space lattice nodes (a node inside any pad keep-out is masked),
-**via-in-pad can never occur** -- the ``MfrLimits.via_in_pad_supported``
-tier gate is moot for this engine rather than merely disabled.  Likewise
-**blind/buried vias are out of scope by construction**: only through-via
+**Via model:** via edges join *matching lattice nodes on adjacent layers*
+and every emitted via is a through-via spanning the whole stack.
+**Blind/buried vias are out of scope by construction**: only through-via
 edges are generated, and a committed through-via masks its node on ALL
-layers.
+layers.  **Via-in-pad is tier-gated, not N/A** (issue #4284): the static
+pad masks exclude only OTHER-net pads, so a lattice node under a same-net
+SMD pad is a legal route node -- :meth:`LatticePathfinder._via_ok`
+therefore rejects any via whose barrel would intersect a same-net SMD pad
+rect unless the configured fab tier sets ``MfrLimits.via_in_pad_supported``
+(``DesignRules.manufacturer``; conservative OFF by default), exactly the
+mesh engine's ``_via_allowed_at`` gate.  Other-net pad sites are always
+rejected.
 
 **Never-ship-a-short (#3906):** every stub leg and every lattice resource is
 validated against BOTH the static per-layer pad masks and a geometric
@@ -320,22 +323,48 @@ class LatticePathfinder:
 
     # -- via legality -----------------------------------------------------------
 
+    @property
+    def _via_in_pad_allowed(self) -> bool:
+        """Whether the configured fab tier permits via-in-pad (else OFF).
+
+        Read from the real fab model exactly as the mesh engine
+        (``mesh/pathfinder.py``) and the grid escape router do:
+        ``rules.manufacturer`` -> ``MfrLimits.via_in_pad_supported`` (base
+        ``jlcpcb`` = False, ``jlcpcb-tier1`` = True).  With no manufacturer
+        configured the conservative default is False, so pad-site vias are
+        pruned and layer changes happen only after a clear escape stub.
+        """
+        mfr = self.rules.manufacturer
+        if not mfr:
+            return False
+        try:
+            from ..mfr_limits import get_mfr_limits
+
+            return bool(get_mfr_limits(mfr).via_in_pad_supported)
+        except Exception:
+            return False
+
     def _via_ok(self, key: NodeKey, net: int, committed: CommittedCopper) -> bool:
         """Through-via legality at a lattice node.
 
         Static part: the via body (inflated beyond the trace keep-out by
         ``via_radius + clearance - agent_radius``) must clear every OTHER-net
         pad on ANY layer (a through-via exists on all of them), and keep the
-        hole-to-hole floor from through-hole pads of any net.  Because pads
-        mask their surrounding nodes, free-space nodes pass by default -- the
-        gate exists to prune boundary sites.  Dynamic part: committed copper
-        on all layers + committed vias (:meth:`CommittedCopper.via_clear`).
+        hole-to-hole floor from through-hole pads of any net.  Additionally
+        (issue #4284) the via barrel must not intersect ANY SMD pad rect
+        (window: pad half-extent + via radius, the mesh engine's window):
+        other-net is always rejected (the grown-rect veto already covers it
+        with clearance on top), and a SAME-net hit is via-in-pad -- admitted
+        only when the fab tier supports it (:attr:`_via_in_pad_allowed`).
+        Dynamic part: committed copper on all layers + committed vias
+        (:meth:`CommittedCopper.via_clear`).
         """
         lattice = self.build()
         obstacles = self.obstacles
         point = lattice.node_point(key)
+        via_radius = self.rules.via_diameter / 2.0
         grow = max(self._via_pad_grow, 0.0)
-        window = grow + 0.5
+        window = max(grow, via_radius) + 0.5
         for idx in obstacles.pads_near(
             point[0] - window, point[1] - window, point[0] + window, point[1] + window
         ):
@@ -344,6 +373,18 @@ class LatticePathfinder:
                 # Hole-to-hole floor applies regardless of net.
                 min_cc = self.rules.via_drill / 2.0 + pad.drill / 2.0 + self.rules.min_hole_to_hole
                 if dist(point, (pad.x, pad.y)) < min_cc - 1e-9:
+                    return False
+            elif (
+                abs(point[0] - pad.x) <= pad.width / 2.0 + via_radius
+                and abs(point[1] - pad.y) <= pad.height / 2.0 + via_radius
+            ):
+                # Via barrel intersects an SMD pad rect (#4284).  Same-net is
+                # via-in-pad: legal only on fab tiers that fill/cap the via
+                # (jlcpcb-tier1, pcbway); the default tier rejects so the
+                # layer change moves off the pad onto the escape stub.
+                # Other-net falls through to the unconditional grown-rect
+                # veto below.
+                if pad.net == net and not self._via_in_pad_allowed:
                     return False
             if pad.net == net:
                 continue
