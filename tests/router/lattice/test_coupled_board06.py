@@ -33,6 +33,10 @@ import pytest
 from kicad_tools.router.lattice.geometry import seg_seg_dist
 from kicad_tools.router.rules import DesignRules
 
+# Runtime-heavy full-board negotiation: excluded from the CI fast lane
+# (`pytest -m "not slow"`); runs in the scheduled/full suites.
+pytestmark = pytest.mark.slow
+
 _REPO = Path(__file__).resolve().parents[3]
 _BOARD = _REPO / "boards/06-diffpair-test/output/diffpair_test.kicad_pcb"
 _CLASS_MAP = _REPO / "boards/06-diffpair-test/output/net_class_map.json"
