@@ -353,6 +353,79 @@ def reversed_bundle_pcb(tmp_path: Path) -> Path:
     return p
 
 
+# --- FACING-ROW FIXTURES (issue #4286 pin-order verification) ----------------
+# Same self-crossing setup as _reversed_bundle_board (stranded DQ2 pad crowded
+# by a dense ring of DQ0 siblings -> PLACEMENT_BOUND + same-group share), but
+# with two added multi-net components UA/UB that each host one pad of every
+# DDR_DATA net in a clean vertical column.  UA/UB are the two components with
+# the most distinct group nets, so the #4286 orientation resolver reads THEM as
+# the facing rows:
+#
+# * co-oriented variant: both columns carry DQ0/DQ1/DQ2 top-to-bottom in the
+#   SAME order -> 0/3 inversions -> DE_REVERSE_BUNDLE must be suppressed.
+# * reversed variant: UB's column is flipped -> 3/3 inversions -> the
+#   de-reversal recommendation must be KEPT (and marked verified).
+
+
+def _facing_rows_bundle_board(*, reversed_rows: bool) -> str:
+    ua_order = ["DQ0", "DQ1", "DQ2"]
+    ub_order = list(reversed(ua_order)) if reversed_rows else ua_order
+    net_num = {"DQ2": 1, "DQ0": 2, "DQ1": 3}
+
+    def _column(ref: str, cx: float, order: list[str]) -> str:
+        pads = "".join(
+            f'    (pad "{i + 1}" smd circle (at 0 {float(i - 1):.1f}) (size 0.2 0.2) '
+            f'(layers "F.Cu") (net {net_num[name]} "{name}"))\n'
+            for i, name in enumerate(order)
+        )
+        return (
+            f'  (footprint "col_{ref}" (layer "F.Cu") (at {cx:.1f} 50)\n'
+            f'    (property "Reference" "{ref}")\n' + pads + "  )\n"
+        )
+
+    body = (
+        _HEADER
+        + (
+            '  (net 0 "")\n'
+            '  (net 1 "DQ2")\n'
+            '  (net 2 "DQ0")\n'
+            '  (net 3 "DQ1")\n'
+            # DQ2 island (routed) far from the stranded pad
+            '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
+            '    (property "Reference" "R1")\n'
+            '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "DQ2"))\n'
+            '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "DQ2"))\n'
+            "  )\n"
+            # stranded DQ2 pad, surrounded by DDR siblings (dense same-group ring)
+            '  (footprint "U_SOT" (layer "F.Cu") (at 80 80)\n'
+            '    (property "Reference" "U1")\n'
+            '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "DQ2"))\n'
+            "  )\n"
+            + _same_group_ring(80, 80, 1.5, count=22, gap=2)
+            # the two facing columns the orientation resolver must find
+            + _column("UA", 30.0, ua_order)
+            + _column("UB", 50.0, ub_order)
+            + '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
+            ")\n"
+        )
+    )
+    return body
+
+
+@pytest.fixture
+def co_oriented_bundle_pcb(tmp_path: Path) -> Path:
+    p = tmp_path / "co_oriented.kicad_pcb"
+    p.write_text(_facing_rows_bundle_board(reversed_rows=False))
+    return p
+
+
+@pytest.fixture
+def verified_reversed_bundle_pcb(tmp_path: Path) -> Path:
+    p = tmp_path / "verified_reversed.kicad_pcb"
+    p.write_text(_facing_rows_bundle_board(reversed_rows=True))
+    return p
+
+
 @pytest.fixture
 def escape_blocked_pcb(tmp_path: Path) -> Path:
     p = tmp_path / "escape.kicad_pcb"
@@ -508,6 +581,132 @@ class TestGenuinelyForeignCluster:
         assert actions[0] is RecommendedAction.MOVE_PART
         assert RecommendedAction.WIDEN_CHANNEL in actions
         assert RecommendedAction.DE_REVERSE_BUNDLE not in actions
+
+
+class TestPinOrderVerification:
+    """Issue #4286: the self-crossing detector must verify the actual facing-row
+    pin order before recommending DE_REVERSE_BUNDLE.  Same-group blocker share
+    fires on BOTH a reversed bundle and a co-oriented bundle in a saturated
+    corridor -- but de-reversing a co-oriented bundle would CREATE the crossing
+    pathology, so the recommendation must be suppressed there."""
+
+    def test_verified_reversed_bundle_keeps_de_reversal(self, verified_reversed_bundle_pcb: Path):
+        """Facing rows resolvable and genuinely reversed (3/3 inversions) ->
+        the de-reversal recommendation is kept and marked verified."""
+        result = classify_stuck_nets(verified_reversed_bundle_pcb)
+        d = next(x for x in result.diagnoses if x.net_name == "DQ2")
+
+        assert d.classification is StuckClass.PLACEMENT_BOUND
+        assert d.topology == "self_crossing_bundle"
+        actions = [a.action for a in d.recommendation]
+        assert actions[0] is RecommendedAction.DE_REVERSE_BUNDLE
+        assert RecommendedAction.WIDEN_CHANNEL not in actions
+        rationale = d.recommendation[0].rationale
+        assert "pin order verified" in rationale
+        assert "3/3" in rationale
+        assert "UA" in rationale and "UB" in rationale
+
+    def test_co_oriented_bundle_suppresses_de_reversal(self, co_oriented_bundle_pcb: Path):
+        """Facing rows resolvable and co-oriented (0/3 inversions) -> NO
+        de-reversal / pin re-order; the co-oriented-saturation ladder
+        (MOVE_PART / ACCEPT_PLATEAU) is emitted instead, still without
+        WIDEN_CHANNEL (same-group congestion does not respond to widening)."""
+        result = classify_stuck_nets(co_oriented_bundle_pcb)
+        d = next(x for x in result.diagnoses if x.net_name == "DQ2")
+
+        assert d.classification is StuckClass.PLACEMENT_BOUND
+        assert d.topology == "co_oriented_bundle"
+        assert d.match_group == "DDR_DATA"
+
+        actions = [a.action for a in d.recommendation]
+        assert RecommendedAction.DE_REVERSE_BUNDLE not in actions
+        assert RecommendedAction.REORDER_PINS not in actions
+        assert RecommendedAction.WIDEN_CHANNEL not in actions
+        assert actions[0] is RecommendedAction.MOVE_PART
+        assert RecommendedAction.ACCEPT_PLATEAU in actions
+
+        rationale = d.recommendation[0].rationale
+        assert "already co-oriented" in rationale
+        assert "0/3" in rationale
+
+    def test_unresolvable_rows_degrade_gracefully(self, reversed_bundle_pcb: Path):
+        """The original #4261 fixture has no component hosting more than one
+        group net, so the facing rows cannot be resolved.  The classifier must
+        not crash and must make NO pin-order claim: the share-based ladder is
+        retained unchanged, with the rationale honestly noting the pin order
+        was not verified."""
+        result = classify_stuck_nets(reversed_bundle_pcb)
+        d = next(x for x in result.diagnoses if x.net_name == "DQ2")
+
+        assert d.topology == "self_crossing_bundle"
+        actions = [a.action for a in d.recommendation]
+        assert actions[0] is RecommendedAction.DE_REVERSE_BUNDLE
+        assert "pin order not verified" in d.recommendation[0].rationale
+
+    def test_co_oriented_json_schema_unchanged(
+        self, co_oriented_bundle_pcb: Path, reversed_bundle_pcb: Path
+    ):
+        """The co-oriented verdict changes recommendation content and the
+        topology VALUE only -- the JSON field set is identical to the existing
+        self-crossing output."""
+        co = next(
+            x for x in classify_stuck_nets(co_oriented_bundle_pcb).diagnoses if x.net_name == "DQ2"
+        ).to_dict()
+        rev = next(
+            x for x in classify_stuck_nets(reversed_bundle_pcb).diagnoses if x.net_name == "DQ2"
+        ).to_dict()
+        assert set(co.keys()) == set(rev.keys())
+        assert co["topology"] == "co_oriented_bundle"
+        assert set(co["recommendation"][0].keys()) == set(rev["recommendation"][0].keys())
+        assert all(a["action"] != "de_reverse_bundle" for a in co["recommendation"])
+
+
+# Committed real-board acceptance evidence (issue #4286): board-07's DDR byte is
+# a measured full reversal (28/28 facing pad pairs invert between U1 and U2)
+# while its TMDS lanes are measured co-oriented (0/15 between J2 and U4).  The
+# classifier must keep DE_REVERSE_BUNDLE for the former and suppress it for the
+# latter -- asserted against the committed routed artifact, not a synthetic.
+
+_BOARD07_ARTIFACT = (
+    Path(__file__).resolve().parents[2]
+    / "boards"
+    / "07-matchgroup-test"
+    / "output"
+    / "matchgroup_test_routed.kicad_pcb"
+)
+
+
+@pytest.mark.skipif(
+    not _BOARD07_ARTIFACT.exists(), reason="board-07 committed artifact not present"
+)
+class TestBoard07PinOrderVerification:
+    @pytest.fixture(scope="class")
+    def board07(self):
+        return classify_stuck_nets(_BOARD07_ARTIFACT)
+
+    def test_reversed_ddr_nets_keep_de_reversal(self, board07):
+        """DQ3/DQ4 (genuinely reversed DDR byte) still get DE_REVERSE_BUNDLE."""
+        for name in ("DQ3", "DQ4"):
+            d = next(x for x in board07.diagnoses if x.net_name == name)
+            assert d.topology == "self_crossing_bundle"
+            actions = [a.action for a in d.recommendation]
+            assert actions[0] is RecommendedAction.DE_REVERSE_BUNDLE
+            assert RecommendedAction.WIDEN_CHANNEL not in actions
+            assert "pin order verified" in d.recommendation[0].rationale
+
+    def test_co_oriented_tmds_nets_lose_de_reversal(self, board07):
+        """TMDS nets (measured co-oriented, #4252 A3) must NOT be told to
+        de-reverse -- the false recommendation this issue exists to remove."""
+        tmds = [d for d in board07.diagnoses if d.net_name.startswith("TMDS_")]
+        assert tmds, "expected stuck TMDS nets on the committed board-07 artifact"
+        for d in tmds:
+            assert d.topology == "co_oriented_bundle"
+            actions = [a.action for a in d.recommendation]
+            assert RecommendedAction.DE_REVERSE_BUNDLE not in actions
+            assert RecommendedAction.REORDER_PINS not in actions
+            assert RecommendedAction.WIDEN_CHANNEL not in actions
+            assert RecommendedAction.MOVE_PART in actions
+            assert "already co-oriented" in d.recommendation[0].rationale
 
 
 class TestBudgetStarved:

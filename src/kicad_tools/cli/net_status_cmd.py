@@ -331,6 +331,11 @@ def _print_recommendation(diag: StuckNetDiagnosis) -> None:
     if diag.topology == "self_crossing_bundle":
         group = diag.match_group or "bundle"
         headline = f"self-crossing {group} bundle"
+    elif diag.topology == "co_oriented_bundle":
+        # Issue #4286: same-group congestion with a MEASURED co-oriented pin
+        # order -- the bundle is planar, so de-reversal is never suggested.
+        group = diag.match_group or "bundle"
+        headline = f"co-oriented {group} bundle (saturated corridor)"
     else:
         headline = "foreign-cluster congestion"
     print(f"  recommendation:   [{confidence}] {headline}")
