@@ -971,6 +971,46 @@ def _finalize_committed_copper_or_demote(
         )
 
 
+def _engine_post_passes_enabled(
+    args: argparse.Namespace,
+    *,
+    quiet: bool = False,
+) -> bool:
+    """Whether the geometric post-passes (TraceOptimizer + DRC nudge) may run.
+
+    Issue #4281: the lattice and mesh engines commit copper by appending
+    to ``router.routes`` without calling ``_mark_route``, so after a
+    non-grid run the grid's obstacle model (cell occupancy + per-layer
+    segment R-tree) contains no route copper.  The optimizer's collision
+    checker is built from that empty model -- every move validates
+    "clear", even across another net's copper -- and the DRC-nudge repair
+    has no foreign-SEGMENT destination gate (only vias, #3028 Part A), so
+    both passes can corrupt correct non-grid copper into cross-net
+    shorts, which the #3989/#4208 backstop then (correctly) demotes:
+    completion loss instead of a shipped short.
+
+    Non-grid copper is 45-degree-legal by construction and negotiated at
+    capacity 1, so the passes' value there is nil while their validation
+    model is structurally blind: skip BOTH passes whenever
+    ``--route-engine`` is not ``grid``.  One shared predicate for all
+    four optimize+nudge call-site pairs (mirroring the
+    ``_finalize_committed_copper_or_demote`` shared-helper pattern).  The
+    #4208 backstop itself stays unconditional as defense in depth.
+    Eventual unification -- non-grid engines committing via
+    ``_mark_route`` plus a foreign-segment nudge destination gate -- is
+    out of scope here (see #4281 curation, option (b)).
+    """
+    engine = getattr(args, "route_engine", "grid") or "grid"
+    if engine == "grid":
+        return True
+    if not quiet:
+        print(
+            f"\n  Skipping optimize/nudge post-passes for --route-engine "
+            f"{engine}: non-grid copper is committed as-is (#4281)"
+        )
+    return False
+
+
 def _make_checkpoint_callback(
     pcb_path: Path,
     output_path: Path,
@@ -4410,8 +4450,12 @@ def route_with_layer_escalation(
         stall_label="layer escalation",
     )
 
+    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
+    # grid-engine-only -- lattice/mesh copper must not be touched.
+    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
+
     # Optimize traces
-    if not args.no_optimize and final_result.router.routes:
+    if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
             OptimizationConfig,
             TraceOptimizer,
@@ -4457,8 +4501,9 @@ def route_with_layer_escalation(
             quiet=quiet,
         )
 
-    # Post-optimization DRC nudge pass
-    if final_result.router.routes:
+    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate)
+    if _post_passes_enabled and final_result.router.routes:
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
         # Issue #2596: snapshot connectivity again before nudge.  The
@@ -4479,10 +4524,13 @@ def route_with_layer_escalation(
             quiet=quiet,
         )
 
-        # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
-        # over the post-optimize/post-nudge copper.  An rtree-less
-        # optimizer can introduce a cross-net crossing the pre-optimize
-        # finalize gate never saw; demote it before the canonical write.
+    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
+    # over the post-optimize/post-nudge copper.  An rtree-less
+    # optimizer can introduce a cross-net crossing the pre-optimize
+    # finalize gate never saw; demote it before the canonical write.
+    # Issue #4281: unconditional -- runs even when the geometric
+    # post-passes are skipped for non-grid engines (defense in depth).
+    if final_result.router.routes:
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
@@ -5086,8 +5134,12 @@ def route_with_rule_relaxation(
         print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
         print("Consider adding layers for more manufacturing margin.")
 
+    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
+    # grid-engine-only -- lattice/mesh copper must not be touched.
+    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
+
     # Optimize traces
-    if not args.no_optimize and final_result.router.routes:
+    if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
             OptimizationConfig,
             TraceOptimizer,
@@ -5130,8 +5182,9 @@ def route_with_rule_relaxation(
             quiet=quiet,
         )
 
-    # Post-optimization DRC nudge pass
-    if final_result.router.routes:
+    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate)
+    if _post_passes_enabled and final_result.router.routes:
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
         # Issue #2596: snapshot connectivity before nudge.
@@ -5150,10 +5203,13 @@ def route_with_rule_relaxation(
             quiet=quiet,
         )
 
-        # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
-        # over the post-optimize/post-nudge copper.  An rtree-less
-        # optimizer can introduce a cross-net crossing the pre-optimize
-        # finalize gate never saw; demote it before the canonical write.
+    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
+    # over the post-optimize/post-nudge copper.  An rtree-less
+    # optimizer can introduce a cross-net crossing the pre-optimize
+    # finalize gate never saw; demote it before the canonical write.
+    # Issue #4281: unconditional -- runs even when the geometric
+    # post-passes are skipped for non-grid engines (defense in depth).
+    if final_result.router.routes:
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
@@ -7277,8 +7333,12 @@ def route_with_combined_escalation(
         print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
         print("Consider redesigning placement for more margin.")
 
+    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
+    # grid-engine-only -- lattice/mesh copper must not be touched.
+    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
+
     # Optimize traces
-    if not args.no_optimize and final_result.router.routes:
+    if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
             OptimizationConfig,
             TraceOptimizer,
@@ -7321,8 +7381,9 @@ def route_with_combined_escalation(
             quiet=quiet,
         )
 
-    # Post-optimization DRC nudge pass
-    if final_result.router.routes:
+    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate)
+    if _post_passes_enabled and final_result.router.routes:
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
         # Issue #2596: snapshot connectivity before nudge.
@@ -7341,10 +7402,13 @@ def route_with_combined_escalation(
             quiet=quiet,
         )
 
-        # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
-        # over the post-optimize/post-nudge copper.  An rtree-less
-        # optimizer can introduce a cross-net crossing the pre-optimize
-        # finalize gate never saw; demote it before the canonical write.
+    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
+    # over the post-optimize/post-nudge copper.  An rtree-less
+    # optimizer can introduce a cross-net crossing the pre-optimize
+    # finalize gate never saw; demote it before the canonical write.
+    # Issue #4281: unconditional -- runs even when the geometric
+    # post-passes are skipped for non-grid engines (defense in depth).
+    if final_result.router.routes:
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
@@ -11179,8 +11243,12 @@ def main(argv: list[str] | None = None) -> int:
     pre_segments = sum(len(r.segments) for r in router.routes)
     pre_vias = sum(len(r.vias) for r in router.routes)
 
+    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
+    # grid-engine-only -- lattice/mesh copper must not be touched.
+    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
+
     # Optimize traces (unless --no-optimize/--raw flag is set)
-    if not args.no_optimize and router.routes:
+    if _post_passes_enabled and not args.no_optimize and router.routes:
         from kicad_tools.router.optimizer import (
             OptimizationConfig,
             TraceOptimizer,
@@ -11223,8 +11291,9 @@ def main(argv: list[str] | None = None) -> int:
             quiet=quiet,
         )
 
-    # Post-optimization DRC nudge pass
-    if router.routes:
+    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate)
+    if _post_passes_enabled and router.routes:
         from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
         # Issue #2596: snapshot connectivity before nudge.
@@ -11243,12 +11312,16 @@ def main(argv: list[str] | None = None) -> int:
             quiet=quiet,
         )
 
-        # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
-        # over the post-optimize/post-nudge copper.  An rtree-less
-        # optimizer can introduce a cross-net crossing the pre-optimize
-        # finalize gate never saw; demote it before the canonical write.
+    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
+    # over the post-optimize/post-nudge copper.  An rtree-less
+    # optimizer can introduce a cross-net crossing the pre-optimize
+    # finalize gate never saw; demote it before the canonical write.
+    # Issue #4281: unconditional -- runs even when the geometric
+    # post-passes are skipped for non-grid engines (defense in depth).
+    if router.routes:
         _finalize_committed_copper_or_demote(router, quiet=quiet)
 
+    if _post_passes_enabled and router.routes:
         # Get post-optimization statistics
         post_segments = sum(len(r.segments) for r in router.routes)
         post_vias = sum(len(r.vias) for r in router.routes)
