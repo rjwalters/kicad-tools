@@ -3499,8 +3499,12 @@ def _add_route_parser(subparsers) -> None:
         "--export-failed-nets",
         metavar="PATH",
         help=(
-            "Export failed (unrouted) net names to a file, one per line. "
-            "Useful for scripted workflows or manual completion in KiCad."
+            "Export failed nets (fully-unrouted and partial) to a file for "
+            "triage or manual completion in KiCad. A '.json' path emits "
+            "structured per-net detail (status, connected/total pads, and the "
+            "stranded pad names for partial nets); any other extension emits "
+            "one net name per line. The file is always written when routing "
+            "is incomplete."
         ),
     )
     route_parser.add_argument(

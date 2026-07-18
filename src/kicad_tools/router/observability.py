@@ -58,6 +58,23 @@ def _pt(x: float, y: float, tol: float = 0.01) -> tuple[float, float]:
     return (_snap(x, tol), _snap(y, tol))
 
 
+def _pad_identity(pad: Pad) -> str:
+    """Human-readable identifier for a pad, e.g. ``U1.3``.
+
+    Falls back to the reference alone, then to a coordinate tag, so a pad
+    always yields a non-empty identifier even when ``ref``/``pin`` are blank.
+    """
+    ref = getattr(pad, "ref", "") or ""
+    pin = getattr(pad, "pin", "") or ""
+    if ref and pin:
+        return f"{ref}.{pin}"
+    if ref:
+        return ref
+    if pin:
+        return pin
+    return f"pad@({pad.x:.3f},{pad.y:.3f})"
+
+
 def validate_net_connectivity(
     routes: list[Route],
     net_pads: dict[int, list[Pad]],
@@ -82,6 +99,11 @@ def validate_net_connectivity(
         - ``connected_pads``: number of pads reachable from the largest
           connected component that includes at least one pad
         - ``connected``: ``True`` when all pads are in one component
+        - ``stranded_pads``: list of identifiers (``ref.pin``, e.g. ``U1.3``)
+          for pads that are NOT in the largest connected component — i.e. the
+          pads that still need connecting.  Empty when the net is fully
+          connected.  Additive field (issue #4316); existing callers that only
+          read the counts are unaffected.
     """
     # Group routes by net
     routes_by_net: dict[int, list[Route]] = {}
@@ -97,16 +119,18 @@ def validate_net_connectivity(
                 "total_pads": len(pads),
                 "connected_pads": len(pads),
                 "connected": True,
+                "stranded_pads": [],
             }
             continue
 
         net_routes = routes_by_net.get(net_id, [])
         if not net_routes:
-            # No routes at all for this net
+            # No routes at all for this net — every pad is stranded
             result[net_id] = {
                 "total_pads": len(pads),
                 "connected_pads": 0,
                 "connected": False,
+                "stranded_pads": [_pad_identity(p) for p in pads],
             }
             continue
 
@@ -166,10 +190,20 @@ def validate_net_connectivity(
         max_component = max(component_pads.values()) if component_pads else 0
         total = len(pads)
 
+        # Identify which pads are NOT in the largest connected component so
+        # callers can report exactly which pads still need connecting.
+        max_root = max(component_pads, key=lambda r: component_pads[r]) if component_pads else None
+        stranded_pads = [
+            _pad_identity(pad)
+            for pad, pp in zip(pads, pad_points, strict=False)
+            if uf.find(pp) != max_root
+        ]
+
         result[net_id] = {
             "total_pads": total,
             "connected_pads": max_component,
             "connected": max_component == total,
+            "stranded_pads": stranded_pads,
         }
 
     return result
