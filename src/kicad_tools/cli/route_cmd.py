@@ -1154,6 +1154,52 @@ def _serialize_preserved_routes(
     return "\n\t".join(parts)
 
 
+def _release_routing_engine_state(router: "Autorouter") -> None:
+    """Free the routing-engine negotiation structures before the CLI tail (#4292).
+
+    Once :func:`_finalize_routes` has serialised the committed copper to
+    S-expressions, the post-route tail -- copper-pour fill and the internal
+    DRC cross-check, both of which shell out to ``kicad-cli`` -- never reads
+    the routing engine's working set again.  The tail's dominant memory cost
+    is that external ``kicad-cli`` child (measured ~1.7 GB on softstart
+    rev-C's 160x100 mm 4-layer board); releasing the engine's retained Python
+    state here shrinks the resident footprint held *concurrently* with that
+    child, lowering peak physical-RAM pressure / OOM risk on constrained
+    machines.  (It also caps the Python high-water mark on cache-heavy boards
+    where the cache serialisation would otherwise push ``RUSAGE_SELF`` above
+    the negotiation peak.)
+
+    What is freed (all unused by the tail):
+
+    * the adaptive-octilinear ``LatticePathfinder`` and its per-net route
+      table -- the bulk of the lattice engine's retained state, and
+    * the :class:`RoutingGrid`'s dense per-cell occupancy arrays.
+
+    What is preserved, because the tail still reads it: ``router.routes`` /
+    ``router.pads`` / ``router.nets`` / ``router.net_names`` (output
+    connectivity verification), ``router.net_class_map`` (post-route DRC),
+    and the grid *object* itself with its lightweight metadata (diagnostics
+    read ``grid.resolution`` / ``grid.num_layers``).
+
+    Safe for every engine and every route flow: no path reads the grid cells
+    or the lattice structures after finalize.  Best-effort -- any attribute
+    that is absent (older router, deserialised fixture) is simply skipped, and
+    the routed board / DRC verdict / cache content are byte-for-byte
+    unaffected (this runs strictly after the copper is committed).
+    """
+    # Adaptive-lattice / mesh negotiation structures (issue #4278 / #4292).
+    for _attr in ("_lattice_pathfinder", "_lattice_net_routes"):
+        if hasattr(router, _attr):
+            with contextlib.suppress(Exception):
+                setattr(router, _attr, None)
+    # Dense grid occupancy planes -- keep the grid object (metadata), drop the
+    # per-cell arrays.
+    grid = getattr(router, "grid", None)
+    if grid is not None and hasattr(grid, "release_arrays"):
+        with contextlib.suppress(Exception):
+            grid.release_arrays()
+
+
 def _finalize_routes(
     router: "Autorouter",
     multi_pad_net_ids: set[int],
@@ -4554,6 +4600,11 @@ def route_with_layer_escalation(
     )
     final_result.success = final_result.completion >= args.min_completion
 
+    # Issue #4292: copper is committed to ``route_sexp``; free the routing grid
+    # + lattice negotiation structures before the save/zone-fill/DRC tail so
+    # they do not coexist with the ``kicad-cli`` child's footprint.
+    _release_routing_engine_state(final_result.router)
+
     # Save output
     if args.dry_run:
         if not quiet:
@@ -5232,6 +5283,11 @@ def route_with_rule_relaxation(
         else 1.0
     )
     final_result.success = final_result.completion >= args.min_completion
+
+    # Issue #4292: copper is committed to ``route_sexp``; free the routing grid
+    # + lattice negotiation structures before the save/zone-fill/DRC tail so
+    # they do not coexist with the ``kicad-cli`` child's footprint.
+    _release_routing_engine_state(final_result.router)
 
     # Save output
     if args.dry_run:
@@ -7431,6 +7487,11 @@ def route_with_combined_escalation(
         else 1.0
     )
     final_result.success = final_result.completion >= args.min_completion
+
+    # Issue #4292: copper is committed to ``route_sexp``; free the routing grid
+    # + lattice negotiation structures before the save/zone-fill/DRC tail so
+    # they do not coexist with the ``kicad-cli`` child's footprint.
+    _release_routing_engine_state(final_result.router)
 
     # Save output
     if args.dry_run:
@@ -10723,6 +10784,15 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("\n  No differential pairs detected")
 
+    # Issue #4292: per-phase peak-RSS tracer for the post-route CLI tail.
+    # Zero-cost no-op unless KCT_RSS_TRACE is set; when enabled it attributes
+    # the tail memory footprint (cache write / zone fill / internal DRC) by
+    # printing the peak-RSS delta at each phase boundary below.
+    from kicad_tools.router.rss_trace import RSSTracer
+
+    _rss = RSSTracer()
+    _rss.mark("route-start")
+
     # Check cache for existing routing result (unless --no-cache)
     cache_key = None
     cached_result = None
@@ -11248,6 +11318,8 @@ def main(argv: list[str] | None = None) -> int:
                 quiet=quiet,
             )
 
+        _rss.mark("post-negotiation")
+
         # Cache the routing result (if caching enabled and routing succeeded)
         if use_cache and cache_key is not None and router.routes:
             import time
@@ -11263,6 +11335,8 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as e:
                 if not quiet:
                     print(f"  Warning: Failed to cache result: {e}")
+
+        _rss.mark("post-cache-write")
 
     # Get pre-optimization statistics (also used in the no-optimize path
     # below so the segment/via summary print does not raise
@@ -11526,6 +11600,15 @@ def main(argv: list[str] | None = None) -> int:
         preserved_routes=_preserved_routes,
     )
 
+    # Issue #4292: the committed copper is now serialised into ``route_sexp``;
+    # the remaining tail (save, zone fill, internal DRC) never touches the
+    # routing grid or the lattice negotiation structures again.  Release them
+    # so their resident footprint does not coexist with the memory-heavy
+    # ``kicad-cli`` DRC/zone-fill child spawned below.
+    _release_routing_engine_state(router)
+
+    _rss.mark("post-finalize")
+
     # Report differential pair length mismatch warnings
     if diffpair_warnings and not quiet:
         print(f"\n--- Differential Pair Warnings ({len(diffpair_warnings)}) ---")
@@ -11690,6 +11773,8 @@ def main(argv: list[str] | None = None) -> int:
         if not quiet:
             print(f"  Saved to: {output_path}")
 
+    _rss.mark("post-save")
+
     # Output connectivity verification (Issue #2264)
     # Re-parse written S-expressions and verify pad-to-pad connectivity
     output_has_disconnected = False
@@ -11785,6 +11870,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run and stats["nets_routed"] > 0:
         _fill_zones_after_route(output_path, quiet=quiet)
 
+    _rss.mark("post-fill-zones")
+
     # Run DRC validation unless skipped or dry-run
     drc_errors = 0
     drc_warnings = 0
@@ -11814,6 +11901,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             if fix_result == 0:
                 drc_errors = 0
+
+    _rss.mark("post-drc")
 
     # Summary
     all_nets_routed = stats["nets_routed"] == nets_to_route

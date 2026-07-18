@@ -1046,6 +1046,54 @@ class RoutingGrid:
         """
         self._static_blocked = None
 
+    def release_arrays(self) -> None:
+        """Drop the large per-cell arrays once routing is finished (issue #4292).
+
+        The ``kct route`` CLI tail (cache write, copper-pour fill, internal
+        DRC) never reads the grid's per-cell occupancy state again after the
+        committed copper has been serialised to S-expressions.  Holding the
+        ``(layers, rows, cols)`` numpy arrays -- tens to hundreds of MB at a
+        fine grid resolution -- alive through that tail needlessly inflates the
+        process's resident footprint *while* the memory-heavy ``kicad-cli``
+        DRC/zone-fill child is running (the two would otherwise coexist in
+        physical RAM).  Releasing them here lets the allocator reclaim the
+        buffers before the tail.
+
+        The lightweight *metadata* (``resolution``, ``num_layers``, ``cols``,
+        ``rows``, ``width``, ``height``, origins) is preserved, so the
+        post-route diagnostics that read e.g. ``grid.resolution`` /
+        ``grid.num_layers`` keep reporting the real values.  The method is
+        idempotent and must only be called once the grid is no longer needed
+        for routing or cleanup.
+        """
+        xp = self._backend
+        # The dense (layers, rows, cols) occupancy planes -- reassign to a
+        # zero-length array of the same dtype so the attribute stays an
+        # ``ndarray`` (mypy-clean, defensive against stray reads) while the
+        # backing buffer is freed.
+        empty_bool = xp.zeros((0, 0, 0), dtype=np.bool_)
+        empty_i32 = xp.zeros((0, 0, 0), dtype=np.int32)
+        self._blocked = xp.zeros((0, 0, 0), dtype=np.bool_)
+        self._net = empty_i32
+        self._usage_count = xp.zeros((0, 0, 0), dtype=np.int16)
+        self._history_cost = xp.zeros((0, 0, 0), dtype=np.float32)
+        self._is_obstacle = xp.zeros((0, 0, 0), dtype=np.bool_)
+        self._is_zone = xp.zeros((0, 0, 0), dtype=np.bool_)
+        self._pad_blocked = empty_bool
+        self._original_net = xp.zeros((0, 0, 0), dtype=np.int32)
+        self._present_cost_ema = None
+        self._static_blocked = None
+        # Congestion planes + cached clearance stamps.
+        self._congestion = xp.zeros((0, 0, 0), dtype=np.int32)
+        self._clearance_masks = {}
+        # Spatial indices (only populated on dense boards).
+        self._seg_rtree = {}
+        self._seg_rtree_items = {}
+        self._seg_rtree_count = 0
+        self._via_rtree = None
+        self._via_rtree_items = {}
+        self._via_rtree_count = 0
+
     def sync_to_cpu(self) -> None:
         """Transfer GPU arrays to CPU for A* operations.
 
