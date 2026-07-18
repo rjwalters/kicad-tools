@@ -363,6 +363,20 @@ class TestLayerEscalationPreservesZones:
 _ZONE_HELPER = "_insert_sexp_before_closing"
 _CENTRAL_WRITER = "_write_routed_pcb"
 
+# Functions that write a *sidecar export file*, not a PCB copper file, and so
+# are legitimately exempt from the zone-preserving write-path audit below.
+#
+# ``_export_failed_nets`` writes the failed/partial-net report next to the
+# output — either ``partial_nets.json`` or the legacy one-net-per-line text
+# file — depending on the export path's extension.  Its text branch happens to
+# pass a ``content`` *Name* to ``write_text`` (the same argument shape the
+# heuristic uses to distinguish PCB writes from report writes), so without this
+# allowlist it trips the guard as a false positive.  It never touches PCB
+# s-expressions, reads no staged PCB input, and must NOT route through
+# ``_write_routed_pcb``.  Keep this set as small as possible so the audit keeps
+# its teeth for genuine PCB-write sites (#3900-class zone-preservation).
+_NON_PCB_WRITE_FUNCS = frozenset({"_export_failed_nets"})
+
 
 def _route_cmd_module_ast() -> ast.Module:
     """Parse ``route_cmd.py`` into an AST for structural inspection."""
@@ -419,8 +433,12 @@ def _pcb_write_calls(func: ast.AST) -> list[ast.Call]:
     If this classification ever over-matches a genuinely non-PCB write,
     the failing test's message explains how to proceed — that is the
     desired behavior for a guard (a reviewable false positive beats a
-    silently stale count).
+    silently stale count).  Known-good non-PCB export writers are named in
+    ``_NON_PCB_WRITE_FUNCS`` and skipped so the audit stays focused on real
+    PCB-write sites.
     """
+    if getattr(func, "name", None) in _NON_PCB_WRITE_FUNCS:
+        return []
     calls: list[ast.Call] = []
     for node in _shallow_walk(func):
         if (
