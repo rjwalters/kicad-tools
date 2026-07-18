@@ -3277,6 +3277,73 @@ def _warn_unresolved_net_class_map(resolution, board_net_names, nearest_fn) -> N
     print("\n".join(lines), file=sys.stderr)
 
 
+def _resolve_mfr_design_rules(args, layer_stack):
+    """Resolve the manufacturer :class:`DesignRules` used for ampacity advisories.
+
+    Resolves the *same* manufacturer profile + copper weight the post-route
+    ampacity DRC resolves (:func:`run_post_route_drc` -> ``DRCChecker`` ->
+    ``get_profile(manufacturer).get_design_rules(layers, copper_oz)``), so
+    the route-time Tier-2 advisory (Issue #4314) derives its required
+    internal-copper width from the identical ``inner_copper_oz`` the DRC
+    uses -- the two numbers agree by construction.
+
+    Returns ``None`` (advisory suppressed, never fatal) when the
+    manufacturer is unknown or has no rules for this layer/copper key,
+    mirroring the graceful degradation of the DRC-constraint sidecar writer.
+    """
+    try:
+        from kicad_tools.manufacturers import get_profile
+
+        profile = get_profile(getattr(args, "manufacturer", "jlcpcb"))
+        return profile.get_design_rules(
+            layers=layer_stack.num_layers,
+            copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+        )
+    except (ValueError, KeyError, OSError):
+        return None
+
+
+def _warn_layer_selection_advisories(args, layer_stack, *, is_auto: bool) -> None:
+    """Emit Issue #4314 route-time layer-selection advisories to stderr.
+
+    Two warn-floor guards, both advisory (printed to stderr, never suppressed
+    by ``--quiet``, exit code unchanged -- matching the #4149 net-class-map
+    diagnostic precedent above):
+
+    * **Tier 1** (``is_auto`` only): ``--layers auto`` picked a stack that
+      routes signal on inner layers while the loaded net-class-map declares
+      pour nets -- ``detect_layer_stack`` never saw that intent. Recommends
+      ``--layers 4``.
+    * **Tier 2** (any ``--layers`` that routes signal on inner layers): a
+      ``target_ampacity`` net whose required internal-copper width is
+      unroutable, predicting the post-route ampacity DRC failure at route
+      time. Uses the exact ``width_for_current`` call shape the DRC uses.
+
+    A pure no-op when the net-class-map declares neither pour nets nor
+    ``target_ampacity`` (drift-prevention contract).
+    """
+    from kicad_tools.router.layer_advisories import (
+        ampacity_inner_layer_conflicts,
+        pour_net_blind_auto_warning,
+    )
+
+    net_class_map = getattr(args, "_loaded_net_class_map", None)
+    lines: list[str] = []
+
+    if is_auto:
+        tier1 = pour_net_blind_auto_warning(layer_stack, net_class_map)
+        if tier1:
+            lines.append(tier1)
+
+    design_rules = _resolve_mfr_design_rules(args, layer_stack)
+    if design_rules is not None:
+        for conflict in ampacity_inner_layer_conflicts(net_class_map, design_rules, layer_stack):
+            lines.append(conflict.message)
+
+    if lines:
+        print("\n".join(lines), file=sys.stderr)
+
+
 def _resolve_analog_net_names(router: "Autorouter", args) -> set[str]:
     """Resolve the set of analog net names selected by the analog flags (#3171).
 
@@ -4817,6 +4884,10 @@ def route_with_rule_relaxation(
             "6": LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig(),
         }
         layer_stack = layer_stack_map[args.layers]
+
+    # Issue #4314: warn if auto is pour-net-blind and/or a target_ampacity
+    # net would be stranded on an inner layer (advisory, never suppressed).
+    _warn_layer_selection_advisories(args, layer_stack, is_auto=args.layers == "auto")
 
     if not quiet:
         flush_print("=" * 60)
@@ -10271,6 +10342,10 @@ def main(argv: list[str] | None = None) -> int:
             "6": LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig(),
         }
         layer_stack = layer_stack_map[args.layers]
+
+    # Issue #4314: warn if auto is pour-net-blind and/or a target_ampacity
+    # net would be stranded on an inner layer (advisory, never suppressed).
+    _warn_layer_selection_advisories(args, layer_stack, is_auto=args.layers == "auto")
 
     # Configure design rules
     grid_origin_offset = getattr(args, "_grid_origin_offset", (0.0, 0.0))

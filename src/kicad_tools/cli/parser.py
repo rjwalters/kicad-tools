@@ -3165,7 +3165,11 @@ def _add_route_parser(subparsers) -> None:
             "'4' = 4-layer with GND/PWR planes; "
             "'4-sig' = 4-layer with 2 signal layers; "
             "'4-all' = 4-layer with all 4 signal layers (no planes); "
-            "'6' = 6-layer"
+            "'6' = 6-layer. "
+            "Pass '4' when your net-class-map declares is_pour_net / plane "
+            "nets so inner layers are reserved for planes: 'auto' infers "
+            "planes only from zones already in the input PCB and cannot see "
+            "pour nets added post-route."
         ),
     )
     route_parser.add_argument(
@@ -6408,7 +6412,10 @@ def _add_pipeline_parser(subparsers) -> None:
             "'auto' = auto-detect from PCB (default when omitted); "
             "'2' = 2-layer; '4' = 4-layer with GND/PWR planes; "
             "'4-sig' = 4-layer with 2 signal + 1 ground plane; "
-            "'4-all' = 4-layer all-signal; '6' = 6-layer"
+            "'4-all' = 4-layer all-signal; '6' = 6-layer. "
+            "Pass '4' when your net-class-map declares is_pour_net / plane "
+            "nets so inner layers are reserved for planes ('auto' cannot see "
+            "pour nets added post-route)."
         ),
     )
     pipeline_parser.add_argument(
