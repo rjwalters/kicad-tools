@@ -4844,3 +4844,50 @@ class TestStagnationRecovery:
             assert "Stagnation recovery" in captured.out, (
                 "Stalls were detected without stagnation recovery firing.\n" + captured.out[-2000:]
             )
+
+
+class TestRecordRoutingDecisionRationale:
+    """Regression tests for the routing-rationale builder (Issue #4305).
+
+    ``_record_routing_decision`` read a nonexistent
+    ``NetClassRouting.min_trace_width`` attribute, which would raise
+    ``AttributeError`` whenever a net class was present while assembling the
+    human-readable rationale. No prior test constructed a real ``net_class``
+    and reached that append, so the bug stayed latent (mypy flagged it but the
+    error was suppressed in the baseline). These tests exercise the branch so
+    the fix (``trace_width``) is locked in.
+    """
+
+    def test_rationale_uses_net_class_trace_width(self):
+        """Rationale reaches the trace-width append without raising."""
+        from kicad_tools.explain.decisions import Decision
+        from kicad_tools.router.rules import NetClassRouting
+
+        router = Autorouter(width=50.0, height=40.0, record_decisions=True)
+
+        net_id = 7
+        net_name = "PWR"
+        router.net_names[net_id] = net_name
+        router.net_class_map[net_name] = NetClassRouting(
+            name="power", priority=1, trace_width=0.5, clearance=0.3
+        )
+
+        # ``_record_routing_decision`` guards on ``if not self._decision_store``,
+        # and ``DecisionStore.__len__`` makes an empty store falsy — so the
+        # store must be non-empty for the rationale branch to run at all. Seed
+        # one unrelated decision to get past that guard.
+        store = router.get_decision_store()
+        assert store is not None
+        store.record(Decision.create(action="place", components=["U1"], rationale="seed"))
+
+        # Pre-fix this raised AttributeError on ``min_trace_width``.
+        router._record_routing_decision(net_id, [])
+
+        decisions = store.query(net=net_name, action="route")
+        assert len(decisions) == 1
+
+        rationale = decisions[0].rationale
+        # The correct field value (trace_width=0.5) must appear, phrased as
+        # a plain trace width rather than the bogus "min trace width".
+        assert "0.5mm trace width" in rationale
+        assert "min_trace_width" not in rationale
