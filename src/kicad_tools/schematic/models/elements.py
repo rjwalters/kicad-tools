@@ -348,6 +348,11 @@ class PowerSymbol:
     rotation: float = 0
     reference: str = "#PWR?"
     uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # BOM / DNP flags.  Defaults preserve historical byte output exactly
+    # (in_bom=True -> "yes", dnp=False -> "no") while letting callers emit
+    # exclude-from-BOM / do-not-populate power symbols (issue #4303).
+    in_bom: bool = True
+    dnp: bool = False
 
     _symbol_def: Optional["SymbolDef"] = field(default=None, repr=False)
 
@@ -362,9 +367,9 @@ class PowerSymbol:
             at(self.x, self.y, self.rotation),
             SExp.list("unit", 1),
             SExp.list("exclude_from_sim", "no"),
-            SExp.list("in_bom", "yes"),
+            SExp.list("in_bom", "yes" if self.in_bom else "no"),
             SExp.list("on_board", "yes"),
-            SExp.list("dnp", "no"),
+            SExp.list("dnp", "yes" if self.dnp else "no"),
             uuid_node(self.uuid_str),
         )
 
@@ -427,8 +432,22 @@ class PowerSymbol:
                 reference = str(atoms[1])
                 break
 
+        # Get BOM / DNP flags (issue #4303); default to historical values
+        # when the token is absent so older schematics round-trip unchanged.
+        in_bom_node = node.get("in_bom")
+        in_bom = str(in_bom_node.get_first_atom()).lower() != "no" if in_bom_node else True
+        dnp_node = node.get("dnp")
+        dnp = str(dnp_node.get_first_atom()).lower() == "yes" if dnp_node else False
+
         return cls(
-            lib_id=lib_id, x=x, y=y, rotation=rotation, reference=reference, uuid_str=uuid_str
+            lib_id=lib_id,
+            x=x,
+            y=y,
+            rotation=rotation,
+            reference=reference,
+            uuid_str=uuid_str,
+            in_bom=in_bom,
+            dnp=dnp,
         )
 
     @staticmethod

@@ -151,6 +151,12 @@ class SymbolDef:
     description: str = ""
     keywords: str = ""
 
+    # BOM flag baked into the generated library symbol.  Default True keeps
+    # historical output ("(in_bom yes)"); set False to generate an
+    # exclude-from-BOM symbol definition — test points, fiducials, mounting
+    # holes, logos, mechanical-only parts (issue #4303).
+    in_bom: bool = True
+
     # Layout options
     pin_length: float = 2.54  # mm
     pin_spacing: float = 2.54  # mm (100 mil)
@@ -519,13 +525,14 @@ def generate_symbol_sexp(sym: SymbolDef) -> str:
 \t\t\t)"""
 
     # Build complete symbol
+    in_bom_tok = "yes" if sym.in_bom else "no"
     sexp = f'''(kicad_symbol_lib
 \t(version 20231120)
 \t(generator "create_symbol.py")
 \t(generator_version "1.0")
 \t(symbol "{sym.name}"
 \t\t(exclude_from_sim no)
-\t\t(in_bom yes)
+\t\t(in_bom {in_bom_tok})
 \t\t(on_board yes)
 \t\t(property "Reference" "{sym.reference}"
 \t\t\t(at 0 {half_h + 2.54:.2f} 0)
