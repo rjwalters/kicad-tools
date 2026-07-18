@@ -197,29 +197,29 @@ ALWAYS_BLOCK_PATTERNS=(
     'wget .* \| .*sh'
     'wget .* -O- \| sh'
 
-    # Cloud infrastructure destruction
+    # Cloud infrastructure destruction. The aws forms below are specific
+    # multi-token phrases, so they stay in this raw substring scan. The az/gcloud
+    # CLIs, by contrast, need command-word anchoring — an unanchored `az.*delete`
+    # matches "h·az·ard … delete" across unrelated prose tokens (#3584) — so they
+    # are handled by the segment-parsed lifecycle/cloud check further below, NOT
+    # here.
     'aws s3 rm.*--recursive'
     'aws s3 rb'
     'aws ec2 terminate'
     'aws iam delete'
     'aws cloudformation delete-stack'
-    'gcloud.*delete'
-    'az.*delete'
-    'az group delete'
 
     # Docker mass destruction
     'docker system prune'
 
-    # System reboot/shutdown — command-position + trailing-boundary anchored so
-    # a flag name (e.g. --instance-initiated-shutdown-behavior) or the word in a
-    # comment/message ("this reboots the box") no longer trips them, while the
-    # bare command (optionally sudo-prefixed, or after a separator) still denies.
-    '(^|[;&|[:space:]])reboot([;&|[:space:]]|$)'
-    '(^|[;&|[:space:]])shutdown([;&|[:space:]]|$)'
-    '(^|[;&|[:space:]])halt([;&|[:space:]]|$)'
-    '(^|[;&|[:space:]])poweroff([;&|[:space:]]|$)'
-    '(^|[;&|[:space:]])init[[:space:]]+0([;&|[:space:]]|$)'
-    '(^|[;&|[:space:]])init[[:space:]]+6([;&|[:space:]]|$)'
+    # NOTE: system-lifecycle commands (halt/reboot/poweroff/shutdown/init 0/
+    # init 6) are deliberately NOT in this raw substring scan. Even the
+    # whitespace-inclusive boundary anchor they used to carry still fired inside
+    # ordinary prose ("...the box will halt", "...after a reboot event"), and a
+    # pure regex tweak can't separate `sudo halt` from `will halt` (both are
+    # "<word> halt"). They are handled by the segment-parsed check below, which
+    # denies only when a segment's *command word* is exactly the lifecycle word
+    # (#3584).
 )
 
 for pattern in "${ALWAYS_BLOCK_PATTERNS[@]}"; do
@@ -246,6 +246,87 @@ if [[ "$COMMAND" == *"#"* ]]; then
     COMMAND_NO_COMMENT=$(printf '%s\n' "$COMMAND" | sed -E 's/(^|[[:space:]])#.*$//')
 else
     COMMAND_NO_COMMENT="$COMMAND"
+fi
+
+# =============================================================================
+# SYSTEM-LIFECYCLE + CLOUD-CLI DELETE (segment-parsed, command-word anchored)
+#
+# The system-lifecycle commands (halt/reboot/poweroff/shutdown/init 0/init 6)
+# and the az/gcloud cloud-delete CLIs are far too common as ordinary prose,
+# identifiers, and flag names to scan as unanchored substrings — and even a
+# whitespace-inclusive boundary anchor still fired inside comments and commit
+# messages ("...the box will halt", "...after a reboot event"). A pure regex
+# tweak cannot separate `sudo halt` (a real command) from `will halt` (prose)
+# because both are "<word> halt".
+#
+# So we segment-parse instead, mirroring extract_rm_targets(): split the command
+# on ; | & && || and newline, strip a leading sudo/env wrapper from each segment,
+# and deny only when a segment's *command word* (first token) is exactly a
+# lifecycle word — or is `az`/`gcloud` with a `delete` subcommand token. This
+# distinguishes `sudo halt` (command word = halt) from `will halt` (command word
+# = echo/other) and from `--instance-initiated-shutdown-behavior` (not a command
+# word at all). The scan runs against COMMAND_NO_COMMENT so a lifecycle/cloud
+# word sitting in a trailing comment is already gone. The catastrophic
+# ALWAYS_BLOCK scan above still reads the raw string for the symbolic patterns
+# (rm -rf /, the fork bomb, curl|sh) that are not prose-prone (#3584).
+# =============================================================================
+lifecycle_or_cloud_reason() {
+    # Emit a deny reason (one per line) for every segment whose command word is a
+    # system-lifecycle command or an az/gcloud delete. Portable awk only.
+    printf '%s' "$1" | awk '
+    {
+        gsub(/&&|\|\||[;|&]/, "\n")
+        n = split($0, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t]+/, "", seg)
+            sub(/^sudo[ \t]+/, "", seg)
+            # Strip a leading `env` wrapper, then loop-strip the env flags and
+            # NAME=value assignments a shell resolves past before the command
+            # word, so `env FOO=bar halt` resolves to command word `halt` (not
+            # `FOO=bar`) and still denies. `env -i FOO=bar halt` and `env -u
+            # NAME halt` likewise resolve to `halt`. A bare `env halt` (no
+            # assignment) is unaffected — the loop matches nothing and leaves
+            # `halt` as the command word. Portable awk only (no GNU/BSD-specific
+            # escapes), consistent with extract_rm_targets(). (#3586)
+            if (sub(/^env([ \t]+|$)/, "", seg)) {
+                sub(/^[ \t]+/, "", seg)
+                stripped = 1
+                while (stripped) {
+                    stripped = 0
+                    if (sub(/^-u[ \t]+[^ \t]+([ \t]+|$)/, "", seg)) { stripped = 1; continue }
+                    if (sub(/^-i([ \t]+|$)/, "", seg))              { stripped = 1; continue }
+                    if (sub(/^--([ \t]+|$)/, "", seg))              { break }
+                    if (sub(/^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*([ \t]+|$)/, "", seg)) { stripped = 1; continue }
+                }
+            }
+            sub(/^[ \t]+/, "", seg)
+            m = split(seg, toks, /[ \t]+/)
+            if (m == 0) continue
+            cmd = toks[1]
+            if (cmd == "halt" || cmd == "reboot" || cmd == "poweroff" || cmd == "shutdown") {
+                print "system lifecycle command: " cmd
+                continue
+            }
+            if (cmd == "init" && (toks[2] == "0" || toks[2] == "6")) {
+                print "system lifecycle command: init " toks[2]
+                continue
+            }
+            if (cmd == "az" || cmd == "gcloud") {
+                for (j = 2; j <= m; j++) {
+                    if (toks[j] == "delete") {
+                        print "cloud resource deletion: " cmd " delete"
+                        break
+                    }
+                }
+            }
+        }
+    }'
+}
+
+_LIFECYCLE_REASON=$(lifecycle_or_cloud_reason "$COMMAND_NO_COMMENT" | head -1)
+if [[ -n "$_LIFECYCLE_REASON" ]]; then
+    deny "BLOCKED: $_LIFECYCLE_REASON"
 fi
 
 # =============================================================================

@@ -34,13 +34,14 @@ suspect the auto-detection missed something (e.g. a touched build flag).
 
 See `README.md` "Fresh worktree checklist" for the full setup sequence.
 
-<!-- BEGIN LOOM ORCHESTRATION -->
-This repository uses [Loom](https://github.com/rjwalters/loom) for AI-powered development orchestration. See `.loom/CLAUDE.md` for the full guide (roles, labels, worktrees, configuration).
-<!-- END LOOM ORCHESTRATION -->
 <!-- BEGIN REPO-SKILLS -->
-This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.4.0 installed —
+This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.4.1 installed —
 general repository hygiene and environment commands invoked as `/repo:<command>`. Run
 `/repo:help` for the command list, or see `.claude/skills/repo/SKILL.md` for the full
 guide. Hygiene commands are report-first: they present findings and wait before changing
 anything. Managed by `install.sh` — edit outside the markers only.
 <!-- END REPO-SKILLS -->
+
+<!-- BEGIN LOOM ORCHESTRATION -->
+This repository uses [Loom](https://github.com/rjwalters/loom) for AI-powered development orchestration. See `.loom/CLAUDE.md` for the full guide (roles, labels, worktrees, configuration).
+<!-- END LOOM ORCHESTRATION -->
