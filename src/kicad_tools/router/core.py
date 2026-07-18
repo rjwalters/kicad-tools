@@ -3227,7 +3227,7 @@ class Autorouter:
         if net_class:
             if net_class.priority <= 1:
                 rationale_parts.append(f"High-priority net ({net_class.__class__.__name__})")
-            rationale_parts.append(f"Routed with {net_class.min_trace_width}mm min trace width")
+            rationale_parts.append(f"Routed with {net_class.trace_width}mm trace width")
             if net_class.clearance:
                 rationale_parts.append(f"{net_class.clearance}mm clearance")
 
