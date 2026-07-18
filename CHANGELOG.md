@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-07-17
+
+### Summary
+
+Feature release. Introduces an **experimental alternative routing substrate** —
+an adaptive octilinear **lattice** engine (`--route-engine lattice`) and a
+constrained-Delaunay **navmesh/mesh** engine (`--route-engine mesh`), both
+**default-OFF** — that routes large mixed-pitch boards the uniform-grid router
+cannot fit in memory (softstart rev-C: 74/77 signal nets DRC-clean at ~3% of the
+grid's memory footprint). Adds new route flags (`--max-cells`, analytical
+`--dry-run`), settable schematic BOM/DNP fields, and a `net-status --why` fix
+recommender. Also lands a batch of parts-catalog, placement, and serialization
+fixes, and refreshes the vendored Loom / Repo-Skills tooling. `--route-engine
+grid` (the default) is byte-identical to 0.16.0.
+
+### Added
+
+- **Experimental octilinear lattice routing engine** (`--route-engine lattice`,
+  default OFF) (#4278) — quadtree octilinear lattice substrate where A* paths are
+  45°-legal copper by construction; couples diff-pairs via a fat-agent centerline
+  (#4288); honors per-net-class widths/clearances (#4289); tapered neck-down
+  escape for oversize net classes (#4293). Routes softstart rev-C at 74/77 nets,
+  0 DRC errors.
+- **Experimental navmesh mesh routing engine** (`--route-engine mesh`, default
+  OFF) (#4269, #4274, #4276) — constrained-Delaunay navmesh + funnel with
+  multi-net negotiation, in-corridor lane assignment, and 2.5D via injection.
+- **`--route-engine {grid,mesh,lattice}`** (#4279) — select the routing
+  substrate; default `grid`.
+- **`--max-cells`** (#4249) — override the auto-grid memory budget on large boards.
+- **Analytical `route --dry-run`** (#4266) — report grid/cell/budget without
+  allocating the grid (no OOM on large boards).
+- **`--via-drill` / `--via-diameter` on `route-auto`** (#4250) — honor board via
+  geometry.
+- **Settable `in_bom` / `dnp` on schematic symbol generation** (#4303) — emit
+  exclude-from-BOM / DNP symbols (test points, fiducials, mounting holes).
+- **`net-status --why` ranked fix recommendations** (#4261) — with pin-order
+  (inversion)-verified reversed-bundle detection (#4286).
+- **Trunk-first region-refine large-board routing recipe** (docs) (#4264).
+
+### Fixed
+
+- **Parts catalog** — non-circular missing-`requests` advice + MPN-column search
+  (#4295, #4296); delimited price-tier parsing so prices surface (#4297); quiet
+  offline-catalog fallback on live-API failure instead of per-part noise (#4299).
+- **`net-status --why`** — correct `PLACEMENT_BOUND` misattribution (removed
+  bogus "analog/codec" label; split same-group vs foreign obstructions) (#4261);
+  no false `DE_REVERSE_BUNDLE` recommendation on co-oriented bundles (#4286).
+- **Placement** — courtyard-artwork edge overhang no longer invalidates a
+  placement when all pads are on-board (ESP32 antenna keep-outs) (#4290).
+- **Lattice engine** — hole-to-hole floor for cross-net vias and large-drill
+  pads (#4291); tier-gated same-net via-in-pad (#4285); optimize/nudge
+  post-passes gated off for non-grid engines (#4281); hard-error on incompatible
+  `--route-engine` / `--strategy` combinations instead of silent grid copper
+  (#4280).
+- **`NetClassRouting` serialization** — `neck_trace_width` round-trip drift
+  (#4309); nonexistent `min_trace_width` reference in the routing rationale
+  (#4310).
+- **`net_class_map_from_dict`** — skip underscore-prefixed comment keys (#4251).
+
+### Changed
+
+- **CLI-tail memory** — free routing-engine state before the DRC tail; attribute
+  the large-board process peak to the external `kicad-cli` DRC child rather than
+  kicad-tools Python (#4292).
+- **board-07 Track A** — coupled diff-pair atomic rip-up/relief transaction +
+  discrete `BundlePlan` HARD-lane allocator; measured verdict: the residual opens
+  are placement-bound (#4256, #4257, #4258).
+- **Tooling** — Loom 0.10.7 → 0.10.9, Repo Skills v0.4.0 → v0.4.1 (#4312).
+
 ## [0.16.0] - 2026-07-15
 
 ### Summary
@@ -1738,6 +1807,8 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.17.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.17.0
+[0.16.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.16.0
 [0.15.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.15.0
 [0.14.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.14.0
 [0.9.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.9.0
