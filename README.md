@@ -592,7 +592,7 @@ All commands support `--format json` for machine-readable output.
 | `mcp` | MCP server for AI agent integration |
 | `layout` | Layout preservation for PCB regeneration |
 
-## What's New (v0.15.0, July 2026)
+## What's New (v0.16.0, July 2026)
 
 Recent additions an agent reading these docs cold should know about:
 
