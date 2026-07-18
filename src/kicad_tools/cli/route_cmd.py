@@ -1526,6 +1526,55 @@ def _save_partial_results() -> bool:
     return False
 
 
+def _collect_partial_connectivity(
+    router: "Autorouter",
+    nets_to_route_ids: set[int] | None,
+) -> dict[int, dict]:
+    """Compute per-net connectivity for the export, if pad data is available.
+
+    Mirrors the connectivity computation in ``router/output.py`` (the source of
+    the stdout "Partially connected nets" report) so the export detail matches
+    what the user sees on screen.  Returns a mapping of net ID -> connectivity
+    info (``total_pads``, ``connected_pads``, ``connected``, ``stranded_pads``)
+    limited to the targeted nets.  Returns an empty dict when the router does
+    not expose pad/net data.
+    """
+    if not (
+        hasattr(router, "pads")
+        and hasattr(router, "nets")
+        and getattr(router, "pads", None)
+        and getattr(router, "nets", None)
+    ):
+        return {}
+
+    from ..router.observability import validate_net_connectivity
+
+    try:
+        net_items = list(router.nets.items())
+    except (TypeError, AttributeError):
+        # e.g. a MagicMock whose .nets is not a real mapping
+        return {}
+
+    net_pads: dict[int, list] = {}
+    for net_id, pad_keys in net_items:
+        try:
+            pad_list = [router.pads[k] for k in pad_keys if k in router.pads]
+        except TypeError:
+            continue
+        if pad_list:
+            net_pads[net_id] = pad_list
+
+    if not net_pads:
+        return {}
+
+    target_pads = (
+        {nid: pads for nid, pads in net_pads.items() if nid in nets_to_route_ids}
+        if nets_to_route_ids is not None
+        else net_pads
+    )
+    return validate_net_connectivity(router.routes, target_pads)
+
+
 def _export_failed_nets(
     router: "Autorouter",
     net_map: dict[str, int],
@@ -1533,14 +1582,30 @@ def _export_failed_nets(
     quiet: bool = False,
     nets_to_route_ids: set[int] | None = None,
 ) -> bool:
-    """Export the list of failed (unrouted) net names to a file.
+    """Export failed (unrouted) and partial net details to a file.
 
-    Writes one net name per line to the specified path.
+    The output format is chosen by the file extension:
+
+    - ``.json`` — a structured JSON array of per-net objects, each with
+      ``net``, ``status`` (``"unrouted"`` for nets with no segments at all,
+      ``"partial"`` for nets that have segments but not all pads connected),
+      ``connected_pads``, ``total_pads``, and ``stranded_pads`` (the pad
+      identifiers, e.g. ``U1.3``, that still need connecting).  Partial nets
+      are included so callers get a machine-readable handle on exactly which
+      pads remain — the actionable output for finishing a near-complete route.
+    - any other extension — the legacy plain-text format: one net name per
+      line (unrouted nets first, then partial nets), preserved for
+      back-compatibility.
+
+    The file is always written when this function is called (routing is
+    incomplete), even when there is nothing to report — a well-formed empty
+    payload (``[]`` for JSON, an empty file for text) — so callers can rely on
+    the file existing.
 
     Args:
         router: The Autorouter instance with completed routing.
         net_map: Mapping of net names to net IDs.
-        export_path: File path to write the failed net names.
+        export_path: File path to write the failed net details.
         quiet: If True, suppress output messages.
         nets_to_route_ids: Optional set of net IDs targeted for routing
             (multi-pad signal nets).  When provided, only nets in this set
@@ -1550,6 +1615,8 @@ def _export_failed_nets(
     Returns:
         True if the file was written successfully, False otherwise.
     """
+    import json
+
     reverse_net = {v: k for k, v in net_map.items() if v > 0}
     routed_net_ids = {route.net for route in router.routes}
     if nets_to_route_ids is not None:
@@ -1558,17 +1625,66 @@ def _export_failed_nets(
         all_net_ids = {v for k, v in net_map.items() if v > 0}
         unrouted_ids = all_net_ids - routed_net_ids
 
-    if not unrouted_ids:
-        if not quiet:
-            print("  No failed nets to export.")
-        return False
+    # Partial nets have segments (so their IDs are in routed_net_ids) but not
+    # all pads connected.  They are excluded from unrouted_ids by construction,
+    # so surface them separately from the connectivity data.
+    connectivity = _collect_partial_connectivity(router, nets_to_route_ids)
+    partial_ids = {
+        nid
+        for nid, info in connectivity.items()
+        if info.get("total_pads", 0) >= 2
+        and not info.get("connected", True)
+        and nid in routed_net_ids
+    }
+
+    def _net_name(nid: int) -> str:
+        return reverse_net.get(nid, f"Net_{nid}")
+
+    export_file = Path(export_path)
+    is_json = export_file.suffix.lower() == ".json"
 
     try:
-        failed_names = sorted(reverse_net.get(nid, f"Net_{nid}") for nid in unrouted_ids)
-        export_file = Path(export_path)
-        export_file.write_text("\n".join(failed_names) + "\n")
+        if is_json:
+            payload: list[dict] = []
+            for nid in sorted(unrouted_ids):
+                info = connectivity.get(nid, {})
+                payload.append(
+                    {
+                        "net": _net_name(nid),
+                        "status": "unrouted",
+                        "connected_pads": int(info.get("connected_pads", 0)),
+                        "total_pads": int(info.get("total_pads", 0)),
+                        "stranded_pads": list(info.get("stranded_pads", [])),
+                    }
+                )
+            for nid in sorted(partial_ids):
+                info = connectivity[nid]
+                payload.append(
+                    {
+                        "net": _net_name(nid),
+                        "status": "partial",
+                        "connected_pads": int(info.get("connected_pads", 0)),
+                        "total_pads": int(info.get("total_pads", 0)),
+                        "stranded_pads": list(info.get("stranded_pads", [])),
+                    }
+                )
+            export_file.write_text(json.dumps(payload, indent=2) + "\n")
+            if not quiet:
+                n_partial = len(partial_ids)
+                n_unrouted = len(unrouted_ids)
+                print(
+                    f"  Failed nets exported to: {export_file} "
+                    f"({n_unrouted} unrouted, {n_partial} partial)"
+                )
+            return True
+
+        # Legacy plain-text: one net name per line (unrouted, then partial).
+        names = sorted(_net_name(nid) for nid in unrouted_ids)
+        names += sorted(_net_name(nid) for nid in partial_ids)
+        content = ("\n".join(names) + "\n") if names else ""
+        export_file.write_text(content)
         if not quiet:
-            print(f"  Failed nets exported to: {export_file} ({len(failed_names)} nets)")
+            print(f"  Failed nets exported to: {export_file} ({len(names)} nets)")
         return True
     except Exception as e:
         if not quiet:
@@ -9642,8 +9758,12 @@ def main(argv: list[str] | None = None) -> int:
         "--export-failed-nets",
         metavar="PATH",
         help=(
-            "Export failed (unrouted) net names to a file, one per line. "
-            "Useful for scripted workflows or manual completion in KiCad."
+            "Export failed nets (fully-unrouted and partial) to a file for "
+            "triage or manual completion in KiCad. A '.json' path emits "
+            "structured per-net detail (status, connected/total pads, and the "
+            "stranded pad names for partial nets); any other extension emits "
+            "one net name per line. The file is always written when routing "
+            "is incomplete."
         ),
     )
 

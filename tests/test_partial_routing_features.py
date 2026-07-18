@@ -36,6 +36,53 @@ def _make_mock_router(
     return router
 
 
+def _make_real_partial_router():
+    """Build a router with real pads/nets/routes exercising the partial case.
+
+    Nets:
+    - VCC (1): two pads joined by a segment -> fully routed.
+    - SCL (3): two pads, no segments -> fully unrouted.
+    - NRST (4): three pads, a segment joining two of them; the third pad is
+      far away and stranded -> partial (2/3, stranded R1.1).
+    """
+    from kicad_tools.router.primitives import Layer, Pad, Route, Segment
+
+    def _pad(x, y, net, ref, pin):
+        return Pad(
+            x=x,
+            y=y,
+            width=0.5,
+            height=0.5,
+            net=net,
+            net_name=f"NET{net}",
+            ref=ref,
+            pin=pin,
+        )
+
+    def _seg(x1, y1, x2, y2):
+        return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU)
+
+    pads = {
+        ("U1", "1"): _pad(0.0, 0.0, 1, "U1", "1"),
+        ("U2", "1"): _pad(5.0, 0.0, 1, "U2", "1"),
+        ("U1", "2"): _pad(0.0, 10.0, 3, "U1", "2"),
+        ("U2", "2"): _pad(5.0, 10.0, 3, "U2", "2"),
+        ("U1", "3"): _pad(0.0, 5.0, 4, "U1", "3"),
+        ("U2", "3"): _pad(5.0, 5.0, 4, "U2", "3"),
+        ("R1", "1"): _pad(20.0, 20.0, 4, "R1", "1"),
+    }
+    nets = {
+        1: [("U1", "1"), ("U2", "1")],
+        3: [("U1", "2"), ("U2", "2")],
+        4: [("U1", "3"), ("U2", "3"), ("R1", "1")],
+    }
+    routes = [
+        Route(net=1, net_name="NET1", segments=[_seg(0.0, 0.0, 5.0, 0.0)]),
+        Route(net=4, net_name="NET4", segments=[_seg(0.0, 5.0, 5.0, 5.0)]),
+    ]
+    return SimpleNamespace(pads=pads, nets=nets, routes=routes)
+
+
 class TestAutoLayersSuggestion:
     """Tests for proactive --auto-layers suggestion in show_routing_summary()."""
 
@@ -258,18 +305,33 @@ class TestExportFailedNets:
         # Net 3 (SCL) and Net 4 (NRST) are unrouted; GND (net 0) is excluded
         assert sorted(lines) == ["NRST", "SCL"]
 
-    def test_export_failed_nets_no_failures(self, tmp_path):
-        """_export_failed_nets returns False when all nets are routed."""
+    def test_export_failed_nets_no_failures_still_writes_empty_file(self, tmp_path):
+        """When there is nothing to report the file is still written (issue #4316).
+
+        Callers rely on the export file existing whenever routing is
+        incomplete, so the empty case emits a well-formed empty payload
+        rather than skipping the write.
+        """
         from kicad_tools.cli.route_cmd import _export_failed_nets
 
         net_map = {"GND": 0, "VCC": 1, "SDA": 2}
         router = _make_mock_router(routed_nets=[1, 2])  # All signal nets routed
 
-        export_file = tmp_path / "failed.txt"
-        result = _export_failed_nets(router, net_map, str(export_file), quiet=True)
+        # Text path: empty file is created.
+        text_file = tmp_path / "failed.txt"
+        result = _export_failed_nets(router, net_map, str(text_file), quiet=True)
+        assert result is True
+        assert text_file.exists()
+        assert text_file.read_text() == ""
 
-        assert result is False
-        assert not export_file.exists()
+        # JSON path: a well-formed empty array is written.
+        import json
+
+        json_file = tmp_path / "failed.json"
+        result = _export_failed_nets(router, net_map, str(json_file), quiet=True)
+        assert result is True
+        assert json_file.exists()
+        assert json.loads(json_file.read_text()) == []
 
     def test_export_failed_nets_writes_one_per_line(self, tmp_path):
         """Each failed net name is on its own line."""
@@ -345,6 +407,91 @@ class TestExportFailedNets:
         lines = export_file.read_text().strip().split("\n")
         # Without filter, both SDA and SINGLE_PAD appear
         assert sorted(lines) == ["SDA", "SINGLE_PAD"]
+
+    def test_export_failed_nets_json_includes_partial_nets(self, tmp_path):
+        """.json export includes partial nets with stranded-pad detail (#4316)."""
+        import json
+
+        from kicad_tools.cli.route_cmd import _export_failed_nets
+
+        router = _make_real_partial_router()
+        net_map = {"GND": 0, "VCC": 1, "SCL": 3, "NRST": 4}
+
+        export_file = tmp_path / "failed.json"
+        result = _export_failed_nets(
+            router,
+            net_map,
+            str(export_file),
+            quiet=True,
+            nets_to_route_ids={1, 3, 4},
+        )
+
+        assert result is True
+        payload = json.loads(export_file.read_text())
+        by_net = {entry["net"]: entry for entry in payload}
+
+        # SCL has no segments -> unrouted, both pads stranded.
+        assert by_net["SCL"]["status"] == "unrouted"
+        assert by_net["SCL"]["connected_pads"] == 0
+        assert by_net["SCL"]["total_pads"] == 2
+
+        # NRST has segments but one stranded pad -> partial, matching stdout
+        # "5/7"-style connected/total counts and naming the stranded pad.
+        assert by_net["NRST"]["status"] == "partial"
+        assert by_net["NRST"]["connected_pads"] == 2
+        assert by_net["NRST"]["total_pads"] == 3
+        assert by_net["NRST"]["stranded_pads"] == ["R1.1"]
+
+        # VCC is fully routed and must NOT appear.
+        assert "VCC" not in by_net
+
+    def test_export_failed_nets_text_appends_partial_names(self, tmp_path):
+        """Non-.json export keeps legacy one-per-line format, incl. partial nets (#4316)."""
+        from kicad_tools.cli.route_cmd import _export_failed_nets
+
+        router = _make_real_partial_router()
+        net_map = {"GND": 0, "VCC": 1, "SCL": 3, "NRST": 4}
+
+        export_file = tmp_path / "failed.txt"
+        result = _export_failed_nets(
+            router,
+            net_map,
+            str(export_file),
+            quiet=True,
+            nets_to_route_ids={1, 3, 4},
+        )
+
+        assert result is True
+        lines = export_file.read_text().strip().split("\n")
+        # Both the unrouted (SCL) and partial (NRST) nets appear; VCC does not.
+        assert sorted(lines) == ["NRST", "SCL"]
+
+    def test_export_failed_nets_dual_mode_by_extension(self, tmp_path):
+        """.json yields structured JSON; other extensions yield plain text (#4316)."""
+        import json
+
+        from kicad_tools.cli.route_cmd import _export_failed_nets
+
+        router = _make_real_partial_router()
+        net_map = {"GND": 0, "VCC": 1, "SCL": 3, "NRST": 4}
+
+        json_file = tmp_path / "out.json"
+        _export_failed_nets(
+            router, net_map, str(json_file), quiet=True, nets_to_route_ids={1, 3, 4}
+        )
+        # Parses as JSON (structured payload).
+        assert isinstance(json.loads(json_file.read_text()), list)
+
+        text_file = tmp_path / "out.lst"
+        _export_failed_nets(
+            router, net_map, str(text_file), quiet=True, nets_to_route_ids={1, 3, 4}
+        )
+        # Not JSON -- plain net names, one per line.
+        content = text_file.read_text()
+        with contextlib.suppress(json.JSONDecodeError):
+            json.loads(content)
+            raise AssertionError("non-.json path should not emit JSON")
+        assert content.endswith("\n")
 
     def test_export_failed_nets_cli_flag_in_help(self):
         """--export-failed-nets appears in help output."""
@@ -562,3 +709,45 @@ class TestAutoLayersSuggestionInJSON:
         layer_suggestions = [s for s in suggestions if s.get("category") == "LAYER_COUNT"]
         assert len(layer_suggestions) > 0
         assert "--layers 4" in layer_suggestions[0]["fix"]
+
+
+class TestCongestionMapEmptyGuard:
+    """Crash guard for get_congestion_map on an empty congestion grid (#4316)."""
+
+    def _make_grid(self):
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.layers import LayerStack
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        stack = LayerStack.four_layer_all_signal()
+        return RoutingGrid(50, 50, rules, origin_x=0, origin_y=0, layer_stack=stack)
+
+    def test_get_congestion_map_returns_zeros_on_empty(self):
+        """A zero-size _congestion array yields zeros instead of raising.
+
+        Reproduces the lattice-engine path where _congestion is never
+        populated: np.max over an empty array previously raised
+        "zero-size array to reduction operation maximum which has no identity".
+        """
+        import numpy as np
+
+        grid = self._make_grid()
+        # Simulate the lattice/mesh engine: an empty congestion grid.
+        grid._congestion = np.empty((0, 0, 0), dtype=grid._congestion.dtype)
+
+        stats = grid.get_congestion_map()
+
+        assert stats == {
+            "max_congestion": 0.0,
+            "avg_congestion": 0.0,
+            "congested_regions": 0,
+        }
+
+    def test_get_congestion_map_normal_grid_still_works(self):
+        """A normally-populated grid still returns real statistics."""
+        grid = self._make_grid()
+        stats = grid.get_congestion_map()
+        # Fresh grid: no congestion recorded, but the call must not raise.
+        assert stats["max_congestion"] == 0.0
+        assert stats["congested_regions"] == 0

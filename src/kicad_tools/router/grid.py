@@ -1274,7 +1274,24 @@ class RoutingGrid:
         return min(1.0, count / max_cells)
 
     def get_congestion_map(self) -> dict[str, float]:
-        """Get congestion statistics for all regions using vectorized operations."""
+        """Get congestion statistics for all regions using vectorized operations.
+
+        Returns all-zero statistics when the congestion grid is empty
+        (a zero-size ``_congestion`` array).  Engines such as the lattice/mesh
+        router do not populate the classic per-cell congestion counters, so
+        ``self._congestion`` can be a zero-size ndarray.  Reducing over an
+        empty array with ``np.max`` / ``np.mean`` raises
+        ``zero-size array to reduction operation maximum which has no
+        identity``; guarding here keeps the partial-result / statistics path
+        working for those engines (issue #4316).
+        """
+        if self._congestion.size == 0:
+            return {
+                "max_congestion": 0.0,
+                "avg_congestion": 0.0,
+                "congested_regions": 0,
+            }
+
         max_cells = self.congestion_size * self.congestion_size
         density = self._congestion / max_cells
 

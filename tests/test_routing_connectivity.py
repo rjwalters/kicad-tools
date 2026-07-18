@@ -91,6 +91,41 @@ class TestValidateNetConnectivity:
         assert result[1]["total_pads"] == 1
         assert result[1]["connected_pads"] == 1
         assert result[1]["connected"] is True
+        assert result[1]["stranded_pads"] == []
+
+    def test_stranded_pads_reported_for_partial_net(self):
+        """A partial net lists the pad identifiers that are not connected (#4316)."""
+        pads = [
+            _pad(0.0, 0.0, 1, "U1", "1"),
+            _pad(5.0, 0.0, 1, "U2", "2"),
+            _pad(20.0, 20.0, 1, "R3", "1"),
+        ]
+        # Segment connects U1.1 <-> U2.2 only; R3.1 is far away and stranded.
+        routes = [Route(net=1, net_name="NET1", segments=[_seg(0.0, 0.0, 5.0, 0.0)])]
+
+        result = validate_net_connectivity(routes, {1: pads})
+
+        assert result[1]["connected_pads"] == 2
+        assert result[1]["connected"] is False
+        assert result[1]["stranded_pads"] == ["R3.1"]
+
+    def test_stranded_pads_lists_all_pads_when_no_routes(self):
+        """When a net has no routes, every pad is stranded (#4316)."""
+        pads = [_pad(0.0, 0.0, 1, "U1", "1"), _pad(5.0, 0.0, 1, "U2", "2")]
+
+        result = validate_net_connectivity([], {1: pads})
+
+        assert sorted(result[1]["stranded_pads"]) == ["U1.1", "U2.2"]
+
+    def test_stranded_pads_empty_when_fully_connected(self):
+        """A fully connected net has no stranded pads (#4316)."""
+        pads = [_pad(0.0, 0.0, 1, "U1", "1"), _pad(5.0, 0.0, 1, "U2", "2")]
+        routes = [Route(net=1, net_name="NET1", segments=[_seg(0.0, 0.0, 5.0, 0.0)])]
+
+        result = validate_net_connectivity(routes, {1: pads})
+
+        assert result[1]["connected"] is True
+        assert result[1]["stranded_pads"] == []
 
     def test_chain_of_segments_connects_all_pads(self):
         """Three pads connected by a chain of segments are fully connected."""
