@@ -3971,7 +3971,11 @@ def route_with_layer_escalation(
             pcb_path,
             quiet=quiet,
             edge_clearance=getattr(args, "edge_clearance", None),
-            force_pour_nets=skip_nets,
+            # Issue #4322: in --nets (route-only) mode ``skip_nets`` is the
+            # large INVERTED set (every net except the ones being routed); it
+            # must NOT be forwarded as pour intent, or auto-pour would try to
+            # zone ~every net.  Keep the user's explicit pour intent empty.
+            force_pour_nets=([] if getattr(args, "_route_only_nets", None) else skip_nets),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -5015,7 +5019,11 @@ def route_with_rule_relaxation(
             pcb_path,
             quiet=quiet,
             edge_clearance=getattr(args, "edge_clearance", None),
-            force_pour_nets=skip_nets,
+            # Issue #4322: in --nets (route-only) mode ``skip_nets`` is the
+            # large INVERTED set (every net except the ones being routed); it
+            # must NOT be forwarded as pour intent, or auto-pour would try to
+            # zone ~every net.  Keep the user's explicit pour intent empty.
+            force_pour_nets=([] if getattr(args, "_route_only_nets", None) else skip_nets),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -7118,7 +7126,11 @@ def route_with_combined_escalation(
             pcb_path,
             quiet=quiet,
             edge_clearance=getattr(args, "edge_clearance", None),
-            force_pour_nets=skip_nets,
+            # Issue #4322: in --nets (route-only) mode ``skip_nets`` is the
+            # large INVERTED set (every net except the ones being routed); it
+            # must NOT be forwarded as pour intent, or auto-pour would try to
+            # zone ~every net.  Keep the user's explicit pour intent empty.
+            force_pour_nets=([] if getattr(args, "_route_only_nets", None) else skip_nets),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -8321,6 +8333,107 @@ def _offboard_preflight(pcb_path: Path) -> int:
     return 2
 
 
+def _resolve_route_only_nets(args, pcb_path: Path) -> int:
+    """Resolve ``--nets`` (route ONLY the listed nets) -- Issue #4322.
+
+    ``--nets`` is the inverse of ``--skip-nets``: it names the nets to route
+    and treats every OTHER board net as an obstacle.  Rather than thread a new
+    ``only_nets`` parameter through ``load_pcb_for_routing`` (and its several
+    call sites), we invert the request into the existing ``--skip-nets``
+    machinery -- ``effective_skip = all_board_nets - requested_nets`` -- so the
+    downstream router is unchanged.  A marker (``args._route_only_nets``) is set
+    so the auto-pour forwarding does NOT treat the (large) inverted skip set as
+    pour intent.
+
+    Enforced here (the single inner-parser source of truth, so the rule holds
+    whether invoked as ``kct route`` or the inner ``route`` entrypoint):
+
+    * ``--nets`` and ``--skip-nets`` are mutually exclusive.
+    * Every requested net must exist on the board (unknown names error and are
+      named); whitespace around each name is trimmed and an empty list errors.
+    * Nets with fewer than 2 pads are reported (nothing to route) rather than
+      silently dropped.
+
+    Returns 0 on success (or when ``--nets`` is absent) and a non-zero exit
+    code (with a printed error) otherwise.
+    """
+    requested_raw = getattr(args, "nets", None)
+    if not requested_raw:
+        return 0
+
+    # Mutually exclusive with --skip-nets: --nets fully specifies the route set.
+    if getattr(args, "skip_nets", None):
+        print(
+            "Error: --nets and --skip-nets are mutually exclusive "
+            "(--nets already limits routing to the listed nets).",
+            file=sys.stderr,
+        )
+        return 2
+
+    requested = [n.strip() for n in requested_raw.split(",") if n.strip()]
+    if not requested:
+        print(
+            "Error: --nets was given but lists no net names "
+            '(expected a comma-separated list, e.g. --nets "/A,/B").',
+            file=sys.stderr,
+        )
+        return 2
+
+    # De-duplicate while preserving first-seen order.
+    seen: set[str] = set()
+    requested_unique: list[str] = []
+    for n in requested:
+        if n not in seen:
+            seen.add(n)
+            requested_unique.append(n)
+
+    # Load the board and count pads per net name.
+    try:
+        from kicad_tools.schema.pcb import PCB as _SchemaPCB
+
+        pcb = _SchemaPCB.load(str(pcb_path))
+    except Exception as e:  # pragma: no cover - load errors also surface later
+        print(f"Error loading PCB for --nets validation: {e}", file=sys.stderr)
+        return 1
+
+    net_pad_counts: dict[str, int] = {}
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            net_name = getattr(pad, "net_name", "") or ""
+            if net_name:
+                net_pad_counts[net_name] = net_pad_counts.get(net_name, 0) + 1
+    board_nets = set(net_pad_counts)
+
+    unknown = [n for n in requested_unique if n not in board_nets]
+    if unknown:
+        preview = ", ".join(unknown)
+        print(
+            f"Error: --nets names net(s) not present on the board: {preview}. "
+            "Net names must match the board exactly (e.g. 'GND', '/SPI_CLK').",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Report requested nets that cannot be routed (fewer than 2 pads) rather
+    # than silently dropping them; they still contribute nothing to route.
+    under_two = [n for n in requested_unique if net_pad_counts.get(n, 0) < 2]
+    if under_two:
+        print(
+            "Warning: --nets includes net(s) with fewer than 2 pads (nothing "
+            f"to route): {', '.join(under_two)}.",
+            file=sys.stderr,
+        )
+
+    # Invert into the skip machinery: skip every board net NOT requested.
+    requested_set = set(requested_unique)
+    effective_skip = sorted(board_nets - requested_set)
+    args.skip_nets = ",".join(effective_skip)
+    # Marker: route-only mode.  The (large) inverted skip set must NOT be
+    # forwarded as force_pour_nets (that would try to pour ~every net).
+    args._route_only_nets = requested_unique
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Issue #4263: analytical --dry-run grid/cell/budget plan.
 #
@@ -8583,6 +8696,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--skip-nets",
         help="Comma-separated nets to skip (e.g., GND,VCC,VBUS)",
+    )
+    parser.add_argument(
+        "--nets",
+        metavar="NET[,NET...]",
+        help=(
+            "Comma-separated nets to route EXCLUSIVELY (Issue #4322): route "
+            "only the listed nets and treat every other board net as an "
+            "obstacle (the inverse of --skip-nets). Mutually exclusive with "
+            "--skip-nets. Unknown net names are an error; whitespace is "
+            "trimmed."
+        ),
     )
     parser.add_argument(
         "--preserve-existing",
@@ -9996,6 +10120,16 @@ def main(argv: list[str] | None = None) -> int:
     if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
 
+    # Issue #4322: resolve --nets (route ONLY the listed nets) by inverting it
+    # into the --skip-nets machinery.  Validates mutual exclusion with
+    # --skip-nets and that every requested net exists on the board, then sets
+    # ``args.skip_nets`` to every OTHER board net.  Runs BEFORE --region so a
+    # spatial bound composes on top of the net selection.
+    args._route_only_nets = None
+    _nets_rc = _resolve_route_only_nets(args, pcb_path)
+    if _nets_rc != 0:
+        return _nets_rc
+
     # Issue #4148: parse + validate --region (SPATIAL routing bound).  Stores a
     # normalized board-relative box on ``args._region_box`` that the
     # ``load_pcb_for_routing`` call sites forward.  Region mode implies
@@ -10452,7 +10586,11 @@ def main(argv: list[str] | None = None) -> int:
             pcb_path,
             quiet=args.quiet,
             edge_clearance=getattr(args, "edge_clearance", None),
-            force_pour_nets=skip_nets,
+            # Issue #4322: in --nets (route-only) mode ``skip_nets`` is the
+            # large INVERTED set (every net except the ones being routed); it
+            # must NOT be forwarded as pour intent, or auto-pour would try to
+            # zone ~every net.  Keep the user's explicit pour intent empty.
+            force_pour_nets=([] if getattr(args, "_route_only_nets", None) else skip_nets),
         )
 
     # Auto-classify pour nets and extend skip_nets

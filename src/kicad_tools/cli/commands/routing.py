@@ -133,35 +133,27 @@ def _print_effective_via_geometry(
     print(f"  Via diameter: {_fmt(eff_diameter, override_diameter)}")
 
 
-def run_route_auto_command(args) -> int:
-    """Handle route-auto command using RoutingOrchestrator."""
+def _route_auto_one(args, net_name: str, pcb_path: str, output_path: str | None) -> int:
+    """Route a single net via RoutingOrchestrator and print the result.
+
+    Extracted from ``run_route_auto_command`` (Issue #4322) so the ``--net``
+    single-net path and each iteration of the ``--nets`` multi-net loop share
+    identical routing + reporting.  ``pcb_path`` / ``output_path`` are passed
+    explicitly so the loop can chain outputs (route net N+1 from net N's
+    output, accumulating copper).  Returns the per-net exit code.
+    """
     import sys
 
     via_drill = getattr(args, "via_drill", None)
     via_diameter = getattr(args, "via_diameter", None)
 
-    # Dry-run: preview strategy selection without routing
-    if args.dry_run:
-        print(f"[dry-run] Would route net '{args.net}' on '{args.pcb}' using RoutingOrchestrator")
-        print(f"  Strategy override: {args.strategy}")
-        print(f"  Repair enabled: {not args.no_repair}")
-        print(f"  Via resolution enabled: {not args.no_via_resolution}")
-        # Report the effective via geometry that would be used (Issue #4247):
-        # an explicit CLI override, or the value derived from the board's
-        # net-class via constraints.
-        eff_drill, eff_diameter = _effective_via_geometry(args.pcb, via_drill, via_diameter)
-        _print_effective_via_geometry(eff_drill, via_drill, eff_diameter, via_diameter)
-        if args.output:
-            print(f"  Output: {args.output}")
-        return 0
-
     from kicad_tools.mcp.tools.routing import route_net_auto
 
     try:
         result = route_net_auto(
-            pcb_path=args.pcb,
-            net_name=args.net,
-            output_path=args.output,
+            pcb_path=pcb_path,
+            net_name=net_name,
+            output_path=output_path,
             strategy=args.strategy,
             enable_repair=not args.no_repair,
             enable_via_resolution=not args.no_via_resolution,
@@ -261,6 +253,108 @@ def run_route_auto_command(args) -> int:
         return 1
 
 
+def _route_auto_dry_run(args, net_name: str) -> None:
+    """Print the strategy-selection preview for one net (no routing)."""
+    via_drill = getattr(args, "via_drill", None)
+    via_diameter = getattr(args, "via_diameter", None)
+    print(f"[dry-run] Would route net '{net_name}' on '{args.pcb}' using RoutingOrchestrator")
+    print(f"  Strategy override: {args.strategy}")
+    print(f"  Repair enabled: {not args.no_repair}")
+    print(f"  Via resolution enabled: {not args.no_via_resolution}")
+    # Report the effective via geometry that would be used (Issue #4247):
+    # an explicit CLI override, or the value derived from the board's
+    # net-class via constraints.
+    eff_drill, eff_diameter = _effective_via_geometry(args.pcb, via_drill, via_diameter)
+    _print_effective_via_geometry(eff_drill, via_drill, eff_diameter, via_diameter)
+    if args.output:
+        print(f"  Output: {args.output}")
+
+
+def _parse_route_auto_targets(args) -> tuple[list[str] | None, int]:
+    """Resolve the net(s) route-auto should route -- Issue #4322.
+
+    Exactly one of ``--net`` (single) / ``--nets`` (comma-separated list) must
+    be given.  Returns ``(net_list, rc)``: on success ``net_list`` is the
+    ordered, de-duplicated, whitespace-trimmed list of nets and ``rc`` is 0; on
+    a usage error ``net_list`` is ``None`` and ``rc`` is a non-zero exit code
+    (an error has already been printed).
+    """
+    import sys
+
+    net = getattr(args, "net", None)
+    nets_raw = getattr(args, "nets", None)
+
+    if net and nets_raw:
+        print(
+            "Error: --net and --nets are mutually exclusive (use --net for a "
+            "single net or --nets for a comma-separated list).",
+            file=sys.stderr,
+        )
+        return None, 2
+    if not net and not nets_raw:
+        print(
+            "Error: route-auto requires --net NAME or --nets NAME[,NAME...].",
+            file=sys.stderr,
+        )
+        return None, 2
+
+    if net:
+        return [net], 0
+
+    # Reachable only when nets_raw is truthy (the guards above returned for the
+    # net / neither cases); ``or ""`` keeps the type checker happy.
+    parsed = [n.strip() for n in (nets_raw or "").split(",") if n.strip()]
+    if not parsed:
+        print(
+            "Error: --nets was given but lists no net names "
+            '(expected a comma-separated list, e.g. --nets "/A,/B").',
+            file=sys.stderr,
+        )
+        return None, 2
+    # De-duplicate while preserving first-seen order.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for n in parsed:
+        if n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    return ordered, 0
+
+
+def run_route_auto_command(args) -> int:
+    """Handle route-auto command using RoutingOrchestrator.
+
+    Routes a single net (``--net``) or several nets in sequence (``--nets``,
+    Issue #4322).  For the multi-net path each net is routed independently and
+    the exit code is non-zero if ANY net fails or is left partial; when an
+    output path is given, copper accumulates (net N+1 routes from net N's
+    output).  The single-net ``--net`` path is unchanged.
+    """
+    net_list, rc = _parse_route_auto_targets(args)
+    if rc != 0:
+        return rc
+    assert net_list is not None  # rc == 0 guarantees a list
+
+    # Dry-run: preview strategy selection without routing (per net).
+    if args.dry_run:
+        for net_name in net_list:
+            _route_auto_dry_run(args, net_name)
+        return 0
+
+    output_path = args.output
+    overall_rc = 0
+    for i, net_name in enumerate(net_list):
+        # Chain outputs so multi-net copper accumulates: the first net routes
+        # from the original board; subsequent nets route from the prior output
+        # (only possible when an output path was given -- otherwise nothing is
+        # persisted and each net routes independently against the input).
+        source = args.pcb if (i == 0 or not output_path) else output_path
+        net_rc = _route_auto_one(args, net_name, source, output_path)
+        if net_rc != 0:
+            overall_rc = 1
+    return overall_rc
+
+
 def run_route_command(args) -> int:
     """Handle route command."""
     from ..route_cmd import main as route_main
@@ -272,6 +366,12 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--strategy", args.strategy])
     if args.skip_nets:
         sub_argv.extend(["--skip-nets", args.skip_nets])
+    # Issue #4322: forward --nets (route ONLY the listed nets).  The inner
+    # route_cmd handler validates it, enforces mutual exclusion with
+    # --skip-nets, and inverts it into the skip machinery.  Declared on BOTH
+    # parsers + here so tests/test_cli_parser_drift.py stays green.
+    if getattr(args, "nets", None):
+        sub_argv.extend(["--nets", args.nets])
     # Issue #3155: forward --preserve-existing (incremental routing).  Both
     # outer (parser.py) and inner (route_cmd.py) parsers declare it as a
     # store_true defaulting to False, so only forward when the user set it.
