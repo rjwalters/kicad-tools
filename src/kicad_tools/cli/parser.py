@@ -3544,6 +3544,20 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--lattice-optimize",
+        action="store_true",
+        help=(
+            "Opt in to the geometric optimize/nudge post-passes on lattice "
+            "(and mesh) copper (issue #4318). By default these passes are "
+            "SKIPPED for non-grid engines (#4281): lattice copper is committed "
+            "as-is, so the byte output of a plain '--route-engine lattice' run "
+            "is unchanged. With this flag the optimize/DRC-nudge post-passes "
+            "are allowed to run so 'repair-clearance'/'fix-drc'-style cleanup "
+            "can operate on lattice output. Off by default; has no effect for "
+            "'--route-engine grid' (grid always runs the post-passes)."
+        ),
+    )
+    route_parser.add_argument(
         "--seed",
         type=int,
         default=None,

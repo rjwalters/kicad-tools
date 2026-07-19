@@ -66,7 +66,7 @@ import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -996,19 +996,67 @@ def _engine_post_passes_enabled(
     four optimize+nudge call-site pairs (mirroring the
     ``_finalize_committed_copper_or_demote`` shared-helper pattern).  The
     #4208 backstop itself stays unconditional as defense in depth.
-    Eventual unification -- non-grid engines committing via
-    ``_mark_route`` plus a foreign-segment nudge destination gate -- is
-    out of scope here (see #4281 curation, option (b)).
+
+    Issue #4318: ``--lattice-optimize`` opts back in.  When it is set, a
+    non-grid engine is treated like grid and the optimize/DRC-nudge
+    post-passes run, so ``repair-clearance``/``fix-drc``-style cleanup can
+    operate on lattice output.  The flag defaults to ``False``, so the
+    absent-flag path is exactly the #4281 skip (byte-identical output for a
+    plain ``--route-engine lattice`` run).
     """
     engine = getattr(args, "route_engine", "grid") or "grid"
     if engine == "grid":
         return True
+    if getattr(args, "lattice_optimize", False):
+        if not quiet:
+            print(
+                f"\n  --lattice-optimize: running optimize/nudge post-passes "
+                f"on --route-engine {engine} copper (#4318)"
+            )
+        return True
     if not quiet:
         print(
             f"\n  Skipping optimize/nudge post-passes for --route-engine "
-            f"{engine}: non-grid copper is committed as-is (#4281)"
+            f"{engine}: non-grid copper is committed as-is (#4281; "
+            f"pass --lattice-optimize to opt in)"
         )
     return False
+
+
+def _mark_nongrid_routes_for_post_pass(
+    router: Any,
+    args: argparse.Namespace,
+    *,
+    quiet: bool = False,
+) -> None:
+    """Populate the grid obstacle model with committed non-grid copper (#4318).
+
+    The lattice / mesh engines append their routes to ``router.routes`` WITHOUT
+    calling ``_mark_route`` (#4281), so the grid's cell-occupancy + per-layer
+    segment R-tree carry no route copper.  The optimize pass' collision checker
+    is built from that model, so under ``--lattice-optimize`` it would validate
+    every move as "clear" even across another net -- the exact blindness #4281
+    describes.  Marking the already-committed routes onto the grid (``_mark_route``
+    only populates the grid; it does NOT re-append to ``router.routes``, so it is
+    idempotent here) gives the collision checker real copper to see before the
+    opt-in post-passes run.
+
+    No-op unless the engine is non-grid AND ``--lattice-optimize`` is set, so the
+    default path (and every grid run) is completely untouched.
+    """
+    engine = getattr(args, "route_engine", "grid") or "grid"
+    if engine == "grid" or not getattr(args, "lattice_optimize", False):
+        return
+    marked = 0
+    for route in router.routes:
+        router._mark_route(route)
+        marked += 1
+    if not quiet and marked:
+        print(
+            f"  --lattice-optimize: marked {marked} committed {engine} route(s) "
+            f"into the grid obstacle model so the optimizer collision checker "
+            f"is not blind (#4318)"
+        )
 
 
 def _make_checkpoint_callback(
@@ -4682,6 +4730,8 @@ def route_with_layer_escalation(
     # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
     # grid-engine-only -- lattice/mesh copper must not be touched.
     _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
+    if _post_passes_enabled:
+        _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
     # Optimize traces
     if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
@@ -5375,6 +5425,8 @@ def route_with_rule_relaxation(
     # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
     # grid-engine-only -- lattice/mesh copper must not be touched.
     _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
+    if _post_passes_enabled:
+        _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
     # Optimize traces
     if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
@@ -7579,6 +7631,8 @@ def route_with_combined_escalation(
     # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
     # grid-engine-only -- lattice/mesh copper must not be touched.
     _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
+    if _post_passes_enabled:
+        _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
     # Optimize traces
     if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
@@ -9149,6 +9203,19 @@ def main(argv: list[str] | None = None) -> int:
             "monte-carlo, evolutionary, --two-phase, --multi-resolution, or "
             "--escape-routing is rejected (issue #4280). Grid remains the "
             "production default and works with every strategy."
+        ),
+    )
+    parser.add_argument(
+        "--lattice-optimize",
+        action="store_true",
+        help=(
+            "Opt in to the geometric optimize/nudge post-passes on lattice "
+            "(and mesh) copper (issue #4318). By default these passes are "
+            "SKIPPED for non-grid engines (#4281): lattice copper is committed "
+            "as-is, so a plain '--route-engine lattice' run is byte-identical. "
+            "With this flag the optimize/DRC-nudge post-passes are allowed to "
+            "run so repair-style cleanup can operate on lattice output. Off by "
+            "default; no effect for '--route-engine grid'."
         ),
     )
     parser.add_argument(
@@ -11542,6 +11609,8 @@ def main(argv: list[str] | None = None) -> int:
     # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
     # grid-engine-only -- lattice/mesh copper must not be touched.
     _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
+    if _post_passes_enabled:
+        _mark_nongrid_routes_for_post_pass(router, args, quiet=quiet)
 
     # Optimize traces (unless --no-optimize/--raw flag is set)
     if _post_passes_enabled and not args.no_optimize and router.routes:
