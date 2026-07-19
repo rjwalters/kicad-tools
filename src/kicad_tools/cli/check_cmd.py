@@ -689,6 +689,74 @@ CHECK_CATEGORIES = [
 ]
 
 
+def _warn_unevaluated_ampacity(
+    declared_ampacity_targets: dict[str, float],
+    ampacity_resolution: object,
+    pcb: PCB,
+    only_set: set[str] | None,
+    skip_set: set[str],
+) -> None:
+    """Warn when a declared ``target_ampacity`` was never actually evaluated.
+
+    Issue #4321 (Tier 3).  ``AmpacityRule`` matches routed segments by net
+    name, so a declared target contributes a violation *only* when the net
+    both resolves to a real board net **and** carries at least one routed
+    segment **and** the ``ampacity`` category ran.  When none of those hold
+    the report shows 0 ampacity errors -- indistinguishable from a genuinely
+    compliant board.  This emits a loud stderr warning naming every declared
+    net whose rule never engaged, so a hand-authored ``--net-class-map`` that
+    silently fails to match cannot pass green.
+
+    Args:
+        declared_ampacity_targets: ``{user_key: target_ampacity}`` for every
+            net-class-map entry that declared a ``target_ampacity`` (keyed by
+            the *original* user key, before board-name resolution).
+        ampacity_resolution: the ``NetClassMapResolution`` returned by
+            ``resolve_net_class_map_keys`` (``resolved`` is
+            ``{board_net: user_key}``).
+        pcb: the loaded board (source of routed-segment net names).
+        only_set: optional ``--only`` whitelist of check categories.
+        skip_set: ``--skip`` set of check categories.
+    """
+    ampacity_active = (only_set is None or "ampacity" in only_set) and "ampacity" not in skip_set
+
+    # Invert {board_net: user_key} so we can look up each declared user key's
+    # resolved board net (absent => the key matched no board net or matched
+    # ambiguously, i.e. it was dropped from the resolved map).
+    resolved = getattr(ampacity_resolution, "resolved", {}) or {}
+    key_to_board = {user_key: board_net for board_net, user_key in resolved.items()}
+
+    segment_nets = {getattr(seg, "net_name", "") for seg in getattr(pcb, "segments", [])}
+
+    unevaluated: list[str] = []
+    for user_key in sorted(declared_ampacity_targets):
+        board_net = key_to_board.get(user_key)
+        if board_net is None:
+            # Resolution miss / ambiguous: the rule can never see this net.
+            unevaluated.append(user_key)
+        elif not ampacity_active:
+            # Net resolved but the whole category was skipped/excluded.
+            unevaluated.append(board_net)
+        elif board_net not in segment_nets:
+            # Net resolved but carries no routed segment for the rule to size.
+            unevaluated.append(board_net)
+
+    # Deduplicate while preserving first-seen order.
+    unevaluated = list(dict.fromkeys(unevaluated))
+    if not unevaluated:
+        return
+
+    print(
+        "WARNING: ampacity rule declared but not evaluated for net(s): "
+        f"{', '.join(unevaluated)}. "
+        "A declared target_ampacity that matched zero routed segments is "
+        "reported as 0 ampacity errors but was never actually checked "
+        "(post-resolution key miss, unrouted net, or the ampacity category "
+        "was excluded via --skip/--only).",
+        file=sys.stderr,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kct check command."""
     parser = argparse.ArgumentParser(
@@ -1108,6 +1176,42 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
 
+    # Issue #4321 (Tier 1/2): resolve the loaded net-class-map's user keys
+    # onto the board's actual net names *before* handing the map to
+    # DRCChecker, mirroring ``route_cmd._apply_net_class_map_sidecar``.
+    #
+    # ``kct check`` reaches ampacity via
+    # ``DRCChecker.check_ampacity`` -> ``derive_ampacity_specs(net_class_map)``
+    # -> ``AmpacityRule.check``, which matches segments by
+    # ``segment.net_name in self.specs`` -- i.e. only when the map's keys
+    # land exactly on the board's segment net names.  ``route`` resolves the
+    # map's keys onto board net names before use; ``check`` historically did
+    # NOT.  A hand-authored ``--net-class-map`` (bare keys, or keys lacking
+    # KiCad's hierarchical ``/`` sheet prefix) therefore matched ZERO
+    # segments, so ``derive_ampacity_specs`` produced specs that never fired
+    # -> 0 errors -> a silent false PASS on a dangerously under-width
+    # high-current trace.  After resolution the ampacity verdict is a pure
+    # function of ``(board segments, resolved map, DesignRules copper
+    # weights)`` and no longer depends on how the board was produced (route
+    # mode / ``.kicad_dru`` presence).  This applies to both the explicit
+    # ``--net-class-map`` path and the auto-discovered route sidecar (whose
+    # keys are already board-resolved, so re-resolution is idempotent).
+    declared_ampacity_targets: dict[str, float] = {}
+    ampacity_resolution = None
+    if net_class_map is not None:
+        from kicad_tools.router.net_names import resolve_net_class_map_keys
+
+        for key, nc in net_class_map.items():
+            target = getattr(nc, "target_ampacity", None)
+            if target is not None:
+                declared_ampacity_targets[key] = float(target)
+        board_net_names = [net.name for net in pcb.nets.values() if net.name]
+        ampacity_resolution = resolve_net_class_map_keys(net_class_map.keys(), board_net_names)
+        net_class_map = {
+            board_net: net_class_map[user_key]
+            for board_net, user_key in ampacity_resolution.resolved.items()
+        }
+
     # Create checker with manufacturer rules
     try:
         checker = DRCChecker(
@@ -1155,6 +1259,23 @@ def main(argv: list[str] | None = None) -> int:
         pad_grid_threshold=pad_grid_threshold,
         pad_grid_auto_derive=pad_grid_auto_derive,
     )
+
+    # Issue #4321 (Tier 3): fail loud when an ampacity target was declared
+    # but never evaluated.  A declared ``target_ampacity`` that matched zero
+    # segments is indistinguishable, in the report, from "genuinely 0
+    # violations" -- yet it usually means the rule never engaged: a
+    # post-resolution key miss, an unrouted net, or the ``ampacity`` category
+    # excluded via ``--skip``/``--only``.  Emit a loud stderr warning naming
+    # the net(s) so a hand-authored map that silently fails to match cannot
+    # sail through green (mirrors the INACTIVE-skew-rules warning above).
+    if declared_ampacity_targets and ampacity_resolution is not None:
+        _warn_unevaluated_ampacity(
+            declared_ampacity_targets,
+            ampacity_resolution,
+            pcb,
+            only_set,
+            skip_set,
+        )
 
     # Apply errors-only filter
     violations = list(results.violations)
