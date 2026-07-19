@@ -149,6 +149,29 @@ def _branched_run_pcb(net: str = "FUSED_LINE") -> PCB:
     return pcb
 
 
+def _fragmented_straight_pcb(net: str = "FUSED_LINE", pieces: int = 12) -> PCB:
+    """A single straight run expressed as many short collinear fragments.
+
+    Emulates lattice/octilinear output where a straight branch is a chain of
+    many short degree-2 collinear segments. The junction-aware chainer walks
+    them into ONE run but leaves them as ``pieces`` separate segments; the
+    tier-3 collinear merge coalesces them for reporting.
+    """
+    pcb = PCB.create(width=200, height=100, center=False)
+    x0, y = 20.0, 50.0
+    length = 96.0
+    step = length / pieces
+    for i in range(pieces):
+        pcb.add_trace(
+            (x0 + i * step, y),
+            (x0 + (i + 1) * step, y),
+            width=2.0,
+            layer="F.Cu",
+            net=net,
+        )
+    return pcb
+
+
 def _net_segments(pcb: PCB, net_name: str) -> list[Segment]:
     """Return segments for ``net_name`` (``add_trace`` leaves seg net_name empty)."""
     net_obj = pcb.get_net_by_name(net_name)
@@ -307,22 +330,47 @@ class TestReinforceNet:
 
 
 class TestClearanceRefuse:
-    def test_refuses_anchor_on_foreign_net_drill(self):
-        """A foreign-net through-hole pad where an anchor would land is refused."""
+    def test_nudges_off_foreign_net_drill_then_places(self):
+        """A foreign-net pad where an anchor would land triggers a bounded nudge.
+
+        Tier-2 (#4319): rather than immediately refusing, the pass searches a
+        short distance along the run's arc-length axis and places the first
+        clear position. With ample clear copper on either side of the lone
+        foreign pad, the anchor is placed at a nudged spot -- NOT on the pad,
+        and NOT refused.
+        """
         pcb = _straight_run_pcb(length=100.0)
-        # An anchor lands at x=35 (arc-length 15 from x0=20). Drop a foreign
-        # through-hole pad right there so the hole-to-hole / clearance check
-        # must refuse it.
+        # An anchor lands at x=35 (arc-length 15 from x0=20). Drop a lone
+        # foreign through-hole pad right there.
         _add_th_pad_footprint(pcb, ref="TP1", x=35.0, y=50.0, net="OTHER", drill=1.0, size=2.0)
 
         result = reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0)
 
-        assert result.refused_count >= 1
-        # The refused anchor is at/near the foreign pad, and NOT placed there.
-        refused_pts = [(r.x, r.y) for r in result.refused]
-        assert any(abs(rx - 35.0) < 0.5 and abs(ry - 50.0) < 0.5 for rx, ry in refused_pts)
+        # Nudge found clear space, so nothing was refused ...
+        assert result.refused_count == 0
         placed_pts = [(a.x, a.y) for a in result.placed]
-        assert not any(abs(px - 35.0) < 0.5 and abs(py - 50.0) < 0.5 for px, py in placed_pts)
+        # ... no anchor sits on/near the foreign pad ...
+        assert not any(abs(px - 35.0) < 2.0 and abs(py - 50.0) < 2.0 for px, py in placed_pts)
+        # ... but an anchor was placed at a nudged position near it (within the
+        # +/- spacing/2 search window).
+        assert any(35.0 < px <= 42.5 and abs(py - 50.0) < 1e-6 for px, py in placed_pts)
+
+    def test_hard_blocked_position_still_refuses(self):
+        """A position blocked across the entire nudge window is still refused."""
+        pcb = _straight_run_pcb(length=100.0)
+        # A wide foreign track spanning the whole +/- spacing/2 window around
+        # the x=35 anchor: every nudge candidate collides -> hard refusal.
+        pcb.add_trace((27, 50), (43, 50), width=3.0, layer="F.Cu", net="OTHER")
+
+        result = reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0)
+
+        assert result.refused_count >= 1
+        refused_pts = [(r.x, r.y) for r in result.refused]
+        # The refusal is recorded at the blocked base position (x=35).
+        assert any(abs(rx - 35.0) < 0.5 and abs(ry - 50.0) < 0.5 for rx, ry in refused_pts)
+        # And no anchor was placed inside the blocked span.
+        placed_pts = [(a.x, a.y) for a in result.placed]
+        assert not any(27.0 <= px <= 43.0 and abs(py - 50.0) < 1e-6 for px, py in placed_pts)
 
     def test_same_net_pad_does_not_refuse(self):
         """A pad on the SAME net does not trigger a refusal."""
@@ -528,3 +576,169 @@ class TestReinforceCLI:
         assert args.net == "FUSED_LINE"
         assert args.wire_gauge == 16
         assert args.spacing == 15.0
+        # New flags default to backward-compatible values (#4319).
+        assert args.all_runs is False
+        assert args.min_run_length is None
+
+    def test_parser_accepts_all_runs_and_min_run_length(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "pcb",
+                "reinforce",
+                "board.kicad_pcb",
+                "--net",
+                "FUSED_LINE",
+                "--all-runs",
+                "--min-run-length",
+                "25.5",
+            ]
+        )
+        assert args.all_runs is True
+        assert args.min_run_length == pytest.approx(25.5)
+
+    def test_cli_all_runs_json_is_additive_superset(self, tmp_path, capsys):
+        """`--all-runs --format json` keeps legacy keys and adds per-run detail."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        _branched_run_pcb().save(pcb_path)
+
+        rc = run_pcb_command(_reinforce_args(pcb_path, format="json", all_runs=True))
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+
+        # Legacy keys still present (AC-12: additive only).
+        for key in (
+            "run_segment_count",
+            "run_length_mm",
+            "unhandled_runs",
+            "anchors_placed",
+            "anchors_refused",
+            "refused",
+        ):
+            assert key in data
+        # New additive per-run keys.
+        assert data["all_runs"] is True
+        assert data["runs_total"] == 3
+        assert isinstance(data["runs"], list) and len(data["runs"]) == 3
+        for rs in data["runs"]:
+            assert {
+                "run_index",
+                "length_mm",
+                "segment_count",
+                "anchors_needed",
+                "anchors_placed",
+                "anchors_refused",
+            } <= set(rs)
+        # An agent can read "N of M runs reinforced" programmatically.
+        assert data["runs_fully_reinforced"] >= 2
+
+
+class TestAllRunsAnchoring:
+    def test_default_mode_anchors_only_longest_run(self):
+        pcb = _branched_run_pcb()
+        result = reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0)
+        # Three runs reported; only the longest (west, 80mm) is anchored.
+        assert len(result.runs) == 3
+        anchored = [r for r in result.runs if r.anchors_placed > 0]
+        assert len(anchored) == 1
+        # Every placed anchor lies on the west arm (x<=100, y==50).
+        assert all(a.x <= 100.0 + 1e-6 and abs(a.y - 50.0) < 1e-6 for a in result.placed)
+        assert result.unhandled_runs == 2
+
+    def test_all_runs_anchors_every_branch(self):
+        pcb = _branched_run_pcb()
+        default = reinforce_net(_branched_run_pcb(), "FUSED_LINE", spacing_mm=15.0)
+        result = reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0, all_runs=True)
+
+        # Anchors now land on >=2 distinct runs (the pre-fix code placed on
+        # exactly one). East arm (x>100) and branch (y>50) both anchored.
+        assert any(a.x > 100.0 + 1e-6 for a in result.placed)
+        assert any(a.y > 50.0 + 1e-6 for a in result.placed)
+        anchored_runs = [r for r in result.runs if r.anchors_placed > 0]
+        assert len(anchored_runs) >= 2
+        # Strictly more coverage than default single-longest-run mode.
+        assert result.placed_count > default.placed_count
+        assert result.unhandled_runs == 0
+        assert result.runs_fully_reinforced == 3
+
+    def test_all_runs_dedupes_shared_junction_vertex(self):
+        """The junction vertex shared by all three arms is anchored exactly once."""
+        pcb = _branched_run_pcb()
+        result = reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0, all_runs=True)
+        junction_hits = [
+            a for a in result.placed if abs(a.x - 100.0) < 1e-6 and abs(a.y - 50.0) < 1e-6
+        ]
+        assert len(junction_hits) == 1
+
+    def test_all_runs_idempotent_second_run_adds_no_new_vias(self):
+        pcb = _branched_run_pcb()
+        reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0, all_runs=True)
+        after_first = len(pcb.vias)
+        reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0, all_runs=True)
+        assert len(pcb.vias) == after_first
+
+    def test_min_run_length_filters_short_runs_but_reports_them(self):
+        pcb = _branched_run_pcb()
+        # Threshold 30mm: west (80) and east (50) anchored; branch (20) filtered.
+        result = reinforce_net(
+            pcb, "FUSED_LINE", spacing_mm=15.0, all_runs=True, min_run_length_mm=30.0
+        )
+        # All three runs are still reported (never silently dropped).
+        assert len(result.runs) == 3
+        # The 20mm branch (goes up to y=70) is NOT anchored.
+        assert not any(a.y > 50.0 + 1e-6 for a in result.placed)
+        short = [r for r in result.runs if r.length_mm < 30.0]
+        assert len(short) == 1
+        assert short[0].anchors_placed == 0
+        assert short[0].anchors_needed > 0
+        assert result.unhandled_runs == 1
+
+    def test_all_runs_below_threshold_places_nothing_without_error(self):
+        pcb = _branched_run_pcb()
+        result = reinforce_net(
+            pcb, "FUSED_LINE", spacing_mm=15.0, all_runs=True, min_run_length_mm=500.0
+        )
+        assert result.placed_count == 0
+        assert len(result.runs) == 3
+        assert result.run_segment_count == 0
+        assert result.unhandled_runs == 3
+
+
+class TestCollinearMergeReporting:
+    def test_raw_chain_keeps_fragments_but_report_merges(self):
+        pcb = _fragmented_straight_pcb(pieces=12)
+        segs = _net_segments(pcb, "FUSED_LINE")
+        raw_run = _chain_polylines(segs)[0]
+        # sort_into_chains walks the fragments into ONE run but keeps them as
+        # 12 separate segments ...
+        assert len(raw_run) == 12
+
+        result = reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0)
+        # ... while the reinforce report coalesces them to a single geometric
+        # segment (materially lower count).
+        assert result.run_segment_count == 1
+        assert result.runs[0].segment_count == 1
+
+    def test_anchor_positions_unchanged_by_merge(self):
+        pcb = _fragmented_straight_pcb(pieces=12)
+        segs = _net_segments(pcb, "FUSED_LINE")
+        raw_run = _chain_polylines(segs)[0]
+        raw_points = [raw_run[0].start] + [s.end for s in raw_run]
+        expected = _anchor_positions(raw_points, 15.0)
+
+        result = reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0)
+        placed = sorted((round(a.x, 6), round(a.y, 6)) for a in result.placed)
+        exp = sorted((round(x, 6), round(y, 6)) for x, y in expected)
+        # Merge changes reporting, not anchor coverage.
+        assert placed == exp
+
+    def test_merge_does_not_bridge_junctions(self):
+        """Collinear merge must not merge across a degree-3 junction (#2389)."""
+        pcb = _branched_run_pcb()
+        result = reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0, all_runs=True)
+        # Still three distinct runs after merge -- the junction is never bridged.
+        assert len(result.runs) == 3

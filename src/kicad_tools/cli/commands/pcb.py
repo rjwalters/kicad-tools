@@ -477,6 +477,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     wire_gauge = getattr(args, "wire_gauge", 16)
     spacing = getattr(args, "spacing", 15.0)
     layer = getattr(args, "layer", None)
+    all_runs = getattr(args, "all_runs", False)
+    min_run_length = getattr(args, "min_run_length", None)
     dry_run = getattr(args, "dry_run", False)
     output_format = getattr(args, "format", "text")
     output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
@@ -495,6 +497,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             spacing_mm=spacing,
             layer=layer,
             dry_run=dry_run,
+            all_runs=all_runs,
+            min_run_length_mm=min_run_length,
         )
     except ReinforceError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -517,6 +521,25 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         "anchors_refused": outcome.refused_count,
         "refused": [
             {"x": round(r.x, 4), "y": round(r.y, 4), "reason": r.reason} for r in outcome.refused
+        ],
+        # Additive per-run accounting (#4319): existing keys above are
+        # unchanged so current agent consumers keep working.
+        "all_runs": all_runs,
+        "min_run_length_mm": min_run_length,
+        "runs_total": len(outcome.runs),
+        "runs_fully_reinforced": outcome.runs_fully_reinforced,
+        "runs_partial": outcome.runs_partial,
+        "runs_unanchored": outcome.runs_unanchored,
+        "runs": [
+            {
+                "run_index": rs.run_index,
+                "length_mm": round(rs.length_mm, 4),
+                "segment_count": rs.segment_count,
+                "anchors_needed": rs.anchors_needed,
+                "anchors_placed": rs.anchors_placed,
+                "anchors_refused": rs.anchors_refused,
+            }
+            for rs in outcome.runs
         ],
     }
 
@@ -543,6 +566,32 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             print(
                 f"  Unhandled runs: {outcome.unhandled_runs} "
                 "(branch/disconnected run(s) on this net NOT anchored)"
+            )
+        print()
+        print(
+            f"  Runs: {len(outcome.runs)} total -- "
+            f"{outcome.runs_fully_reinforced} fully reinforced, "
+            f"{outcome.runs_partial} partial, "
+            f"{outcome.runs_unanchored} unanchored"
+        )
+        if not all_runs and len(outcome.runs) > 1:
+            print(
+                "        (default anchors only the longest run; pass "
+                "--all-runs to anchor every branch)"
+            )
+        for rs in outcome.runs:
+            if rs.fully_reinforced:
+                state = "full"
+            elif rs.partial:
+                state = "partial"
+            else:
+                state = "none"
+            print(
+                f"    run {rs.run_index}: {rs.length_mm:.1f} mm, "
+                f"{rs.segment_count} seg -- {rs.anchors_placed}/{rs.anchors_needed} "
+                f"anchored"
+                + (f", {rs.anchors_refused} refused" if rs.anchors_refused else "")
+                + f" [{state}]"
             )
         print()
         print(f"  Anchors placed:  {outcome.placed_count}")
