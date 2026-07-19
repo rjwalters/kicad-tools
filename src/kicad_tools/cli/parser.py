@@ -1650,6 +1650,22 @@ def _add_pcb_parser(subparsers) -> None:
         "cumulative routed length for the net)",
     )
     pcb_reinforce.add_argument(
+        "--all-runs",
+        dest="all_runs",
+        action="store_true",
+        help="Anchor EVERY chained run on the target layer (multi-branch HV "
+        "nets), not just the single longest run. Default anchors only the "
+        "longest run.",
+    )
+    pcb_reinforce.add_argument(
+        "--min-run-length",
+        dest="min_run_length",
+        type=float,
+        default=None,
+        help="Only anchor runs at least this long, in mm. Shorter runs are "
+        "reported but not anchored. Composes with --all-runs.",
+    )
+    pcb_reinforce.add_argument(
         "-o",
         "--output",
         dest="output",
