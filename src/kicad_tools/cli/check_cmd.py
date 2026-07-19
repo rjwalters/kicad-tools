@@ -68,7 +68,24 @@ _MEASUREMENT_RULE_IDS: frozenset[str] = frozenset(
 # ``nets[0] == nets[1]`` would mislabel two *distinct* floating pins as
 # ``same-net``.  Floating pins share no electrical identity, so any pair
 # involving a floating endpoint is ``different-net``.
-_NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset({"dimension_drill_clearance"})
+# Issue #4318: the copper-copper clearance rules carry the same
+# ``nets=(net_a, net_b)`` pair (set in ``_create_violation``,
+# ``validate/rules/clearance.py``), so an agent reading a ``clearance_segment_via``
+# report needs the same same-net / different-net split ``dimension_drill_clearance``
+# already gets -- a different-net 0.000mm coincidence is a genuine short to
+# prioritize, while a same-net coincidence is a lower-risk (still-defective)
+# malformed-copper artifact.  The classifier (``_net_relationship`` /
+# ``_is_floating_net``) is floating-aware, so a floating (``net:0``) endpoint in a
+# segment-via pair classifies as ``different-net`` (#4127) with no extra work.
+_NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset(
+    {
+        "dimension_drill_clearance",
+        "clearance_segment_via",
+        "clearance_segment_segment",
+        "clearance_via_via",
+        "clearance_pad_via",
+    }
+)
 
 
 def _is_floating_net(net: str) -> bool:

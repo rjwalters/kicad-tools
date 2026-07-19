@@ -52,7 +52,7 @@ from ..quantize import dogleg_points
 from ..rules import DesignRules
 from .coupled import CoupledConnection
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
-from .obstacles import CommittedCopper, LatticeObstacleModel
+from .obstacles import CommittedCopper, LatticeObstacleModel, seg_body_crosses_pt
 from .quadtree import EdgeKey, NodeKey, OctilinearLattice, RefineRegion
 
 # A negotiation connection: (opaque hashable key, start pad, end pad, net_class)
@@ -1455,6 +1455,38 @@ class LatticePathfinder:
 
     # -- multi-net negotiation ------------------------------------------------
 
+    def _self_drc_reason(self, result: _RouteResult) -> str | None:
+        """Final self-DRC gate over ONE net's freshly emitted geometry (#4318).
+
+        The per-move A* predicates (:meth:`CommittedCopper.seg_clear` /
+        :meth:`via_clear`) validate each new segment / via against the
+        *committed* model -- copper that is already placed, and (within a pass)
+        almost always foreign-net.  A net's own via and its own octilinear
+        segments, however, are emitted together and are never cross-checked
+        against one another: nothing rejects a segment whose body runs across
+        THIS net's own via center.  That is a 0.000mm segment-to-via
+        coincidence -- malformed copper the downstream ``kct check`` DRC cannot
+        nudge away (and, being same-net, would not even surface, yet is still a
+        manufacturing defect).
+
+        Reuse the same body-vs-endpoint predicate the tightened committed-copper
+        model uses (:func:`seg_body_crosses_pt`) so the router's accept gate and
+        the checker agree by construction.  Returns a decline reason string when
+        the route is malformed (flowing into the lattice ``decline[...]``
+        census), or ``None`` when it is clean.  The legitimate in-pad-escape
+        endpoint-at-via-center invariant (#2706) is exempt by construction.
+        """
+        if not result.via_points:
+            return None
+        for _layer_idx, points, _widths in result.runs:
+            for a, b in zip(points, points[1:], strict=False):
+                if dist(a, b) <= 1e-9:
+                    continue
+                for via_pt in result.via_points:
+                    if seg_body_crosses_pt(a, b, via_pt):
+                        return "self-drc-segment-via-coincident"
+        return None
+
     def route_netset(
         self,
         connections: list[Connection],
@@ -1555,6 +1587,15 @@ class LatticePathfinder:
                 )
                 if result is None:
                     reasons[key] = reason
+                    failed.append((kind, item))
+                    continue
+                # Final self-DRC gate (#4318): a route whose own segment body
+                # runs across its own via center is malformed copper the
+                # checker cannot repair -- decline it honestly rather than
+                # ship a 0.000mm segment-to-via coincidence.
+                self_reason = self._self_drc_reason(result)
+                if self_reason is not None:
+                    reasons[key] = self_reason
                     failed.append((kind, item))
                     continue
                 routed_items += 1

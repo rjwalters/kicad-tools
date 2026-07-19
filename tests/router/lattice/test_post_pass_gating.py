@@ -66,6 +66,91 @@ def test_quiet_suppresses_skip_notice(engine: str, capsys: pytest.CaptureFixture
 
 
 # ---------------------------------------------------------------------------
+# #4318: --lattice-optimize opt-in flips the gate for non-grid engines.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("engine", ["lattice", "mesh"])
+def test_lattice_optimize_flag_enables_post_passes(
+    engine: str, capsys: pytest.CaptureFixture
+) -> None:
+    args = argparse.Namespace(route_engine=engine, lattice_optimize=True)
+    assert _engine_post_passes_enabled(args) is True
+    out = capsys.readouterr().out
+    assert "--lattice-optimize" in out
+    assert engine in out
+    assert "#4318" in out
+
+
+@pytest.mark.parametrize("engine", ["lattice", "mesh"])
+def test_lattice_optimize_absent_preserves_skip(engine: str, capsys: pytest.CaptureFixture) -> None:
+    # Flag explicitly False (as argparse store_true yields) == the #4281 skip:
+    # the byte-identical-output guarantee for a plain --route-engine run.
+    args = argparse.Namespace(route_engine=engine, lattice_optimize=False)
+    assert _engine_post_passes_enabled(args) is False
+    assert "Skipping optimize/nudge post-passes" in capsys.readouterr().out
+
+
+def test_lattice_optimize_flag_ignored_for_grid(capsys: pytest.CaptureFixture) -> None:
+    # Grid always runs the passes and stays silent; the flag adds no notice.
+    args = argparse.Namespace(route_engine="grid", lattice_optimize=True)
+    assert _engine_post_passes_enabled(args) is True
+    assert capsys.readouterr().out == ""
+
+
+def test_lattice_optimize_quiet_suppresses_optin_notice(capsys: pytest.CaptureFixture) -> None:
+    args = argparse.Namespace(route_engine="lattice", lattice_optimize=True)
+    assert _engine_post_passes_enabled(args, quiet=True) is True
+    assert capsys.readouterr().out == ""
+
+
+def test_mark_nongrid_routes_noop_without_flag() -> None:
+    """The grid-marking helper is inert unless engine is non-grid AND flag set."""
+    from kicad_tools.cli.route_cmd import _mark_nongrid_routes_for_post_pass
+
+    class _Router:
+        def __init__(self) -> None:
+            self.routes = [object(), object()]
+            self.marked: list[object] = []
+
+        def _mark_route(self, route: object) -> None:  # pragma: no cover - guarded off
+            self.marked.append(route)
+
+    # grid engine: no-op regardless of flag.
+    r = _Router()
+    _mark_nongrid_routes_for_post_pass(
+        r, argparse.Namespace(route_engine="grid", lattice_optimize=True), quiet=True
+    )
+    assert r.marked == []
+
+    # lattice, flag absent: no-op (byte-identical default path).
+    r = _Router()
+    _mark_nongrid_routes_for_post_pass(
+        r, argparse.Namespace(route_engine="lattice", lattice_optimize=False), quiet=True
+    )
+    assert r.marked == []
+
+
+def test_mark_nongrid_routes_marks_when_opted_in() -> None:
+    """With --lattice-optimize the committed lattice routes are marked into the grid."""
+    from kicad_tools.cli.route_cmd import _mark_nongrid_routes_for_post_pass
+
+    class _Router:
+        def __init__(self) -> None:
+            self.routes = [object(), object(), object()]
+            self.marked: list[object] = []
+
+        def _mark_route(self, route: object) -> None:
+            self.marked.append(route)
+
+    r = _Router()
+    _mark_nongrid_routes_for_post_pass(
+        r, argparse.Namespace(route_engine="lattice", lattice_optimize=True), quiet=True
+    )
+    assert r.marked == r.routes
+
+
+# ---------------------------------------------------------------------------
 # CLI tail integration: lattice copper never reaches optimize/nudge; the
 # unconditional #4208 backstop finds nothing to demote (board 02 is 8/8).
 # ---------------------------------------------------------------------------
@@ -137,6 +222,56 @@ def test_cli_lattice_skips_both_passes_and_demotes_nothing(
     assert "Skipping optimize/nudge post-passes for --route-engine lattice" in out
     # The unconditional #4208 backstop ran and found nothing to demote
     # (pre-fix: 'Post-optimize backstop demoted 1 net(s) ...' -> 7/8).
+    assert "Post-optimize backstop demoted" not in out
+    assert "Nets routed:     8/8" in out
+    assert out_pcb.exists()
+
+
+def test_cli_lattice_optimize_runs_passes_without_demotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """#4318 AC T2: ``--lattice-optimize`` runs the post-passes on lattice copper.
+
+    The opt-in must (a) actually run BOTH geometric passes on the non-grid
+    copper (the #4281 skip is lifted), (b) first mark the committed lattice
+    routes into the grid so the optimizer's collision checker is not blind, and
+    (c) NOT trigger the #3989/#4208 backstop demotion -- board-02 stays 8/8 with
+    no completion loss (the exact regression the marking prevents).
+    """
+    from kicad_tools.cli import route_cmd
+
+    calls = _spy_post_passes(monkeypatch)
+    out_pcb = tmp_path / "routed.kicad_pcb"
+    rc = route_cmd.main(
+        [
+            str(_CHARLIEPLEX),
+            "--route-engine",
+            "lattice",
+            "--strategy",
+            "basic",
+            "--seed",
+            "42",
+            "--lattice-optimize",
+            "--skip-drc",
+            "-o",
+            str(out_pcb),
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    # Both passes ran (the opt-in lifted the #4281 skip).
+    assert calls["optimize"] >= 1, "--lattice-optimize must run the optimizer on lattice copper"
+    assert calls["nudge"] >= 1, "--lattice-optimize must run the DRC nudge on lattice copper"
+    assert "--lattice-optimize: running optimize/nudge post-passes" in out
+    # The committed lattice routes were marked into the grid obstacle model so
+    # the collision checker is not blind (the #4281 root cause).
+    assert "marked" in out and "into the grid obstacle model" in out
+    assert "Skipping optimize/nudge post-passes" not in out
+    # No backstop demotion: completion is preserved (8/8), NOT a cross-net short
+    # demoted to a completion loss.
     assert "Post-optimize backstop demoted" not in out
     assert "Nets routed:     8/8" in out
     assert out_pcb.exists()

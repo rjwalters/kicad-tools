@@ -38,6 +38,31 @@ from .quadtree import EdgeKey, NodeKey, OctilinearLattice
 
 _BUCKET = 4.0  # mm; pad-lookup acceleration grid
 
+# Manufacturing co-location epsilon (matches ``_COLOCATION_EPSILON_MM`` in
+# ``validate/rules/clearance.py``).  A segment ENDPOINT coincident with a via
+# center within this distance is the legitimate in-pad-escape router invariant
+# (#2706) and is NOT a defect.  A segment whose INTERIOR (body) crosses a via
+# center *is* malformed copper: for different-net pairs the DRC checker flags
+# it at 0.000mm, and for same-net pairs it is an octilinear segment running
+# across an unrelated via node that no nudge post-pass can clean (issue #4318).
+_COLOCATION_EPSILON_MM = 1e-4
+
+
+def seg_body_crosses_pt(a: Pt, b: Pt, p: Pt, eps: float = _COLOCATION_EPSILON_MM) -> bool:
+    """True iff ``p`` coincides with segment ``a-b``'s INTERIOR, not an endpoint.
+
+    Distinguishes the malformed "segment body crosses a via center" case
+    (rejected) from the legitimate in-pad-escape endpoint-at-via-center
+    invariant (#2706, permitted).  ``p`` counts as a body crossing only when it
+    is within ``eps`` of the segment yet farther than ``eps`` from BOTH
+    endpoints -- so a via tapped at a segment endpoint (the router invariant) is
+    never treated as malformed, while a via center the segment merely runs over
+    mid-span is.  See issue #4318.
+    """
+    if seg_pt_dist(a, b, p) >= eps:
+        return False
+    return dist(a, p) >= eps and dist(b, p) >= eps
+
 
 class LatticeObstacleModel:
     """Static per-layer pad masks over a built lattice (built once per board).
@@ -252,7 +277,17 @@ class CommittedCopper:
                 return False
         via_gap = self.via_radius + own_clr + own_half
         for point, vnet in self.vias:
-            if vnet != net and seg_pt_dist(a, b, point) < via_gap - 1e-9:
+            if vnet != net:
+                if seg_pt_dist(a, b, point) < via_gap - 1e-9:
+                    return False
+            elif seg_body_crosses_pt(a, b, point):
+                # Same-net octilinear segment whose BODY runs across a same-net
+                # via center is malformed lattice copper (#4318).  The DRC
+                # checker skips same-net pairs, so this coincidence would never
+                # surface downstream and no nudge post-pass could clean it --
+                # the negotiator must simply not emit it.  The legal
+                # endpoint-at-via-center in-pad invariant (#2706) is preserved
+                # by ``seg_body_crosses_pt``'s endpoint exemption.
                 return False
         return True
 

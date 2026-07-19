@@ -496,6 +496,11 @@ def run_route_command(args) -> int:
     # (grid) run stays byte-identical to the pre-mesh sub-invocation.
     if getattr(args, "route_engine", "grid") != "grid":
         sub_argv.extend(["--route-engine", args.route_engine])
+    # Issue #4318: forward --lattice-optimize (opt-in geometric post-passes on
+    # non-grid copper).  Both parsers declare it as store_true defaulting to
+    # False, so only forward when the user set it -- flag-off is byte-identical.
+    if getattr(args, "lattice_optimize", False):
+        sub_argv.append("--lattice-optimize")
     # Issue #2589: forward --seed for deterministic runs.  Default is None
     # (router uses os.urandom-derived state, existing behaviour).
     if getattr(args, "seed", None) is not None:

@@ -1135,3 +1135,104 @@ class TestDrillClearanceNetRelationship:
         output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 2, False)
         out = capsys.readouterr().out
         assert "dimension_drill_clearance: 3 errors (2 different-net, 1 same-net)" in out
+
+
+class TestClearanceSegmentViaNetRelationship:
+    """Issue #4318: same-net / different-net split for copper-copper clearance.
+
+    ``clearance_segment_via`` (and the sibling ``clearance_segment_segment`` /
+    ``clearance_via_via`` / ``clearance_pad_via`` rules) already carry
+    ``nets=(net_a, net_b)`` (set in ``_create_violation``,
+    ``validate/rules/clearance.py``), also serialized in ``--format json``.
+    Adding them to ``_NET_RELATIONSHIP_RULE_IDS`` gives them the same
+    presentational split ``dimension_drill_clearance`` gets: a per-finding
+    qualifier + unconditional ``Nets:`` line and a ``BY RULE`` sub-count.  An
+    agent can then triage a genuine different-net short ahead of a lower-risk
+    same-net coincidence.  Presentational only; severity is unchanged.
+    """
+
+    @staticmethod
+    def _violation(nets, rule_id="clearance_segment_via", severity="error"):
+        from kicad_tools.validate import DRCViolation
+
+        return DRCViolation(
+            rule_id=rule_id,
+            severity=severity,
+            message="Segment to via clearance 0.000mm < minimum 0.200mm",
+            location=(10.0, 20.0),
+            layer="F.Cu",
+            actual_value=0.0,
+            required_value=0.200,
+            items=("seg-1", "via-1"),
+            nets=tuple(nets),
+        )
+
+    def test_rule_ids_registered(self):
+        from kicad_tools.cli.check_cmd import _NET_RELATIONSHIP_RULE_IDS
+
+        for rid in (
+            "clearance_segment_via",
+            "clearance_segment_segment",
+            "clearance_via_via",
+            "clearance_pad_via",
+        ):
+            assert rid in _NET_RELATIONSHIP_RULE_IDS
+
+    def test_different_net_header_and_nets_default(self, capsys):
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        _print_violation(self._violation(("SIG1", "SIG2")), verbose=False)
+        out = capsys.readouterr().out
+        assert "clearance_segment_via (different-net)" in out
+        assert "Nets: SIG1 / SIG2" in out
+
+    def test_same_net_header_and_nets_default(self, capsys):
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        _print_violation(self._violation(("SIG1", "SIG1")), verbose=False)
+        out = capsys.readouterr().out
+        assert "clearance_segment_via (same-net)" in out
+        assert "Nets: SIG1 / SIG1" in out
+
+    def test_floating_endpoint_is_different_net(self, capsys):
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        # A floating (net:0) endpoint in a segment-via pair classifies as
+        # different-net (#4127) -- never same-net.
+        _print_violation(self._violation(("net:0", "SIG1")), verbose=False)
+        out = capsys.readouterr().out
+        assert "clearance_segment_via (different-net)" in out
+
+    def test_by_rule_summary_split(self, capsys):
+        from pathlib import Path
+
+        from kicad_tools.cli.check_cmd import output_table
+        from kicad_tools.validate import DRCResults
+
+        results = DRCResults()
+        violations = [
+            self._violation(("SIG1", "SIG2")),  # different-net
+            self._violation(("SIG3", "SIG4")),  # different-net
+            self._violation(("SIG1", "SIG1")),  # same-net
+        ]
+        for v in violations:
+            results.add(v)
+        results.rules_checked = 1
+
+        output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 2, False)
+        out = capsys.readouterr().out
+        assert "clearance_segment_via: 3 errors (2 different-net, 1 same-net)" in out
+
+    def test_json_still_carries_nets(self):
+        # AC T3: --format json must keep the nets pair (no schema regression).
+        v = self._violation(("SIG1", "SIG2"))
+        d = v.to_dict()
+        assert d["nets"] == ["SIG1", "SIG2"]
+
+    def test_sibling_rules_also_split(self, capsys):
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        for rid in ("clearance_segment_segment", "clearance_via_via", "clearance_pad_via"):
+            _print_violation(self._violation(("A", "B"), rule_id=rid), verbose=False)
+            out = capsys.readouterr().out
+            assert f"{rid} (different-net)" in out

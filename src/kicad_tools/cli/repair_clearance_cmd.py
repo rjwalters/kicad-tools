@@ -410,6 +410,21 @@ def _print_text(
         print(f"{unrepaired} violation(s) require manual repair")
         if result.skipped_exceeds_max > 0:
             print(f"  Try increasing --max-displacement (currently {max_displacement}mm)")
+        if result.skipped_infeasible > 0:
+            # Issue #4318: a coincident (0.000mm) segment-body-crosses-via
+            # overlap -- the malformed copper a lattice run could leave behind --
+            # is NOT a displacement-nudge fix: translating the segment just
+            # slides the crossing or shorts a neighbour (that is how raising
+            # --max-displacement regressed 33 -> 34 on the softstart repro).
+            # Steer the operator to the right remedy instead of the dead-end
+            # knob.  (Tier 1 now declines such copper at the source, so a fresh
+            # 'kct route --route-engine lattice' run does not emit it.)
+            print(
+                "  Coincident (0.000mm) copper cannot be nudged apart -- raising "
+                "--max-displacement will not help.  Re-route the offending net "
+                "(dogleg/split off the via center); a fresh 'kct route "
+                "--route-engine lattice' run declines such copper (#4318)."
+            )
 
 
 def _print_nudge(nudge: NudgeResult) -> None:
