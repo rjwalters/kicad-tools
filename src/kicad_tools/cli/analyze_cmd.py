@@ -245,6 +245,61 @@ def main(argv: list[str] | None = None) -> int:
         help="Suppress informational output",
     )
 
+    # Current-sense subcommand
+    current_sense_parser = subparsers.add_parser(
+        "current-sense",
+        help="Analyze sense-net vs. high-current-net parallel coupling",
+        description=(
+            "Flag sense/analog nets that run parallel and close to "
+            "high-current/switching nets on the same layer (advisory)"
+        ),
+    )
+    current_sense_parser.add_argument(
+        "pcb",
+        help="PCB file to analyze (.kicad_pcb)",
+    )
+    current_sense_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    current_sense_parser.add_argument(
+        "--sense-net",
+        action="append",
+        dest="sense_nets",
+        default=[],
+        metavar="NAME",
+        help="Explicitly tag NAME as a sense net (repeatable)",
+    )
+    current_sense_parser.add_argument(
+        "--hicur-net",
+        action="append",
+        dest="hicur_nets",
+        default=[],
+        metavar="NAME",
+        help="Explicitly tag NAME as a high-current net (repeatable)",
+    )
+    current_sense_parser.add_argument(
+        "--max-parallel",
+        type=float,
+        default=10.0,
+        help="Parallel-run FAIL threshold in mm (default: 10.0)",
+    )
+    current_sense_parser.add_argument(
+        "--min-gap",
+        type=float,
+        default=0.5,
+        help="Edge-to-edge gap FAIL threshold in mm (default: 0.5)",
+    )
+    current_sense_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
     if argv is None:
         argv = sys.argv[1:]
 
@@ -268,6 +323,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "complexity":
         return _run_complexity_analysis(args)
+
+    if args.subcommand == "current-sense":
+        return _run_current_sense_analysis(args)
 
     return 0
 
@@ -1134,6 +1192,138 @@ def _output_complexity_text(report, filename: str, quiet: bool = False) -> None:
             console.print(f"  • {rec}")
 
         console.print()
+
+
+# ============================================================================
+# Current-Sense Analysis
+# ============================================================================
+
+
+def _run_current_sense_analysis(args: argparse.Namespace) -> int:
+    """Run current-sense / analog layout lint on a PCB.
+
+    Advisory: returns non-zero only when at least one sense net is FAIL, so
+    it can gate CI. File-not-found / load errors return 1.
+    """
+    from kicad_tools.analysis.current_sense import CurrentSenseAnalyzer
+
+    pcb_path = Path(args.pcb)
+
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if pcb_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    analyzer = CurrentSenseAnalyzer(
+        max_parallel_mm=args.max_parallel,
+        min_gap_mm=args.min_gap,
+        sense_nets=list(getattr(args, "sense_nets", []) or []),
+        hicur_nets=list(getattr(args, "hicur_nets", []) or []),
+    )
+    results = analyzer.analyze(pcb)
+
+    if args.format == "json":
+        _output_current_sense_json(results, args.max_parallel, args.min_gap)
+    else:
+        _output_current_sense_text(
+            results,
+            pcb_path.name,
+            args.max_parallel,
+            args.min_gap,
+            quiet=args.quiet,
+        )
+
+    # Non-zero exit when any sense net FAILs (CI-gateable).
+    if any(r.status == "FAIL" for r in results):
+        return 1
+    return 0
+
+
+def _output_current_sense_json(
+    results: list,
+    max_parallel_mm: float,
+    min_gap_mm: float,
+) -> None:
+    """Output current-sense census as JSON (mirrors signal-integrity JSON)."""
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    output = {
+        "census": [r.to_dict() for r in results],
+        "thresholds": {
+            "max_parallel_mm": max_parallel_mm,
+            "min_gap_mm": min_gap_mm,
+        },
+        "summary": {
+            "total": len(results),
+            "fail": fail_count,
+            "pass": len(results) - fail_count,
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+def _output_current_sense_text(
+    results: list,
+    filename: str,
+    max_parallel_mm: float,
+    min_gap_mm: float,
+    quiet: bool = False,
+) -> None:
+    """Output current-sense census as a formatted table."""
+    console = Console()
+
+    if not results:
+        if not quiet:
+            console.print(f"[green]No sense nets found in {filename}[/green]")
+        return
+
+    if not quiet:
+        console.print(f"\n[bold]Current-Sense Layout Lint: {filename}[/bold]")
+        console.print(
+            f"[dim]FAIL when parallel-run >= {max_parallel_mm:.2f}mm AND "
+            f"gap <= {min_gap_mm:.2f}mm (same layer)[/dim]\n"
+        )
+
+    table = Table(show_header=True)
+    table.add_column("sense_net", style="cyan")
+    table.add_column("nearest_hicur_net")
+    table.add_column("layer")
+    table.add_column("max_parallel_mm", justify="right")
+    table.add_column("min_gap_mm", justify="right")
+    table.add_column("status", justify="center")
+
+    for r in results:
+        status_style = "red bold" if r.status == "FAIL" else "green"
+        nearest = r.nearest_hicur_net if r.nearest_hicur_net is not None else "-"
+        layer = r.layer if r.layer is not None else "-"
+        gap_str = "-" if r.min_gap_mm is None else f"{r.min_gap_mm:.3f}"
+        table.add_row(
+            r.sense_net,
+            nearest,
+            layer,
+            f"{r.max_parallel_mm:.3f}",
+            gap_str,
+            f"[{status_style}]{r.status}[/{status_style}]",
+        )
+
+    console.print(table)
+
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    console.print()
+    summary_style = "red bold" if fail_count else "green"
+    console.print(
+        f"[{summary_style}]Total: {len(results)} sense nets, "
+        f"{fail_count} FAIL, {len(results) - fail_count} PASS[/{summary_style}]"
+    )
 
 
 if __name__ == "__main__":

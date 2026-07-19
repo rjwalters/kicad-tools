@@ -23,6 +23,10 @@ from .complexity import (
     RoutingComplexity,
 )
 from .congestion import CongestionAnalyzer, CongestionReport, Severity
+from .current_sense import (
+    CurrentSenseAnalyzer,
+    CurrentSenseResult,
+)
 from .net_status import (
     NetStatus,
     NetStatusAnalyzer,
@@ -59,6 +63,8 @@ __all__ = [
     "CongestionAnalyzer",
     "CongestionReport",
     "CrosstalkRisk",
+    "CurrentSenseAnalyzer",
+    "CurrentSenseResult",
     "DifferentialPairReport",
     "ImpedanceDiscontinuity",
     "LayerPrediction",
