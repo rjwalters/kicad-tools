@@ -7,7 +7,10 @@ def run_analyze_command(args) -> int:
     """Handle analyze command and its subcommands."""
     if not args.analyze_command:
         print("Usage: kicad-tools analyze <command> [options] <file>")
-        print("Commands: complexity, congestion, trace-lengths, signal-integrity, thermal")
+        print(
+            "Commands: complexity, congestion, trace-lengths, signal-integrity, "
+            "thermal, current-sense"
+        )
         return 1
 
     if args.analyze_command == "complexity":
@@ -24,6 +27,9 @@ def run_analyze_command(args) -> int:
 
     if args.analyze_command == "thermal":
         return _run_thermal_command(args)
+
+    if args.analyze_command == "current-sense":
+        return _run_current_sense_command(args)
 
     return 1
 
@@ -99,6 +105,28 @@ def _run_thermal_command(args) -> int:
         sub_argv.extend(["--cluster-radius", str(args.analyze_cluster_radius)])
     if getattr(args, "analyze_min_power", 0.05) != 0.05:
         sub_argv.extend(["--min-power", str(args.analyze_min_power)])
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+
+    return analyze_main(sub_argv)
+
+
+def _run_current_sense_command(args) -> int:
+    """Handle analyze current-sense command."""
+    from ..analyze_cmd import main as analyze_main
+
+    sub_argv = ["current-sense", args.pcb]
+
+    if getattr(args, "analyze_format", "text") != "text":
+        sub_argv.extend(["--format", args.analyze_format])
+    for name in getattr(args, "analyze_sense_nets", None) or []:
+        sub_argv.extend(["--sense-net", name])
+    for name in getattr(args, "analyze_hicur_nets", None) or []:
+        sub_argv.extend(["--hicur-net", name])
+    if getattr(args, "analyze_max_parallel", 10.0) != 10.0:
+        sub_argv.extend(["--max-parallel", str(args.analyze_max_parallel)])
+    if getattr(args, "analyze_min_gap", 0.5) != 0.5:
+        sub_argv.extend(["--min-gap", str(args.analyze_min_gap)])
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
 

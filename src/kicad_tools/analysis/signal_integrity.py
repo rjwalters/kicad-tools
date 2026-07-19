@@ -65,6 +65,74 @@ HIGH_SPEED_NET_PATTERNS = [
 ]
 
 
+def calculate_coupling_geometry(seg1: Segment, seg2: Segment) -> tuple[float, float]:
+    """Calculate parallel-run length and edge-to-edge spacing of two segments.
+
+    Shared geometry primitive reused by both the crosstalk analyzer
+    (:class:`TraceIntegrityAnalyzer`) and the current-sense analyzer so the
+    pairwise math lives in exactly one place.
+
+    The two segments are treated as parallel only when their unit direction
+    vectors are near-collinear (``|dot| >= 0.9``). For parallel pairs, the
+    edge-to-edge spacing is the center-to-center perpendicular distance minus
+    the average of the two half-widths (clamped at 0), and the parallel-run
+    length is the projected overlap of ``seg2`` onto ``seg1``'s direction.
+
+    Degenerate (near zero-length) or non-parallel pairs return
+    ``(0.0, inf)`` so callers can cheaply skip them.
+
+    Args:
+        seg1: First segment.
+        seg2: Second segment.
+
+    Returns:
+        Tuple of (parallel_length_mm, edge_spacing_mm).
+    """
+    # Vector for seg1
+    dx1 = seg1.end[0] - seg1.start[0]
+    dy1 = seg1.end[1] - seg1.start[1]
+    len1 = math.sqrt(dx1 * dx1 + dy1 * dy1)
+
+    # Vector for seg2
+    dx2 = seg2.end[0] - seg2.start[0]
+    dy2 = seg2.end[1] - seg2.start[1]
+    len2 = math.sqrt(dx2 * dx2 + dy2 * dy2)
+
+    if len1 < 0.01 or len2 < 0.01:
+        return 0.0, float("inf")
+
+    # Normalize vectors
+    nx1, ny1 = dx1 / len1, dy1 / len1
+    nx2, ny2 = dx2 / len2, dy2 / len2
+
+    # Check if approximately parallel (dot product close to +/-1)
+    dot = abs(nx1 * nx2 + ny1 * ny2)
+    if dot < 0.9:  # Not parallel enough
+        return 0.0, float("inf")
+
+    # Calculate perpendicular distance between track centerlines
+    # Project seg2.start onto seg1's line
+    px = seg2.start[0] - seg1.start[0]
+    py = seg2.start[1] - seg1.start[1]
+
+    # Distance along seg1's direction
+    proj_along = px * nx1 + py * ny1
+
+    # Perpendicular distance (center-to-center)
+    perp_dist = abs(px * (-ny1) + py * nx1)
+
+    # Edge-to-edge spacing = center distance - half widths
+    spacing = perp_dist - (seg1.width + seg2.width) / 2
+    spacing = max(0.0, spacing)  # Can't be negative
+
+    # Parallel overlap length (simplified - uses projection)
+    overlap_start = max(0, proj_along)
+    overlap_end = min(len1, proj_along + len2)
+    parallel_length = max(0, overlap_end - overlap_start)
+
+    return parallel_length, spacing
+
+
 @dataclass
 class TraceCrosstalkRisk:
     """Crosstalk risk between two nets.
@@ -449,6 +517,11 @@ class TraceIntegrityAnalyzer:
     ) -> tuple[float, float]:
         """Calculate parallel length and spacing between two segments.
 
+        Thin instance-method wrapper around the shared free function
+        :func:`calculate_coupling_geometry` so callers outside this class
+        (e.g. the ``current-sense`` analyzer) can reuse the exact same math
+        without duplicating it.
+
         Args:
             seg1: First segment.
             seg2: Second segment.
@@ -456,49 +529,7 @@ class TraceIntegrityAnalyzer:
         Returns:
             Tuple of (parallel_length_mm, edge_spacing_mm).
         """
-        # Vector for seg1
-        dx1 = seg1.end[0] - seg1.start[0]
-        dy1 = seg1.end[1] - seg1.start[1]
-        len1 = math.sqrt(dx1 * dx1 + dy1 * dy1)
-
-        # Vector for seg2
-        dx2 = seg2.end[0] - seg2.start[0]
-        dy2 = seg2.end[1] - seg2.start[1]
-        len2 = math.sqrt(dx2 * dx2 + dy2 * dy2)
-
-        if len1 < 0.01 or len2 < 0.01:
-            return 0.0, float("inf")
-
-        # Normalize vectors
-        nx1, ny1 = dx1 / len1, dy1 / len1
-        nx2, ny2 = dx2 / len2, dy2 / len2
-
-        # Check if approximately parallel (dot product close to +/-1)
-        dot = abs(nx1 * nx2 + ny1 * ny2)
-        if dot < 0.9:  # Not parallel enough
-            return 0.0, float("inf")
-
-        # Calculate perpendicular distance between track centerlines
-        # Project seg2.start onto seg1's line
-        px = seg2.start[0] - seg1.start[0]
-        py = seg2.start[1] - seg1.start[1]
-
-        # Distance along seg1's direction
-        proj_along = px * nx1 + py * ny1
-
-        # Perpendicular distance (center-to-center)
-        perp_dist = abs(px * (-ny1) + py * nx1)
-
-        # Edge-to-edge spacing = center distance - half widths
-        spacing = perp_dist - (seg1.width + seg2.width) / 2
-        spacing = max(0.0, spacing)  # Can't be negative
-
-        # Parallel overlap length (simplified - uses projection)
-        overlap_start = max(0, proj_along)
-        overlap_end = min(len1, proj_along + len2)
-        parallel_length = max(0, overlap_end - overlap_start)
-
-        return parallel_length, spacing
+        return calculate_coupling_geometry(seg1, seg2)
 
     def _calculate_crosstalk_risk(
         self,

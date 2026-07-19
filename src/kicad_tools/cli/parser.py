@@ -5363,6 +5363,55 @@ def _add_analyze_parser(subparsers) -> None:
         help="Grid cell size for density analysis in mm (default: 5.0)",
     )
 
+    # analyze current-sense
+    current_sense_parser = analyze_subparsers.add_parser(
+        "current-sense",
+        help="Analyze sense-net vs. high-current-net parallel coupling",
+        description=(
+            "Flag sense/analog nets that run parallel and close to "
+            "high-current/switching nets on the same layer (advisory)"
+        ),
+    )
+    current_sense_parser.add_argument("pcb", help="PCB file to analyze (.kicad_pcb)")
+    current_sense_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    current_sense_parser.add_argument(
+        "--sense-net",
+        action="append",
+        dest="analyze_sense_nets",
+        default=[],
+        metavar="NAME",
+        help="Explicitly tag NAME as a sense net (repeatable)",
+    )
+    current_sense_parser.add_argument(
+        "--hicur-net",
+        action="append",
+        dest="analyze_hicur_nets",
+        default=[],
+        metavar="NAME",
+        help="Explicitly tag NAME as a high-current net (repeatable)",
+    )
+    current_sense_parser.add_argument(
+        "--max-parallel",
+        dest="analyze_max_parallel",
+        type=float,
+        default=10.0,
+        help="Parallel-run FAIL threshold in mm (default: 10.0)",
+    )
+    current_sense_parser.add_argument(
+        "--min-gap",
+        dest="analyze_min_gap",
+        type=float,
+        default=0.5,
+        help="Edge-to-edge gap FAIL threshold in mm (default: 0.5)",
+    )
+
 
 def _add_constraints_parser(subparsers) -> None:
     """Add constraints subcommand parser with its subcommands."""
