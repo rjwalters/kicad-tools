@@ -141,6 +141,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_drc_parser(subparsers)
     _add_bom_parser(subparsers)
     _add_check_parser(subparsers)
+    _add_creepage_parser(subparsers)
     _add_sch_parser(subparsers)
     _add_pcb_parser(subparsers)
     _add_lib_parser(subparsers)
@@ -417,6 +418,48 @@ def _add_bom_parser(subparsers) -> None:
     bom_parser.add_argument("--include-dnp", action="store_true")
     bom_parser.add_argument(
         "--sort", choices=["reference", "value", "footprint"], default="reference"
+    )
+
+
+def _add_creepage_parser(subparsers) -> None:
+    """Add creepage subcommand parser (HV surface-path audit, Issue #4327)."""
+    creepage_parser = subparsers.add_parser(
+        "creepage",
+        help="HV creepage/clearance census (surface-path distance)",
+    )
+    creepage_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    creepage_parser.add_argument(
+        "--net-class",
+        dest="net_class",
+        default="HV",
+        help="Net class to treat as the HV group (default: HV)",
+    )
+    creepage_parser.add_argument(
+        "--net-class-map",
+        dest="net_class_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to NetClassRouting "
+            "fields (parsed by net_class_map_from_dict); nets whose class "
+            "name matches --net-class are the HV group.  Falls back to "
+            "name-pattern classification for unmapped nets."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--min",
+        type=float,
+        required=True,
+        help=(
+            "Required minimum creepage (surface-path) distance in mm.  Exit "
+            "is non-zero if any pair's creepage falls below this value.  "
+            "Phase 1 has no IEC tables (see #4332); the operator supplies it."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
     )
 
 

@@ -57,6 +57,7 @@ from .commands import (
     run_config_command,
     run_constraints_command,
     run_create_pcb_command,
+    run_creepage_command,
     run_datasheet_command,
     run_decisions_command,
     run_estimate_command,
@@ -285,6 +286,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "check":
         return run_check_command(args)
+
+    elif args.command == "creepage":
+        return run_creepage_command(args)
 
     elif args.command == "sch":
         return run_sch_command(args)
