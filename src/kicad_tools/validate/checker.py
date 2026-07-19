@@ -76,6 +76,8 @@ class DRCChecker:
         emit_measurements: bool = False,
         courtyard_waivers: CourtyardWaivers | None = None,
         strict_connectivity: bool = False,
+        copper_oz_outer: float | None = None,
+        copper_oz_inner: float | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -136,6 +138,18 @@ class DRCChecker:
                 then correctly fires the connectivity rule.  Default False
                 preserves the legacy tolerance model so existing ``kct check``
                 output is unchanged.
+            copper_oz_outer: Optional override for the *ampacity* gate's
+                outer-layer (F.Cu / B.Cu) copper weight in oz (Issue #4326).
+                When provided, replaces ``design_rules.outer_copper_oz``
+                after the manufacturer preset is loaded, letting the CLI
+                honor the board's declared ``(setup (stackup ...))`` copper
+                weight (or an explicit keyed ``--copper outer=..``) without
+                repointing the preset's min-trace-width / clearance rules.
+                ``None`` leaves the preset default in place.
+            copper_oz_inner: Optional override for the *ampacity* gate's
+                inner-layer (In*.Cu) copper weight in oz (Issue #4326).
+                Same semantics as ``copper_oz_outer`` for
+                ``design_rules.inner_copper_oz``.
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -166,6 +180,31 @@ class DRCChecker:
         # Load manufacturer profile and design rules
         profile = get_profile(manufacturer)
         self.design_rules: DesignRules = profile.get_design_rules(layers, copper_oz)
+
+        # Issue #4326: override the ampacity copper weights ONLY.
+        #
+        # ``copper_oz_outer`` / ``copper_oz_inner`` let the CLI repoint the
+        # IPC-2221 ampacity gate at the board's declared ``(setup (stackup
+        # ...))`` copper weights (or an explicit keyed ``--copper
+        # outer=..,inner=..``) without disturbing the preset's
+        # min-trace-width / clearance rules, which stay governed by
+        # ``copper_oz`` / ``--mfr`` as before.  ``get_design_rules`` may
+        # return a shared preset instance, so replace() a copy rather than
+        # mutating the registry in place.
+        if copper_oz_outer is not None or copper_oz_inner is not None:
+            self.design_rules = replace(
+                self.design_rules,
+                outer_copper_oz=(
+                    copper_oz_outer
+                    if copper_oz_outer is not None
+                    else self.design_rules.outer_copper_oz
+                ),
+                inner_copper_oz=(
+                    copper_oz_inner
+                    if copper_oz_inner is not None
+                    else self.design_rules.inner_copper_oz
+                ),
+            )
 
     # The canonical ordered list of bound-method names that
     # :meth:`check_all` invokes.  Exposed as a class attribute so the CLI

@@ -66,6 +66,7 @@ from .constants import (
     SPEED_OF_LIGHT,
     CopperWeight,
     DielectricMaterial,
+    copper_oz_from_thickness,
     copper_thickness_from_oz,
     get_material,
     get_material_or_default,
@@ -113,6 +114,7 @@ __all__ = [
     "COPPER_1OZ",
     "COPPER_2OZ",
     "copper_thickness_from_oz",
+    "copper_oz_from_thickness",
     # Ampacity (IPC-2221)
     "width_for_current",
     # Wire gauge (AWG) / buttress-wire reinforcement

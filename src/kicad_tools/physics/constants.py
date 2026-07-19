@@ -148,3 +148,20 @@ def copper_thickness_from_oz(oz: float) -> float:
         Thickness in mm
     """
     return oz * 0.035  # 1 oz = 35 um = 0.035 mm
+
+
+def copper_oz_from_thickness(thickness_mm: float) -> float:
+    """Convert copper thickness (mm) to weight (oz/ft^2).
+
+    Exact inverse of :func:`copper_thickness_from_oz` (35 um = 1 oz), kept
+    here so the oz<->mm constant lives in exactly one place.  Used when
+    deriving a board's copper weight from its declared ``(setup (stackup
+    ...))`` thicknesses (Issue #4326).
+
+    Args:
+        thickness_mm: Copper thickness in mm
+
+    Returns:
+        Copper weight in oz/ft^2
+    """
+    return thickness_mm / 0.035  # 35 um = 0.035 mm = 1 oz
