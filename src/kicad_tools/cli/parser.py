@@ -2847,6 +2847,19 @@ def _add_route_parser(subparsers) -> None:
     )
     route_parser.add_argument("--skip-nets", help="Comma-separated nets to skip")
     route_parser.add_argument(
+        "--nets",
+        metavar="NET[,NET...]",
+        help=(
+            "Comma-separated nets to route EXCLUSIVELY (Issue #4322): route "
+            "only the listed nets and treat every OTHER board net as a fixed "
+            "obstacle -- the inverse of --skip-nets. Mutually exclusive with "
+            "--skip-nets (passing both is an error). Names must match the "
+            "board's net names exactly (e.g. 'GND', '/SPI_CLK'); an unknown "
+            "name is an error that names the missing net. Whitespace around "
+            "each name is trimmed."
+        ),
+    )
+    route_parser.add_argument(
         "--preserve-existing",
         action="store_true",
         default=False,
@@ -2868,7 +2881,9 @@ def _add_route_parser(subparsers) -> None:
             "convention as 'pcb strip --region'). Every cell outside the box "
             "is treated as a fixed obstacle, and existing copper outside is "
             "preserved unchanged (implies --preserve-existing semantics). "
-            "Composable with --nets/--skip-nets. NOTE: unrelated to "
+            "Composable with --nets (route only the listed nets) or "
+            "--skip-nets (route all but the listed nets); --nets and "
+            "--skip-nets are themselves mutually exclusive. NOTE: unrelated to "
             "--region-parallel (which partitions the grid for PARALLEL "
             "routing); --region is a spatial bound, not a parallelism knob. "
             "Nets whose pads all lie inside the box route normally; a net "
@@ -3799,11 +3814,26 @@ def _add_route_auto_parser(subparsers) -> None:
         help="Route a net using RoutingOrchestrator smart strategy selection",
     )
     route_auto_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    # Issue #4322: --net is no longer unconditionally required because --nets
+    # (route several nets in sequence) is an alternative.  Exactly one of
+    # --net / --nets must be given; the handler enforces this and errors if
+    # both (or neither) are supplied.
     route_auto_parser.add_argument(
         "--net",
-        required=True,
+        required=False,
         metavar="NAME",
-        help="Net to route (e.g., 'GND', 'SPI_CLK')",
+        help="Net to route (e.g., 'GND', 'SPI_CLK'). Mutually exclusive with --nets.",
+    )
+    route_auto_parser.add_argument(
+        "--nets",
+        metavar="NAME[,NAME...]",
+        help=(
+            "Comma-separated nets to route in sequence (Issue #4322). Each net "
+            "is routed independently via RoutingOrchestrator, accumulating "
+            "copper into the output; the exit code is non-zero if ANY net "
+            "fails or is left partial. Whitespace around each name is trimmed. "
+            "Mutually exclusive with --net."
+        ),
     )
     route_auto_parser.add_argument(
         "--region",
