@@ -31,6 +31,7 @@ from .constants import (
     COPPER_1OZ,
     COPPER_HALF_OZ,
     FR4_STANDARD,
+    copper_oz_from_thickness,
     copper_thickness_from_oz,
 )
 
@@ -152,7 +153,7 @@ class Stackup:
             # Infer copper weight from thickness
             if layer_type == LayerType.COPPER and layer.thickness_mm > 0:
                 # Approximate oz from thickness (35um = 1oz)
-                layer.copper_weight_oz = layer.thickness_mm / 0.035
+                layer.copper_weight_oz = copper_oz_from_thickness(layer.thickness_mm)
 
             layers.append(layer)
 
@@ -587,6 +588,74 @@ class Stackup:
     def copper_layers(self) -> list[StackupLayer]:
         """Get all copper layers in order from top to bottom."""
         return [layer for layer in self.layers if layer.is_copper]
+
+    @staticmethod
+    def _copper_layer_oz(layer: StackupLayer) -> float | None:
+        """Copper weight (oz) for a single copper layer, or None if unknown.
+
+        Prefers the layer's physical ``thickness_mm`` (the fab-declared
+        truth) via the centralized 35 um = 1 oz conversion, falling back to
+        a pre-computed ``copper_weight_oz`` when thickness is absent.
+        """
+        if layer.thickness_mm and layer.thickness_mm > 0:
+            return copper_oz_from_thickness(layer.thickness_mm)
+        return layer.copper_weight_oz
+
+    def outer_inner_copper_oz(self) -> tuple[float | None, float | None] | None:
+        """Derive ``(outer_oz, inner_oz)`` copper weights from the stackup.
+
+        This is the Tier-1 source of truth for the ampacity gate (Issue
+        #4326): when a board carries an explicit ``(setup (stackup ...))``
+        block, its declared copper thicknesses -- not the ``--copper``
+        default -- determine the copper weight used for IPC-2221 width
+        checks.
+
+        - **Outer** = the first and last copper layers (``F.Cu`` / ``B.Cu``,
+          matching :meth:`is_outer_layer` and ampacity's own
+          ``_EXTERNAL_LAYERS`` split).  When the two faces declare different
+          weights (asymmetric build), the **thinner** (safer) weight is
+          returned, because thinner copper requires a wider trace for the
+          same current -- the conservative choice for a safety gate.
+        - **Inner** = the ``In*.Cu`` layers (all copper layers between the
+          two faces); again the thinner weight wins on disagreement.
+
+        Returns:
+            ``(outer_oz, inner_oz)`` where each element is the derived oz or
+            ``None`` when that layer class is absent / has no usable
+            thickness (the caller then leaves the profile default in place
+            for that class).  Returns ``None`` entirely when the stackup is
+            not explicit (``has_explicit_data`` is False -- absent or a
+            synthesized default), signalling the caller to fall back to
+            ``--copper`` / profile behaviour with byte-identical output.
+        """
+        # Gate strictly on an explicitly-declared stackup.  A synthesized
+        # default stackup must not silently change any verdict (AC: absent /
+        # default => byte-identical to today).
+        if not self.has_explicit_data:
+            return None
+
+        coppers = self.copper_layers
+        if not coppers:
+            return None
+
+        # Outer faces: first and last copper layer (dedup for a 1-copper
+        # degenerate stackup).
+        outer_layers = [coppers[0]]
+        if len(coppers) > 1 and coppers[-1] is not coppers[0]:
+            outer_layers.append(coppers[-1])
+        outer_ozs = [
+            oz for layer in outer_layers if (oz := self._copper_layer_oz(layer)) is not None
+        ]
+        outer_oz = min(outer_ozs) if outer_ozs else None
+
+        # Inner layers: everything strictly between the two faces.
+        inner_layers = coppers[1:-1]
+        inner_ozs = [
+            oz for layer in inner_layers if (oz := self._copper_layer_oz(layer)) is not None
+        ]
+        inner_oz = min(inner_ozs) if inner_ozs else None
+
+        return (outer_oz, inner_oz)
 
     @property
     def dielectric_layers(self) -> list[StackupLayer]:

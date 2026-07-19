@@ -331,3 +331,92 @@ class TestStackupFromPCB:
         repr_str = repr(stackup)
         assert "4L" in repr_str
         assert "1.6mm" in repr_str
+
+
+class TestOuterInnerCopperOz:
+    """Tests for ``Stackup.outer_inner_copper_oz`` (Issue #4326).
+
+    This is the Tier-1 derivation helper: it converts a declared stackup's
+    copper thicknesses into ``(outer_oz, inner_oz)`` so the ampacity gate can
+    use the board's real build instead of the ``--copper`` default.
+    """
+
+    @staticmethod
+    def _explicit(layers):
+        return Stackup(layers=layers, has_explicit_data=True)
+
+    def _copper(self, name, thickness_mm):
+        return StackupLayer(
+            name=name,
+            layer_type=LayerType.COPPER,
+            thickness_mm=thickness_mm,
+            material="copper",
+        )
+
+    def _diel(self, name="core"):
+        return StackupLayer(
+            name=name,
+            layer_type=LayerType.DIELECTRIC,
+            thickness_mm=0.2,
+            material="FR4",
+        )
+
+    def test_absent_stackup_returns_none(self):
+        """A non-explicit (default/synthesized) stackup derives nothing."""
+        stackup = Stackup.jlcpcb_4layer()  # preset -> has_explicit_data False
+        assert stackup.has_explicit_data is False
+        assert stackup.outer_inner_copper_oz() is None
+
+    def test_two_oz_outer_half_oz_inner_4layer(self):
+        """A 2oz-outer / 0.5oz-inner 4-layer build derives (2.0, 0.5)."""
+        stackup = self._explicit(
+            [
+                self._copper("F.Cu", 0.070),  # 2 oz
+                self._diel("prepreg"),
+                self._copper("In1.Cu", 0.0175),  # 0.5 oz
+                self._diel("core"),
+                self._copper("In2.Cu", 0.0175),  # 0.5 oz
+                self._diel("prepreg2"),
+                self._copper("B.Cu", 0.070),  # 2 oz
+            ]
+        )
+        outer, inner = stackup.outer_inner_copper_oz()
+        assert outer == pytest.approx(2.0, abs=1e-6)
+        assert inner == pytest.approx(0.5, abs=1e-6)
+
+    def test_two_layer_has_no_inner(self):
+        """A 2-layer explicit stackup derives outer only (inner is None)."""
+        stackup = self._explicit(
+            [
+                self._copper("F.Cu", 0.070),  # 2 oz
+                self._diel("core"),
+                self._copper("B.Cu", 0.070),  # 2 oz
+            ]
+        )
+        outer, inner = stackup.outer_inner_copper_oz()
+        assert outer == pytest.approx(2.0, abs=1e-6)
+        assert inner is None
+
+    def test_asymmetric_outer_picks_thinner_safer_face(self):
+        """F.Cu != B.Cu: the thinner (conservative) outer weight wins."""
+        stackup = self._explicit(
+            [
+                self._copper("F.Cu", 0.070),  # 2 oz
+                self._diel("core"),
+                self._copper("B.Cu", 0.035),  # 1 oz (thinner -> safer)
+            ]
+        )
+        outer, _inner = stackup.outer_inner_copper_oz()
+        assert outer == pytest.approx(1.0, abs=1e-6)
+
+    def test_uses_035_conversion(self):
+        """Derived oz uses the established 35um = 1oz conversion."""
+        stackup = self._explicit(
+            [
+                self._copper("F.Cu", 0.105),  # 3 oz
+                self._diel("core"),
+                self._copper("B.Cu", 0.105),
+            ]
+        )
+        outer, _ = stackup.outer_inner_copper_oz()
+        assert outer == pytest.approx(0.105 / 0.035, abs=1e-6)

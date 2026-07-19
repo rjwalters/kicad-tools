@@ -219,6 +219,77 @@ def _find_pcb_file(directory: Path) -> Path | None:
     return None
 
 
+def _parse_copper_weight_arg(raw: str) -> tuple[float | None, float | None]:
+    """Parse a ``--copper`` value into ``(outer_oz, inner_oz)`` (Issue #4326).
+
+    Accepts two forms:
+
+    - **Scalar** -- ``"2"`` / ``"1.0"`` -- applies to both the outer and
+      inner layer classes, returning ``(oz, oz)``.
+    - **Keyed** -- ``"outer=2,inner=0.5"`` -- sets each layer class
+      independently.  A key omitted from the keyed form returns ``None`` for
+      that class, meaning "fall back to the stackup / profile for that layer
+      class" (so ``--copper outer=2`` overrides only the outer weight).
+
+    Raises:
+        ValueError: on empty input, unknown keys, duplicate keys, a
+            non-numeric value, or a non-positive weight -- mirroring the
+            ``--only`` / ``--skip`` category-validation contract (a clear
+            ``Error:`` + exit 1 at the call site).
+    """
+    text = raw.strip()
+    if not text:
+        raise ValueError("--copper value is empty")
+
+    if "=" not in text:
+        # Scalar form: one number for both layer classes.
+        try:
+            oz = float(text)
+        except ValueError:
+            raise ValueError(
+                f"invalid --copper value {raw!r} "
+                "(expected a number like '2' or a keyed form 'outer=2,inner=0.5')"
+            ) from None
+        if oz <= 0:
+            raise ValueError(f"--copper weight must be positive: {oz}")
+        return (oz, oz)
+
+    # Keyed form: comma-separated key=value tokens.
+    outer: float | None = None
+    inner: float | None = None
+    seen: set[str] = set()
+    for token in text.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "=" not in token:
+            raise ValueError(f"invalid --copper token {token!r} (expected 'key=value')")
+        key, _, value = token.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        if key not in ("outer", "inner"):
+            raise ValueError(f"unknown --copper key {key!r} (expected 'outer' or 'inner')")
+        if key in seen:
+            raise ValueError(f"duplicate --copper key {key!r}")
+        seen.add(key)
+        try:
+            oz = float(value)
+        except ValueError:
+            raise ValueError(
+                f"invalid --copper {key} value {value!r} (expected a number)"
+            ) from None
+        if oz <= 0:
+            raise ValueError(f"--copper {key} weight must be positive: {oz}")
+        if key == "outer":
+            outer = oz
+        else:
+            inner = oz
+
+    if outer is None and inner is None:
+        raise ValueError(f"--copper keyed form set no values: {raw!r}")
+    return (outer, inner)
+
+
 def _discover_net_class_map_sidecar(pcb_path: Path) -> Path | None:
     """Probe conventional locations for a ``net_class_map.json`` sidecar.
 
@@ -833,9 +904,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--copper",
         "-c",
-        type=float,
-        default=1.0,
-        help="Copper weight in oz (default: 1.0)",
+        default=None,
+        metavar="OZ",
+        help=(
+            "Copper weight in oz for the ampacity gate. Scalar form "
+            "'--copper 2' applies to both outer and inner layers; keyed "
+            "form '--copper outer=2,inner=0.5' sets each layer class "
+            "independently (e.g. a JLCPCB 2oz-outer / 0.5oz-inner order, "
+            "where the inner stays 0.5oz even on a 2oz build). Precedence: "
+            "explicit --copper (keyed > scalar) > the board's declared "
+            "(setup (stackup ...)) copper weight > profile default "
+            "(1oz outer / 0.5oz inner). When --copper is omitted, an "
+            "explicit board stackup is the source of truth; a stackup that "
+            "disagrees with an explicit --copper emits a WARNING and is "
+            "fatal under --strict."
+        ),
     )
     parser.add_argument(
         "--only",
@@ -1212,13 +1295,89 @@ def main(argv: list[str] | None = None) -> int:
             for board_net, user_key in ampacity_resolution.resolved.items()
         }
 
+    # Issue #4326: resolve the ampacity gate's copper weights (outer / inner
+    # oz).  Precedence, per layer class: an EXPLICIT ``--copper`` (keyed >
+    # scalar) > the board's DECLARED ``(setup (stackup ...))`` copper weight
+    # (Tier 1 -- the new default source of truth) > the profile default.
+    #
+    # This override is scoped to the ampacity copper weights ONLY
+    # (design_rules.outer_copper_oz / inner_copper_oz); the preset's
+    # min-trace-width / clearance rules stay governed by ``--copper`` /
+    # ``--mfr`` exactly as before, so Tier 1 cannot flip unrelated verdicts.
+    cli_copper_outer: float | None = None
+    cli_copper_inner: float | None = None
+    copper_explicit = args.copper is not None
+    if copper_explicit:
+        try:
+            cli_copper_outer, cli_copper_inner = _parse_copper_weight_arg(args.copper)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    # Preset selection still keys on the scalar/outer ``--copper`` (or the
+    # historical 1oz default) -- only the ampacity copper weights follow the
+    # declared stackup.
+    preset_copper_oz = cli_copper_outer if cli_copper_outer is not None else 1.0
+
+    # Tier 1: derive copper weights from the board's declared stackup.
+    stackup_outer: float | None = None
+    stackup_inner: float | None = None
+    try:
+        from kicad_tools.physics.stackup import Stackup
+
+        _derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+        if _derived is not None:
+            stackup_outer, stackup_inner = _derived
+    except Exception:  # noqa: BLE001 - never crash `check` on a stackup parse quirk
+        stackup_outer = stackup_inner = None
+
+    # Per-class resolution: explicit --copper wins, else the declared
+    # stackup, else None (leave the profile default in place).
+    resolved_copper_outer = cli_copper_outer if cli_copper_outer is not None else stackup_outer
+    resolved_copper_inner = cli_copper_inner if cli_copper_inner is not None else stackup_inner
+
+    # Tier 2: loud warning when an EXPLICIT --copper disagrees with the
+    # board's declared stackup.  Explicit --copper WINS (a deliberate
+    # operator override), but silently ignoring the board's declaration
+    # would itself be a footgun, so we always warn -- and under --strict the
+    # disagreement is fatal so an autonomous agent cannot sail past it.
+    def _copper_disagrees(cli_oz: float | None, stk_oz: float | None) -> bool:
+        return cli_oz is not None and stk_oz is not None and abs(cli_oz - stk_oz) > 1e-6
+
+    copper_disagreement = False
+    if copper_explicit:
+        if _copper_disagrees(cli_copper_outer, stackup_outer):
+            copper_disagreement = True
+            print(
+                f"WARNING: stackup declares {stackup_outer:g}oz outer but --copper "
+                f"requests {cli_copper_outer:g}oz — ampacity is evaluating at "
+                f"{cli_copper_outer:g}oz. Pass --copper {stackup_outer:g} or fix the stackup.",
+                file=sys.stderr,
+            )
+        if _copper_disagrees(cli_copper_inner, stackup_inner):
+            copper_disagreement = True
+            print(
+                f"WARNING: stackup declares {stackup_inner:g}oz inner but --copper "
+                f"requests {cli_copper_inner:g}oz — ampacity is evaluating at "
+                f"{cli_copper_inner:g}oz. Pass --copper inner={stackup_inner:g} or fix the stackup.",
+                file=sys.stderr,
+            )
+        if copper_disagreement and args.strict:
+            print(
+                "ERROR: --strict: stackup-vs---copper copper-weight disagreement is "
+                "fatal (exit 2). Reconcile --copper with the board's declared stackup.",
+                file=sys.stderr,
+            )
+
     # Create checker with manufacturer rules
     try:
         checker = DRCChecker(
             pcb,
             manufacturer=args.mfr,
             layers=layers,
-            copper_oz=args.copper,
+            copper_oz=preset_copper_oz,
+            copper_oz_outer=resolved_copper_outer,
+            copper_oz_inner=resolved_copper_inner,
             suppress_library=args.suppress_library,
             net_class_map=net_class_map,
             # The CLI already prints its own up-front INACTIVE warning
@@ -1349,6 +1508,14 @@ def main(argv: list[str] | None = None) -> int:
     # exit 2 also when any sub-check is FAILED, and -- per AC #3 --
     # exit 2 when the rollup is INCOMPLETE (any sub-check is NOT RUN)
     # unless the caller opted in to ``--allow-incomplete``.
+    #
+    # Issue #4326 (Tier 2 safety backstop): under --strict, a stackup-vs-
+    # --copper copper-weight disagreement is fatal on its own (a warning
+    # already fired above), so an autonomous agent cannot sail past an
+    # ampacity evaluation that silently ignored the board's declared build.
+    if args.strict and copper_disagreement:
+        return 2
+
     if drc_only:
         if error_count > 0 or (warning_count > 0 and args.strict):
             return 2
