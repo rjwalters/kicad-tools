@@ -29,7 +29,49 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kicad_tools.cost.suggest import parse_component_value
 from kicad_tools.schema.bom import extract_bom
+
+# Relative tolerance for comparing parsed passive magnitudes.  Mirrors
+# ``kicad_tools.export.lcsc_value_check.VALUE_REL_TOLERANCE`` so both consumers
+# interpret numeric component values identically.
+_VALUE_REL_TOLERANCE = 0.05
+
+
+def _values_equivalent(sch_value: str, pcb_value: str, reference: str) -> bool:
+    """Return True when two value strings denote the same component value.
+
+    Numeric passives (R/L/C) are compared by parsed SI magnitude within
+    ``_VALUE_REL_TOLERANCE``, so a trailing voltage/tolerance/rating token
+    (``'100nF'`` vs ``'100nF 25V'``) is NOT treated as a mismatch.  Case- and
+    whitespace-only differences (``'100nF'`` vs ``'100NF'``) are equivalent for
+    all component types.  Non-numeric parts (ICs, connectors) and unparseable
+    exotic values fall back to case-insensitive string equality, preserving
+    raw-string strictness so genuinely different parts still flag.
+
+    Args:
+        sch_value: Schematic-side value string.
+        pcb_value: PCB-side value string.
+        reference: Reference designator, used to hint the component type
+            (e.g. ``C13`` -> capacitor) for the numeric parser.
+
+    Returns:
+        True when the two values are electrically equivalent.
+    """
+    s = (sch_value or "").strip()
+    p = (pcb_value or "").strip()
+    if s.casefold() == p.casefold():
+        return True
+    ps = parse_component_value(s, reference)
+    pp = parse_component_value(p, reference)
+    if (
+        ps.numeric_value is not None
+        and pp.numeric_value is not None
+        and ps.component_type is pp.component_type
+    ):
+        return math.isclose(ps.numeric_value, pp.numeric_value, rel_tol=_VALUE_REL_TOLERANCE)
+    return False  # non-numeric or unparseable -> keep raw-string strictness
+
 
 # Mechanical mounting holes (and similar fiducial/mechanical features) have no
 # schematic symbol by convention, so they always appear as PCB-only footprints.
@@ -139,6 +181,10 @@ class SyncAnalysis:
         schematic_orphans: References in schematic with no PCB match.
         pcb_orphans: References in PCB with no schematic match.
         value_mismatches: Components matched by reference but with different values.
+        value_suffix_notes: Components whose schematic/PCB values are electrically
+            equivalent but differ only by a trailing rating/tolerance suffix
+            (e.g. ``'100nF'`` vs ``'100nF 25V'``).  Informational only -- these
+            are NOT counted as mismatches and do NOT affect exit codes.
         footprint_mismatches: Components matched by reference but with different footprints.
         add_footprint_actions: Proposed add_footprint actions for schematic orphans
             that have a footprint assigned and could be placed on the PCB.
@@ -148,6 +194,7 @@ class SyncAnalysis:
     schematic_orphans: list[str] = field(default_factory=list)
     pcb_orphans: list[str] = field(default_factory=list)
     value_mismatches: list[dict[str, str]] = field(default_factory=list)
+    value_suffix_notes: list[dict[str, str]] = field(default_factory=list)
     footprint_mismatches: list[dict[str, str]] = field(default_factory=list)
     add_footprint_actions: list[dict[str, str]] = field(default_factory=list)
 
@@ -218,6 +265,7 @@ class SyncAnalysis:
             "schematic_orphans": self.schematic_orphans,
             "pcb_orphans": self.pcb_orphans,
             "value_mismatches": self.value_mismatches,
+            "value_suffix_notes": self.value_suffix_notes,
             "footprint_mismatches": self.footprint_mismatches,
             "add_footprint_actions": self.add_footprint_actions,
             "summary": {
@@ -340,25 +388,38 @@ class Reconciler:
             pcb = pcb_components[ref]
             actions = []
 
-            # Check value mismatch
+            # Check value mismatch.  A PCB value that merely appends a
+            # voltage/tolerance/rating suffix ('100nF' vs '100nF 25V') is NOT a
+            # mismatch -- compare parsed magnitude, not raw strings.  Such
+            # suffix-only differences are surfaced as informational notes so the
+            # rating signal is preserved without polluting value_mismatches.
             sch_value = sch.get("value", "")
             pcb_value = pcb.get("value", "")
             if sch_value and pcb_value and sch_value != pcb_value:
-                actions.append(
-                    {
-                        "type": "update_value",
-                        "reference": ref,
-                        "old_value": pcb_value,
-                        "new_value": sch_value,
-                    }
-                )
-                analysis.value_mismatches.append(
-                    {
-                        "reference": ref,
-                        "schematic_value": sch_value,
-                        "pcb_value": pcb_value,
-                    }
-                )
+                if _values_equivalent(sch_value, pcb_value, ref):
+                    analysis.value_suffix_notes.append(
+                        {
+                            "reference": ref,
+                            "schematic_value": sch_value,
+                            "pcb_value": pcb_value,
+                        }
+                    )
+                else:
+                    actions.append(
+                        {
+                            "type": "update_value",
+                            "reference": ref,
+                            "old_value": pcb_value,
+                            "new_value": sch_value,
+                        }
+                    )
+                    analysis.value_mismatches.append(
+                        {
+                            "reference": ref,
+                            "schematic_value": sch_value,
+                            "pcb_value": pcb_value,
+                        }
+                    )
 
             # Check footprint mismatch
             sch_fp = sch.get("footprint", "")
@@ -424,7 +485,7 @@ class Reconciler:
                 pcb_fp = pcb.get("footprint", "")
                 pcb_fp_name = pcb_fp.split(":")[-1] if ":" in pcb_fp else pcb_fp
 
-                if sch_value == pcb_value and sch_fp_name == pcb_fp_name:
+                if _values_equivalent(sch_value, pcb_value, sch_ref) and sch_fp_name == pcb_fp_name:
                     candidates.append(pcb_ref)
 
             if len(candidates) == 1:
@@ -481,11 +542,16 @@ class Reconciler:
                         "new_value": sch_ref,
                     },
                 ]
-                # Also update value if different
+                # Also update value if genuinely different (a suffix-only
+                # rating difference is not a value change worth rewriting).
                 pcb = pcb_components[pcb_ref]
                 sch_value = sch.get("value", "")
                 pcb_value = pcb.get("value", "")
-                if sch_value and pcb_value and sch_value != pcb_value:
+                if (
+                    sch_value
+                    and pcb_value
+                    and not _values_equivalent(sch_value, pcb_value, sch_ref)
+                ):
                     actions_list.append(
                         {
                             "type": "update_value",

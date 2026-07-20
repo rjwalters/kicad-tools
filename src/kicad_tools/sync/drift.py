@@ -71,13 +71,36 @@ def _drift_summary_parts(analysis: SyncAnalysis) -> list[str]:
 
 
 def has_drift(analysis: SyncAnalysis) -> bool:
-    """True when any of the four drift axes is non-empty."""
+    """True when any of the four drift axes is non-empty.
+
+    ``value_suffix_notes`` are intentionally excluded: a value that differs only
+    by a rating/tolerance suffix ('100nF' vs '100nF 25V') is informational and
+    must never affect the drift verdict or the ``--netlist-sync`` exit code.
+    """
     return bool(
         analysis.schematic_orphans
         or analysis.pcb_orphans
         or analysis.value_mismatches
         or analysis.footprint_mismatches
     )
+
+
+def _render_suffix_notes(analysis: SyncAnalysis) -> list[str]:
+    """Render the informational "same value, PCB adds rating suffix" section.
+
+    Returns an empty list when there are no suffix notes.  These rows are
+    informational only -- they are excluded from ``has_drift`` and the summary
+    fragments so they never affect the drift verdict or exit code.
+    """
+    notes = getattr(analysis, "value_suffix_notes", None)
+    if not notes:
+        return []
+    lines: list[str] = ["", f"Informational: same value, PCB adds rating suffix [{len(notes)}]:"]
+    for m in notes:
+        lines.append(
+            f"  - {m['reference']}: schematic={m['schematic_value']!r} pcb={m['pcb_value']!r}"
+        )
+    return lines
 
 
 def format_drift_banner(analysis: SyncAnalysis, pcb_path: str | Path) -> str | None:
@@ -110,6 +133,7 @@ def render_drift_report(analysis: SyncAnalysis, pcb_path: str | Path, schematic_
     if not has_drift(analysis):
         lines.append("")
         lines.append("IN SYNC - schematic and PCB component sets match.")
+        lines.extend(_render_suffix_notes(analysis))
         return "\n".join(lines)
 
     parts = _drift_summary_parts(analysis)
@@ -146,6 +170,8 @@ def render_drift_report(analysis: SyncAnalysis, pcb_path: str | Path, schematic_
                 f"  - {m['reference']}: schematic={m['schematic_footprint']!r} "
                 f"pcb={m['pcb_footprint']!r}"
             )
+
+    lines.extend(_render_suffix_notes(analysis))
 
     lines.append("")
     lines.append("Remediation:")
