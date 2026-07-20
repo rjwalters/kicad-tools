@@ -242,6 +242,61 @@ def main(argv: list[str] | None = None) -> int:
         help="Suppress progress output",
     )
 
+    # zones hv-keepout
+    hv_parser = subparsers.add_parser(
+        "hv-keepout",
+        help="Generate plane pour-keepouts so inner pours clear HV nets",
+    )
+    hv_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    hv_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input, consistent with 'zones fill')",
+    )
+    hv_parser.add_argument(
+        "--net-class",
+        default="HV",
+        help="Net class naming the HV group (default: HV)",
+    )
+    hv_parser.add_argument(
+        "--net-class-map",
+        help="Path to a net-class-map JSON sidecar classifying the HV nets "
+        "(same file 'kct creepage' accepts)",
+    )
+    hv_parser.add_argument(
+        "--clearance",
+        type=float,
+        required=True,
+        help="Required clearance from HV copper in mm (the void distance)",
+    )
+    hv_parser.add_argument(
+        "--plane-layers",
+        help="Comma-separated copper layers whose pours must void "
+        "(e.g. 'In1.Cu,In2.Cu'). Default: all layers carrying a plane pour.",
+    )
+    hv_parser.add_argument(
+        "--refill",
+        action="store_true",
+        help="Run 'kicad-cli pcb drc --refill-zones' after writing the keepouts",
+    )
+    hv_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Verbose output",
+    )
+    hv_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the planned voids without writing output",
+    )
+    hv_parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output",
+    )
+
     # zones fill
     fill_parser = subparsers.add_parser("fill", help="Fill all zones in a PCB")
     fill_parser.add_argument("pcb", help="Path to .kicad_pcb file")
@@ -284,6 +339,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_list(args)
     elif args.zones_command == "batch":
         return _run_batch(args)
+    elif args.zones_command == "hv-keepout":
+        return _run_hv_keepout(args)
     elif args.zones_command == "fill":
         return _run_fill(args)
 
@@ -592,6 +649,196 @@ def _print_batch_summary(gen, quiet: bool) -> None:
         )
     else:
         print(f"\nCreated {zone_count} zone(s)")
+
+
+def _load_net_class_map(path_str: str | None):
+    """Load a net-class-map JSON sidecar (shared with ``kct creepage``).
+
+    Returns ``(net_class_map, error_message)``.  On success ``error_message``
+    is ``None``; on failure ``net_class_map`` is ``None`` and the caller should
+    print ``error_message`` to stderr and exit non-zero.
+    """
+    if not path_str:
+        return None, None
+
+    import json
+
+    from kicad_tools.router.rules import net_class_map_from_dict
+
+    ncm_path = Path(path_str)
+    if not ncm_path.exists():
+        return None, f"net-class-map file not found: {ncm_path}"
+    try:
+        return net_class_map_from_dict(json.loads(ncm_path.read_text())), None
+    except json.JSONDecodeError as e:
+        return None, f"parsing net-class-map JSON: {e}"
+    except (TypeError, ValueError) as e:
+        return None, f"invalid net-class-map structure: {e}"
+
+
+def _run_hv_keepout(args) -> int:
+    """Generate plane pour-keepouts so inner pours clear HV nets (issue #4372).
+
+    Resolves the HV net set exactly as ``kct creepage`` does, buffers the HV
+    copper by ``--clearance`` to build void regions, and appends persistent
+    keepout rule areas (``copperpour not_allowed``) on the plane layers so the
+    inner pours void around the mains nets.  Optionally refills afterwards.
+    """
+    from kicad_tools._shapely import has_shapely
+    from kicad_tools.creepage.engine import resolve_hv_nets
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_file
+    from kicad_tools.zones.hv_keepout import build_hv_keepout_plan
+
+    quiet = getattr(args, "quiet", False)
+
+    if not has_shapely():
+        print(
+            "Error: hv-keepout requires shapely (a core dependency); "
+            "it is not importable in this environment.",
+            file=sys.stderr,
+        )
+        return 1
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if args.clearance <= 0:
+        print(
+            f"Error: --clearance must be positive (got {args.clearance}).",
+            file=sys.stderr,
+        )
+        return 1
+
+    net_class_map, ncm_error = _load_net_class_map(getattr(args, "net_class_map", None))
+    if ncm_error is not None:
+        print(f"Error: {ncm_error}", file=sys.stderr)
+        return 1
+
+    # No -o means overwrite the input in place, consistent with 'zones fill'.
+    output_path = Path(args.output) if args.output else pcb_path
+
+    plane_layers = None
+    if getattr(args, "plane_layers", None):
+        plane_layers = [layer.strip() for layer in args.plane_layers.split(",") if layer.strip()]
+
+    if not quiet:
+        print(f"Loading PCB: {pcb_path}")
+
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    net_class = getattr(args, "net_class", "HV") or "HV"
+    hv_nets = resolve_hv_nets(pcb, net_class, net_class_map)
+
+    if not hv_nets:
+        # Clean no-op mirroring `kct creepage`'s guidance (issue #4372 edge a).
+        print(
+            f"No '{net_class}' nets found "
+            "(supply --net-class-map to classify HV nets, or check --net-class)."
+        )
+        print("No keepouts generated -- nothing to void.")
+        return 0
+
+    plan = build_hv_keepout_plan(
+        pcb,
+        hv_nets,
+        clearance_mm=args.clearance,
+        plane_layers=plane_layers,
+    )
+
+    if not quiet or args.dry_run:
+        print(f"\nHV nets ({len(plan.hv_nets)}): {', '.join(sorted(plan.hv_nets.values()))}")
+        print(f"Clearance: {plan.clearance_mm} mm")
+        print(
+            "Target plane layers: "
+            f"{', '.join(plan.plane_layers) if plan.plane_layers else '(none)'}"
+        )
+        if plan.excluded_layers:
+            print(f"Excluded (HV net has its own pour there): {', '.join(plan.excluded_layers)}")
+        print(f"Planned keepout voids: {plan.keepout_count}")
+        if args.verbose:
+            for i, void in enumerate(plan.voids, 1):
+                print(f"  Void {i}: {len(void.points)} pts on {', '.join(void.layers)}")
+
+    if plan.keepout_count == 0:
+        if not plan.plane_layers:
+            print(
+                "No target plane layers to void (supply --plane-layers, or add plane pours first)."
+            )
+        else:
+            print("No HV copper found on the board -- no keepouts generated.")
+        return 0
+
+    if args.dry_run:
+        if not quiet:
+            print("\n--- Dry run - not saving ---")
+        return 0
+
+    # Append the keepout zones to the parsed document and save.
+    try:
+        doc = parse_file(pcb_path)
+    except Exception as e:
+        print(f"Error parsing PCB for write: {e}", file=sys.stderr)
+        return 1
+
+    for node in plan.zone_nodes():
+        doc.append(node)
+
+    if not quiet:
+        print(f"\nSaving to: {output_path}")
+
+    try:
+        from kicad_tools.core.sexp_file import save_pcb
+
+        save_pcb(doc, output_path)
+    except Exception as e:
+        print(f"Error: Write failed: {e}", file=sys.stderr)
+        return 1
+
+    if not quiet:
+        print(f"Wrote {plan.keepout_count} keepout zone(s).")
+
+    if args.refill:
+        rc = _refill_after_keepout(output_path, quiet)
+        if rc != 0:
+            return rc
+
+    if not quiet:
+        print("Done!")
+
+    return 0
+
+
+def _refill_after_keepout(path: Path, quiet: bool) -> int:
+    """Run kicad-cli refill so the new pour-keepouts take effect."""
+    from .runner import find_kicad_cli, run_fill_zones
+
+    kicad_cli = find_kicad_cli()
+    if not kicad_cli:
+        print(
+            "Error: --refill requested but kicad-cli not found. "
+            "Install KiCad from https://www.kicad.org/download/",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not quiet:
+        print(f"Refilling zones in: {path}")
+
+    result = run_fill_zones(path, None, kicad_cli=kicad_cli)
+    if not result.success:
+        print(f"Error refilling zones: {result.stderr}", file=sys.stderr)
+        return 1
+
+    if not quiet:
+        print("Zones refilled.")
+    return 0
 
 
 def _run_fill(args) -> int:

@@ -12,7 +12,7 @@ def run_zones_command(args) -> int:
     """Handle zones command."""
     if not args.zones_command:
         print("Usage: kicad-tools zones <command> [options] <file>")
-        print("Commands: add, list, batch, fill")
+        print("Commands: add, list, batch, hv-keepout, fill")
         return 1
 
     from ..zones_cmd import main as zones_main
@@ -60,6 +60,26 @@ def run_zones_command(args) -> int:
         if args.dry_run:
             sub_argv.append("--dry-run")
         # Use global quiet flag
+        if getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
+        return zones_main(sub_argv) or 0
+
+    elif args.zones_command == "hv-keepout":
+        sub_argv = ["hv-keepout", args.pcb]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        sub_argv.extend(["--net-class", args.net_class])
+        if getattr(args, "net_class_map", None):
+            sub_argv.extend(["--net-class-map", args.net_class_map])
+        sub_argv.extend(["--clearance", str(args.clearance)])
+        if getattr(args, "plane_layers", None):
+            sub_argv.extend(["--plane-layers", args.plane_layers])
+        if getattr(args, "refill", False):
+            sub_argv.append("--refill")
+        if args.verbose:
+            sub_argv.append("--verbose")
+        if args.dry_run:
+            sub_argv.append("--dry-run")
         if getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
         return zones_main(sub_argv) or 0

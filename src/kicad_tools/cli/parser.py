@@ -2722,6 +2722,43 @@ def _add_zones_parser(subparsers) -> None:
     zones_batch.add_argument("-v", "--verbose", action="store_true")
     zones_batch.add_argument("--dry-run", action="store_true")
 
+    # zones hv-keepout
+    zones_hv = zones_subparsers.add_parser(
+        "hv-keepout",
+        help="Generate plane pour-keepouts so inner pours clear HV nets",
+    )
+    zones_hv.add_argument("pcb", help="Path to .kicad_pcb file")
+    zones_hv.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input, consistent with 'zones fill')",
+    )
+    zones_hv.add_argument(
+        "--net-class", default="HV", help="Net class naming the HV group (default: HV)"
+    )
+    zones_hv.add_argument(
+        "--net-class-map",
+        help="Path to a net-class-map JSON sidecar classifying the HV nets",
+    )
+    zones_hv.add_argument(
+        "--clearance",
+        type=float,
+        required=True,
+        help="Required clearance from HV copper in mm (the void distance)",
+    )
+    zones_hv.add_argument(
+        "--plane-layers",
+        help="Comma-separated copper layers whose pours must void "
+        "(default: all layers carrying a plane pour)",
+    )
+    zones_hv.add_argument(
+        "--refill",
+        action="store_true",
+        help="Run 'kicad-cli pcb drc --refill-zones' after writing the keepouts",
+    )
+    zones_hv.add_argument("-v", "--verbose", action="store_true")
+    zones_hv.add_argument("--dry-run", action="store_true")
+
     # zones fill
     zones_fill = zones_subparsers.add_parser("fill", help="Fill all zones in a PCB")
     zones_fill.add_argument("pcb", help="Path to .kicad_pcb file")
