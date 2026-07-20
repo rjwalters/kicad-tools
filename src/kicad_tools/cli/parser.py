@@ -490,7 +490,27 @@ def _add_creepage_parser(subparsers) -> None:
             "RMS working voltage in volts.  Creepage keys on this RMS value "
             "directly (step-up to the next-higher tabulated row, never "
             "interpolated); clearance keys on its peak (RMS x sqrt(2), "
-            "sinusoidal assumption).  Required with --standard."
+            "sinusoidal assumption).  Required with --standard unless "
+            "--voltage-map is supplied."
+        ),
+    )
+    # Per-net voltage model (#4371): derive the requirement per pair from |ΔV|.
+    creepage_parser.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to their RMS working "
+            'potential (volts) about a common reference, e.g. {"/AC_LINE": 150, '
+            '"/AC_NEUTRAL": 0, "/SCAP_POS": 90}.  With --standard, the required '
+            "creepage/clearance is derived PER PAIR from |V_a - V_b| instead of "
+            "one global --working-voltage: same-potential nets require ~0 and "
+            "cross-domain pairs use their real difference.  Unmapped nets default "
+            "to 0 V; the reserved key _edge_voltage sets the board-edge/earth "
+            "reference (default 0 V); other _-prefixed keys (e.g. _comment) are "
+            "ignored.  Potentials are worst-case DC-equivalent magnitudes -- AC "
+            "phase is not modelled, so |ΔV| is conservative for in-phase nets.  "
+            "Requires --standard (and --pollution-degree)."
         ),
     )
     creepage_parser.add_argument(

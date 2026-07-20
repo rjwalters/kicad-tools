@@ -294,3 +294,194 @@ def test_min_only_json_schema_unchanged(tmp_path, capsys):
             "margin_mm",
             "pass",
         }
+
+
+# ---------------------------------------------------------------------------
+# Per-net voltage map + pairwise |dV| requirement (Issue #4371)
+# ---------------------------------------------------------------------------
+
+
+def _vmap_file(tmp_path, data, name="voltage_map.json"):
+    p = tmp_path / name
+    p.write_text(json.dumps(data))
+    return p
+
+
+def _run_map(tmp_path, capsys, vmap_data, *, fmt="json", pd="2", extra=None):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    vmap = _vmap_file(tmp_path, vmap_data)
+    argv = [
+        "creepage",
+        str(pcb),
+        "--net-class-map",
+        str(ncm),
+        "--standard",
+        "iec60664",
+        "--pollution-degree",
+        pd,
+        "--voltage-map",
+        str(vmap),
+        "--format",
+        fmt,
+    ]
+    if extra:
+        argv.extend(extra)
+    rc = run_creepage_command(create_parser().parse_args(argv))
+    return rc, capsys.readouterr()
+
+
+def test_voltage_map_same_potential_passes(tmp_path, capsys):
+    # L_MAINS and GND both at 90 V -> that pair requires ~0 and PASSes.
+    rc, cap = _run_map(tmp_path, capsys, {"L_MAINS": 90, "GND": 90})
+    assert rc == 0
+    payload = json.loads(cap.out)
+    cond = next(p for p in payload["pairs"] if p["kind"] == "conductor")
+    assert cond["required_creepage_mm"] == 0.0
+    assert cond["pass"] is True
+
+
+def test_voltage_map_cross_domain_uses_real_delta(tmp_path, capsys):
+    # L_MAINS 150 V vs GND (unmapped -> 0 V): the ~1 mm gap FAILs the 150 V req.
+    rc, cap = _run_map(tmp_path, capsys, {"L_MAINS": 150})
+    payload = json.loads(cap.out)
+    cond = next(p for p in payload["pairs"] if p["kind"] == "conductor")
+    assert cond["required_creepage_mm"] > 1.0
+    assert cond["provenance"]["voltage"]["delta_v_v"] == 150.0
+
+
+def test_voltage_map_json_report_fields(tmp_path, capsys):
+    rc, cap = _run_map(tmp_path, capsys, {"L_MAINS": 150, "_edge_voltage": 5})
+    payload = json.loads(cap.out)
+    # Report-level scalar requirement / working voltage are null in map mode.
+    assert payload["working_voltage_v"] is None
+    assert payload["required_creepage_mm"] is None
+    assert payload["voltage_source"] == "per-pair |dV| (voltage-map)"
+    assert payload["voltage_map"] == {"L_MAINS": 150.0}
+    assert payload["edge_voltage_v"] == 5.0
+
+
+def test_voltage_map_table_header_mentions_per_pair(tmp_path, capsys):
+    rc, cap = _run_map(tmp_path, capsys, {"L_MAINS": 150}, fmt="table")
+    assert "per-pair |dV| (voltage-map" in cap.out
+
+
+def test_voltage_map_without_working_voltage_is_allowed(tmp_path, capsys):
+    # --working-voltage is NOT required when --voltage-map is supplied.
+    rc, cap = _run_map(tmp_path, capsys, {"L_MAINS": 90, "GND": 90})
+    assert rc == 0
+    assert "requires both --working-voltage" not in cap.err
+
+
+def test_voltage_map_requires_standard(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    vmap = _vmap_file(tmp_path, {"L_MAINS": 150})
+    rc = _run(["creepage", str(pcb), "--voltage-map", str(vmap), "--min", "1.5"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "--voltage-map requires --standard" in err
+
+
+def test_voltage_map_requires_pollution_degree(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    vmap = _vmap_file(tmp_path, {"L_MAINS": 150})
+    rc = _run(["creepage", str(pcb), "--standard", "iec60664", "--voltage-map", str(vmap)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "requires --pollution-degree" in err
+
+
+def test_voltage_map_missing_file_fails_loud(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--pollution-degree",
+            "2",
+            "--voltage-map",
+            str(tmp_path / "does_not_exist.json"),
+        ]
+    )
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "voltage-map file not found" in err
+
+
+def test_voltage_map_malformed_json_fails_loud(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not valid json")
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--pollution-degree",
+            "2",
+            "--voltage-map",
+            str(bad),
+        ]
+    )
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "parsing voltage-map JSON" in err
+
+
+def test_voltage_map_non_numeric_value_fails_loud(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    vmap = _vmap_file(tmp_path, {"L_MAINS": "high"})
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--pollution-degree",
+            "2",
+            "--voltage-map",
+            str(vmap),
+        ]
+    )
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "invalid voltage-map structure" in err
+
+
+def test_voltage_map_over_range_delta_fails_loud(tmp_path, capsys):
+    # A per-pair |ΔV| beyond the highest tabulated row must fail loud (never
+    # silently pass a safety-critical audit).
+    rc, cap = _run_map(tmp_path, capsys, {"L_MAINS": 1_000_000})
+    assert rc == 1
+    assert "standard-table lookup failed" in cap.err
+
+
+def test_single_voltage_json_does_not_leak_map_keys(tmp_path, capsys):
+    # Backward compat: the single --working-voltage (no map) phase-2 JSON must
+    # NOT gain any of the #4371 map-mode keys.
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "150",
+            "--pollution-degree",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["working_voltage_v"] == 150
+    assert payload["required_creepage_mm"] is not None
+    for leaked in ("voltage_source", "voltage_map", "edge_voltage_v"):
+        assert leaked not in payload

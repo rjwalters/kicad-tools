@@ -46,6 +46,7 @@ def run_creepage_command(args) -> int:
         compute_creepage_census,
         mains_suspect_nets,
         resolve_hv_nets,
+        voltage_map_from_dict,
     )
     from kicad_tools.creepage.standards import (
         RMS_TO_PEAK,
@@ -83,33 +84,78 @@ def run_creepage_command(args) -> int:
         )
         return 1
 
+    # --- Optional per-net voltage map (#4371) --------------------------------
+    # When supplied, the required creepage/clearance is derived PER PAIR from
+    # |V_a - V_b| instead of a single global --working-voltage.  It requires a
+    # --standard (the table is the only source of a derived requirement) but
+    # makes --working-voltage optional (unmapped nets default to 0 V).
+    voltage_map: dict | None = None
+    edge_voltage = 0.0
+    vmap_arg = getattr(args, "voltage_map", None)
+    if vmap_arg:
+        if standard_id is None:
+            print(
+                "Error: --voltage-map requires --standard (and --pollution-degree); "
+                "the per-pair requirement is derived from an IEC table.",
+                file=sys.stderr,
+            )
+            return 1
+        vmap_path = Path(vmap_arg)
+        if not vmap_path.exists():
+            print(f"Error: voltage-map file not found: {vmap_path}", file=sys.stderr)
+            return 1
+        try:
+            voltage_map, edge_voltage = voltage_map_from_dict(json.loads(vmap_path.read_text()))
+        except json.JSONDecodeError as e:
+            print(f"Error: parsing voltage-map JSON: {e}", file=sys.stderr)
+            return 1
+        except (TypeError, ValueError) as e:
+            print(f"Error: invalid voltage-map structure: {e}", file=sys.stderr)
+            return 1
+
     # Phase-2 derived requirements (None in phase-1 mode).
     required_creepage_mm: float | None = None
     required_clearance_mm: float | None = None
     creepage_prov: dict | None = None
     clearance_prov: dict | None = None
     standard_edition: str | None = None
+    std = None
     working_voltage = getattr(args, "working_voltage", None)
     pollution_degree = getattr(args, "pollution_degree", None)
     material_group = getattr(args, "material_group", "IIIa")
 
     if standard_id is not None:
-        if working_voltage is None or pollution_degree is None:
-            print(
-                "Error: --standard requires both --working-voltage and --pollution-degree.",
-                file=sys.stderr,
-            )
-            return 1
+        if voltage_map is None:
+            # Single-voltage mode: preserve the exact phase-2 requirement/message.
+            if working_voltage is None or pollution_degree is None:
+                print(
+                    "Error: --standard requires both --working-voltage and --pollution-degree.",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            # Per-net voltage mode (#4371): --working-voltage is optional (each
+            # pair keys on its own |ΔV|), but --pollution-degree is still needed.
+            if pollution_degree is None:
+                print(
+                    "Error: --standard (with --voltage-map) requires --pollution-degree.",
+                    file=sys.stderr,
+                )
+                return 1
         try:
             std = get_standard(standard_id)
-            required_creepage_mm, creepage_prov = std.required_creepage(
-                float(working_voltage), int(pollution_degree), material_group
-            )
-            peak_voltage = float(working_voltage) * RMS_TO_PEAK
-            required_clearance_mm, clearance_prov = std.required_clearance(
-                peak_voltage, int(pollution_degree)
-            )
             standard_edition = std.edition
+            if voltage_map is None:
+                # Single-voltage mode: derive the one global requirement up front.
+                # (working_voltage / pollution_degree were validated non-None above.)
+                assert working_voltage is not None and pollution_degree is not None
+                required_creepage_mm, creepage_prov = std.required_creepage(
+                    float(working_voltage), int(pollution_degree), material_group
+                )
+                peak_voltage = float(working_voltage) * RMS_TO_PEAK
+                required_clearance_mm, clearance_prov = std.required_clearance(
+                    peak_voltage, int(pollution_degree)
+                )
         except StandardLookupError as e:
             # Safety-critical: fail LOUD, never emit a guessed number.
             print(f"Error: standard-table lookup failed: {e}", file=sys.stderr)
@@ -138,22 +184,33 @@ def run_creepage_command(args) -> int:
     net_class = getattr(args, "net_class", "HV") or "HV"
 
     hv_nets = resolve_hv_nets(pcb, net_class, net_class_map)
-    report = compute_creepage_census(
-        pcb,
-        hv_nets,
-        min_mm,
-        net_class=net_class,
-        board=str(pcb_path),
-        required_creepage_mm=required_creepage_mm,
-        required_clearance_mm=required_clearance_mm,
-        standard=standard_id,
-        standard_edition=standard_edition,
-        working_voltage=working_voltage,
-        pollution_degree=pollution_degree,
-        material_group=material_group if standard_id is not None else None,
-        creepage_provenance=creepage_prov,
-        clearance_provenance=clearance_prov,
-    )
+    try:
+        report = compute_creepage_census(
+            pcb,
+            hv_nets,
+            min_mm,
+            net_class=net_class,
+            board=str(pcb_path),
+            # In map mode the requirement varies per pair, so the report-level
+            # scalar requirement / working voltage are null (per-pair).
+            required_creepage_mm=required_creepage_mm,
+            required_clearance_mm=required_clearance_mm,
+            standard=standard_id,
+            standard_edition=standard_edition,
+            working_voltage=None if voltage_map is not None else working_voltage,
+            pollution_degree=pollution_degree,
+            material_group=material_group if standard_id is not None else None,
+            creepage_provenance=creepage_prov,
+            clearance_provenance=clearance_prov,
+            voltage_map=voltage_map,
+            standard_obj=std if voltage_map is not None else None,
+            edge_voltage=edge_voltage,
+        )
+    except StandardLookupError as e:
+        # A per-pair |ΔV| out of the table's range (map mode): fail LOUD, never
+        # silently pass a safety-critical audit.
+        print(f"Error: standard-table lookup failed: {e}", file=sys.stderr)
+        return 1
 
     # Vacuity guard (issue #4354): a census that resolves ZERO HV nets is only
     # legitimately "nothing to audit" on a genuinely low-voltage board.  When
@@ -302,24 +359,39 @@ def _render_table_standard(report: CreepageReport, *, guard_triggered: bool = Fa
     print(f"HV creepage/clearance census  (net-class '{report.net_class}')")
     print(f"Board: {report.board}")
     print(f"Standard: {std_name} {report.standard_edition}  (--standard {report.standard})")
-    print(
-        f"Working voltage: {report.working_voltage:g} V RMS  "
-        f"(peak ~ {clp.get('peak_voltage_v', 0.0):.0f} V)  |  "
-        f"Pollution degree: {report.pollution_degree}  |  "
-        f"Material group: {report.material_group}"
-    )
-    if report.required_creepage_mm is not None:
+    if report.uses_voltage_map:
+        # Per-net voltage mode (#4371): the requirement is derived per pair from
+        # |ΔV|, so there is no single working voltage / derived requirement.
+        n_mapped = len(report.voltage_map or {})
         print(
-            f"Derived required creepage: {report.required_creepage_mm:.3f} mm  "
-            f"[{cp.get('table_id', '?')}, {cp.get('voltage_row_used_v', '?')} V row, "
-            f"step-up]"
+            f"Voltage source: per-pair |dV| (voltage-map, {n_mapped} net(s) mapped, "
+            f"edge/earth = {report.edge_voltage:g} V)  |  "
+            f"Pollution degree: {report.pollution_degree}  |  "
+            f"Material group: {report.material_group}"
         )
-    if report.required_clearance_mm is not None:
         print(
-            f"Derived required clearance: {report.required_clearance_mm:.3f} mm  "
-            f"[{clp.get('table_id', '?')}, {clp.get('governing_component', '?')}, "
-            f"altitude {clp.get('altitude_assumption', '?')}]"
+            "Derived requirement: per pair (see the ReqCr / ReqCl columns; nets at "
+            "equal potential require ~0)."
         )
+    else:
+        print(
+            f"Working voltage: {report.working_voltage:g} V RMS  "
+            f"(peak ~ {clp.get('peak_voltage_v', 0.0):.0f} V)  |  "
+            f"Pollution degree: {report.pollution_degree}  |  "
+            f"Material group: {report.material_group}"
+        )
+        if report.required_creepage_mm is not None:
+            print(
+                f"Derived required creepage: {report.required_creepage_mm:.3f} mm  "
+                f"[{cp.get('table_id', '?')}, {cp.get('voltage_row_used_v', '?')} V row, "
+                f"step-up]"
+            )
+        if report.required_clearance_mm is not None:
+            print(
+                f"Derived required clearance: {report.required_clearance_mm:.3f} mm  "
+                f"[{clp.get('table_id', '?')}, {clp.get('governing_component', '?')}, "
+                f"altitude {clp.get('altitude_assumption', '?')}]"
+            )
     if report.min_mm is not None:
         print(f"Manual override (--min): {report.min_mm:.3f} mm  (stricter governs)")
     print(f"HV nets ({len(report.hv_nets)}): {', '.join(report.hv_nets)}")
