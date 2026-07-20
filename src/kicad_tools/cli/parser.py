@@ -5487,6 +5487,24 @@ def _add_analyze_parser(subparsers) -> None:
         metavar="NAME",
         help="Shared return conductor (e.g. Kelvin ground) to close sense loops",
     )
+    current_sense_parser.add_argument(
+        "--kelvin-tol",
+        dest="analyze_kelvin_tol",
+        type=float,
+        default=0.05,
+        help="Kelvin-tap coincidence tolerance in mm (default: 0.05)",
+    )
+    current_sense_parser.add_argument(
+        "--kelvin-pair",
+        action="append",
+        dest="analyze_kelvin_pairs",
+        default=[],
+        metavar="SENSE:FORCE",
+        help=(
+            "Kelvin force pairing: check SENSE taps FORCE at a pad "
+            "(repeatable). Nets ending _SENSE/_FORCE, SNS/FRC auto-pair."
+        ),
+    )
 
 
 def _add_constraints_parser(subparsers) -> None:
