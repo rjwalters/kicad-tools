@@ -345,6 +345,7 @@ class MeshPathfinder:
         self,
         connections: list[Connection],
         *,
+        fixed_copper: list[Route] | None = None,
         max_iterations: int = 8,
         present_cost_initial: float = 0.5,
         present_cost_growth: float = 1.6,
@@ -364,6 +365,20 @@ class MeshPathfinder:
         stops early when every net routes or the routed set stops improving.
         The mesh is built **once** (see :meth:`build`); only portal cost changes
         between passes -- never the triangulation (risk (e)).
+
+        Issue #4364: ``fixed_copper`` is the preserved copper of NON-listed
+        nets (``Autorouter.existing_routes`` minus the routable set, loaded
+        under ``--nets`` / ``--preserve-existing`` after #4355).  Because the
+        per-pass ``committed_by_layer`` obstacle dict is reset empty at the top
+        of every pass, the fixed copper is **re-seeded into it each pass** via
+        the same :meth:`_route_obstacles_by_layer` capsule conversion the
+        commit loop uses -- so a negotiated net routes AROUND foreign copper or
+        is honestly declined, never emitted overlapping it.  The mesh committed
+        model is net-AGNOSTIC (plain polygons, no same-net exemption); this is
+        safe only because ``fixed_copper`` is pre-filtered to non-listed nets
+        by the driver, so a net being routed never self-blocks on its own seed.
+        ``fixed_copper=None`` / ``[]`` seeds nothing and is a byte-identical
+        no-op relative to the pre-#4364 negotiation.
 
         Returns ``(routes_by_key, stats)`` for the best iteration seen.
         """
@@ -396,6 +411,14 @@ class MeshPathfinder:
             # blocked by another net's B.Cu cross-under.  Reset each pass so a
             # rip-up genuinely frees the corridor.
             committed_by_layer: dict[int, list[list[Pt]]] = {}
+            # Issue #4364: pre-seed the preserved copper of NON-listed nets as
+            # an immovable hard obstacle.  The dict is reset every pass (so a
+            # rip-up frees listed-net corridors), therefore the fixed seed must
+            # be re-applied every pass.  Reusing ``_route_obstacles_by_layer``
+            # inflates and layer-buckets it identically to same-pass committed
+            # copper, so both the in-layer fit and ``_route_via_injection``
+            # (which reads the whole dict) honor it.
+            self._seed_fixed_copper(committed_by_layer, fixed_copper)
             for key, start, end, net_class in ordered:
                 start_L = self._layer_index(start.layer) or 0
                 # Issue #4274: the net's own-layer committed copper doubles as
@@ -864,6 +887,24 @@ class MeshPathfinder:
             if poly is not None:
                 out.setdefault(lidx, []).append(poly)
         return out
+
+    def _seed_fixed_copper(
+        self,
+        committed_by_layer: dict[int, list[list[Pt]]],
+        fixed_copper: list[Route] | None,
+    ) -> None:
+        """Pre-seed ``committed_by_layer`` with preserved non-listed copper (#4364).
+
+        Mirrors the same-pass commit loop's use of
+        :meth:`_route_obstacles_by_layer`: each fixed route's segments become
+        inflated per-layer capsule polygons so later listed nets clear them.
+        Called at the top of every negotiation pass (the dict is reset each
+        pass), so the seed is re-applied per pass.  A ``None`` / empty seed adds
+        nothing and is a byte-identical no-op.
+        """
+        for route in fixed_copper or []:
+            for lidx, polys in self._route_obstacles_by_layer(route).items():
+                committed_by_layer.setdefault(lidx, []).extend(polys)
 
     def _build_route(self, start: Pad, net: int, trace_w: float, fitted: list[Pt]) -> Route:
         route = Route(net=net, net_name=start.net_name)
