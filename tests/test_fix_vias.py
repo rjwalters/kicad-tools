@@ -1828,6 +1828,75 @@ _PCB_BOXED_IN = """(kicad_pcb
 )
 """
 
+# Plane-stitch in-pad via WITH a same-net pour whose boundary extends well
+# beyond the pad -- Phase 2 can slide the via off-pad into the zone (no stub).
+_PCB_PLANE_STITCH_WITH_ZONE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "GND"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-stitch"))
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zone-gnd")
+    (polygon (pts (xy 95 95) (xy 108 95) (xy 108 108) (xy 95 108)))
+  )
+)
+"""
+
+# Plane-stitch in-pad via whose same-net pour is only a thin strip to the +X of
+# the pad, and a foreign-net pad occupies that strip -> every zone-legal
+# candidate collides with foreign copper, so the via is unresolvable (never
+# mis-placed outside the pour or into a short).
+_PCB_PLANE_STITCH_BOXED_IN = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG2")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "GND"))
+  )
+  (footprint "test:pad" (layer "F.Cu") (at 102 100)
+    (pad "1" smd rect (at 0 0) (size 2.0 1.0) (layers "F.Cu") (net 2 "SIG2"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-stitch"))
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zone-gnd")
+    (polygon (pts (xy 100.5 99.7) (xy 104 99.7) (xy 104 100.3) (xy 100.5 100.3)))
+  )
+)
+"""
+
+# Plane-stitch via with a same-net pour, but the via is already clear of the
+# pad -> nothing to relocate (clean no-op even though a zone exists).
+_PCB_PLANE_STITCH_CLEAR_OF_PAD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "GND"))
+  )
+  (via (at 104 104) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-clear"))
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zone-gnd")
+    (polygon (pts (xy 95 95) (xy 108 95) (xy 108 108) (xy 95 108)))
+  )
+)
+"""
+
 # Board with a via that is NOT inside any pad (well clear of it).
 _PCB_NO_IN_PAD = """(kicad_pcb
   (version 20240108)
@@ -2031,3 +2100,176 @@ class TestRelocateInPadVias:
         assert data["dry_run"] is True
         assert len(data["moved"]) == 1
         assert "skipped" in data and "unresolvable" in data
+
+
+# ===========================================================================
+# Issue #4367 -- fix-vias --relocate-in-pad (Phase 2: plane-stitch off-pad)
+# ===========================================================================
+
+from kicad_tools.cli.stitch_cmd import point_in_polygon  # noqa: E402
+
+
+class TestPlaneStitchRelocation:
+    """Phase-2 plane-stitch in-pad via relocation (issue #4367)."""
+
+    def test_plane_stitch_via_moved_into_zone(self, tmp_path: Path):
+        """A plane-stitch via is slid off-pad into the same-net zone, no stub."""
+        p = _write(tmp_path, _PCB_PLANE_STITCH_WITH_ZONE)
+        pcb = PCB.load(p)
+        assert _via_in_pad_count(pcb) == 1  # precondition: it IS in-pad
+
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert len(result.moved) == 1
+        assert not result.skipped
+        assert not result.unresolvable
+
+        moved = result.moved[0]
+        # Plane-stitch move: NO stub (pour overlap carries the net after refill).
+        assert moved.stub_layers == []
+        assert moved.kind == "plane-stitch"
+
+        via = pcb.vias[0]
+        fp = pcb.footprints[0]
+        pad = fp.pads[0]
+        bbox = _pad_absolute_bbox(pad, fp)
+
+        # Via drill is now fully OUTSIDE the pad bbox.
+        assert not _via_inside_pad(via, bbox)
+        # Drill edge clears the pad edge by at least min_clearance (any side).
+        drill_edge_gap = (
+            min(
+                abs(via.position[0] - bbox[0]),
+                abs(via.position[0] - bbox[2]),
+                abs(via.position[1] - bbox[1]),
+                abs(via.position[1] - bbox[3]),
+            )
+            - via.drill / 2.0
+        )
+        assert drill_edge_gap >= rules.min_clearance_mm - 1e-6
+
+        # The new position lies inside the same-net zone boundary polygon.
+        zone = pcb.zones[0]
+        assert point_in_polygon(via.position[0], via.position[1], zone.polygon)
+
+        # No stub segment was appended (plane-stitch relies on pour overlap).
+        assert len(pcb.segments) == 0
+
+    def test_plane_stitch_move_persists_through_save(self, tmp_path: Path):
+        """The plane-stitch move round-trips to disk and clears the DRC count."""
+        p = _write(tmp_path, _PCB_PLANE_STITCH_WITH_ZONE)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        relocate_in_pad_vias(pcb, rules, dry_run=False)
+        moved_pos = pcb.vias[0].position
+        pcb.save(p)
+
+        reloaded = PCB.load(p)
+        assert reloaded.vias[0].position == pytest.approx(moved_pos)
+        assert _via_in_pad_count(reloaded) == 0
+
+    def test_plane_stitch_dry_run_mutates_nothing(self, tmp_path: Path):
+        """--dry-run reports the plane-stitch move but writes nothing."""
+        p = _write(tmp_path, _PCB_PLANE_STITCH_WITH_ZONE)
+        pcb = PCB.load(p)
+        n_segments_before = len(pcb.segments)
+        via_pos_before = pcb.vias[0].position
+
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=True)
+
+        assert len(result.moved) == 1
+        assert result.moved[0].kind == "plane-stitch"
+        # ...but nothing was mutated.
+        assert pcb.vias[0].position == via_pos_before
+        assert len(pcb.segments) == n_segments_before
+
+    def test_plane_stitch_dry_run_via_main_no_file_write(self, tmp_path: Path):
+        """The CLI --dry-run path leaves the file byte-identical for a stitch move."""
+        p = _write(tmp_path, _PCB_PLANE_STITCH_WITH_ZONE)
+        original = p.read_text()
+        rc = main([str(p), "--mfr", "jlcpcb", "--relocate-in-pad", "--dry-run", "-q"])
+        assert rc in (0, 2)
+        assert p.read_text() == original
+
+    def test_plane_stitch_no_zone_reported_unresolvable(self, tmp_path: Path):
+        """A plane-stitch via with NO same-net zone stays unresolvable, untouched."""
+        p = _write(tmp_path, _PCB_PLANE_STITCH_IN_PAD)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert not result.moved
+        assert len(result.unresolvable) == 1
+        assert result.unresolvable[0].category == "unresolvable"
+        assert "no same-net zone" in result.unresolvable[0].reason
+        # The via is left untouched (still in-pad, but reported).
+        assert pcb.vias[0].position == (100.0, 100.0)
+
+    def test_plane_stitch_boxed_in_unresolvable(self, tmp_path: Path):
+        """A plane-stitch via whose only in-zone candidates hit foreign copper
+        is unresolvable, never mis-placed outside the pour or into a short."""
+        p = _write(tmp_path, _PCB_PLANE_STITCH_BOXED_IN)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert not result.moved
+        assert len(result.unresolvable) == 1
+        assert result.unresolvable[0].category == "unresolvable"
+        # Untouched: never emit a worse board.
+        assert pcb.vias[0].position == (100.0, 100.0)
+
+    def test_plane_stitch_clear_of_pad_clean_noop(self, tmp_path: Path):
+        """A via already clear of its pad is a clean no-op even with a zone."""
+        p = _write(tmp_path, _PCB_PLANE_STITCH_CLEAR_OF_PAD)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert not result.moved
+        assert not result.skipped
+        assert not result.unresolvable
+        assert pcb.vias[0].position == (104.0, 104.0)
+
+    def test_plane_stitch_supported_mfr_is_noop(self, tmp_path: Path):
+        """On jlcpcb-tier1 (via-in-pad supported) nothing is relocated."""
+        p = _write(tmp_path, _PCB_PLANE_STITCH_WITH_ZONE)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb-tier1", 2, 1.0)
+        assert rules.via_in_pad_supported is True
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert result.supported_noop is True
+        assert not result.moved
+        assert pcb.vias[0].position == (100.0, 100.0)
+
+    def test_plane_stitch_net_scoping(self, tmp_path: Path):
+        """--net scoping excludes/includes the plane net as expected."""
+        p = _write(tmp_path, _PCB_PLANE_STITCH_WITH_ZONE)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+
+        # Excluded: no move.
+        pcb = PCB.load(p)
+        result = relocate_in_pad_vias(pcb, rules, nets={"OTHER_NET"}, dry_run=False)
+        assert not result.moved
+        assert pcb.vias[0].position == (100.0, 100.0)
+
+        # Included: moved.
+        pcb2 = PCB.load(p)
+        result2 = relocate_in_pad_vias(pcb2, rules, nets={"GND"}, dry_run=False)
+        assert len(result2.moved) == 1
+        assert result2.moved[0].kind == "plane-stitch"
+
+    def test_plane_stitch_json_report_includes_kind(self, tmp_path: Path, capsys):
+        """--format json marks the plane-stitch move with kind + empty stub_layers."""
+        import json as _json
+
+        p = _write(tmp_path, _PCB_PLANE_STITCH_WITH_ZONE)
+        rc = main([str(p), "--mfr", "jlcpcb", "--relocate-in-pad", "--dry-run", "--format", "json"])
+        assert rc in (0, 2)
+        data = _json.loads(capsys.readouterr().out)
+        assert len(data["moved"]) == 1
+        assert data["moved"][0]["kind"] == "plane-stitch"
+        assert data["moved"][0]["stub_layers"] == []
