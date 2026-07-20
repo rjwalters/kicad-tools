@@ -15,6 +15,7 @@ import pytest
 from kicad_tools.placement.cost import BoardOutline
 from kicad_tools.placement.slide_off import (
     SlideOffResult,
+    _SpatialGrid,
     slide_off_overlaps,
 )
 from kicad_tools.placement.vector import (
@@ -748,58 +749,91 @@ class TestPerformance:
 
         assert elapsed < 0.1, f"Took {elapsed:.3f}s, expected < 0.1s"
 
-    def test_spatial_index_outperforms_bruteforce(self):
-        """Spatial index beats brute-force on a spread-out placement.
+    def test_spatial_index_prunes_candidate_pairs(self):
+        """Grid broad-phase prunes the candidate-pair set deterministically.
 
-        This replaces a former absolute wall-clock bound (``elapsed < 0.5s``)
-        that flaked on loaded CI runners (issue #3858). Instead of timing
-        against a hardware-dependent threshold, we time both the brute-force
-        O(n^2) baseline (``use_spatial_index=False``) and the grid-based
-        spatial index (``use_spatial_index=True``) with identical inputs and
-        assert the grid variant is meaningfully faster.
+        This replaces a former wall-clock ratio assertion (grid >= 2x faster
+        than brute force) that flaked on loaded CI runners: it dipped to 1.56x
+        on 2026-07-20 (issue #4366) despite already using a spread-grid
+        placement, best-of-3 ``min`` timing, and a "conservative" 2x gate.
+        Both variants share a large *identical* fixed overhead (coincident
+        jitter, half-size / safe-bound computation, output assembly) that the
+        spatial index never touches, so the ratio ``(F + B) / (F + G)`` is
+        pulled toward 1x whenever a loaded runner inflates ``F`` — a structural
+        fragility that ``min()`` and larger ``n`` cannot remove.
 
-        The comparison uses a *spread-out* 2D grid placement, because the
-        spatial-index broad-phase only prunes candidate pairs when components
-        fall into distinct grid cells. (With all components coincident the
-        candidate set is still ~all pairs and the index gives almost no
-        advantage — see #3858 root-cause analysis.) On a spread placement the
-        grid holds a stable ~2.5-3x advantage that grows with n, so a 2x gate
-        has comfortable headroom yet still fails loudly if the broad-phase
-        regresses to O(n^2) (where the ratio collapses toward 1x).
+        Instead we assert directly on the property that *makes* the index
+        fast, which is entirely deterministic and has zero timing sensitivity:
+        the grid broad-phase reduces the candidate set from ``O(n^2)``
+        (``n*(n-1)/2`` for brute force) to ``O(n)`` on a spread placement.
 
-        Timing uses best-of-3 (``min``) per variant to damp scheduler/
-        contention jitter on tiny absolute durations.
+        We reconstruct ``positions`` / ``half_sizes`` exactly the way
+        :func:`slide_off_overlaps` does (rotation index 0 for these un-rotated
+        square components -> half = width/2, height/2) and drive the real
+        production ``_SpatialGrid(cell_size=10.0)``.
         """
         n = 200
-        board = _make_board(500.0, 500.0)
         components = _make_components(n, size=2.0)
         vector = _make_vector_spread_grid(n, spacing=15.0)
+        margin = 0.5
 
-        def _time(use_spatial_index: bool) -> float:
-            best = math.inf
-            for _ in range(3):
-                start = time.perf_counter()
-                slide_off_overlaps(
-                    vector,
-                    components,
-                    board,
-                    margin_mm=0.5,
-                    max_iterations=5,
-                    use_spatial_index=use_spatial_index,
-                )
-                best = min(best, time.perf_counter() - start)
-            return best
+        # Reconstruct positions/half_sizes the way slide_off_overlaps does.
+        # These components are un-rotated squares (rot_idx 0), so half_sizes
+        # are simply (width/2, height/2) — mirroring slide_off's derivation.
+        positions = np.array(
+            [
+                [
+                    vector.data[i * FIELDS_PER_COMPONENT],
+                    vector.data[i * FIELDS_PER_COMPONENT + 1],
+                ]
+                for i in range(n)
+            ],
+            dtype=np.float64,
+        )
+        half_sizes = np.array(
+            [[c.width / 2.0, c.height / 2.0] for c in components],
+            dtype=np.float64,
+        )
 
-        brute_elapsed = _time(use_spatial_index=False)
-        grid_elapsed = _time(use_spatial_index=True)
+        # Brute force checks every one of these pairs.
+        total_pairs = n * (n - 1) // 2
 
-        # Conservative relative gate: grid at least ~2x faster than brute.
-        # Measured ratio is ~2.5-3x, so this tolerates CI noise while still
-        # catching a broad-phase regression to O(n^2).
-        assert grid_elapsed * 2.0 < brute_elapsed, (
-            f"Spatial index not meaningfully faster than brute force: "
-            f"grid={grid_elapsed:.4f}s brute={brute_elapsed:.4f}s "
-            f"(ratio {brute_elapsed / grid_elapsed:.2f}x, expected >= 2x)"
+        grid = _SpatialGrid(cell_size=10.0)
+        grid.build(positions, half_sizes, margin=margin)
+        pruned = len(grid.potential_pairs())
+
+        # On a spacing=15 > cell_size=10 grid, each 3mm AABB (2mm box + 0.5mm
+        # margin per side) sits in its own cell, so NO candidate pairs survive
+        # the broad-phase (measured: pruned == 0, i.e. 0.0% of total_pairs).
+        # The 10% threshold is generous headroom yet still collapses far below
+        # the O(n^2) regression signal this guard exists to catch.
+        assert pruned < 0.10 * total_pairs, (
+            f"broad-phase pruned to {pruned}/{total_pairs} "
+            f"({pruned / total_pairs:.1%}); expected < 10%"
+        )
+
+        # Negative control (self-proving that the assertion above is not
+        # neutered): reproduce the #3858 degenerate case where the grid gives
+        # no advantage by placing every component at the SAME point. With the
+        # production cell_size=10.0 they all fall into the same cell(s), so the
+        # broad-phase cannot prune and must yield exactly the O(n^2) pair set.
+        # This is a built-in mutation test: if a future change regresses
+        # potential_pairs() to emit ~all pairs regardless of cell occupancy,
+        # the primary < 10% assertion above fails loudly.
+        #
+        # Force-all-pairs verification recipe (to confirm this guard bites):
+        # temporarily edit _SpatialGrid.potential_pairs() (or build()) to emit
+        # every i<j pair (e.g. drop all components into one cell); the primary
+        # assertion above MUST then fail. Revert afterwards. The control below
+        # exercises exactly that degenerate path deterministically, so it
+        # proves the < 10% assertion can distinguish a pruning grid from a
+        # non-pruning one.
+        coincident = np.zeros((n, 2), dtype=np.float64)
+        degenerate = _SpatialGrid(cell_size=10.0)
+        degenerate.build(coincident, half_sizes, margin=margin)
+        assert len(degenerate.potential_pairs()) == total_pairs, (
+            "negative control: a non-partitioning grid (all components "
+            "coincident) must yield every O(n^2) pair"
         )
 
 
