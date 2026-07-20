@@ -99,6 +99,48 @@ def board_no_hv_source() -> str:
     return "".join(parts)
 
 
+# Header for the benign-suspect fixture (issue #4365): net names that *look*
+# mains-ish to a naive scanner (LINE / HOT / PRIMARY tokens) but are ordinary
+# signals -- SPI_LINE, HOT_SWAP, PRIMARY_CLK.  The tightened MAINS_NAME_RE must
+# NOT flag any of these, so a board carrying only these nets (and no mains-level
+# working voltage) exits 0 rather than tripping the #4354 vacuity guard.
+_BENIGN_HEADER = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test_creepage")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SPI_LINE")
+  (net 2 "GND")
+  (net 3 "HOT_SWAP")
+  (net 4 "PRIMARY_CLK")
+"""
+
+
+def board_benign_suspect_names_source() -> str:
+    """Board whose only suspect-shaped nets are benign (issue #4365).
+
+    ``SPI_LINE`` / ``HOT_SWAP`` / ``PRIMARY_CLK`` carry the LINE / HOT / PRIMARY
+    tokens that the *old* broad regex over-matched.  With the tightened
+    :data:`kicad_tools.creepage.engine.MAINS_NAME_RE`, none are mains-suspect, so
+    a low-voltage audit of this board must exit 0 (no vacuity guard trip).
+    """
+    parts = [_BENIGN_HEADER, _OUTLINE]
+    parts.append(_footprint("U1", 110, 110, 1, "SPI_LINE"))
+    parts.append(_footprint("U2", 130, 110, 2, "GND"))
+    parts.append(_footprint("U3", 135, 110, 3, "HOT_SWAP"))
+    parts.append(_footprint("U4", 105, 110, 4, "PRIMARY_CLK"))
+    parts.append(")\n")
+    return "".join(parts)
+
+
 # Header for the mains-named fixture: unmistakable mains net names (AC_LINE /
 # AC_NEUTRAL / FUSED_LINE) that the broadened HV name-pattern fallback (#4354)
 # must classify as HV without any net-class-map.

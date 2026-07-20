@@ -73,8 +73,8 @@ SELV_WORKING_VOLTAGE_V = 50.0
 MAINS_NAME_RE = re.compile(
     r"(?:^|[_/])"
     r"(?:"
-    r"AC[_-]?LINE|AC[_-]?NEUT(?:RAL)?|L[_-]?LINE|N[_-]?LINE|LINE(?:_IN)?|"
-    r"LIVE|NEUTRAL|MAINS|FUSED(?:_[A-Z0-9]+)?|HV[_A-Z0-9]*|PRIMARY|HOT"
+    r"AC[_-]?LINE|AC[_-]?NEUT(?:RAL)?|L[_-]?LINE|N[_-]?LINE|"
+    r"LIVE|NEUTRAL|MAINS|FUSED(?:_[A-Z0-9]+)?|HV[_A-Z0-9]*"
     r")"
     r"(?:$|[_/])",
     re.IGNORECASE,
@@ -332,8 +332,8 @@ def resolve_hv_nets(
        can never return ``"HV"`` and step 2 is unreachable for the HV group
        (issue #4354).  Any unmapped net whose name carries a strong mains/HV
        signal (:data:`MAINS_NAME_RE` -- ``AC_LINE``, ``AC_NEUTRAL``,
-       ``FUSED_LINE``, ``*MAINS*``, ``HV*``, ``LIVE``, ``NEUTRAL``,
-       ``PRIMARY`` ...) is therefore selected here.  An explicit map entry
+       ``FUSED_LINE``, ``*MAINS*``, ``HV*``, ``LIVE``,
+       ``NEUTRAL`` ...) is therefore selected here.  An explicit map entry
        always wins (step 1), so operator-supplied classification is never
        overridden by this fallback.
     """

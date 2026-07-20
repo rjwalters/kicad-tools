@@ -210,12 +210,13 @@ def test_name_pattern_fallback_without_map(tmp_path):
         "FUSED",
         "MAINS_L",
         "L_MAINS",
+        "MAINS_IN",
         "HV_BUS",
         "HV",
+        "L_LINE",
+        "N_LINE",
         "LIVE",
         "NEUTRAL",
-        "PRIMARY",
-        "LINE",
         "/AC_LINE",  # hierarchical leading slash
     ],
 )
@@ -235,6 +236,17 @@ def test_is_mains_suspect_name_positive(name):
         "VCC",
         "ONLINE",  # 'LINE' substring, no token boundary -> must NOT match
         "REMAINS",  # 'MAINS' substring, no token boundary -> must NOT match
+        # Bare LINE/HOT/PRIMARY tokens no longer match (issue #4365): they
+        # over-matched benign nets and were dropped from MAINS_NAME_RE.
+        "PRIMARY",
+        "LINE",
+        "HOT",
+        "LINE_A",
+        "SPI_LINE",
+        "LINE_IN",
+        "HOT_SWAP",
+        "PRIMARY_CLK",
+        "KEEP_ALIVE",  # 'LIVE' preceded by 'A', not a token boundary
         "",
         None,
     ],
