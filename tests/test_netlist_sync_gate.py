@@ -31,7 +31,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from test_pcb_sync_netlist import (  # noqa: E402
     MINIMAL_PCB_MATCHING,
     MINIMAL_SCHEMATIC,
+    PCB_FOOTPRINT_MISMATCH,
     PCB_MISSING_R1,
+    PCB_VALUE_MISMATCH,
+    PCB_VALUE_SUFFIX_ONLY,
     PCB_WITH_ORPHAN,
 )
 
@@ -104,6 +107,39 @@ class TestNetlistSyncGate:
         assert "R1" in out
         assert "1 schematic-only" in out
         assert "OUT OF SYNC" in out
+
+    def test_value_mismatch_exits_nonzero_by_default(self, tmp_path, capsys):
+        # R1 value diverges (10k schematic vs 4.7k PCB): a real value mismatch
+        # must fail the blocking gate by default, no --strict required (#4352).
+        pcb = _write_pair(tmp_path, "board", MINIMAL_SCHEMATIC, PCB_VALUE_MISMATCH)
+        rc = check_main([str(pcb), "--netlist-sync"])
+        assert rc == 2
+        out = capsys.readouterr().out
+        assert "OUT OF SYNC" in out
+        assert "R1" in out
+        assert "1 value mismatch(es)" in out
+
+    def test_footprint_mismatch_exits_nonzero_by_default(self, tmp_path, capsys):
+        # C1 footprint diverges (C_0402 schematic vs C_0805 PCB): a real
+        # footprint mismatch must fail the blocking gate by default (#4352).
+        pcb = _write_pair(tmp_path, "board", MINIMAL_SCHEMATIC, PCB_FOOTPRINT_MISMATCH)
+        rc = check_main([str(pcb), "--netlist-sync"])
+        assert rc == 2
+        out = capsys.readouterr().out
+        assert "OUT OF SYNC" in out
+        assert "C1" in out
+        assert "1 footprint mismatch(es)" in out
+
+    def test_value_suffix_only_diff_stays_zero(self, tmp_path, capsys):
+        # C1 differs only by a benign rating suffix (100n vs 100n 25V): this is
+        # surfaced as an informational suffix note (#4351), NOT a value
+        # mismatch, so the gate must stay exit 0 (guards a #4351 regression).
+        pcb = _write_pair(tmp_path, "board", MINIMAL_SCHEMATIC, PCB_VALUE_SUFFIX_ONLY)
+        rc = check_main([str(pcb), "--netlist-sync"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "IN SYNC" in out
+        assert "C1" in out
 
     def test_in_sync_exits_zero(self, tmp_path, capsys):
         pcb = _write_pair(tmp_path, "board", MINIMAL_SCHEMATIC, MINIMAL_PCB_MATCHING)

@@ -369,16 +369,35 @@ def run_netlist_sync_gate(
     footprint set, then prints a full add/drop/orphan report.
 
     Exit codes (mirroring ``kct check``'s convention):
-        0 - in sync, or only PCB-only/value/footprint drift without --strict
+        0 - in sync, or only PCB-only extras / suffix-note drift without
+            --strict
         1 - no schematic could be resolved (cannot run the gate)
-        2 - components present in the schematic are missing from the PCB
-            (unbuildable BOM), or any drift with --strict
+        2 - a matched component's value or footprint diverges from the
+            schematic (wrong part / wrong package placed), or a schematic
+            component is missing from the PCB (unbuildable BOM); also any
+            drift with --strict
+
+    Drift-axis policy (issue #4352):
+        schematic_orphans    -> exit 2 by default (unbuildable BOM)
+        value_mismatches     -> exit 2 by default (real, suffix notes excluded)
+        footprint_mismatches -> exit 2 by default (wrong package placed)
+        pcb_orphans          -> advisory (exit 0) unless --strict
+        value_suffix_notes   -> informational only, never affects the exit code
+
+    Value/footprint mismatches block by default because ``--netlist-sync`` is
+    documented as a *blocking* gate: a CI job wired on its exit status must
+    fail when the placed part set diverges from the schematic/BOM.  Benign
+    rating-suffix diffs ('100nF' vs '100nF 25V') are surfaced as informational
+    ``value_suffix_notes`` (issue #4351) and never counted in
+    ``value_mismatches``, so they do not trip this gate.  A recipe that wants
+    advisory-only value/footprint reporting should drop ``--netlist-sync`` and
+    rely on the plain ``kct check`` drift banner (same text, exit 0).
 
     Args:
         pcb_path: Path to the ``.kicad_pcb`` file.
         schematic: Optional explicit schematic path override.
-        strict: When True, any drift (including PCB-only/value/footprint)
-            yields exit code 2.
+        strict: When True, PCB-only extras also yield exit code 2 (i.e. any
+            drift is fatal).
     """
     from kicad_tools.sync.drift import analyze_drift, has_drift, render_drift_report
 
@@ -398,11 +417,15 @@ def run_netlist_sync_gate(
 
     print(render_drift_report(analysis, pcb_path, resolved))
 
-    # Schematic-only drift == unbuildable BOM == blocking (mirrors the
-    # auditor's NOT_READY verdict rule).  PCB-only / value / footprint drift
-    # is advisory unless --strict.
-    if analysis.schematic_orphans:
+    # Real component-identity drift is blocking by default (issue #4352):
+    # schematic-only (unbuildable BOM) OR a matched component whose value /
+    # footprint diverges (wrong part / wrong package placed).  Benign
+    # rating-suffix diffs are surfaced as value_suffix_notes (issue #4351)
+    # and already excluded from value_mismatches, so they never trip this.
+    if analysis.schematic_orphans or analysis.value_mismatches or analysis.footprint_mismatches:
         return 2
+    # PCB-only extras (test points, fiducials, DNP alternates) remain advisory
+    # unless the caller opts into --strict.
     if strict and has_drift(analysis):
         return 2
     return 0
@@ -1009,8 +1032,11 @@ def main(argv: list[str] | None = None) -> int:
             "Run a blocking schematic/PCB netlist-sync gate (issue #3154). "
             "Compares the schematic component set against the PCB footprint set "
             "via the Reconciler and prints a full add/drop/orphan report. Exits "
-            "with code 2 when components present in the schematic are missing "
-            "from the PCB (unbuildable BOM). PCB-only/value/footprint drift is a "
+            "with code 2 when a schematic component is missing from the PCB "
+            "(unbuildable BOM) OR a matched component's value or footprint "
+            "diverges (wrong part / wrong package placed). Benign rating-suffix "
+            "value diffs ('100nF' vs '100nF 25V', issue #4351) are "
+            "informational and do not fail the gate. PCB-only extras stay a "
             "warning unless --strict. Skips silently if no schematic is found."
         ),
     )
