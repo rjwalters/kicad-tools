@@ -1761,7 +1761,12 @@ class TestGetBoardOuterLayers:
 # ===========================================================================
 
 from kicad_tools.cli.fix_vias_cmd import get_mfr_design_rules  # noqa: E402
-from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias  # noqa: E402
+from kicad_tools.cli.relocate_in_pad_vias import (  # noqa: E402
+    _check_clearance,
+    _collect_smd_pads_by_net,
+    _collect_tht_pads,
+    relocate_in_pad_vias,
+)
 from kicad_tools.schema.pcb import PCB  # noqa: E402
 from kicad_tools.validate.rules.via_in_pad import (  # noqa: E402
     ViaInPadRule,
@@ -2273,3 +2278,372 @@ class TestPlaneStitchRelocation:
         assert len(data["moved"]) == 1
         assert data["moved"][0]["kind"] == "plane-stitch"
         assert data["moved"][0]["stub_layers"] == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 (issue #4377): multi-branch fallback + THT hole-to-hole clearance.
+# ---------------------------------------------------------------------------
+
+# Signal in-pad via whose +X off-pad slide lands next to a foreign-net THT pad
+# drill closer than min_hole_to_hole (0.5mm) -> the slide must be SKIPPED.
+# The via slides to x=100.777 (t_exit 0.5 + drill/2 0.15 + clearance 0.127); the
+# THT hole at (101.3, 100) leaves a hole-to-hole gap of only ~0.22mm.  The
+# --refill-zones DRC cross-gate would NOT catch this (hole-to-hole is not a
+# copper interaction), so _check_clearance must.
+_PCB_THT_HOLE_TO_HOLE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG1")
+  (net 2 "SIG2")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "SIG1"))
+  )
+  (footprint "test:tht" (layer "F.Cu") (at 101.3 100)
+    (pad "1" thru_hole circle (at 0 0) (size 0.5 0.5) (drill 0.3) (layers "*.Cu") (net 2 "SIG2"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-inpad"))
+  (segment (start 100 100) (end 105 100) (width 0.2) (layer "B.Cu") (net 1) (uuid "seg-escape"))
+)
+"""
+
+# Same slide, but the crowding THT pad is on the SAME net (SIG1) as the via.
+# Hole-to-hole is net-agnostic (a drill collision is a drill collision), so the
+# slide must still be SKIPPED -- mirroring the existing other-via logic.
+_PCB_THT_HOLE_TO_HOLE_SAME_NET = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG1")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "SIG1"))
+  )
+  (footprint "test:tht" (layer "F.Cu") (at 101.3 100)
+    (pad "1" thru_hole circle (at 0 0) (size 0.5 0.5) (drill 0.3) (layers "*.Cu") (net 1 "SIG1"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-inpad"))
+  (segment (start 100 100) (end 105 100) (width 0.2) (layer "B.Cu") (net 1) (uuid "seg-escape"))
+)
+"""
+
+# Signal in-pad via whose +X slide keeps the THT DRILL far (hole-to-hole OK) but
+# runs the via copper inside min_clearance of a large foreign-net THT pad's
+# copper -> SKIPPED on copper clearance (different-net plated pad).
+_PCB_THT_COPPER_CLEARANCE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG1")
+  (net 2 "SIG2")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "SIG1"))
+  )
+  (footprint "test:tht" (layer "F.Cu") (at 102 100)
+    (pad "1" thru_hole circle (at 0 0) (size 2.0 2.0) (drill 0.3) (layers "*.Cu") (net 2 "SIG2"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-inpad"))
+  (segment (start 100 100) (end 105 100) (width 0.2) (layer "B.Cu") (net 1) (uuid "seg-escape"))
+)
+"""
+
+# Multi-branch in-pad via: both connected branches terminate INSIDE the pad, so
+# no single escape direction exists.  Phase 3 walks the 8-dir ladder and stubs
+# on every connected layer (F.Cu from the pad + F.Cu/B.Cu from the branches).
+_PCB_MULTIBRANCH = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG1")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "SIG1"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-mb"))
+  (segment (start 100 100) (end 100.3 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg-b1"))
+  (segment (start 100 100) (end 100 100.3) (width 0.2) (layer "B.Cu") (net 1) (uuid "seg-b2"))
+)
+"""
+
+# Multi-branch via boxed in by a large overlapping foreign-net pad -> every
+# ladder candidate collides with foreign copper, so it is UNRESOLVABLE and left
+# in place (never mis-placed).
+_PCB_MULTIBRANCH_BOXED_IN = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG1")
+  (net 2 "SIG2")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "SIG1"))
+  )
+  (footprint "test:block" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 8.0 8.0) (layers "F.Cu") (net 2 "SIG2"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-mb"))
+  (segment (start 100 100) (end 100.3 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg-b1"))
+  (segment (start 100 100) (end 100 100.3) (width 0.2) (layer "B.Cu") (net 1) (uuid "seg-b2"))
+)
+"""
+
+# Footprint rotated 45deg with an in-pad signal via and a +X escape.  The
+# over-approximated (rotated-rectangle) AABB drives a conservative slide; the
+# moved via must still land clear of the true pad and pass _check_clearance.
+_PCB_ROTATED_PAD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG1")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100 45)
+    (pad "1" smd rect (at 0 0) (size 2.0 1.0) (layers "F.Cu") (net 1 "SIG1"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-rot"))
+  (segment (start 100 100) (end 110 100) (width 0.2) (layer "B.Cu") (net 1) (uuid "seg-rot"))
+)
+"""
+
+# Dense-pitch cluster: a ring of 8 foreign-net THT pads boxes a multi-branch via
+# in -- every ladder candidate is rejected on hole-to-hole (net-agnostic) to a
+# ring drill, so the via is UNRESOLVABLE and the board is left unchanged.
+_PCB_DENSE_THT_RING = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG1")
+  (net 2 "SIG2")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "SIG1"))
+  )
+  (footprint "test:r1" (layer "F.Cu") (at 101 100)
+    (pad "1" thru_hole circle (at 0 0) (size 0.9 0.9) (drill 0.6) (layers "*.Cu") (net 2 "SIG2")))
+  (footprint "test:r2" (layer "F.Cu") (at 99 100)
+    (pad "1" thru_hole circle (at 0 0) (size 0.9 0.9) (drill 0.6) (layers "*.Cu") (net 2 "SIG2")))
+  (footprint "test:r3" (layer "F.Cu") (at 100 101)
+    (pad "1" thru_hole circle (at 0 0) (size 0.9 0.9) (drill 0.6) (layers "*.Cu") (net 2 "SIG2")))
+  (footprint "test:r4" (layer "F.Cu") (at 100 99)
+    (pad "1" thru_hole circle (at 0 0) (size 0.9 0.9) (drill 0.6) (layers "*.Cu") (net 2 "SIG2")))
+  (footprint "test:r5" (layer "F.Cu") (at 100.707 100.707)
+    (pad "1" thru_hole circle (at 0 0) (size 0.9 0.9) (drill 0.6) (layers "*.Cu") (net 2 "SIG2")))
+  (footprint "test:r6" (layer "F.Cu") (at 99.293 100.707)
+    (pad "1" thru_hole circle (at 0 0) (size 0.9 0.9) (drill 0.6) (layers "*.Cu") (net 2 "SIG2")))
+  (footprint "test:r7" (layer "F.Cu") (at 99.293 99.293)
+    (pad "1" thru_hole circle (at 0 0) (size 0.9 0.9) (drill 0.6) (layers "*.Cu") (net 2 "SIG2")))
+  (footprint "test:r8" (layer "F.Cu") (at 100.707 99.293)
+    (pad "1" thru_hole circle (at 0 0) (size 0.9 0.9) (drill 0.6) (layers "*.Cu") (net 2 "SIG2")))
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-dense"))
+  (segment (start 100 100) (end 100.3 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg-d1"))
+  (segment (start 100 100) (end 100 100.3) (width 0.2) (layer "B.Cu") (net 1) (uuid "seg-d2"))
+)
+"""
+
+
+class TestRelocatePhase3:
+    """Phase-3 edge cases (issue #4377): THT hole-to-hole + multi-branch."""
+
+    def test_tht_hole_to_hole_blocks_slide(self, tmp_path: Path):
+        """A slide that crowds a foreign THT drill is skipped, not moved."""
+        p = _write(tmp_path, _PCB_THT_HOLE_TO_HOLE)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        via_pos_before = pcb.vias[0].position
+
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert not result.moved
+        assert len(result.skipped) == 1
+        reason = result.skipped[0].reason
+        assert "hole-to-hole" in reason
+        assert "THT pad" in reason
+        # Safety invariant: the via was NOT moved into the violation.
+        assert pcb.vias[0].position == via_pos_before
+
+    def test_without_tht_pad_the_slide_succeeds(self, tmp_path: Path):
+        """Contrast: identical geometry without the THT pad DOES relocate.
+
+        Proves the THT hole-to-hole check is what blocks the move -- the pre-#4377
+        code (which never inspected THT drills) would have mis-placed this via.
+        """
+        p = _write(tmp_path, _PCB_SIGNAL_IN_PAD)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+        assert len(result.moved) == 1
+        assert not result.skipped
+
+    def test_tht_hole_to_hole_is_net_agnostic(self, tmp_path: Path):
+        """A same-net THT drill still blocks the slide (hole-to-hole any net)."""
+        p = _write(tmp_path, _PCB_THT_HOLE_TO_HOLE_SAME_NET)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+        assert not result.moved
+        assert len(result.skipped) == 1
+        assert "hole-to-hole" in result.skipped[0].reason
+
+    def test_tht_copper_clearance_different_net(self, tmp_path: Path):
+        """Different-net THT copper (drill far) is rejected on copper clearance."""
+        p = _write(tmp_path, _PCB_THT_COPPER_CLEARANCE)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+        assert not result.moved
+        assert len(result.skipped) == 1
+        reason = result.skipped[0].reason
+        assert "clearance" in reason
+        assert "THT pad" in reason
+
+    def test_collect_tht_pads_finds_plated_holes(self, tmp_path: Path):
+        """_collect_tht_pads returns plated pads (any net) with a hole center."""
+        p = _write(tmp_path, _PCB_THT_HOLE_TO_HOLE)
+        pcb = PCB.load(p)
+        tht = _collect_tht_pads(pcb)
+        assert len(tht) == 1
+        _fp, pad, _bbox, hole_center = tht[0]
+        assert pad.drill == pytest.approx(0.3)
+        assert hole_center == pytest.approx((101.3, 100.0))
+
+    def test_multibranch_relocated_via_ladder(self, tmp_path: Path):
+        """A via with no escaping branch relocates via the ladder + stubs."""
+        p = _write(tmp_path, _PCB_MULTIBRANCH)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert len(result.moved) == 1
+        assert not result.unresolvable
+        moved = result.moved[0]
+        # Signal-kind move (stubs), not plane-stitch.
+        assert moved.kind == "signal"
+        # Stubs land on every connected layer (pad F.Cu + both branch layers).
+        assert "F.Cu" in moved.stub_layers
+        assert "B.Cu" in moved.stub_layers
+
+        via = pcb.vias[0]
+        fp = pcb.footprints[0]
+        bbox = _pad_absolute_bbox(fp.pads[0], fp)
+        # The via now sits OUTSIDE the pad it was drilled into.
+        assert not _via_inside_pad(via, bbox)
+        # And the relocated via is clearance-clean.
+        pads_by_net = _collect_smd_pads_by_net(pcb)
+        tht = _collect_tht_pads(pcb)
+        assert (
+            _check_clearance(
+                pcb,
+                via,
+                via.position[0],
+                via.position[1],
+                pads_by_net,
+                tht,
+                rules.min_clearance_mm,
+                rules.min_hole_to_hole_mm,
+            )
+            is None
+        )
+
+    def test_multibranch_boxed_in_unresolvable(self, tmp_path: Path):
+        """A boxed-in multi-branch via is unresolvable and left in place."""
+        p = _write(tmp_path, _PCB_MULTIBRANCH_BOXED_IN)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        n_segments_before = len(pcb.segments)
+        via_pos_before = pcb.vias[0].position
+
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert not result.moved
+        assert len(result.unresolvable) == 1
+        assert "multi-branch" in result.unresolvable[0].reason
+        # Board unchanged: no stubs added, via not moved.
+        assert len(pcb.segments) == n_segments_before
+        assert pcb.vias[0].position == via_pos_before
+
+    def test_rotated_pad_relocates_clearance_clean(self, tmp_path: Path):
+        """A 45deg footprint relocates its via to a clearance-clean spot."""
+        p = _write(tmp_path, _PCB_ROTATED_PAD)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        # Relocate-or-unresolvable; never skipped-into-violation.
+        assert len(result.moved) + len(result.unresolvable) == 1
+        if result.moved:
+            via = pcb.vias[0]
+            fp = pcb.footprints[0]
+            bbox = _pad_absolute_bbox(fp.pads[0], fp)
+            assert not _via_inside_pad(via, bbox)
+            pads_by_net = _collect_smd_pads_by_net(pcb)
+            tht = _collect_tht_pads(pcb)
+            assert (
+                _check_clearance(
+                    pcb,
+                    via,
+                    via.position[0],
+                    via.position[1],
+                    pads_by_net,
+                    tht,
+                    rules.min_clearance_mm,
+                    rules.min_hole_to_hole_mm,
+                )
+                is None
+            )
+
+    def test_dense_tht_ring_unresolvable_board_unchanged(self, tmp_path: Path):
+        """A via boxed in by a dense THT ring is unresolvable, board unchanged."""
+        p = _write(tmp_path, _PCB_DENSE_THT_RING)
+        original = p.read_text()
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        n_segments_before = len(pcb.segments)
+
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert not result.moved
+        assert len(result.unresolvable) == 1
+        assert len(pcb.segments) == n_segments_before
+        # A CLI dry-run over the same board writes nothing.
+        rc = main([str(p), "--mfr", "jlcpcb", "--relocate-in-pad", "--dry-run", "-q"])
+        assert rc in (0, 2)
+        assert p.read_text() == original
+
+    def test_dry_run_with_tht_mutates_nothing(self, tmp_path: Path):
+        """--dry-run over a THT-blocked board leaves the file byte-identical."""
+        p = _write(tmp_path, _PCB_THT_HOLE_TO_HOLE)
+        original = p.read_text()
+        pcb = PCB.load(p)
+        n_segments_before = len(pcb.segments)
+        via_pos_before = pcb.vias[0].position
+
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        relocate_in_pad_vias(pcb, rules, dry_run=True)
+
+        assert pcb.vias[0].position == via_pos_before
+        assert len(pcb.segments) == n_segments_before
+        rc = main([str(p), "--mfr", "jlcpcb", "--relocate-in-pad", "--dry-run", "-q"])
+        assert rc in (0, 2)
+        assert p.read_text() == original
