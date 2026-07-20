@@ -448,11 +448,59 @@ def _add_creepage_parser(subparsers) -> None:
     creepage_parser.add_argument(
         "--min",
         type=float,
-        required=True,
+        default=None,
         help=(
-            "Required minimum creepage (surface-path) distance in mm.  Exit "
-            "is non-zero if any pair's creepage falls below this value.  "
-            "Phase 1 has no IEC tables (see #4332); the operator supplies it."
+            "Required minimum creepage (surface-path) distance in mm.  Manual "
+            "override / phase-1 mode.  Optional when --standard is supplied; "
+            "when BOTH are given the stricter (larger) of {manual, derived} "
+            "governs per pair.  Provide either --standard or --min."
+        ),
+    )
+    # Phase 2 (#4332): derive the required creepage/clearance from an IEC table.
+    creepage_parser.add_argument(
+        "--standard",
+        choices=["iec60664", "iec62368"],
+        default=None,
+        help=(
+            "Derive the required creepage (and clearance) from an IEC "
+            "standard table instead of --min: iec60664 (IEC 60664-1 Table F.4 "
+            "creepage / Table F.2 clearance) or iec62368 (IEC 62368-1 Table 17 "
+            "/ Table 14).  Requires --working-voltage and --pollution-degree.  "
+            "Engineering aid, NOT a certification."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help=(
+            "IEC pollution degree (1=sealed, 2=typical indoor/office FR-4, "
+            "3=conductive pollution).  Required with --standard."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--working-voltage",
+        dest="working_voltage",
+        type=float,
+        default=None,
+        help=(
+            "RMS working voltage in volts.  Creepage keys on this RMS value "
+            "directly (step-up to the next-higher tabulated row, never "
+            "interpolated); clearance keys on its peak (RMS x sqrt(2), "
+            "sinusoidal assumption).  Required with --standard."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--material-group",
+        dest="material_group",
+        choices=["I", "II", "IIIa", "IIIb"],
+        default="IIIa",
+        help=(
+            "Insulation material group by CTI (I: CTI>=600, II: 400<=CTI<600, "
+            "IIIa: 175<=CTI<400, IIIb: 100<=CTI<175).  Default IIIa -- the "
+            "conservative assumption for common FR-4."
         ),
     )
     creepage_parser.add_argument(
