@@ -267,22 +267,28 @@ def test_emit_does_not_change_exit_code(board_copy: Path, tmp_path: Path) -> Non
     assert rc_plain == rc_emit
 
 
-def test_emit_degrades_on_unwritable_dir(board_copy: Path, capsys) -> None:
-    """A sidecar write failure warns without failing the check (#4375)."""
-    # Point the board at a directory whose sidecars cannot be created by
-    # making the parent read-only.
-    parent = board_copy.parent
+def test_emit_degrades_on_unwritable_dir(board_copy: Path, capsys, monkeypatch) -> None:
+    """A sidecar write failure warns without failing the check (#4375).
+
+    The failure is injected by monkeypatching the ``.kicad_dru`` write to
+    raise ``OSError`` directly, which exercises the production
+    ``except OSError`` degrade path independent of the process euid.  An
+    earlier version relied on ``os.chmod(parent, read-only)``, but CI runs
+    pytest as root and root bypasses directory permission bits, so the write
+    succeeded and the warning never fired.
+    """
     plain_rc = main([str(board_copy), "--mfr", "jlcpcb", "--allow-incomplete"])
     capsys.readouterr()
-    import os
-    import stat
 
-    orig_mode = parent.stat().st_mode
-    os.chmod(parent, stat.S_IRUSR | stat.S_IXUSR)
-    try:
-        rc = main([str(board_copy), "--mfr", "jlcpcb", "--emit-dru", "--allow-incomplete"])
-    finally:
-        os.chmod(parent, orig_mode)
+    real_write_text = Path.write_text
+
+    def failing_write_text(self: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if self.suffix == ".kicad_dru":
+            raise OSError("injected write failure")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+    rc = main([str(board_copy), "--mfr", "jlcpcb", "--emit-dru", "--allow-incomplete"])
 
     captured = capsys.readouterr()
     # Verdict unchanged despite the failed sidecar write, and a warning fired.
