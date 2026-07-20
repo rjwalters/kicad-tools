@@ -294,3 +294,176 @@ def test_broadened_fallback_only_applies_to_hv_target(tmp_path):
     pcb = _load(tmp_path, board_mains_named_source())
     hv = resolve_hv_nets(pcb, "power", net_class_map=None)
     assert "AC_LINE" not in set(hv.values())
+
+
+# ---------------------------------------------------------------------------
+# Per-net voltage model + pairwise |dV| requirement (Issue #4371)
+# ---------------------------------------------------------------------------
+
+
+def _std():
+    from kicad_tools.creepage.standards import get_standard
+
+    return get_standard("iec60664")
+
+
+def _census_map(pcb, hv, vmap, *, edge=0.0, pd=2, mg="IIIa"):
+    std = _std()
+    return compute_creepage_census(
+        pcb,
+        hv,
+        None,
+        standard="iec60664",
+        standard_edition=std.edition,
+        pollution_degree=pd,
+        material_group=mg,
+        voltage_map=vmap,
+        standard_obj=std,
+        edge_voltage=edge,
+    )
+
+
+def _both_hv_map():
+    from kicad_tools.router.rules import net_class_map_from_dict
+
+    return net_class_map_from_dict({"L_MAINS": {"name": "HV"}, "GND": {"name": "HV"}})
+
+
+def test_voltage_map_from_dict_parses_nets_reserved_keys_and_edge():
+    from kicad_tools.creepage.engine import voltage_map_from_dict
+
+    voltages, edge = voltage_map_from_dict(
+        {
+            "/AC_LINE": 150,
+            "/AC_NEUTRAL": 0,
+            "_edge_voltage": 12.0,
+            "_comment": "ignored documentation",
+        }
+    )
+    assert voltages == {"/AC_LINE": 150.0, "/AC_NEUTRAL": 0.0}
+    assert edge == 12.0
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"NET": "not-a-number"},
+        {"NET": True},  # bool is not a voltage
+        {"NET": None},
+        {"NET": float("nan")},
+        {"_edge_voltage": "x"},
+    ],
+)
+def test_voltage_map_from_dict_rejects_non_numeric(bad):
+    from kicad_tools.creepage.engine import voltage_map_from_dict
+
+    with pytest.raises((ValueError, TypeError)):
+        voltage_map_from_dict(bad)
+
+
+def test_voltage_map_from_dict_rejects_non_dict():
+    from kicad_tools.creepage.engine import voltage_map_from_dict
+
+    with pytest.raises(TypeError):
+        voltage_map_from_dict([("A", 1)])
+
+
+def test_same_potential_pair_requires_zero_and_skips_lookup(tmp_path):
+    # Two nets at equal mapped voltage -> dv == 0 -> required 0.0, trivial PASS,
+    # and NO standard-table lookup (no creepage provenance attached).
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = _census_map(pcb, hv, {"L_MAINS": 90.0, "GND": 90.0})
+    pair = _conductor_pair(report, "GND")
+    assert pair.required_creepage_mm == 0.0
+    assert pair.required_clearance_mm == 0.0
+    assert pair.passed is True
+    v = pair.provenance["voltage"]
+    assert v["delta_v_v"] == 0.0
+    assert v["same_potential"] is True
+    assert "creepage" not in pair.provenance  # lookup was short-circuited
+
+
+def test_cross_domain_pair_matches_flat_voltage_lookup(tmp_path):
+    # V_a=150, V_b=0 -> requirement equals the flat-150V step-up row.
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = _census_map(pcb, hv, {"L_MAINS": 150.0})  # GND unmapped -> 0 V
+    pair = _conductor_pair(report, "GND")
+    expected, _ = _std().required_creepage(150.0, 2, "IIIa")
+    assert pair.required_creepage_mm == pytest.approx(expected)
+    assert pair.provenance["voltage"]["delta_v_v"] == 150.0
+
+
+def test_sub_table_floor_steps_up_to_fifty_volt_row(tmp_path):
+    # dv=30 V (< the 50 V lowest row) conservatively uses the 50 V row.
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = _census_map(pcb, hv, {"L_MAINS": 30.0})
+    pair = _conductor_pair(report, "GND")
+    expected, _ = _std().required_creepage(50.0, 2, "IIIa")
+    assert pair.required_creepage_mm == pytest.approx(expected)
+    assert pair.provenance["creepage"]["voltage_row_used_v"] == 50.0
+
+
+def test_board_edge_uses_edge_voltage_default_zero(tmp_path):
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = _census_map(pcb, hv, {"L_MAINS": 90.0})
+    edge = next(p for p in report.pairs if p.kind == "edge")
+    assert edge.provenance["voltage"]["delta_v_v"] == 90.0  # |90 - 0|
+
+
+def test_board_edge_voltage_override(tmp_path):
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = _census_map(pcb, hv, {"L_MAINS": 90.0}, edge=90.0)
+    edge = next(p for p in report.pairs if p.kind == "edge")
+    assert edge.provenance["voltage"]["delta_v_v"] == 0.0  # |90 - 90|
+    assert edge.required_creepage_mm == 0.0
+
+
+def test_map_present_net_absent_from_copper_is_ignored(tmp_path):
+    # A net named in the map but with no copper must not crash or add pairs.
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = _census_map(pcb, hv, {"L_MAINS": 150.0, "NOT_ON_BOARD": 300.0})
+    assert all(p.net_a != "NOT_ON_BOARD" and p.net_b != "NOT_ON_BOARD" for p in report.pairs)
+
+
+def test_hv_vs_hv_pair_formed_in_map_mode(tmp_path):
+    # With BOTH nets in the HV class, map mode relaxes the HV-vs-HV skip so a
+    # same-class pair at different potentials is evaluated (bank-vs-bank).
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _both_hv_map())
+    assert set(hv.values()) == {"L_MAINS", "GND"}
+    report = _census_map(pcb, hv, {"L_MAINS": 150.0, "GND": 0.0})
+    conductor = [p for p in report.pairs if p.kind == "conductor"]
+    # Exactly one canonical HV-HV conductor pair (not both directions).
+    assert len(conductor) == 1
+    assert conductor[0].provenance["voltage"]["delta_v_v"] == 150.0
+
+
+def test_hv_vs_hv_skipped_without_map(tmp_path):
+    # Legacy single-voltage mode still skips HV-vs-HV pairs entirely.
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _both_hv_map())
+    report = compute_creepage_census(pcb, hv, min_mm=1.5)
+    assert [p for p in report.pairs if p.kind == "conductor"] == []
+
+
+def test_over_range_delta_v_raises_loud(tmp_path):
+    from kicad_tools.creepage.standards import StandardLookupError
+
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    with pytest.raises(StandardLookupError):
+        _census_map(pcb, hv, {"L_MAINS": 1_000_000.0})
+
+
+def test_no_voltage_map_leaves_report_in_single_voltage_mode(tmp_path):
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = compute_creepage_census(pcb, hv, min_mm=1.5)
+    assert report.voltage_map is None
+    assert report.uses_voltage_map is False

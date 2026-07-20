@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 from kicad_tools._shapely import has_shapely, require_shapely
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.creepage.standards import CreepageStandard
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
 
@@ -55,6 +56,71 @@ _INTERIOR_SHRINK = 1e-6  # shrink a slot before the "crosses interior" test
 # A pair is a PASS when creepage >= min within this tolerance (mm).  Mirrors
 # the spirit of DRC_TOLERANCE -- a sub-micron shortfall is not a real defect.
 _PASS_TOLERANCE = 1e-4
+
+# Per-net voltage model (#4371): two conductors whose mapped potentials differ
+# by less than this (volts) are treated as the SAME node -> required creepage
+# 0.0 (trivial PASS), short-circuiting the standard-table lookup.  The IEC
+# creepage tables start at 50 V and ``_step_up_index`` raises for ``V <= 0``, so
+# a same-potential pair (``dv == 0``) must never reach the lookup.
+_ZERO_DV_EPS = 1e-6
+
+
+def _norm_net_key(name: str) -> str:
+    """Normalise a net name for voltage-map lookup (drop one leading ``/``).
+
+    KiCad emits hierarchical net names with a leading ``/`` (``/AC_LINE``);
+    hand-authored voltage maps may or may not include it.  Stripping a single
+    leading slash on both sides makes the lookup robust to either convention.
+    """
+    return name[1:] if name.startswith("/") else name
+
+
+# Reserved voltage-map key (#4371): the board-edge / earth reference potential.
+_EDGE_VOLTAGE_KEY = "_edge_voltage"
+
+
+def voltage_map_from_dict(data: Any) -> tuple[dict[str, float], float]:
+    """Parse a per-net voltage map sidecar (#4371).
+
+    ``data`` maps net names to their **RMS working potential relative to a
+    common reference** (volts), e.g.
+    ``{"/AC_LINE": 150, "/AC_NEUTRAL": 0, "/SCAP_POS": 90}``.  Keys starting
+    with ``_`` are reserved for in-band metadata and are NOT treated as nets
+    (mirrors :func:`kicad_tools.router.rules.net_class_map_from_dict`).  The one
+    recognised reserved key is ``_edge_voltage`` -- the board-edge / earth
+    reference potential (default ``0.0`` V).
+
+    Returns ``(voltages, edge_voltage)``.
+
+    Raises:
+        TypeError: if ``data`` is not a dict.
+        ValueError: if any net voltage (or ``_edge_voltage``) is not a finite
+            real number.
+    """
+    if not isinstance(data, dict):
+        raise TypeError(f"voltage_map_from_dict expects a dict, got {type(data).__name__}")
+    voltages: dict[str, float] = {}
+    edge_voltage = 0.0
+    for key, value in data.items():
+        if isinstance(key, str) and key.startswith("_"):
+            if key == _EDGE_VOLTAGE_KEY:
+                edge_voltage = _coerce_voltage(key, value)
+            continue  # other _-prefixed keys are documentation (_comment, ...)
+        voltages[str(key)] = _coerce_voltage(key, value)
+    return voltages, edge_voltage
+
+
+def _coerce_voltage(key: Any, value: Any) -> float:
+    """Coerce a voltage-map value to a finite float or raise ``ValueError``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"voltage-map entry for {key!r} must be a number (volts), got {type(value).__name__}"
+        )
+    v = float(value)
+    if not math.isfinite(v):
+        raise ValueError(f"voltage-map entry for {key!r} must be finite, got {value!r}")
+    return v
+
 
 # IEC 60664-1 SELV boundary: below ~50 V RMS a design is not a mains/HV
 # safety concern.  A working-voltage argument at or above this threshold is a
@@ -251,6 +317,12 @@ class CreepageReport:
     required_clearance_mm: float | None = None
     creepage_provenance: dict[str, Any] = field(default_factory=dict)
     clearance_provenance: dict[str, Any] = field(default_factory=dict)
+    # Per-net voltage model (#4371).  None in single-voltage / phase-1 modes;
+    # a ``{net_name: volts}`` map when the requirement is derived per pair from
+    # ``|ΔV|`` instead of one global working voltage.  When set, the report-level
+    # ``required_creepage_mm`` / ``working_voltage`` are ``None`` (per-pair).
+    voltage_map: dict[str, float] | None = None
+    edge_voltage: float = 0.0
 
     @property
     def passed(self) -> bool:
@@ -265,6 +337,11 @@ class CreepageReport:
     def uses_standard(self) -> bool:
         return self.standard is not None
 
+    @property
+    def uses_voltage_map(self) -> bool:
+        """``True`` when the requirement is derived per pair from ``|ΔV|``."""
+        return self.voltage_map is not None
+
     def to_dict(self) -> dict[str, Any]:
         # Phase-1 backward compatibility: no standard -> exact phase-1 schema.
         if self.standard is None:
@@ -277,7 +354,7 @@ class CreepageReport:
                 "pairs": [p.to_dict() for p in self.pairs],
                 "passed": self.passed,
             }
-        return {
+        d: dict[str, Any] = {
             "board": self.board,
             "net_class": self.net_class,
             "min_mm": self.min_mm,
@@ -303,6 +380,15 @@ class CreepageReport:
             "pairs": [p.to_dict() for p in self.pairs],
             "passed": self.passed,
         }
+        # Per-net voltage mode (#4371): the requirement varies per pair, so the
+        # report-level scalar requirement / working voltage are null (already set
+        # to None by the caller) and we echo the voltage source instead.  These
+        # keys are added ONLY in map mode, so single-voltage output is unchanged.
+        if self.voltage_map is not None:
+            d["voltage_source"] = "per-pair |dV| (voltage-map)"
+            d["voltage_map"] = dict(self.voltage_map)
+            d["edge_voltage_v"] = self.edge_voltage
+        return d
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +732,9 @@ def compute_creepage_census(
     material_group: str | None = None,
     creepage_provenance: dict[str, Any] | None = None,
     clearance_provenance: dict[str, Any] | None = None,
+    voltage_map: dict[str, float] | None = None,
+    standard_obj: CreepageStandard | None = None,
+    edge_voltage: float = 0.0,
 ) -> CreepageReport:
     """Build the full HV creepage/clearance census for a board.
 
@@ -655,11 +744,33 @@ def compute_creepage_census(
     The pass/fail threshold comes from either the operator's ``min_mm``
     (phase 1) or a standard-derived ``required_creepage_mm`` /
     ``required_clearance_mm`` (phase 2, #4332), or both -- in which case the
-    stricter creepage bound governs per pair.  The derived requirement is
+    stricter creepage bound governs per pair.
+
+    Per-net voltage model (#4371)
+    -----------------------------
+    When ``voltage_map`` (``{net_name: volts}``) **and** ``standard_obj`` are
+    supplied, the requirement is derived **per pair** from the pairwise voltage
+    difference ``dv = |V(a) - V(b)|`` (unmapped nets default to ``0 V``; the
+    board edge uses ``edge_voltage``, default ``0 V`` == earth), instead of one
+    global working voltage.  Same-potential pairs (``dv <= _ZERO_DV_EPS``) get a
+    required creepage/clearance of ``0.0`` and are a trivial PASS -- this
+    short-circuits the standard-table lookup (which starts at 50 V and raises
+    for ``V <= 0``).  In map mode the HV-vs-HV pairing skip is relaxed so that
+    same-class nets at different potentials (bank-vs-bank, phase-vs-phase) are
+    also evaluated.  Voltages are treated as worst-case DC-equivalent magnitudes
+    about a common reference; AC phase relationships are NOT modelled, so
+    ``|dv|`` is conservative for in-phase nets.
+
+    In single-voltage mode (no ``voltage_map``) the derived requirement is
     identical for every pair (it depends only on the standard + voltage + PD +
-    material group, not on geometry), so it is stamped onto each row.
+    material group, not on geometry), so it is stamped onto each row -- byte-for
+    -byte unchanged from phase 2.
     """
     require_shapely("creepage census")
+
+    # Per-net voltage mode (#4371) requires BOTH a map and a resolved standard
+    # table (the table is the only source of a derived requirement).
+    map_mode = voltage_map is not None and standard_obj is not None
 
     report = CreepageReport(
         net_class=net_class,
@@ -675,6 +786,8 @@ def compute_creepage_census(
         required_clearance_mm=required_clearance_mm,
         creepage_provenance=creepage_provenance or {},
         clearance_provenance=clearance_provenance or {},
+        voltage_map=dict(voltage_map) if (map_mode and voltage_map is not None) else None,
+        edge_voltage=edge_voltage,
     )
 
     # Merged per-pair provenance (creepage + clearance citations together).
@@ -684,14 +797,80 @@ def compute_creepage_census(
     if clearance_provenance:
         pair_provenance["clearance"] = clearance_provenance
 
-    def _make_pair(**kw: Any) -> CreepagePair:
+    def _make_pair(
+        *,
+        req_creep: float | None = required_creepage_mm,
+        req_clear: float | None = required_clearance_mm,
+        prov: dict[str, Any] | None = None,
+        **kw: Any,
+    ) -> CreepagePair:
         return CreepagePair(
             min_mm=min_mm,
-            required_creepage_mm=required_creepage_mm,
-            required_clearance_mm=required_clearance_mm,
-            provenance=pair_provenance,
+            required_creepage_mm=req_creep,
+            required_clearance_mm=req_clear,
+            provenance=pair_provenance if prov is None else prov,
             **kw,
         )
+
+    # --- Per-pair |dV| requirement machinery (map mode only, #4371) ---------
+    norm_vmap: dict[str, float] = {}
+    if map_mode:
+        assert voltage_map is not None
+        norm_vmap = {_norm_net_key(k): float(v) for k, v in voltage_map.items()}
+    _req_cache: dict[float, tuple[float, float, dict[str, Any], dict[str, Any]]] = {}
+
+    def _voltage(name: str) -> float:
+        return norm_vmap.get(_norm_net_key(name), 0.0)
+
+    def _required_for_dv(
+        dv: float,
+    ) -> tuple[float, float, dict[str, Any], dict[str, Any]]:
+        """Derive ``(req_creepage, req_clearance, creep_prov, clear_prov)`` at ``dv``.
+
+        Memoised by ``dv`` (rounded) so the ~1500-pair census performs at most
+        one table lookup per distinct voltage difference.  ``dv <= _ZERO_DV_EPS``
+        short-circuits to a trivial ``0.0`` requirement (no lookup).  An
+        out-of-range ``dv`` propagates ``StandardLookupError`` (fail loud).
+        """
+        from kicad_tools.creepage.standards import RMS_TO_PEAK
+
+        key = round(dv, 6)
+        cached = _req_cache.get(key)
+        if cached is not None:
+            return cached
+        if dv <= _ZERO_DV_EPS:
+            res: tuple[float, float, dict[str, Any], dict[str, Any]] = (0.0, 0.0, {}, {})
+        else:
+            assert standard_obj is not None and pollution_degree is not None
+            creep, cprov = standard_obj.required_creepage(
+                dv, int(pollution_degree), material_group or "IIIa"
+            )
+            clr, clprov = standard_obj.required_clearance(dv * RMS_TO_PEAK, int(pollution_degree))
+            res = (creep, clr, cprov, clprov)
+        _req_cache[key] = res
+        return res
+
+    def _pair_requirement(
+        name_a: str, name_b: str | None, *, edge: bool = False
+    ) -> tuple[float, float, dict[str, Any]]:
+        """Per-pair ``(req_creepage, req_clearance, provenance)`` from ``|dV|``."""
+        va = _voltage(name_a)
+        vb = edge_voltage if edge else _voltage(name_b or "")
+        dv = abs(va - vb)
+        req_creep, req_clear, cprov, clprov = _required_for_dv(dv)
+        prov: dict[str, Any] = {
+            "voltage": {
+                "net_a_v": va,
+                "net_b_v": vb,
+                "delta_v_v": round(dv, 4),
+                "same_potential": dv <= _ZERO_DV_EPS,
+            }
+        }
+        if cprov:
+            prov["creepage"] = cprov
+        if clprov:
+            prov["clearance"] = clprov
+        return req_creep, req_clear, prov
 
     if not hv_nets:
         return report
@@ -706,6 +885,12 @@ def compute_creepage_census(
 
     # --- HV-vs-other-conductor pairs (binding layer = smallest creepage) ---
     # (hv_number, other_number) -> (clearance, creepage, layer)
+    #
+    # In single-voltage mode HV-vs-HV pairs are skipped (an HV net has no
+    # meaningful requirement against another net in its own group).  In per-net
+    # voltage mode (#4371) that skip is relaxed so same-class nets at different
+    # potentials (bank-vs-bank, phase-vs-phase) ARE evaluated; such pairs are
+    # deduplicated to a single canonical direction (smaller net number first).
     best: dict[tuple[int, int], tuple[float, float, str]] = {}
     for layer_name, unions in layer_unions.items():
         for hv_num in hv_nets:
@@ -713,8 +898,14 @@ def compute_creepage_census(
             if hv_geom is None:
                 continue
             for other_num, other_geom in unions.items():
-                if other_num == 0 or other_num in hv_nets:
+                if other_num == 0 or other_num == hv_num:
                     continue
+                if other_num in hv_nets:
+                    if not map_mode:
+                        continue
+                    # Canonical dedup: evaluate each HV-HV pair once.
+                    if other_num < hv_num:
+                        continue
                 clearance, creepage = surface_path_length(hv_geom, other_geom, obstacles)
                 key = (hv_num, other_num)
                 prev = best.get(key)
@@ -722,16 +913,34 @@ def compute_creepage_census(
                     best[key] = (clearance, creepage, layer_name)
 
     for (hv_num, other_num), (clearance, creepage, layer_name) in best.items():
-        report.pairs.append(
-            _make_pair(
-                net_a=hv_nets[hv_num],
-                net_b=number_to_name.get(other_num, f"net{other_num}"),
-                kind="conductor",
-                layer=layer_name,
-                clearance_mm=clearance,
-                creepage_mm=creepage,
+        net_a_name = hv_nets[hv_num]
+        net_b_name = number_to_name.get(other_num, f"net{other_num}")
+        if map_mode:
+            req_creep, req_clear, prov = _pair_requirement(net_a_name, net_b_name)
+            report.pairs.append(
+                _make_pair(
+                    req_creep=req_creep,
+                    req_clear=req_clear,
+                    prov=prov,
+                    net_a=net_a_name,
+                    net_b=net_b_name,
+                    kind="conductor",
+                    layer=layer_name,
+                    clearance_mm=clearance,
+                    creepage_mm=creepage,
+                )
             )
-        )
+        else:
+            report.pairs.append(
+                _make_pair(
+                    net_a=net_a_name,
+                    net_b=net_b_name,
+                    kind="conductor",
+                    layer=layer_name,
+                    clearance_mm=clearance,
+                    creepage_mm=creepage,
+                )
+            )
 
     # --- HV-vs-board-edge pairs (copper union across all layers) ---
     edge_geom = board_edge_geometry(pcb)
@@ -744,16 +953,32 @@ def compute_creepage_census(
                 continue
             hv_all = unary_union(parts)
             clearance, creepage = surface_path_length(hv_all, edge_geom, obstacles)
-            report.pairs.append(
-                _make_pair(
-                    net_a=hv_nets[hv_num],
-                    net_b=BOARD_EDGE_LABEL,
-                    kind="edge",
-                    layer="*",
-                    clearance_mm=clearance,
-                    creepage_mm=creepage,
+            if map_mode:
+                req_creep, req_clear, prov = _pair_requirement(hv_nets[hv_num], None, edge=True)
+                report.pairs.append(
+                    _make_pair(
+                        req_creep=req_creep,
+                        req_clear=req_clear,
+                        prov=prov,
+                        net_a=hv_nets[hv_num],
+                        net_b=BOARD_EDGE_LABEL,
+                        kind="edge",
+                        layer="*",
+                        clearance_mm=clearance,
+                        creepage_mm=creepage,
+                    )
                 )
-            )
+            else:
+                report.pairs.append(
+                    _make_pair(
+                        net_a=hv_nets[hv_num],
+                        net_b=BOARD_EDGE_LABEL,
+                        kind="edge",
+                        layer="*",
+                        clearance_mm=clearance,
+                        creepage_mm=creepage,
+                    )
+                )
 
     # Deterministic ordering: by net A, then edge last, then net B.
     report.pairs.sort(key=lambda p: (p.net_a, p.kind == "edge", p.net_b))
