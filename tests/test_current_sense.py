@@ -187,6 +187,126 @@ class TestAnalyzerGeometry:
         r = CurrentSenseAnalyzer(max_parallel_mm=5.0, min_gap_mm=5.0).analyze(pcb)[0]
         assert r.status == "FAIL"
 
+    def test_long_run_farther_blocker_fails_not_just_nearest(self, tmp_path: Path) -> None:
+        # Regression for #4336 (the false-PASS the judge identified). Two
+        # same-layer high-current blockers:
+        #   PHASE_A: gap 0.10mm, 3mm run   -> nearest-by-gap, PASSes alone.
+        #   PHASE_B: gap 0.15mm, 20mm run  -> FAILs the AND rule alone.
+        # Phase-1 collapsed to the nearest-by-gap blocker (PHASE_A) and thus
+        # falsely PASSed. The net must now FAIL and point at PHASE_B.
+        text = (
+            _HEADER
+            + """
+  (net 0 "")
+  (net 1 "ISENSE")
+  (net 2 "PHASE_A")
+  (net 3 "PHASE_B")
+  (segment (start 0 1.0) (end 20 1.0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 0 1.3) (end 3 1.3) (width 0.2) (layer "F.Cu") (net 2))
+  (segment (start 0 0.65) (end 20 0.65) (width 0.2) (layer "F.Cu") (net 3))
+)
+"""
+        )
+        pcb = _load(tmp_path, text)
+        r = CurrentSenseAnalyzer().analyze(pcb)[0]
+        assert r.sense_net == "ISENSE"
+        assert r.status == "FAIL"
+        # Worst offender is the long-run (but slightly farther) blocker.
+        assert r.nearest_hicur_net == "PHASE_B"
+        assert r.max_parallel_mm == pytest.approx(20.0, abs=0.01)
+        assert r.min_gap_mm == pytest.approx(0.15, abs=0.001)
+        assert r.layer == "F.Cu"
+        # margin = 0.15 - 0.5 = -0.35 (violated).
+        assert r.margin_mm == pytest.approx(-0.35, abs=0.001)
+
+    def test_nearest_blocker_also_long_still_points_at_it(self, tmp_path: Path) -> None:
+        # No regression: when the nearest-by-gap blocker itself has a long run,
+        # it is (the/a) failing offender and remains the reported net.
+        pcb = _load(tmp_path, FAIL_PCB)
+        r = CurrentSenseAnalyzer().analyze(pcb)[0]
+        assert r.status == "FAIL"
+        assert r.nearest_hicur_net == "PHASE_A"
+        assert r.max_parallel_mm == pytest.approx(20.0, abs=0.01)
+
+    def test_worst_offender_prefers_larger_parallel_run(self, tmp_path: Path) -> None:
+        # Both blockers FAIL the AND rule; the worst offender is the one with
+        # the larger parallel run (strongest coupling), even though the other
+        # is nearer by gap.
+        text = (
+            _HEADER
+            + """
+  (net 0 "")
+  (net 1 "ISENSE")
+  (net 2 "PHASE_A")
+  (net 3 "PHASE_B")
+  (segment (start 0 1.0) (end 30 1.0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 0 1.3) (end 15 1.3) (width 0.2) (layer "F.Cu") (net 2))
+  (segment (start 0 0.65) (end 30 0.65) (width 0.2) (layer "F.Cu") (net 3))
+)
+"""
+        )
+        pcb = _load(tmp_path, text)
+        r = CurrentSenseAnalyzer().analyze(pcb)[0]
+        assert r.status == "FAIL"
+        assert r.nearest_hicur_net == "PHASE_B"  # 30mm run > PHASE_A's 15mm
+        assert r.max_parallel_mm == pytest.approx(30.0, abs=0.01)
+
+    def test_worst_offender_tiebreak_smallest_gap(self, tmp_path: Path) -> None:
+        # Both blockers FAIL with equal parallel runs; tiebreak selects the
+        # smaller-gap blocker.
+        text = (
+            _HEADER
+            + """
+  (net 0 "")
+  (net 1 "ISENSE")
+  (net 2 "PHASE_A")
+  (net 3 "PHASE_B")
+  (segment (start 0 1.0) (end 20 1.0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 0 1.3) (end 20 1.3) (width 0.2) (layer "F.Cu") (net 2))
+  (segment (start 0 0.65) (end 20 0.65) (width 0.2) (layer "F.Cu") (net 3))
+)
+"""
+        )
+        pcb = _load(tmp_path, text)
+        r = CurrentSenseAnalyzer().analyze(pcb)[0]
+        assert r.status == "FAIL"
+        assert r.nearest_hicur_net == "PHASE_A"  # gap 0.10 < PHASE_B's 0.15
+        assert r.min_gap_mm == pytest.approx(0.1, abs=0.001)
+
+    def test_multi_blocker_all_pass_reports_nearest_by_gap(self, tmp_path: Path) -> None:
+        # When NO blocker fails, the row is byte-identical to phase 1: it
+        # reports the nearest-by-gap blocker (PHASE_A here), not the other.
+        text = (
+            _HEADER
+            + """
+  (net 0 "")
+  (net 1 "ISENSE")
+  (net 2 "PHASE_A")
+  (net 3 "PHASE_B")
+  (segment (start 0 1.0) (end 20 1.0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 0 1.3) (end 3 1.3) (width 0.2) (layer "F.Cu") (net 2))
+  (segment (start 0 0.65) (end 5 0.65) (width 0.2) (layer "F.Cu") (net 3))
+)
+"""
+        )
+        pcb = _load(tmp_path, text)
+        r = CurrentSenseAnalyzer().analyze(pcb)[0]
+        assert r.status == "PASS"
+        # Nearest-by-gap wins on PASS (0.10 < 0.15).
+        assert r.nearest_hicur_net == "PHASE_A"
+        assert r.min_gap_mm == pytest.approx(0.1, abs=0.001)
+        assert r.max_parallel_mm == pytest.approx(3.0, abs=0.01)
+        # The whole census row matches the phase-1 nearest-by-gap contract.
+        assert r.to_dict() == {
+            "sense_net": "ISENSE",
+            "nearest_hicur_net": "PHASE_A",
+            "layer": "F.Cu",
+            "max_parallel_mm": 3.0,
+            "min_gap_mm": 0.1,
+            "status": "PASS",
+            "margin": -0.4,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Classification + overrides
