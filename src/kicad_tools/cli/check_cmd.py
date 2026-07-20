@@ -153,6 +153,12 @@ class MetaCheckResult:
     lvs: SubCheckResult
     manifest: SubCheckResult
     overall: Literal["PASSED", "FAILED", "INCOMPLETE"] = "PASSED"
+    # Issue #4350: True when ERC/LVS are NOT RUN specifically because no
+    # schematic could be discovered next to the PCB (as opposed to kicad-cli
+    # being unavailable).  Drives the loud "skipped LVS hard gate" warning and
+    # a machine-detectable JSON field so a skipped gate is never mistaken for a
+    # clean one.
+    schematic_missing: bool = False
 
     def _subs(self) -> tuple[SubCheckResult, ...]:
         return (self.drc, self.erc, self.lvs, self.manifest)
@@ -189,6 +195,7 @@ class MetaCheckResult:
             "lvs": self.lvs.to_dict(),
             "manifest": self.manifest.to_dict(),
             "overall": self.overall,
+            "schematic_missing": self.schematic_missing,
         }
 
 
@@ -693,7 +700,27 @@ def run_meta_checks(
     lvs = _lvs_subcheck(resolved_sch, pcb_path)
     manifest = _manifest_subcheck(pcb_path)
 
-    result = MetaCheckResult(drc=drc_status, erc=erc, lvs=lvs, manifest=manifest)
+    # Issue #4350: when discovery turned up no schematic, ERC and (critically)
+    # the LVS *manufacturing hard gate* are silently NOT RUN.  Emit a loud
+    # one-line warning to stderr so a skipped hard gate is never mistaken for a
+    # clean comparison, and record a machine-detectable flag for JSON consumers.
+    schematic_missing = resolved_sch is None
+    if schematic_missing:
+        print(
+            "WARNING: no schematic discovered next to "
+            f"{pcb_path.name}; ERC and the LVS manufacturing hard gate were "
+            "SKIPPED (not run) -- copper was NOT compared to any schematic. "
+            "Pass --schematic <path.kicad_sch> to run them.",
+            file=sys.stderr,
+        )
+
+    result = MetaCheckResult(
+        drc=drc_status,
+        erc=erc,
+        lvs=lvs,
+        manifest=manifest,
+        schematic_missing=schematic_missing,
+    )
     result.compute_overall()
     return result
 

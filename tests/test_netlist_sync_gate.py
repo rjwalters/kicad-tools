@@ -257,5 +257,75 @@ class TestValueSuffixNotesRendering:
         assert "same value, PCB adds rating suffix" in report
 
 
+# ---------------------------------------------------------------------------
+# Versioned-basename discovery + loud skipped-gate warning (issue #4350)
+# ---------------------------------------------------------------------------
+
+
+class TestVersionedBasenameCheck:
+    """``kct check`` on a versioned board (``board_v24.kicad_pcb``) must
+    auto-discover the unversioned root schematic and actually run LVS instead
+    of reporting ``NOT RUN``; when no schematic is found, it must warn loudly.
+    """
+
+    def _write_versioned_layout(self, directory: Path, schematic: str, pcb: str) -> Path:
+        """Repro layout: versioned board + its own .kicad_pro, plus an
+        unversioned root project pair (.kicad_sch + .kicad_pro).  Returns the
+        versioned PCB path.
+        """
+        (directory / "board.kicad_sch").write_text(schematic)
+        (directory / "board.kicad_pro").write_text("")
+        (directory / "board_v24.kicad_pro").write_text("")
+        pcb_path = directory / "board_v24.kicad_pcb"
+        pcb_path.write_text(pcb)
+        return pcb_path
+
+    def test_versioned_board_runs_lvs(self, tmp_path, capsys):
+        import json
+
+        pcb = self._write_versioned_layout(tmp_path, MINIMAL_SCHEMATIC, MINIMAL_PCB_MATCHING)
+        check_main([str(pcb), "--format", "json"])
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        meta = payload["meta_checks"]
+        # LVS is pure-python (no kicad-cli dependency); it must have run and
+        # compared copper -- not report the "no schematic discovered" skip.
+        assert meta["lvs"]["status"] != "NOT RUN"
+        assert "no schematic discovered" not in meta["lvs"]["detail"]
+        assert meta["schematic_missing"] is False
+        # No skipped-gate warning when the schematic was discovered.
+        assert "manufacturing hard gate" not in captured.err
+
+    def test_no_schematic_warns_loudly_and_flags_json(self, tmp_path, capsys):
+        import json
+
+        # Bare board, no schematic and no project pairing anywhere.
+        pcb = tmp_path / "orphan_v24.kicad_pcb"
+        pcb.write_text(MINIMAL_PCB_MATCHING)
+        rc = check_main([str(pcb), "--format", "json"])
+        captured = capsys.readouterr()
+        # Loud warning to stderr naming the skipped LVS hard gate.
+        assert "WARNING:" in captured.err
+        assert "LVS manufacturing hard gate" in captured.err
+        assert "SKIPPED" in captured.err
+        # Machine-detectable JSON flag.
+        payload = json.loads(captured.out)
+        assert payload["meta_checks"]["schematic_missing"] is True
+        assert payload["meta_checks"]["lvs"]["status"] == "NOT RUN"
+        # Default policy: INCOMPLETE rollup exits non-zero.
+        assert rc == 2
+
+    def test_allow_incomplete_still_exits_zero(self, tmp_path):
+        # Skip the connectivity DRC check so the minimal fixture's unrouted-net
+        # error does not mask the INCOMPLETE (schematic-missing) rollup we are
+        # asserting: default -> exit 2, --allow-incomplete -> exit 0.
+        pcb = tmp_path / "orphan_v24.kicad_pcb"
+        pcb.write_text(MINIMAL_PCB_MATCHING)
+        rc_default = check_main([str(pcb), "--skip", "connectivity"])
+        assert rc_default == 2
+        rc_allow = check_main([str(pcb), "--skip", "connectivity", "--allow-incomplete"])
+        assert rc_allow == 0
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
