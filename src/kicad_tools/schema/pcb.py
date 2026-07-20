@@ -4836,6 +4836,72 @@ class PCB:
 
         return via
 
+    def relocate_via(self, via: Via, new_position: tuple[float, float]) -> bool:
+        """Move an existing via to a new board-relative position.
+
+        Updates BOTH the in-memory :class:`Via` object and the backing
+        ``(via ...)`` S-expression node's ``(at ...)`` child, so the move
+        persists through :meth:`save`.  This is the mutating counterpart the
+        ``vias`` property setter deliberately forbids (direct assignment to
+        ``pcb.vias`` raises, because it would not touch the S-expression tree).
+
+        The via is matched to its S-expression node by UUID when available,
+        falling back to the via's current (pre-move) position.  Inputs are in
+        board-relative coordinates (matching :attr:`Via.position` and
+        :meth:`add_via`); the S-expression form stores sheet-absolute
+        coordinates, so :attr:`_board_origin` is added when writing the node.
+
+        Args:
+            via: The Via object to move (its :attr:`position` is updated in place).
+            new_position: Target ``(x, y)`` in board-relative mm.
+
+        Returns:
+            ``True`` when a backing S-expression node was found and updated;
+            ``False`` when no matching ``(via ...)`` node could be located
+            (in which case the in-memory object is still updated, but the move
+            will not persist -- callers should treat ``False`` as a failure).
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> v = next(pcb.vias_in_net(5))
+            >>> pcb.relocate_via(v, (v.position[0] + 0.5, v.position[1]))
+            >>> pcb.save()
+        """
+        ox, oy = self._board_origin
+        old_x, old_y = via.position
+        target_uuid = via.uuid
+
+        updated = False
+        for child in self._sexp.children:
+            if child.is_atom or child.name != "via":
+                continue
+
+            at_node = child.find("at")
+            if at_node is None:
+                continue
+
+            if target_uuid:
+                uuid_node = child.find("uuid")
+                if not uuid_node or (uuid_node.get_string(0) or "") != target_uuid:
+                    continue
+            else:
+                # Fallback: match by current (sheet-absolute) position.
+                ax = at_node.get_float(0) or 0.0
+                ay = at_node.get_float(1) or 0.0
+                if abs(ax - (old_x + ox)) > 1e-6 or abs(ay - (old_y + oy)) > 1e-6:
+                    continue
+
+            at_node.set_value(0, new_position[0] + ox)
+            at_node.set_value(1, new_position[1] + oy)
+            updated = True
+            break
+
+        # Update the in-memory object regardless so reads reflect the move.
+        via.position = (new_position[0], new_position[1])
+        # Position changed -> the cached via dedup key set is stale.
+        self._invalidate_dedup_keys()
+        return updated
+
     def reinforce_net(
         self,
         net_name: str,

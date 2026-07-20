@@ -143,6 +143,32 @@ def get_design_rules(
     return drill or 0.3, diameter or 0.6, 0.0, 0.2
 
 
+def get_mfr_design_rules(mfr: str, layers: int, copper: float):
+    """Load the full :class:`DesignRules` object for a manufacturer/stackup.
+
+    Unlike :func:`get_design_rules` (which returns only the scalar via
+    drill/diameter/clearance tuple used by the resize path), the relocation
+    path needs the whole rules object -- specifically ``min_clearance_mm``,
+    ``min_hole_to_hole_mm``, and the ``via_in_pad_supported`` capability flag.
+
+    Resolves through the manufacturer *profile* registry (not the raw YAML
+    loader) so capability-tier aliases such as ``jlcpcb-tier1`` /
+    ``jlcpcb_capabilityplus`` resolve correctly and carry the right
+    ``via_in_pad_supported`` flag.
+
+    Returns:
+        The matching ``DesignRules`` for the stackup, or ``None`` when the
+        manufacturer is unknown.
+    """
+    from kicad_tools.manufacturers import get_profile
+
+    try:
+        profile = get_profile(mfr)
+    except ValueError:
+        return None
+    return profile.get_design_rules(layers=layers, copper_oz=copper)
+
+
 def _closest_point_on_segment(
     x1: float, y1: float, x2: float, y2: float, px: float, py: float
 ) -> tuple[float, float, float]:
@@ -722,6 +748,63 @@ def print_fix_results(
             print(f"  ... and {len(warnings) - 5} more")
 
 
+def _run_relocate_in_pad(args, pcb_path: Path, resolved_layers: int) -> int:
+    """Run the --relocate-in-pad pass on the PCB schema and save if changed.
+
+    Returns a process exit code: 0 on success (incl. clean no-op), 1 on
+    load/save error, 2 when some vias could not be relocated (skipped or
+    unresolvable) so the pipeline surfaces the partial result.
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    from .relocate_in_pad_vias import print_relocation_results, relocate_in_pad_vias
+
+    rules = get_mfr_design_rules(args.mfr, resolved_layers, args.copper)
+    if rules is None:
+        print(
+            f"Error: No design rules found for manufacturer '{args.mfr}'",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error parsing PCB file: {e}", file=sys.stderr)
+        return 1
+
+    nets = set(args.nets) if getattr(args, "nets", None) else None
+
+    result = relocate_in_pad_vias(pcb, rules, nets=nets, dry_run=args.dry_run)
+
+    if not args.quiet:
+        print_relocation_results(
+            result,
+            output_format=args.format,
+            dry_run=args.dry_run,
+            mfr=args.mfr,
+        )
+
+    # Persist only when vias actually moved and this is not a dry run.
+    if result.changed and not args.dry_run:
+        output_path = Path(args.output) if args.output else pcb_path
+        try:
+            pcb.save(output_path)
+            if not args.quiet and args.format == "text":
+                print(f"\nSaved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB file: {e}", file=sys.stderr)
+            return 1
+
+    # Exit code 2 signals "completed with unhandled vias" (skipped/unresolvable)
+    # so a pipeline treats it as completed-with-warnings, mirroring the resize
+    # path's warning convention.  A clean run (all handled or nothing to do)
+    # returns 0.
+    if result.skipped or result.unresolvable:
+        return 2
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for fix-vias command."""
     parser = argparse.ArgumentParser(
@@ -799,6 +882,26 @@ Examples:
             "minimum clearance to nearby tracks, pads, or other vias."
         ),
     )
+    parser.add_argument(
+        "--relocate-in-pad",
+        action="store_true",
+        help=(
+            "Relocate via-in-pad vias off-pad (connectivity-preserving) so the "
+            "board can move to a manufacturer profile that disallows via-in-pad "
+            "(e.g. standard jlcpcb). Slides each in-pad signal via just outside "
+            "the pad along its connected escape track and adds short stub "
+            "segments to preserve the net. Vias that cannot be safely relocated "
+            "are reported (skipped/unresolvable), never left silently in-pad. "
+            "This is a distinct pass from via resizing."
+        ),
+    )
+    parser.add_argument(
+        "--net",
+        action="append",
+        dest="nets",
+        metavar="NET",
+        help=("Restrict --relocate-in-pad to the given net name (repeatable). Default: all nets."),
+    )
 
     args = parser.parse_args(argv)
 
@@ -824,6 +927,12 @@ Examples:
             resolved_layers = detected if detected > 0 else 2
         except Exception:
             resolved_layers = 2
+
+    # Relocation is a distinct pass from via resizing: when --relocate-in-pad
+    # is requested we run only the connectivity-preserving off-pad slide and
+    # return, leaving the resize path untouched (issue #4359).
+    if getattr(args, "relocate_in_pad", False):
+        return _run_relocate_in_pad(args, pcb_path, resolved_layers)
 
     # Get target dimensions
     target_drill, target_diameter, min_annular_ring, min_clearance = get_design_rules(
