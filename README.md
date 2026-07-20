@@ -538,7 +538,9 @@ Notes and caveats:
 | `kct erc <schematic>` | Run electrical rules check |
 | `kct drc <pcb>` | Run design rules check (requires kicad-cli) |
 | `kct check <pcb>` | Pure Python DRC (no kicad-cli needed) |
-| `kct route <pcb>` | Autoroute a PCB |
+| `kct creepage <pcb>` | HV surface-path (creepage) audit vs IEC 60664-1 / 62368-1 |
+| `kct analyze <pcb>` | Signal-integrity + current-sense analog layout lint |
+| `kct route <pcb>` | Autoroute a PCB (`--nets`/`--skip-nets` to select nets) |
 | `kct reason <pcb>` | LLM-driven PCB layout reasoning |
 | `kct placement <pcb>` | Detect and optimize component placement |
 | `kct optimize-placement <pcb>` | CMA-ES/Bayesian global placement optimization |
