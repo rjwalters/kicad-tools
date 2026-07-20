@@ -29,9 +29,10 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.cli.check_cmd import main
+from kicad_tools.cli.check_cmd import _emit_drc_sidecars, main
 from kicad_tools.manufacturers import get_profile
 from kicad_tools.manufacturers.dru_generator import generate_dru
+from kicad_tools.router.rules import NetClassRouting
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate import DRCChecker
 
@@ -122,6 +123,94 @@ def test_emit_dru_micro_via_exemption_present(board_copy: Path) -> None:
     main([str(board_copy), "--mfr", "jlcpcb", "--emit-dru", "--allow-incomplete"])
     dru = board_copy.with_suffix(".kicad_dru").read_text(encoding="utf-8")
     assert "A.Via_Type != 'Micro'" in dru
+
+
+# ---------------------------------------------------------------------------
+# Ampacity dedup: one rule pair per CLASS, not per NET (#4375 Judge feedback)
+# ---------------------------------------------------------------------------
+
+
+def test_emit_dedups_shared_ampacity_class_to_one_rule_pair(board_copy: Path) -> None:
+    """A class spanning several nets emits ONE ampacity rule pair, not N.
+
+    ``_emit_drc_sidecars`` receives the resolved ``net_class_map`` -- keyed by
+    board-net name, with the SAME ampacity class attached to every net in that
+    class.  A ``--net-class-map`` sidecar deserializes a *distinct-but-same-*
+    ``name`` object per net, so identity-based dedup (``dict.fromkeys``) cannot
+    collapse them.  Feeding ``list(net_class_map.values())`` straight to
+    ``generate_dru`` therefore emitted one ``Ampacity Min Width`` rule pair per
+    NET (3 nets -> 6 rules) instead of per CLASS, bloating the DRU and risking
+    KiCad duplicate-rule-name warnings -- contradicting "clean by construction".
+
+    This drives the REAL emission shape (multiple net keys -> distinct objects
+    sharing ``name`` + ``target_ampacity``) and asserts each ampacity rule name
+    appears exactly once.
+    """
+    pcb = PCB.load(board_copy)
+    checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4, copper_oz=2.0, copper_oz_outer=2.0)
+
+    # Distinct objects, same name -- exactly what a sidecar deserialization
+    # produces for three nets sharing one POWER class.
+    net_class_map = {
+        "VBUS": NetClassRouting(name="POWER", target_ampacity=15.0),
+        "+5V": NetClassRouting(name="POWER", target_ampacity=15.0),
+        "GND": NetClassRouting(name="POWER", target_ampacity=15.0),
+    }
+
+    _emit_drc_sidecars(
+        board_copy,
+        checker,
+        manufacturer_id="jlcpcb",
+        layers=4,
+        copper_oz=2.0,
+        net_class_map=net_class_map,
+        emit_both=False,
+    )
+
+    dru = board_copy.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    assert dru.count("Ampacity Min Width (POWER, external)") == 1
+    assert dru.count("Ampacity Min Width (POWER, internal)") == 1
+    # Byte-identical to a SINGLE deduplicated class -- the DRU carries no
+    # per-net redundancy.
+    expected = generate_dru(
+        checker.design_rules,
+        manufacturer_name="jlcpcb",
+        net_classes=[NetClassRouting(name="POWER", target_ampacity=15.0)],
+    )
+    assert dru == expected
+
+
+def test_emit_preserves_distinct_ampacity_classes(board_copy: Path) -> None:
+    """Dedup collapses only same-name classes -- distinct classes both survive.
+
+    Guards against an over-eager dedup that would drop a second, genuinely
+    different ampacity class (e.g. POWER + MOTOR spanning different nets).
+    """
+    pcb = PCB.load(board_copy)
+    checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4, copper_oz=2.0, copper_oz_outer=2.0)
+
+    net_class_map = {
+        "VBUS": NetClassRouting(name="POWER", target_ampacity=15.0),
+        "+5V": NetClassRouting(name="POWER", target_ampacity=15.0),
+        "PHASE_A": NetClassRouting(name="MOTOR", target_ampacity=8.0),
+        "PHASE_B": NetClassRouting(name="MOTOR", target_ampacity=8.0),
+    }
+
+    _emit_drc_sidecars(
+        board_copy,
+        checker,
+        manufacturer_id="jlcpcb",
+        layers=4,
+        copper_oz=2.0,
+        net_class_map=net_class_map,
+        emit_both=False,
+    )
+
+    dru = board_copy.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    assert dru.count("Ampacity Min Width (POWER, external)") == 1
+    assert dru.count("Ampacity Min Width (POWER, internal)") == 1
+    assert dru.count("Ampacity Min Width (MOTOR, external)") == 1
+    assert dru.count("Ampacity Min Width (MOTOR, internal)") == 1
 
 
 # ---------------------------------------------------------------------------

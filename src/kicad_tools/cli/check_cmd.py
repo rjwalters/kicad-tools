@@ -1667,7 +1667,23 @@ def _emit_drc_sidecars(
     warning rather than raising (mirrors ``kct mfr apply-rules``).  Written
     paths are reported on stderr so JSON stdout stays uncorrupted.
     """
-    net_classes = list(net_class_map.values()) if net_class_map else None
+    # ``net_class_map`` is keyed by board-net name with the SAME class object
+    # shared across every net in that class (and a ``--net-class-map`` sidecar
+    # deserializes a distinct-but-same-``name`` object per net).  Feeding
+    # ``list(.values())`` straight to ``generate_dru`` would emit one ampacity
+    # rule pair PER NET instead of per class (#4375 Judge feedback).  Dedup on
+    # ``.name`` -- identity-based dedup (``dict.fromkeys``) won't collapse the
+    # distinct per-net objects a sidecar produces -- while preserving first-seen
+    # order for deterministic output.
+    net_classes: list | None = None
+    if net_class_map:
+        _seen_names: set[str] = set()
+        net_classes = []
+        for nc in net_class_map.values():
+            if nc.name in _seen_names:
+                continue
+            _seen_names.add(nc.name)
+            net_classes.append(nc)
     try:
         if emit_both:
             from kicad_tools.manufacturers import write_drc_constraints
