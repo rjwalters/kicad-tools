@@ -248,7 +248,14 @@ class IsolationStatus:
     * ``could_not_verify=True`` -- shapely is unavailable or a standard-table
       lookup failed; HV present but not evaluated -> ``WARNING`` (fail-loud,
       never a hard crash of the whole audit).
-    * ``hv_present=False`` -- no HV-class nets; inert, no verdict change.
+    * ``mains_suspected_unclassified=True`` (issue #4354) -- HV-net resolution
+      returned EMPTY, but the board carries mains-named copper (or a mains-level
+      working voltage was supplied), so the HV path was never evaluated ->
+      ``NOT_READY`` (hard fail).  This is the direct analog of the LVS
+      zero-bound-pad vacuity guard (#4011): a mains board with an un-evaluated
+      HV path must not ship.
+    * ``hv_present=False`` and NOT mains-suspected -- no HV-class nets on a
+      genuinely low-voltage board; inert, no verdict change.
     """
 
     # Whether HV nets were present AND a threshold source was supplied AND the
@@ -260,6 +267,12 @@ class IsolationStatus:
     threshold_supplied: bool = False
     # HV present but could not be evaluated (shapely absent / lookup error).
     could_not_verify: bool = False
+    # Zero HV nets resolved on a board that looks like mains/HV (issue #4354).
+    # Hard-gates the verdict to NOT_READY -- an un-evaluated HV path is a
+    # safety-gate false pass, never a silent skip.
+    mains_suspected_unclassified: bool = False
+    # Net names that tripped the mains/HV suspicion (for the report + provenance).
+    mains_suspect_nets: list[str] = field(default_factory=list)
     passed: bool = True
     hv_nets: list[str] = field(default_factory=list)
     pair_count: int = 0
@@ -281,6 +294,8 @@ class IsolationStatus:
             "hv_present": self.hv_present,
             "threshold_supplied": self.threshold_supplied,
             "could_not_verify": self.could_not_verify,
+            "mains_suspected_unclassified": self.mains_suspected_unclassified,
+            "mains_suspect_nets": list(self.mains_suspect_nets),
             "passed": self.passed,
             "hv_nets": list(self.hv_nets),
             "pair_count": self.pair_count,
@@ -388,6 +403,14 @@ class AuditResult:
         # governing creepage/clearance bound is a manufacturing-blocking defect
         # -- fold it into NOT_READY so ``kct audit`` exits 2 (the gate FAILs).
         if self.isolation.checked and not self.isolation.passed:
+            return AuditVerdict.NOT_READY
+
+        # HV / isolation vacuity hard fail (issue #4354): HV-net resolution
+        # returned EMPTY on a board that looks like mains/HV -- the insulation
+        # path was never evaluated.  Treat it exactly like the LVS zero-bound
+        # vacuity guard (#4011): un-evaluated safety evidence is a hard FAIL,
+        # NOT a silent skip.
+        if self.isolation.mains_suspected_unclassified:
             return AuditVerdict.NOT_READY
 
         # Schematic refs missing from PCB == unbuildable BOM == hard fail.
@@ -1232,7 +1255,41 @@ class ManufacturingAudit:
             return status
 
         if not hv_nets:
-            # No HV-class nets -> inert; no section, no verdict change.
+            # Vacuity guard (issue #4354): an empty HV group is only legitimately
+            # "inert" on a genuinely low-voltage board.  When the board carries
+            # mains-named copper OR a mains-level working voltage was supplied,
+            # the HV insulation path was never evaluated -- a safety-gate false
+            # pass.  Hard-fail the verdict (mirrors the LVS zero-bound guard,
+            # #4011) rather than silently reporting READY.
+            from kicad_tools.creepage.engine import (
+                SELV_WORKING_VOLTAGE_V,
+                mains_suspect_nets,
+            )
+
+            suspects = mains_suspect_nets(pcb)
+            wv = self.hv_working_voltage
+            high_working_voltage = wv is not None and float(wv) >= SELV_WORKING_VOLTAGE_V
+            if suspects or high_working_voltage:
+                status.mains_suspected_unclassified = True
+                status.mains_suspect_nets = suspects
+                reasons = []
+                if suspects:
+                    shown = ", ".join(suspects[:8])
+                    more = "" if len(suspects) <= 8 else f" (+{len(suspects) - 8} more)"
+                    reasons.append(f"mains-named nets present ({shown}{more})")
+                if high_working_voltage and wv is not None:
+                    reasons.append(
+                        f"working voltage {float(wv):g} V >= "
+                        f"{SELV_WORKING_VOLTAGE_V:g} V SELV boundary"
+                    )
+                status.details = (
+                    f"0 '{self.hv_net_class}' nets resolved but the board looks "
+                    f"like mains/HV ({'; '.join(reasons)}) -- the HV insulation "
+                    "path was NOT evaluated.  Map the mains nets to the HV class "
+                    "(--net-class-map) or set --hv-net-class.  NOT_READY."
+                )
+                return status
+            # No HV-class nets on a genuinely low-voltage board -> inert.
             status.details = f"No '{self.hv_net_class}' nets found -- HV/isolation audit skipped."
             return status
 

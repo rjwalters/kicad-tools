@@ -97,3 +97,44 @@ def board_no_hv_source() -> str:
     parts.append(_footprint("U2", 130, 110, 2, "GND"))
     parts.append(")\n")
     return "".join(parts)
+
+
+# Header for the mains-named fixture: unmistakable mains net names (AC_LINE /
+# AC_NEUTRAL / FUSED_LINE) that the broadened HV name-pattern fallback (#4354)
+# must classify as HV without any net-class-map.
+_MAINS_HEADER = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test_creepage")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "AC_LINE")
+  (net 2 "GND")
+  (net 3 "AC_NEUTRAL")
+  (net 4 "FUSED_LINE")
+"""
+
+
+def board_mains_named_source() -> str:
+    """Board with mains net names (``AC_LINE`` / ``AC_NEUTRAL`` / ``FUSED_LINE``).
+
+    Deliberately ships **no** net-class-map so the broadened HV name-pattern
+    fallback (issue #4354) is the only thing that can classify the mains nets.
+    ``AC_LINE`` (x=110) and ``GND`` (x=113) sit ~1 mm apart -- far below any
+    realistic mains creepage requirement -- so once the fallback classifies the
+    mains nets the resulting census FAILS (rather than silently exiting 0).
+    """
+    parts = [_MAINS_HEADER, _OUTLINE]
+    parts.append(_footprint("U1", 110, 110, 1, "AC_LINE"))
+    parts.append(_footprint("U2", 113, 110, 2, "GND"))
+    parts.append(_footprint("U3", 135, 110, 3, "AC_NEUTRAL"))
+    parts.append(_footprint("U4", 105, 110, 4, "FUSED_LINE"))
+    parts.append(")\n")
+    return "".join(parts)
