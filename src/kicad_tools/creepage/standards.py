@@ -42,7 +42,7 @@ Table provenance (transcribed values -- spot-check before certifying)
   occur), so a single PD1 column is tabulated.  The two standards are
   harmonised on the tracking physics, so their creepage values are identical
   over the range encoded here.
-* **Clearance** -- IEC 60664-1:2020 Table F.2 (inhomogeneous-field / "case B",
+* **Clearance** -- IEC 60664-1:2020 Table F.2 (inhomogeneous-field / "case A",
   basic insulation) with the pollution-degree minimum floors of clause 6.1,
   at altitude **<= 2000 m**; IEC 62368-1:2018 Table 14 is the harmonised
   counterpart.  Keyed on the **peak** value of the working voltage plus the
@@ -272,7 +272,7 @@ _CREEPAGE_MM[2]["IIIb"] = _CREEPAGE_MM[2]["IIIa"]
 # ---------------------------------------------------------------------------
 
 # Ascending peak-voltage rows for the clearance table.
-# IEC 60664-1:2020 Table F.2 (inhomogeneous field / "case B", <= 2000 m).
+# IEC 60664-1:2020 Table F.2 (inhomogeneous field / "case A", <= 2000 m).
 _CLEARANCE_PEAK_ROWS: tuple[float, ...] = (
     330.0,
     500.0,
@@ -476,7 +476,7 @@ _IEC_60664_1 = CreepageStandard(
     creepage_table_id="Table F.4",
     creepage_clause="clause 6.2 (creepage, keyed on RMS working voltage)",
     clearance_table_id="Table F.2",
-    clearance_clause="clause 6.1 (clearance, inhomogeneous field / case B)",
+    clearance_clause="clause 6.1 (clearance, inhomogeneous field / case A)",
 )
 
 _IEC_62368_1 = CreepageStandard(
