@@ -23,8 +23,11 @@ Phase 1 scope (see issue #4328):
   **plus** explicit ``sense_nets`` / ``hicur_nets`` name overrides so nets whose
   prefixes are not yet auto-classified (``GATE_*`` / ``SRC_*`` / ``TRK_*``) can
   be tagged today. Auto-classification of those prefixes is deferred to Phase 3.
-* Only same-layer pairs are considered. Inner-layer / broadside coupling is
-  Phase 3 (#4331); copper sense-loop area is Phase 2 (#4330).
+* Only same-layer pairs are considered. Copper sense-loop area is Phase 2
+  (#4330); Kelvin-tap integrity (does the sense line tap the force node at the
+  pad metallization, or mistakenly mid-trace where it picks up IR drop?) is
+  Phase 3 (#4331). Inner-layer / broadside coupling and GATE/SRC/TRK
+  auto-classification are deferred to a possible Phase 3b.
 
 The pairwise parallel-run + gap geometry is computed by the shared
 :func:`kicad_tools.analysis.signal_integrity.calculate_coupling_geometry`
@@ -61,6 +64,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CurrentSenseAnalyzer",
     "CurrentSenseResult",
+    "DEFAULT_KELVIN_TOL_MM",
     "DEFAULT_MAX_LOOP_AREA_MM2",
     "DEFAULT_MAX_PARALLEL_MM",
     "DEFAULT_MIN_GAP_MM",
@@ -76,6 +80,13 @@ DEFAULT_MIN_GAP_MM = 0.5
 # conservative starting value pending EE confirmation (see the issue's note).
 DEFAULT_MAX_LOOP_AREA_MM2 = 10.0
 
+# Phase 3 (#4331): default Kelvin-tap coincidence tolerance (mm). A correct
+# Kelvin sense tap lands on a force-net pad's metallization (KiCad routes a
+# trace's endpoint to the pad anchor, so distance-to-pad is 0). This tolerance
+# is tight because proper taps are exactly coincident; it exists only to absorb
+# sub-micron floating-point noise, not to bless real gaps.
+DEFAULT_KELVIN_TOL_MM = 0.05
+
 # Endpoint-snapping tolerance (mm) used when merging a conductor's segments into
 # ordered polylines. Numerically-coincident joints (and via transitions, whose
 # two layers' segments meet at the shared via position) are merged within this
@@ -90,6 +101,42 @@ _AUTO_PAIR_SUFFIXES: tuple[tuple[str, str], ...] = (
     ("+", "-"),
     ("_H", "_L"),
 )
+
+# Phase 3 (#4331): suffix conventions for auto-pairing a Kelvin *sense* net with
+# its *force* (current-carrying) conductor: ``(sense_suffix, force_suffix)``.
+# ``/I_SENSE`` pairs with ``/I_FORCE``, ``ISNS`` with ``IFRC``. This is a
+# distinct pairing from ``_AUTO_PAIR_SUFFIXES`` (which pairs a sense net with its
+# loop *return*): a sense net's shunt force conductor and its loop return are
+# different partners, so force pairing has its own convention and its own
+# ``--kelvin-pair`` override rather than overloading the loop-return pairing.
+_FORCE_PAIR_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("_SENSE", "_FORCE"),
+    ("SNS", "FRC"),
+)
+
+
+def _normalize_pairs(
+    raw: list[tuple[str, str]] | list[list[str]] | list[str] | None,
+) -> list[tuple[str, str]]:
+    """Normalize explicit pairings to a list of ``(a, b)`` string 2-tuples.
+
+    Accepts 2-sequences (``("SENSE", "FORCE")``) *and* colon-joined strings
+    (``"SENSE:FORCE"``, the ``--kelvin-pair`` CLI form). Malformed entries are
+    dropped defensively (the analyzer is advisory-only).
+    """
+    out: list[tuple[str, str]] = []
+    for p in raw or []:
+        if p is None:
+            continue
+        if isinstance(p, str):
+            if ":" in p:
+                a, b = p.split(":", 1)
+                if a and b:
+                    out.append((a, b))
+            continue
+        if len(p) == 2 and p[0] and p[1]:
+            out.append((str(p[0]), str(p[1])))
+    return out
 
 
 @dataclass
@@ -123,6 +170,20 @@ class CurrentSenseResult:
         loop_reason: Human-readable reason the loop area is ``None`` (e.g. no
             return conductor, or the loop did not close). ``None`` when a loop
             area was measured.
+        kelvin_status: Phase 3 (#4331). ``"PASS"`` when the sense tap lands on a
+            force-net pad's metallization (proper Kelvin connection),
+            ``"FAIL"`` when the tap coincides with force copper only mid-trace
+            (never at a pad -- it picks up the trace's IR drop), or ``None``
+            when there is no force partner or the connection is indirect
+            (advisory graceful-degrade, no verdict).
+        kelvin_force_net: The resolved force (current-carrying) partner net the
+            tap was checked against, or ``None`` when none resolved.
+        kelvin_tap_gap_mm: On ``FAIL``, how far (mm) the mid-trace tap sits from
+            the nearest force pad (0 would be a PASS); ~0 on ``PASS``; ``None``
+            when there is no verdict.
+        kelvin_reason: Human-readable reason ``kelvin_status`` is ``None`` (e.g.
+            no force pair, tap not coincident with force copper). ``None`` when
+            a Kelvin verdict was reached.
     """
 
     sense_net: str
@@ -137,12 +198,20 @@ class CurrentSenseResult:
     loop_area_mm2: float | None = None
     loop_status: str | None = None
     loop_reason: str | None = None
+    # Phase 3 (#4331) -- additive; default None so Phase-1/2 construction and any
+    # sense net with no resolvable force partner carries null Kelvin fields.
+    kelvin_status: str | None = None
+    kelvin_force_net: str | None = None
+    kelvin_tap_gap_mm: float | None = None
+    kelvin_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a JSON-serializable dict (mirrors sibling analyzers).
 
         Phase-1 keys are emitted unchanged; Phase-2 adds ``loop_area_mm2`` and
-        ``loop_status`` (always), plus ``loop_reason`` only when it is set.
+        ``loop_status`` (always), plus ``loop_reason`` only when it is set;
+        Phase-3 appends ``kelvin_status``/``kelvin_force_net``/
+        ``kelvin_tap_gap_mm`` (always) and ``kelvin_reason`` only when it is set.
         """
         out: dict[str, Any] = {
             "sense_net": self.sense_net,
@@ -157,6 +226,13 @@ class CurrentSenseResult:
         }
         if self.loop_reason is not None:
             out["loop_reason"] = self.loop_reason
+        out["kelvin_status"] = self.kelvin_status
+        out["kelvin_force_net"] = self.kelvin_force_net
+        out["kelvin_tap_gap_mm"] = (
+            None if self.kelvin_tap_gap_mm is None else round(self.kelvin_tap_gap_mm, 3)
+        )
+        if self.kelvin_reason is not None:
+            out["kelvin_reason"] = self.kelvin_reason
         return out
 
 
@@ -176,6 +252,8 @@ class CurrentSenseAnalyzer:
         max_loop_area_mm2: float = DEFAULT_MAX_LOOP_AREA_MM2,
         sense_pairs: list[tuple[str, str]] | list[list[str]] | None = None,
         sense_return: str | None = None,
+        kelvin_tol_mm: float = DEFAULT_KELVIN_TOL_MM,
+        kelvin_pairs: list[tuple[str, str]] | list[list[str]] | list[str] | None = None,
     ) -> None:
         """Initialize the analyzer.
 
@@ -188,11 +266,17 @@ class CurrentSenseAnalyzer:
                 auto-classification).
             max_loop_area_mm2: Phase 2 (#4330) enclosed-loop-area threshold
                 (mm^2) for the loop FAIL rule.
-            sense_pairs: Explicit Kelvin pairings ``[(sense, return), ...]``.
+            sense_pairs: Explicit Kelvin loop pairings ``[(sense, return), ...]``.
                 Either order matches; the partner conductor closes the loop.
             sense_return: A single shared return-conductor name (e.g. a Kelvin
                 ground) used to close any sense net that has no explicit or
                 auto-detected partner.
+            kelvin_tol_mm: Phase 3 (#4331) Kelvin-tap coincidence tolerance
+                (mm) for PASS/FAIL discrimination.
+            kelvin_pairs: Phase 3 (#4331) explicit sense->force pairings, each a
+                ``(sense, force)`` 2-tuple or a ``"SENSE:FORCE"`` string. Used
+                when the ``_SENSE``/``_FORCE`` (or ``SNS``/``FRC``) suffix
+                convention does not apply.
         """
         self.max_parallel_mm = max_parallel_mm
         self.min_gap_mm = min_gap_mm
@@ -201,12 +285,10 @@ class CurrentSenseAnalyzer:
         self.max_loop_area_mm2 = max_loop_area_mm2
         # Normalize explicit pairs to a list of 2-tuples, dropping malformed
         # entries defensively (advisory-only contract).
-        self.sense_pairs: list[tuple[str, str]] = [
-            (str(p[0]), str(p[1]))
-            for p in (sense_pairs or [])
-            if p is not None and len(p) == 2 and p[0] and p[1]
-        ]
+        self.sense_pairs: list[tuple[str, str]] = _normalize_pairs(sense_pairs)
         self.sense_return = sense_return or None
+        self.kelvin_tol_mm = kelvin_tol_mm
+        self.kelvin_pairs: list[tuple[str, str]] = _normalize_pairs(kelvin_pairs)
 
     # ------------------------------------------------------------------
     # Net classification
@@ -287,6 +369,23 @@ class CurrentSenseAnalyzer:
 
         conductor_names = set(segs_by_name)
 
+        # Phase 3 (#4331): index each net's pad copper (footprint pads) so the
+        # Kelvin check can build force-pad polygons. Advisory: any footprint /
+        # pad access failure degrades to an empty index (all Kelvin None).
+        pads_by_name: dict[str, list[tuple[Any, Any]]] = {}
+        try:
+            for fp in pcb.footprints:
+                for pad in fp.pads:
+                    pname = pad.net_name or num_to_name.get(pad.net_number, "")
+                    if pname:
+                        pads_by_name.setdefault(pname, []).append((pad, fp))
+        except Exception:
+            pads_by_name = {}
+
+        # A net can serve as a force partner if it has any force copper -- a pad
+        # to land on (PASS) or a routed trace to mistakenly T into (FAIL).
+        force_capable_names = set(pads_by_name) | set(segs_by_name)
+
         results: list[CurrentSenseResult] = []
         for sense_name in sorted(sense_names):
             sense_segs = segs_by_name.get(sense_name, [])
@@ -297,6 +396,18 @@ class CurrentSenseAnalyzer:
             result.loop_area_mm2 = area
             result.loop_status = status
             result.loop_reason = reason
+            k_status, k_force, k_gap, k_reason = self._analyze_kelvin(
+                sense_name,
+                sense_segs,
+                vias_by_name.get(sense_name, []),
+                force_capable_names,
+                pads_by_name,
+                segs_by_name,
+            )
+            result.kelvin_status = k_status
+            result.kelvin_force_net = k_force
+            result.kelvin_tap_gap_mm = k_gap
+            result.kelvin_reason = k_reason
             results.append(result)
         return results
 
@@ -459,6 +570,143 @@ class CurrentSenseAnalyzer:
         if len(lines) == 1:
             return lines[0]
         return linemerge(lines)
+
+    # ------------------------------------------------------------------
+    # Phase 3: Kelvin-tap integrity
+    # ------------------------------------------------------------------
+    def _resolve_force_partner(self, sense_name: str, force_capable_names: set[str]) -> str | None:
+        """Return the force (current-carrying) partner net for a sense net.
+
+        Resolution order mirrors :meth:`_resolve_partner`: explicit
+        ``kelvin_pairs`` (directional ``sense -> force``) -> ``_SENSE``/
+        ``_FORCE`` (and ``SNS``/``FRC``) suffix convention. The partner must
+        have force copper (be in ``force_capable_names``) and differ from the
+        sense net. Returns ``None`` when no force partner resolves.
+        """
+        for s, f in self.kelvin_pairs:
+            if sense_name == s and f != sense_name and f in force_capable_names:
+                return f
+
+        for sfx_s, sfx_f in _FORCE_PAIR_SUFFIXES:
+            if sense_name.endswith(sfx_s):
+                cand = sense_name[: -len(sfx_s)] + sfx_f
+                if cand != sense_name and cand in force_capable_names:
+                    return cand
+        return None
+
+    @staticmethod
+    def _sense_endpoints(
+        sense_segs: list[Segment], sense_vias: list[Via]
+    ) -> list[tuple[float, float]]:
+        """Return candidate tap points: the free ends of the sense conductor.
+
+        When the sense segments merge into one contiguous polyline, its two
+        endpoints are the candidates. Otherwise (branched / un-mergeable
+        conductor) fall back to every segment endpoint, so the end nearest the
+        force copper can still be chosen as the tap.
+        """
+        merged = CurrentSenseAnalyzer._merge_conductor(sense_segs, sense_vias)
+        if merged is not None and getattr(merged, "geom_type", None) == "LineString":
+            coords = list(merged.coords)
+            if len(coords) >= 2:
+                first, last = coords[0], coords[-1]
+                return [
+                    (float(first[0]), float(first[1])),
+                    (float(last[0]), float(last[1])),
+                ]
+        pts: list[tuple[float, float]] = []
+        for seg in sense_segs:
+            pts.append(seg.start)
+            pts.append(seg.end)
+        return pts
+
+    def _analyze_kelvin(
+        self,
+        sense_name: str,
+        sense_segs: list[Segment],
+        sense_vias: list[Via],
+        force_capable_names: set[str],
+        pads_by_name: dict[str, list[tuple[Any, Any]]],
+        segs_by_name: dict[str, list[Segment]],
+    ) -> tuple[str | None, str | None, float | None, str | None]:
+        """Return ``(kelvin_status, force_net, tap_gap_mm, reason)`` for a net.
+
+        Discriminates a proper Kelvin tap (sense trace ends on a force-net pad's
+        metallization -> ``d_pad <= tol`` -> PASS) from a mid-trace tap (sense
+        trace T's into the force *trace* interior, far from every force pad ->
+        ``d_pad > tol`` and ``d_seg <= tol`` -> FAIL). An indirect connection
+        (tap coincident with neither -> ``min(d_pad, d_seg) > tol``) yields no
+        verdict. Advisory-only: any failure degrades to ``(None, force, None,
+        reason)`` and never raises.
+        """
+        force_name = self._resolve_force_partner(sense_name, force_capable_names)
+        if force_name is None:
+            return None, None, None, "no force pair"
+
+        try:
+            from kicad_tools._shapely import has_shapely
+
+            if not has_shapely():
+                return None, force_name, None, "shapely unavailable"
+
+            from shapely.geometry import Point
+
+            from kicad_tools.geometry.copper import segment_copper_polygon
+            from kicad_tools.validate.rules.clearance import _pad_polygon
+
+            force_pad_polys = []
+            for pad, fp in pads_by_name.get(force_name, []):
+                try:
+                    poly = _pad_polygon(pad, fp)
+                except Exception:
+                    poly = None
+                if poly is not None:
+                    force_pad_polys.append(poly)
+
+            force_seg_polys = []
+            for seg in segs_by_name.get(force_name, []):
+                try:
+                    poly = segment_copper_polygon(seg.start, seg.end, seg.width)
+                except Exception:
+                    poly = None
+                if poly is not None:
+                    force_seg_polys.append(poly)
+
+            if not force_pad_polys:
+                # No force-pad metallization (no footprints, or all force pads
+                # degenerate): the Kelvin reference point is undefined, so a
+                # mid-trace tap cannot be judged against "where it should have
+                # landed". No verdict rather than a spurious FAIL.
+                return None, force_name, None, "no force pad metallization"
+
+            candidates = self._sense_endpoints(sense_segs, sense_vias)
+            if not candidates:
+                return None, force_name, None, "no sense conductor geometry"
+
+            # Choose the sense free-end nearest the force copper as the tap.
+            best: tuple[float, float, float] | None = None
+            for cand in candidates:
+                pt = Point(cand)
+                d_pad = min((pt.distance(poly) for poly in force_pad_polys), default=math.inf)
+                d_seg = min((pt.distance(poly) for poly in force_seg_polys), default=math.inf)
+                key = min(d_pad, d_seg)
+                if best is None or key < best[0]:
+                    best = (key, d_pad, d_seg)
+
+            assert best is not None  # candidates non-empty
+            _, d_pad, d_seg = best
+            tol = self.kelvin_tol_mm
+
+            if d_pad <= tol:
+                # Proper Kelvin tap: coincides with a force pad's metallization.
+                return "PASS", force_name, d_pad, None
+            if d_seg <= tol:
+                # Mid-trace tap: on force copper, but never at a pad.
+                gap = None if math.isinf(d_pad) else d_pad
+                return "FAIL", force_name, gap, None
+            return None, force_name, None, "tap not coincident with force copper"
+        except Exception:
+            return None, force_name, None, "kelvin analysis failed"
 
     def _analyze_sense_net(
         self,

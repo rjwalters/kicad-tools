@@ -296,7 +296,9 @@ class TestAnalyzerGeometry:
         assert r.nearest_hicur_net == "PHASE_A"
         assert r.min_gap_mm == pytest.approx(0.1, abs=0.001)
         assert r.max_parallel_mm == pytest.approx(3.0, abs=0.01)
-        # The whole census row matches the phase-1 nearest-by-gap contract.
+        # The Phase-1 nearest-by-gap contract is preserved; Phase-2 (loop) and
+        # Phase-3 (kelvin) keys are appended. ISENSE has no return conductor and
+        # no force partner here, so both degrade to null with a reason.
         assert r.to_dict() == {
             "sense_net": "ISENSE",
             "nearest_hicur_net": "PHASE_A",
@@ -305,6 +307,13 @@ class TestAnalyzerGeometry:
             "min_gap_mm": 0.1,
             "status": "PASS",
             "margin": -0.4,
+            "loop_area_mm2": None,
+            "loop_status": None,
+            "loop_reason": "no return conductor (single-ended, not closable)",
+            "kelvin_status": None,
+            "kelvin_force_net": None,
+            "kelvin_tap_gap_mm": None,
+            "kelvin_reason": "no force pair",
         }
 
 
@@ -444,11 +453,19 @@ class TestCli:
         assert rc == 1
         payload = json.loads(capsys.readouterr().out)
         assert set(payload) == {"census", "thresholds", "summary"}
-        # Phase-1 summary keys unchanged; Phase-2 adds loop_fail.
-        assert payload["summary"] == {"total": 1, "fail": 1, "pass": 0, "loop_fail": 0}
+        # Phase-1 summary keys unchanged; Phase-2 adds loop_fail; Phase-3 adds
+        # kelvin_fail.
+        assert payload["summary"] == {
+            "total": 1,
+            "fail": 1,
+            "pass": 0,
+            "loop_fail": 0,
+            "kelvin_fail": 0,
+        }
         assert payload["thresholds"]["max_parallel_mm"] == 10.0
         assert payload["thresholds"]["min_gap_mm"] == 0.5
         assert payload["thresholds"]["max_loop_area_mm2"] == 10.0
+        assert payload["thresholds"]["kelvin_tol_mm"] == 0.05
         row = payload["census"][0]
         assert row["sense_net"] == "ISENSE"
         assert row["nearest_hicur_net"] == "PHASE_A"
@@ -767,3 +784,257 @@ class TestLoopAreaCli:
         assert "40.000" in out
         assert "loop-area FAIL" in out
         assert "2 PASS" in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 (#4331): Kelvin-tap integrity
+# ---------------------------------------------------------------------------
+#
+# Each fixture has a 1x1mm force pad (footprint R1) centred at board (10,10) on
+# net I_FORCE, plus a 20mm force trace I_FORCE from the pad to (30,10). The sense
+# net I_SENSE auto-pairs to I_FORCE via the _SENSE/_FORCE suffix convention. The
+# only variable is where the sense trace ends (the "tap"):
+#   PASS     -> ends on the force pad centre (10,10): d_pad = 0.
+#   FAIL     -> T's into the force trace mid-span (20,10): on copper, but 9.5mm
+#               from the pad.
+#   INDIRECT -> ends well away from all force copper (20,25): no verdict.
+
+_KELVIN_FP = """
+  (footprint "R_shunt" (layer "F.Cu") (at 10 10)
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "I_FORCE"))
+  )
+"""
+
+KELVIN_PASS_PCB = (
+    _HEADER
+    + """
+  (net 0 "")
+  (net 1 "I_FORCE")
+  (net 2 "I_SENSE")
+"""
+    + _KELVIN_FP
+    + """
+  (segment (start 10 10) (end 30 10) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 10 10) (end 10 20) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+)
+
+KELVIN_FAIL_PCB = (
+    _HEADER
+    + """
+  (net 0 "")
+  (net 1 "I_FORCE")
+  (net 2 "I_SENSE")
+"""
+    + _KELVIN_FP
+    + """
+  (segment (start 10 10) (end 30 10) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 20 10) (end 20 20) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+)
+
+KELVIN_INDIRECT_PCB = (
+    _HEADER
+    + """
+  (net 0 "")
+  (net 1 "I_FORCE")
+  (net 2 "I_SENSE")
+"""
+    + _KELVIN_FP
+    + """
+  (segment (start 10 10) (end 30 10) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 20 25) (end 20 35) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+)
+
+# Force pad has zero size -> skipped; force trace still present. No force-pad
+# metallization means no Kelvin reference point -> null verdict (never crash).
+KELVIN_DEGENERATE_PAD_PCB = (
+    _HEADER
+    + """
+  (net 0 "")
+  (net 1 "I_FORCE")
+  (net 2 "I_SENSE")
+  (footprint "R_shunt" (layer "F.Cu") (at 10 10)
+    (pad "1" smd rect (at 0 0) (size 0 0) (layers "F.Cu") (net 1 "I_FORCE"))
+  )
+  (segment (start 10 10) (end 30 10) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 20 10) (end 20 20) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+)
+
+# Names that do NOT match the _SENSE/_FORCE convention; paired explicitly. VDROP
+# has a pad at (10,10); VMEAS taps it -> PASS only when --kelvin-pair is given.
+KELVIN_EXPLICIT_PAIR_PCB = (
+    _HEADER
+    + """
+  (net 0 "")
+  (net 1 "VDROP")
+  (net 2 "VMEAS")
+  (footprint "R_shunt" (layer "F.Cu") (at 10 10)
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "VDROP"))
+  )
+  (segment (start 10 10) (end 30 10) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 10 10) (end 10 20) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+)
+
+
+def _kelvin(pcb, **kwargs):
+    """Analyze with I_SENSE tagged, return the I_SENSE row."""
+    analyzer = CurrentSenseAnalyzer(sense_nets=["I_SENSE"], **kwargs)
+    rows = {r.sense_net: r for r in analyzer.analyze(pcb)}
+    return rows["I_SENSE"]
+
+
+class TestKelvin:
+    def test_tap_on_pad_passes(self, tmp_path: Path) -> None:
+        r = _kelvin(_load(tmp_path, KELVIN_PASS_PCB))
+        assert r.kelvin_status == "PASS"
+        assert r.kelvin_force_net == "I_FORCE"
+        assert r.kelvin_tap_gap_mm == pytest.approx(0.0, abs=0.05)
+        assert r.kelvin_reason is None
+
+    def test_mid_trace_tap_fails(self, tmp_path: Path) -> None:
+        r = _kelvin(_load(tmp_path, KELVIN_FAIL_PCB))
+        assert r.kelvin_status == "FAIL"
+        assert r.kelvin_force_net == "I_FORCE"
+        # Tap sits ~9.5mm up the force trace from the pad edge (10.5,10).
+        assert r.kelvin_tap_gap_mm == pytest.approx(9.5, abs=0.1)
+        assert r.kelvin_tap_gap_mm > 0.05
+        assert r.kelvin_reason is None
+
+    def test_indirect_tap_is_null(self, tmp_path: Path) -> None:
+        r = _kelvin(_load(tmp_path, KELVIN_INDIRECT_PCB))
+        assert r.kelvin_status is None
+        assert r.kelvin_tap_gap_mm is None
+        assert r.kelvin_reason == "tap not coincident with force copper"
+
+    def test_no_force_pair_is_null(self, tmp_path: Path) -> None:
+        # ISENSE has no _SENSE suffix and no explicit pairing -> no partner.
+        pcb = _load(tmp_path, FAIL_PCB)
+        r = {x.sense_net: x for x in CurrentSenseAnalyzer().analyze(pcb)}["ISENSE"]
+        assert r.kelvin_status is None
+        assert r.kelvin_force_net is None
+        assert r.kelvin_reason == "no force pair"
+
+    def test_degenerate_force_pad_is_null_no_crash(self, tmp_path: Path) -> None:
+        r = _kelvin(_load(tmp_path, KELVIN_DEGENERATE_PAD_PCB))
+        assert r.kelvin_status is None  # never a spurious FAIL
+        assert r.kelvin_reason == "no force pad metallization"
+
+    def test_explicit_kelvin_pair(self, tmp_path: Path) -> None:
+        pcb = _load(tmp_path, KELVIN_EXPLICIT_PAIR_PCB)
+        # Without the explicit pair, VMEAS has no force partner.
+        base = CurrentSenseAnalyzer(sense_nets=["VMEAS"])
+        r0 = {x.sense_net: x for x in base.analyze(pcb)}["VMEAS"]
+        assert r0.kelvin_status is None
+        assert r0.kelvin_reason == "no force pair"
+        # With it, VMEAS taps VDROP's pad -> PASS.
+        paired = CurrentSenseAnalyzer(sense_nets=["VMEAS"], kelvin_pairs=[("VMEAS", "VDROP")])
+        r1 = {x.sense_net: x for x in paired.analyze(pcb)}["VMEAS"]
+        assert r1.kelvin_status == "PASS"
+        assert r1.kelvin_force_net == "VDROP"
+
+    def test_kelvin_pair_colon_string_form(self, tmp_path: Path) -> None:
+        # The "SENSE:FORCE" CLI string form normalizes the same as a 2-tuple.
+        pcb = _load(tmp_path, KELVIN_EXPLICIT_PAIR_PCB)
+        paired = CurrentSenseAnalyzer(sense_nets=["VMEAS"], kelvin_pairs=["VMEAS:VDROP"])
+        r = {x.sense_net: x for x in paired.analyze(pcb)}["VMEAS"]
+        assert r.kelvin_status == "PASS"
+
+    def test_custom_tol_flips_pass_to_fail(self, tmp_path: Path) -> None:
+        # A negative-ish tight tolerance can't flip PASS (d_pad==0), but a large
+        # tolerance turns the mid-trace FAIL into a PASS (tap within tol of pad).
+        r = _kelvin(_load(tmp_path, KELVIN_FAIL_PCB), kelvin_tol_mm=20.0)
+        assert r.kelvin_status == "PASS"
+
+    def test_shapely_unavailable_is_null(self, tmp_path: Path, monkeypatch) -> None:
+        import kicad_tools._shapely as _shp
+
+        monkeypatch.setattr(_shp, "has_shapely", lambda: False)
+        r = _kelvin(_load(tmp_path, KELVIN_PASS_PCB))
+        assert r.kelvin_status is None
+        assert r.kelvin_reason == "shapely unavailable"
+
+    def test_additive_output_guard(self, tmp_path: Path) -> None:
+        # Every Phase-1/2 key is still present; Phase-3 keys are appended.
+        r = _kelvin(_load(tmp_path, KELVIN_PASS_PCB))
+        d = r.to_dict()
+        for key in (
+            "sense_net",
+            "nearest_hicur_net",
+            "layer",
+            "max_parallel_mm",
+            "min_gap_mm",
+            "status",
+            "margin",
+            "loop_area_mm2",
+            "loop_status",
+        ):
+            assert key in d
+        assert d["kelvin_status"] == "PASS"
+        assert d["kelvin_force_net"] == "I_FORCE"
+        assert "kelvin_tap_gap_mm" in d
+        # PASS reached a verdict -> no reason key (mirrors loop_reason).
+        assert "kelvin_reason" not in d
+        json.dumps(d)  # JSON-safe (no inf/NaN)
+
+
+class TestKelvinCli:
+    def test_cli_fail_exit_code(self, tmp_path: Path, capsys) -> None:
+        pcb = _write(tmp_path, KELVIN_FAIL_PCB)
+        rc = analyze_main(["current-sense", str(pcb), "--sense-net", "I_SENSE"])
+        assert rc == 1  # Kelvin FAIL gates the exit
+        out = capsys.readouterr().out
+        assert "Kelvin FAIL" in out
+
+    def test_cli_pass_exit_zero(self, tmp_path: Path, capsys) -> None:
+        pcb = _write(tmp_path, KELVIN_PASS_PCB)
+        rc = analyze_main(["current-sense", str(pcb), "--sense-net", "I_SENSE"])
+        assert rc == 0
+
+    def test_cli_json_additive_keys(self, tmp_path: Path, capsys) -> None:
+        pcb = _write(tmp_path, KELVIN_FAIL_PCB)
+        rc = analyze_main(["current-sense", str(pcb), "--sense-net", "I_SENSE", "--format", "json"])
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["thresholds"]["kelvin_tol_mm"] == 0.05
+        assert payload["summary"]["kelvin_fail"] == 1
+        row = {r["sense_net"]: r for r in payload["census"]}["I_SENSE"]
+        assert row["kelvin_status"] == "FAIL"
+        assert row["kelvin_force_net"] == "I_FORCE"
+        assert row["kelvin_tap_gap_mm"] > 0.05
+
+    def test_cli_kelvin_pair_flag(self, tmp_path: Path, capsys) -> None:
+        pcb = _write(tmp_path, KELVIN_EXPLICIT_PAIR_PCB)
+        rc = analyze_main(
+            [
+                "current-sense",
+                str(pcb),
+                "--sense-net",
+                "VMEAS",
+                "--kelvin-pair",
+                "VMEAS:VDROP",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == 0  # PASS
+        payload = json.loads(capsys.readouterr().out)
+        row = {r["sense_net"]: r for r in payload["census"]}["VMEAS"]
+        assert row["kelvin_status"] == "PASS"
+        assert row["kelvin_force_net"] == "VDROP"
+
+    def test_cli_kelvin_tol_flag(self, tmp_path: Path, capsys) -> None:
+        pcb = _write(tmp_path, KELVIN_FAIL_PCB)
+        # Loosen tolerance above the 9.5mm gap -> the mid-trace tap now PASSes.
+        rc = analyze_main(
+            ["current-sense", str(pcb), "--sense-net", "I_SENSE", "--kelvin-tol", "20"]
+        )
+        assert rc == 0
