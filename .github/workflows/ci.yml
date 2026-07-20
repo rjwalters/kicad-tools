@@ -1744,7 +1744,7 @@ jobs:
     #
     # Board 04 has a committed output/lvs.json (clean: true), so this reuses
     # the board-03 --lvs-only asserter pattern (NOT the full asserter: board 04
-    # carries 2 grandfathered dimension_drill_clearance drills + 1 advisory
+    # carries 2 grandfathered hole_to_hole_clearance drills + 1 advisory
     # connectivity finding, so board-metrics classifies it status:partial /
     # drc_violations:2, which the full status:ok / drc_violations:0 assertion
     # would FAIL).
@@ -1844,7 +1844,7 @@ jobs:
         #     .github/routed-drc-tolerance.yml, so the committed-artifact
         #     "Routed PCB DRC Check" job ratchets it at strict-0.
         #   * The FRESH regen still routes the LEGACY 0.350mm pair (2
-        #     dimension_drill_clearance errors), because the recipe geometry
+        #     hole_to_hole_clearance errors), because the recipe geometry
         #     was intentionally untouched (curation constraint).
         #
         # A single YAML value can't satisfy both (both resolve to the same

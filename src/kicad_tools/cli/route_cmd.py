@@ -627,7 +627,7 @@ def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
     current route s-expression on top of stale segments/vias from the prior
     write, doubling (or worse) the via population in the output file.
 
-    The duplicated vias trigger ``dimension_drill_clearance`` errors --
+    The duplicated vias trigger ``hole_to_hole_clearance`` errors --
     -0.300mm clearance == two coincident drills on the same net -- because
     they are literally the same physical via emitted twice with different
     UUIDs.

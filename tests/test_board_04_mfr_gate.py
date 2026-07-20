@@ -15,7 +15,7 @@ the same gate the CI ``routed-pcb-drc-check`` job uses
 2. The gate's blocking error count stays at or below the floor declared
    for board 04 in the same YAML.  The floor is strict-0: Issue #3842
    re-baselined it to 2 for the pre-existing TRUE-POSITIVE sub-0.5mm
-   ``dimension_drill_clearance`` drills (a 0.350mm pair at
+   ``hole_to_hole_clearance`` drills (a 0.350mm pair at
    [26.84, 22.5]/[26.84, 22.0]), and Issue #4017 re-spaced that pair to
    >= 0.500mm edge-to-edge (artifact-only nudge: the NRST in-pad via
    relocated 0.5mm east onto its B.Cu escape node, re-bonded to pad U2.7

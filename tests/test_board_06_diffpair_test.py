@@ -789,11 +789,11 @@ class TestBoard06StrictGateGuard:
     spec (canonical 0.5 mm fab default; the old code keyed off
     ``min_clearance_mm`` and never fired below 0.5 mm).  The committed
     board-06 artifact carries 6 genuine pre-existing
-    ``dimension_drill_clearance`` violations -- sub-0.5 mm drill pairs that
+    ``hole_to_hole_clearance`` violations -- sub-0.5 mm drill pairs that
     were always present but invisible to the broken check.  These are TRUE
     POSITIVES, NOT new regressions from this PR; the board-layout fix
     (re-spacing the drills to >= 0.5 mm) is tracked in **#3847**, the rule
-    change refs #3842 / #3830.  The +6 are ``dimension_drill_clearance``,
+    change refs #3842 / #3830.  The +6 are ``hole_to_hole_clearance``,
     a DISTINCT family from the 18 diff-pair quality defects
     (``diffpair_length_skew`` / ``diffpair_routing_continuity``), so the
     diff-pair-only baseline (``DIFFPAIR_VIOLATION_BASELINE`` = 18 in
@@ -811,7 +811,7 @@ class TestBoard06StrictGateGuard:
     #   * 18 diff-pair quality defects (9 ``diffpair_length_skew`` + 9
     #     ``diffpair_routing_continuity``) -- UNCHANGED; coupled
     #     convergence is tracked in #3540-#3544.
-    #   * ``dimension_drill_clearance`` dropped 6 -> 1.  The router /
+    #   * ``hole_to_hole_clearance`` dropped 6 -> 1.  The router /
     #     recipe via placers now reject sub-0.5mm drill pairs (#3855), so
     #     5 of the 6 prior drill true-positives are gone.  The lone
     #     remainder is a same-net USB2_D+ coupled-route via pair placed by
@@ -839,7 +839,7 @@ class TestBoard06StrictGateGuard:
     # shorts (a USB_CC1 In1.Cu track through the USB2_D-/USB3_RX1- via
     # barrels) and the U2-F1 clearance pair do not re-appear on the fresh
     # route, and the residual same-net via_in_pad (USB_CC1 at U1-12) + 2
-    # ``dimension_drill_clearance`` staples (USB2_D+, MIPI_RST) are
+    # ``hole_to_hole_clearance`` staples (USB2_D+, MIPI_RST) are
     # repaired by step 13.  kicad-cli reports 0 errors / 0 unconnected and
     # the manufacturing bundle's report.md shows Errors = 0.  What remains
     # is EXACTLY the diff-pair quality block: 9 ``diffpair_length_skew`` +
@@ -945,7 +945,7 @@ class TestBoard06StrictGateGuard:
           (currently 24 = 18 diff-pair + 6 drill; the strict gate's drift
           warning will be your guide).  Driving the 18 diff-pair errors to
           0 is the coupled-convergence work tracked in #3540-#3544; the 6
-          ``dimension_drill_clearance`` true-positives (Issue #3842 gate)
+          ``hole_to_hole_clearance`` true-positives (Issue #3842 gate)
           are the board-layout fix tracked in #3847.
         """
         from kicad_tools.validate.checker import DRCChecker

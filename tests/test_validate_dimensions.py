@@ -469,7 +469,7 @@ class TestDrillClearanceCheck:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 0
 
@@ -491,7 +491,7 @@ class TestDrillClearanceCheck:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 1
         assert clearance_violations[0].actual_value == pytest.approx(0.1)
@@ -531,7 +531,7 @@ class TestDrillClearanceCheck:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 1
 
@@ -586,7 +586,7 @@ class TestDrillClearanceCheck:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         # Buggy code would find the via 0.7mm from the (10,14) pad -> flag.
         # Correct code measures against (14,10) -> 5.77mm edge -> no flag.
@@ -632,7 +632,7 @@ class TestDrillClearanceCheck:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 1
         assert clearance_violations[0].actual_value == pytest.approx(0.3)
@@ -668,7 +668,7 @@ class TestDrillClearanceCheck:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 0
 
@@ -692,7 +692,7 @@ class TestDrillClearanceCheck:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 1
         assert clearance_violations[0].actual_value == pytest.approx(0.3)
@@ -715,7 +715,7 @@ class TestDrillClearanceCheck:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 0
 
@@ -754,7 +754,7 @@ class TestDrillClearanceCheck:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 1
         assert clearance_violations[0].severity == "error"
@@ -802,7 +802,7 @@ class TestSameFootprintDrillClearance:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 1
         assert clearance_violations[0].severity == "warning"
@@ -850,7 +850,7 @@ class TestSameFootprintDrillClearance:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 1
         assert clearance_violations[0].severity == "error"
@@ -887,7 +887,7 @@ class TestSameFootprintDrillClearance:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 1
         assert clearance_violations[0].severity == "error"
@@ -908,7 +908,7 @@ class TestSameFootprintDrillClearance:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 1
         assert clearance_violations[0].severity == "error"
@@ -936,7 +936,7 @@ class TestSameFootprintDrillClearance:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 1
         v = clearance_violations[0]
@@ -972,7 +972,7 @@ class TestSameFootprintDrillClearance:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 0
 
@@ -1011,7 +1011,7 @@ class TestSameFootprintDrillClearance:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 0
 
@@ -1128,7 +1128,7 @@ class TestViolationLocation:
         results = rule.check(pcb, rules)
 
         clearance_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(clearance_violations) == 1
         # Midpoint of (0,0) and (0.4, 0) is (0.2, 0)

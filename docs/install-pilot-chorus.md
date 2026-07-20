@@ -159,7 +159,7 @@ Followed the vendored `/kct:manufacturing-readiness` playbook.
 |------:|---------|
 | 692 | `clearance_segment_zone` |
 | 385 | `clearance_via_zone` |
-| 49 | `dimension_drill_clearance` |
+| 49 | `hole_to_hole_clearance` |
 | 21 | `clearance_pad_zone` |
 | 19 | `clearance_pad_segment` |
 | 1 | `edge_clearance_pad_hole` |
@@ -219,7 +219,7 @@ artifact-first).
 |-------|----------------|-----|
 | 1117 `clearance_*_zone` (kct) / 507 `clearance` + zone shorts (kicad-cli) | **Board-file provenance**, not a defect | Stale pours + generic embedded rules; the board is a routed static artifact whose `(setup)` never carried tier1 rules. 2026-07-04 checked with a refilled tier1 capability project. |
 | 199 `track_width` / 199 `drill_out_of_range` / 199 `via_diameter` / 5 `copper_edge_clearance` | **Tier-config mismatch** | KiCad's generic defaults (0.2/0.3/0.5) are stricter than tier1's real floors (0.13/0.2/0.45). These are legal tier1 geometry flagged only because the board embeds no tier1 rules. |
-| 49 `dimension_drill_clearance` (kct) / 27 `hole_clearance` (kicad-cli) | **Board-file provenance / known referee items** | Hole-to-hole spacing; LAYOUT_NOTES carried `hole 1` as an accepted NT3 net-tie artifact at sign-off. Bare-default checking amplifies these. |
+| 49 `hole_to_hole_clearance` (kct) / 27 `hole_clearance` (kicad-cli) | **Board-file provenance / known referee items** | Hole-to-hole spacing; LAYOUT_NOTES carried `hole 1` as an accepted NT3 net-tie artifact at sign-off. Bare-default checking amplifies these. |
 | 11 `courtyards_overlap`, 95 unconnected (referee) | **Advisory / known-accepted** | Present and accepted at 2026-07-04 sign-off per LAYOUT_NOTES. |
 | kct-vs-kicad count difference (1167 vs 1147) | **kct drift (benign)** | Two independent DRC engines with different rule taxonomies and sliver/zone accounting; both agree on the *root cause* (rules + stale fills), not on exact counts. |
 

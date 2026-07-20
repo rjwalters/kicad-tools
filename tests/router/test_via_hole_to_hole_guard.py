@@ -10,7 +10,7 @@ manufacturer ``min_hole_to_hole`` (canonical 0.5 mm) drill-to-drill floor:
 Each now rejects a candidate via whose DRILL would sit within
 ``min_hole_to_hole`` (edge-to-edge) of any existing drill (via OR
 through-hole pad, any net), reusing the canonical edge-to-edge formula
-from the DRC ``dimension_drill_clearance`` rule.
+from the DRC ``hole_to_hole_clearance`` rule.
 """
 
 from __future__ import annotations

@@ -1785,16 +1785,20 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
 #   * advisory ``connectivity`` (1 stranded GND-stitch pad; in
 #     ``DRCChecker.ADVISORY_RULE_IDS``, filtered from every CI gate).
 #
-# The 2 ``dimension_drill_clearance`` errors that #3842 grandfathered at 2
+# The 2 ``hole_to_hole_clearance`` errors that #3842 grandfathered at 2
 # (a 0.350mm hole-to-hole micro-via pair on the LQFP-48 west escape) were
 # re-spaced to >= 0.500mm edge-to-edge by Issue #4017 (artifact-only nudge:
 # the NRST in-pad via relocated 0.5mm east onto its B.Cu escape node and
 # bonded back to pad U2.7 with a short F.Cu stub).  With that fix the
 # drill-clearance allowance is now strict-0 and the CI tolerance entry is
-# removed -- ANY ``dimension_drill_clearance`` error, or any other blocking
+# removed -- ANY ``hole_to_hole_clearance`` error, or any other blocking
 # rule, fails the gate so a real DRC regression cannot ship 0.
 _ADVISORY_DRC_RULE_IDS: frozenset[str] = frozenset({"connectivity"})
-_DRILL_CLEARANCE_RULE_ID = "dimension_drill_clearance"
+# Issue #4353: the emitted rule_id was renamed from
+# ``hole_to_hole_clearance`` to ``hole_to_hole_clearance`` so the report
+# label matches the "Hole-to-hole clearance ..." message text.  This gate
+# parses the raw JSON ``rule_id`` string, so it must track the new value.
+_DRILL_CLEARANCE_RULE_ID = "hole_to_hole_clearance"
 _DRILL_CLEARANCE_ALLOWANCE = 0  # strict-0 since #4017 re-spaced the drill pair
 
 
@@ -1824,7 +1828,7 @@ def run_drc(pcb_path: Path) -> bool:
     Issue #3839: the return value now gates ``main()``'s exit code, so it
     is **allowlist-aware** rather than a raw ``returncode == 0`` check.
     ``kct check --drc-only`` exits 2 on the 2 grandfathered
-    ``dimension_drill_clearance`` drills (#3842/#3847) and on the advisory
+    ``hole_to_hole_clearance`` drills (#3842/#3847) and on the advisory
     ``connectivity`` finding, neither of which should fail the recipe.
     Instead of trusting the exit code we parse the emitted JSON and count
     *blocking* violations the same way the CI gate
@@ -2174,7 +2178,7 @@ def main() -> int:
         # the ``write_lvs_report`` return -- so a board with a NEW blocking DRC
         # error or a copper-LVS short could print SUCCESS and exit 0.  The gate
         # now ANDs ``drc_success`` (allowlist-aware per ``run_drc``: tolerates
-        # the 2 grandfathered ``dimension_drill_clearance`` drills (#3847) +
+        # the 2 grandfathered ``hole_to_hole_clearance`` drills (#3847) +
         # advisory ``connectivity`` but fails on a 3rd drill or any new rule)
         # and ``copper_clean`` (the copper-LVS verdict) so a real DRC/LVS
         # regression exits non-zero.  The current committed board -- 2

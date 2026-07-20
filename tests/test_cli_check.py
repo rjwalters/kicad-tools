@@ -981,7 +981,7 @@ def main_(pcb: Path) -> int:
 
 
 class TestDrillClearanceNetRelationship:
-    """Issue #4102: net-relationship enrichment for dimension_drill_clearance.
+    """Issue #4102: net-relationship enrichment for hole_to_hole_clearance.
 
     The findings already carry both endpoints' nets (``nets=(net1, net2)``,
     also serialized in ``--format json`` via ``DRCViolation.to_dict``).  These
@@ -995,7 +995,7 @@ class TestDrillClearanceNetRelationship:
         from kicad_tools.validate import DRCViolation
 
         return DRCViolation(
-            rule_id="dimension_drill_clearance",
+            rule_id="hole_to_hole_clearance",
             severity=severity,
             message="Hole-to-hole clearance 0.113mm < minimum 0.500mm",
             location=(10.0, 20.0),
@@ -1048,7 +1048,7 @@ class TestDrillClearanceNetRelationship:
 
         _print_violation(self._violation(("HALL_A", "GND")), verbose=False)
         out = capsys.readouterr().out
-        assert "dimension_drill_clearance (different-net)" in out
+        assert "hole_to_hole_clearance (different-net)" in out
         assert "Nets: HALL_A / GND" in out
 
     def test_same_net_finding_shows_label_and_nets_default(self, capsys):
@@ -1057,7 +1057,7 @@ class TestDrillClearanceNetRelationship:
 
         _print_violation(self._violation(("HALL_A", "HALL_A")), verbose=False)
         out = capsys.readouterr().out
-        assert "dimension_drill_clearance (same-net)" in out
+        assert "hole_to_hole_clearance (same-net)" in out
         assert "Nets: HALL_A / HALL_A" in out
 
     def test_verbose_keeps_label_and_nets(self, capsys):
@@ -1066,7 +1066,7 @@ class TestDrillClearanceNetRelationship:
 
         _print_violation(self._violation(("HALL_A", "GND")), verbose=True)
         out = capsys.readouterr().out
-        assert "dimension_drill_clearance (different-net)" in out
+        assert "hole_to_hole_clearance (different-net)" in out
         # Net endpoints rendered exactly once, in the net-relationship form.
         assert out.count("Nets:") == 1
         assert "Nets: HALL_A / GND" in out
@@ -1108,7 +1108,7 @@ class TestDrillClearanceNetRelationship:
 
         output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 2, False)
         out = capsys.readouterr().out
-        assert "dimension_drill_clearance: 3 errors (2 different-net, 1 same-net)" in out
+        assert "hole_to_hole_clearance: 3 errors (2 different-net, 1 same-net)" in out
 
     def test_by_rule_summary_floating_pair_counts_as_different(self, capsys):
         """Issue #4127: floating/floating pairs count as different-net in BY RULE.
@@ -1134,7 +1134,7 @@ class TestDrillClearanceNetRelationship:
 
         output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 2, False)
         out = capsys.readouterr().out
-        assert "dimension_drill_clearance: 3 errors (2 different-net, 1 same-net)" in out
+        assert "hole_to_hole_clearance: 3 errors (2 different-net, 1 same-net)" in out
 
 
 class TestClearanceSegmentViaNetRelationship:
@@ -1145,7 +1145,7 @@ class TestClearanceSegmentViaNetRelationship:
     ``nets=(net_a, net_b)`` (set in ``_create_violation``,
     ``validate/rules/clearance.py``), also serialized in ``--format json``.
     Adding them to ``_NET_RELATIONSHIP_RULE_IDS`` gives them the same
-    presentational split ``dimension_drill_clearance`` gets: a per-finding
+    presentational split ``hole_to_hole_clearance`` gets: a per-finding
     qualifier + unconditional ``Nets:`` line and a ``BY RULE`` sub-count.  An
     agent can then triage a genuine different-net short ahead of a lower-risk
     same-net coincidence.  Presentational only; severity is unchanged.

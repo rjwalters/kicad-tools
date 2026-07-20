@@ -621,7 +621,7 @@ class TestDrillClearanceNets:
         results = checker.check_dimensions()
 
         drill_violations = [
-            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(drill_violations) > 0
 

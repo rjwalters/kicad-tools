@@ -320,6 +320,6 @@ class TestDimensionRulesTolerance:
         rules = MockDesignRules(min_clearance_mm=0.127)
         result = DimensionRules().check(pcb, rules)
         drill_violations = [
-            v for v in result.violations if v.rule_id == "dimension_drill_clearance"
+            v for v in result.violations if v.rule_id == "hole_to_hole_clearance"
         ]
         assert len(drill_violations) == 1
