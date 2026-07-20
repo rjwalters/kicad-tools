@@ -25,6 +25,7 @@ provisions paid infrastructure and is never part of a routine hygiene pass.
 /repo:all --ask                # Confirm findings before applying at every stage
 /repo:all packages/core        # Scope the read-only scans to one subtree
 /repo:all --prune              # Also delete confirmed-safe branches/worktrees (passed to reset, after the loss check)
+/repo:all --caches             # Also clear regenerable caches in the Tidy stage (passed to tidy; off by default)
 ```
 
 The optional path argument scopes the scanning stages ([[audit]]) the same way
@@ -59,7 +60,12 @@ fixes the audit surfaced — apply the ones the user approves.
 ### 3. Tidy (see [[tidy]])
 
 Inventory filesystem clutter — build artifacts, caches, temp files, empty dirs
-— present it grouped with sizes, and remove what the user approves.
+— present it grouped with sizes, and delete the SAFE junk (OS droppings, merge
+leftovers, empty dirs). **Regenerable caches are kept by default** in a routine
+hygiene pass — deleting them just forces a costly rebuild — so this stage does
+**not** pass `--caches` to [[tidy]] unless the user gave `/repo:all --caches`.
+Environments (`node_modules/`, virtualenvs) and other ASK items are never
+auto-removed here regardless.
 
 ### 4. Update tools (see [[update-tools]])
 

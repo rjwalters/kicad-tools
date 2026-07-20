@@ -354,12 +354,21 @@ gh issue view NUMBER --json state
 
 **If issue is still open after PR merged:**
 1. Check if PR body used correct syntax (`Closes #X`)
-2. If missing keyword, manually close the issue with explanation
-3. Leave comment documenting what happened
+2. **Exclude intentional partial increments first** — if the merged PR body contains a non-closing reference (`Part of #X` / `Contributes to #X`), or the still-open issue is labeled `loom:epic` / `loom:epic-phase`, the issue is **supposed** to stay open across increments. This is NOT an orphan — do NOT close it and do NOT flag it as a process failure.
+3. If genuinely missing keyword (a full-implementation PR that used sloppy syntax), manually close the issue with explanation
+4. Leave comment documenting what happened
+
+```bash
+# Guard: skip closure if this is a deliberate partial increment
+gh pr view <pr-number> --json body -q .body | grep -Eiq 'part of #|contributes to #' && echo "PARTIAL — leave issue open"
+gh issue view <issue-number> --json labels -q '.labels[].name' | grep -Eqx 'loom:epic|loom:epic-phase' && echo "EPIC/family — leave issue open"
+```
 
 **3. Close Orphaned Issues**
 
-When you find a completed issue that stayed open:
+> **Only close TRUE orphans.** A `loom:epic` / `loom:epic-phase` issue, or an issue whose merged PR referenced it with `Part of #N` / `Contributes to #N`, is intentionally kept open until its final increment lands — it is not orphaned. Never close it as "completed but missing keyword".
+
+When you find a completed issue that stayed open (and the partial-increment exclusion above does not apply):
 
 ```bash
 # Close the issue

@@ -38,8 +38,28 @@ ls .claude/skills/*/install-metadata.json 2>/dev/null
 
 Key names vary by tool (`version` vs `loom_version` / `anvil_version`, `source`
 vs `loom_source` / `anvil_source`) — read whichever variant is present. Each
-file gives: installed version, installed commit, install date, and the path of
-the local source clone it was installed from.
+file gives: installed version, installed commit, install date, and (for the
+"prefer local source clone" fast path) the path of the local source clone it
+was installed from.
+
+**Locating the local source path (`source`).** The absolute source path and
+install timestamp are machine-local — they mean nothing in another clone — so
+newer installers keep them out of the tracked metadata file and write them to a
+gitignored sidecar instead. Resolve `source` in this order, and treat every
+step failing as "source clone unknown" rather than an error:
+
+1. **Sidecar first.** For Repo Skills, read
+   `.claude/skills/repo/.install-local.json` (generally
+   `.claude/skills/*/.install-local.json`); it holds `source` and
+   `installed_at`. Loom uses the plain-text `.loom/loom-source-path` sidecar for
+   the same purpose. A sidecar is gitignored, so it is present only on the
+   machine that ran the install — a fresh clone elsewhere legitimately has none.
+2. **Legacy inline fallback.** Older (pre-split) installs still embed `source` /
+   `installed_at` directly in `install-metadata.json` — read them from there if
+   no sidecar exists, so existing installs keep their fast path.
+3. **Unknown → GitHub.** If neither yields a usable path, the local source clone
+   is simply unknown; skip to the GitHub check in step 2. This is normal (fresh
+   clone on a different machine), not a failure.
 
 Known family members: Loom (`.loom/`), Anvil (`.anvil/`), Repo Skills
 (`.claude/skills/repo/`), kicad-tools, and anything else that follows the same

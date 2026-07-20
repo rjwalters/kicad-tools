@@ -68,7 +68,7 @@ The issue template integrates with Loom's label-based workflow coordination:
 | `loom:reviewing` | Judge is actively reviewing | Judge agent |
 | `loom:pr` | Approved for merge | Judge agent |
 
-See [.loom/CLAUDE.md](../.loom/CLAUDE.md) for complete workflow documentation.
+See [WORKFLOWS.md](https://github.com/rjwalters/loom/blob/main/docs/workflows.md) for complete workflow documentation.
 
 ## Benefits
 

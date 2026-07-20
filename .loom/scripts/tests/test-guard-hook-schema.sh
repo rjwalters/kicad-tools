@@ -21,6 +21,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULTS_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 GUARD_DESTRUCTIVE="$DEFAULTS_DIR/hooks/guard-destructive.sh"
+GUARD_LOOM_WORKFLOW="$DEFAULTS_DIR/hooks/guard-loom-workflow.sh"
 GUARD_READONLY_TEMPLATE="$DEFAULTS_DIR/hooks/guard-readonly-dirs.sh.template"
 
 RED='\033[0;31m'
@@ -63,6 +64,10 @@ fi
 
 if [[ ! -f "$GUARD_DESTRUCTIVE" ]]; then
     echo "ERROR: $GUARD_DESTRUCTIVE not found" >&2
+    exit 1
+fi
+if [[ ! -f "$GUARD_LOOM_WORKFLOW" ]]; then
+    echo "ERROR: $GUARD_LOOM_WORKFLOW not found" >&2
     exit 1
 fi
 if [[ ! -f "$GUARD_READONLY_TEMPLATE" ]]; then
@@ -110,6 +115,35 @@ if [[ "$FALLBACK_LINES" -eq 2 ]]; then
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "  ${RED}FAIL${NC}: expected 2 raw fallback echoes with hookEventName, found $FALLBACK_LINES"
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
+# guard-loom-workflow.sh — functional deny path (gh pr merge redirect)
+# ---------------------------------------------------------------------------
+echo "guard-loom-workflow.sh: deny decision carries hookEventName"
+LW_DENY_INPUT=$(jq -n --arg cmd "gh pr merge 123" --arg cwd "$DEFAULTS_DIR" \
+    '{tool_input: {command: $cmd}, cwd: $cwd}')
+LW_DENY_OUT=$(printf '%s' "$LW_DENY_INPUT" | bash "$GUARD_LOOM_WORKFLOW" 2>/dev/null)
+
+assert_jq_true "$LW_DENY_OUT" '.hookSpecificOutput.hookEventName == "PreToolUse"' \
+    "loom-workflow deny: hookEventName == PreToolUse"
+assert_jq_true "$LW_DENY_OUT" '.hookSpecificOutput.permissionDecision == "deny"' \
+    "loom-workflow deny: permissionDecision == deny"
+echo ""
+
+# ---------------------------------------------------------------------------
+# guard-loom-workflow.sh — raw jq-fallback echo strings carry the field
+# ---------------------------------------------------------------------------
+echo "guard-loom-workflow.sh: raw jq-fallback echoes carry hookEventName"
+LW_FALLBACK_LINES=$(grep -c 'echo "{\\"hookSpecificOutput\\":{\\"hookEventName\\":\\"PreToolUse\\"' "$GUARD_LOOM_WORKFLOW")
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$LW_FALLBACK_LINES" -eq 2 ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: both raw fallback echoes (deny + ask) include hookEventName"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: expected 2 raw fallback echoes with hookEventName, found $LW_FALLBACK_LINES"
 fi
 echo ""
 

@@ -5,8 +5,9 @@ tools: Read, Glob, Grep, Bash, Task
 ---
 
 > ⚠️  DEPRECATED: The `loom-daemon` subagent is scheduled for removal in the next
->     major release (Phase 3 of epic #3372). Use `./.loom/scripts/spawn-loop.sh`
->     for multi-account `/loom:sweep` launching, or enable the GitHub Actions
+>     major release (Phase 3 of epic #3372). Use `mcp__loom__dispatch_sweep`
+>     against the Rust `loom-daemon` binary (or `/loom:sweep <issue>`) for
+>     multi-account `/loom:sweep` launching, or enable the GitHub Actions
 >     workflows under `.github/workflows/loom-*.yml` for scheduled support roles
 >     (Champion, Curator, Judge, Auditor, Guide). See #3372 for the migration plan
 >     and #3382 for the sphere downstream coordination tracker. No behavior change

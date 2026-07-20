@@ -26,11 +26,20 @@ commands.
 ```bash
 ls .claude/commands/repo/*.md
 cat .claude/skills/repo/install-metadata.json
+cat .claude/skills/repo/.install-local.json 2>/dev/null   # machine-local, gitignored
 ```
 
 Build the command list from the files present. For each, pull the one-line
 `description:` from its frontmatter. Do not list commands that are not
 installed here.
+
+`install-metadata.json` (tracked) carries `version`, `commands`, and `dev`. The
+install date lives in the gitignored `.install-local.json` sidecar
+(`installed_at`), so it is present only on the machine that ran the install;
+older installs still keep `installed_at` inline in `install-metadata.json`. Use
+whichever is present for the date below, and simply omit "(installed <date>)"
+when neither has it (e.g. a fresh clone on another machine) — its absence is
+expected, not an error.
 
 ### 2. Present the overview
 
@@ -50,6 +59,7 @@ stashes, untracked files) always need an explicit opt-in.
 | /repo:reset | Done with a task — get back on main, synced, stale state reviewed |
 | /repo:tidy  | Working tree cluttered with build artifacts and temp files |
 | /repo:remote | Need a cloud dev box (GCP/AWS) with this repo ready to go |
+| /repo:release | Cut a release — pre-flight, semver, CHANGELOG, version bump, tag, GitHub Release |
 
 ### Periodic maintenance
 | /repo:audit | Monthly sweep, or after a big refactor/import |

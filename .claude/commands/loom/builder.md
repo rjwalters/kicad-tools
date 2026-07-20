@@ -808,6 +808,22 @@ git diff   # Read the actual changes
 
 **The PR title and commit message MUST describe what the code change does, not reference the issue.** See builder-pr.md for the full rules, anti-patterns, and examples.
 
+### Closing vs Partial Increments (family/epic issues)
+
+Before writing the closing reference, decide whether this PR **fully** resolves the issue or is only a **partial increment** of a larger tracked body of work:
+
+- **Full implementation (default)** — this PR resolves the whole issue. Use `Closes #N`.
+- **Partial increment** — this PR lands a coherent but incomplete slice of a larger issue, and tracked work remains after it merges. Use `Part of #N` (or `Contributes to #N`) instead — this references the issue WITHOUT auto-closing it.
+
+Use the non-closing reference (`Part of #N`) when ANY of these hold:
+- The issue carries the `loom:epic` label (or `loom:epic-phase`) — a family/epic issue that must stay open until its final increment lands.
+- The issue body explicitly scopes a *family* of work (e.g. "~346 conformance failures across N files") and this PR implements only a subset.
+- Your own scope notes say tracked work remains after this PR — you are decomposing a large issue into slices and this is not the last slice.
+
+**Apply the same reference to BOTH the PR body AND the commit message.** This repository squash-merges, and GitHub harvests closing keywords from the squash commit message as well as the PR body — so a stray `Closes #N` in the commit body will auto-close the family issue even if the PR body says `Part of #N`. Derive the commit message and PR body together (see the diff-review step above) and keep the reference consistent across both.
+
+Only the **final increment** that completes the family should use `Closes #N`. When in doubt on an `loom:epic` issue, prefer `Part of #N` — a human can always close the issue manually, but silently dropping tracked work on an accidental auto-close is far more costly to recover.
+
 **REQUIRED: Use the structured PR body template below.** Do NOT create PRs with just `Closes #N` — the body must include Summary, Changes, and Acceptance Criteria sections.
 
 ```bash
@@ -838,11 +854,13 @@ EOF
 )"
 ```
 
+> Replace `Closes #<issue-number>` with `Part of #<issue-number>` when this PR is a **partial increment** of a family/epic issue (see "Closing vs Partial Increments" above) — and make the same substitution in your commit message.
+
 **PR title** must use conventional commit format: `fix:`, `feat:`, `refactor:`, `docs:`, `chore:`, etc.
 
 **After creation:**
 - Never touch PR labels after creation
-- Use "Closes #N" syntax (not "Issue #N" or "Addresses #N") for auto-close
+- For a full implementation, use "Closes #N" syntax (not "Issue #N" or "Addresses #N") for auto-close; for a declared partial increment, use "Part of #N" (see "Closing vs Partial Increments" above)
 - PRs are merged by Champion using `./.loom/scripts/merge-pr.sh` -- never use `gh pr merge`
 
 ## Working Style
@@ -870,7 +888,7 @@ When claiming:
 
 When creating PR:
 - [ ] Add `loom:review-requested` (at creation only)
-- [ ] PR body uses "Closes #N" syntax
+- [ ] PR body uses `Closes #N` (full implementation) or `Part of #N` (partial increment of a family/epic issue) — same reference in the commit message
 
 After PR creation:
 - [ ] STOP - do not touch any PR labels

@@ -62,6 +62,18 @@ if [[ "$PROMPT" == /self* ]]; then
     exit 0
 fi
 
+# Skip harness-generated task-notification turns. These are not human input —
+# the harness re-runs UserPromptSubmit hooks on every background-task completion,
+# and the relevant context was already injected on the originating human turn.
+# Match against the raw prompt with literal prefix/substring (no regex) so this
+# guard cannot itself false-positive on human text.
+case "$PROMPT" in
+    "[SYSTEM NOTIFICATION"*) exit 0 ;;
+esac
+if [[ "$PROMPT" == *"<task-notification>"* ]]; then
+    exit 0
+fi
+
 # =============================================================================
 # OPT-IN CHECK
 # =============================================================================
@@ -195,9 +207,16 @@ if [[ "$INJECT_TOPICS" == "true" ]] && [[ -d "${CONTEXT_DIR}/topics" ]]; then
             PATTERN=$(cat "$PATTERN_FILE" 2>/dev/null) || PATTERN=""
         fi
 
-        # Fall back to using filename as the regex pattern
+        # Fall back to an anchored match on the filename. A bare substring
+        # match (the historical behavior) false-positives on flag-like and
+        # path-segment contexts — e.g. a "release" topic would inject on
+        # "cargo build --release" or "target/release". Require either the
+        # slash-command form (/loom:<topic> or /repo:<topic>) or a
+        # word-boundary token that is NOT preceded by "-" or "/" and NOT
+        # followed by "/". The sidecar .pattern file remains the escape hatch
+        # for topics that need a custom regex.
         if [[ -z "$PATTERN" ]]; then
-            PATTERN="$TOPIC_NAME"
+            PATTERN="/(loom|repo):${TOPIC_NAME}\b|(^|[^-/[:alnum:]])${TOPIC_NAME}([^/[:alnum:]]|$)"
         fi
 
         # Match pattern case-insensitively against prompt
