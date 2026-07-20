@@ -321,6 +321,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Shared return conductor (e.g. Kelvin ground) to close sense loops",
     )
     current_sense_parser.add_argument(
+        "--kelvin-tol",
+        dest="kelvin_tol",
+        type=float,
+        default=0.05,
+        help="Kelvin-tap coincidence tolerance in mm (default: 0.05)",
+    )
+    current_sense_parser.add_argument(
+        "--kelvin-pair",
+        action="append",
+        dest="kelvin_pairs",
+        default=[],
+        metavar="SENSE:FORCE",
+        help=(
+            "Kelvin force pairing: check SENSE taps FORCE at a pad "
+            "(repeatable). Nets ending _SENSE/_FORCE, SNS/FRC auto-pair."
+        ),
+    )
+    current_sense_parser.add_argument(
         "--quiet",
         "-q",
         action="store_true",
@@ -1259,12 +1277,18 @@ def _run_current_sense_analysis(args: argparse.Namespace) -> int:
         max_loop_area_mm2=getattr(args, "max_loop_area", 10.0),
         sense_pairs=list(getattr(args, "sense_pairs", []) or []),
         sense_return=getattr(args, "sense_return", None),
+        kelvin_tol_mm=getattr(args, "kelvin_tol", 0.05),
+        kelvin_pairs=list(getattr(args, "kelvin_pairs", []) or []),
     )
     results = analyzer.analyze(pcb)
 
     if args.format == "json":
         _output_current_sense_json(
-            results, args.max_parallel, args.min_gap, getattr(args, "max_loop_area", 10.0)
+            results,
+            args.max_parallel,
+            args.min_gap,
+            getattr(args, "max_loop_area", 10.0),
+            getattr(args, "kelvin_tol", 0.05),
         )
     else:
         _output_current_sense_text(
@@ -1273,13 +1297,16 @@ def _run_current_sense_analysis(args: argparse.Namespace) -> int:
             args.max_parallel,
             args.min_gap,
             getattr(args, "max_loop_area", 10.0),
+            getattr(args, "kelvin_tol", 0.05),
             quiet=args.quiet,
         )
 
-    # Non-zero exit when any Phase-1 parallel/gap FAIL OR any loop-area FAIL is
-    # present (both are CI-gateable). No closable loop (loop_status None) does
-    # not gate.
-    if any(r.status == "FAIL" or r.loop_status == "FAIL" for r in results):
+    # Non-zero exit when any Phase-1 parallel/gap FAIL, any loop-area FAIL, OR
+    # any Kelvin-tap FAIL is present (all three are CI-gateable). A null verdict
+    # (loop_status / kelvin_status None) does not gate.
+    if any(
+        r.status == "FAIL" or r.loop_status == "FAIL" or r.kelvin_status == "FAIL" for r in results
+    ):
         return 1
     return 0
 
@@ -1289,22 +1316,26 @@ def _output_current_sense_json(
     max_parallel_mm: float,
     min_gap_mm: float,
     max_loop_area_mm2: float,
+    kelvin_tol_mm: float = 0.05,
 ) -> None:
     """Output current-sense census as JSON (mirrors signal-integrity JSON)."""
     fail_count = sum(1 for r in results if r.status == "FAIL")
     loop_fail_count = sum(1 for r in results if r.loop_status == "FAIL")
+    kelvin_fail_count = sum(1 for r in results if r.kelvin_status == "FAIL")
     output = {
         "census": [r.to_dict() for r in results],
         "thresholds": {
             "max_parallel_mm": max_parallel_mm,
             "min_gap_mm": min_gap_mm,
             "max_loop_area_mm2": max_loop_area_mm2,
+            "kelvin_tol_mm": kelvin_tol_mm,
         },
         "summary": {
             "total": len(results),
             "fail": fail_count,
             "pass": len(results) - fail_count,
             "loop_fail": loop_fail_count,
+            "kelvin_fail": kelvin_fail_count,
         },
     }
     print(json.dumps(output, indent=2))
@@ -1316,6 +1347,7 @@ def _output_current_sense_text(
     max_parallel_mm: float,
     min_gap_mm: float,
     max_loop_area_mm2: float,
+    kelvin_tol_mm: float = 0.05,
     quiet: bool = False,
 ) -> None:
     """Output current-sense census as a formatted table."""
@@ -1331,11 +1363,14 @@ def _output_current_sense_text(
         console.print(
             f"[dim]FAIL when parallel-run >= {max_parallel_mm:.2f}mm AND "
             f"gap <= {min_gap_mm:.2f}mm (same layer); "
-            f"loop FAIL when enclosed area > {max_loop_area_mm2:.2f}mm^2[/dim]\n"
+            f"loop FAIL when enclosed area > {max_loop_area_mm2:.2f}mm^2; "
+            f"Kelvin FAIL when tap is mid-trace (>{kelvin_tol_mm:.2f}mm from a "
+            f"force pad)[/dim]\n"
         )
 
     table = Table(show_header=True)
-    # Phase-1 columns (order preserved); loop_area_mm2 is appended (Phase 2).
+    # Phase-1 columns (order preserved); loop_area_mm2 is appended (Phase 2);
+    # kelvin_status / kelvin_force_net are appended after that (Phase 3).
     table.add_column("sense_net", style="cyan")
     table.add_column("nearest_hicur_net")
     table.add_column("layer")
@@ -1343,6 +1378,8 @@ def _output_current_sense_text(
     table.add_column("min_gap_mm", justify="right")
     table.add_column("status", justify="center")
     table.add_column("loop_area_mm2", justify="right")
+    table.add_column("kelvin_status", justify="center")
+    table.add_column("kelvin_force_net")
 
     for r in results:
         status_style = "red bold" if r.status == "FAIL" else "green"
@@ -1354,6 +1391,12 @@ def _output_current_sense_text(
         else:
             loop_style = "red bold" if r.loop_status == "FAIL" else "green"
             loop_str = f"[{loop_style}]{r.loop_area_mm2:.3f}[/{loop_style}]"
+        if r.kelvin_status is None:
+            kelvin_str = "-"
+        else:
+            kelvin_style = "red bold" if r.kelvin_status == "FAIL" else "green"
+            kelvin_str = f"[{kelvin_style}]{r.kelvin_status}[/{kelvin_style}]"
+        kelvin_net = r.kelvin_force_net if r.kelvin_force_net is not None else "-"
         table.add_row(
             r.sense_net,
             nearest,
@@ -1362,18 +1405,21 @@ def _output_current_sense_text(
             gap_str,
             f"[{status_style}]{r.status}[/{status_style}]",
             loop_str,
+            kelvin_str,
+            kelvin_net,
         )
 
     console.print(table)
 
     fail_count = sum(1 for r in results if r.status == "FAIL")
     loop_fail_count = sum(1 for r in results if r.loop_status == "FAIL")
+    kelvin_fail_count = sum(1 for r in results if r.kelvin_status == "FAIL")
     console.print()
-    summary_style = "red bold" if (fail_count or loop_fail_count) else "green"
+    summary_style = "red bold" if (fail_count or loop_fail_count or kelvin_fail_count) else "green"
     console.print(
         f"[{summary_style}]Total: {len(results)} sense nets, "
         f"{fail_count} FAIL, {len(results) - fail_count} PASS "
-        f"({loop_fail_count} loop-area FAIL)[/{summary_style}]"
+        f"({loop_fail_count} loop-area FAIL, {kelvin_fail_count} Kelvin FAIL)[/{summary_style}]"
     )
 
 

@@ -133,6 +133,10 @@ def _run_current_sense_command(args) -> int:
         sub_argv.extend(["--sense-pair", pair[0], pair[1]])
     if getattr(args, "analyze_sense_return", None):
         sub_argv.extend(["--sense-return", args.analyze_sense_return])
+    if getattr(args, "analyze_kelvin_tol", 0.05) != 0.05:
+        sub_argv.extend(["--kelvin-tol", str(args.analyze_kelvin_tol)])
+    for kpair in getattr(args, "analyze_kelvin_pairs", None) or []:
+        sub_argv.extend(["--kelvin-pair", kpair])
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
 
