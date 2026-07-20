@@ -2,6 +2,7 @@
 """Relocate via-in-pad vias off-pad (connectivity-preserving).
 
 Issue #4359 -- Phase 1 (signal-via slide-out).
+Issue #4367 -- Phase 2 (plane-stitch off-pad placement).
 
 When a board is routed for a manufacturer that supports via-in-pad
 (``jlcpcb-tier1``, ``pcbway``) and then re-targeted to a profile that does
@@ -18,17 +19,28 @@ each connected segment's layer).  No existing copper is mutated -- only the
 via's ``(at ...)`` position moves and new stub segments are appended -- so an
 already-routed board is never regressed.
 
-Deferred to follow-ups (explicitly out of scope for Phase 1):
+**Phase 2** (issue #4367) extends this to **plane-stitch** vias -- a via tying
+a power/ground SMD pad to a same-net copper pour, with no routed escape track.
+These have no slide direction, so instead the pass walks the
+``stitch --avoid-pad-overlap`` candidate ladder (8 directions x 3 escape
+offsets from the pad edge) and picks the first off-pad location that (a) clears
+the pad by ``min_clearance_mm``, (b) clears all other-net copper + the
+hole-to-hole floor, and (c) lands **inside a same-net zone boundary polygon**
+on a layer the via spans.  Because plane connectivity is realized by pour
+overlap -- not a discrete track -- a plane-stitch move needs **no stub**: after
+the operator re-floods the pour (``kicad-cli pcb drc --refill-zones``) the
+zone reconnects to the via's annular ring at its new location.  When no
+plane-legal, clearance-safe candidate exists (no same-net zone, or every
+candidate is boxed in) the via is reported *unresolvable* and left in place --
+never mis-placed into a short.
 
-* **Phase 2** -- plane-stitch vias (a via tying a power/ground pad to a pour
-  with no routed track).  These have no escape direction; relocating them needs
-  the ``stitch --avoid-pad-overlap`` candidate-offset engine.  They are reported
-  as *unresolvable* here, never left silently in-pad.
+Deferred to follow-ups (explicitly out of scope):
+
 * **Phase 3** -- multi-branch fan-out, non-cardinal rotated pads, and
   dense-pitch pads with no clearing location.  Each is reported as
   *unresolvable* / *skipped* rather than mis-placed.
 
-Any via Phase 1 cannot safely handle is counted in the report (skipped or
+Any via this pass cannot safely handle is counted in the report (skipped or
 unresolvable) -- it is never left in-pad without being surfaced.
 """
 
@@ -39,6 +51,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from kicad_tools.cli.stitch_cmd import point_in_polygon
 from kicad_tools.validate.rules.via_pad_geometry import (
     is_smd_pad,
     pad_absolute_bbox,
@@ -47,7 +60,7 @@ from kicad_tools.validate.rules.via_pad_geometry import (
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers.base import DesignRules
-    from kicad_tools.schema.pcb import PCB, Footprint, Pad, Segment, Via
+    from kicad_tools.schema.pcb import PCB, Footprint, Pad, Segment, Via, Zone
 
 # Coincidence tolerance for "a track endpoint lands on the via center", mirroring
 # the 0.001 mm test used by fix_vias_cmd.find_nearby_items.
@@ -56,7 +69,14 @@ _COINCIDENT_TOL = 1e-3
 
 @dataclass
 class ViaRelocation:
-    """Record of an in-pad via that was slid off-pad."""
+    """Record of an in-pad via that was moved off-pad.
+
+    ``kind`` is ``"signal"`` for a Phase-1 slide-along-track move (which appends
+    connectivity stubs -- see :attr:`stub_layers`) or ``"plane-stitch"`` for a
+    Phase-2 pour-overlap move (which appends **no** stub; the net reconnects on
+    the next zone refill).  Plane-stitch moves therefore always have an empty
+    :attr:`stub_layers`.
+    """
 
     old_x: float
     old_y: float
@@ -67,6 +87,7 @@ class ViaRelocation:
     pad_ref: str
     uuid: str
     stub_layers: list[str] = field(default_factory=list)
+    kind: str = "signal"
 
 
 @dataclass
@@ -179,6 +200,113 @@ def _pad_copper_layer(pad: Pad) -> str:
         if layer.endswith(".Cu") and not layer.startswith("*"):
             return layer
     return "F.Cu"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: plane-stitch off-pad placement helpers
+# ---------------------------------------------------------------------------
+
+# Candidate directions from the pad centre (unit vectors) -- the 8-direction
+# ladder mirrored from stitch_cmd.calculate_via_position.
+_PLANE_DIRECTIONS: tuple[tuple[float, float], ...] = (
+    (1.0, 0.0),
+    (0.0, 1.0),
+    (-1.0, 0.0),
+    (0.0, -1.0),
+    (0.707, 0.707),
+    (-0.707, 0.707),
+    (-0.707, -0.707),
+    (0.707, -0.707),
+)
+
+
+def _via_spans_zone_layer(via: Via, zone: Zone) -> bool:
+    """True when ``zone.layer`` is a copper layer the ``via`` connects on.
+
+    A candidate is only plane-legal on layers the via actually touches.  A via
+    whose ``layers`` list names the zone layer clearly spans it; a full
+    through-hole via (both ``F.Cu`` and ``B.Cu`` present) passes through every
+    copper layer, so any copper zone layer counts.
+    """
+    via_layers = set(via.layers)
+    if zone.layer in via_layers:
+        return True
+    if "F.Cu" in via_layers and "B.Cu" in via_layers and zone.layer.endswith(".Cu"):
+        return True
+    return False
+
+
+def _same_net_zone_boundaries(pcb: PCB, via: Via, net_name: str) -> list[list[tuple[float, float]]]:
+    """Return boundary polygons of same-net zones on a layer the via spans.
+
+    Uses each zone's ``polygon`` (the pour *boundary*, not the stale
+    ``filled_polygons``): connectivity is realized only after a zone refill, so
+    the boundary is the correct membership target for a relocated stitch via.
+    Net matching is by number when both are non-zero, falling back to name
+    (KiCad 10 may emit ``(net "GND")`` with no numeric id).
+    """
+    polygons: list[list[tuple[float, float]]] = []
+    for zone in pcb.zones:
+        net_matches = (via.net_number != 0 and zone.net_number == via.net_number) or (
+            bool(net_name) and zone.net_name == net_name
+        )
+        if not net_matches:
+            continue
+        if not _via_spans_zone_layer(via, zone):
+            continue
+        if zone.polygon:
+            polygons.append(zone.polygon)
+    return polygons
+
+
+def _first_offpad_plane_candidate(
+    pcb: PCB,
+    via: Via,
+    bbox: tuple[float, float, float, float],
+    pads_by_net: dict[int, list[tuple[Footprint, Pad, tuple[float, float, float, float]]]],
+    min_clearance: float,
+    min_hole_to_hole: float,
+    zone_polygons: list[list[tuple[float, float]]],
+) -> tuple[float, float] | None:
+    """Find the first plane-legal, clearance-safe off-pad location for a via.
+
+    Walks the 8-direction x 3-offset ladder from the pad centre.  A candidate is
+    accepted only when it (a) clears the pad bbox edge by ``min_clearance`` (via
+    copper radius), (b) lands inside a same-net zone boundary polygon, and (c)
+    introduces no other-net clearance or hole-to-hole violation
+    (:func:`_check_clearance`).  Returns ``None`` when every candidate fails --
+    the caller then reports the via as ``unresolvable`` and leaves it in place.
+    """
+    pad_cx = (bbox[0] + bbox[2]) / 2.0
+    pad_cy = (bbox[1] + bbox[3]) / 2.0
+    via_r = via.size / 2.0
+    # Extra push-out beyond the guaranteed pad-clearing distance, to dodge
+    # obstacles farther from the pad edge (mirrors stitch's offset*{1,1.5,2}).
+    step = via.size + min_clearance
+    extra_offsets = (0.0, step * 0.5, step)
+
+    for extra in extra_offsets:
+        for dx, dy in _PLANE_DIRECTIONS:
+            t_exit = _ray_aabb_exit_distance(pad_cx, pad_cy, dx, dy, bbox)
+            slide = t_exit + via_r + min_clearance + extra
+            nx = pad_cx + dx * slide
+            ny = pad_cy + dy * slide
+
+            # (a) via copper must clear the pad bbox edge by min_clearance.
+            if _dist_point_to_aabb(nx, ny, bbox) - via_r < min_clearance - 1e-6:
+                continue
+            # (b) must land inside a same-net zone boundary (pour overlap).
+            if not any(point_in_polygon(nx, ny, poly) for poly in zone_polygons):
+                continue
+            # (c) must not violate other-net copper / hole-to-hole.
+            if (
+                _check_clearance(pcb, via, nx, ny, pads_by_net, min_clearance, min_hole_to_hole)
+                is not None
+            ):
+                continue
+            return (nx, ny)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -331,20 +459,85 @@ def relocate_in_pad_vias(
                 connected.append((seg, far))
 
         if not connected:
-            # No routed track -> plane-stitch or unconnected via (Phase 2).
-            result.unresolvable.append(
-                ViaRelocationSkip(
-                    x=vx,
-                    y=vy,
+            # No routed track -> plane-stitch via (Phase 2).  Its only electrical
+            # path is pour overlap, so relocation stays inside a same-net zone
+            # boundary and adds NO stub -- connectivity re-realizes on the next
+            # zone refill.  Fall back to unresolvable only when placement fails.
+            zone_polygons = _same_net_zone_boundaries(pcb, via, net_name)
+            if not zone_polygons:
+                result.unresolvable.append(
+                    ViaRelocationSkip(
+                        x=vx,
+                        y=vy,
+                        net=via.net_number,
+                        net_name=net_name,
+                        pad_ref=pad_ref,
+                        reason=(
+                            "plane-stitch via has no same-net zone on a via layer to relocate into"
+                        ),
+                        uuid=via.uuid,
+                        category="unresolvable",
+                    )
+                )
+                continue
+
+            target = _first_offpad_plane_candidate(
+                pcb,
+                via,
+                bbox,
+                pads_by_net,
+                min_clearance,
+                min_hole_to_hole,
+                zone_polygons,
+            )
+            if target is None:
+                result.unresolvable.append(
+                    ViaRelocationSkip(
+                        x=vx,
+                        y=vy,
+                        net=via.net_number,
+                        net_name=net_name,
+                        pad_ref=pad_ref,
+                        reason=(
+                            "plane-stitch via: no clearance-legal off-pad location "
+                            "inside the same-net zone boundary (boxed in)"
+                        ),
+                        uuid=via.uuid,
+                        category="unresolvable",
+                    )
+                )
+                continue
+
+            new_x, new_y = target
+            if not dry_run:
+                moved_ok = pcb.relocate_via(via, (new_x, new_y))
+                if not moved_ok:
+                    result.unresolvable.append(
+                        ViaRelocationSkip(
+                            x=vx,
+                            y=vy,
+                            net=via.net_number,
+                            net_name=net_name,
+                            pad_ref=pad_ref,
+                            reason="could not locate backing (via ...) node to persist move",
+                            uuid=via.uuid,
+                            category="unresolvable",
+                        )
+                    )
+                    continue
+
+            result.moved.append(
+                ViaRelocation(
+                    old_x=vx,
+                    old_y=vy,
+                    new_x=new_x,
+                    new_y=new_y,
                     net=via.net_number,
                     net_name=net_name,
                     pad_ref=pad_ref,
-                    reason=(
-                        "no connected routed track (plane-stitch via -- deferred to "
-                        "Phase 2 stitch-engine relocation)"
-                    ),
                     uuid=via.uuid,
-                    category="unresolvable",
+                    stub_layers=[],
+                    kind="plane-stitch",
                 )
             )
             continue
@@ -513,6 +706,7 @@ def print_relocation_results(
                     "pad": m.pad_ref,
                     "uuid": m.uuid,
                     "stub_layers": m.stub_layers,
+                    "kind": m.kind,
                 }
                 for m in result.moved
             ],
@@ -569,13 +763,24 @@ def print_relocation_results(
     action = "Would move" if dry_run else "Moved"
     print(f"{action} {len(result.moved)} in-pad via(s) off-pad:")
     for m in result.moved[:10]:
+        if m.stub_layers:
+            tie = f"stubs on {', '.join(m.stub_layers)}"
+        else:
+            tie = "plane-stitch (no stub; pour overlap re-realized on zone refill)"
         print(
             f"  Via {m.uuid[:8] or '?'} (net '{m.net_name}') on pad {m.pad_ref}: "
             f"({m.old_x:.3f}, {m.old_y:.3f}) -> ({m.new_x:.3f}, {m.new_y:.3f}); "
-            f"stubs on {', '.join(m.stub_layers)}"
+            f"{tie}"
         )
     if len(result.moved) > 10:
         print(f"  ... and {len(result.moved) - 10} more")
+
+    if any(m.kind == "plane-stitch" for m in result.moved):
+        print(
+            "\nNote: plane-stitch vias were moved without a stub -- run "
+            "`kicad-cli pcb drc --refill-zones` to re-establish the pour "
+            "connection at each via's new location."
+        )
 
     if result.skipped:
         print(f"\nSkipped {len(result.skipped)} via(s) (would violate clearance):")
