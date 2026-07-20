@@ -66,8 +66,20 @@ class CreepagePair:
     """One evaluated (HV-net, other-conductor | board-edge) census row.
 
     ``clearance_mm`` is the straight-line copper gap; ``creepage_mm`` is the
-    slot-aware surface path (``>= clearance_mm``).  ``min_mm`` is the operator
-    supplied required value.
+    slot-aware surface path (``>= clearance_mm``).
+
+    Threshold sources (phase 2, #4332):
+
+    * ``min_mm`` -- the operator's manual override (``--min``), or ``None``.
+    * ``required_creepage_mm`` -- creepage derived from an IEC standard table,
+      or ``None`` when no ``--standard`` was supplied.
+    * ``required_clearance_mm`` -- clearance derived from the standard, or
+      ``None`` (phase-1 mode never thresholds clearance).
+
+    When both a manual ``min_mm`` and a derived ``required_creepage_mm`` are
+    present, the **stricter (larger)** governs (see :attr:`governing_creepage_mm`
+    and :attr:`governing_bound`).  ``provenance`` carries the structured
+    standard citation for the derived requirements (empty in phase-1 mode).
     """
 
     net_a: str
@@ -76,20 +88,74 @@ class CreepagePair:
     layer: str  # copper layer of the binding measurement, or "*" for edges
     clearance_mm: float
     creepage_mm: float
-    min_mm: float
+    min_mm: float | None = None
+    required_creepage_mm: float | None = None
+    required_clearance_mm: float | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def governing_creepage_mm(self) -> float:
+        """The effective required creepage: the stricter of manual / derived.
+
+        At least one of ``min_mm`` / ``required_creepage_mm`` is always set
+        (validated by the CLI before the census is built).
+        """
+        candidates = [v for v in (self.min_mm, self.required_creepage_mm) if v is not None]
+        if not candidates:
+            # Defensive: no threshold supplied -> nothing to clear.
+            return 0.0
+        return max(candidates)
+
+    @property
+    def governing_bound(self) -> str:
+        """Which threshold governs the creepage pass/fail decision."""
+        has_min = self.min_mm is not None
+        has_derived = self.required_creepage_mm is not None
+        if has_min and has_derived:
+            # Tie or derived-larger -> derived governs (conservative default).
+            if self.required_creepage_mm >= self.min_mm:  # type: ignore[operator]
+                return "derived"
+            return "manual (--min)"
+        if has_derived:
+            return "derived"
+        return "manual (--min)"
 
     @property
     def margin_mm(self) -> float:
-        """Creepage headroom over the required minimum (negative == fail)."""
-        return self.creepage_mm - self.min_mm
+        """Creepage headroom over the governing requirement (negative == fail)."""
+        return self.creepage_mm - self.governing_creepage_mm
+
+    @property
+    def clearance_margin_mm(self) -> float | None:
+        """Clearance headroom over the derived requirement, or ``None``."""
+        if self.required_clearance_mm is None:
+            return None
+        return self.clearance_mm - self.required_clearance_mm
+
+    @property
+    def creepage_passed(self) -> bool:
+        """``True`` when the surface path clears the governing creepage bound."""
+        return self.creepage_mm >= self.governing_creepage_mm - _PASS_TOLERANCE
+
+    @property
+    def clearance_passed(self) -> bool:
+        """``True`` when through-air clearance clears its derived requirement.
+
+        Vacuously ``True`` in phase-1 mode (no clearance requirement).
+        """
+        if self.required_clearance_mm is None:
+            return True
+        return self.clearance_mm >= self.required_clearance_mm - _PASS_TOLERANCE
 
     @property
     def passed(self) -> bool:
-        """``True`` when the surface path clears the required minimum."""
-        return self.creepage_mm >= self.min_mm - _PASS_TOLERANCE
+        """``True`` only when BOTH creepage and clearance clear their bounds."""
+        return self.creepage_passed and self.clearance_passed
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        # Phase-1 backward compatibility: with no derived requirement (manual
+        # --min only) the JSON schema is byte-for-byte identical to phase 1.
+        base = {
             "net_a": self.net_a,
             "net_b": self.net_b,
             "kind": self.kind,
@@ -99,32 +165,94 @@ class CreepagePair:
             "margin_mm": round(self.margin_mm, 4),
             "pass": self.passed,
         }
+        if self.required_creepage_mm is None:
+            return base
+        # Phase-2 (standard) mode: attach the derived requirements + provenance.
+        base["required_creepage_mm"] = round(self.required_creepage_mm, 4)
+        base["governing_bound"] = self.governing_bound
+        if self.min_mm is not None:
+            base["min_mm"] = self.min_mm
+        if self.required_clearance_mm is not None:
+            base["required_clearance_mm"] = round(self.required_clearance_mm, 4)
+            cm = self.clearance_margin_mm
+            base["clearance_margin_mm"] = round(cm, 4) if cm is not None else None
+            base["clearance_pass"] = self.clearance_passed
+        base["provenance"] = self.provenance
+        return base
 
 
 @dataclass
 class CreepageReport:
-    """Full census of HV creepage/clearance pairs for a board."""
+    """Full census of HV creepage/clearance pairs for a board.
+
+    In phase-1 mode (manual ``--min`` only) ``standard`` is ``None`` and the
+    serialized schema is byte-for-byte identical to phase 1.  In phase-2 mode a
+    ``standard`` context (id/edition/PD/material group + derived-requirement
+    provenance) is attached.
+    """
 
     net_class: str
-    min_mm: float
+    min_mm: float | None
     hv_nets: list[str] = field(default_factory=list)
     pairs: list[CreepagePair] = field(default_factory=list)
     board: str = ""
+    # Phase-2 (#4332) standard context -- None in phase-1 (manual --min) mode.
+    standard: str | None = None
+    standard_edition: str | None = None
+    working_voltage: float | None = None
+    pollution_degree: int | None = None
+    material_group: str | None = None
+    required_creepage_mm: float | None = None
+    required_clearance_mm: float | None = None
+    creepage_provenance: dict[str, Any] = field(default_factory=dict)
+    clearance_provenance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def passed(self) -> bool:
-        """``True`` when every pair clears ``min_mm`` (vacuously true if empty)."""
+        """``True`` when every pair clears its bounds (vacuously true if empty)."""
         return all(p.passed for p in self.pairs)
 
     @property
     def has_hv_nets(self) -> bool:
         return bool(self.hv_nets)
 
+    @property
+    def uses_standard(self) -> bool:
+        return self.standard is not None
+
     def to_dict(self) -> dict[str, Any]:
+        # Phase-1 backward compatibility: no standard -> exact phase-1 schema.
+        if self.standard is None:
+            return {
+                "board": self.board,
+                "net_class": self.net_class,
+                "min_mm": self.min_mm,
+                "hv_nets": list(self.hv_nets),
+                "pair_count": len(self.pairs),
+                "pairs": [p.to_dict() for p in self.pairs],
+                "passed": self.passed,
+            }
         return {
             "board": self.board,
             "net_class": self.net_class,
             "min_mm": self.min_mm,
+            "standard": self.standard,
+            "standard_edition": self.standard_edition,
+            "working_voltage_v": self.working_voltage,
+            "pollution_degree": self.pollution_degree,
+            "material_group": self.material_group,
+            "required_creepage_mm": (
+                round(self.required_creepage_mm, 4)
+                if self.required_creepage_mm is not None
+                else None
+            ),
+            "required_clearance_mm": (
+                round(self.required_clearance_mm, 4)
+                if self.required_clearance_mm is not None
+                else None
+            ),
+            "creepage_provenance": self.creepage_provenance,
+            "clearance_provenance": self.clearance_provenance,
             "hv_nets": list(self.hv_nets),
             "pair_count": len(self.pairs),
             "pairs": [p.to_dict() for p in self.pairs],
@@ -448,14 +576,31 @@ def surface_path_length(
 def compute_creepage_census(
     pcb: PCB,
     hv_nets: dict[int, str],
-    min_mm: float,
+    min_mm: float | None = None,
     net_class: str = "HV",
     board: str = "",
+    *,
+    required_creepage_mm: float | None = None,
+    required_clearance_mm: float | None = None,
+    standard: str | None = None,
+    standard_edition: str | None = None,
+    working_voltage: float | None = None,
+    pollution_degree: int | None = None,
+    material_group: str | None = None,
+    creepage_provenance: dict[str, Any] | None = None,
+    clearance_provenance: dict[str, Any] | None = None,
 ) -> CreepageReport:
     """Build the full HV creepage/clearance census for a board.
 
     For every HV net the census records one row per non-HV conductor (the
     binding, smallest-creepage layer) and one row for the board edge.
+
+    The pass/fail threshold comes from either the operator's ``min_mm``
+    (phase 1) or a standard-derived ``required_creepage_mm`` /
+    ``required_clearance_mm`` (phase 2, #4332), or both -- in which case the
+    stricter creepage bound governs per pair.  The derived requirement is
+    identical for every pair (it depends only on the standard + voltage + PD +
+    material group, not on geometry), so it is stamped onto each row.
     """
     require_shapely("creepage census")
 
@@ -464,7 +609,33 @@ def compute_creepage_census(
         min_mm=min_mm,
         hv_nets=[hv_nets[num] for num in sorted(hv_nets)],
         board=board,
+        standard=standard,
+        standard_edition=standard_edition,
+        working_voltage=working_voltage,
+        pollution_degree=pollution_degree,
+        material_group=material_group,
+        required_creepage_mm=required_creepage_mm,
+        required_clearance_mm=required_clearance_mm,
+        creepage_provenance=creepage_provenance or {},
+        clearance_provenance=clearance_provenance or {},
     )
+
+    # Merged per-pair provenance (creepage + clearance citations together).
+    pair_provenance: dict[str, Any] = {}
+    if creepage_provenance:
+        pair_provenance["creepage"] = creepage_provenance
+    if clearance_provenance:
+        pair_provenance["clearance"] = clearance_provenance
+
+    def _make_pair(**kw: Any) -> CreepagePair:
+        return CreepagePair(
+            min_mm=min_mm,
+            required_creepage_mm=required_creepage_mm,
+            required_clearance_mm=required_clearance_mm,
+            provenance=pair_provenance,
+            **kw,
+        )
+
     if not hv_nets:
         return report
 
@@ -495,14 +666,13 @@ def compute_creepage_census(
 
     for (hv_num, other_num), (clearance, creepage, layer_name) in best.items():
         report.pairs.append(
-            CreepagePair(
+            _make_pair(
                 net_a=hv_nets[hv_num],
                 net_b=number_to_name.get(other_num, f"net{other_num}"),
                 kind="conductor",
                 layer=layer_name,
                 clearance_mm=clearance,
                 creepage_mm=creepage,
-                min_mm=min_mm,
             )
         )
 
@@ -518,14 +688,13 @@ def compute_creepage_census(
             hv_all = unary_union(parts)
             clearance, creepage = surface_path_length(hv_all, edge_geom, obstacles)
             report.pairs.append(
-                CreepagePair(
+                _make_pair(
                     net_a=hv_nets[hv_num],
                     net_b=BOARD_EDGE_LABEL,
                     kind="edge",
                     layer="*",
                     clearance_mm=clearance,
                     creepage_mm=creepage,
-                    min_mm=min_mm,
                 )
             )
 

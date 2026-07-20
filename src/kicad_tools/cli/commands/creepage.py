@@ -1,13 +1,24 @@
-"""``kct creepage`` command handler (Issue #4327, phase 1 MVP).
+"""``kct creepage`` command handler (Issue #4327 phase 1, #4332 phase 2).
 
 Measures per-pair surface-path (creepage) distance between an HV net group
 and every other conductor / board edge, honoring milled Edge.Cuts slots, and
 reports a **census** (all pairs + margin, not just violations) with clearance
 (through-air) and creepage (over-surface) reported as distinct values.
 
-The required minimum is supplied by the operator via ``--min`` (phase 1 does
-not know IEC table values -- that is #4332).  Exit is non-zero iff any pair's
-creepage falls below ``--min``.
+The required threshold comes from one of two sources:
+
+* ``--min`` -- the operator supplies the required creepage directly (phase 1).
+* ``--standard`` -- the required creepage AND clearance are *derived* from an
+  IEC 60664-1 / 62368-1 table for a ``(working voltage, pollution degree,
+  material group)`` triple (phase 2, #4332).
+
+When both are supplied the stricter (larger) creepage bound governs per pair.
+Exit is non-zero iff any pair fails its governing creepage bound or (in
+standard mode) its derived clearance bound.
+
+.. warning::
+   The derived values are an engineering aid, NOT a certification.  The
+   governing standard and a qualified engineer are authoritative.
 """
 
 from __future__ import annotations
@@ -25,6 +36,11 @@ def run_creepage_command(args) -> int:
     """Handle the ``creepage`` command.  Returns the process exit code."""
     from kicad_tools._shapely import has_shapely
     from kicad_tools.creepage.engine import compute_creepage_census, resolve_hv_nets
+    from kicad_tools.creepage.standards import (
+        RMS_TO_PEAK,
+        StandardLookupError,
+        get_standard,
+    )
     from kicad_tools.schema.pcb import PCB
 
     fmt = getattr(args, "format", "table") or "table"
@@ -42,6 +58,51 @@ def run_creepage_command(args) -> int:
     if not pcb_path.exists():
         print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
         return 1
+
+    # --- Threshold-source resolution (phase 1 --min vs phase 2 --standard) ---
+    min_arg = getattr(args, "min", None)
+    min_mm = float(min_arg) if min_arg is not None else None
+    standard_id = getattr(args, "standard", None)
+
+    if standard_id is None and min_mm is None:
+        print(
+            "Error: provide either --standard (with --working-voltage and "
+            "--pollution-degree) or --min.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Phase-2 derived requirements (None in phase-1 mode).
+    required_creepage_mm: float | None = None
+    required_clearance_mm: float | None = None
+    creepage_prov: dict | None = None
+    clearance_prov: dict | None = None
+    standard_edition: str | None = None
+    working_voltage = getattr(args, "working_voltage", None)
+    pollution_degree = getattr(args, "pollution_degree", None)
+    material_group = getattr(args, "material_group", "IIIa")
+
+    if standard_id is not None:
+        if working_voltage is None or pollution_degree is None:
+            print(
+                "Error: --standard requires both --working-voltage and --pollution-degree.",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            std = get_standard(standard_id)
+            required_creepage_mm, creepage_prov = std.required_creepage(
+                float(working_voltage), int(pollution_degree), material_group
+            )
+            peak_voltage = float(working_voltage) * RMS_TO_PEAK
+            required_clearance_mm, clearance_prov = std.required_clearance(
+                peak_voltage, int(pollution_degree)
+            )
+            standard_edition = std.edition
+        except StandardLookupError as e:
+            # Safety-critical: fail LOUD, never emit a guessed number.
+            print(f"Error: standard-table lookup failed: {e}", file=sys.stderr)
+            return 1
 
     # Load the optional net-class map sidecar (reuses net_class_map_from_dict).
     net_class_map = None
@@ -64,7 +125,6 @@ def run_creepage_command(args) -> int:
 
     pcb = PCB.load(pcb_path)
     net_class = getattr(args, "net_class", "HV") or "HV"
-    min_mm = float(args.min)
 
     hv_nets = resolve_hv_nets(pcb, net_class, net_class_map)
     report = compute_creepage_census(
@@ -73,20 +133,31 @@ def run_creepage_command(args) -> int:
         min_mm,
         net_class=net_class,
         board=str(pcb_path),
+        required_creepage_mm=required_creepage_mm,
+        required_clearance_mm=required_clearance_mm,
+        standard=standard_id,
+        standard_edition=standard_edition,
+        working_voltage=working_voltage,
+        pollution_degree=pollution_degree,
+        material_group=material_group if standard_id is not None else None,
+        creepage_provenance=creepage_prov,
+        clearance_provenance=clearance_prov,
     )
 
     if fmt == "json":
         print(json.dumps(report.to_dict(), indent=2))
+    elif report.uses_standard:
+        _render_table_standard(report)
     else:
         _render_table(report)
 
-    # Non-zero exit iff any pair's creepage < --min.  An empty census
+    # Non-zero exit iff any pair fails its governing bound(s).  An empty census
     # (no HV nets, or HV nets with no neighbors) is a clean exit 0.
     return 0 if report.passed else 1
 
 
 def _render_table(report: CreepageReport) -> None:
-    """Print the human-readable census table."""
+    """Print the human-readable census table (phase-1 / manual --min mode)."""
     if not report.has_hv_nets:
         print(
             f"No '{report.net_class}' nets found "
@@ -127,3 +198,80 @@ def _render_table(report: CreepageReport) -> None:
         print(f"FAIL: {len(failures)}/{total} pair(s) below {report.min_mm:.3f} mm creepage.")
     else:
         print(f"PASS: all {total} pair(s) clear {report.min_mm:.3f} mm creepage.")
+
+
+def _render_table_standard(report: CreepageReport) -> None:
+    """Print the census table with IEC-derived requirements (phase-2 mode)."""
+    from kicad_tools.creepage.standards import DISCLAIMER
+
+    if not report.has_hv_nets:
+        print(
+            f"No '{report.net_class}' nets found "
+            "(supply --net-class-map to classify HV nets, or check --net-class)."
+        )
+        print(f"Board: {report.board}")
+        print("Census: 0 pairs.  Nothing to audit -- exit 0.")
+        return
+
+    cp = report.creepage_provenance or {}
+    clp = report.clearance_provenance or {}
+    std_name = cp.get("standard", report.standard)
+    print(f"HV creepage/clearance census  (net-class '{report.net_class}')")
+    print(f"Board: {report.board}")
+    print(f"Standard: {std_name} {report.standard_edition}  (--standard {report.standard})")
+    print(
+        f"Working voltage: {report.working_voltage:g} V RMS  "
+        f"(peak ~ {clp.get('peak_voltage_v', 0.0):.0f} V)  |  "
+        f"Pollution degree: {report.pollution_degree}  |  "
+        f"Material group: {report.material_group}"
+    )
+    if report.required_creepage_mm is not None:
+        print(
+            f"Derived required creepage: {report.required_creepage_mm:.3f} mm  "
+            f"[{cp.get('table_id', '?')}, {cp.get('voltage_row_used_v', '?')} V row, "
+            f"step-up]"
+        )
+    if report.required_clearance_mm is not None:
+        print(
+            f"Derived required clearance: {report.required_clearance_mm:.3f} mm  "
+            f"[{clp.get('table_id', '?')}, {clp.get('governing_component', '?')}, "
+            f"altitude {clp.get('altitude_assumption', '?')}]"
+        )
+    if report.min_mm is not None:
+        print(f"Manual override (--min): {report.min_mm:.3f} mm  (stricter governs)")
+    print(f"HV nets ({len(report.hv_nets)}): {', '.join(report.hv_nets)}")
+    print(f"NOTE: {DISCLAIMER}")
+    print()
+
+    if not report.pairs:
+        print("Census: 0 pairs (HV nets present but no other conductors / edge found).")
+        return
+
+    header = (
+        f"{'HV net':<14} {'Against':<14} {'Layer':<6} "
+        f"{'Clnce':>8} {'ReqCl':>8} {'Creep':>8} {'ReqCr':>8} "
+        f"{'Margin':>8} {'Govern':>8} {'Result':>7}"
+    )
+    print(header)
+    print("-" * len(header))
+    for p in report.pairs:
+        result = "PASS" if p.passed else "FAIL"
+        req_cl = p.required_clearance_mm if p.required_clearance_mm is not None else 0.0
+        req_cr = p.required_creepage_mm if p.required_creepage_mm is not None else 0.0
+        print(
+            f"{p.net_a:<14} {p.net_b:<14} {p.layer:<6} "
+            f"{p.clearance_mm:>8.3f} {req_cl:>8.3f} "
+            f"{p.creepage_mm:>8.3f} {req_cr:>8.3f} "
+            f"{p.margin_mm:>8.3f} {p.governing_bound:>8} {result:>7}"
+        )
+
+    print()
+    failures = [p for p in report.pairs if not p.passed]
+    total = len(report.pairs)
+    if failures:
+        print(
+            f"FAIL: {len(failures)}/{total} pair(s) fail the derived creepage/clearance "
+            "requirement."
+        )
+    else:
+        print(f"PASS: all {total} pair(s) clear the derived creepage/clearance requirement.")
