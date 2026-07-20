@@ -24,6 +24,7 @@ from .create_pcb import run_create_pcb_command
 from .creepage import run_creepage_command
 from .datasheet import run_datasheet_command
 from .decisions import run_decisions_command
+from .doctor import run_doctor_command
 from .estimate import run_estimate_command
 from .fleet import run_fleet_command
 from .footprint import run_footprint_command
@@ -139,6 +140,8 @@ __all__ = [
     "run_mcp_command",
     # Native build
     "run_build_native_command",
+    # Doctor
+    "run_doctor_command",
     # Run
     "run_run_command",
     # Panel
