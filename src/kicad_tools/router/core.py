@@ -2404,7 +2404,16 @@ class Autorouter:
         if not connections:
             return {}
 
-        routes_by_key, stats = pf.route_netset(connections)
+        # Issue #4364: mirror the lattice driver (#4355) -- the preserved copper
+        # of NON-listed nets (``existing_routes`` loaded under --preserve-existing
+        # / --nets, keyed by their real net ids) must be a HARD obstacle in the
+        # mesh negotiation, else a listed net legally crosses foreign copper ->
+        # segment-segment short.  Feed only copper whose net is NOT in the
+        # routable set: a listed net being re-routed replaces its own stale
+        # copper, so it must not fix itself in place (byte-identical filter to
+        # ``_negotiate_lattice_netset``).
+        fixed_copper = [r for r in self.existing_routes if r.net not in self.nets]
+        routes_by_key, stats = pf.route_netset(connections, fixed_copper=fixed_copper)
         self._mesh_negotiation_stats = stats
 
         by_net: dict[int, list[Route]] = {}
