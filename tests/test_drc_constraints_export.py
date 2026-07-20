@@ -221,6 +221,59 @@ def test_write_drc_constraints_emits_siblings(tmp_path: Path):
     assert data["board"]["design_settings"]["rules"]["min_clearance"] == rules.min_clearance_mm
 
 
+def test_write_drc_constraints_threads_net_classes_to_dru(tmp_path: Path):
+    """``net_classes`` reach ``generate_dru`` so ampacity floors match (#4375).
+
+    Before #4375, ``write_drc_constraints`` called ``generate_dru`` WITHOUT
+    ``net_classes``, silently dropping the net-scoped ampacity min-width
+    rules -- so ``kicad-cli`` would not enforce the ampacity floors
+    ``kct check`` evaluated.  The emitted ``.kicad_dru`` must carry the
+    net-scoped rules for any class that declares a ``target_ampacity``.
+    """
+    from kicad_tools.manufacturers.dru_generator import generate_dru
+    from kicad_tools.router.rules import NetClassRouting
+
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4, copper_oz=2.0)
+    net_classes = [NetClassRouting(name="POWER", target_ampacity=15.0)]
+
+    write_drc_constraints(
+        board,
+        rules,
+        manufacturer_id="jlcpcb-tier1",
+        layers=4,
+        net_classes=net_classes,
+    )
+
+    dru_text = board.with_suffix(".kicad_dru").read_text()
+    # The net-scoped ampacity rules must be present...
+    assert "Ampacity Min Width (POWER, external)" in dru_text
+    assert "Ampacity Min Width (POWER, internal)" in dru_text
+    # ...and the emitted text must be byte-identical to a direct
+    # generate_dru call with the same net_classes (no drift in the wiring).
+    assert dru_text == generate_dru(
+        rules, manufacturer_name="jlcpcb-tier1", net_classes=net_classes
+    )
+
+
+def test_write_drc_constraints_without_net_classes_omits_ampacity(tmp_path: Path):
+    """Omitting ``net_classes`` preserves the byte-identical board-wide DRU."""
+    from kicad_tools.manufacturers.dru_generator import generate_dru
+
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+    write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    dru_text = board.with_suffix(".kicad_dru").read_text()
+    assert "Ampacity Min Width" not in dru_text
+    assert dru_text == generate_dru(rules, manufacturer_name="jlcpcb-tier1")
+
+
 # ---------------------------------------------------------------------------
 # End-to-end: kct export emits a sibling .kicad_pro reflecting the profile
 # ---------------------------------------------------------------------------

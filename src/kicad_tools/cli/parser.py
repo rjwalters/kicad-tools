@@ -569,6 +569,34 @@ def _add_check_parser(subparsers) -> None:
         dest="skip_checks",
         help="Skip specific checks (comma-separated)",
     )
+    check_parser.add_argument(
+        "--emit-dru",
+        dest="emit_dru",
+        action="store_true",
+        help=(
+            "Emit a sibling <board>.kicad_dru from the SAME resolved design "
+            "rules this check enforced, so 'kicad-cli pcb drc' reasons over "
+            "identical fab-tier floors (issue #4375). Side effect only: never "
+            "modifies the .kicad_pcb or changes the exit code. A .kicad_dru "
+            "alone does NOT give clearance parity (kicad-cli reads the applied "
+            "Default netclass clearance from .kicad_pro, #4097) -- use "
+            "--emit-drc-constraints for full parity."
+        ),
+    )
+    check_parser.add_argument(
+        "--emit-drc-constraints",
+        dest="emit_drc_constraints",
+        action="store_true",
+        help=(
+            "Emit BOTH sidecars (<board>.kicad_dru and <board>.kicad_pro) from "
+            "the SAME resolved design rules this check enforced (issue #4375). "
+            "The .kicad_pro write relaxes the built-in minimums AND the applied "
+            "Default netclass clearance so kicad-cli's clearance test agrees by "
+            "construction (#4097). Preserves an existing .kicad_pro, overwriting "
+            "only the constraint/severity/Default-netclass entries. Recommended "
+            "flag for a kicad-cli cross-gate; --emit-dru is its DRU-only subset."
+        ),
+    )
     check_parser.add_argument("-v", "--verbose", action="store_true")
     check_parser.add_argument(
         "--output",

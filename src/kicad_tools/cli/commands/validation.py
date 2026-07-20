@@ -228,6 +228,11 @@ def run_check_command(args) -> int:
         sub_argv.extend(["--only", args.only_checks])
     if args.skip_checks:
         sub_argv.extend(["--skip", args.skip_checks])
+    # Issue #4375: forward the DRC-constraint sidecar emission flags.
+    if getattr(args, "emit_dru", False):
+        sub_argv.append("--emit-dru")
+    if getattr(args, "emit_drc_constraints", False):
+        sub_argv.append("--emit-drc-constraints")
     if args.verbose:
         sub_argv.append("--verbose")
     if getattr(args, "output", None):

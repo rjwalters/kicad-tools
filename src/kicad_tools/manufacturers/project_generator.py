@@ -40,8 +40,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING, Sequence
 
 from .base import DesignRules
+
+if TYPE_CHECKING:
+    from kicad_tools.router.rules import NetClassRouting
 
 # Severities for DRC rule categories that are *not* manufacturability
 # blockers.  ``lib_footprint_mismatch`` is a library-sync artifact (the
@@ -285,6 +289,7 @@ def write_drc_constraints(
     layers: int | None = None,
     copper_oz: float | None = None,
     write_dru: bool = True,
+    net_classes: Sequence[NetClassRouting] | None = None,
 ) -> list[Path]:
     """Emit DRC-constraint sources next to a routed ``.kicad_pcb``.
 
@@ -302,6 +307,13 @@ def write_drc_constraints(
         layers: Optional copper-layer count (stored in ``meta``).
         copper_oz: Optional copper weight (stored in ``meta``).
         write_dru: When True (default), also emit the ``.kicad_dru``.
+        net_classes: Optional net-class routing configs threaded through to
+            :func:`~kicad_tools.manufacturers.dru_generator.generate_dru`.
+            When any class declares a ``target_ampacity`` the emitted
+            ``.kicad_dru`` carries the matching net-scoped minimum-width
+            rules, so ``kicad-cli`` enforces the same ampacity floors
+            ``kct check`` evaluated.  When ``None`` the ``.kicad_dru`` is
+            byte-for-byte identical to the board-wide rule set (#4216).
 
     Returns:
         List of paths written.
@@ -343,7 +355,7 @@ def write_drc_constraints(
 
         dru_path = pcb_path.with_suffix(".kicad_dru")
         dru_path.write_text(
-            generate_dru(rules, manufacturer_name=manufacturer_id),
+            generate_dru(rules, manufacturer_name=manufacturer_id, net_classes=net_classes),
             encoding="utf-8",
         )
         written.append(dru_path)

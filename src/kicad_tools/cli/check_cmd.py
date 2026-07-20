@@ -972,6 +972,41 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--emit-dru",
+        dest="emit_dru",
+        action="store_true",
+        help=(
+            "Emit a sibling ``<board>.kicad_dru`` from the SAME resolved "
+            "design rules this check enforced, so ``kicad-cli pcb drc`` "
+            "reasons over identical fab-tier floors (issue #4375). This is "
+            "a side effect only: it never modifies the ``.kicad_pcb`` and "
+            "never changes the check verdict/exit code. NOTE: a "
+            "``.kicad_dru`` alone does NOT give clearance parity -- "
+            "kicad-cli's copper-clearance test reads the applied Default "
+            "netclass clearance from ``.kicad_pro`` (#4097). Use "
+            "--emit-drc-constraints for full parity."
+        ),
+    )
+    parser.add_argument(
+        "--emit-drc-constraints",
+        dest="emit_drc_constraints",
+        action="store_true",
+        help=(
+            "Emit BOTH sidecars (``<board>.kicad_dru`` and "
+            "``<board>.kicad_pro``) from the SAME resolved design rules this "
+            "check enforced (issue #4375). The ``.kicad_pro`` write relaxes "
+            "the built-in minimums AND the applied Default netclass clearance "
+            "so kicad-cli's clearance test agrees by construction (#4097). "
+            "Preserves an existing ``.kicad_pro``, overwriting only the "
+            "constraint/severity/Default-netclass entries. Side effect only: "
+            "does not modify the ``.kicad_pcb`` or change the exit code. This "
+            "is the recommended flag for a kicad-cli cross-gate; "
+            "--emit-dru is its DRU-only subset. Only the floor-comparable "
+            "rule families agree -- connectivity/LVS semantics have no "
+            "``.kicad_dru`` equivalent."
+        ),
+    )
+    parser.add_argument(
         "--only",
         dest="only_checks",
         help=f"Run only specific checks (comma-separated: {', '.join(CHECK_CATEGORIES)})",
@@ -1553,6 +1588,23 @@ def main(argv: list[str] | None = None) -> int:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         write_json_report(violations, results, pcb_path, args.mfr, layers, output_path, meta=meta)
 
+    # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
+    # resolved design rules this check enforced (``checker.design_rules``),
+    # so ``kicad-cli pcb drc`` reasons over identical fab-tier floors by
+    # construction.  Emission is a pure side effect: it must never change the
+    # verdict/exit code, and a sidecar write failure degrades to a warning
+    # rather than failing the check (mirrors ``kct mfr apply-rules``).
+    if getattr(args, "emit_dru", False) or getattr(args, "emit_drc_constraints", False):
+        _emit_drc_sidecars(
+            pcb_path,
+            checker,
+            manufacturer_id=args.mfr,
+            layers=layers,
+            copper_oz=preset_copper_oz,
+            net_class_map=net_class_map,
+            emit_both=getattr(args, "emit_drc_constraints", False),
+        )
+
     # Determine exit code
     # Exit 2 = check ran successfully but found issues (errors, or warnings+strict)
     # Exit 1 = reserved for tool-level failures (file not found, parse error) above
@@ -1586,6 +1638,88 @@ def main(argv: list[str] | None = None) -> int:
     if meta.overall == "INCOMPLETE" and not getattr(args, "allow_incomplete", False):
         return 2
     return 0
+
+
+def _emit_drc_sidecars(
+    pcb_path: Path,
+    checker: DRCChecker,
+    *,
+    manufacturer_id: str,
+    layers: int | None,
+    copper_oz: float | None,
+    net_class_map: dict | None,
+    emit_both: bool,
+) -> None:
+    """Emit DRC-constraint sidecars from the checker's resolved rules (#4375).
+
+    Writes ``<board>.kicad_dru`` (and, when ``emit_both``, the sibling
+    ``<board>.kicad_pro``) from ``checker.design_rules`` -- the EXACT
+    resolved :class:`DesignRules` the pure-Python check enforced, including
+    layer count and copper-weight overrides -- so ``kicad-cli pcb drc``
+    reasons over identical fab-tier floors by construction.
+
+    The resolved ``net_class_map`` (board-net -> ``NetClassRouting``) is
+    threaded through so the emitted ampacity net-scoped minimum-width rules
+    match what the checker evaluated (#4216).
+
+    This is a pure side effect: it never mutates the ``.kicad_pcb`` and must
+    not change the check verdict.  A write failure degrades to a stderr
+    warning rather than raising (mirrors ``kct mfr apply-rules``).  Written
+    paths are reported on stderr so JSON stdout stays uncorrupted.
+    """
+    # ``net_class_map`` is keyed by board-net name with the SAME class object
+    # shared across every net in that class (and a ``--net-class-map`` sidecar
+    # deserializes a distinct-but-same-``name`` object per net).  Feeding
+    # ``list(.values())`` straight to ``generate_dru`` would emit one ampacity
+    # rule pair PER NET instead of per class (#4375 Judge feedback).  Dedup on
+    # ``.name`` -- identity-based dedup (``dict.fromkeys``) won't collapse the
+    # distinct per-net objects a sidecar produces -- while preserving first-seen
+    # order for deterministic output.
+    net_classes: list | None = None
+    if net_class_map:
+        _seen_names: set[str] = set()
+        net_classes = []
+        for nc in net_class_map.values():
+            if nc.name in _seen_names:
+                continue
+            _seen_names.add(nc.name)
+            net_classes.append(nc)
+    try:
+        if emit_both:
+            from kicad_tools.manufacturers import write_drc_constraints
+
+            written = write_drc_constraints(
+                pcb_path,
+                checker.design_rules,
+                manufacturer_id=manufacturer_id,
+                layers=layers,
+                copper_oz=copper_oz,
+                write_dru=True,
+                net_classes=net_classes,
+            )
+        else:
+            from kicad_tools.manufacturers.dru_generator import generate_dru
+
+            dru_path = pcb_path.with_suffix(".kicad_dru")
+            dru_path.write_text(
+                generate_dru(
+                    checker.design_rules,
+                    manufacturer_name=manufacturer_id,
+                    net_classes=net_classes,
+                ),
+                encoding="utf-8",
+            )
+            written = [dru_path]
+    except OSError as e:
+        print(
+            f"WARNING: could not emit DRC-constraint sidecar(s) next to "
+            f"{pcb_path}: {e}. The check verdict is unaffected.",
+            file=sys.stderr,
+        )
+        return
+
+    joined = ", ".join(str(p) for p in written)
+    print(f"DRC-constraint sidecars updated: {joined}", file=sys.stderr)
 
 
 def run_selected_checks(
