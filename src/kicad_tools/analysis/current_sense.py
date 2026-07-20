@@ -11,8 +11,12 @@ Phase 1 scope (see issue #4328):
 
 * For every sense net, scan all segments of every high-current net on the same
   layer and report, per sense net, the **maximum parallel-run length** and the
-  **minimum edge-to-edge gap** to the *nearest* high-current net (the blocker
-  with the smallest gap), flagged PASS/FAIL against thresholds.
+  **minimum edge-to-edge gap** to a single reported high-current blocker,
+  flagged PASS/FAIL against thresholds. The FAIL rule is evaluated against
+  *every* same-layer high-current blocker (not just the nearest-by-gap one);
+  the reported blocker is the nearest-by-gap net on PASS and the
+  worst-coupling offender (largest parallel run, tiebreak smallest gap) on
+  FAIL.
 * Sense / high-current nets are identified by
   :func:`kicad_tools.router.net_class.classify_from_name`
   (``ANALOG`` -> sense; ``HIGH_CURRENT_SIGNAL`` / ``POWER`` -> high-current),
@@ -27,12 +31,16 @@ The pairwise parallel-run + gap geometry is computed by the shared
 primitive (not duplicated here).
 
 **FAIL rule** (physically motivated, documented for the census): a sense net is
-``FAIL`` when, against its nearest high-current blocker, it *both* runs parallel
-for at least ``max_parallel_mm`` **and** is separated by at most ``min_gap_mm``.
-A long run that stays far away, or a close approach that is only momentary
-(short parallel run), is ``PASS``. Both conditions must hold to fail because
-coupling scales with parallel length *and* inverse gap -- either one alone is
-not sufficient to corrupt a sense line.
+``FAIL`` when, against *any* same-layer high-current blocker, it *both* runs
+parallel for at least ``max_parallel_mm`` **and** is separated by at most
+``min_gap_mm``. The rule is checked per blocker, so a long-parallel blocker at a
+slightly larger (but still sub-threshold) gap triggers a FAIL even when a
+different, closer blocker only grazes the sense line -- evaluating the
+nearest-by-gap blocker alone would miss this and falsely PASS. A long run that
+stays far away, or a close approach that is only momentary (short parallel run),
+is ``PASS``. Both conditions must hold to fail because coupling scales with
+parallel length *and* inverse gap -- either one alone is not sufficient to
+corrupt a sense line.
 
 This module is advisory only: it never raises on malformed geometry and skips
 un-inspectable data.
@@ -90,13 +98,16 @@ class CurrentSenseResult:
 
     Attributes:
         sense_net: Name of the sense net.
-        nearest_hicur_net: Name of the nearest high-current net (smallest gap
-            among same-layer parallel neighbors), or ``None`` if the sense net
-            has no same-layer high-current neighbor.
-        layer: Copper layer on which the nearest coupling occurs, or ``None``.
-        max_parallel_mm: Maximum parallel-run length (mm) against the nearest
+        nearest_hicur_net: Name of the reported same-layer high-current
+            blocker, or ``None`` if the sense net has no same-layer
+            high-current neighbor. Selection depends on status: on ``PASS``
+            this is the nearest-by-gap blocker (smallest gap); on ``FAIL`` it
+            is the *worst offender* -- the failing blocker with the largest
+            ``max_parallel_mm`` (strongest coupling), tiebreak smallest gap.
+        layer: Copper layer on which the reported coupling occurs, or ``None``.
+        max_parallel_mm: Maximum parallel-run length (mm) against the reported
             blocker. ``0.0`` when there is no neighbor.
-        min_gap_mm: Minimum edge-to-edge gap (mm) to the nearest blocker, or
+        min_gap_mm: Minimum edge-to-edge gap (mm) to the reported blocker, or
             ``None`` when there is no neighbor.
         status: ``"FAIL"`` or ``"PASS"``.
         margin_mm: Gap-clearance margin (``min_gap_mm - min_gap_threshold``);
@@ -502,20 +513,40 @@ class CurrentSenseAnalyzer:
                 margin_mm=None,
             )
 
-        # Nearest blocker = smallest gap.
-        nearest = min(per_net_min_gap, key=lambda n: per_net_min_gap[n])
-        min_gap = per_net_min_gap[nearest]
-        max_parallel = per_net_max_parallel.get(nearest, 0.0)
-        layer = per_net_layer.get(nearest)
+        # Evaluate the AND FAIL rule against EVERY same-layer high-current
+        # blocker -- not just the nearest-by-gap one. A blocker with a longer
+        # parallel run at a slightly larger (but still sub-threshold) gap is a
+        # real coupling risk that a nearest-by-gap-only check would miss
+        # (false PASS). The net FAILs if ANY blocker satisfies the rule.
+        failing = [
+            name
+            for name in per_net_min_gap
+            if per_net_max_parallel.get(name, 0.0) >= self.max_parallel_mm
+            and per_net_min_gap[name] <= self.min_gap_mm
+        ]
 
-        # FAIL rule: long parallel run AND small gap (both must hold).
-        is_fail = max_parallel >= self.max_parallel_mm and min_gap <= self.min_gap_mm
-        status = "FAIL" if is_fail else "PASS"
+        if failing:
+            # FAIL: report the WORST offender = failing blocker with the
+            # largest parallel run (strongest coupling), tiebreak smallest gap.
+            offender = min(
+                failing,
+                key=lambda n: (-per_net_max_parallel.get(n, 0.0), per_net_min_gap[n]),
+            )
+            status = "FAIL"
+        else:
+            # PASS: preserve phase-1 behavior exactly -- report the
+            # nearest-by-gap blocker so clean rows stay byte-identical.
+            offender = min(per_net_min_gap, key=lambda n: per_net_min_gap[n])
+            status = "PASS"
+
+        min_gap = per_net_min_gap[offender]
+        max_parallel = per_net_max_parallel.get(offender, 0.0)
+        layer = per_net_layer.get(offender)
         margin = min_gap - self.min_gap_mm
 
         return CurrentSenseResult(
             sense_net=sense_name,
-            nearest_hicur_net=nearest,
+            nearest_hicur_net=offender,
             layer=layer,
             max_parallel_mm=max_parallel,
             min_gap_mm=min_gap,
