@@ -1754,3 +1754,280 @@ class TestGetBoardOuterLayers:
         start, end = get_board_outer_layers(doc)
         assert start == "F.Cu"
         assert end == "B.Cu"
+
+
+# ===========================================================================
+# Issue #4359 -- fix-vias --relocate-in-pad (Phase 1: signal-via slide-out)
+# ===========================================================================
+
+from kicad_tools.cli.fix_vias_cmd import get_mfr_design_rules  # noqa: E402
+from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias  # noqa: E402
+from kicad_tools.schema.pcb import PCB  # noqa: E402
+from kicad_tools.validate.rules.via_in_pad import (  # noqa: E402
+    ViaInPadRule,
+    _pad_absolute_bbox,
+    _via_inside_pad,
+)
+
+# Signal in-pad via: 1x1mm SMD pad U1-1 at (100,100) on net SIG1, a via drilled
+# dead-center inside it, and a B.Cu escape track leaving the pad to (105,100).
+_PCB_SIGNAL_IN_PAD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG1")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "SIG1"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-inpad"))
+  (segment (start 100 100) (end 105 100) (width 0.2) (layer "B.Cu") (net 1) (uuid "seg-escape"))
+)
+"""
+
+# In-pad via with NO connected routed track (plane-stitch style).
+_PCB_PLANE_STITCH_IN_PAD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "GND"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-stitch"))
+)
+"""
+
+# In-pad signal via whose only off-pad slide (+X) lands inside a foreign-net pad
+# -> relocation would create a clearance violation and must be skipped.
+_PCB_BOXED_IN = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG1")
+  (net 2 "SIG2")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "SIG1"))
+  )
+  (footprint "test:pad" (layer "F.Cu") (at 100.9 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 2 "SIG2"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-boxed"))
+  (segment (start 100 100) (end 105 100) (width 0.2) (layer "B.Cu") (net 1) (uuid "seg-boxed"))
+)
+"""
+
+# Board with a via that is NOT inside any pad (well clear of it).
+_PCB_NO_IN_PAD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG1")
+  (footprint "test:pad" (layer "F.Cu") (at 100 100)
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "SIG1"))
+  )
+  (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-clear"))
+  (segment (start 110 110) (end 115 110) (width 0.2) (layer "B.Cu") (net 1) (uuid "seg-clear"))
+)
+"""
+
+
+def _write(tmp_path: Path, content: str) -> Path:
+    p = tmp_path / "board.kicad_pcb"
+    p.write_text(content)
+    return p
+
+
+def _via_in_pad_count(pcb: PCB, mfr: str = "jlcpcb") -> int:
+    rules = get_mfr_design_rules(mfr, 2, 1.0)
+    return len(ViaInPadRule().check(pcb, rules).violations)
+
+
+class TestRelocateInPadVias:
+    """Phase-1 signal in-pad via relocation (issue #4359)."""
+
+    def test_signal_via_moved_off_pad(self, tmp_path: Path):
+        """In-pad signal via is slid outside the pad with drill-edge clearance."""
+        p = _write(tmp_path, _PCB_SIGNAL_IN_PAD)
+        pcb = PCB.load(p)
+        assert _via_in_pad_count(pcb) == 1  # precondition: it IS in-pad
+
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert len(result.moved) == 1
+        assert not result.skipped
+        assert not result.unresolvable
+
+        via = pcb.vias[0]
+        fp = pcb.footprints[0]
+        pad = fp.pads[0]
+        bbox = _pad_absolute_bbox(pad, fp)
+
+        # Via drill is now fully OUTSIDE the pad bbox.
+        assert not _via_inside_pad(via, bbox)
+        # Drill edge clears the pad edge by at least min_clearance.
+        drill_edge = via.position[0] - via.drill / 2.0
+        assert drill_edge >= bbox[2] + rules.min_clearance_mm - 1e-6
+
+    def test_stub_and_connectivity_preserved(self, tmp_path: Path):
+        """A stub on the pad layer + escape layer keeps the net connected."""
+        p = _write(tmp_path, _PCB_SIGNAL_IN_PAD)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        moved = result.moved[0]
+        # Stub added on both the pad's copper layer and the escape track layer.
+        assert "F.Cu" in moved.stub_layers
+        assert "B.Cu" in moved.stub_layers
+
+        via = pcb.vias[0]
+        new_x, new_y = via.position
+        # The via net is unchanged (no net rip).
+        assert via.net_number == 1
+        # A same-net segment now lands on the relocated via (connectivity intact).
+        landing = [
+            seg
+            for seg in pcb.segments_in_net(1)
+            if (abs(seg.start[0] - new_x) < 1e-6 and abs(seg.start[1] - new_y) < 1e-6)
+            or (abs(seg.end[0] - new_x) < 1e-6 and abs(seg.end[1] - new_y) < 1e-6)
+        ]
+        assert landing, "no segment lands on the relocated via"
+        # The original in-pad escape segment is untouched (no existing copper mutated).
+        escape = [seg for seg in pcb.segments if seg.uuid == "seg-escape"]
+        assert len(escape) == 1
+        assert escape[0].start == (100.0, 100.0)
+        assert escape[0].end == (105.0, 100.0)
+
+    def test_relocate_persists_through_save(self, tmp_path: Path):
+        """The move round-trips to disk and clears the via-in-pad DRC count."""
+        p = _write(tmp_path, _PCB_SIGNAL_IN_PAD)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        relocate_in_pad_vias(pcb, rules, dry_run=False)
+        moved_pos = pcb.vias[0].position
+        pcb.save(p)
+
+        reloaded = PCB.load(p)
+        assert reloaded.vias[0].position == pytest.approx(moved_pos)
+        assert _via_in_pad_count(reloaded) == 0
+
+    def test_dry_run_mutates_nothing(self, tmp_path: Path):
+        """--dry-run reports the move but writes nothing to the board."""
+        p = _write(tmp_path, _PCB_SIGNAL_IN_PAD)
+        pcb = PCB.load(p)
+        n_segments_before = len(pcb.segments)
+        via_pos_before = pcb.vias[0].position
+
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=True)
+
+        assert len(result.moved) == 1  # it is reported as movable
+        # ...but nothing was mutated.
+        assert pcb.vias[0].position == via_pos_before
+        assert len(pcb.segments) == n_segments_before
+
+    def test_dry_run_via_main_no_file_write(self, tmp_path: Path):
+        """The CLI --dry-run path leaves the file byte-identical."""
+        p = _write(tmp_path, _PCB_SIGNAL_IN_PAD)
+        original = p.read_text()
+        rc = main([str(p), "--mfr", "jlcpcb", "--relocate-in-pad", "--dry-run", "-q"])
+        assert rc in (0, 2)
+        assert p.read_text() == original
+
+    def test_no_in_pad_vias_clean_noop(self, tmp_path: Path):
+        """A board with no in-pad vias is a clean no-op (no moves, no writes)."""
+        p = _write(tmp_path, _PCB_NO_IN_PAD)
+        original = p.read_text()
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert not result.moved
+        assert not result.skipped
+        assert not result.unresolvable
+        # main() must not rewrite the file when nothing changed.
+        rc = main([str(p), "--mfr", "jlcpcb", "--relocate-in-pad", "-q"])
+        assert rc == 0
+        assert p.read_text() == original
+
+    def test_supported_mfr_is_noop(self, tmp_path: Path):
+        """On jlcpcb-tier1 (via-in-pad supported) nothing is relocated."""
+        p = _write(tmp_path, _PCB_SIGNAL_IN_PAD)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb-tier1", 2, 1.0)
+        assert rules.via_in_pad_supported is True
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert result.supported_noop is True
+        assert not result.moved
+        assert pcb.vias[0].position == (100.0, 100.0)
+
+    def test_plane_stitch_via_reported_unresolvable(self, tmp_path: Path):
+        """An in-pad via with no escape track is surfaced, never left silently."""
+        p = _write(tmp_path, _PCB_PLANE_STITCH_IN_PAD)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert not result.moved
+        assert len(result.unresolvable) == 1
+        assert result.unresolvable[0].category == "unresolvable"
+        # The via is left untouched (still in-pad, but reported).
+        assert pcb.vias[0].position == (100.0, 100.0)
+
+    def test_boxed_in_via_skipped(self, tmp_path: Path):
+        """A via that cannot clear a foreign-net pad is skipped, not mis-placed."""
+        p = _write(tmp_path, _PCB_BOXED_IN)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, dry_run=False)
+
+        assert not result.moved
+        assert len(result.skipped) == 1
+        assert result.skipped[0].category == "skipped"
+        # Untouched: never emit a worse board.
+        assert pcb.vias[0].position == (100.0, 100.0)
+
+    def test_net_filter_scopes_pass(self, tmp_path: Path):
+        """--net scoping skips vias whose net is not in the filter set."""
+        p = _write(tmp_path, _PCB_SIGNAL_IN_PAD)
+        pcb = PCB.load(p)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        result = relocate_in_pad_vias(pcb, rules, nets={"OTHER_NET"}, dry_run=False)
+        assert not result.moved
+        assert pcb.vias[0].position == (100.0, 100.0)
+
+        # And the matching net IS processed.
+        pcb2 = PCB.load(p)
+        result2 = relocate_in_pad_vias(pcb2, rules, nets={"SIG1"}, dry_run=False)
+        assert len(result2.moved) == 1
+
+    def test_cli_main_json_report(self, tmp_path: Path, capsys):
+        """--format json emits moved/skipped/unresolvable arrays."""
+        import json as _json
+
+        p = _write(tmp_path, _PCB_SIGNAL_IN_PAD)
+        rc = main([str(p), "--mfr", "jlcpcb", "--relocate-in-pad", "--dry-run", "--format", "json"])
+        assert rc in (0, 2)
+        out = capsys.readouterr().out
+        data = _json.loads(out)
+        assert data["dry_run"] is True
+        assert len(data["moved"]) == 1
+        assert "skipped" in data and "unresolvable" in data

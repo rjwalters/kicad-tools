@@ -4235,6 +4235,24 @@ def _add_fix_vias_parser(subparsers) -> None:
             "minimum clearance to nearby tracks, pads, or other vias."
         ),
     )
+    fix_vias_parser.add_argument(
+        "--relocate-in-pad",
+        action="store_true",
+        help=(
+            "Relocate via-in-pad vias off-pad (connectivity-preserving) so the "
+            "board can move to a manufacturer profile that disallows via-in-pad "
+            "(e.g. standard jlcpcb). Distinct pass from via resizing; slides "
+            "each in-pad signal via just outside the pad along its escape track "
+            "and adds stub segments to preserve the net."
+        ),
+    )
+    fix_vias_parser.add_argument(
+        "--net",
+        action="append",
+        dest="nets",
+        metavar="NET",
+        help=("Restrict --relocate-in-pad to the given net name (repeatable). Default: all nets."),
+    )
 
 
 def _add_fix_silkscreen_parser(subparsers) -> None:
