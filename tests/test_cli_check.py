@@ -709,11 +709,20 @@ class TestCheckMetaCheck:
         # New: meta_checks envelope.
         assert "meta_checks" in data
         meta = data["meta_checks"]
-        assert set(meta.keys()) == {"drc", "erc", "lvs", "manifest", "overall"}
+        assert set(meta.keys()) == {
+            "drc",
+            "erc",
+            "lvs",
+            "manifest",
+            "overall",
+            "schematic_missing",
+        }
         for name in ("drc", "erc", "lvs", "manifest"):
             assert "status" in meta[name]
             assert "detail" in meta[name]
         assert meta["overall"] == "PASSED"
+        # Schematic was present in this fixture, so the LVS gate was not skipped.
+        assert meta["schematic_missing"] is False
 
     def test_meta_checks_omitted_under_drc_only_in_json(self, drc_clean_pcb: Path, capsys):
         """--drc-only must NOT add meta_checks to the JSON envelope."""
