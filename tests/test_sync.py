@@ -15,7 +15,47 @@ from kicad_tools.sync.reconciler import (
     SyncChange,
     SyncMatch,
     _is_mounting_hole,
+    _values_equivalent,
 )
+
+
+class TestValuesEquivalent:
+    """Tests for the value-equivalence helper (issue #4351).
+
+    A PCB value that merely appends a voltage/tolerance/rating suffix must not
+    be reported as a value mismatch, while genuinely different values still are.
+    """
+
+    def test_suffix_only_capacitor_is_equivalent(self):
+        assert _values_equivalent("100nF", "100nF 25V", "C13")
+        assert _values_equivalent("10uF", "10uF 16V", "C14")
+
+    def test_tolerance_suffix_resistor_is_equivalent(self):
+        assert _values_equivalent("4.7k", "4.7k 1%", "R1")
+
+    def test_unit_normalized_capacitor_is_equivalent(self):
+        # 0.1uF == 100nF -> not a mismatch.
+        assert _values_equivalent("100nF", "0.1uF", "C1")
+
+    def test_genuinely_different_capacitor_is_mismatch(self):
+        assert not _values_equivalent("100nF", "2.2nF 50V", "C15")
+        assert not _values_equivalent("100nF", "10nF", "C36")
+        assert not _values_equivalent("10uF", "1uF 25V", "C39")
+
+    def test_non_numeric_ic_values_fall_back_to_string_strictness(self):
+        # Different part numbers must still flag.
+        assert not _values_equivalent("AP2112K-3.3", "XC6206-3.3V", "U1")
+        # Identical IC values are equivalent.
+        assert _values_equivalent("AP2112K-3.3", "AP2112K-3.3", "U2")
+
+    def test_whitespace_and_case_only_differences_are_equivalent(self):
+        assert _values_equivalent("100nF", "100NF", "C1")
+        assert _values_equivalent("  100nF ", "100nF", "C1")
+        assert _values_equivalent("LM358", "lm358", "U5")
+
+    def test_empty_value_is_not_equivalent_to_nonempty(self):
+        assert not _values_equivalent("", "100nF", "C1")
+        assert not _values_equivalent("100nF", "", "C1")
 
 
 class TestIsMountingHole:
@@ -414,6 +454,59 @@ class TestReconcilerAnalyze:
         assert len(analysis.value_mismatches) == 1
         assert analysis.value_mismatches[0]["schematic_value"] == "10k"
         assert analysis.value_mismatches[0]["pcb_value"] == "4.7k"
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_suffix_only_value_is_not_a_mismatch(self):
+        """Issue #4351: a PCB rating suffix is informational, not a mismatch."""
+        bom_items = [self._make_bom_item("C13", "100nF", "Capacitor_SMD:C_0402")]
+        footprints = [self._make_mock_footprint("C13", "100nF 25V", "Capacitor_SMD:C_0402")]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        # No genuine value mismatch, and no update_value action queued.
+        assert analysis.value_mismatches == []
+        assert not any(a["type"] == "update_value" for m in analysis.matches for a in m.actions)
+        # Surfaced as an informational suffix note instead.
+        assert len(analysis.value_suffix_notes) == 1
+        note = analysis.value_suffix_notes[0]
+        assert note["reference"] == "C13"
+        assert note["schematic_value"] == "100nF"
+        assert note["pcb_value"] == "100nF 25V"
+        # Suffix notes are informational -> board is still in sync.
+        assert analysis.is_in_sync
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_genuine_mismatch_still_flagged_amid_suffix_notes(self):
+        """Genuine value divergence remains visible while suffix-only rows do not."""
+        bom_items = [
+            self._make_bom_item("C13", "100nF", "Capacitor_SMD:C_0402"),  # suffix-only
+            self._make_bom_item("C15", "100nF", "Capacitor_SMD:C_0402"),  # genuine
+            self._make_bom_item("U1", "AP2112K-3.3", "Package_TO_SOT_SMD:SOT-23-5"),  # genuine
+        ]
+        footprints = [
+            self._make_mock_footprint("C13", "100nF 25V", "Capacitor_SMD:C_0402"),
+            self._make_mock_footprint("C15", "2.2nF 50V", "Capacitor_SMD:C_0402"),
+            self._make_mock_footprint("U1", "XC6206-3.3V", "Package_TO_SOT_SMD:SOT-23-5"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        mismatched_refs = {m["reference"] for m in analysis.value_mismatches}
+        assert mismatched_refs == {"C15", "U1"}
+        suffix_refs = {m["reference"] for m in analysis.value_suffix_notes}
+        assert suffix_refs == {"C13"}
 
         Path(sch_path).unlink()
         Path(pcb_path).unlink()

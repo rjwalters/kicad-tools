@@ -201,5 +201,61 @@ class TestAdvisoryBanner:
         assert "out of sync" not in capsys.readouterr().out.lower()
 
 
+# ---------------------------------------------------------------------------
+# Value suffix notes are informational, not drift (issue #4351)
+# ---------------------------------------------------------------------------
+
+
+class TestValueSuffixNotesRendering:
+    def _analysis_with_suffix_note(self):
+        from kicad_tools.sync.reconciler import SyncAnalysis
+
+        return SyncAnalysis(
+            value_suffix_notes=[
+                {"reference": "C13", "schematic_value": "100nF", "pcb_value": "100nF 25V"},
+            ]
+        )
+
+    def test_has_drift_excludes_suffix_notes(self):
+        from kicad_tools.sync.drift import has_drift
+
+        # A board whose only difference is a rating suffix is NOT out of sync.
+        assert has_drift(self._analysis_with_suffix_note()) is False
+
+    def test_render_shows_informational_section_when_in_sync(self, tmp_path):
+        from kicad_tools.sync.drift import render_drift_report
+
+        report = render_drift_report(
+            self._analysis_with_suffix_note(),
+            tmp_path / "board.kicad_pcb",
+            tmp_path / "board.kicad_sch",
+        )
+        # In sync (suffix note is not drift) but the note is still surfaced.
+        assert "IN SYNC" in report
+        assert "same value, PCB adds rating suffix" in report
+        assert "C13" in report
+        assert "100nF 25V" in report
+
+    def test_render_shows_informational_section_alongside_real_drift(self, tmp_path):
+        from kicad_tools.sync.drift import render_drift_report
+        from kicad_tools.sync.reconciler import SyncAnalysis
+
+        analysis = SyncAnalysis(
+            value_mismatches=[
+                {"reference": "C15", "schematic_value": "100nF", "pcb_value": "2.2nF 50V"},
+            ],
+            value_suffix_notes=[
+                {"reference": "C13", "schematic_value": "100nF", "pcb_value": "100nF 25V"},
+            ],
+        )
+        report = render_drift_report(
+            analysis, tmp_path / "board.kicad_pcb", tmp_path / "board.kicad_sch"
+        )
+        assert "OUT OF SYNC" in report
+        assert "1 value mismatch(es)" in report  # only the genuine one counts
+        assert "Value mismatches [1]" in report
+        assert "same value, PCB adds rating suffix" in report
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
