@@ -60,6 +60,7 @@ from .commands import (
     run_creepage_command,
     run_datasheet_command,
     run_decisions_command,
+    run_doctor_command,
     run_estimate_command,
     run_fix_footprints_command,
     run_fleet_command,
@@ -454,6 +455,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "build-native":
         return run_build_native_command(args)
+
+    elif args.command == "doctor":
+        return run_doctor_command(args)
 
     elif args.command == "spec":
         return run_spec_command(args)

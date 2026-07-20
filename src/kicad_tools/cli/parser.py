@@ -187,6 +187,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_create_pcb_parser(subparsers)
     _add_build_parser(subparsers)
     _add_build_native_parser(subparsers)
+    _add_doctor_parser(subparsers)
     _add_spec_parser(subparsers)
     _add_benchmark_parser(subparsers)
     _add_sync_parser(subparsers)
@@ -7006,6 +7007,42 @@ def _add_build_native_parser(subparsers) -> None:
         dest="build_native_check",
         action="store_true",
         help="Just check if C++ backend is available, don't build",
+    )
+
+
+def _add_doctor_parser(subparsers) -> None:
+    """Add doctor subcommand parser for environment/installation health checks."""
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Diagnose kicad-tools installation health (version-record drift)",
+        description=(
+            "Check the health of a kicad-tools installation. The first check is "
+            "version-record drift: the installed package version (ground truth) is "
+            "compared against the records the installer stamps into a consumer repo "
+            "(pyproject.toml dependency pin, .kct/install-metadata.json, and the "
+            "CLAUDE.md marker block). Advisory by default; use --strict to exit "
+            "non-zero on drift so it can gate CI / pre-commit hooks."
+        ),
+    )
+    doctor_parser.add_argument(
+        "--root",
+        dest="doctor_root",
+        default=".",
+        metavar="DIR",
+        help="Directory to look for the version records in (default: current dir)",
+    )
+    doctor_parser.add_argument(
+        "--format",
+        dest="doctor_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    doctor_parser.add_argument(
+        "--strict",
+        dest="doctor_strict",
+        action="store_true",
+        help="Exit 1 when any version record has drifted (default: advisory exit 0)",
     )
 
 
