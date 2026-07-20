@@ -45,7 +45,7 @@ from kicad_tools.sexp.builders import segment_node, via_node
 KICAD_HOLE_TO_COPPER_CLEARANCE = 0.25
 
 #: Default minimum drill edge-to-edge spacing, in mm, for the hole-to-hole
-#: guard (``dimension_drill_clearance`` fab floor, Issue #3855).  Matches the
+#: guard (``hole_to_hole_clearance`` fab floor, Issue #3855).  Matches the
 #: ``calculate_via_position`` default and the local checks in
 #: ``run_stitch``'s connectivity fallback.  Used by the thermal/blanket
 #: stitch paths (Issue #4010) so a stitch via never lands within this floor
@@ -1235,7 +1235,7 @@ def find_all_drills(
     :func:`find_all_board_vias` (which reports pad SIZE).  A stitch via
     dropped within ``min_hole_to_hole`` (drill edge-to-edge) of a
     through-hole pad drill (the J1-S2 case -- the GND stitch via vs the GND
-    connector pad's plated hole) trips a ``dimension_drill_clearance`` DRC
+    connector pad's plated hole) trips a ``hole_to_hole_clearance`` DRC
     error even when copper clears, so the placement loop must reject it.
 
     Only plated drilled holes are included: ``thru_hole`` pads with a
@@ -1804,7 +1804,7 @@ def calculate_via_position(
             # COPPER geometry; they do not enforce the fab's drill-to-drill
             # minimum.  A stitch via dropped within ``min_hole_to_hole``
             # (drill edge-to-edge) of an other-net through-hole pad / via
-            # drill (the J1-S2 case) trips ``dimension_drill_clearance``
+            # drill (the J1-S2 case) trips ``hole_to_hole_clearance``
             # even when copper clears -- reject and try the next offset.
             if other_net_drills and via_drill > 0:
                 cand_drill_radius = via_drill / 2
@@ -2237,7 +2237,7 @@ def calculate_dogleg_via_position(
                     # fab's drill-to-drill minimum.  A dog-leg stitch via
                     # dropped within ``min_hole_to_hole`` (drill edge-to-
                     # edge) of an other-net through-hole pad / via drill
-                    # trips ``dimension_drill_clearance`` even when copper
+                    # trips ``hole_to_hole_clearance`` even when copper
                     # clears -- exactly the coincident-hole short reported
                     # in the congested regions where dog-leg placement is
                     # used.  Reject and try the next candidate.
@@ -2486,7 +2486,7 @@ def calculate_extended_escape_position(
         # Issue #4177: drill hole-to-hole guard.  The checks above use
         # COPPER geometry; a via dropped within ``min_hole_to_hole`` (drill
         # edge-to-edge) of an other-net through-hole pad / via drill trips
-        # ``dimension_drill_clearance`` even when copper clears.  Extended-
+        # ``hole_to_hole_clearance`` even when copper clears.  Extended-
         # escape is the deepest congestion fallback -- the exact path where
         # coincident-hole collisions were slipping through unchecked.
         if other_net_drills and via_drill > 0:

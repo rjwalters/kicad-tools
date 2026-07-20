@@ -7769,7 +7769,7 @@ class TestMultiNetPreexistingHoleGuard:
     def test_no_different_net_drill_pair_within_floor_after_stitch(self, tmp_path: Path) -> None:
         """Whole-board invariant: after a multi-net stitch, NO two drills on
         DIFFERENT nets sit within the hole-to-hole floor (the
-        ``dimension_drill_clearance`` different-net check), and specifically no
+        ``hole_to_hole_clearance`` different-net check), and specifically no
         coincident (-0.000mm) pairs.  Load-bearing: the fixture places the GND
         pad's straight-line escape directly onto a pre-existing +3.3V VIA, so a
         clean board proves the guard machinery relocated the GND via."""

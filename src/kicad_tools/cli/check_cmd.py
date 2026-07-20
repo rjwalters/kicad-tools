@@ -52,7 +52,8 @@ _MEASUREMENT_RULE_IDS: frozenset[str] = frozenset(
     }
 )
 
-# Issue #4102: ``dimension_drill_clearance`` hole-to-hole findings carry both
+# Issue #4102: ``hole_to_hole_clearance`` (formerly ``dimension_drill_clearance``,
+# renamed in #4353) hole-to-hole findings carry both
 # endpoints' resolved net names in ``nets=(net1, net2)``.  A user reading the
 # report needs to separate the fab's real concern (different-net pairs, where a
 # drill-wall break creates a short) from same-net pairs.  The data is
@@ -71,7 +72,7 @@ _MEASUREMENT_RULE_IDS: frozenset[str] = frozenset(
 # Issue #4318: the copper-copper clearance rules carry the same
 # ``nets=(net_a, net_b)`` pair (set in ``_create_violation``,
 # ``validate/rules/clearance.py``), so an agent reading a ``clearance_segment_via``
-# report needs the same same-net / different-net split ``dimension_drill_clearance``
+# report needs the same same-net / different-net split ``hole_to_hole_clearance``
 # already gets -- a different-net 0.000mm coincidence is a genuine short to
 # prioritize, while a same-net coincidence is a lower-risk (still-defective)
 # malformed-copper artifact.  The classifier (``_net_relationship`` /
@@ -79,7 +80,7 @@ _MEASUREMENT_RULE_IDS: frozenset[str] = frozenset(
 # segment-via pair classifies as ``different-net`` (#4127) with no extra work.
 _NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset(
     {
-        "dimension_drill_clearance",
+        "hole_to_hole_clearance",
         "clearance_segment_via",
         "clearance_segment_segment",
         "clearance_via_via",
@@ -1767,7 +1768,7 @@ def output_table(
         else [v for v in violations if not (v.is_info and v.rule_id in _MEASUREMENT_RULE_IDS)]
     )
     by_rule: dict[str, dict[str, int]] = {}
-    # Issue #4102: for net-relationship rules (dimension_drill_clearance),
+    # Issue #4102: for net-relationship rules (hole_to_hole_clearance),
     # additionally tally a same-net / different-net breakdown so the BY RULE
     # summary line is immediately actionable -- directly answering the
     # "49-finding wall" complaint without scrolling the detail list.
@@ -1814,7 +1815,7 @@ def output_table(
         line = f"  {rule_id}: {', '.join(parts)}"
         # Issue #4102: append the same-net / different-net breakdown for
         # net-relationship rules, e.g.
-        #   dimension_drill_clearance: 49 errors (32 different-net, 17 same-net)
+        #   hole_to_hole_clearance: 49 errors (32 different-net, 17 same-net)
         rel = by_rule_relationship.get(rule_id)
         if rel:
             diff_n = rel["different-net"]

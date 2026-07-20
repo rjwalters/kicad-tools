@@ -74,7 +74,7 @@ tolerances:
   # are the dominant failure mode tracked in #2756).  Per-rule
   # (post-fix): 38 clearance_pad_segment, 9 clearance_segment_segment,
   # 4 clearance_segment_via, 1 diffpair_clearance_intra,
-  # 1 dimension_drill_clearance.  Tracked in #2756 for re-routing,
+  # 1 hole_to_hole_clearance.  Tracked in #2756 for re-routing,
   # #2542 for full clean state.
   #
   # Tightened 53 -> 9 by Issue #3127 (M-E Round 3).  PR enlarges
@@ -1042,7 +1042,7 @@ tolerances:
   # ``min_hole_to_hole_mm`` spec (canonical 0.5 mm fab default; the old
   # code keyed off ``min_clearance_mm`` and never fired below 0.5 mm).  The
   # corrected rule surfaces 6 genuine pre-existing sub-0.5 mm
-  # ``dimension_drill_clearance`` drill pairs that were ALWAYS present on
+  # ``hole_to_hole_clearance`` drill pairs that were ALWAYS present on
   # board 06 but invisible to the broken check.  They are TRUE POSITIVES,
   # NOT new regressions from this PR; the board-layout fix (re-spacing the
   # drills to >= 0.5 mm) is tracked in **#3847**, rule change refs
@@ -1053,7 +1053,7 @@ tolerances:
   #       9 diffpair_routing_continuity -- unchanged)
   #     + 5 non-diff-pair clearance near-misses from the imperfect coupled
   #       re-route fan-out + pour-repair vias (unchanged, #3829)
-  #     + 6 dimension_drill_clearance sub-0.5 mm true-positives (NEW to the
+  #     + 6 hole_to_hole_clearance sub-0.5 mm true-positives (NEW to the
   #       count only because the gate was broken; #3842 surfaces them).
   #   * COMMITTED strict gate (``Routed PCB DRC Check``, advisory filtered):
   #     18 -> 24 (= 18 diff-pair + 6 drill).  Pinned by
@@ -1062,7 +1062,7 @@ tolerances:
   #     admits the committed artifact and the strict gate emits its
   #     by-design tightening ::warning:: (9 slack).
   # The diff-pair-ONLY slice is STILL exactly 18 -- the 6 drill errors are
-  # ``dimension_drill_clearance`` (a DISTINCT family), so
+  # ``hole_to_hole_clearance`` (a DISTINCT family), so
   # DIFFPAIR_VIOLATION_BASELINE (18) in check_diffpair_coverage.py is
   # UNCHANGED and a 19th diff-pair violation still fails the gate.  This
   # floor (33) governs only the TOTAL error count; it does NOT loosen the
@@ -1820,7 +1820,7 @@ tolerances:
   #
   # !!! RE-BASELINE CLOSED: 2 -> strict-0 (Issue #4017, July 09 2026) !!!
   # ----------------------------------------------------------------------
-  # The 2 ``dimension_drill_clearance`` violations grandfathered at 2 by
+  # The 2 ``hole_to_hole_clearance`` violations grandfathered at 2 by
   # #3842 (a 0.350 mm hole-to-hole micro-via pair on the LQFP-48 west
   # escape: GND/NRST and OSC_OUT/NRST, both in-pad ``(via micro ...)``
   # structures at 0.5 mm pin pitch) have been re-spaced.  The middle NRST

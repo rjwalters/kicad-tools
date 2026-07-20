@@ -4,7 +4,7 @@ Background
 ----------
 
 Running ``kct route`` on board 05 with the proven 2-layer recipe produced
-14 ``dimension_drill_clearance`` errors reading "-0.300mm < minimum
+14 ``hole_to_hole_clearance`` errors reading "-0.300mm < minimum
 0.127mm" between two vias on the **same** logical net (e.g. HALL_A vs
 HALL_A).  Negative clearance == two same-net drills literally on top of
 each other -- a manufacturing fault that breaks the drill file.
@@ -17,7 +17,7 @@ route s-expression is *appended* on top of stale segments and vias from
 the prior write.  Two checkpoint writes + one final write yields three
 copies of every via in the output PCB.  The duplicates carry distinct
 UUIDs but identical (net, x, y, drill) tuples, so the DRC validator sees
-overlapping drills on the same net and flags ``dimension_drill_clearance``.
+overlapping drills on the same net and flags ``hole_to_hole_clearance``.
 
 Fix: ``_insert_sexp_before_closing`` now calls ``_strip_route_blocks``
 before inserting the new route s-expression.  The strip removes any

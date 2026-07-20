@@ -67,11 +67,28 @@ class TestValidateRuleIdMapping:
             ("dimension_via_drill", ViolationType.DIMENSION_VIA_DRILL),
             ("dimension_via_diameter", ViolationType.DIMENSION_VIA_DIAMETER),
             ("dimension_annular_ring", ViolationType.DIMENSION_ANNULAR_RING),
-            ("dimension_drill_clearance", ViolationType.DIMENSION_DRILL_CLEARANCE),
+            # Issue #4353: canonical id is now ``hole_to_hole_clearance``; the
+            # legacy ``dimension_drill_clearance`` still resolves via the
+            # backwards-compat alias (asserted in test_hole_to_hole_compat_alias).
+            ("hole_to_hole_clearance", ViolationType.HOLE_TO_HOLE_CLEARANCE),
         ],
     )
     def test_dimension_rules(self, rule_id: str, expected: ViolationType):
         assert ViolationType.from_string(rule_id) == expected
+
+    def test_hole_to_hole_compat_alias(self):
+        """Issue #4353: the legacy ``dimension_drill_clearance`` rule_id must
+        still resolve to the renamed member so previously-saved JSON reports
+        and ``kct fix-drc dimension_drill_clearance`` keep working."""
+        assert (
+            ViolationType.from_string("dimension_drill_clearance")
+            == ViolationType.HOLE_TO_HOLE_CLEARANCE
+        )
+        # And the new canonical string resolves to the same member.
+        assert (
+            ViolationType.from_string("hole_to_hole_clearance")
+            == ViolationType.HOLE_TO_HOLE_CLEARANCE
+        )
 
     # -- silkscreen rules ----------------------------------------------------
 
@@ -127,6 +144,8 @@ class TestValidateRuleIdMapping:
             "dimension_via_drill",
             "dimension_via_diameter",
             "dimension_annular_ring",
+            "hole_to_hole_clearance",
+            # Issue #4353: legacy alias must still resolve (never UNKNOWN).
             "dimension_drill_clearance",
             "silkscreen_line_width",
             "silkscreen_text_height",

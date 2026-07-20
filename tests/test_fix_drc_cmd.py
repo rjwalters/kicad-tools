@@ -675,11 +675,20 @@ class TestViolationTypeMapping:
         """Should parse 'drill_clearance' to DRILL_CLEARANCE."""
         assert ViolationType.from_string("drill_clearance") == ViolationType.DRILL_CLEARANCE
 
-    def test_dimension_drill_clearance(self):
-        """Should parse 'dimension_drill_clearance' to DIMENSION_DRILL_CLEARANCE."""
+    def test_hole_to_hole_clearance(self):
+        """Should parse 'hole_to_hole_clearance' to HOLE_TO_HOLE_CLEARANCE (#4353)."""
+        assert (
+            ViolationType.from_string("hole_to_hole_clearance")
+            == ViolationType.HOLE_TO_HOLE_CLEARANCE
+        )
+
+    def test_dimension_drill_clearance_compat_alias(self):
+        """Legacy 'dimension_drill_clearance' still routes to the renamed member
+        (#4353 backwards-compat alias) so ``kct fix-drc dimension_drill_clearance``
+        keeps reaching DrillClearanceRepairer."""
         assert (
             ViolationType.from_string("dimension_drill_clearance")
-            == ViolationType.DIMENSION_DRILL_CLEARANCE
+            == ViolationType.HOLE_TO_HOLE_CLEARANCE
         )
 
     def test_clearance_still_works(self):

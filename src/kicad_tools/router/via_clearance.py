@@ -78,7 +78,7 @@ class FilledPolygonLike(Protocol):
 
 #: Default manufacturer hole-to-hole (drill-to-drill) minimum, in mm.  Mirrors
 #: ``manufacturers.base.DesignRules.min_hole_to_hole_mm`` and the canonical fab
-#: floor used by the DRC ``dimension_drill_clearance`` rule.
+#: floor used by the DRC ``hole_to_hole_clearance`` rule.
 DEFAULT_MIN_HOLE_TO_HOLE = 0.5
 
 #: Numerical tolerance for the hole-to-hole comparison, mirroring
@@ -98,7 +98,7 @@ def drill_hole_to_hole_clear(
     existing drill by at least ``min_hole_to_hole`` edge-to-edge.
 
     This mirrors the canonical edge-to-edge formula used by the DRC
-    ``dimension_drill_clearance`` rule
+    ``hole_to_hole_clearance`` rule
     (:meth:`validate.rules.dimensions.DimensionRules._check_drill_clearance`)
     so a candidate via the router accepts here will not trip a hole-to-hole
     DRC error later::
@@ -306,7 +306,7 @@ def point_clear_of_copper(
             When supplied with ``via_drill > 0`` and
             ``min_hole_to_hole > 0``, the candidate drill must clear
             every foreign drill edge-to-edge by ``min_hole_to_hole``
-            (fab ``dimension_drill_clearance`` floor, Issue #3855).
+            (fab ``hole_to_hole_clearance`` floor, Issue #3855).
         hole_to_copper_clearance: KiCad ``hole_clearance`` band in mm
             (typically :data:`kicad_tools.cli.stitch_cmd.KICAD_HOLE_TO_COPPER_CLEARANCE`).
             Only consulted when ``via_drill > 0``.
@@ -391,7 +391,7 @@ def point_clear_of_copper(
     # Drill hole-to-hole guard (Issue #3855): the copper checks above do
     # not enforce the fab's drill-to-drill minimum.  A via dropped within
     # ``min_hole_to_hole`` (drill edge-to-edge) of a foreign through-hole
-    # pad / via drill trips ``dimension_drill_clearance`` even when copper
+    # pad / via drill trips ``hole_to_hole_clearance`` even when copper
     # clears.  Reuses the canonical edge-to-edge predicate.
     if via_drill > 0 and min_hole_to_hole > 0 and other_net_drills:
         if not drill_hole_to_hole_clear(

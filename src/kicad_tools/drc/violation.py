@@ -69,7 +69,7 @@ def _init_type_category_map() -> None:
             ViolationType.TRACK_WIDTH: ViolationCategory.ROUTING,
             ViolationType.TRACK_ANGLE: ViolationCategory.ROUTING,
             ViolationType.DIMENSION_TRACE_WIDTH: ViolationCategory.ROUTING,
-            ViolationType.DIMENSION_DRILL_CLEARANCE: ViolationCategory.ROUTING,
+            ViolationType.HOLE_TO_HOLE_CLEARANCE: ViolationCategory.ROUTING,
             # Placement: inherent to component placement
             ViolationType.CLEARANCE_PAD_PAD: ViolationCategory.PLACEMENT,
             ViolationType.COURTYARD_OVERLAP: ViolationCategory.PLACEMENT,
@@ -217,7 +217,14 @@ class ViolationType(Enum):
     DIMENSION_VIA_DRILL = "dimension_via_drill"
     DIMENSION_VIA_DIAMETER = "dimension_via_diameter"
     DIMENSION_ANNULAR_RING = "dimension_annular_ring"
-    DIMENSION_DRILL_CLEARANCE = "dimension_drill_clearance"
+    # Hole-to-hole (drill center-to-center minus both radii) clearance from the
+    # dimensions checker (``validate/rules/dimensions.py``).  Issue #4353: the
+    # emitted ``rule_id`` was renamed from ``dimension_drill_clearance`` to
+    # ``hole_to_hole_clearance`` so the report label matches the physically
+    # accurate "Hole-to-hole clearance ..." message text.  The old string is
+    # retained as a backwards-compat alias in ``from_string`` below so saved
+    # JSON reports and ``kct fix-drc dimension_drill_clearance`` keep working.
+    HOLE_TO_HOLE_CLEARANCE = "hole_to_hole_clearance"
 
     # Hole issues
     DRILL_HOLE_TOO_SMALL = "drill_hole_too_small"
@@ -357,7 +364,17 @@ class ViolationType(Enum):
             "dimension_via_drill": cls.DIMENSION_VIA_DRILL,
             "dimension_via_diameter": cls.DIMENSION_VIA_DIAMETER,
             "dimension_annular_ring": cls.DIMENSION_ANNULAR_RING,
-            "dimension_drill_clearance": cls.DIMENSION_DRILL_CLEARANCE,
+            # Hole-to-hole clearance (Issue #4353).  The new canonical id
+            # ``hole_to_hole_clearance`` matches the enum value directly, but
+            # is aliased here explicitly (mirroring the other dimension rules)
+            # so the fuzzy ``"clearance"`` fallback at the bottom of
+            # from_string() can never mis-route it to the generic CLEARANCE
+            # type.  The old ``dimension_drill_clearance`` string is retained
+            # below it as a backwards-compat alias so previously-saved JSON
+            # reports and ``kct fix-drc dimension_drill_clearance`` still
+            # parse.  Do NOT delete either entry as "redundant".
+            "hole_to_hole_clearance": cls.HOLE_TO_HOLE_CLEARANCE,
+            "dimension_drill_clearance": cls.HOLE_TO_HOLE_CLEARANCE,
             # silkscreen rules from validate silkscreen checker
             "silkscreen_line_width": cls.SILKSCREEN_LINE_WIDTH,
             "silkscreen_text_height": cls.SILKSCREEN_TEXT_HEIGHT,

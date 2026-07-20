@@ -78,7 +78,7 @@ class DesignRules:
     # candidate via whose drill would sit within ``min_hole_to_hole`` edge-to-edge
     # of any existing drill (via OR through-hole pad, ANY net).  Mirrors the
     # validate-side ``manufacturers.base.DesignRules.min_hole_to_hole_mm`` (#3846)
-    # and the DRC ``dimension_drill_clearance`` rule (#3842) so the router
+    # and the DRC ``hole_to_hole_clearance`` rule (#3842) so the router
     # pre-check and the DRC post-check agree.  Defaults to 0.5 so behavior is
     # correct even when no manufacturer profile is threaded in.
     min_hole_to_hole: float = 0.5  # mm

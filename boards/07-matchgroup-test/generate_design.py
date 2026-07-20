@@ -685,7 +685,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     BRIDGE_W = 0.2
     # Fab hole-to-hole floor, EDGE-to-edge (mirrors the jlcpcb
     # ``min_hole_to_hole_mm`` = 0.5 that ``kct check`` enforces as
-    # ``dimension_drill_clearance``).  The old constant here was a bare
+    # ``hole_to_hole_clearance``).  The old constant here was a bare
     # 0.45 mm CENTER-to-center -- for a 0.25 mm repair drill next to a
     # 0.20 mm stitch drill that allowed an edge gap of just 0.225 mm and
     # shipped two ~0.39 mm violations on the re-routed artifact.

@@ -4,7 +4,8 @@
 This command repairs multiple types of DRC violations:
 - clearance_segment_segment: nudge traces via ClearanceRepairer
 - clearance_segment_via: nudge traces away from enlarged vias via ClearanceRepairer
-- dimension_drill_clearance: de-duplicate or slide vias via DrillClearanceRepairer
+- hole_to_hole_clearance (formerly dimension_drill_clearance, #4353): de-duplicate
+  or slide vias via DrillClearanceRepairer
 
 Usage:
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt

@@ -668,7 +668,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     # hardcoded center-to-center constant -- the same defect class #3851
     # fixed in ``generate_pcb._via_ok``.  The old ``DRILL_CC = 0.45`` (c-c)
     # let two 0.25 mm-drill vias sit 0.20 mm edge-to-edge (a
-    # ``dimension_drill_clearance`` true positive); 0.5 mm edge-to-edge is
+    # ``hole_to_hole_clearance`` true positive); 0.5 mm edge-to-edge is
     # the manufacturable floor checked by the DRC rule (#3842).
     REPAIR_VIA_DRILL = 0.25  # matches the "(drill 0.25)" emitted below
     MIN_HOLE_TO_HOLE = 0.5  # fab drill-to-drill edge-to-edge floor
@@ -1068,7 +1068,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
 # pipeline on this board.  Both are SAME-NET via-placement artifacts (no
 # short risk), and both block the manufacturing bundle's "Errors = 0" gate:
 #
-#   1. ``dimension_drill_clearance`` -- the A* leaves a two-via "staple"
+#   1. ``hole_to_hole_clearance`` -- the A* leaves a two-via "staple"
 #      (via -> short inter-via chain on one layer -> via) whose drills sit
 #      closer than the 0.5 mm fab hole-to-hole floor.  This is the #3855
 #      holdout (the guard covers the via PLACERS, not the A* path builder).
@@ -1205,7 +1205,7 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
     Strategy per defect class (both validated with shapely against ALL
     copper; every new segment is axis/45-aligned by construction):
 
-    * **Staple collapse** (``dimension_drill_clearance``, same-net pair):
+    * **Staple collapse** (``hole_to_hole_clearance``, same-net pair):
       find the single-layer chain of same-net segments joining the two
       vias.  Delete one via (the "victim") plus the chain, and re-draw
       the link on the victim's OTHER attached layer as a 1-2 leg

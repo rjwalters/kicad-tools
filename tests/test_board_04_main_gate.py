@@ -7,7 +7,7 @@ error or a copper-LVS short printed SUCCESS and exited 0.  Issue #3839 wires
 both into the gate.  ``run_drc`` is now ALLOWLIST-AWARE: it parses the DRC
 JSON and tolerates exactly the grandfathered violations the CI gate tolerates.
 Since Issue #4017 re-spaced the LQFP-48 west-escape drill pair, the
-``dimension_drill_clearance`` allowance is strict-0 -- the only remaining
+``hole_to_hole_clearance`` allowance is strict-0 -- the only remaining
 grandfathered rule is the advisory ``connectivity`` finding; ANY drill error
 or any other blocking rule fails the gate.
 
@@ -120,7 +120,7 @@ def test_run_drc_fails_on_any_drill(
         board04,
         monkeypatch,
         tmp_path,
-        ["dimension_drill_clearance"],
+        ["hole_to_hole_clearance"],
     )
     pcb = tmp_path / "stm32_devboard_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
@@ -135,7 +135,7 @@ def test_run_drc_fails_on_non_drill_blocking_rule(
         board04,
         monkeypatch,
         tmp_path,
-        ["dimension_drill_clearance", "clearance_segment_zone"],
+        ["hole_to_hole_clearance", "clearance_segment_zone"],
     )
     pcb = tmp_path / "stm32_devboard_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")

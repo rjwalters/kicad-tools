@@ -270,7 +270,14 @@ class DimensionRules(DRCRule):
 
                     results.add(
                         DRCViolation(
-                            rule_id="dimension_drill_clearance",
+                            # Issue #4353: the emitted rule_id is
+                            # ``hole_to_hole_clearance`` (was
+                            # ``dimension_drill_clearance``) so the report
+                            # label matches the "Hole-to-hole clearance ..."
+                            # message text below.  The old id still parses via
+                            # the backwards-compat alias in
+                            # ``ViolationType.from_string``.
+                            rule_id="hole_to_hole_clearance",
                             severity=severity,
                             message=(
                                 f"{message_prefix}Hole-to-hole clearance "

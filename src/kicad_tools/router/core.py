@@ -690,7 +690,7 @@ class _TraceResolverTransaction:
         # Build the board-wide existing-drill registry once (foreign-net PTH
         # pad drills + all pre-existing / other newly-committed via drills) so a
         # via the main router just placed cannot sit within ``min_hole_to_hole``
-        # of another drill and later trip a ``dimension_drill_clearance`` DRC.
+        # of another drill and later trip a ``hole_to_hole_clearance`` DRC.
         min_h2h = float(getattr(self._router.rules, "min_hole_to_hole", 0.5))
 
         # Validate against the CURRENT grid state (post-rip, post-
@@ -735,7 +735,7 @@ class _TraceResolverTransaction:
         main A* router.  Compares the candidate via drill against every
         foreign-net through-hole pad drill and every other via drill (existing
         + committed) using the canonical edge-to-edge predicate shared with the
-        DRC ``dimension_drill_clearance`` rule and the escape router
+        DRC ``hole_to_hole_clearance`` rule and the escape router
         (:func:`kicad_tools.router.via_clearance.drill_hole_to_hole_clear`).
 
         Same-drill self-comparison (the via against itself) is excluded by an

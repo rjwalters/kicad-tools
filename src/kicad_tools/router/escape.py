@@ -6886,7 +6886,7 @@ class EscapeRouter:
         # above operates on PAD diameters; it does not enforce the fab's
         # drill-to-drill (hole-to-hole) minimum, so an escape via could land
         # within ``min_hole_to_hole`` of a through-hole pad / existing via
-        # drill and trip a ``dimension_drill_clearance`` DRC error.  Reject
+        # drill and trip a ``hole_to_hole_clearance`` DRC error.  Reject
         # such candidates (callers treat ``False`` as "try the next site").
         if existing_drills:
             from .via_clearance import drill_hole_to_hole_clear
