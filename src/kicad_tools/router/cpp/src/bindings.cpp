@@ -274,7 +274,53 @@ NB_MODULE(router_cpp, m) {
     nb::class_<Pathfinder>(m, "Pathfinder")
         .def(nb::init<Grid3D&, const DesignRules&, bool>(),
              "grid"_a, "rules"_a, "diagonal_routing"_a = true)
-        .def("route", &Pathfinder::route,
+        // Issue #4346: ``start_pad_bounds`` / ``end_pad_bounds`` are bound via a
+        // thin lambda taking ``std::optional<PadBounds>`` defaulting to
+        // ``nb::none()`` instead of a materialized ``PadBounds{}`` default arg.
+        // A *bound-type* default argument makes nanobind cast the sentinel into a
+        // persistent Python object held for the module's lifetime; because CPython
+        // does not deallocate extension modules at interpreter finalization, those
+        // objects are still live when nanobind's teardown leak checker runs -- the
+        // exact source of the "leaked 4 instances of PadBounds" report on
+        // ``kct build-native``. Defaulting to None keeps zero tracked instances;
+        // the omitted case substitutes an all-zero ``PadBounds{}`` inside the
+        // lambda, preserving pre-#4346 Python-visible behavior identically.
+        .def("route",
+             [](Pathfinder& self,
+                float start_x, float start_y, int start_layer,
+                float end_x, float end_y, int end_layer,
+                int net,
+                const std::vector<int>& start_layers,
+                const std::vector<int>& end_layers,
+                bool negotiated_mode,
+                float present_cost_factor,
+                float weight,
+                int trace_radius_cells,
+                int via_radius_cells,
+                std::optional<PadBounds> start_pad_bounds,
+                std::optional<PadBounds> end_pad_bounds,
+                int partner_net,
+                int intra_pair_radius_cells,
+                double per_net_timeout_seconds,
+                int max_search_iterations,
+                float emit_trace_width,
+                float emit_via_diameter,
+                float emit_via_drill,
+                const std::vector<PadChannelBudget>& pad_channel_budgets) {
+                 return self.route(
+                     start_x, start_y, start_layer,
+                     end_x, end_y, end_layer,
+                     net,
+                     start_layers, end_layers,
+                     negotiated_mode, present_cost_factor, weight,
+                     trace_radius_cells, via_radius_cells,
+                     start_pad_bounds.value_or(PadBounds{}),
+                     end_pad_bounds.value_or(PadBounds{}),
+                     partner_net, intra_pair_radius_cells,
+                     per_net_timeout_seconds, max_search_iterations,
+                     emit_trace_width, emit_via_diameter, emit_via_drill,
+                     pad_channel_budgets);
+             },
              "start_x"_a, "start_y"_a, "start_layer"_a,
              "end_x"_a, "end_y"_a, "end_layer"_a,
              "net"_a,
@@ -285,8 +331,8 @@ NB_MODULE(router_cpp, m) {
              "weight"_a = 1.0f,
              "trace_radius_cells"_a = 0,
              "via_radius_cells"_a = 0,
-             "start_pad_bounds"_a = PadBounds{},
-             "end_pad_bounds"_a = PadBounds{},
+             "start_pad_bounds"_a = nb::none(),
+             "end_pad_bounds"_a = nb::none(),
              // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
              "partner_net"_a = -1,
              "intra_pair_radius_cells"_a = 0,
@@ -301,7 +347,42 @@ NB_MODULE(router_cpp, m) {
              "emit_via_drill"_a = 0.0f,
              // Issue #3143: per-pad lateral-channel budget (empty = inert).
              "pad_channel_budgets"_a = std::vector<PadChannelBudget>{})
-        .def("route_resumable", &Pathfinder::route_resumable,
+        .def("route_resumable",
+             [](Pathfinder& self,
+                float start_x, float start_y, int start_layer,
+                float end_x, float end_y, int end_layer,
+                int net,
+                const std::vector<int>& start_layers,
+                const std::vector<int>& end_layers,
+                bool negotiated_mode,
+                float present_cost_factor,
+                float weight,
+                int trace_radius_cells,
+                int via_radius_cells,
+                std::optional<PadBounds> start_pad_bounds,
+                std::optional<PadBounds> end_pad_bounds,
+                int partner_net,
+                int intra_pair_radius_cells,
+                double per_net_timeout_seconds,
+                int max_search_iterations,
+                float emit_trace_width,
+                float emit_via_diameter,
+                float emit_via_drill,
+                const std::vector<PadChannelBudget>& pad_channel_budgets) {
+                 return self.route_resumable(
+                     start_x, start_y, start_layer,
+                     end_x, end_y, end_layer,
+                     net,
+                     start_layers, end_layers,
+                     negotiated_mode, present_cost_factor, weight,
+                     trace_radius_cells, via_radius_cells,
+                     start_pad_bounds.value_or(PadBounds{}),
+                     end_pad_bounds.value_or(PadBounds{}),
+                     partner_net, intra_pair_radius_cells,
+                     per_net_timeout_seconds, max_search_iterations,
+                     emit_trace_width, emit_via_diameter, emit_via_drill,
+                     pad_channel_budgets);
+             },
              "start_x"_a, "start_y"_a, "start_layer"_a,
              "end_x"_a, "end_y"_a, "end_layer"_a,
              "net"_a,
@@ -312,8 +393,8 @@ NB_MODULE(router_cpp, m) {
              "weight"_a = 1.0f,
              "trace_radius_cells"_a = 0,
              "via_radius_cells"_a = 0,
-             "start_pad_bounds"_a = PadBounds{},
-             "end_pad_bounds"_a = PadBounds{},
+             "start_pad_bounds"_a = nb::none(),
+             "end_pad_bounds"_a = nb::none(),
              // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
              "partner_net"_a = -1,
              "intra_pair_radius_cells"_a = 0,
