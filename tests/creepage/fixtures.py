@@ -74,6 +74,21 @@ def board_source(with_slot: bool) -> str:
     return "".join(parts)
 
 
+def board_close_hv_source() -> str:
+    """Two 2x2 pads (L_MAINS at x=110, GND at x=113) -- a ~1 mm HV gap.
+
+    Pad copper edges sit at x=111 (L_MAINS) and x=112 (GND), so the
+    straight-line clearance (and, with no slot, the creepage) is ~1 mm -- far
+    below any realistic IEC-derived mains requirement.  Used for the
+    below-standard gate-FAIL path.
+    """
+    parts = [_HEADER, _OUTLINE]
+    parts.append(_footprint("U1", 110, 110, 1, "L_MAINS"))
+    parts.append(_footprint("U2", 113, 110, 2, "GND"))
+    parts.append(")\n")
+    return "".join(parts)
+
+
 def board_no_hv_source() -> str:
     """Board whose only assigned nets are GND / SIG -- no HV net exists."""
     header = _HEADER.replace('(net 1 "L_MAINS")', '(net 1 "SIG")')

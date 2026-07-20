@@ -97,15 +97,35 @@ kct export <board.kicad_pcb> --output <dir> --mfr <tier>
 - **Confirm `<dir>/manifest.json` exists and was freshly written** (its mtime should be newer than the routed PCB). No manifest ⇒ no sign-off.
 - Useful variants: `--dry-run` (show what would be generated without writing) and `--no-report`.
 
+### Gate 4 — HV / isolation creepage gate (conditional: mains/HV boards only)
+
+**Skip this gate entirely for boards with no high-voltage / mains net.** For any board carrying an HV net group (mains input, primary-side switcher, etc.), a below-standard creepage/clearance pair is a safety defect that neither Gate 1 nor Gate 2 derives from an insulation standard. Run the isolation audit and require a clean verdict:
+
+```bash
+kct audit <board.kicad_pcb> --mfr <tier> \
+  --net-class-map <net_class_map.json> \
+  --hv-standard <iec60664|iec62368> \
+  --hv-working-voltage <V-rms> \
+  --hv-pollution-degree <1|2|3> \
+  [--hv-material-group <I|II|IIIa|IIIb>]
+```
+
+- HV nets are selected from the `--net-class-map` sidecar (the net whose class name is `HV`, or `--hv-net-class <name>`). Without a map the HV group will not resolve and the section is skipped.
+- The required creepage **and** clearance are derived from the IEC 60664-1 / 62368-1 tables for the `(working voltage, pollution degree, material group)` triple. To gate against a manually specified creepage instead, use `--hv-min <mm>` (phase-1).
+- A below-derived-requirement HV pair makes the audit verdict `NOT_READY`, so **`kct audit` exits 2** — the manufacturing-readiness gate FAILs with a non-zero exit. A compliant board exits 0.
+- If HV nets are present but no threshold source (`--hv-min` / `--hv-standard`) is supplied, the audit downgrades to `WARNING` ("no isolation requirement specified") rather than silently passing — so an HV path is never signed off un-evaluated.
+- The derived values are an engineering aid, **NOT a certification** — the governing standard and a qualified engineer remain authoritative.
+
 ## Sign-off verdict
 
-Sign off **only if all three** hold:
+Sign off **only if all applicable gates** hold:
 
 1. Gate 1 `kct check --mfr <tier>` exits clean at the resolved tier.
 2. Gate 2 `kicad-cli pcb drc --refill-zones` reports **0 new errors** (and actually ran — a missing `kicad-cli` is a blocker, not a pass).
 3. Gate 3 `kct export --mfr <tier>` wrote a fresh `manifest.json`.
+4. **(HV/mains boards only)** Gate 4 `kct audit --hv-standard ...` exits 0 with a clean HV/isolation verdict — a `NOT_READY` (exit 2) isolation gate is a hard blocker; an un-gated HV path (`WARNING`, no requirement specified) is not sign-off either.
 
-If any gate fails or could not run, report **NOT signed off**, name the failing gate, and quote the specific violation(s). Never mark a board fab-ready on a partial run.
+If any applicable gate fails or could not run, report **NOT signed off**, name the failing gate, and quote the specific violation(s). Never mark a board fab-ready on a partial run.
 
 ## What this skill does NOT do
 

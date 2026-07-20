@@ -102,6 +102,60 @@ def main(argv: list[str] | None = None) -> int:
             "(Issue #2684)."
         ),
     )
+    # HV / isolation (creepage) audit flags (Issue #4333, phase 3).  All
+    # additive; the isolation section only activates when HV nets resolve AND
+    # a threshold source (--hv-min or --hv-standard) is supplied.  HV net
+    # selection reuses the existing --net-class-map sidecar.
+    parser.add_argument(
+        "--hv-net-class",
+        dest="hv_net_class",
+        default="HV",
+        help="Net class treated as the HV group for the isolation audit (default: HV)",
+    )
+    parser.add_argument(
+        "--hv-min",
+        dest="hv_min",
+        type=float,
+        default=None,
+        help=(
+            "Manual required creepage (surface-path) distance in mm (phase-1). "
+            "When combined with --hv-standard the stricter creepage bound governs."
+        ),
+    )
+    parser.add_argument(
+        "--hv-standard",
+        dest="hv_standard",
+        choices=["iec60664", "iec62368"],
+        default=None,
+        help=(
+            "Derive the required creepage AND clearance from an IEC standard "
+            "table (iec60664 / iec62368) instead of --hv-min.  Requires "
+            "--hv-working-voltage and --hv-pollution-degree.  Engineering aid, "
+            "NOT a certification."
+        ),
+    )
+    parser.add_argument(
+        "--hv-working-voltage",
+        dest="hv_working_voltage",
+        type=float,
+        default=None,
+        help="RMS working voltage in volts (required with --hv-standard).",
+    )
+    parser.add_argument(
+        "--hv-pollution-degree",
+        dest="hv_pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help="IEC pollution degree 1/2/3 (required with --hv-standard).",
+    )
+    parser.add_argument(
+        "--hv-material-group",
+        dest="hv_material_group",
+        choices=["I", "II", "IIIa", "IIIb"],
+        default="IIIa",
+        help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
+    )
     parser.add_argument(
         "--strict",
         action="store_true",
@@ -141,6 +195,12 @@ def main(argv: list[str] | None = None) -> int:
             no_assembly=args.no_assembly,
             pcb_override=args.pcb,
             net_class_map_path=args.net_class_map,
+            hv_net_class=args.hv_net_class,
+            hv_min_mm=args.hv_min,
+            hv_standard=args.hv_standard,
+            hv_working_voltage=args.hv_working_voltage,
+            hv_pollution_degree=args.hv_pollution_degree,
+            hv_material_group=args.hv_material_group,
         )
         result = audit.run()
     except ValueError as e:
@@ -334,6 +394,11 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
         layers_icon = "OK" if layers[2] else "X"
         print(f"    [{layers_icon}] Layers: {layers[0]} (supported: {layers[1]})")
 
+    # HV / Isolation (creepage) -- only when HV nets were present (Issue #4333).
+    iso = result.isolation
+    if iso.hv_present:
+        _output_isolation_section(iso)
+
     # Layer utilization
     if verbose and result.layers.utilization:
         print(f"\n{'-' * 70}")
@@ -374,6 +439,79 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
     print(f"\n{'=' * 70}")
 
 
+def _output_isolation_section(iso) -> None:
+    """Render the HV / Isolation (creepage) audit block (Issue #4333).
+
+    Reports, per HV net group, the measured minimum creepage and clearance
+    against the IEC-derived (or manual) required values with distinct margins,
+    plus the governing standard citation and the standards DISCLAIMER.
+    """
+    if iso.could_not_verify:
+        icon, verdict = "!!", "COULD NOT VERIFY"
+    elif not iso.threshold_supplied:
+        icon, verdict = "!!", "NO REQUIREMENT SPECIFIED"
+    elif iso.passed:
+        icon, verdict = "OK", "PASS"
+    else:
+        icon, verdict = "X", "FAIL"
+
+    print(f"\n[{icon}] HV / Isolation (creepage): {verdict}")
+    hv_nets = ", ".join(iso.hv_nets) if iso.hv_nets else "(none)"
+    print(f"    HV nets ({len(iso.hv_nets)}): {hv_nets}")
+
+    if iso.could_not_verify or not iso.threshold_supplied:
+        if iso.details:
+            print(f"    Note: {iso.details}")
+        # Still surface the measured census informationally when we have it.
+        if iso.min_creepage_mm is not None:
+            print(
+                f"    Measured min creepage: {iso.min_creepage_mm:.3f}mm, "
+                f"min clearance: {iso.min_clearance_mm:.3f}mm "
+                f"({iso.pair_count} pair(s))"
+            )
+        return
+
+    if iso.standard:
+        edition = f" {iso.standard_edition}" if iso.standard_edition else ""
+        print(f"    Standard: {iso.standard}{edition}")
+
+    # Creepage (surface path) -- always thresholded.
+    if iso.min_creepage_mm is not None and iso.required_creepage_mm is not None:
+        margin = iso.min_creepage_mm - iso.required_creepage_mm
+        cr_icon = "OK" if margin >= -1e-4 else "X"
+        print(
+            f"    [{cr_icon}] Creepage: {iso.min_creepage_mm:.3f}mm "
+            f"(required: {iso.required_creepage_mm:.3f}mm, margin: {margin:+.3f}mm)"
+        )
+    elif iso.min_creepage_mm is not None:
+        print(f"    Creepage (min measured): {iso.min_creepage_mm:.3f}mm")
+
+    # Clearance (through-air) -- only thresholded in standard mode.
+    if iso.min_clearance_mm is not None and iso.required_clearance_mm is not None:
+        margin = iso.min_clearance_mm - iso.required_clearance_mm
+        cl_icon = "OK" if margin >= -1e-4 else "X"
+        print(
+            f"    [{cl_icon}] Clearance: {iso.min_clearance_mm:.3f}mm "
+            f"(required: {iso.required_clearance_mm:.3f}mm, margin: {margin:+.3f}mm)"
+        )
+    elif iso.min_clearance_mm is not None:
+        print(f"    Clearance (min measured): {iso.min_clearance_mm:.3f}mm")
+
+    if iso.pair_count == 0:
+        print("    Census: 0 pairs (HV nets present but no other conductors / edge).")
+
+    for fp in iso.failing_pairs[:5]:
+        print(
+            f"    [X] {fp['net_a']} <-> {fp['net_b']} ({fp['kind']}): "
+            f"creepage {fp['creepage_mm']:.3f}mm / clearance {fp['clearance_mm']:.3f}mm"
+        )
+
+    if iso.standard:
+        from kicad_tools.creepage.standards import DISCLAIMER
+
+        print(f"    NOTE: {DISCLAIMER}")
+
+
 def output_json(result: AuditResult) -> None:
     """Output audit results as JSON."""
     print(json.dumps(result.to_dict(), indent=2, default=str))
@@ -408,6 +546,14 @@ def output_summary(result: AuditResult) -> None:
         )
     print(f"  Net completion: {summary['net_completion']:.0f}%")
     print(f"  Manufacturer compatible: {'Yes' if summary['manufacturer_compatible'] else 'No'}")
+    if result.isolation.hv_present:
+        if result.isolation.checked:
+            iso_state = "PASS" if result.isolation.passed else "FAIL"
+        elif result.isolation.could_not_verify:
+            iso_state = "could not verify"
+        else:
+            iso_state = "no requirement specified"
+        print(f"  HV isolation: {iso_state}")
     if summary["estimated_cost"] > 0:
         print(f"  Estimated cost: ${summary['estimated_cost']:.2f}")
     if summary["action_items"] > 0:
