@@ -2642,8 +2642,21 @@ class Autorouter:
         # coupled connections are present (issue #4270).  The default 8
         # is preserved exactly for pair-free boards.
         max_iterations = 12 if coupled else 8
+        # Issue #4355: the preserved copper of NON-listed nets
+        # (``existing_routes`` loaded under --preserve-existing / --nets /
+        # --region, keyed by their real net ids) must be a HARD clearance
+        # obstacle in the lattice -- not just marked on the legacy grid the
+        # lattice never consults.  Feed only the copper whose net is NOT in the
+        # routable set (``self.nets``): a listed net being re-routed replaces
+        # its own stale copper, so it must not fix itself in place.  Without
+        # this the lattice sees the non-listed pads but not the traces between
+        # them and legally crosses foreign copper -> segment-segment shorts.
+        fixed_copper = [r for r in self.existing_routes if r.net not in self.nets]
         routes_by_key, stats = pf.route_netset(
-            connections, coupled=coupled, max_iterations=max_iterations
+            connections,
+            coupled=coupled,
+            fixed_copper=fixed_copper,
+            max_iterations=max_iterations,
         )
         self._lattice_negotiation_stats = stats
 

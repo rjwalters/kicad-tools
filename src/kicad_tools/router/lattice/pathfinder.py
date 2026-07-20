@@ -254,6 +254,16 @@ class LatticePathfinder:
         # Per-diff-pair outcome for the best pass: "coupled" or a decline
         # reason, keyed by ``CoupledConnection.key`` (issue #4270).
         self.pair_outcomes: dict[object, str] = {}
+        # Issue #4355: immovable copper from NON-listed nets (the preserved
+        # ``router.existing_routes``), pre-processed into per-segment seed
+        # tuples ``(layer_idx, a, b, net, half_width)`` plus via sites
+        # ``(point, net)``.  Every fresh CommittedCopper model is pre-seeded
+        # with these so a negotiated net spaces against the fixed copper as a
+        # HARD geometric block -- routes around it or is honestly reported
+        # unroutable, never shipped as a short.  Empty (the default) preserves
+        # the pre-#4355 behavior byte-for-byte.
+        self._fixed_runs: list[tuple[int, Pt, Pt, int, float]] = []
+        self._fixed_vias: list[tuple[Pt, int]] = []
 
     # -- construction from a board ----------------------------------------
 
@@ -360,7 +370,7 @@ class LatticePathfinder:
             return tuple(range(self.num_layers))
 
     def _fresh_committed(self) -> CommittedCopper:
-        return CommittedCopper(
+        committed = CommittedCopper(
             self.num_layers,
             trace_half=self._trace_half,
             clearance=self.rules.trace_clearance,
@@ -368,6 +378,61 @@ class LatticePathfinder:
             via_via_gap=self._via_via_gap,
             same_net_via_gap=self._same_net_via_gap,
         )
+        # Issue #4355: pre-seed immovable non-listed copper so EVERY fresh
+        # model (per-pass negotiation, isolated stub/pair probes, and the
+        # desired-corridor history bumps) spaces against it consistently.  The
+        # seed set is empty unless ``route_netset`` was given ``fixed_copper``,
+        # so this is a no-op on the pre-#4355 paths.
+        self._seed_fixed_copper(committed)
+        return committed
+
+    def _seed_fixed_copper(self, committed: CommittedCopper) -> None:
+        """Commit the preserved non-listed copper into ``committed`` (#4355).
+
+        Each preserved segment is committed under its OWN net id at its emitted
+        half-width and the board-global clearance floor -- a hard geometric
+        block that ``route_netset`` declines to cross (never shipped as a
+        short).  Same-net exemption in :meth:`CommittedCopper.seg_clear` means
+        seeding a listed net's own stale copper (if any slipped into the fixed
+        set) cannot block that net's fresh route.  Each preserved via seeds
+        ``committed.vias`` (a through-via blocks every layer).
+        """
+        clr = self.rules.trace_clearance
+        for layer_idx, a, b, net, half in self._fixed_runs:
+            committed.add_run(layer_idx, [a, b], net, half, clr)
+        for point, net in self._fixed_vias:
+            committed.add_via(point, net)
+
+    def _set_fixed_copper(self, routes: list[Route] | None) -> None:
+        """Pre-process preserved ``Route``s into flat seed tuples (#4355).
+
+        Called once by :meth:`route_netset`; maps each segment's layer enum to
+        a lattice layer index (dropping copper on non-routing layers) and each
+        via to a site.  ``None``/empty resets the seed set so a reused
+        pathfinder does not carry stale fixed copper.
+        """
+        runs: list[tuple[int, Pt, Pt, int, float]] = []
+        vias: list[tuple[Pt, int]] = []
+        for route in routes or []:
+            for seg in getattr(route, "segments", []):
+                try:
+                    layer_idx = self.layer_stack.layer_enum_to_index(seg.layer)
+                except Exception:
+                    # Copper on a layer outside this routing stack cannot
+                    # collide with a lattice trace; skip it silently.
+                    continue
+                if not (0 <= layer_idx < self.num_layers):
+                    continue
+                a = (seg.x1, seg.y1)
+                b = (seg.x2, seg.y2)
+                if dist(a, b) <= 1e-9:
+                    continue
+                half = (getattr(seg, "width", None) or self.rules.trace_width) / 2.0
+                runs.append((layer_idx, a, b, seg.net, half))
+            for via in getattr(route, "vias", []):
+                vias.append(((via.x, via.y), via.net))
+        self._fixed_runs = runs
+        self._fixed_vias = vias
 
     def _conn_geometry(self, net_class: object | None) -> tuple[float, float]:
         """Per-connection ``(trace half-width, clearance)`` (issue #4271).
@@ -1492,6 +1557,7 @@ class LatticePathfinder:
         connections: list[Connection],
         *,
         coupled: list[CoupledConnection] | None = None,
+        fixed_copper: list[Route] | None = None,
         max_iterations: int = 8,
         present_cost_initial: float = 1.0,
         present_cost_growth: float = 1.6,
@@ -1526,7 +1592,14 @@ class LatticePathfinder:
         Returns ``(routes_by_key, stats)`` for the best pass seen;
         :attr:`failure_reasons` carries the per-connection decline diagnosis
         for that pass.
+
+        Issue #4355: ``fixed_copper`` is the preserved copper of NON-listed
+        nets (``router.existing_routes`` minus the routable set).  It is
+        pre-seeded into every per-pass :class:`CommittedCopper` model as an
+        immovable hard obstacle, so a negotiated net routes AROUND it or is
+        honestly declined -- it is never emitted overlapping foreign copper.
         """
+        self._set_fixed_copper(fixed_copper)
         self.build()
         pairs = list(coupled or [])
 

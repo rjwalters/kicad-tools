@@ -8431,6 +8431,26 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
     # Marker: route-only mode.  The (large) inverted skip set must NOT be
     # forwarded as force_pour_nets (that would try to pour ~every net).
     args._route_only_nets = requested_unique
+
+    # Issue #4355: --nets promises (per --help) that every OTHER board net is a
+    # "fixed obstacle" -- its copper must be RETAINED in the output AND honored
+    # for clearance.  Both flow through the --preserve-existing machinery:
+    # ``load_existing_routes`` ingests the non-listed segment/via copper and the
+    # writer re-emits it verbatim (route_cmd.py `_write_routed_pcb`).  Without
+    # this, a plain ``--nets`` run is DESTRUCTIVE -- the skipped nets' copper is
+    # never loaded and never re-emitted, stranding the rest of the board as
+    # 1-pad islands.  Mirror how --region implies preserve-existing.  This is an
+    # IMPLICATION, not an override: an explicit ``--preserve-existing`` is a
+    # harmless no-op, so passing both is never an error.
+    already_preserving = bool(getattr(args, "preserve_existing", False))
+    args.preserve_existing = True
+    if not already_preserving and not getattr(args, "quiet", False):
+        print(
+            "Note: --nets implies --preserve-existing "
+            "(every non-listed net's copper is retained and treated as a fixed "
+            "obstacle).",
+            file=sys.stderr,
+        )
     return 0
 
 

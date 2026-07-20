@@ -189,6 +189,62 @@ def test_nets_sub_two_pad_net_is_reported(fake_board, capsys):
 
 
 # ---------------------------------------------------------------------------
+# Issue #4355: --nets must RETAIN all non-listed copper (imply preserve-existing)
+#
+# Without this, a plain ``--nets`` run is destructive -- the skipped nets' copper
+# is never loaded and never re-emitted, stranding the rest of the board as 1-pad
+# islands.  Retention flows through the --preserve-existing load + re-emit path,
+# so --nets must imply it.
+# ---------------------------------------------------------------------------
+def test_nets_implies_preserve_existing(fake_board, capsys):
+    """``--nets`` sets ``preserve_existing`` so non-listed copper is retained."""
+    from pathlib import Path
+
+    from kicad_tools.cli.route_cmd import _resolve_route_only_nets
+
+    args = _route_args(nets="/A,/B", preserve_existing=False, quiet=False)
+    rc = _resolve_route_only_nets(args, Path("dummy.kicad_pcb"))
+
+    assert rc == 0
+    assert args.preserve_existing is True
+    # The implied flag is visible (non-quiet).
+    assert "implies --preserve-existing" in capsys.readouterr().err
+
+
+def test_nets_with_explicit_preserve_existing_is_noop(fake_board, capsys):
+    """Passing ``--preserve-existing`` alongside ``--nets`` is not an error.
+
+    The implication is a no-op when the flag is already set, and no redundant
+    notice is printed.
+    """
+    from pathlib import Path
+
+    from kicad_tools.cli.route_cmd import _resolve_route_only_nets
+
+    args = _route_args(nets="/A,/B", preserve_existing=True, quiet=False)
+    rc = _resolve_route_only_nets(args, Path("dummy.kicad_pcb"))
+
+    assert rc == 0
+    assert args.preserve_existing is True
+    # Already preserving -> no duplicate implied-flag notice.
+    assert "implies --preserve-existing" not in capsys.readouterr().err
+
+
+def test_nets_quiet_suppresses_implied_flag_notice(fake_board, capsys):
+    """``--quiet`` suppresses the implied-flag notice but still sets the flag."""
+    from pathlib import Path
+
+    from kicad_tools.cli.route_cmd import _resolve_route_only_nets
+
+    args = _route_args(nets="/A,/B", preserve_existing=False, quiet=True)
+    rc = _resolve_route_only_nets(args, Path("dummy.kicad_pcb"))
+
+    assert rc == 0
+    assert args.preserve_existing is True
+    assert "implies --preserve-existing" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # Parser wiring (drift-adjacent): --nets present on both route parsers + shim.
 # ---------------------------------------------------------------------------
 def test_nets_flag_on_outer_route_parser():
