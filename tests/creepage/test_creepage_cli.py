@@ -16,7 +16,12 @@ from kicad_tools._shapely import has_shapely
 from kicad_tools.cli.commands.creepage import run_creepage_command
 from kicad_tools.cli.parser import create_parser
 
-from .fixtures import board_mains_named_source, board_no_hv_source, board_source
+from .fixtures import (
+    board_benign_suspect_names_source,
+    board_mains_named_source,
+    board_no_hv_source,
+    board_source,
+)
 
 pytestmark = pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
 
@@ -222,6 +227,30 @@ def test_low_voltage_non_hv_board_still_exits_zero(tmp_path, capsys):
     # voltage below the 50 V SELV boundary) must still exit 0 with the inert
     # "Nothing to audit" message -- no false alarms.
     pcb = _write(tmp_path, board_no_hv_source())
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "24",
+            "--pollution-degree",
+            "2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Nothing to audit -- exit 0" in captured.out
+    assert "WARNING" not in captured.err
+
+
+def test_benign_suspect_named_board_exits_zero(tmp_path, capsys):
+    # Issue #4365: a board whose only suspect-shaped nets are benign
+    # (SPI_LINE / HOT_SWAP / PRIMARY_CLK) with no mains-level working voltage
+    # must NOT trip the #4354 vacuity guard -- the tightened MAINS_NAME_RE no
+    # longer flags bare LINE / HOT / PRIMARY tokens, so this exits 0.
+    pcb = _write(tmp_path, board_benign_suspect_names_source())
     rc = _run(
         [
             "creepage",
