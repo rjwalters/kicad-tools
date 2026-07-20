@@ -620,9 +620,7 @@ class TestDrillClearanceNets:
         checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2, copper_oz=1.0)
         results = checker.check_dimensions()
 
-        drill_violations = [
-            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
-        ]
+        drill_violations = [v for v in results.violations if v.rule_id == "hole_to_hole_clearance"]
         assert len(drill_violations) > 0
 
         v = drill_violations[0]
