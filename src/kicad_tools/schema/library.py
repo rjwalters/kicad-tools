@@ -12,6 +12,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from kicad_tools.core.version import (
+    KICAD_GENERATOR_VERSION,
+    KICAD_SYM_FORMAT_VERSION,
+)
 from kicad_tools.sexp import SExp, parse_file, parse_string, serialize_sexp
 
 # Valid KiCad pin types
@@ -1189,22 +1193,24 @@ class SymbolLibrary:
     def to_sexp_node(self) -> SExp:
         """Generate S-expression for the entire library.
 
-        Format:
+        Format (``version`` / ``generator_version`` come from
+        :mod:`kicad_tools.core.version`)::
+
             (kicad_symbol_lib
-              (version 20231120)
+              (version <KICAD_SYM_FORMAT_VERSION>)
               (generator "kicad_tools")
-              (generator_version "1.0")
+              (generator_version "<KICAD_GENERATOR_VERSION>")
               (symbol ...)
               (symbol ...)
             )
         """
         # generator_version is a strict-typed string field in KiCad; emit the
-        # value as a quoted atom so kicad-cli accepts the file even though
-        # "1.0" textually parses as a number.
+        # value as a quoted atom so kicad-cli accepts the file even though the
+        # version string textually parses as a number.
         children: list[SExp] = [
-            SExp.list("version", 20231120),
+            SExp.list("version", KICAD_SYM_FORMAT_VERSION),
             SExp.list("generator", "kicad_tools"),
-            SExp.list("generator_version", SExp.quoted_atom("1.0")),
+            SExp.list("generator_version", SExp.quoted_atom(KICAD_GENERATOR_VERSION)),
         ]
 
         # Add all symbols

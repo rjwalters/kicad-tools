@@ -11,6 +11,11 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.version import (
+    KICAD_GENERATOR_VERSION,
+    KICAD_SCH_FORMAT_VERSION,
+    KICAD_SYM_FORMAT_VERSION,
+)
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import (
     sheet_instances,
@@ -311,13 +316,13 @@ class SchematicIOMixin:
     def to_sexp_node(self) -> SExp:
         """Build complete schematic as SExp tree."""
         # generator_version is a strict-typed string field in KiCad; emit the
-        # value as a quoted atom so kicad-cli accepts the file even though
-        # "9.0" textually parses as a number.
+        # value as a quoted atom so kicad-cli accepts the file even though the
+        # version string textually parses as a number.
         root = SExp.list(
             "kicad_sch",
-            SExp.list("version", 20231120),
+            SExp.list("version", KICAD_SCH_FORMAT_VERSION),
             SExp.list("generator", "eeschema"),
-            SExp.list("generator_version", SExp.quoted_atom("9.0")),
+            SExp.list("generator_version", SExp.quoted_atom(KICAD_GENERATOR_VERSION)),
             uuid_node(self.sheet_uuid),
             SExp.list("paper", self.paper),
         )
@@ -596,7 +601,7 @@ class SchematicIOMixin:
         """
         lib = SExp.list(
             "kicad_symbol_lib",
-            SExp.list("version", 20231120),
+            SExp.list("version", KICAD_SYM_FORMAT_VERSION),
             SExp.list("generator", "kicad-tools"),
         )
         prefix = f"{self._PWR_SYNTH_LIB_PREFIX}:"

@@ -2389,10 +2389,30 @@ class TestPCBCreate:
         assert oy == pytest.approx(77.0)
 
     def test_create_stamps_kicad10_format_version(self):
-        """Generated board stamps the KiCad-10 format version 20241229 (#3805)."""
-        from kicad_tools.core.version import KICAD_BOARD_FORMAT_VERSION
+        """Generated board stamps the KiCad-10 format version 20241229 (#3805).
+
+        Also pins the sibling per-stream constants and the shared
+        ``generator_version`` so a stale/inconsistent literal can never creep
+        back into the writers (#4378).  20241229 is the conservative floor that
+        loads across the whole 10.0.x line; 20260206 is 10.0.4-only and is
+        rejected by 10.0.3, so the board constant must NOT be bumped past it.
+        """
+        from kicad_tools.core.version import (
+            KICAD_BOARD_FORMAT_VERSION,
+            KICAD_GENERATOR_VERSION,
+            KICAD_SCH_FORMAT_VERSION,
+            KICAD_SYM_FORMAT_VERSION,
+        )
 
         assert KICAD_BOARD_FORMAT_VERSION == 20241229
+        assert KICAD_SCH_FORMAT_VERSION == 20231120
+        assert KICAD_SYM_FORMAT_VERSION == 20231120
+        assert KICAD_GENERATOR_VERSION == "10.0"
+
+        # Regression guard: the board constant must stay at a code that every
+        # 10.0.x release accepts. 20260206 is 10.0.4-authored but rejected by
+        # 10.0.3 (a *future* format); bumping to it would regress those users.
+        assert KICAD_BOARD_FORMAT_VERSION < 20260206
 
         pcb = PCB.create(width=65, height=56)
         version = pcb._sexp.find("version")
