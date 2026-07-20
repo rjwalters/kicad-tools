@@ -10,7 +10,7 @@ import re
 import uuid
 from pathlib import Path
 
-from ..core.version import KICAD_BOARD_FORMAT_VERSION
+from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
 from .layout import PCBLayout
 
 
@@ -57,7 +57,7 @@ class KiCadPCBExporter:
         return f'''(kicad_pcb
 	(version {KICAD_BOARD_FORMAT_VERSION})
 	(generator "kicad_pcb_blocks.py")
-	(generator_version "1.0")
+	(generator_version "{KICAD_GENERATOR_VERSION}")
 	(general
 		(thickness 1.6)
 		(legacy_teardrops no)

@@ -38,6 +38,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .core.version import (
+    KICAD_BOARD_FORMAT_VERSION,
+    KICAD_GENERATOR_VERSION,
+    KICAD_SCH_FORMAT_VERSION,
+)
 from .schema.bom import BOM, extract_bom
 from .schema.pcb import PCB
 from .schema.schematic import Schematic
@@ -338,7 +343,7 @@ class Project:
         project_path.write_text(json.dumps(project_data, indent=2))
 
         # Create minimal .kicad_sch file (S-expression format)
-        schematic_content = f'''(kicad_sch (version 20231120) (generator "kicad_tools") (generator_version "0.2.0")
+        schematic_content = f'''(kicad_sch (version {KICAD_SCH_FORMAT_VERSION}) (generator "kicad_tools") (generator_version "{KICAD_GENERATOR_VERSION}")
 
   (uuid "{schematic_uuid}")
 
@@ -354,7 +359,7 @@ class Project:
         schematic_path.write_text(schematic_content)
 
         # Create minimal .kicad_pcb file (S-expression format)
-        pcb_content = f'''(kicad_pcb (version 20231014) (generator "kicad_tools") (generator_version "0.2.0")
+        pcb_content = f'''(kicad_pcb (version {KICAD_BOARD_FORMAT_VERSION}) (generator "kicad_tools") (generator_version "{KICAD_GENERATOR_VERSION}")
 
   (general
     (thickness 1.6)

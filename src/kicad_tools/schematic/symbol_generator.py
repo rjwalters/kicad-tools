@@ -52,6 +52,10 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from kicad_tools.core.version import (
+    KICAD_GENERATOR_VERSION,
+    KICAD_SYM_FORMAT_VERSION,
+)
 from kicad_tools.schema.library import (
     SymbolArc,
     SymbolCircle,
@@ -527,9 +531,9 @@ def generate_symbol_sexp(sym: SymbolDef) -> str:
     # Build complete symbol
     in_bom_tok = "yes" if sym.in_bom else "no"
     sexp = f'''(kicad_symbol_lib
-\t(version 20231120)
+\t(version {KICAD_SYM_FORMAT_VERSION})
 \t(generator "create_symbol.py")
-\t(generator_version "1.0")
+\t(generator_version "{KICAD_GENERATOR_VERSION}")
 \t(symbol "{sym.name}"
 \t\t(exclude_from_sim no)
 \t\t(in_bom {in_bom_tok})

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 from kicad_tools.sexp import SExp
 
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
-from ..core.version import KICAD_BOARD_FORMAT_VERSION
+from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
 from ..footprints.library_path import (
     detect_kicad_library_path,
     guess_standard_library,
@@ -1638,9 +1638,9 @@ class PCB:
         pcb.append(SExp.list("version", KICAD_BOARD_FORMAT_VERSION))
         pcb.append(SExp.list("generator", "kicad_tools"))
         # generator_version is a strict-typed string field in KiCad; emit the
-        # value as a quoted atom so kicad-cli accepts the file even though
-        # "10.0" textually parses as a number.
-        pcb.append(SExp.list("generator_version", SExp.quoted_atom("10.0")))
+        # value as a quoted atom so kicad-cli accepts the file even though the
+        # version string textually parses as a number.
+        pcb.append(SExp.list("generator_version", SExp.quoted_atom(KICAD_GENERATOR_VERSION)))
 
         # General settings
         pcb.append(
