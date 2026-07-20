@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-07-20
+
+### Summary
+
+Feature release focused on **high-voltage / analog manufacturing gates** for
+zero-GUI, agent-driven boards. Adds two new inspection capabilities — a `kct
+creepage` audit that measures physical over-surface **creepage** distance
+(slot-aware) against **IEC 60664-1 / 62368-1** table requirements, and a `kct
+analyze current-sense` analog-layout lint (sense↔high-current parallel-run,
+sense-loop area, Kelvin-tap integrity) — plus a real `--nets` route filter and
+`pcb reinforce` multi-branch anchoring. Also closes a family of safety-relevant
+`kct check` false-PASS bugs on ampacity / copper-weight sourcing. No breaking
+changes; existing commands are unaffected.
+
+### Added
+
+- **`kct creepage` — HV surface-path (creepage) audit** (#4327):
+  - Per-pair creepage **census** between HV-class nets and every other conductor
+    plus the board edge, honoring milled Edge.Cuts slots (a slot lengthens the
+    over-surface path), with clearance (through-air) and creepage (over-surface)
+    reported as **distinct** values; `--net-class` / `--min` / `--format json`
+    (#4334).
+  - Required creepage/clearance **derived from IEC 60664-1 / 62368-1 tables**
+    given `--working-voltage`, `--pollution-degree`, `--material-group`,
+    `--standard` (conservative step-up lookup, loud on out-of-range; an
+    engineering aid, not a certification) (#4332/#4338).
+  - **HV/isolation section in `kct audit`** + manufacturing-readiness gate — a
+    below-standard HV pair fails the audit gate (#4333/#4341).
+- **`kct analyze current-sense` — analog layout lint** (#4328):
+  - Per sense net: max parallel-run length + min gap to the nearest
+    high-current/switching net (same layer), flagged against thresholds, census
+    + `--format json` (#4335).
+  - Copper **sense-loop area** metric, `--max-loop-area` (#4337).
+  - **Kelvin-tap integrity** — flags a sense tap that connects mid-trace instead
+    of at the force pad's metallization (#4331).
+- **Real `--nets NET[,NET...]` on `route` / `route-auto`** (#4325) — route only
+  the listed nets (inverse of `--skip-nets`); mutually exclusive with
+  `--skip-nets`; corrects the stale `--region` help text.
+- **`pcb reinforce` multi-branch anchoring** (#4323) — `--all-runs` /
+  `--min-run-length` anchor every current-carrying branch of a net (not just the
+  single longest run), a bounded nudge-fallback before refusing an anchor, and a
+  collinear-segment-merge per-run report.
+- **`route --layers auto` inner-layer advisory** (#4315) — warn when automatic
+  layer assignment strands pour-net / high-ampacity nets on inner layers.
+
+### Fixed
+
+- **`kct check` ampacity false-PASS (safety-relevant)** — `--net-class-map` now
+  resolves its keys onto board net names so `target_ampacity` is actually
+  enforced (a 15 A / 0.2 mm mains trace no longer silently passes) (#4324);
+  copper weight is now sourced from the board's declared **stackup** when
+  present, not just `--copper`, with a cross-check warning on disagreement
+  (#4326).
+- **`kct analyze current-sense`** — evaluate the FAIL rule against **all**
+  high-current blockers, not just the nearest-by-gap one (closes a false-PASS
+  where a longer-parallel-but-farther net was the real coupling risk) (#4339).
+- **`kct creepage` provenance** — correct the clearance-table field-condition
+  label to **Case A (inhomogeneous field)** per IEC 60664-1 (#4343).
+- **Lattice engine** — reject 0.000 mm segment-to-via copper; opt-in cleanup +
+  net split (#4320).
+- **`route`** — guard an empty congestion grid and export partial nets under
+  `--export-failed-nets` (#4317).
+
 ## [0.17.0] - 2026-07-17
 
 ### Summary
@@ -1807,6 +1870,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.18.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.18.0
 [0.17.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.17.0
 [0.16.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.16.0
 [0.15.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.15.0
