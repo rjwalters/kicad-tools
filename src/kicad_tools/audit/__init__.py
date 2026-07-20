@@ -20,6 +20,7 @@ Usage:
 from .auditor import (
     AuditResult,
     AuditVerdict,
+    IsolationStatus,
     ManufacturingAudit,
     SyncStatus,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "ManufacturingAudit",
     "AuditResult",
     "AuditVerdict",
+    "IsolationStatus",
     "SyncStatus",
     "AffectedPad",
     "StaleNetGroup",

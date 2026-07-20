@@ -228,6 +228,75 @@ class ManufacturerCompatibility:
 
 
 @dataclass
+class IsolationStatus:
+    """HV creepage/clearance isolation check results (Issue #4333, phase 3).
+
+    Wraps the phase-1/phase-2 creepage engine
+    (:func:`kicad_tools.creepage.engine.resolve_hv_nets` +
+    :func:`~kicad_tools.creepage.engine.compute_creepage_census`).  The audit
+    does NOT reimplement any geometry or standard-table math -- it consumes the
+    engine's :class:`~kicad_tools.creepage.engine.CreepageReport` verbatim.
+
+    Gating semantics (folded into :attr:`AuditResult.verdict`):
+
+    * ``checked=True and passed=False`` -- a resolved HV pair is below its
+      governing creepage/clearance bound -> ``NOT_READY`` (the manufacturing
+      gate fails with a non-zero exit).
+    * ``hv_present=True and threshold_supplied=False`` -- HV nets exist but no
+      ``--hv-min`` / ``--hv-standard`` was supplied, so the path cannot be
+      gated -> ``WARNING`` (never silently green).
+    * ``could_not_verify=True`` -- shapely is unavailable or a standard-table
+      lookup failed; HV present but not evaluated -> ``WARNING`` (fail-loud,
+      never a hard crash of the whole audit).
+    * ``hv_present=False`` -- no HV-class nets; inert, no verdict change.
+    """
+
+    # Whether HV nets were present AND a threshold source was supplied AND the
+    # census was evaluated (the only state that can hard-gate the verdict).
+    checked: bool = False
+    # HV-class nets were resolved on the board (independent of thresholding).
+    hv_present: bool = False
+    # A threshold source (--hv-min or --hv-standard) was supplied.
+    threshold_supplied: bool = False
+    # HV present but could not be evaluated (shapely absent / lookup error).
+    could_not_verify: bool = False
+    passed: bool = True
+    hv_nets: list[str] = field(default_factory=list)
+    pair_count: int = 0
+    min_creepage_mm: float | None = None
+    min_clearance_mm: float | None = None
+    required_creepage_mm: float | None = None
+    required_clearance_mm: float | None = None
+    standard: str | None = None
+    standard_edition: str | None = None
+    failing_pairs: list[dict] = field(default_factory=list)
+    details: str = ""
+    # Full engine census dict (CreepageReport.to_dict()) -- kept verbatim so
+    # JSON provenance matches ``kct creepage --format json``.
+    report: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "checked": self.checked,
+            "hv_present": self.hv_present,
+            "threshold_supplied": self.threshold_supplied,
+            "could_not_verify": self.could_not_verify,
+            "passed": self.passed,
+            "hv_nets": list(self.hv_nets),
+            "pair_count": self.pair_count,
+            "min_creepage_mm": self.min_creepage_mm,
+            "min_clearance_mm": self.min_clearance_mm,
+            "required_creepage_mm": self.required_creepage_mm,
+            "required_clearance_mm": self.required_clearance_mm,
+            "standard": self.standard,
+            "standard_edition": self.standard_edition,
+            "failing_pairs": [dict(p) for p in self.failing_pairs],
+            "details": self.details,
+            "report": self.report,
+        }
+
+
+@dataclass
 class LayerUtilization:
     """PCB layer utilization statistics."""
 
@@ -297,6 +366,7 @@ class AuditResult:
     sync: SyncStatus = field(default_factory=SyncStatus)
     connectivity: ConnectivityStatus = field(default_factory=ConnectivityStatus)
     compatibility: ManufacturerCompatibility = field(default_factory=ManufacturerCompatibility)
+    isolation: IsolationStatus = field(default_factory=IsolationStatus)
     layers: LayerUtilization = field(default_factory=LayerUtilization)
     cost: CostEstimate = field(default_factory=CostEstimate)
 
@@ -312,6 +382,12 @@ class AuditResult:
         if self.drc.blocking_count > 0:
             return AuditVerdict.NOT_READY
         if not self.compatibility.passed:
+            return AuditVerdict.NOT_READY
+
+        # HV / isolation hard fail (issue #4333): a resolved HV pair below its
+        # governing creepage/clearance bound is a manufacturing-blocking defect
+        # -- fold it into NOT_READY so ``kct audit`` exits 2 (the gate FAILs).
+        if self.isolation.checked and not self.isolation.passed:
             return AuditVerdict.NOT_READY
 
         # Schematic refs missing from PCB == unbuildable BOM == hard fail.
@@ -356,6 +432,17 @@ class AuditResult:
         if self.drc.passed and not self.drc.geometric_drc_ran:
             return AuditVerdict.WARNING
 
+        # HV / isolation soft gate (issue #4333): HV nets are present but the
+        # path could NOT be authoritatively gated -- either no requirement was
+        # specified (no --hv-min / --hv-standard) or the census could not be
+        # evaluated (shapely absent / standard-table lookup error).  Mirror the
+        # non-authoritative-DRC policy: downgrade to WARNING so the board is
+        # never silently green on an un-evaluated HV path.
+        if self.isolation.hv_present and (
+            self.isolation.could_not_verify or not self.isolation.threshold_supplied
+        ):
+            return AuditVerdict.WARNING
+
         return AuditVerdict.READY
 
     @property
@@ -379,6 +466,8 @@ class AuditResult:
             "sync_pcb_only": self.sync.pcb_only_count,
             "sync_value_mismatches": self.sync.value_mismatch_count,
             "sync_footprint_mismatches": self.sync.footprint_mismatch_count,
+            "isolation_checked": self.isolation.checked,
+            "isolation_passed": self.isolation.passed,
         }
 
     def to_dict(self) -> dict:
@@ -396,6 +485,7 @@ class AuditResult:
             "sync": self.sync.to_dict(),
             "connectivity": self.connectivity.to_dict(),
             "compatibility": self.compatibility.to_dict(),
+            "isolation": self.isolation.to_dict(),
             "layers": self.layers.to_dict(),
             "cost": self.cost.to_dict(),
             "action_items": [a.to_dict() for a in self.action_items],
@@ -426,6 +516,12 @@ class ManufacturingAudit:
         no_assembly: bool = False,
         pcb_override: Path | None = None,
         net_class_map_path: str | Path | None = None,
+        hv_net_class: str = "HV",
+        hv_min_mm: float | None = None,
+        hv_standard: str | None = None,
+        hv_working_voltage: float | None = None,
+        hv_pollution_degree: int | None = None,
+        hv_material_group: str = "IIIa",
     ):
         """Initialize the audit.
 
@@ -445,6 +541,15 @@ class ManufacturingAudit:
                 When supplied, the diff-pair routing-continuity and
                 length-skew DRC rules can fire on routed boards.  Issue
                 #2684 -- mirrors the ``kct check --net-class-map`` flag.
+            hv_net_class: Net-class name treated as the HV group for the
+                creepage/isolation audit (issue #4333, default ``HV``).
+            hv_min_mm: Manual required creepage in mm (phase-1 override).
+            hv_standard: IEC standard id (``iec60664`` / ``iec62368``) to
+                derive the required creepage AND clearance (phase-2).  Requires
+                ``hv_working_voltage`` and ``hv_pollution_degree``.
+            hv_working_voltage: RMS working voltage (V) for standard derivation.
+            hv_pollution_degree: IEC pollution degree (1/2/3) for derivation.
+            hv_material_group: Insulation material group (default ``IIIa``).
         """
         self.path = Path(project_or_pcb)
         self.manufacturer = manufacturer
@@ -456,6 +561,13 @@ class ManufacturingAudit:
         self.net_class_map_path = (
             Path(net_class_map_path) if net_class_map_path is not None else None
         )
+        # HV / isolation (creepage) audit configuration (issue #4333).
+        self.hv_net_class = hv_net_class or "HV"
+        self.hv_min_mm = hv_min_mm
+        self.hv_standard = hv_standard
+        self.hv_working_voltage = hv_working_voltage
+        self.hv_pollution_degree = hv_pollution_degree
+        self.hv_material_group = hv_material_group
 
         # Resolve paths
         if self.path.suffix == ".kicad_pro":
@@ -639,6 +751,7 @@ class ManufacturingAudit:
             result.compatibility = self._check_compatibility(pcb)
             result.layers = self._check_layer_utilization(pcb)
             result.cost = self._estimate_cost(pcb)
+            result.isolation = self._check_isolation(pcb)
 
         # Run schematic <-> PCB sync drift check before generating action
         # items so the action-item generator can read result.sync and emit
@@ -1069,6 +1182,191 @@ class ManufacturingAudit:
             logger.warning(f"Connectivity check failed: {e}")
             status.details = f"Connectivity check could not run: {e}"
             status.passed = False
+
+        return status
+
+    def _check_isolation(self, pcb: PCB) -> IsolationStatus:
+        """Check HV creepage/clearance isolation (issue #4333, phase 3).
+
+        Reuses the phase-1/phase-2 creepage engine end-to-end -- HV-net
+        resolution (:func:`resolve_hv_nets`), the surface-path census
+        (:func:`compute_creepage_census`), and (in standard mode) the IEC
+        table derivation (:meth:`CreepageStandard.required_creepage` /
+        ``required_clearance``).  No geometry or table math is reimplemented.
+
+        The returned status gates the verdict via :attr:`AuditResult.verdict`:
+        a resolved below-standard pair -> ``NOT_READY``; HV present but not
+        gateable (no threshold / shapely absent / lookup error) -> ``WARNING``;
+        no HV nets -> inert (``checked=False``, no verdict change).
+        """
+        status = IsolationStatus(standard=self.hv_standard)
+
+        # Parse the net-class-map sidecar with the SAME block _check_drc uses
+        # so HV selection agrees with the diff-pair DRC rules (issue #2684).
+        net_class_map = None
+        if self.net_class_map_path is not None:
+            try:
+                import json as _json
+
+                from kicad_tools.router.rules import net_class_map_from_dict
+
+                ncm_data = _json.loads(self.net_class_map_path.read_text())
+                net_class_map = net_class_map_from_dict(ncm_data)
+            except (OSError, ValueError, TypeError) as e:
+                logger.warning(
+                    "Isolation check: failed to load net-class-map from %s: %s",
+                    self.net_class_map_path,
+                    e,
+                )
+
+        from kicad_tools.creepage.engine import resolve_hv_nets
+
+        try:
+            hv_nets = resolve_hv_nets(pcb, self.hv_net_class, net_class_map)
+        except Exception as e:  # pragma: no cover - defensive
+            # Never let HV-net resolution crash the whole audit.
+            logger.warning("Isolation check: HV-net resolution failed: %s", e)
+            status.could_not_verify = True
+            status.hv_present = True
+            status.details = f"HV-net resolution failed: {e}"
+            return status
+
+        if not hv_nets:
+            # No HV-class nets -> inert; no section, no verdict change.
+            status.details = f"No '{self.hv_net_class}' nets found -- HV/isolation audit skipped."
+            return status
+
+        status.hv_present = True
+        status.hv_nets = [hv_nets[num] for num in sorted(hv_nets)]
+
+        threshold_supplied = self.hv_min_mm is not None or self.hv_standard is not None
+        status.threshold_supplied = threshold_supplied
+
+        # Shapely is required for the surface-path census.  Guard it fail-loud
+        # (mirrors the connectivity could-not-verify policy) so a missing core
+        # dependency degrades to WARNING rather than crashing the audit.
+        from kicad_tools._shapely import has_shapely
+
+        if not has_shapely():
+            status.could_not_verify = True
+            status.details = (
+                "HV nets present but creepage analysis requires shapely "
+                "(not importable) -- isolation NOT verified."
+            )
+            return status
+
+        # Derive the required creepage/clearance from an IEC standard table when
+        # requested (phase-2), mirroring the ``kct creepage`` wiring exactly.
+        required_creepage_mm: float | None = None
+        required_clearance_mm: float | None = None
+        creepage_prov: dict | None = None
+        clearance_prov: dict | None = None
+        if self.hv_standard is not None:
+            from kicad_tools.creepage.standards import (
+                RMS_TO_PEAK,
+                StandardLookupError,
+                get_standard,
+            )
+
+            if self.hv_working_voltage is None or self.hv_pollution_degree is None:
+                status.could_not_verify = True
+                status.details = (
+                    "HV standard supplied but --hv-working-voltage and "
+                    "--hv-pollution-degree are both required -- isolation NOT verified."
+                )
+                return status
+            try:
+                std = get_standard(self.hv_standard)
+                required_creepage_mm, creepage_prov = std.required_creepage(
+                    float(self.hv_working_voltage),
+                    int(self.hv_pollution_degree),
+                    self.hv_material_group,
+                )
+                peak_voltage = float(self.hv_working_voltage) * RMS_TO_PEAK
+                required_clearance_mm, clearance_prov = std.required_clearance(
+                    peak_voltage, int(self.hv_pollution_degree)
+                )
+                status.standard_edition = std.edition
+            except StandardLookupError as e:
+                # Safety-critical: fail LOUD, never emit a guessed number.
+                status.could_not_verify = True
+                status.details = f"standard-table lookup failed: {e}"
+                return status
+
+        from kicad_tools.creepage.engine import compute_creepage_census
+
+        try:
+            report = compute_creepage_census(
+                pcb,
+                hv_nets,
+                self.hv_min_mm,
+                net_class=self.hv_net_class,
+                board=str(self.pcb_path),
+                required_creepage_mm=required_creepage_mm,
+                required_clearance_mm=required_clearance_mm,
+                standard=self.hv_standard,
+                standard_edition=status.standard_edition,
+                working_voltage=self.hv_working_voltage,
+                pollution_degree=self.hv_pollution_degree,
+                material_group=(self.hv_material_group if self.hv_standard is not None else None),
+                creepage_provenance=creepage_prov,
+                clearance_provenance=clearance_prov,
+            )
+        except Exception as e:
+            # A genuine census crash must NOT be coerced into a clean PASS.
+            logger.warning("Isolation check: creepage census failed: %s", e)
+            status.could_not_verify = True
+            status.details = f"creepage census could not run: {e}"
+            return status
+
+        status.report = report.to_dict()
+        status.pair_count = len(report.pairs)
+        status.required_creepage_mm = required_creepage_mm
+        status.required_clearance_mm = required_clearance_mm
+        if report.pairs:
+            status.min_creepage_mm = min(p.creepage_mm for p in report.pairs)
+            status.min_clearance_mm = min(p.clearance_mm for p in report.pairs)
+
+        if threshold_supplied:
+            # Fully gated: the verdict can hard-fail on this result.
+            status.checked = True
+            status.passed = report.passed
+            status.failing_pairs = [
+                {
+                    "net_a": p.net_a,
+                    "net_b": p.net_b,
+                    "kind": p.kind,
+                    "creepage_mm": round(p.creepage_mm, 4),
+                    "clearance_mm": round(p.clearance_mm, 4),
+                    "margin_mm": round(p.margin_mm, 4),
+                    "required_creepage_mm": (
+                        round(p.governing_creepage_mm, 4) if p.governing_creepage_mm else None
+                    ),
+                    "required_clearance_mm": (
+                        round(p.required_clearance_mm, 4)
+                        if p.required_clearance_mm is not None
+                        else None
+                    ),
+                }
+                for p in report.pairs
+                if not p.passed
+            ]
+            if status.passed:
+                status.details = (
+                    f"All {status.pair_count} HV pair(s) clear the required creepage/clearance."
+                )
+            else:
+                status.details = (
+                    f"{len(status.failing_pairs)}/{status.pair_count} HV pair(s) "
+                    "below the required creepage/clearance."
+                )
+        else:
+            # HV present, census rendered informationally, but no requirement
+            # was supplied -> cannot gate (verdict downgrades to WARNING).
+            status.details = (
+                "HV nets present but no isolation requirement specified "
+                "(--hv-min / --hv-standard) -- cannot gate."
+            )
 
         return status
 
