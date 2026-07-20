@@ -5411,6 +5411,34 @@ def _add_analyze_parser(subparsers) -> None:
         default=0.5,
         help="Edge-to-edge gap FAIL threshold in mm (default: 0.5)",
     )
+    current_sense_parser.add_argument(
+        "--max-loop-area",
+        dest="analyze_max_loop_area",
+        type=float,
+        default=10.0,
+        help=(
+            "Enclosed copper sense-loop area FAIL threshold in mm^2 (default: 10.0; EE-confirmable)"
+        ),
+    )
+    current_sense_parser.add_argument(
+        "--sense-pair",
+        action="append",
+        nargs=2,
+        dest="analyze_sense_pairs",
+        default=[],
+        metavar=("SENSE", "RETURN"),
+        help=(
+            "Kelvin loop pairing: close SENSE's loop with RETURN conductor "
+            "(repeatable). Nets ending _P/_N, +/-, _H/_L auto-pair."
+        ),
+    )
+    current_sense_parser.add_argument(
+        "--sense-return",
+        dest="analyze_sense_return",
+        default=None,
+        metavar="NAME",
+        help="Shared return conductor (e.g. Kelvin ground) to close sense loops",
+    )
 
 
 def _add_constraints_parser(subparsers) -> None:

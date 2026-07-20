@@ -127,6 +127,12 @@ def _run_current_sense_command(args) -> int:
         sub_argv.extend(["--max-parallel", str(args.analyze_max_parallel)])
     if getattr(args, "analyze_min_gap", 0.5) != 0.5:
         sub_argv.extend(["--min-gap", str(args.analyze_min_gap)])
+    if getattr(args, "analyze_max_loop_area", 10.0) != 10.0:
+        sub_argv.extend(["--max-loop-area", str(args.analyze_max_loop_area)])
+    for pair in getattr(args, "analyze_sense_pairs", None) or []:
+        sub_argv.extend(["--sense-pair", pair[0], pair[1]])
+    if getattr(args, "analyze_sense_return", None):
+        sub_argv.extend(["--sense-return", args.analyze_sense_return])
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
 
