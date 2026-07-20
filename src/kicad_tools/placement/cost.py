@@ -50,6 +50,10 @@ class PlacementCostConfig:
         area_weight: Weight for bounding-box area cost.
         block_boundary_weight: Weight for block boundary violation penalty.
         inter_block_spacing: Minimum spacing between block bounding boxes (mm).
+        creepage_weight: Weight for the HV creepage-keepout penalty. Applied to
+            :func:`compute_creepage_violation`. Like ``overlap``/``drc``/
+            ``boundary`` it is treated as a hard-feasibility term: a non-zero
+            creepage shortfall makes the placement infeasible.
         mode: Scoring mode (weighted_sum or lexicographic).
     """
 
@@ -60,6 +64,7 @@ class PlacementCostConfig:
     area_weight: float = 0.1
     block_boundary_weight: float = 1e5
     inter_block_spacing: float = 1.0
+    creepage_weight: float = 1e5
     mode: CostMode = CostMode.WEIGHTED_SUM
 
 
@@ -94,6 +99,9 @@ class CostBreakdown:
         area: Raw bounding-box area of all placements (mm^2).
         block_boundary: Raw block boundary violation penalty (mm).
         inter_block: Raw inter-block spacing violation penalty (mm).
+        creepage: Raw HV creepage-keepout shortfall penalty (mm) -- the sum of
+            required-minus-actual gaps across cross-domain footprint pairs that
+            are closer than their required creepage.
     """
 
     wirelength: float = 0.0
@@ -103,6 +111,7 @@ class CostBreakdown:
     area: float = 0.0
     block_boundary: float = 0.0
     inter_block: float = 0.0
+    creepage: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -112,7 +121,8 @@ class PlacementScore:
     Attributes:
         total: Scalar score (lower is better).
         breakdown: Per-component raw costs before weighting.
-        is_feasible: True if overlap=0, drc=0, and boundary=0.
+        is_feasible: True if overlap=0, drc=0, boundary=0, block_boundary=0,
+            and creepage=0 (HV keepout satisfied).
     """
 
     total: float
@@ -523,6 +533,106 @@ def compute_inter_block_spacing_violation(
     return total
 
 
+def _domain_pair_key(a: str, b: str) -> tuple[str, str]:
+    """Return an order-independent key for a pair of domain ids."""
+    return (a, b) if a <= b else (b, a)
+
+
+def compute_creepage_violation(
+    placements: Sequence[ComponentPlacement],
+    ref_domains: dict[str, str],
+    required_mm_by_domain_pair: dict[tuple[str, str], float],
+    footprint_sizes: dict[str, tuple[float, float]] | None = None,
+    exempt_pairs: set[frozenset[str]] | None = None,
+) -> float:
+    """Compute the HV creepage-keepout shortfall between cross-domain footprints.
+
+    This is the voltage-aware placement term (issue #4373). Each component is
+    assigned an HV *domain* (e.g. ``"mains"``, ``"signal"``) via *ref_domains*.
+    For every pair of footprints that belong to **different** domains, the
+    edge-to-edge gap between their bounding boxes is compared against the
+    required creepage for that domain pair (looked up in
+    *required_mm_by_domain_pair*, keyed by the order-independent
+    ``(min, max)`` domain-id tuple). When the gap is short of the requirement,
+    the shortfall ``required - gap`` is accumulated.
+
+    Same-domain pairs, pairs whose domain combination has no tabulated
+    requirement, and pairs listed in *exempt_pairs* (guarded sense taps that are
+    intentionally close to their parent HV net, issue #4373 Phase 3) contribute
+    zero. Components absent from *ref_domains* are treated as domain-less and
+    skipped.
+
+    The required distances are supplied by the caller -- typically derived from
+    ``kicad_tools.creepage.standards`` at the cross-domain ``|ΔV|`` -- so this
+    function stays a pure numeric penalty with no standards dependency.
+
+    Args:
+        placements: Current component positions.
+        ref_domains: Map from component reference to its HV domain id.
+        required_mm_by_domain_pair: Map from an order-independent
+            ``(domain_a, domain_b)`` tuple to the required creepage in mm.
+        footprint_sizes: Map from reference to (width, height) in mm.
+        exempt_pairs: Optional set of ``frozenset({ref_a, ref_b})`` pairs to
+            exclude from the keepout (guarded sense taps).
+
+    Returns:
+        Sum of creepage shortfalls (mm) across all constrained cross-domain
+        footprint pairs. Zero means every cross-domain pair meets its required
+        creepage.
+    """
+    if not ref_domains or not required_mm_by_domain_pair:
+        return 0.0
+
+    default_size = (1.0, 1.0)
+    exempt = exempt_pairs or set()
+
+    boxes: list[tuple[str, str, float, float, float, float]] = []
+    for p in placements:
+        domain = ref_domains.get(p.reference)
+        if domain is None:
+            continue
+        w, h = (footprint_sizes or {}).get(p.reference, default_size)
+        half_w, half_h = w / 2, h / 2
+        boxes.append(
+            (
+                p.reference,
+                domain,
+                p.x - half_w,
+                p.y - half_h,
+                p.x + half_w,
+                p.y + half_h,
+            )
+        )
+
+    total = 0.0
+    n = len(boxes)
+    for i in range(n):
+        ref_i, dom_i, imin_x, imin_y, imax_x, imax_y = boxes[i]
+        for j in range(i + 1, n):
+            ref_j, dom_j, jmin_x, jmin_y, jmax_x, jmax_y = boxes[j]
+            if dom_i == dom_j:
+                continue
+            required = required_mm_by_domain_pair.get(_domain_pair_key(dom_i, dom_j))
+            if required is None or required <= 0.0:
+                continue
+            if frozenset((ref_i, ref_j)) in exempt:
+                continue
+
+            gap_x = max(imin_x, jmin_x) - min(imax_x, jmax_x)
+            gap_y = max(imin_y, jmin_y) - min(imax_y, jmax_y)
+            if gap_x <= 0 and gap_y <= 0:
+                gap = 0.0
+            elif gap_x > 0 and gap_y > 0:
+                gap = (gap_x**2 + gap_y**2) ** 0.5
+            else:
+                gap = max(gap_x, gap_y)
+
+            if gap < required:
+                total += required - gap
+
+    return total
+
+
 def evaluate_placement(
     placements: Sequence[ComponentPlacement],
     nets: Sequence[Net],
@@ -532,6 +642,9 @@ def evaluate_placement(
     footprint_sizes: dict[str, tuple[float, float]] | None = None,
     block_regions: Sequence[BlockRegion] | None = None,
     block_membership: dict[str, str] | None = None,
+    ref_domains: dict[str, str] | None = None,
+    required_mm_by_domain_pair: dict[tuple[str, str], float] | None = None,
+    exempt_pairs: set[frozenset[str]] | None = None,
 ) -> PlacementScore:
     """Evaluate a placement configuration and return a composite score.
 
@@ -562,6 +675,13 @@ def evaluate_placement(
             Used by overlap, boundary, and DRC sub-functions.
         block_regions: Optional block boundary regions for block-aware scoring.
         block_membership: Optional map from component reference to block_id.
+        ref_domains: Optional map from component reference to its HV domain id.
+            Enables the voltage-aware creepage-keepout term (issue #4373).
+        required_mm_by_domain_pair: Optional map from an order-independent
+            ``(domain_a, domain_b)`` tuple to the required creepage in mm.
+            Required alongside *ref_domains* for the creepage term to fire.
+        exempt_pairs: Optional set of ``frozenset({ref_a, ref_b})`` pairs
+            exempted from the creepage keepout (guarded sense taps).
 
     Returns:
         PlacementScore with total score, per-component breakdown, and
@@ -588,6 +708,19 @@ def evaluate_placement(
             placements, block_membership, config.inter_block_spacing, footprint_sizes
         )
 
+    # HV creepage-keepout term (issue #4373). Only fires when both a domain
+    # map and a required-distance table are supplied -- keeps the default
+    # (voltage-blind) objective byte-identical.
+    creepage = 0.0
+    if ref_domains and required_mm_by_domain_pair:
+        creepage = compute_creepage_violation(
+            placements,
+            ref_domains,
+            required_mm_by_domain_pair,
+            footprint_sizes,
+            exempt_pairs,
+        )
+
     breakdown = CostBreakdown(
         wirelength=wirelength,
         overlap=overlap,
@@ -596,9 +729,16 @@ def evaluate_placement(
         area=area,
         block_boundary=block_boundary,
         inter_block=inter_block,
+        creepage=creepage,
     )
 
-    is_feasible = overlap == 0.0 and drc == 0.0 and boundary == 0.0 and block_boundary == 0.0
+    is_feasible = (
+        overlap == 0.0
+        and drc == 0.0
+        and boundary == 0.0
+        and block_boundary == 0.0
+        and creepage == 0.0
+    )
 
     if config.mode == CostMode.LEXICOGRAPHIC:
         total = _lexicographic_score(breakdown, config, is_feasible)
@@ -622,6 +762,7 @@ def _weighted_sum_score(breakdown: CostBreakdown, config: PlacementCostConfig) -
         + config.area_weight * breakdown.area
         + config.block_boundary_weight * breakdown.block_boundary
         + config.block_boundary_weight * breakdown.inter_block
+        + config.creepage_weight * breakdown.creepage
     )
 
 
@@ -648,6 +789,7 @@ def _lexicographic_score(
             config.overlap_weight * breakdown.overlap
             + config.drc_weight * breakdown.drc
             + config.boundary_weight * breakdown.boundary
+            + config.creepage_weight * breakdown.creepage
         )
     else:
         return config.wirelength_weight * breakdown.wirelength + config.area_weight * breakdown.area

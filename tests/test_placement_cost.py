@@ -11,9 +11,15 @@ from __future__ import annotations
 import pytest
 
 from kicad_tools.placement.cost import (
+    BoardOutline,
     ComponentPlacement,
+    CostMode,
+    DesignRuleSet,
     Net,
+    PlacementCostConfig,
+    compute_creepage_violation,
     compute_wirelength,
+    evaluate_placement,
 )
 
 # ---------------------------------------------------------------------------
@@ -130,3 +136,124 @@ class TestComputeWirelengthZeroWeight:
         placements = _placements()
         net = Net(name="ZERO", pins=[("A", "1"), ("B", "1"), ("C", "1")], weight=0.0)
         assert compute_wirelength(placements, [net]) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# HV creepage-keepout term (issue #4373)
+# ---------------------------------------------------------------------------
+
+# Two 2x2 mm footprints; edge-to-edge gap = |dx| - 2 when placed on the X axis.
+_HV_SIZES = {"A": (2.0, 2.0), "B": (2.0, 2.0)}
+# Reproduces the AC_NEUTRAL <-> REF_1V65 evidence pair: required 1.6 mm.
+_REQ = {("mains", "signal"): 1.6}
+
+
+def _hv_pair(dx: float) -> list[ComponentPlacement]:
+    """A at origin, B at (dx, 0). Both 2x2 mm -> gap = dx - 2 for dx >= 2."""
+    return [
+        ComponentPlacement(reference="A", x=0.0, y=0.0),
+        ComponentPlacement(reference="B", x=dx, y=0.0),
+    ]
+
+
+class TestComputeCreepageViolation:
+    def test_same_domain_pair_is_zero(self) -> None:
+        """Two refs in the same domain never incur a keepout shortfall."""
+        placements = _hv_pair(2.35)  # gap 0.35 mm -- but same domain
+        domains = {"A": "mains", "B": "mains"}
+        assert compute_creepage_violation(placements, domains, _REQ, _HV_SIZES) == 0.0
+
+    def test_cross_domain_below_required_reports_shortfall(self) -> None:
+        placements = _hv_pair(2.35)  # gap 0.35 mm, required 1.6 -> shortfall 1.25
+        domains = {"A": "mains", "B": "signal"}
+        got = compute_creepage_violation(placements, domains, _REQ, _HV_SIZES)
+        assert got == pytest.approx(1.25)
+
+    def test_cross_domain_at_or_above_required_is_zero(self) -> None:
+        placements = _hv_pair(3.6)  # gap exactly 1.6 mm == required -> no shortfall
+        domains = {"A": "mains", "B": "signal"}
+        assert compute_creepage_violation(placements, domains, _REQ, _HV_SIZES) == 0.0
+
+    def test_untabulated_domain_pair_is_zero(self) -> None:
+        """A cross-domain pair with no required-distance entry is unconstrained."""
+        placements = _hv_pair(2.35)
+        domains = {"A": "mains", "B": "other"}  # ("mains","other") absent from _REQ
+        assert compute_creepage_violation(placements, domains, _REQ, _HV_SIZES) == 0.0
+
+    def test_exempt_pair_is_skipped(self) -> None:
+        """Guarded sense taps: an exempt ref pair incurs no shortfall."""
+        placements = _hv_pair(2.35)
+        domains = {"A": "mains", "B": "signal"}
+        exempt = {frozenset(("A", "B"))}
+        got = compute_creepage_violation(placements, domains, _REQ, _HV_SIZES, exempt)
+        assert got == 0.0
+
+    def test_ref_absent_from_domains_is_skipped(self) -> None:
+        placements = _hv_pair(2.35)
+        domains = {"A": "mains"}  # B has no domain -> pair skipped
+        assert compute_creepage_violation(placements, domains, _REQ, _HV_SIZES) == 0.0
+
+    def test_empty_inputs_are_zero(self) -> None:
+        placements = _hv_pair(2.35)
+        assert compute_creepage_violation(placements, {}, _REQ, _HV_SIZES) == 0.0
+        assert compute_creepage_violation(placements, {"A": "mains"}, {}, _HV_SIZES) == 0.0
+
+
+class TestEvaluatePlacementCreepageFeasibility:
+    """The creepage term gates feasibility in evaluate_placement."""
+
+    _BOARD = BoardOutline(min_x=-10.0, min_y=-10.0, max_x=10.0, max_y=10.0)
+    _RULES = DesignRuleSet()
+
+    def test_too_close_is_infeasible(self) -> None:
+        placements = _hv_pair(2.35)  # gap 0.35 < 1.6
+        domains = {"A": "mains", "B": "signal"}
+        score = evaluate_placement(
+            placements,
+            nets=[],
+            rules=self._RULES,
+            board=self._BOARD,
+            config=PlacementCostConfig(mode=CostMode.LEXICOGRAPHIC),
+            footprint_sizes=_HV_SIZES,
+            ref_domains=domains,
+            required_mm_by_domain_pair=_REQ,
+        )
+        assert score.breakdown.creepage == pytest.approx(1.25)
+        assert score.is_feasible is False
+        # Lexicographic: infeasible placements sit above the sentinel offset.
+        assert score.total >= 1e12
+
+    def test_separated_is_feasible(self) -> None:
+        placements = _hv_pair(3.6)  # gap 1.6 == required
+        domains = {"A": "mains", "B": "signal"}
+        score = evaluate_placement(
+            placements,
+            nets=[],
+            rules=self._RULES,
+            board=self._BOARD,
+            config=PlacementCostConfig(mode=CostMode.LEXICOGRAPHIC),
+            footprint_sizes=_HV_SIZES,
+            ref_domains=domains,
+            required_mm_by_domain_pair=_REQ,
+        )
+        assert score.breakdown.creepage == 0.0
+        assert score.is_feasible is True
+
+    def test_no_domain_input_is_byte_identical(self) -> None:
+        """Absent a domain/voltage input the creepage term stays dormant."""
+        placements = _hv_pair(2.35)
+        common = {
+            "nets": [],
+            "rules": self._RULES,
+            "board": self._BOARD,
+            "config": PlacementCostConfig(mode=CostMode.LEXICOGRAPHIC),
+            "footprint_sizes": _HV_SIZES,
+        }
+        baseline = evaluate_placement(placements, **common)
+        # Passing domains but no required table (and vice versa) must also no-op.
+        with_domains_only = evaluate_placement(
+            placements, ref_domains={"A": "mains", "B": "signal"}, **common
+        )
+        assert baseline.breakdown.creepage == 0.0
+        assert with_domains_only.breakdown.creepage == 0.0
+        assert with_domains_only.total == baseline.total

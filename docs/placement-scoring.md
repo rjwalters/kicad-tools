@@ -90,3 +90,81 @@ decoded current vector (verified by
 - When you optimize from a good hand placement, **seed the optimizer from it**
   rather than a random population; otherwise CMA-ES searches a layout space
   disconnected from your placement and can regress wirelength substantially.
+
+## HV-aware placement: the creepage-keepout term (issue #4373)
+
+By default the optimizer objective is **voltage-blind**: the wirelength term
+pulls connected pins together and the DRC term enforces a single
+`min_clearance` (0.2 mm) uniformly across every pad pair. Nothing keeps a
+150 V mains net away from a 1.65 V reference. On a mains board this drives the
+optimizer to pack high- and low-voltage copper together, and the only way to
+reach a creepage-feasible floorplan was a hand-authored zoned layout.
+
+`optimize-placement` can now be made **HV-aware** by supplying a voltage or
+domain input. This activates an extra hard-feasibility term,
+`compute_creepage_violation`, alongside overlap/DRC/boundary:
+
+- Each footprint is assigned an HV **domain** (a voltage cluster).
+- For every pair of footprints in **different** domains, the edge-to-edge gap
+  is compared against the **required creepage** for that domain pair, looked up
+  in `kicad_tools.creepage.standards` at the cross-domain `|ΔV|` (step-up rule,
+  no interpolation — the same table `kct creepage` uses).
+- A pair closer than its requirement contributes a shortfall, and any non-zero
+  creepage shortfall makes the placement **infeasible** — so under the default
+  lexicographic mode the optimizer refuses to converge on an HV-too-close
+  layout, exactly as it does for overlap or DRC.
+
+Absent a voltage/domain input the term stays dormant and scores are
+**byte-identical** to the historical objective (regression-safe opt-in,
+mirroring `--anchor-weight`).
+
+### Input contract
+
+Two mutually-exclusive sources:
+
+- **`--voltage-map v.json`** — a flat `{net_name: volts}` object (reuses the
+  per-net ΔV model format). Each footprint's domain is the *name of its
+  highest-magnitude-voltage net* (a footprint touching a 150 V mains net lands
+  in that mains domain); the domain's voltage is that magnitude.
+
+  ```json
+  {"/AC_LINE": 150, "/AC_NEUTRAL": 150, "/REF_1V65": 1.65, "/GATE_BUS": 12}
+  ```
+
+- **`--hv-domains d.json`** — the manual fallback so the feature works
+  standalone. Keys are domain ids; each carries a list of `fnmatch` ref globs
+  and a representative voltage:
+
+  ```json
+  {
+    "mains":  {"refs": ["J1", "F1", "R1", "R2"], "voltage": 150},
+    "signal": {"refs": ["U3", "R10", "C5"],      "voltage": 3.3}
+  }
+  ```
+
+  A ref matching more than one domain resolves to the higher-voltage domain.
+
+### Tuning knobs
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--creepage-standard` | `iec60664` | Standard for the required-distance lookup (`iec60664`/`iec62368`). |
+| `--pollution-degree` | `2` | IEC pollution degree (1/2/3). |
+| `--material-group` | `IIIa` | Insulation material group (I/II/IIIa/IIIb). |
+| `--hv-threshold` | `30.0` | Minimum cross-domain `|ΔV|` (V) that triggers a keepout. Lower-difference domain pairs rely on normal DRC clearance, so low-voltage/low-voltage nets are not over-segregated. |
+| `--weights '{"creepage": …}'` | `1e5` | Weight applied to the creepage shortfall (a hard-feasibility term). |
+
+A `|ΔV|` above the highest tabulated creepage row raises a loud
+`StandardLookupError` (surfaced as an `Error:` and exit code 1) — the tool
+never silently extrapolates a safety distance.
+
+### Guarded sense taps (partial)
+
+Some low-voltage nets are *derived from* an HV net (e.g. `V_AC_SENSE_RAW` off
+`AC_LINE` through a divider) and cannot be pushed away — they need a guard ring
+rather than separation. `compute_creepage_violation` accepts an `exempt_pairs`
+set that excludes such `(HV-ref, tap-ref)` pairs from the keepout while keeping
+the tap constrained against *other* domains. The cost-function mechanism is in
+place; automatic detection of derived taps from the voltage map (and the guard
+advisory) is tracked as follow-up work (see issue #4373 Phase 3, and #4372 for
+the complementary guard-copper generation).

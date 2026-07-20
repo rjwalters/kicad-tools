@@ -23,4 +23,10 @@ def run_optimize_placement_command(args) -> int:
         anchor_weight=getattr(args, "anchor_weight", 0.0),
         time_budget=getattr(args, "time_budget", None),
         allow_infeasible=getattr(args, "allow_infeasible", False),
+        voltage_map_path=getattr(args, "voltage_map", None),
+        hv_domains_path=getattr(args, "hv_domains", None),
+        creepage_standard=getattr(args, "creepage_standard", "iec60664"),
+        pollution_degree=getattr(args, "pollution_degree", 2),
+        material_group=getattr(args, "material_group", "IIIa"),
+        hv_threshold=getattr(args, "hv_threshold", 30.0),
     )
