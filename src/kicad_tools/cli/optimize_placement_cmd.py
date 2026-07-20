@@ -168,10 +168,28 @@ def _evaluate(
     board: BoardOutline,
     cost_config: PlacementCostConfig,
     footprint_sizes: dict[str, tuple[float, float]],
+    ref_domains: dict[str, str] | None = None,
+    required_mm_by_domain_pair: dict[tuple[str, str], float] | None = None,
+    exempt_pairs: set[frozenset[str]] | None = None,
 ) -> PlacementScore:
-    """Evaluate a single placement vector and return its score."""
+    """Evaluate a single placement vector and return its score.
+
+    When ``ref_domains`` and ``required_mm_by_domain_pair`` are supplied the
+    HV creepage-keepout term (issue #4373) is active; otherwise the objective
+    is byte-identical to the historical voltage-blind score.
+    """
     placements = _vector_to_placements(vector, components)
-    return evaluate_placement(placements, nets, rules, board, cost_config, footprint_sizes)
+    return evaluate_placement(
+        placements,
+        nets,
+        rules,
+        board,
+        cost_config,
+        footprint_sizes,
+        ref_domains=ref_domains,
+        required_mm_by_domain_pair=required_mm_by_domain_pair,
+        exempt_pairs=exempt_pairs,
+    )
 
 
 def _build_footprint_sizes(
@@ -179,6 +197,77 @@ def _build_footprint_sizes(
 ) -> dict[str, tuple[float, float]]:
     """Build a footprint_sizes dict from component definitions."""
     return {c.reference: (c.width, c.height) for c in components}
+
+
+def _build_hv_context(
+    components: Sequence[ComponentDef],
+    nets: Sequence[Net],
+    *,
+    voltage_map_path: str | None,
+    hv_domains_path: str | None,
+    creepage_standard: str,
+    pollution_degree: int,
+    material_group: str,
+    hv_threshold: float,
+    quiet: bool,
+) -> tuple[dict[str, str] | None, dict[tuple[str, str], float] | None]:
+    """Build the HV creepage-keepout context from the voltage/domain input.
+
+    Returns ``(ref_domains, required_mm_by_domain_pair)``. Both are ``None``
+    when no voltage/domain input is supplied (regression-safe no-op).
+
+    Raises:
+        ValueError: On mutually-exclusive inputs, a malformed input file, or a
+            standard-table lookup that would require extrapolation
+            (``StandardLookupError`` is re-raised as ``ValueError`` with an
+            actionable message).
+    """
+    if voltage_map_path is None and hv_domains_path is None:
+        return None, None
+    if voltage_map_path is not None and hv_domains_path is not None:
+        raise ValueError("--voltage-map and --hv-domains are mutually exclusive; supply only one")
+
+    from kicad_tools.creepage.standards import StandardLookupError
+    from kicad_tools.placement.hv_domains import (
+        build_required_by_domain_pair,
+        derive_ref_domains_from_declaration,
+        derive_ref_domains_from_voltage_map,
+        load_hv_domains,
+        load_voltage_map,
+    )
+
+    if voltage_map_path is not None:
+        voltage_map = load_voltage_map(voltage_map_path)
+        ref_domains, domain_voltages = derive_ref_domains_from_voltage_map(nets, voltage_map)
+        source = f"voltage map ({len(voltage_map)} nets)"
+    else:
+        assert hv_domains_path is not None  # guaranteed by the guards above
+        declaration = load_hv_domains(hv_domains_path)
+        refs = [c.reference for c in components]
+        ref_domains, domain_voltages = derive_ref_domains_from_declaration(refs, declaration)
+        source = f"hv-domains declaration ({len(declaration)} domains)"
+
+    try:
+        required = build_required_by_domain_pair(
+            domain_voltages,
+            standard_id=creepage_standard,
+            pollution_degree=pollution_degree,
+            material_group=material_group,
+            hv_threshold=hv_threshold,
+        )
+    except StandardLookupError as e:
+        raise ValueError(f"creepage lookup failed: {e}") from e
+
+    if not quiet:
+        print(
+            f"  HV domains: {len(set(ref_domains.values()))} domains over "
+            f"{len(ref_domains)} refs from {source}; "
+            f"{len(required)} cross-domain keepout pair(s) "
+            f"(standard={creepage_standard}, PD{pollution_degree}, "
+            f"group={material_group}, threshold={hv_threshold:g}V)"
+        )
+
+    return ref_domains, required
 
 
 def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
@@ -197,6 +286,7 @@ def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
         "boundary_weight": 1e5,
         "wirelength_weight": 1.0,
         "area_weight": 0.1,
+        "creepage_weight": 1e5,
         "mode": CostMode.LEXICOGRAPHIC,
     }
 
@@ -227,6 +317,7 @@ def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
         boundary_weight=data.get("boundary", defaults["boundary_weight"]),
         wirelength_weight=data.get("wirelength", defaults["wirelength_weight"]),
         area_weight=data.get("area", defaults["area_weight"]),
+        creepage_weight=data.get("creepage", defaults["creepage_weight"]),
         mode=mode,
     )
 
@@ -318,10 +409,11 @@ def _print_score(label: str, score: PlacementScore) -> None:
     """Print a score summary line."""
     b = score.breakdown
     feasible = "feasible" if score.is_feasible else "INFEASIBLE"
+    creepage_str = f" crp={b.creepage:.2f}" if b.creepage else ""
     print(
         f"  {label}: {score.total:.4f} ({feasible}) "
         f"[wl={b.wirelength:.2f} ovl={b.overlap:.2f} bnd={b.boundary:.2f} "
-        f"drc={b.drc:.0f} area={b.area:.2f}]"
+        f"drc={b.drc:.0f} area={b.area:.2f}{creepage_str}]"
     )
 
 
@@ -583,6 +675,12 @@ def run_optimize_placement(
     anchor_weight: float = 0.0,
     time_budget: float | None = None,
     allow_infeasible: bool = False,
+    voltage_map_path: str | None = None,
+    hv_domains_path: str | None = None,
+    creepage_standard: str = "iec60664",
+    pollution_degree: int = 2,
+    material_group: str = "IIIa",
+    hv_threshold: float = 30.0,
 ) -> int:
     """Run placement optimization.
 
@@ -612,6 +710,21 @@ def run_optimize_placement(
             if the final placement is infeasible (overlap/DRC/boundary
             violations remain). Default behaviour is to exit 1 with a
             ``FATAL:`` message on stderr in that case (issue #2821).
+        voltage_map_path: Optional path to a ``{net_name: volts}`` JSON voltage
+            map (reusing the #4371 format). Enables the HV-aware creepage
+            keepout: components are grouped into voltage domains and
+            cross-domain footprints are pushed apart to their required creepage
+            (issue #4373). Absent, the objective is byte-identical to today.
+        hv_domains_path: Optional path to an ``--hv-domains`` declaration JSON
+            (manual fallback when no voltage map is available). Mutually
+            exclusive with ``voltage_map_path``.
+        creepage_standard: Creepage standard id for the required-distance
+            lookup (``iec60664`` / ``iec62368``).
+        pollution_degree: IEC pollution degree (1, 2 or 3) for the lookup.
+        material_group: Insulation material group (``I``/``II``/``IIIa``/``IIIb``).
+        hv_threshold: Minimum cross-domain ``|ΔV|`` (volts) that triggers a
+            creepage keepout; lower-difference domain pairs rely on normal DRC
+            clearance (avoids over-segregating low-voltage nets).
 
     Returns:
         Exit code:
@@ -682,6 +795,27 @@ def run_optimize_placement(
         print(f"  Nets: {len(nets)}")
         print(f"  Board: {board_outline.width:.1f} x {board_outline.height:.1f} mm")
 
+    # --- HV-aware placement context (issue #4373) ---
+    # Build the per-ref domain map + per-domain-pair required-creepage table
+    # from the supplied voltage/domain input. When neither is supplied the
+    # structures stay None and the objective is byte-identical to today.
+    try:
+        hv_ref_domains, hv_required = _build_hv_context(
+            components,
+            nets,
+            voltage_map_path=voltage_map_path,
+            hv_domains_path=hv_domains_path,
+            creepage_standard=creepage_standard,
+            pollution_degree=pollution_degree,
+            material_group=material_group,
+            hv_threshold=hv_threshold,
+            quiet=quiet,
+        )
+    except (ValueError, FileNotFoundError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    hv_exempt: set[frozenset[str]] | None = None
+
     footprint_sizes = _build_footprint_sizes(components)
 
     # Compute bounds
@@ -705,6 +839,9 @@ def run_optimize_placement(
             board_outline,
             cost_config,
             footprint_sizes,
+            ref_domains=hv_ref_domains,
+            required_mm_by_domain_pair=hv_required,
+            exempt_pairs=hv_exempt,
         )
         if not quiet:
             _print_score("Current", score)
@@ -784,6 +921,9 @@ def run_optimize_placement(
             board_outline,
             cost_config,
             footprint_sizes,
+            ref_domains=hv_ref_domains,
+            required_mm_by_domain_pair=hv_required,
+            exempt_pairs=hv_exempt,
         )
         if not quiet:
             _print_score("Seed", seed_score)
@@ -805,6 +945,9 @@ def run_optimize_placement(
                 board_outline,
                 cost_config,
                 footprint_sizes,
+                ref_domains=hv_ref_domains,
+                required_mm_by_domain_pair=hv_required,
+                exempt_pairs=hv_exempt,
             )
             initial_scores.append(score.total)
 
@@ -821,6 +964,9 @@ def run_optimize_placement(
             board_outline,
             cost_config,
             footprint_sizes,
+            ref_domains=hv_ref_domains,
+            required_mm_by_domain_pair=hv_required,
+            exempt_pairs=hv_exempt,
         )
 
     # Keep interrupt state up-to-date with best vector for graceful save
@@ -871,6 +1017,9 @@ def run_optimize_placement(
                     board_outline,
                     cost_config,
                     footprint_sizes,
+                    ref_domains=hv_ref_domains,
+                    required_mm_by_domain_pair=hv_required,
+                    exempt_pairs=hv_exempt,
                 )
                 scores.append(score.total)
 
@@ -933,6 +1082,9 @@ def run_optimize_placement(
         board_outline,
         cost_config,
         footprint_sizes,
+        ref_domains=hv_ref_domains,
+        required_mm_by_domain_pair=hv_required,
+        exempt_pairs=hv_exempt,
     )
 
     # Save final checkpoint
@@ -969,6 +1121,8 @@ def run_optimize_placement(
         print(f"    Boundary:      {_delta(si.boundary, sf.boundary)}")
         print(f"    DRC:           {si.drc:.0f} → {sf.drc:.0f} ({sf.drc - si.drc:+.0f})")
         print(f"    Area:          {_delta(si.area, sf.area)}")
+        if si.creepage or sf.creepage:
+            print(f"    Creepage:      {_delta(si.creepage, sf.creepage)}")
 
         # Feasibility transition (categorical, not percent)
         seed_feas = "feasible" if seed_score.is_feasible else "INFEASIBLE"
@@ -1046,6 +1200,8 @@ def run_optimize_placement(
             components_failing.append(f"boundary={b.boundary:.2f}")
         if b.block_boundary > 0:
             components_failing.append(f"block_boundary={b.block_boundary:.2f}")
+        if b.creepage > 0:
+            components_failing.append(f"creepage={b.creepage:.2f}mm")
         detail = ", ".join(components_failing) if components_failing else "unknown"
 
         if not allow_infeasible:

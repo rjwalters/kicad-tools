@@ -13,6 +13,7 @@ pytest.importorskip("cmaes", reason="cmaes not installed (optional 'placement'/'
 
 from kicad_tools.cli.optimize_placement_cmd import (  # noqa: E402
     _build_footprint_sizes,
+    _build_hv_context,
     _create_strategy,
     _evaluate,
     _generate_seed,
@@ -1488,3 +1489,162 @@ class TestCLIFlagsForFeasibilityGate:
         parser = create_parser()
         args = parser.parse_args(["optimize-placement", "board.kicad_pcb"])
         assert args.allow_infeasible is False
+
+
+# ---------------------------------------------------------------------------
+# HV-aware placement (issue #4373)
+# ---------------------------------------------------------------------------
+
+
+class TestHvContext:
+    """_build_hv_context turns the voltage/domain input into cost structures."""
+
+    def _components(self):
+        return [ComponentDef(reference="R1"), ComponentDef(reference="C1")]
+
+    def _nets(self):
+        return [
+            Net(name="/AC_LINE", pins=[("R1", "1")]),
+            Net(name="/REF_1V65", pins=[("C1", "1")]),
+        ]
+
+    def test_no_input_returns_none(self):
+        ref_domains, required = _build_hv_context(
+            self._components(),
+            self._nets(),
+            voltage_map_path=None,
+            hv_domains_path=None,
+            creepage_standard="iec60664",
+            pollution_degree=2,
+            material_group="IIIa",
+            hv_threshold=30.0,
+            quiet=True,
+        )
+        assert ref_domains is None
+        assert required is None
+
+    def test_mutually_exclusive_raises(self, tmp_path):
+        vm = tmp_path / "v.json"
+        vm.write_text(json.dumps({"/AC_LINE": 150}))
+        dm = tmp_path / "d.json"
+        dm.write_text(json.dumps({"mains": {"refs": ["R1"], "voltage": 150}}))
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            _build_hv_context(
+                self._components(),
+                self._nets(),
+                voltage_map_path=str(vm),
+                hv_domains_path=str(dm),
+                creepage_standard="iec60664",
+                pollution_degree=2,
+                material_group="IIIa",
+                hv_threshold=30.0,
+                quiet=True,
+            )
+
+    def test_voltage_map_builds_context(self, tmp_path):
+        vm = tmp_path / "v.json"
+        vm.write_text(json.dumps({"/AC_LINE": 150, "/REF_1V65": 1.65}))
+        ref_domains, required = _build_hv_context(
+            self._components(),
+            self._nets(),
+            voltage_map_path=str(vm),
+            hv_domains_path=None,
+            creepage_standard="iec60664",
+            pollution_degree=2,
+            material_group="IIIa",
+            hv_threshold=30.0,
+            quiet=True,
+        )
+        assert ref_domains == {"R1": "/AC_LINE", "C1": "/REF_1V65"}
+        assert required[("/AC_LINE", "/REF_1V65")] == pytest.approx(1.6)
+
+    def test_hv_domains_declaration_builds_context(self, tmp_path):
+        dm = tmp_path / "d.json"
+        dm.write_text(
+            json.dumps(
+                {
+                    "mains": {"refs": ["R1"], "voltage": 150},
+                    "signal": {"refs": ["C1"], "voltage": 1.65},
+                }
+            )
+        )
+        ref_domains, required = _build_hv_context(
+            self._components(),
+            self._nets(),
+            voltage_map_path=None,
+            hv_domains_path=str(dm),
+            creepage_standard="iec60664",
+            pollution_degree=2,
+            material_group="IIIa",
+            hv_threshold=30.0,
+            quiet=True,
+        )
+        assert ref_domains == {"R1": "mains", "C1": "signal"}
+        assert required[("mains", "signal")] == pytest.approx(1.6)
+
+    def test_out_of_range_voltage_raises_valueerror(self, tmp_path):
+        vm = tmp_path / "v.json"
+        # /AC_LINE at 5000 V exceeds the highest tabulated creepage row.
+        vm.write_text(json.dumps({"/AC_LINE": 5000, "/REF_1V65": 0}))
+        with pytest.raises(ValueError, match="creepage lookup failed"):
+            _build_hv_context(
+                self._components(),
+                self._nets(),
+                voltage_map_path=str(vm),
+                hv_domains_path=None,
+                creepage_standard="iec60664",
+                pollution_degree=2,
+                material_group="IIIa",
+                hv_threshold=30.0,
+                quiet=True,
+            )
+
+
+class TestRunWithVoltageMap:
+    """End-to-end run_optimize_placement wiring for the HV inputs."""
+
+    def test_mutually_exclusive_cli_exit_1(self, tmp_pcb, tmp_path, capsys):
+        vm = tmp_path / "v.json"
+        vm.write_text(json.dumps({"N1": 150}))
+        dm = tmp_path / "d.json"
+        dm.write_text(json.dumps({"mains": {"refs": ["R1"], "voltage": 150}}))
+        result = run_optimize_placement(
+            str(tmp_pcb),
+            voltage_map_path=str(vm),
+            hv_domains_path=str(dm),
+            quiet=True,
+        )
+        assert result == 1
+        assert "mutually exclusive" in capsys.readouterr().err
+
+    def test_voltage_map_run_completes(self, tmp_pcb, tmp_path):
+        vm = tmp_path / "v.json"
+        # N1 is a 150 V mains net, N2 a low-voltage signal.
+        vm.write_text(json.dumps({"N1": 150, "N2": 1.65}))
+        output = tmp_path / "out.kicad_pcb"
+        result = run_optimize_placement(
+            str(tmp_pcb),
+            max_iterations=15,
+            output_path=str(output),
+            voltage_map_path=str(vm),
+            quiet=True,
+            allow_infeasible=True,
+        )
+        # Should run to completion (exit 0 feasible, or non-fatal with
+        # allow_infeasible) and write the board.
+        assert result in (0, 2)
+        assert output.exists()
+
+    def test_dry_run_with_voltage_map_reports_creepage(self, tmp_pcb, tmp_path, capsys):
+        vm = tmp_path / "v.json"
+        vm.write_text(json.dumps({"N1": 150, "N2": 1.65}))
+        result = run_optimize_placement(
+            str(tmp_pcb),
+            dry_run=True,
+            voltage_map_path=str(vm),
+        )
+        assert result == 0
+        # The evidence board's R1 (mains) and C1 (signal) start < 1.6 mm apart,
+        # so the dry-run should flag the current placement as INFEASIBLE.
+        out = capsys.readouterr().out
+        assert "HV domains" in out

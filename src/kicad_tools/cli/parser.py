@@ -5105,7 +5105,64 @@ def _add_optimize_placement_parser(subparsers) -> None:
         metavar="JSON",
         help=(
             'Custom cost weights as JSON, e.g. \'{"wirelength": 2.0, "overlap": 1e6}\'. '
-            "Keys: overlap, drc, boundary, wirelength, area"
+            "Keys: overlap, drc, boundary, wirelength, area, creepage"
+        ),
+    )
+    op_parser.add_argument(
+        "--voltage-map",
+        metavar="FILE",
+        dest="voltage_map",
+        help=(
+            "Path to a JSON voltage map {net_name: volts} (reuses the #4371 "
+            "format). Enables HV-aware placement (issue #4373): footprints are "
+            "grouped into voltage domains and cross-domain footprints are pushed "
+            "apart to their required creepage. Absent, the objective is "
+            "byte-identical to the voltage-blind default. Mutually exclusive "
+            "with --hv-domains."
+        ),
+    )
+    op_parser.add_argument(
+        "--hv-domains",
+        metavar="FILE",
+        dest="hv_domains",
+        help=(
+            "Path to a JSON HV-domains declaration "
+            '{domain_id: {"refs": [globs], "voltage": v}} -- the manual fallback '
+            "for HV-aware placement when no voltage map is available. Mutually "
+            "exclusive with --voltage-map."
+        ),
+    )
+    op_parser.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for the required-distance lookup (default: iec60664)",
+    )
+    op_parser.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree for the creepage lookup (default: 2)",
+    )
+    op_parser.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help="Insulation material group I/II/IIIa/IIIb for the creepage lookup (default: IIIa)",
+    )
+    op_parser.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help=(
+            "Minimum cross-domain |ΔV| (volts) that triggers a creepage keepout; "
+            "lower-difference domain pairs rely on normal DRC clearance to avoid "
+            "over-segregating low-voltage nets (default: 30.0)"
         ),
     )
     op_parser.add_argument(
