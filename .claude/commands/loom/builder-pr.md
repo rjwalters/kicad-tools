@@ -126,7 +126,7 @@ Closes #N
 EOF
 ```
 
-Replace `#N` with the actual issue number. Write this BEFORE running `pnpm check:ci` or any test suite.
+Replace `#N` with the actual issue number. Write this BEFORE running `pnpm check:ci` or any test suite. Use `Part of #N` instead of `Closes #N` when this PR is a **partial increment** of a family/epic issue (see "Partial increments" below).
 
 ### When to Update It
 
@@ -526,12 +526,16 @@ These patterns are **WRONG** — the shepherd will reject PRs with titles matchi
 
 ## Creating Pull Requests: Label and Auto-Close Requirements
 
-> **CRITICAL**: PRs MUST include `Closes #N` (or `Fixes #N` / `Resolves #N`) in the body.
-> This is required for:
+> **CRITICAL**: PRs MUST include an issue reference in the body — either a closing keyword
+> (`Closes #N` / `Fixes #N` / `Resolves #N`) for a full implementation, or a non-closing
+> reference (`Part of #N` / `Contributes to #N`) for a declared **partial increment** of a
+> family/epic issue (see "Partial increments" below).
+> A closing keyword is required for:
 > 1. GitHub to auto-close the issue when the PR merges
 > 2. **Shepherd orchestration to detect your PR during phase validation**
 >
-> Without this keyword, shepherd phase validation cannot find your PR and will report false failures.
+> A partial-increment PR intentionally omits the closing keyword so the family/epic issue
+> stays open — it still references the issue with `Part of #N` so the PR is discoverable.
 
 ### PR Label Rules
 
@@ -613,13 +617,26 @@ GitHub's auto-close feature only works with specific keywords at the start of a 
 
 **Any other phrasing will NOT trigger auto-close.**
 
+### Partial increments (family/epic issues)
+
+The auto-close guidance above assumes one issue → one PR → close. Some issues track a **family** of work (labeled `loom:epic` / `loom:epic-phase`, or whose body explicitly scopes a family such as "~346 conformance failures across N files") and are intentionally landed in slices. For a PR that implements only a subset — with tracked work remaining after it merges — use a **non-closing** reference instead:
+
+```markdown
+Part of #123
+Contributes to #123
+```
+
+`Part of #N` references the issue (keeping the PR discoverable) but does NOT trigger auto-close, so the family/epic issue survives the merge. Only the **final increment** that completes the family uses `Closes #N`.
+
+**Both the PR body and the commit message must carry the same reference.** This repo squash-merges, and GitHub harvests closing keywords from the squash commit message as well as the PR body — a stray `Closes #N` in the commit body will auto-close the family issue even when the PR body says `Part of #N`. When in doubt on a `loom:epic` issue, prefer `Part of #N`.
+
 ### PR Creation Checklist
 
 When creating a PR, verify:
 
 1. **PR title uses conventional commit format** - e.g., `fix: descriptive summary` (see "PR Titles" above)
 2. **Acceptance criteria verified** - Each criterion from issue explicitly checked (see "Acceptance Criteria Verification" above)
-3. PR description uses "Closes #X" syntax (not "Issue #X" or "Addresses #X")
+3. PR description references the issue: `Closes #X` for a full implementation, or `Part of #X` for a declared partial increment (not "Issue #X" or "Addresses #X") — same reference in the commit message
 4. Issue number is correct
 5. PR has `loom:review-requested` label
 6. All CI checks pass (`pnpm check:ci` locally)
@@ -656,7 +673,7 @@ EOF
 ```
 
 **Remember**:
-- Put "Closes #123" on its own line in the PR description
+- Put "Closes #123" (or "Part of #123" for a partial increment) on its own line in the PR description, and use the same reference in the commit message
 - Include the acceptance criteria verification table showing each criterion was checked
 
 ## Handling Pre-existing Lint/Build Failures

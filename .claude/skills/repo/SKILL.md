@@ -14,7 +14,7 @@ each change; add `--ask` to review findings and confirm first. Anything
 irreversible — deleting a branch, worktree, stash, or untracked file — is never
 automatic: it takes an explicit opt-in and passes a permanent-loss check.
 Commands whose only action is consequential (`orphans`, `update-tools`,
-`release`, `remote`) always confirm first by nature. The environment commands (`remote`) stand up
+`followups`, `release`, `remote`) always confirm first by nature. The environment commands (`remote`) stand up
 infrastructure only after showing exactly what they will create and what it
 costs.
 
@@ -30,6 +30,7 @@ costs.
 | [[release]] | Cut a release — pre-flight, semver decision, CHANGELOG, version bump, tag, GitHub Release |
 | [[remote]] | Launch a cloud dev session (GCP or AWS) with this repo ready to go, then open SSH |
 | [[update-tools]] | Check installed tool packages (Loom, Anvil, …) against their sources and offer updates |
+| [[followups]] | Capture follow-on work from this session and file it as issues — here or in upstream tool repos, always confirmed first |
 | [[branches]] | Branch & worktree hygiene — merged PRs, orphaned branches, stale worktrees |
 | [[gitignore]] | Gitignore hygiene — over-ignored files, under-ignored build artifacts |
 | [[docs]] | Documentation health — content accuracy, README structure, cross-references (canonical docs command) |
@@ -64,3 +65,46 @@ costs.
    never hardcoded.
 4. **Don't be noisy.** Only flag things that are actually wrong or confusing.
    A missing README in a tiny utility directory isn't worth flagging.
+
+## Destructive-command guard (PreToolUse hook)
+
+Installing Repo Skills also wires a **PreToolUse safety hook** —
+`.claude/skills/repo/hooks/guard-destructive.sh` — into the consumer repo's
+`.claude/settings.json`. It runs before every agent `Bash` command and:
+
+- **Blocks** catastrophic operations outright: `rm -rf` of root / `$HOME` / a
+  top-level system dir, force-push to `main`/`master`, fork bombs,
+  `curl … | sh`, `gh repo delete`/`archive`, `docker system prune`, cloud
+  destruction (`aws iam delete`, `aws s3 rb`, `aws cloudformation delete-stack`,
+  `az … delete`, `gcloud … delete`, `aws ec2 terminate`), system-lifecycle
+  commands (`halt`/`reboot`/`poweroff`/`shutdown`/`init 0|6`), and SQL DDL/DML
+  (`DROP TABLE`, `TRUNCATE TABLE`, `DELETE FROM …` without a `WHERE`).
+- **Asks** for confirmation on reversible-but-risky ones: `git reset --hard`,
+  `git clean -fd`, `git push --force` (non-main), `kubectl delete`, `docker rm`,
+  `gh pr/issue close`, credential reads (`cat ~/.ssh/…`), etc.
+- **Allows** everything else — including scoped deletes like `rm -rf /tmp/foo`
+  and `rm -rf node_modules`.
+
+The hook only fires when Claude Code runs with `--dangerously-skip-permissions`
+(it is skipped entirely under `--permission-mode bypassPermissions`).
+
+### Opting out per repo
+
+Two guard categories can be turned off for repos where they are a category
+error (a database engine, or a repo whose job is managing cloud/containers).
+Resolution order, highest precedence first:
+
+| Category | Env var (wins) | Legacy env var | Config key |
+|----------|----------------|----------------|------------|
+| SQL DDL/DML | `REPO_GUARD_SQL` | `LOOM_GUARD_SQL` | `guards.sqlDdl` |
+| Cloud CLI | `REPO_GUARD_CLOUD` | `LOOM_GUARD_CLOUD` | `guards.cloudCli` |
+
+Env values `0`/`false`/`no` disable; `1`/`true`/`yes` force on. The config key
+is read from `.claude/skills/repo/config.json` (Repo Skills' own location),
+falling back to the legacy `.loom/config.json` for repos migrating off Loom's
+guard. Only an explicit `false` disables — a missing key keeps the guard on.
+
+```json
+// .claude/skills/repo/config.json
+{ "guards": { "sqlDdl": false, "cloudCli": true } }
+```

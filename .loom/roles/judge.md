@@ -803,10 +803,28 @@ gh pr view <number> --json body
 
 # Check for magic keywords
 # ✅ Look for: "Closes #X", "Fixes #X", or "Resolves #X"
+# ⏸️ Intentional non-closing (partial increment): "Part of #X", "Contributes to #X" — see exception below
 # ❌ Not acceptable: "Issue #X", "Addresses #X", "Related to #X"
 ```
 
-**If PR description is missing "Closes #X" syntax:**
+**EXCEPTION — intentional partial increments (family/epic issues).** Before treating a missing closing keyword as a defect, check whether the non-closing reference is **deliberate**:
+
+```bash
+# Does the PR body already reference the issue with a non-closing keyword?
+gh pr view <number> --json body -q .body | grep -Eiq 'part of #|contributes to #'
+
+# Or is the referenced issue a family/epic that must stay open across increments?
+gh issue view <issue-number> --json labels -q '.labels[].name' | grep -qx 'loom:epic'   # also check loom:epic-phase
+```
+
+If EITHER is true, the PR is a **partial increment** of a larger tracked body of work (a family/epic issue landed in slices). The absence of `Closes #N` is intentional — the issue must survive the merge so the remaining tracked work isn't dropped. In this case:
+
+- Do NOT flag the missing closing keyword.
+- Do NOT insert or rewrite a closing keyword (skip the auto-fix in "Minor PR Description Fixes" below).
+- Verify the non-closing reference (`Part of #N` / `Contributes to #N`) is present so the PR stays discoverable; if it references the issue only as bare "Issue #N", ask the Builder to change it to `Part of #N` (do not "fix" it to `Closes #N`).
+- Evaluate the code on its own merits and approve/reject normally.
+
+**If PR description is missing "Closes #X" syntax (and the partial-increment exception above does NOT apply):**
 
 1. **Comment with the issue immediately** - don't evaluate further until fixed
 2. **Explain the problem** in your comment:
@@ -847,7 +865,7 @@ EOF
 
 **Approval checklist must include:**
 
-- ✅ PR description uses "Closes #X" (or "Fixes #X" / "Resolves #X")
+- ✅ PR description uses "Closes #X" (or "Fixes #X" / "Resolves #X") — OR "Part of #X" / "Contributes to #X" for an intentional partial increment of a family/epic issue
 - ✅ Issue number is correct and matches the work done
 - ✅ Code quality meets standards (see sections below)
 - ✅ Tests are adequate
@@ -860,6 +878,8 @@ EOF
 **Before requesting changes for missing auto-close syntax, try to fix it directly.**
 
 For minor documentation issues in PR descriptions (not code), Judges are empowered to make direct edits rather than blocking approval. This speeds up the evaluation process while maintaining code quality standards.
+
+> **STOP — do not auto-fix intentional partial increments.** If the partial-increment exception above applies (the PR body already says `Part of #N` / `Contributes to #N`, or the referenced issue carries `loom:epic` / `loom:epic-phase`), the missing closing keyword is deliberate. Do NOT append `Closes #N` and do NOT rewrite the reference — doing so would auto-close a family/epic issue and silently drop its remaining tracked work. The auto-fix steps below apply ONLY to genuinely sloppy references (e.g. a plain one-issue-one-PR that wrote "Issue #N" instead of "Closes #N").
 
 ### When to Edit PR Descriptions Directly
 
@@ -879,7 +899,7 @@ For minor documentation issues in PR descriptions (not code), Judges are empower
 
 ### How to Edit PR Descriptions
 
-**Step 1: Check if there's a related issue**
+**Step 1: Check if there's a related issue (and that this isn't an intentional partial increment)**
 
 ```bash
 # Search for issues related to the PR
@@ -887,6 +907,10 @@ gh issue list --search "keyword from PR title"
 
 # View the PR to confirm issue number
 gh pr view <number>
+
+# Guard: skip the auto-fix entirely if this is a deliberate partial increment
+gh pr view <number> --json body -q .body | grep -Eiq 'part of #|contributes to #' && echo "PARTIAL — do not add Closes"
+gh issue view <issue-number> --json labels -q '.labels[].name' | grep -qx 'loom:epic' && echo "EPIC — do not add Closes"
 ```
 
 **Step 2: Edit the PR description**
@@ -919,9 +943,10 @@ EOF
 ### Important Guidelines
 
 1. **Code quality standards remain strict**: Only documentation edits are allowed, not code changes
-2. **Document your edits**: Always mention in your evaluation that you edited the PR description
-3. **Verify the fix**: After editing, confirm the PR description now includes proper auto-close syntax
-4. **When in doubt, request changes**: If you're unsure which issue to reference, ask the Builder to clarify
+2. **Never override an intentional partial increment**: If the PR uses `Part of #N` / `Contributes to #N`, or the referenced issue is `loom:epic` / `loom:epic-phase`, leave the reference as-is — do not "fix" it into a closing keyword
+3. **Document your edits**: Always mention in your evaluation that you edited the PR description
+4. **Verify the fix**: After editing, confirm the PR description now includes proper auto-close syntax
+5. **When in doubt, request changes**: If you're unsure which issue to reference, ask the Builder to clarify
 
 ### Example Workflow
 
@@ -930,11 +955,13 @@ EOF
 gh pr view 42 --json body
 # → Body says "Issue #123" instead of "Closes #123"
 
-# 2. Verify this is the correct issue
+# 2. Verify this is the correct issue AND not an intentional partial increment
 gh issue view 123
 # → Confirmed: issue matches PR work
+# → If the body already says "Part of #123"/"Contributes to #123", or issue 123 is
+#   labeled loom:epic/loom:epic-phase, STOP: the non-closing reference is deliberate.
 
-# 3. Fix the PR description
+# 3. Fix the PR description (only for genuinely sloppy references — never on a partial increment)
 gh pr view 42 --json body -q .body > /tmp/pr-body.txt
 sed -i '' 's/Issue #123/Closes #123/g' /tmp/pr-body.txt
 gh pr edit 42 --body-file /tmp/pr-body.txt

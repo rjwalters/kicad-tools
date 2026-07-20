@@ -107,10 +107,9 @@ EOF
 # failure mode in busy shepherd sessions is multi-minute hangs (10-20 min)
 # while a peer process holds an `index.lock` it will never release.
 #
-# We use the same POSIX-atomic `mkdir`-based primitive as spawn-loop.sh
-# (`.loom/scripts/spawn-loop.sh:236-260`) — `flock` is not available on stock
-# macOS, so `mkdir` is the only portable atomic file-system operation we can
-# rely on.
+# We use a POSIX-atomic `mkdir`-based lock primitive — `flock` is not
+# available on stock macOS, so `mkdir` is the only portable atomic
+# file-system operation we can rely on.
 #
 # Lock scope is **repo-global** (`.loom/locks/worktree-add/`). The original
 # per-issue design was tried first but failed under concurrent invocations
@@ -129,7 +128,7 @@ EOF
 # very problem this PR fixes.
 #
 # The lock path uses the same name (`worktree-<id>/`) the per-issue version
-# used so its layout matches `.loom/locks/issue-<N>/` (spawn-loop). The "id"
+# used so its layout matches `.loom/locks/issue-<N>/`. The "id"
 # here is the constant string "add"; per-issue accounting still lives in the
 # `owner.json` body for debugging visibility.
 #
@@ -195,7 +194,7 @@ EOF
         fi
 
         # Lock exists. Check whether the owner is still alive; if not, clear
-        # it once and retry (mirrors spawn-loop's stale-lock recovery).
+        # it once and retry (stale-lock recovery).
         local owner_pid=""
         if [[ -f "$lock/owner.json" ]]; then
             owner_pid=$(awk -F'[ ,]+' '/owner_pid/ {gsub(/[^0-9]/,"",$3); print $3; exit}' "$lock/owner.json" 2>/dev/null)

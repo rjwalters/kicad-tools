@@ -57,11 +57,11 @@ OPTIONS:
 
 CRITICAL COMMANDS (required):
     loom-cleanup          - Log archival and lock-dir cleanup
-    loom-orphan-recovery  - Recover orphaned tasks after spawn-loop crash
+    loom-orphan-recovery  - Recover orphaned tasks after a sweep crash
 
 OPTIONAL COMMANDS (degraded without):
     loom-stuck-detection  - Detect stuck sweep children
-    loom-status           - Show spawn-loop / pipeline status
+    loom-status           - Show sweep / pipeline status
     loom-health-monitor   - Health monitoring
     loom-agent-wait       - Wait for agent completion
     loom-agent-spawn      - Spawn agent sessions

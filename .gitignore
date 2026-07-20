@@ -1,36 +1,9 @@
-# Loom runtime state (don't commit these)
-.loom-in-use
-.loom-checkpoint
-.loom/.daemon.pid
-.loom/.daemon.log
-.loom/daemon.sock
 .loom/daemon-state.json
-.loom/daemon-loop.pid
-.loom/daemon-metrics.json
-.loom/loom-source-path
 .loom/[0-9][0-9]-daemon-state.json
 .loom/stuck-history.json
 .loom/alerts.json
-.loom/issue-failures.json
 .loom/health-metrics.json
-.loom/interventions/
-.loom/mcp-command.json
-.loom/activity.db
-.loom/claims/
-.loom/signals/
-.loom/status/
 .loom/progress/
-.loom/retry-state/
-.loom/diagnostics/
-.loom/guide-docs-state.json
-.loom/metrics_state.json
-.loom/manifest.json
-.loom/stuck-config.json
-.loom/metrics/
-.loom/usage-cache.json
-.loom/claude-config/
-.loom/logs/
-.loom/spawn-loop-state.json
 
 # Build artifacts
 # Compiled native extension (rebuilt locally via `uv run kct build-native`)
@@ -61,7 +34,39 @@ boards/*/*/output/board.json
 .env
 .env.*
 !.env.example
+# >>> loom-managed (do not edit) >>>
+# Loom runtime state (don't commit these)
+.loom-in-use
+.loom-checkpoint
+.loom/.daemon.pid
+.loom/.daemon.log
+.loom/daemon.sock
+.loom/daemon-loop.pid
+.loom/daemon-metrics.json
+.loom/loom-source-path
+.loom/spawn-loop-state.json
+.loom/issue-failures.json
+.loom/interventions/
 .loom/worktrees/
 .loom/state.json
+.loom/mcp-command.json
+.loom/activity.db
+.loom/claims/
+.loom/signals/
+.loom/status/
+.loom/retry-state/
+.loom/diagnostics/
+.loom/guide-docs-state.json
+.loom/metrics_state.json
+.loom/manifest.json
+.loom/stuck-config.json
+.loom/metrics/
+.loom/usage-cache.json
+.loom/claude-config/
 .loom/*.log
 .loom/*.sock
+.loom/logs/
+# <<< loom-managed <<<
+
+# Repo Skills machine-local install metadata (absolute source path + timestamp)
+.claude/skills/repo/.install-local.json

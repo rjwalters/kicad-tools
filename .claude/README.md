@@ -169,7 +169,7 @@ The `agents/` directory contains custom subagent definitions for Loom roles. The
 | `loom-guide` | sonnet | Prioritize and triage issues |
 | `loom-auditor` | sonnet | Verify runtime behavior of built software |
 
-> **Note**: the `loom-shepherd` subagent was removed in v0.10.0 along with the `/shepherd` slash command — see [the migration guide](../../docs/migration/v0.10.0-shepherd-deprecation.md). Use `/loom:sweep <issue>` (Tier 1) for the equivalent lifecycle. The `loom-daemon` subagent is preserved and now documents the shell-level daemon surface (`./.loom/scripts/daemon.sh` + tmux + token rotation) rather than the deleted Python brain.
+> **Note**: the `loom-shepherd` subagent was removed in v0.10.0 along with the `/shepherd` slash command — see [the migration guide](https://github.com/rjwalters/loom/blob/main/docs/migration/v0.10.0-shepherd-deprecation.md). Use `/loom:sweep <issue>` (Tier 1) for the equivalent lifecycle. The `loom-daemon` subagent is preserved and now documents the shell-level daemon surface (`./.loom/scripts/daemon.sh` + tmux + token rotation) rather than the deleted Python brain.
 
 ### How Subagents Work
 

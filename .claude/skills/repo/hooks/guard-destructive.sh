@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # guard-destructive.sh - PreToolUse hook to block destructive agent commands
 #
-# Claude Code PreToolUse hook that intercepts Bash commands before execution.
+# Part of Repo Skills (https://github.com/rjwalters/repo). Generic repository
+# hygiene: this hook is a Claude Code PreToolUse hook that intercepts Bash
+# commands before execution and blocks / asks on catastrophic operations. It is
+# installed by install.sh into .claude/skills/repo/hooks/ and wired into the
+# consumer repo's .claude/settings.json PreToolUse -> Bash matcher.
+#
 # Receives JSON on stdin with tool_input.command and cwd fields.
 #
 # IMPORTANT: This hook only fires when Claude Code is invoked with:
-#   --dangerously-skip-permissions  ← hooks FIRE (used by Loom agents)
+#   --dangerously-skip-permissions  <- hooks FIRE
 #
 # It does NOT fire with:
-#   --permission-mode bypassPermissions  ← hooks SKIPPED entirely
+#   --permission-mode bypassPermissions  <- hooks SKIPPED entirely
 #
 # If you have a shell alias like 'alias claude="claude --permission-mode bypassPermissions"',
 # this safety hook will be silently disabled in interactive sessions.
@@ -24,7 +29,15 @@
 #
 # NOTE: The "hookEventName": "PreToolUse" field is REQUIRED by Claude Code's
 # PreToolUse hook schema. Without it, Claude Code silently discards the
-# decision and the guard becomes inert (see issue #3550).
+# decision and the guard becomes inert.
+#
+# Toggles (see the SQL / cloud guard sections below):
+#   - SQL DDL/DML guard:  REPO_GUARD_SQL   env, or guards.sqlDdl   config key
+#   - Cloud-CLI guard:    REPO_GUARD_CLOUD env, or guards.cloudCli config key
+#   Config is read from .claude/skills/repo/config.json (Repo Skills' own
+#   location). For back-compat with repos that previously ran Loom's guard, the
+#   legacy LOOM_GUARD_SQL / LOOM_GUARD_CLOUD env vars and .loom/config.json are
+#   accepted as lower-precedence fallbacks.
 #
 # Error handling: This script MUST never exit with a non-zero code or produce
 # invalid output. Any internal error is caught by the trap, logged for
@@ -75,6 +88,55 @@ elif [[ -n "$CWD" ]]; then
 fi
 
 # =============================================================================
+# Config toggle resolution helper.
+#
+# read_guard_toggle <config-key> <REPO_env_value> <LOOM_env_value>
+#   Echoes "true" or "false". Resolution order (highest precedence first):
+#     1. REPO_GUARD_* env var  (Repo Skills' own name)
+#     2. LOOM_GUARD_*  env var  (legacy back-compat)
+#     3. .claude/skills/repo/config.json  -> guards.<key>  (Repo Skills' location)
+#     4. .loom/config.json                -> guards.<key>  (legacy back-compat)
+#     5. Default: true (guard on)
+#
+# Env values 0/false/no disable; 1/true/yes force on. Only an explicit `false`
+# in a config file disables (a missing key stays on). Every read is best-effort:
+# any parse failure falls through to guard-ON and never trips the ERR trap.
+# =============================================================================
+read_guard_toggle() {
+    local key="$1" repo_env="$2" loom_env="$3"
+    local enabled=true
+    local cfg
+
+    # Config files (lowest precedence first, so later reads override earlier).
+    for cfg in "$REPO_ROOT/.loom/config.json" "$REPO_ROOT/.claude/skills/repo/config.json"; do
+        if [[ -n "$REPO_ROOT" && -f "$cfg" ]]; then
+            # jq // is alternative-on-null, not default-on-missing, so use
+            # if/then/else to treat only an explicit `false` as disabled (a
+            # missing key stays on). On malformed JSON jq exits non-zero and the
+            # `||` fallback preserves the current value.
+            local val
+            val=$(jq -r --arg k "$key" 'if .guards[$k] == false then "false" elif .guards[$k] == true then "true" else "unset" end' "$cfg" 2>/dev/null) || val="unset"
+            case "$val" in
+                false) enabled=false ;;
+                true)  enabled=true ;;
+            esac
+        fi
+    done
+
+    # Env overrides win over config; REPO name wins over the legacy LOOM name.
+    case "$loom_env" in
+        0|false|no)  enabled=false ;;
+        1|true|yes)  enabled=true ;;
+    esac
+    case "$repo_env" in
+        0|false|no)  enabled=false ;;
+        1|true|yes)  enabled=true ;;
+    esac
+
+    echo "$enabled"
+}
+
+# =============================================================================
 # SQL DDL/DML guard toggle — default ON.
 #
 # The SQL DDL/DML blocks (DROP DATABASE/TABLE/SCHEMA, TRUNCATE TABLE, and
@@ -82,164 +144,35 @@ fi
 # database engines, where those statements are the product's own dev/test
 # vocabulary. Such repos opt out; everyone else keeps the guard on.
 #
-# Resolution order (highest precedence first):
-#   1. LOOM_GUARD_SQL env var (0/false/no disables, 1/true/yes forces on)
-#   2. .loom/config.json  ->  guards.sqlDdl  (default true when absent)
-#   3. Default: true (guard on)
-#
-# The resolution runs LAZILY — sql_guard_enabled() is only invoked once a
-# command has already matched a SQL DDL/DML pattern, so the jq config read never
-# touches the hot path for the ~99% of commands that are not SQL. The result is
-# cached so a command matching multiple SQL patterns pays for at most one read.
-#
-# The config read is best-effort: any parse failure falls through to guard-ON
-# and never trips the ERR trap or produces a non-zero exit.
+# Resolution runs LAZILY — sql_guard_enabled() is only invoked once a command
+# has already matched a SQL DDL/DML pattern, so the config read never touches
+# the hot path for the ~99% of commands that are not SQL. The result is cached
+# so a command matching multiple SQL patterns pays for at most one read.
 # =============================================================================
 _SQL_GUARD_CACHE=""
 sql_guard_enabled() {
     if [[ -z "$_SQL_GUARD_CACHE" ]]; then
-        local enabled=true
-        if [[ -n "$REPO_ROOT" && -f "$REPO_ROOT/.loom/config.json" ]]; then
-            # jq // is alternative-on-null, not default-on-missing, so use
-            # if/then/else to treat only an explicit `false` as disabled (a
-            # missing guards.sqlDdl key stays on). On malformed JSON jq exits
-            # non-zero and the `||` fallback restores the guard-ON default.
-            enabled=$(jq -r 'if .guards.sqlDdl == false then "false" else "true" end' "$REPO_ROOT/.loom/config.json" 2>/dev/null) || enabled=true
-            [[ -n "$enabled" ]] || enabled=true
-        fi
-        # Env override wins over config.
-        case "${LOOM_GUARD_SQL:-}" in
-            0|false|no)  enabled=false ;;
-            1|true|yes)  enabled=true ;;
-        esac
-        _SQL_GUARD_CACHE="$enabled"
+        _SQL_GUARD_CACHE=$(read_guard_toggle sqlDdl "${REPO_GUARD_SQL:-}" "${LOOM_GUARD_SQL:-}")
     fi
     [[ "$_SQL_GUARD_CACHE" == "true" ]]
 }
 
 # =============================================================================
-# Cloud CLI guard toggle — default ON.
+# Cloud-CLI guard toggle — default ON. Same mechanism as the SQL guard.
 #
-# The cloud/docker ASK patterns (mutating aws ec2/lambda/s3/... subcommands and
-# docker rm/rmi/stop/kill/restart) prompt for confirmation on every match. For a
-# repo whose *purpose* is managing cloud infrastructure (launch/stop/terminate
-# dev VMs, build/tear-down containers), that friction is a category error — the
-# mutating calls are the product's own dev/test vocabulary. Such repos opt out;
-# everyone else keeps the guard on. The genuinely catastrophic aws/docker denies
-# in ALWAYS_BLOCK_PATTERNS are NOT gated by this toggle and stay active.
+# Lets a repo whose job IS managing cloud/containers (e.g. a remote-dev
+# command that launches/stops/terminates EC2) opt down the broad aws/docker
+# ASK patterns and the `aws ec2 terminate` deny, which otherwise fire on every
+# read-only describe and make legitimate teardown unrunnable.
 #
-# Resolution order (highest precedence first):
-#   1. LOOM_GUARD_CLOUD env var (0/false/no disables, 1/true/yes forces on)
-#   2. .loom/config.json  ->  guards.cloudCli  (default true when absent)
-#   3. Default: true (guard on)
-#
-# Mirrors sql_guard_enabled() exactly: cached in _CLOUD_GUARD_CACHE, invoked
-# LAZILY only after a cloud pattern has already matched so the jq config read
-# never touches the hot path for non-cloud commands. The config read is
-# best-effort: any parse failure falls through to guard-ON.
+# Lazy + cached, mirroring sql_guard_enabled().
 # =============================================================================
 _CLOUD_GUARD_CACHE=""
 cloud_guard_enabled() {
     if [[ -z "$_CLOUD_GUARD_CACHE" ]]; then
-        local enabled=true
-        if [[ -n "$REPO_ROOT" && -f "$REPO_ROOT/.loom/config.json" ]]; then
-            # jq // is alternative-on-null, not default-on-missing, so use
-            # if/then/else to treat only an explicit `false` as disabled (a
-            # missing guards.cloudCli key stays on). On malformed JSON jq exits
-            # non-zero and the `||` fallback restores the guard-ON default.
-            enabled=$(jq -r 'if .guards.cloudCli == false then "false" else "true" end' "$REPO_ROOT/.loom/config.json" 2>/dev/null) || enabled=true
-            [[ -n "$enabled" ]] || enabled=true
-        fi
-        # Env override wins over config.
-        case "${LOOM_GUARD_CLOUD:-}" in
-            0|false|no)  enabled=false ;;
-            1|true|yes)  enabled=true ;;
-        esac
-        _CLOUD_GUARD_CACHE="$enabled"
+        _CLOUD_GUARD_CACHE=$(read_guard_toggle cloudCli "${REPO_GUARD_CLOUD:-}" "${LOOM_GUARD_CLOUD:-}")
     fi
     [[ "$_CLOUD_GUARD_CACHE" == "true" ]]
-}
-
-# =============================================================================
-# rm-scope repo mode toggle — default REPO (safe-by-default; opt out to off).
-#
-# As of issue #3628 (ADR Option B) this guard defaults to `repo` mode: it
-# DENIES any rm target that is neither under the repo / worktree areas nor on a
-# built-in ephemeral allowlist (system temp dirs + the Claude scratchpad), in
-# addition to the catastrophic top-level deny. A zero-config install therefore
-# gets outside-repo rm protection out of the box (e.g. `rm -rf
-# /Users/someone/important` is DENIED).
-#
-# The legacy permissive behaviour — block only catastrophic rm targets (root,
-# $HOME, bare top-level dirs) and ALLOW every deeper subpath including subpaths
-# OUTSIDE the repo — is now an explicit opt-out: guards.rmScope:"off" (or the
-# synonym "permissive") / LOOM_RM_SCOPE=off. Consumers who relied on the old
-# permissive default must set one of those to restore it.
-#
-# The catastrophic top-level deny stays unconditional in BOTH modes, so bare
-# /tmp and / are still blocked regardless of rmScope.
-#
-# Resolution order (highest precedence first):
-#   1. LOOM_RM_SCOPE env var (repo enables; off/0/no/permissive disables).
-#      Overrides config. Absent → falls through to config/default.
-#   2. .loom/config.json  ->  guards.rmScope: "off"/"permissive" => off;
-#      absent key / any other value / malformed JSON => repo (the new default).
-#   3. Default: repo (safe-by-default, current behaviour after #3628)
-#
-# Mirrors sql_guard_enabled() / cloud_guard_enabled(): cached in
-# _RM_SCOPE_CACHE, invoked LAZILY only after a candidate rm target survives the
-# catastrophic check, so the jq config read never touches the hot path for
-# non-rm commands. The config read is best-effort: any parse failure falls
-# through to REPO (the safe default) and never trips the ERR trap.
-# =============================================================================
-_RM_SCOPE_CACHE=""
-rm_scope_repo_enabled() {
-    if [[ -z "$_RM_SCOPE_CACHE" ]]; then
-        local mode=repo
-        if [[ -n "$REPO_ROOT" && -f "$REPO_ROOT/.loom/config.json" ]]; then
-            # Only an explicit guards.rmScope of "off" or "permissive" opts out
-            # to the legacy permissive behaviour; any other value, a missing
-            # key, or malformed JSON resolves to "repo" (the safe default — the
-            # jq non-zero exit on malformed JSON is caught by the `||`
-            # fallback, which also resolves to repo).
-            mode=$(jq -r 'if (.guards.rmScope == "off" or .guards.rmScope == "permissive") then "off" else "repo" end' "$REPO_ROOT/.loom/config.json" 2>/dev/null) || mode=repo
-            [[ -n "$mode" ]] || mode=repo
-        fi
-        # Env override wins over config.
-        case "${LOOM_RM_SCOPE:-}" in
-            repo)                  mode=repo ;;
-            off|0|no|permissive)   mode=off ;;
-        esac
-        _RM_SCOPE_CACHE="$mode"
-    fi
-    [[ "$_RM_SCOPE_CACHE" == "repo" ]]
-}
-
-# Resolve the Loom worktree base dir for repo-scope checks. Mirrors the
-# precedence of loom_worktree_root() in defaults/scripts/lib/worktree-root.sh
-# (env -> config -> default), replicated inline so the hook stays
-# self-contained and best-effort: any failure falls back to the default in-repo
-# path and never fails the hook. Only called in repo mode, once per rm scan.
-resolve_worktree_root() {
-    local repo_root="$1"
-    [[ -z "$repo_root" ]] && return 0
-    # 1. Env override (highest priority); must be absolute.
-    if [[ -n "${LOOM_WORKTREE_ROOT:-}" && "$LOOM_WORKTREE_ROOT" == /* ]]; then
-        printf '%s/%s' "${LOOM_WORKTREE_ROOT%/}" "$(basename "$repo_root")"
-        return 0
-    fi
-    # 2. Config key .loom/config.json -> worktree.root (absolute only).
-    local config_file="$repo_root/.loom/config.json"
-    if [[ -f "$config_file" ]]; then
-        local cfg_root
-        cfg_root=$(jq -r '.worktree.root? // empty' "$config_file" 2>/dev/null) || cfg_root=""
-        if [[ -n "$cfg_root" && "$cfg_root" == /* ]]; then
-            printf '%s/%s' "${cfg_root%/}" "$(basename "$repo_root")"
-            return 0
-        fi
-    fi
-    # 3. Default — in-repo worktrees dir.
-    printf '%s/.loom/worktrees' "$repo_root"
 }
 
 # Helper: output a deny decision and exit
@@ -287,10 +220,10 @@ ask() {
 ALWAYS_BLOCK_PATTERNS=(
     # GitHub destructive operations — command-position anchored (start-of-line
     # or a shell separator must precede the verb) so the phrase inside a flag
-    # value no longer trips. NOTE: the catastrophic scan still runs over the
-    # full raw command, including quoted/heredoc text, so a `gh repo delete`
-    # that a shell would actually execute (leading, sudo-prefixed, or after a
-    # separator) still denies (#3553).
+    # value no longer trips. The catastrophic scan still runs over the full raw
+    # command, including quoted/heredoc text, so a `gh repo delete` that a shell
+    # would actually execute (leading, sudo-prefixed, or after a separator)
+    # still denies.
     '(^|[;&|[:space:]])gh repo delete'
     '(^|[;&|[:space:]])gh repo archive'
 
@@ -306,9 +239,9 @@ ALWAYS_BLOCK_PATTERNS=(
     # scoped path like `rm -rf /tmp/x` no longer trips the catastrophic rule,
     # while root / home obliteration still denies. The left side of `rm` is
     # deliberately NOT anchored, so a quoted payload such as `bash -c 'rm -rf /'`
-    # (root followed by a closing quote) still matches (#3553). The trailing
-    # class matches anything that is not a path-continuation character (so `/`,
-    # `/ `, `/*`, `/;`, `/'` all count as "root itself" but `/tmp` does not).
+    # (root followed by a closing quote) still matches. The trailing class
+    # matches anything that is not a path-continuation character (so `/`, `/ `,
+    # `/*`, `/;`, `/'` all count as "root itself" but `/tmp` does not).
     'rm[[:space:]]+-[a-zA-Z]*[rf][a-zA-Z]*[[:space:]]+/([^[:alnum:]._~/-]|$)'
     'rm[[:space:]]+-[a-zA-Z]*[rf][a-zA-Z]*[[:space:]]+~([^[:alnum:]._~/-]|$)'
     'rm[[:space:]]+-[a-zA-Z]*[rf][a-zA-Z]*[[:space:]]+\$HOME([^[:alnum:]._~/-]|$)'
@@ -325,17 +258,11 @@ ALWAYS_BLOCK_PATTERNS=(
     # Cloud infrastructure destruction. The aws forms below are specific
     # multi-token phrases, so they stay in this raw substring scan. The az/gcloud
     # CLIs, by contrast, need command-word anchoring — an unanchored `az.*delete`
-    # matches "h·az·ard … delete" across unrelated prose tokens (#3584) — so they
-    # are handled by the segment-parsed lifecycle/cloud check further below, NOT
-    # here.
-    # NOTE: `aws ec2 terminate` is deliberately NOT in this raw catastrophic
-    # scan. For a repo whose job is standing up and tearing down dev VMs the
-    # teardown path (`terminate-instances`) is a first-class workflow, so it is
-    # downgraded to an ask via the toggle-gated CLOUD_ASK_PATTERNS below (and
-    # fully bypassed when LOOM_GUARD_CLOUD=0 / guards.cloudCli:false). The other
-    # aws forms here stay ungated — they remain a hard safety floor (#3593).
+    # matches "h·az·ard … delete" across unrelated prose tokens — so they are
+    # handled by the segment-parsed lifecycle/cloud check further below, NOT here.
     'aws s3 rm.*--recursive'
     'aws s3 rb'
+    'aws ec2 terminate'
     'aws iam delete'
     'aws cloudformation delete-stack'
 
@@ -343,16 +270,22 @@ ALWAYS_BLOCK_PATTERNS=(
     'docker system prune'
 
     # NOTE: system-lifecycle commands (halt/reboot/poweroff/shutdown/init 0/
-    # init 6) are deliberately NOT in this raw substring scan. Even the
-    # whitespace-inclusive boundary anchor they used to carry still fired inside
-    # ordinary prose ("...the box will halt", "...after a reboot event"), and a
-    # pure regex tweak can't separate `sudo halt` from `will halt` (both are
-    # "<word> halt"). They are handled by the segment-parsed check below, which
-    # denies only when a segment's *command word* is exactly the lifecycle word
-    # (#3584).
+    # init 6) are deliberately NOT in this raw substring scan. Even a
+    # whitespace-inclusive boundary anchor still fired inside ordinary prose
+    # ("...the box will halt", "...after a reboot event"), and a pure regex tweak
+    # can't separate `sudo halt` from `will halt` (both are "<word> halt"). They
+    # are handled by the segment-parsed check below, which denies only when a
+    # segment's *command word* is exactly the lifecycle word.
 )
 
 for pattern in "${ALWAYS_BLOCK_PATTERNS[@]}"; do
+    # EC2 terminate is a first-class teardown verb for cloud-management repos;
+    # let the cloud-CLI toggle downgrade it (deny -> pass to normal flow). The
+    # other catastrophic aws/docker patterns (iam delete, s3 rb, s3 recursive
+    # delete, cloudformation delete-stack, docker system prune) stay always-on.
+    if [[ "$pattern" == 'aws ec2 terminate' ]] && ! cloud_guard_enabled; then
+        continue
+    fi
     if echo "$COMMAND" | grep -qiE "$pattern"; then
         deny "BLOCKED: Command matches dangerous pattern: $pattern"
     fi
@@ -370,7 +303,7 @@ done
 # stripped copy is used only for the *narrowing* ASK/DDL matches (never the
 # catastrophic scan) the worst case is a missed ask on quoted data, never a
 # missed catastrophic block. The sed only runs when a `#` is actually present,
-# keeping it off the hot path (#3553).
+# keeping it off the hot path.
 # =============================================================================
 if [[ "$COMMAND" == *"#"* ]]; then
     COMMAND_NO_COMMENT=$(printf '%s\n' "$COMMAND" | sed -E 's/(^|[[:space:]])#.*$//')
@@ -385,9 +318,8 @@ fi
 # and the az/gcloud cloud-delete CLIs are far too common as ordinary prose,
 # identifiers, and flag names to scan as unanchored substrings — and even a
 # whitespace-inclusive boundary anchor still fired inside comments and commit
-# messages ("...the box will halt", "...after a reboot event"). A pure regex
-# tweak cannot separate `sudo halt` (a real command) from `will halt` (prose)
-# because both are "<word> halt".
+# messages. A pure regex tweak cannot separate `sudo halt` (a real command)
+# from `will halt` (prose) because both are "<word> halt".
 #
 # So we segment-parse instead, mirroring extract_rm_targets(): split the command
 # on ; | & && || and newline, strip a leading sudo/env wrapper from each segment,
@@ -396,9 +328,7 @@ fi
 # distinguishes `sudo halt` (command word = halt) from `will halt` (command word
 # = echo/other) and from `--instance-initiated-shutdown-behavior` (not a command
 # word at all). The scan runs against COMMAND_NO_COMMENT so a lifecycle/cloud
-# word sitting in a trailing comment is already gone. The catastrophic
-# ALWAYS_BLOCK scan above still reads the raw string for the symbolic patterns
-# (rm -rf /, the fork bomb, curl|sh) that are not prose-prone (#3584).
+# word sitting in a trailing comment is already gone.
 # =============================================================================
 lifecycle_or_cloud_reason() {
     # Emit a deny reason (one per line) for every segment whose command word is a
@@ -418,7 +348,7 @@ lifecycle_or_cloud_reason() {
             # NAME halt` likewise resolve to `halt`. A bare `env halt` (no
             # assignment) is unaffected — the loop matches nothing and leaves
             # `halt` as the command word. Portable awk only (no GNU/BSD-specific
-            # escapes), consistent with extract_rm_targets(). (#3586)
+            # escapes), consistent with extract_rm_targets().
             if (sub(/^env([ \t]+|$)/, "", seg)) {
                 sub(/^[ \t]+/, "", seg)
                 stripped = 1
@@ -456,14 +386,20 @@ lifecycle_or_cloud_reason() {
 
 _LIFECYCLE_REASON=$(lifecycle_or_cloud_reason "$COMMAND_NO_COMMENT" | head -1)
 if [[ -n "$_LIFECYCLE_REASON" ]]; then
-    deny "BLOCKED: $_LIFECYCLE_REASON"
+    # Gate the cloud-delete portion behind the cloud toggle; lifecycle commands
+    # stay always-on.
+    if [[ "$_LIFECYCLE_REASON" == "cloud resource deletion:"* ]]; then
+        cloud_guard_enabled && deny "BLOCKED: $_LIFECYCLE_REASON"
+    else
+        deny "BLOCKED: $_LIFECYCLE_REASON"
+    fi
 fi
 
 # =============================================================================
 # DATABASE DESTRUCTION - Gated by the SQL DDL/DML guard toggle
 #
 # Kept separate from ALWAYS_BLOCK_PATTERNS so DB-engine repos can opt out
-# (guards.sqlDdl:false / LOOM_GUARD_SQL=0). A single alternation grep matches
+# (guards.sqlDdl:false / REPO_GUARD_SQL=0). A single alternation grep matches
 # all four DDL statements in one pass (cheaper than a per-pattern loop), and
 # sql_guard_enabled() is consulted only after a match, so the config read stays
 # off the hot path.
@@ -480,15 +416,13 @@ fi
 # Only *actual local* `rm` command words are inspected. `extract_rm_targets`
 # splits the command on ; | & && || and, for each simple-command segment whose
 # command word is `rm` (optionally sudo-prefixed) AND which carries a
-# recursive/force flag, emits the non-flag argument tokens. Consequences (#3553):
-#   - A token from an earlier command in the same line (e.g. the `host-ip.txt`
-#     in `HOST=$(cat host-ip.txt); ssh $HOST rm -rf …`) is never mis-read as an
+# recursive/force flag, emits the non-flag argument tokens. Consequences:
+#   - A token from an earlier command in the same line is never mis-read as an
 #     rm target — only tokens of a real `rm` segment are considered.
 #   - An `rm` inside a remote payload (`ssh host 'rm -rf /home/ubuntu/foo'`) is
 #     NOT treated as a local rm: the wrapper's command word is `ssh`/`scp`, not
-#     `rm`, so no local target is emitted and the local scope check is skipped.
-#     The ALWAYS_BLOCK catastrophic patterns above still scan the whole string,
-#     so a remote or quoted `rm -rf /` still denies.
+#     `rm`. The ALWAYS_BLOCK catastrophic patterns above still scan the whole
+#     string, so a remote or quoted `rm -rf /` still denies.
 #   - Only root, the user's $HOME, and *top-level* directories (/tmp, /var, /etc,
 #     /usr, /home, /opt, /bin, …) are blocked. A scoped subpath such as
 #     `rm -rf /tmp/whatever` or `rm -rf /var/foo` is allowed — the guard stops
@@ -580,8 +514,6 @@ if echo "$COMMAND" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
                 continue ;;
             build|./build|*/build)
                 continue ;;
-            .loom/worktrees/*|*/.loom/worktrees/*)
-                continue ;;
             .next|./.next|*/.next)
                 continue ;;
             __pycache__|./__pycache__|*/__pycache__)
@@ -620,63 +552,6 @@ if echo "$COMMAND" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
                [[ "$ABS_PATH" =~ ^/[^/]+$ ]]; then
                 deny "BLOCKED: rm on protected system path: $ABS_PATH"
             fi
-
-            # Opt-in repo-scoped strict mode (guards.rmScope:"repo" /
-            # LOOM_RM_SCOPE=repo). The catastrophic top-level deny above stays
-            # unconditional; here we additionally DENY any target that is
-            # neither under the repo / worktree areas nor on the built-in
-            # ephemeral allowlist. Default OFF preserves the permissive
-            # behaviour byte-for-byte (rm_scope_repo_enabled() returns false).
-            if rm_scope_repo_enabled; then
-                IN_SCOPE=false
-
-                # Repo + worktree areas. Prefix matches carry a trailing slash
-                # (or match the dir itself) so a sibling dir sharing a name
-                # prefix — e.g. "<repo>-sibling" vs "<repo>" — is NOT admitted.
-                if [[ -n "$REPO_ROOT" ]]; then
-                    if [[ "$ABS_PATH" == "$REPO_ROOT" || "$ABS_PATH" == "$REPO_ROOT"/* ]]; then
-                        IN_SCOPE=true
-                    fi
-                    # The default in-repo worktrees dir is always in scope, even
-                    # when an external worktree.root / LOOM_WORKTREE_ROOT is set.
-                    if [[ "$IN_SCOPE" == false ]] && \
-                       { [[ "$ABS_PATH" == "$REPO_ROOT/.loom/worktrees" || "$ABS_PATH" == "$REPO_ROOT/.loom/worktrees"/* ]]; }; then
-                        IN_SCOPE=true
-                    fi
-                    # Configured/overridden worktree root (external volumes).
-                    if [[ "$IN_SCOPE" == false ]]; then
-                        if [[ -z "${_WT_ROOT+x}" ]]; then
-                            _WT_ROOT=$(resolve_worktree_root "$REPO_ROOT")
-                        fi
-                        if [[ -n "$_WT_ROOT" ]] && \
-                           { [[ "$ABS_PATH" == "$_WT_ROOT" || "$ABS_PATH" == "$_WT_ROOT"/* ]]; }; then
-                            IN_SCOPE=true
-                        fi
-                    fi
-                fi
-
-                # Built-in ephemeral allowlist: system temp roots + the Claude
-                # scratchpad. normalize_abs_path() is LEXICAL — it does NOT
-                # resolve symlinks — so on macOS both the symlink form (/tmp,
-                # /var/tmp, /var/folders) AND its /private target must be listed.
-                # A bare temp root (/tmp, /private/tmp, …) is NOT matched here:
-                # those have no trailing component, so the catastrophic
-                # top-level deny above already handled bare /tmp, and a bare
-                # /private/tmp falls through to the out-of-scope deny.
-                if [[ "$IN_SCOPE" == false ]]; then
-                    case "$ABS_PATH" in
-                        /tmp/*|/private/tmp/*|\
-                        /var/tmp/*|/private/var/tmp/*|\
-                        /var/folders/*|/private/var/folders/*|\
-                        */claude-*/*/scratchpad/*)
-                            IN_SCOPE=true ;;
-                    esac
-                fi
-
-                if [[ "$IN_SCOPE" == false ]]; then
-                    deny "BLOCKED: rm target outside repo scope (LOOM_RM_SCOPE=repo): $ABS_PATH"
-                fi
-            fi
         fi
     done
 fi
@@ -686,7 +561,7 @@ fi
 # =============================================================================
 
 # Gated by the SQL DDL/DML guard toggle. DB-engine repos opt out via
-# guards.sqlDdl:false or LOOM_GUARD_SQL=0. sql_guard_enabled() is consulted only
+# guards.sqlDdl:false or REPO_GUARD_SQL=0. sql_guard_enabled() is consulted only
 # after the DELETE-FROM-without-WHERE match, keeping the config read off the hot
 # path for non-SQL commands.
 if echo "$COMMAND_NO_COMMENT" | grep -qiE 'DELETE[[:space:]]+FROM[[:space:]]+' && \
@@ -713,9 +588,17 @@ ASK_PATTERNS=(
     'gh release delete'
     'gh label delete'
 
-    # NOTE: cloud CLI (aws) + docker ASK patterns are NOT in this ungated array.
-    # They live in CLOUD_ASK_PATTERNS below, gated by cloud_guard_enabled() so
-    # cloud-dev repos can opt down (LOOM_GUARD_CLOUD=0 / guards.cloudCli:false).
+    # Cloud CLI operations
+    'aws s3'
+    'aws ec2'
+    'aws lambda'
+
+    # Docker operations
+    'docker rm'
+    'docker rmi'
+    'docker stop'
+    'docker kill'
+    'docker restart'
 
     # Service management
     'systemctl restart'
@@ -740,68 +623,17 @@ ASK_PATTERNS=(
 )
 
 for pattern in "${ASK_PATTERNS[@]}"; do
+    # When the cloud-CLI guard is toggled off, skip the broad aws/docker
+    # namespace asks (they fire on read-only describe/ls too). The credential-
+    # exposure and non-cloud asks below still apply.
+    case "$pattern" in
+        'aws s3'|'aws ec2'|'aws lambda'|'docker rm'|'docker rmi'|'docker stop'|'docker kill'|'docker restart')
+            cloud_guard_enabled || continue ;;
+    esac
     if echo "$COMMAND_NO_COMMENT" | grep -qE "$pattern"; then
         ask "Command requires confirmation: $COMMAND"
     fi
 done
-
-# =============================================================================
-# CLOUD CLI ASK patterns — gated by the cloud CLI guard toggle
-#
-# Kept separate from ASK_PATTERNS so cloud-dev repos can opt out
-# (guards.cloudCli:false / LOOM_GUARD_CLOUD=0). cloud_guard_enabled() is
-# consulted only AFTER a cloud pattern matches, so the config read stays off the
-# hot path for non-cloud commands (mirrors the SQL DDL block above).
-#
-# The aws entries are VERB-ANCHORED (case-sensitive ERE against the
-# comment-stripped command): only mutating subcommands match, never read-only
-# describe*/get*/list*/ls. So `aws ec2 describe-instances`, `aws s3 ls`, and
-# `aws lambda list-functions` no longer prompt, while `run-instances`,
-# `create-*`, `terminate-instances`, `stop-instances`, `lambda invoke`,
-# `lambda publish*`, `sns publish`, etc. still ask.
-#
-# The docker entries already name only mutating verbs (rm/rmi/stop/kill/restart)
-# and never match read-only `docker ps`/`docker logs`, so they are unchanged —
-# they only move under this toggle.
-# =============================================================================
-CLOUD_ASK_PATTERNS=(
-    # aws mutating subcommands (verb-anchored). The service list covers the
-    # common infra-mutating namespaces; the verb list is the mutating vocabulary
-    # (never describe*/get*/list*/ls). terminate lands here — an ask, not a deny.
-    # invoke/publish are mutating (lambda invoke runs arbitrary code with side
-    # effects; lambda publish-version / publish-layer-version and sns publish
-    # mutate state) — there is no read-only `aws <svc> invoke|publish`, so they
-    # cannot introduce describe/get/list false-positives. copy (ec2
-    # copy-image/copy-snapshot) and assign (ec2 assign-*-addresses) are likewise
-    # mutating-only. All were caught by the pre-#3593 bare `aws ec2|lambda`
-    # prefixes and must stay asks (#3595).
-    'aws (ec2|lambda|s3api|rds|iam|autoscaling|cloudformation|eks|ecs|elb|elbv2|route53|dynamodb|sns|sqs) (run|create|delete|terminate|stop|start|modify|update|put|reboot|authorize|revoke|attach|detach|associate|disassociate|register|deregister|enable|disable|add|remove|set|import|restore|reset|cancel|scale|invoke|publish|copy|assign)'
-    # aws s3 (high-level) mutating verbs. `ls` is intentionally excluded. `mb`
-    # (make-bucket) is mutating and was caught by the old bare `aws s3` prefix.
-    'aws s3 (rm|rb|cp|mv|sync|mb)'
-
-    # Docker operations (already mutating-verb only; does not match docker ps/logs)
-    'docker rm'
-    'docker rmi'
-    'docker stop'
-    'docker kill'
-    'docker restart'
-)
-
-for pattern in "${CLOUD_ASK_PATTERNS[@]}"; do
-    if echo "$COMMAND_NO_COMMENT" | grep -qE "$pattern" && cloud_guard_enabled; then
-        ask "Command requires confirmation: $COMMAND (set guards.cloudCli:false in .loom/config.json if this repo manages cloud infra as a first-class workflow)"
-    fi
-done
-
-# =============================================================================
-# NOTE: The two Loom-workflow-specific guards (the 'gh pr merge' → merge-pr.sh
-# redirect, and the 'pip install -e' worktree block keyed on LOOM_WORKTREE_PATH)
-# were extracted into guard-loom-workflow.sh (issue #3604). They are registered
-# as a separate PreToolUse/Bash hook and fire independently of this guard. This
-# file is the generic repository-hygiene guard, on its way to Repo Skills
-# (rjwalters/repo#13); the Loom-specific pair stays Loom-owned.
-# =============================================================================
 
 # =============================================================================
 # ALLOW - Everything else passes through

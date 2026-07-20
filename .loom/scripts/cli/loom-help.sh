@@ -151,7 +151,7 @@ ${YELLOW}FOR MORE HELP:${NC}
 ${YELLOW}RELATED COMMANDS:${NC}
     /loom:sweep <issue>       Orchestrate a single issue lifecycle (Curator → Merge)
     /builder, /judge, etc.    Assume specialized agent roles
-    spawn-loop.sh             Multi-issue batch driver (Tier 2)
+    mcp__loom__dispatch_sweep Multi-issue dispatch via loom-daemon (Tier 2)
 
 ${GRAY}Loom CLI v0.1.0${NC}
 EOF

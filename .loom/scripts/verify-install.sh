@@ -39,8 +39,24 @@ EXIT_DRIFT=1
 EXIT_BAD_ARGS=2
 EXIT_NO_MANIFEST=3
 EXIT_ENV_ERROR=4
+EXIT_SCHEMA_OUTDATED=5
 
-MANIFEST_VERSION=1
+# Manifest schema version.
+#   v1: whole-file hash of every tracked path; file list derived from a
+#       hard-coded directory walk (captured sibling-installer files).
+#   v2 (issue #3600): file list derived from .loom/install-metadata.json
+#       "installed_files" (Loom's ownership boundary); the top-level CLAUDE.md
+#       entry is hashed over its <!-- BEGIN/END LOOM ORCHESTRATION --> region
+#       only (recorded as "region": "loom-block"), so sibling edits outside
+#       the Loom block no longer report drift.
+# cmd_verify refuses to compare a manifest whose version != MANIFEST_VERSION
+# and instructs the caller to regenerate, rather than reporting false drift.
+MANIFEST_VERSION=2
+
+# Loom section markers in the top-level CLAUDE.md (mirrors
+# loom-daemon/src/init/scaffolding.rs LOOM_SECTION_START / LOOM_SECTION_END).
+LOOM_SECTION_START='<!-- BEGIN LOOM ORCHESTRATION -->'
+LOOM_SECTION_END='<!-- END LOOM ORCHESTRATION -->'
 
 # Find the repository root (works from worktrees and subdirectories)
 find_repo_root() {
@@ -90,28 +106,30 @@ ${BOLD}USAGE:${NC}
 
 ${BOLD}DESCRIPTION:${NC}
     Generates a SHA-256 checksum manifest (.loom/manifest.json) of all
-    tracked Loom installation files. The manifest can then be used to
+    Loom-owned installation files. The manifest can then be used to
     detect post-installation drift (modified or missing files).
 
-${BOLD}TRACKED FILE LOCATIONS:${NC}
-    .loom/roles/*.md, *.json       Role definitions
-    .loom/scripts/*, cli/*         Helper scripts
-    .loom/docs/*                   Documentation
-    .claude/commands/loom/*.md     Slash commands
-    .claude/agents/*.md            Agent definitions
-    .claude/settings.json          Claude settings
-    .github/labels.yml             Label definitions
-    .github/ISSUE_TEMPLATE/*       Issue templates
-    .github/workflows/*.yml        GitHub workflows
-    CLAUDE.md                       Top-level docs
-    .loom/CLAUDE.md, .loom/README.md
-    loom                           CLI wrapper
+${BOLD}TRACKED FILE SET:${NC}
+    The file list is derived from .loom/install-metadata.json
+    "installed_files" (Loom's ownership boundary) intersected with the
+    files actually present on disk. Files a sibling installer added
+    (e.g. .claude/agents/<other-tool>-*.md) are never tracked. When the
+    metadata file is absent (pre-#3450 installs), a legacy directory
+    walk is used instead, with a stderr warning.
 
-${BOLD}NOT TRACKED (runtime/user files):${NC}
+    The top-level CLAUDE.md is hashed over its
+    ${LOOM_SECTION_START} ... ${LOOM_SECTION_END}
+    region only, so sibling edits outside the Loom block do not report
+    drift. All other files are hashed whole.
+
+${BOLD}NOT TRACKED (runtime/user/merge-target files):${NC}
     .loom/config.json              Local terminal config
     .loom/daemon-state.json        Daemon runtime state
+    .loom/manifest.json            This manifest
+    .loom/install-metadata.json    Install ownership record
     .loom/progress/                Shepherd progress
     .loom/worktrees/               Git worktrees
+    .gitignore                     Consumer-merged ignore rules
     package.json                   Project package config
 
 ${BOLD}EXIT CODES:${NC}
@@ -120,6 +138,7 @@ ${BOLD}EXIT CODES:${NC}
     2    Invalid arguments
     3    Manifest not found (verify mode)
     4    Environment error (not a git repo, no SHA command)
+    5    Manifest schema outdated (verify mode) — run generate
 
 ${BOLD}EXAMPLES:${NC}
     # After installation, generate a manifest
@@ -134,35 +153,98 @@ ${BOLD}EXAMPLES:${NC}
 EOF
 }
 
-# Collect all tracked file paths (relative to repo root)
-# Outputs one path per line, sorted
-collect_tracked_files() {
+# Return "loom-block" for the top-level CLAUDE.md (region-scoped hashing),
+# empty string for every other path (whole-file hashing). Only the repo-root
+# CLAUDE.md is a merge target; .loom/CLAUDE.md is fully Loom-owned.
+region_for_path() {
+    if [[ "$1" == "CLAUDE.md" ]]; then
+        echo "loom-block"
+    else
+        echo ""
+    fi
+}
+
+# Runtime / user-mutable / merge-target files that Loom installs (so they
+# appear in install-metadata.json) but must NOT be checksum-tracked: verifying
+# them would report drift on every legitimate consumer edit. Returns 0 (match)
+# for paths to exclude from the tracked set.
+is_untracked_runtime_file() {
+    case "$1" in
+        .loom/config.json) return 0 ;;
+        .loom/daemon-state.json) return 0 ;;
+        .loom/manifest.json) return 0 ;;
+        .loom/install-metadata.json) return 0 ;;
+        .loom/progress/*) return 0 ;;
+        .loom/worktrees/*) return 0 ;;
+        .gitignore) return 0 ;;
+        package.json) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Parse the "installed_files" JSON array from install-metadata.json into
+# newline-delimited target-relative paths. Deliberately jq-free (awk) so
+# `generate` has no hard jq dependency — the awk split pattern is ported from
+# scripts/install/manifest.sh::_emit_loom_ownership_set (Loom-shipped paths
+# never contain commas, so a naive comma split is safe).
+parse_installed_files() {
+    local metadata_path="$1"
+    awk '
+        { buf = buf $0 "\n" }
+        END {
+            idx = index(buf, "\"installed_files\"")
+            if (idx == 0) { exit }
+            rest = substr(buf, idx)
+            lb = index(rest, "[")
+            if (lb == 0) { exit }
+            rest = substr(rest, lb + 1)
+            rb = index(rest, "]")
+            if (rb == 0) { exit }
+            arr = substr(rest, 1, rb - 1)
+            n = split(arr, items, ",")
+            for (i = 1; i <= n; i++) {
+                entry = items[i]
+                sub(/^[[:space:]]+/, "", entry)
+                sub(/[[:space:]]+$/, "", entry)
+                sub(/^"/, "", entry)
+                sub(/"$/, "", entry)
+                if (entry != "") print entry
+            }
+        }
+    ' "$metadata_path"
+}
+
+# Legacy fallback: hard-coded directory walk (pre-#3450 installs, or when
+# install-metadata.json is absent/empty). This is the historical behavior and
+# intentionally still captures .claude/agents/*.md by glob — it is only reached
+# when Loom's ownership manifest is unavailable.
+collect_tracked_files_walk() {
     local root="$1"
     local files=()
 
     # .loom/roles/*.md and *.json
     while IFS= read -r -d '' f; do
-        files+=("${f#$root/}")
+        files+=("${f#"$root"/}")
     done < <(find "$root/.loom/roles" -maxdepth 1 -type f \( -name "*.md" -o -name "*.json" \) -print0 2>/dev/null || true)
 
     # .loom/scripts/* (recursive, all files)
     while IFS= read -r -d '' f; do
-        files+=("${f#$root/}")
+        files+=("${f#"$root"/}")
     done < <(find "$root/.loom/scripts" -type f -print0 2>/dev/null || true)
 
     # .loom/docs/*
     while IFS= read -r -d '' f; do
-        files+=("${f#$root/}")
+        files+=("${f#"$root"/}")
     done < <(find "$root/.loom/docs" -type f -print0 2>/dev/null || true)
 
     # .claude/commands/loom/*.md
     while IFS= read -r -d '' f; do
-        files+=("${f#$root/}")
+        files+=("${f#"$root"/}")
     done < <(find "$root/.claude/commands/loom" -maxdepth 1 -type f -name "*.md" -print0 2>/dev/null || true)
 
     # .claude/agents/*.md
     while IFS= read -r -d '' f; do
-        files+=("${f#$root/}")
+        files+=("${f#"$root"/}")
     done < <(find "$root/.claude/agents" -maxdepth 1 -type f -name "*.md" -print0 2>/dev/null || true)
 
     # .claude/settings.json
@@ -177,7 +259,7 @@ collect_tracked_files() {
 
     # .github/ISSUE_TEMPLATE/*
     while IFS= read -r -d '' f; do
-        files+=("${f#$root/}")
+        files+=("${f#"$root"/}")
     done < <(find "$root/.github/ISSUE_TEMPLATE" -type f -print0 2>/dev/null || true)
 
     # .github/workflows/ - no workflows installed by default
@@ -200,7 +282,83 @@ collect_tracked_files() {
     fi
 
     # Output sorted, one per line
-    printf '%s\n' "${files[@]}" | sort
+    [[ ${#files[@]} -eq 0 ]] && return 0
+    printf '%s\n' "${files[@]}" | sort -u
+}
+
+# Collect all tracked file paths (relative to repo root), one per line, sorted.
+#
+# Primary path (issue #3600): derive the list from .loom/install-metadata.json
+# "installed_files" (Loom's ownership boundary), intersected with files present
+# on disk and minus the runtime/merge-target denylist. This means files a
+# sibling installer added (e.g. Anvil's .claude/agents/anvil-*.md) never enter
+# the manifest. Falls back to the legacy directory walk (with a warning) when
+# the metadata is absent or yields no usable entries.
+collect_tracked_files() {
+    local root="$1"
+    local metadata_path="$root/.loom/install-metadata.json"
+
+    local installed=""
+    if [[ -f "$metadata_path" ]]; then
+        installed=$(parse_installed_files "$metadata_path")
+    fi
+
+    if [[ -n "$installed" ]]; then
+        local files=()
+        local rel
+        while IFS= read -r rel; do
+            [[ -z "$rel" ]] && continue
+            is_untracked_runtime_file "$rel" && continue
+            [[ -f "$root/$rel" ]] || continue
+            files+=("$rel")
+        done <<< "$installed"
+
+        if [[ ${#files[@]} -gt 0 ]]; then
+            printf '%s\n' "${files[@]}" | sort -u
+            return 0
+        fi
+    fi
+
+    # Fallback: metadata missing or empty (pre-#3450 install).
+    echo "Warning: .loom/install-metadata.json missing or has no installed_files;" \
+         "falling back to legacy directory walk (pre-#3450 install?)." \
+         "Sibling-installer files may be captured; re-run install to refresh metadata." >&2
+    collect_tracked_files_walk "$root"
+}
+
+# Emit the hashable bytes for an entry to stdout, honoring region rules.
+# For region "loom-block", emit only the CLAUDE.md Loom marker region
+# (inclusive). For whole-file entries, cat the file verbatim.
+emit_hashable_content() {
+    local full_path="$1"
+    local region="$2"
+    if [[ "$region" == "loom-block" ]]; then
+        sed -n "/${LOOM_SECTION_START}/,/${LOOM_SECTION_END}/p" "$full_path"
+    else
+        cat "$full_path"
+    fi
+}
+
+# Compute "<sha256> <byte-size>" for an entry, honoring the region rule.
+# Whole-file entries hash the raw file bytes (identical to `shasum`); region
+# entries hash the extracted marker block. Both generate and verify call this,
+# so the two sides always agree.
+compute_entry_digest() {
+    local full_path="$1"
+    local region="$2"
+    local sha size
+    if [[ "$region" == "loom-block" ]]; then
+        local block
+        block=$(emit_hashable_content "$full_path" "$region")
+        sha=$(printf '%s' "$block" | $SHA_CMD | awk '{print $1}')
+        size=$(printf '%s' "$block" | wc -c | tr -d '[:space:]')
+    else
+        sha=$(compute_sha256 "$full_path")
+        size=$(wc -c < "$full_path" | tr -d '[:space:]')
+    fi
+    # Trailing newline is required: callers use `read`, which returns non-zero
+    # on EOF-without-newline and would abort under `set -e`.
+    printf '%s %s\n' "$sha" "$size"
 }
 
 # Generate manifest
@@ -268,10 +426,10 @@ cmd_generate() {
                 continue
             fi
 
-            local sha256
-            sha256=$(compute_sha256 "$full_path")
-            local size
-            size=$(wc -c < "$full_path" | tr -d '[:space:]')
+            local region
+            region=$(region_for_path "$rel_path")
+            local sha256 size
+            read -r sha256 size < <(compute_entry_digest "$full_path" "$region")
 
             if [[ "$first" == "true" ]]; then
                 first=false
@@ -285,7 +443,12 @@ cmd_generate() {
 
             printf '    "%s": {\n' "$json_path"
             printf '      "sha256": "%s",\n' "$sha256"
-            printf '      "size": %s\n' "$size"
+            printf '      "size": %s' "$size"
+            if [[ -n "$region" ]]; then
+                printf ',\n      "region": "%s"\n' "$region"
+            else
+                printf '\n'
+            fi
             printf '    }'
         done <<< "$tracked_files"
 
@@ -335,6 +498,22 @@ cmd_verify() {
         exit $EXIT_ENV_ERROR
     fi
 
+    # Schema-version gate (issue #3600). A manifest written by an older
+    # verify-install.sh uses a different file-set / hashing contract (v1:
+    # directory walk + whole-file CLAUDE.md hash). Comparing against it would
+    # report false drift, so refuse and instruct the caller to regenerate.
+    local manifest_schema
+    manifest_schema=$(jq -r '.version // 0' "$manifest_path")
+    if [[ "$manifest_schema" != "$MANIFEST_VERSION" ]]; then
+        if [[ "$output_mode" == "json" ]]; then
+            printf '{"status": "error", "error": "manifest_schema_outdated", "manifest_version": %s, "expected_version": %s}\n' \
+                "${manifest_schema:-0}" "$MANIFEST_VERSION"
+        elif [[ "$output_mode" != "quiet" ]]; then
+            echo -e "${YELLOW}manifest schema outdated (found v${manifest_schema}, expected v${MANIFEST_VERSION}) — run 'verify-install.sh generate'${NC}" >&2
+        fi
+        exit $EXIT_SCHEMA_OUTDATED
+    fi
+
     # Read manifest metadata
     local manifest_generated_at
     manifest_generated_at=$(jq -r '.generated_at // ""' "$manifest_path")
@@ -360,16 +539,25 @@ cmd_verify() {
         expected_sha256=$(jq -r --arg p "$rel_path" '.files[$p].sha256' "$manifest_path")
         local expected_size
         expected_size=$(jq -r --arg p "$rel_path" '.files[$p].size' "$manifest_path")
+        # Per-entry region marker (issue #3600). Absent → whole-file hashing.
+        local region
+        region=$(jq -r --arg p "$rel_path" '.files[$p].region // ""' "$manifest_path")
 
         if [[ ! -f "$full_path" ]]; then
             missing_files+=("$rel_path|$expected_sha256|$expected_size")
             continue
         fi
 
-        local actual_sha256
-        actual_sha256=$(compute_sha256 "$full_path")
-        local actual_size
-        actual_size=$(wc -c < "$full_path" | tr -d '[:space:]')
+        # A region-scoped entry whose Loom marker block is now absent is real
+        # drift (the block was removed), even though the file still exists.
+        if [[ "$region" == "loom-block" ]] \
+            && ! grep -q "$LOOM_SECTION_START" "$full_path" 2>/dev/null; then
+            modified_files+=("$rel_path|$expected_sha256|missing-loom-markers|$expected_size|0")
+            continue
+        fi
+
+        local actual_sha256 actual_size
+        read -r actual_sha256 actual_size < <(compute_entry_digest "$full_path" "$region")
 
         if [[ "$actual_sha256" != "$expected_sha256" ]]; then
             modified_files+=("$rel_path|$expected_sha256|$actual_sha256|$expected_size|$actual_size")
@@ -523,11 +711,21 @@ main() {
             exit $EXIT_OK
             ;;
         "")
-            # Auto mode: verify if manifest exists, generate if not
+            # Auto mode: verify if manifest exists, generate if not.
+            # Self-heal: an outdated-schema manifest is regenerated rather than
+            # verified, giving consumers a hands-free upgrade path (issue #3600).
             local root
             root=$(find_repo_root) || exit $EXIT_ENV_ERROR
             if [[ -f "$root/.loom/manifest.json" ]]; then
-                cmd_verify
+                # Lightweight, jq-free schema read so auto mode stays robust.
+                local auto_schema
+                auto_schema=$(grep -o '"version"[[:space:]]*:[[:space:]]*[0-9]\{1,\}' \
+                    "$root/.loom/manifest.json" | grep -o '[0-9]\{1,\}$' | head -1 || true)
+                if [[ "$auto_schema" != "$MANIFEST_VERSION" ]]; then
+                    cmd_generate
+                else
+                    cmd_verify
+                fi
             else
                 cmd_generate
             fi
