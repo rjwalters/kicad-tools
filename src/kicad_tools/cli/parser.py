@@ -591,8 +591,12 @@ def _add_check_parser(subparsers) -> None:
         help=(
             "Run a blocking schematic/PCB netlist-sync gate (issue #3154): "
             "compares the schematic component set against the PCB footprint "
-            "set and exits with code 2 when schematic components are missing "
-            "from the PCB. Skips silently if no schematic is found."
+            "set and exits with code 2 when a schematic component is missing "
+            "from the PCB (unbuildable BOM) or a matched component's value or "
+            "footprint diverges (wrong part / wrong package). Benign "
+            "rating-suffix value diffs (issue #4351) do not fail the gate; "
+            "PCB-only extras stay a warning unless --strict. Skips silently "
+            "if no schematic is found."
         ),
     )
     check_parser.add_argument(
