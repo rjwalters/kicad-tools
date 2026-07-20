@@ -266,7 +266,10 @@ class TestResultDict:
     def test_to_dict_keys(self, tmp_path: Path) -> None:
         pcb = _load(tmp_path, FAIL_PCB)
         d = CurrentSenseAnalyzer().analyze(pcb)[0].to_dict()
-        assert set(d) == {
+        # Phase-1 keys are all still present (additive-output guarantee); the
+        # Phase-2 keys are added alongside them. ISENSE has no return conductor
+        # here, so loop_reason is present.
+        assert {
             "sense_net",
             "nearest_hicur_net",
             "layer",
@@ -274,8 +277,12 @@ class TestResultDict:
             "min_gap_mm",
             "status",
             "margin",
-        }
+        }.issubset(set(d))
         assert d["status"] == "FAIL"
+        # Phase-2 additive keys.
+        assert d["loop_area_mm2"] is None
+        assert d["loop_status"] is None
+        assert d["loop_reason"]
 
     def test_to_dict_no_neighbor_is_json_safe(self, tmp_path: Path) -> None:
         pcb = _load(tmp_path, DIFFERENT_LAYER_PCB)
@@ -317,9 +324,11 @@ class TestCli:
         assert rc == 1
         payload = json.loads(capsys.readouterr().out)
         assert set(payload) == {"census", "thresholds", "summary"}
-        assert payload["summary"] == {"total": 1, "fail": 1, "pass": 0}
+        # Phase-1 summary keys unchanged; Phase-2 adds loop_fail.
+        assert payload["summary"] == {"total": 1, "fail": 1, "pass": 0, "loop_fail": 0}
         assert payload["thresholds"]["max_parallel_mm"] == 10.0
         assert payload["thresholds"]["min_gap_mm"] == 0.5
+        assert payload["thresholds"]["max_loop_area_mm2"] == 10.0
         row = payload["census"][0]
         assert row["sense_net"] == "ISENSE"
         assert row["nearest_hicur_net"] == "PHASE_A"
@@ -373,3 +382,268 @@ def test_result_dataclass_direct() -> None:
         margin_mm=None,
     )
     assert r.to_dict()["status"] == "PASS"
+    # Phase-2 fields default to null on direct construction.
+    assert r.loop_area_mm2 is None
+    assert r.loop_status is None
+    assert r.loop_reason is None
+    d = r.to_dict()
+    assert d["loop_area_mm2"] is None
+    assert d["loop_status"] is None
+    assert "loop_reason" not in d  # omitted when null
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 (#4330): copper sense-loop area
+# ---------------------------------------------------------------------------
+
+# A Kelvin sense pair ISENSE_P / ISENSE_N forming a 20mm x 2mm rectangle:
+# enclosed area = 40 mm^2 (well above the 10 mm^2 default) => loop FAIL.
+LARGE_LOOP_PCB = (
+    _HEADER
+    + """
+  (net 0 "")
+  (net 1 "ISENSE_P")
+  (net 2 "ISENSE_N")
+  (segment (start 0 0) (end 20 0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 0 2) (end 20 2) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+)
+
+# Same topology but 2mm x 0.3mm => 0.6 mm^2 => loop PASS.
+TIGHT_LOOP_PCB = (
+    _HEADER
+    + """
+  (net 0 "")
+  (net 1 "ISENSE_P")
+  (net 2 "ISENSE_N")
+  (segment (start 0 0) (end 2 0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 0 0.3) (end 2 0.3) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+)
+
+# Each conductor drawn as two collinear segments that linemerge must join into
+# a single 20mm polyline before closure. Same 20mm x 2mm = 40 mm^2 loop.
+MULTI_SEGMENT_LOOP_PCB = (
+    _HEADER
+    + """
+  (net 0 "")
+  (net 1 "ISENSE_P")
+  (net 2 "ISENSE_N")
+  (segment (start 0 0) (end 10 0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 10 0) (end 20 0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 0 2) (end 10 2) (width 0.2) (layer "F.Cu") (net 2))
+  (segment (start 10 2) (end 20 2) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+)
+
+# ISENSE_P split across F.Cu / B.Cu joined by a via at the shared position
+# (10,0); ISENSE_N is a single 20mm return. Same 40 mm^2 loop when bridged.
+VIA_LOOP_PCB = (
+    _HEADER
+    + """
+  (net 0 "")
+  (net 1 "ISENSE_P")
+  (net 2 "ISENSE_N")
+  (segment (start 0 0) (end 10 0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 10 0) (end 20 0) (width 0.2) (layer "B.Cu") (net 1))
+  (via (at 10 0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+  (segment (start 0 2) (end 20 2) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+)
+
+# A lone sense net with no pair/return => single-ended, not closable.
+SINGLE_ENDED_PCB = (
+    _HEADER
+    + """
+  (net 0 "")
+  (net 1 "ISENSE_P")
+  (segment (start 0 0) (end 20 0) (width 0.2) (layer "F.Cu") (net 1))
+)
+"""
+)
+
+
+class TestLoopArea:
+    def test_large_loop_fails(self, tmp_path: Path) -> None:
+        pcb = _load(tmp_path, LARGE_LOOP_PCB)
+        results = CurrentSenseAnalyzer().analyze(pcb)
+        by_net = {r.sense_net: r for r in results}
+        r = by_net["ISENSE_P"]
+        assert r.loop_area_mm2 == pytest.approx(40.0, rel=0.01)
+        assert r.loop_status == "FAIL"
+        assert r.loop_reason is None
+        # The auto-paired partner row reports the same loop.
+        assert by_net["ISENSE_N"].loop_area_mm2 == pytest.approx(40.0, rel=0.01)
+        assert by_net["ISENSE_N"].loop_status == "FAIL"
+
+    def test_tight_loop_passes(self, tmp_path: Path) -> None:
+        pcb = _load(tmp_path, TIGHT_LOOP_PCB)
+        r = {x.sense_net: x for x in CurrentSenseAnalyzer().analyze(pcb)}["ISENSE_P"]
+        assert r.loop_area_mm2 == pytest.approx(0.6, rel=0.01)
+        assert r.loop_status == "PASS"
+        assert r.loop_reason is None
+
+    def test_multi_segment_loop_merges(self, tmp_path: Path) -> None:
+        pcb = _load(tmp_path, MULTI_SEGMENT_LOOP_PCB)
+        r = {x.sense_net: x for x in CurrentSenseAnalyzer().analyze(pcb)}["ISENSE_P"]
+        # Matches the single-polyline 40 mm^2 equivalent.
+        assert r.loop_area_mm2 == pytest.approx(40.0, rel=0.01)
+        assert r.loop_status == "FAIL"
+
+    def test_via_transitioned_loop(self, tmp_path: Path) -> None:
+        pcb = _load(tmp_path, VIA_LOOP_PCB)
+        r = {x.sense_net: x for x in CurrentSenseAnalyzer().analyze(pcb)}["ISENSE_P"]
+        # Bridged at the via position => correct 40 mm^2 area (never a crash).
+        assert r.loop_area_mm2 == pytest.approx(40.0, rel=0.01)
+        assert r.loop_status == "FAIL"
+
+    def test_single_ended_is_null_with_reason(self, tmp_path: Path) -> None:
+        pcb = _load(tmp_path, SINGLE_ENDED_PCB)
+        r = {x.sense_net: x for x in CurrentSenseAnalyzer().analyze(pcb)}["ISENSE_P"]
+        assert r.loop_area_mm2 is None
+        assert r.loop_status is None  # never a default FAIL
+        assert r.loop_reason  # a reason is set
+        assert "closable" in r.loop_reason or "close" in r.loop_reason
+
+    def test_explicit_sense_pair(self, tmp_path: Path) -> None:
+        # Two sense nets whose names do NOT auto-pair, joined explicitly.
+        text = (
+            _HEADER
+            + """
+  (net 0 "")
+  (net 1 "ISENSE")
+  (net 2 "IRETURN")
+  (segment (start 0 0) (end 20 0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 0 2) (end 20 2) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+        )
+        pcb = _load(tmp_path, text)
+        analyzer = CurrentSenseAnalyzer(
+            sense_nets=["ISENSE", "IRETURN"],
+            sense_pairs=[("ISENSE", "IRETURN")],
+        )
+        r = {x.sense_net: x for x in analyzer.analyze(pcb)}["ISENSE"]
+        assert r.loop_area_mm2 == pytest.approx(40.0, rel=0.01)
+        assert r.loop_status == "FAIL"
+
+    def test_sense_return_shared_conductor(self, tmp_path: Path) -> None:
+        text = (
+            _HEADER
+            + """
+  (net 0 "")
+  (net 1 "ISENSE")
+  (net 2 "AGND")
+  (segment (start 0 0) (end 2 0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 0 0.3) (end 2 0.3) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+        )
+        pcb = _load(tmp_path, text)
+        analyzer = CurrentSenseAnalyzer(sense_nets=["ISENSE"], sense_return="AGND")
+        r = {x.sense_net: x for x in analyzer.analyze(pcb)}["ISENSE"]
+        assert r.loop_area_mm2 == pytest.approx(0.6, rel=0.01)
+        assert r.loop_status == "PASS"
+
+    def test_custom_max_loop_area_flips_status(self, tmp_path: Path) -> None:
+        pcb = _load(tmp_path, LARGE_LOOP_PCB)
+        # Raise the threshold above 40 mm^2 => the same loop now PASSes.
+        r = {x.sense_net: x for x in CurrentSenseAnalyzer(max_loop_area_mm2=100.0).analyze(pcb)}[
+            "ISENSE_P"
+        ]
+        assert r.loop_area_mm2 == pytest.approx(40.0, rel=0.01)
+        assert r.loop_status == "PASS"
+
+
+class TestLoopAreaCli:
+    def test_additive_json_keys(self, tmp_path: Path, capsys) -> None:
+        pcb = _write(tmp_path, LARGE_LOOP_PCB)
+        rc = analyze_main(["current-sense", str(pcb), "--format", "json"])
+        assert rc == 1  # loop-area FAIL gates
+        payload = json.loads(capsys.readouterr().out)
+        # Phase-1 census keys still present alongside the new ones.
+        row = payload["census"][0]
+        for key in (
+            "sense_net",
+            "nearest_hicur_net",
+            "layer",
+            "max_parallel_mm",
+            "min_gap_mm",
+            "status",
+            "margin",
+        ):
+            assert key in row
+        assert "loop_area_mm2" in row
+        assert "loop_status" in row
+        assert payload["thresholds"]["max_loop_area_mm2"] == 10.0
+        assert payload["summary"]["loop_fail"] >= 1
+
+    def test_loop_only_fail_exit_code(self, tmp_path: Path, capsys) -> None:
+        # Loop FAIL with NO Phase-1 parallel/gap FAIL still exits non-zero.
+        pcb = _write(tmp_path, LARGE_LOOP_PCB)
+        rc = analyze_main(["current-sense", str(pcb), "--format", "json"])
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        # Confirm no Phase-1 FAIL drove the exit (nets are 2mm apart, parallel
+        # 20mm: gap 1.8mm > 0.5mm default => Phase-1 PASS).
+        assert payload["summary"]["fail"] == 0
+        assert payload["summary"]["loop_fail"] >= 1
+
+    def test_tight_loop_all_pass_exit_zero(self, tmp_path: Path, capsys) -> None:
+        pcb = _write(tmp_path, TIGHT_LOOP_PCB)
+        rc = analyze_main(["current-sense", str(pcb)])
+        assert rc == 0
+
+    def test_max_loop_area_flag(self, tmp_path: Path, capsys) -> None:
+        pcb = _write(tmp_path, LARGE_LOOP_PCB)
+        rc = analyze_main(["current-sense", str(pcb), "--max-loop-area", "100"])
+        assert rc == 0  # threshold raised above the 40 mm^2 loop
+
+    def test_sense_pair_flag(self, tmp_path: Path, capsys) -> None:
+        text = (
+            _HEADER
+            + """
+  (net 0 "")
+  (net 1 "ISENSE")
+  (net 2 "IRETURN")
+  (segment (start 0 0) (end 20 0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 0 2) (end 20 2) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+        )
+        pcb = _write(tmp_path, text)
+        rc = analyze_main(
+            [
+                "current-sense",
+                str(pcb),
+                "--sense-net",
+                "ISENSE",
+                "--sense-net",
+                "IRETURN",
+                "--sense-pair",
+                "ISENSE",
+                "IRETURN",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        row = {r["sense_net"]: r for r in payload["census"]}["ISENSE"]
+        assert row["loop_area_mm2"] == pytest.approx(40.0, rel=0.01)
+        assert row["loop_status"] == "FAIL"
+
+    def test_text_output_has_loop_column(self, tmp_path: Path, capsys) -> None:
+        pcb = _write(tmp_path, LARGE_LOOP_PCB)
+        rc = analyze_main(["current-sense", str(pcb)])
+        assert rc == 1
+        out = capsys.readouterr().out
+        # The enclosed loop area is rendered and the loop-area FAIL is counted
+        # in the summary alongside the (unchanged) Phase-1 PASS/FAIL tally.
+        assert "40.000" in out
+        assert "loop-area FAIL" in out
+        assert "2 PASS" in out

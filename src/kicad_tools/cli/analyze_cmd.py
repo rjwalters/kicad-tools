@@ -294,6 +294,33 @@ def main(argv: list[str] | None = None) -> int:
         help="Edge-to-edge gap FAIL threshold in mm (default: 0.5)",
     )
     current_sense_parser.add_argument(
+        "--max-loop-area",
+        type=float,
+        default=10.0,
+        help=(
+            "Enclosed copper sense-loop area FAIL threshold in mm^2 (default: 10.0; EE-confirmable)"
+        ),
+    )
+    current_sense_parser.add_argument(
+        "--sense-pair",
+        action="append",
+        nargs=2,
+        dest="sense_pairs",
+        default=[],
+        metavar=("SENSE", "RETURN"),
+        help=(
+            "Kelvin loop pairing: close SENSE's loop with RETURN conductor "
+            "(repeatable). Nets ending _P/_N, +/-, _H/_L auto-pair."
+        ),
+    )
+    current_sense_parser.add_argument(
+        "--sense-return",
+        dest="sense_return",
+        default=None,
+        metavar="NAME",
+        help="Shared return conductor (e.g. Kelvin ground) to close sense loops",
+    )
+    current_sense_parser.add_argument(
         "--quiet",
         "-q",
         action="store_true",
@@ -1229,22 +1256,30 @@ def _run_current_sense_analysis(args: argparse.Namespace) -> int:
         min_gap_mm=args.min_gap,
         sense_nets=list(getattr(args, "sense_nets", []) or []),
         hicur_nets=list(getattr(args, "hicur_nets", []) or []),
+        max_loop_area_mm2=getattr(args, "max_loop_area", 10.0),
+        sense_pairs=list(getattr(args, "sense_pairs", []) or []),
+        sense_return=getattr(args, "sense_return", None),
     )
     results = analyzer.analyze(pcb)
 
     if args.format == "json":
-        _output_current_sense_json(results, args.max_parallel, args.min_gap)
+        _output_current_sense_json(
+            results, args.max_parallel, args.min_gap, getattr(args, "max_loop_area", 10.0)
+        )
     else:
         _output_current_sense_text(
             results,
             pcb_path.name,
             args.max_parallel,
             args.min_gap,
+            getattr(args, "max_loop_area", 10.0),
             quiet=args.quiet,
         )
 
-    # Non-zero exit when any sense net FAILs (CI-gateable).
-    if any(r.status == "FAIL" for r in results):
+    # Non-zero exit when any Phase-1 parallel/gap FAIL OR any loop-area FAIL is
+    # present (both are CI-gateable). No closable loop (loop_status None) does
+    # not gate.
+    if any(r.status == "FAIL" or r.loop_status == "FAIL" for r in results):
         return 1
     return 0
 
@@ -1253,19 +1288,23 @@ def _output_current_sense_json(
     results: list,
     max_parallel_mm: float,
     min_gap_mm: float,
+    max_loop_area_mm2: float,
 ) -> None:
     """Output current-sense census as JSON (mirrors signal-integrity JSON)."""
     fail_count = sum(1 for r in results if r.status == "FAIL")
+    loop_fail_count = sum(1 for r in results if r.loop_status == "FAIL")
     output = {
         "census": [r.to_dict() for r in results],
         "thresholds": {
             "max_parallel_mm": max_parallel_mm,
             "min_gap_mm": min_gap_mm,
+            "max_loop_area_mm2": max_loop_area_mm2,
         },
         "summary": {
             "total": len(results),
             "fail": fail_count,
             "pass": len(results) - fail_count,
+            "loop_fail": loop_fail_count,
         },
     }
     print(json.dumps(output, indent=2))
@@ -1276,6 +1315,7 @@ def _output_current_sense_text(
     filename: str,
     max_parallel_mm: float,
     min_gap_mm: float,
+    max_loop_area_mm2: float,
     quiet: bool = False,
 ) -> None:
     """Output current-sense census as a formatted table."""
@@ -1290,22 +1330,30 @@ def _output_current_sense_text(
         console.print(f"\n[bold]Current-Sense Layout Lint: {filename}[/bold]")
         console.print(
             f"[dim]FAIL when parallel-run >= {max_parallel_mm:.2f}mm AND "
-            f"gap <= {min_gap_mm:.2f}mm (same layer)[/dim]\n"
+            f"gap <= {min_gap_mm:.2f}mm (same layer); "
+            f"loop FAIL when enclosed area > {max_loop_area_mm2:.2f}mm^2[/dim]\n"
         )
 
     table = Table(show_header=True)
+    # Phase-1 columns (order preserved); loop_area_mm2 is appended (Phase 2).
     table.add_column("sense_net", style="cyan")
     table.add_column("nearest_hicur_net")
     table.add_column("layer")
     table.add_column("max_parallel_mm", justify="right")
     table.add_column("min_gap_mm", justify="right")
     table.add_column("status", justify="center")
+    table.add_column("loop_area_mm2", justify="right")
 
     for r in results:
         status_style = "red bold" if r.status == "FAIL" else "green"
         nearest = r.nearest_hicur_net if r.nearest_hicur_net is not None else "-"
         layer = r.layer if r.layer is not None else "-"
         gap_str = "-" if r.min_gap_mm is None else f"{r.min_gap_mm:.3f}"
+        if r.loop_area_mm2 is None:
+            loop_str = "-"
+        else:
+            loop_style = "red bold" if r.loop_status == "FAIL" else "green"
+            loop_str = f"[{loop_style}]{r.loop_area_mm2:.3f}[/{loop_style}]"
         table.add_row(
             r.sense_net,
             nearest,
@@ -1313,16 +1361,19 @@ def _output_current_sense_text(
             f"{r.max_parallel_mm:.3f}",
             gap_str,
             f"[{status_style}]{r.status}[/{status_style}]",
+            loop_str,
         )
 
     console.print(table)
 
     fail_count = sum(1 for r in results if r.status == "FAIL")
+    loop_fail_count = sum(1 for r in results if r.loop_status == "FAIL")
     console.print()
-    summary_style = "red bold" if fail_count else "green"
+    summary_style = "red bold" if (fail_count or loop_fail_count) else "green"
     console.print(
         f"[{summary_style}]Total: {len(results)} sense nets, "
-        f"{fail_count} FAIL, {len(results) - fail_count} PASS[/{summary_style}]"
+        f"{fail_count} FAIL, {len(results) - fail_count} PASS "
+        f"({loop_fail_count} loop-area FAIL)[/{summary_style}]"
     )
 
 
