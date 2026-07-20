@@ -24,11 +24,13 @@ from kicad_tools._shapely import has_shapely
 from kicad_tools.creepage.engine import (
     BOARD_EDGE_LABEL,
     compute_creepage_census,
+    is_mains_suspect_name,
+    mains_suspect_nets,
     resolve_hv_nets,
     surface_path_length,
 )
 
-from .fixtures import board_no_hv_source, board_source
+from .fixtures import board_mains_named_source, board_no_hv_source, board_source
 
 pytestmark = pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
 
@@ -191,3 +193,92 @@ def test_name_pattern_fallback_without_map(tmp_path):
     pcb = _load(tmp_path, board_source(with_slot=False))
     hv = resolve_hv_nets(pcb, "ground", net_class_map=None)
     assert set(hv.values()) == {"GND"}
+
+
+# ---------------------------------------------------------------------------
+# Mains/HV name detection + broadened HV fallback (issue #4354)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "AC_LINE",
+        "AC_NEUTRAL",
+        "ACLINE",
+        "FUSED_LINE",
+        "FUSED",
+        "MAINS_L",
+        "L_MAINS",
+        "HV_BUS",
+        "HV",
+        "LIVE",
+        "NEUTRAL",
+        "PRIMARY",
+        "LINE",
+        "/AC_LINE",  # hierarchical leading slash
+    ],
+)
+def test_is_mains_suspect_name_positive(name):
+    assert is_mains_suspect_name(name) is True
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "GND",
+        "SDA",
+        "SCL",
+        "USB_DP",
+        "USB_DM",
+        "SIG",
+        "VCC",
+        "ONLINE",  # 'LINE' substring, no token boundary -> must NOT match
+        "REMAINS",  # 'MAINS' substring, no token boundary -> must NOT match
+        "",
+        None,
+    ],
+)
+def test_is_mains_suspect_name_negative(name):
+    assert is_mains_suspect_name(name) is False
+
+
+def test_mains_suspect_nets_lists_only_mains_named(tmp_path):
+    pcb = _load(tmp_path, board_mains_named_source())
+    # GND is excluded; the three mains nets are listed (sorted).
+    assert mains_suspect_nets(pcb) == ["AC_LINE", "AC_NEUTRAL", "FUSED_LINE"]
+
+
+def test_broadened_hv_fallback_classifies_mains_without_map(tmp_path):
+    # The NetClass enum has no HV member, so this only works via the #4354
+    # broadened mains/HV name fallback -- with NO net-class-map at all.
+    pcb = _load(tmp_path, board_mains_named_source())
+    hv = resolve_hv_nets(pcb, "HV", net_class_map=None)
+    assert set(hv.values()) == {"AC_LINE", "AC_NEUTRAL", "FUSED_LINE"}
+    assert "GND" not in set(hv.values())
+
+
+def test_explicit_map_still_governs_over_fallback(tmp_path):
+    # A map that classifies the mains nets as a NON-HV class must exclude them
+    # from the HV group (explicit operator classification wins; the broadened
+    # fallback never double-adds a mapped net).
+    from kicad_tools.router.rules import net_class_map_from_dict
+
+    pcb = _load(tmp_path, board_mains_named_source())
+    generic = net_class_map_from_dict(
+        {
+            "AC_LINE": {"name": "Power"},
+            "AC_NEUTRAL": {"name": "Power"},
+            "FUSED_LINE": {"name": "Power"},
+        }
+    )
+    hv = resolve_hv_nets(pcb, "HV", generic)
+    assert hv == {}
+
+
+def test_broadened_fallback_only_applies_to_hv_target(tmp_path):
+    # Asking for a non-HV class must NOT pull in mains-named nets via the #4354
+    # fallback (it is gated on target == "hv").
+    pcb = _load(tmp_path, board_mains_named_source())
+    hv = resolve_hv_nets(pcb, "power", net_class_map=None)
+    assert "AC_LINE" not in set(hv.values())

@@ -33,6 +33,7 @@ from kicad_tools.audit import AuditResult, AuditVerdict, IsolationStatus, Manufa
 from kicad_tools.cli import audit_cmd
 from tests.creepage.fixtures import (
     board_close_hv_source,
+    board_mains_named_source,
     board_no_hv_source,
     board_source,
 )
@@ -213,14 +214,18 @@ def test_hv_present_no_threshold_not_checked(tmp_path, capsys):
 
 
 def test_no_hv_nets_no_section(tmp_path, capsys):
-    """A non-HV board: no section, checked=False, hv_present=False."""
+    """A genuinely low-voltage non-HV board: no section, inert isolation.
+
+    Uses a below-SELV working voltage (24 V) with no mains-named nets so the
+    #4354 vacuity guard stays quiet -- the legitimately-inert path.
+    """
     pcb = _write(tmp_path, board_no_hv_source())
     ncm = _hv_map_file(tmp_path)
     result = _audit(
         pcb,
         ncm,
         hv_standard="iec60664",
-        hv_working_voltage=250.0,
+        hv_working_voltage=24.0,  # below the 50 V SELV boundary
         hv_pollution_degree=2,
     ).run()
     iso = result.isolation
@@ -228,10 +233,78 @@ def test_no_hv_nets_no_section(tmp_path, capsys):
     assert iso.hv_present is False
     assert iso.checked is False
     assert iso.passed is True
+    assert iso.mains_suspected_unclassified is False
 
     audit_cmd.output_table(result)
     out = capsys.readouterr().out
     assert "HV / Isolation" not in out
+
+
+def test_mains_named_board_empty_hv_group_is_not_ready(tmp_path, capsys):
+    """#4354: a mains-named board whose HV group resolves EMPTY -> NOT_READY.
+
+    A GENERIC net-class-map names the mains nets Power (never HV), so HV
+    resolution returns empty -- but the board is obviously mains, so the audit
+    vacuity guard fires (mains_suspected_unclassified) and the verdict hard-fails
+    rather than silently reporting READY.
+    """
+    pcb = _write(tmp_path, board_mains_named_source())
+    gmap = tmp_path / "generic_map.json"
+    gmap.write_text(
+        json.dumps(
+            {
+                "AC_LINE": {"name": "Power"},
+                "AC_NEUTRAL": {"name": "Power"},
+                "FUSED_LINE": {"name": "Power"},
+            }
+        )
+    )
+    result = _audit(
+        pcb,
+        str(gmap),
+        hv_standard="iec60664",
+        hv_working_voltage=250.0,
+        hv_pollution_degree=2,
+    ).run()
+    iso = result.isolation
+
+    assert iso.mains_suspected_unclassified is True
+    assert iso.hv_present is False
+    assert "AC_LINE" in iso.mains_suspect_nets
+    assert result.verdict == AuditVerdict.NOT_READY
+
+    audit_cmd.output_table(result)
+    out = capsys.readouterr().out
+    assert "HV / Isolation" in out
+    assert "mains nets unclassified" in out
+    assert "AC_LINE" in out
+
+
+def test_mains_suspected_unclassified_json(tmp_path):
+    """#4354: the vacuity-guard state is serialized in the isolation JSON."""
+    pcb = _write(tmp_path, board_mains_named_source())
+    gmap = tmp_path / "generic_map.json"
+    gmap.write_text(
+        json.dumps(
+            {
+                "AC_LINE": {"name": "Power"},
+                "AC_NEUTRAL": {"name": "Power"},
+                "FUSED_LINE": {"name": "Power"},
+            }
+        )
+    )
+    result = _audit(
+        pcb,
+        str(gmap),
+        hv_standard="iec60664",
+        hv_working_voltage=250.0,
+        hv_pollution_degree=2,
+    ).run()
+    data = result.to_dict()
+
+    assert data["isolation"]["mains_suspected_unclassified"] is True
+    assert "AC_LINE" in data["isolation"]["mains_suspect_nets"]
+    assert data["verdict"] == AuditVerdict.NOT_READY.value
 
 
 def test_no_hv_nets_json_isolation_inert(tmp_path):
@@ -391,6 +464,16 @@ class TestVerdictRollup:
             hv_present=True, threshold_supplied=True, could_not_verify=True
         )
         assert result.verdict == AuditVerdict.WARNING
+
+    def test_mains_suspected_unclassified_not_ready(self):
+        """#4354: empty HV group on a mains-looking board -> NOT_READY."""
+        result = self._clean_result()
+        result.isolation = IsolationStatus(
+            hv_present=False,
+            mains_suspected_unclassified=True,
+            mains_suspect_nets=["AC_LINE"],
+        )
+        assert result.verdict == AuditVerdict.NOT_READY
 
     def test_exit_code_maps_from_verdict(self, tmp_path, monkeypatch, capsys):
         """The CLI exit code reflects the isolation-driven verdict.

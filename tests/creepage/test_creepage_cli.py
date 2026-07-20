@@ -16,7 +16,7 @@ from kicad_tools._shapely import has_shapely
 from kicad_tools.cli.commands.creepage import run_creepage_command
 from kicad_tools.cli.parser import create_parser
 
-from .fixtures import board_no_hv_source, board_source
+from .fixtures import board_mains_named_source, board_no_hv_source, board_source
 
 pytestmark = pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
 
@@ -121,6 +121,123 @@ def test_no_hv_nets_json_empty_census(tmp_path, capsys):
     assert payload["pairs"] == []
     assert payload["pair_count"] == 0
     assert payload["passed"] is True
+
+
+# ---------------------------------------------------------------------------
+# #4354 vacuity guard: a mains-looking board must never silently exit 0.
+# ---------------------------------------------------------------------------
+
+
+def test_mains_named_board_no_map_exits_nonzero(tmp_path, capsys):
+    # Realistic invocation #1 from the report: NO net-class-map.  The broadened
+    # HV name fallback classifies AC_LINE/AC_NEUTRAL/FUSED_LINE, the ~1 mm
+    # AC_LINE<->GND gap fails the 250 V IIIa/PD2 requirement -> exit 1 (a real
+    # measured failure), NOT a silent exit 0.
+    pcb = _write(tmp_path, board_mains_named_source())
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "250",
+            "--pollution-degree",
+            "2",
+            "--material-group",
+            "IIIa",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert "Nothing to audit -- exit 0" not in captured.out
+    # The mains nets were actually classified and audited.
+    assert "AC_LINE" in captured.out
+
+
+def test_generic_map_hiding_mains_fires_vacuity_guard(tmp_path, capsys):
+    # Realistic invocation #2 from the report: a GENERIC net-class-map that
+    # names Power/Digital but never HV.  The mains nets are mapped away from HV,
+    # so 0 HV nets resolve -- but the board is obviously mains, so the vacuity
+    # guard fires with the distinct exit code 2 (NOT a silent 0).
+    pcb = _write(tmp_path, board_mains_named_source())
+    gmap = tmp_path / "generic_map.json"
+    gmap.write_text(
+        json.dumps(
+            {
+                "AC_LINE": {"name": "Power"},
+                "AC_NEUTRAL": {"name": "Power"},
+                "FUSED_LINE": {"name": "Power"},
+            }
+        )
+    )
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(gmap),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "250",
+            "--pollution-degree",
+            "2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2  # distinct "HV unclassified" code, not 0 and not 1
+    assert "Nothing to audit -- exit 0" not in captured.out
+    assert "WARNING" in captured.err
+    assert "AC_LINE" in captured.err
+    assert "--net-class-map" in captured.err
+
+
+def test_high_working_voltage_without_mains_names_fires_guard(tmp_path, capsys):
+    # The repro board's real HV nets (TRK_POS/V_RSV_POS) do NOT match mains
+    # name patterns.  A mains-level --working-voltage with 0 resolved HV nets
+    # must still fire the guard (exit 2), never silent 0.
+    pcb = _write(tmp_path, board_no_hv_source())
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "250",
+            "--pollution-degree",
+            "2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "WARNING" in captured.err
+    assert "250" in captured.err
+    assert "Nothing to audit -- exit 0" not in captured.out
+
+
+def test_low_voltage_non_hv_board_still_exits_zero(tmp_path, capsys):
+    # Negative control: a genuinely low-voltage board (no mains names, working
+    # voltage below the 50 V SELV boundary) must still exit 0 with the inert
+    # "Nothing to audit" message -- no false alarms.
+    pcb = _write(tmp_path, board_no_hv_source())
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "24",
+            "--pollution-degree",
+            "2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Nothing to audit -- exit 0" in captured.out
+    assert "WARNING" not in captured.err
 
 
 def test_missing_pcb_file_errors(tmp_path, capsys):

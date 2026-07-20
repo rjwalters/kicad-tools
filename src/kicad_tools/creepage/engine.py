@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -54,6 +55,50 @@ _INTERIOR_SHRINK = 1e-6  # shrink a slot before the "crosses interior" test
 # A pair is a PASS when creepage >= min within this tolerance (mm).  Mirrors
 # the spirit of DRC_TOLERANCE -- a sub-micron shortfall is not a real defect.
 _PASS_TOLERANCE = 1e-4
+
+# IEC 60664-1 SELV boundary: below ~50 V RMS a design is not a mains/HV
+# safety concern.  A working-voltage argument at or above this threshold is a
+# strong signal that the operator IS analysing a mains/HV insulation path, so
+# a census that resolves ZERO HV nets at such a voltage is a vacuity red flag
+# (issue #4354) rather than an inert "nothing to audit" -- the same contract as
+# the LVS zero-bound-pad guard (#4011).
+SELV_WORKING_VOLTAGE_V = 50.0
+
+# Strong mains/HV net-name signals (case-insensitive, whole-token boundaries so
+# substrings like ONLINE / REMAINS / GND do NOT trip).  Used both to broaden the
+# HV name-pattern fallback (the ``NetClass`` enum deliberately has no HV member,
+# so :func:`classify_from_name` can never return ``"HV"``) and to power the
+# vacuity guard (issue #4354).  Net names frequently carry a leading ``/``
+# (hierarchical sheet path), so ``/`` is an accepted token boundary.
+MAINS_NAME_RE = re.compile(
+    r"(?:^|[_/])"
+    r"(?:"
+    r"AC[_-]?LINE|AC[_-]?NEUT(?:RAL)?|L[_-]?LINE|N[_-]?LINE|LINE(?:_IN)?|"
+    r"LIVE|NEUTRAL|MAINS|FUSED(?:_[A-Z0-9]+)?|HV[_A-Z0-9]*|PRIMARY|HOT"
+    r")"
+    r"(?:$|[_/])",
+    re.IGNORECASE,
+)
+
+
+def is_mains_suspect_name(name: str | None) -> bool:
+    """True when ``name`` carries a strong mains/HV signal (see MAINS_NAME_RE)."""
+    return bool(name) and MAINS_NAME_RE.search(name) is not None  # type: ignore[arg-type]
+
+
+def mains_suspect_nets(pcb: PCB) -> list[str]:
+    """Sorted board net names that strongly imply a mains/HV conductor.
+
+    Powers the issue #4354 vacuity guard: when HV-net *resolution* returns
+    empty but the board clearly carries mains-named copper, the creepage census
+    must NOT silently pass -- the operator most likely just needs a
+    ``--net-class-map`` (or ``--net-class``) that actually names the HV group.
+    """
+    return sorted(
+        n.name
+        for n in pcb.nets.values()
+        if n.number != 0 and n.name and MAINS_NAME_RE.search(n.name)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -281,9 +326,16 @@ def resolve_hv_nets(
     2. **Name-pattern fallback** -- for any net NOT resolved by the map, the
        existing :func:`kicad_tools.router.net_class.classify_from_name` is
        consulted and its :class:`NetClass` value compared to ``net_class``
-       (case-insensitive).  This lets ``--net-class power`` work without a map
-       while ``--net-class HV`` (which has no built-in pattern) relies on the
-       map, exactly as the phase-1 spec intends.
+       (case-insensitive).  This lets ``--net-class power`` work without a map.
+    3. **Mains/HV name fallback** -- when ``net_class`` is ``HV`` (the default),
+       the :class:`NetClass` enum has no HV member, so ``classify_from_name``
+       can never return ``"HV"`` and step 2 is unreachable for the HV group
+       (issue #4354).  Any unmapped net whose name carries a strong mains/HV
+       signal (:data:`MAINS_NAME_RE` -- ``AC_LINE``, ``AC_NEUTRAL``,
+       ``FUSED_LINE``, ``*MAINS*``, ``HV*``, ``LIVE``, ``NEUTRAL``,
+       ``PRIMARY`` ...) is therefore selected here.  An explicit map entry
+       always wins (step 1), so operator-supplied classification is never
+       overridden by this fallback.
     """
     from kicad_tools.router.net_class import classify_from_name
 
@@ -302,6 +354,11 @@ def resolve_hv_nets(
         # Name-pattern fallback for nets not covered by the map.
         classification = classify_from_name(net.name)
         if classification is not None and classification.value.strip().lower() == target:
+            selected[net.number] = net.name
+            continue
+        # Broadened mains/HV fallback for the HV group (issue #4354): there is
+        # no NetClass.HV, so classify_from_name never yields "hv" above.
+        if target == "hv" and MAINS_NAME_RE.search(net.name):
             selected[net.number] = net.name
     return selected
 

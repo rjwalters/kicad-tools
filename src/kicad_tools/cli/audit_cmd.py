@@ -394,9 +394,10 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
         layers_icon = "OK" if layers[2] else "X"
         print(f"    [{layers_icon}] Layers: {layers[0]} (supported: {layers[1]})")
 
-    # HV / Isolation (creepage) -- only when HV nets were present (Issue #4333).
+    # HV / Isolation (creepage) -- when HV nets were present (Issue #4333) OR
+    # when the mains-suspect vacuity guard fired on an empty HV group (#4354).
     iso = result.isolation
-    if iso.hv_present:
+    if iso.hv_present or getattr(iso, "mains_suspected_unclassified", False):
         _output_isolation_section(iso)
 
     # Layer utilization
@@ -446,6 +447,22 @@ def _output_isolation_section(iso) -> None:
     against the IEC-derived (or manual) required values with distinct margins,
     plus the governing standard citation and the standards DISCLAIMER.
     """
+    # Vacuity guard (issue #4354): 0 HV nets resolved on a mains-looking board.
+    # This is a hard FAIL (NOT_READY), rendered before the normal states so the
+    # report explains why an apparently HV-free board is not shippable.
+    if getattr(iso, "mains_suspected_unclassified", False):
+        print("\n[X] HV / Isolation (creepage): FAIL (mains nets unclassified)")
+        suspects = getattr(iso, "mains_suspect_nets", []) or []
+        if suspects:
+            shown = ", ".join(suspects[:8])
+            more = "" if len(suspects) <= 8 else f" (+{len(suspects) - 8} more)"
+            print(f"    Mains/HV-suspect nets: {shown}{more}")
+        else:
+            print("    Mains/HV working voltage supplied but 0 HV nets classified.")
+        if iso.details:
+            print(f"    Note: {iso.details}")
+        return
+
     if iso.could_not_verify:
         icon, verdict = "!!", "COULD NOT VERIFY"
     elif not iso.threshold_supplied:
@@ -546,7 +563,9 @@ def output_summary(result: AuditResult) -> None:
         )
     print(f"  Net completion: {summary['net_completion']:.0f}%")
     print(f"  Manufacturer compatible: {'Yes' if summary['manufacturer_compatible'] else 'No'}")
-    if result.isolation.hv_present:
+    if getattr(result.isolation, "mains_suspected_unclassified", False):
+        print("  HV isolation: FAIL (mains nets unclassified)")
+    elif result.isolation.hv_present:
         if result.isolation.checked:
             iso_state = "PASS" if result.isolation.passed else "FAIL"
         elif result.isolation.could_not_verify:

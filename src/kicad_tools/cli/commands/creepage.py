@@ -31,11 +31,22 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.creepage.engine import CreepageReport
 
+# Distinct exit code for "could not classify any HV net on a board that looks
+# like mains" (issue #4354).  Kept separate from 1 ("a measured pair failed its
+# bound") so CI / agent gates can tell an unclassifiable-HV vacuity from a real
+# creepage failure.
+EXIT_HV_UNCLASSIFIED = 2
+
 
 def run_creepage_command(args) -> int:
     """Handle the ``creepage`` command.  Returns the process exit code."""
     from kicad_tools._shapely import has_shapely
-    from kicad_tools.creepage.engine import compute_creepage_census, resolve_hv_nets
+    from kicad_tools.creepage.engine import (
+        SELV_WORKING_VOLTAGE_V,
+        compute_creepage_census,
+        mains_suspect_nets,
+        resolve_hv_nets,
+    )
     from kicad_tools.creepage.standards import (
         RMS_TO_PEAK,
         StandardLookupError,
@@ -144,19 +155,75 @@ def run_creepage_command(args) -> int:
         clearance_provenance=clearance_prov,
     )
 
+    # Vacuity guard (issue #4354): a census that resolves ZERO HV nets is only
+    # legitimately "nothing to audit" on a genuinely low-voltage board.  When
+    # the board carries mains-named copper OR a mains-level working voltage was
+    # supplied, an empty HV group means the HV path was never evaluated -- a
+    # safety-gate FALSE PASS.  Fire loud and exit non-zero (distinct code) so
+    # this is never mistaken for a clean board.
+    mains_suspects: list[str] = []
+    guard_triggered = False
+    if not report.has_hv_nets:
+        mains_suspects = mains_suspect_nets(pcb)
+        high_working_voltage = (
+            working_voltage is not None and float(working_voltage) >= SELV_WORKING_VOLTAGE_V
+        )
+        guard_triggered = bool(mains_suspects) or high_working_voltage
+
     if fmt == "json":
         print(json.dumps(report.to_dict(), indent=2))
     elif report.uses_standard:
-        _render_table_standard(report)
+        _render_table_standard(report, guard_triggered=guard_triggered)
     else:
-        _render_table(report)
+        _render_table(report, guard_triggered=guard_triggered)
+
+    if guard_triggered:
+        _warn_hv_unclassified(report, mains_suspects, working_voltage)
+        return EXIT_HV_UNCLASSIFIED
 
     # Non-zero exit iff any pair fails its governing bound(s).  An empty census
-    # (no HV nets, or HV nets with no neighbors) is a clean exit 0.
+    # on a genuinely low-voltage board (no mains names, no HV working voltage)
+    # is a clean exit 0.
     return 0 if report.passed else 1
 
 
-def _render_table(report: CreepageReport) -> None:
+def _warn_hv_unclassified(
+    report: CreepageReport,
+    mains_suspects: list[str],
+    working_voltage: float | None,
+) -> None:
+    """Loud stderr warning when the HV group is empty on a mains-looking board."""
+    from kicad_tools.creepage.engine import SELV_WORKING_VOLTAGE_V
+
+    print(
+        "WARNING: creepage resolved 0 HV nets, but this board looks like a "
+        "mains/HV design -- the HV insulation path was NOT evaluated.",
+        file=sys.stderr,
+    )
+    if mains_suspects:
+        shown = ", ".join(mains_suspects[:12])
+        more = "" if len(mains_suspects) <= 12 else f" (+{len(mains_suspects) - 12} more)"
+        print(f"  Mains/HV-suspect nets on the board: {shown}{more}", file=sys.stderr)
+    if working_voltage is not None and float(working_voltage) >= SELV_WORKING_VOLTAGE_V:
+        print(
+            f"  Working voltage {float(working_voltage):g} V is at/above the "
+            f"{SELV_WORKING_VOLTAGE_V:g} V SELV boundary -- an HV path is implied.",
+            file=sys.stderr,
+        )
+    print(
+        f"  None of these nets were classified as '{report.net_class}'.  Supply "
+        "--net-class-map (mapping the mains nets to the HV class) or --net-class "
+        "so the census can actually audit them.",
+        file=sys.stderr,
+    )
+    print(
+        f"  Exiting {EXIT_HV_UNCLASSIFIED} (HV-unclassified) rather than 0 to "
+        "avoid a safety-gate false pass.",
+        file=sys.stderr,
+    )
+
+
+def _render_table(report: CreepageReport, *, guard_triggered: bool = False) -> None:
     """Print the human-readable census table (phase-1 / manual --min mode)."""
     if not report.has_hv_nets:
         print(
@@ -164,7 +231,15 @@ def _render_table(report: CreepageReport) -> None:
             "(supply --net-class-map to classify HV nets, or check --net-class)."
         )
         print(f"Board: {report.board}")
-        print("Census: 0 pairs.  Nothing to audit -- exit 0.")
+        if guard_triggered:
+            # #4354: mains-looking board with an empty HV group -- do NOT claim
+            # a clean exit; the loud WARNING + non-zero exit follow.
+            print(
+                "Census: 0 pairs, but the board looks like mains/HV -- "
+                "HV classification FAILED (see WARNING below)."
+            )
+        else:
+            print("Census: 0 pairs.  Nothing to audit -- exit 0.")
         return
 
     print(f"HV creepage/clearance census  (net-class '{report.net_class}')")
@@ -200,7 +275,7 @@ def _render_table(report: CreepageReport) -> None:
         print(f"PASS: all {total} pair(s) clear {report.min_mm:.3f} mm creepage.")
 
 
-def _render_table_standard(report: CreepageReport) -> None:
+def _render_table_standard(report: CreepageReport, *, guard_triggered: bool = False) -> None:
     """Print the census table with IEC-derived requirements (phase-2 mode)."""
     from kicad_tools.creepage.standards import DISCLAIMER
 
@@ -210,7 +285,15 @@ def _render_table_standard(report: CreepageReport) -> None:
             "(supply --net-class-map to classify HV nets, or check --net-class)."
         )
         print(f"Board: {report.board}")
-        print("Census: 0 pairs.  Nothing to audit -- exit 0.")
+        if guard_triggered:
+            # #4354: mains-looking board with an empty HV group -- do NOT claim
+            # a clean exit; the loud WARNING + non-zero exit follow.
+            print(
+                "Census: 0 pairs, but the board looks like mains/HV -- "
+                "HV classification FAILED (see WARNING below)."
+            )
+        else:
+            print("Census: 0 pairs.  Nothing to audit -- exit 0.")
         return
 
     cp = report.creepage_provenance or {}
