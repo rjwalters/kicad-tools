@@ -118,6 +118,26 @@ Absent a voltage/domain input the term stays dormant and scores are
 **byte-identical** to the historical objective (regression-safe opt-in,
 mirroring `--anchor-weight`).
 
+### Same-domain clustering: the cohesion term
+
+The creepage keepout pushes *different* domains **apart**; the complementary
+`compute_domain_cohesion` term pulls a *same* domain **together**. Whenever a
+domain partition is supplied, each domain with two or more member footprints
+contributes a radius-of-gyration-style spread penalty: the centroid of its
+members is computed and each member's Euclidean distance to that centroid is
+summed. Minimizing it packs every voltage domain into a compact zone instead of
+leaning on wirelength to incidentally cluster it.
+
+Unlike creepage, cohesion is a **soft preference, not a feasibility gate**. It
+is deliberately excluded from `is_feasible` and from the infeasible branch of
+the lexicographic score — a spread-out domain is suboptimal, never infeasible —
+so it only shapes the layout once a placement is already feasible. Its weight
+(`cohesion`, default `1.0`) is kept small relative to the hard-constraint
+weights so it can never override feasibility. The term needs only the domain
+partition (no per-pair voltages), so it fires on both the `--voltage-map` and
+`--hv-domains` paths, and stays dormant (contributing `0.0`) when no HV input is
+supplied — preserving the byte-identical guarantee above.
+
 ### Input contract
 
 Two mutually-exclusive sources:
@@ -153,18 +173,36 @@ Two mutually-exclusive sources:
 | `--material-group` | `IIIa` | Insulation material group (I/II/IIIa/IIIb). |
 | `--hv-threshold` | `30.0` | Minimum cross-domain `|ΔV|` (V) that triggers a keepout. Lower-difference domain pairs rely on normal DRC clearance, so low-voltage/low-voltage nets are not over-segregated. |
 | `--weights '{"creepage": …}'` | `1e5` | Weight applied to the creepage shortfall (a hard-feasibility term). |
+| `--weights '{"cohesion": …}'` | `1.0` | Weight applied to the same-domain clustering penalty (a soft preference; see above). |
 
 A `|ΔV|` above the highest tabulated creepage row raises a loud
 `StandardLookupError` (surfaced as an `Error:` and exit code 1) — the tool
 never silently extrapolates a safety distance.
 
-### Guarded sense taps (partial)
+### Guarded sense taps (auto-detected)
 
 Some low-voltage nets are *derived from* an HV net (e.g. `V_AC_SENSE_RAW` off
 `AC_LINE` through a divider) and cannot be pushed away — they need a guard ring
 rather than separation. `compute_creepage_violation` accepts an `exempt_pairs`
 set that excludes such `(HV-ref, tap-ref)` pairs from the keepout while keeping
-the tap constrained against *other* domains. The cost-function mechanism is in
-place; automatic detection of derived taps from the voltage map (and the guard
-advisory) is tracked as follow-up work (see issue #4373 Phase 3, and #4372 for
-the complementary guard-copper generation).
+the tap constrained against *other* domains.
+
+Derived taps are now **auto-detected** from a `--voltage-map` by
+`detect_derived_tap_exempt_pairs` (`placement/hv_domains.py`), reusing the
+existing `--hv-threshold` — no new knob. The heuristic:
+
+1. Each net in the voltage map is HV when `|V| >= --hv-threshold`, else LV.
+2. An LV net `t` is a **derived tap of** HV net `h` when they share at least one
+   common component ref (the bridging divider/limiter resistor touches both
+   nets) and `|V_t| < |V_h|`.
+3. For each derived `(t, h)`, every ref on `t` and ref on `h` whose **domains
+   differ** is added to `exempt_pairs` — so the tap-side footprints are exempt
+   from *their parent* HV domain, while the bridging ref (which resolves to the
+   HV domain) never self-exempts and the tap keeps its keepout against
+   *unrelated* HV domains.
+
+Each detected tap prints a guard advisory (unless `--quiet`), e.g.
+`guarded tap: /V_AC_SENSE_RAW derived from /AC_LINE - route with a guard
+trace/ring`. This path is voltage-map only: the `--hv-domains` declaration has
+no per-net data, so no taps are auto-exempted there. Generating the actual guard
+trace/ring copper remains out of scope (see #4372).

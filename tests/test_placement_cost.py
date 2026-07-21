@@ -18,6 +18,7 @@ from kicad_tools.placement.cost import (
     Net,
     PlacementCostConfig,
     compute_creepage_violation,
+    compute_domain_cohesion,
     compute_wirelength,
     evaluate_placement,
 )
@@ -257,3 +258,141 @@ class TestEvaluatePlacementCreepageFeasibility:
         assert baseline.breakdown.creepage == 0.0
         assert with_domains_only.breakdown.creepage == 0.0
         assert with_domains_only.total == baseline.total
+
+
+# ---------------------------------------------------------------------------
+# Same-domain clustering / cohesion term (issue #4373 Phase 1)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeDomainCohesion:
+    def test_empty_ref_domains_is_zero(self) -> None:
+        placements = _hv_pair(10.0)
+        assert compute_domain_cohesion(placements, {}) == 0.0
+        assert compute_domain_cohesion(placements, None) == 0.0
+
+    def test_single_domain_single_member_is_zero(self) -> None:
+        """A domain with one member has zero spread."""
+        placements = _hv_pair(10.0)
+        assert compute_domain_cohesion(placements, {"A": "mains"}) == 0.0
+
+    def test_all_singleton_domains_is_zero(self) -> None:
+        """Every domain a singleton -> nothing to cluster."""
+        placements = _hv_pair(10.0)
+        domains = {"A": "mains", "B": "signal"}
+        assert compute_domain_cohesion(placements, domains) == 0.0
+
+    def test_monotonic_in_spread(self) -> None:
+        """Two refs in one domain 10 mm apart cost more than 1 mm apart."""
+        domains = {"A": "mains", "B": "mains"}
+        far = compute_domain_cohesion(_hv_pair(10.0), domains)
+        near = compute_domain_cohesion(_hv_pair(1.0), domains)
+        assert far > near
+        # Each member sits at half the separation from the centroid:
+        # 2 members * (dx / 2) = dx.
+        assert far == pytest.approx(10.0)
+        assert near == pytest.approx(1.0)
+
+    def test_domainless_refs_contribute_zero(self) -> None:
+        """A ref absent from ref_domains does not join any cluster."""
+        placements = [
+            ComponentPlacement(reference="A", x=0.0, y=0.0),
+            ComponentPlacement(reference="B", x=10.0, y=0.0),
+            ComponentPlacement(reference="C", x=100.0, y=0.0),
+        ]
+        # C is domain-less; only A,B (same domain) cluster.
+        domains = {"A": "mains", "B": "mains"}
+        assert compute_domain_cohesion(placements, domains) == pytest.approx(10.0)
+
+    def test_footprint_sizes_ignored(self) -> None:
+        """footprint_sizes is accepted for parity but does not change the value."""
+        placements = _hv_pair(10.0)
+        domains = {"A": "mains", "B": "mains"}
+        with_sizes = compute_domain_cohesion(placements, domains, _HV_SIZES)
+        without = compute_domain_cohesion(placements, domains)
+        assert with_sizes == without
+
+
+class TestEvaluatePlacementCohesion:
+    """Cohesion is a soft term: it scores but never gates feasibility."""
+
+    _BOARD = BoardOutline(min_x=-100.0, min_y=-100.0, max_x=100.0, max_y=100.0)
+    _RULES = DesignRuleSet()
+
+    def _common(self, config: PlacementCostConfig) -> dict:
+        return {
+            "nets": [],
+            "rules": self._RULES,
+            "board": self._BOARD,
+            "config": config,
+            "footprint_sizes": _HV_SIZES,
+        }
+
+    def test_cohesion_populated_when_ref_domains_supplied(self) -> None:
+        placements = _hv_pair(10.0)
+        domains = {"A": "mains", "B": "mains"}
+        score = evaluate_placement(
+            placements,
+            ref_domains=domains,
+            **self._common(PlacementCostConfig(mode=CostMode.LEXICOGRAPHIC)),
+        )
+        assert score.breakdown.cohesion == pytest.approx(10.0)
+
+    def test_high_cohesion_keeps_feasible(self) -> None:
+        """A large spread does NOT flip is_feasible (soft-term proof)."""
+        placements = _hv_pair(10.0)  # 8 mm gap -> no overlap/drc/creepage
+        domains = {"A": "mains", "B": "mains"}  # same domain -> no keepout
+        score = evaluate_placement(
+            placements,
+            ref_domains=domains,
+            required_mm_by_domain_pair=_REQ,
+            **self._common(PlacementCostConfig(mode=CostMode.LEXICOGRAPHIC)),
+        )
+        assert score.breakdown.cohesion == pytest.approx(10.0)
+        assert score.breakdown.overlap == 0.0
+        assert score.breakdown.drc == 0.0
+        assert score.breakdown.creepage == 0.0
+        assert score.is_feasible is True
+        # Feasible: total sits below the infeasibility sentinel.
+        assert score.total < 1e12
+
+    def test_cohesion_enters_feasible_branch_only(self) -> None:
+        """Feasible total includes the weighted cohesion term."""
+        placements = _hv_pair(10.0)
+        domains = {"A": "mains", "B": "mains"}
+        config = PlacementCostConfig(mode=CostMode.LEXICOGRAPHIC, cohesion_weight=2.0)
+        score = evaluate_placement(placements, ref_domains=domains, **self._common(config))
+        assert score.is_feasible is True
+        # wirelength=0 (no nets), area = bbox area of the two 2x2 footprints.
+        expected = config.area_weight * score.breakdown.area + 2.0 * score.breakdown.cohesion
+        assert score.total == pytest.approx(expected)
+
+    def test_cohesion_absent_from_infeasible_branch(self) -> None:
+        """An infeasible (overlapping) placement's score excludes cohesion."""
+        placements = _hv_pair(0.5)  # overlapping 2x2 footprints -> infeasible
+        domains = {"A": "mains", "B": "mains"}
+        config = PlacementCostConfig(mode=CostMode.LEXICOGRAPHIC, cohesion_weight=1e9)
+        score = evaluate_placement(placements, ref_domains=domains, **self._common(config))
+        assert score.is_feasible is False
+        # Infeasible offset branch = OFFSET + overlap/drc/boundary/creepage only.
+        # A huge cohesion_weight must NOT leak into the total.
+        expected = 1e12 + (
+            config.overlap_weight * score.breakdown.overlap
+            + config.drc_weight * score.breakdown.drc
+            + config.boundary_weight * score.breakdown.boundary
+            + config.creepage_weight * score.breakdown.creepage
+        )
+        assert score.total == pytest.approx(expected)
+
+    def test_weighted_sum_includes_cohesion(self) -> None:
+        placements = _hv_pair(10.0)
+        domains = {"A": "mains", "B": "mains"}
+        config = PlacementCostConfig(mode=CostMode.WEIGHTED_SUM, cohesion_weight=3.0)
+        score = evaluate_placement(placements, ref_domains=domains, **self._common(config))
+        # Isolate the cohesion contribution against a zero-weight baseline.
+        baseline = evaluate_placement(
+            placements,
+            ref_domains=domains,
+            **self._common(PlacementCostConfig(mode=CostMode.WEIGHTED_SUM, cohesion_weight=0.0)),
+        )
+        assert score.total - baseline.total == pytest.approx(3.0 * score.breakdown.cohesion)

@@ -202,3 +202,106 @@ def build_required_by_domain_pair(
             required, _prov = std.required_creepage(dv, pollution_degree, material_group)
             out[(a, b)] = required
     return out
+
+
+def detect_derived_tap_exempt_pairs(
+    nets: Sequence,
+    ref_domains: Mapping[str, str],
+    voltage_map: Mapping[str, float],
+    *,
+    hv_threshold: float = 30.0,
+) -> tuple[set[frozenset[str]], list[str]]:
+    """Detect derived sense taps and build their creepage auto-exemption set.
+
+    This is issue #4373 Phase 3 (auto). A *derived tap* is a low-voltage net
+    that is electrically bound to an HV net through a bridging divider/limiter
+    component (e.g. ``V_AC_SENSE_RAW`` off ``AC_LINE`` through the sense
+    resistor). Such a tap **cannot** be pushed far from its parent HV node, so
+    penalizing it for sitting close would fight its own spring. Instead it is
+    *exempted* from the cross-domain creepage keepout against its parent -- and
+    only its parent -- while staying constrained against every other HV domain
+    (route it with a guard trace/ring, which is out of scope here, cross-ref
+    #4372).
+
+    Detection heuristic (reuses ``hv_threshold`` -- no new required knob):
+
+    1. Each net in *voltage_map* is HV when ``|V| >= hv_threshold`` else LV.
+    2. An LV net ``t`` is a **derived tap of** HV net ``h`` when they share at
+       least one common component ref (the bridging divider/limiter touches
+       both nets) and ``|V_t| < |V_h|``.
+    3. For each derived ``(t, h)`` and every ref ``a`` on ``t`` and ``b`` on
+       ``h`` whose **domains differ** (``ref_domains[a] != ref_domains[b]``),
+       ``frozenset({a, b})`` is added to the exemption set. This exempts exactly
+       the intentionally-close tap-side footprints from their parent HV domain
+       and nothing else -- the bridging ref itself (which resolves to the HV
+       domain) never self-exempts, and the tap keeps its keepout against
+       *unrelated* HV domains.
+
+    Args:
+        nets: Sequence of objects exposing ``name`` and ``pins`` (an iterable of
+            ``(ref, pad)`` tuples) -- e.g. :class:`kicad_tools.placement.cost.Net`.
+        ref_domains: Map from component reference to its HV domain id (as
+            produced by :func:`derive_ref_domains_from_voltage_map`).
+        voltage_map: ``{net_name: volts}`` -- per-net voltages are required, so
+            this path is voltage-map only (the ``--hv-domains`` declaration has
+            no per-net data and yields no exemptions).
+        hv_threshold: Minimum ``|V|`` (volts) at which a net counts as HV.
+
+    Returns:
+        ``(exempt_pairs, advisories)`` where *exempt_pairs* is a set of
+        ``frozenset({ref_a, ref_b})`` cross-domain pairs to skip in the keepout,
+        and *advisories* is a list of human-readable guard notes (one per
+        detected tap-parent relation), deterministically ordered.
+    """
+    if not voltage_map:
+        return set(), []
+
+    # Member refs per net, restricted to nets that carry a voltage.
+    refs_by_net: dict[str, set[str]] = {}
+    for net in nets:
+        name = net.name
+        if name not in voltage_map:
+            continue
+        members = refs_by_net.setdefault(name, set())
+        for ref, _pad in net.pins:
+            members.add(ref)
+
+    hv_nets = sorted(n for n, v in voltage_map.items() if abs(float(v)) >= hv_threshold)
+    lv_nets = sorted(n for n, v in voltage_map.items() if abs(float(v)) < hv_threshold)
+
+    exempt_pairs: set[frozenset[str]] = set()
+    advisories: list[str] = []
+
+    for t in lv_nets:
+        t_refs = refs_by_net.get(t)
+        if not t_refs:
+            continue
+        for h in hv_nets:
+            h_refs = refs_by_net.get(h)
+            if not h_refs:
+                continue
+            # A derived tap shares a bridging ref with its HV parent and sits at
+            # a strictly lower voltage.
+            if t_refs.isdisjoint(h_refs):
+                continue
+            if abs(float(voltage_map[t])) >= abs(float(voltage_map[h])):
+                continue
+
+            added = False
+            for a in t_refs:
+                da = ref_domains.get(a)
+                if da is None:
+                    continue
+                for b in h_refs:
+                    db = ref_domains.get(b)
+                    if db is None or da == db:
+                        continue
+                    exempt_pairs.add(frozenset((a, b)))
+                    added = True
+
+            if added:
+                advisories.append(
+                    f"guarded tap: {t} derived from {h} - route with a guard trace/ring"
+                )
+
+    return exempt_pairs, advisories
