@@ -348,3 +348,126 @@ class TestEntryPointRegistryParity:
             f"check_all-only={check_all_methods - dispatcher_methods}.  "
             "See Issue #3044."
         )
+
+
+class TestRuleCategoryTaxonomy:
+    """Issue #3803: the manufacturing-vs-advisory *reporting* taxonomy.
+
+    ``DRCChecker.category_for_rule`` classifies every rule_id into one of
+    two presentation buckets so ``kct check`` can render a per-bucket
+    headline.  These tests pin:
+
+    * the classifier is total (no rule_id resolves to an unexpected
+      category) and covers every rule_id registered in the validate rules;
+    * the load-bearing advisory rules (the ones that inflated the headline)
+      land in ``advisory-quality`` and the fab-blocking rules land in
+      ``manufacturing``;
+    * the taxonomy is ORTHOGONAL to the gating ``ADVISORY_RULE_IDS`` set --
+      classifying ``copper_sliver`` as advisory-quality for reporting must
+      NOT change what :meth:`DRCChecker.is_advisory_rule` returns (that
+      drives gate verdicts and must stay ``{"connectivity"}``).
+    """
+
+    import re
+    from pathlib import Path as _Path
+
+    _RULES_DIR = _Path(__file__).resolve().parent.parent / "src" / "kicad_tools" / "validate"
+    _RULE_ID_RE = re.compile(r'rule_id\s*=\s*"([a-z0-9_]+)"')
+
+    @classmethod
+    def _registered_rule_ids(cls) -> set[str]:
+        """Scrape every literal ``rule_id="..."`` from the validate engine."""
+        found: set[str] = set()
+        for path in cls._RULES_DIR.rglob("*.py"):
+            found.update(cls._RULE_ID_RE.findall(path.read_text()))
+        return found
+
+    def test_every_registered_rule_id_is_categorized(self) -> None:
+        """No uncategorized leak: each registered rule_id maps to exactly
+        one of the two known categories."""
+        valid = {DRCChecker.CATEGORY_MANUFACTURING, DRCChecker.CATEGORY_ADVISORY}
+        rule_ids = self._registered_rule_ids()
+        assert rule_ids, "expected to scrape at least one rule_id from validate/"
+        for rule_id in rule_ids:
+            category = DRCChecker.category_for_rule(rule_id)
+            assert category in valid, f"{rule_id} -> {category!r} is not a valid category"
+
+    def test_advisory_quality_rules_classified(self) -> None:
+        """The routing-intent / quality rules that inflated the headline
+        must land in the advisory bucket."""
+        for rule_id in (
+            "connectivity",
+            "ampacity",
+            "copper_sliver",
+            "impedance",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_clearance_intra",
+            "match_group_length_skew",
+            "silk_over_copper",
+        ):
+            assert DRCChecker.category_for_rule(rule_id) == DRCChecker.CATEGORY_ADVISORY, (
+                f"{rule_id} must be advisory-quality"
+            )
+
+    def test_manufacturing_rules_classified(self) -> None:
+        """Fab-blocking copper / clearance / hole / edge / mask / drill
+        rules must land in the manufacturing bucket."""
+        for rule_id in (
+            "clearance",
+            "clearance_segment_zone",
+            "clearance_via_zone",
+            "edge_clearance",
+            "edge_clearance_via",
+            "hole_to_hole_clearance",
+            "via_in_pad",
+            "solder_mask_pad",
+            "dimension_via_drill",
+            "single_pad_net",
+            "footprint_outside_board",
+            "zone_fill",
+        ):
+            assert DRCChecker.category_for_rule(rule_id) == DRCChecker.CATEGORY_MANUFACTURING, (
+                f"{rule_id} must be manufacturing"
+            )
+
+    def test_dynamic_clearance_subtypes_classified(self) -> None:
+        """Dynamically-suffixed ``clearance_*`` subtypes (built via
+        ``f"clearance_{suffix}"`` in rules/clearance.py, so not literal in
+        the map) fall through to the manufacturing prefix rule."""
+        for rule_id in (
+            "clearance_pad_segment",
+            "clearance_segment_via",
+            "clearance_pad_via",
+            "clearance_via_via",
+            "clearance_segment_segment",
+        ):
+            assert DRCChecker.category_for_rule(rule_id) == DRCChecker.CATEGORY_MANUFACTURING, (
+                f"{rule_id} must be manufacturing"
+            )
+
+    def test_unknown_rule_defaults_to_manufacturing(self) -> None:
+        """An unrecognized rule surfaces in the fab-blocking bucket rather
+        than being silently hidden among advisory findings."""
+        assert (
+            DRCChecker.category_for_rule("some_brand_new_rule") == DRCChecker.CATEGORY_MANUFACTURING
+        )
+
+    def test_reporting_taxonomy_is_orthogonal_to_gating(self) -> None:
+        """Reporting-category classification must NOT change the gating
+        advisory set: ``is_advisory_rule`` stays ``{"connectivity"}`` even
+        though copper_sliver/diffpair/ampacity are advisory *for reporting*.
+        """
+        assert frozenset({"connectivity"}) == DRCChecker.ADVISORY_RULE_IDS
+        assert DRCChecker.is_advisory_rule("connectivity") is True
+        for rule_id in (
+            "copper_sliver",
+            "diffpair_length_skew",
+            "ampacity",
+            "impedance",
+            "silk_over_copper",
+        ):
+            # advisory-quality for REPORTING ...
+            assert DRCChecker.category_for_rule(rule_id) == DRCChecker.CATEGORY_ADVISORY
+            # ... but NOT advisory for GATING (unchanged behavior).
+            assert DRCChecker.is_advisory_rule(rule_id) is False

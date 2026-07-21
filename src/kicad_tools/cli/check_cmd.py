@@ -26,7 +26,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -2063,6 +2063,81 @@ def _print_measurement_summary(violations: list[DRCViolation]) -> None:
         )
 
 
+@dataclass
+class _CategoryTally:
+    """Per-severity counts + rule_id set for one reporting category (Issue #3803)."""
+
+    errors: int = 0
+    warnings: int = 0
+    infos: int = 0
+    waived: int = 0
+    rules: set[str] = field(default_factory=set)
+
+    def add(self, v: DRCViolation) -> None:
+        self.rules.add(v.rule_id)
+        if v.is_waived:
+            self.waived += 1
+        elif v.is_error:
+            self.errors += 1
+        elif v.is_info:
+            self.infos += 1
+        else:
+            self.warnings += 1
+
+    @property
+    def total(self) -> int:
+        """Active (non-waived) finding count for the bucket headline."""
+        return self.errors + self.warnings + self.infos
+
+    def detail(self) -> str:
+        parts = [f"{self.errors} errors", f"{self.warnings} warnings", f"{self.infos} infos"]
+        if self.waived:
+            parts.append(f"{self.waived} waived")
+        return ", ".join(parts)
+
+    def rule_list(self) -> str:
+        return ", ".join(sorted(self.rules)) if self.rules else "none"
+
+
+def _print_category_summary(violations: list[DRCViolation]) -> None:
+    """Print the manufacturing-vs-advisory reporting buckets (Issue #3803).
+
+    Splits the finding set into two clearly-labelled categories using the
+    single-source-of-truth :meth:`DRCChecker.category_for_rule` classifier
+    so a reader can trust the manufacturing headline to mean
+    fabrication-blocking copper defects, and not confuse it with
+    routing-intent / quality findings (connectivity completion, diff-pair
+    skew/continuity, copper slivers, ampacity, silk).
+
+    Presentation-only: this reads the same ``violations`` list already
+    counted by :func:`output_table` and does not alter the verdict, exit
+    code, or any per-severity count.
+    """
+    mfg = _CategoryTally()
+    adv = _CategoryTally()
+    for v in violations:
+        bucket = (
+            adv if DRCChecker.category_for_rule(v.rule_id) == DRCChecker.CATEGORY_ADVISORY else mfg
+        )
+        bucket.add(v)
+
+    print(f"\n{'-' * 60}")
+    print("CATEGORY SUMMARY (fabrication-blocking vs advisory -- Issue #3803):")
+    # The manufacturing headline is ALWAYS shown -- its value is precisely
+    # that a reader can trust "Manufacturing DRC: 0 blocking" on a board
+    # whose only findings are advisory-quality (the headline complaint).
+    print(f"  Manufacturing DRC: {mfg.errors} blocking  (copper/clearance/hole/edge/mask/drill)")
+    print(f"      {mfg.detail()}  [{mfg.rule_list()}]")
+    # The advisory block is shown only when there ARE advisory findings, so
+    # a manufacturing-only board does not render an empty advisory header.
+    if adv.total:
+        print(
+            f"  Advisory/quality:  {adv.total} advisory"
+            "  (connectivity, diff-pair, copper_sliver, ampacity, silk)"
+        )
+        print(f"      {adv.detail()}  [{adv.rule_list()}]")
+
+
 def output_table(
     violations: list[DRCViolation],
     results: DRCResults,
@@ -2099,6 +2174,13 @@ def output_table(
         print(f"\n{'=' * 60}")
         print("DRC PASSED - No violations found")
         return
+
+    # Issue #3803: render the manufacturing-vs-advisory category buckets so
+    # the headline distinguishes fabrication-blocking copper defects from
+    # routing-intent / quality findings.  Presentation-only -- the
+    # per-severity counts above and the PASS/FAIL verdict below are
+    # unchanged.
+    _print_category_summary(violations)
 
     # Issue #3924 AC1: render the length-match / continuity measurement
     # table before the violation listing so the measured values are visible
