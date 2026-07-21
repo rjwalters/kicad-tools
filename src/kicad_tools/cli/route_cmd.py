@@ -1985,10 +1985,39 @@ def show_preview(
         return "n"
 
 
+def _sidecar_collides_with_input(input_path: Path, sidecar_path: Path) -> bool:
+    """True when the derived sidecar would overwrite the user's input file.
+
+    Issue #4428: the derived sidecar basename (``net_class_map.json``) is
+    identical to the natural name of a hand-authored ``--net-class-map``
+    file, so when the routed board is written into the directory that holds
+    the user's input, the two paths are the *same file* and the route step
+    silently clobbers the authored constraints.  This detects that
+    collision so the caller can divert the write.
+
+    Uses :func:`os.path.samefile` (inode identity — handles symlinks and
+    ``./`` / ``../`` path noise) when both paths exist; falls back to
+    resolved-path equality when the sidecar target does not yet exist.
+    """
+    import os
+
+    try:
+        if input_path.exists() and sidecar_path.exists():
+            return os.path.samefile(str(input_path), str(sidecar_path))
+    except OSError:
+        pass
+    try:
+        return input_path.resolve() == sidecar_path.resolve()
+    except OSError:
+        return False
+
+
 def _write_net_class_map_sidecar(
     output_path: Path,
     net_class_map: dict | None,
     quiet: bool = False,
+    input_path: Path | None = None,
+    loaded_net_class_map: dict | None = None,
 ) -> None:
     """Serialize the router's net-class map to a sidecar next to the PCB.
 
@@ -2002,24 +2031,61 @@ def _write_net_class_map_sidecar(
     continuity rules.  A blocked write (read-only output dir) is a
     non-fatal warning, never a route failure.
 
+    Issue #4428 — never overwrite the user's input file: when the routed
+    board is written into the same directory that holds the user's
+    hand-authored ``--net-class-map`` file, the derived sidecar path
+    resolves to the *exact same file* the user passed in.  When
+    ``input_path`` collides with the derived ``net_class_map.json``, the
+    write is diverted to a sibling ``net_class_map.effective.json`` so the
+    authored input is left untouched.  In the common (no-collision) case the
+    plain ``net_class_map.json`` name is kept so ``kct check`` auto-discovery
+    is unaffected.
+
+    Issue #4428 — round-trip fidelity: when a user map was loaded, its
+    authored entries are merged *over* the classifier output before
+    serialization so resolved HV nets keep their authored ``name`` /
+    ``target_ampacity`` / ``avoid_layers`` instead of the name-pattern
+    classifier's guess (e.g. ``AC_LINE`` would otherwise re-serialize as the
+    classifier's ``'Audio'``).
+
     Args:
         output_path: Path to the routed PCB file.  The sidecar is written
             to the same directory.
         net_class_map: The autorouter's ``{net_name: NetClassRouting}``
-            map.  Skipped when ``None`` or empty (an empty map would write
-            a misleading sidecar that the check-side probe would treat as
-            present).
+            map.  Skipped when empty *and* no ``loaded_net_class_map`` is
+            supplied (an empty map would write a misleading sidecar that the
+            check-side probe would treat as present).
         quiet: If True, suppress the confirmation line.
+        input_path: The resolved ``--net-class-map`` INPUT path (or
+            ``None``).  Used only to detect — and avoid — a self-overwrite
+            of the user's authored file.
+        loaded_net_class_map: The user's loaded ``{net_name: NetClassRouting}``
+            map (``args._loaded_net_class_map``), merged over
+            ``net_class_map`` for round-trip fidelity.
     """
-    if not net_class_map:
-        return
     import json
 
     from kicad_tools.router.rules import net_class_map_to_dict
 
+    # Round-trip fidelity (Issue #4428): overlay the user's authored entries
+    # on the classifier output so resolved HV nets keep their authored
+    # name / target_ampacity / avoid_layers rather than the name-pattern guess.
+    effective_map = dict(net_class_map or {})
+    if loaded_net_class_map:
+        effective_map.update(loaded_net_class_map)
+    if not effective_map:
+        return
+
     sidecar_path = output_path.parent / "net_class_map.json"
+
+    # Never clobber the user's --net-class-map input file (Issue #4428).
+    diverted = False
+    if input_path is not None and _sidecar_collides_with_input(input_path, sidecar_path):
+        sidecar_path = output_path.parent / "net_class_map.effective.json"
+        diverted = True
+
     try:
-        payload = net_class_map_to_dict(net_class_map)
+        payload = net_class_map_to_dict(effective_map)
         sidecar_path.write_text(json.dumps(payload, indent=2))
     except (OSError, TypeError, ValueError) as e:
         # Non-fatal: a blocked / read-only output directory (or an
@@ -2028,7 +2094,10 @@ def _write_net_class_map_sidecar(
             print(f"  Warning: could not write net-class-map sidecar: {e}")
         return
     if not quiet:
-        print(f"  Net-class-map sidecar: {sidecar_path}")
+        if diverted:
+            print(f"  Net-class-map sidecar: {sidecar_path} (input --net-class-map left unchanged)")
+        else:
+            print(f"  Net-class-map sidecar: {sidecar_path}")
 
 
 def _write_fab_profile_sidecar(
@@ -2144,6 +2213,8 @@ def run_post_route_drc(
     net_class_map: dict | None = None,
     copper_oz: float = 1.0,
     strict_drc: bool = False,
+    net_class_map_input_path: Path | None = None,
+    loaded_net_class_map: dict | None = None,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -2171,6 +2242,14 @@ def run_post_route_drc(
             that the PASS is not authoritative.  Default ``False``
             preserves the graceful-degradation soft NOTE for KiCad-less
             environments (Issue #4178).
+        net_class_map_input_path: The resolved ``--net-class-map`` INPUT
+            path (Issue #4428).  Threaded to the sidecar writer so it never
+            overwrites the user's authored file when the routed board is
+            written into the same directory.
+        loaded_net_class_map: The user's loaded net-class map
+            (``args._loaded_net_class_map``), merged over the classifier
+            output for round-trip fidelity in the derived sidecar (Issue
+            #4428).
 
     Returns:
         Tuple of (error_count, warning_count)
@@ -2184,7 +2263,13 @@ def run_post_route_drc(
     # This is the shared post-route DRC entry for all three route flows
     # (default multi-layer, rule-relaxation, and single-layer), so writing
     # here covers every callsite in one place.
-    _write_net_class_map_sidecar(output_path, net_class_map, quiet=quiet)
+    _write_net_class_map_sidecar(
+        output_path,
+        net_class_map,
+        quiet=quiet,
+        input_path=net_class_map_input_path,
+        loaded_net_class_map=loaded_net_class_map,
+    )
 
     # Issue #3920: persist the resolved fab profile as a ``fab_profile.json``
     # sidecar next to the routed PCB so bare ``kct check`` auto-discovers the
@@ -5048,6 +5133,13 @@ def route_with_layer_escalation(
             # Issue #4178: forward --strict-drc so a native DRC that did
             # not run becomes a hard failure instead of a soft NOTE.
             strict_drc=getattr(args, "strict_drc", False),
+            # Issue #4428: thread the resolved --net-class-map INPUT path +
+            # loaded map so the derived sidecar never overwrites the user's
+            # authored file and preserves authored HV/ampacity fields.
+            net_class_map_input_path=(
+                Path(args.net_class_map).resolve() if getattr(args, "net_class_map", None) else None
+            ),
+            loaded_net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -5745,6 +5837,13 @@ def route_with_rule_relaxation(
             # Issue #4178: forward --strict-drc so a native DRC that did
             # not run becomes a hard failure instead of a soft NOTE.
             strict_drc=getattr(args, "strict_drc", False),
+            # Issue #4428: thread the resolved --net-class-map INPUT path +
+            # loaded map so the derived sidecar never overwrites the user's
+            # authored file and preserves authored HV/ampacity fields.
+            net_class_map_input_path=(
+                Path(args.net_class_map).resolve() if getattr(args, "net_class_map", None) else None
+            ),
+            loaded_net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -7959,6 +8058,13 @@ def route_with_combined_escalation(
             # Issue #4178: forward --strict-drc so a native DRC that did
             # not run becomes a hard failure instead of a soft NOTE.
             strict_drc=getattr(args, "strict_drc", False),
+            # Issue #4428: thread the resolved --net-class-map INPUT path +
+            # loaded map so the derived sidecar never overwrites the user's
+            # authored file and preserves authored HV/ampacity fields.
+            net_class_map_input_path=(
+                Path(args.net_class_map).resolve() if getattr(args, "net_class_map", None) else None
+            ),
+            loaded_net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -9372,7 +9478,12 @@ def main(argv: list[str] | None = None) -> int:
             "matches KiCad's '/'-prefixed label net /FUSED_LINE while "
             "global power nets (GND, +3.3V) stay bare; keys that match no "
             "board net or match ambiguously are reported on stderr and "
-            "skipped (Issue #4149)."
+            "skipped (Issue #4149).  This INPUT file is never overwritten: "
+            "the route writes a derived sidecar (net_class_map.json) next to "
+            "the routed PCB for kct check auto-discovery, and when that would "
+            "collide with this input file (board written into the same "
+            "directory) the derived map is diverted to "
+            "net_class_map.effective.json instead (Issue #4428)."
         ),
     )
     parser.add_argument(
@@ -12482,6 +12593,12 @@ def main(argv: list[str] | None = None) -> int:
             net_class_map=getattr(router, "net_class_map", None),
             # Issue #4178: forward --strict-drc (see other call sites).
             strict_drc=getattr(args, "strict_drc", False),
+            # Issue #4428: never overwrite the user's --net-class-map input
+            # (see other call sites); preserve authored fields round-trip.
+            net_class_map_input_path=(
+                Path(args.net_class_map).resolve() if getattr(args, "net_class_map", None) else None
+            ),
+            loaded_net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
 
         # Auto-fix DRC violations if requested
