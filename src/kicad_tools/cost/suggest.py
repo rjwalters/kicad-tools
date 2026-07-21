@@ -557,7 +557,7 @@ class PartSuggester:
 
             # Filter and rank results
             candidates = []
-            for part in results.parts:
+            for part in results.parts or []:
                 # Skip parts with insufficient stock
                 if part.stock < self.min_stock:
                     continue

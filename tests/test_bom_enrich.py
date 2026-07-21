@@ -160,6 +160,60 @@ class TestEnrichBomLcsc:
         assert len(report.unmatched_entries) == 1
         assert report.unmatched_entries[0].value == "STM32C011F4P6"
 
+    @patch("kicad_tools.cost.suggest.PartSuggester._get_client")
+    @patch("kicad_tools.parts.lcsc.LCSCClient._get_session")
+    def test_null_list_yields_clean_unmatched_reason(self, mock_session, mock_get_client):
+        """A no-match query (API ``"list": null``) reports a clean reason.
+
+        End-to-end regression for #4407: previously the null candidate list
+        raised ``TypeError: 'NoneType' object is not iterable`` inside
+        ``LCSCClient.search()``; that TypeError was swallowed by
+        ``suggest_for_component``'s broad ``except`` and stored verbatim as the
+        per-part reason, so ``summary_lines()`` printed
+        ``... (J1) ('NoneType' object is not iterable)``. With the parse-site
+        guard the query flows through the normal unmatched path and reports the
+        user-facing ``"no matching parts found"`` reason instead.
+        """
+        from kicad_tools.parts import LCSCClient
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "code": 200,
+            "data": {"componentPageInfo": {"list": None, "total": 0}},
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_session.return_value.post.return_value = mock_resp
+
+        # Real client (no cache / no offline catalog / no rate limit) so the
+        # real search() + parse path runs against the mocked null response.
+        client = LCSCClient(use_cache=False, use_local_catalog=False, rate_limit=0)
+        mock_get_client.return_value = client
+
+        items = [
+            _make_item(
+                "J1",
+                "PinHeader_1x02",
+                "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+            ),
+        ]
+
+        report = enrich_bom_lcsc(items)
+
+        # The live search was actually exercised (not short-circuited).
+        assert mock_session.return_value.post.called
+
+        # Clean unmatched outcome, no leaked exception.
+        assert items[0].lcsc == ""
+        assert report.unmatched == 1
+        entry = report.unmatched_entries[0]
+        assert entry.source == "unmatched"
+        assert entry.error == "no matching parts found"
+
+        # The raw exception string must never reach user-facing output.
+        summary = "\n".join(report.summary_lines())
+        assert "not iterable" not in summary
+        assert "no matching parts found" in summary
+
     @patch("kicad_tools.export.bom_enrich.PartSuggester")
     def test_skips_dnp_items(self, MockSuggester):
         """DNP items are not searched."""
