@@ -2154,8 +2154,7 @@ def _add_pcb_parser(subparsers) -> None:
         type=float,
         default=0.05,
         metavar="MM",
-        help="Endpoint-coincidence match radius in mm for --drag-endpoints "
-        "(default: 0.05)",
+        help="Endpoint-coincidence match radius in mm for --drag-endpoints (default: 0.05)",
     )
 
     # pcb page-fit
