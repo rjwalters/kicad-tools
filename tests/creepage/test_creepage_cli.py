@@ -20,6 +20,8 @@ from .fixtures import (
     board_benign_suspect_names_source,
     board_mains_named_source,
     board_no_hv_source,
+    board_same_footprint_fail_source,
+    board_same_footprint_only_source,
     board_source,
 )
 
@@ -267,6 +269,107 @@ def test_benign_suspect_named_board_exits_zero(tmp_path, capsys):
     assert rc == 0
     assert "Nothing to audit -- exit 0" in captured.out
     assert "WARNING" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# #4403 same-footprint waiver: classify + gate on --waive-same-footprint.
+# ---------------------------------------------------------------------------
+
+
+def test_same_footprint_tagged_in_json(tmp_path, capsys):
+    pcb = _write(tmp_path, board_same_footprint_only_source())
+    ncm = _hv_map_file(tmp_path)
+    _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.0", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    src = next(p for p in payload["pairs"] if p["net_b"] == "SRC_NEG")
+    gnd = next(p for p in payload["pairs"] if p["net_b"] == "GND")
+    assert src["relationship"] == "same_footprint"
+    assert gnd["relationship"] == "board"
+    # Without the waiver flag nothing is marked waived.
+    assert "waived" not in src
+
+
+def test_waiver_off_same_footprint_fail_exits_nonzero(tmp_path, capsys):
+    # Default (flag absent): a same-footprint fail still fails the gate (exit 1),
+    # exactly as before -- the waiver is opt-in.
+    pcb = _write(tmp_path, board_same_footprint_only_source())
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.0"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "FAIL" in out
+    # The relationship split is surfaced to prompt the operator toward the flag.
+    assert "same-footprint" in out
+
+
+def test_waiver_on_only_same_footprint_fail_exits_zero(tmp_path, capsys):
+    # With --waive-same-footprint and the ONLY fail being same-footprint, the
+    # gate passes (exit 0) but the pair is still listed (annotated WAIVED).
+    pcb = _write(tmp_path, board_same_footprint_only_source())
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--min",
+            "1.0",
+            "--waive-same-footprint",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "WAIVED" in out
+    assert "SRC_NEG" in out  # still listed, never dropped
+    assert "PASS (gate)" in out
+
+
+def test_waiver_on_board_fail_still_exits_nonzero(tmp_path, capsys):
+    # A board-level fail must still fail the gate even when same-footprint pairs
+    # are waived.
+    pcb = _write(tmp_path, board_same_footprint_fail_source())
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--min",
+            "1.0",
+            "--waive-same-footprint",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "FAIL (gate)" in out
+    assert "WAIVED" in out  # the same-footprint pair is annotated but excluded
+
+
+def test_waiver_on_json_marks_waived_true(tmp_path, capsys):
+    pcb = _write(tmp_path, board_same_footprint_only_source())
+    ncm = _hv_map_file(tmp_path)
+    _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--min",
+            "1.0",
+            "--waive-same-footprint",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    src = next(p for p in payload["pairs"] if p["net_b"] == "SRC_NEG")
+    gnd = next(p for p in payload["pairs"] if p["net_b"] == "GND")
+    assert src["waived"] is True
+    assert "waived" not in gnd  # board pairs are never waived
+    # The report-level passed stays False (raw) -- only the exit code (gate) flips.
+    assert payload["passed"] is False
 
 
 def test_missing_pcb_file_errors(tmp_path, capsys):

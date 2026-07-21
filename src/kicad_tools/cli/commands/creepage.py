@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from kicad_tools.creepage.engine import CreepageReport
+    from kicad_tools.creepage.engine import CreepagePair, CreepageReport
 
 # Distinct exit code for "could not classify any HV net on a board that looks
 # like mains" (issue #4354).  Kept separate from 1 ("a measured pair failed its
@@ -225,6 +225,16 @@ def run_creepage_command(args) -> int:
         print(f"Error: standard-table lookup failed: {e}", file=sys.stderr)
         return 1
 
+    # Same-footprint waiver (#4403): mark component-internal pairs as waived so
+    # they drop out of the exit-code gate (report.gate_passed) while remaining
+    # listed (annotated WAIVED).  This is a STANDALONE-CLI opt-in only -- it
+    # never touches report.passed, so the kct audit manufacturing-readiness gate
+    # (which keys off the raw, un-waived result) is unaffected.
+    if getattr(args, "waive_same_footprint", False):
+        for pair in report.pairs:
+            if pair.relationship == "same_footprint":
+                pair.waived = True
+
     # Vacuity guard (issue #4354): a census that resolves ZERO HV nets is only
     # legitimately "nothing to audit" on a genuinely low-voltage board.  When
     # the board carries mains-named copper OR a mains-level working voltage was
@@ -251,10 +261,11 @@ def run_creepage_command(args) -> int:
         _warn_hv_unclassified(report, mains_suspects, working_voltage)
         return EXIT_HV_UNCLASSIFIED
 
-    # Non-zero exit iff any pair fails its governing bound(s).  An empty census
-    # on a genuinely low-voltage board (no mains names, no HV working voltage)
-    # is a clean exit 0.
-    return 0 if report.passed else 1
+    # Non-zero exit iff any NON-waived pair fails its governing bound(s) (#4403).
+    # ``gate_passed`` == ``passed`` unless --waive-same-footprint was supplied, so
+    # the default exit behavior is unchanged.  An empty census on a genuinely
+    # low-voltage board (no mains names, no HV working voltage) is a clean exit 0.
+    return 0 if report.gate_passed else 1
 
 
 def _warn_hv_unclassified(
@@ -293,6 +304,59 @@ def _warn_hv_unclassified(
     )
 
 
+def _result_token(p: CreepagePair) -> str:
+    """Per-row result token: WAIVED for a waived failing pair, else PASS/FAIL."""
+    if p.waived and not p.passed:
+        return "WAIVED"
+    return "PASS" if p.passed else "FAIL"
+
+
+def _rel_token(p: CreepagePair) -> str:
+    """Compact footprint-relationship token for the census tables (#4403)."""
+    return "same-ftpt" if p.relationship == "same_footprint" else "board"
+
+
+def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
+    """Print the pass/fail summary, honoring same-footprint waivers (#4403).
+
+    Silence is a false-pass, so the waived list is always surfaced.  When a
+    waiver is active the GATE result (``report.gate_passed``) is reported; the
+    raw ``report.passed`` still counts every pair (and still drives ``kct
+    audit``).
+    """
+    total = len(report.pairs)
+    waived = [p for p in report.pairs if p.waived]
+    gate_failures = [p for p in report.pairs if not p.passed and not p.waived]
+    same_fp = [p for p in report.pairs if p.relationship == "same_footprint"]
+
+    if waived:
+        if gate_failures:
+            print(
+                f"FAIL (gate): {len(gate_failures)}/{total} board pair(s) fail "
+                f"{unit_desc}; {len(waived)} same-footprint pair(s) WAIVED "
+                "(component-rating residuals -- qualify at the component, not the layout)."
+            )
+        else:
+            print(
+                f"PASS (gate): {total - len(waived)}/{total} pair(s) clear "
+                f"{unit_desc}; {len(waived)} same-footprint pair(s) WAIVED "
+                "(component-rating residuals -- qualify at the component, not the layout)."
+            )
+        return
+
+    failures = [p for p in report.pairs if not p.passed]
+    if failures:
+        line = f"FAIL: {len(failures)}/{total} pair(s) fail {unit_desc}."
+    else:
+        line = f"PASS: all {total} pair(s) clear {unit_desc}."
+    if same_fp:
+        line += (
+            f"  ({len(same_fp)} same-footprint pair(s) present -- re-run with "
+            "--waive-same-footprint to exclude component-internal spacing from the gate.)"
+        )
+    print(line)
+
+
 def _render_table(report: CreepageReport, *, guard_triggered: bool = False) -> None:
     """Print the human-readable census table (phase-1 / manual --min mode)."""
     if not report.has_hv_nets:
@@ -324,25 +388,20 @@ def _render_table(report: CreepageReport, *, guard_triggered: bool = False) -> N
 
     header = (
         f"{'HV net':<16} {'Against':<16} {'Layer':<7} "
-        f"{'Clearance':>10} {'Creepage':>10} {'Margin':>10} {'Result':>7}"
+        f"{'Clearance':>10} {'Creepage':>10} {'Margin':>10} {'Rel':>10} {'Result':>7}"
     )
     print(header)
     print("-" * len(header))
     for p in report.pairs:
-        result = "PASS" if p.passed else "FAIL"
+        result = _result_token(p)
         print(
             f"{p.net_a:<16} {p.net_b:<16} {p.layer:<7} "
             f"{p.clearance_mm:>9.3f}  {p.creepage_mm:>9.3f}  "
-            f"{p.margin_mm:>9.3f}  {result:>7}"
+            f"{p.margin_mm:>9.3f}  {_rel_token(p):>10}  {result:>7}"
         )
 
     print()
-    failures = [p for p in report.pairs if not p.passed]
-    total = len(report.pairs)
-    if failures:
-        print(f"FAIL: {len(failures)}/{total} pair(s) below {report.min_mm:.3f} mm creepage.")
-    else:
-        print(f"PASS: all {total} pair(s) clear {report.min_mm:.3f} mm creepage.")
+    _print_gate_summary(report, f"{report.min_mm:.3f} mm creepage")
 
 
 def _render_table_standard(report: CreepageReport, *, guard_triggered: bool = False) -> None:
@@ -418,28 +477,20 @@ def _render_table_standard(report: CreepageReport, *, guard_triggered: bool = Fa
     header = (
         f"{'HV net':<14} {'Against':<14} {'Layer':<6} "
         f"{'Clnce':>8} {'ReqCl':>8} {'Creep':>8} {'ReqCr':>8} "
-        f"{'Margin':>8} {'Govern':>8} {'Result':>7}"
+        f"{'Margin':>8} {'Govern':>8} {'Rel':>10} {'Result':>7}"
     )
     print(header)
     print("-" * len(header))
     for p in report.pairs:
-        result = "PASS" if p.passed else "FAIL"
+        result = _result_token(p)
         req_cl = p.required_clearance_mm if p.required_clearance_mm is not None else 0.0
         req_cr = p.required_creepage_mm if p.required_creepage_mm is not None else 0.0
         print(
             f"{p.net_a:<14} {p.net_b:<14} {p.layer:<6} "
             f"{p.clearance_mm:>8.3f} {req_cl:>8.3f} "
             f"{p.creepage_mm:>8.3f} {req_cr:>8.3f} "
-            f"{p.margin_mm:>8.3f} {p.governing_bound:>8} {result:>7}"
+            f"{p.margin_mm:>8.3f} {p.governing_bound:>8} {_rel_token(p):>10} {result:>7}"
         )
 
     print()
-    failures = [p for p in report.pairs if not p.passed]
-    total = len(report.pairs)
-    if failures:
-        print(
-            f"FAIL: {len(failures)}/{total} pair(s) fail the derived creepage/clearance "
-            "requirement."
-        )
-    else:
-        print(f"PASS: all {total} pair(s) clear the derived creepage/clearance requirement.")
+    _print_gate_summary(report, "the derived creepage/clearance requirement")

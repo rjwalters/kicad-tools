@@ -108,6 +108,10 @@ def test_standard_json_carries_provenance(tmp_path, capsys):
         assert pair["required_clearance_mm"] == 0.2
         assert "clearance_pass" in pair
         assert "provenance" in pair
+        # Phase-2 drift-guard (#4403): ``relationship`` is always emitted; the
+        # single-pad fixture has no same-footprint pairs, and none are waived.
+        assert pair["relationship"] == "board"
+        assert "waived" not in pair
 
 
 def test_standard_fail_when_requirement_not_met(tmp_path, capsys):
@@ -284,6 +288,8 @@ def test_min_only_json_schema_unchanged(tmp_path, capsys):
         "passed",
     }
     for pair in payload["pairs"]:
+        # Drift-guard: ``relationship`` is now an always-on additive key (#4403);
+        # ``waived`` appears only on waived rows (none here).
         assert set(pair.keys()) == {
             "net_a",
             "net_b",
@@ -292,8 +298,10 @@ def test_min_only_json_schema_unchanged(tmp_path, capsys):
             "clearance_mm",
             "creepage_mm",
             "margin_mm",
+            "relationship",
             "pass",
         }
+        assert pair["relationship"] == "board"
 
 
 # ---------------------------------------------------------------------------

@@ -180,3 +180,105 @@ def board_mains_named_source() -> str:
     parts.append(_footprint("U4", 105, 110, 4, "FUSED_LINE"))
     parts.append(")\n")
     return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Same-footprint classification fixtures (Issue #4403)
+# ---------------------------------------------------------------------------
+
+# Header for the same-footprint fixtures.  Nets: L_MAINS (HV via the standard
+# net-class map), plus GND / SRC_NEG / DIV_MID as ordinary conductors.
+_SAMEFP_HEADER = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test_creepage")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "L_MAINS")
+  (net 2 "GND")
+  (net 3 "SRC_NEG")
+  (net 4 "DIV_MID")
+"""
+
+
+def _footprint2(ref: str, x: float, y: float, pads: list[tuple]) -> str:
+    """A multi-pad SMD footprint at (x, y).
+
+    ``pads`` is a list of ``(number, net_number, net_name, local_x, local_y)``;
+    each pad is a 0.6 x 0.6 mm rect so a 1.0 mm pad-centre pitch leaves a 0.4 mm
+    copper-edge gap (below any realistic mains creepage requirement).
+    """
+    pad_lines = "\n".join(
+        f'    (pad "{num}" smd rect (at {lx} {ly}) (size 0.6 0.6) (layers "F.Cu")\n'
+        f'      (net {nn} "{name}"))'
+        for num, nn, name, lx, ly in pads
+    )
+    # A Reference property is required so ``fp.reference`` is populated -- the
+    # same-footprint classification (#4403) keys the binding measurement on it.
+    ref_prop = f'    (property "Reference" "{ref}" (at 0 0 0) (layer "F.SilkS"))\n'
+    return f'  (footprint "test:pad2" (layer "F.Cu") (at {x} {y})\n{ref_prop}{pad_lines}\n  )\n'
+
+
+def board_same_footprint_fail_source() -> str:
+    """Board exercising all three binding relationships (#4403).
+
+    * **same_footprint** -- ``FET1`` carries an ``L_MAINS`` pad and an
+      ``SRC_NEG`` pad 1.0 mm apart (0.4 mm copper gap).  ``SRC_NEG`` exists on
+      no other footprint, so the only ``L_MAINS <-> SRC_NEG`` approach is this
+      component-internal gap.
+    * **board** -- ``P1`` (``L_MAINS``) and ``P2`` (``GND``) sit 1.0 mm apart
+      on distinct footprints, so the binding ``L_MAINS <-> GND`` gap is
+      board-fixable.
+    * **shared-footprint but board-binds** -- ``FET2`` holds ``L_MAINS`` and
+      ``DIV_MID`` pads 2.0 mm apart (1.7 mm gap), but ``P3`` (``L_MAINS``) and
+      ``P4`` (``DIV_MID``) approach to 0.4 mm elsewhere.  Because the binding
+      minimum (0.4 mm) is NOT the intra-footprint gap (1.7 mm), the pair is
+      correctly ``board`` -- this is the equality-check guard.
+
+    All three binding gaps are 0.4 mm, so every conductor pair FAILs a
+    >=1 mm requirement -- used for the "board fail remains after waiver" path.
+    """
+    parts = [_SAMEFP_HEADER, _OUTLINE]
+    # same_footprint: L_MAINS + SRC_NEG in one package, 0.4 mm gap.
+    parts.append(
+        _footprint2("FET1", 110, 110, [("1", 1, "L_MAINS", 0, 0), ("2", 3, "SRC_NEG", 0, 1.0)])
+    )
+    # board: L_MAINS + GND on distinct footprints, 0.4 mm gap.
+    parts.append(_footprint2("P1", 120, 110, [("1", 1, "L_MAINS", 0, 0)]))
+    parts.append(_footprint2("P2", 120, 111, [("1", 2, "GND", 0, 0)]))
+    # shared-footprint but board-binds: FET2 holds both nets 1.7 mm apart, but
+    # P3/P4 approach to 0.4 mm, so DIV_MID binds board-level, not intra-FET2.
+    parts.append(
+        _footprint2("FET2", 110, 115, [("1", 1, "L_MAINS", 0, 0), ("2", 4, "DIV_MID", 0, 2.0)])
+    )
+    parts.append(_footprint2("P3", 130, 110, [("1", 1, "L_MAINS", 0, 0)]))
+    parts.append(_footprint2("P4", 130, 111, [("1", 4, "DIV_MID", 0, 0)]))
+    parts.append(")\n")
+    return "".join(parts)
+
+
+def board_same_footprint_only_source() -> str:
+    """Board whose ONLY sub-requirement gap is a same-footprint pair (#4403).
+
+    ``FET1`` carries an ``L_MAINS`` pad and an ``SRC_NEG`` pad 0.4 mm apart (the
+    same_footprint fail).  ``P1`` (``L_MAINS``) and ``P2`` (``GND``) sit ~7 mm
+    apart, so the board-level ``L_MAINS <-> GND`` pair and the board-edge pairs
+    all clear a ~1 mm requirement.  With ``--waive-same-footprint`` the gate then
+    passes (exit 0); without it, the same-footprint fail exits 1.
+    """
+    parts = [_SAMEFP_HEADER, _OUTLINE]
+    parts.append(
+        _footprint2("FET1", 110, 110, [("1", 1, "L_MAINS", 0, 0), ("2", 3, "SRC_NEG", 0, 1.0)])
+    )
+    # Board-level L_MAINS <-> GND ~7 mm apart -> clears a ~1 mm requirement.
+    parts.append(_footprint2("P1", 118, 110, [("1", 1, "L_MAINS", 0, 0)]))
+    parts.append(_footprint2("P2", 118, 118, [("1", 2, "GND", 0, 0)]))
+    parts.append(")\n")
+    return "".join(parts)
