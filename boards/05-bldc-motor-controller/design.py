@@ -3563,8 +3563,7 @@ def main() -> int:
             lvs_ok=None,
             supplemental_drc_ok=drc_success,
             supplemental_reason=(
-                "kct check --drc-only reported error-level DRC findings "
-                "(see DRC output above)"
+                "kct check --drc-only reported error-level DRC findings (see DRC output above)"
             ),
         )
 
