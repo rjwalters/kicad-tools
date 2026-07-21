@@ -34,7 +34,11 @@ Table provenance (transcribed values -- spot-check before certifying)
 ---------------------------------------------------------------------
 
 * **Creepage** -- IEC 60664-1:2020 Table F.4 (the "Table 4" of older
-  editions) and the harmonised IEC 62368-1:2018 (3rd ed.) Table 17.  Keyed on
+  editions; renumbered Table F.5 in the 2020 Ed. 3.1) and the harmonised
+  IEC 62368-1:2018 (3rd ed.) Table 17.  The full 10 V-1000 V voltage axis
+  transcribed here (including the sub-50 V head) is cross-checked against the
+  controlled copy of **EN 60664-1:2007 Table F.4 (p. 67)**, "Creepage
+  distances to avoid failure due to tracking".  Keyed on
   **RMS working voltage**, pollution degree, and material group
   (I: CTI >= 600, II: 400 <= CTI < 600, IIIa: 175 <= CTI < 400,
   IIIb: 100 <= CTI < 175).  For pollution degree 1 the standard does not
@@ -114,7 +118,18 @@ def normalize_material_group(group: str) -> str:
 
 # Ascending RMS working-voltage rows shared by every creepage column below.
 # IEC 60664-1:2020 Table F.4 / IEC 62368-1:2018 Table 17 (voltage axis).
+# The sub-50 V head (10-40 V) is the low end of EN 60664-1:2007 Table F.4
+# (p. 67); without it every working voltage <= 50 V spuriously stepped up to
+# the 50 V row (1.2 mm @ PD2/IIIa), which no dense-board pad gap can meet and
+# which kept the creepage gate from ever passing (issue #4402).
 _CREEPAGE_VOLTAGE_ROWS: tuple[float, ...] = (
+    10.0,
+    12.5,
+    16.0,
+    20.0,
+    25.0,
+    32.0,
+    40.0,
     50.0,
     63.0,
     80.0,
@@ -133,13 +148,23 @@ _CREEPAGE_VOLTAGE_ROWS: tuple[float, ...] = (
 
 # Creepage distances in mm, aligned index-for-index with _CREEPAGE_VOLTAGE_ROWS.
 # Source: IEC 60664-1:2020 Table F.4 (== IEC 62368-1:2018 Table 17, harmonised).
+# The sub-50 V rows (10-40 V) are the general-material columns of
+# EN 60664-1:2007 Table F.4 (p. 67); material groups I/II/III are identical
+# through 32 V and first diverge at 40 V (PD2: 0.56/0.80/1.10) per the standard.
 # PD1 is material-group independent (single column); PD2/PD3 subdivide by group.
-# Rows read left-to-right at: 50, 63, 80, 100, 125, 160, 200, 250, 320, 400,
-# 500, 630, 800, 1000 V.
+# Rows read left-to-right at: 10, 12.5, 16, 20, 25, 32, 40, 50, 63, 80, 100,
+# 125, 160, 200, 250, 320, 400, 500, 630, 800, 1000 V.
 _CREEPAGE_MM: dict[int, dict[str, tuple[float, ...]]] = {
     # Pollution degree 1 -- Table F.4, PD1 column (no material-group split).
     1: {
         _PD1_ANY: (
+            0.080,  # 10 V
+            0.090,  # 12.5 V
+            0.100,  # 16 V
+            0.110,  # 20 V
+            0.125,  # 25 V
+            0.14,  # 32 V
+            0.16,  # 40 V
             0.18,  # 50 V
             0.20,  # 63 V
             0.22,  # 80 V
@@ -159,6 +184,13 @@ _CREEPAGE_MM: dict[int, dict[str, tuple[float, ...]]] = {
     # Pollution degree 2 -- Table F.4, PD2 columns.
     2: {
         "I": (
+            0.40,  # 10 V
+            0.42,  # 12.5 V
+            0.45,  # 16 V
+            0.48,  # 20 V
+            0.50,  # 25 V
+            0.53,  # 32 V
+            0.56,  # 40 V
             0.6,  # 50 V
             0.63,  # 63 V
             0.67,  # 80 V
@@ -175,6 +207,13 @@ _CREEPAGE_MM: dict[int, dict[str, tuple[float, ...]]] = {
             5.0,  # 1000 V
         ),
         "II": (
+            0.40,  # 10 V
+            0.42,  # 12.5 V
+            0.45,  # 16 V
+            0.48,  # 20 V
+            0.50,  # 25 V
+            0.53,  # 32 V
+            0.80,  # 40 V
             0.85,  # 50 V
             0.9,  # 63 V
             0.9,  # 80 V
@@ -191,6 +230,13 @@ _CREEPAGE_MM: dict[int, dict[str, tuple[float, ...]]] = {
             7.1,  # 1000 V
         ),
         "IIIa": (
+            0.40,  # 10 V
+            0.42,  # 12.5 V
+            0.45,  # 16 V
+            0.48,  # 20 V
+            0.50,  # 25 V
+            0.53,  # 32 V
+            1.10,  # 40 V
             1.2,  # 50 V
             1.25,  # 63 V
             1.3,  # 80 V
@@ -212,6 +258,13 @@ _CREEPAGE_MM: dict[int, dict[str, tuple[float, ...]]] = {
     # lookup fails loud rather than aliasing to IIIa.
     3: {
         "I": (
+            1.00,  # 10 V
+            1.05,  # 12.5 V
+            1.10,  # 16 V
+            1.20,  # 20 V
+            1.25,  # 25 V
+            1.30,  # 32 V
+            1.40,  # 40 V
             1.5,  # 50 V
             1.6,  # 63 V
             1.7,  # 80 V
@@ -228,6 +281,13 @@ _CREEPAGE_MM: dict[int, dict[str, tuple[float, ...]]] = {
             12.5,  # 1000 V
         ),
         "II": (
+            1.00,  # 10 V
+            1.05,  # 12.5 V
+            1.10,  # 16 V
+            1.20,  # 20 V
+            1.25,  # 25 V
+            1.30,  # 32 V
+            1.60,  # 40 V
             1.7,  # 50 V
             1.8,  # 63 V
             1.9,  # 80 V
@@ -244,6 +304,13 @@ _CREEPAGE_MM: dict[int, dict[str, tuple[float, ...]]] = {
             14.0,  # 1000 V
         ),
         "IIIa": (
+            1.00,  # 10 V
+            1.05,  # 12.5 V
+            1.10,  # 16 V
+            1.20,  # 20 V
+            1.25,  # 25 V
+            1.30,  # 32 V
+            1.80,  # 40 V
             1.9,  # 50 V
             2.0,  # 63 V
             2.1,  # 80 V

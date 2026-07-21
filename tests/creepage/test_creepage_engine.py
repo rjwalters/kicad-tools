@@ -395,15 +395,16 @@ def test_cross_domain_pair_matches_flat_voltage_lookup(tmp_path):
     assert pair.provenance["voltage"]["delta_v_v"] == 150.0
 
 
-def test_sub_table_floor_steps_up_to_fifty_volt_row(tmp_path):
-    # dv=30 V (< the 50 V lowest row) conservatively uses the 50 V row.
+def test_sub_50v_steps_up_to_nearest_tabulated_row(tmp_path):
+    # dv=30 V steps up to the 32 V row of Table F.4 (issue #4402: the sub-50 V
+    # rows are now tabulated, so a 30 V pair no longer jumps to the 50 V row).
     pcb = _load(tmp_path, board_source(with_slot=False))
     hv = resolve_hv_nets(pcb, "HV", _hv_map())
     report = _census_map(pcb, hv, {"L_MAINS": 30.0})
     pair = _conductor_pair(report, "GND")
-    expected, _ = _std().required_creepage(50.0, 2, "IIIa")
+    expected, _ = _std().required_creepage(32.0, 2, "IIIa")
     assert pair.required_creepage_mm == pytest.approx(expected)
-    assert pair.provenance["creepage"]["voltage_row_used_v"] == 50.0
+    assert pair.provenance["creepage"]["voltage_row_used_v"] == 32.0
 
 
 def test_board_edge_uses_edge_voltage_default_zero(tmp_path):

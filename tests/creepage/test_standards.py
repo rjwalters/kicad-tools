@@ -119,9 +119,52 @@ def test_between_rows_steps_up_not_interpolated():
 
 def test_below_lowest_row_steps_up_to_lowest():
     std = get_standard("iec60664")
+    # 12 V sits between the 10 and 12.5 V rows -> steps UP to the 12.5 V row.
     value, prov = std.required_creepage(12, 2, "IIIa")
-    assert prov["voltage_row_used_v"] == 50.0  # lowest tabulated row
-    assert value == pytest.approx(1.2)
+    assert prov["voltage_row_used_v"] == 12.5
+    assert value == pytest.approx(0.42)
+
+
+def test_below_lowest_tabulated_row_steps_up_to_10v():
+    """Working voltages below the F.4 floor (10 V) step up to the 10 V row.
+
+    The reported ΔV = 1.65 V regression (issue #4402): before the sub-50 V
+    rows were added this stepped up to the 50 V row (1.2 mm) and no dense-board
+    pad gap could satisfy it.  It now resolves to the 10 V row -> 0.40 mm.
+    """
+    std = get_standard("iec60664")
+    for v in (1.65, 5.0, 9.9):
+        value, prov = std.required_creepage(v, 2, "IIIa")
+        assert prov["voltage_row_used_v"] == 10.0, f"{v} V did not step up to 10 V row"
+        assert value == pytest.approx(0.40)
+
+
+def test_sub_50v_rows_exact_boundaries():
+    """Exact-row and just-above-boundary step-up across the new sub-50 V rows."""
+    std = get_standard("iec60664")
+    # Exact-row hits.
+    assert std.required_creepage(10, 2, "IIIa")[0] == pytest.approx(0.40)
+    assert std.required_creepage(12.5, 2, "IIIa")[0] == pytest.approx(0.42)
+    assert std.required_creepage(16, 2, "IIIa")[0] == pytest.approx(0.45)
+    assert std.required_creepage(20, 2, "IIIa")[0] == pytest.approx(0.48)
+    assert std.required_creepage(25, 2, "IIIa")[0] == pytest.approx(0.50)
+    assert std.required_creepage(32, 2, "IIIa")[0] == pytest.approx(0.53)
+    # 40 V is where the material groups first diverge.
+    assert std.required_creepage(40, 2, "I")[0] == pytest.approx(0.56)
+    assert std.required_creepage(40, 2, "II")[0] == pytest.approx(0.80)
+    assert std.required_creepage(40, 2, "IIIa")[0] == pytest.approx(1.10)
+    assert std.required_creepage(40, 3, "IIIa")[0] == pytest.approx(1.80)
+    # Just above the 10 V row -> steps up to the 12.5 V row (no interpolation).
+    value, prov = std.required_creepage(10.1, 2, "IIIa")
+    assert prov["voltage_row_used_v"] == 12.5
+    assert value == pytest.approx(0.42)
+
+
+def test_sub_50v_pd1_column():
+    """PD1 sub-50 V values are material-group independent."""
+    std = get_standard("iec60664")
+    assert std.required_creepage(10, 1, "II")[0] == pytest.approx(0.080)
+    assert std.required_creepage(40, 1, "II")[0] == pytest.approx(0.16)
 
 
 def test_above_highest_row_fails_loud():
