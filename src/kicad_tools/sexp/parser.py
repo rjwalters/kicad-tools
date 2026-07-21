@@ -710,6 +710,11 @@ class SExp:
             "x",
             "y",
             "xy",
+            # Keepout / rule-area disposition enums (Issue #4430, #4185)
+            # KiCad 10 requires these as bare symbols, e.g. (tracks allowed),
+            # (copperpour not_allowed). Quoting them is a hard parse error.
+            "allowed",
+            "not_allowed",
             # Other
             "allow_missing_courtyard",
             "allow_soldermask_bridges",
