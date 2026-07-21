@@ -103,3 +103,58 @@ def test_exactly_one_board_is_gated() -> None:
     assert gated == ["05-bldc-motor-controller"], (
         f"Expected board 05 to be the sole gated board, got {gated}"
     )
+
+
+#: The verbatim substring of the alarming auto-grid warning (issue #3942).
+#: It literally claims risk "at fine-pitch pads", so it must fire ONLY on the
+#: fine-pitch memory-coerced board (05) -- never on a clean, no-fine-pitch board
+#: that routes DRC-clean (boards 01 / 07 tripped it before the #3942 gate fix).
+_MEMORY_CAP_WARNING = "memory budget cap forces grid"
+
+
+@pytest.mark.parametrize("budget", [500_000, 2_000_000])
+@pytest.mark.parametrize("board_dir,stem,expected", FLEET)
+def test_fleet_memory_cap_warning_matches_gate(
+    board_dir: str, stem: str, expected: bool, budget: int
+) -> None:
+    """Issue #3942: the alarming "may produce clearance violations at fine-pitch
+    pads" warning fires iff the board actually trips the gate.
+
+    Before the fix the warning fired on *every* memory-coerced board -- even
+    boards 01 (2.54mm divider) and 07 (0.8mm match group) that carry no
+    fine-pitch pads and route DRC-clean -- because it was gated on the looser
+    ``grid_unsafe_by_memory_cap`` predicate instead of the ``has_fine_pitch``
+    term that ``memory_forced_unsafe_grid`` carries.  The warning's own
+    precondition ("at fine-pitch pads") was unmet, so users of provably-clean
+    boards were told the board was at risk.  This locks the warning to the same
+    condition as the gate: emitted for board 05 only.
+    """
+    pcb = _input_pcb(board_dir, stem)
+    if not pcb.exists():
+        pytest.skip(f"input PCB not committed: {pcb}")
+
+    pads = extract_pad_positions(pcb)
+    dims = extract_board_dimensions(pcb)
+    assert dims is not None, f"{board_dir}: no board dimensions"
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        auto_select_grid_resolution(
+            pads=pads,
+            clearance=ROUTE_DEFAULT_CLEARANCE,
+            board_width=dims[0],
+            board_height=dims[1],
+            max_cells=budget,
+        )
+
+    warning_texts = [str(w.message) for w in caught]
+    fired = any(_MEMORY_CAP_WARNING in t for t in warning_texts)
+
+    assert fired is expected, (
+        f"{board_dir} @ max_cells={budget:,}: memory-cap clearance warning "
+        f"fired={fired} (expected {expected}). The warning claims risk 'at "
+        f"fine-pitch pads' and must track the gate exactly -- a True on a "
+        f"non-05 board is the #3942 false alarm that tells a DRC-clean board "
+        f"it is at risk; a False on board 05 drops a genuine warning. "
+        f"Warnings seen: {warning_texts}"
+    )
