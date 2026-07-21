@@ -272,6 +272,18 @@ class DesignRules:
     # Use layer names like ["F.Cu"] for single-layer routing
     allowed_layers: list[str] | None = None
 
+    # Per-net avoid-layer hardness (Issue #4433)
+    # When True, a net class's ``avoid_layers`` is upgraded from a SOFT cost
+    # bias (``layer_cost_multiplier``) to a HARD constraint -- the avoided
+    # layers are removed from that net's routable set in BOTH backends, so
+    # the search physically refuses to route the net there.  Set by the
+    # ``kct route --strict-layers`` flag.  Default False preserves the
+    # historical soft behaviour for the ampacity-free case.  Nets that also
+    # declare ``target_ampacity`` are hard-blocked regardless of this flag
+    # (an ampacity-bearing net cannot lose copper to a thin inner plane) --
+    # see :meth:`NetClassRouting.hard_avoided_layer_indices`.
+    strict_layers: bool = False
+
     # Bidirectional A* configuration (Issue #964)
     # Enable parallel frontier exploration for large paths
     bidirectional_search: bool = True  # Enable bidirectional A* by default
@@ -1069,6 +1081,42 @@ class NetClassRouting:
         if self.intra_pair_clearance is not None:
             return self.intra_pair_clearance
         return self.clearance
+
+    def hard_avoided_layer_indices(self, strict_layers: bool = False) -> frozenset[int]:
+        """Grid-layer indices this net must NOT be routed on (Issue #4433).
+
+        ``avoid_layers`` is normally a SOFT cost bias (each avoided layer is
+        surcharged by :attr:`layer_cost_multiplier` in the pathfinder), which
+        readily loses to congestion -- a 15 A HV net can still land on a thin
+        inner plane.  This accessor returns the subset of ``avoid_layers`` that
+        must be enforced as a HARD block (the layer is removed from the net's
+        routable set in BOTH backends) when either:
+
+        - a :attr:`target_ampacity` is declared on the class -- an
+          ampacity-bearing net physically cannot lose copper to a 0.5 oz inner
+          plane, so its declared ``avoid_layers`` is auto-hardened; OR
+        - the caller opts in via ``strict_layers`` (the ``kct route
+          --strict-layers`` flag), hardening ``avoid_layers`` for the
+          ampacity-free case.
+
+        Returns an EMPTY set when ``avoid_layers`` is unset/empty, or when
+        neither hardening condition holds -- preserving the pre-#4433 soft
+        default for every existing net class (no ampacity, no ``--strict-layers``
+        => byte-for-byte unchanged routing).
+
+        Args:
+            strict_layers: The board-global opt-in flag (``DesignRules
+                .strict_layers``).  When True, ``avoid_layers`` is hard even
+                without a declared ampacity.
+
+        Returns:
+            Frozen set of grid-layer indices to hard-block for this net.
+        """
+        if not self.avoid_layers:
+            return frozenset()
+        if self.target_ampacity is not None or strict_layers:
+            return frozenset(int(layer) for layer in self.avoid_layers)
+        return frozenset()
 
     def effective_coupled_continuity_threshold(self, default: float = 0.7) -> float:
         """Return the coupled-continuity threshold for the DRC rule.

@@ -3655,6 +3655,24 @@ def _add_route_parser(subparsers) -> None:
             "actually run and passed."
         ),
     )
+    # Issue #4433: opt-in HARD per-net avoid_layers.  Mirror of the inner
+    # route_cmd.py flag; both sites must stay in sync per
+    # ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--strict-layers",
+        action="store_true",
+        default=False,
+        help=(
+            "Upgrade a net class's per-net 'avoid_layers' from a SOFT cost "
+            "bias to a HARD constraint: the avoided layers are removed from "
+            "that net's routable set so the router physically refuses to route "
+            "it there (e.g. keep an HV net off the inner planes). By default "
+            "avoid_layers is a soft bias that can lose to congestion. Nets that "
+            "also declare 'target_ampacity' are hard-blocked regardless of this "
+            "flag. Use this for manufacturability-critical boards where an "
+            "avoided layer must never carry a given net."
+        ),
+    )
     route_parser.add_argument(
         "--auto-fix",
         action="store_true",

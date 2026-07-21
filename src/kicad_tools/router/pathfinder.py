@@ -2269,6 +2269,27 @@ class Router:
 
         return 1.0  # Neutral
 
+    def _hard_avoided_layers(self, net_class: NetClassRouting | None) -> frozenset[int]:
+        """Grid-layer indices to HARD-block for this net (Issue #4433).
+
+        Mirrors the C++ backend's per-net avoid-layer enforcement.  Returns
+        the subset of ``net_class.avoid_layers`` that must be enforced as a
+        hard constraint (auto-hard when the class declares ``target_ampacity``;
+        opt-in hard for the ampacity-free case via ``--strict-layers`` /
+        ``DesignRules.strict_layers``).  An empty set means "no hard block" --
+        ``avoid_layers`` keeps its historical SOFT cost bias
+        (:meth:`_get_layer_preference_cost`), preserving pre-#4433 behaviour.
+
+        Args:
+            net_class: The routing net class for the net being routed, or None.
+
+        Returns:
+            Frozen set of grid-layer indices the net must not be routed on.
+        """
+        if net_class is None:
+            return frozenset()
+        return net_class.hard_avoided_layer_indices(self.rules.strict_layers)
+
     def _is_layer_allowed(self, layer_idx: int) -> bool:
         """Check if routing on this layer is allowed (Issue #715).
 
@@ -2536,6 +2557,21 @@ class Router:
             start_layers = [l for l in start_layers if self._is_layer_allowed(l)]
             end_layers = [l for l in end_layers if self._is_layer_allowed(l)]
             # If no valid layers remain, routing is impossible
+            if not start_layers or not end_layers:
+                return None
+
+        # Issue #4433: hard per-net avoid_layers.  Drop avoided layers from the
+        # start/end seed sets so the A* never seeds (or terminates) on an inner
+        # plane the net must not use.  Combined with the via-loop gate below,
+        # this makes ``avoid_layers`` a HARD constraint when the net declares
+        # ``target_ampacity`` or the board opted in via ``--strict-layers``.
+        # An empty set is a no-op (soft default preserved).  A net left with no
+        # legal start/end layer fails LOUD (returns None -> unrouted report)
+        # rather than silently landing unmanufacturable copper on In1/In2.
+        hard_avoided_layers = self._hard_avoided_layers(net_class)
+        if hard_avoided_layers:
+            start_layers = [l for l in start_layers if l not in hard_avoided_layers]
+            end_layers = [l for l in end_layers if l not in hard_avoided_layers]
             if not start_layers or not end_layers:
                 return None
 
@@ -3067,6 +3103,12 @@ class Router:
 
                 # Check layer constraint (Issue #715)
                 if not self._is_layer_allowed(new_layer):
+                    continue
+
+                # Issue #4433: hard per-net avoid_layers -- refuse to via onto
+                # a layer this net must not use (ampacity-bearing or
+                # --strict-layers).  No-op when the set is empty (soft default).
+                if new_layer in hard_avoided_layers:
                     continue
 
                 # Check if via placement is valid on ALL layers (through-hole via)
@@ -4011,6 +4053,21 @@ class Router:
             if not start_layers or not end_layers:
                 return None
 
+        # Issue #4433: hard per-net avoid_layers (see the unidirectional
+        # ``_route_impl`` for the full rationale).  Filter the seed sets so the
+        # bidirectional frontiers never start on an avoided inner plane; the
+        # via-loop gate in ``_expand_bidirectional_neighbors`` keeps them off it
+        # mid-path.  Empty set => no-op (soft default preserved).
+        if self.rules.strict_layers or (
+            net_class is not None and net_class.target_ampacity is not None
+        ):
+            bidi_hard_avoided = self._hard_avoided_layers(net_class)
+            if bidi_hard_avoided:
+                start_layers = [l for l in start_layers if l not in bidi_hard_avoided]
+                end_layers = [l for l in end_layers if l not in bidi_hard_avoided]
+                if not start_layers or not end_layers:
+                    return None
+
         # Get pad metal bounds for goal checking (Issue #956)
         start_metal_bounds = self._get_pad_metal_bounds(start)
         end_metal_bounds = self._get_pad_metal_bounds(end)
@@ -4546,12 +4603,21 @@ class Router:
                 heapq.heappush(open_set, neighbor_node)
                 nodes[neighbor_key] = neighbor_node
 
+        # Issue #4433: hard per-net avoid_layers -- resolved once for this
+        # expansion so the via loop below refuses to change onto an avoided
+        # inner plane.  Empty set => no-op (soft default preserved).
+        bidi_hard_avoided = self._hard_avoided_layers(self._get_net_class(source_pad.net_name))
+
         # Try layer changes (vias)
         for new_layer in self.grid.get_routable_indices():
             if new_layer == current.layer:
                 continue
 
             if not self._is_layer_allowed(new_layer):
+                continue
+
+            # Issue #4433: refuse a via onto a hard-avoided layer for this net.
+            if new_layer in bidi_hard_avoided:
                 continue
 
             # Check via blocking on all layers

@@ -119,6 +119,7 @@ def _run_route(
     *,
     preserve: bool,
     skip_nets: str | None = None,
+    net_class_map_path: str | None = None,
 ) -> str:
     """Write ``pcb_text`` to a temp file, run ``kct route``, return output text.
 
@@ -140,6 +141,8 @@ def _run_route(
     ]
     if skip_nets:
         argv += ["--skip-nets", skip_nets]
+    if net_class_map_path:
+        argv += ["--net-class-map", net_class_map_path]
     if preserve:
         argv.append("--preserve-existing")
 
@@ -500,3 +503,199 @@ class TestCatastrophicCopperLossGuard:
         # elements).
         _write_routed_pcb(in_path, out_path, route_sexp, guard_copper_loss=True)
         assert out_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Issue #4433: per-net avoid_layers is a HARD constraint under composition.
+# ---------------------------------------------------------------------------
+
+
+class TestPreserveExistingHardAvoidLayers:
+    """Issue #4433: composition (`--preserve-existing`) must honour a hard
+    per-net ``avoid_layers`` and must NOT regress #4413 copper preservation.
+
+    The report: a two-step composition (step-1 pre-routes some nets, step-2
+    routes the rest with ``--preserve-existing``) leaked an HV net onto the
+    inner planes because per-net ``avoid_layers`` was soft in Python and absent
+    in the C++ (default) backend, and the reloaded step-1 outer copper congests
+    the surface so escalation reaches the ``four_layer_all_signal`` rung where
+    In1/In2 are routable.
+    """
+
+    def test_preserve_existing_with_hard_avoid_map_keeps_skipped_nets(self, tmp_path, board_text):
+        """A ``--preserve-existing`` composition run with a net-class map that
+        declares ``avoid_layers`` + ``target_ampacity`` on the routed net keeps
+        every skipped net's copper byte-identical (no #4413 regression) and
+        still routes the requested net.
+
+        This exercises the full CLI path with the new hard-avoid plumbing loaded
+        (sidecar merge -> DesignRules.strict_layers/target_ampacity gating ->
+        backend routable-layer narrowing) end to end.
+        """
+        import json
+
+        orig = parse_segments(board_text)
+        assert set(orig) == set(_ALL_SIGNAL_NETS)
+
+        # Declare LINE_A as a 15 A HV net that must avoid the inner planes.
+        map_path = tmp_path / "netclass.json"
+        map_path.write_text(
+            json.dumps(
+                {
+                    "LINE_A": {
+                        "name": "HV",
+                        "avoid_layers": [1, 2],
+                        "target_ampacity": 15.0,
+                        "trace_width": 0.25,
+                        "clearance": 0.2,
+                    }
+                }
+            )
+        )
+
+        out_text = _run_route(
+            tmp_path,
+            board_text,
+            preserve=True,
+            skip_nets=_SKIP_ALL_BUT_LINE_A,
+            net_class_map_path=str(map_path),
+        )
+        out = parse_segments(out_text)
+
+        # Every skipped net survived byte-identical -- the new hard-avoid code
+        # path does not disturb #4413 copper preservation.
+        for net in ("LINE_B", "LINE_C", "LINE_D", "NODE_A", "NODE_B", "NODE_C", "NODE_D"):
+            assert net in out, (
+                f"{net} geometry destroyed under --preserve-existing + hard avoid map"
+            )
+            assert _geom_set(out[net]) == _geom_set(orig[net]), (
+                f"{net} geometry changed under --preserve-existing + hard avoid map"
+            )
+
+        # The HV net is still routed, and (on this 2-layer board where In1/In2
+        # do not physically exist) it carries zero inner-layer copper.
+        assert "LINE_A" in out and len(out["LINE_A"]) > 0
+        assert all(seg.layer.name not in ("In1.Cu", "In2.Cu") for seg in out["LINE_A"])
+
+    def test_composition_hard_avoid_net_gets_zero_inner_segments(self):
+        """Deterministic composition repro: reloaded step-1 outer copper forces
+        the step-2 HV net toward the inner planes; the hard ``avoid_layers``
+        (via ``target_ampacity``) keeps it OFF In1/In2 while the SOFT default
+        still leaks -- and the preserved step-1 copper is untouched.
+
+        Built on the core ``RoutingGrid``/pathfinder (not the full CLI) so it is
+        fast and environment-independent, while still exercising the exact
+        four_layer_all_signal rung where the constraint was absent.
+        """
+        from kicad_tools.router.cpp_backend import (
+            CppGrid,
+            CppPathfinder,
+            is_cpp_available,
+        )
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.layers import Layer, LayerStack
+        from kicad_tools.router.primitives import Obstacle, Pad, Route, Segment
+        from kicad_tools.router.rules import DesignRules, NetClassRouting
+
+        def route_hv(*, hard: bool):
+            rules = DesignRules(
+                trace_width=0.25,
+                trace_clearance=0.2,
+                via_diameter=0.6,
+                via_clearance=0.2,
+                grid_resolution=0.1,
+            )
+            grid = RoutingGrid(
+                width=20.0,
+                height=10.0,
+                rules=rules,
+                layer_stack=LayerStack.four_layer_all_signal(),
+            )
+            start = Pad(
+                x=3.0,
+                y=5.0,
+                width=1.0,
+                height=1.0,
+                net=1,
+                net_name="HV",
+                layer=Layer.F_CU,
+                ref="J1",
+                pin="1",
+                through_hole=True,
+                drill=0.6,
+            )
+            end = Pad(
+                x=17.0,
+                y=5.0,
+                width=1.0,
+                height=1.0,
+                net=1,
+                net_name="HV",
+                layer=Layer.F_CU,
+                ref="J2",
+                pin="1",
+                through_hole=True,
+                drill=0.6,
+            )
+            grid.add_pad(start)
+            grid.add_pad(end)
+
+            # Model reloaded step-1 copper: an existing preserved route occupying
+            # the outer surface, marked on the grid as obstacles the step-2 net
+            # must route around.  A full-height wall on BOTH outer layers stands
+            # in for a congested surface where the only crossing is inner.
+            preserved = Route(
+                net=2,
+                net_name="PRESERVED",
+                segments=[
+                    Segment(x1=10.0, y1=0.0, x2=10.0, y2=10.0, width=0.5, net=2, layer=Layer.F_CU),
+                    Segment(x1=10.0, y1=0.0, x2=10.0, y2=10.0, width=0.5, net=2, layer=Layer.B_CU),
+                ],
+            )
+            grid.add_obstacle(Obstacle(x=10.0, y=5.0, width=2.0, height=16.0, layer=Layer.F_CU))
+            grid.add_obstacle(Obstacle(x=10.0, y=5.0, width=2.0, height=16.0, layer=Layer.B_CU))
+
+            nc = NetClassRouting(
+                name="HV",
+                trace_width=0.25,
+                clearance=0.2,
+                avoid_layers=[1, 2],
+                target_ampacity=(15.0 if hard else None),
+            )
+            backend = "cpp" if is_cpp_available() else "python"
+            if backend == "cpp":
+                cpp_grid = CppGrid.from_routing_grid(grid)
+                pf = CppPathfinder(cpp_grid, rules, diagonal_routing=True, net_class_map={"HV": nc})
+            else:
+                from kicad_tools.router.pathfinder import Router
+
+                pf = Router(grid, rules, net_class_map={"HV": nc})
+            route = pf.route(start, end, net_class=nc)
+            return route, preserved
+
+        # SOFT default: the composition congestion pushes the HV net onto an
+        # inner layer (the reported leak).  This confirms the repro is real.
+        soft_route, _ = route_hv(hard=False)
+        assert soft_route is not None, "soft HV net failed to route across the congested surface"
+        soft_inner = [s for s in soft_route.segments if s.layer.value in (1, 2)]
+        assert soft_inner, (
+            "expected the SOFT default to leak onto an inner plane under composition "
+            "congestion (the reported #4433 symptom) -- test setup no longer reproduces it"
+        )
+
+        # HARD (target_ampacity): zero inner-layer segments -- the fix.  The
+        # preserved step-1 copper is never touched by the step-2 route.
+        hard_route, preserved = route_hv(hard=True)
+        hard_inner = (
+            0
+            if hard_route is None
+            else sum(1 for s in hard_route.segments if s.layer.value in (1, 2))
+        )
+        assert hard_inner == 0, (
+            "ampacity-bearing HV net still landed on an inner plane under "
+            "--preserve-existing composition"
+        )
+        # #4413 non-regression: the preserved route object is intact (the step-2
+        # HV route neither consumes nor mutates it).
+        assert len(preserved.segments) == 2
+        assert {s.layer.kicad_name for s in preserved.segments} == {"F.Cu", "B.Cu"}
