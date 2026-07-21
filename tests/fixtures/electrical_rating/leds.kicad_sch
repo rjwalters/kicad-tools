@@ -1,0 +1,289 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(uuid "00000000-0000-0000-0000-000000000030")
+	(paper "A4")
+	(lib_symbols
+		(symbol "Device:R"
+			(pin_numbers hide)
+			(pin_names hide)
+			(symbol "R_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+			)
+		)
+		(symbol "Device:LED"
+			(pin_numbers hide)
+			(pin_names hide)
+			(symbol "LED_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "K") (number "1"))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "A") (number "2"))
+			)
+		)
+		(symbol "Device:C"
+			(pin_numbers hide)
+			(pin_names hide)
+			(symbol "C_1_1"
+				(pin passive line (at 0 3.81 270) (length 2.794) (name "~") (number "1"))
+				(pin passive line (at 0 -3.81 90) (length 2.794) (name "~") (number "2"))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 100 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(property "Reference" "R1"
+			(at 102 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "100"
+			(at 102 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 102 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "~"
+			(at 102 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000002"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000003"))
+	)
+	(symbol
+		(lib_id "Device:LED")
+		(at 100 57.62 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000004")
+		(property "Reference" "D1"
+			(at 102 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "LED"
+			(at 102 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 102 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "~"
+			(at 102 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Vf" "2.0V"
+			(at 102 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "If_max" "20mA"
+			(at 102 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000005"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000006"))
+	)
+	(label "+5V"
+		(at 100 46.19 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000007")
+	)
+	(label "GND"
+		(at 100 61.43 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000008")
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 120 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000009")
+		(property "Reference" "R2"
+			(at 122 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "220"
+			(at 122 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 122 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "~"
+			(at 122 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000010"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000011"))
+	)
+	(symbol
+		(lib_id "Device:LED")
+		(at 120 57.62 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000012")
+		(property "Reference" "D2"
+			(at 122 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "LED"
+			(at 122 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 122 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "~"
+			(at 122 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Vf" "2.0V"
+			(at 122 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "If_max" "20mA"
+			(at 122 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000013"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000014"))
+	)
+	(label "+5V"
+		(at 120 46.19 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000015")
+	)
+	(label "GND"
+		(at 120 61.43 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000016")
+	)
+	(symbol
+		(lib_id "Device:LED")
+		(at 140 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000017")
+		(property "Reference" "D3"
+			(at 142 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "LED"
+			(at 142 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 142 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "~"
+			(at 142 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Vf" "2.0V"
+			(at 142 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000018"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000019"))
+	)
+	(label "+5V"
+		(at 140 46.19 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000020")
+	)
+	(label "GND"
+		(at 140 53.81 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000021")
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 160 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000022")
+		(property "Reference" "R4"
+			(at 162 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "100"
+			(at 162 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 162 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "~"
+			(at 162 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000023"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000024"))
+	)
+	(symbol
+		(lib_id "Device:LED")
+		(at 160 57.62 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000025")
+		(property "Reference" "D4"
+			(at 162 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "LED"
+			(at 162 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 162 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "~"
+			(at 162 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Vf" "abc"
+			(at 162 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "If_max" "20mA"
+			(at 162 57.62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000026"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000027"))
+	)
+	(label "+5V"
+		(at 160 46.19 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000028")
+	)
+	(label "GND"
+		(at 160 61.43 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000029")
+	)
+)
