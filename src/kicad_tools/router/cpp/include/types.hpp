@@ -10,6 +10,8 @@
 #include <vector>
 #include <tuple>
 #include <optional>
+#include <string>
+#include <unordered_map>
 
 namespace router {
 
@@ -377,6 +379,15 @@ struct CoupledPathNode {
 //   iteration_limited    -- when ``timeout_exceeded``, TRUE iff the ITERATION
 //                           budget was the binding constraint (else the
 //                           wall-clock budget); mirrors ``last_iteration_limited``.
+//   rejections           -- Issue #4459: per-reason move-rejection histogram
+//                           (which guard pruned the frontier), keyed by the
+//                           SAME reason vocabulary the pure-Python coupled
+//                           loop uses (``last_rejections``): sym/asym x
+//                           blocked/spacing/floor/trail, the via guards, and
+//                           corridor pruning.  Lets a 0/9 budget-exit be
+//                           triaged (plateau vs no-progress vs off-angle vs
+//                           infeasible-gap) instead of reading the old
+//                           categorically-empty dict on the C++ path.
 struct CoupledRouteResult {
     std::vector<CoupledPathNode> path;  // root->goal; empty when !success.
     bool success = false;
@@ -385,6 +396,9 @@ struct CoupledRouteResult {
     double best_progress = -1.0;
     bool timeout_exceeded = false;
     bool iteration_limited = false;
+    // Issue #4459: rejection histogram (reason -> count).  Empty only when the
+    // search popped no neighbours at all (e.g. the start state is the goal).
+    std::unordered_map<std::string, int64_t> rejections;
 };
 
 // Neighbor direction: dx, dy, dlayer, cost_multiplier

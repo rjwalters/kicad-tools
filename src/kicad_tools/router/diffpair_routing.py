@@ -23,6 +23,8 @@ from enum import Enum
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from .core import Autorouter
     from .cpp_backend import CppCoupledPathfinder
     from .grid import RoutingGrid
@@ -173,6 +175,156 @@ _SHADOW_GAP_MAX_TOL_FRAC: float = float(os.environ.get("KCT_SHADOW_GAP_MAX_TOL_F
 #   1. compute per-segment-pair clearance,
 #   2. report violations,
 #   3. expose a public accessor for Phase B to consume.
+
+
+# Issue #4459: diff-pair Phase 1 ground-truth taxonomy.  Every coupled pair
+# that fails to couple falls into exactly one of these classes; Phases 2-5 of
+# the #4409 epic each target a specific class, so this per-pair classification
+# is the measurement harness that lets a later phase verify it fixed the class
+# it claims to.  Diagnostic-only -- classifying a pair changes no geometry.
+COUPLED_OUTCOME_GUIDE_MISSING = "guide-missing"
+COUPLED_OUTCOME_SHADOW_OVERLAP = "shadow-declined-overlap"
+COUPLED_OUTCOME_SHADOW_BLOCKAGE = "shadow-declined-blockage"
+COUPLED_OUTCOME_JOINT_PLATEAU = "joint-A*-plateau"
+COUPLED_OUTCOME_LANDING_STALL = "landing-stall"
+
+
+def dominant_rejection(rejections: Mapping[str, int] | None) -> str | None:
+    """Return the single most-frequent rejection reason, or ``None``.
+
+    Issue #4459: the coupled search's per-reason rejection histogram
+    (``CoupledPathfinder.last_rejections``) tells us WHICH guard pruned the
+    frontier most often on a budget-exit.  Ties break alphabetically for a
+    deterministic diagnostic.  An empty / ``None`` histogram returns ``None``
+    (the search popped no neighbours -- e.g. the start state was the goal).
+    """
+    if not rejections:
+        return None
+    # max by (count, then reverse-alpha) so the highest count wins and ties
+    # resolve to the alphabetically-first key deterministically.
+    return max(sorted(rejections), key=lambda k: rejections[k])
+
+
+@dataclass
+class CoupledPairReport:
+    """Structured per-pair ground-truth for one coupled diff-pair attempt.
+
+    Issue #4459 (Phase 1 of #4409): emitted for every pair the coupled router
+    attempts so Phases 2-5 have a per-pair failure classification to verify
+    against.  Diagnostic-only -- constructing this record changes no routing
+    behaviour or geometry.
+
+    Attributes:
+        pair_name: Base name of the diff pair (e.g. ``"MIPI_CLK"``).
+        classification: One of the ``COUPLED_OUTCOME_*`` taxonomy strings, or
+            ``"coupled-ok"`` when the pair actually coupled.
+        coupled: Whether the pair coupled (a route was produced).
+        backend: Which search served the attempt (``"cpp"`` / ``"python"``).
+        coupled_phase: The phase label the attempt reached (``open`` /
+            ``corridor`` / ``shadow`` / ``shadow-swapped`` / ...).
+        guide_ok: Whether the single-ended guide probe produced segments.
+        best_progress: Smallest joint remaining Manhattan distance any popped
+            joint state reached (``inf`` when nothing popped / not applicable).
+        dominant_rejection: The most-frequent frontier-pruning reason, or
+            ``None``.
+        start_pitch_cells: P/N start-pad pitch in grid cells.
+        end_pitch_cells: P/N end-pad pitch in grid cells.
+        target_spacing_cells: The coupled search's target center spacing.
+        off_angle_segments: Count of guide segments that are neither
+            axis-aligned nor exactly 45 degrees (an off-angle proxy Phase 4
+            targets).
+        shadow_enabled: Whether shadow construction was active for this pair.
+    """
+
+    pair_name: str
+    classification: str
+    coupled: bool
+    backend: str
+    coupled_phase: str
+    guide_ok: bool
+    best_progress: float
+    dominant_rejection: str | None
+    start_pitch_cells: float
+    end_pitch_cells: float
+    target_spacing_cells: int
+    off_angle_segments: int
+    shadow_enabled: bool
+
+    def format_line(self) -> str:
+        """One-line ``[coupled-pair-report]`` rendering for stdout logs."""
+        bp = "inf" if self.best_progress == float("inf") else f"{self.best_progress:.0f}"
+        return (
+            f"    [coupled-pair-report] pair={self.pair_name} "
+            f"class={self.classification} coupled={self.coupled} "
+            f"backend={self.backend} phase={self.coupled_phase} "
+            f"guide_ok={self.guide_ok} best_progress={bp} "
+            f"dominant_rejection={self.dominant_rejection} "
+            f"start_pitch={self.start_pitch_cells:.1f} "
+            f"end_pitch={self.end_pitch_cells:.1f} "
+            f"target_spacing={self.target_spacing_cells} "
+            f"off_angle_segs={self.off_angle_segments} "
+            f"shadow={self.shadow_enabled}"
+        )
+
+
+def _count_off_angle_segments(route: Route | None) -> int:
+    """Count guide segments that are neither axis-aligned nor exactly 45 deg.
+
+    Issue #4459: an off-angle proxy for the Phase-4 failure class.  A segment
+    is on-angle when it is horizontal (``dy == 0``), vertical (``dx == 0``) or
+    a true 45 (``|dx| == |dy|``); anything else is off-angle.  ``None`` / empty
+    routes contribute zero.
+    """
+    if route is None:
+        return 0
+    off = 0
+    for seg in route.segments:
+        dx = abs(seg.x2 - seg.x1)
+        dy = abs(seg.y2 - seg.y1)
+        if dx < 1e-9 or dy < 1e-9:
+            continue  # axis-aligned
+        if abs(dx - dy) < 1e-6:
+            continue  # exact 45
+        off += 1
+    return off
+
+
+def classify_coupled_pair_outcome(
+    *,
+    coupled: bool,
+    coupled_phase: str,
+    guide_ok: bool,
+    best_progress: float,
+    shadow_enabled: bool,
+    shadow_decline_reason: str | None,
+    near_miss_cells: int = NEAR_MISS_RESCUE_CELLS,
+) -> str:
+    """Classify a coupled-pair attempt into the #4459 failure taxonomy.
+
+    Diagnostic-only.  Returns ``"coupled-ok"`` when the pair coupled, else one
+    of the ``COUPLED_OUTCOME_*`` classes:
+
+    * ``guide-missing`` -- the single-ended guide probe produced no path, so
+      neither the shadow constructor nor the corridor search had a seed.
+    * ``shadow-declined-overlap`` / ``shadow-declined-blockage`` -- shadow
+      construction was active and declined (only reachable with shadow ON);
+      the sub-reason is the shadow's last decline cause.
+    * ``landing-stall`` -- the joint A* got within ``near_miss_cells`` of the
+      goal (the pad-landing needle-eye stall, Phase 5's class).
+    * ``joint-A*-plateau`` -- the joint A* stalled far from the goal (overlap /
+      blockage / off-angle body failures, Phases 2-4's classes).
+    """
+    if coupled:
+        return "coupled-ok"
+    if not guide_ok:
+        return COUPLED_OUTCOME_GUIDE_MISSING
+    if shadow_enabled and shadow_decline_reason is not None:
+        if shadow_decline_reason == "overlap":
+            return COUPLED_OUTCOME_SHADOW_OVERLAP
+        return COUPLED_OUTCOME_SHADOW_BLOCKAGE
+    if best_progress != float("inf") and best_progress <= near_miss_cells:
+        return COUPLED_OUTCOME_LANDING_STALL
+    return COUPLED_OUTCOME_JOINT_PLATEAU
 
 
 @dataclass
@@ -691,6 +843,11 @@ class CoupledPathfinder:
         self.last_best_progress: float = float("inf")
         self.last_best_state: CoupledState | None = None
         self.last_best_node: CoupledNode | None = None
+        # Issue #4459: backend that served the most-recent coupled search
+        # ("python" or "cpp").  Lets the ``[coupled-timing]`` diagnostic report
+        # ``best_state=n/a (cpp)`` instead of a misleading ``best_state=None``
+        # for the C++ path, which carries no Python ``CoupledState`` object.
+        self.last_coupled_backend: str = "python"
 
         # Issue #3508: per-search move-rejection counters keyed by
         # rejection reason (sym/asym x blocked/spacing/floor/trail,
@@ -1698,11 +1855,24 @@ class CoupledPathfinder:
         self.last_iterations = int(diagnostics["iterations"])
         bp = diagnostics["best_progress"]
         self.last_best_progress = float("inf") if bp < 0 else float(bp)
+        # Issue #4459: the C++ joint-state search carries no Python
+        # ``CoupledState`` object, so ``last_best_state`` / ``last_best_node``
+        # are genuinely unavailable on this path -- but ``last_best_progress``
+        # above IS the real progress signal.  The old ``[coupled-timing]``
+        # print read ``last_best_state`` (hard-set to ``None`` here) and
+        # printed ``best_state=None`` for EVERY C++ pair, implying "never
+        # moved" even when the joint A* made progress.  Record the backend so
+        # the diagnostic can print ``best_state=n/a (cpp)`` and lean on
+        # ``best_progress`` / ``rejections`` instead of the None red herring.
         self.last_best_state = None
         self.last_best_node = None
+        self.last_coupled_backend = "cpp"
         self.last_timeout_exceeded = bool(diagnostics["timeout_exceeded"])
         self.last_iteration_limited = bool(diagnostics["iteration_limited"])
-        self.last_rejections = collections.defaultdict(int)
+        # Issue #4459: populate the rejection histogram from the C++ search
+        # (was hard-emptied here, so ``last_rejections`` was categorically
+        # empty on the C++ path and no guard-pruning signal survived).
+        self.last_rejections = collections.defaultdict(int, diagnostics.get("rejections", {}) or {})
 
         if path is None:
             return True, None
@@ -1827,6 +1997,12 @@ class CoupledPathfinder:
         self.last_best_progress: float = float("inf")
         self.last_best_state: CoupledState | None = None
         self.last_best_node: CoupledNode | None = None
+        # Issue #4459: which backend served the most-recent search.  Defaults
+        # to ``"python"`` here; ``_try_cpp_route_coupled`` overrides it to
+        # ``"cpp"`` when the C++ joint-state search handles the pair.  The
+        # ``[coupled-timing]`` diagnostic uses this to avoid reading the
+        # C++-path ``last_best_state=None`` as "never moved".
+        self.last_coupled_backend = "python"
         # Issue #3508: reset the per-search rejection counters.
         self.last_rejections = collections.defaultdict(int)
 
@@ -2721,6 +2897,17 @@ class DiffPairRouter:
         # observability-only; Phase B (separate PR) will consume this
         # list to drive a fine-grid repair sub-pass.
         self._intra_clearance_violations: list[IntraPairClearanceViolation] = []
+        # Issue #4459 (Phase 1 of #4409): ground-truth instrumentation for the
+        # coupled diff-pair search.  ``_last_shadow_decline_reason`` records the
+        # LAST reason the geometric shadow constructor declined a side
+        # ("overlap" -- self-check / physical P/N overlap, or "blockage" --
+        # no legal via site / mid-route obstacle / unreachable pad tail);
+        # reset per spec, set inside ``_shadow_route_pair``.
+        # ``_last_coupled_pair_report`` holds the most-recent per-pair
+        # taxonomy classification (a :class:`CoupledPairReport`).  Both are
+        # diagnostic-only and never influence routing decisions.
+        self._last_shadow_decline_reason: str | None = None
+        self._last_coupled_pair_report: CoupledPairReport | None = None
         # Issue #3089: True iff the most-recent call to
         # ``route_differential_pair_coupled`` returned because the
         # inner ``CoupledPathfinder.route_coupled`` exceeded its
@@ -4330,6 +4517,7 @@ class DiffPairRouter:
                     f"    [coupled-shadow] side={side:+.0f} no legal shadow-via "
                     f"site for {pair.name}"
                 )
+                self._last_shadow_decline_reason = "blockage"  # #4459
                 continue
 
             # ------------------------------------------------------------
@@ -4375,6 +4563,7 @@ class DiffPairRouter:
                     )
                     break
             if interior_block:
+                self._last_shadow_decline_reason = "blockage"  # #4459
                 continue
             a0 = trim_start + 2 * step if trim_start > 0 else 0.0
             a1 = arc_total - trim_end - (2 * step if trim_end > 0 else 0.0)
@@ -4383,6 +4572,7 @@ class DiffPairRouter:
                     f"    [coupled-shadow] side={side:+.0f} clear run too "
                     f"short for {pair.name} ({a1 - a0:.2f}mm)"
                 )
+                self._last_shadow_decline_reason = "blockage"  # #4459
                 continue
 
             # Slice elements to [lo, hi] by arc length.  Vias are kept
@@ -4449,6 +4639,7 @@ class DiffPairRouter:
                     a0_eff = a0 + extra0
                     break
             if start_tail is None:
+                self._last_shadow_decline_reason = "blockage"  # #4459
                 continue
             end_tail = None
             a1_eff = a1
@@ -4474,10 +4665,12 @@ class DiffPairRouter:
                     a1_eff = a1 - extra1
                     break
             if end_tail is None:
+                self._last_shadow_decline_reason = "blockage"  # #4459
                 continue
             kept = _slice_kept(a0_eff, a1_eff)
             seg_elements = [e for e in kept if e[0] == "seg"]
             if not seg_elements:
+                self._last_shadow_decline_reason = "blockage"  # #4459
                 continue
 
             shadow_route = Route(net=s_net, net_name=s_net_name)
@@ -4576,6 +4769,7 @@ class DiffPairRouter:
                     f"(worst={violation.actual_clearance_mm:+.3f}mm); trying "
                     f"other side"
                 )
+                self._last_shadow_decline_reason = "overlap"  # #4459
                 continue
             # Issue #3508 (second pass): full physical-overlap check
             # (via-vs-seg / via-vs-via / seg-vs-seg) mirroring the
@@ -4587,6 +4781,7 @@ class DiffPairRouter:
                     f"P/N overlap (via-aware) for {pair.name}; trying "
                     f"other side"
                 )
+                self._last_shadow_decline_reason = "overlap"  # #4459
                 continue
             return p_route, n_route
 
@@ -5010,6 +5205,10 @@ class DiffPairRouter:
             spec_t0 = time.monotonic()
             result: tuple[Route, Route] | None = None
             coupled_phase = "open"
+            # Issue #4459: reset the shadow-decline reason for this spec so a
+            # prior pair's decline cannot leak into this pair's per-pair
+            # classification.  ``_shadow_route_pair`` sets it at each decline.
+            self._last_shadow_decline_reason = None
             # Issue #3473: iterations the corridor attempt consumed,
             # charged against the shared per-pair iteration budget so
             # the open fallback gets the REMAINDER (not a fresh full
@@ -5252,17 +5451,82 @@ class DiffPairRouter:
             # for a failing pair is the budget-exceeded warning -- the
             # corridor/open phase split and the iteration cost (the two
             # knobs recipe authors tune) were invisible in CI logs.
+            # Issue #4459: kill the ``best_state=None`` red herring.  The C++
+            # joint-state search (``_try_cpp_route_coupled``) carries no Python
+            # ``CoupledState`` object, so ``last_best_state`` is genuinely
+            # ``None`` on that path -- but the OLD line printed ``best_state=
+            # None`` for EVERY C++ pair, implying "never moved" even when the
+            # joint A* made real progress.  The true signal is
+            # ``last_best_progress`` (the smallest joint remaining distance any
+            # popped state reached) plus the dominant frontier-pruning reason.
+            # Report ``n/a (cpp)`` on the C++ path so the line stops implying a
+            # stall; keep the real state repr on the Python path.
+            backend = getattr(pathfinder, "last_coupled_backend", "python")
             best_state = pathfinder.last_best_state
+            if best_state is None and backend == "cpp":
+                best_state_repr = "n/a (cpp)"
+            else:
+                best_state_repr = str(best_state)
+            dominant = dominant_rejection(pathfinder.last_rejections)
             print(
                 f"    [coupled-timing] phase={coupled_phase} "
+                f"backend={backend} "
                 f"elapsed={spec_elapsed:.2f}s "
                 f"corridor_iters={corridor_iterations_used} "
                 f"last_iters={pathfinder.last_iterations} "
                 f"best_progress={pathfinder.last_best_progress} "
-                f"best_state={best_state} "
+                f"best_state={best_state_repr} "
+                f"dominant_rejection={dominant} "
                 f"rejections={dict(pathfinder.last_rejections)} "
                 f"success={result is not None}"
             )
+
+            # Issue #4459: structured per-pair ground-truth report.  Classify
+            # this attempt into the #4409 failure taxonomy so Phases 2-5 can
+            # verify a fix targeted the class it claims.  Emitted for EVERY
+            # pair (coupled or not) under both shadow-OFF (default) and
+            # shadow-ON (``KCT_BOARD06_SHADOW=1``) so board-06's 9 pairs each
+            # get a classification.  Diagnostic-only: building/printing this
+            # record changes no routing behaviour or geometry.
+            resolution = self.autorouter.grid.resolution
+            start_pitch_cells = (
+                math.dist((spec.p_start.x, spec.p_start.y), (spec.n_start.x, spec.n_start.y))
+                / resolution
+            )
+            end_pitch_cells = (
+                math.dist((spec.p_end.x, spec.p_end.y), (spec.n_end.x, spec.n_end.y)) / resolution
+            )
+            guide_ok = guide_route is not None and bool(guide_route.segments)
+            shadow_decline_reason = (
+                getattr(self, "_last_shadow_decline_reason", None)
+                if self.enable_shadow_construction
+                else None
+            )
+            classification = classify_coupled_pair_outcome(
+                coupled=result is not None,
+                coupled_phase=coupled_phase,
+                guide_ok=guide_ok,
+                best_progress=pathfinder.last_best_progress,
+                shadow_enabled=self.enable_shadow_construction,
+                shadow_decline_reason=shadow_decline_reason,
+            )
+            report = CoupledPairReport(
+                pair_name=pair.name,
+                classification=classification,
+                coupled=result is not None,
+                backend=backend,
+                coupled_phase=coupled_phase,
+                guide_ok=guide_ok,
+                best_progress=pathfinder.last_best_progress,
+                dominant_rejection=dominant,
+                start_pitch_cells=start_pitch_cells,
+                end_pitch_cells=end_pitch_cells,
+                target_spacing_cells=spacing_cells,
+                off_angle_segments=_count_off_angle_segments(guide_route),
+                shadow_enabled=self.enable_shadow_construction,
+            )
+            self._last_coupled_pair_report = report
+            print(report.format_line())
 
             # Issue #3508: near-miss rescue.  The weighted corridor-
             # bounded coupled search reliably traverses the route body

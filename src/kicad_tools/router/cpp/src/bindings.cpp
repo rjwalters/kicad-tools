@@ -14,6 +14,7 @@
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/unordered_map.h>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -479,13 +480,16 @@ NB_MODULE(router_cpp, m) {
         .def_ro("iterations", &CoupledRouteResult::iterations)
         .def_ro("best_progress", &CoupledRouteResult::best_progress)
         .def_ro("timeout_exceeded", &CoupledRouteResult::timeout_exceeded)
-        .def_ro("iteration_limited", &CoupledRouteResult::iteration_limited);
+        .def_ro("iteration_limited", &CoupledRouteResult::iteration_limited)
+        // Issue #4459: per-reason move-rejection histogram (reason -> count).
+        .def_ro("rejections", &CoupledRouteResult::rejections);
 
     // CoupledPathfinder class (Issue #4065): C++ port of the joint-state
     // diff-pair A* loop.  Consumes the SAME Grid3D as the single-ended
     // Pathfinder.  See coupled_pathfinder.hpp for the v1 scope / deferred
-    // features (allow_swap_via, manhattan_sum heuristic, string-keyed
-    // rejection counters remain Python-only).
+    // features (allow_swap_via, manhattan_sum heuristic).  Issue #4459 wired
+    // the string-keyed rejection histogram out of the C++ search (previously
+    // Python-only), surfaced on ``CoupledRouteResult::rejections``.
     nb::class_<CoupledPathfinder>(m, "CoupledPathfinder")
         .def(nb::init<Grid3D&, const DesignRules&, int, int, int, int, int,
                       double, double>(),
