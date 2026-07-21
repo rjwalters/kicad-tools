@@ -37,6 +37,7 @@ from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
 from kicad_tools.pcb.center_sheet import centered_origin
+from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.schematic.grid import GridSize
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 
@@ -837,6 +838,28 @@ def main() -> int:
         # mtime must be newer than the freshly routed PCB).
         mfg_success = export_manufacturing_bundle(routed_path, output_dir)
 
+        # Issue #3912: derive BOTH the SUMMARY and the exit code from ONE
+        # shared PipelineGateResult so they can never diverge.  The gate's
+        # DRC leg is AUTHORITATIVE -- it runs ``kicad-cli pcb drc
+        # --refill-zones`` (run_geometric_drc) from scratch, catching copper
+        # shorts the stale-zone-fill ``kct check`` engine misses -- and the
+        # recipe's own ``run_drc`` verdict (``drc_success``) is threaded in
+        # as ``supplemental_drc_ok`` so it can only TIGHTEN the DRC verdict.
+        # Board 02 routes fully (the fast-fail above already raised on a
+        # partial route) with no allowance; its copper-LVS verdict
+        # (``lvs_success``) is the LVS leg.  Board 02 is manufacturable-clean,
+        # so the gate passes and the recipe exits 0.
+        gate = evaluate_pipeline_gate(
+            routed_path,
+            route_ok=route_success,
+            route_allowance=0,
+            lvs_ok=lvs_success,
+            supplemental_drc_ok=drc_success,
+            supplemental_reason=(
+                "kct check reported error-level DRC findings (see DRC output above)"
+            ),
+        )
+
         # Summary
         print("\n" + "=" * 60)
         print("SUMMARY")
@@ -849,19 +872,23 @@ def main() -> int:
         print(f"  4. PCB (routed): {routed_path.name}")
         print("\nResults:")
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
-        print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
-        print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
-        print(f"  LVS: {'PASS' if lvs_success else 'FAIL'}")
-        print(f"  MFG bundle: {'PASS' if mfg_success else 'FAIL'}")
+        for line in gate.summary_lines():
+            print(line)
+        # #3912: mfg_success means ``kct export`` WROTE a bundle (exit 0),
+        # NOT that the board is DRC-clean -- cleanliness is the ``DRC``/
+        # ``Overall`` verdict above.  Label "WRITTEN" so PASS is never
+        # mistaken for a DRC pass.
+        print(f"  MFG bundle: {'WRITTEN' if mfg_success else 'FAILED'}")
         print("\nCharlieplex LED mapping:")
         print("  LED   Anode    Cathode")
         for led_conn in LED_CONNECTIONS:
             print(f"  {led_conn.ref}    {led_conn.anode_node}  {led_conn.cathode_node}")
 
-        # Partial routing is acceptable; success if ERC, DRC, and LVS pass.
-        # (``write_lvs_report`` raises on a dirty LVS so a False
-        # ``lvs_success`` here would mean LVS short-circuited.)
-        return 0 if erc_success and drc_success and lvs_success else 1
+        # #3912: the exit code derives from the SAME PipelineGateResult that
+        # drove the SUMMARY above (route / DRC / LVS legs).  ERC remains an
+        # independent gating leg.  (``write_lvs_report`` already raises on a
+        # dirty LVS so a False ``lvs_ok`` here would mean LVS short-circuited.)
+        return 0 if erc_success and gate.passed else 1
 
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)

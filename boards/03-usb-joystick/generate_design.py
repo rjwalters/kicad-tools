@@ -31,6 +31,7 @@ from pathlib import Path
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
+from kicad_tools.recipes.gate import evaluate_pipeline_gate
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
@@ -878,7 +879,13 @@ def main() -> int:
         # surface the green status.  ``run_label`` stays ``False``: the
         # copper comparator is the meaningful leg, and the USB-C fixture's
         # ``schematic_net=None`` label noise keeps the label leg advisory.
-        write_lvs_report(
+        # Issue #3912: capture the copper-LVS verdict so it can be ANDed
+        # into the shared gate below.  ``require_clean=True`` already RAISES
+        # on a dirty copper comparator (so a short/open can't reach the
+        # gate at all), but threading ``copper_clean`` makes the gate's LVS
+        # leg self-documenting and defends against a future
+        # ``require_clean=False``.
+        copper_clean, _label_clean = write_lvs_report(
             sch_path,
             routed_path,
             output_dir,
@@ -892,6 +899,30 @@ def main() -> int:
         # reports ``ship_ready=true``.
         mfg_success = export_manufacturing_bundle(routed_path, output_dir)
 
+        # Issue #3912: derive BOTH the SUMMARY and the exit code from ONE
+        # shared PipelineGateResult so they can never diverge.  The previous
+        # exit gate (``erc_success and drc_success``) dropped route
+        # completion and LVS from the exit expression entirely.  The gate's
+        # DRC leg is AUTHORITATIVE -- it runs ``kicad-cli pcb drc
+        # --refill-zones`` (run_geometric_drc) from scratch -- and the
+        # recipe's own ``run_drc`` verdict (``drc_success``,
+        # ``--mfr jlcpcb-tier1``) is threaded in as ``supplemental_drc_ok``
+        # so it can only TIGHTEN the DRC verdict.  Board 03 routes fully
+        # (the fast-fail above already raised on a partial route) with no
+        # allowance; ``copper_clean`` is the LVS leg.  Board 03 passes at
+        # its jlcpcb-tier1 tier, so the gate passes and the recipe exits 0.
+        gate = evaluate_pipeline_gate(
+            routed_path,
+            route_ok=route_success,
+            route_allowance=0,
+            lvs_ok=copper_clean,
+            supplemental_drc_ok=drc_success,
+            supplemental_reason=(
+                "kct check --mfr jlcpcb-tier1 reported error-level DRC findings "
+                "(see DRC output above)"
+            ),
+        )
+
         # Summary
         print("\n" + "=" * 60)
         print("SUMMARY")
@@ -904,18 +935,24 @@ def main() -> int:
         print(f"  4. PCB (routed): {routed_path.name}")
         print("\nResults:")
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
-        print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
-        print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
-        print(f"  MFG bundle: {'PASS' if mfg_success else 'FAIL'}")
+        for line in gate.summary_lines():
+            print(line)
+        # #3912: mfg_success means ``kct export`` WROTE a bundle (exit 0),
+        # NOT that the board is DRC-clean -- cleanliness is the ``DRC``/
+        # ``Overall`` verdict above.  Label "WRITTEN" so PASS is never
+        # mistaken for a DRC pass.
+        print(f"  MFG bundle: {'WRITTEN' if mfg_success else 'FAILED'}")
         print("\nBoard description:")
         print("  - USB game controller with analog joystick")
         print("  - 32-pin QFP MCU")
         print("  - USB Type-C connector")
         print("  - 4 tactile buttons")
 
-        # For this complex demo board, partial routing is acceptable
-        # Success if ERC passes and DRC has no errors (warnings OK)
-        return 0 if erc_success and drc_success else 1
+        # #3912: the exit code derives from the SAME PipelineGateResult that
+        # drove the SUMMARY above (route / DRC / LVS legs).  ERC remains an
+        # independent gating leg.  For this complex demo board partial routing
+        # would trip the route leg (the fast-fail above handles that path).
+        return 0 if erc_success and gate.passed else 1
 
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
