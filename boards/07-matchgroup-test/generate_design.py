@@ -62,6 +62,7 @@ from kicad_tools.pcb.center_sheet import (
     edge_cuts_bbox,
     translate_pcb_text,
 )
+from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.router.rules import (
     NET_CLASS_POWER,
     NetClassRouting,
@@ -2145,6 +2146,53 @@ def main() -> int:
             # bundle still clears the ``"artifacts stale"`` blocker.
             mfg_ok = export_manufacturing_bundle(routed_path, output_dir)
 
+            # Issue #3912: derive BOTH the SUMMARY and the exit code from ONE
+            # shared PipelineGateResult so they can never diverge.  The
+            # previous ``return 0 if route_success else 1`` gated ONLY on
+            # route completion while the SUMMARY printed an independent
+            # ``DRC:`` line -- exactly the exit-code-vs-SUMMARY drift this
+            # issue eliminates.
+            #
+            # Board 07 is PARTIAL BY DESIGN: 5 seed-invariant unroutable nets
+            # (#3438: DQ3, DQ4, MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N).  The gate
+            # reflects that PARTIAL state HONESTLY rather than papering over
+            # it:
+            #   * ``route_ok=route_success`` -- ``kct route`` exits non-zero
+            #     on a partial route, so ``route_success`` is False and the
+            #     ``Routing:`` line honestly reads PARTIAL.  ``route_allowance``
+            #     is left at 0 ON PURPOSE: inflating it to swallow the known
+            #     opens would flip the ``Routing:`` line to a FALSE "SUCCESS"
+            #     (route_status() reads SUCCESS whenever route_ok is True),
+            #     which is the opposite of reflecting PARTIAL honestly.
+            #   * ``lvs_ok=None`` -- the 5 copper-LVS opens ARE the documented
+            #     #3438 plateau (``write_lvs_report(require_clean=False)``
+            #     above keeps them advisory); making them a gating leg would
+            #     FALSELY FAIL the board for being exactly at its plateau.
+            #   * ``supplemental_drc_ok=drc_ok`` -- ``run_drc``
+            #     (``kct check --mfr jlcpcb``) is the only engine that sees
+            #     the match-group / diffpair length-skew rule families
+            #     kicad-cli cannot express, so its verdict tightens the DRC
+            #     leg (the authoritative geometric ``kicad-cli --refill-zones``
+            #     leg runs inside the gate).
+            # Net effect: the board honestly ends FAIL (route PARTIAL + real
+            # kct-check DRC residuals) and exits non-zero -- NOT a false exit 0
+            # for a board that is not fully routed and not DRC-clean.  The
+            # board-07-end-to-end CI job tolerates this non-zero recipe exit
+            # (`|| true`) and gates on the explicit known-opens + allowlist
+            # asserters instead.
+            gate = evaluate_pipeline_gate(
+                routed_path,
+                route_ok=route_success,
+                route_allowance=0,
+                lvs_ok=None,
+                supplemental_drc_ok=drc_ok,
+                supplemental_reason=(
+                    "kct check --mfr jlcpcb reported error-level DRC findings "
+                    "(match-group / diffpair skew + allowlisted residuals; see "
+                    "DRC output above)"
+                ),
+            )
+
             print("\n" + "=" * 60)
             print("SUMMARY")
             print("=" * 60)
@@ -2154,15 +2202,15 @@ def main() -> int:
             print(f"  PCB:       {pcb_path.name}")
             print(f"  Routed:    {routed_path.name}")
             print("\nResults:")
-            print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
-            print(f"  DRC:     {'PASS' if drc_ok else 'FAIL (see above)'}")
+            for line in gate.summary_lines():
+                print(line)
             # #3912: mfg_ok means `kct export` wrote a bundle (exit 0), not
             # that the board is DRC-clean.  Board DRC status is the "DRC:"
             # line above.  Label "WRITTEN" so PASS is never mistaken for a
             # DRC pass.
             print(f"  MFG:     {'WRITTEN' if mfg_ok else 'FAILED (see above)'}")
 
-            return 0 if route_success else 1
+            return gate.exit_code()
 
         if args.step == "schematic":
             create_schematic(output_dir)
