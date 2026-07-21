@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-07-20
+
+### Summary
+
+Feature release centered on a **high-voltage / isolation design loop** and
+**via-in-pad manufacturability**, plus a family of correctness fixes to the
+creepage, netlist-sync, router, and writer subsystems. New capabilities let
+agent-driven boards define per-net voltage domains, void inner pours around HV
+copper, place HV parts with creepage-aware segregation, relocate via-in-pad
+vias off-pad while preserving connectivity, and lint LED/capacitor electrical
+ratings — all deterministic and zero-GUI. No breaking changes; existing
+commands are unaffected.
+
+### Added
+
+- **HV-isolation design loop** — a coordinated set of high-voltage tools:
+  - `kct creepage --voltage-map`: per-net voltage model that derives each
+    conductor pair's required creepage/clearance from its own `|ΔV|`, replacing
+    the single group working-voltage assumption (#4371).
+  - `kct zones hv-keepout`: generate geometric plane voids/keepouts so inner
+    GND/power pours clear HV nets by a required clearance (#4372).
+  - `kct optimize-placement --voltage-map` / `--hv-domains`: HV-aware placement
+    with a hard creepage-keepout feasibility term, a soft same-domain cohesion
+    term, and automatic derived-tap creepage exemption (#4373).
+  - `/kct:hv-isolation-loop` orchestration skill sequencing the loop from
+    voltage-domain capture through creepage + refill-zones fab sign-off (#4374).
+- **`kct analyze electrical-rating`** — deterministic, advisory LED-overcurrent
+  and capacitor voltage-derating checks sourced from schematic-field
+  conventions; parts missing ratings are skipped, never failed (#4381).
+- **`kct check --emit-dru` / `--emit-drc-constraints`** — emit `.kicad_dru` /
+  `.kicad_pro` sidecars from the checker's already-resolved `--mfr` floors so
+  `kicad-cli pcb drc` and `kct check` reason over identical rules by
+  construction (#4375).
+- **`kct fix-vias` off-pad relocation** — relocate via-in-pad and plane-stitch
+  vias off-pad while preserving connectivity, with THT hole-to-hole clearance
+  checking and multi-branch relocation (#4363, #4376, #4377).
+- **`kct doctor` version-record drift check** — flags stale KiCad version
+  records (#4349).
+
+### Fixed
+
+- **creepage/audit HV false-pass guards** — block silent HV false-PASS on mains
+  boards, and drop bare `LINE`/`HOT`/`PRIMARY` from the mains-name regex to
+  curb over-matching (#4362, #4370).
+- **writer format hygiene** — centralize KiCad format-version stamps into
+  per-stream constants, and guarantee the writer never emits a crash-form pad
+  chamfer corner that segfaults `kicad-cli` (#4390, #4393).
+- **DRC net attribution** — populate violation nets from the `[NetName]` token
+  in `kicad-cli` JSON output (previously always empty), and rename the
+  drill-clearance rule id to `hole_to_hole_clearance` (#4392, #4357).
+- **netlist-sync correctness** — block value/footprint mismatches by default,
+  and compare component values by parsed magnitude rather than raw strings
+  (#4356, #4360).
+- **router obstacle handling** — treat non-listed copper as a fixed obstacle
+  for `route --nets` and seed it as a hard obstacle in the mesh router (#4361,
+  #4369).
+- **LVS gate** — resolve schematics for versioned board stems and warn on a
+  skipped LVS gate rather than passing silently (#4358).
+- **native backend** — stop a nanobind `PadBounds` ref-leak on
+  `kct build-native` (#4346).
+
+### Testing
+
+- Golden/fidelity guards pinning the `kicad-cli pcb drc --format json` schema
+  and KiCad-10 new-token round-trip fidelity, plus a deterministic replacement
+  for a flaky slide-off timing test (#4388, #4389, #4368).
+
 ## [0.18.0] - 2026-07-20
 
 ### Summary
