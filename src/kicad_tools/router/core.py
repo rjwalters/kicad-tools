@@ -7984,6 +7984,85 @@ class Autorouter:
 
         return routes
 
+    def _stuck_nets_all_non_budget_starved(
+        self,
+        still_unrouted: list[int],
+        pads_by_net: dict[int, list],
+        neg_router: Any,
+    ) -> tuple[bool, dict[int, tuple[str, str]]]:
+        """Grid-domain proxy classifier for the terminal-stall early bail (#4406).
+
+        The negotiated loop holds no ``PCB`` mid-route, so it cannot run the
+        exact geometry classifier (:func:`classify_stuck_nets_from_pcb`).  This
+        proxy reuses the one blocker signal the loop already computes --
+        committed-copper blockers via
+        :meth:`NegotiatedRouter.find_blocking_nets_for_connection` -- to decide,
+        for each currently-stuck net, whether it could plausibly be
+        ``BUDGET_STARVED`` (the *only* :class:`StuckClass` whose remedy is "more
+        router time"; see ``stuck_classifier._decide``).
+
+        Per-net proxy rule:
+
+        - **Any** committed blocking net on a pin-to-pin connection -> the direct
+          path is boxed in by committed strict copper, so more iterations of the
+          same negotiated loop cannot free it.  Proxy label
+          ``CONGESTION_SATURATED`` (a non-``BUDGET_STARVED`` class).
+        - **No** committed blockers -> geometrically nothing rippable is in the
+          way, which under pure grid geometry is indistinguishable from "the
+          batch negotiation never committed this net".  Treated as *possibly*
+          ``BUDGET_STARVED`` -> the net's full budget must be preserved.
+        - Fewer than two pads on grid -> cannot form a connection to classify;
+          stay conservative (do not authorize a bail).
+
+        Returns ``(all_non_starved, labels)`` where ``all_non_starved`` is True
+        only when **every** stuck net is confidently non-``BUDGET_STARVED``, and
+        ``labels`` maps each stuck net number to a ``(class_name, reason)`` proxy
+        label for the diagnostic emission at the bail site.  Conservative by
+        construction: any net that *might* be budget-starved flips
+        ``all_non_starved`` to False, so genuinely budget-starved boards keep
+        their full iteration budget (AC4).
+        """
+        labels: dict[int, tuple[str, str]] = {}
+        all_non_starved = bool(still_unrouted)
+        for net in still_unrouted:
+            pads = pads_by_net.get(net, [])
+            if len(pads) < 2:
+                # Not enough pads on grid to form a connection -- we cannot
+                # prove this net is non-starved, so stay conservative.
+                all_non_starved = False
+                labels[net] = (
+                    "UNKNOWN",
+                    "fewer than 2 pads on grid -- cannot classify",
+                )
+                continue
+            blocking_nets: set[int] = set()
+            for j in range(len(pads) - 1):
+                blockers = neg_router.find_blocking_nets_for_connection(pads[j], pads[j + 1])
+                blocking_nets.update(blockers)
+            if blocking_nets:
+                blocker_names = sorted(self.net_names.get(b, f"Net_{b}") for b in blocking_nets)
+                labels[net] = (
+                    "CONGESTION_SATURATED",
+                    (
+                        f"committed strict copper boxes in the direct path "
+                        f"(blockers: {', '.join(blocker_names)}); more router "
+                        f"iterations cannot free it -- needs a region re-solve "
+                        f"or a placement change"
+                    ),
+                )
+            else:
+                # No committed blockers -> possibly BUDGET_STARVED.  Preserve
+                # this net's full budget by refusing to authorize a bail.
+                all_non_starved = False
+                labels[net] = (
+                    "BUDGET_STARVED?",
+                    (
+                        "no committed blockers on the direct path -- possibly "
+                        "budget-starved; preserving full iteration budget"
+                    ),
+                )
+        return all_non_starved, labels
+
     def route_all_negotiated(
         self,
         max_iterations: int = 10,
@@ -8019,6 +8098,7 @@ class Autorouter:
         checkpoint_callback: Callable[[list[Route], IterationMetrics], None] | None = None,
         best_stall_patience: int | None = 2,
         best_stall_min_iterations: int = 2,
+        early_bail_terminal_stall: bool = True,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -8146,6 +8226,23 @@ class Autorouter:
                 check from firing in degenerate first-iteration cases
                 where the iter-0 metric is already optimal but at least
                 one rip-up pass is warranted to confirm convergence.
+            early_bail_terminal_stall: Issue #4406 -- when a neighborhood
+                rip-up round makes ZERO progress AND every remaining stuck
+                net classifies as non-``BUDGET_STARVED`` (a grid-domain
+                proxy over the committed-copper blocker signal; see
+                :meth:`_stuck_nets_all_non_budget_starved`), break out of
+                the iteration loop instead of escalating the rip-up radius
+                to the full iteration budget.  Additional router time cannot
+                help a stuck set with no budget-starved member by
+                construction -- the remaining nets need an escape upgrade, a
+                region re-solve, or a placement change.  On board-07 this
+                turns a ~13-minute grind on a provably terminal plateau into
+                an early PARTIAL return with the same open-net set.
+                Conservative: any net that *might* be budget-starved (no
+                committed blockers) preserves the full budget.  Default:
+                True.  Set to ``False`` to force the historical
+                grind-to-budget behavior (A/B comparison / regression
+                bisection).
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -10324,6 +10421,34 @@ class Autorouter:
                                         f"    Neighborhood rip-up did not improve "
                                         f"({new_count}/{total_nets} nets) ({elapsed_str()})"
                                     )
+                                    # Issue #4406: terminal-stall early bail.
+                                    # Zero progress from neighborhood rip-up.
+                                    # If every remaining stuck net classifies
+                                    # non-BUDGET_STARVED (grid-domain proxy),
+                                    # more router time cannot help -- bail to
+                                    # PARTIAL instead of escalating the rip-up
+                                    # radius to the full iteration budget.
+                                    if early_bail_terminal_stall and still_unrouted_targeted:
+                                        all_non_starved, stuck_labels = (
+                                            self._stuck_nets_all_non_budget_starved(
+                                                still_unrouted_targeted,
+                                                pads_by_net,
+                                                neg_router,
+                                            )
+                                        )
+                                        if all_non_starved:
+                                            flush_print(
+                                                f"  Terminal-stall early bail (#4406): all "
+                                                f"{len(still_unrouted_targeted)} stuck net(s) are "
+                                                f"non-BUDGET_STARVED -- more router iterations "
+                                                f"cannot help; returning PARTIAL ({elapsed_str()})"
+                                            )
+                                            for _n in still_unrouted_targeted:
+                                                _cls, _reason = stuck_labels[_n]
+                                                _name = self.net_names.get(_n, f"Net_{_n}")
+                                                flush_print(f"    {_name}: {_cls} -- {_reason}")
+                                            self._reset_perturbation()
+                                            break
 
                                 # Issue #3448: full-connectivity predicate, not
                                 # a ``len(net_routes)`` count (see above).
@@ -10912,6 +11037,35 @@ class Autorouter:
                                         f"    Neighborhood rip-up did not improve "
                                         f"({new_count}/{total_nets} nets) ({elapsed_str()})"
                                     )
+                                    # Issue #4406: terminal-stall early bail
+                                    # (standard path).  Zero progress from
+                                    # neighborhood rip-up.  If every remaining
+                                    # stuck net classifies non-BUDGET_STARVED
+                                    # (grid-domain proxy), more router time
+                                    # cannot help -- bail to PARTIAL instead of
+                                    # escalating the rip-up radius to the full
+                                    # iteration budget.
+                                    if early_bail_terminal_stall and still_unrouted_std:
+                                        all_non_starved, stuck_labels = (
+                                            self._stuck_nets_all_non_budget_starved(
+                                                still_unrouted_std,
+                                                pads_by_net,
+                                                neg_router,
+                                            )
+                                        )
+                                        if all_non_starved:
+                                            flush_print(
+                                                f"  Terminal-stall early bail (#4406): all "
+                                                f"{len(still_unrouted_std)} stuck net(s) are "
+                                                f"non-BUDGET_STARVED -- more router iterations "
+                                                f"cannot help; returning PARTIAL ({elapsed_str()})"
+                                            )
+                                            for _n in still_unrouted_std:
+                                                _cls, _reason = stuck_labels[_n]
+                                                _name = self.net_names.get(_n, f"Net_{_n}")
+                                                flush_print(f"    {_name}: {_cls} -- {_reason}")
+                                            self._reset_perturbation()
+                                            break
 
                                 # Issue #3448: full-connectivity predicate, not
                                 # a ``len(net_routes)`` count (see _stranded_nets).
