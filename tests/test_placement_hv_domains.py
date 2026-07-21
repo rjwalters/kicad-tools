@@ -109,6 +109,36 @@ class TestLoaders:
         p.write_text(json.dumps({"/AC_LINE": 150, "/REF": 1.65}))
         assert load_voltage_map(p) == {"/AC_LINE": 150.0, "/REF": 1.65}
 
+    def test_load_voltage_map_collapses_range_to_worst_case_magnitude(self, tmp_path) -> None:
+        """A ``{min,max}`` entry collapses to ``max(|lo|, |hi|)`` (#4411).
+
+        Placement's cross-domain model is magnitude-only, so a swinging node is
+        segregated on its worst-case magnitude while the loader keeps returning
+        ``dict[str, float]``.
+        """
+        p = tmp_path / "v.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "/SRC_NEG": {"min": -170, "max": 90},  # worst-case magnitude 170
+                    "/TRK_POS": {"min": -146, "max": 90},  # worst-case magnitude 146
+                    "/REF": 1.65,  # scalar collapses to |1.65| = 1.65
+                }
+            )
+        )
+        assert load_voltage_map(p) == {
+            "/SRC_NEG": 170.0,
+            "/TRK_POS": 146.0,
+            "/REF": 1.65,
+        }
+
+    def test_load_voltage_map_rejects_malformed_range(self, tmp_path) -> None:
+        """A malformed range object propagates the shared parser's ``ValueError``."""
+        p = tmp_path / "v.json"
+        p.write_text(json.dumps({"/AC_LINE": {"min": 0}}))  # missing 'max'
+        with pytest.raises(ValueError):
+            load_voltage_map(p)
+
     def test_load_voltage_map_rejects_non_numeric(self, tmp_path) -> None:
         p = tmp_path / "v.json"
         p.write_text(json.dumps({"/AC_LINE": "high"}))

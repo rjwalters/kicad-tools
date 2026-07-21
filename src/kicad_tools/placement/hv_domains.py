@@ -61,6 +61,16 @@ def load_voltage_map(path: str | Path) -> dict[str, float]:
     net magnitudes and has no concept of an edge/earth reference, so the
     ``edge_voltage`` half of the returned pair is discarded here.
 
+    Range support (#4411): the shared parser now models each net as a closed
+    ``[lo, hi]`` interval so the creepage census can reason about swinging nodes.
+    Placement's cross-domain model is *magnitude-only* (``derive_ref_domains_*``
+    and ``detect_derived_tap_exempt_pairs`` operate on ``abs(...)``), so each
+    interval is collapsed here to its worst-case magnitude ``max(|lo|, |hi|)``,
+    keeping this loader's ``dict[str, float]`` return and confining the range
+    blast radius to the loader.  A scalar entry ``v`` collapses to ``|v|`` --
+    identical to the pre-range behaviour, since the downstream consumers already
+    took ``abs`` of the signed value.
+
     Raises:
         ValueError: If the file is not a JSON object, or if any net voltage is
             not a finite real number.
@@ -70,7 +80,8 @@ def load_voltage_map(path: str | Path) -> dict[str, float]:
         # ``voltage_map_from_dict`` raises ``TypeError`` for a non-dict; keep the
         # historical ``ValueError`` contract for the placement loader's callers.
         raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
-    return voltage_map_from_dict(raw)[0]
+    intervals = voltage_map_from_dict(raw)[0]
+    return {name: max(abs(iv.lo), abs(iv.hi)) for name, iv in intervals.items()}
 
 
 def load_hv_domains(path: str | Path) -> dict[str, dict]:

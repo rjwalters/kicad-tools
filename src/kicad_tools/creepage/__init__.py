@@ -19,9 +19,11 @@ from __future__ import annotations
 from .engine import (
     CreepagePair,
     CreepageReport,
+    VoltageInterval,
     compute_creepage_census,
     resolve_hv_nets,
     surface_path_length,
+    voltage_map_from_dict,
 )
 from .standards import (
     DISCLAIMER,
@@ -38,8 +40,10 @@ __all__ = [
     "CreepageReport",
     "CreepageStandard",
     "StandardLookupError",
+    "VoltageInterval",
     "compute_creepage_census",
     "get_standard",
     "resolve_hv_nets",
     "surface_path_length",
+    "voltage_map_from_dict",
 ]

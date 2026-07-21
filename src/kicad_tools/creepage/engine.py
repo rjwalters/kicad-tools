@@ -36,7 +36,7 @@ import heapq
 import math
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from kicad_tools._shapely import has_shapely, require_shapely
 
@@ -78,36 +78,110 @@ def _norm_net_key(name: str) -> str:
 # Reserved voltage-map key (#4371): the board-edge / earth reference potential.
 _EDGE_VOLTAGE_KEY = "_edge_voltage"
 
+# Range-object keys for a swinging-node interval entry (#4411).
+_RANGE_MIN_KEY = "min"
+_RANGE_MAX_KEY = "max"
 
-def voltage_map_from_dict(data: Any) -> tuple[dict[str, float], float]:
-    """Parse a per-net voltage map sidecar (#4371).
 
-    ``data`` maps net names to their **RMS working potential relative to a
-    common reference** (volts), e.g.
-    ``{"/AC_LINE": 150, "/AC_NEUTRAL": 0, "/SCAP_POS": 90}``.  Keys starting
-    with ``_`` are reserved for in-band metadata and are NOT treated as nets
-    (mirrors :func:`kicad_tools.router.rules.net_class_map_from_dict`).  The one
+class VoltageInterval(NamedTuple):
+    """A net's mapped potential as a closed interval ``[lo, hi]`` (volts) (#4411).
+
+    A single static value ``v`` cannot represent a switching node that *swings*
+    over a range (a common-source net that rides ``-170..+90 V`` every mains
+    cycle in normal operation).  Each mapped net therefore becomes a closed
+    interval:
+
+    * a scalar ``v`` -> the degenerate interval ``(v, v)`` (byte-identical to the
+      pre-#4411 scalar model);
+    * a ``{"min": v0, "max": v1}`` object -> ``(min(v0, v1), max(v0, v1))``.
+
+    Endpoints are worst-case DC-equivalent magnitudes about a common reference
+    (see the census docstring); AC phase relationships are NOT modelled.
+    """
+
+    lo: float
+    hi: float
+
+    @property
+    def is_degenerate(self) -> bool:
+        """``True`` when ``lo == hi`` (equivalent to a scalar voltage)."""
+        return self.lo == self.hi
+
+
+def _as_interval(value: Any) -> VoltageInterval:
+    """Normalise a voltage-map value to a :class:`VoltageInterval`.
+
+    Accepts an already-parsed interval (pass-through) or a bare scalar (a
+    degenerate ``(v, v)`` interval).  This lets the census / HV-union consumers
+    be called with either the interval-typed map from
+    :func:`voltage_map_from_dict` or a plain ``{net: volts}`` scalar map without
+    a separate parse step -- a scalar is exactly its degenerate interval.
+    """
+    if isinstance(value, VoltageInterval):
+        return value
+    return VoltageInterval(float(value), float(value))
+
+
+def voltage_map_from_dict(data: Any) -> tuple[dict[str, VoltageInterval], float]:
+    """Parse a per-net voltage map sidecar (#4371, ranges added #4411).
+
+    ``data`` maps net names to their **working potential relative to a common
+    reference** (volts).  Each entry is EITHER a scalar (a single static
+    potential) OR a ``{"min": v0, "max": v1}`` object describing a swinging
+    node's excursion, e.g.
+    ``{"/AC_LINE": 150, "/AC_NEUTRAL": 0, "/SRC_NEG": {"min": -170, "max": 90}}``.
+    Every net becomes a closed :class:`VoltageInterval`; a scalar is the
+    degenerate interval ``(v, v)`` and a range is normalised to
+    ``(min, max)`` (author order is irrelevant).
+
+    Keys starting with ``_`` are reserved for in-band metadata and are NOT
+    treated as nets (mirrors
+    :func:`kicad_tools.router.rules.net_class_map_from_dict`).  The one
     recognised reserved key is ``_edge_voltage`` -- the board-edge / earth
-    reference potential (default ``0.0`` V).
+    reference potential (default ``0.0`` V).  ``_edge_voltage`` stays a *scalar*
+    (earth is a fixed reference, not a swing); a range object there is rejected.
 
     Returns ``(voltages, edge_voltage)``.
 
     Raises:
         TypeError: if ``data`` is not a dict.
-        ValueError: if any net voltage (or ``_edge_voltage``) is not a finite
-            real number.
+        ValueError: if any net voltage endpoint (or ``_edge_voltage``) is not a
+            finite real number, or a range object is malformed.
     """
     if not isinstance(data, dict):
         raise TypeError(f"voltage_map_from_dict expects a dict, got {type(data).__name__}")
-    voltages: dict[str, float] = {}
+    voltages: dict[str, VoltageInterval] = {}
     edge_voltage = 0.0
     for key, value in data.items():
         if isinstance(key, str) and key.startswith("_"):
             if key == _EDGE_VOLTAGE_KEY:
-                edge_voltage = _coerce_voltage(key, value)
+                edge_voltage = _coerce_voltage(key, value)  # scalar-only reference
             continue  # other _-prefixed keys are documentation (_comment, ...)
-        voltages[str(key)] = _coerce_voltage(key, value)
+        voltages[str(key)] = _coerce_interval(key, value)
     return voltages, edge_voltage
+
+
+def _coerce_interval(key: Any, value: Any) -> VoltageInterval:
+    """Coerce a voltage-map value to a :class:`VoltageInterval` or raise.
+
+    A scalar becomes the degenerate interval ``(v, v)``; a
+    ``{"min": v0, "max": v1}`` object is normalised to ``(min, max)``.  Both
+    endpoints go through the existing :func:`_coerce_voltage` finite/real/no-bool
+    checks.  A malformed range object (missing a key, carrying extra keys, or a
+    non-numeric endpoint) raises ``ValueError`` in the same style as the scalar
+    message.
+    """
+    if isinstance(value, dict):
+        if set(value) != {_RANGE_MIN_KEY, _RANGE_MAX_KEY}:
+            raise ValueError(
+                f"voltage-map range entry for {key!r} must be an object with exactly "
+                f"'min' and 'max' keys, got keys {sorted(value)!r}"
+            )
+        lo = _coerce_voltage(f"{key}.min", value[_RANGE_MIN_KEY])
+        hi = _coerce_voltage(f"{key}.max", value[_RANGE_MAX_KEY])
+        return VoltageInterval(min(lo, hi), max(lo, hi))
+    v = _coerce_voltage(key, value)
+    return VoltageInterval(v, v)
 
 
 def _coerce_voltage(key: Any, value: Any) -> float:
@@ -340,7 +414,7 @@ class CreepageReport:
     # a ``{net_name: volts}`` map when the requirement is derived per pair from
     # ``|ΔV|`` instead of one global working voltage.  When set, the report-level
     # ``required_creepage_mm`` / ``working_voltage`` are ``None`` (per-pair).
-    voltage_map: dict[str, float] | None = None
+    voltage_map: dict[str, VoltageInterval] | None = None
     edge_voltage: float = 0.0
 
     @property
@@ -425,7 +499,13 @@ class CreepageReport:
         # keys are added ONLY in map mode, so single-voltage output is unchanged.
         if self.voltage_map is not None:
             d["voltage_source"] = "per-pair |dV| (voltage-map)"
-            d["voltage_map"] = dict(self.voltage_map)
+            # Backward-compat (#4411): echo a degenerate interval (lo == hi) as a
+            # bare scalar so an all-scalar map serialises byte-identically to the
+            # pre-range schema; a genuine swing surfaces as ``{"min", "max"}``.
+            d["voltage_map"] = {
+                name: (iv.lo if iv.is_degenerate else {"min": iv.lo, "max": iv.hi})
+                for name, iv in self.voltage_map.items()
+            }
             d["edge_voltage_v"] = self.edge_voltage
         return d
 
@@ -440,7 +520,7 @@ def resolve_hv_nets(
     net_class: str,
     net_class_map: dict[str, NetClassRouting] | None = None,
     *,
-    voltage_map: dict[str, float] | None = None,
+    voltage_map: dict[str, VoltageInterval] | None = None,
     edge_voltage: float = 0.0,
     census_threshold: float | None = None,
 ) -> dict[int, str]:
@@ -466,8 +546,9 @@ def resolve_hv_nets(
        always wins (step 1), so operator-supplied classification is never
        overridden by this fallback.
     4. **Voltage-derived union** (issue #4401) -- when both ``voltage_map`` and
-       ``census_threshold`` are supplied, every net whose mapped potential
-       differs from ``edge_voltage`` by at least ``census_threshold`` volts is
+       ``census_threshold`` are supplied, every net whose worst-case magnitude
+       relative to ``edge_voltage`` -- ``max(|lo - edge|, |hi - edge|)`` over its
+       mapped interval (#4411) -- is at least ``census_threshold`` volts is
        added, **in union** with the class/name selection above.  This closes the
        false-pass where a high-|V| net carrying a non-HV routing class (e.g. a
        ``±150 V`` gate-drive net classed ``Digital``) was silently excluded from
@@ -508,13 +589,17 @@ def resolve_hv_nets(
     # potential differs from the board-edge reference by >= the threshold,
     # regardless of its routing class.  Union, not replace.
     if voltage_map is not None and census_threshold is not None:
-        norm_vmap = {_norm_net_key(k): float(v) for k, v in voltage_map.items()}
+        norm_vmap = {_norm_net_key(k): _as_interval(v) for k, v in voltage_map.items()}
         for net in pcb.nets.values():
             if net.number == 0 or not net.name:
                 continue
-            v = norm_vmap.get(_norm_net_key(net.name))
-            if v is not None and abs(v - edge_voltage) >= census_threshold:
-                selected[net.number] = net.name
+            iv = norm_vmap.get(_norm_net_key(net.name))
+            if iv is not None:
+                # Worst-case magnitude relative to the edge (#4411): a net that
+                # swings across the threshold in EITHER extreme is pulled in.
+                worst = max(abs(iv.lo - edge_voltage), abs(iv.hi - edge_voltage))
+                if worst >= census_threshold:
+                    selected[net.number] = net.name
 
     return selected
 
@@ -876,7 +961,7 @@ def compute_creepage_census(
     material_group: str | None = None,
     creepage_provenance: dict[str, Any] | None = None,
     clearance_provenance: dict[str, Any] | None = None,
-    voltage_map: dict[str, float] | None = None,
+    voltage_map: dict[str, VoltageInterval] | None = None,
     standard_obj: CreepageStandard | None = None,
     edge_voltage: float = 0.0,
 ) -> CreepageReport:
@@ -892,11 +977,14 @@ def compute_creepage_census(
 
     Per-net voltage model (#4371)
     -----------------------------
-    When ``voltage_map`` (``{net_name: volts}``) **and** ``standard_obj`` are
-    supplied, the requirement is derived **per pair** from the pairwise voltage
-    difference ``dv = |V(a) - V(b)|`` (unmapped nets default to ``0 V``; the
-    board edge uses ``edge_voltage``, default ``0 V`` == earth), instead of one
-    global working voltage.  Same-potential pairs (``dv <= _ZERO_DV_EPS``) get a
+    When ``voltage_map`` (``{net_name: VoltageInterval}``) **and** ``standard_obj``
+    are supplied, the requirement is derived **per pair** from the worst-case
+    pairwise voltage difference ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)`` over
+    the two nets' closed intervals (#4411) -- a swinging node's excursion can no
+    longer hide behind its dominant static value (unmapped nets default to the
+    degenerate ``0 V`` interval; the board edge uses the degenerate
+    ``edge_voltage`` interval, default ``0 V`` == earth), instead of one global
+    working voltage.  Same-potential pairs (``dv <= _ZERO_DV_EPS``) get a
     required creepage/clearance of ``0.0`` and are a trivial PASS -- this
     short-circuits the standard-table lookup (which starts at 50 V and raises
     for ``V <= 0``).  In map mode the HV-vs-HV pairing skip is relaxed so that
@@ -930,7 +1018,11 @@ def compute_creepage_census(
         required_clearance_mm=required_clearance_mm,
         creepage_provenance=creepage_provenance or {},
         clearance_provenance=clearance_provenance or {},
-        voltage_map=dict(voltage_map) if (map_mode and voltage_map is not None) else None,
+        voltage_map=(
+            {k: _as_interval(v) for k, v in voltage_map.items()}
+            if (map_mode and voltage_map is not None)
+            else None
+        ),
         edge_voltage=edge_voltage,
     )
 
@@ -957,14 +1049,15 @@ def compute_creepage_census(
         )
 
     # --- Per-pair |dV| requirement machinery (map mode only, #4371) ---------
-    norm_vmap: dict[str, float] = {}
+    norm_vmap: dict[str, VoltageInterval] = {}
     if map_mode:
         assert voltage_map is not None
-        norm_vmap = {_norm_net_key(k): float(v) for k, v in voltage_map.items()}
+        norm_vmap = {_norm_net_key(k): _as_interval(v) for k, v in voltage_map.items()}
     _req_cache: dict[float, tuple[float, float, dict[str, Any], dict[str, Any]]] = {}
 
-    def _voltage(name: str) -> float:
-        return norm_vmap.get(_norm_net_key(name), 0.0)
+    def _voltage(name: str) -> VoltageInterval:
+        # Unmapped nets default to the degenerate 0 V interval.
+        return norm_vmap.get(_norm_net_key(name), VoltageInterval(0.0, 0.0))
 
     def _required_for_dv(
         dv: float,
@@ -997,19 +1090,39 @@ def compute_creepage_census(
     def _pair_requirement(
         name_a: str, name_b: str | None, *, edge: bool = False
     ) -> tuple[float, float, dict[str, Any]]:
-        """Per-pair ``(req_creepage, req_clearance, provenance)`` from ``|dV|``."""
-        va = _voltage(name_a)
-        vb = edge_voltage if edge else _voltage(name_b or "")
-        dv = abs(va - vb)
+        """Per-pair ``(req_creepage, req_clearance, provenance)`` from worst-case ``|dV|``.
+
+        Each net is a closed interval (#4411).  The binding stress is the
+        worst-case endpoint combination
+        ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)`` -- a swinging node's excursion
+        can no longer hide behind its dominant static value.  For two degenerate
+        intervals ``(v, v)``/``(w, w)`` this collapses to ``|v - w|``, so scalar
+        maps reproduce the pre-range behaviour byte-for-byte.  The board edge is
+        the degenerate interval ``(edge_voltage, edge_voltage)``.
+        """
+        a = _voltage(name_a)
+        b = VoltageInterval(edge_voltage, edge_voltage) if edge else _voltage(name_b or "")
+        # Worst-case ΔV over interval endpoints, tracking which endpoints governed.
+        dv_hi_lo = abs(a.hi - b.lo)
+        dv_lo_hi = abs(b.hi - a.lo)
+        if dv_hi_lo >= dv_lo_hi:
+            dv, a_ep, b_ep, va, vb = dv_hi_lo, "hi", "lo", a.hi, b.lo
+        else:
+            dv, a_ep, b_ep, va, vb = dv_lo_hi, "lo", "hi", a.lo, b.hi
         req_creep, req_clear, cprov, clprov = _required_for_dv(dv)
-        prov: dict[str, Any] = {
-            "voltage": {
-                "net_a_v": va,
-                "net_b_v": vb,
-                "delta_v_v": round(dv, 4),
-                "same_potential": dv <= _ZERO_DV_EPS,
-            }
+        voltage_prov: dict[str, Any] = {
+            "net_a_v": va,
+            "net_b_v": vb,
+            "delta_v_v": round(dv, 4),
+            "same_potential": dv <= _ZERO_DV_EPS,
         }
+        # Record the governing endpoints only when a genuine swing was involved,
+        # so an all-scalar (degenerate) map serialises byte-identically to the
+        # pre-#4411 provenance (the endpoint choice is arbitrary when lo == hi).
+        if not (a.is_degenerate and b.is_degenerate):
+            voltage_prov["net_a_endpoint"] = a_ep
+            voltage_prov["net_b_endpoint"] = b_ep
+        prov: dict[str, Any] = {"voltage": voltage_prov}
         if cprov:
             prov["creepage"] = cprov
         if clprov:
