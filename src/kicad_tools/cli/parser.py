@@ -554,8 +554,12 @@ def _add_check_parser(subparsers) -> None:
         "--mfr",
         "-m",
         choices=get_all_manufacturer_names(),
-        default="jlcpcb",
-        help="Target manufacturer (default: jlcpcb)",
+        default=None,
+        help=(
+            "Target manufacturer. When omitted, auto-resolves from the "
+            "fab_profile.json sidecar, then project.kct target_fab, then "
+            "falls back to jlcpcb. An explicit --mfr always wins."
+        ),
     )
     check_parser.add_argument("--layers", "-l", type=int, default=2, help="Number of layers")
     check_parser.add_argument("--copper", "-c", type=float, default=1.0, help="Copper weight (oz)")

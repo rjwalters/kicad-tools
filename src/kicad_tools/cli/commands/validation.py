@@ -218,7 +218,11 @@ def run_check_command(args) -> int:
     # Issue #4176: forward the connectivity real-geometry opt-in.
     if getattr(args, "strict_connectivity", False):
         sub_argv.append("--strict-connectivity")
-    if args.mfr != "jlcpcb":
+    # Issue #3920: forward an explicit --mfr regardless of value so that
+    # check_main can distinguish "no flag given" (None → auto-resolve from
+    # sidecar/project.kct) from an explicit choice that must always win. The
+    # subparser default is None, mirroring check_cmd.py's None sentinel.
+    if args.mfr is not None:
         sub_argv.extend(["--mfr", args.mfr])
     if args.layers != 2:
         sub_argv.extend(["--layers", str(args.layers)])
