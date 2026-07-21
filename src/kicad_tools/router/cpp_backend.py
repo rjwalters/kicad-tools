@@ -1223,6 +1223,31 @@ class CppPathfinder:
         if permitted and permitted != list(base):
             self.set_routable_layers(permitted)
 
+    def _hard_avoided_layers(self, net_class: NetClassRouting | None) -> frozenset[int]:
+        """Grid-layer indices to HARD-block for this net (Issue #4433).
+
+        The C++ (default) backend previously had NO per-net ``avoid_layers``
+        enforcement at all -- neither the soft cost bias the Python pathfinder
+        applies nor a hard block -- so a net escalated onto the
+        ``four_layer_all_signal`` rung (In1/In2 routable) could drop straight
+        onto a thin inner plane.  This helper returns the subset of
+        ``net_class.avoid_layers`` that must be enforced as a hard constraint:
+        auto-hard when the class declares ``target_ampacity`` (an
+        ampacity-bearing net cannot use 0.5 oz inner copper), opt-in hard for
+        the ampacity-free case via ``--strict-layers`` /
+        ``DesignRules.strict_layers``.  An empty set is a no-op (the historical
+        native behaviour -- inner planes remain routable for that net).
+
+        Args:
+            net_class: The routing net class for the net being routed, or None.
+
+        Returns:
+            Frozen set of grid-layer indices the net must not be routed on.
+        """
+        if net_class is None:
+            return frozenset()
+        return net_class.hard_avoided_layer_indices(self._rules.strict_layers)
+
     def _is_layer_allowed(self, layer_idx: int) -> bool:
         """Check if routing on this layer is allowed by allowed_layers constraint.
 
@@ -1511,6 +1536,24 @@ class CppPathfinder:
             math.ceil((net_via_size / 2 + self._rules.via_clearance) / self._grid.resolution),
         )
 
+        # Issue #4433: hard per-net avoid_layers for the NATIVE backend (the
+        # default backend that previously ignored ``avoid_layers`` entirely).
+        # When the net's ``avoid_layers`` must be hard (declared
+        # ``target_ampacity``, or ``--strict-layers``), drop the avoided layers
+        # from the start/end seed sets AND narrow the C++ routable-layer vector
+        # for the DURATION of this route call (restored in the finally below,
+        # because the Pathfinder's ``routable_layers_`` vector is reused for
+        # every net on the board).  Empty set => no-op: the native backend
+        # behaves byte-for-byte as before for nets without ampacity/strict.
+        hard_avoided_layers = self._hard_avoided_layers(net_class)
+        if hard_avoided_layers:
+            start_layers = [l for l in (start_layers or []) if l not in hard_avoided_layers]
+            end_layers = [l for l in (end_layers or []) if l not in hard_avoided_layers]
+            # No legal start/end layer left -> fail LOUD (unrouted report)
+            # rather than dropping unmanufacturable copper on an inner plane.
+            if not start_layers or not end_layers:
+                return None
+
         # Issue #3130: per-net emit widths/diameters.  Forward the per-net
         # ``trace_width`` and ``via_size`` so the C++-internal Segment /
         # Via objects returned from route_resumable() carry per-net values
@@ -1581,6 +1624,22 @@ class CppPathfinder:
         # 2x the cap (and the 10-100x-slower Python A* is exactly where
         # capped searches go to die).  ``None`` => unbudgeted (legacy).
         route_deadline = time.monotonic() + float(per_net_timeout) if per_net_timeout else None
+
+        # Issue #4433: narrow the C++ routable-layer vector to exclude this
+        # net's hard-avoided layers for the duration of the search (initial
+        # route_resumable + every resume).  Saved and restored in the finally
+        # so the shared Pathfinder's ``routable_layers_`` reverts for the next
+        # net.  The Python fallback constructs its own Router that re-derives
+        # the hard block from the same net_class, so it stays enforced there
+        # too regardless of this narrowing.
+        saved_routable_layers: list[int] | None = None
+        if hard_avoided_layers:
+            narrowed_routable = [
+                idx for idx in self._routable_layers if idx not in hard_avoided_layers
+            ]
+            if narrowed_routable and narrowed_routable != self._routable_layers:
+                saved_routable_layers = list(self._routable_layers)
+                self.set_routable_layers(narrowed_routable)
 
         try:
             result = self._impl.route_resumable(
@@ -1756,6 +1815,10 @@ class CppPathfinder:
         finally:
             # Always clear search state to release memory (Issue #2447 risk).
             self._impl.clear_search_state()
+            # Issue #4433: restore the routable-layer vector narrowed above so
+            # the shared Pathfinder reverts to its full set for the next net.
+            if saved_routable_layers is not None:
+                self.set_routable_layers(saved_routable_layers)
 
     def _capture_failure_info(self, result: router_cpp.RouteResult) -> None:
         """Record structured failure diagnostics from a failed C++ route.

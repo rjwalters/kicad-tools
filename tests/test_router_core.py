@@ -4891,3 +4891,174 @@ class TestRecordRoutingDecisionRationale:
         # a plain trace width rather than the bogus "min trace width".
         assert "0.5mm trace width" in rationale
         assert "min_trace_width" not in rationale
+
+
+class TestPerNetAvoidLayersHardConstraint:
+    """Issue #4433: per-net ``avoid_layers`` as a HARD constraint in BOTH backends.
+
+    Root cause the report exposed: on the ``four_layer_all_signal`` escalation
+    rung (In1/In2 are routable SIGNAL layers) the per-net ``avoid_layers`` was
+    only a SOFT cost bias in the Python pathfinder and **entirely absent** in
+    the C++ (default) backend, so an HV net could land unmanufacturable copper
+    on a thin inner plane.  These tests build a small board where a wall on the
+    outer layers forces any successful route to cross on an inner layer -- the
+    deterministic stand-in for the report's congestion-driven escalation -- and
+    assert the hardening keeps the net off In1/In2 under BOTH backends.
+
+    The policy under test (task deliverable #3):
+
+    * DEFAULT (no ``target_ampacity``, no ``--strict-layers``): ``avoid_layers``
+      stays a SOFT bias -- the net still uses the inner crossing.  This locks in
+      that the default escalation behaviour is UNCHANGED.
+    * ``target_ampacity`` declared: ``avoid_layers`` is auto-HARD -- zero inner
+      segments (fail-loud rather than ship inner copper).
+    * ``--strict-layers`` (``DesignRules.strict_layers``): ``avoid_layers`` is
+      HARD even without a declared ampacity.
+    """
+
+    # In1.Cu / In2.Cu grid indices on the four_layer_all_signal stack.
+    _INNER = (1, 2)
+
+    def _route_hv_net(self, *, backend: str, target_ampacity, strict_layers: bool):
+        """Route a single HV net across an outer-layer wall; return its Route.
+
+        The two THT pads sit on opposite sides of a wall that blocks BOTH outer
+        copper layers, so a successful route must dive to an inner layer -- the
+        exact condition under which the missing constraint leaked inner copper.
+        """
+        from kicad_tools.router.cpp_backend import (
+            CppGrid,
+            CppPathfinder,
+            is_cpp_available,
+        )
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+        from kicad_tools.router.primitives import Obstacle, Pad
+        from kicad_tools.router.rules import NetClassRouting
+
+        if backend == "cpp" and not is_cpp_available():
+            pytest.skip("C++ router backend not available")
+
+        rules = DesignRules(
+            trace_width=0.25,
+            trace_clearance=0.2,
+            via_diameter=0.6,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+            strict_layers=strict_layers,
+        )
+        grid = RoutingGrid(
+            width=20.0,
+            height=10.0,
+            rules=rules,
+            layer_stack=LayerStack.four_layer_all_signal(),
+        )
+        start = Pad(
+            x=3.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="HV",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="1",
+            through_hole=True,
+            drill=0.6,
+        )
+        end = Pad(
+            x=17.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="HV",
+            layer=Layer.F_CU,
+            ref="J2",
+            pin="1",
+            through_hole=True,
+            drill=0.6,
+        )
+        grid.add_pad(start)
+        grid.add_pad(end)
+        # Seal BOTH outer layers at x=10 across (more than) the full board
+        # height -> the only continuous crossing is on an inner layer.
+        grid.add_obstacle(Obstacle(x=10.0, y=5.0, width=2.0, height=16.0, layer=Layer.F_CU))
+        grid.add_obstacle(Obstacle(x=10.0, y=5.0, width=2.0, height=16.0, layer=Layer.B_CU))
+
+        nc = NetClassRouting(
+            name="HV",
+            trace_width=0.25,
+            clearance=0.2,
+            avoid_layers=[1, 2],
+            target_ampacity=target_ampacity,
+        )
+        ncmap = {"HV": nc}
+
+        if backend == "cpp":
+            cpp_grid = CppGrid.from_routing_grid(grid)
+            pf = CppPathfinder(cpp_grid, rules, diagonal_routing=True, net_class_map=ncmap)
+        else:
+            pf = Router(grid, rules, net_class_map=ncmap)
+        return pf.route(start, end, net_class=nc)
+
+    @staticmethod
+    def _inner_segment_count(route) -> int:
+        if route is None:
+            return 0
+        return sum(1 for seg in route.segments if seg.layer.value in (1, 2))
+
+    @pytest.mark.parametrize("backend", ["cpp", "python"])
+    def test_default_avoid_layers_stays_soft(self, backend):
+        """DEFAULT policy: no ampacity + no --strict-layers => inner crossing allowed.
+
+        This is the crucial "default behaviour is unchanged" assertion: the
+        wall forces an inner crossing, and with a plain ``avoid_layers`` (soft
+        bias) the net still takes it -- exactly the pre-#4433 escalation
+        behaviour we must NOT change without opt-in.
+        """
+        route = self._route_hv_net(backend=backend, target_ampacity=None, strict_layers=False)
+        # Inner is the ONLY crossing, so a soft-bias route must use it.
+        assert route is not None, f"[{backend}] soft HV net failed to route across the wall"
+        assert self._inner_segment_count(route) >= 1, (
+            f"[{backend}] default (soft) avoid_layers unexpectedly kept the net "
+            "off the inner layers -- default escalation behaviour changed"
+        )
+
+    @pytest.mark.parametrize("backend", ["cpp", "python"])
+    def test_target_ampacity_hardens_avoid_layers(self, backend):
+        """``target_ampacity`` auto-hardens ``avoid_layers`` -> ZERO inner segments.
+
+        Runs under BOTH backends because the constraint was specifically ABSENT
+        in the C++ default backend (grep found zero ``avoid_layers`` refs).
+        """
+        route = self._route_hv_net(backend=backend, target_ampacity=15.0, strict_layers=False)
+        assert self._inner_segment_count(route) == 0, (
+            f"[{backend}] ampacity-bearing HV net landed on an inner plane despite "
+            "target_ampacity hardening avoid_layers"
+        )
+
+    @pytest.mark.parametrize("backend", ["cpp", "python"])
+    def test_strict_layers_flag_hardens_avoid_layers(self, backend):
+        """``--strict-layers`` hardens ``avoid_layers`` for the ampacity-free case."""
+        route = self._route_hv_net(backend=backend, target_ampacity=None, strict_layers=True)
+        assert self._inner_segment_count(route) == 0, (
+            f"[{backend}] --strict-layers did not hard-block the avoided inner layers"
+        )
+
+    def test_both_backends_agree_on_hard_avoid(self):
+        """Parity: with the constraint hardened, NEITHER backend uses inner layers.
+
+        The historical gap was C++-only, so this cross-backend assertion is the
+        regression guard: both the native (default) and Python backends must now
+        refuse the inner crossing for an ampacity-bearing net.
+        """
+        from kicad_tools.router.cpp_backend import is_cpp_available
+
+        if not is_cpp_available():
+            pytest.skip("C++ router backend not available")
+
+        cpp_route = self._route_hv_net(backend="cpp", target_ampacity=15.0, strict_layers=False)
+        py_route = self._route_hv_net(backend="python", target_ampacity=15.0, strict_layers=False)
+        assert self._inner_segment_count(cpp_route) == 0
+        assert self._inner_segment_count(py_route) == 0

@@ -553,6 +553,11 @@ def run_route_command(args) -> int:
     # flag-off path stays byte-identical.
     if getattr(args, "strict_drc", False):
         sub_argv.append("--strict-drc")
+    # Issue #4433: forward --strict-layers so per-net avoid_layers is enforced
+    # as a hard constraint.  Defaults off; forward only when set so the flag-off
+    # path stays byte-identical.
+    if getattr(args, "strict_layers", False):
+        sub_argv.append("--strict-layers")
     # Issue #3154: forward the advisory drift-banner flags.  --sync-check
     # defaults on; forward --no-sync-check only when explicitly disabled.
     if getattr(args, "sync_check", True) is False:

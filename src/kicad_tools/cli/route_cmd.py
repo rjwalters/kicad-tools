@@ -4094,6 +4094,10 @@ def route_with_layer_escalation(
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
         auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
+        # Issue #4433: upgrade per-net ``avoid_layers`` from a soft cost bias
+        # to a HARD constraint for the ampacity-free case (nets with a declared
+        # ``target_ampacity`` are hard-blocked regardless of this flag).
+        strict_layers=getattr(args, "strict_layers", False),
     )
 
     # Parse skip nets
@@ -5295,6 +5299,8 @@ def route_with_rule_relaxation(
             manufacturer=getattr(args, "manufacturer", None),
             # Issue #2891: forward escalation-in-progress flag.
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
+            # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
+            strict_layers=getattr(args, "strict_layers", False),
         )
 
         # Load PCB
@@ -7453,6 +7459,8 @@ def route_with_combined_escalation(
                 manufacturer=getattr(args, "manufacturer", None),
                 # Issue #2891: forward escalation-in-progress flag.
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
+                # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
+                strict_layers=getattr(args, "strict_layers", False),
             )
 
             # Load PCB
@@ -9567,6 +9575,24 @@ def main(argv: list[str] | None = None) -> int:
             "actually run and passed."
         ),
     )
+    # Issue #4433: opt-in HARD per-net avoid_layers.  Mirror of the outer
+    # parser.py flag; both sites must stay in sync per
+    # ``tests/test_cli_parser_drift.py``.
+    parser.add_argument(
+        "--strict-layers",
+        action="store_true",
+        default=False,
+        help=(
+            "Upgrade a net class's per-net 'avoid_layers' from a SOFT cost "
+            "bias to a HARD constraint: the avoided layers are removed from "
+            "that net's routable set so the router physically refuses to route "
+            "it there (e.g. keep an HV net off the inner planes). By default "
+            "avoid_layers is a soft bias that can lose to congestion. Nets that "
+            "also declare 'target_ampacity' are hard-blocked regardless of this "
+            "flag. Use this for manufacturability-critical boards where an "
+            "avoided layer must never carry a given net."
+        ),
+    )
     # Issue #3154: advisory schematic/PCB drift banner.  When a schematic is
     # auto-discovered (or passed via --schematic) and the component sets have
     # drifted, kct route prints a one-line, non-blocking warning before
@@ -10878,6 +10904,10 @@ def main(argv: list[str] | None = None) -> int:
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
         auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
+        # Issue #4433: upgrade per-net ``avoid_layers`` from a soft cost bias
+        # to a HARD constraint for the ampacity-free case (nets with a declared
+        # ``target_ampacity`` are hard-blocked regardless of this flag).
+        strict_layers=getattr(args, "strict_layers", False),
     )
 
     # Import progress helpers
