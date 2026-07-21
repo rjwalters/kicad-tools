@@ -34,6 +34,7 @@ from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
 from kicad_tools.pcb.center_sheet import centered_origin
+from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.schematic.blocks import (
     DebugHeader,
     create_crystal_with_loads,
@@ -2029,8 +2030,13 @@ def main() -> int:
         # refreshed pour).
         fill_success = fill_zones(routed_path)
 
-        # Step 7: Run DRC
-        drc_success = run_drc(routed_path)
+        # Step 7: Run DRC.  Issue #3912: run_drc still runs for its
+        # side-effect -- it writes ``output/drc_report.json`` (the sidecar
+        # ``kct fleet ship-ready`` reads, #3765).  Its kct-check return no
+        # longer gates the recipe: the authoritative DRC verdict now comes
+        # from the shared gate's ``kicad-cli pcb drc --refill-zones`` leg
+        # below.
+        run_drc(routed_path)
 
         # Step 7.5: LVS (advisory, #3780) -- board 04 is in
         # ``ADVISORY_LVS_BOARDS``.  The real ``OSC_IN<->OSC_OUT`` B.Cu
@@ -2075,6 +2081,32 @@ def main() -> int:
         # Step 8: Generate manufacturing artifacts (Gerbers, BOM, CPL)
         mfr_success = generate_manufacturing(routed_path, output_dir)
 
+        # Issue #3912: board-04 is the REFERENCE migration to the shared
+        # recipe success gate (kicad_tools.recipes.gate).  The route / DRC /
+        # LVS legs -- previously three hand-rolled booleans (route_success,
+        # drc_success, copper_clean) ANDed by hand into the exit code -- are
+        # now folded into ONE PipelineGateResult that drives BOTH the
+        # SUMMARY lines below and the exit code, so they cannot diverge.
+        #
+        # The gate's DRC leg is authoritative: it runs
+        # ``kicad-cli pcb drc --refill-zones`` (run_geometric_drc) instead of
+        # the ``kct check --drc-only`` that ``run_drc`` uses (run_drc is still
+        # called above so ``output/drc_report.json`` -- the sidecar
+        # ``kct fleet ship-ready`` reads -- keeps being written).  The two
+        # legacy 0.350mm ``hole_clearance`` drills the fresh regen still
+        # routes (#3847 / CI ``--allow 2``) are tolerated via an explicit
+        # per-rule allowance; a 3rd drill or any new blocking rule fails the
+        # gate.  copper-LVS (``copper_clean``) is the LVS leg -- and
+        # ``write_lvs_report(require_clean=True)`` already RAISED above on a
+        # dirty comparator, so a short can't even reach here.
+        gate = evaluate_pipeline_gate(
+            routed_path,
+            route_ok=route_success,
+            route_allowance=0,
+            lvs_ok=copper_clean,
+            rule_allowances={"hole_clearance": 2},
+        )
+
         # Summary
         print("\n" + "=" * 60)
         print("SUMMARY")
@@ -2088,14 +2120,14 @@ def main() -> int:
         print(f"  5. Manufacturing: {(output_dir / 'manufacturing').name}/")
         print("\nResults:")
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
-        print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
+        for line in gate.summary_lines():
+            print(line)
         print(f"  OSC escape fix: {'SUCCESS' if osc_success else 'FAIL'}")
         print(f"  45-quantize: {'SUCCESS' if quantize_success else 'FAIL'}")
         print(f"  Stitch: {'SUCCESS' if stitch_success else 'FAIL'}")
         print(f"  Power-pad tie: {'SUCCESS' if tie_success else 'FAIL'}")
         print(f"  Zone fill: {'SUCCESS' if fill_success else 'FAIL'}")
-        print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
-        print(f"  Manufacturing: {'SUCCESS' if mfr_success else 'FAIL'}")
+        print(f"  Manufacturing bundle: {'WRITTEN' if mfr_success else 'FAILED'}")
         print("\nBoard description:")
         print("  - U1: AMS1117-3.3 LDO (5V to 3.3V)")
         print("  - U2: STM32F103C8T6 MCU (LQFP-48, 0.5mm pitch)")
@@ -2184,18 +2216,21 @@ def main() -> int:
         # regression exits non-zero.  The current committed board -- 2
         # allowlisted drills, 1 advisory connectivity, copper-LVS clean --
         # still exits 0.
+        # Issue #3912: route_success + drc_success + copper_clean are now
+        # subsumed by ``gate.passed`` (route / DRC / LVS legs), derived from
+        # the SAME PipelineGateResult the SUMMARY printed.  The board-04
+        # specific pipeline-step booleans stay ANDed in as before so a failed
+        # stitch / tie / fill / quantize / export still fails the recipe.
         return (
             0
             if (
                 erc_success
-                and route_success
                 and quantize_success
                 and stitch_success
                 and tie_success
                 and fill_success
-                and drc_success
-                and copper_clean
                 and mfr_success
+                and gate.passed
             )
             else 1
         )

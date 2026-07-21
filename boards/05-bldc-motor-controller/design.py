@@ -32,6 +32,7 @@ from pathlib import Path
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.pcb.center_sheet import centered_origin
+from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.router.partial_rescue import RescueConfig
 from kicad_tools.router.partial_rescue import rescue_partial_nets as shared_rescue_partial_nets
 from kicad_tools.schematic.blocks import (
@@ -3540,6 +3541,33 @@ def main() -> int:
         # bundle produced" criterion.
         mfg_success = generate_manufacturing(routed_path, output_dir)
 
+        # Issue #3912: derive BOTH the SUMMARY and the exit code from one
+        # shared PipelineGateResult so they cannot diverge.  The previous
+        # gate (``return 0 if erc_success and drc_success else 1``) dropped
+        # route-completion entirely -- an 81%-routed board exited 0 -- and
+        # its ``drc_success`` came from ``run_drc`` shelling
+        # ``kct check --drc-only``, which evaluates the STALE on-disk zone
+        # fills and so missed the 2 real copper shorts that
+        # ``kicad-cli pcb drc --refill-zones`` reports.  The shared gate's
+        # authoritative DRC leg runs exactly that kicad-cli command, so a
+        # fresh regen with copper shorts now fails.  ``run_drc``'s
+        # kct-check verdict is threaded in as a supplemental constraint
+        # (it can only tighten, never loosen).  Route completion is a
+        # first-class leg with no allowance: a PARTIAL route now fails.
+        # LVS is tracked separately for this board (#3762), so it is not a
+        # leg of the recipe gate (``lvs_ok=None``).
+        gate = evaluate_pipeline_gate(
+            routed_path,
+            route_ok=route_success,
+            route_allowance=0,
+            lvs_ok=None,
+            supplemental_drc_ok=drc_success,
+            supplemental_reason=(
+                "kct check --drc-only reported error-level DRC findings "
+                "(see DRC output above)"
+            ),
+        )
+
         # Summary
         print("\n" + "=" * 60)
         print("SUMMARY")
@@ -3553,8 +3581,8 @@ def main() -> int:
         print("\nResults:")
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         print(f"  Zones: {zones_created} zone(s) created, {zones_filled} filled")
-        print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
-        print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
+        for line in gate.summary_lines():
+            print(line)
         # #3912: mfg_success reflects whether `kct export` wrote a bundle
         # (exit 0), NOT whether the board is DRC-clean.  Board DRC status is
         # reported separately above ("DRC: ...").  Label this line "written"
@@ -3571,9 +3599,10 @@ def main() -> int:
         print("  LEDs: D3-D4, R3-R4")
         print("  Hall filter: R30-R32 (pull-ups), C30-C32 (filters)")
 
-        # For this board, partial routing is acceptable
-        # Success if ERC passes and DRC has no errors (warnings OK)
-        return 0 if erc_success and drc_success else 1
+        # #3912: exit code derives from the same PipelineGateResult that
+        # drives the SUMMARY above.  ERC remains an independent gating leg
+        # (not modelled by the shared route/DRC/LVS gate).
+        return 0 if (erc_success and gate.passed) else 1
 
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)

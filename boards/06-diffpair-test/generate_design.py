@@ -40,6 +40,7 @@ from pathlib import Path
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
+from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED, NET_CLASS_POWER, NetClassRouting
 
 # Re-export net definitions and footprint generators from generate_pcb.
@@ -3450,6 +3451,9 @@ def main() -> int:
             # refused to call that clean -- the LVS step was skipped
             # entirely.  #4012 wired the schematic, restoring the hard
             # gate #4004 originally intended.)
+            # write_lvs_report(require_clean=True) RAISES on any short /
+            # open / label divergence, so reaching the next line means the
+            # copper-LVS verdict is clean.
             write_lvs_report(
                 sch_path,
                 routed_path,
@@ -3458,6 +3462,7 @@ def main() -> int:
                 run_copper=True,
                 run_label=True,
             )
+            lvs_ok = True
 
             # Export manufacturing bundle (#3147) so ``kct fleet status``
             # reports ``ship_ready=true`` (the bundle's manifest mtime must
@@ -3465,6 +3470,31 @@ def main() -> int:
             # routing is allowed to be PARTIAL on this board, and a current
             # bundle still clears the ``"artifacts stale"`` blocker.
             mfg_ok = export_manufacturing_bundle(routed_path, output_dir)
+
+            # Issue #3912: the exit code and the SUMMARY are now BOTH derived
+            # from one shared PipelineGateResult so they cannot diverge.  The
+            # previous ``return 0 if route_success else 1`` dropped the DRC
+            # leg entirely -- 18 differential-pair errors printed ``DRC: FAIL``
+            # while the process exited 0.  ``run_drc`` here uses
+            # ``kct check --net-class-map``; that engine is the ONLY one that
+            # can see the diffpair / match-group length-skew rule families
+            # (kicad-cli has no native expression for them), so its verdict is
+            # threaded in as ``supplemental_drc_ok``.  The gate's authoritative
+            # geometric leg (``kicad-cli pcb drc --refill-zones``) catches the
+            # shorts / clearance defects kicad-cli owns; the union of the two
+            # is the real DRC verdict.  Board-06 routes fully by design, so
+            # ``route_allowance=0``.
+            gate = evaluate_pipeline_gate(
+                routed_path,
+                route_ok=route_success,
+                route_allowance=0,
+                lvs_ok=lvs_ok,
+                supplemental_drc_ok=drc_ok,
+                supplemental_reason=(
+                    "kct check --net-class-map reported diffpair / match-group "
+                    "errors (see DRC output above)"
+                ),
+            )
 
             print("\n" + "=" * 60)
             print("SUMMARY")
@@ -3475,11 +3505,14 @@ def main() -> int:
             print(f"  PCB:       {pcb_path.name}")
             print(f"  Routed:    {routed_path.name}")
             print("\nResults:")
-            print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
-            print(f"  DRC:     {'PASS' if drc_ok else 'FAIL (see above)'}")
-            print(f"  MFG:     {'PASS' if mfg_ok else 'FAIL (see above)'}")
+            for line in gate.summary_lines():
+                print(line)
+            # ``MFG`` reports whether the bundle was WRITTEN (exit 0 of the
+            # export), NOT whether the board is DRC-clean -- board cleanliness
+            # is the ``DRC``/``Overall`` verdict above (issue #3912 wording).
+            print(f"  MFG bundle: {'WRITTEN' if mfg_ok else 'FAILED'}")
 
-            return 0 if route_success else 1
+            return gate.exit_code()
 
         if args.step == "schematic":
             create_schematic(output_dir)
