@@ -914,8 +914,14 @@ def run_optimize_placement(
         if not quiet:
             print(f"\nGenerating seed placement ({seed_method})...")
 
-        # Generate initial seed
-        seed_vector = _generate_seed(seed_method, components, nets, board_outline)
+        # Generate initial seed. The "current" method warm-starts from the
+        # on-disk footprint positions (via _read_current_vector, the same
+        # encoder used by --dry-run) so the optimizer refines the existing
+        # layout; other methods synthesise a fresh seed.
+        if seed_method == "current":
+            seed_vector = _read_current_vector(pcb_path, components)
+        else:
+            seed_vector = _generate_seed(seed_method, components, nets, board_outline)
 
         # Apply slide-off pre-processing
         if not no_slide_off:
@@ -932,6 +938,16 @@ def run_optimize_placement(
                     f"({slide_result.overlaps_remaining} remaining, "
                     f"{slide_result.iterations_run} iterations)"
                 )
+
+        # Warm-start CMA-ES from the (slid-off) current layout so the
+        # optimizer refines it rather than re-imagining from the bounds
+        # center. CMAESStrategy.initialize honours config.extra["mean"]
+        # (shape-validated + bounds-clamped) and defaults to a tight sigma
+        # when a mean override is present. Other seed methods keep their
+        # historical center-mean behaviour -- their generated seed is only
+        # scored for the "Seed" line below, never fed to the optimizer.
+        if seed_method == "current":
+            config.extra["mean"] = seed_vector.data
 
         # Evaluate seed
         seed_score = _evaluate(

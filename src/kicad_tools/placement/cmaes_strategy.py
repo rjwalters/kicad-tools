@@ -124,8 +124,11 @@ class CMAESStrategy(PlacementStrategy):
         """Initialize the CMA-ES optimizer and produce initial population.
 
         Sets up the CMAwM optimizer with:
-        - Mean at the center of the bounded region
-        - Sigma as 1/4 of the average range (covers ~95% of the space)
+        - Mean at the center of the bounded region, or a caller-supplied
+          warm-start mean (``config.extra["mean"]``) for refining an existing
+          layout instead of re-imagining from the center.
+        - Sigma as 1/4 of the average range (covers ~95% of the space), or a
+          much tighter step when warm-starting so refinement stays local.
         - Discrete steps for rotation and side variables
         - Auto-scaled or user-specified population size
 
@@ -134,9 +137,18 @@ class CMAESStrategy(PlacementStrategy):
             config: Strategy configuration. Supports extra keys:
                 - ``population_size`` (int): Override auto-scaled pop size.
                 - ``sigma`` (float): Override initial step size.
+                - ``mean`` (array-like): Warm-start initial mean, shape
+                  ``(ndim,)``. Validated against ``bounds`` and clamped into
+                  ``[lower, upper]`` (CMAwM requires the mean inside bounds).
+                  When supplied, the default sigma is tightened so the run
+                  refines the seed layout rather than re-imagining it.
 
         Returns:
             Initial population of placement vectors for external evaluation.
+
+        Raises:
+            ValueError: If ``config.extra["mean"]`` has a shape that does not
+                match ``bounds``.
         """
         self._config = config
         self._bounds = bounds
@@ -148,14 +160,32 @@ class CMAESStrategy(PlacementStrategy):
             _auto_population_size(ndim),
         )
 
-        # Initial mean: center of the bounded region
-        mean = (bounds.lower + bounds.upper) / 2.0
+        # Initial mean: caller-supplied warm-start, else center of the region.
+        mean_override = config.extra.get("mean")
+        warm_start = mean_override is not None
+        if not warm_start:
+            mean = (bounds.lower + bounds.upper) / 2.0
+        else:
+            mean = np.asarray(mean_override, dtype=np.float64)
+            if mean.shape != bounds.lower.shape:
+                raise ValueError(
+                    "config.extra['mean'] has shape "
+                    f"{mean.shape}, expected {bounds.lower.shape} to match bounds"
+                )
+            # CMAwM raises if the mean falls outside bounds; clamp to stay in.
+            # Discrete dims (rotation index, side) are already integer-valued
+            # from encode() and lie within [lower, upper], so clipping is a
+            # no-op for them.
+            mean = np.clip(mean, bounds.lower, bounds.upper)
 
-        # Initial sigma: 1/4 of the average range
+        # Initial sigma: 1/4 of the average range (fresh seed), or a much
+        # tighter step when warm-starting so CMA-ES refines the seed layout
+        # rather than re-imagining it.
         ranges = bounds.upper - bounds.lower
         # Avoid zero range (can happen for single-value discrete dims)
         safe_ranges = np.where(ranges > 0, ranges, 1.0)
-        sigma = float(config.extra.get("sigma", np.mean(safe_ranges) / 4.0))
+        default_sigma = np.mean(safe_ranges) / (20.0 if warm_start else 4.0)
+        sigma = float(config.extra.get("sigma", default_sigma))
 
         # Build CMAwM bounds array: shape (ndim, 2)
         cma_bounds = np.column_stack([bounds.lower, bounds.upper])
