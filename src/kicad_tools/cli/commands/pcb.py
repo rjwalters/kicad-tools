@@ -1007,6 +1007,8 @@ def _run_move_footprint_command(args, pcb_path: Path) -> int:
     dry_run = getattr(args, "dry_run", False)
     output_format = getattr(args, "format", "text")
     absolute = getattr(args, "absolute", False)
+    drag_endpoints = getattr(args, "drag_endpoints", False)
+    drag_tolerance = getattr(args, "drag_tolerance", 0.05)
 
     # Parse batch map JSON if provided
     batch_map = None
@@ -1041,6 +1043,8 @@ def _run_move_footprint_command(args, pcb_path: Path) -> int:
         output_path=output_path,
         output_format=output_format,
         absolute=absolute,
+        drag_endpoints=drag_endpoints,
+        drag_tolerance=drag_tolerance,
     )
 
 

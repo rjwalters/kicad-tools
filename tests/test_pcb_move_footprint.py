@@ -306,6 +306,364 @@ class TestRunMoveFootprint:
         assert j3.rotation == pytest.approx(j3_rot_before, abs=0.01)
 
 
+# A routed board: two 2-pad passives with traces landing exactly on pads.
+#   R1 @ (100, 100): pad 1 -> (99, 100) net 1, pad 2 -> (101, 100) net 2
+#   R3 @ (100, 120): pad 1 -> (99, 120) net 3 -- copper is NOT coincident
+#     (seg-d starts at 95, 120), used to exercise the zero-match warning.
+# seg-c terminates on R2's pad (129, 100) and must never move when R1 moves.
+ROUTED_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "N1")
+  (net 2 "N2")
+  (net 3 "N3")
+  (footprint "R"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 1 "N1"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 2 "N2"))
+  )
+  (footprint "R"
+    (layer "F.Cu")
+    (uuid "fp-r2")
+    (at 130 100)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 1 "N1"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "R"
+    (layer "F.Cu")
+    (uuid "fp-r3")
+    (at 100 120)
+    (property "Reference" "R3" (at 0 -1.5 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 3 "N3"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+  (segment (start 99 100) (end 90 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-a"))
+  (segment (start 101 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-b"))
+  (segment (start 129 100) (end 120 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-c"))
+  (segment (start 95 120) (end 90 120) (width 0.25) (layer "F.Cu") (net 3) (uuid "seg-d"))
+)
+"""
+
+# Same routed board translated onto a non-zero board origin (116, 77).  In the
+# tree, copper is sheet-absolute; after load, board_origin is subtracted so the
+# in-memory view matches ROUTED_PCB.  R1's pad 1 is board-relative (99, 100).
+ROUTED_NONZERO_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "N1")
+  (net 2 "N2")
+  (gr_rect
+    (start 116 77)
+    (end 300 260)
+    (layer "Edge.Cuts")
+    (width 0.1)
+    (uuid "edge-rect")
+  )
+  (footprint "R"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 216 177)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 1 "N1"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 2 "N2"))
+  )
+  (segment (start 215 177) (end 206 177) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-a"))
+  (segment (start 217 177) (end 226 177) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-b"))
+)
+"""
+
+# KiCad-10 name-only dialect (#4416): pads and segments carry (net "N1") with
+# no numeric id, so their net_number parses as 0.
+ROUTED_NAME_ONLY_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "N1")
+  (net 2 "N2")
+  (footprint "R"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net "N1"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net "N2"))
+  )
+  (segment (start 99 100) (end 90 100) (width 0.25) (layer "F.Cu") (net "N1") (uuid "seg-a"))
+  (segment (start 101 100) (end 110 100) (width 0.25) (layer "F.Cu") (net "N2") (uuid "seg-b"))
+)
+"""
+
+
+def _seg(pcb, uuid):
+    """Return the Segment with the given uuid, or None."""
+    for s in pcb.segments:
+        if s.uuid == uuid:
+            return s
+    return None
+
+
+class TestDragEndpoints:
+    """Tests for move-footprint --drag-endpoints."""
+
+    def test_drag_persists_after_reload(self, tmp_path):
+        """Move + drag, save, RELOAD from disk: endpoints followed the pads.
+
+        Reloading is the critical assertion -- Segment has no __setattr__ ->
+        S-expression sync, so an in-memory-only check would pass even if the
+        tree was never updated.
+        """
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROUTED_PCB)
+
+        rc = run_move_footprint(pcb, reference="R1", to=(105.0, 100.0), drag_endpoints=True)
+        assert rc == 0
+
+        board = PCB.load(pcb)
+        # R1 pad 1 was (99, 100) -> delta (5, 0): seg-a start follows.
+        seg_a = _seg(board, "seg-a")
+        assert seg_a is not None
+        assert seg_a.start == pytest.approx((104.0, 100.0))
+        # Far end of seg-a is untouched.
+        assert seg_a.end == pytest.approx((90.0, 100.0))
+        # R1 pad 2 was (101, 100): seg-b start follows.
+        seg_b = _seg(board, "seg-b")
+        assert seg_b is not None
+        assert seg_b.start == pytest.approx((106.0, 100.0))
+        assert seg_b.end == pytest.approx((110.0, 100.0))
+        # UUIDs preserved by the in-place tree-sync strategy.
+        assert {"seg-a", "seg-b", "seg-c", "seg-d"} <= {s.uuid for s in board.segments}
+
+    def test_drag_leaves_other_nets_and_footprints_untouched(self, tmp_path):
+        """seg-c (on R2's pad) is not moved when R1 moves."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROUTED_PCB)
+
+        rc = run_move_footprint(pcb, reference="R1", to=(105.0, 100.0), drag_endpoints=True)
+        assert rc == 0
+
+        board = PCB.load(pcb)
+        seg_c = _seg(board, "seg-c")
+        assert seg_c is not None
+        assert seg_c.start == pytest.approx((129.0, 100.0))
+        assert seg_c.end == pytest.approx((120.0, 100.0))
+
+    def test_no_drag_flag_strands_traces(self, tmp_path):
+        """Without --drag-endpoints the traces stay put (regression guard)."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROUTED_PCB)
+
+        rc = run_move_footprint(pcb, reference="R1", to=(105.0, 100.0))
+        assert rc == 0
+
+        board = PCB.load(pcb)
+        seg_a = _seg(board, "seg-a")
+        assert seg_a is not None
+        # Endpoint unchanged -> stranded (the gap this feature fills).
+        assert seg_a.start == pytest.approx((99.0, 100.0))
+
+    def test_zero_match_warning_json(self, tmp_path, capsys):
+        """Per-pad zero_match_warning surfaces in JSON output."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROUTED_PCB)
+
+        rc = run_move_footprint(
+            pcb,
+            reference="R3",
+            to=(105.0, 120.0),
+            drag_endpoints=True,
+            output_format="json",
+        )
+        assert rc == 0
+
+        data = json.loads(capsys.readouterr().out)
+        drag = data["moves"][0]["drag"]
+        # Only pad 1 (net 3) is reported; pad 2 (net 0) is unconnected + skipped.
+        assert len(drag) == 1
+        assert drag[0]["pad"] == "1"
+        assert drag[0]["endpoints_dragged"] == 0
+        assert drag[0]["zero_match_warning"] is True
+
+    def test_zero_match_warning_text(self, tmp_path, capsys):
+        """Zero-match warning is printed in text mode."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROUTED_PCB)
+
+        rc = run_move_footprint(pcb, reference="R3", to=(105.0, 120.0), drag_endpoints=True)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+
+    def test_per_pad_counts_in_json(self, tmp_path, capsys):
+        """JSON reports per-pad drag counts and a total."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROUTED_PCB)
+
+        rc = run_move_footprint(
+            pcb,
+            reference="R1",
+            to=(105.0, 100.0),
+            drag_endpoints=True,
+            output_format="json",
+        )
+        assert rc == 0
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["drag_endpoints"] is True
+        assert data["drag_tolerance"] == 0.05
+        assert data["endpoints_dragged"] == 2
+        counts = {d["pad"]: d["endpoints_dragged"] for d in data["moves"][0]["drag"]}
+        assert counts == {"1": 1, "2": 1}
+
+    def test_nonzero_origin_drag_persists(self, tmp_path):
+        """Drag applies the board-origin offset when writing the tree."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROUTED_NONZERO_PCB)
+
+        # R1 board-relative (100, 100) -> (105, 100): delta (5, 0).
+        rc = run_move_footprint(pcb, reference="R1", to=(105.0, 100.0), drag_endpoints=True)
+        assert rc == 0
+
+        board = PCB.load(pcb)
+        assert board.board_origin == pytest.approx((116.0, 77.0))
+        seg_a = _seg(board, "seg-a")
+        assert seg_a is not None
+        # Board-relative endpoint follows the pad.
+        assert seg_a.start == pytest.approx((104.0, 100.0))
+
+        # And the raw tree stores sheet-absolute (104 + 116, 100 + 77).
+        text = pcb.read_text()
+        assert "(start 220 177)" in text
+
+    def test_name_only_dialect_drag(self, tmp_path):
+        """Name-only nets (net_number 0) drag via geometric fallback (#4416)."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROUTED_NAME_ONLY_PCB)
+
+        rc = run_move_footprint(pcb, reference="R1", to=(105.0, 100.0), drag_endpoints=True)
+        assert rc == 0
+
+        board = PCB.load(pcb)
+        seg_a = _seg(board, "seg-a")
+        seg_b = _seg(board, "seg-b")
+        assert seg_a is not None and seg_b is not None
+        assert seg_a.start == pytest.approx((104.0, 100.0))
+        assert seg_b.start == pytest.approx((106.0, 100.0))
+        # The name-only dialect is preserved on save.
+        assert '(net "N1")' in pcb.read_text()
+
+    def test_map_batch_composes_with_drag(self, tmp_path):
+        """--map batch mode applies the drag per moved footprint."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROUTED_PCB)
+
+        batch = {
+            "R1": {"x": 105.0, "y": 100.0},
+            "R2": {"x": 135.0, "y": 100.0},
+        }
+        rc = run_move_footprint(pcb, batch_map=batch, drag_endpoints=True)
+        assert rc == 0
+
+        board = PCB.load(pcb)
+        # R1 pad 1 -> seg-a start moved by (5, 0).
+        assert _seg(board, "seg-a").start == pytest.approx((104.0, 100.0))
+        # R2 pad 1 (129, 100) -> seg-c start moved by (5, 0).
+        assert _seg(board, "seg-c").start == pytest.approx((134.0, 100.0))
+
+    def test_dry_run_reports_drag_without_writing(self, tmp_path, capsys):
+        """--dry-run reports intended drags but leaves the file untouched."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROUTED_PCB)
+        original = pcb.read_text()
+
+        rc = run_move_footprint(
+            pcb,
+            reference="R1",
+            to=(105.0, 100.0),
+            drag_endpoints=True,
+            dry_run=True,
+            output_format="json",
+        )
+        assert rc == 0
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["dry_run"] is True
+        assert data["endpoints_dragged"] == 2
+        # File must be byte-identical -- nothing was written.
+        assert pcb.read_text() == original
+
+    def test_rotation_skips_drag_with_warning(self, tmp_path, capsys):
+        """Combining --drag-endpoints with a rotation change skips the drag."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROUTED_PCB)
+
+        rc = run_move_footprint(
+            pcb,
+            reference="R1",
+            to=(105.0, 100.0),
+            rotation=90.0,
+            drag_endpoints=True,
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "SKIPPED" in out
+
+        board = PCB.load(pcb)
+        # Footprint moved + rotated, but copper was NOT dragged.
+        fp = board.get_footprint("R1")
+        assert fp is not None
+        assert fp.rotation == pytest.approx(90.0)
+        seg_a = _seg(board, "seg-a")
+        assert seg_a is not None
+        assert seg_a.start == pytest.approx((99.0, 100.0))
+
+
 class TestMoveFootprintCLIParser:
     """Tests for the move-footprint CLI parser."""
 

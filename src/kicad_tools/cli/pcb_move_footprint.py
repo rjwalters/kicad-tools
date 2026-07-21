@@ -35,6 +35,8 @@ def run_move_footprint(
     output_path: Path | None = None,
     output_format: str = "text",
     absolute: bool = False,
+    drag_endpoints: bool = False,
+    drag_tolerance: float = 0.05,
 ) -> int:
     """Move one or more footprints in a PCB file.
 
@@ -51,6 +53,12 @@ def run_move_footprint(
         absolute: When True, interpret (x, y) as absolute KiCad page
             coordinates (subtract the board origin before assignment) rather
             than board-relative coordinates.
+        drag_endpoints: When True, translate trace-segment endpoints that were
+            coincident (within ``drag_tolerance``) with each moved pad by that
+            pad's delta, so routed copper follows the footprint instead of being
+            stranded.  First slice is translation-only: dragging is skipped (with
+            a warning) for any footprint whose ``rotation`` also changes.
+        drag_tolerance: Endpoint-coincidence match radius in mm (default 0.05).
 
     Returns:
         Exit code (0 for success, 1 for errors).
@@ -97,8 +105,12 @@ def run_move_footprint(
             return (x - ox, y - oy)
         return (x, y)
 
-    # Validate all references exist before making any changes
+    # Validate all references exist before making any changes.  When dragging
+    # endpoints, capture each pad's OLD board-relative position and its
+    # board-relative translation delta BEFORE any footprint moves -- the drag
+    # translates copper that terminated on the old pad position by that delta.
     move_details: list[dict] = []
+    drag_plans: list[dict] = []
     for ref, x, y, rot in moves:
         fp = pcb.get_footprint(ref)
         if not fp:
@@ -122,6 +134,35 @@ def run_move_footprint(
             }
         )
 
+        if drag_endpoints:
+            # Board-relative delta of a pure translation: the difference between
+            # the target board-relative footprint position and the current one.
+            # (_assign_coords maps the user's --to into board-relative space.)
+            assign_x, assign_y = _assign_coords(x, y)
+            fp_old_x, fp_old_y = fp.position
+            delta = (assign_x - fp_old_x, assign_y - fp_old_y)
+            rotation_changed = rot is not None and abs(rot - fp.rotation) > 1e-9
+            pads: list[dict] = []
+            for pad in fp.pads:
+                old_pos = pcb.get_pad_position(ref, pad.number)
+                if old_pos is None:
+                    continue
+                pads.append(
+                    {
+                        "number": pad.number,
+                        "net_number": pad.net_number,
+                        "net_name": pad.net_name,
+                        "old_pos": old_pos,
+                    }
+                )
+            drag_plans.append(
+                {
+                    "delta": delta,
+                    "rotation_changed": rotation_changed,
+                    "pads": pads,
+                }
+            )
+
     result = {
         "pcb": str(pcb_path),
         "dry_run": dry_run,
@@ -130,6 +171,57 @@ def run_move_footprint(
         "moves": move_details,
         "moved": False,
     }
+    if drag_endpoints:
+        result["drag_endpoints"] = True
+        result["drag_tolerance"] = drag_tolerance
+
+    # Drag coincident trace endpoints with each moved pad.  The drag mutates the
+    # in-memory PCB (and its S-expression tree) in place; it runs in dry-run too
+    # so per-pad counts can be reported, but the mutations are only persisted
+    # when save() is called below (skipped on dry-run).  Endpoints are matched
+    # against each pad's OLD position (captured pre-move) and translated by the
+    # footprint's board-relative delta.
+    if drag_endpoints:
+        total_dragged = 0
+        for md, plan in zip(move_details, drag_plans, strict=True):
+            if plan["rotation_changed"]:
+                md["drag_skipped_rotation"] = True
+                md["drag"] = []
+                continue
+            dx, dy = plan["delta"]
+            per_pad: list[dict] = []
+            for prec in plan["pads"]:
+                # A pad has attached copper only if it belongs to a real net.
+                # Skip unconnected pads so a passing-through trace on another
+                # net is never dragged by accident.
+                has_net = prec["net_number"] != 0 or bool(prec["net_name"])
+                if not has_net:
+                    continue
+                if dx == 0.0 and dy == 0.0:
+                    count = 0
+                else:
+                    # net_number 0 on a connected pad means a name-only board
+                    # (#4416): fall back to purely geometric matching.
+                    net_filter = prec["net_number"] or None
+                    count = pcb.drag_trace_endpoints(
+                        prec["old_pos"],
+                        (dx, dy),
+                        tolerance=drag_tolerance,
+                        net_number=net_filter,
+                    )
+                total_dragged += count
+                per_pad.append(
+                    {
+                        "pad": prec["number"],
+                        "net": prec["net_name"] or prec["net_number"],
+                        "endpoints_dragged": count,
+                        # The "subtly-broken board" signature: a pad with copper
+                        # expected but no endpoint moved with it.
+                        "zero_match_warning": count == 0,
+                    }
+                )
+            md["drag"] = per_pad
+        result["endpoints_dragged"] = total_dragged
 
     if not dry_run:
         for ref, x, y, rot in moves:
@@ -167,6 +259,20 @@ def run_move_footprint(
             )
             if md["old_rotation"] != md["new_rotation"]:
                 print(f"    Rotation: {md['old_rotation']} -> {md['new_rotation']}")
+            if md.get("drag_skipped_rotation"):
+                print(
+                    "    Drag endpoints: SKIPPED (rotation changed; "
+                    "rotation-aware dragging not supported in this slice)"
+                )
+            elif "drag" in md:
+                for dr in md["drag"]:
+                    line = (
+                        f"    Drag pad {dr['pad']} (net {dr['net']}): "
+                        f"{dr['endpoints_dragged']} endpoint(s)"
+                    )
+                    if dr["zero_match_warning"]:
+                        line += "  [WARNING: attached copper but no endpoint matched]"
+                    print(line)
         print()
         if dry_run:
             print("  Would move footprint(s)")

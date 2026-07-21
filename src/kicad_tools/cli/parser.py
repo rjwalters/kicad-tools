@@ -2141,6 +2141,22 @@ def _add_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Preview moves without modifying the PCB file",
     )
+    pcb_move_fp.add_argument(
+        "--drag-endpoints",
+        action="store_true",
+        help="Translate trace-segment endpoints coincident with each moved pad "
+        "by that pad's delta, so routed copper follows the footprint instead "
+        "of being stranded. Translation-only; skipped (with a warning) for a "
+        "footprint whose --rotation also changes.",
+    )
+    pcb_move_fp.add_argument(
+        "--drag-tolerance",
+        type=float,
+        default=0.05,
+        metavar="MM",
+        help="Endpoint-coincidence match radius in mm for --drag-endpoints "
+        "(default: 0.05)",
+    )
 
     # pcb page-fit
     pcb_page_fit = pcb_subparsers.add_parser(
