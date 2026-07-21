@@ -1832,38 +1832,34 @@ jobs:
           test -f /tmp/board04-ci/lvs.json
           test -f /tmp/board04-ci/stm32_devboard_routed.kicad_pcb
 
-      - name: Assert fresh DRC within recipe tolerance (--allow 2, recipe-vs-artifact)
-        # This step gates the FRESH regen (the recipe's output), which is a
-        # DIFFERENT artifact from the committed board-04 PCB.  Since #4017 the
-        # two diverge by design:
+      - name: Assert fresh DRC strict-0 (recipe-vs-artifact now converged)
+        # This step gates the FRESH regen (the recipe's output).  Since #4408
+        # the recipe reproduces a strict-0 board, so the fresh regen and the
+        # committed artifact have CONVERGED:
         #
-        #   * The COMMITTED artifact is strict-0 -- its 0.350mm drill pair was
-        #     re-spaced artifact-only (the NRST in-pad via nudged 0.5mm east +
-        #     re-bonded to pad U2.7 with an F.Cu stub), with NO change to
-        #     generate_design.py's router/placement.  It carries NO entry in
-        #     .github/routed-drc-tolerance.yml, so the committed-artifact
-        #     "Routed PCB DRC Check" job ratchets it at strict-0.
-        #   * The FRESH regen still routes the LEGACY 0.350mm pair (2
-        #     hole_to_hole_clearance errors), because the recipe geometry
-        #     was intentionally untouched (curation constraint).
+        #   * The COMMITTED artifact is strict-0.  Its 0.350mm drill pair was
+        #     originally re-spaced artifact-only in #4017 (the NRST in-pad via
+        #     nudged 0.5mm east + re-bonded to pad U2.7 with an F.Cu stub).
+        #   * The FRESH regen is NOW strict-0 too: #4408 back-ported that fix
+        #     into the recipe as a generic, mfr-floor-driven hole-to-hole
+        #     relocation post-pass (``relocate_drill_clearance_step``), so the
+        #     router-stacked 0.350mm pair is relocated by construction every
+        #     regen -- no artifact patching.
         #
-        # A single YAML value can't satisfy both (both resolve to the same
-        # repo-relative path).  So this fresh-regen gate uses ``--allow 2`` to
-        # tolerate the 2 grandfathered recipe drills + the advisory
-        # connectivity finding, while the YAML stays entry-free (strict-0) for
-        # the committed artifact.  A 3rd blocking error or any new rule still
-        # fails this gate (exit 2).  When #3847's exit clause is finally closed
-        # in the RECIPE (router re-spaces the pair), drop this to strict-0 by
-        # removing ``--allow 2``.
+        # Both artifacts resolve to the same repo-relative path and now both
+        # measure strict-0, so this gate drops ``--allow`` entirely (default
+        # tolerance 0).  ANY blocking error -- a re-introduced hole-to-hole
+        # pair or a new rule -- fails this gate (exit 2), which is exactly the
+        # regression guard #4408 asked for.
         run: |
           set -euo pipefail
           # Stage the fresh routed PCB over the repo-relative committed path:
           # check_routed_drc.py keys the jlcpcb-tier1 mfr override off the
           # path's repo-relative form (relative_to(cwd)), so the fresh artifact
           # MUST live at the committed path for the jlcpcb-tier1 override to
-          # resolve.  The blocking-error tolerance for THIS invocation comes
-          # from ``--allow 2`` (recipe-vs-artifact divergence, see above), not
-          # the YAML.  No cleanup is needed afterwards: the CI checkout is a
+          # resolve.  The blocking-error tolerance for THIS invocation is now
+          # strict-0 (default), matching the committed artifact.  No cleanup is
+          # needed afterwards: the CI checkout is a
           # throwaway workspace discarded when the job ends, nothing downstream
           # reads the committed PCB, and (per #3854 review) the previous
           # ``git checkout -- ...`` restore aborted the step with exit 128
@@ -1875,7 +1871,6 @@ jobs:
           cp /tmp/board04-ci/stm32_devboard_routed.kicad_pcb \
             boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
           uv run python scripts/ci/check_routed_drc.py \
-            --allow 2 \
             boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
 
       - name: Emit board.json via kct board-metrics

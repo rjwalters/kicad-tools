@@ -27,7 +27,8 @@ from kicad_tools.drc.repair_clearance import ClearanceRepairer, RepairResult
 from kicad_tools.drc.repair_drill_clearance import DrillClearanceRepairer, DrillRepairResult
 from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import ViolationType
-from kicad_tools.manufacturers import get_all_manufacturer_names
+from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
+from kicad_tools.manufacturers.base import DesignRules
 
 
 @dataclass
@@ -236,6 +237,16 @@ Examples:
     do_connectivity_check = not args.dry_run and not args.no_connectivity_check
     connectivity_rollback_occurred = False
 
+    # Active manufacturer design rules -- forwarded to the drill-clearance
+    # repairer so every via slide is re-validated against the shared clearance
+    # engine before it is applied (issue #4408).  Best-effort: if the profile
+    # cannot be resolved we fall back to the legacy unchecked-slide behaviour.
+    drill_design_rules: DesignRules | None = None
+    try:
+        drill_design_rules = get_profile(args.mfr).get_design_rules(args.layers)
+    except Exception:
+        drill_design_rules = None
+
     for pass_num in range(1, effective_max_passes + 1):
         # Classify violations from current report
         do_clearance = args.only is None or args.only == "clearance"
@@ -328,6 +339,7 @@ Examples:
             dry_run=args.dry_run,
             pass_number=pass_num,
             local_reroute=args.local_reroute,
+            design_rules=drill_design_rules,
         )
 
         repaired_this_pass = clearance_result.repaired + drill_result.repaired
@@ -490,8 +502,15 @@ def _run_single_pass(
     dry_run: bool,
     pass_number: int = 1,
     local_reroute: bool = False,
+    design_rules: DesignRules | None = None,
 ) -> tuple[RepairResult, DrillRepairResult]:
-    """Execute a single repair pass (clearance + drill) and return results."""
+    """Execute a single repair pass (clearance + drill) and return results.
+
+    When ``design_rules`` is provided it is forwarded to the drill-clearance
+    repairer so every via slide is re-validated against the shared clearance
+    engine before it is applied (issue #4408) -- a slide that would introduce a
+    new violation is declined rather than mis-placing the via.
+    """
     clearance_result = RepairResult()
     drill_result = DrillRepairResult()
 
@@ -526,6 +545,7 @@ def _run_single_pass(
                 max_displacement=max_displacement,
                 margin=margin,
                 dry_run=dry_run,
+                design_rules=design_rules,
             )
             if drill_result.repaired > 0 and not dry_run:
                 drill_repairer.save(output_path)

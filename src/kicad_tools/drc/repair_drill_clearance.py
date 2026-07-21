@@ -18,10 +18,14 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..sexp import SExp, parse_file
 from .net_compat import resolve_net_atom
 from .violation import DRCViolation, ViolationType
+
+if TYPE_CHECKING:
+    from kicad_tools.manufacturers.base import DesignRules
 
 
 @dataclass
@@ -62,6 +66,7 @@ class DrillRepairResult:
     skipped_no_delta: int = 0
     skipped_exceeds_max: int = 0
     skipped_infeasible: int = 0
+    skipped_unsafe: int = 0
     actions: list[DrillRepairAction] = field(default_factory=list)
 
     @property
@@ -84,6 +89,10 @@ class DrillRepairResult:
             lines.append(f"  Skipped (exceeds max displacement): {self.skipped_exceeds_max}")
         if self.skipped_infeasible > 0:
             lines.append(f"  Skipped (infeasible): {self.skipped_infeasible}")
+        if self.skipped_unsafe > 0:
+            lines.append(
+                f"  Skipped (slide would introduce a new violation): {self.skipped_unsafe}"
+            )
         if self.skipped_no_location > 0:
             lines.append(f"  Skipped (no location): {self.skipped_no_location}")
         if self.skipped_no_delta > 0:
@@ -144,6 +153,7 @@ class DrillClearanceRepairer:
         max_displacement: float = 0.5,
         margin: float = 0.01,
         dry_run: bool = False,
+        design_rules: DesignRules | None = None,
     ) -> DrillRepairResult:
         """Repair drill clearance violations.
 
@@ -152,6 +162,20 @@ class DrillClearanceRepairer:
             max_displacement: Maximum allowed slide distance in mm
             margin: Extra clearance margin beyond minimum in mm
             dry_run: If True, compute repairs but don't modify PCB
+            design_rules: Active manufacturer rules.  When provided, every
+                computed slide is **re-validated** against the shared
+                clearance engine
+                (:func:`kicad_tools.cli.relocate_in_pad_vias._check_clearance`)
+                before it is applied: a slide that would introduce a new
+                hole-to-hole / copper-clearance violation (crowding another
+                neighbour, shorting a foreign net) is **declined** -- the via
+                is left in place and counted in
+                :attr:`DrillRepairResult.skipped_unsafe`.  This is the
+                clearance-safety gap #4017 hit: the previous ``_slide_via``
+                moved a via without checking that its new position was itself
+                legal, so the fix had to be done by hand.  When ``None``
+                (default) the legacy unchecked-slide behaviour is preserved
+                for backward compatibility.
 
         Returns:
             DrillRepairResult with details of all repairs
@@ -167,7 +191,7 @@ class DrillClearanceRepairer:
         result.total_violations = len(drill_violations)
 
         for violation in drill_violations:
-            self._repair_single(violation, result, max_displacement, margin, dry_run)
+            self._repair_single(violation, result, max_displacement, margin, dry_run, design_rules)
 
         return result
 
@@ -178,6 +202,7 @@ class DrillClearanceRepairer:
         max_displacement: float,
         margin: float,
         dry_run: bool,
+        design_rules: DesignRules | None = None,
     ) -> None:
         """Attempt to repair a single drill clearance violation."""
         if not violation.locations or len(violation.locations) < 1:
@@ -242,6 +267,7 @@ class DrillClearanceRepairer:
             required_displacement,
             result,
             dry_run,
+            design_rules,
         )
 
     def _find_vias_near(
@@ -330,11 +356,17 @@ class DrillClearanceRepairer:
         required_displacement: float,
         result: DrillRepairResult,
         dry_run: bool,
+        design_rules: DesignRules | None = None,
     ) -> None:
         """Slide a via away from another object to achieve clearance.
 
         Finds a connected trace segment and slides the via along it.
         Falls back to pushing via directly away if no connected trace exists.
+
+        When ``design_rules`` is provided the computed target is re-validated
+        against the shared clearance engine before it is applied; a slide that
+        would introduce a new violation is declined (the via is left in place
+        and counted in :attr:`DrillRepairResult.skipped_unsafe`).
         """
         # Find connected segment to determine slide direction
         connected_seg = self._find_connected_segment(via_x, via_y, via_net)
@@ -389,6 +421,21 @@ class DrillClearanceRepairer:
                 via_x, via_y, other_x, other_y, required_displacement
             )
 
+        # Clearance-safety gate (#4408): re-validate the computed target before
+        # applying it.  The legacy path slid ``dist`` and updated the segment
+        # endpoint WITHOUT checking that the new position was itself legal, so a
+        # slide could crowd the OTHER neighbour or short a foreign net -- which
+        # is why #4017 had to be relocated by hand.  When ``design_rules`` is
+        # provided we reject a target that introduces a new violation and leave
+        # the via untouched (safety invariant: never make the board worse).
+        if design_rules is not None:
+            reason = self._target_clearance_reason(
+                via_x, via_y, via_x + dx, via_y + dy, design_rules
+            )
+            if reason is not None:
+                result.skipped_unsafe += 1
+                return
+
         uuid_node = via_node.find("uuid")
         uuid_str = uuid_node.get_first_atom() if uuid_node else ""
         action = DrillRepairAction(
@@ -413,6 +460,66 @@ class DrillClearanceRepairer:
 
         result.repaired += 1
         result.slid += 1
+
+    def _target_clearance_reason(
+        self,
+        via_x: float,
+        via_y: float,
+        new_x: float,
+        new_y: float,
+        design_rules: DesignRules,
+    ) -> str | None:
+        """Return a reason string if moving the via at ``(via_x, via_y)`` to
+        ``(new_x, new_y)`` would violate clearance; ``None`` when the target is
+        clearance-safe.
+
+        Bridges the SExp repair model to the shared PCB-schema clearance engine
+        (:func:`kicad_tools.cli.relocate_in_pad_vias._check_clearance`) by
+        building a lightweight :class:`PCB` view over the current document.
+        Rebuilt per call because a prior repair may have mutated the document;
+        drill-clearance violation clusters are small so this stays cheap.
+        """
+        from kicad_tools.cli.relocate_in_pad_vias import (
+            _check_clearance,
+            _collect_smd_pads_by_net,
+            _collect_tht_pads,
+        )
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB(self.doc)
+        # The repairer works in ABSOLUTE file coordinates, but a PCB view is
+        # board-relative (``_detect_board_origin``).  Convert the pre- and
+        # post-move points into the view's frame before matching / checking.
+        ox, oy = pcb._board_origin
+        rel_via_x, rel_via_y = via_x - ox, via_y - oy
+        rel_new_x, rel_new_y = new_x - ox, new_y - oy
+
+        # Locate the schema Via matching the pre-move position so
+        # ``_check_clearance`` exempts it (and reads its drill/size/net).
+        target_via = None
+        best = 1e-3
+        for v in pcb.vias:
+            d = math.hypot(v.position[0] - rel_via_x, v.position[1] - rel_via_y)
+            if d < best:
+                best = d
+                target_via = v
+        if target_via is None:
+            # Could not map the via into the schema view; do not block the
+            # legacy behaviour on a lookup miss.
+            return None
+
+        pads_by_net = _collect_smd_pads_by_net(pcb)
+        tht_pads = _collect_tht_pads(pcb)
+        return _check_clearance(
+            pcb,
+            target_via,
+            rel_new_x,
+            rel_new_y,
+            pads_by_net,
+            tht_pads,
+            design_rules.min_clearance_mm,
+            design_rules.min_hole_to_hole_mm,
+        )
 
     def undo_action(self, action: DrillRepairAction) -> bool:
         """Reverse a previously-applied drill-clearance repair action.
