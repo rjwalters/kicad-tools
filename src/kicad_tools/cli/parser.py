@@ -4059,6 +4059,73 @@ def _add_route_parser(subparsers) -> None:
             "two sets are unioned)."
         ),
     )
+    # Issue #4431 (Phase 1): --voltage-map HV pairwise clearance.  Declared on
+    # BOTH parsers + forwarded by commands/routing.py (enforced by
+    # tests/test_cli_parser_drift.py).
+    route_parser.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON per-net voltage map {net_name: volts} (reuses the "
+            "#4371 format; ranges {min,max} per #4411 collapse to worst-case "
+            "magnitude). Enables HV-isolation pairwise clearance (Issue #4431 "
+            "Phase 1): the router derives a net-pair required-clearance matrix "
+            "max(dru, IEC creepage @ |ΔV|) using the SAME lookup as HV-aware "
+            "placement (--voltage-map on optimize-placement) and the creepage "
+            "census, then the Python post-route validator flags an HV net that "
+            "runs closer than its pairwise requirement to non-HV copper. Absent, "
+            "routing is byte-identical to the scalar-clearance default. NOTE: "
+            "Phase 1 is a diagnostic/foundation -- it does NOT by itself make an "
+            "HV board route cleanly (search-time avoidance is deferred to a "
+            "follow-up architect epic, Phase 2)."
+        ),
+    )
+    route_parser.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help=(
+            "Creepage standard for the --voltage-map pairwise-clearance lookup "
+            "(default: iec60664). Mirrors optimize-placement / kct creepage."
+        ),
+    )
+    route_parser.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help=(
+            "IEC pollution degree for the --voltage-map pairwise-clearance "
+            "lookup (default: 2). Mirrors optimize-placement / kct creepage."
+        ),
+    )
+    route_parser.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help=(
+            "Insulation material group I/II/IIIa/IIIb for the --voltage-map "
+            "pairwise-clearance lookup (default: IIIa). Mirrors "
+            "optimize-placement / kct creepage."
+        ),
+    )
+    route_parser.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help=(
+            "Minimum net-pair |ΔV| (volts) that triggers a creepage widening "
+            "for --voltage-map pairwise clearance; lower-difference pairs keep "
+            "the scalar DRU floor to avoid over-segregating low-voltage nets "
+            "(default: 30.0). Mirrors optimize-placement / kct creepage."
+        ),
+    )
 
 
 def _add_route_auto_parser(subparsers) -> None:
