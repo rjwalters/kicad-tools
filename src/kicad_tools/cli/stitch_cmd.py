@@ -283,6 +283,14 @@ class StitchResult:
     # corresponding pads are also recorded in ``pads_skipped`` with a
     # ``hole_to_hole:`` reason.
     hole_to_hole_rejected: int = 0
+    # Issue #4432: pads whose only reachable via site lands OFF the same-net
+    # refilled fill (inside a keepout void / clearance pullback where the
+    # pour has retreated).  A local via there would dangle (``via_dangling``)
+    # once zones refill, so instead of placing it we record the pad here --
+    # it needs a routed fanout trace out to the fill edge, not a stitch via.
+    # Each entry is (pad, reason).  These pads are ALSO recorded in
+    # ``pads_skipped`` so existing summaries still count them.
+    needs_routed_fanout: list[tuple[PadInfo, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -1641,6 +1649,72 @@ def identify_nearest_obstacle(
     return best
 
 
+def _same_net_fill_on_layer(
+    same_net_filled_polygons: list[FilledPolygon] | None,
+    layer: str | None,
+) -> list[FilledPolygon]:
+    """Return the same-net fill polygons that lie on ``layer``.
+
+    Issue #4432: the same-net fill *gate* is active only when actual pour
+    geometry exists on the via's target layer.  When ``layer`` is ``None``
+    (no resolved terminus) every same-net fill polygon qualifies.  An empty
+    result means the gate is a **no-op** (unfilled board / no fill on the
+    target layer) and the caller must fall back to outline behaviour.
+    """
+    if not same_net_filled_polygons:
+        return []
+    if layer is None:
+        return list(same_net_filled_polygons)
+    return [fp for fp in same_net_filled_polygons if fp.layer == layer]
+
+
+def _point_on_same_net_fill(
+    px: float,
+    py: float,
+    radius: float,
+    same_net_filled_polygons: list[FilledPolygon],
+    layer: str | None,
+) -> bool:
+    """Return True if a via pad at ``(px, py)`` sits on same-net zone fill.
+
+    Issue #4432: a stitching via only bonds to the plane when its pad lands
+    on the refilled copper (``filled_polygon``), not merely inside the zone
+    OUTLINE.  The pour retreats from the outline wherever a copper keepout,
+    thermal relief, clearance pullback, or island split removes fill, and a
+    via dropped in one of those retreated regions dangles.
+
+    Margin-aware: the point must be inside a same-net ``FilledPolygon`` AND
+    at least ``radius`` from every edge, so the via *pad* (not just its
+    centre) sits on copper rather than overhanging a void or the fill
+    boundary.  The even-odd :func:`point_in_polygon` already treats keepout
+    voids (holed fill rings KiCad emits as keyholed ``pts`` lists) as
+    outside, so a candidate inside a void hole is correctly rejected.
+
+    Layer filtering: only polygons whose ``.layer`` matches ``layer`` are
+    considered (``layer=None`` skips the filter).
+
+    Returns ``False`` when ``same_net_filled_polygons`` is empty -- callers
+    must gate on the presence of fill (see :func:`_same_net_fill_on_layer`)
+    so the check stays a no-op on unfilled boards.
+    """
+    for fp in same_net_filled_polygons:
+        if layer is not None and fp.layer != layer:
+            continue
+        # Fast bounding-box pre-filter (with the pad radius as a margin).
+        if (
+            px < fp.min_x - radius
+            or px > fp.max_x + radius
+            or py < fp.min_y - radius
+            or py > fp.max_y + radius
+        ):
+            continue
+        if point_in_polygon(px, py, fp.points) and _point_has_edge_margin(
+            px, py, fp.points, radius
+        ):
+            return True
+    return False
+
+
 def calculate_via_position(
     pad: PadInfo,
     offset: float,
@@ -1656,6 +1730,8 @@ def calculate_via_position(
     other_net_drills: list[tuple[float, float, float, int]] | None = None,
     via_drill: float = 0.0,
     min_hole_to_hole: float = 0.5,
+    same_net_filled_polygons: list[FilledPolygon] | None = None,
+    same_net_fill_layer: str | None = None,
 ) -> tuple[float, float] | None:
     """Calculate a valid via placement position near the pad.
 
@@ -1694,6 +1770,15 @@ def calculate_via_position(
             used only for the ``other_net_drills`` hole-to-hole check.
         min_hole_to_hole: Minimum drill edge-to-edge spacing (mm,
             default 0.5) for the ``other_net_drills`` check.
+        same_net_filled_polygons: Issue #4432 -- same-net zone fill
+            (``filled_polygon``) geometry.  When non-empty AND fill exists on
+            ``same_net_fill_layer``, a candidate whose via pad does not land
+            on same-net fill is rejected (it would dangle where the pour has
+            retreated for a keepout / clearance pullback).  Empty (or no fill
+            on the layer) makes the gate a no-op, so unfilled boards stitch
+            exactly as before.
+        same_net_fill_layer: Target layer the via bonds to.  Only same-net
+            fill on this layer counts toward the containment gate.
     """
     if other_net_tracks is None:
         other_net_tracks = []
@@ -1708,6 +1793,10 @@ def calculate_via_position(
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
+
+    # Issue #4432: same-net fill containment gate, active only when pour
+    # geometry exists on the target layer (empty -> no-op / outline fallback).
+    same_net_fill_gate = _same_net_fill_on_layer(same_net_filled_polygons, same_net_fill_layer)
 
     # Try different offsets from pad center
     # Start with the direction away from pad center, try 8 directions
@@ -1826,6 +1915,16 @@ def calculate_via_position(
                     conflict = True
 
             if conflict:
+                continue
+
+            # Issue #4432: same-net FILL containment gate.  After clearance
+            # passes, reject a candidate that lands where the same-net pour
+            # cannot exist (keepout void / clearance pullback) -- such a via
+            # dangles once zones refill.  No-op when no same-net fill exists
+            # on the target layer (``same_net_fill_gate`` empty).
+            if same_net_fill_gate and not _point_on_same_net_fill(
+                via_x, via_y, via_radius, same_net_fill_gate, same_net_fill_layer
+            ):
                 continue
 
             # Check connecting trace path (pad center -> via center) for clearance
@@ -2030,6 +2129,8 @@ def calculate_dogleg_via_position(
     via_drill: float = 0.0,
     other_net_drills: list[tuple[float, float, float, int]] | None = None,
     min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
+    same_net_filled_polygons: list[FilledPolygon] | None = None,
+    same_net_fill_layer: str | None = None,
 ) -> tuple[float, float, float, float] | None:
     """Calculate a dog-leg (L-shaped) via placement for fine-pitch components.
 
@@ -2086,6 +2187,9 @@ def calculate_dogleg_via_position(
     trace_half_width = trace_width / 2
 
     pad_radius = max(pad.width, pad.height) / 2
+
+    # Issue #4432: same-net fill containment gate (see calculate_via_position).
+    same_net_fill_gate = _same_net_fill_on_layer(same_net_filled_polygons, same_net_fill_layer)
 
     # Determine the dominant alignment direction based on nearby other-net pads
     # This helps us route along the pad row first, then escape perpendicular
@@ -2232,6 +2336,15 @@ def calculate_dogleg_via_position(
                     if conflict:
                         continue
 
+                    # Issue #4432: same-net FILL containment gate.  Reject a
+                    # dog-leg via landing where the same-net pour has retreated
+                    # (keepout void / clearance pullback).  No-op when no
+                    # same-net fill exists on the target layer.
+                    if same_net_fill_gate and not _point_on_same_net_fill(
+                        via_x, via_y, via_radius, same_net_fill_gate, same_net_fill_layer
+                    ):
+                        continue
+
                     # Issue #4177: drill hole-to-hole guard.  The checks
                     # above use COPPER geometry; they do not enforce the
                     # fab's drill-to-drill minimum.  A dog-leg stitch via
@@ -2339,6 +2452,8 @@ def calculate_extended_escape_position(
     via_drill: float = 0.0,
     other_net_drills: list[tuple[float, float, float, int]] | None = None,
     min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
+    same_net_filled_polygons: list[FilledPolygon] | None = None,
+    same_net_fill_layer: str | None = None,
 ) -> tuple[float, float, list[tuple[float, float]]] | None:
     """Calculate an extended escape route for pads in dense IC pin fields.
 
@@ -2397,6 +2512,9 @@ def calculate_extended_escape_position(
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
     pad_radius = max(pad.width, pad.height) / 2
+
+    # Issue #4432: same-net fill containment gate (see calculate_via_position).
+    same_net_fill_gate = _same_net_fill_on_layer(same_net_filled_polygons, same_net_fill_layer)
 
     # Analyze nearby other-net pads to find escape channels
     nearby_pads = [
@@ -2498,6 +2616,14 @@ def calculate_extended_escape_position(
                 min_hole_to_hole=min_hole_to_hole,
             ):
                 return False
+
+        # Issue #4432: same-net FILL containment gate.  Reject an escape via
+        # landing where the same-net pour has retreated (keepout void /
+        # clearance pullback).  No-op when no same-net fill on the layer.
+        if same_net_fill_gate and not _point_on_same_net_fill(
+            vx, vy, via_radius, same_net_fill_gate, same_net_fill_layer
+        ):
+            return False
 
         return True
 
@@ -3873,6 +3999,8 @@ def run_thermal_stitch(
     other_net_vias = find_all_board_vias(sexp, exclude_nets=target_net_nums)
     other_net_pads = find_all_pads(sexp, exclude_nets=target_net_nums)
     other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=target_net_nums)
+    # Issue #4432: same-net zone FILL geometry for the fill-containment gate.
+    same_net_filled_polys = find_same_net_filled_polygons(sexp, target_net_nums)
     # Issue #3855: foreign-net DRILL registry for the hole-to-hole guard.
     # Issue #4010: exclude target-net PAD drills from the base pool too --
     # a thermal via halo rings a TO-220 pad at ~0.55mm from its center,
@@ -4034,12 +4162,23 @@ def run_thermal_stitch(
             ):
                 continue
 
-            # Must fall inside a same-net zone polygon with proper margin.
-            # (When no zones are defined for the net, fall back to placing
-            # the via anyway -- this lets the stitcher be useful on boards
-            # whose zone step has not yet run, at the cost of a possible
-            # DRC warning until zones are added.)
-            if same_net_zones:
+            # Must land on same-net copper with proper margin.
+            #
+            # Issue #4432: prefer the refilled FILL geometry over the zone
+            # OUTLINE.  A via inside the outline but inside a keepout void /
+            # clearance pullback lands where no copper exists and would dangle
+            # once zones refill.  ``_point_on_same_net_fill`` is margin- and
+            # keepout-void-aware (even-odd ray cast excludes holed fill rings).
+            #
+            # Empty-fill no-op: when no same-net fill exists on the target
+            # layer (zones unfilled), fall back to the zone OUTLINE gate so
+            # the stitcher stays usable pre-refill.
+            _, thermal_terminus = get_via_layers(surface_layer, target_layer_by_net.get(net_name))
+            fill_gate = _same_net_fill_on_layer(same_net_filled_polys, thermal_terminus)
+            if fill_gate:
+                if not _point_on_same_net_fill(vx, vy, zone_margin, fill_gate, thermal_terminus):
+                    continue
+            elif same_net_zones:
                 in_zone = False
                 for zp in same_net_zones:
                     if point_in_polygon(vx, vy, zp.points) and _point_has_edge_margin(
@@ -4131,6 +4270,10 @@ def run_blanket_stitch(
     other_net_vias = find_all_board_vias(sexp, exclude_nets=target_net_nums)
     other_net_pads = find_all_pads(sexp, exclude_nets=target_net_nums)
     other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=target_net_nums)
+    # Issue #4432: same-net zone FILL geometry.  Blanket vias are seeded from
+    # the fill (not the zone outline) so grid points never land in a keepout
+    # void / clearance pullback where the pour has retreated.
+    same_net_filled_polys = find_same_net_filled_polygons(sexp, target_net_nums)
     # Issue #3855: foreign-net DRILL registry for the hole-to-hole guard.
     # Issue #4010: exclude target-net PAD drills from the base pool too (see
     # the matching note in run_thermal_stitch).  A blanket via ringing a
@@ -4210,9 +4353,31 @@ def run_blanket_stitch(
                     net_target_layer = None
                     result.fallback_nets.append(net_name)
 
-        for zone_poly in zone_polygons:
-            # Generate grid positions inside this zone polygon
-            grid_positions = generate_grid_positions(zone_poly.points, spacing, margin)
+        # Issue #4432: seed the grid from the refilled FILL polygons on the
+        # target layer, not the zone OUTLINE.  ``generate_grid_positions``
+        # keeps only points inside the seed polygon with edge margin, so
+        # seeding from the fill automatically excludes keepout voids /
+        # clearance pullbacks (KiCad keyholes voids into the fill ring, and
+        # both the even-odd containment and the edge-margin check reject them).
+        # Empty-fill no-op: when no same-net fill exists on the target layer
+        # (zones unfilled), fall back to seeding from the zone outline.
+        net_fill_polys = _same_net_fill_on_layer(
+            [fp for fp in same_net_filled_polys if fp.net_number == net_number],
+            net_target_layer,
+        )
+        if net_fill_polys:
+            seed_polygons = [fp.points for fp in net_fill_polys]
+        else:
+            seed_polygons = [zp.points for zp in zone_polygons]
+
+        # Zone layer drives the via's surface terminus (unchanged semantics);
+        # zone polygons for a net share a layer, so read it once here since the
+        # seed loop no longer iterates ``ZonePolygon`` objects (issue #4432).
+        zone_layer_str = zone_polygons[0].layer
+
+        for seed_points in seed_polygons:
+            # Generate grid positions inside this seed polygon
+            grid_positions = generate_grid_positions(seed_points, spacing, margin)
 
             for gx, gy in grid_positions:
                 # Check clearance against all existing copper, including
@@ -4248,7 +4413,7 @@ def run_blanket_stitch(
                 # Determine via layers
                 # For blanket vias, use F.Cu -> target or F.Cu -> B.Cu
                 surface_layer = "F.Cu"
-                if zone_poly.layer.startswith("B."):
+                if zone_layer_str.startswith("B."):
                     surface_layer = "B.Cu"
                 layers = get_via_layers(surface_layer, net_target_layer)
 
@@ -4485,6 +4650,7 @@ def run_stitch(
         pad: PadInfo,
         eff_other_net_tracks: list[TrackSegment],
         eff_other_net_vias: list[tuple[float, float, float, int]],
+        enforce_fill_gate: bool = True,
     ) -> (
         tuple[
             tuple[float, float] | None,
@@ -4497,6 +4663,16 @@ def run_stitch(
         # Per-pad obstacle pools including SIBLING stitch-net pads (see
         # ``_sibling_pools`` above -- board 07 +1V2 via on +1V8 pad short).
         eff_pads, eff_pad_bboxes, eff_drills = _sibling_pools(pad)
+
+        # Issue #4432: resolve the via's deep terminus layer -- the plane fill
+        # the via must bond to lives there.  The same-net FILL gate rejects a
+        # candidate landing where the pour has retreated (keepout void /
+        # clearance pullback).  ``enforce_fill_gate=False`` disables it so the
+        # caller can reclassify a fully-failed pad as needs-routed-fanout vs a
+        # genuine clearance obstruction.  Empty ``same_net_filled_polys``
+        # (unfilled board) makes the gate a no-op regardless.
+        _, terminus_layer = get_via_layers(pad.layer, net_target_layers.get(pad.net_name))
+        fill_gate = same_net_filled_polys if enforce_fill_gate else []
 
         # Calculate via position with clearance checking against all copper,
         # including the connecting trace path from pad to via
@@ -4514,6 +4690,8 @@ def run_stitch(
             other_net_pad_bboxes=eff_pad_bboxes,
             other_net_drills=eff_drills,
             via_drill=drill,
+            same_net_filled_polygons=fill_gate,
+            same_net_fill_layer=terminus_layer,
         )
 
         # Track if we're using dog-leg or extended escape routing
@@ -4538,6 +4716,8 @@ def run_stitch(
                 via_drill=drill,
                 other_net_drills=eff_drills,
                 min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                same_net_filled_polygons=fill_gate,
+                same_net_fill_layer=terminus_layer,
             )
 
             if dogleg_pos is None:
@@ -4558,6 +4738,8 @@ def run_stitch(
                     via_drill=drill,
                     other_net_drills=eff_drills,
                     min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                    same_net_filled_polygons=fill_gate,
+                    same_net_fill_layer=terminus_layer,
                 )
 
                 if extended_pos is None:
@@ -4578,6 +4760,8 @@ def run_stitch(
                             other_net_pad_bboxes=eff_pad_bboxes,
                             other_net_drills=eff_drills,
                             via_drill=micro_via_drill,
+                            same_net_filled_polygons=fill_gate,
+                            same_net_fill_layer=terminus_layer,
                         )
                         if micro_pos is None:
                             # Also try dogleg with micro-via size
@@ -4595,6 +4779,8 @@ def run_stitch(
                                 via_drill=micro_via_drill,
                                 other_net_drills=eff_drills,
                                 min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                                same_net_filled_polygons=fill_gate,
+                                same_net_fill_layer=terminus_layer,
                             )
                             if micro_dogleg is not None:
                                 # Use micro dogleg
@@ -4614,6 +4800,8 @@ def run_stitch(
                                 via_drill=micro_via_drill,
                                 other_net_drills=eff_drills,
                                 min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
+                                same_net_filled_polygons=fill_gate,
+                                same_net_fill_layer=terminus_layer,
                             )
                             if micro_extended is not None:
                                 return (None, None, micro_extended, True)
@@ -4673,6 +4861,33 @@ def run_stitch(
             # band intrusion rather than leaving the pad disconnected.
             fallback_result = _attempt_placement(pad, other_net_tracks, other_net_vias)
             if fallback_result is None:
+                # Issue #4432: distinguish an OFF-FILL failure from a genuine
+                # clearance obstruction.  Re-run placement against the same
+                # pre-existing copper but with the same-net FILL gate DISABLED.
+                # If a candidate now appears, the ONLY blocker was the fill
+                # gate -- the pad sits in a void band / clearance pullback
+                # where a local via would dangle (``via_dangling``).  Report it
+                # as needing a routed fanout to the fill edge instead of
+                # placing (or reporting a bogus clearance conflict for) it.
+                if same_net_filled_polys and (
+                    _attempt_placement(
+                        pad,
+                        other_net_tracks,
+                        other_net_vias,
+                        enforce_fill_gate=False,
+                    )
+                    is not None
+                ):
+                    reason = (
+                        "no same-net fill at candidate site -- pad sits in a "
+                        "keepout void / clearance pullback where the pour has "
+                        "retreated; needs routed fanout to the fill edge (a "
+                        "local via would dangle once zones refill)"
+                    )
+                    result.needs_routed_fanout.append((pad, reason))
+                    result.pads_skipped.append((pad, reason))
+                    continue
+
                 # Genuinely no placement even against pre-existing copper --
                 # this is a real obstruction, not a self-inflicted cross-net
                 # rejection.  Record the skip diagnostic as before.
@@ -5358,6 +5573,19 @@ def output_result(
             "clearance graze to avoid stranding the pad)"
         )
         for pad, _reason in result.connectivity_fallback[:5]:
+            print(f"      - {pad.net_name}: {pad.reference}.{pad.pad_number}")
+    if result.needs_routed_fanout:
+        # Issue #4432: pads whose only reachable via site is OFF the same-net
+        # fill (keepout void / clearance pullback).  A local via would dangle,
+        # so it was NOT placed -- the pad needs a routed fanout to the fill
+        # edge.  Surfaced distinctly so the operator does not read a bogus
+        # "Added via near X" success for a pad that stayed unconnected.
+        print(
+            f"  ~ {len(result.needs_routed_fanout)} pad(s) need routed fanout "
+            "(only reachable via site is off same-net fill -- inside a keepout "
+            "void / clearance pullback; a local via would dangle)"
+        )
+        for pad, _reason in result.needs_routed_fanout[:5]:
             print(f"      - {pad.net_name}: {pad.reference}.{pad.pad_number}")
     if result.pads_skipped:
         print(f"  ! Skipped {len(result.pads_skipped)} pads (manual placement needed)")
