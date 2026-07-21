@@ -542,6 +542,24 @@ def _add_creepage_parser(subparsers) -> None:
             "conservative assumption for common FR-4."
         ),
     )
+    # Same-footprint waiver (#4403): pairs whose binding gap is between two pads
+    # of ONE footprint are component pin-pitch (functional insulation governed
+    # by the component's own rating, not board creepage tables).  Off by default
+    # -- when set, such pairs stay listed (annotated WAIVED) but drop out of the
+    # exit-code gate so board-level defects are no longer buried.  This is a
+    # STANDALONE-CLI opt-in only: it never relaxes the ``kct audit``
+    # manufacturing-readiness gate (which keys off the raw, un-waived result).
+    creepage_parser.add_argument(
+        "--waive-same-footprint",
+        dest="waive_same_footprint",
+        action="store_true",
+        help=(
+            "Exclude same-footprint pad pairs (component-internal spacing) from "
+            "the exit-code gate.  They remain listed (annotated WAIVED) as "
+            "component-rating residuals -- qualify them at the component, not the "
+            "layout.  Does NOT affect the kct audit manufacturing-readiness gate."
+        ),
+    )
     creepage_parser.add_argument(
         "--format",
         choices=["table", "json"],

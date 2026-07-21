@@ -30,7 +30,13 @@ from kicad_tools.creepage.engine import (
     surface_path_length,
 )
 
-from .fixtures import board_mains_named_source, board_no_hv_source, board_source
+from .fixtures import (
+    board_mains_named_source,
+    board_no_hv_source,
+    board_same_footprint_fail_source,
+    board_same_footprint_only_source,
+    board_source,
+)
 
 pytestmark = pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
 
@@ -600,3 +606,87 @@ def test_no_map_output_byte_identical_to_baseline(tmp_path):
     # voltage_map=None disables the union even when a threshold is present.
     same_no_map = resolve_hv_nets(pcb, "HV", _hv_map(), voltage_map=None, census_threshold=30.0)
     assert same_no_map == baseline
+
+
+# ---------------------------------------------------------------------------
+# Same-footprint classification + gate_passed (Issue #4403)
+# ---------------------------------------------------------------------------
+
+
+def _census_samefp(pcb, min_mm=1.0):
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    return compute_creepage_census(pcb, hv, min_mm=min_mm)
+
+
+def test_intra_footprint_pad_gap_classifies_same_footprint(tmp_path):
+    # FET1 holds L_MAINS + SRC_NEG pads 0.4 mm apart; SRC_NEG exists on no other
+    # footprint, so the binding L_MAINS<->SRC_NEG gap is component-internal.
+    report = _census_samefp(_load(tmp_path, board_same_footprint_fail_source()))
+    assert _conductor_pair(report, "SRC_NEG").relationship == "same_footprint"
+
+
+def test_net_to_net_board_approach_classifies_board(tmp_path):
+    # P1(L_MAINS) and P2(GND) are distinct footprints 0.4 mm apart -> board.
+    report = _census_samefp(_load(tmp_path, board_same_footprint_fail_source()))
+    assert _conductor_pair(report, "GND").relationship == "board"
+
+
+def test_shared_footprint_but_board_binds_classifies_board(tmp_path):
+    # FET2 holds L_MAINS + DIV_MID 1.7 mm apart, but P3/P4 approach to 0.4 mm.
+    # Because the binding minimum (0.4) is NOT the intra-footprint gap (1.7),
+    # the pair is board-level -- the equality-check guard.
+    report = _census_samefp(_load(tmp_path, board_same_footprint_fail_source()))
+    div = _conductor_pair(report, "DIV_MID")
+    assert div.clearance_mm == pytest.approx(0.4, abs=1e-3)
+    assert div.relationship == "board"
+
+
+def test_edge_pair_is_always_board(tmp_path):
+    report = _census_samefp(_load(tmp_path, board_same_footprint_fail_source()))
+    edge = next(p for p in report.pairs if p.kind == "edge")
+    assert edge.relationship == "board"
+
+
+def test_relationship_defaults_board_for_plain_board(tmp_path):
+    # The single-pad-per-footprint board has no same-footprint pairs at all.
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    report = compute_creepage_census(pcb, resolve_hv_nets(pcb, "HV", _hv_map()), min_mm=1.5)
+    assert all(p.relationship == "board" for p in report.pairs)
+
+
+def test_gate_passed_excludes_waived_pairs_but_passed_does_not(tmp_path):
+    # A board whose ONLY sub-requirement fail is a same-footprint pair: once that
+    # pair is waived, gate_passed is True while the raw passed stays False.
+    report = _census_samefp(_load(tmp_path, board_same_footprint_only_source()))
+    assert report.passed is False  # SRC_NEG (same_footprint) fails
+    assert report.gate_passed is False  # nothing waived yet
+
+    for p in report.pairs:
+        if p.relationship == "same_footprint":
+            p.waived = True
+    assert report.gate_passed is True  # waived pair drops out of the gate
+    assert report.passed is False  # raw result still counts it (safety gate)
+
+
+def test_gate_passed_still_fails_on_a_board_pair_after_waiver(tmp_path):
+    # With a board-level fail present, waiving same-footprint pairs must NOT
+    # rescue the gate.
+    report = _census_samefp(_load(tmp_path, board_same_footprint_fail_source()))
+    for p in report.pairs:
+        if p.relationship == "same_footprint":
+            p.waived = True
+    assert report.gate_passed is False  # GND / DIV_MID board fails remain
+    assert report.passed is False
+
+
+def test_relationship_serialized_always_and_waived_only_when_true(tmp_path):
+    report = _census_samefp(_load(tmp_path, board_same_footprint_only_source()))
+    same_fp = _conductor_pair(report, "SRC_NEG")
+    board = _conductor_pair(report, "GND")
+    # relationship is always present; waived only appears once set True.
+    assert same_fp.to_dict()["relationship"] == "same_footprint"
+    assert "waived" not in same_fp.to_dict()
+    same_fp.waived = True
+    assert same_fp.to_dict()["waived"] is True
+    assert board.to_dict()["relationship"] == "board"
+    assert "waived" not in board.to_dict()

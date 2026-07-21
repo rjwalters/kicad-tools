@@ -203,6 +203,18 @@ class CreepagePair:
     required_creepage_mm: float | None = None
     required_clearance_mm: float | None = None
     provenance: dict[str, Any] = field(default_factory=dict)
+    # Footprint relationship of the binding measurement (#4403).  ``"board"``
+    # is a layout-fixable net-to-net (or net-to-edge) approach; ``"same_footprint"``
+    # means the binding gap is between two pads of a SINGLE footprint (component
+    # pin pitch), which the board layout cannot change -- per IEC 60664-1 that is
+    # functional insulation governed by the component's own rating, not the
+    # board's creepage tables.
+    relationship: str = "board"  # "board" | "same_footprint"
+    # Set True only when the operator passes ``--waive-same-footprint`` AND this
+    # pair is ``relationship == "same_footprint"``.  A waived pair is still listed
+    # (annotated WAIVED) but is excluded from :attr:`CreepageReport.gate_passed`.
+    # It NEVER affects the raw :attr:`CreepageReport.passed` (the safety gate).
+    waived: bool = False
 
     @property
     def governing_creepage_mm(self) -> float:
@@ -265,7 +277,11 @@ class CreepagePair:
 
     def to_dict(self) -> dict[str, Any]:
         # Phase-1 backward compatibility: with no derived requirement (manual
-        # --min only) the JSON schema is byte-for-byte identical to phase 1.
+        # --min only) the JSON schema matched phase 1 byte-for-byte.  The
+        # additive ``relationship`` key (#4403) intentionally changes that
+        # schema in BOTH phase-1 and phase-2 rows -- the serialization
+        # drift-guard tests were updated to include it.  ``waived`` is emitted
+        # only on the rows the operator actually waived.
         base = {
             "net_a": self.net_a,
             "net_b": self.net_b,
@@ -274,8 +290,11 @@ class CreepagePair:
             "clearance_mm": round(self.clearance_mm, 4),
             "creepage_mm": round(self.creepage_mm, 4),
             "margin_mm": round(self.margin_mm, 4),
+            "relationship": self.relationship,
             "pass": self.passed,
         }
+        if self.waived:
+            base["waived"] = True
         if self.required_creepage_mm is None:
             return base
         # Phase-2 (standard) mode: attach the derived requirements + provenance.
@@ -326,8 +345,28 @@ class CreepageReport:
 
     @property
     def passed(self) -> bool:
-        """``True`` when every pair clears its bounds (vacuously true if empty)."""
+        """``True`` when every pair clears its bounds (vacuously true if empty).
+
+        This is the RAW, un-waived result.  The manufacturing-readiness gate
+        (``kct audit`` -> :class:`IsolationStatus`) keys off THIS property, so a
+        same-footprint waiver must NEVER flow into it -- an unqualified
+        component-internal shortfall still blocks manufacturing by default
+        (#4403 safety guard).  Only :attr:`gate_passed` honors waivers, and only
+        the standalone ``kct creepage`` CLI opts into it.
+        """
         return all(p.passed for p in self.pairs)
+
+    @property
+    def gate_passed(self) -> bool:
+        """``True`` when every NON-waived pair clears its bounds (#4403).
+
+        Identical to :attr:`passed` unless the operator waived same-footprint
+        pairs via ``kct creepage --waive-same-footprint``.  Waived pairs remain
+        listed (annotated WAIVED) but drop out of this exit-code gate so the
+        actionable board-level defects are no longer buried under
+        component-rating residuals.
+        """
+        return all(p.passed for p in self.pairs if not p.waived)
 
     @property
     def has_hv_nets(self) -> bool:
@@ -547,6 +586,80 @@ def _net_union_on_layer(pcb: PCB, layer_name: str) -> dict[int, Any]:
         for net_number, parts in _net_geoms_on_layer(pcb, layer_name).items()
         if parts
     }
+
+
+# ---------------------------------------------------------------------------
+# Footprint-membership index for same-footprint classification (#4403)
+# ---------------------------------------------------------------------------
+
+
+class _FootprintPadIndex:
+    """Per-layer footprint -> net -> pad-polygon index (#4403).
+
+    The census unions each net's copper per layer (:func:`_net_union_on_layer`)
+    before pairing, which erases which *pad* -- and therefore which *footprint*
+    -- produced a binding measurement.  This index recovers that identity so a
+    component-internal pad gap (two pads of one package) can be told apart from
+    a board-fixable net-to-net approach.
+
+    It attributes the *binding* measurement: a binding pair ``(net_a, net_b)``
+    with binding straight-line ``clearance`` on ``layer`` is ``same_footprint``
+    iff a **single footprint** holds pads on BOTH nets whose minimum
+    pad-to-pad distance on that layer equals the binding ``clearance`` within a
+    geometric epsilon.  The equality check matters: two nets can share a
+    footprint *and* also approach at a board-level site elsewhere that is the
+    true binding minimum -- when the intra-footprint gap is larger than the
+    binding clearance, something else (a trace, another package) bound it, so
+    the pair is correctly ``board``.
+
+    Reuses the same pad geometry (:func:`_pad_polygon`) and layer-membership
+    test as :func:`_net_geoms_on_layer`, and ``fp.reference`` as the footprint
+    identity -- the same refdes source the hole-to-hole same-footprint downgrade
+    uses (``validate/rules/dimensions.py``).
+    """
+
+    def __init__(self, pcb: PCB) -> None:
+        from kicad_tools.validate.rules.clearance import _pad_polygon
+
+        # layer -> net_number -> set(fp_ref) that has a pad on that net/layer.
+        self._by_net: dict[str, dict[int, set[str]]] = {}
+        # layer -> (fp_ref, net_number) -> [pad polygons].
+        self._pads: dict[str, dict[tuple[str, int], list[Any]]] = {}
+
+        copper_layer_names = [layer.name for layer in pcb.copper_layers]
+        for fp in pcb.footprints:
+            ref = fp.reference
+            if not ref:
+                continue
+            for pad in fp.pads:
+                poly = _pad_polygon(pad, fp)
+                if poly is None or getattr(poly, "is_empty", False):
+                    continue
+                for layer_name in copper_layer_names:
+                    if layer_name in pad.layers or "*.Cu" in pad.layers:
+                        self._by_net.setdefault(layer_name, {}).setdefault(
+                            pad.net_number, set()
+                        ).add(ref)
+                        self._pads.setdefault(layer_name, {}).setdefault(
+                            (ref, pad.net_number), []
+                        ).append(poly)
+
+    def relationship(self, layer_name: str, net_a: int, net_b: int, clearance_mm: float) -> str:
+        """Classify a binding pair as ``"same_footprint"`` or ``"board"``."""
+        by_net = self._by_net.get(layer_name)
+        pads = self._pads.get(layer_name)
+        if not by_net or pads is None:
+            return "board"
+        shared = by_net.get(net_a, set()) & by_net.get(net_b, set())
+        for ref in shared:
+            a_polys = pads.get((ref, net_a), [])
+            b_polys = pads.get((ref, net_b), [])
+            if not a_polys or not b_polys:
+                continue
+            min_dist = min(pa.distance(pb) for pa in a_polys for pb in b_polys)
+            if abs(min_dist - clearance_mm) <= _PASS_TOLERANCE:
+                return "same_footprint"
+        return "board"
 
 
 # ---------------------------------------------------------------------------
@@ -914,6 +1027,11 @@ def compute_creepage_census(
     for layer in pcb.copper_layers:
         layer_unions[layer.name] = _net_union_on_layer(pcb, layer.name)
 
+    # Footprint-membership index (#4403): recovers the pad->footprint identity
+    # the per-net union erases, so each binding pair can be classified as a
+    # board-fixable approach or a component-internal (same-footprint) gap.
+    fp_index = _FootprintPadIndex(pcb)
+
     # --- HV-vs-other-conductor pairs (binding layer = smallest creepage) ---
     # (hv_number, other_number) -> (clearance, creepage, layer)
     #
@@ -946,6 +1064,7 @@ def compute_creepage_census(
     for (hv_num, other_num), (clearance, creepage, layer_name) in best.items():
         net_a_name = hv_nets[hv_num]
         net_b_name = number_to_name.get(other_num, f"net{other_num}")
+        relationship = fp_index.relationship(layer_name, hv_num, other_num, clearance)
         if map_mode:
             req_creep, req_clear, prov = _pair_requirement(net_a_name, net_b_name)
             report.pairs.append(
@@ -959,6 +1078,7 @@ def compute_creepage_census(
                     layer=layer_name,
                     clearance_mm=clearance,
                     creepage_mm=creepage,
+                    relationship=relationship,
                 )
             )
         else:
@@ -970,6 +1090,7 @@ def compute_creepage_census(
                     layer=layer_name,
                     clearance_mm=clearance,
                     creepage_mm=creepage,
+                    relationship=relationship,
                 )
             )
 
