@@ -331,6 +331,19 @@ def sheet_instances(sheet_path: str, page: str) -> SExp:
 # =============================================================================
 
 
+def _net_node(net: int, net_name: str | None) -> SExp:
+    """Build a ``(net ...)`` child in the requested dialect (issue #4416).
+
+    When *net_name* is a non-empty string the reference is emitted in
+    KiCad-10 name-only form ``(net "name")``; otherwise the numeric
+    ``(net <int>)`` form is used.  ``None``/empty *net_name* preserves the
+    historical numeric behavior for every existing caller.
+    """
+    if net_name:
+        return SExp.list("net", SExp.quoted_atom(net_name))
+    return SExp.list("net", net)
+
+
 def segment_node(
     start_x: float,
     start_y: float,
@@ -340,6 +353,7 @@ def segment_node(
     layer: str,
     net: int,
     uuid_str: str,
+    net_name: str | None = None,
 ) -> SExp:
     """Build a PCB track segment S-expression.
 
@@ -350,6 +364,10 @@ def segment_node(
         layer: Copper layer (e.g., "F.Cu", "B.Cu")
         net: Net number
         uuid_str: Unique identifier
+        net_name: Optional net name (issue #4416).  When supplied (and
+            non-empty) the net reference is emitted in KiCad-10 name-only
+            ``(net "name")`` dialect so copper appended to a name-based
+            board stays name-based.  Defaults to ``None`` (numeric).
 
     Example output:
         (segment
@@ -367,7 +385,7 @@ def segment_node(
         SExp.list("end", fmt(end_x), fmt(end_y)),
         SExp.list("width", fmt(width)),
         SExp.list("layer", layer),
-        SExp.list("net", net),
+        _net_node(net, net_name),
         uuid_node(uuid_str),
     )
 
@@ -381,6 +399,7 @@ def via_node(
     net: int,
     uuid_str: str,
     via_type: str | None = None,
+    net_name: str | None = None,
 ) -> SExp:
     """Build a PCB via S-expression.
 
@@ -394,6 +413,9 @@ def via_node(
         via_type: Optional via type. Use ``"micro"`` for micro-vias
             (KiCad emits ``(via micro ...)``). When *None* (the default),
             a standard through-hole via is produced.
+        net_name: Optional net name (issue #4416).  When supplied (and
+            non-empty) the net reference is emitted in name-only
+            ``(net "name")`` dialect.  Defaults to ``None`` (numeric).
 
     Example output (standard):
         (via
@@ -416,6 +438,7 @@ def via_node(
         )
     """
     layers_node = SExp.list("layers", *layers)
+    net_node = _net_node(net, net_name)
     if via_type == "micro":
         return SExp.list(
             "via",
@@ -424,7 +447,7 @@ def via_node(
             SExp.list("size", fmt(size)),
             SExp.list("drill", fmt(drill)),
             layers_node,
-            SExp.list("net", net),
+            net_node,
             uuid_node(uuid_str),
         )
     return SExp.list(
@@ -433,7 +456,7 @@ def via_node(
         SExp.list("size", fmt(size)),
         SExp.list("drill", fmt(drill)),
         layers_node,
-        SExp.list("net", net),
+        net_node,
         uuid_node(uuid_str),
     )
 

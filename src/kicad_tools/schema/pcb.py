@@ -998,6 +998,14 @@ class Segment:
     net_number: int
     net_name: str = ""
     uuid: str = ""
+    # Issue #4416: parsed-dialect memory.  ``True`` when this segment's net
+    # reference was read in KiCad-10 name-only form ``(net "SDA")`` (no
+    # numeric id).  Serialization re-emits the same dialect so a name-based
+    # board stays name-based on save instead of flipping to ``(net 12)`` and
+    # ping-ponging with kicad-cli's ``--save-board`` name-only rewrite.
+    # Mirrors the parser's ``_originally_bare`` round-trip flag at the element
+    # level.  ``compare=False`` keeps dataclass equality identity-stable.
+    net_name_only: bool = field(default=False, compare=False)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Segment:
@@ -1030,22 +1038,48 @@ class Segment:
                 # KiCad 10 name-only format: (net "name")
                 seg.net_number = 0
                 seg.net_name = net.get_string(0) or ""
+                seg.net_name_only = True
         if uuid := sexp.find("uuid"):
             seg.uuid = uuid.get_string(0) or ""
 
         return seg
 
-    def to_sexp(self) -> SExp:
-        """Convert segment to S-expression for serialization."""
+    def _net_sexp(self) -> SExp:
+        """Build the ``(net ...)`` child in the segment's parsed dialect.
+
+        Issue #4416: emit ``(net "name")`` when the segment was read (or
+        constructed) in KiCad-10 name-only dialect and a net name is known;
+        otherwise fall back to the numeric ``(net N)`` form.  The empty-name
+        fallback keeps numeric boards and programmatic construction unchanged
+        and avoids emitting an invalid ``(net "")``.
+        """
+        if self.net_name_only and self.net_name:
+            return SExp.list("net", SExp.quoted_atom(self.net_name))
+        return SExp.list("net", self.net_number)
+
+    def to_sexp(self, offset: tuple[float, float] = (0.0, 0.0)) -> SExp:
+        """Convert segment to S-expression for serialization.
+
+        Issue #3925/#3907 parity: field order matches KiCad's canonical
+        writer (``uuid`` BEFORE ``net``), aligning the schema emitter with
+        ``router/primitives.py`` so a node flowing through either path does
+        not churn field order on the first KiCad open/save round-trip.
+
+        Issue #4416: ``offset`` adds a board-origin shift to the stored
+        coordinates (board-relative -> sheet-absolute) without mutating the
+        Python object, so ``add_trace`` can serialize through this single
+        dialect-aware path instead of hand-rolling a numeric ``(net ...)``.
+        """
+        ox, oy = offset
         seg_sexp = SExp.list("segment")
-        seg_sexp.append(SExp.list("start", self.start[0], self.start[1]))
-        seg_sexp.append(SExp.list("end", self.end[0], self.end[1]))
+        seg_sexp.append(SExp.list("start", self.start[0] + ox, self.start[1] + oy))
+        seg_sexp.append(SExp.list("end", self.end[0] + ox, self.end[1] + oy))
         seg_sexp.append(SExp.list("width", self.width))
         seg_sexp.append(SExp.list("layer", self.layer))
-        seg_sexp.append(SExp.list("net", self.net_number))
         if not self.uuid:
             self.uuid = str(uuid.uuid4())
         seg_sexp.append(SExp.list("uuid", self.uuid))
+        seg_sexp.append(self._net_sexp())
         return seg_sexp
 
 
@@ -1067,6 +1101,10 @@ class Via:
     # ``None`` => standard through-hole via.  The serializer mirrors
     # :func:`kicad_tools.sexp.builders.via_node` exactly.
     via_type: str | None = None
+    # Issue #4416: parsed-dialect memory (see :class:`Segment.net_name_only`).
+    # ``True`` when the via's net reference was read in name-only
+    # ``(net "SDA")`` form so serialization re-emits the same dialect.
+    net_name_only: bool = field(default=False, compare=False)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Via:
@@ -1116,32 +1154,51 @@ class Via:
                 # KiCad 10 name-only format: (net "name")
                 via.net_number = 0
                 via.net_name = net.get_string(0) or ""
+                via.net_name_only = True
         if uuid := sexp.find("uuid"):
             via.uuid = uuid.get_string(0) or ""
 
         return via
 
-    def to_sexp(self) -> SExp:
+    def _net_sexp(self) -> SExp:
+        """Build the ``(net ...)`` child in the via's parsed dialect (#4416).
+
+        See :meth:`Segment._net_sexp` -- emit ``(net "name")`` for name-only
+        boards with a known name, numeric ``(net N)`` otherwise.
+        """
+        if self.net_name_only and self.net_name:
+            return SExp.list("net", SExp.quoted_atom(self.net_name))
+        return SExp.list("net", self.net_number)
+
+    def to_sexp(self, offset: tuple[float, float] = (0.0, 0.0)) -> SExp:
         """Convert via to S-expression for serialization.
 
         When :attr:`via_type` is set (``"micro"`` / ``"blind"`` /
         ``"buried"``) the token is emitted immediately after ``via`` to
         match KiCad's format and survive a load + save round-trip
         (issue #3124).
+
+        Issue #3925/#3907 parity: ``uuid`` is emitted BEFORE ``net`` to
+        match KiCad's canonical writer and ``router/primitives.py``.
+
+        Issue #4416: ``offset`` adds a board-origin shift (board-relative ->
+        sheet-absolute) without mutating the Python object, and the net
+        reference is emitted in the via's parsed dialect.
         """
+        ox, oy = offset
         via_sexp = SExp.list("via")
         if self.via_type:
             via_sexp.append(SExp.atom(self.via_type))
-        via_sexp.append(SExp.list("at", self.position[0], self.position[1]))
+        via_sexp.append(SExp.list("at", self.position[0] + ox, self.position[1] + oy))
         via_sexp.append(SExp.list("size", self.size))
         via_sexp.append(SExp.list("drill", self.drill))
         # Build layers list
         layers_sexp = SExp.list("layers", *self.layers)
         via_sexp.append(layers_sexp)
-        via_sexp.append(SExp.list("net", self.net_number))
         if not self.uuid:
             self.uuid = str(uuid.uuid4())
         via_sexp.append(SExp.list("uuid", self.uuid))
+        via_sexp.append(self._net_sexp())
         return via_sexp
 
 
@@ -1506,6 +1563,13 @@ class PCB:
         self._setup: Setup | None = None
         self._title_block: dict[str, str] = {}
         self._board_origin: tuple[float, float] = (0.0, 0.0)
+        # Issue #4416: board-level net-reference dialect signal.  Set by
+        # _fixup_net_numbers() when the loaded board uses KiCad-10 name-only
+        # ``(net "SDA")`` inline references (or had its header net table
+        # stripped by kicad-cli --save-board).  Newly added copper
+        # (add_trace/add_via) emits name-based refs when this is True so a
+        # name-based board stays name-based on save.
+        self._net_name_only_dialect: bool = False
         self._parse()
         self._detect_board_origin()
         self._link_footprint_sexp_nodes()
@@ -1939,6 +2003,25 @@ class PCB:
            recovery loop, otherwise ``self._nets`` stays empty and every
            element silently collapses to ``net_number=0``.
         """
+        # Issue #4416: detect the board-level net-reference dialect BEFORE the
+        # recovery loop rewrites name-only elements' net_number.  The board is
+        # treated as name-only when any parsed segment/via was read in
+        # ``(net "name")`` form, or when any pad carries a name but no number
+        # (the pad-level name-only signal).  The kicad-cli --save-board case
+        # (stripped header table) is covered by these same element-level flags
+        # -- its inline copper/pad refs are all name-only.  We deliberately do
+        # NOT treat an empty ``self._nets`` alone as name-only, so a freshly
+        # constructed board with no header table keeps numeric emission.
+        self._net_name_only_dialect = (
+            any(seg.net_name_only for seg in self._segments)
+            or any(via.net_name_only for via in self._vias)
+            or any(
+                pad.net_number == 0 and bool(pad.net_name)
+                for fp in self._footprints
+                for pad in fp.pads
+            )
+        )
+
         # KiCad 10 --save-board: no header table survived. Synthesize one from
         # the inline name-only references so the recovery loop below has a map.
         if not self._nets:
@@ -4741,22 +4824,19 @@ class PCB:
                 width=width,
                 layer=layer,
                 net_number=net_number,
+                net_name=net or "",
+                # Issue #4416: match the board's net-reference dialect so
+                # copper added to a name-based board stays name-based on save.
+                net_name_only=self._net_name_only_dialect and bool(net),
                 uuid=str(uuid.uuid4()),
             )
             segments.append(seg)
             self._segments.append(seg)
-            if ox != 0.0 or oy != 0.0:
-                # Build sheet-absolute sexp without mutating the Python object.
-                seg_sexp = SExp.list("segment")
-                seg_sexp.append(SExp.list("start", seg.start[0] + ox, seg.start[1] + oy))
-                seg_sexp.append(SExp.list("end", seg.end[0] + ox, seg.end[1] + oy))
-                seg_sexp.append(SExp.list("width", seg.width))
-                seg_sexp.append(SExp.list("layer", seg.layer))
-                seg_sexp.append(SExp.list("net", seg.net_number))
-                seg_sexp.append(SExp.list("uuid", seg.uuid))
-                self._sexp.append(seg_sexp)
-            else:
-                self._sexp.append(seg.to_sexp())
+            # Serialize through the dialect-aware emitter; the board-origin
+            # offset converts board-relative coords to sheet-absolute without
+            # mutating the Python object (issue #4416 folds the former hand-
+            # rolled numeric branch into Segment.to_sexp).
+            self._sexp.append(seg.to_sexp(offset=(ox, oy)))
 
         return segments
 
@@ -4815,24 +4895,19 @@ class PCB:
             drill=drill,
             layers=list(layers),
             net_number=net_number,
+            net_name=net or "",
+            # Issue #4416: match the board's net-reference dialect (see add_trace).
+            net_name_only=self._net_name_only_dialect and bool(net),
             uuid=str(uuid.uuid4()),
         )
         self._vias.append(via)
 
         # Input position is board-relative (matches Footprint.position and
         # add_trace inputs); the S-expression form requires sheet-absolute.
+        # Serialize through the dialect-aware emitter with the board-origin
+        # offset (issue #4416 folds the former hand-rolled numeric branch in).
         ox, oy = self._board_origin
-        if ox != 0.0 or oy != 0.0:
-            via_sexp = SExp.list("via")
-            via_sexp.append(SExp.list("at", via.position[0] + ox, via.position[1] + oy))
-            via_sexp.append(SExp.list("size", via.size))
-            via_sexp.append(SExp.list("drill", via.drill))
-            via_sexp.append(SExp.list("layers", *via.layers))
-            via_sexp.append(SExp.list("net", via.net_number))
-            via_sexp.append(SExp.list("uuid", via.uuid))
-            self._sexp.append(via_sexp)
-        else:
-            self._sexp.append(via.to_sexp())
+        self._sexp.append(via.to_sexp(offset=(ox, oy)))
 
         return via
 

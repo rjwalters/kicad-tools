@@ -1,5 +1,6 @@
 """Tests for PCB parsing and editing."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -3879,6 +3880,173 @@ class TestKiCad10NetNumberRecovery:
         assert pad1.net_name == "GND"
         assert pad2.net_number == 2
         assert pad2.net_name == "+3.3V"
+
+
+class TestNetDialectPreservation:
+    """Issue #4416: preserve the input board's net-reference dialect on save.
+
+    A KiCad-10 name-only board uses inline ``(net "SDA")`` references (no
+    numeric id).  Copper added by ``add_trace`` / ``add_via`` must re-emit
+    that same dialect so the file does not flip to numeric ``(net 12)`` and
+    ping-pong with kicad-cli's ``--save-board`` name-only rewrite.  Numeric
+    boards must stay numeric (no regression).
+    """
+
+    @staticmethod
+    def _child_names(sexp) -> list[str]:
+        return [c.name for c in sexp.children if c.name is not None]
+
+    def test_added_trace_stays_name_based_on_name_only_board(self, tmp_path):
+        """add_trace on a name-only board emits (net "GND"), not (net 1)."""
+        pcb_path = tmp_path / "kicad10.kicad_pcb"
+        pcb_path.write_text(KICAD10_NAMEONLY_PCB)
+        pcb = PCB.load(pcb_path)
+
+        # Board dialect is detected as name-only (seg-1 uses (net "GND")).
+        assert pcb._net_name_only_dialect is True
+
+        added = pcb.add_trace((99.0, 101.0), (101.0, 101.0), net="GND")
+        assert len(added) == 1
+        assert added[0].net_name_only is True
+        assert added[0].net_name == "GND"
+
+        out_path = tmp_path / "out.kicad_pcb"
+        pcb.save(out_path)
+        text = out_path.read_text()
+
+        # Both the original and the newly added segment are name-based.
+        # Every top-level (segment ...) net ref must be quoted, none numeric.
+        seg_net_refs = re.findall(r"\(segment.*?(\(net[^)]*\))", text, re.DOTALL)
+        assert len(seg_net_refs) == 2
+        for ref in seg_net_refs:
+            assert ref == '(net "GND")', ref
+
+        # Reloading round-trips the dialect (name-only preserved).
+        reloaded = PCB.load(out_path)
+        assert all(s.net_name_only for s in reloaded.segments)
+
+    def test_added_via_stays_name_based_on_name_only_board(self, tmp_path):
+        """add_via on a name-only board emits (net "VCC"), not (net 2)."""
+        pcb_path = tmp_path / "kicad10.kicad_pcb"
+        pcb_path.write_text(KICAD10_NAMEONLY_PCB)
+        pcb = PCB.load(pcb_path)
+
+        via = pcb.add_via(100.0, 100.0, net="VCC")
+        assert via is not None
+        assert via.net_name_only is True
+
+        out_path = tmp_path / "out.kicad_pcb"
+        pcb.save(out_path)
+        text = out_path.read_text()
+
+        via_net_refs = re.findall(r"\(via\b.*?(\(net[^)]*\))", text, re.DOTALL)
+        assert len(via_net_refs) == 1
+        assert via_net_refs[0] == '(net "VCC")'
+
+    def test_numeric_board_stays_numeric(self, minimal_pcb, tmp_path):
+        """add_trace on a traditional (net N "name") board stays numeric."""
+        pcb = PCB.load(minimal_pcb)
+        assert pcb._net_name_only_dialect is False
+
+        added = pcb.add_trace((10.0, 10.0), (20.0, 10.0), net="GND")
+        assert len(added) == 1
+        assert added[0].net_name_only is False
+
+        out_path = tmp_path / "out.kicad_pcb"
+        pcb.save(out_path)
+        text = out_path.read_text()
+
+        # No inline name-only segment refs appear on a numeric board.
+        seg_net_refs = re.findall(r"\(segment.*?(\(net[^)]*\))", text, re.DOTALL)
+        assert seg_net_refs, "expected at least one segment"
+        for ref in seg_net_refs:
+            assert re.match(r"\(net \d", ref), ref
+
+    def test_schema_segment_field_order_uuid_before_net(self):
+        """Segment.to_sexp emits uuid BEFORE net (KiCad canonical, #3925)."""
+        from kicad_tools.schema.pcb import Segment
+
+        seg = Segment(
+            start=(0.0, 0.0),
+            end=(1.0, 0.0),
+            width=0.25,
+            layer="F.Cu",
+            net_number=3,
+            net_name="SDA",
+            uuid="seg-uuid",
+        )
+        names = self._child_names(seg.to_sexp())
+        assert names.index("uuid") < names.index("net")
+
+    def test_schema_via_field_order_uuid_before_net(self):
+        """Via.to_sexp emits uuid BEFORE net (KiCad canonical, #3925)."""
+        from kicad_tools.schema.pcb import Via
+
+        via = Via(
+            position=(0.0, 0.0),
+            size=0.6,
+            drill=0.3,
+            layers=["F.Cu", "B.Cu"],
+            net_number=3,
+            net_name="SDA",
+            uuid="via-uuid",
+        )
+        names = self._child_names(via.to_sexp())
+        assert names.index("uuid") < names.index("net")
+
+    def test_name_only_segment_with_empty_name_falls_back_to_numeric(self):
+        """A name-only segment with a known number but empty name is safe.
+
+        Serializes to a valid ``(net N)`` -- never an invalid ``(net "")``.
+        """
+        from kicad_tools.schema.pcb import Segment
+
+        seg = Segment(
+            start=(0.0, 0.0),
+            end=(1.0, 0.0),
+            width=0.25,
+            layer="F.Cu",
+            net_number=7,
+            net_name="",
+            net_name_only=True,
+            uuid="seg-uuid",
+        )
+        net_child = seg.to_sexp().find("net")
+        assert net_child is not None
+        assert net_child.get_int(0) == 7
+        assert '(net "")' not in seg.to_sexp().to_string()
+
+    def test_router_primitive_segment_name_only_emission(self):
+        """router.primitives.Segment.to_sexp(name_only=True) emits the name."""
+        from kicad_tools.router.primitives import Layer, Segment
+
+        seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=1.0,
+            y2=0.0,
+            width=0.25,
+            layer=Layer.F_CU,
+            net=3,
+            net_name="SDA",
+        )
+        assert '(net "SDA")' in seg.to_sexp(name_only=True)
+        assert "(net 3)" in seg.to_sexp(name_only=False)
+        # Empty name falls back to numeric even when name_only is requested.
+        seg.net_name = ""
+        assert "(net 3)" in seg.to_sexp(name_only=True)
+
+    def test_builder_segment_node_name_only(self):
+        """builders.segment_node emits name-based ref when net_name is given."""
+        from kicad_tools.sexp.builders import segment_node
+
+        node = segment_node(0, 0, 1, 0, 0.25, "F.Cu", 3, "u", net_name="SDA")
+        net_child = node.find("net")
+        assert net_child is not None
+        assert net_child.get_string(0) == "SDA"
+        # Default (no net_name) stays numeric.
+        node2 = segment_node(0, 0, 1, 0, 0.25, "F.Cu", 3, "u")
+        assert node2.find("net").get_int(0) == 3
 
 
 class TestRemoveFootprint:

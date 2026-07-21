@@ -239,16 +239,22 @@ class Via:
     # producer of micro vias from inside the routing pipeline.
     is_micro: bool = False
 
-    def to_sexp(self) -> str:
+    def to_sexp(self, name_only: bool = False) -> str:
         """Generate KiCad S-expression.
 
         Emits ``(via micro ...)`` when :attr:`is_micro` is True so the
         micro-via token survives the route -> finalize -> file
         round-trip (issue #3124).  Otherwise emits a plain ``(via ...)``.
+
+        Issue #4416: when ``name_only`` is True and :attr:`net_name` is
+        known, the net reference is emitted as ``(net "name")`` to match a
+        KiCad-10 name-based board's dialect; otherwise the numeric
+        ``(net N)`` form is used (preserving behavior for numeric boards).
         """
         layer_start = self.layers[0].kicad_name
         layer_end = self.layers[1].kicad_name
         type_token = " micro" if self.is_micro else ""
+        net_ref = f'"{self.net_name}"' if name_only and self.net_name else str(self.net)
         # Issue #3925: field order matches KiCad's canonical writer
         # (uuid BEFORE net).  Emitting net before uuid caused every via to
         # churn on the first KiCad open/save round-trip, producing a diff
@@ -259,7 +265,7 @@ class Via:
 \t\t(drill {_fmt(self.drill)})
 \t\t(layers "{layer_start}" "{layer_end}")
 \t\t(uuid "{_make_uuid()}")
-\t\t(net {self.net})
+\t\t(net {net_ref})
 \t)"""
 
 
@@ -286,8 +292,13 @@ class Segment:
         """Return the end point as a tuple (x2, y2)."""
         return (self.x2, self.y2)
 
-    def to_sexp(self) -> str:
+    def to_sexp(self, name_only: bool = False) -> str:
         """Generate KiCad S-expression.
+
+        Issue #4416: when ``name_only`` is True and :attr:`net_name` is
+        known, the net reference is emitted as ``(net "name")`` to match a
+        KiCad-10 name-based board's dialect; otherwise the numeric
+        ``(net N)`` form is used.
 
         Issue #3925: field order matches KiCad's canonical writer (uuid
         BEFORE net).  Emitting net before uuid caused every segment to
@@ -324,13 +335,14 @@ class Segment:
                 self.y2,
                 context=f"net {self.net} on {self.layer.kicad_name}",
             )
+        net_ref = f'"{self.net_name}"' if name_only and self.net_name else str(self.net)
         return f"""(segment
 \t\t(start {self.x1:.4f} {self.y1:.4f})
 \t\t(end {self.x2:.4f} {self.y2:.4f})
 \t\t(width {_fmt(self.width)})
 \t\t(layer "{self.layer.kicad_name}")
 \t\t(uuid "{_make_uuid()}")
-\t\t(net {self.net})
+\t\t(net {net_ref})
 \t)"""
 
 
@@ -351,13 +363,18 @@ class Route:
     # re-enabled under the C++ backend).
     is_escape: bool = False
 
-    def to_sexp(self) -> str:
-        """Generate all S-expressions for this route."""
+    def to_sexp(self, name_only: bool = False) -> str:
+        """Generate all S-expressions for this route.
+
+        Issue #4416: ``name_only`` is threaded to every segment/via emitter
+        so a route appended to a KiCad-10 name-based board keeps that
+        board's ``(net "name")`` dialect.
+        """
         parts = []
         for seg in self.segments:
-            parts.append(seg.to_sexp())
+            parts.append(seg.to_sexp(name_only=name_only))
         for via in self.vias:
-            parts.append(via.to_sexp())
+            parts.append(via.to_sexp(name_only=name_only))
         return "\n\t".join(parts)
 
     def copy_geometry(self) -> "Route":

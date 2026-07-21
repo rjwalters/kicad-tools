@@ -59,6 +59,7 @@ import logging
 import math
 import os
 import random
+import re
 import shutil
 import signal
 import sys
@@ -723,6 +724,27 @@ def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
     return "".join(out), segments_removed, vias_removed
 
 
+# Issue #4416: a KiCad-10 name-only inline net reference is ``(net "SDA")`` --
+# a ``(net`` token immediately followed by a quoted string.  Numeric boards
+# write ``(net 12)`` / ``(net 12 "SDA")`` inline and ``(net 12 "SDA")`` in the
+# header table (a digit always follows ``(net``), so the quoted-first form
+# appears only on name-based boards.  This lets us detect the input dialect
+# and re-emit route-added copper in the same dialect (see _finalize_routes).
+_NAME_ONLY_NET_RE = re.compile(r'\(net\s+"')
+
+
+def _board_uses_name_only_dialect(pcb_path: "Path | str") -> bool:
+    """Return True when *pcb_path* uses KiCad-10 name-only net refs (#4416).
+
+    Returns False on any read error (falls back to today's numeric emission).
+    """
+    try:
+        content = Path(pcb_path).read_text()
+    except OSError:
+        return False
+    return bool(_NAME_ONLY_NET_RE.search(content))
+
+
 def _insert_sexp_before_closing(pcb_content: str, sexp_fragments: str) -> str:
     """Insert S-expression fragments before the final closing parenthesis of a PCB file.
 
@@ -1165,6 +1187,10 @@ def _make_checkpoint_callback(
     if interval <= 0:
         return None
 
+    # Issue #4416: detect the source dialect once so every checkpoint write
+    # re-emits route copper in the board's own net-reference dialect.
+    name_only = _board_uses_name_only_dialect(pcb_path)
+
     # Mutable container so the closure can write back the timestamp.
     # ``[None]`` sentinel means "no checkpoint written yet"; the first
     # improvement event triggers an immediate write.
@@ -1180,7 +1206,7 @@ def _make_checkpoint_callback(
         # Materialize sexp from the snapshot (NOT self.routes).  Each
         # Route has its own to_sexp() so we can serialize directly without
         # touching the router's live state.
-        route_sexp = "\n\t".join(r.to_sexp() for r in best_routes)
+        route_sexp = "\n\t".join(r.to_sexp(name_only=name_only) for r in best_routes)
         # Issue #3155: carry preserved existing copper through every
         # checkpoint so the strip-then-rewrite (#2976) inside
         # _write_routed_pcb does not erase it from the staged input.
@@ -1244,19 +1270,25 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
 def _serialize_preserved_routes(
     preserved_routes: list["Route"],
     exclude_net_ids: set[int] | None = None,
+    *,
+    name_only: bool = False,
 ) -> str:
     """Serialize preserved routes, skipping any net in ``exclude_net_ids``.
 
     The exclusion set is the freshly-routed net ids: a net that was both
     pre-existing *and* re-routed must be emitted from the routed copy only,
     never twice (#3155 defensive dedupe).
+
+    Issue #4416: ``name_only`` re-emits preserved copper in the board's
+    ``(net "name")`` dialect so an incremental route pass does not flip the
+    preserved geometry to numeric.
     """
     exclude = exclude_net_ids or set()
     parts: list[str] = []
     for route in preserved_routes:
         if route.net in exclude:
             continue
-        sexp = route.to_sexp()
+        sexp = route.to_sexp(name_only=name_only)
         if sexp:
             parts.append(sexp)
     return "\n\t".join(parts)
@@ -1319,6 +1351,7 @@ def _finalize_routes(
     aggregate_segment_drop_threshold: float = 0.5,
     preserve_existing: bool = False,
     preserved_routes: list["Route"] | None = None,
+    pcb_path: "Path | str | None" = None,
 ) -> tuple[str, dict, dict]:
     """Run cleanup, compute statistics, and generate S-expressions.
 
@@ -1465,8 +1498,13 @@ def _finalize_routes(
             if not quiet:
                 flush_print(f"  {warning_msg}")
 
-    # Step 2: Generate S-expressions from the cleaned routes
-    route_sexp = router.to_sexp(skip_cleanup=True)
+    # Step 2: Generate S-expressions from the cleaned routes.
+    # Issue #4416: when the source board uses KiCad-10 name-only net refs,
+    # emit route-added copper in the same ``(net "name")`` dialect so the
+    # written file does not flip to numeric and ping-pong with kicad-cli's
+    # --save-board rewrite.  Defaults to numeric when pcb_path is unavailable.
+    name_only = _board_uses_name_only_dialect(pcb_path) if pcb_path is not None else False
+    route_sexp = router.to_sexp(skip_cleanup=True, name_only=name_only)
 
     # Issue #3155: re-emit preserved copper.  The preserved routes were
     # captured once from the freshly-staged input (``preserved_routes``),
@@ -1496,7 +1534,7 @@ def _finalize_routes(
             if stub_net_ids:
                 routed_net_ids = routed_net_ids - stub_net_ids
             preserved_sexp = _serialize_preserved_routes(
-                source_routes, exclude_net_ids=routed_net_ids
+                source_routes, exclude_net_ids=routed_net_ids, name_only=name_only
             )
             if preserved_sexp:
                 emitted = [r for r in source_routes if r.net not in routed_net_ids]
@@ -1591,8 +1629,11 @@ def _save_partial_results() -> bool:
         # Read original PCB content
         original_content = pcb_path.read_text()
 
-        # Get partial route S-expressions
-        route_sexp = router.to_sexp()
+        # Get partial route S-expressions.  Issue #4416: match the input
+        # dialect so the interrupted save does not flip name-based copper to
+        # numeric.  Detect from the content already in hand (avoid re-reading).
+        name_only = bool(_NAME_ONLY_NET_RE.search(original_content))
+        route_sexp = router.to_sexp(name_only=name_only)
 
         if route_sexp:
             # When the interrupt state holds a best *completed* attempt from
@@ -4938,6 +4979,7 @@ def route_with_layer_escalation(
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        pcb_path=pcb_path,
     )
     # Update result with post-cleanup stats
     final_result.nets_routed = final_stats["nets_routed"]
@@ -5636,6 +5678,7 @@ def route_with_rule_relaxation(
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        pcb_path=pcb_path,
     )
     # Update result with post-cleanup stats
     final_result.nets_routed = final_stats["nets_routed"]
@@ -7850,6 +7893,7 @@ def route_with_combined_escalation(
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        pcb_path=pcb_path,
     )
     # Update result with post-cleanup stats
     final_result.nets_routed = final_stats["nets_routed"]
@@ -12143,6 +12187,7 @@ def main(argv: list[str] | None = None) -> int:
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        pcb_path=pcb_path,
     )
 
     # Issue #4292: the committed copper is now serialised into ``route_sexp``;

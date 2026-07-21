@@ -14261,16 +14261,20 @@ class Autorouter:
         self._cleanup_stats = stats
         return stats
 
-    def to_sexp(self, *, skip_cleanup: bool = False) -> str:
+    def to_sexp(self, *, skip_cleanup: bool = False, name_only: bool = False) -> str:
         """Generate KiCad S-expressions for all routes.
 
         Automatically runs ``cleanup_artifacts()`` before emitting to
         remove net-0 orphans and out-of-bounds segments, unless
         *skip_cleanup* is True.
+
+        Issue #4416: ``name_only`` is threaded to every route so copper
+        appended to a KiCad-10 name-based board keeps its ``(net "name")``
+        dialect instead of flipping to numeric ``(net N)``.
         """
         if not skip_cleanup:
             self.cleanup_artifacts()
-        return "\n\t".join(route.to_sexp() for route in self.routes)
+        return "\n\t".join(route.to_sexp(name_only=name_only) for route in self.routes)
 
     def get_statistics(self, nets_to_route_ids: set[int] | None = None) -> dict:
         """Get routing statistics including congestion metrics.
