@@ -287,6 +287,7 @@ def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
         "wirelength_weight": 1.0,
         "area_weight": 0.1,
         "creepage_weight": 1e5,
+        "cohesion_weight": 1.0,
         "mode": CostMode.LEXICOGRAPHIC,
     }
 
@@ -318,6 +319,7 @@ def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
         wirelength_weight=data.get("wirelength", defaults["wirelength_weight"]),
         area_weight=data.get("area", defaults["area_weight"]),
         creepage_weight=data.get("creepage", defaults["creepage_weight"]),
+        cohesion_weight=data.get("cohesion", defaults["cohesion_weight"]),
         mode=mode,
     )
 
@@ -814,7 +816,26 @@ def run_optimize_placement(
     except (ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
+
+    # Derived-tap auto-exemption (issue #4373 Phase 3, auto). Only the
+    # voltage-map path carries the per-net voltages the detector needs; the
+    # --hv-domains declaration path has no per-net data, so hv_exempt stays
+    # empty there. When no HV input is supplied hv_ref_domains is None and this
+    # is skipped entirely (regression-safe no-op).
     hv_exempt: set[frozenset[str]] | None = None
+    if voltage_map_path is not None and hv_ref_domains is not None:
+        from kicad_tools.placement.hv_domains import (
+            detect_derived_tap_exempt_pairs,
+            load_voltage_map,
+        )
+
+        voltage_map = load_voltage_map(voltage_map_path)
+        hv_exempt, hv_advisories = detect_derived_tap_exempt_pairs(
+            nets, hv_ref_domains, voltage_map, hv_threshold=hv_threshold
+        )
+        if not quiet:
+            for advisory in hv_advisories:
+                print(f"  {advisory}")
 
     footprint_sizes = _build_footprint_sizes(components)
 

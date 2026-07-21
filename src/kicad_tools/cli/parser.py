@@ -5190,7 +5190,7 @@ def _add_optimize_placement_parser(subparsers) -> None:
         metavar="JSON",
         help=(
             'Custom cost weights as JSON, e.g. \'{"wirelength": 2.0, "overlap": 1e6}\'. '
-            "Keys: overlap, drc, boundary, wirelength, area, creepage"
+            "Keys: overlap, drc, boundary, wirelength, area, creepage, cohesion"
         ),
     )
     op_parser.add_argument(

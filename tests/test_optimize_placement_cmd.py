@@ -227,6 +227,13 @@ class TestParseWeights:
         assert config.wirelength_weight == 2.5
         assert config.overlap_weight == 500
 
+    def test_cohesion_default(self):
+        assert _parse_weights(None).cohesion_weight == 1.0
+
+    def test_cohesion_override(self):
+        config = _parse_weights('{"cohesion": 5.0}')
+        assert config.cohesion_weight == 5.0
+
     def test_invalid_json_exits(self):
         with pytest.raises(SystemExit):
             _parse_weights("not json at all")
@@ -1648,3 +1655,88 @@ class TestRunWithVoltageMap:
         # so the dry-run should flag the current placement as INFEASIBLE.
         out = capsys.readouterr().out
         assert "HV domains" in out
+
+
+class TestDerivedTapAutoExempt:
+    """Phase 3 (auto): derived-tap detection is wired through the CLI (#4373).
+
+    The ``tmp_pcb`` fixture has N1 = {R1, R2} and N2 = {R1, R2, C1}. With a
+    voltage map ``{N1: 150, N2: 1.65}`` the low-voltage N2 shares divider refs
+    R1/R2 with the high-voltage N1, so N2 is a derived tap of N1 and its
+    signal-side ref C1 is auto-exempted from the mains-domain refs.
+    """
+
+    def test_detected_exempt_pairs_threaded_into_evaluate(self, tmp_pcb, tmp_path, monkeypatch):
+        from kicad_tools.cli import optimize_placement_cmd as mod
+
+        captured: dict = {}
+        real_eval = mod._evaluate
+
+        def spy(*args, **kwargs):
+            captured["exempt_pairs"] = kwargs.get("exempt_pairs")
+            return real_eval(*args, **kwargs)
+
+        monkeypatch.setattr(mod, "_evaluate", spy)
+
+        vm = tmp_path / "v.json"
+        vm.write_text(json.dumps({"N1": 150, "N2": 1.65}))
+        result = run_optimize_placement(
+            str(tmp_pcb), dry_run=True, voltage_map_path=str(vm), quiet=True
+        )
+        assert result == 0
+        ep = captured["exempt_pairs"]
+        # No longer the hardcoded None -- the detected set is threaded through.
+        assert ep is not None
+        assert frozenset({"C1", "R1"}) in ep
+        assert frozenset({"C1", "R2"}) in ep
+
+    def test_advisory_printed_and_suppressed_by_quiet(self, tmp_pcb, tmp_path, capsys):
+        vm = tmp_path / "v.json"
+        vm.write_text(json.dumps({"N1": 150, "N2": 1.65}))
+
+        run_optimize_placement(str(tmp_pcb), dry_run=True, voltage_map_path=str(vm))
+        out = capsys.readouterr().out
+        assert "guarded tap" in out
+        assert "N2" in out
+        assert "N1" in out
+
+        run_optimize_placement(str(tmp_pcb), dry_run=True, voltage_map_path=str(vm), quiet=True)
+        out_quiet = capsys.readouterr().out
+        assert "guarded tap" not in out_quiet
+
+    def test_no_input_prints_no_hv_or_tap_output(self, tmp_pcb, capsys):
+        """Without a voltage/domain input, no HV or tap lines appear (no-op)."""
+        result = run_optimize_placement(str(tmp_pcb), dry_run=True)
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "guarded tap" not in out
+        assert "HV domains" not in out
+
+    def test_hv_domains_declaration_leaves_exempt_empty(self, tmp_pcb, tmp_path, monkeypatch):
+        """The --hv-domains path carries no per-net data -> no auto-exemption."""
+        from kicad_tools.cli import optimize_placement_cmd as mod
+
+        captured: dict = {}
+        real_eval = mod._evaluate
+
+        def spy(*args, **kwargs):
+            captured["exempt_pairs"] = kwargs.get("exempt_pairs")
+            return real_eval(*args, **kwargs)
+
+        monkeypatch.setattr(mod, "_evaluate", spy)
+
+        dm = tmp_path / "d.json"
+        dm.write_text(
+            json.dumps(
+                {
+                    "mains": {"refs": ["R1", "R2"], "voltage": 150},
+                    "signal": {"refs": ["C1"], "voltage": 1.65},
+                }
+            )
+        )
+        result = run_optimize_placement(
+            str(tmp_pcb), dry_run=True, hv_domains_path=str(dm), quiet=True
+        )
+        assert result == 0
+        # No per-net voltages -> detector never runs -> exempt stays None/empty.
+        assert not captured["exempt_pairs"]

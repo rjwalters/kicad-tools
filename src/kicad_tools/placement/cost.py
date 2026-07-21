@@ -54,6 +54,12 @@ class PlacementCostConfig:
             :func:`compute_creepage_violation`. Like ``overlap``/``drc``/
             ``boundary`` it is treated as a hard-feasibility term: a non-zero
             creepage shortfall makes the placement infeasible.
+        cohesion_weight: Weight for the same-domain clustering (cohesion)
+            penalty. Applied to :func:`compute_domain_cohesion`. Unlike the
+            creepage term this is a **soft preference** -- it packs footprints
+            that share a voltage domain into a compact zone but never gates
+            feasibility. Kept small relative to the hard-constraint weights so
+            it only shapes the layout once a placement is already feasible.
         mode: Scoring mode (weighted_sum or lexicographic).
     """
 
@@ -65,6 +71,7 @@ class PlacementCostConfig:
     block_boundary_weight: float = 1e5
     inter_block_spacing: float = 1.0
     creepage_weight: float = 1e5
+    cohesion_weight: float = 1.0
     mode: CostMode = CostMode.WEIGHTED_SUM
 
 
@@ -102,6 +109,10 @@ class CostBreakdown:
         creepage: Raw HV creepage-keepout shortfall penalty (mm) -- the sum of
             required-minus-actual gaps across cross-domain footprint pairs that
             are closer than their required creepage.
+        cohesion: Raw same-domain clustering penalty (mm) -- the sum, across
+            every voltage domain with two or more members, of each member's
+            distance to its domain centroid (a radius-of-gyration-style spread
+            penalty). Lower means each domain is packed more tightly.
     """
 
     wirelength: float = 0.0
@@ -112,6 +123,7 @@ class CostBreakdown:
     block_boundary: float = 0.0
     inter_block: float = 0.0
     creepage: float = 0.0
+    cohesion: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -633,6 +645,73 @@ def compute_creepage_violation(
     return total
 
 
+def compute_domain_cohesion(
+    placements: Sequence[ComponentPlacement],
+    ref_domains: dict[str, str] | None,
+    footprint_sizes: dict[str, tuple[float, float]] | None = None,
+) -> float:
+    """Compute the same-domain clustering (cohesion) penalty (issue #4373).
+
+    This is the voltage-aware *attraction* term. It complements
+    :func:`compute_creepage_violation` (which pushes **different** domains
+    apart): cohesion actively packs footprints that share a voltage *domain*
+    into a compact zone so a domain forms a coherent region rather than relying
+    on wirelength to incidentally pull it together.
+
+    For each domain (from *ref_domains*) with two or more member footprints, the
+    centroid of the member positions is computed and each member's Euclidean
+    distance to that centroid is summed; the totals across all domains are
+    added. This is a radius-of-gyration-style spread penalty whose minimum is a
+    tight cluster per domain. It is smooth, needs no voltages (only the domain
+    partition), and depends on nothing but footprint positions.
+
+    Singleton domains (a single member), and components absent from
+    *ref_domains* (domain-less), contribute zero. An empty or ``None``
+    *ref_domains* yields ``0.0`` -- the term is dormant on the no-HV-input path,
+    keeping the voltage-blind objective byte-identical.
+
+    .. note::
+        This is a **soft** preference, not a feasibility gate. It is
+        deliberately excluded from the ``is_feasible`` conjunction in
+        :func:`evaluate_placement` and from the infeasible branch of the
+        lexicographic score -- a spread-out domain is suboptimal, never
+        infeasible.
+
+    Args:
+        placements: Current component positions.
+        ref_domains: Map from component reference to its HV domain id. ``None``
+            or empty disables the term.
+        footprint_sizes: Accepted for signature parity with the other cost
+            terms; unused (cohesion is centroid-of-positions based).
+
+    Returns:
+        Sum of per-domain spread penalties (mm). Zero means every domain is a
+        single point (or has fewer than two members).
+    """
+    del footprint_sizes  # unused: cohesion is measured between footprint centres
+    if not ref_domains:
+        return 0.0
+
+    by_domain: dict[str, list[tuple[float, float]]] = {}
+    for p in placements:
+        domain = ref_domains.get(p.reference)
+        if domain is None:
+            continue
+        by_domain.setdefault(domain, []).append((p.x, p.y))
+
+    total = 0.0
+    for positions in by_domain.values():
+        n = len(positions)
+        if n < 2:
+            continue
+        cx = sum(x for x, _ in positions) / n
+        cy = sum(y for _, y in positions) / n
+        for x, y in positions:
+            total += ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+
+    return total
+
+
 def evaluate_placement(
     placements: Sequence[ComponentPlacement],
     nets: Sequence[Net],
@@ -721,6 +800,15 @@ def evaluate_placement(
             exempt_pairs,
         )
 
+    # Same-domain clustering (issue #4373 Phase 1). Fires whenever a domain
+    # partition is supplied -- independent of the required-creepage table, since
+    # clustering needs only the partition, not per-pair voltages. It is a SOFT
+    # preference: computed here and added to the score, but deliberately absent
+    # from the is_feasible gate below.
+    cohesion = 0.0
+    if ref_domains:
+        cohesion = compute_domain_cohesion(placements, ref_domains, footprint_sizes)
+
     breakdown = CostBreakdown(
         wirelength=wirelength,
         overlap=overlap,
@@ -730,8 +818,12 @@ def evaluate_placement(
         block_boundary=block_boundary,
         inter_block=inter_block,
         creepage=creepage,
+        cohesion=cohesion,
     )
 
+    # NOTE: cohesion is intentionally NOT part of this conjunction. It is an
+    # optimization preference (pack same-domain refs), not a feasibility
+    # constraint -- a spread-out domain is suboptimal, never infeasible.
     is_feasible = (
         overlap == 0.0
         and drc == 0.0
@@ -763,6 +855,7 @@ def _weighted_sum_score(breakdown: CostBreakdown, config: PlacementCostConfig) -
         + config.block_boundary_weight * breakdown.block_boundary
         + config.block_boundary_weight * breakdown.inter_block
         + config.creepage_weight * breakdown.creepage
+        + config.cohesion_weight * breakdown.cohesion
     )
 
 
@@ -778,8 +871,11 @@ def _lexicographic_score(
     sum of the infeasibility components (overlap, DRC, boundary) plus a
     large constant offset.
 
-    Feasible placements are scored by the weighted sum of wirelength and
-    area only.
+    Feasible placements are scored by the weighted sum of wirelength, area,
+    and the soft same-domain cohesion term. Cohesion shapes the layout only
+    once a placement is already feasible -- it is absent from the infeasible
+    offset branch so it can never make one infeasible placement outrank
+    another on preference alone.
     """
     if not is_feasible:
         # Large offset ensures any infeasible score > any feasible score.
@@ -792,4 +888,8 @@ def _lexicographic_score(
             + config.creepage_weight * breakdown.creepage
         )
     else:
-        return config.wirelength_weight * breakdown.wirelength + config.area_weight * breakdown.area
+        return (
+            config.wirelength_weight * breakdown.wirelength
+            + config.area_weight * breakdown.area
+            + config.cohesion_weight * breakdown.cohesion
+        )
