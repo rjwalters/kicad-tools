@@ -1282,6 +1282,20 @@ def main(argv: list[str] | None = None) -> int:
             "omitted (Issue #4137)."
         ),
     )
+    parser.add_argument(
+        "--waivers",
+        dest="waivers",
+        default=None,
+        help=(
+            "Path to a general .kct_waivers.json sidecar (schema version 2) "
+            "waiving findings for ANY rule by matching the violation's items "
+            "(and optional nets) set (see kicad_tools.validate.rules.waivers). "
+            "Matched findings report as WAIVED instead of failing the gate. "
+            "Auto-discovered next to the board when this flag is omitted "
+            "(Issue #4417). Waived findings keep severity 'error' in JSON so "
+            "the kct audit manufacturing gate stays blocking by default."
+        ),
+    )
     # Issue #3061: auto-derive the pad_grid tolerance from each board's
     # pad-offset histogram by default for the CLI.  Users can opt back into
     # the fixed-0.05mm behaviour with --pad-grid-strict, or pin a custom
@@ -1531,6 +1545,46 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
 
+    # Load optional general waivers sidecar (Issue #4417).  Same load/degrade
+    # contract as --courtyard-waivers above: an explicit --waivers path always
+    # wins and a malformed explicit file is a hard error; an auto-discovered
+    # .kct_waivers.json that fails to parse degrades gracefully (warn + zero
+    # waivers).  Applied centrally after check_all() (below), so it covers any
+    # rule id -- not just courtyards_overlap.
+    from kicad_tools.validate.rules.waivers import (
+        discover_waivers_sidecar,
+        load_waivers,
+    )
+
+    general_waivers = None
+    gw_explicit = args.waivers is not None
+    if gw_explicit:
+        gw_path: Path | None = Path(args.waivers).resolve()
+    else:
+        gw_path = discover_waivers_sidecar(pcb_path)
+
+    if gw_path is not None:
+        if not gw_path.exists():
+            print(f"Error: waivers file not found: {gw_path}", file=sys.stderr)
+            return 1
+        try:
+            general_waivers = load_waivers(gw_path)
+        except ValueError as e:
+            if gw_explicit:
+                print(f"Error: {e}", file=sys.stderr)
+                return 1
+            print(
+                f"WARNING: ignoring malformed waivers sidecar {gw_path}: {e}",
+                file=sys.stderr,
+            )
+            general_waivers = None
+        else:
+            if not gw_explicit:
+                print(
+                    f"[INFO] auto-loaded waivers sidecar: {gw_path}",
+                    file=sys.stderr,
+                )
+
     # Issue #4321 (Tier 1/2): resolve the loaded net-class-map's user keys
     # onto the board's actual net names *before* handing the map to
     # DRCChecker, mirroring ``route_cmd._apply_net_class_map_sidecar``.
@@ -1690,6 +1744,18 @@ def main(argv: list[str] | None = None) -> int:
         pad_grid_threshold=pad_grid_threshold,
         pad_grid_auto_derive=pad_grid_auto_derive,
     )
+
+    # Issue #4417: apply general waivers centrally, once, AFTER all checks run.
+    # This marks matching findings waived (visible, counted separately, excluded
+    # from error_count) and appends a waiver_unused info advisory for any stale
+    # entry.  It intentionally runs on the raw results before the errors-only
+    # filter and exit-code computation below.  The courtyard rule keeps its own
+    # per-rule waiver path (Issue #4137); apply_waivers skips already-waived
+    # findings, so the two paths compose without double-waiving.
+    if general_waivers is not None:
+        from kicad_tools.validate.rules.waivers import apply_waivers
+
+        apply_waivers(results, general_waivers)
 
     # Issue #4321 (Tier 3): fail loud when an ampacity target was declared
     # but never evaluated.  A declared ``target_ampacity`` that matched zero
