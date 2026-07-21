@@ -80,6 +80,51 @@ _RE_END = re.compile(r"\(end\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)")
 _RE_WIDTH = re.compile(r"\(width\s+([\d.eE+-]+)\)")
 _RE_LAYER = re.compile(r'\(layer\s+"([^"]+)"\)')
 _RE_NET = re.compile(r"\(net\s+(\d+)\)")
+# Issue #4413: KiCad-10 name-based net dialect -- segments/vias reference
+# their net by quoted name instead of a numeric id, e.g.
+# ``(net "Net-(C11-Pad2)")``.  The numeric ``_RE_NET`` above matches
+# nothing on such blocks, so before this pattern existed the parser
+# skipped EVERY segment/via on a name-based board.  When those parsers
+# feed ``--preserve-existing`` / ``--nets``, an empty preserved set let
+# the dialect-blind strip pass delete all existing copper on save
+# (silent, catastrophic data loss).
+_RE_NET_NAME = re.compile(r'\(net\s+"([^"]*)"\)')
+
+
+def _resolve_block_net(
+    block: str,
+    net_names: dict[int, str],
+    name_to_id: dict[str, int],
+) -> tuple[int, str] | None:
+    """Resolve the net id + name referenced inside a segment/via *block*.
+
+    Handles both KiCad net-reference dialects (issue #4413):
+
+    * numeric  ``(net N)``        -> id ``N``, name from the header table.
+    * name     ``(net "NAME")``   -> id from the ``name_to_id`` reverse map,
+      name ``NAME``.
+
+    Returns ``None`` only when the block carries no ``(net ...)`` field at
+    all (a genuinely malformed block).  A name-only reference whose name is
+    absent from the header table is deliberately **not** dropped: it is
+    kept with a best-effort net id of ``0`` so pre-existing copper is never
+    silently discarded -- dropping copper is exactly the failure mode this
+    resolver fixes.
+    """
+    m_net = _RE_NET.search(block)
+    if m_net:
+        net = int(m_net.group(1))
+        return net, net_names.get(net, f"Net{net}")
+
+    m_name = _RE_NET_NAME.search(block)
+    if m_name:
+        net_name = m_name.group(1)
+        # An empty inline name is the KiCad no-net (net 0) reference.
+        if not net_name:
+            return 0, "Net0"
+        return name_to_id.get(net_name, 0), net_name
+
+    return None
 
 
 def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
@@ -91,18 +136,23 @@ def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
     """
     segments_by_net: dict[str, list[Segment]] = {}
 
-    # First, build net ID to name mapping
+    # First, build net ID to name mapping (and its reverse, so name-based
+    # ``(net "NAME")`` references resolve to numeric ids -- issue #4413).
     net_names = parse_net_names(pcb_text)
+    name_to_id = {name: nid for nid, name in net_names.items()}
 
     for _start, _end, block in _extract_balanced_blocks(pcb_text, "segment"):
         m_start = _RE_START.search(block)
         m_end = _RE_END.search(block)
         m_width = _RE_WIDTH.search(block)
         m_layer = _RE_LAYER.search(block)
-        m_net = _RE_NET.search(block)
+        resolved_net = _resolve_block_net(block, net_names, name_to_id)
 
-        # All five core fields are required; skip malformed blocks.
-        if not (m_start and m_end and m_width and m_layer and m_net):
+        # All five core fields are required; skip malformed blocks.  The
+        # net resolver handles both the numeric ``(net N)`` and name-based
+        # ``(net "NAME")`` dialects, so a name-only board no longer drops
+        # every segment here (#4413).
+        if not (m_start and m_end and m_width and m_layer and resolved_net):
             continue
 
         x1 = float(m_start.group(1))
@@ -111,8 +161,7 @@ def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
         y2 = float(m_end.group(2))
         width = float(m_width.group(1))
         layer_name = m_layer.group(1)
-        net = int(m_net.group(1))
-        net_name = net_names.get(net, f"Net{net}")
+        net, net_name = resolved_net
 
         # Convert layer name to Layer enum
         try:
@@ -152,8 +201,10 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
     """
     vias_by_net: dict[str, list[Via]] = {}
 
-    # Reuse existing net-name mapping
+    # Reuse existing net-name mapping (plus its reverse for the name-based
+    # ``(net "NAME")`` dialect -- issue #4413).
     net_names = parse_net_names(pcb_text)
+    name_to_id = {name: nid for nid, name in net_names.items()}
 
     # Issue #3414 / #3155: use the same balanced-parentheses walker as
     # ``parse_segments`` so that fields may appear in any order and extra
@@ -187,10 +238,13 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
         m_size = _re_size.search(block)
         m_drill = _re_drill.search(block)
         m_layers = _re_layers.search(block)
-        m_net = _RE_NET.search(block)
+        resolved_net = _resolve_block_net(block, net_names, name_to_id)
 
-        # All five core fields are required; skip malformed blocks.
-        if not (m_at and m_size and m_drill and m_layers and m_net):
+        # All five core fields are required; skip malformed blocks.  The
+        # net resolver handles both the numeric ``(net N)`` and name-based
+        # ``(net "NAME")`` dialects, so a name-only board no longer drops
+        # every via here (#4413).
+        if not (m_at and m_size and m_drill and m_layers and resolved_net):
             continue
 
         m_type = _re_via_type.match(block)
@@ -201,8 +255,7 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
         drill = float(m_drill.group(1))
         layer_start_name = m_layers.group(1)
         layer_end_name = m_layers.group(2)
-        net = int(m_net.group(1))
-        net_name = net_names.get(net, f"Net{net}")
+        net, net_name = resolved_net
 
         # Convert layer names to Layer enum
         try:

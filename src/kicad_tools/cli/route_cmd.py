@@ -785,6 +785,28 @@ def _validate_sexp_parentheses(content: str) -> bool:
     return depth == 0
 
 
+class CatastrophicCopperLossError(RuntimeError):
+    """Raised when a save would drop almost all of a board's existing copper.
+
+    Issue #4413 defense-in-depth: a ``--preserve-existing`` / ``--nets`` /
+    ``--region`` save must round-trip the board's pre-existing segments and
+    vias.  If a parser dialect regression (or any future bug) ever empties
+    the preserved set again, the terminal write would otherwise silently
+    overwrite a fully-routed board with only the freshly-routed net.  This
+    guard turns that silent data loss into a loud, safe abort that leaves
+    the output file untouched.
+    """
+
+
+# Below this fraction of the input's copper surviving a preserve/nets/region
+# save, the write is treated as catastrophic loss and aborted (#4413).
+_COPPER_LOSS_ABORT_FRACTION = 0.10
+# Inputs with at most this many routed elements are "trivial" -- the guard
+# does not fire (a near-empty board legitimately routes to a handful of
+# elements, so the ratio test would be meaningless / falsely tripped).
+_COPPER_LOSS_TRIVIAL_INPUT = 100
+
+
 def _write_routed_pcb(
     pcb_path: Path,
     output_path: Path,
@@ -792,6 +814,7 @@ def _write_routed_pcb(
     *,
     layer_count: int = 2,
     is_checkpoint: bool = False,
+    guard_copper_loss: bool = False,
 ) -> Path:
     """Atomically write a routed PCB file.
 
@@ -826,6 +849,13 @@ def _write_routed_pcb(
             Checkpoints serialize the in-progress best snapshot; they
             should match whatever stackup is currently in use and not
             attempt to escalate.  Defaults to False.
+        guard_copper_loss: Issue #4413 defense-in-depth.  When True (the
+            terminal ``--preserve-existing`` / ``--nets`` / ``--region``
+            save), the write aborts with
+            :class:`CatastrophicCopperLossError` -- leaving the output file
+            untouched -- if a non-trivial input's routed copper would drop
+            below :data:`_COPPER_LOSS_ABORT_FRACTION`.  Checkpoint writes
+            leave this False so a mid-route snapshot is never blocked.
 
     Returns:
         The ``output_path`` that was written to (returned unchanged so
@@ -836,6 +866,9 @@ def _write_routed_pcb(
         ValueError: If the generated PCB has unbalanced S-expression
             parentheses (indicates a bug in route generation -- caller
             is responsible for surfacing this).
+        CatastrophicCopperLossError: If ``guard_copper_loss`` is True and
+            the save would drop >90% of a non-trivial input's copper
+            (issue #4413).  The output file is left untouched.
     """
     original_content = pcb_path.read_text()
 
@@ -857,6 +890,33 @@ def _write_routed_pcb(
             "(unbalanced parentheses). This is a bug in kicad-tools. "
             "Please report it."
         )
+
+    # Issue #4413 defense-in-depth: on a preserve/nets/region save, refuse
+    # to overwrite a fully-routed board with only a sliver of copper.  Count
+    # the routed elements the input carried vs what the output would carry;
+    # if a non-trivial input drops below the abort fraction, raise BEFORE
+    # touching the output file so silent data loss becomes a loud, safe
+    # failure independent of any future parser dialect regression.
+    if guard_copper_loss:
+        _, in_segs, in_vias = _strip_route_blocks(original_content)
+        _, out_segs, out_vias = _strip_route_blocks(output_content)
+        in_total = in_segs + in_vias
+        out_total = out_segs + out_vias
+        if (
+            in_total > _COPPER_LOSS_TRIVIAL_INPUT
+            and out_total < _COPPER_LOSS_ABORT_FRACTION * in_total
+        ):
+            raise CatastrophicCopperLossError(
+                "Refusing to save: the routed output would retain only "
+                f"{out_total} of {in_total} existing copper elements "
+                f"(<{_COPPER_LOSS_ABORT_FRACTION:.0%}) under "
+                "--preserve-existing/--nets/--region. This indicates the "
+                "board's existing copper was NOT preserved (e.g. a net-"
+                "reference dialect the parser could not resolve). The output "
+                f"file {output_path} was left UNCHANGED to prevent data "
+                "loss. Please report this at "
+                "https://github.com/rjwalters/kicad-tools/issues (ref #4413)."
+            )
 
     # Atomic write: tmp file -> fsync -> rename.  Sibling-in-same-dir
     # ensures os.replace is a same-filesystem rename (atomic on POSIX).
@@ -4914,6 +4974,10 @@ def route_with_layer_escalation(
             output_path,
             route_sexp,
             layer_count=final_result.layer_count,
+            # Issue #4413: guard the terminal preserve/nets/region save so a
+            # dropped preserved set aborts loudly instead of overwriting the
+            # board with only the freshly-routed net.
+            guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
         )
 
     if not quiet:
@@ -5608,6 +5672,10 @@ def route_with_rule_relaxation(
             output_path,
             route_sexp,
             layer_count=final_result.layer_count,
+            # Issue #4413: guard the terminal preserve/nets/region save so a
+            # dropped preserved set aborts loudly instead of overwriting the
+            # board with only the freshly-routed net.
+            guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
         )
 
     if not quiet:
@@ -7816,6 +7884,10 @@ def route_with_combined_escalation(
             output_path,
             route_sexp,
             layer_count=final_result.layer_count,
+            # Issue #4413: guard the terminal preserve/nets/region save so a
+            # dropped preserved set aborts loudly instead of overwriting the
+            # board with only the freshly-routed net.
+            guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
         )
 
     if not quiet:
@@ -12236,6 +12308,9 @@ def main(argv: list[str] | None = None) -> int:
                 pcb_path,
                 output_path,
                 combined_sexp,
+                # Issue #4413: abort rather than overwrite when a
+                # preserve/nets/region save would drop nearly all copper.
+                guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
             )
 
             # We need output_content for the connectivity verification below;
