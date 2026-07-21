@@ -131,10 +131,13 @@ class TestKeeoutDataclass:
 
         assert "(zone" in sexp_str
         assert "(keepout" in sexp_str
-        # S-expression uses quoted strings for keyword values
-        assert 'tracks "not_allowed"' in sexp_str or "(tracks not_allowed)" in sexp_str
-        assert 'vias "allowed"' in sexp_str or "(vias allowed)" in sexp_str
-        assert 'copperpour "not_allowed"' in sexp_str or "(copperpour not_allowed)" in sexp_str
+        # Disposition tokens MUST be bare symbols -- KiCad 10 rejects the quoted
+        # form as a hard parse error (Issue #4430).
+        assert "(tracks not_allowed)" in sexp_str
+        assert "(vias allowed)" in sexp_str
+        assert "(copperpour not_allowed)" in sexp_str
+        assert '"not_allowed"' not in sexp_str
+        assert '"allowed"' not in sexp_str
 
 
 class TestZoneNodeBuilder:
@@ -202,6 +205,9 @@ class TestKeepoutNodeBuilder:
         assert "(zone" in sexp_str
         assert "(keepout" in sexp_str
         assert '(layers "F.Cu" "B.Cu")' in sexp_str
+        # A rule-area keepout must NOT carry a bare (fill yes) node -- KiCad 10
+        # regenerates the rule-area fill on save (Issue #4430).
+        assert "(fill yes)" not in sexp_str
 
     def test_keepout_node_restrictions(self):
         """keepout_node respects restriction settings."""
@@ -215,10 +221,13 @@ class TestKeepoutNodeBuilder:
         )
         sexp_str = sexp.to_string()
 
-        # S-expression uses quoted strings for keyword values
-        assert 'tracks "not_allowed"' in sexp_str or "(tracks not_allowed)" in sexp_str
-        assert 'vias "allowed"' in sexp_str or "(vias allowed)" in sexp_str
-        assert 'copperpour "not_allowed"' in sexp_str or "(copperpour not_allowed)" in sexp_str
+        # Disposition tokens MUST be bare symbols -- KiCad 10 rejects the quoted
+        # form as a hard parse error (Issue #4430).
+        assert "(tracks not_allowed)" in sexp_str
+        assert "(vias allowed)" in sexp_str
+        assert "(copperpour not_allowed)" in sexp_str
+        assert '"not_allowed"' not in sexp_str
+        assert '"allowed"' not in sexp_str
 
 
 class TestPCBEditorZoneAPI:

@@ -8,6 +8,8 @@ pure geometry (no ``kicad-cli`` needed), the shared HV-net classification with
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,9 @@ from kicad_tools.schema.pcb import PCB
 from kicad_tools.zones.hv_keepout import build_hv_keepout_plan
 
 pytest.importorskip("shapely")
+
+# kicad-cli is used for the end-to-end load test below; skip when absent.
+KICAD_CLI = shutil.which("kicad-cli")
 
 
 # A minimal-but-real board:
@@ -235,6 +240,72 @@ def test_cli_writes_keepout_zone(tmp_path: Path) -> None:
     pcb = PCB.load(str(board))
     keepouts = [z for z in pcb.zones if z.net_number == 0]
     assert len(keepouts) == 1
+
+
+@pytest.mark.skipif(KICAD_CLI is None, reason="kicad-cli not installed")
+def test_emitted_keepout_loads_in_kicad(tmp_path: Path) -> None:
+    """Regression (Issue #4430): the emitted keepout must load in kicad-cli.
+
+    v0.19.0 wrote quoted disposition tokens (``(tracks "allowed")``) plus a bare
+    ``(fill yes)`` node, which KiCad 10 rejects as a hard parse error ->
+    ``Failed to load board``.  This is the construction-path twin of #4185.
+
+    We inject an actual ``keepout_node()`` (the exact builder used by
+    ``kct zones hv-keepout``) into a real, loadable demo board and assert
+    ``kicad-cli pcb drc`` still loads it.  The minimal in-module ``_BOARD``
+    fixtures are intentionally partial and do not load in kicad-cli on their
+    own, so a full real board is required for a meaningful load test (mirrors
+    ``tests/test_sexp_roundtrip.py::test_keepout_board_loads_in_kicad``).
+    """
+    from kicad_tools.sexp.builders import keepout_node
+    from kicad_tools.sexp.parser import parse_file
+
+    demo = (
+        Path(__file__).parent.parent
+        / "boards"
+        / "00-simple-led"
+        / "output"
+        / "simple_led.kicad_pcb"
+    )
+    if not demo.exists():
+        pytest.skip(f"Demo board not found: {demo}")
+
+    doc = parse_file(demo)
+    keepout = keepout_node(
+        points=[(50, 50), (70, 50), (70, 70), (50, 70)],
+        layers=["F.Cu", "B.Cu"],
+        no_tracks=False,
+        no_vias=False,
+        no_pour=True,
+        uuid_str="hv-keepout-4430-test",
+    )
+    doc.children.append(keepout)
+
+    output = doc.to_string()
+    # Disposition tokens must be BARE, and no bare (fill yes) on a rule area.
+    assert '"not_allowed"' not in output
+    assert '"allowed"' not in output
+    assert "(copperpour not_allowed)" in output
+    assert "(fill yes)" not in output
+
+    out_path = tmp_path / "keepout_board.kicad_pcb"
+    out_path.write_text(output)
+
+    # kicad-cli returns 0 on a clean load (or if DRC violations are found); a
+    # load failure prints "Failed to load board" and returns non-zero.
+    result = subprocess.run(
+        [KICAD_CLI, "pcb", "drc", str(out_path), "-o", str(tmp_path / "drc.json")],
+        capture_output=True,
+        text=True,
+    )
+    assert "Failed to load board" not in result.stderr, (
+        f"kicad-cli failed to load a board carrying the emitted keepout.\n"
+        f"rc={result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert result.returncode == 0, (
+        f"kicad-cli pcb drc returned {result.returncode} on the keepout board.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
 
 
 def test_cli_dry_run_writes_nothing(tmp_path: Path) -> None:

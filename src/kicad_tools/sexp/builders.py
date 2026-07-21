@@ -704,7 +704,6 @@ def keepout_node(
             (connect_pads (clearance 0))
             (min_thickness 0.25)
             (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour not_allowed))
-            (fill yes)
             (polygon (pts (xy X Y) ...))
         )
     """
@@ -734,10 +733,15 @@ def keepout_node(
     )
     zone.append(keepout)
 
-    # Add minimal zone properties
+    # Add minimal zone properties.
+    #
+    # Note: a rule-area (keepout) zone must NOT carry a bare ``(fill yes)`` node.
+    # KiCad 10 writes the fill state for rule areas as ``(fill (thermal_gap ...)
+    # (thermal_bridge_width ...))`` with no ``yes`` token, and regenerates the
+    # node on save, so we omit it here entirely (Issue #4430). Emitting
+    # ``(fill yes)`` is non-canonical for rule areas.
     zone.append(SExp.list("connect_pads", SExp.list("clearance", 0)))
     zone.append(SExp.list("min_thickness", 0.25))
-    zone.append(SExp.list("fill", "yes"))
     zone.append(polygon)
 
     return zone
