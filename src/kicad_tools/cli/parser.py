@@ -513,6 +513,24 @@ def _add_creepage_parser(subparsers) -> None:
             "Requires --standard (and --pollution-degree)."
         ),
     )
+    # Voltage-derived census membership (issue #4401): a high-|V| net whose
+    # routing class is not HV must still enter the census.
+    creepage_parser.add_argument(
+        "--census-threshold",
+        dest="census_threshold",
+        type=float,
+        default=30.0,
+        help=(
+            "Voltage threshold (volts) for voltage-derived HV census membership. "
+            "Only takes effect with --voltage-map: any net whose mapped potential "
+            "differs from the board-edge reference (_edge_voltage) by at least "
+            "this many volts is added to the HV census, in UNION with the "
+            "class-based/name-pattern selection.  This pulls a high-|V| net "
+            "carrying a non-HV routing class (e.g. a 150 V gate-drive net classed "
+            "Digital) into the audit instead of silently excluding it.  Default "
+            "30.0 -- aligned with optimize-placement --hv-threshold."
+        ),
+    )
     creepage_parser.add_argument(
         "--material-group",
         dest="material_group",

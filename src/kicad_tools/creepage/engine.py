@@ -400,6 +400,10 @@ def resolve_hv_nets(
     pcb: PCB,
     net_class: str,
     net_class_map: dict[str, NetClassRouting] | None = None,
+    *,
+    voltage_map: dict[str, float] | None = None,
+    edge_voltage: float = 0.0,
+    census_threshold: float | None = None,
 ) -> dict[int, str]:
     """Return ``{net_number: net_name}`` for nets belonging to ``net_class``.
 
@@ -422,6 +426,20 @@ def resolve_hv_nets(
        ``NEUTRAL`` ...) is therefore selected here.  An explicit map entry
        always wins (step 1), so operator-supplied classification is never
        overridden by this fallback.
+    4. **Voltage-derived union** (issue #4401) -- when both ``voltage_map`` and
+       ``census_threshold`` are supplied, every net whose mapped potential
+       differs from ``edge_voltage`` by at least ``census_threshold`` volts is
+       added, **in union** with the class/name selection above.  This closes the
+       false-pass where a high-|V| net carrying a non-HV routing class (e.g. a
+       ``±150 V`` gate-drive net classed ``Digital``) was silently excluded from
+       the census.  Keys are normalised with :func:`_norm_net_key`, matching the
+       census's own leading-``/`` convention.  The union never *removes* a
+       class-selected net, so a class-``HV`` net at low/unmapped voltage is
+       still audited.
+
+    ``voltage_map``/``edge_voltage``/``census_threshold`` all default to the
+    no-op path: with no map (or ``census_threshold=None``) the output is
+    byte-identical to the class/name selection alone.
     """
     from kicad_tools.router.net_class import classify_from_name
 
@@ -446,6 +464,19 @@ def resolve_hv_nets(
         # no NetClass.HV, so classify_from_name never yields "hv" above.
         if target == "hv" and MAINS_NAME_RE.search(net.name):
             selected[net.number] = net.name
+
+    # Voltage-derived union (issue #4401): pull in any mapped net whose
+    # potential differs from the board-edge reference by >= the threshold,
+    # regardless of its routing class.  Union, not replace.
+    if voltage_map is not None and census_threshold is not None:
+        norm_vmap = {_norm_net_key(k): float(v) for k, v in voltage_map.items()}
+        for net in pcb.nets.values():
+            if net.number == 0 or not net.name:
+                continue
+            v = norm_vmap.get(_norm_net_key(net.name))
+            if v is not None and abs(v - edge_voltage) >= census_threshold:
+                selected[net.number] = net.name
+
     return selected
 
 

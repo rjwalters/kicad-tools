@@ -183,7 +183,20 @@ def run_creepage_command(args) -> int:
     pcb = PCB.load(pcb_path)
     net_class = getattr(args, "net_class", "HV") or "HV"
 
-    hv_nets = resolve_hv_nets(pcb, net_class, net_class_map)
+    # Voltage-derived census membership (issue #4401): when a voltage map is
+    # supplied, a high-|V| net whose routing class is not HV must still enter
+    # the census.  Gate the union on the map's presence so the no-map path is
+    # byte-identical to before.
+    hv_nets = resolve_hv_nets(
+        pcb,
+        net_class,
+        net_class_map,
+        voltage_map=voltage_map,
+        edge_voltage=edge_voltage,
+        census_threshold=(
+            getattr(args, "census_threshold", 30.0) if voltage_map is not None else None
+        ),
+    )
     try:
         report = compute_creepage_census(
             pcb,
