@@ -5482,6 +5482,16 @@ class PCB:
                         net_numbers_to_strip.add(net_num)
                         break
 
+        # Reverse map (net name -> number) so we can resolve name-based inline
+        # net references — ``(net "GND")``, the dialect KiCad 10 writes — back to
+        # the numeric id carried in the header net table.  Mirrors the map built
+        # by ``_fixup_net_numbers`` (see the ``name_to_number`` construction
+        # above).  Without this, ``get_int(0)`` returns None for a name token and
+        # every copper item resolves to net 0, so the net filter matches nothing.
+        name_to_number: dict[str, int] = {
+            net.name: net_num for net_num, net in self._nets.items() if net.name and net_num != 0
+        }
+
         # Build layer set for fast membership tests
         layer_set: set[str] | None = None
         if layers is not None:
@@ -5545,8 +5555,18 @@ class PCB:
 
         def _net_num_from_child(child: SExp) -> int:
             net_node = child.find("net")
-            if net_node:
-                return net_node.get_int(0) or 0
+            if not net_node:
+                return 0
+            # Numeric dialect: ``(net 5)`` — read the id directly.
+            num = net_node.get_int(0)
+            if num is not None:
+                return num
+            # Name-based dialect: ``(net "GND")`` — resolve via the header table.
+            # Read-only resolution for the filter decision; the on-disk token is
+            # left untouched, so kept items retain their original name form.
+            name = net_node.get_string(0)
+            if name is not None:
+                return name_to_number.get(name, 0)
             return 0
 
         def _should_strip_net(net_num: int) -> bool:

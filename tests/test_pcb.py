@@ -3027,6 +3027,58 @@ class TestStripTraces:
                 break
         assert gnd_net_num not in remaining_net_nums
 
+    def test_strip_specific_nets_name_based_dialect(self, tmp_path: Path):
+        """Strip name-based inline net refs — ``(net "GND")`` — via the header table.
+
+        Regression for #4414: KiCad 10 writes copper items with name-based net
+        references (``(net "GND")``) while the header net table still carries
+        numeric ids (``(net 1 "GND")``).  ``strip_traces`` walks the raw
+        S-expression and read each item's net token with ``get_int(0)``, which
+        returns None for a name atom → net 0 → the net filter matched nothing and
+        removed 0 segments/vias for every net name.  The fix resolves name-based
+        refs through the header net table.
+        """
+        board_text = """\
+(kicad_pcb
+  (version 20260306)
+  (generator "pcbnew")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (segment (start 10 10) (end 50 10) (width 0.25) (layer "F.Cu") (net "GND") (uuid "s1"))
+  (segment (start 10 12) (end 50 12) (width 0.25) (layer "F.Cu") (net "GND") (uuid "s2"))
+  (segment (start 10 20) (end 50 20) (width 0.25) (layer "F.Cu") (net "VCC") (uuid "s3"))
+  (via (at 30 10) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net "GND") (uuid "v1"))
+  (via (at 30 20) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net "VCC") (uuid "v2"))
+)
+"""
+        board_path = tmp_path / "name_based.kicad_pcb"
+        board_path.write_text(board_text)
+        pcb = PCB.load(str(board_path))
+
+        assert len(pcb.segments) == 3
+        assert len(pcb.vias) == 2
+
+        # Strip only GND — must resolve the name-based inline refs.
+        stats = pcb.strip_traces(nets=["GND"])
+
+        # Only GND copper removed: 2 GND segments + 1 GND via.
+        assert stats["segments"] == 2
+        assert stats["vias"] == 1
+
+        # VCC copper survives untouched.
+        assert len(pcb.segments) == 1
+        assert len(pcb.vias) == 1
+        vcc_net_num = None
+        for net_num, net in pcb.nets.items():
+            if net.name == "VCC":
+                vcc_net_num = net_num
+                break
+        assert vcc_net_num is not None
+        assert {seg.net_number for seg in pcb.segments} == {vcc_net_num}
+        assert {via.net_number for via in pcb.vias} == {vcc_net_num}
+
     def test_strip_traces_updates_sexp(self, minimal_pcb: Path, tmp_path: Path):
         """Test that stripping traces updates the underlying S-expression."""
         pcb = PCB.load(minimal_pcb)
