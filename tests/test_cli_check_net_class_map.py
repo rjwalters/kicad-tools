@@ -559,6 +559,144 @@ class TestSidecarWrittenByRoute:
             or (ro_dir / "net_class_map.json").exists()
         )
 
+    def test_input_file_not_overwritten_on_collision(self, tmp_path: Path):
+        """Issue #4428: when the routed board lives in the same directory as
+        the user's hand-authored ``net_class_map.json``, the route step must
+        NOT clobber it -- the derived map is diverted to
+        ``net_class_map.effective.json`` instead."""
+        from kicad_tools.cli.route_cmd import _write_net_class_map_sidecar
+        from kicad_tools.router.rules import (
+            NetClassRouting,
+            net_class_map_from_dict,
+            net_class_map_to_dict,
+        )
+
+        # Hand-authored HV input sidecar, sitting next to where the board
+        # will be written.
+        input_path = tmp_path / "net_class_map.json"
+        authored = {
+            "AC_LINE": NetClassRouting(
+                name="HV",
+                target_ampacity=15.0,
+                avoid_layers=[1, 2],
+            )
+        }
+        input_path.write_text(json.dumps(net_class_map_to_dict(authored), indent=2))
+        original_bytes = input_path.read_bytes()
+
+        pcb_out = tmp_path / "board_routed.kicad_pcb"
+        pcb_out.write_text("(kicad_pcb)")
+
+        # The classifier's guess for AC_LINE ("Audio") is what the router map
+        # would carry; the loaded authored map must win in the derived sidecar.
+        classifier = {"AC_LINE": NetClassRouting(name="Audio")}
+
+        _write_net_class_map_sidecar(
+            pcb_out,
+            classifier,
+            quiet=True,
+            input_path=input_path,
+            loaded_net_class_map=authored,
+        )
+
+        # The authored input file is byte-for-byte untouched.
+        assert input_path.read_bytes() == original_bytes
+
+        # The derived map landed in the effective sidecar, not the input file.
+        effective = tmp_path / "net_class_map.effective.json"
+        assert effective.is_file()
+        loaded = net_class_map_from_dict(json.loads(effective.read_text()))
+        # Round-trip fidelity: authored HV fields survive, not "Audio".
+        assert loaded["AC_LINE"].name == "HV"
+        assert loaded["AC_LINE"].target_ampacity == 15.0
+        assert loaded["AC_LINE"].avoid_layers == [1, 2]
+
+    def test_no_collision_writes_plain_sidecar(self, tmp_path: Path):
+        """Issue #4428: when the input path differs from the derived sidecar
+        path (input lives in a different directory), the plain
+        ``net_class_map.json`` is still written so ``kct check`` auto-discovery
+        is unaffected."""
+        from kicad_tools.cli.route_cmd import _write_net_class_map_sidecar
+        from kicad_tools.router.rules import NetClassRouting, net_class_map_to_dict
+
+        # Input in a separate directory -> no collision with the output dir.
+        input_dir = tmp_path / "authored"
+        input_dir.mkdir()
+        input_path = input_dir / "net_class_map.json"
+        input_path.write_text(
+            json.dumps(net_class_map_to_dict({"AC_LINE": NetClassRouting(name="HV")}))
+        )
+
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        pcb_out = out_dir / "board_routed.kicad_pcb"
+        pcb_out.write_text("(kicad_pcb)")
+
+        _write_net_class_map_sidecar(
+            pcb_out,
+            {"AC_LINE": NetClassRouting(name="HV")},
+            quiet=True,
+            input_path=input_path,
+            loaded_net_class_map={"AC_LINE": NetClassRouting(name="HV")},
+        )
+
+        # Plain sidecar written; no diverted effective sidecar.
+        assert (out_dir / "net_class_map.json").is_file()
+        assert not (out_dir / "net_class_map.effective.json").exists()
+
+    def test_round_trip_fidelity_merges_loaded_over_classifier(self, tmp_path: Path):
+        """Issue #4428: the loaded user map is merged OVER the classifier
+        output before serialization so resolved nets keep authored fields
+        (``name``/``target_ampacity``/``avoid_layers``) rather than the
+        name-pattern guess."""
+        from kicad_tools.cli.route_cmd import _write_net_class_map_sidecar
+        from kicad_tools.router.rules import NetClassRouting, net_class_map_from_dict
+
+        pcb_out = tmp_path / "board_routed.kicad_pcb"
+        pcb_out.write_text("(kicad_pcb)")
+
+        classifier = {"AC_LINE": NetClassRouting(name="Audio")}
+        authored = {"AC_LINE": NetClassRouting(name="HV", target_ampacity=20.0, avoid_layers=[1])}
+
+        # No input collision here (no input_path) -> plain sidecar, but the
+        # authored map must still override the classifier's "Audio".
+        _write_net_class_map_sidecar(pcb_out, classifier, quiet=True, loaded_net_class_map=authored)
+
+        sidecar = tmp_path / "net_class_map.json"
+        loaded = net_class_map_from_dict(json.loads(sidecar.read_text()))
+        assert loaded["AC_LINE"].name == "HV"
+        assert loaded["AC_LINE"].target_ampacity == 20.0
+        assert loaded["AC_LINE"].avoid_layers == [1]
+
+    def test_symlinked_input_resolves_to_same_inode(self, tmp_path: Path):
+        """Issue #4428: a symlinked input path resolving to the same file as
+        the derived sidecar is detected as a collision (samefile inode
+        identity), so the input target is not overwritten."""
+        from kicad_tools.cli.route_cmd import _write_net_class_map_sidecar
+        from kicad_tools.router.rules import NetClassRouting, net_class_map_to_dict
+
+        real = tmp_path / "net_class_map.json"
+        real.write_text(json.dumps(net_class_map_to_dict({"AC_LINE": NetClassRouting(name="HV")})))
+        original_bytes = real.read_bytes()
+
+        link = tmp_path / "authored_link.json"
+        link.symlink_to(real)
+
+        pcb_out = tmp_path / "board_routed.kicad_pcb"
+        pcb_out.write_text("(kicad_pcb)")
+
+        _write_net_class_map_sidecar(
+            pcb_out,
+            {"AC_LINE": NetClassRouting(name="Audio")},
+            quiet=True,
+            input_path=link,
+            loaded_net_class_map={"AC_LINE": NetClassRouting(name="HV")},
+        )
+
+        # The real file (target of the symlink) is untouched.
+        assert real.read_bytes() == original_bytes
+        assert (tmp_path / "net_class_map.effective.json").is_file()
+
 
 class TestInactiveSkewRuleWarningNonCLI:
     """Issue #3917 Defect 3 / AC4: the INACTIVE warning fires from a *direct*
