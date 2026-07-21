@@ -351,11 +351,10 @@ class TestKicadCliDrcGoldenSchema:
 
         Note: KiCad 10.0.4 does NOT emit a per-item `net` key nor a
         violation-level `pos` -- the net is embedded in the item
-        `description` as ``[NetName]``. The parser reads `net`/`pos`
-        defensively via `dict.get`/`"net" in item`, so their absence is
-        tolerated (nets end up empty). If a future KiCad ADDS `net`, the
-        parser will start populating `DRCViolation.nets`; this test documents
-        the current real shape so that transition is a visible diff.
+        `description` as ``[NetName]``. The parser extracts nets from that
+        ``[NetName]`` token and also honors a per-item `net` key as a
+        forward-compat fallback if a future KiCad ADDS one. This test
+        documents the current real shape (description + pos, no `net` key).
         """
         data = _load_golden_raw()
         saw_items = False
@@ -447,6 +446,107 @@ class TestKicadCliDrcGoldenSchema:
         # ...but the shape contract would have caught it first.
         missing = [k for k in _REQUIRED_KICAD_CLI_DRC_KEYS if k not in data]
         assert "violations" in missing
+
+    def test_golden_nets_extracted_from_item_descriptions(self):
+        """Nets are populated from the ``[NetName]`` token in real output.
+
+        Regression guard for the silent no-op where `_parse_kicad_cli_json`
+        only read a per-item `net` key that real KiCad 10.0.4 never emits,
+        leaving `DRCViolation.nets` empty and breaking `--net` filtering,
+        `violations_for_net()`, and the DRC fixer/repair targeting. The net
+        lives inside each item's `description` as ``[NetName]``; the parser
+        now extracts it there.
+        """
+        report = parse_json_report(_GOLDEN_FIXTURE.read_text())
+
+        # At least one violation must carry a non-empty net set.
+        assert any(v.nets for v in report.violations), (
+            "No violation had nets populated -- the [NetName] extraction in "
+            "_parse_kicad_cli_json regressed (real output has no `net` key)."
+        )
+
+        # The expected net names from the golden capture are surfaced.
+        all_nets = {net for v in report.violations for net in v.nets}
+        assert "Net-(C11-2)" in all_nets
+        assert "Net-(R1-1)" in all_nets
+
+        # The shorting violations expose BOTH shorted nets (dedup preserved).
+        shorting = [
+            v for v in report.violations if v.nets and set(v.nets) == {"Net-(C11-2)", "Net-(R1-1)"}
+        ]
+        assert shorting, (
+            "Expected a violation carrying both shorted nets Net-(C11-2) and "
+            f"Net-(R1-1); saw net sets {[v.nets for v in report.violations]!r}"
+        )
+
+    def test_kicad_cli_json_extracts_net_without_net_key(self):
+        """A synthetic item with only a ``[NetName]`` description yields nets.
+
+        Unit-level guard: no per-item `net` key, net inferred from the
+        bracket token, ``<no net>`` excluded, duplicates deduped across items.
+        """
+        data = {
+            "source": "board.kicad_pcb",
+            "violations": [
+                {
+                    "type": "clearance",
+                    "description": "Clearance violation",
+                    "severity": "error",
+                    "items": [
+                        {
+                            "description": "Track [Net-(C11-2)] on F.Cu",
+                            "pos": {"x": 1.0, "y": 2.0},
+                        },
+                        {
+                            "description": "Via [Net-(C11-2)] on F.Cu - B.Cu",
+                            "pos": {"x": 3.0, "y": 4.0},
+                        },
+                        {
+                            "description": "Pad 1 [<no net>] of R1 on F.Cu",
+                            "pos": {"x": 5.0, "y": 6.0},
+                        },
+                    ],
+                }
+            ],
+        }
+        report = parse_json_report(json.dumps(data))
+        assert report.violations[0].nets == ["Net-(C11-2)"]
+
+    def test_kicad_cli_json_honors_legacy_net_key_fallback(self):
+        """A forward-compat item carrying a `net` key is still honored."""
+        data = {
+            "source": "board.kicad_pcb",
+            "violations": [
+                {
+                    "type": "clearance",
+                    "description": "Clearance violation",
+                    "severity": "error",
+                    "items": [
+                        {"description": "no bracket here", "net": "GND"},
+                    ],
+                }
+            ],
+        }
+        report = parse_json_report(json.dumps(data))
+        assert report.violations[0].nets == ["GND"]
+
+    def test_kicad_cli_json_no_bracket_yields_empty_nets(self):
+        """An item description with no bracket token produces empty nets."""
+        data = {
+            "source": "board.kicad_pcb",
+            "violations": [
+                {
+                    "type": "silk_over_copper",
+                    "description": "Silk over copper",
+                    "severity": "warning",
+                    "items": [
+                        {"description": "Text item on F.SilkS"},
+                    ],
+                }
+            ],
+        }
+        report = parse_json_report(json.dumps(data))
+        assert report.violations[0].nets == []
 
 
 class TestKicadCliDrcLiveSmoke:

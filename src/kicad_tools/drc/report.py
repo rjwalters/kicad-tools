@@ -412,7 +412,17 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
                     )
                 )
 
-            # Extract nets
+            # Extract nets from the [NetName] token(s) in the description.
+            # Real KiCad-cli JSON has no per-item "net" key; the net lives
+            # inside the description, e.g. "Track [Net-(C11-2)] on F.Cu".
+            # Mirrors the plain-text parser above (parse_text_report).
+            net_matches = re.findall(r"\[([^\]]+)\]", desc)
+            for net in net_matches:
+                if net != "<no net>" and net not in nets:
+                    nets.append(net)
+
+            # Forward-compat fallback: honor a per-item "net" key if a
+            # future KiCad schema provides one directly.
             if "net" in item_data:
                 net = item_data["net"]
                 if net and net not in nets:
