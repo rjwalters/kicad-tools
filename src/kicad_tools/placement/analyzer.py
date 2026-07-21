@@ -38,6 +38,10 @@ class DesignRules:
     min_hole_to_hole: float = 0.5  # mm
     min_edge_clearance: float = 0.3  # mm
     courtyard_margin: float = 0.25  # mm - margin around pads for courtyard
+    # Maximum gap an off-board connector's courtyard may stand off from the
+    # nearest board edge before it is flagged as marooned in the interior
+    # (issue #4450). Board-03's USB-C J1 sits 8 mm inside the north edge.
+    edge_connector_max_inset: float = 2.0  # mm
 
 
 class PlacementAnalyzer:
@@ -130,6 +134,7 @@ class PlacementAnalyzer:
         if self._board_edge:
             conflicts.extend(self._check_off_board())
             conflicts.extend(self._check_edge_clearance(rules.min_edge_clearance))
+            conflicts.extend(self._check_edge_connectors(rules.edge_connector_max_inset))
 
         # Sort by severity then location
         conflicts.sort(key=lambda c: (c.severity.value, c.location.x, c.location.y))
@@ -264,6 +269,7 @@ class PlacementAnalyzer:
         if self._board_edge:
             conflicts.extend(self._check_off_board())
             conflicts.extend(self._check_edge_clearance(rules.min_edge_clearance))
+            conflicts.extend(self._check_edge_connectors(rules.edge_connector_max_inset))
 
         # Sort by severity then location
         conflicts.sort(key=lambda c: (c.severity.value, c.location.x, c.location.y))
@@ -815,6 +821,97 @@ class PlacementAnalyzer:
                     actual_clearance=dist,
                     required_clearance=min_clearance,
                 )
+
+    def _check_edge_connectors(self, max_inset: float) -> Iterator[Conflict]:
+        """Flag off-board connectors marooned in the board interior.
+
+        An "edge connector" — USB, barrel jack, RJ45, card-edge finger, or a
+        cable header — must sit at the board **perimeter** so its mating face
+        is accessible off the board.  A connector whose courtyard is *fully
+        inside* the outline yet stands off from the nearest edge by more than
+        ``max_inset`` mm is almost certainly mis-placed: no cable can physically
+        reach it.  This is the motivating case for issue #4450 — board-03's
+        USB-C ``J1`` sits 8 mm inside the north edge with its mouth facing the
+        board interior, so a USB cable cannot plug in.
+
+        Connector classification reuses the shared detector in
+        :mod:`kicad_tools.optim.edge_placement` (``_is_connector``, keyed on
+        reference designator and footprint-name keywords) rather than a private
+        keyword list, so the placement checker and the placement optimizer never
+        drift apart on what counts as a connector.
+
+        Only components whose courtyard is fully inside the outline are
+        considered.  A connector whose courtyard overhangs or falls outside the
+        edge is either an intentional edge overhang or a shifted-off-board part
+        already reported by :meth:`_check_off_board`; skipping those avoids
+        double-reporting and means a correctly *edge-placed* connector (its
+        courtyard touching the edge) never trips this check.
+
+        This is a heuristic surfaced at ``WARNING`` severity: some connectors
+        (board-to-board mezzanine, internal jumpers) are legitimately interior,
+        so the finding invites review rather than invalidating the placement.
+        """
+        if not self._board_edge:
+            return
+
+        from kicad_tools.optim.edge_placement import _is_connector
+
+        edge = self._board_edge
+        # Float-noise tolerance for the fully-inside containment test (the
+        # board-relative frame is produced by subtraction).
+        eps = 1e-6
+
+        for comp in self._components:
+            if not comp.courtyard:
+                continue
+            if not _is_connector(comp.reference, comp.footprint):
+                continue
+
+            cy = comp.courtyard
+
+            # Skip parts not fully inside the outline — those are handled by
+            # _check_off_board (overhang / shifted-off-board).  A connector
+            # placed flush at the edge has its courtyard touching (or slightly
+            # past) the outline, so it is excluded here by design.
+            outside = (
+                cy.min_x < edge.min_x - eps
+                or cy.max_x > edge.max_x + eps
+                or cy.min_y < edge.min_y - eps
+                or cy.max_y > edge.max_y + eps
+            )
+            if outside:
+                continue
+
+            # Distance from the courtyard to each of the four board edges; the
+            # smallest is how far the connector stands off the perimeter.
+            gaps = {
+                "left": cy.min_x - edge.min_x,
+                "right": edge.max_x - cy.max_x,
+                "top": cy.min_y - edge.min_y,
+                "bottom": edge.max_y - cy.max_y,
+            }
+            nearest_edge = min(gaps, key=lambda k: gaps[k])
+            inset = gaps[nearest_edge]
+
+            if inset <= max_inset:
+                # Adjacent to an edge — correctly perimeter-placed.
+                continue
+
+            yield Conflict(
+                type=ConflictType.EDGE_CONNECTOR_PLACEMENT,
+                severity=ConflictSeverity.WARNING,
+                component1=comp.reference,
+                component2=f"{nearest_edge}_edge",
+                message=(
+                    f"off-board connector {comp.reference} is {inset:.1f}mm inside "
+                    f"the board interior (nearest edge: {nearest_edge}); off-board "
+                    "connectors must sit at the perimeter with the mating face "
+                    "accessible off-board"
+                ),
+                location=cy.center,
+                actual_clearance=inset,
+                required_clearance=max_inset,
+            )
 
     def _extract_board_edge(self, pcb) -> Rectangle | None:
         """Extract board outline bounding box from the Edge.Cuts layer.
