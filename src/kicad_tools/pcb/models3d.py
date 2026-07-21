@@ -32,11 +32,31 @@ no copper/pad/zone/net geometry changes.  Footprints that already share the
 library's origin convention (most SMD parts, e.g. ``R_0805_2012Metric``)
 compute a zero delta and are inserted verbatim.
 
+**Orientation-convention rotation.**  Some generators bake a footprint's
+rotation into the *pad coordinates* rather than expressing it as the
+placement angle ``(at x y angle)`` -- e.g. board-07's 0.1" header lays its
+pads along X (``(-10.16, 0)`` … ``(10.16, 0)``) while the canonical library
+footprint (and its ``.step`` body) lays them along Y.  The placement angle is
+``0`` and the copied model rotate is ``0``, so ``kicad-cli pcb render`` draws
+the body 90° off from the copper.  This is the rotation analog of the origin
+offset above: we derive the pad-field orientation of both the target block
+and the source library footprint from two anchor pads (the pad-1→pad-2
+vector), and bake ``theta = target - source`` into the inserted model's
+``(rotate (xyz 0 0 ...))``.  Because the model frame's Y is negated versus the
+footprint 2D frame, a footprint-2D rotation of ``theta`` maps to a model-frame
+Z rotation of ``-theta``.  The centroid offset is composed **in the rotated
+frame** (``offset_2d = target_centroid - R_theta * source_centroid``) so the
+body still lands on the target pads.  Co-oriented footprints (all SMD parts,
+headers already authored on the library convention, the origin-offset case
+above) compute ``theta ~= 0`` and keep ``(rotate (xyz 0 0 0))`` plus the
+existing offset verbatim.
+
 Used by ``kct pcb add-3d-models``.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -299,6 +319,94 @@ def _find_first_at(text: str, start: int, end: int) -> tuple[float, float] | Non
     return None
 
 
+def _pad_number(text: str, start: int, end: int) -> str:
+    """Return the pad number (first quoted field) of a ``(pad ...)`` node.
+
+    ``text[start:end]`` spans the pad node's interior (just past ``(pad``).
+    Returns ``""`` when the pad carries no quoted number.
+    """
+    q = text.find('"', start, end)
+    if q == -1:
+        return ""
+    q_end = _skip_string(text, q)
+    return text[q + 1 : q_end - 1]
+
+
+def _pad_positions(block_text: str) -> list[tuple[str, tuple[float, float]]]:
+    """Return ``(pad_number, (x, y))`` for every positioned pad, in order.
+
+    Scans *block_text* (a full ``(footprint ...)`` or ``.kicad_mod`` body,
+    string-aware) for every copper ``(pad ...)`` node and records its number
+    and ``(at x y)`` position.  Pads without an ``(at ...)`` are skipped.
+    """
+    out: list[tuple[str, tuple[float, float]]] = []
+    i = 0
+    n = len(block_text)
+    needle = "(pad"
+    while i < n:
+        c = block_text[i]
+        if c == '"':
+            i = _skip_string(block_text, i)
+            continue
+        if c == "(" and block_text.startswith(needle, i):
+            after = i + len(needle)
+            if after < n and block_text[after] in " \t\n":
+                pad_end = _find_matching_paren(block_text, i)
+                number = _pad_number(block_text, after, pad_end)
+                at = _find_first_at(block_text, i, pad_end)
+                if at is not None:
+                    out.append((number, at))
+                i = pad_end + 1
+                continue
+        i += 1
+    return out
+
+
+def _pad_field_orientation(block_text: str) -> float | None:
+    """Return the pad-field orientation of a footprint block, in degrees.
+
+    The orientation is the angle (``atan2(dy, dx)``, degrees) of the vector
+    from pad ``"1"`` to pad ``"2"`` in the footprint-local 2D frame.  When the
+    numbered pads ``"1"`` / ``"2"`` are not both present, the first two
+    positioned pads (document order) are used as a fallback.
+
+    Returns ``None`` when fewer than two positioned pads exist, or when the two
+    anchor pads coincide (no derivable direction) -- callers then fall back to
+    zero rotation.  A footprint whose pad field is rotated by ``theta`` from
+    its library counterpart yields ``target - source == theta``.
+    """
+    pads = _pad_positions(block_text)
+    if len(pads) < 2:
+        return None
+    by_number = dict(pads)
+    if "1" in by_number and "2" in by_number:
+        p1, p2 = by_number["1"], by_number["2"]
+    else:
+        p1, p2 = pads[0][1], pads[1][1]
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        return None
+    return math.degrees(math.atan2(dy, dx))
+
+
+def _normalize_angle(deg: float) -> float:
+    """Normalize an angle in degrees to the half-open range ``(-180, 180]``."""
+    a = deg % 360.0
+    if a > 180.0:
+        a -= 360.0
+    return a
+
+
+def _rotate_point(point: tuple[float, float], theta_deg: float) -> tuple[float, float]:
+    """Rotate *point* about the origin by *theta_deg* (footprint 2D frame, CCW)."""
+    rad = math.radians(theta_deg)
+    cos_t = math.cos(rad)
+    sin_t = math.sin(rad)
+    x, y = point
+    return (x * cos_t - y * sin_t, x * sin_t + y * cos_t)
+
+
 def _apply_offset_delta(model_block: str, dx: float, dy: float) -> str:
     """Return *model_block* with ``(dx, -dy)`` added into its ``(offset ...)``.
 
@@ -352,6 +460,43 @@ def _fmt_num(value: float) -> str:
     return f"{rounded:g}"
 
 
+def _apply_rotate_delta(model_block: str, theta_deg: float) -> str:
+    """Return *model_block* with a model-frame Z rotation of ``-theta_deg`` baked in.
+
+    *theta_deg* is the pad-field rotation of the target footprint relative to
+    its library source, measured in the footprint 2D frame.  The KiCad 3D-model
+    frame negates Y versus the footprint 2D frame, so a footprint-2D rotation of
+    ``theta`` maps to a model-frame Z rotation of ``-theta`` (pinned by the
+    regression tests).  The delta is added into the block's own ``(rotate (xyz
+    X Y Z))`` Z field; X and Y are preserved.
+
+    When *theta_deg* is (near) zero -- the co-oriented case (all SMD parts, the
+    origin-convention offset fixtures) -- the block is returned unchanged so
+    already-correct footprints get a verbatim insert.
+    """
+    if abs(_normalize_angle(theta_deg)) < 1e-6:
+        return model_block
+    rot_idx = model_block.find("(rotate")
+    if rot_idx == -1:
+        return model_block
+    rot_end = _find_matching_paren(model_block, rot_idx)
+    xyz_idx = model_block.find("(xyz", rot_idx, rot_end)
+    if xyz_idx == -1:
+        return model_block
+    xyz_end = _find_matching_paren(model_block, xyz_idx)
+    inner = model_block[xyz_idx + len("(xyz") : xyz_end]
+    fields = inner.split()
+    if len(fields) < 3:
+        return model_block
+    try:
+        rx, ry, rz = float(fields[0]), float(fields[1]), float(fields[2])
+    except ValueError:
+        return model_block
+    nz = _fmt_num(_normalize_angle(rz - theta_deg))  # footprint 2D theta -> model Z -theta
+    new_xyz = f"(xyz {_fmt_num(rx)} {_fmt_num(ry)} {nz})"
+    return model_block[:xyz_idx] + new_xyz + model_block[xyz_end + 1 :]
+
+
 # --------------------------------------------------------------------------
 # Resolvers: lib id -> dedented (model ...) block texts
 # --------------------------------------------------------------------------
@@ -359,17 +504,21 @@ def _fmt_num(value: float) -> str:
 
 @dataclass
 class ResolvedModels:
-    """A resolver hit: the model block texts plus the source pad-1 position.
+    """A resolver hit: the model block texts plus the source pad-field geometry.
 
     *models* are the dedented ``(model ...)`` node texts from the resolved
     library ``.kicad_mod``.  *source_anchor* is that footprint's own pad
     centroid (``None`` when it has no positioned pads), used to compute the
     origin-convention offset ``target_anchor - source_anchor`` at insertion
-    time.
+    time.  *source_orientation* is that footprint's pad-field orientation in
+    degrees (``None`` when fewer than two positioned pads exist), used to
+    compute the rotation ``theta = target_orientation - source_orientation``
+    that a pad-field-rotated target footprint needs baked into its model.
     """
 
     models: list[str]
     source_anchor: tuple[float, float] | None = None
+    source_orientation: float | None = None
 
 
 # A resolver maps a lib id to its resolved models.  For backward
@@ -535,6 +684,7 @@ def make_library_resolver(
                     result = ResolvedModels(
                         models=extract_model_blocks(mod_text),
                         source_anchor=_pad_anchor(mod_text),
+                        source_orientation=_pad_field_orientation(mod_text),
                     )
                     if sub_id is not None and substitution_log is not None:
                         substitution_log[lib_id] = sub_id
@@ -601,26 +751,42 @@ def add_model_refs_to_text(pcb_text: str, resolver: Resolver) -> tuple[str, Mode
         if isinstance(resolved, ResolvedModels):
             models = resolved.models
             source_anchor = resolved.source_anchor
+            source_orientation = resolved.source_orientation
         else:
             models = resolved
             source_anchor = None
+            source_orientation = None
         if not models:
             report.no_model_in_library.append(block.lib_id)
             continue
-        # Origin-convention offset: shift the body by target_anchor -
-        # source_anchor (pad centroids) so the model lands on the target
-        # footprint's pads even when it reuses a canonical name on a
-        # different origin convention.
+        # Orientation-convention rotation: a target footprint whose pad field
+        # is rotated relative to its library source (rotation baked into pad
+        # coordinates rather than the placement angle) needs the delta baked
+        # into the model's (rotate ...).  theta is measured in the footprint
+        # 2D frame; the model frame negates Y, so _apply_rotate_delta bakes a
+        # model-frame Z of -theta.  When either orientation is underivable
+        # (single-pad parts, LCSC-synthesized bodies) theta stays 0.
+        target_orientation = _pad_field_orientation(body)
+        theta = 0.0
+        if source_orientation is not None and target_orientation is not None:
+            theta = _normalize_angle(target_orientation - source_orientation)
+        # Origin-convention offset, composed in the rotated frame: shift the
+        # body by target_anchor - R_theta * source_anchor (pad centroids) so
+        # the model lands on the target footprint's pads after rotation.  With
+        # theta == 0 this reduces to the plain target - source centroid delta.
         target_anchor = _pad_anchor(body)
         dx = dy = 0.0
         if source_anchor is not None and target_anchor is not None:
-            dx = target_anchor[0] - source_anchor[0]
-            dy = target_anchor[1] - source_anchor[1]
+            rsx, rsy = _rotate_point(source_anchor, theta)
+            dx = target_anchor[0] - rsx
+            dy = target_anchor[1] - rsy
         # Insert before the line that holds the footprint's closing paren.
         close_line_start = pcb_text.rfind("\n", 0, block.end) + 1
         child_indent = block.indent + "\t"
         text = "".join(
-            _indent_block(_apply_offset_delta(m, dx, dy), child_indent) + "\n" for m in models
+            _indent_block(_apply_rotate_delta(_apply_offset_delta(m, dx, dy), theta), child_indent)
+            + "\n"
+            for m in models
         )
         insertions.append((close_line_start, text))
         report.patched.append(block.lib_id)

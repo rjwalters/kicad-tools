@@ -15,7 +15,9 @@ from kicad_tools.footprints.library_path import LibraryPaths
 from kicad_tools.pcb.models3d import (
     ResolvedModels,
     _apply_offset_delta,
+    _apply_rotate_delta,
     _pad_anchor,
+    _pad_field_orientation,
     add_model_refs,
     add_model_refs_to_text,
     extract_model_blocks,
@@ -748,3 +750,308 @@ class TestResolvedModels:
         assert report.patched
         # No anchor available -> zero offset applied (verbatim).
         assert "(xyz 0 0 0)" in new_text
+
+
+# --------------------------------------------------------------------------
+# Orientation-convention rotation (issue #4448)
+# --------------------------------------------------------------------------
+#
+# Some generators bake a footprint's rotation into the *pad coordinates*
+# rather than the placement angle: board-07's 0.1" header lays its pads along
+# X while the canonical library footprint (and its STEP body) lays them along
+# Y.  Placement angle and model rotate are both 0 as written, so kicad-cli
+# renders the body 90° off from the copper.  The patcher must derive the
+# pad-field orientation from two anchor pads and bake theta = target - source
+# into the model (rotate (xyz 0 0 -theta)) -- model-frame Y is negated vs the
+# footprint 2D frame, so a footprint-2D rotation of theta maps to model-frame
+# Z of -theta -- while composing the centroid offset in the rotated frame.
+
+# Library footprint: 1x09 pins running along +Y (pad 1 at origin), matching
+# the canonical KiCad PinHeader_1x09_P2.54mm_Vertical .step authoring.
+# Centroid = (0, 10.16), orientation = +90° (pad-1 -> pad-2 is +Y).
+ROT_HEADER_LIB_MOD = (
+    '(footprint "PinHeader_1x09_P2.54mm_Vertical"\n'
+    '\t(layer "F.Cu")\n'
+    + "".join(
+        f'\t(pad "{i + 1}" thru_hole {"rect" if i == 0 else "oval"}\n'
+        f"\t\t(at 0 {i * 2.54:g})\n"
+        "\t\t(size 1.7 1.7)\n"
+        "\t\t(drill 1)\n"
+        '\t\t(layers "*.Cu" "*.Mask")\n'
+        "\t)\n"
+        for i in range(9)
+    )
+    + '\t(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/'
+    'PinHeader_1x09_P2.54mm_Vertical.step"\n'
+    "\t\t(offset\n\t\t\t(xyz 0 0 0)\n\t\t)\n"
+    "\t\t(scale\n\t\t\t(xyz 1 1 1)\n\t\t)\n"
+    "\t\t(rotate\n\t\t\t(xyz 0 0 0)\n\t\t)\n"
+    "\t)\n"
+    ")\n"
+)
+
+# Board footprint reusing that lib id but with the 90° baked into pad coords:
+# pads run along X from (-10.16, 0) to (10.16, 0) (board-07 generate_addr_header
+# geometry).  Centroid = (0, 0), orientation = 0° (pad-1 -> pad-2 is +X).
+ROT_HEADER_PCB_TEXT = (
+    "(kicad_pcb\n"
+    "\t(version 20240108)\n"
+    '\t(footprint "Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"\n'
+    '\t\t(layer "F.Cu")\n'
+    "\t\t(at 113.5 120)\n"
+    + "".join(
+        f'\t\t(pad "{i + 1}" thru_hole {"rect" if i == 0 else "oval"}\n'
+        f"\t\t\t(at {(i - 4) * 2.54:g} 0)\n"
+        "\t\t\t(size 1.7 1.7)\n"
+        "\t\t\t(drill 1)\n"
+        '\t\t\t(layers "*.Cu" "*.Mask")\n'
+        "\t\t)\n"
+        for i in range(9)
+    )
+    + "\t)\n"
+    ")\n"
+)
+
+
+def _make_rot_header_library(tmp_path: Path) -> LibraryPaths:
+    root = tmp_path / "footprints"
+    lib = root / "Connector_PinHeader_2.54mm.pretty"
+    lib.mkdir(parents=True)
+    (lib / "PinHeader_1x09_P2.54mm_Vertical.kicad_mod").write_text(ROT_HEADER_LIB_MOD)
+    return LibraryPaths(footprints_path=root, source="config")
+
+
+class TestPadFieldOrientationHelper:
+    def _block(self, p2: tuple[float, float]) -> str:
+        return (
+            '(footprint "x"\n'
+            '\t(pad "1" thru_hole rect (at 0 0) (size 1 1))\n'
+            f'\t(pad "2" thru_hole oval (at {p2[0]:g} {p2[1]:g}) (size 1 1))\n'
+            ")\n"
+        )
+
+    def test_orientation_zero_pads_along_x(self):
+        assert _pad_field_orientation(self._block((1, 0))) == 0.0
+
+    def test_orientation_ninety_pads_along_y(self):
+        assert _pad_field_orientation(self._block((0, 1))) == 90.0
+
+    def test_orientation_one_eighty(self):
+        assert _pad_field_orientation(self._block((-1, 0))) == 180.0
+
+    def test_orientation_two_seventy_is_minus_ninety(self):
+        # atan2(-1, 0) = -90°; 270° is represented as -90 in the raw helper.
+        assert _pad_field_orientation(self._block((0, -1))) == -90.0
+
+    def test_orientation_uses_numbered_pads_not_document_order(self):
+        # Pad "2" appears before pad "1" in document order, but the pad-1 -> pad-2
+        # vector (+Y) must still drive the orientation.
+        block = (
+            '(footprint "x"\n'
+            '\t(pad "2" thru_hole oval (at 0 2.54) (size 1 1))\n'
+            '\t(pad "1" thru_hole rect (at 0 0) (size 1 1))\n'
+            ")\n"
+        )
+        assert _pad_field_orientation(block) == 90.0
+
+    def test_orientation_falls_back_to_first_two_pads_when_unnumbered(self):
+        block = (
+            '(footprint "x"\n'
+            '\t(pad "" thru_hole rect (at 0 0) (size 1 1))\n'
+            '\t(pad "" thru_hole oval (at 3 0) (size 1 1))\n'
+            ")\n"
+        )
+        assert _pad_field_orientation(block) == 0.0
+
+    def test_orientation_none_for_single_pad(self):
+        block = '(footprint "x"\n\t(pad "1" thru_hole rect (at 0 0) (size 1 1))\n)\n'
+        assert _pad_field_orientation(block) is None
+
+    def test_orientation_none_for_no_pads(self):
+        assert _pad_field_orientation('(footprint "x"\n\t(layer "F.Cu")\n)\n') is None
+
+    def test_orientation_none_for_coincident_anchor_pads(self):
+        block = (
+            '(footprint "x"\n'
+            '\t(pad "1" thru_hole rect (at 5 5) (size 1 1))\n'
+            '\t(pad "2" thru_hole oval (at 5 5) (size 1 1))\n'
+            ")\n"
+        )
+        assert _pad_field_orientation(block) is None
+
+
+class TestApplyRotateDelta:
+    MODEL = (
+        '(model "a.step"\n'
+        "\t(offset\n\t\t(xyz 0 0 0)\n\t)\n"
+        "\t(scale\n\t\t(xyz 1 1 1)\n\t)\n"
+        "\t(rotate\n\t\t(xyz 0 0 0)\n\t)\n)"
+    )
+
+    def test_footprint_theta_maps_to_model_z_negated(self):
+        # theta = -90 (target rotated -90 from source) -> model-frame Z = +90.
+        out = _apply_rotate_delta(self.MODEL, -90.0)
+        assert "(rotate\n\t\t(xyz 0 0 90)" in out
+        # Only the rotate xyz changed; offset/scale untouched.
+        assert "(offset\n\t\t(xyz 0 0 0)" in out
+        assert "(scale\n\t\t(xyz 1 1 1)" in out
+
+    def test_positive_theta_maps_to_negative_model_z(self):
+        out = _apply_rotate_delta(self.MODEL, 90.0)
+        assert "(rotate\n\t\t(xyz 0 0 -90)" in out
+
+    def test_zero_theta_is_verbatim(self):
+        assert _apply_rotate_delta(self.MODEL, 0.0) == self.MODEL
+
+    def test_full_turn_theta_is_verbatim(self):
+        # 360° normalizes to 0 -> no rotation baked in.
+        assert _apply_rotate_delta(self.MODEL, 360.0) == self.MODEL
+
+    def test_existing_nonzero_rotate_is_added_to(self):
+        model = '(model "a.step"\n\t(rotate\n\t\t(xyz 0 0 45)\n\t)\n)'
+        out = _apply_rotate_delta(model, -90.0)
+        # 45 - (-90) = 135
+        assert "(xyz 0 0 135)" in out
+
+
+class TestOrientationConventionRotation:
+    def test_pad_rotated_header_gets_ninety_degree_model_rotate(self, tmp_path):
+        """The board-07 case: library pads along Y, board pads along X.
+
+        theta = target(0°) - source(90°) = -90°; model-frame Z = -theta = +90°.
+        Offset is composed in the rotated frame:
+          R_{-90} * source_centroid(0, 10.16) = (10.16, 0)
+          offset_2d = target_centroid(0,0) - (10.16, 0) = (-10.16, 0)
+          model offset = (-10.16, -0, 0) = (-10.16, 0, 0)
+        """
+        lib = _make_rot_header_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(ROT_HEADER_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib)
+        assert report.patched == ["Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"]
+        text = pcb.read_text()
+        import re
+
+        # Sign convention pinned: +90 model-frame Z for a -90 footprint rotation.
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", text)
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 90"
+        # Centroid offset composed in the rotated frame.
+        offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", text)
+        assert offset_xyz is not None
+        assert offset_xyz.group(1).strip() == "-10.16 0 0"
+
+    def test_rotate_and_offset_are_pure_metadata(self, tmp_path):
+        """Only inserted model lines differ; no original copper line moves."""
+        lib = _make_rot_header_library(tmp_path)
+        new_text, _ = add_model_refs_to_text(ROT_HEADER_PCB_TEXT, make_library_resolver(lib))
+        original_lines = ROT_HEADER_PCB_TEXT.splitlines()
+        new_lines = new_text.splitlines()
+        it = iter(new_lines)
+        assert all(line in it for line in original_lines), "an original line moved/was dropped"
+        added = set(new_lines) - set(original_lines)
+        for line in added:
+            body = line.strip()
+            assert body.startswith(("(model", "(offset", "(scale", "(rotate", "(xyz", ")"))
+
+    def test_co_oriented_header_keeps_zero_rotate(self, tmp_path):
+        """The #4034 origin-convention header (pads along Y in BOTH the library
+        and the board) is co-oriented: theta ~= 0, so the inserted model keeps
+        (rotate (xyz 0 0 0)) verbatim -- no regression."""
+        import re
+
+        lib = _make_header_library(tmp_path)
+        new_text, _ = add_model_refs_to_text(HEADER_PCB_TEXT, make_library_resolver(lib))
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", new_text)
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 0"
+        # And the origin offset is still the #4034 value (Y negated vs -1.27).
+        assert "(xyz 0 1.27 0)" in new_text
+
+    def test_co_oriented_smd_keeps_zero_rotate(self, tmp_path):
+        """An SMD 0805 part (co-oriented) keeps (rotate (xyz 0 0 0)) verbatim."""
+        import re
+
+        lib = _make_library(tmp_path)
+        new_text, _ = add_model_refs_to_text(PCB_TEXT, make_library_resolver(lib))
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", new_text)
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 0"
+
+    def test_source_orientation_carried_on_resolved_models(self, tmp_path):
+        lib = _make_rot_header_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        resolved = resolver("Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical")
+        assert isinstance(resolved, ResolvedModels)
+        assert resolved.source_orientation == 90.0
+
+    def test_one_eighty_rotation(self, tmp_path):
+        """A header whose pads run in -Y (180° from the library +Y) gets a
+        180° model rotate and the centroid offset composed in that frame."""
+        root = tmp_path / "footprints"
+        libdir = root / "Connector_PinHeader_2.54mm.pretty"
+        libdir.mkdir(parents=True)
+        (libdir / "PinHeader_1x09_P2.54mm_Vertical.kicad_mod").write_text(ROT_HEADER_LIB_MOD)
+        paths = LibraryPaths(footprints_path=root, source="config")
+        # Board pads run downward from (0, 20.32): pad 1 (0, 20.32) ... pad 9 (0, 0),
+        # i.e. the pad-1 -> pad-2 vector is -Y (180° from the library +Y).
+        # Centroid = (0, 10.16).
+        pcb_text = (
+            "(kicad_pcb\n"
+            '\t(footprint "Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"\n'
+            '\t\t(layer "F.Cu")\n'
+            + "".join(
+                f'\t\t(pad "{i + 1}" thru_hole {"rect" if i == 0 else "oval"}\n'
+                f"\t\t\t(at 0 {20.32 - i * 2.54:g})\n"
+                "\t\t\t(size 1.7 1.7)\n"
+                "\t\t\t(drill 1)\n"
+                '\t\t\t(layers "*.Cu" "*.Mask")\n'
+                "\t\t)\n"
+                for i in range(9)
+            )
+            + "\t)\n"
+            ")\n"
+        )
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(pcb_text)
+        add_model_refs(pcb, library_paths=paths)
+        text = pcb.read_text()
+        import re
+
+        # target orient = -90 (atan2(-2.54, 0)); source = 90; theta = -180 -> 180;
+        # model-frame Z = -theta = -180 -> normalize to 180.
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", text)
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 180"
+        # R_{180} * source_centroid(0, 10.16) = (0, -10.16);
+        # offset_2d = target_centroid(0, 10.16) - (0, -10.16) = (0, 20.32);
+        # model offset Y negated -> (0, -20.32, 0).
+        offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", text)
+        assert offset_xyz is not None
+        assert offset_xyz.group(1).strip() == "0 -20.32 0"
+
+    def test_single_pad_target_falls_back_to_zero_rotation(self, tmp_path):
+        """A target footprint with only one positioned pad has no derivable
+        orientation -> zero rotation, no crash."""
+        lib = _make_rot_header_library(tmp_path)
+        pcb_text = (
+            "(kicad_pcb\n"
+            '\t(footprint "Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"\n'
+            '\t\t(layer "F.Cu")\n'
+            '\t\t(pad "1" thru_hole rect\n'
+            "\t\t\t(at 0 0)\n"
+            "\t\t\t(size 1.7 1.7)\n"
+            '\t\t\t(layers "*.Cu" "*.Mask")\n'
+            "\t\t)\n"
+            "\t)\n"
+            ")\n"
+        )
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(pcb_text)
+        report = add_model_refs(pcb, library_paths=lib)
+        assert report.patched
+        import re
+
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", pcb.read_text())
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 0"
