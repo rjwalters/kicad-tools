@@ -783,9 +783,16 @@ class LCSCClient:
             logger.warning(f"Search API returned error: {message}")
             return SearchResult(query=query)
 
-        result_data = data.get("data", {})
-        components = result_data.get("componentPageInfo", {}).get("list", [])
-        total = result_data.get("componentPageInfo", {}).get("total", 0)
+        result_data = data.get("data") or {}
+        # The live JLCPCB API returns the keys present but explicitly null for a
+        # no-match query (e.g. "componentPageInfo": {"list": null, "total": 0}).
+        # dict.get(key, default) only substitutes the default when the key is
+        # ABSENT, not when it is present-but-null, so use `... or {}` / `... or []`
+        # to coerce explicit null. A genuine no-match then flows through the
+        # existing unmatched path instead of raising 'NoneType' is not iterable.
+        page_info = result_data.get("componentPageInfo") or {}
+        components = page_info.get("list") or []
+        total = page_info.get("total") or 0
 
         parts = []
         for comp in components:

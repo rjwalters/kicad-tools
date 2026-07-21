@@ -868,6 +868,60 @@ class TestLCSCClientExtended:
             assert payload["currentPage"] == 2
             assert payload["pageSize"] == 50
 
+    def test_search_null_list_returns_empty(self, tmp_path):
+        """A no-match query where the API returns ``"list": null`` must not raise.
+
+        Regression for #4407: the live JLCPCB API returns the
+        ``componentPageInfo`` keys present but explicitly null for a generic
+        no-match query (e.g. a ``PinHeader_1x02`` connector). ``dict.get(key,
+        default)`` only substitutes the default when the key is *absent*, so
+        the old parser set ``components = None`` and ``for comp in components``
+        raised ``TypeError: 'NoneType' object is not iterable``. That leaked
+        verbatim into the BOM-enrichment "reason" field.
+        """
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "code": 200,
+                "data": {"componentPageInfo": {"list": None, "total": 0}},
+            }
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.post.return_value = mock_resp
+
+            from kicad_tools.parts import LCSCClient
+
+            client = LCSCClient(use_cache=False, use_local_catalog=False)
+
+            result = client.search("PinHeader_1x02")
+
+            assert result.parts == []
+            assert result.total_count == 0
+
+    def test_search_null_component_page_info_returns_empty(self, tmp_path):
+        """``componentPageInfo: null`` must also coerce to an empty result.
+
+        Regression for #4407: guarding only the inner ``list`` key would still
+        raise ``AttributeError`` on ``None.get("list")`` if the whole
+        ``componentPageInfo`` object comes back null.
+        """
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "code": 200,
+                "data": {"componentPageInfo": None},
+            }
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.post.return_value = mock_resp
+
+            from kicad_tools.parts import LCSCClient
+
+            client = LCSCClient(use_cache=False, use_local_catalog=False)
+
+            result = client.search("PinHeader_1x02")
+
+            assert result.parts == []
+            assert result.total_count == 0
+
     def test_context_manager(self, tmp_path):
         """Test LCSCClient as context manager."""
         from kicad_tools.parts import LCSCClient, PartsCache
