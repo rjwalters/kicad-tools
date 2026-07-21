@@ -467,3 +467,135 @@ def test_no_voltage_map_leaves_report_in_single_voltage_mode(tmp_path):
     report = compute_creepage_census(pcb, hv, min_mm=1.5)
     assert report.voltage_map is None
     assert report.uses_voltage_map is False
+
+
+# ---------------------------------------------------------------------------
+# Voltage-derived census membership union (issue #4401)
+# ---------------------------------------------------------------------------
+
+
+def test_voltage_union_selects_high_v_non_hv_class_net(tmp_path):
+    # The repro: a high-|V| net (SIG at 150 V) that is NEITHER mains-named NOR
+    # class-HV. Without a voltage map it is invisible to the census; with the
+    # map + threshold it is pulled in by the voltage-derived union.
+    pcb = _load(tmp_path, board_no_hv_source())  # nets: SIG, GND
+    base = resolve_hv_nets(pcb, "HV", net_class_map=None)
+    assert base == {}  # neither SIG nor GND is HV by class/name
+
+    hv = resolve_hv_nets(
+        pcb,
+        "HV",
+        net_class_map=None,
+        voltage_map={"SIG": 150.0},
+        census_threshold=30.0,
+    )
+    assert set(hv.values()) == {"SIG"}
+
+
+def test_voltage_union_is_union_not_replace(tmp_path):
+    # A class-HV net at a LOW/unmapped voltage must remain selected even though
+    # the voltage-derived pass would not add it (union, not replace); a separate
+    # high-|V| non-HV net is added on top.
+    pcb = _load(tmp_path, board_source(with_slot=False))  # L_MAINS (HV via map), GND
+    hv = resolve_hv_nets(
+        pcb,
+        "HV",
+        _hv_map(),  # classifies L_MAINS as HV
+        voltage_map={"L_MAINS": 5.0, "GND": 150.0},  # L_MAINS below threshold
+        census_threshold=30.0,
+    )
+    # L_MAINS kept via class selection despite 5 V; GND added via voltage union.
+    assert set(hv.values()) == {"L_MAINS", "GND"}
+
+
+def test_voltage_union_edge_voltage_shifts_reference(tmp_path):
+    # Membership keys on |V - edge_voltage|, not raw |V|.  With edge_voltage=140
+    # a 150 V net is only 10 V above the reference -> below the 30 V threshold.
+    pcb = _load(tmp_path, board_no_hv_source())
+    hv = resolve_hv_nets(
+        pcb,
+        "HV",
+        net_class_map=None,
+        voltage_map={"SIG": 150.0},
+        edge_voltage=140.0,
+        census_threshold=30.0,
+    )
+    assert hv == {}
+
+    # Same net, edge_voltage=0 -> 150 V >= 30 V -> selected.
+    hv2 = resolve_hv_nets(
+        pcb,
+        "HV",
+        net_class_map=None,
+        voltage_map={"SIG": 150.0},
+        edge_voltage=0.0,
+        census_threshold=30.0,
+    )
+    assert set(hv2.values()) == {"SIG"}
+
+
+def test_voltage_union_threshold_boundary_is_inclusive(tmp_path):
+    # A net exactly AT the threshold is selected (>= boundary).
+    pcb = _load(tmp_path, board_no_hv_source())
+    hv = resolve_hv_nets(
+        pcb,
+        "HV",
+        net_class_map=None,
+        voltage_map={"SIG": 30.0},
+        census_threshold=30.0,
+    )
+    assert set(hv.values()) == {"SIG"}
+
+    # Just below the threshold -> excluded.
+    hv2 = resolve_hv_nets(
+        pcb,
+        "HV",
+        net_class_map=None,
+        voltage_map={"SIG": 29.999},
+        census_threshold=30.0,
+    )
+    assert hv2 == {}
+
+
+def test_voltage_union_key_normalization_matches_census(tmp_path):
+    # A leading-'/' voltage-map key resolves the same net as the bare name
+    # (reuses _norm_net_key, matching the census's own lookup convention).
+    pcb = _load(tmp_path, board_no_hv_source())
+    hv = resolve_hv_nets(
+        pcb,
+        "HV",
+        net_class_map=None,
+        voltage_map={"/SIG": 150.0},  # hierarchical leading slash
+        census_threshold=30.0,
+    )
+    assert set(hv.values()) == {"SIG"}
+
+
+def test_voltage_union_negative_potential_uses_magnitude(tmp_path):
+    # A -150 V net is |−150 − 0| = 150 V from the edge reference -> selected.
+    pcb = _load(tmp_path, board_no_hv_source())
+    hv = resolve_hv_nets(
+        pcb,
+        "HV",
+        net_class_map=None,
+        voltage_map={"SIG": -150.0},
+        census_threshold=30.0,
+    )
+    assert set(hv.values()) == {"SIG"}
+
+
+def test_no_map_output_byte_identical_to_baseline(tmp_path):
+    # The no-op path: passing voltage_map=None (or census_threshold=None) must
+    # yield exactly the class/name selection with no voltage influence.
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    baseline = resolve_hv_nets(pcb, "HV", _hv_map())
+
+    # census_threshold=None disables the union even when a map is present.
+    same_no_threshold = resolve_hv_nets(
+        pcb, "HV", _hv_map(), voltage_map={"GND": 150.0}, census_threshold=None
+    )
+    assert same_no_threshold == baseline
+
+    # voltage_map=None disables the union even when a threshold is present.
+    same_no_map = resolve_hv_nets(pcb, "HV", _hv_map(), voltage_map=None, census_threshold=30.0)
+    assert same_no_map == baseline

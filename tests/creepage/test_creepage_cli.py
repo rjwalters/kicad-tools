@@ -284,3 +284,132 @@ def test_missing_net_class_map_errors(tmp_path, capsys):
     err = capsys.readouterr().err
     assert rc == 1
     assert "net-class-map file not found" in err
+
+
+# ---------------------------------------------------------------------------
+# #4401 voltage-derived census membership: a high-|V| net whose routing class
+# is not HV must still enter the census when a --voltage-map is supplied.
+# ---------------------------------------------------------------------------
+
+
+def _vmap_file(tmp_path, mapping, name="vmap.json"):
+    p = tmp_path / name
+    p.write_text(json.dumps(mapping))
+    return p
+
+
+def test_census_threshold_pulls_high_v_non_hv_net_into_census(tmp_path, capsys):
+    # board_no_hv_source ships SIG + GND -- neither is mains-named nor class-HV,
+    # so without a voltage map the census is empty (see
+    # test_high_working_voltage_without_mains_names_fires_guard).  Mapping SIG at
+    # 150 V with the default 30 V --census-threshold pulls it into hv_nets and
+    # produces audited pair rows (against GND and the board edge).
+    pcb = _write(tmp_path, board_no_hv_source())
+    vmap = _vmap_file(tmp_path, {"SIG": 150.0})
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--voltage-map",
+            str(vmap),
+            "--pollution-degree",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0  # 18 mm gap clears the 150 V requirement
+    assert "SIG" in payload["hv_nets"]
+    assert payload["pair_count"] >= 2  # SIG-vs-GND and SIG-vs-edge
+    kinds = {p["kind"] for p in payload["pairs"]}
+    assert {"conductor", "edge"} <= kinds
+
+
+def test_census_threshold_above_voltage_excludes_net(tmp_path, capsys):
+    # A --census-threshold above the mapped potential leaves the net out: SIG at
+    # 150 V with a 200 V threshold resolves an empty census (no mains names, no
+    # working voltage -> no vacuity guard) -> inert exit 0.
+    pcb = _write(tmp_path, board_no_hv_source())
+    vmap = _vmap_file(tmp_path, {"SIG": 150.0})
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--voltage-map",
+            str(vmap),
+            "--pollution-degree",
+            "2",
+            "--census-threshold",
+            "200",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["hv_nets"] == []
+    assert payload["pairs"] == []
+
+
+def test_census_edge_voltage_reference_honored_via_cli(tmp_path, capsys):
+    # The reserved _edge_voltage key shifts the reference: with _edge_voltage=140
+    # a 150 V net is only 10 V above it -> below the default 30 V threshold ->
+    # not a census member.
+    pcb = _write(tmp_path, board_no_hv_source())
+    vmap = _vmap_file(tmp_path, {"SIG": 150.0, "_edge_voltage": 140.0})
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--voltage-map",
+            str(vmap),
+            "--pollution-degree",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["hv_nets"] == []
+
+
+def test_census_threshold_inert_without_voltage_map(tmp_path, capsys):
+    # Without --voltage-map the flag has no effect: the class/name selection
+    # alone governs.  A mains-named board still resolves its HV nets exactly as
+    # before, regardless of --census-threshold.
+    pcb = _write(tmp_path, board_mains_named_source())
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "250",
+            "--pollution-degree",
+            "2",
+            "--census-threshold",
+            "5",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    # Mains nets still classified via the #4354 name fallback (not the voltage
+    # union), the ~1 mm AC_LINE<->GND gap fails -> exit 1.
+    assert rc == 1
+    assert "AC_LINE" in payload["hv_nets"]
+
+
+def test_census_threshold_defaults_to_thirty(tmp_path):
+    # The flag default matches optimize-placement --hv-threshold (30.0).
+    args = create_parser().parse_args(["creepage", "board.kicad_pcb", "--min", "1.5"])
+    assert args.census_threshold == 30.0
