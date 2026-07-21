@@ -290,6 +290,37 @@ class TestBuildRenamePlan:
         assert "u1" not in plan  # #PWR40 is canonical, unchanged
         assert plan["u2"]["new"] == "#PWR01"  # #PWR040 normalized, 40 reserved
 
+    def test_cross_sheet_canonical_duplicate_reassigned(self):
+        # Two *individually-canonical* #PWR40 symbols on different sheets are a
+        # real cross-sheet annotation collision even though each looks fine in
+        # isolation.  First-occurrence-wins: the first holder keeps #PWR40; the
+        # later duplicate is reassigned to a fresh, non-reserved number.
+        plan = build_rename_plan(
+            [
+                self._power("power:+3V3", "#PWR40", "u1"),
+                self._power("power:+5V", "#PWR40", "u2"),
+            ],
+        )
+        assert "u1" not in plan  # first holder keeps #PWR40
+        assert plan["u2"]["old"] == "#PWR40"
+        assert plan["u2"]["new"] == "#PWR01"  # reassigned, 40 reserved
+        assert len(plan) == 1  # exactly one of the duplicates renamed
+
+    def test_three_way_canonical_duplicate_reassigned(self):
+        # Three colliding #PWR40: only the first survives; the other two get
+        # distinct fresh numbers (no collision among the reassignments).
+        plan = build_rename_plan(
+            [
+                self._power("power:GND", "#PWR40", "u1"),
+                self._power("power:GND", "#PWR40", "u2"),
+                self._power("power:GND", "#PWR40", "u3"),
+            ],
+        )
+        assert "u1" not in plan
+        assert plan["u2"]["new"] == "#PWR01"
+        assert plan["u3"]["new"] == "#PWR02"
+        assert plan["u2"]["new"] != plan["u3"]["new"]
+
     def test_real_components_absent(self):
         # Only power symbols are passed to build_rename_plan by the caller;
         # a symbol that is already canonical is omitted from the plan.
@@ -335,16 +366,40 @@ class TestDiffNetMembership:
         diffs = diff_net_membership(before, after, ref_rename)
         assert diffs
 
-    def test_naive_comparison_would_falsely_diff(self):
-        # Without translation, the rename alone changes (ref, pin) identity;
-        # confirm the translation path (empty rename) *does* diff, proving the
-        # translation is what makes the neutral case pass.
+    def test_power_only_rename_neutral_even_without_translation(self):
+        # Power/flag nodes (#-prefixed) are dropped from the membership snapshot
+        # entirely: they connect by *value*, so their designators are
+        # electrically meaningless.  A pure power rename is therefore net-neutral
+        # even with an EMPTY rename map — the drop, not the translation, is what
+        # makes it neutral now.  A power-only net collapses to the empty
+        # membership on both sides.
         before = Netlist(nets=[_net("GND", ("#GNDD", "1"))])
         after = Netlist(nets=[_net("GND", ("#PWR01", "1"))])
-        diffs_no_translation = diff_net_membership(before, after, {})
-        assert diffs_no_translation  # naive: would (correctly) look changed
-        diffs_translated = diff_net_membership(before, after, {"#GNDD": "#PWR01"})
-        assert diffs_translated == []
+        assert diff_net_membership(before, after, {}) == []
+        assert diff_net_membership(before, after, {"#GNDD": "#PWR01"}) == []
+
+    def test_cross_sheet_duplicate_power_rename_is_neutral(self):
+        # Regression for the net-neutrality gate abort on cross-sheet duplicates.
+        # Two #PWR40 symbols on DIFFERENT rails (+3.3V vs +5V); the repair
+        # renames exactly one to #PWR41.  ref_rename is keyed by the shared old
+        # string "#PWR40", so the old membership (which included power nodes)
+        # would translate BOTH #PWR40 nodes to #PWR41 -> a spurious diff that
+        # aborts the whole repair.  With power nodes dropped, the gate compares
+        # only the real-component connectivity (U1.3 / U1.5), which is invariant.
+        before = Netlist(
+            nets=[
+                _net("+3V3", ("#PWR40", "1"), ("U1", "3")),
+                _net("+5V", ("#PWR40", "1"), ("U1", "5")),
+            ]
+        )
+        after = Netlist(
+            nets=[
+                _net("+3V3", ("#PWR40", "1"), ("U1", "3")),
+                _net("+5V", ("#PWR41", "1"), ("U1", "5")),
+            ]
+        )
+        ref_rename = {"#PWR40": "#PWR41"}
+        assert diff_net_membership(before, after, ref_rename) == []
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +478,47 @@ class TestRunFixAnnotationSkipNetCheck:
 
         # Real component reference untouched.
         assert '(property "Reference" "R1"' in root_after
+
+    def test_cross_sheet_canonical_duplicate_renames_exactly_one(self, tmp_path):
+        # Two individually-canonical #PWR40 power symbols on different rails,
+        # one per sheet.  The old per-symbol canonicality check skipped BOTH
+        # (each looked fine in isolation), so the annotation error survived the
+        # repair.  Project-wide uniqueness must reassign exactly one: the first
+        # holder (root, processed first) keeps #PWR40; the sub-sheet duplicate
+        # gets a fresh number.
+        root_text = _root_schematic(
+            _power_symbol_with_instance(
+                "power:+3V3", "#PWR40", "u-root-40", "root", f"/{ROOT_UUID}"
+            ),
+        )
+        sub_text = _sub_schematic(
+            _power_symbol_with_instance(
+                "power:+5V",
+                "#PWR40",
+                "u-sub-40",
+                "root",
+                f"/{ROOT_UUID}/{SUB_SHEET_UUID}",
+            ),
+        )
+        root = _write_hierarchy(tmp_path, root_text, sub_text)
+
+        rc = run_fix_annotation(root, backup=False, skip_net_check=True)
+        assert rc == 0
+
+        root_after = root.read_text()
+        sub_after = (tmp_path / "sub.kicad_sch").read_text()
+        combined = root_after + sub_after
+
+        # Exactly one symbol keeps #PWR40; the duplicate is reassigned to #PWR01.
+        assert combined.count('(property "Reference" "#PWR40"') == 1
+        assert combined.count('(property "Reference" "#PWR01"') == 1
+        # The first holder (root) keeps #PWR40; the sub-sheet duplicate renamed.
+        assert '(property "Reference" "#PWR40"' in root_after
+        assert '(property "Reference" "#PWR01"' in sub_after
+        # The renamed symbol's (instances) block is updated in step — no stale
+        # #PWR40 designator left behind for kicad-cli to keep flagging.
+        assert '(reference "#PWR01")' in sub_after
+        assert '(reference "#PWR40")' not in sub_after
 
     def test_backup_creates_bak_file(self, tmp_path):
         root_text = _root_schematic(
