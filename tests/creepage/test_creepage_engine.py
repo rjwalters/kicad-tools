@@ -314,7 +314,12 @@ def _std():
 
 
 def _census_map(pcb, hv, vmap, *, edge=0.0, pd=2, mg="IIIa"):
+    from kicad_tools.creepage.engine import voltage_map_from_dict
+
     std = _std()
+    # Route through the shared parser so the census receives the interval-typed
+    # map exactly as the CLI does (scalars -> degenerate intervals, #4411).
+    parsed, _edge = voltage_map_from_dict(vmap)
     return compute_creepage_census(
         pcb,
         hv,
@@ -323,7 +328,7 @@ def _census_map(pcb, hv, vmap, *, edge=0.0, pd=2, mg="IIIa"):
         standard_edition=std.edition,
         pollution_degree=pd,
         material_group=mg,
-        voltage_map=vmap,
+        voltage_map=parsed,
         standard_obj=std,
         edge_voltage=edge,
     )
@@ -336,7 +341,7 @@ def _both_hv_map():
 
 
 def test_voltage_map_from_dict_parses_nets_reserved_keys_and_edge():
-    from kicad_tools.creepage.engine import voltage_map_from_dict
+    from kicad_tools.creepage.engine import VoltageInterval, voltage_map_from_dict
 
     voltages, edge = voltage_map_from_dict(
         {
@@ -346,8 +351,50 @@ def test_voltage_map_from_dict_parses_nets_reserved_keys_and_edge():
             "_comment": "ignored documentation",
         }
     )
-    assert voltages == {"/AC_LINE": 150.0, "/AC_NEUTRAL": 0.0}
+    # Each scalar entry becomes a degenerate interval (v, v) (#4411).
+    assert voltages == {
+        "/AC_LINE": VoltageInterval(150.0, 150.0),
+        "/AC_NEUTRAL": VoltageInterval(0.0, 0.0),
+    }
+    assert all(iv.is_degenerate for iv in voltages.values())
     assert edge == 12.0
+
+
+def test_voltage_map_from_dict_accepts_range_and_normalises_order():
+    # A {min,max} entry becomes a closed interval; author order is irrelevant
+    # (both {min,max} and {max,min} normalise to (min, max)) (#4411).
+    from kicad_tools.creepage.engine import VoltageInterval, voltage_map_from_dict
+
+    voltages, _edge = voltage_map_from_dict(
+        {
+            "/SRC_NEG": {"min": -170, "max": 90},
+            "/SRC_NEG_REV": {"min": 90, "max": -170},  # inverted author order
+            "/STATIC": 42,
+        }
+    )
+    assert voltages["/SRC_NEG"] == VoltageInterval(-170.0, 90.0)
+    assert voltages["/SRC_NEG_REV"] == VoltageInterval(-170.0, 90.0)
+    # A scalar alongside ranges stays degenerate.
+    assert voltages["/STATIC"] == VoltageInterval(42.0, 42.0)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"NET": {"min": 0}},  # missing 'max'
+        {"NET": {"max": 0}},  # missing 'min'
+        {"NET": {"min": 0, "max": 1, "typ": 0.5}},  # extra key
+        {"NET": {"min": "x", "max": 1}},  # non-numeric endpoint
+        {"NET": {"min": 0, "max": True}},  # bool endpoint
+        {"NET": {"min": 0, "max": float("nan")}},  # NaN endpoint
+        {"_edge_voltage": {"min": 0, "max": 1}},  # edge stays scalar-only
+    ],
+)
+def test_voltage_map_from_dict_rejects_malformed_range(bad):
+    from kicad_tools.creepage.engine import voltage_map_from_dict
+
+    with pytest.raises(ValueError):
+        voltage_map_from_dict(bad)
 
 
 @pytest.mark.parametrize(
@@ -474,6 +521,118 @@ def test_no_voltage_map_leaves_report_in_single_voltage_mode(tmp_path):
     report = compute_creepage_census(pcb, hv, min_mm=1.5)
     assert report.voltage_map is None
     assert report.uses_voltage_map is False
+
+
+# ---------------------------------------------------------------------------
+# Worst-case interval ΔV (Issue #4411): swinging nodes can no longer hide the
+# real pairwise stress behind a single dominant static value.
+# ---------------------------------------------------------------------------
+
+
+def test_swinging_node_not_reported_same_potential(tmp_path):
+    # SCAP_POS(+90) vs TRK_POS[-146..+90]: the two nets share their DOMINANT
+    # state (+90) so a scalar model would derive dv == 0 (a same-potential false
+    # PASS).  The interval model derives the worst-case excursion:
+    #   dv = max(|90 - 90|, |90 - (-146)|) = 236 V  -> a mains-class requirement.
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _both_hv_map())
+    report = _census_map(
+        pcb,
+        hv,
+        {"L_MAINS": {"min": -146.0, "max": 90.0}, "GND": 90.0},
+    )
+    conductor = [p for p in report.pairs if p.kind == "conductor"]
+    assert len(conductor) == 1
+    pair = conductor[0]
+    v = pair.provenance["voltage"]
+    assert v["same_potential"] is False
+    assert v["delta_v_v"] == pytest.approx(236.0)
+    # A real, non-trivial creepage requirement is derived (NOT the 0.0 of a
+    # same-potential pair).
+    assert pair.required_creepage_mm is not None and pair.required_creepage_mm > 0.0
+    expected, _ = _std().required_creepage(236.0, 2, "IIIa")
+    assert pair.required_creepage_mm == pytest.approx(expected)
+
+
+def test_worst_case_provenance_records_governing_endpoints(tmp_path):
+    # The binding ΔV came from L_MAINS's low endpoint against GND's high endpoint
+    # (or the symmetric assignment) -- provenance must name which endpoints won.
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _both_hv_map())
+    report = _census_map(
+        pcb,
+        hv,
+        {"L_MAINS": {"min": -146.0, "max": 90.0}, "GND": 90.0},
+    )
+    pair = next(p for p in report.pairs if p.kind == "conductor")
+    v = pair.provenance["voltage"]
+    assert {"net_a_endpoint", "net_b_endpoint"} <= set(v)
+    # The governing endpoints are the two that are 236 V apart: one net's -146
+    # extreme and the other's +90.  net_a_v / net_b_v echo those governing values.
+    assert {v["net_a_v"], v["net_b_v"]} == {-146.0, 90.0}
+
+
+def test_edge_pair_uses_worst_case_swing_vs_edge(tmp_path):
+    # A net swinging about earth: TRK[-146..+90] vs the board edge (0 V) must use
+    # the worst-case magnitude 146 V, not the +90 dominant value.
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = _census_map(pcb, hv, {"L_MAINS": {"min": -146.0, "max": 90.0}})
+    edge = next(p for p in report.pairs if p.kind == "edge")
+    assert edge.provenance["voltage"]["delta_v_v"] == pytest.approx(146.0)
+
+
+def test_degenerate_range_equals_scalar_and_stays_byte_identical(tmp_path):
+    # {min:v, max:v} is exactly the scalar v: same requirement, same provenance
+    # (including NO endpoint keys, so scalar-map JSON is unchanged).
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    scalar = _census_map(pcb, hv, {"L_MAINS": 150.0})
+    ranged = _census_map(pcb, hv, {"L_MAINS": {"min": 150.0, "max": 150.0}})
+    ps = _conductor_pair(scalar, "GND")
+    pr = _conductor_pair(ranged, "GND")
+    assert ps.required_creepage_mm == pr.required_creepage_mm
+    assert ps.provenance == pr.provenance
+    # Degenerate pairs carry NO endpoint provenance (arbitrary when lo == hi).
+    assert "net_a_endpoint" not in ps.provenance["voltage"]
+
+
+def test_scalar_map_report_echo_serialises_as_scalar(tmp_path):
+    # Backward-compat: an all-scalar map echoes bare scalars in to_dict (no
+    # {min,max} wrapping), while a genuine range surfaces as {min,max}.
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _both_hv_map())
+    scalar = _census_map(pcb, hv, {"L_MAINS": 150.0, "GND": 0.0}).to_dict()
+    assert scalar["voltage_map"] == {"L_MAINS": 150.0, "GND": 0.0}
+    ranged = _census_map(pcb, hv, {"L_MAINS": {"min": -146.0, "max": 90.0}, "GND": 0.0}).to_dict()
+    assert ranged["voltage_map"] == {"L_MAINS": {"min": -146.0, "max": 90.0}, "GND": 0.0}
+
+
+def test_resolve_hv_union_pulls_in_net_swinging_across_threshold(tmp_path):
+    # A net whose DOMINANT state is below threshold but whose swing crosses it
+    # must still be pulled into the census by worst-case magnitude (#4411).
+    from kicad_tools.creepage.engine import VoltageInterval
+
+    pcb = _load(tmp_path, board_no_hv_source())  # nets: SIG, GND
+    # SIG dominant +5 V (below 30 V), but swings to -150 V -> worst-case 150 V.
+    hv = resolve_hv_nets(
+        pcb,
+        "HV",
+        net_class_map=None,
+        voltage_map={"SIG": VoltageInterval(-150.0, 5.0)},
+        census_threshold=30.0,
+    )
+    assert set(hv.values()) == {"SIG"}
+
+    # Dominant +5 V AND a shallow -5 V swing: worst-case 5 V stays below 30 V.
+    hv2 = resolve_hv_nets(
+        pcb,
+        "HV",
+        net_class_map=None,
+        voltage_map={"SIG": VoltageInterval(-5.0, 5.0)},
+        census_threshold=30.0,
+    )
+    assert hv2 == {}
 
 
 # ---------------------------------------------------------------------------
