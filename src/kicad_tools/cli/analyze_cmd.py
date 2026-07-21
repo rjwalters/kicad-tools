@@ -345,6 +345,56 @@ def main(argv: list[str] | None = None) -> int:
         help="Suppress informational output",
     )
 
+    # Electrical-rating subcommand (operates on a schematic, not a PCB)
+    elec_parser = subparsers.add_parser(
+        "electrical-rating",
+        help="Check LED overcurrent and capacitor voltage derating (advisory)",
+        description=(
+            "Read Vf/If_max/Voltage_Rating symbol fields from a schematic and "
+            "flag over-driven LEDs (I=(V_rail-Vf)/R_series > If_max) and "
+            "under-rated capacitors (rated_V < V_rail*(1+margin)). Parts "
+            "missing a rating field, or on an unknown rail, are skipped "
+            "(census-counted), never failed."
+        ),
+    )
+    elec_parser.add_argument(
+        "schematic",
+        help="Schematic file to analyze (.kicad_sch)",
+    )
+    elec_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    elec_parser.add_argument(
+        "--derate-margin",
+        type=float,
+        default=0.2,
+        help=(
+            "Capacitor voltage headroom fraction (default: 0.2; a cap on a "
+            "12V rail must be rated >= 14.4V)"
+        ),
+    )
+    elec_parser.add_argument(
+        "--led-default-vf",
+        type=float,
+        default=None,
+        metavar="VOLTS",
+        help=(
+            "Fallback LED forward voltage (V) for parts with If_max but no Vf "
+            "field. Default: skip such parts (zero false positives). When set, "
+            "the assumption is surfaced in the finding."
+        ),
+    )
+    elec_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
     if argv is None:
         argv = sys.argv[1:]
 
@@ -371,6 +421,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "current-sense":
         return _run_current_sense_analysis(args)
+
+    if args.subcommand == "electrical-rating":
+        return _run_electrical_rating_analysis(args)
 
     return 0
 
@@ -1420,6 +1473,138 @@ def _output_current_sense_text(
         f"[{summary_style}]Total: {len(results)} sense nets, "
         f"{fail_count} FAIL, {len(results) - fail_count} PASS "
         f"({loop_fail_count} loop-area FAIL, {kelvin_fail_count} Kelvin FAIL)[/{summary_style}]"
+    )
+
+
+# ============================================================================
+# Electrical-Rating Analysis
+# ============================================================================
+
+
+def _run_electrical_rating_analysis(args: argparse.Namespace) -> int:
+    """Run LED-overcurrent + capacitor-derating lint on a schematic.
+
+    Advisory: returns non-zero only when at least one check is FAIL (so it can
+    gate CI). SKIP rows (missing field / unknown rail) never gate. File-not-
+    found / bad-suffix errors return 1.
+    """
+    from kicad_tools.analysis.electrical_rating import ElectricalRatingAnalyzer
+
+    sch_path = Path(args.schematic)
+
+    if not sch_path.exists():
+        print(f"Error: File not found: {sch_path}", file=sys.stderr)
+        return 1
+
+    if sch_path.suffix != ".kicad_sch":
+        print(f"Error: Expected .kicad_sch file, got: {sch_path.suffix}", file=sys.stderr)
+        return 1
+
+    analyzer = ElectricalRatingAnalyzer(
+        derate_margin=args.derate_margin,
+        led_default_vf=args.led_default_vf,
+    )
+    results = analyzer.analyze(sch_path)
+
+    if args.format == "json":
+        _output_electrical_rating_json(results, args.derate_margin)
+    else:
+        _output_electrical_rating_text(results, sch_path.name, args.derate_margin, quiet=args.quiet)
+
+    if any(r.status == "FAIL" for r in results):
+        return 1
+    return 0
+
+
+def _output_electrical_rating_json(results: list, derate_margin: float) -> None:
+    """Output electrical-rating census as JSON (mirrors sibling analyzers)."""
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    skip_count = sum(1 for r in results if r.status == "SKIP")
+    pass_count = sum(1 for r in results if r.status == "PASS")
+    output = {
+        "census": [r.to_dict() for r in results],
+        "parameters": {"derate_margin": derate_margin},
+        "summary": {
+            "total": len(results),
+            "checked": pass_count + fail_count,
+            "pass": pass_count,
+            "fail": fail_count,
+            "skipped": skip_count,
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+def _output_electrical_rating_text(
+    results: list,
+    filename: str,
+    derate_margin: float,
+    quiet: bool = False,
+) -> None:
+    """Output electrical-rating census as a formatted table + summary line."""
+    console = Console()
+
+    if not results:
+        if not quiet:
+            console.print(f"[green]No LEDs or capacitors with ratings found in {filename}[/green]")
+        return
+
+    if not quiet:
+        console.print(f"\n[bold]Electrical-Rating Lint: {filename}[/bold]")
+        console.print(
+            "[dim]LED FAIL when I=(V_rail-Vf)/R_series > If_max; "
+            f"cap FAIL when rated_V < V_rail*(1+{derate_margin:.2f}). "
+            "SKIP = missing rating field or unknown rail (never a FAIL).[/dim]\n"
+        )
+
+    table = Table(show_header=True)
+    table.add_column("ref", style="cyan")
+    table.add_column("check")
+    table.add_column("rail")
+    table.add_column("V_rail", justify="right")
+    table.add_column("detail")
+    table.add_column("status", justify="center")
+
+    for r in results:
+        if r.status == "FAIL":
+            status_style = "red bold"
+        elif r.status == "PASS":
+            status_style = "green"
+        else:
+            status_style = "yellow"
+        rail = r.rail_net if r.rail_net is not None else "-"
+        vrail = "-" if r.rail_voltage_v is None else f"{r.rail_voltage_v:.2f}"
+
+        if r.check == "led_overcurrent":
+            if r.current_a is not None:
+                detail = f"I={r.current_a * 1000:.2f}mA vs If_max={r.if_max_a * 1000:.2f}mA"
+            else:
+                detail = r.reason or "-"
+        else:
+            if r.rated_voltage_v is not None and r.required_voltage_v is not None:
+                detail = f"rated={r.rated_voltage_v:.1f}V vs need>={r.required_voltage_v:.2f}V"
+            else:
+                detail = r.reason or "-"
+
+        table.add_row(
+            r.reference,
+            r.check,
+            rail,
+            vrail,
+            detail,
+            f"[{status_style}]{r.status}[/{status_style}]",
+        )
+
+    console.print(table)
+
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    skip_count = sum(1 for r in results if r.status == "SKIP")
+    checked = len(results) - skip_count
+    console.print()
+    summary_style = "red bold" if fail_count else "green"
+    console.print(
+        f"[{summary_style}]checked={checked}  fail={fail_count}  "
+        f"skipped={skip_count} (no rating field / unknown rail)[/{summary_style}]"
     )
 
 

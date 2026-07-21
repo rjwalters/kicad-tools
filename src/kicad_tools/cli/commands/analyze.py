@@ -9,7 +9,7 @@ def run_analyze_command(args) -> int:
         print("Usage: kicad-tools analyze <command> [options] <file>")
         print(
             "Commands: complexity, congestion, trace-lengths, signal-integrity, "
-            "thermal, current-sense"
+            "thermal, current-sense, electrical-rating"
         )
         return 1
 
@@ -30,6 +30,9 @@ def run_analyze_command(args) -> int:
 
     if args.analyze_command == "current-sense":
         return _run_current_sense_command(args)
+
+    if args.analyze_command == "electrical-rating":
+        return _run_electrical_rating_command(args)
 
     return 1
 
@@ -137,6 +140,24 @@ def _run_current_sense_command(args) -> int:
         sub_argv.extend(["--kelvin-tol", str(args.analyze_kelvin_tol)])
     for kpair in getattr(args, "analyze_kelvin_pairs", None) or []:
         sub_argv.extend(["--kelvin-pair", kpair])
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+
+    return analyze_main(sub_argv)
+
+
+def _run_electrical_rating_command(args) -> int:
+    """Handle analyze electrical-rating command (operates on a schematic)."""
+    from ..analyze_cmd import main as analyze_main
+
+    sub_argv = ["electrical-rating", args.schematic]
+
+    if getattr(args, "analyze_format", "text") != "text":
+        sub_argv.extend(["--format", args.analyze_format])
+    if getattr(args, "analyze_derate_margin", 0.2) != 0.2:
+        sub_argv.extend(["--derate-margin", str(args.analyze_derate_margin)])
+    if getattr(args, "analyze_led_default_vf", None) is not None:
+        sub_argv.extend(["--led-default-vf", str(args.analyze_led_default_vf)])
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
 

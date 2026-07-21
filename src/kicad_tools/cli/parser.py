@@ -5671,6 +5671,49 @@ def _add_analyze_parser(subparsers) -> None:
         ),
     )
 
+    # analyze electrical-rating (operates on a schematic, not a PCB)
+    elec_parser = analyze_subparsers.add_parser(
+        "electrical-rating",
+        help="Check LED overcurrent and capacitor voltage derating (advisory)",
+        description=(
+            "Read Vf/If_max/Voltage_Rating symbol fields from a schematic and "
+            "flag over-driven LEDs (I=(V_rail-Vf)/R_series > If_max) and "
+            "under-rated capacitors (rated_V < V_rail*(1+margin)). Parts "
+            "missing a rating field, or on an unknown rail, are skipped "
+            "(census-counted), never failed."
+        ),
+    )
+    elec_parser.add_argument("schematic", help="Schematic file to analyze (.kicad_sch)")
+    elec_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    elec_parser.add_argument(
+        "--derate-margin",
+        dest="analyze_derate_margin",
+        type=float,
+        default=0.2,
+        help=(
+            "Capacitor voltage headroom fraction (default: 0.2; a cap on a "
+            "12V rail must be rated >= 14.4V)"
+        ),
+    )
+    elec_parser.add_argument(
+        "--led-default-vf",
+        dest="analyze_led_default_vf",
+        type=float,
+        default=None,
+        metavar="VOLTS",
+        help=(
+            "Fallback LED forward voltage (V) for parts with If_max but no Vf "
+            "field. Default: skip such parts (zero false positives)."
+        ),
+    )
+
 
 def _add_constraints_parser(subparsers) -> None:
     """Add constraints subcommand parser with its subcommands."""

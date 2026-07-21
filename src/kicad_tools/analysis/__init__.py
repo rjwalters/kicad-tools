@@ -27,6 +27,11 @@ from .current_sense import (
     CurrentSenseAnalyzer,
     CurrentSenseResult,
 )
+from .electrical_rating import (
+    ElectricalRatingAnalyzer,
+    ElectricalRatingResult,
+    infer_rail_voltage,
+)
 from .net_status import (
     NetStatus,
     NetStatusAnalyzer,
@@ -66,6 +71,8 @@ __all__ = [
     "CurrentSenseAnalyzer",
     "CurrentSenseResult",
     "DifferentialPairReport",
+    "ElectricalRatingAnalyzer",
+    "ElectricalRatingResult",
     "ImpedanceDiscontinuity",
     "LayerPrediction",
     "NetStatus",
@@ -87,4 +94,5 @@ __all__ = [
     "TraceLengthReport",
     "build_zone_net_map",
     "detect_analog_components",
+    "infer_rail_voltage",
 ]
