@@ -29,6 +29,10 @@ parts, cost). Badges follow the data contract's omit-when-absent rule — a badg
 appears only when its backing field is present. Cards link to `/<slug>`, the
 per-board detail route (issue #3681; that route 404s until it lands).
 
+The index also carries a static release-capabilities section (with a version
+badge) and a footer milestone marker; keep both in sync with the current
+release at each milestone.
+
 ## Board detail pages
 
 Each board also has a per-board detail page at the static route `/<slug>`
