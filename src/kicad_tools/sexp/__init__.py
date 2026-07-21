@@ -29,6 +29,7 @@ from .parser import (
     SExp,
     SExpParser,
     SExpSerializer,
+    normalize_chamfer,
     parse_file,
     parse_sexp,
     parse_string,
@@ -43,6 +44,8 @@ __all__ = [
     "Document",
     "parse_file",
     "parse_string",
+    # Pad chamfer writer-safety normalizer (issue #4393)
+    "normalize_chamfer",
     # Backward compatibility with core/sexp.py
     "parse_sexp",
     "serialize_sexp",
