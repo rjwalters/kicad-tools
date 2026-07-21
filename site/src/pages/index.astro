@@ -40,7 +40,7 @@ const hasPcbFor = (slug: string): boolean =>
     <title>kicad-tools demo gallery</title>
     <meta
       name="description"
-      content="A gallery of PCB designs produced end-to-end by kicad-tools' automated agent pipeline."
+      content="A gallery of PCB designs produced end-to-end by kicad-tools' automated agent pipeline, with design-verification and HV-isolation capabilities (v0.19.0)."
     />
   </head>
   <body>
@@ -49,7 +49,8 @@ const hasPcbFor = (slug: string): boolean =>
       <header class="page-header">
         <h1>kicad-tools demo gallery</h1>
         <p class="tagline">
-          PCB designs produced end-to-end by the kicad-tools automated pipeline.
+          PCB designs produced end-to-end by the kicad-tools automated
+          pipeline — with design-verification and HV-isolation capabilities.
         </p>
         <p class="count">
           {boards.length} board{boards.length === 1 ? "" : "s"}
@@ -63,6 +64,47 @@ const hasPcbFor = (slug: string): boolean =>
           <code>uv run kct board-metrics --all</code> to populate data.
         </p>
       )}
+
+      <section class="capabilities">
+        <div class="capabilities-head">
+          <h2>Capabilities</h2>
+          <span class="version-badge">v0.19.0</span>
+        </div>
+        <p class="section-copy">
+          Beyond placement and routing, the 0.19.0 pipeline adds a
+          high-voltage isolation design loop and electrical-rating checks that
+          run against real KiCad designs.
+        </p>
+        <ul class="capability-list" role="list">
+          <li>
+            <strong>HV-isolation design loop</strong> —
+            <code>kct creepage --voltage-map</code>,
+            <code>kct zones hv-keepout</code>, HV-aware
+            <code>optimize-placement</code>, and the
+            <code>/kct:hv-isolation-loop</code> skill.
+          </li>
+          <li>
+            <strong>Electrical-rating analysis</strong> —
+            <code>kct analyze electrical-rating</code> flags LED overcurrent
+            and capacitor voltage-derating violations.
+          </li>
+          <li>
+            <strong>Design-rule constraint export</strong> —
+            <code>kct check --emit-dru</code> /
+            <code>--emit-drc-constraints</code> emit KiCad design-rule and DRC
+            constraint files.
+          </li>
+          <li>
+            <strong>Smarter via repair</strong> —
+            <code>kct fix-vias</code> relocates off-pad vias and repairs
+            through-hole hole-to-hole clearance.
+          </li>
+          <li>
+            <strong>KiCad-10 format-stamp centralization</strong> — a
+            single-source format stamp guarded by DRC and round-trip tests.
+          </li>
+        </ul>
+      </section>
 
       {demoBoards.length > 0 && (
         <section class="board-section">
@@ -164,6 +206,64 @@ const hasPcbFor = (slug: string): boolean =>
     margin: 0.5rem 0 0;
     color: var(--muted);
     font-size: 0.85rem;
+  }
+
+  .capabilities {
+    margin-top: 2.5rem;
+    padding: 1.5rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card-bg);
+  }
+
+  .capabilities-head {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0 0 0.3rem;
+  }
+
+  .capabilities-head h2 {
+    margin: 0;
+    font-size: 1.3rem;
+  }
+
+  .version-badge {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    color: var(--accent);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  .capability-list {
+    list-style: none;
+    margin: 1rem 0 0;
+    padding: 0;
+    display: grid;
+    gap: 0.75rem;
+    max-width: 80ch;
+  }
+
+  .capability-list li {
+    color: var(--muted);
+    font-size: 0.92rem;
+  }
+
+  .capability-list strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .capability-list code {
+    background: var(--badge-bg);
+    padding: 0.05rem 0.3rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+    color: var(--text);
   }
 
   .board-section {
