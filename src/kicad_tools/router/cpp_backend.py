@@ -2188,6 +2188,29 @@ class CppPathfinder:
                     ):
                         return (via.x, via.y)
 
+        # Issue #4431 (Phase 1): additive pairwise HV-isolation post-check on the
+        # Python validation path (no C++ change in this slice).  When a
+        # voltage-map-derived pairwise table is attached, reject a route segment
+        # that runs closer than max(dru, IEC creepage @ |ΔV|) to foreign copper.
+        # The C++ ``validate_route`` above already enforced the scalar clearance
+        # against ``py_grid.routes``; this layer adds only the HV widening for
+        # net pairs whose requirement exceeds the scalar floor.  Absent the
+        # table (``None``) this is a no-op -- the scalar path is byte-identical.
+        pairwise = getattr(self._rules, "pairwise_clearance", None)
+        if pairwise is not None:
+            from .pairwise_clearance import route_pairwise_violation
+
+            id_to_name = {nid: name for name, nid in self._net_name_to_id.items()}
+            violation = route_pairwise_violation(
+                route,
+                start.net,
+                py_grid.routes,
+                pairwise,
+                id_to_name=id_to_name,
+            )
+            if violation is not None:
+                return (violation.x, violation.y)
+
         return None
 
     def _boost_avoidance_at(

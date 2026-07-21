@@ -3541,6 +3541,48 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
         )
 
 
+def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -> None:
+    """Attach the preloaded HV pairwise-clearance table to the router (#4431).
+
+    ``main()`` validates and derives the ``--voltage-map`` pairwise matrix early
+    (so error paths short-circuit before routing) and stashes the per-net
+    voltages + ``{(net_a, net_b): required_mm}`` matrix on
+    ``args._pairwise_voltages`` / ``args._pairwise_required``.  Each
+    router-creation site calls this helper (alongside
+    :func:`_apply_net_class_map_sidecar`) to build a
+    :class:`~kicad_tools.router.pairwise_clearance.PairwiseClearanceTable` with
+    the router's actual DRU floor (``rules.trace_clearance``) and set it on the
+    shared :class:`DesignRules` instance the pathfinder/backend read at
+    post-route validation time.
+
+    Idempotent and a no-op when ``--voltage-map`` was not supplied (the scalar
+    clearance path is then byte-identical to pre-#4431).
+    """
+    required = getattr(args, "_pairwise_required", None)
+    voltages = getattr(args, "_pairwise_voltages", None)
+    if required is None or voltages is None:
+        return
+
+    from kicad_tools.router.pairwise_clearance import PairwiseClearanceTable
+
+    rules = getattr(router, "rules", None)
+    if rules is None:
+        return
+    rules.pairwise_clearance = PairwiseClearanceTable(
+        dru=float(rules.trace_clearance),
+        net_voltages=voltages,
+        required_by_pair=required,
+    )
+
+    if not quiet:
+        from kicad_tools.cli.progress import flush_print
+
+        flush_print(
+            f"  HV pairwise clearance: {len(voltages)} mapped nets, "
+            f"{len(required)} cross-pairs (route-time creepage rejection active)"
+        )
+
+
 def _warn_unresolved_net_class_map(resolution, board_net_names, nearest_fn) -> None:
     """Emit the Issue #4149 misconfiguration diagnostic to stderr.
 
@@ -4406,6 +4448,8 @@ def route_with_layer_escalation(
 
         # Issue #2996: merge --net-class-map sidecar onto router's map.
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
+        # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
+        _apply_pairwise_clearance(router, args, quiet=quiet)
         # Issue #3470: thread --max-ripups-per-net into the destructive
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
@@ -5327,6 +5371,8 @@ def route_with_rule_relaxation(
 
         # Issue #2996: merge --net-class-map sidecar onto router's map.
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
+        # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
+        _apply_pairwise_clearance(router, args, quiet=quiet)
         # Issue #3470: thread --max-ripups-per-net into the destructive
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
@@ -7486,6 +7532,8 @@ def route_with_combined_escalation(
 
             # Issue #2996: merge --net-class-map sidecar onto router's map.
             _apply_net_class_map_sidecar(router, args, quiet=quiet)
+            # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
+            _apply_pairwise_clearance(router, args, quiet=quiet)
             # Issue #3470: thread --max-ripups-per-net into the destructive
             # rip-up budgets (route_all + two-phase stall recovery).
             _apply_ripup_budget_override(router, args)
@@ -9376,6 +9424,70 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON per-net voltage map {net_name: volts} (reuses the "
+            "#4371 format; ranges {min,max} per #4411 collapse to worst-case "
+            "magnitude). Enables HV-isolation pairwise clearance (Issue #4431 "
+            "Phase 1): the router derives a net-pair required-clearance matrix "
+            "max(dru, IEC creepage @ |ΔV|) using the SAME lookup as HV-aware "
+            "placement (--voltage-map on optimize-placement) and the creepage "
+            "census, then the Python post-route validator flags an HV net that "
+            "runs closer than its pairwise requirement to non-HV copper. Absent, "
+            "routing is byte-identical to the scalar-clearance default. NOTE: "
+            "Phase 1 is a diagnostic/foundation -- it does NOT by itself make an "
+            "HV board route cleanly (search-time avoidance is deferred to a "
+            "follow-up architect epic, Phase 2)."
+        ),
+    )
+    parser.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help=(
+            "Creepage standard for the --voltage-map pairwise-clearance lookup "
+            "(default: iec60664). Mirrors optimize-placement / kct creepage."
+        ),
+    )
+    parser.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help=(
+            "IEC pollution degree for the --voltage-map pairwise-clearance "
+            "lookup (default: 2). Mirrors optimize-placement / kct creepage."
+        ),
+    )
+    parser.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help=(
+            "Insulation material group I/II/IIIa/IIIb for the --voltage-map "
+            "pairwise-clearance lookup (default: IIIa). Mirrors "
+            "optimize-placement / kct creepage."
+        ),
+    )
+    parser.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help=(
+            "Minimum net-pair |ΔV| (volts) that triggers a creepage widening "
+            "for --voltage-map pairwise clearance; lower-difference pairs keep "
+            "the scalar DRU floor to avoid over-segregating low-voltage nets "
+            "(default: 30.0). Mirrors optimize-placement / kct creepage."
+        ),
+    )
+    parser.add_argument(
         "--analog-nets",
         dest="analog_nets",
         default=None,
@@ -10393,6 +10505,49 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
             return 1
 
+    # Issue #4431 (Phase 1): validate and load the optional --voltage-map early
+    # (mirrors the --net-class-map preload above) so a missing file / malformed
+    # JSON / out-of-table |ΔV| short-circuits with exit 1 before any routing
+    # work runs.  The derived per-net voltages + pairwise required-clearance
+    # matrix are stashed on ``args._pairwise_voltages`` / ``_pairwise_required``;
+    # each router-creation site attaches a ``PairwiseClearanceTable`` (built with
+    # the router's actual DRU floor) via ``_apply_pairwise_clearance``.  Absent
+    # the flag this is a no-op and routing stays byte-identical to the scalar
+    # path.
+    args._pairwise_voltages = None
+    args._pairwise_required = None
+    if getattr(args, "voltage_map", None) is not None:
+        from kicad_tools.creepage.standards import StandardLookupError
+        from kicad_tools.placement.hv_domains import (
+            build_required_by_domain_pair,
+            load_voltage_map,
+        )
+        from kicad_tools.router.pairwise_clearance import _norm_net_key
+
+        vm_path = Path(args.voltage_map).resolve()
+        if not vm_path.exists():
+            print(f"Error: voltage-map file not found: {vm_path}", file=sys.stderr)
+            return 1
+        try:
+            _raw_voltages = load_voltage_map(vm_path)
+        except (ValueError, OSError) as e:
+            print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
+            return 1
+        _voltages = {_norm_net_key(n): abs(float(v)) for n, v in _raw_voltages.items()}
+        try:
+            _required = build_required_by_domain_pair(
+                _voltages,
+                standard_id=getattr(args, "creepage_standard", "iec60664"),
+                pollution_degree=getattr(args, "pollution_degree", 2),
+                material_group=getattr(args, "material_group", "IIIa"),
+                hv_threshold=getattr(args, "hv_threshold", 30.0),
+            )
+        except StandardLookupError as e:
+            print(f"Error: voltage-map creepage lookup failed: {e}", file=sys.stderr)
+            return 1
+        args._pairwise_voltages = _voltages
+        args._pairwise_required = _required
+
     # Normalize --auto-fix-passes: explicit value implies --auto-fix
     if args.auto_fix_passes is not None:
         if args.auto_fix_passes < 1:
@@ -10991,6 +11146,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # Issue #2996: merge --net-class-map sidecar onto router's map.
     _apply_net_class_map_sidecar(router, args, quiet=quiet)
+    # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
+    _apply_pairwise_clearance(router, args, quiet=quiet)
     # Issue #3470: thread --max-ripups-per-net into the destructive
     # rip-up budgets (route_all + two-phase stall recovery).
     _apply_ripup_budget_override(router, args)
@@ -11038,6 +11195,8 @@ def main(argv: list[str] | None = None) -> int:
                 per_net_iterations=getattr(args, "per_net_iterations", 0) or 0,
             )
             _apply_net_class_map_sidecar(fresh, args, quiet=True)
+            # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
+            _apply_pairwise_clearance(fresh, args, quiet=True)
             _apply_analog_net_class(fresh, args, quiet=True)
             return fresh
 

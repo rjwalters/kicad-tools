@@ -723,6 +723,21 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--analog-nets", args.analog_nets])
     if getattr(args, "auto_analog", False):
         sub_argv.append("--auto-analog")
+    # Issue #4431 (Phase 1): forward --voltage-map + the creepage lookup knobs
+    # so the inner route_cmd builds the HV pairwise-clearance table.  Both
+    # parsers declare each; the creepage knobs share the inner defaults
+    # (iec60664 / 2 / IIIa / 30.0), so only forward non-defaults to keep
+    # flag-off argv byte-identical (enforced by tests/test_cli_parser_drift.py).
+    if getattr(args, "voltage_map", None) is not None:
+        sub_argv.extend(["--voltage-map", args.voltage_map])
+        if getattr(args, "creepage_standard", "iec60664") != "iec60664":
+            sub_argv.extend(["--creepage-standard", args.creepage_standard])
+        if getattr(args, "pollution_degree", 2) != 2:
+            sub_argv.extend(["--pollution-degree", str(args.pollution_degree)])
+        if getattr(args, "material_group", "IIIa") != "IIIa":
+            sub_argv.extend(["--material-group", args.material_group])
+        if getattr(args, "hv_threshold", 30.0) != 30.0:
+            sub_argv.extend(["--hv-threshold", str(args.hv_threshold)])
     return route_main(sub_argv)
 
 

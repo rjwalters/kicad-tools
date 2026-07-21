@@ -3731,6 +3731,29 @@ class Router:
             if not is_valid:
                 return False
 
+        # Issue #4431 (Phase 1): additive pairwise HV-isolation check.  When a
+        # voltage-map-derived pairwise clearance table is present, reject a route
+        # segment that runs closer than max(dru, IEC creepage @ |ΔV|) to foreign
+        # copper.  Absent the table (``None``) this is a no-op, preserving the
+        # scalar path byte-for-byte.  Foreign copper is the already-routed
+        # ``self.grid.routes``; the scalar seg/pad/via checks above still run.
+        pairwise = getattr(self.rules, "pairwise_clearance", None)
+        if pairwise is not None:
+            from .pairwise_clearance import route_pairwise_violation
+
+            id_to_name = {nid: name for name, nid in self._net_name_to_id.items()}
+            if (
+                route_pairwise_violation(
+                    route,
+                    exclude_net,
+                    self.grid.routes,
+                    pairwise,
+                    id_to_name=id_to_name,
+                )
+                is not None
+            ):
+                return False
+
         return True
 
     def _merge_same_net_vias(self, route: Route) -> None:

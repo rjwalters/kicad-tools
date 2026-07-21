@@ -10,9 +10,12 @@ This module provides:
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from .layers import Layer
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .pairwise_clearance import PairwiseClearanceTable
 
 # Allowed values for :attr:`NetClassRouting.route_via`.
 # - ``"pathfinder"`` (default) -- ordinary trace, standard pathfinder routing.
@@ -113,6 +116,18 @@ class DesignRules:
     # Maps component reference (e.g., "U1") to clearance in mm
     # Use for fine-pitch ICs where tighter clearance is needed between pins
     component_clearances: dict[str, float] = field(default_factory=dict)
+
+    # Pairwise (net-pair) HV-isolation clearance table (Issue #4431, Phase 1).
+    # Scalar clearance cannot express "far from LV copper, near from own
+    # cluster".  When a ``--voltage-map`` is supplied, the route CLI builds a
+    # :class:`~kicad_tools.router.pairwise_clearance.PairwiseClearanceTable`
+    # (net-pair -> max(dru, IEC creepage @ |ΔV|)) and attaches it here; the
+    # Python post-route validators then reject an HV net that runs too close to
+    # non-HV copper.  ``None`` (default) preserves the scalar path byte-for-byte
+    # -- absent a voltage map NOTHING consults this field.  The search-time halo
+    # widening + C++ validator extension (what actually makes an HV board
+    # converge) are deferred to Phase 2; KiCad netclass-pair export to Phase 3.
+    pairwise_clearance: "PairwiseClearanceTable | None" = None
 
     # Fine-pitch automatic clearance (Issue #1016)
     # When set, components with pin pitch below fine_pitch_threshold automatically
