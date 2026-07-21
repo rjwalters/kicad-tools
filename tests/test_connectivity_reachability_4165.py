@@ -106,3 +106,26 @@ def test_pcb_schema_segment_shape_via_start_end():
     pads = [(0.0, 0.0), (10.0, 0.0)]
     segs = [_PcbSeg((0.0, 0.0), (10.0, 0.0))]
     assert check_net_pad_connectivity(pads, segments=segs) == (2, 2)
+
+
+def test_through_via_inner_layer_chain_complete():
+    """Issue #4429 (confirming): the router oracle already handles this.
+
+    ``pad -> In2.Cu trace -> through-via -> F.Cu trace -> pad`` with the vias
+    at the segment endpoints: the layer-agnostic via union joins the two
+    different-layer segments into one component, so both pads are connected.
+    This confirms the router accounting is NOT affected by the per-component
+    layer bug that #4429 fixes in ``NetStatusAnalyzer``.
+    """
+    pads = [(20.0, 15.0), (35.0, 15.0)]
+    segs = [
+        _seg(20.0, 15.0, 30.0, 15.0, layer=Layer.IN2_CU),
+        _seg(30.0, 15.0, 35.0, 15.0, layer=Layer.F_CU),
+    ]
+    # Without vias the two segments are on different layers -> disjoint.
+    assert check_net_pad_connectivity(pads, segments=segs) == (1, 2)
+    vias = [
+        Via(x=20.0, y=15.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU)),
+        Via(x=30.0, y=15.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU)),
+    ]
+    assert check_net_pad_connectivity(pads, segments=segs, vias=vias) == (2, 2)

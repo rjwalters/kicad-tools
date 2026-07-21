@@ -719,61 +719,71 @@ class NetStatusAnalyzer:
                         graph[pad].add(other)
                         graph[other].add(pad)
 
-        # Connect segment chains to vias (Issue #1991 fix).
-        # If a segment endpoint coincides with a via position, all pads in
-        # that segment chain are electrically connected through the via.
-        # Without this link the pad->trace->via chain breaks whenever the
-        # zone-connection check fails (e.g. zone on inner layer, through-via
-        # not recognized, or via near zone boundary edge).
-        for component in segment_components:
-            component_endpoints: list[tuple[float, float]] = []
-            for seg_idx in component:
+        # Connect segment chains to vias, fusing chains that share a via
+        # (Issue #4429 — the pad-to-pad analogue of the #4229 zone/pour fix,
+        # originally the Issue #1991 pad->trace->via link).
+        #
+        # ``_build_segment_components`` only chains segments whose own copper
+        # touches, so a cross-layer path
+        #   pad -> F.Cu trace -> through-via -> In2.Cu trace -> through-via ->
+        #   F.Cu trace -> pad
+        # splits into three per-layer components that a shared through-via never
+        # fuses.  The old per-component loop bridged pads only *within* one
+        # component, so the far pad landed in its own island -> false
+        # ``incomplete`` even though kicad-cli DRC reports the copper continuous.
+        #
+        # We now merge components that share a via into extended chains
+        # (``_merge_chains_via_vias``) and, for each extended chain, fully
+        # connect every pad reachable through it: pads on the chain's segments
+        # plus pads sitting on any via the chain electrically touches.  A trace
+        # landing on the via *annular ring* (offset from centre, as a real
+        # router/hand-stitch does) is recognised by ``_segment_touches_via``'s
+        # copper-geometry fallback.
+        #
+        # The via<->segment bond is gated on ``_via_spans_layer`` so a
+        # blind/buried via does not fuse an inner-layer segment it does not
+        # electrically reach; through-vias span every layer and are unaffected.
+        #
+        # Shapely-absent (core-only) installs degrade gracefully:
+        # ``_segment_touches_via`` and ``_find_pads_touching_geom`` fall back to
+        # endpoint/centre proximity when the copper geometry is ``None``, so
+        # cross-component bridging via coincident via-centre endpoints still
+        # works without shapely (only ring landings need the geometry path).
+        extended_chains = self._merge_chains_via_vias(
+            segments, segment_components, vias, require_layer_span=True
+        )
+        for chain in extended_chains:
+            chain_pads: set[str] = set()
+            for seg_idx in chain:
                 seg = segments[seg_idx]
-                component_endpoints.append(seg.start)
-                component_endpoints.append(seg.end)
-
-            # Check if this segment chain's copper touches a via.
-            # Default: an endpoint within POSITION_TOLERANCE of the via center.
-            # Strict (Issue #4176): a segment copper polygon in the chain
-            # intersects the via copper geometry.
-            for via in vias:
                 if self.strict:
-                    via_geom = self._via_geom(via)
-                    touches_via = any(
-                        self._geoms_touch(self._segment_poly(segments[seg_idx]), via_geom)
-                        for seg_idx in component
+                    chain_pads.update(
+                        self._find_pads_touching_geom(self._segment_poly(seg), pad_positions)
                     )
                 else:
-                    touches_via = any(
-                        self._points_close(ep, via.position) for ep in component_endpoints
-                    )
-                if touches_via:
-                    # Collect all pads in this segment chain
-                    chain_pads: set[str] = set()
-                    for seg_idx in component:
-                        seg = segments[seg_idx]
-                        if self.strict:
-                            chain_pads.update(
-                                self._find_pads_touching_geom(
-                                    self._segment_poly(seg), pad_positions
-                                )
-                            )
-                        else:
-                            chain_pads.update(self._find_pads_at_point(seg.start, pad_positions))
-                            chain_pads.update(self._find_pads_at_point(seg.end, pad_positions))
-                    # Also include any pads at the via position itself
+                    chain_pads.update(self._find_pads_at_point(seg.start, pad_positions))
+                    chain_pads.update(self._find_pads_at_point(seg.end, pad_positions))
+
+            # Include pads sitting on any via this chain electrically touches
+            # (the via must span the touching segment's layer).
+            for via in vias:
+                via_geom = self._via_geom(via)
+                if any(
+                    self._segment_touches_via(segments[seg_idx], via, via_geom)
+                    and self._via_spans_layer(via.layers, segments[seg_idx].layer)
+                    for seg_idx in chain
+                ):
                     if self.strict:
-                        chain_pads.update(
-                            self._find_pads_touching_geom(self._via_geom(via), pad_positions)
-                        )
+                        chain_pads.update(self._find_pads_touching_geom(via_geom, pad_positions))
                     else:
                         chain_pads.update(self._find_pads_at_point(via.position, pad_positions))
-                    # Connect all pads in this chain through the via
-                    chain_list = list(chain_pads)
-                    for i, pad in enumerate(chain_list):
-                        for other in chain_list[i + 1 :]:
-                            graph[pad].add(other)
-                            graph[other].add(pad)
+
+            # Fully connect every pad reachable through this extended chain.
+            chain_list = list(chain_pads)
+            for i, pad in enumerate(chain_list):
+                for other in chain_list[i + 1 :]:
+                    graph[pad].add(other)
+                    graph[other].add(pad)
 
         # --- Zone / pour connectivity via per-fill-island grouping (#3914) ---
         # The previous model added every pad inside a zone *boundary* polygon
@@ -1083,6 +1093,7 @@ class NetStatusAnalyzer:
         segments: list,
         segment_components: list[set[int]],
         vias: list,
+        require_layer_span: bool = False,
     ) -> list[set[int]]:
         """Merge segment components that share a via into extended chains.
 
@@ -1096,6 +1107,12 @@ class NetStatusAnalyzer:
         The merge is purely additive connectivity: it never fuses two chains
         that don't share a via, so genuinely separate copper stays separate and
         the #3914 "don't union disjoint fills" guarantee is unaffected.
+
+        When ``require_layer_span`` is ``True`` a via only bonds a segment whose
+        layer the via electrically spans (``_via_spans_layer``), so a
+        blind/buried via does not fuse an inner-layer segment it cannot reach
+        (Issue #4429).  The default (``False``) preserves the layer-agnostic
+        behaviour the zone/pour path (#4229) relies on.
         """
         n = len(segment_components)
         parent = list(range(n))
@@ -1115,7 +1132,14 @@ class NetStatusAnalyzer:
             via_geom = self._via_geom(via)
             touching: list[int] = []
             for ci, component in enumerate(segment_components):
-                if any(self._segment_touches_via(segments[s], via, via_geom) for s in component):
+                if any(
+                    self._segment_touches_via(segments[s], via, via_geom)
+                    and (
+                        not require_layer_span
+                        or self._via_spans_layer(via.layers, segments[s].layer)
+                    )
+                    for s in component
+                ):
                     touching.append(ci)
             for other in touching[1:]:
                 union(touching[0], other)
