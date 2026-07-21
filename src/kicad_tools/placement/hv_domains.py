@@ -45,24 +45,32 @@ import json
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from kicad_tools.creepage.engine import voltage_map_from_dict
 from kicad_tools.creepage.standards import get_standard
 
 
 def load_voltage_map(path: str | Path) -> dict[str, float]:
     """Load a ``{net_name: volts}`` voltage map from a JSON file.
 
+    Delegates parsing to :func:`kicad_tools.creepage.engine.voltage_map_from_dict`
+    so the placement ``--voltage-map`` loader honors the exact same parse
+    contract as ``kct creepage --voltage-map`` (the two consumers of the shared
+    sidecar, #4404). That contract skips ``_``-prefixed reserved keys
+    (``_comment`` and friends are documentation) and interprets ``_edge_voltage``
+    as the board-edge reference potential. Placement derives per-ref domains from
+    net magnitudes and has no concept of an edge/earth reference, so the
+    ``edge_voltage`` half of the returned pair is discarded here.
+
     Raises:
-        ValueError: If the file is not a JSON object of ``str -> number``.
+        ValueError: If the file is not a JSON object, or if any net voltage is
+            not a finite real number.
     """
     raw = json.loads(Path(path).read_text())
     if not isinstance(raw, dict):
+        # ``voltage_map_from_dict`` raises ``TypeError`` for a non-dict; keep the
+        # historical ``ValueError`` contract for the placement loader's callers.
         raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
-    out: dict[str, float] = {}
-    for net, volts in raw.items():
-        if not isinstance(volts, (int, float)) or isinstance(volts, bool):
-            raise ValueError(f"voltage for net {net!r} must be a number, got {volts!r}")
-        out[str(net)] = float(volts)
-    return out
+    return voltage_map_from_dict(raw)[0]
 
 
 def load_hv_domains(path: str | Path) -> dict[str, dict]:

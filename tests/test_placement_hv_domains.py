@@ -121,6 +121,44 @@ class TestLoaders:
         with pytest.raises(ValueError):
             load_voltage_map(p)
 
+    def test_load_voltage_map_skips_reserved_keys(self, tmp_path) -> None:
+        """`_`-prefixed keys are metadata: `_comment` is dropped, `_edge_voltage`
+        is consumed, and neither leaks into the returned net voltage map (#4404).
+
+        This is the shared-sidecar contract already honored by
+        ``kct creepage --voltage-map`` (``voltage_map_from_dict``); the placement
+        loader now delegates to it so the same file is accepted by both
+        consumers.
+        """
+        p = tmp_path / "v.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "_comment": "softstart rev-C per-net working-voltage map",
+                    "_edge_voltage": 0,
+                    "/AC_LINE": 150,
+                    "/REF": 1.65,
+                }
+            )
+        )
+        result = load_voltage_map(p)
+        assert result == {"/AC_LINE": 150.0, "/REF": 1.65}
+        assert "_comment" not in result
+        assert "_edge_voltage" not in result
+
+    def test_load_voltage_map_only_reserved_keys_is_empty(self, tmp_path) -> None:
+        """A map of only reserved keys yields an empty net map, not an error."""
+        p = tmp_path / "v.json"
+        p.write_text(json.dumps({"_comment": "note", "_edge_voltage": 12.0}))
+        assert load_voltage_map(p) == {}
+
+    def test_load_voltage_map_rejects_non_dict(self, tmp_path) -> None:
+        """A non-dict top-level JSON still raises a clear ``ValueError``."""
+        p = tmp_path / "v.json"
+        p.write_text(json.dumps([150, 1.65]))
+        with pytest.raises(ValueError):
+            load_voltage_map(p)
+
     def test_load_hv_domains(self, tmp_path) -> None:
         p = tmp_path / "d.json"
         p.write_text(json.dumps({"mains": {"refs": ["J1"], "voltage": 150}}))
