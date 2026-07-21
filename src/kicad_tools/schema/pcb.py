@@ -2960,6 +2960,132 @@ class PCB:
 
         return removed_count
 
+    def drag_trace_endpoints(
+        self,
+        point: tuple[float, float],
+        delta: tuple[float, float],
+        tolerance: float = 0.05,
+        net_number: int | None = None,
+    ) -> int:
+        """Translate trace-segment endpoints coincident with ``point`` by ``delta``.
+
+        Moves every segment endpoint (``start`` or ``end``) whose board-relative
+        position lies within ``tolerance`` mm of ``point`` by
+        ``delta = (dx, dy)``, updating BOTH the in-memory :class:`Segment`
+        dataclasses and the backing S-expression tree in place so the change
+        survives :meth:`save`.  Segment UUIDs are preserved (unlike a
+        remove + :meth:`add_trace`, which would mint fresh UUIDs).
+
+        This is the primitive behind ``move-footprint --drag-endpoints``: when a
+        footprint is nudged, the caller records each pad's OLD board-relative
+        position, moves the footprint, then calls this method once per pad with
+        that pad's translation so the copper that terminated on the pad follows
+        it and stays electrically attached.
+
+        Coordinate spaces: ``point``, ``delta`` and the stored
+        :attr:`Segment.start`/:attr:`Segment.end` values are all board-relative
+        (see :meth:`_detect_board_origin`).  The S-expression tree stores
+        sheet-absolute coordinates, so the board-origin offset is re-added when
+        the ``(start ...)``/``(end ...)`` atoms are rewritten -- this is what
+        makes the move persist correctly on a non-zero-origin board.
+
+        Args:
+            point: Board-relative (x, y) to match endpoints against.
+            delta: Board-relative (dx, dy) translation applied to each match.
+            tolerance: Match radius in mm (default 0.05).
+            net_number: When a positive net id is given, only segments in that
+                net are considered (fast path).  When ``None`` or ``0`` (e.g.
+                KiCad-10 name-only boards whose segments carry
+                ``net_number == 0``; see issue #4416), all segments are
+                considered and matching is purely geometric.
+
+        Returns:
+            The number of endpoints translated.
+        """
+        ox, oy = self._board_origin
+        px, py = point
+        dx, dy = delta
+        tol_sq = tolerance * tolerance
+
+        # Index the backing tree nodes so the matched atoms can be rewritten
+        # in place.  Segments loaded from disk carry UUIDs; fall back to a
+        # sheet-absolute coordinate key for any UUID-less node (mirrors the
+        # matching in remove_segments()).
+        node_by_uuid: dict[str, SExp] = {}
+        node_by_coord: dict[tuple[float, float, float, float, str], SExp] = {}
+        for child in self._sexp.children:
+            if child.is_atom or child.name != "segment":
+                continue
+            uuid_node = child.find("uuid")
+            uval = uuid_node.get_string(0) if uuid_node else None
+            if uval:
+                node_by_uuid[uval] = child
+                continue
+            start_node = child.find("start")
+            end_node = child.find("end")
+            layer_node = child.find("layer")
+            if start_node and end_node and layer_node:
+                key = (
+                    start_node.get_float(0) or 0.0,
+                    start_node.get_float(1) or 0.0,
+                    end_node.get_float(0) or 0.0,
+                    end_node.get_float(1) or 0.0,
+                    layer_node.get_string(0) or "",
+                )
+                node_by_coord[key] = child
+
+        def _matches(coord: tuple[float, float]) -> bool:
+            return (coord[0] - px) ** 2 + (coord[1] - py) ** 2 <= tol_sq
+
+        def _tree_node(seg: Segment) -> SExp | None:
+            if seg.uuid:
+                return node_by_uuid.get(seg.uuid)
+            key = (
+                seg.start[0] + ox,
+                seg.start[1] + oy,
+                seg.end[0] + ox,
+                seg.end[1] + oy,
+                seg.layer,
+            )
+            return node_by_coord.get(key)
+
+        moved = 0
+        for seg in self._segments:
+            if net_number is not None and net_number > 0 and seg.net_number != net_number:
+                continue
+            hit_start = _matches(seg.start)
+            hit_end = _matches(seg.end)
+            if not hit_start and not hit_end:
+                continue
+
+            # Resolve the tree node BEFORE mutating the coordinates so the
+            # coordinate-fallback key still reflects the on-disk position.
+            node = _tree_node(seg)
+
+            if hit_start:
+                new_start = (seg.start[0] + dx, seg.start[1] + dy)
+                seg.start = new_start
+                if node is not None:
+                    start_node = node.find("start")
+                    if start_node is not None:
+                        start_node.set_atom(0, new_start[0] + ox)
+                        start_node.set_atom(1, new_start[1] + oy)
+                moved += 1
+            if hit_end:
+                new_end = (seg.end[0] + dx, seg.end[1] + dy)
+                seg.end = new_end
+                if node is not None:
+                    end_node = node.find("end")
+                    if end_node is not None:
+                        end_node.set_atom(0, new_end[0] + ox)
+                        end_node.set_atom(1, new_end[1] + oy)
+                moved += 1
+
+        if moved:
+            self._invalidate_dedup_keys()
+
+        return moved
+
     def footprints_on_layer(self, layer: str) -> Iterator[Footprint]:
         """Get footprints on a specific layer."""
         for fp in self._footprints:
