@@ -2067,7 +2067,15 @@ class TestLoadPcbForRoutingDrcCompliance:
         assert router.rules.grid_resolution == 0.1  # Default
 
     def test_validate_drc_emits_warning(self, tmp_path):
-        """Test that validate_drc=True emits warnings for bad grid resolution."""
+        """Test that validate_drc=True emits warnings for bad grid resolution.
+
+        Issue #3942: the "grid > clearance/2 may cause clearance violations"
+        warning is now scoped to boards that actually carry fine-pitch pads
+        (the only zones a coarse-but-<=clearance grid can short).  The fixture
+        therefore uses two pads at 0.5mm centre spacing (<= FINE_PITCH_SPACING_MM
+        = 0.65mm) so the at-risk condition is met and the warning still fires --
+        exercising the contract that a genuine risk is still reported.
+        """
         pcb_content = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -2080,7 +2088,8 @@ class TestLoadPcbForRoutingDrcCompliance:
     (layer "F.Cu")
     (at 120 120)
     (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
-    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+    (pad "1" smd rect (at 0 0) (size 0.3 0.3) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd rect (at 0.5 0) (size 0.3 0.3) (layers "F.Cu") (net 0 ""))
   )
 )"""
         pcb_file = tmp_path / "test_drc.kicad_pcb"
@@ -2100,6 +2109,50 @@ class TestLoadPcbForRoutingDrcCompliance:
             # Should emit a warning
             assert len(w) >= 1
             assert "clearance" in str(w[0].message).lower()
+
+    def test_validate_drc_no_warning_without_fine_pitch(self, tmp_path):
+        """Issue #3942: a coarse-but-<=clearance grid on a board with NO
+        fine-pitch pads must NOT emit the "may cause clearance violations"
+        warning.
+
+        Two pads at 2.54mm centre spacing (>> FINE_PITCH_SPACING_MM) route
+        DRC-clean on a 0.15mm grid, so the generic heads-up is a false alarm
+        (this is the board 01 / board 07 case the issue reopened on).  The
+        strict-mode raise is unaffected -- only the advisory warning is scoped.
+        """
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd rect (at 2.54 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+)"""
+        pcb_file = tmp_path / "test_drc_coarse.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        # grid=0.15 > clearance/2 (0.1) but <= clearance (0.2): pre-#3942 this
+        # warned; post-#3942 it must not, because no fine-pitch pads are at risk.
+        rules = DesignRules(grid_resolution=0.15, trace_clearance=0.2)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            load_pcb_for_routing(str(pcb_file), rules=rules, validate_drc=True, strict_drc=False)
+
+        clearance_warnings = [
+            msg for msg in (str(x.message) for x in w) if "may cause clearance" in msg.lower()
+        ]
+        assert clearance_warnings == [], (
+            f"Expected no clearance warning on a non-fine-pitch board, got: {clearance_warnings}"
+        )
 
     def test_validate_drc_false_no_warning(self, tmp_path):
         """Test that validate_drc=False suppresses warnings."""

@@ -1454,7 +1454,13 @@ def auto_select_grid_resolution(
                 f"backstop.",
                 stacklevel=2,
             )
-        else:
+        elif has_fine_pitch:
+            # Genuine #3911 risk: the memory cap coerced a grid > clearance/2
+            # AND the board carries fine-pitch pads whose inter-pad channel the
+            # coarse grid cannot honour (e.g. board 05's 0.5mm-pitch DRV8301).
+            # This is the sole memory-cap path that can actually short, so it
+            # keeps the alarming "may produce clearance violations" wording and
+            # mirrors ``memory_forced_unsafe_grid`` / the CLI hard-error gate.
             warnings.warn(
                 f"Auto-grid: memory budget cap forces grid {best_resolution}mm > "
                 f"clearance/2 ({recommended_max}mm) even at "
@@ -1463,6 +1469,25 @@ def auto_select_grid_resolution(
                 f"capped at {BUMP_CEILING:,} by the auto-grid retry) or use a "
                 f"looser manufacturer profile.",
                 stacklevel=2,
+            )
+        else:
+            # Issue #3942: the memory cap coerced a grid > clearance/2 but the
+            # board has NO fine-pitch pads (e.g. board 01 @2.54mm, board 07
+            # @0.8mm > FINE_PITCH_SPACING_MM = 0.65mm).  The coarse grid is
+            # <= clearance and these boards route DRC-clean, so the "may
+            # produce clearance violations at fine-pitch pads" alarm is a
+            # false positive -- its own precondition (fine-pitch pads present)
+            # is unmet, exactly matching ``memory_forced_unsafe_grid=False``.
+            # Demote to an informational note that makes NO risk claim, so
+            # downstream tooling can still observe the grid-selection event
+            # without alarming users on provably-clean boards.
+            logger.info(
+                "Auto-grid: memory budget cap selected grid %smm > clearance/2 "
+                "(%smm) even at max_cells=%s; no fine-pitch pads present, so no "
+                "clearance risk is expected.",
+                best_resolution,
+                recommended_max,
+                f"{effective_max_cells:,}",
             )
 
     return GridAutoSelection(
@@ -3681,10 +3706,25 @@ def load_pcb_for_routing(
 
     # Validate grid resolution for DRC compliance
     if validate_drc:
+        # Issue #3942: the "grid > clearance/2 may cause clearance violations"
+        # heads-up is only a genuine risk when the board carries fine-pitch pads
+        # whose inter-pad channel the coarse grid cannot honour -- the same
+        # predicate as the #3911 auto-grid gate.  On boards with NO fine-pitch
+        # pads (e.g. board 01 @2.54mm, board 07 @0.8mm > FINE_PITCH_SPACING_MM =
+        # 0.65mm) a coarse-but-<=clearance grid routes DRC-clean, so this generic
+        # warning is a duplicate false alarm (the auto-grid selector already owns
+        # the authoritative message).  Scope the warning emission to at-risk
+        # fine-pitch boards; the strict-mode raise is unchanged (still gated on
+        # ``strict_drc``), so this is a diagnostics-only narrowing.
+        _pad_positions = [
+            PadPosition(x=pad["x"], y=pad["y"]) for comp in components for pad in comp["pads"]
+        ]
+        _min_spacing = _min_pad_center_spacing(_pad_positions)
+        _has_fine_pitch = _min_spacing is not None and _min_spacing <= FINE_PITCH_SPACING_MM
         validate_grid_resolution(
             rules.grid_resolution,
             rules.trace_clearance,
-            warn=True,
+            warn=_has_fine_pitch,
             strict=strict_drc,
         )
 
