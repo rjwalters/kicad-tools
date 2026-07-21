@@ -14,7 +14,12 @@ from kicad_tools.core.sexp_file import (
 )
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
-from kicad_tools.sexp import SExp, parse_string, serialize_sexp
+from kicad_tools.sexp import (
+    SExp,
+    normalize_chamfer,
+    parse_string,
+    serialize_sexp,
+)
 
 
 class TestSExpBasicParsing:
@@ -497,6 +502,104 @@ class TestSExpSerialization:
                 f"bare token '{token}' should not be quoted, got: {result}"
             )
             assert f"(field {token})" == result
+
+    def test_programmatic_chamfer_corners_emit_bare(self):
+        """Programmatically-built chamfer corner atoms must emit bare.
+
+        Pad chamfer corners flow through the generic writer with no dedicated
+        serializer. Before issue #4393 the four corner tokens were absent from
+        the _needs_quoting() allowlist, so a programmatically-constructed
+        SExp(value="top_left") (which carries no parse-time _originally_bare
+        flag) was wrongly quoted as (chamfer "top_left") — a non-canonical
+        grammar. Allowlisting the corners makes them emit bare.
+        """
+        for corner in ("top_left", "top_right", "bottom_left", "bottom_right"):
+            node = SExp(name="chamfer", children=[SExp(value=corner)])
+            result = node.to_string(compact=True)
+            assert result == f"(chamfer {corner})", (
+                f"programmatic corner must emit bare, got: {result}"
+            )
+            assert '"' not in result
+
+    def test_programmatic_multi_corner_chamfer_all_bare(self):
+        """A multi-corner chamfer emits every corner bare."""
+        node = SExp(
+            name="chamfer",
+            children=[
+                SExp(value="top_left"),
+                SExp(value="top_right"),
+                SExp(value="bottom_left"),
+                SExp(value="bottom_right"),
+            ],
+        )
+        result = node.to_string(compact=True)
+        assert result == "(chamfer top_left top_right bottom_left bottom_right)"
+        assert '"' not in result
+
+    def test_normalize_chamfer_repairs_segfault_form(self):
+        """normalize_chamfer() rewrites the (chamfer (top_left)) crash form.
+
+        A childless *named* corner node emits the parenthesized-corner form
+        (chamfer (top_left)) that segfaults KiCad-10's `pcb drc` loader
+        (exit 139). The allowlist alone does not repair this — a named node is
+        a list, not an atom, so it never reaches the quoting heuristic. The
+        normalizer rewrites it into a bare atom so (top_left) never survives
+        export (issue #4393).
+        """
+        for corner in ("top_left", "top_right", "bottom_left", "bottom_right"):
+            # The malformed segfault form before repair.
+            malformed = SExp(name="chamfer", children=[SExp(name=corner)])
+            assert malformed.to_string(compact=True) == f"(chamfer ({corner}))"
+            # After repair it emits the canonical bare corner.
+            normalize_chamfer(malformed)
+            assert malformed.to_string(compact=True) == f"(chamfer {corner})"
+
+    def test_normalize_chamfer_is_idempotent_on_bare_corners(self):
+        """Normalizing a chamfer that already holds bare corners is a no-op."""
+        text = "(pad (chamfer top_left bottom_right))"
+        node = parse_string(text)
+        before = node.to_string()
+        normalize_chamfer(node)
+        assert node.to_string() == before
+        assert "(top_left)" not in node.to_string()
+
+    def test_normalize_chamfer_scoped_to_chamfer_parents(self):
+        """The normalizer must not touch childless named nodes elsewhere.
+
+        An unrelated childless named node (e.g. (fill)) outside a chamfer must
+        be left untouched — the repair is scoped to chamfer parents only.
+        """
+        node = SExp(
+            name="pad",
+            children=[
+                SExp(name="fill"),  # unrelated childless named node
+                SExp(name="chamfer", children=[SExp(name="top_left")]),
+            ],
+        )
+        normalize_chamfer(node)
+        # The chamfer corner was repaired to a bare atom...
+        chamfer = node.children[1]
+        assert chamfer.children[0].is_atom
+        assert chamfer.children[0].value == "top_left"
+        # ...but the unrelated (fill) node is left as a childless named node.
+        fill = node.children[0]
+        assert not fill.is_atom
+        assert fill.name == "fill"
+        assert fill.to_string(compact=True) == "(fill)"
+
+    def test_authored_chamfer_round_trips_bare(self):
+        """A correctly-authored chamfer still round-trips byte-identically.
+
+        Guard against regressing the existing bare-token behavior: parsing and
+        re-emitting a canonical (chamfer top_left bottom_right) must preserve
+        the bare corners exactly (issue #4393 must not disturb #4380's
+        round-trip fidelity).
+        """
+        text = "(pad (chamfer top_left bottom_right))"
+        result = parse_string(text).to_string()
+        assert "(chamfer top_left bottom_right)" in result
+        assert '"top_left"' not in result
+        assert "(top_left)" not in result
 
     def test_parsed_quoted_string_stays_quoted(self):
         """An originally-quoted string must stay quoted on round-trip.

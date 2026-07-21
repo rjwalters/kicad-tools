@@ -643,6 +643,18 @@ class SExp:
             "roundrect",
             "trapezoid",
             "custom",
+            # Pad chamfer corners (issue #4393). KiCad emits these as bare
+            # symbols inside a pad's (chamfer ...) node, e.g.
+            # (chamfer top_left bottom_right). They are absent from this
+            # allowlist, so a *programmatically constructed* corner atom
+            # (SExp(value="top_left"), which carries no parse-time
+            # _originally_bare flag) would otherwise be quoted by the
+            # "quote everything else" fallback below — a non-canonical form.
+            # Same rationale as the not_allowed/chamfer_rect enum tokens.
+            "top_left",
+            "top_right",
+            "bottom_left",
+            "bottom_right",
             # fp_text types
             "reference",
             "value",
@@ -1437,6 +1449,58 @@ def serialize_sexp(sexp: SExp, indent: str = "  ") -> str:
         Serialized S-expression string
     """
     return sexp.to_string()
+
+
+# Pad chamfer corner tokens (issue #4393). KiCad emits these as bare symbols
+# inside a pad's (chamfer ...) node, e.g. (chamfer top_left bottom_right).
+_CHAMFER_CORNERS = frozenset({"top_left", "top_right", "bottom_left", "bottom_right"})
+
+
+def normalize_chamfer(node: SExp) -> SExp:
+    """Repair malformed pad-chamfer corner children into bare atoms in place.
+
+    Pad chamfer corners have no dedicated serializer — they flow through the
+    generic ``SExp.to_string()`` writer, so the emitted byte content depends
+    entirely on *how* each corner child was constructed:
+
+    - ``SExp(value="top_left", _originally_bare=True)`` (what the parser builds
+      from a correctly-authored ``(chamfer top_left)``) emits bare ``top_left``.
+    - ``SExp(value="top_left")`` emits bare too, now that the four corner
+      tokens are on the ``_needs_quoting()`` allowlist (issue #4393 item 1).
+    - ``SExp(name="top_left")`` — a *childless named/list* node — emits
+      ``(top_left)``. KiCad-10's ``pcb drc`` loader **segfaults (exit 139)** on
+      that parenthesized-corner form rather than reporting a parse error.
+
+    The allowlist alone does not stop the segfault form: a childless *named*
+    node is a list, not an atom, so it never reaches the quoting heuristic.
+    This helper closes that gap. For every ``chamfer`` node in the tree it
+    rewrites any childless named corner child into a bare atom
+    (``SExp(value=<corner>, _originally_bare=True)``), guaranteeing the writer
+    never *originates* — and repairing, if present — the crash form regardless
+    of how it entered the tree.
+
+    The pass is:
+
+    - **Scoped** to ``chamfer`` parents only — an unrelated childless named
+      node elsewhere in the tree (e.g. ``(fill)``) is left untouched.
+    - **Idempotent** — a chamfer already carrying bare corner atoms is a no-op.
+    - **Opt-in** — it is *not* wired into ``to_string()``/``write()``, so it
+      does not disturb the round-trip fidelity of a hand-authored malformed
+      fixture (issue #4380); callers invoke it explicitly on the write path.
+
+    Args:
+        node: The root of the tree (or subtree) to normalize. Mutated in place.
+
+    Returns:
+        The same ``node``, for convenient chaining.
+    """
+    if node.name == "chamfer":
+        for i, child in enumerate(node.children):
+            if not child.is_atom and not child.children and child.name in _CHAMFER_CORNERS:
+                node.children[i] = SExp(value=child.name, _originally_bare=True)
+    for child in node.children:
+        normalize_chamfer(child)
+    return node
 
 
 def parse_file(path: str | Path, track_positions: bool = False) -> SExp:
