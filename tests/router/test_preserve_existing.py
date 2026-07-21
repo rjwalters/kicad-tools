@@ -40,18 +40,21 @@ These tests verify:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
 from kicad_tools.cli.route_cmd import (
+    CatastrophicCopperLossError,
     _capture_preserved_routes,
     _finalize_routes,
     _serialize_preserved_routes,
+    _write_routed_pcb,
 )
 from kicad_tools.cli.route_cmd import main as route_main
 from kicad_tools.router.io import load_pcb_for_routing
-from kicad_tools.router.optimizer.pcb import parse_net_names, parse_segments
+from kicad_tools.router.optimizer.pcb import parse_net_names, parse_segments, parse_vias
 
 # A real routed board with eight 2-pad signal nets (LINE_*/NODE_*) and full
 # segment geometry.  Reused as the fixture so the tests exercise real KiCad
@@ -324,3 +327,176 @@ class TestPreserveExistingFinalize:
             preserved_routes=preserved,
         )
         assert route_sexp_off.count("(segment") == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #4413: name-based net dialect + catastrophic-copper-loss guard.
+# ---------------------------------------------------------------------------
+
+
+def _to_name_based_dialect(pcb_text: str) -> str:
+    """Rewrite inline numeric ``(net N)`` refs to the name-based dialect.
+
+    KiCad-10 hand-evolved boards reference a segment/via's net by quoted
+    name -- ``(net "Net-(C11-Pad2)")`` -- instead of the numeric
+    ``(net 5)``.  This helper converts a numeric-dialect fixture into that
+    dialect so the preservation path can be exercised against it.
+
+    Only the *inline* number-only form is rewritten: the header
+    declarations ``(net N "name")`` carry a trailing string and never match
+    ``\\(net (\\d+)\\)``, so they are left untouched (and remain the source
+    of truth for the name->id reverse map).  ``(net 0)`` / unnamed nets stay
+    numeric because they have no name to key on.
+    """
+    net_names = parse_net_names(pcb_text)
+
+    def repl(m: re.Match) -> str:
+        nid = int(m.group(1))
+        name = net_names.get(nid)
+        if not name:
+            return m.group(0)
+        return f'(net "{name}")'
+
+    return re.sub(r"\(net (\d+)\)", repl, pcb_text)
+
+
+class TestNameBasedDialectParsing:
+    """Issue #4413: the preserve-path parser must resolve ``(net "NAME")``."""
+
+    def test_parse_segments_resolves_name_based_refs(self, board_text):
+        """AC: parse_segments returns resolved segments on a name-based board."""
+        name_based = _to_name_based_dialect(board_text)
+        # Sanity: the conversion actually produced name-based inline refs and
+        # removed the numeric-only inline form for a real net.
+        assert '(net "LINE_A")' in name_based
+
+        numeric = parse_segments(board_text)
+        namebased = parse_segments(name_based)
+
+        # Before the fix, ``namebased`` was empty (every block dropped).
+        assert namebased, "name-based board parsed to ZERO segments (data-loss bug)"
+        assert set(namebased) == set(numeric)
+        for net in _ALL_SIGNAL_NETS:
+            # Same geometry AND same resolved numeric net id (connectivity).
+            assert _geom_set(namebased[net]) == _geom_set(numeric[net])
+
+    def test_parse_vias_resolves_name_based_refs(self, tmp_path, board_text):
+        """AC: parse_vias resolves name-based via refs (incl. a stitch via)."""
+        net_names = parse_net_names(board_text)
+        gnd_net = next(nid for nid, name in net_names.items() if name == "GND")
+        stitched = _inject_stitch_via(board_text, net=gnd_net, x=12.3456, y=23.4567)
+        name_based = _to_name_based_dialect(stitched)
+
+        v_numeric = parse_vias(stitched)
+        v_namebased = parse_vias(name_based)
+
+        assert v_namebased, "name-based board parsed to ZERO vias (data-loss bug)"
+        assert set(v_namebased) == set(v_numeric)
+        # The GND stitch via survived with its resolved numeric net id.
+        assert any(abs(v.x - 12.3456) < 1e-4 and v.net == gnd_net for v in v_namebased["GND"])
+
+    def test_name_absent_from_header_is_not_dropped(self):
+        """Edge case (a): a name-only ref with no header entry keeps the block."""
+        pcb_text = (
+            "(kicad_pcb\n"
+            '  (net 0 "")\n'
+            "  (segment (start 0 0) (end 1 1) (width 0.2) "
+            '(layer "F.Cu") (net "MYSTERY_NET"))\n'
+            ")\n"
+        )
+        segs = parse_segments(pcb_text)
+        # The block is preserved (keyed by its name) rather than silently
+        # discarded -- dropping copper is the exact failure mode being fixed.
+        assert "MYSTERY_NET" in segs
+        assert len(segs["MYSTERY_NET"]) == 1
+
+
+class TestPreserveExistingNameBasedCLI:
+    """End-to-end: --preserve-existing must round-trip a name-based board."""
+
+    def test_preserve_keeps_other_nets_on_name_based_board(self, tmp_path, board_text):
+        """AC #1: every OTHER net's copper survives a single-net re-route."""
+        name_based = _to_name_based_dialect(board_text)
+        orig = parse_segments(name_based)
+        assert set(orig) == set(_ALL_SIGNAL_NETS)
+
+        out_text = _run_route(tmp_path, name_based, preserve=True, skip_nets=_SKIP_ALL_BUT_LINE_A)
+        out = parse_segments(out_text)
+
+        # All pre-existing copper on the skipped nets survives byte-identical.
+        for net in ("LINE_B", "LINE_C", "LINE_D", "NODE_A", "NODE_B", "NODE_C", "NODE_D"):
+            assert net in out, (
+                f"{net} copper was destroyed on a NAME-BASED board under "
+                "--preserve-existing (the #4413 data-loss regression)"
+            )
+            assert _geom_set(out[net]) == _geom_set(orig[net])
+
+        # The one routable net is present (re-routed in place).
+        assert "LINE_A" in out
+        assert len(out["LINE_A"]) > 0
+
+
+class TestCatastrophicCopperLossGuard:
+    """Issue #4413 defense-in-depth: refuse to overwrite on catastrophic loss."""
+
+    @staticmethod
+    def _board_with_segments(count: int) -> str:
+        seg = '(segment (start 0 0) (end 1 1) (width 0.2) (layer "F.Cu") (net 1))'
+        body = "\n  ".join(seg for _ in range(count))
+        return f'(kicad_pcb\n  (net 0 "")\n  (net 1 "GND")\n  {body}\n)\n'
+
+    def test_guard_aborts_and_leaves_output_untouched(self, tmp_path):
+        """A >90% copper drop under the guard raises and does NOT write."""
+        in_path = tmp_path / "in.kicad_pcb"
+        in_path.write_text(self._board_with_segments(150))
+
+        out_path = tmp_path / "out.kicad_pcb"
+        sentinel = "SENTINEL-UNTOUCHED"
+        out_path.write_text(sentinel)
+
+        # Only a single segment re-emitted -> 1/150 survives (<10%).
+        route_sexp = '(segment (start 0 0) (end 2 2) (width 0.2) (layer "F.Cu") (net 1))'
+        with pytest.raises(CatastrophicCopperLossError):
+            _write_routed_pcb(in_path, out_path, route_sexp, guard_copper_loss=True)
+
+        # The output file on disk is unchanged (no partial/torn overwrite).
+        assert out_path.read_text() == sentinel
+
+    def test_guard_off_permits_the_same_write(self, tmp_path):
+        """Without the guard flag (default) the same write proceeds."""
+        in_path = tmp_path / "in.kicad_pcb"
+        in_path.write_text(self._board_with_segments(150))
+        out_path = tmp_path / "out.kicad_pcb"
+
+        route_sexp = '(segment (start 0 0) (end 2 2) (width 0.2) (layer "F.Cu") (net 1))'
+        _write_routed_pcb(in_path, out_path, route_sexp)  # guard_copper_loss defaults False
+        assert out_path.exists()
+        assert out_path.read_text().count("(segment") == 1
+
+    def test_guard_no_false_positive_when_copper_preserved(self, tmp_path):
+        """The guard does not fire when the preserved copper is re-emitted."""
+        in_path = tmp_path / "in.kicad_pcb"
+        in_path.write_text(self._board_with_segments(150))
+        out_path = tmp_path / "out.kicad_pcb"
+
+        # Re-emit all 150 preserved segments plus one freshly-routed one.
+        seg = '(segment (start 0 0) (end 1 1) (width 0.2) (layer "F.Cu") (net 1))'
+        preserved = "\n  ".join(seg for _ in range(150))
+        route_sexp = (
+            '(segment (start 0 0) (end 2 2) (width 0.2) (layer "F.Cu") (net 1))\n  ' + preserved
+        )
+        _write_routed_pcb(in_path, out_path, route_sexp, guard_copper_loss=True)
+        assert out_path.read_text().count("(segment") == 151
+
+    def test_guard_ignores_trivial_input(self, tmp_path):
+        """A trivial input (<=100 segments) never trips the guard."""
+        in_path = tmp_path / "in.kicad_pcb"
+        in_path.write_text(self._board_with_segments(10))
+        out_path = tmp_path / "out.kicad_pcb"
+
+        route_sexp = '(segment (start 0 0) (end 2 2) (width 0.2) (layer "F.Cu") (net 1))'
+        # 1/10 survives -- below the fraction, but the input is trivial so the
+        # guard stays silent (a near-empty board legitimately routes to a few
+        # elements).
+        _write_routed_pcb(in_path, out_path, route_sexp, guard_copper_loss=True)
+        assert out_path.exists()
