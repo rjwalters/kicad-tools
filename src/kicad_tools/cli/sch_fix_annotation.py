@@ -119,18 +119,32 @@ def _needs_reassignment(sym: dict) -> bool:
 
 
 def _existing_canonical_numbers(power_symbols: list[dict]) -> dict[str, set[int]]:
-    """Collect canonical numbers already in use, keyed by prefix.
+    """Collect the canonical numbers *kept* under first-occurrence-wins dedup.
 
-    Only references that are *already canonical and correctly-familied*
-    (i.e. would not be reassigned) reserve their number.  This lets the
-    assignment phase skip over numbers that established, correct symbols hold.
+    A reference reserves its number only when it is *already canonical and
+    correctly-familied* AND it is the **first** symbol across the flattened
+    hierarchy to hold that ``(prefix, number)`` pair.  Later symbols carrying
+    the same canonical designator are cross-sheet duplicates that will be
+    reassigned by ``build_rename_plan`` — so they do **not** reserve.
+
+    Reserving via a plain set would collapse two ``#PWR40`` symbols into the
+    single entry ``{40}`` and silently discard the collision, leaving both
+    duplicates untouched.  Seeding from first-occurrence canonicals only keeps
+    the reserved set consistent with the keep/reassign decision made in
+    ``build_rename_plan`` (the first holder keeps ``40``; the ``_next()``
+    machinery then hands the duplicate a fresh, non-reserved number).
     """
     reserved: dict[str, set[int]] = {_POWER_PREFIX: set(), _FLAG_PREFIX: set()}
     for sym in power_symbols:
         number = _canonical_number(sym)
         if number is None:
             continue
-        reserved[_power_prefix_for(sym)].add(number)
+        prefix = _power_prefix_for(sym)
+        if number in reserved[prefix]:
+            # Duplicate canonical ref (cross-sheet collision): the first holder
+            # already reserved this number; this one will be reassigned.
+            continue
+        reserved[prefix].add(number)
     return reserved
 
 
@@ -143,6 +157,15 @@ def build_rename_plan(ordered_power_symbols: list[dict]) -> dict[str, dict]:
     unique ``#PWR<dd>`` / ``#FLG<dd>`` designators are assigned to every
     symbol whose reference is not already canonical, skipping numbers held by
     canonical symbols so no collision is introduced.
+
+    Uniqueness is enforced **project-wide across the flattened hierarchy**
+    using first-occurrence-wins: the first symbol to hold a canonical
+    ``(prefix, number)`` keeps it, and any *later* symbol carrying the same
+    canonical designator is treated as a cross-sheet duplicate and reassigned
+    via ``_next()``.  This catches the case the old per-symbol canonicality
+    check missed — two individually-canonical ``#PWR40`` symbols on different
+    sheets are a real annotation error even though each looks fine in
+    isolation.
 
     Returns a dict mapping symbol UUID -> ``{"old": str, "new": str}`` for
     every symbol that actually changes reference (identity renames are
@@ -159,11 +182,20 @@ def build_rename_plan(ordered_power_symbols: list[dict]) -> dict[str, dict]:
         counters[prefix] = n + 1
         return n
 
+    # Canonical (prefix, number) pairs already kept, so a later symbol holding
+    # the same canonical designator is recognised as a cross-sheet duplicate.
+    kept_canonical: dict[str, set[int]] = {_POWER_PREFIX: set(), _FLAG_PREFIX: set()}
+
     plan: dict[str, dict] = {}
     for sym in ordered_power_symbols:
-        if not _needs_reassignment(sym):
-            continue
         prefix = _power_prefix_for(sym)
+        number = _canonical_number(sym)
+        if number is not None and number not in kept_canonical[prefix]:
+            # First canonical holder of this (prefix, number): keep it as-is.
+            kept_canonical[prefix].add(number)
+            continue
+        # Non-canonical ref, OR a later duplicate of an already-kept canonical:
+        # assign a fresh, project-globally-unique number.
         new_ref = _format_reference(prefix, _next(prefix))
         old_ref = str(sym["reference"])
         if old_ref == new_ref:
@@ -180,11 +212,22 @@ def _net_membership(netlist: Netlist) -> dict[frozenset[tuple[str, str]], int]:
     net's display name/code, since renumbering can legitimately change a net's
     name while leaving the electrical grouping intact.
 
+    ``#``-prefixed nodes (power/flag symbols) are **excluded** from the
+    membership: power symbols connect by *value*, so their designators are
+    electrically meaningless — the very thing this command renumbers.  Keeping
+    them would break the gate on cross-sheet duplicates: ``ref_rename`` is keyed
+    by the old reference *string*, so renaming one of two same-named ``#PWR40``
+    nodes translates **both** before-snapshot nodes, producing a spurious diff
+    that aborts an otherwise net-neutral repair.  Dropping power nodes compares
+    only the real-component connectivity that must stay invariant.
+
     Returns a multiset ``{membership_frozenset: count}``.
     """
     snapshot: dict[frozenset[tuple[str, str]], int] = {}
     for net in netlist.nets:
-        membership = frozenset((node.reference, node.pin) for node in net.nodes)
+        membership = frozenset(
+            (node.reference, node.pin) for node in net.nodes if not node.reference.startswith("#")
+        )
         snapshot[membership] = snapshot.get(membership, 0) + 1
     return snapshot
 
