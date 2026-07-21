@@ -276,6 +276,133 @@ class DRCChecker:
         """
         return rule_id in cls.ADVISORY_RULE_IDS
 
+    # Reporting-category taxonomy (Issue #3803).
+    #
+    # ``kct check`` historically folded routing-intent / quality findings
+    # (``connectivity``, diff-pair skew/continuity, ``copper_sliver``,
+    # ``ampacity``, silk) into the same undifferentiated "DRC violations"
+    # count as fabrication-blocking copper/clearance defects.  Because
+    # ``connectivity`` and the diff-pair rules emit ``severity="error"``,
+    # they inflate the headline exactly like a real short -- so
+    # "N DRC violations" could not be trusted to mean "N fab-blocking
+    # copper defects".
+    #
+    # This map classifies every rule_id into one of two *reporting*
+    # buckets so the CLI can render a per-bucket headline.  The category
+    # names mirror the wording of the native ``ViolationCategory``
+    # taxonomy (``drc/violation.py``) for cross-report consistency.
+    #
+    # IMPORTANT: this is a PRESENTATION-ONLY axis and is deliberately
+    # ORTHOGONAL to :attr:`ADVISORY_RULE_IDS` (the *gating* advisory set,
+    # which stays ``{"connectivity"}``).  Classifying a rule as
+    # ``advisory-quality`` here does NOT change any gate verdict, exit
+    # code, or severity -- only how the finding is grouped in the human
+    # report.  Do not derive :meth:`is_advisory_rule` from this map.
+    CATEGORY_MANUFACTURING: str = "manufacturing"
+    CATEGORY_ADVISORY: str = "advisory-quality"
+
+    # Single source of truth: rule_id -> reporting category.  Adding a
+    # rule requires exactly one edit here.  Dynamically-suffixed subtypes
+    # (e.g. ``clearance_pad_segment``, built via ``f"clearance_{suffix}"``
+    # in ``rules/clearance.py``) are covered by the prefix fallback in
+    # :meth:`category_for_rule`, so this map need only list canonical ids.
+    RULE_CATEGORY: dict[str, str] = {
+        # ---- Advisory / quality: routing-intent & non-fab-blocking. ----
+        "connectivity": CATEGORY_ADVISORY,
+        "ampacity": CATEGORY_ADVISORY,
+        "copper_sliver": CATEGORY_ADVISORY,
+        "impedance": CATEGORY_ADVISORY,
+        "diffpair_clearance_intra": CATEGORY_ADVISORY,
+        "diffpair_length_skew": CATEGORY_ADVISORY,
+        "diffpair_routing_continuity": CATEGORY_ADVISORY,
+        "match_group_length_skew": CATEGORY_ADVISORY,
+        "silk_over_copper": CATEGORY_ADVISORY,
+        "silk_edge_clearance": CATEGORY_ADVISORY,
+        "silkscreen_line_width": CATEGORY_ADVISORY,
+        "silkscreen_over_pad": CATEGORY_ADVISORY,
+        "silkscreen_text_height": CATEGORY_ADVISORY,
+        # ---- Manufacturing DRC: fab-blocking copper/clearance/hole/
+        #      edge/mask/drill/geometry. -----------------------------
+        "clearance": CATEGORY_MANUFACTURING,
+        "clearance_net0_bridge": CATEGORY_MANUFACTURING,
+        "clearance_pad_zone": CATEGORY_MANUFACTURING,
+        "clearance_segment_zone": CATEGORY_MANUFACTURING,
+        "clearance_via_zone": CATEGORY_MANUFACTURING,
+        "edge_clearance": CATEGORY_MANUFACTURING,
+        "edge_clearance_pad": CATEGORY_MANUFACTURING,
+        "edge_clearance_pad_hole": CATEGORY_MANUFACTURING,
+        "edge_clearance_trace": CATEGORY_MANUFACTURING,
+        "edge_clearance_via": CATEGORY_MANUFACTURING,
+        "edge_clearance_zone": CATEGORY_MANUFACTURING,
+        "hole_to_hole_clearance": CATEGORY_MANUFACTURING,
+        "solder_mask_clearance": CATEGORY_MANUFACTURING,
+        "solder_mask_pad": CATEGORY_MANUFACTURING,
+        "via_in_pad": CATEGORY_MANUFACTURING,
+        "min_pad_size": CATEGORY_MANUFACTURING,
+        "pth_annular_ring": CATEGORY_MANUFACTURING,
+        "pad_grid": CATEGORY_MANUFACTURING,
+        "dimensions": CATEGORY_MANUFACTURING,
+        "dimension_trace_width": CATEGORY_MANUFACTURING,
+        "dimension_via_diameter": CATEGORY_MANUFACTURING,
+        "dimension_via_drill": CATEGORY_MANUFACTURING,
+        "dimension_annular_ring": CATEGORY_MANUFACTURING,
+        "footprint_outside_board": CATEGORY_MANUFACTURING,
+        "single_pad_net": CATEGORY_MANUFACTURING,
+        "net_undeclared": CATEGORY_MANUFACTURING,
+        "zone_fill": CATEGORY_MANUFACTURING,
+        "zone_fill_disabled": CATEGORY_MANUFACTURING,
+        "zone_no_net": CATEGORY_MANUFACTURING,
+        "zone_unfilled": CATEGORY_MANUFACTURING,
+    }
+
+    # Prefix fallbacks for dynamically-suffixed rule_id families so a new
+    # subtype is categorized without a map edit.  The first matching
+    # prefix wins, so the advisory prefixes (which are more specific
+    # netlist/quality families) are checked before the broad
+    # ``clearance`` manufacturing prefix.
+    _CATEGORY_PREFIXES: tuple[tuple[str, str], ...] = (
+        ("diffpair", CATEGORY_ADVISORY),
+        ("match_group", CATEGORY_ADVISORY),
+        ("silk", CATEGORY_ADVISORY),
+        ("edge_clearance", CATEGORY_MANUFACTURING),
+        ("clearance", CATEGORY_MANUFACTURING),
+        ("dimension", CATEGORY_MANUFACTURING),
+        ("zone", CATEGORY_MANUFACTURING),
+        ("via", CATEGORY_MANUFACTURING),
+        ("hole", CATEGORY_MANUFACTURING),
+        ("drill", CATEGORY_MANUFACTURING),
+        ("solder_mask", CATEGORY_MANUFACTURING),
+        ("pth_", CATEGORY_MANUFACTURING),
+    )
+
+    @classmethod
+    def category_for_rule(cls, rule_id: str) -> str:
+        """Return the reporting category for ``rule_id``.
+
+        One of :attr:`CATEGORY_MANUFACTURING` (fabrication-blocking
+        copper / clearance / hole / edge / mask / drill defects) or
+        :attr:`CATEGORY_ADVISORY` (routing-intent & quality findings such
+        as connectivity completion, diff-pair skew, copper slivers,
+        ampacity, silk).
+
+        Classification is resolved from the explicit :attr:`RULE_CATEGORY`
+        map first, then a prefix fallback for dynamically-suffixed
+        subtypes, and finally defaults to
+        :attr:`CATEGORY_MANUFACTURING`.  The manufacturing default is
+        deliberate: an unrecognized rule surfaces in the fab-blocking
+        bucket rather than being silently hidden among advisory findings.
+
+        This is a presentation-only classifier; see :attr:`RULE_CATEGORY`
+        for why it must not alter any gate verdict.
+        """
+        category = cls.RULE_CATEGORY.get(rule_id)
+        if category is not None:
+            return category
+        for prefix, prefix_category in cls._CATEGORY_PREFIXES:
+            if rule_id.startswith(prefix):
+                return prefix_category
+        return cls.CATEGORY_MANUFACTURING
+
     def _absolutize(self, results: DRCResults) -> DRCResults:
         """Rewrite violation locations from board-relative to sheet-absolute.
 
