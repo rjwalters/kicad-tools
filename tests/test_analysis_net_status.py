@@ -1865,3 +1865,166 @@ class TestZeroFillZoneConnectivity:
         assert gnd.status == "complete", (
             f"Fully filled zone should connect both pads; got {gnd.status}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #4429 — through-via + inner-layer segment connectivity (no zone)
+# ---------------------------------------------------------------------------
+
+# Pad-to-pad cross-layer path with NO zone:
+#   U1.12 (F.Cu) -> through-via -> In2.Cu segment (landed on the via rings) ->
+#   through-via -> F.Cu segment -> U2.3 (F.Cu)
+# The inner-layer trace endpoints sit 0.15 mm off the via centres (on the via
+# annular ring), so default endpoint-proximity (POSITION_TOLERANCE = 0.01 mm)
+# cannot chain across layers -- the fix must recognise the through-via as
+# fusing the two different-layer segment components (Issue #4429).
+THROUGH_VIA_INNER_SEGMENT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "OC_TRIP_N")
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 20 15)
+    (property "Reference" "U1")
+    (pad "12" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "OC_TRIP_N"))
+  )
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 35 15)
+    (property "Reference" "U2")
+    (pad "3" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "OC_TRIP_N"))
+  )
+
+  (via (at 20 15) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+  (via (at 30 15) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+
+  (segment (start 20.15 15) (end 29.85 15) (width 0.25) (layer "In2.Cu") (net 1))
+  (segment (start 30 15) (end 35 15) (width 0.25) (layer "F.Cu") (net 1))
+)
+"""
+
+
+# Edge case: a blind F.Cu/In1.Cu via must NOT bridge an In2.Cu segment it does
+# not electrically span.  Same shape as above but every via is blind
+# F.Cu/In1.Cu, so the inner In2.Cu run is electrically isolated from the F.Cu
+# pads and the far pad stays unconnected (guards against over-connecting).
+BLIND_VIA_INNER_SEGMENT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "OC_TRIP_N")
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 20 15)
+    (property "Reference" "U1")
+    (pad "12" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "OC_TRIP_N"))
+  )
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 35 15)
+    (property "Reference" "U2")
+    (pad "3" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "OC_TRIP_N"))
+  )
+
+  (via (at 20 15) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+  (via (at 30 15) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+
+  (segment (start 20.15 15) (end 29.85 15) (width 0.25) (layer "In2.Cu") (net 1))
+  (segment (start 30 15) (end 35 15) (width 0.25) (layer "F.Cu") (net 1))
+)
+"""
+
+
+@pytest.fixture
+def through_via_inner_segment_pcb(tmp_path: Path) -> Path:
+    """PCB: F.Cu pad -> through-via -> In2.Cu segment -> through-via -> F.Cu pad."""
+    pcb_file = tmp_path / "through_via_inner_segment.kicad_pcb"
+    pcb_file.write_text(THROUGH_VIA_INNER_SEGMENT_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def blind_via_inner_segment_pcb(tmp_path: Path) -> Path:
+    """PCB: same topology but blind F.Cu/In1.Cu vias that cannot reach In2.Cu."""
+    pcb_file = tmp_path / "blind_via_inner_segment.kicad_pcb"
+    pcb_file.write_text(BLIND_VIA_INNER_SEGMENT_PCB)
+    return pcb_file
+
+
+class TestThroughViaInnerSegmentConnectivity:
+    """Issue #4429: through-vias joining inner-layer segment runs.
+
+    A through-via joining two different-layer segment components must fuse the
+    pads they carry, so a ``pad -> trace -> via -> inner-trace -> via -> trace
+    -> pad`` path reports ``complete`` (matching kicad-cli DRC) instead of a
+    false open.  This is the pad-to-pad analogue of the #4229 zone/pour fix.
+    """
+
+    def test_default_mode_complete(self, through_via_inner_segment_pcb: Path):
+        """Default (non-strict) mode reports the cross-layer path complete."""
+        analyzer = NetStatusAnalyzer(through_via_inner_segment_pcb)
+        result = analyzer.analyze()
+
+        net = result.get_net("OC_TRIP_N")
+        assert net is not None
+        assert net.total_pads == 2
+        assert net.unconnected_count == 0, (
+            "through-via -> In2.Cu segment -> through-via must connect both pads; "
+            f"unconnected: {[p.full_name for p in net.unconnected_pads]}"
+        )
+        assert net.status == "complete", f"expected complete, got {net.status}"
+
+    def test_strict_mode_complete(self, through_via_inner_segment_pcb: Path):
+        """Strict (real-geometry) mode also reports the path complete."""
+        analyzer = NetStatusAnalyzer(through_via_inner_segment_pcb, strict=True)
+        result = analyzer.analyze()
+
+        net = result.get_net("OC_TRIP_N")
+        assert net is not None
+        assert net.total_pads == 2
+        assert net.unconnected_count == 0, (
+            "strict mode must also fuse the through-via inner-segment path; "
+            f"unconnected: {[p.full_name for p in net.unconnected_pads]}"
+        )
+        assert net.status == "complete", f"expected complete, got {net.status}"
+
+    def test_blind_via_does_not_bridge_unspanned_inner_segment(
+        self, blind_via_inner_segment_pcb: Path
+    ):
+        """A blind F.Cu/In1.Cu via must NOT bridge an In2.Cu segment.
+
+        The layer-span gate keeps a via from fusing an inner-layer segment it
+        does not electrically reach, so the far pad honestly stays unconnected.
+        """
+        analyzer = NetStatusAnalyzer(blind_via_inner_segment_pcb)
+        result = analyzer.analyze()
+
+        net = result.get_net("OC_TRIP_N")
+        assert net is not None
+        assert net.total_pads == 2
+        assert net.status != "complete", (
+            "blind F.Cu/In1.Cu via must not over-connect an In2.Cu segment; "
+            f"got status={net.status}"
+        )
+        assert net.unconnected_count == 1
