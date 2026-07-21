@@ -19,6 +19,8 @@ from kicad_tools.cli.optimize_placement_cmd import (  # noqa: E402
     _generate_seed,
     _parse_weights,
     _print_score,
+    _read_board_data,
+    _read_current_vector,
     _vector_to_placements,
     _write_placements_to_pcb_atomic,
     run_optimize_placement,
@@ -263,6 +265,137 @@ class TestGenerateSeed:
     def test_unknown_seed_raises(self, simple_components, simple_nets, board):
         with pytest.raises(ValueError, match="Unknown seed method"):
             _generate_seed("nonexistent", simple_components, simple_nets, board)
+
+
+class TestSeedCurrentWiring:
+    """`--seed current` warm-starts CMA-ES from the on-disk placement."""
+
+    def test_read_current_vector_encodes_on_disk_positions(self, tmp_pcb):
+        """_read_current_vector reflects the actual footprint positions."""
+        components, _nets, _board, _rules, _origin = _read_board_data(str(tmp_pcb))
+        vec = _read_current_vector(str(tmp_pcb), components)
+        assert isinstance(vec, PlacementVector)
+        assert vec.num_components == len(components)
+        # The mean is the current layout, NOT the geometric center of the
+        # board bounds -- so at least one component's x/y differs from center.
+        placement_bounds = bounds(_board, components)
+        center = (placement_bounds.lower + placement_bounds.upper) / 2.0
+        assert not np.allclose(vec.data, center)
+
+    def test_seed_current_sets_cmaes_mean_to_current_positions(
+        self, tmp_pcb, tmp_path, monkeypatch
+    ):
+        """--seed current injects config.extra['mean'] = current placement."""
+        from kicad_tools.cli import optimize_placement_cmd as mod
+
+        captured: dict[str, object] = {}
+        original_initialize = CMAESStrategy.initialize
+
+        def spy_initialize(self, placement_bounds, config):
+            captured["mean"] = config.extra.get("mean")
+            return original_initialize(self, placement_bounds, config)
+
+        monkeypatch.setattr(CMAESStrategy, "initialize", spy_initialize)
+
+        # Expected mean = the encoded current placement (slide-off disabled so
+        # the comparison is exact; the sample board has no overlaps anyway).
+        components, _nets, _board, _rules, _origin = _read_board_data(str(tmp_pcb))
+        expected = _read_current_vector(str(tmp_pcb), components).data
+
+        out = tmp_path / "out.kicad_pcb"
+        rc = mod.run_optimize_placement(
+            str(tmp_pcb),
+            seed_method="current",
+            max_iterations=1,
+            output_path=str(out),
+            no_slide_off=True,
+            quiet=True,
+        )
+        assert rc in (0, 1)  # optimization ran; feasibility is not asserted here
+        assert captured["mean"] is not None, "mean was not injected for --seed current"
+        assert np.allclose(np.asarray(captured["mean"], dtype=float), expected)
+        # And it must NOT be the bounds-center default.
+        placement_bounds = bounds(_board, components)
+        center = (placement_bounds.lower + placement_bounds.upper) / 2.0
+        assert not np.allclose(np.asarray(captured["mean"], dtype=float), center)
+
+    def test_default_seed_does_not_inject_mean(self, tmp_pcb, tmp_path, monkeypatch):
+        """force-directed keeps the historical center-mean (mean unset)."""
+        from kicad_tools.cli import optimize_placement_cmd as mod
+
+        captured: dict[str, object] = {"seen": False, "mean": "sentinel"}
+        original_initialize = CMAESStrategy.initialize
+
+        def spy_initialize(self, placement_bounds, config):
+            captured["seen"] = True
+            captured["mean"] = config.extra.get("mean")
+            return original_initialize(self, placement_bounds, config)
+
+        monkeypatch.setattr(CMAESStrategy, "initialize", spy_initialize)
+
+        out = tmp_path / "out.kicad_pcb"
+        mod.run_optimize_placement(
+            str(tmp_pcb),
+            seed_method="force-directed",
+            max_iterations=1,
+            output_path=str(out),
+            quiet=True,
+        )
+        assert captured["seen"] is True
+        assert captured["mean"] is None
+
+
+class TestInitializeMeanOverride:
+    """CMAESStrategy.initialize honours config.extra['mean']."""
+
+    def test_mean_override_used_as_initial_mean(self, simple_components, board):
+        """With a tiny sigma, the first population sits at the supplied mean."""
+        placement_bounds = bounds(board, simple_components)
+        # A distinct in-bounds mean (shifted off the center).
+        target = (placement_bounds.lower + placement_bounds.upper) / 2.0
+        # Nudge continuous x/y dims for each component toward the lower bound.
+        for i in range(len(simple_components)):
+            base = i * 4
+            target[base] = placement_bounds.lower[base] + 0.1
+            target[base + 1] = placement_bounds.lower[base + 1] + 0.1
+
+        strategy = CMAESStrategy()
+        config = StrategyConfig(
+            max_iterations=1,
+            seed=7,
+            extra={"mean": target, "sigma": 1e-9},
+        )
+        pop = strategy.initialize(placement_bounds, config)
+        # Continuous dims of every candidate should hug the injected mean.
+        cont = ~placement_bounds.discrete_mask
+        for cand in pop:
+            assert np.allclose(cand.data[cont], target[cont], atol=1e-3)
+
+    def test_wrong_length_mean_raises(self, simple_components, board):
+        placement_bounds = bounds(board, simple_components)
+        bad = np.zeros(len(placement_bounds.lower) + 1, dtype=float)
+        strategy = CMAESStrategy()
+        config = StrategyConfig(max_iterations=1, seed=1, extra={"mean": bad})
+        with pytest.raises(ValueError, match="mean"):
+            strategy.initialize(placement_bounds, config)
+
+    def test_out_of_bounds_mean_is_clamped_not_rejected(self, simple_components, board):
+        """An out-of-bounds mean is clipped into [lower, upper], not rejected."""
+        placement_bounds = bounds(board, simple_components)
+        # Far above the upper bound on every dimension.
+        over = placement_bounds.upper + 1000.0
+        strategy = CMAESStrategy()
+        config = StrategyConfig(
+            max_iterations=1,
+            seed=3,
+            extra={"mean": over, "sigma": 1e-9},
+        )
+        pop = strategy.initialize(placement_bounds, config)  # must not raise
+        cont = ~placement_bounds.discrete_mask
+        for cand in pop:
+            # Clamped to the upper bound (within CMAwM's discretization slack).
+            assert np.all(cand.data[cont] <= placement_bounds.upper[cont] + 1e-6)
+            assert np.all(cand.data[cont] >= placement_bounds.lower[cont] - 1e-6)
 
 
 class TestPrintScore:
@@ -598,6 +731,22 @@ class TestCLIHelp:
         assert args.verbose is True
         assert args.quiet is True
 
+    def test_parser_accepts_seed_current(self):
+        """--seed current is a valid choice."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["optimize-placement", "board.kicad_pcb", "--seed", "current"])
+        assert args.seed_method == "current"
+
+    def test_parser_rejects_unknown_seed(self):
+        """An unknown --seed value is rejected by argparse."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["optimize-placement", "board.kicad_pcb", "--seed", "bogus"])
+
 
 # ---------------------------------------------------------------------------
 # Optimization convergence test (sanity check, not performance benchmark)
@@ -758,7 +907,6 @@ class TestInterruptHandling:
 # Import helpers needed by the new tests
 from kicad_tools.cli.optimize_placement_cmd import (
     _extract_board_outline,
-    _read_board_data,
     _write_placements_to_pcb,
 )
 

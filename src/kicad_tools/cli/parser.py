@@ -5220,10 +5220,16 @@ def _add_optimize_placement_parser(subparsers) -> None:
     )
     op_parser.add_argument(
         "--seed",
-        choices=["force-directed", "random"],
+        choices=["force-directed", "random", "current"],
         default="force-directed",
         dest="seed_method",
-        help="Seed placement method (default: force-directed)",
+        help=(
+            "Seed placement method (default: force-directed). "
+            "'current' warm-starts CMA-ES from the board's existing footprint "
+            "positions with a tight step size, refining the current layout "
+            "instead of re-imagining it -- use it to resolve a few local "
+            "violations without discarding a ratified hand floorplan."
+        ),
     )
     op_parser.add_argument(
         "--weights",
