@@ -712,6 +712,21 @@ the worktree's `.venv/` does not inherit the C++ extension built in the
 main checkout. After `cd` into the worktree, run `uv run kct build-native`
 once before any routing benchmarks.
 
+The build's `nanobind` dependency is composed into the default dev
+dependency-group, so a plain `uv sync` keeps it resolved and a later
+`uv sync` (e.g. adding `--extra placement`) will not prune it. If you
+installed with only a subset of groups, add the `native` extra explicitly
+so nanobind stays lockfile-tracked:
+
+```bash
+uv sync --extra native            # repo/dev worktree
+pip install "kicad-tools[native]" # consumer / installed wheel
+```
+
+Avoid a bare `pip install nanobind` — it is not recorded in the resolved
+set and a subsequent `uv sync` will uninstall it, breaking the next
+`kct build-native` (issue #4412).
+
 ### Available Commands
 
 If you have `pnpm` installed, you can use these convenience scripts:

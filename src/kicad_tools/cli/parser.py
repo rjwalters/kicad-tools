@@ -7223,7 +7223,10 @@ def _add_build_native_parser(subparsers) -> None:
         description=(
             "Build and install the C++ router extension for significantly faster routing. "
             "This command handles all the build steps automatically: checking prerequisites, "
-            "installing nanobind, configuring cmake, and building the extension."
+            "ensuring nanobind is available, configuring cmake, and building the extension. "
+            "For a lockfile-tracked nanobind that survives a later `uv sync`, install the "
+            "build tooling via the `native` extra: `uv sync --extra native` (repo) or "
+            '`pip install "kicad-tools[native]"` (consumer).'
         ),
     )
     build_native_parser.add_argument(
