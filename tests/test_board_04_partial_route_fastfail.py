@@ -67,6 +67,9 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(module, "fix_osc_escape", _boom("fix_osc_escape"))
         monkeypatch.setattr(module, "stitch_pcb", _boom("stitch_pcb"))
         monkeypatch.setattr(module, "tie_power_pads", _boom("tie_power_pads"))
+        monkeypatch.setattr(
+            module, "relocate_drill_clearance_step", _boom("relocate_drill_clearance_step")
+        )
         monkeypatch.setattr(module, "quantize_escapes", _boom("quantize_escapes"))
         monkeypatch.setattr(module, "fill_zones", _boom("fill_zones"))
         monkeypatch.setattr(module, "run_drc", _boom("run_drc"))
@@ -102,6 +105,7 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(module, "fix_osc_escape", lambda *a, **k: True)
         monkeypatch.setattr(module, "stitch_pcb", lambda *a, **k: True)
         monkeypatch.setattr(module, "tie_power_pads", lambda *a, **k: True)
+        monkeypatch.setattr(module, "relocate_drill_clearance_step", lambda *a, **k: True)
         monkeypatch.setattr(module, "quantize_escapes", lambda *a, **k: True)
         monkeypatch.setattr(module, "fill_zones", lambda *a, **k: True)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)

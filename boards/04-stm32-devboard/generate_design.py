@@ -1676,6 +1676,61 @@ def tie_power_pads(routed_path: Path) -> bool:
     return True
 
 
+def relocate_drill_clearance_step(routed_path: Path) -> bool:
+    """Relieve fine-pitch hole-to-hole via crowding (issue #4408).
+
+    The fresh deterministic route escapes three adjacent LQFP-48 west pins
+    (OSC_OUT / NRST / GND) through in-pad micro-vias stacked at the 0.5 mm pin
+    pitch.  Two of the resulting drill pairs measure 0.350 mm edge-to-edge --
+    below the ``jlcpcb-tier1`` 0.500 mm ``min_hole_to_hole_mm`` floor -- so a
+    fresh regen previously FAILED ``kct check --mfr jlcpcb-tier1`` with 2
+    ``hole_to_hole_clearance`` errors.  #4017 fixed this artifact-only (a hand
+    nudge of the middle NRST via that was deliberately NOT back-ported), so the
+    committed board diverged from the recipe and every regen reintroduced the
+    violation.
+
+    This step back-ports that fix as a **generic, ``--mfr``-driven** post-route
+    pass (:func:`kicad_tools.drc.relocate_drill_clearance.relocate_drill_clearance`):
+    it reads the active manufacturer profile's hole-to-hole floor, relocates the
+    offending via onto a clearance-safe location (preferring its own routed
+    escape node -- the #4017 pattern) validated against the shared clearance
+    engine, and re-bonds it with short connectivity stubs on every connected
+    layer.  It never mis-places a via into a fresh violation; a boxed-in via is
+    left in place and reported.
+
+    Because the pass is purely floor-driven, any fine-pitch QFP/QFN board routed
+    at a via-in-pad tier benefits -- board 04 passing is the evidence.  Runs
+    AFTER the via-adding steps (``stitch_pcb`` / ``tie_power_pads``) so it sees
+    the full via set, and BEFORE ``quantize_escapes`` / ``fill_zones`` so any
+    stub is 45-quantized and the re-pour backs off the relocated via.
+
+    Returns True on success (including a no-op when the route is already clear).
+    """
+    from kicad_tools.drc.relocate_drill_clearance import relocate_drill_clearance
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+
+    print("\n" + "=" * 60)
+    print("Relocating fine-pitch hole-to-hole vias (issue #4408)...")
+    print("=" * 60)
+
+    design_rules = get_profile("jlcpcb-tier1").get_design_rules()
+    pcb = PCB.load(str(routed_path))
+    result = relocate_drill_clearance(pcb, design_rules)
+
+    if result.changed:
+        pcb.save(str(routed_path))
+
+    print("   " + result.summary().replace("\n", "\n   "))
+    if result.unresolved:
+        print(
+            f"\n   WARNING: {len(result.unresolved)} via(s) left in place (boxed in) -- "
+            "the fresh regen may still carry a hole-to-hole error."
+        )
+    print("\n   SUCCESS: relocate_drill_clearance_step completed")
+    return True
+
+
 def fill_zones(routed_path: Path) -> bool:
     """
     Re-pour the copper zones (GND B.Cu plane) after stitching.
@@ -2011,6 +2066,19 @@ def main() -> int:
         # re-pours so the new ties take effect).
         tie_success = tie_power_pads(routed_path)
 
+        # Step 6.3: Relieve fine-pitch hole-to-hole via crowding (#4408) -- the
+        # fresh route stacks the OSC_OUT/NRST/GND LQFP-48 west escapes as in-pad
+        # micro-vias at the 0.5mm pin pitch, leaving two 0.350mm drill pairs
+        # below the jlcpcb-tier1 0.500mm hole-to-hole floor.  This generic,
+        # mfr-floor-driven pass relocates the offending (middle NRST) via onto a
+        # clearance-safe escape node and re-bonds it with connectivity stubs,
+        # back-porting the artifact-only #4017 nudge into the recipe so a fresh
+        # regen is tier1-clean by construction.  Must run AFTER stitch_pcb +
+        # tie_power_pads (so it sees every via) and BEFORE quantize_escapes (so
+        # any stub is 45-quantized) / fill_zones (so the re-pour backs off the
+        # relocated via).
+        drill_clearance_success = relocate_drill_clearance_step(routed_path)
+
         # Step 6.4: 45-degree quantize the escape copper (#3797 / #3532) -- the
         # fresh deterministic route + the fix_osc_escape re-aim + the kct stitch
         # GND pad-tails ship a few arbitrary-angle hops (the OSC_OUT re-aim
@@ -2126,6 +2194,7 @@ def main() -> int:
         print(f"  45-quantize: {'SUCCESS' if quantize_success else 'FAIL'}")
         print(f"  Stitch: {'SUCCESS' if stitch_success else 'FAIL'}")
         print(f"  Power-pad tie: {'SUCCESS' if tie_success else 'FAIL'}")
+        print(f"  Hole-to-hole relocate: {'SUCCESS' if drill_clearance_success else 'FAIL'}")
         print(f"  Zone fill: {'SUCCESS' if fill_success else 'FAIL'}")
         print(f"  Manufacturing bundle: {'WRITTEN' if mfr_success else 'FAILED'}")
         print("\nBoard description:")
@@ -2228,6 +2297,7 @@ def main() -> int:
                 and quantize_success
                 and stitch_success
                 and tie_success
+                and drill_clearance_success
                 and fill_success
                 and mfr_success
                 and gate.passed
