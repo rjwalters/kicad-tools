@@ -21,6 +21,8 @@ from kicad_tools.cli.stitch_cmd import (
     _fallback_grazes_foreign_pour,
     _fallback_overlaps_sibling_stitch,
     _is_ground_net,
+    _point_on_same_net_fill,
+    _same_net_fill_on_layer,
     _should_use_stackup_fallback,
     calculate_dogleg_via_position,
     calculate_extended_escape_position,
@@ -7873,3 +7875,388 @@ class TestMultiNetPreexistingHoleGuard:
                 - j1_drill / 2
             )
             assert edge + 1e-3 >= MIN_HOLE_TO_HOLE_CLEARANCE
+
+
+# ---------------------------------------------------------------------------
+# Issue #4432: stitch must validate via candidates against the refilled FILL
+# (filled_polygon), not the zone OUTLINE.  Vias that land where the pour has
+# retreated (keepout void / clearance pullback) dangle once zones refill.
+# ---------------------------------------------------------------------------
+
+# Pad-based board: GND plane on In1.Cu whose refilled copper has RETREATED to
+# the right half (x >= 125).  The left half (x < 125) is inside the zone
+# OUTLINE but has NO fill -- a via there would dangle.  One GND SMD pad sits
+# in the void band, one sits over solid fill.
+FILL_RETREAT_TEST_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-retreat-gnd")
+    (name "GND_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes)
+    (polygon (pts (xy 100 100) (xy 140 100) (xy 140 140) (xy 100 140)))
+    (filled_polygon (layer "In1.Cu") (pts (xy 125 100) (xy 140 100) (xy 140 140) (xy 125 140)))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-00000000off1")
+    (at 105 120)
+    (property "Reference" "OFFPAD" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-off"))
+    (pad "1" smd roundrect (at 0 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000on1")
+    (at 132 120)
+    (property "Reference" "ONPAD" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-on"))
+    (pad "1" smd roundrect (at 0 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+)
+"""
+
+
+# Same board WITHOUT any filled_polygon nodes -- zone OUTLINE only (unfilled
+# board).  The fill gate must be a no-op here so both pads still stitch.
+EMPTY_FILL_TEST_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-nofill-gnd")
+    (name "GND_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes)
+    (polygon (pts (xy 100 100) (xy 140 100) (xy 140 140) (xy 100 140)))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-00000000off2")
+    (at 105 120)
+    (property "Reference" "OFFPAD" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-off2"))
+    (pad "1" smd roundrect (at 0 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000on2")
+    (at 132 120)
+    (property "Reference" "ONPAD" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-on2"))
+    (pad "1" smd roundrect (at 0 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+)
+"""
+
+
+def _fill_layer_pcb(filled_polygon_line: str) -> str:
+    """Build a thermal-pad board with a configurable GND fill on In1.Cu.
+
+    A single 5x5mm exposed GND pad (Q1) sits centred at (110, 110).  The
+    caller supplies the ``(filled_polygon ...)`` s-expression line (or an
+    empty string for an unfilled board) to control where the pour actually
+    exists relative to the pad.
+    """
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-thermal-gnd")
+    (name "GND_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes)
+    (polygon (pts (xy 100 100) (xy 140 100) (xy 140 140) (xy 100 140)))
+    {filled_polygon_line}
+  )
+  (footprint "Package_DFN_QFN:QFN-EP"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000q1000")
+    (at 110 110)
+    (property "Reference" "Q1" (at 0 -3 0) (layer "F.SilkS") (uuid "ref-q1"))
+    (pad "1" smd roundrect (at 0 0) (size 5 5) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.1) (net 1 "GND"))
+  )
+)
+"""
+
+
+# Blanket board: GND plane on In1.Cu whose refilled copper covers only the
+# LEFT half (x <= 114).  The right half (x > 114) is inside the zone OUTLINE
+# but has no fill -- blanket vias must not be seeded there.
+BLANKET_VOID_TEST_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-blanket-void")
+    (name "GND_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes)
+    (polygon (pts (xy 100 100) (xy 130 100) (xy 130 130) (xy 100 130)))
+    (filled_polygon (layer "In1.Cu") (pts (xy 100 100) (xy 114 100) (xy 114 130) (xy 100 130)))
+  )
+)
+"""
+
+
+class TestPointOnSameNetFillHelper:
+    """Unit tests for the ``_point_on_same_net_fill`` / gate helpers (#4432)."""
+
+    # A holed fill ring: outer 20x20 square with a 4x4 keepout void centred at
+    # (10, 10), keyholed via a zero-width seam on the left edge (y=10).  The
+    # even-odd ray cast treats the void interior as OUTSIDE.
+    HOLED_RING = [
+        (0, 0),
+        (20, 0),
+        (20, 20),
+        (0, 20),
+        (0, 10),
+        (8, 10),
+        (8, 8),
+        (12, 8),
+        (12, 12),
+        (8, 12),
+        (8, 10),
+        (0, 10),
+    ]
+
+    def _fp(self, points, layer="In1.Cu", net_number=1, net_name="GND"):
+        return FilledPolygon(net_number=net_number, net_name=net_name, layer=layer, points=points)
+
+    def test_true_on_solid_fill(self):
+        """A point well inside solid fill returns True."""
+        fp = self._fp([(40, 40), (60, 40), (60, 60), (40, 60)])
+        assert _point_on_same_net_fill(50, 50, 0.225, [fp], "In1.Cu") is True
+
+    def test_false_inside_keepout_void(self):
+        """A point inside a holed ring's keepout void returns False."""
+        fp = self._fp(self.HOLED_RING)
+        # (10, 10) is the centre of the 4x4 void -> off fill.
+        assert _point_on_same_net_fill(10, 10, 0.225, [fp], "In1.Cu") is False
+        # A point in the solid part of the same ring -> on fill.
+        assert _point_on_same_net_fill(3, 3, 0.225, [fp], "In1.Cu") is True
+
+    def test_margin_aware_rejects_pad_overhang(self):
+        """A centre on fill but whose pad radius overhangs the edge is False."""
+        fp = self._fp([(40, 40), (60, 40), (60, 60), (40, 60)])
+        # Centre 0.1mm inside the x=60 edge; a 0.225 radius pad overhangs it.
+        assert _point_on_same_net_fill(59.9, 50, 0.225, [fp], "In1.Cu") is False
+
+    def test_filters_by_layer(self):
+        """Only fill on the requested layer counts."""
+        fp = self._fp([(40, 40), (60, 40), (60, 60), (40, 60)], layer="In1.Cu")
+        assert _point_on_same_net_fill(50, 50, 0.225, [fp], "B.Cu") is False
+        assert _point_on_same_net_fill(50, 50, 0.225, [fp], "In1.Cu") is True
+
+    def test_gate_helper_empty_when_no_fill_on_layer(self):
+        """``_same_net_fill_on_layer`` returns [] (gate off) when no fill matches."""
+        fp = self._fp([(40, 40), (60, 40), (60, 60), (40, 60)], layer="In1.Cu")
+        assert _same_net_fill_on_layer([fp], "B.Cu") == []
+        assert _same_net_fill_on_layer([], "In1.Cu") == []
+        assert _same_net_fill_on_layer([fp], "In1.Cu") == [fp]
+        # layer=None -> no filter (all fills qualify).
+        assert _same_net_fill_on_layer([fp], None) == [fp]
+
+
+class TestStitchFillContainmentGate:
+    """Issue #4432: pad-based stitch rejects off-fill via sites."""
+
+    def test_off_fill_pad_reported_not_stitched(self, tmp_path: Path):
+        """A GND pad in the void band is reported needs-routed-fanout, no via."""
+        pcb_file = tmp_path / "retreat.kicad_pcb"
+        pcb_file.write_text(FILL_RETREAT_TEST_PCB)
+
+        result = run_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            offset=0.5,
+            trace_width=0.2,
+            dry_run=True,
+        )
+
+        # The off-fill pad must NOT receive a via and must be flagged.
+        fanout_refs = {pad.reference for pad, _ in result.needs_routed_fanout}
+        assert "OFFPAD" in fanout_refs
+        placed_refs = {v.pad.reference for v in result.vias_added}
+        assert "OFFPAD" not in placed_refs
+
+    def test_on_fill_pad_still_stitched(self, tmp_path: Path):
+        """A GND pad over solid fill still gets a via (no over-rejection)."""
+        pcb_file = tmp_path / "retreat.kicad_pcb"
+        pcb_file.write_text(FILL_RETREAT_TEST_PCB)
+
+        result = run_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            offset=0.5,
+            trace_width=0.2,
+            dry_run=True,
+        )
+
+        placed_refs = {v.pad.reference for v in result.vias_added}
+        assert "ONPAD" in placed_refs
+        # The placed via lands on the fill (x >= 125 solid boundary).
+        on_via = next(v for v in result.vias_added if v.pad.reference == "ONPAD")
+        assert on_via.via_x >= 125.0
+
+    def test_empty_fill_is_noop(self, tmp_path: Path):
+        """With no filled_polygon nodes the gate is inactive: both pads stitch."""
+        pcb_file = tmp_path / "nofill.kicad_pcb"
+        pcb_file.write_text(EMPTY_FILL_TEST_PCB)
+
+        result = run_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            offset=0.5,
+            trace_width=0.2,
+            dry_run=True,
+        )
+
+        assert result.needs_routed_fanout == []
+        placed_refs = {v.pad.reference for v in result.vias_added}
+        assert {"OFFPAD", "ONPAD"} <= placed_refs
+
+
+class TestThermalFillContainmentGate:
+    """Issue #4432: thermal stitch gates candidates on fill, not outline."""
+
+    def test_thermal_pad_over_fill_places_vias(self, tmp_path: Path):
+        """Thermal vias are placed when the fill covers the pad."""
+        pcb_file = tmp_path / "thermal_fill.kicad_pcb"
+        pcb_file.write_text(
+            _fill_layer_pcb(
+                '(filled_polygon (layer "In1.Cu") '
+                "(pts (xy 100 100) (xy 140 100) (xy 140 140) (xy 100 140)))"
+            )
+        )
+
+        result = run_thermal_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            vias_per_pad=4,
+            dry_run=True,
+        )
+        assert len(result.vias_added) > 0
+
+    def test_thermal_pad_in_void_rejected(self, tmp_path: Path):
+        """No thermal via lands where the fill has retreated from the pad."""
+        pcb_file = tmp_path / "thermal_void.kicad_pcb"
+        # Fill retreated to x >= 130; the pad (bbox 107.5-112.5) is fully void.
+        pcb_file.write_text(
+            _fill_layer_pcb(
+                '(filled_polygon (layer "In1.Cu") '
+                "(pts (xy 130 100) (xy 140 100) (xy 140 140) (xy 130 140)))"
+            )
+        )
+
+        result = run_thermal_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            vias_per_pad=4,
+            dry_run=True,
+        )
+        assert len(result.vias_added) == 0
+        assert any("thermal" in reason for _pad, reason in result.pads_skipped)
+
+    def test_thermal_empty_fill_is_noop(self, tmp_path: Path):
+        """With no fill geometry the outline gate still places thermal vias."""
+        pcb_file = tmp_path / "thermal_nofill.kicad_pcb"
+        pcb_file.write_text(_fill_layer_pcb(""))
+
+        result = run_thermal_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            vias_per_pad=4,
+            dry_run=True,
+        )
+        assert len(result.vias_added) > 0
+
+
+class TestBlanketFillContainmentGate:
+    """Issue #4432: blanket stitch seeds the grid from fill, not outline."""
+
+    def test_blanket_grid_confined_to_fill(self, tmp_path: Path):
+        """No blanket via lands in the void band beyond the fill boundary."""
+        pcb_file = tmp_path / "blanket_void.kicad_pcb"
+        pcb_file.write_text(BLANKET_VOID_TEST_PCB)
+
+        result = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            spacing=3.0,
+            dry_run=True,
+        )
+
+        assert len(result.vias_added) > 0
+        # Fill covers x <= 114; every seeded via must stay on it (with margin).
+        assert all(v.via_x <= 114.5 for v in result.vias_added)
+
+    def test_blanket_empty_fill_spans_outline(self, tmp_path: Path):
+        """With no fill the grid still spans the full zone outline (no-op)."""
+        pcb_file = tmp_path / "blanket_nofill.kicad_pcb"
+        pcb_file.write_text(BLANKET_TEST_PCB)
+
+        result = run_blanket_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            spacing=3.0,
+            dry_run=True,
+        )
+        # Outline spans x 100-130; grid should reach beyond x=115 (no fill gate).
+        assert any(v.via_x > 115 for v in result.vias_added)
