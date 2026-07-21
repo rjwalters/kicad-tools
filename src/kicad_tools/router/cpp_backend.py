@@ -3123,8 +3123,9 @@ class CppCoupledPathfinder:
         ``(p_x, p_y, p_layer, n_x, n_y, n_layer, via_from_parent)`` tuples in
         root->goal order (or ``None`` when the search failed), and
         ``diagnostics`` carries ``iterations`` / ``best_progress`` /
-        ``timeout_exceeded`` / ``iteration_limited`` for the caller's
-        ``last_*`` bookkeeping.
+        ``timeout_exceeded`` / ``iteration_limited`` and (Issue #4459) the
+        per-reason ``rejections`` histogram for the caller's ``last_*``
+        bookkeeping.
         """
         res = self._impl.route(
             int(p_start_xy[0]),
@@ -3152,6 +3153,12 @@ class CppCoupledPathfinder:
             "best_progress": float(res.best_progress),
             "timeout_exceeded": bool(res.timeout_exceeded),
             "iteration_limited": bool(res.iteration_limited),
+            # Issue #4459: per-reason move-rejection histogram (reason -> count).
+            # Surfaces WHICH guard pruned the frontier on the C++ path so a
+            # budget-exit is triageable (was hard-emptied on the C++ path,
+            # forcing the caller's ``last_rejections`` to a categorically-empty
+            # dict).  ``res.rejections`` is a ``dict[str, int]`` from nanobind.
+            "rejections": {str(k): int(v) for k, v in dict(res.rejections).items()},
         }
         if not res.success:
             return None, diagnostics

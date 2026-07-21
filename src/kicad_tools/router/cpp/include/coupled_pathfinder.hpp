@@ -12,10 +12,12 @@
  * #2473/#3508 approach/departure tolerance relaxation, the #3078/#3508
  * path-history / trail-proximity guard, the #3439 corridor bitset, the
  * ``partner_aware`` heuristic (#3115), weighted A* (#3508) and the #3508
- * LIFO-seq tie-break.  The ``allow_swap_via`` polarity-swap move (#2473),
- * the ``manhattan_sum`` legacy heuristic and exact ``last_rejections``
- * string-keyed parity are intentionally DEFERRED to the pure-Python
- * fallback; the Python wrapper routes those cases to Python.
+ * LIFO-seq tie-break.  The ``allow_swap_via`` polarity-swap move (#2473)
+ * and the ``manhattan_sum`` legacy heuristic are intentionally DEFERRED to
+ * the pure-Python fallback; the Python wrapper routes those cases to Python.
+ * Issue #4459 wired the ``last_rejections`` string-keyed histogram out of
+ * the C++ search (surfaced on ``CoupledRouteResult::rejections``) so a
+ * C++-path budget-exit reports which guard pruned the frontier.
  *
  * The search consumes the SAME ``Grid3D`` the single-ended ``Pathfinder``
  * uses (marshalled once via ``CppGrid.from_routing_grid``); it is a new

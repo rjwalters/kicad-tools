@@ -214,6 +214,15 @@ CoupledRouteResult CoupledPathfinder::route(
 
     double best_progress = -1.0;  // -1 sentinel = "nothing popped yet".
 
+    // Issue #4459: per-reason move-rejection histogram.  Counts which guard
+    // pruned each candidate so a 0/9 budget-exit can be triaged (which
+    // constraint dominates the frontier).  Keys mirror the pure-Python
+    // ``last_rejections`` vocabulary (diffpair_routing.py) so the two backends
+    // report the same taxonomy; the via-guard keys are the C++ path's superset
+    // (the Python via move does not currently count rejections).
+    std::unordered_map<std::string, int64_t> rejections;
+    auto rej = [&rejections](const char* reason) { ++rejections[reason]; };
+
     // Endpoint (x,y,layer) cells stripped from the trail sets, mirroring the
     // Python discard at diffpair_routing.py:1829-1838.
     const uint64_t p_start_cell = xyl_key(p_start_x, p_start_y, start_layer);
@@ -245,6 +254,7 @@ CoupledRouteResult CoupledPathfinder::route(
             result.best_progress = best_progress;
             result.timeout_exceeded = true;
             result.iteration_limited = true;  // #3921: iteration budget bound.
+            result.rejections = std::move(rejections);  // #4459
             return result;
         }
         // Wall-clock check every 64 iters (diffpair_routing.py:1728-1743).
@@ -254,6 +264,7 @@ CoupledRouteResult CoupledPathfinder::route(
             result.best_progress = best_progress;
             result.timeout_exceeded = true;
             result.iteration_limited = false;  // wall-clock bound.
+            result.rejections = std::move(rejections);  // #4459
             return result;
         }
 
@@ -290,6 +301,7 @@ CoupledRouteResult CoupledPathfinder::route(
             result.success = true;
             result.iterations = static_cast<int>(iterations);
             result.best_progress = best_progress;
+            result.rejections = std::move(rejections);  // #4459
             return result;
         }
 
@@ -438,19 +450,19 @@ CoupledRouteResult CoupledPathfinder::route(
                         at_goal(np_x, np_y, p_start_x, p_start_y);
             bool n_ep = at_goal(nn_x, nn_y, n_goal_x, n_goal_y) ||
                         at_goal(nn_x, nn_y, n_start_x, n_start_y);
-            if (!p_ep && is_trace_blocked(np_x, np_y, np_l, p_net)) continue;
-            if (!n_ep && is_trace_blocked(nn_x, nn_y, nn_l, n_net)) continue;
+            if (!p_ep && is_trace_blocked(np_x, np_y, np_l, p_net)) { rej("sym_blocked_p"); continue; }
+            if (!n_ep && is_trace_blocked(nn_x, nn_y, nn_l, n_net)) { rej("sym_blocked_n"); continue; }
 
             double sdx = np_x - nn_x, sdy = np_y - nn_y;
             double new_spacing = std::sqrt(sdx * sdx + sdy * sdy);
             int tolerance = spacing_relaxed ? relaxed_tolerance : 1;
-            if (std::abs(new_spacing - target_spacing) > tolerance) continue;
+            if (std::abs(new_spacing - target_spacing) > tolerance) { rej("sym_spacing"); continue; }
 
             if (min_spacing_cells_ > 0 && !(p_ep && n_ep)) {
-                if (new_spacing + 1e-9 < min_spacing_cells_) continue;
+                if (new_spacing + 1e-9 < min_spacing_cells_) { rej("sym_floor"); continue; }
             }
             if (self_intersects(np_x, np_y, np_l, nn_x, nn_y, nn_l,
-                                true, true, p_ep, n_ep)) continue;
+                                true, true, p_ep, n_ep)) { rej("sym_trail"); continue; }
 
             double cost = rules_.cost_straight;
             bool dir_changed = !(current.dir_dx == 0 && current.dir_dy == 0) &&
@@ -483,19 +495,25 @@ CoupledRouteResult CoupledPathfinder::route(
                     bool p_ep = at_goal(cp_x, cp_y, p_goal_x, p_goal_y) ||
                                 at_goal(cp_x, cp_y, p_start_x, p_start_y);
                     bool blocked = !(p_ep || !is_trace_blocked(cp_x, cp_y, cp_l, p_net));
+                    if (blocked) rej("asym_blocked_p");  // #4459
                     if (!blocked) {
                         double sdx = cp_x - cn_x, sdy = cp_y - cn_y;
                         double new_spacing = std::sqrt(sdx * sdx + sdy * sdy);
-                        if (std::abs(new_spacing - target_spacing) <= asym_tolerance) {
+                        if (std::abs(new_spacing - target_spacing) > asym_tolerance) {
+                            rej("asym_spacing_p");  // #4459
+                        } else {
                             bool n_ep = at_goal(cn_x, cn_y, n_goal_x, n_goal_y) ||
                                         at_goal(cn_x, cn_y, n_start_x, n_start_y);
                             bool bypass_floor = p_ep && n_ep;
                             bool floor_ok =
                                 !(min_spacing_cells_ > 0 && !bypass_floor &&
                                   new_spacing + 1e-9 < min_spacing_cells_);
-                            if (floor_ok &&
-                                !self_intersects(cp_x, cp_y, cp_l, cn_x, cn_y, cn_l,
-                                                 true, false, p_ep, n_ep)) {
+                            if (!floor_ok) {
+                                rej("asym_floor_p");  // #4459
+                            } else if (self_intersects(cp_x, cp_y, cp_l, cn_x, cn_y, cn_l,
+                                                       true, false, p_ep, n_ep)) {
+                                rej("asym_trail_p");  // #4459
+                            } else {
                                 double cost = rules_.cost_straight;
                                 bool dir_changed =
                                     !(current.dir_dx == 0 && current.dir_dy == 0) &&
@@ -526,19 +544,26 @@ CoupledRouteResult CoupledPathfinder::route(
                     int cn_x = current.n_x + dx, cn_y = current.n_y + dy, cn_l = current.n_layer;
                     bool n_ep = at_goal(cn_x, cn_y, n_goal_x, n_goal_y) ||
                                 at_goal(cn_x, cn_y, n_start_x, n_start_y);
-                    if (n_ep || !is_trace_blocked(cn_x, cn_y, cn_l, n_net)) {
+                    if (!(n_ep || !is_trace_blocked(cn_x, cn_y, cn_l, n_net))) {
+                        rej("asym_blocked_n");  // #4459
+                    } else {
                         double sdx = cp_x - cn_x, sdy = cp_y - cn_y;
                         double new_spacing = std::sqrt(sdx * sdx + sdy * sdy);
-                        if (std::abs(new_spacing - target_spacing) <= asym_tolerance) {
+                        if (std::abs(new_spacing - target_spacing) > asym_tolerance) {
+                            rej("asym_spacing_n");  // #4459
+                        } else {
                             bool p_ep = at_goal(cp_x, cp_y, p_goal_x, p_goal_y) ||
                                         at_goal(cp_x, cp_y, p_start_x, p_start_y);
                             bool bypass_floor = p_ep && n_ep;
                             bool floor_ok =
                                 !(min_spacing_cells_ > 0 && !bypass_floor &&
                                   new_spacing + 1e-9 < min_spacing_cells_);
-                            if (floor_ok &&
-                                !self_intersects(cp_x, cp_y, cp_l, cn_x, cn_y, cn_l,
-                                                 false, true, p_ep, n_ep)) {
+                            if (!floor_ok) {
+                                rej("asym_floor_n");  // #4459
+                            } else if (self_intersects(cp_x, cp_y, cp_l, cn_x, cn_y, cn_l,
+                                                       false, true, p_ep, n_ep)) {
+                                rej("asym_trail_n");  // #4459
+                            } else {
                                 double cost = rules_.cost_straight;
                                 bool dir_changed =
                                     !(current.dir_dx == 0 && current.dir_dy == 0) &&
@@ -573,10 +598,10 @@ CoupledRouteResult CoupledPathfinder::route(
                            at_goal(current.n_x, current.n_y, n_start_x, n_start_y);
             for (int new_layer : routable_layers) {
                 if (new_layer == current.p_layer) continue;
-                if (!p_at_ep && is_via_blocked(current.p_x, current.p_y, p_net)) continue;
-                if (!n_at_ep && is_via_blocked(current.n_x, current.n_y, n_net)) continue;
-                if (!p_at_ep && is_trace_blocked(current.p_x, current.p_y, new_layer, p_net)) continue;
-                if (!n_at_ep && is_trace_blocked(current.n_x, current.n_y, new_layer, n_net)) continue;
+                if (!p_at_ep && is_via_blocked(current.p_x, current.p_y, p_net)) { rej("via_blocked_p"); continue; }
+                if (!n_at_ep && is_via_blocked(current.n_x, current.n_y, n_net)) { rej("via_blocked_n"); continue; }
+                if (!p_at_ep && is_trace_blocked(current.p_x, current.p_y, new_layer, p_net)) { rej("via_trace_blocked_p"); continue; }
+                if (!n_at_ep && is_trace_blocked(current.n_x, current.n_y, new_layer, n_net)) { rej("via_trace_blocked_n"); continue; }
                 double cost = rules_.cost_via * 2.0;
                 // Issue #4080: corridor attractor on the via-drop
                 // destination cells -- the reservation is what makes the
@@ -600,7 +625,10 @@ CoupledRouteResult CoupledPathfinder::route(
         for (const Cand& c : neighbors) {
             // Corridor pruning (diffpair_routing.py:1864-1871).
             if (have_corridor) {
-                if (!in_corridor(c.px, c.py) || !in_corridor(c.nx, c.ny)) continue;
+                if (!in_corridor(c.px, c.py) || !in_corridor(c.nx, c.ny)) {
+                    rej("corridor");  // #4459
+                    continue;
+                }
             }
             JointKey nkey = joint_key(c.px, c.py, c.pl, c.nx, c.ny, c.nl);
             if (closed_set.count(nkey)) continue;
@@ -631,6 +659,7 @@ CoupledRouteResult CoupledPathfinder::route(
     result.success = false;
     result.iterations = static_cast<int>(iterations);
     result.best_progress = best_progress;
+    result.rejections = std::move(rejections);  // #4459
     return result;
 }
 
