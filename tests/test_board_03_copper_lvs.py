@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.runner import find_kicad_cli
+from kicad_tools.drc.geometric import GeometricDRCResult
 from kicad_tools.lvs import compare_copper_netlist
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -307,9 +308,34 @@ class TestBoard03PartialRouteFastFail:
 
         def _fake_lvs(*a, **k):
             lvs_called.append(True)
+            # #3912: the migrated main() unpacks ``copper_clean, _label_clean =
+            # write_lvs_report(...)`` and ANDs ``copper_clean`` into the shared
+            # gate's LVS leg.  Return a clean 2-tuple so the happy path reaches
+            # a PASSING gate (the whole point of this test).
+            return (True, True)
 
         monkeypatch.setattr(module, "write_lvs_report", _fake_lvs)
         monkeypatch.setattr(module, "export_manufacturing_bundle", lambda *a, **k: True)
+
+        # #3912: neutralise the gate's AUTHORITATIVE geometric-DRC leg.  The
+        # migrated main() calls ``evaluate_pipeline_gate(routed_path, ...)``,
+        # which shells ``run_geometric_drc`` (kicad-cli pcb drc) on the routed
+        # PCB.  This unit test stubs the entire pipeline prefix, so no real
+        # routed board exists for kicad-cli to check -- the DRC run would report
+        # ``ran=False`` and (with the default ``require_drc=True``) fail the gate
+        # for a reason this test is NOT trying to exercise.  Wrap the recipe's
+        # ``evaluate_pipeline_gate`` reference to inject a clean, "did-run"
+        # ``GeometricDRCResult`` via the gate's documented ``_drc_result`` test
+        # seam.  The gate's route/LVS legs (the ones this test asserts on) still
+        # run for real, so a PASSING verdict genuinely proves the full-route
+        # path reaches and clears the LVS gate.
+        real_gate = module.evaluate_pipeline_gate
+
+        def _gate_with_clean_drc(*a, **k):
+            k.setdefault("_drc_result", GeometricDRCResult(ran=True, by_type={}))
+            return real_gate(*a, **k)
+
+        monkeypatch.setattr(module, "evaluate_pipeline_gate", _gate_with_clean_drc)
         monkeypatch.setattr(module.sys, "argv", ["generate_design.py", str(tmp_path / "out")])
 
         rc = module.main()
