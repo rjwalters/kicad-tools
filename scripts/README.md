@@ -10,7 +10,7 @@ Python helpers with `uv run python scripts/<name>.py`, from the repository root.
 
 | Script | Purpose |
 |--------|---------|
-| `build-cpp.sh` | Build/install the nanobind C++ router extension (`clean`, `check` subcommands). Wrapped by `kct build-native`. |
+| `build-cpp.sh` | Build/install the nanobind C++ router extension (`clean`, `check` subcommands). Wrapped by `kct build-native`. Requires the `native` extra (`uv sync --extra native` / `pip install "kicad-tools[native]"`) so nanobind stays lockfile-tracked; the default dev group already composes it in. |
 | `deploy-site.sh` | Manual one-command deploy of the kicad-tools.org demo gallery to Cloudflare Pages (via a locally authenticated `wrangler`). |
 | `install-kct.sh` | Install kicad-tools into a consumer PCB-design repo (uv dependency + vendored `.claude/commands/kct/` skills and `ci/` gate scripts). |
 | `calibrate_area_estimate.py` | Calibration helper for the sum-of-clearances board-area estimator (#3403). |

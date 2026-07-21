@@ -1793,6 +1793,7 @@ all = [
     { name = "markitdown" },
     { name = "matplotlib" },
     { name = "mlx" },
+    { name = "nanobind" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pdfplumber" },
@@ -1893,8 +1894,12 @@ visualization = [
 [package.dev-dependencies]
 dev = [
     { name = "cairosvg" },
+    { name = "cmake" },
     { name = "jinja2" },
+    { name = "nanobind" },
+    { name = "ninja" },
     { name = "pytest-cov" },
+    { name = "scikit-build-core" },
 ]
 
 [package.metadata]
@@ -1930,6 +1935,7 @@ requires-dist = [
     { name = "mlx", marker = "extra == 'all'", specifier = ">=0.5" },
     { name = "mlx", marker = "extra == 'metal'", specifier = ">=0.5" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0" },
+    { name = "nanobind", marker = "extra == 'all'", specifier = ">=2.0" },
     { name = "nanobind", marker = "extra == 'native'", specifier = ">=2.0" },
     { name = "ninja", marker = "extra == 'native'", specifier = ">=1.10" },
     { name = "numpy", specifier = ">=1.24" },
@@ -1979,8 +1985,12 @@ provides-extras = ["geometry", "drc", "parts", "datasheet", "placement", "resear
 [package.metadata.requires-dev]
 dev = [
     { name = "cairosvg", specifier = ">=2.6" },
+    { name = "cmake", specifier = ">=3.15" },
     { name = "jinja2", specifier = ">=3.1" },
+    { name = "nanobind", specifier = ">=2.0" },
+    { name = "ninja", specifier = ">=1.10" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
+    { name = "scikit-build-core", specifier = ">=0.8" },
 ]
 
 [[package]]

@@ -199,6 +199,10 @@ all = [
     "jinja2>=3.1",
     "markdown>=3.5",
     "weasyprint>=60.0",
+    # nanobind is the build-time dependency for the C++ router extension
+    # (`kct build-native`). Included here so `pip install kicad-tools[all]`
+    # keeps it resolved; see the `native` extra and issue #4412.
+    "nanobind>=2.0",
     # shapely is a core dependency; listed here too for explicitness.
     "shapely>=2.0",
 ]
@@ -348,4 +352,14 @@ dev = [
     # cairosvg in the default sync, worktree exports silently shipped
     # bundles with no images/ (per-layer renders, assembly views).
     "cairosvg>=2.6",
+    # C++ router build tooling (mirrors the `native` extra). This group is
+    # installed by a default `uv sync`, so keeping the build deps here means
+    # nanobind stays resolved in the lockfile and a later `uv sync` won't
+    # prune it. Previously `kct build-native` ad-hoc-installed nanobind out
+    # of band, so an unrelated `uv sync` (e.g. adding `--extra placement`)
+    # silently removed it and the next rebuild failed (issue #4412).
+    "nanobind>=2.0",
+    "scikit-build-core>=0.8",
+    "cmake>=3.15",
+    "ninja>=1.10",
 ]

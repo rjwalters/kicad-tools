@@ -175,9 +175,19 @@ def _install_nanobind(verbose: bool = False) -> tuple[bool, str | None]:
     except ImportError:
         pass
 
-    # Try to install nanobind
+    # Try to install nanobind ad hoc.
+    #
+    # NOTE (issue #4412): this fallback exists for pip-installed-wheel users
+    # who never ran `uv sync`. It installs nanobind directly into the active
+    # environment WITHOUT recording it in any lockfile/resolved set, so a
+    # later `uv sync` (e.g. adding an extra, or a fresh worktree) will prune
+    # it and the next `kct build-native` will fail on the missing import. The
+    # robust path is to keep nanobind resolved via the `native` extra
+    # (`uv sync --extra native` / `pip install "kicad-tools[native]"`), which
+    # the default dev dependency-group now composes in.
     if verbose:
-        print("  Installing nanobind...")
+        print("  Installing nanobind (ad hoc — not lockfile-tracked; prefer")
+        print("  `uv sync --extra native` so a later `uv sync` won't prune it)...")
 
     # Try different installation methods
     install_commands = [
@@ -218,7 +228,16 @@ def _install_nanobind(verbose: bool = False) -> tuple[bool, str | None]:
         except Exception as e:
             last_error = str(e)
 
-    return False, f"Failed to install nanobind. Last error: {last_error}"
+    return False, (
+        "Failed to install nanobind, the build-time dependency for the C++ "
+        "router extension. Install it via the `native` extra so it stays "
+        "resolved in your environment:\n"
+        "  - repo/dev worktree:  uv sync --extra native\n"
+        '  - consumer/wheel:     pip install "kicad-tools[native]"\n'
+        "(A bare `pip install nanobind` is not lockfile-tracked and can be "
+        "pruned by a later `uv sync`; see issue #4412.)\n"
+        f"Last error: {last_error}"
+    )
 
 
 def _get_nanobind_cmake_dir() -> Path | None:
