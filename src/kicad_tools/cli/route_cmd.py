@@ -1930,6 +1930,51 @@ def _write_net_class_map_sidecar(
         print(f"  Net-class-map sidecar: {sidecar_path}")
 
 
+def _write_fab_profile_sidecar(
+    output_path: Path,
+    manufacturer: str,
+    quiet: bool = False,
+) -> None:
+    """Persist the resolved fab profile as a sidecar next to the PCB (#3920).
+
+    A routed ``.kicad_pcb`` carries no embedded fab-tier hint, so bare
+    ``kct check`` cannot tell which manufacturer profile the board targets and
+    defaults to the base ``jlcpcb`` tier -- reporting a false ``FAILED`` on
+    boards that route legal, tier-gated geometry (e.g. via-in-pad, legal at
+    ``jlcpcb-tier1``).  Writing the profile the router actually resolved
+    (``--manufacturer``) to a small ``<output_dir>/fab_profile.json`` lets
+    ``kct check`` auto-discover it and judge against the same tier, without
+    mutating the ``.kicad_pcb``.  This mirrors the net-class-map sidecar
+    precedent (Issue #3917 / PR #3948) exactly: the schema is single-purpose,
+    and a blocked write (read-only output dir) is a non-fatal warning, never a
+    route failure.
+
+    Args:
+        output_path: Path to the routed PCB file.  The sidecar is written to
+            the same directory.
+        manufacturer: The resolved manufacturer/profile id (e.g.
+            ``"jlcpcb-tier1"``) -- the value already threaded as
+            ``--manufacturer``.
+        quiet: If True, suppress the confirmation line.
+    """
+    if not manufacturer:
+        return
+    import json
+
+    sidecar_path = output_path.parent / "fab_profile.json"
+    payload = {"mfr": manufacturer, "source": "kct route --manufacturer"}
+    try:
+        sidecar_path.write_text(json.dumps(payload, indent=2))
+    except OSError as e:
+        # Non-fatal: a blocked / read-only output directory must not fail the
+        # route (mirrors the net-class-map sidecar contract).
+        if not quiet:
+            print(f"  Warning: could not write fab-profile sidecar: {e}")
+        return
+    if not quiet:
+        print(f"  Fab-profile sidecar: {sidecar_path}")
+
+
 def _write_drc_constraint_sidecars(
     output_path: Path,
     manufacturer: str,
@@ -2039,6 +2084,12 @@ def run_post_route_drc(
     # (default multi-layer, rule-relaxation, and single-layer), so writing
     # here covers every callsite in one place.
     _write_net_class_map_sidecar(output_path, net_class_map, quiet=quiet)
+
+    # Issue #3920: persist the resolved fab profile as a ``fab_profile.json``
+    # sidecar next to the routed PCB so bare ``kct check`` auto-discovers the
+    # intended manufacturer tier instead of defaulting to base ``jlcpcb`` and
+    # reporting a false FAILED on legal tier-gated geometry (e.g. via-in-pad).
+    _write_fab_profile_sidecar(output_path, manufacturer, quiet=quiet)
 
     # Issue #3919: emit the ``.kicad_pro`` + ``.kicad_dru`` constraint
     # sidecars from the manufacturer profile *before* the geometric DRC

@@ -151,3 +151,54 @@ def resolve_schematic_for_pcb(pcb_path: str | Path) -> Path | None:
         return all_sch[0]
 
     return None
+
+
+def resolve_target_fab_for_pcb(pcb_path: str | Path) -> str | None:
+    """Resolve the target fabricator profile declared for a PCB (issue #3920).
+
+    A routed ``.kicad_pcb`` carries no embedded fab-tier hint, so bare
+    ``kct check`` cannot tell which manufacturer profile a board targets and
+    defaults to the base ``jlcpcb`` tier -- reporting a false ``FAILED`` on
+    boards that route legal, tier-gated geometry (e.g. via-in-pad, which is
+    legal at ``jlcpcb-tier1``).  This helper lets ``kct check`` consult the
+    board's ``project.kct`` for its declared ``target_fab`` as one input to the
+    effective ``--mfr`` resolution, mirroring how ``resolve_schematic_for_pcb``
+    already opens the same file for ``artifacts.schematic``.
+
+    Looks for ``project.kct`` next to the PCB, then one directory up (the same
+    search order as :func:`resolve_schematic_for_pcb`), and reads
+    ``requirements.manufacturing.target_fab``.
+
+    Args:
+        pcb_path: Path to a ``.kicad_pcb`` file.
+
+    Returns:
+        The declared ``target_fab`` profile id (e.g. ``"jlcpcb-tier1"``) if a
+        ``project.kct`` declares one, else ``None``.
+    """
+    pcb_path = Path(pcb_path)
+    project_dir = pcb_path.parent
+
+    kct_path = project_dir / "project.kct"
+    if not kct_path.exists():
+        kct_path = project_dir.parent / "project.kct"
+
+    if not kct_path.exists():
+        return None
+
+    try:
+        from kicad_tools.spec import load_spec
+
+        spec = load_spec(kct_path)
+        if (
+            spec.requirements
+            and spec.requirements.manufacturing
+            and spec.requirements.manufacturing.target_fab
+        ):
+            target_fab = spec.requirements.manufacturing.target_fab
+            logger.debug("Using target_fab from project.kct: %s", target_fab)
+            return target_fab
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("Failed to read target_fab from project.kct: %s", e)
+
+    return None

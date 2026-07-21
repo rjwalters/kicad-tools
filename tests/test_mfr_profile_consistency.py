@@ -98,23 +98,24 @@ def _target_fab(board: str) -> str:
     return fab
 
 
-def _run_check(pcb: Path, mfr: str) -> dict:
-    """Run ``kct check --format json`` and return the parsed report."""
+def _run_check(pcb: Path, mfr: str | None, cwd: Path | None = None) -> dict:
+    """Run ``kct check --format json`` and return the parsed report.
+
+    When ``mfr`` is ``None`` the ``--mfr`` flag is omitted entirely, so the
+    CLI exercises its auto-resolution precedence (sidecar → project.kct →
+    default). This routes through the real top-level dispatcher
+    (``validation.run_check_command``), which is the exact surface issue
+    #3920's precedence-forwarding regression lived on.
+    """
+    argv = [sys.executable, "-m", "kicad_tools.cli", "check", str(pcb)]
+    if mfr is not None:
+        argv += ["--mfr", mfr]
+    argv += ["--format", "json"]
     proc = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "kicad_tools.cli",
-            "check",
-            str(pcb),
-            "--mfr",
-            mfr,
-            "--format",
-            "json",
-        ],
+        argv,
         capture_output=True,
         text=True,
-        cwd=REPO_ROOT,
+        cwd=str(cwd) if cwd is not None else REPO_ROOT,
     )
     assert proc.stdout, (
         f"kct check produced no stdout for {pcb.name} @ {mfr}.\nstderr:\n{proc.stderr}"
@@ -271,6 +272,68 @@ def test_board_03_reproduces_split_brain_at_base_tier() -> None:
         "split-brain the fix eliminates at tier1). If the board's copper "
         "changed so it no longer uses in-pad vias, this negative control "
         "and the issue-3920 rationale need revisiting."
+    )
+
+
+def test_explicit_base_tier_overrides_sidecar_via_real_cli(tmp_path: Path) -> None:
+    """Explicit ``--mfr jlcpcb`` beats a higher sidecar AND project tier (#3920).
+
+    Real-CLI (subprocess) negative control for the dispatcher-forwarding
+    regression the judge caught on PR #4422. The in-process resolver test
+    (``test_resolve_explicit_mfr_wins_over_spec``) exercises
+    ``build_cmd._resolve_effective_mfr`` directly and therefore *bypasses*
+    ``validation.run_check_command`` -- the top-level ``check`` subparser
+    dispatcher that forwards ``--mfr`` into ``check_cmd.main``. That dispatcher
+    is exactly where the bug lived: its ``--mfr`` default was ``"jlcpcb"`` and
+    it only forwarded ``if args.mfr != "jlcpcb"``, so an explicit
+    ``--mfr jlcpcb`` was silently dropped and ``check_main`` auto-resolved from
+    the sidecar / ``project.kct`` to a higher tier -- violating the PR's own
+    "explicit --mfr always wins" precedence rule 1.
+
+    This test pins the whole CLI path end-to-end: it stages board-03's copper
+    with a ``fab_profile.json`` sidecar declaring the higher ``jlcpcb-tier1``
+    profile, then proves that
+
+    * omitting ``--mfr`` auto-resolves to the sidecar tier (clean, tier1), and
+    * an explicit ``--mfr jlcpcb`` overrides both the sidecar and the copy's
+      residual ``project.kct`` and forces base-tier evaluation (via_in_pad).
+
+    If the dispatcher ever drops an explicit base-tier flag again, the second
+    assertion fails with ``manufacturer == 'jlcpcb-tier1'`` / ``errors == 0``.
+    """
+    src_pcb = _routed_pcb("03-usb-joystick")
+    if not src_pcb.exists():
+        pytest.skip(f"committed routed PCB not present: {src_pcb}")
+
+    # Stage the copper in an isolated dir with a tier1 fab-profile sidecar so
+    # the auto-resolution precedence (sidecar → project.kct → default) has a
+    # concrete, higher-than-base tier to resolve to.
+    staged_pcb = tmp_path / "usb_joystick_routed.kicad_pcb"
+    staged_pcb.write_bytes(src_pcb.read_bytes())
+    (tmp_path / "fab_profile.json").write_text(json.dumps({"mfr": "jlcpcb-tier1"}))
+
+    # No flag: the sidecar wins → clean at tier1.
+    auto = _run_check(staged_pcb, None, cwd=tmp_path)
+    assert auto["manufacturer"] == "jlcpcb-tier1", (
+        "Sanity: with no --mfr flag the fab_profile.json sidecar should "
+        f"auto-resolve to jlcpcb-tier1, got {auto['manufacturer']!r}."
+    )
+    assert auto["summary"]["errors"] == 0
+
+    # Explicit base tier: must override the sidecar via the real dispatcher.
+    forced = _run_check(staged_pcb, "jlcpcb", cwd=tmp_path)
+    assert forced["manufacturer"] == "jlcpcb", (
+        "Explicit --mfr jlcpcb was dropped by the CLI dispatcher: check "
+        f"judged at {forced['manufacturer']!r} instead of the forced base "
+        "tier. This is the issue-3920 precedence regression -- "
+        "validation.run_check_command must forward an explicit --mfr "
+        "regardless of value (default None, forward when `is not None`)."
+    )
+    forced_error_rules = {v["rule_id"] for v in forced["violations"] if v["severity"] == "error"}
+    assert forced["summary"]["errors"] > 0
+    assert "via_in_pad" in forced_error_rules, (
+        "Expected via_in_pad errors once the explicit base tier is honored; "
+        f"got error rules {sorted(forced_error_rules)}."
     )
 
 

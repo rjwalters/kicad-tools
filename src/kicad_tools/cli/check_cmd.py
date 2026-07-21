@@ -25,12 +25,14 @@ Difference from `kct drc`:
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from kicad_tools.manufacturers import get_manufacturer_ids
+from kicad_tools.manufacturers import get_manufacturer_ids, get_profile
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.sync.discover import resolve_target_fab_for_pcb
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
 
 # Issue #3750: meta-check status set.  ``NOT RUN`` is rendered with a space
@@ -332,6 +334,169 @@ def _discover_net_class_map_sidecar(pcb_path: Path) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def _discover_fab_profile_sidecar(pcb_path: Path) -> Path | None:
+    """Probe conventional locations for a ``fab_profile.json`` sidecar (#3920).
+
+    ``kct route`` writes a ``fab_profile.json`` sidecar next to the routed PCB
+    recording the resolved manufacturer profile (``--manufacturer``).  ``kct
+    check`` should auto-load it so the effective ``--mfr`` matches the tier the
+    board was routed against -- without the user having to pass ``--mfr`` by
+    hand.  Mirrors :func:`_discover_net_class_map_sidecar`'s probe locations
+    exactly.
+
+    Returns:
+        The first existing candidate path, or ``None`` when no sidecar is
+        found.
+    """
+    pcb_dir = pcb_path.parent
+    candidates = [
+        pcb_dir / "fab_profile.json",
+        pcb_dir / "output" / "fab_profile.json",
+        pcb_dir.parent / "output" / "fab_profile.json",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _resolve_effective_check_mfr(
+    cli_mfr: str | None,
+    pcb_path: Path,
+    default: str = "jlcpcb",
+) -> tuple[str, list[str]]:
+    """Resolve the manufacturer profile ``kct check`` judges against (#3920).
+
+    A routed ``.kicad_pcb`` carries no embedded fab-tier hint, so bare ``kct
+    check`` used to hard-default to the base ``jlcpcb`` tier and report a false
+    ``FAILED`` on boards that route legal, tier-gated geometry (e.g.
+    via-in-pad, legal at ``jlcpcb-tier1``).  This resolves the effective
+    profile from every available source with a documented precedence.
+
+    Precedence (highest first):
+
+    1. Explicit ``--mfr`` flag (``cli_mfr is not None``).  Always wins, mirroring
+       ``build_cmd._resolve_effective_mfr``'s "explicit flag wins" contract.
+    2. Auto-discovered ``fab_profile.json`` sidecar written by ``kct route``.
+    3. Discovered ``project.kct`` ``target_fab``.
+    4. The historical ``default`` (``"jlcpcb"``).
+
+    A malformed / empty sidecar, or an unknown profile id from either the
+    sidecar or ``project.kct``, degrades gracefully: warn and fall back to the
+    next precedence tier (mirroring the net-class-map malformed-sidecar
+    handling).
+
+    Returns:
+        ``(effective_mfr, messages)`` where ``messages`` are stderr lines
+        (``[INFO] auto-loaded ...`` / ``WARNING: ignoring ...``) the caller
+        should print.  Kept as return values (not printed here) so the
+        resolution is unit-testable in isolation.
+    """
+    messages: list[str] = []
+
+    # Precedence 1: an explicit flag always wins.
+    if cli_mfr is not None:
+        return cli_mfr, messages
+
+    valid_ids = set(get_manufacturer_ids())
+
+    # Precedence 2: fab_profile.json sidecar.
+    sidecar = _discover_fab_profile_sidecar(pcb_path)
+    if sidecar is not None:
+        mfr: str | None = None
+        try:
+            data = json.loads(sidecar.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            messages.append(f"WARNING: ignoring malformed fab-profile sidecar {sidecar}: {e}")
+        else:
+            mfr = data.get("mfr") if isinstance(data, dict) else None
+            if not mfr:
+                messages.append(f"WARNING: ignoring fab-profile sidecar {sidecar}: no 'mfr' field")
+            elif mfr not in valid_ids:
+                messages.append(
+                    f"WARNING: ignoring fab-profile sidecar {sidecar}: unknown profile {mfr!r}"
+                )
+            else:
+                messages.append(f"[INFO] auto-loaded fab profile: {mfr} (from {sidecar})")
+                return mfr, messages
+
+    # Precedence 3: project.kct target_fab.
+    target_fab = resolve_target_fab_for_pcb(pcb_path)
+    if target_fab:
+        if target_fab not in valid_ids:
+            messages.append(
+                f"WARNING: ignoring project.kct target_fab {target_fab!r}: unknown profile"
+            )
+        else:
+            messages.append(
+                f"[INFO] auto-loaded fab profile: {target_fab} (from project.kct target_fab)"
+            )
+            return target_fab, messages
+
+    # Precedence 4: historical default.
+    return default, messages
+
+
+def _profile_supports_via_in_pad(mfr: str) -> bool:
+    """Return True when profile ``mfr`` permits via-in-pad geometry (#3920).
+
+    ``via_in_pad_supported`` is a per-tier capability flag on the profile's
+    :class:`DesignRules` (layer/copper independent), so resolving with the
+    default layer/copper key is sufficient.  An unknown profile degrades to
+    ``False``.
+    """
+    try:
+        return bool(get_profile(mfr).get_design_rules().via_in_pad_supported)
+    except (ValueError, AttributeError):  # pragma: no cover - defensive
+        return False
+
+
+def _maybe_emit_via_in_pad_tier_advisory(mfr: str, violations: Sequence) -> None:
+    """Emit a non-blocking via-in-pad tier hint when it would help (#3920).
+
+    Belt-and-suspenders for a standalone routed board with NO ``fab_profile.json``
+    sidecar and NO ``project.kct``: if the active profile does not support
+    via-in-pad, the DRC results contain ``via_in_pad`` findings, and at least
+    one registered profile DOES permit via-in-pad, print a loud, actionable
+    stderr advisory naming the permitting tier.  This turns a scary,
+    unexplained ``FAILED`` into a self-explaining one.
+
+    CRITICAL: this is advisory only.  It must NOT change the verdict or exit
+    code -- it only prints to stderr.
+    """
+    # Only advise when the active profile is known AND definitively does not
+    # support via-in-pad.  An unknown profile never reaches here in practice
+    # (DRCChecker construction rejects it), but guard defensively so we never
+    # emit a misleading hint about a profile we cannot resolve.
+    try:
+        active_supported = get_profile(mfr).get_design_rules().via_in_pad_supported
+    except (ValueError, AttributeError):
+        return
+    if active_supported:
+        return
+
+    vip_count = sum(1 for v in violations if getattr(v, "rule_id", None) == "via_in_pad")
+    if vip_count == 0:
+        return
+
+    permitting: str | None = None
+    for profile_id in get_manufacturer_ids():
+        if _profile_supports_via_in_pad(profile_id):
+            permitting = profile_id
+            break
+    if permitting is None:
+        return
+
+    print(
+        f"WARNING: {vip_count} via_in_pad finding(s) at profile {mfr!r}. "
+        "Via-in-pad is a tier-gated capability: it is LEGAL at "
+        f"{permitting} (via_in_pad_supported). If this board targets a higher "
+        f"fab tier, re-run with --mfr {permitting} (or pass the intended "
+        "--mfr). Defaulting to the base tier.",
+        file=sys.stderr,
+    )
 
 
 def _emit_drift_banner(pcb_path: Path, schematic: str | None) -> None:
@@ -942,8 +1107,16 @@ def main(argv: list[str] | None = None) -> int:
         "--mfr",
         "-m",
         choices=get_manufacturer_ids(),
-        default="jlcpcb",
-        help="Target manufacturer for design rules (default: jlcpcb)",
+        default=None,
+        help=(
+            "Target manufacturer profile for design rules. When omitted, the "
+            "effective profile is resolved by precedence (highest first): "
+            "explicit --mfr > auto-discovered fab_profile.json sidecar (written "
+            "by `kct route`) > project.kct target_fab > jlcpcb default. This "
+            "lets a routed board judged at a higher fab tier (e.g. via-in-pad, "
+            "legal at jlcpcb-tier1) pass a bare `kct check` without a false "
+            "FAILED (issue #3920)."
+        ),
     )
     parser.add_argument(
         "--layers",
@@ -1217,6 +1390,16 @@ def main(argv: list[str] | None = None) -> int:
     # exit code on the default run -- the hard gate lives behind --netlist-sync.
     _emit_drift_banner(pcb_path, getattr(args, "schematic", None))
 
+    # Issue #3920: resolve the effective manufacturer profile.  A routed
+    # ``.kicad_pcb`` carries no embedded fab-tier hint, so bare ``kct check``
+    # used to hard-default to the base ``jlcpcb`` tier and report a false
+    # FAILED on legal tier-gated geometry (e.g. via-in-pad, legal at
+    # jlcpcb-tier1).  Precedence: explicit --mfr > fab_profile.json sidecar >
+    # project.kct target_fab > jlcpcb default.  An explicit flag always wins.
+    effective_mfr, mfr_notices = _resolve_effective_check_mfr(args.mfr, pcb_path)
+    for _line in mfr_notices:
+        print(_line, file=sys.stderr)
+
     # Auto-detect layer count from PCB if not explicitly provided
     if args.layers is not None:
         layers = args.layers
@@ -1462,7 +1645,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         checker = DRCChecker(
             pcb,
-            manufacturer=args.mfr,
+            manufacturer=effective_mfr,
             layers=layers,
             copper_oz=preset_copper_oz,
             copper_oz_outer=resolved_copper_outer,
@@ -1525,6 +1708,14 @@ def main(argv: list[str] | None = None) -> int:
             skip_set,
         )
 
+    # Issue #3920 (Layer 2): belt-and-suspenders advisory for a standalone
+    # routed board with NO fab_profile.json sidecar and NO project.kct.  When
+    # the active profile does not permit via-in-pad yet the results contain
+    # via_in_pad findings AND a registered profile DOES permit them, print a
+    # loud, actionable stderr hint naming the permitting tier.  This is
+    # advisory ONLY -- it must not change the verdict or exit code.
+    _maybe_emit_via_in_pad_tier_advisory(effective_mfr, results.violations)
+
     # Apply errors-only filter
     violations = list(results.violations)
     if args.errors_only:
@@ -1572,13 +1763,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # Output results
     if args.format == "json":
-        output_json(violations, results, pcb_path, args.mfr, layers, meta=meta)
+        output_json(violations, results, pcb_path, effective_mfr, layers, meta=meta)
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
         if meta is not None:
             print_meta_check_stanza(meta)
     else:
-        output_table(violations, results, pcb_path, args.mfr, layers, args.verbose)
+        output_table(violations, results, pcb_path, effective_mfr, layers, args.verbose)
         if meta is not None:
             print_meta_check_stanza(meta)
 
@@ -1586,7 +1777,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        write_json_report(violations, results, pcb_path, args.mfr, layers, output_path, meta=meta)
+        write_json_report(
+            violations, results, pcb_path, effective_mfr, layers, output_path, meta=meta
+        )
 
     # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
     # resolved design rules this check enforced (``checker.design_rules``),
@@ -1598,7 +1791,7 @@ def main(argv: list[str] | None = None) -> int:
         _emit_drc_sidecars(
             pcb_path,
             checker,
-            manufacturer_id=args.mfr,
+            manufacturer_id=effective_mfr,
             layers=layers,
             copper_oz=preset_copper_oz,
             net_class_map=net_class_map,
