@@ -3156,6 +3156,53 @@ def rescue_partial_nets(routed_path: Path) -> dict[str, bool]:
     return shared_rescue_partial_nets(routed_path, _RESCUE_CONFIG)
 
 
+def emit_phase1_diagnostics(routed_path: Path) -> None:
+    """Print the board-05 Phase-1 ground-truth diagnostics (issue #4469).
+
+    DIAGNOSE-ONLY: reads the post-rescue routed board and prints
+
+    * a grid-fidelity report flagging where the ``--allow-unsafe-grid`` 0.1mm
+      grid (coarser than clearance/2 = 0.076mm for the 0.152mm jlcpcb-tier1
+      clearance) cannot represent sub-cell clearance -- the sites that later
+      become the Phase-2 shorts, and
+    * the per-net stranding classification (the existing stuck-net taxonomy)
+      for any residual stranded signal nets.
+
+    Never mutates the board and never changes the routing outcome; a failure to
+    produce a report is reported and swallowed so the pipeline continues.
+    """
+    from kicad_tools.router.rescue_diagnostics import (
+        format_grid_fidelity_report,
+        format_stranding_report,
+        grid_fidelity_report,
+    )
+
+    # Board-05's effective routing clearance is 0.15mm (the value the router
+    # enforces and warns about: "grid 0.1mm > clearance/2 (0.075mm)", see
+    # route_pcb() around design.py:3040 and io.py's validate_grid_resolution
+    # warning).  This is the board's DesignRules clearance, tighter than the
+    # jlcpcb-tier1 mfr floor (0.127mm) does not govern here -- use the value the
+    # route actually applied so the report describes the real grid.  The grid
+    # resolution is the board-05 memory-forced 0.1mm grid.
+    clearance = 0.15
+    resolution = 0.1
+    try:
+        report = grid_fidelity_report(
+            routed_path,
+            resolution=resolution,
+            clearance=clearance,
+            excluded_nets=_RESCUE_EXCLUDED_NETS,
+        )
+        print(format_grid_fidelity_report(report))
+    except Exception as exc:  # pragma: no cover - defensive only
+        print(f"\n   WARNING: grid-fidelity report failed: {exc}")
+
+    try:
+        print(format_stranding_report(routed_path, excluded_nets=_RESCUE_EXCLUDED_NETS))
+    except Exception as exc:  # pragma: no cover - defensive only
+        print(f"\n   WARNING: stranding classification failed: {exc}")
+
+
 def stitch_pcb(routed_path: Path) -> bool:
     """Add stitching vias for every pour-net pad (Issue #3936).
 
@@ -3574,6 +3621,12 @@ def main() -> int:
                 # Every residual net rescued -- the board is fully routed
                 # even though step 6's exit code reported partial.
                 route_success = True
+
+            # Step 6b-diagnostics: board-05 Phase-1 ground-truth instrumentation
+            # (Issue #4469).  Prints the grid-fidelity report + per-net stranding
+            # classification for the post-rescue board.  DIAGNOSE-ONLY -- reads
+            # the board, never mutates it, never changes the routing outcome.
+            emit_phase1_diagnostics(routed_path)
 
         # Step 6c: Stitch pour-net pads to their planes (Issue #3936).
         # route_pcb() routes signal nets only; it drops no stitching vias
