@@ -3229,6 +3229,84 @@ def stitch_pcb(routed_path: Path) -> bool:
     return True
 
 
+def repair_shorts_in_routed_pcb(routed_path: Path) -> int:
+    """Verify + repair grid-independent different-net copper shorts (Issue #4470).
+
+    board-05 routes on ``--allow-unsafe-grid`` (a 0.1mm grid coarser than
+    ``clearance/2`` = 0.075mm) because the memory-safe 0.05mm grid reaches
+    fewer nets.  At that resolution the C++ A* occupancy model cannot
+    represent sub-cell clearance, so two different-net vias/segments can
+    quantize into geometrically-overlapping world positions that pass
+    grid-occupancy yet fail geometric DRC.  A fresh regen therefore emitted
+    real ``shorting_items`` under ``kicad-cli pcb drc --refill-zones`` (a via
+    shorting NRST/OSC_IN on In2.Cu and a via shorting PWM_CH/OSC_OUT on
+    B.Cu) that the router's coarse occupancy model was structurally blind
+    to.
+
+    This step runs the grid-independent geometric verifier
+    (:func:`kicad_tools.drc.different_net_short.find_different_net_shorts`)
+    over the emitted copper and then relocates each offending via with the
+    clearance-safe candidate-ladder engine
+    (:func:`kicad_tools.drc.different_net_short.repair_different_net_shorts`,
+    built on the #4408 hole-to-hole relocation template).  A relocation
+    target is accepted only when it clears every foreign via/segment/pad by
+    the manufacturer clearance, so the move eliminates the short without
+    introducing a new one; a boxed-in via is left in place and reported.
+
+    Ordering (critical): this must run **after** routing / rescue / stitch
+    (so it sees all placed copper -- signal traces, escape/rescue vias, and
+    the pour stitch vias) and **before** :func:`fill_zones_in_routed_pcb`
+    (so the subsequent zone re-fill and the final DRC measure the repaired
+    geometry).
+
+    This step never changes the script's exit code directly (a residual
+    short surfaces through the authoritative ``kicad-cli pcb drc
+    --refill-zones`` gate in :func:`main`).  Returns the number of vias
+    relocated.
+    """
+    from kicad_tools.drc.different_net_short import (
+        find_different_net_shorts,
+        repair_different_net_shorts,
+    )
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+
+    print("\n" + "=" * 60)
+    print("Repairing different-net copper shorts (Issue #4470)...")
+    print("=" * 60)
+
+    pcb = PCB.load(routed_path)
+    before = find_different_net_shorts(pcb)
+    if not before:
+        print("\n   No different-net copper shorts detected (grid-independent verifier).")
+        return 0
+
+    print(f"\n1. Detected {len(before)} different-net short(s):")
+    for s in before:
+        print(f"   {s.describe()}")
+
+    rules = get_profile("jlcpcb-tier1").get_design_rules()
+    result = repair_different_net_shorts(pcb, rules)
+
+    print("\n2. Repair:")
+    for line in result.summary().split("\n"):
+        print(f"   {line}")
+
+    if result.changed:
+        pcb.save(routed_path)
+
+    remaining = find_different_net_shorts(pcb)
+    if remaining:
+        print(
+            f"\n   WARNING: {len(remaining)} different-net short(s) remain after repair "
+            "(boxed-in or segment-only) -- see the kicad-cli DRC gate below."
+        )
+    else:
+        print("\n   SUCCESS: no different-net shorts remain.")
+
+    return len(result.moved)
+
+
 def fill_zones_in_routed_pcb(routed_path: Path) -> int:
     """Fill copper zones in the routed PCB via ``kicad-cli``.
 
@@ -3508,6 +3586,18 @@ def main() -> int:
         # vias into the plane).  See stitch_pcb() for the full rationale.
         if routed_path.exists():
             stitch_pcb(routed_path)
+
+        # Step 7a: Verify + repair grid-independent different-net copper
+        # shorts (Issue #4470).  The --allow-unsafe-grid route can quantize
+        # two different-net vias/segments into geometrically-overlapping
+        # positions that pass grid-occupancy but fail geometric DRC (real
+        # shorting_items).  This grid-independent post-pass geometrically
+        # detects those overlaps and relocates the offending via
+        # clearance-safely.  Must run AFTER routing/rescue/stitch (all copper
+        # placed) and BEFORE fill_zones_in_routed_pcb (so the re-fill + DRC
+        # measure the repaired geometry).
+        if routed_path.exists():
+            repair_shorts_in_routed_pcb(routed_path)
 
         # Step 7: Repair DRC clearance violations introduced by routing.
         # Issue #3096: tried calling fix-drc as a separate subprocess
