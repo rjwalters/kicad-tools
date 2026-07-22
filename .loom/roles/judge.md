@@ -363,6 +363,34 @@ This check applies everywhere the judge would run `gh pr checkout`:
 
 This catches merge conflicts early in the evaluation cycle, preventing wasted effort on code that will need to be rebased anyway.
 
+> ### ⛔ NEVER mutate the main checkout's real git index during a merge simulation or inspection
+>
+> **You run in the shared main checkout** — you either reuse the builder's `.loom/worktrees/issue-N` worktree or `gh pr checkout` in place. You do **not** own a disposable git index. Any command that writes the repository's real staging index corrupts the live checkout for every role that touches it next.
+>
+> **NEVER run any of these against the main checkout's real index** to "simulate a merge", preview a tree, or inspect conflicts:
+>
+> - **`git read-tree`** (bare, or `git read-tree <tree>` **without** an isolated `GIT_INDEX_FILE`) — a bare `git read-tree` is equivalent to `git read-tree --empty`: it silently empties the index, turning **every tracked file into a phantom staged deletion**. The working tree and `HEAD` are untouched and **no reflog entry is written**, so the damage is near-invisible until the next `git add -A` commits it.
+> - **`git commit-tree`** piped from a `read-tree`-populated index.
+> - **`git reset`**, **`git rm --cached`**, **`git add`**, or **`git checkout .`** used "just to simulate" a merge or a conflicting state.
+>
+> **Instead, use the index-free approach** (the same one `doctor.md` uses — see `doctor.md`'s merge-conflict check, `git merge-tree origin/main | grep -q "^+<<<<<<<"`):
+>
+> ```bash
+> # Merge preview — writes to the object store, NEVER the working index:
+> git merge-tree --write-tree <base> <branch>
+>
+> # Conflict detection only (older two-arg form):
+> git merge-tree <base> <branch>
+> ```
+>
+> If you genuinely must populate an index (you almost never do), **isolate it** so the real index is never touched:
+>
+> ```bash
+> GIT_INDEX_FILE="$(mktemp)" git read-tree <tree>
+> ```
+>
+> **Why this matters:** bare `read-tree` empties the live index, leaves the working tree and `HEAD` untouched, and writes **no reflog entry**, so recovery is hard and the corruption is easy to miss. Every role that operates in the main checkout (Judge, Champion, Auditor, Guide) is exposed to the same hazard — prefer `git merge-tree --write-tree` for any merge preview and reach for index-mutating plumbing only under an isolated `GIT_INDEX_FILE`.
+
 ### Check Merge State
 
 ```bash

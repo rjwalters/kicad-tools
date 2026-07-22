@@ -167,6 +167,8 @@ When creating a proposal:
 
 **For templates and examples**, read `.claude/commands/loom/architect-patterns.md`.
 
+> **Do not run concurrent Architects — serialize issue creation (#3707).** `gh issue create` returns a server-assigned number with no client-side coordination, so two Architects (or an Architect and a Curator-decomposition / Champion epic-phase run) filing issues at the same time in the same repo **race on issue numbers and cross-contaminate bodies**. Never place an issue-creating agent in a parallel wave; one issue-creating agent must finish its entire `gh issue create` burst before the next starts. See `sweep.md` → "Execution Model → Only Builders parallelize" for the full invariant. Parallel **Builders** (implementing already-filed issues) stay safe — only issue *creation* must be serialized.
+
 ### Duplicate Detection (CRITICAL)
 
 **BEFORE creating any issue, check for potential duplicates:**
@@ -230,7 +232,7 @@ For large features that span multiple phases (4+ issues with dependencies), crea
 **When to create an epic**:
 - Feature requires 4+ distinct implementation issues
 - Work has natural phases with dependencies
-- Multiple shepherds could work in parallel
+- Multiple shepherds could work in parallel — this refers to **Builders implementing already-created phase issues** (safe: each in its own worktree, one PR each), NOT to multiple Architects filing issues concurrently (unsafe — see the serialization note under "Creating Proposals" and `sweep.md` → "Only Builders parallelize", #3707)
 - Implementation order matters
 
 **For epic templates and workflow**, read `.claude/commands/loom/architect-patterns.md`.

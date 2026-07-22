@@ -9,6 +9,11 @@
 #       CWD_DELETED     — working directory was removed
 #       TOKEN_EXPIRED   — 401 / OAuth token expired (skip this token)
 #       TOKEN_EXHAUSTED — quota/weekly limit hit (rotate)
+#       MODEL_REFUSAL   — model safety classifier refused the turn
+#                         (stop_reason "refusal" on a non-zero-exit run);
+#                         a routing error, not a quality signal — the sweep
+#                         orchestrator drops one ladder rung (e.g. fable→opus)
+#                         WITHOUT consuming a Doctor cycle (see sweep.md).
 #       RECOVERABLE     — transient (rate limit, 5xx, network, etc.)
 #       FATAL           — non-recoverable (currently never returned;
 #                         reserved for future explicit FATAL signals)
@@ -48,6 +53,18 @@ classify_error() {
     # Working directory deleted (worktree cleaned up while CLI ran)
     if echo "$output" | grep -qi "current working directory was deleted"; then
         echo "CWD_DELETED"
+        return
+    fi
+
+    # Model refusal (safety classifier declined the turn) — a `stop_reason`
+    # of "refusal" on a non-zero-exit run. This is a routing error, not a
+    # transport failure or a quality signal: the sweep orchestrator responds
+    # by dropping one ladder rung (e.g. fable→opus) WITHOUT consuming a Doctor
+    # cycle (see sweep.md, "Refusal-aware fallback"). Matched only on a genuine
+    # failure (exit_code != 0) so the exit-code-first #3233 guarantee holds — a
+    # clean exit whose output merely mentions "refusal" stays SUCCESS above.
+    if echo "$output" | grep -qiE '"?stop_reason"?[[:space:]]*[:=][[:space:]]*"?refusal'; then
+        echo "MODEL_REFUSAL"
         return
     fi
 

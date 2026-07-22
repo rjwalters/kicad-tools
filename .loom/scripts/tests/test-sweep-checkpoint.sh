@@ -279,6 +279,29 @@ assert_eq "alias model reads back" "sonnet" "$out"
 out=$("$CHECKPOINT" model 60)
 assert_eq "model cleared after model-less rewrite" "" "$out"
 
+# --- Doctor-cycle cap raise: attempt > 2 (issue #3668) ---
+# The configurable sweep.max_doctor_cycles cap and the default-cap distinct-defect
+# grace cycle both write attempt values above 2 (cycle 2 -> attempt 3, etc.).
+# Confirm the checkpoint schema round-trips them (no plumbing change needed).
+
+# 33. write with --attempt 3 round-trips through read and attempt
+assert "write doctor-done with --attempt 3 (second Doctor cycle)" "$CHECKPOINT" write 70 doctor-done --task-id t --pr-number 700 --attempt 3
+out=$("$CHECKPOINT" read 70)
+if echo "$out" | grep -q '"attempt": 3'; then
+    echo "PASS: attempt 3 persisted as integer in JSON"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: attempt 3 missing or wrong: $out" >&2
+    FAIL=$((FAIL + 1))
+fi
+out=$("$CHECKPOINT" attempt 70)
+assert_eq "attempt command reads back 3" "3" "$out"
+
+# 34. A larger raised cap (e.g. max_doctor_cycles=5 -> cycle 5 -> attempt 6) round-trips
+assert "write doctor-done with --attempt 6 (raised cap)" "$CHECKPOINT" write 71 doctor-done --task-id t --attempt 6
+out=$("$CHECKPOINT" attempt 71)
+assert_eq "attempt command reads back 6" "6" "$out"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]] || exit 1

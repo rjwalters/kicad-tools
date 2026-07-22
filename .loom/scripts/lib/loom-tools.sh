@@ -92,8 +92,13 @@ run_loom_tool() {
     local full_cli="loom-${cli_name}"
 
     # Try to find loom-tools directory (source takes precedence)
+    # ${BASH_SOURCE[1]:-$0} hardens the caller-frame lookup for the zsh case
+    # (#3680, defense-in-depth). No current call site sources this file directly
+    # into a zsh shell — every site executes a bash-shebang'd script, so
+    # BASH_SOURCE is always populated and bash behavior is byte-for-byte
+    # unchanged — but the bare bashism would break if that ever changed.
     local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[1]:-$0}")" && pwd)"
 
     if find_loom_tools "$script_dir"; then
         # Try Python module with PYTHONPATH first (always current source)
@@ -128,8 +133,9 @@ _loom_tool_not_found_error() {
     echo "" >&2
     echo "To install:" >&2
 
+    # ${BASH_SOURCE[1]:-$0} — see run_loom_tool above (#3680 defense-in-depth).
     local script_dir repo_root
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[1]:-$0}")" && pwd)"
     if repo_root="$(_find_repo_root "$script_dir")"; then
         if [[ -d "$repo_root/loom-tools" ]]; then
             echo "  cd $repo_root && pipx install --editable ./loom-tools" >&2

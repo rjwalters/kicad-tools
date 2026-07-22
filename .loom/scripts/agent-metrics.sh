@@ -24,5 +24,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source shared loom-tools helper
 source "$SCRIPT_DIR/lib/loom-tools.sh"
 
+# --model-experiment (or `sweep-experiment`) routes to the sweep model-cost
+# experiment reader (#3725) rather than the activity-db metrics. It aggregates
+# .loom/stats/sweep-model-stats.jsonl into the per-arm inequality inputs #3718
+# needs; keeping it here puts it next to the existing --by-model cost dimension.
+if [[ "${1:-}" == "--model-experiment" || "${1:-}" == "sweep-experiment" ]]; then
+    shift
+    run_loom_tool "sweep-experiment" "sweep_experiment" harvest "$@"
+fi
+
 # Run the command with proper fallback chain
 run_loom_tool "agent-metrics" "agent_metrics" "$@"

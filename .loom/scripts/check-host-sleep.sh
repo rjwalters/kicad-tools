@@ -5,7 +5,7 @@
 # to stderr (and a brief one-liner to stdout) when the host is configured in a
 # way that could let it sleep mid-session, killing in-flight subagents (#3350).
 #
-# It is invoked at the start of /loom:sweep and the spawn loop. It MUST NOT
+# It is invoked at the start of /loom:sweep. It MUST NOT
 # block — even if detection fails, it returns 0 and orchestration proceeds.
 #
 # Usage:

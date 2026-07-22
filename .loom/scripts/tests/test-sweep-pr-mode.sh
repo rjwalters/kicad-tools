@@ -117,9 +117,10 @@ assert_contains "Never-invoke /shepherd/judge/doctor slash commands as subagents
 # Sequential per-PR Judge.
 assert_contains "Per-PR Judge sequential within wave" 'Per-PR Judge is sequential'
 
-# Single Doctor→Judge cycle cap.
-assert_contains "Single Doctor→Judge cycle cap (Mode C, C1b)" 'single inline Doctor → Judge cycle'
-assert_contains "Cap reached note" 'Cap reached'
+# Configurable Doctor→Judge cycle cap (#3668).
+assert_contains "Configurable Doctor→Judge cycle cap (Mode C, C1b)" 'up to `sweep.max_doctor_cycles`'
+assert_contains "Cap-reached block note (Mode C, C1b)" 'cap reached'
+assert_contains "Distinct-defect exception referenced (Mode C, C1b)" 'distinct defect'
 
 # #3373: checkpoint reuse via closingIssuesReferences.
 assert_contains "Checkpoint scope via closingIssuesReferences" 'closingIssuesReferences'

@@ -65,6 +65,198 @@ if [[ -z "$COMMAND" ]]; then
     exit 0
 fi
 
+# =============================================================================
+# READ-ONLY FAST PATH (issue #3687) — default ON.
+#
+# guard-destructive.sh is a PreToolUse/Bash hook, so it fires before EVERY Bash
+# tool call. In Bash-dense sessions (remote ops, benchmark drivers) the vast
+# majority of those calls are obviously read-only — `git status`, `ls`, `grep`,
+# `aws … describe*`, `gh … list` — yet each one still runs the full deny/ask
+# gauntlet (~37 grep/awk/sed forks + a git rev-parse, ~179ms measured). This
+# block short-circuits that overwhelmingly-common case to a silent `allow` with
+# a single bash-builtin structural test (zero forks) plus, only when that test
+# passes, one lazy `jq` config read.
+#
+# SECURITY: a fast path is a guard bypass by construction, so admission is
+# purely STRUCTURAL and conservative — never content-sensitive:
+#   1. Reject fast-path eligibility if the raw command contains ANY of
+#      ;  &  |  <  >  backtick  $(  or a newline. This kills chaining, piping,
+#      redirection, and command substitution (so `git status && <force-push>`,
+#      `git status; rm -rf /`, `git status $(rm -rf /)`, `git status > /etc/x`
+#      all fall through to the full path unchanged).
+#   2. Exact first-token (command-word) allowlist — never a wrapper. Because the
+#      allowlist is keyed on the literal first token, wrapper forms (`bash -c`,
+#      `sh -c`, `eval`, `xargs`, `env … git status`, `sudo git status`) are
+#      excluded automatically: their first token isn't allowlisted.
+#   3. Verb/subcommand exactness for multi-word tools, chosen to be provably
+#      disjoint from every existing deny/ask pattern:
+#        git status|log|diff|show  (bare — `git -C /p status` is NOT admitted)
+#        ls  grep  rg
+#        gh <noun> view|list       (never delete/close/archive/…)
+#        aws <service> describe*|get*|list*  and  aws s3 ls   (mirrors the
+#          verb-anchoring already in CLOUD_ASK_PATTERNS: those verbs are never
+#          mutating, so this only skips greps that were going to allow anyway)
+#   cat and ssh are DELIBERATELY EXCLUDED from the built-in list:
+#     - cat has a narrow existing ASK carve-out (cat …/.ssh/, cat …/.aws/
+#       credentials); a blanket cat fast-path would silently skip it.
+#     - ssh wraps an OPAQUE remote command string that the raw ALWAYS_BLOCK scan
+#       still covers today; fast-pathing any `ssh …` would drop that coverage.
+#
+# False NEGATIVES (declining eligibility) are always safe — they just fall
+# through to the correct, slower existing behavior. False POSITIVES are the only
+# danger, so the eligibility test stays maximally conservative.
+#
+# CONFIG-ORDERING CHOICE: this block runs BEFORE REPO_ROOT is resolved (the git
+# rev-parse subprocess below), on purpose — the structural test never needs the
+# repo root. Only the toggle/extra-list config read needs a config file, and it
+# is resolved LAZILY (only after structural admission already passed) by walking
+# up from CWD to the nearest .loom/config.json WITHOUT forking git
+# (fastpath_config_file). So a fast-pathed command pays: 1 bash-builtin test +
+# (only if eligible) 1 stat-walk + 1 jq read — never the git rev-parse, never a
+# deny/ask array, never a log write.
+#
+# Toggle: guards.readOnlyFastPath (default true) / LOOM_GUARD_READONLY_FASTPATH
+# env (0/false/no disables, 1/true/yes forces on; env wins). Optional
+# guards.readOnlyFastPathExtra is an EXTEND-ONLY array of literal first-word
+# commands (each entry is a full-generality bypass for that command word).
+# =============================================================================
+
+# Locate the nearest .loom/config.json by walking up from CWD, fork-free (no
+# git rev-parse). Cached. Best-effort: empty when none is found.
+_FASTPATH_CFG_FILE=""
+_FASTPATH_CFG_FILE_DONE=""
+fastpath_config_file() {
+    if [[ -z "$_FASTPATH_CFG_FILE_DONE" ]]; then
+        _FASTPATH_CFG_FILE_DONE=1
+        local d="$CWD"
+        if [[ -n "$d" && "$d" == /* ]]; then
+            while :; do
+                if [[ -f "$d/.loom/config.json" ]]; then
+                    _FASTPATH_CFG_FILE="$d/.loom/config.json"
+                    break
+                fi
+                [[ "$d" == "/" ]] && break
+                local parent="${d%/*}"
+                [[ -z "$parent" ]] && parent="/"
+                d="$parent"
+            done
+        fi
+    fi
+    printf '%s' "$_FASTPATH_CFG_FILE"
+}
+
+# Resolve the fast-path toggle (config + env), cached. Default true. Only ever
+# called after structural admission has already passed, so the jq read stays off
+# the hot path for commands that don't structurally qualify.
+_FASTPATH_ENABLED_CACHE=""
+fastpath_enabled() {
+    if [[ -z "$_FASTPATH_ENABLED_CACHE" ]]; then
+        local enabled=true cfg
+        cfg=$(fastpath_config_file)
+        if [[ -n "$cfg" ]]; then
+            # Only an explicit `false` disables; a missing key or malformed JSON
+            # (jq non-zero, caught by ||) stays ON — mirrors sql_guard_enabled().
+            enabled=$(jq -r 'if .guards.readOnlyFastPath == false then "false" else "true" end' "$cfg" 2>/dev/null) || enabled=true
+            [[ -n "$enabled" ]] || enabled=true
+        fi
+        # Env override wins over config.
+        case "${LOOM_GUARD_READONLY_FASTPATH:-}" in
+            0|false|no)  enabled=false ;;
+            1|true|yes)  enabled=true ;;
+        esac
+        _FASTPATH_ENABLED_CACHE="$enabled"
+    fi
+    [[ "$_FASTPATH_ENABLED_CACHE" == "true" ]]
+}
+
+# Shared structural pre-check: reject any chaining/piping/redirection/
+# substitution/newline. Pure bash builtins, zero forks.
+fastpath_structural_ok() {
+    case "$1" in
+        *';'*|*'&'*|*'|'*|*'<'*|*'>'*|*'`'*|*'$('*) return 1 ;;
+    esac
+    [[ "$1" == *$'\n'* ]] && return 1
+    return 0
+}
+
+# Built-in allowlist admission — bash-builtin regex/case only, zero forks.
+fastpath_builtin_admits() {
+    local cmd="$1"
+    fastpath_structural_ok "$cmd" || return 1
+    local -a t
+    read -ra t <<< "$cmd"
+    local n=${#t[@]}
+    (( n >= 1 )) || return 1
+    case "${t[0]}" in
+        ls|grep|rg)
+            return 0
+            ;;
+        git)
+            (( n >= 2 )) || return 1
+            case "${t[1]}" in
+                status|log|diff|show) return 0 ;;
+            esac
+            return 1
+            ;;
+        gh)
+            (( n >= 3 )) || return 1
+            case "${t[2]}" in
+                view|list) return 0 ;;
+            esac
+            return 1
+            ;;
+        aws)
+            (( n >= 3 )) || return 1
+            [[ "${t[1]}" == "s3" && "${t[2]}" == "ls" ]] && return 0
+            case "${t[2]}" in
+                describe*|get*|list*) return 0 ;;
+            esac
+            return 1
+            ;;
+    esac
+    return 1
+}
+
+# Optional extend-only escape hatch: guards.readOnlyFastPathExtra is an array of
+# literal first-word commands. Read lazily (only when the built-in list did not
+# admit) and cached. Each entry is a full-generality bypass for that word.
+_FASTPATH_EXTRA_CACHE=""
+_FASTPATH_EXTRA_DONE=""
+fastpath_extra_admits() {
+    local cmd="$1"
+    fastpath_structural_ok "$cmd" || return 1
+    local -a t
+    read -ra t <<< "$cmd"
+    (( ${#t[@]} >= 1 )) || return 1
+    local first="${t[0]}"
+    if [[ -z "$_FASTPATH_EXTRA_DONE" ]]; then
+        _FASTPATH_EXTRA_DONE=1
+        local cfg
+        cfg=$(fastpath_config_file)
+        if [[ -n "$cfg" ]]; then
+            _FASTPATH_EXTRA_CACHE=$(jq -r '(.guards.readOnlyFastPathExtra // []) | .[]' "$cfg" 2>/dev/null) || _FASTPATH_EXTRA_CACHE=""
+        fi
+    fi
+    [[ -n "$_FASTPATH_EXTRA_CACHE" ]] || return 1
+    local w
+    while IFS= read -r w; do
+        [[ -n "$w" && "$first" == "$w" ]] && return 0
+    done <<< "$_FASTPATH_EXTRA_CACHE"
+    return 1
+}
+
+# Fast-path dispatch. The env fast-disable check is first so a fully-disabled
+# feature stays entirely off the hot path (no structural test, no config read).
+_fastpath_env="${LOOM_GUARD_READONLY_FASTPATH:-}"
+if [[ "$_fastpath_env" != "0" && "$_fastpath_env" != "false" && "$_fastpath_env" != "no" ]]; then
+    if fastpath_builtin_admits "$COMMAND"; then
+        # Silent allow: no stdout/stderr, no log_hook_error, before REPO_ROOT.
+        fastpath_enabled && exit 0
+    elif fastpath_extra_admits "$COMMAND"; then
+        fastpath_enabled && exit 0
+    fi
+fi
+
 # Resolve repo root from cwd (handles worktree paths safely)
 REPO_ROOT=""
 if [[ -n "$CWD" ]] && [[ -d "$CWD" ]]; then
@@ -242,6 +434,242 @@ resolve_worktree_root() {
     printf '%s/.loom/worktrees' "$repo_root"
 }
 
+# =============================================================================
+# force-op branch-scope toggle — default ALL (preserve current behaviour).
+#
+# The three generic force-op ASK patterns (git push --force / -f /
+# --force-with-lease and git reset --hard) prompt on EVERY match regardless of
+# which branch is targeted. For an autonomous/background agent that cannot answer
+# an interactive prompt, that stalls the agent on routine own-branch rebase /
+# amend / reset work. The genuinely dangerous case is a force op against a
+# PROTECTED branch (the repo default plus main/master), which stays a hard deny
+# via ALWAYS_BLOCK_PATTERNS for the explicit main/master forms.
+#
+# guards.forceScope selects the behaviour:
+#   "all"       (default) — ask on every force op, exactly as before (#3674).
+#   "protected"           — ask only when the resolved target is a protected
+#                           branch (repo default / main / master) or the branch
+#                           identity is ambiguous (detached HEAD); allow force
+#                           ops on the agent's own working branches.
+#   "off"                 — never ask/deny on force ops. The unconditional
+#                           main/master hard-denies in ALWAYS_BLOCK_PATTERNS
+#                           STILL apply in every mode, including "off".
+#
+# Resolution order (highest precedence first):
+#   1. LOOM_FORCE_SCOPE env var (all/protected/off). Overrides config.
+#   2. .loom/config.json  ->  guards.forceScope: "protected"/"off"; absent key /
+#      any other value / malformed JSON => "all" (the current-behaviour default).
+#   3. Default: all (preserve current behaviour byte-for-byte)
+#
+# Mirrors sql_guard_enabled() / rm_scope_repo_enabled(): cached in
+# _FORCE_SCOPE_CACHE, invoked LAZILY only after a command plausibly carries a
+# force op, so the jq config read never touches the hot path for the ~99% of
+# commands that are not force ops. The config read is best-effort: any parse
+# failure falls through to "all" (the safe default) and never trips the ERR trap.
+# =============================================================================
+_FORCE_SCOPE_CACHE=""
+force_scope_mode() {
+    if [[ -z "$_FORCE_SCOPE_CACHE" ]]; then
+        local mode=all
+        if [[ -n "$REPO_ROOT" && -f "$REPO_ROOT/.loom/config.json" ]]; then
+            # jq // is alternative-on-null, not default-on-missing, so use an
+            # explicit if/elif/else: only "protected"/"off" opt away from the
+            # default. A missing key, any other value, or malformed JSON (jq
+            # exits non-zero, caught by ||) resolves to "all".
+            mode=$(jq -r 'if (.guards.forceScope == "protected") then "protected" elif (.guards.forceScope == "off") then "off" else "all" end' "$REPO_ROOT/.loom/config.json" 2>/dev/null) || mode=all
+            [[ -n "$mode" ]] || mode=all
+        fi
+        # Env override wins over config.
+        case "${LOOM_FORCE_SCOPE:-}" in
+            all)         mode=all ;;
+            protected)   mode=protected ;;
+            off)         mode=off ;;
+        esac
+        _FORCE_SCOPE_CACHE="$mode"
+    fi
+    printf '%s' "$_FORCE_SCOPE_CACHE"
+}
+
+# Resolve the repository's default branch name for the protected-branch set.
+# Inlined, offline-first detection mirroring loom_default_branch() in
+# defaults/scripts/lib/default-branch.sh, replicated here so the hook stays
+# self-contained (same rationale as resolve_worktree_root() mirroring
+# loom_worktree_root() rather than sourcing it). Deliberately OMITS the network
+# `git ls-remote` fallback — a PreToolUse hook must never touch the network — so
+# resolution is env-var / local-ref only; the main/master literals in the
+# protected set below cover the common case when local detection yields nothing.
+# Best-effort: echoes the branch name or nothing on failure. Only invoked in
+# "protected" mode after a force op has already matched.
+resolve_default_branch() {
+    local dir="$1"
+    # 1. Env var override — highest priority (escape hatch + test seam).
+    if [[ -n "${LOOM_DEFAULT_BRANCH:-}" ]]; then
+        printf '%s' "$LOOM_DEFAULT_BRANCH"
+        return 0
+    fi
+    [[ -z "$dir" ]] && return 0
+    # 2. Local symbolic ref for origin/HEAD — offline, no network.
+    local sref
+    sref=$(git -C "$dir" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    if [[ -n "$sref" ]]; then
+        printf '%s' "${sref#origin/}"
+        return 0
+    fi
+    # 3. Local probe: prefer main, then master, whichever remote ref exists.
+    local candidate
+    for candidate in main master; do
+        if git -C "$dir" show-ref --verify --quiet "refs/remotes/origin/$candidate" 2>/dev/null; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    # 4. No local answer — echo nothing (caller's main/master literals cover it).
+    return 0
+}
+
+# Parse force-op segments out of a command, emitting one TAB-separated
+# "<cpath>\t<target>" line per genuine git force-push / hard-reset. Portable awk
+# only (mirrors extract_rm_targets / lifecycle_or_cloud_reason segment parsing):
+#   - split on ; | & && || and newline, strip a leading sudo wrapper.
+#   - only a segment whose command word is `git` is considered.
+#   - `git -C <path> ...` sets <cpath>; other pre-subcommand global options are
+#     skipped (`-c <k=v>` consumes its argument).
+#   - push: emitted only when a --force/-f/--force-with-lease flag is present.
+#     ONE line is emitted per positional refspec (pos[2], pos[3], …) after the
+#     remote — a multi-refspec push like `git push --force origin a b` emits a
+#     line for `a` AND `b`, so a protected branch in any refspec position (not
+#     just the first) reaches the caller's per-line check (#3674 follow-up).
+#     <target> is the destination branch parsed from each refspec —
+#       * `<src>:<dst>` form => <dst>
+#       * a bare ref        => the ref with a leading `+` stripped
+#       * `HEAD`, or no ref => the literal "@HEAD@" (resolve checked-out branch)
+#   - reset --hard: always emitted with <target> = "@HEAD@".
+# The caller resolves "@HEAD@" to the checked-out branch and applies the mode.
+parse_force_ops() {
+    printf '%s' "$1" | awk '
+    BEGIN { SEP = sprintf("%c", 31) }  # US (unit separator) — non-whitespace so
+                                       # bash read does not trim an empty cpath.
+    {
+        gsub(/&&|\|\||[;|&]/, "\n")
+        n = split($0, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t]+/, "", seg)
+            sub(/^sudo[ \t]+/, "", seg)
+            sub(/^[ \t]+/, "", seg)
+            m = split(seg, toks, /[ \t]+/)
+            if (m == 0) continue
+            if (toks[1] != "git") continue
+            # Walk global options between `git` and the subcommand.
+            cpath = ""
+            k = 2
+            while (k <= m) {
+                t = toks[k]
+                if (t == "-C") { cpath = toks[k+1]; k += 2; continue }
+                if (t == "-c") { k += 2; continue }
+                if (t ~ /^-/)  { k += 1; continue }
+                break
+            }
+            if (k > m) continue
+            subcmd = toks[k]
+            if (subcmd == "push") {
+                force = 0
+                np = 0
+                # pos is a file-global awk array; clear it per segment
+                # (portable — split with an empty string empties the array) so
+                # refspecs from a prior segment cannot leak into this one now
+                # that we read every positional slot, not just pos[2].
+                split("", pos)
+                for (j = k+1; j <= m; j++) {
+                    t = toks[j]
+                    if (t == "--force" || t == "-f" || t == "--force-with-lease" || t ~ /^--force-with-lease=/) { force = 1; continue }
+                    if (t ~ /^-/) continue
+                    np++
+                    pos[np] = t
+                }
+                if (!force) continue
+                # pos[1] is the remote; pos[2..np] are refspecs. Emit ONE line per
+                # positional refspec so a protected branch in ANY refspec position
+                # (not just the first) reaches the per-line check in the caller. A
+                # bare push with no refspec (np < 2) resolves the checked-out branch.
+                if (np < 2) {
+                    print cpath SEP "@HEAD@"
+                } else {
+                    for (p = 2; p <= np; p++) {
+                        rs = pos[p]
+                        sub(/^\+/, "", rs)
+                        ci = index(rs, ":")
+                        if (ci > 0) rs = substr(rs, ci + 1)
+                        target = "@HEAD@"
+                        if (rs != "HEAD" && rs != "") target = rs
+                        print cpath SEP target
+                    }
+                }
+            } else if (subcmd == "reset") {
+                hard = 0
+                for (j = k+1; j <= m; j++) if (toks[j] == "--hard") hard = 1
+                if (hard) print cpath SEP "@HEAD@"
+            }
+        }
+    }'
+}
+
+# Redact the quoted VALUES of known text-carrying flags (--body, -m/--message,
+# --title, --notes) so a dangerous-looking phrase quoted INSIDE such a value no
+# longer trips the raw ALWAYS_BLOCK_PATTERNS substring scan. Used ONLY to build
+# COMMAND_NO_LITERAL_TEXT for that one loop (mirrors the COMMAND_NO_COMMENT
+# precedent); every other scan keeps reading the raw command. This kills the
+# #3679 false positive where `gh pr comment --body "…git push --force origin
+# main…"` / `git commit -m "…"` hard-denied even though nothing executes.
+#
+# Safety floor preserved two ways:
+#   - `-c` is deliberately NOT a text-carrying flag, so `bash -c '<payload>'`
+#     is never redacted and its payload stays caught by the raw scan.
+#   - a quoted span is redacted ONLY when it carries no command-substitution or
+#     backtick opener (`$(` — which also subsumes the arithmetic `$((` — or a
+#     backtick). So a smuggling attempt like `git commit -m "$(git push --force
+#     origin main)"` is left intact and still hard-denies.
+# Each redacted span is replaced by a SAME-LENGTH placeholder so byte offsets of
+# the surrounding command are unchanged. Best-effort like COMMAND_NO_COMMENT:
+# it does not model backslash-escaped quotes, but since the result feeds only
+# the narrowing (never widening) catastrophic scan, the worst case is a raw
+# substring surviving — never a catastrophic block being skipped incorrectly.
+strip_literal_text() {
+    printf '%s' "$1" | awk '
+    BEGIN {
+        SQ = sprintf("%c", 39)   # single quote
+        DQ = sprintf("%c", 34)   # double quote
+        # boundary + text-carrying flag + optional (ws / = / ws) + quoted span
+        re = "(^|[ \t])(--message|--body|--notes|--title|-m)[ \t]*=?[ \t]*(" \
+             DQ "[^" DQ "]*" DQ "|" SQ "[^" SQ "]*" SQ ")"
+    }
+    {
+        s = $0
+        out = ""
+        while (match(s, re)) {
+            pre     = substr(s, 1, RSTART - 1)
+            matched = substr(s, RSTART, RLENGTH)
+            s       = substr(s, RSTART + RLENGTH)
+            # Locate the opening quote inside the matched span.
+            qpos = 0
+            for (i = 1; i <= length(matched); i++) {
+                c = substr(matched, i, 1)
+                if (c == DQ || c == SQ) { qpos = i; break }
+            }
+            head  = substr(matched, 1, qpos)                              # up to & incl. opening quote
+            qchar = substr(matched, qpos, 1)
+            inner = substr(matched, qpos + 1, length(matched) - qpos - 1) # between the quotes
+            # Redact ONLY provably inert text (no command substitution / backtick).
+            if (index(inner, "$(") == 0 && index(inner, "`") == 0) {
+                gsub(/./, "X", inner)
+            }
+            out = out pre head inner qchar
+        }
+        out = out s
+        printf "%s", out
+    }'
+}
+
 # Helper: output a deny decision and exit
 deny() {
     local reason="$1"
@@ -352,8 +780,22 @@ ALWAYS_BLOCK_PATTERNS=(
     # (#3584).
 )
 
+# Build a literal-text-redacted working copy ONLY for the catastrophic scan
+# below, so a force-push-to-main phrase quoted inside a --body/-m/--title/--notes
+# value no longer false-positives (#3679). The awk only runs when one of those
+# flags is actually present, keeping it off the hot path (mirrors the
+# COMMAND_NO_COMMENT `#`-present guard). `-c` is intentionally excluded so
+# `bash -c '<payload>'` payloads still reach the raw scan; spans carrying `$(` /
+# backtick are left intact so command-substitution smuggling still hard-denies.
+COMMAND_NO_LITERAL_TEXT="$COMMAND"
+if [[ "$COMMAND" == *"--body"* || "$COMMAND" == *"--message"* || \
+      "$COMMAND" == *"--title"* || "$COMMAND" == *"--notes"* || \
+      "$COMMAND" == *"-m"* ]]; then
+    COMMAND_NO_LITERAL_TEXT=$(strip_literal_text "$COMMAND")
+fi
+
 for pattern in "${ALWAYS_BLOCK_PATTERNS[@]}"; do
-    if echo "$COMMAND" | grep -qiE "$pattern"; then
+    if echo "$COMMAND_NO_LITERAL_TEXT" | grep -qiE "$pattern"; then
         deny "BLOCKED: Command matches dangerous pattern: $pattern"
     fi
 done
@@ -695,14 +1137,76 @@ if echo "$COMMAND_NO_COMMENT" | grep -qiE 'DELETE[[:space:]]+FROM[[:space:]]+' &
 fi
 
 # =============================================================================
+# FORCE-OP BRANCH SCOPE - branch-aware git push --force / git reset --hard
+#
+# Gated by guards.forceScope / LOOM_FORCE_SCOPE (see force_scope_mode() above).
+#   - "all"       (default): every force op asks — byte-for-byte the pre-#3674
+#                            behaviour, so existing tests still see an ask.
+#   - "protected"          : ask only when the resolved target is a protected
+#                            branch (repo default / main / master) or the branch
+#                            identity is ambiguous (detached HEAD / unresolved);
+#                            own working branches pass straight through.
+#   - "off"                : never ask/deny here.
+#
+# The explicit main/master force-push hard-denies in ALWAYS_BLOCK_PATTERNS above
+# already fired for those forms and are NOT reachable here in ANY mode — this
+# block only ever downgrades to ask/allow, never weakens a hard deny.
+#
+# A cheap pre-check keeps the config read + segment parser off the hot path for
+# the ~99% of commands with no force flag at all.
+# =============================================================================
+if [[ "$COMMAND_NO_COMMENT" == *git* ]] && \
+   echo "$COMMAND_NO_COMMENT" | grep -qE '(--force|--force-with-lease|(^|[[:space:]])-f([[:space:]]|$)|--hard)'; then
+    _FORCE_MODE=$(force_scope_mode)
+    if [[ "$_FORCE_MODE" != "off" ]]; then
+        _FORCE_OPS=$(parse_force_ops "$COMMAND_NO_COMMENT")
+        if [[ -n "$_FORCE_OPS" ]]; then
+            if [[ "$_FORCE_MODE" == "all" ]]; then
+                # Preserve pre-#3674 behaviour byte-for-byte: any force op asks.
+                ask "Command requires confirmation: $COMMAND"
+            fi
+            # "protected" mode: ask only for protected-branch or ambiguous
+            # targets; allow own working branches. resolve_default_branch() plus
+            # the main/master literals form the protected set.
+            while IFS=$'\037' read -r _fcpath _ftarget; do
+                [[ -z "$_ftarget" ]] && _ftarget="@HEAD@"
+                _fcwd="$_fcpath"
+                [[ -z "$_fcwd" ]] && _fcwd="$CWD"
+                if [[ "$_ftarget" == "@HEAD@" ]]; then
+                    _fbranch=""
+                    if [[ -n "$_fcwd" ]]; then
+                        _fbranch=$(git -C "$_fcwd" symbolic-ref --short HEAD 2>/dev/null || true)
+                    fi
+                    if [[ -z "$_fbranch" ]]; then
+                        # Detached HEAD / unresolved identity is ambiguous — ask,
+                        # never silently allow (fail toward asking).
+                        ask "Command requires confirmation: $COMMAND (force operation on a detached or unresolved branch)"
+                    fi
+                    _ftarget="$_fbranch"
+                fi
+                _fdefault=$(resolve_default_branch "$_fcwd")
+                if [[ "$_ftarget" == "main" || "$_ftarget" == "master" ]] || \
+                   { [[ -n "$_fdefault" && "$_ftarget" == "$_fdefault" ]]; }; then
+                    ask "Command requires confirmation: $COMMAND (force operation targets protected branch '$_ftarget')"
+                fi
+            done <<< "$_FORCE_OPS"
+            # No protected/ambiguous target matched — fall through to allow.
+        fi
+    fi
+fi
+
+# =============================================================================
 # REQUIRE CONFIRMATION - Potentially dangerous but sometimes legitimate
 # =============================================================================
 
 ASK_PATTERNS=(
-    # Git destructive operations (not on main/master - those are blocked above)
-    'git push --force'
-    'git push -f '
-    'git reset --hard'
+    # NOTE: the force-op patterns (git push --force / -f / --force-with-lease and
+    # git reset --hard) are NOT in this ungated array. They are handled by the
+    # branch-aware FORCE-OP BRANCH SCOPE block above, gated by
+    # force_scope_mode() (guards.forceScope / LOOM_FORCE_SCOPE, #3674), so an
+    # autonomous agent can force-push / hard-reset its own working branch without
+    # a stall while protected-branch force ops still ask. git clean / checkout .
+    # / restore . stay here — they are not force ops and have no branch scope.
     'git clean -fd'
     'git checkout \.'
     'git restore \.'
@@ -744,6 +1248,33 @@ for pattern in "${ASK_PATTERNS[@]}"; do
         ask "Command requires confirmation: $COMMAND"
     fi
 done
+
+# =============================================================================
+# git read-tree WITHOUT an isolating GIT_INDEX_FILE assignment
+#
+# A bare `git read-tree` (no tree-ish, no isolated index) is equivalent to
+# `git read-tree --empty`: it clobbers the repository's REAL staging index,
+# turning every tracked file into a phantom staged deletion. The working tree
+# and HEAD are left untouched and NO reflog entry is written, so the corruption
+# is silent and near-invisible (issue #3637 — a judge ran one against the main
+# checkout during a merge simulation and emptied the live index).
+#
+# This is an ASK (not a deny) because it is generic git hygiene, not a Loom
+# workflow rule, and an isolated form is legitimate. It is kept narrow: the
+# safe, index-free path is `git merge-tree --write-tree <base> <branch>` for a
+# merge preview, or `GIT_INDEX_FILE=$(mktemp) git read-tree <tree>` when a
+# temporary index really is needed. Any command that carries a `GIT_INDEX_FILE=`
+# assignment is treated as isolated and passes through untouched.
+#
+# `git commit-tree` is intentionally NOT guarded here — it writes a commit
+# object from an existing tree and does not mutate the index.
+# =============================================================================
+if echo "$COMMAND_NO_COMMENT" | grep -qE '(^|[;&|(]|[[:space:]])git[[:space:]]+read-tree'; then
+    # Isolated form (GIT_INDEX_FILE=... git read-tree ...) is allowed.
+    if ! echo "$COMMAND_NO_COMMENT" | grep -qE 'GIT_INDEX_FILE='; then
+        ask "Command requires confirmation: $COMMAND (a bare 'git read-tree' empties the real staging index with no reflog trace; use 'git merge-tree --write-tree <base> <branch>' for a merge preview, or isolate with GIT_INDEX_FILE=\$(mktemp))"
+    fi
+fi
 
 # =============================================================================
 # CLOUD CLI ASK patterns — gated by the cloud CLI guard toggle
