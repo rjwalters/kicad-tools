@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1562,6 +1563,7 @@ class LatticePathfinder:
         present_cost_initial: float = 1.0,
         present_cost_growth: float = 1.6,
         history_increment_factor: float = 1.0,
+        deadline: float | None = None,
     ) -> tuple[dict[object, Route], LatticeNegotiationStats]:
         """PathFinder/VPR-style negotiation over capacity-1 lattice resources.
 
@@ -1598,6 +1600,14 @@ class LatticePathfinder:
         pre-seeded into every per-pass :class:`CommittedCopper` model as an
         immovable hard obstacle, so a negotiated net routes AROUND it or is
         honestly declined -- it is never emitted overlapping foreign copper.
+
+        Issue #4472: ``deadline`` is an optional absolute
+        :func:`time.monotonic` timestamp.  When set, the negotiation aborts as
+        soon as it is reached -- checked before each iteration and before each
+        per-connection search -- and returns the best routes found so far.
+        This bounds a ``--complete`` completion pass so a pathological search
+        aborts within a per-link budget instead of grinding (issue #4434).
+        ``None`` preserves the pre-#4472 unbudgeted (iteration-capped) loop.
         """
         self._set_fixed_copper(fixed_copper)
         self.build()
@@ -1625,7 +1635,13 @@ class LatticePathfinder:
         iterations_run = 0
         present = present_cost_initial
 
+        deadline_hit = False
         for it in range(max_iterations):
+            # Issue #4472: abort before starting a fresh pass once the per-link
+            # budget is spent; the best pass seen so far is returned below.
+            if deadline is not None and time.monotonic() >= deadline:
+                deadline_hit = True
+                break
             iterations_run = it + 1
             committed = self._fresh_committed()
             routes: dict[object, Route] = {}
@@ -1634,6 +1650,11 @@ class LatticePathfinder:
             routed_items = 0
             failed: list[tuple[int, Any]] = []
             for _length, kind, item in items:
+                # Issue #4472: abort mid-pass on the deadline too, so a single
+                # slow search inside one pass cannot overrun the budget.
+                if deadline is not None and time.monotonic() >= deadline:
+                    deadline_hit = True
+                    break
                 if kind == 1:
                     pres, preason = self._route_pair_impl(
                         item, committed=committed, history=history, present=present
@@ -1691,6 +1712,12 @@ class LatticePathfinder:
                 best_routes = routes
                 best_reasons = reasons
                 best_pair_outcomes = pair_outcomes
+
+            # Issue #4472: a deadline-truncated pass is NOT convergence -- some
+            # items were never attempted, so ``failed`` is incomplete.  Record
+            # the best-so-far above, then stop without claiming convergence.
+            if deadline_hit:
+                break
 
             if not failed:
                 converged = True

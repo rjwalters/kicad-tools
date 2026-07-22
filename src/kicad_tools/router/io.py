@@ -3387,6 +3387,8 @@ def load_pcb_for_routing(
     region: tuple[float, float, float, float] | None = None,
     stub_terminals: dict[int, list[StubTerminal]] | None = None,
     strategy: str = "grid",
+    localize_lattice_to_region: bool = False,
+    lattice_link_budget_s: float | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -3460,6 +3462,19 @@ def load_pcb_for_routing(
                 :class:`Pad` and are never inserted into ``router.pads`` /
                 ``router.nets``.  Requires ``load_existing_routes=True`` (the
                 stub copper must be loaded first).
+        localize_lattice_to_region: Issue #4472 (epic #4465, Phase 2).  When
+                True AND ``region`` is set, the WORLD-coordinate region box is
+                stamped on ``router._lattice_region_world`` so the octilinear
+                lattice build + per-layer static masks are confined to that box
+                (snapped to the whole-board coarse grid) instead of the entire
+                board outline.  This is the ``--complete`` perf enabler that
+                bounds a per-link completion build + A* to the walled pocket.
+                Default False keeps a plain ``--region`` run whole-board.
+        lattice_link_budget_s: Issue #4472.  Optional per-link wall-clock
+                budget (seconds) stamped on ``router._lattice_link_budget_s``;
+                the lattice netset negotiation aborts within
+                ``budget x link-count`` seconds and returns the best routes so
+                far.  ``None`` preserves the unbudgeted negotiation.
 
     Returns:
         Tuple of (Autorouter instance, net_map dict)
@@ -3906,6 +3921,20 @@ def load_pcb_for_routing(
             max(ry1, ry2),
             blocked,
         )
+        # Issue #4472 (epic #4465, Phase 2): under ``--complete`` the same
+        # region box also LOCALIZES the octilinear lattice build -- the
+        # per-link perf enabler.  Stamp the WORLD-coordinate box on the router
+        # so ``_ensure_lattice_pathfinder`` builds + masks only that pocket
+        # (snapped to the whole-board coarse grid) instead of the entire board
+        # outline.  Gated on ``localize_lattice_to_region`` so a plain
+        # ``--region`` grid/lattice run is byte-identical.
+        if localize_lattice_to_region:
+            router._lattice_region_world = (wx1, wy1, wx2, wy2)
+
+    # Issue #4472: per-link wall-clock budget for the lattice netset
+    # negotiation (``--complete``); ``None`` preserves the unbudgeted loop.
+    if lattice_link_budget_s is not None:
+        router._lattice_link_budget_s = lattice_link_budget_s
 
     # Issue #4170 (Phase 2b-1): carve bare boundary stub endpoints open as
     # same-net A* targets and store them for the Autorouter target-merge shim.

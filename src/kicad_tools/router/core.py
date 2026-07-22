@@ -1085,6 +1085,24 @@ class Autorouter:
         # Issue #4270: per-diff-pair coupled-routing outcomes for the lattice
         # engine ("coupled" or a decline reason), keyed by pair base name.
         self._lattice_pair_outcomes: dict[str, str] = {}
+        # Issue #4472 (epic #4465, Phase 2): localized per-link lattice build.
+        # When set to a WORLD-coordinate ``(x1, y1, x2, y2)`` box,
+        # :meth:`_ensure_lattice_pathfinder` builds the octilinear lattice +
+        # per-layer static pad masks over ONLY this box (snapped to the
+        # whole-board coarse grid so in-box nodes stay a subset of the
+        # whole-board lattice) instead of the entire board outline.  This is
+        # the ``--complete`` perf enabler: a completion pass re-routing one
+        # walled link pays a per-link build + A* rather than a whole-board one
+        # (issue #4434's ">10-minute" non-termination).  ``None`` preserves
+        # the whole-board build byte-for-byte.
+        self._lattice_region_world: tuple[float, float, float, float] | None = None
+        # Issue #4472: per-link wall-clock budget (seconds) for the lattice
+        # netset negotiation.  When set, :meth:`_negotiate_lattice_netset`
+        # stamps an absolute monotonic deadline (budget x link-count) and
+        # ``route_netset`` aborts the negotiation once it passes, returning the
+        # best routes found so far.  ``None`` preserves the unbudgeted
+        # (iteration-capped only) behaviour.
+        self._lattice_link_budget_s: float | None = None
 
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
@@ -2451,6 +2469,8 @@ class Autorouter:
         :meth:`_ensure_mesh_pathfinder`: the Edge.Cuts bbox when the board has
         an outline, else the grid origin/dimensions fallback.
         """
+        import inspect
+
         from .lattice.pathfinder import LatticePathfinder
 
         if self._lattice_pathfinder is None:
@@ -2461,6 +2481,20 @@ class Autorouter:
                 by0 = self.grid.origin_y
                 bx1 = self.grid.origin_x + self.grid.width
                 by1 = self.grid.origin_y + self.grid.height
+            # Issue #4472: localized per-link build.  When a completion pass
+            # has stamped a per-link region box, snap it to the whole-board
+            # lattice coarse grid and build the lattice over ONLY that box.
+            # Snapping to the same coarse origin the whole-board build would
+            # use keeps the localized lattice's in-box nodes an exact subset of
+            # the whole-board lattice (the pad set -- and thus the refine
+            # max-level and node ``unit`` -- is unchanged), so a route that
+            # stays inside the box is identical to the un-localized build; this
+            # is a pure perf optimization, not a routing-behaviour change.
+            if self._lattice_region_world is not None:
+                coarse = inspect.signature(LatticePathfinder).parameters["coarse"].default
+                bx0, by0, bx1, by1 = self._snap_lattice_region(
+                    self._lattice_region_world, (bx0, by0, bx1, by1), float(coarse)
+                )
             outline = [(bx0, by0), (bx1, by0), (bx1, by1), (bx0, by1)]
             # The lattice is replicated across the board's REAL copper stack
             # (issue #4278 acceptance 6) -- never hardcoded to 2 layers.
@@ -2476,6 +2510,51 @@ class Autorouter:
                 layer_stack=self.layer_stack,
             )
         return self._lattice_pathfinder
+
+    @staticmethod
+    def _snap_lattice_region(
+        box: tuple[float, float, float, float],
+        board_bbox: tuple[float, float, float, float],
+        coarse: float,
+    ) -> tuple[float, float, float, float]:
+        """Snap a per-link region box to the whole-board lattice coarse grid.
+
+        Issue #4472.  The octilinear lattice anchors its node grid at the
+        outline's min corner (``OctilinearLattice.origin == bbox[:2]``) and
+        places nodes at integer multiples of its cell unit from there.  A
+        localized build over an arbitrary sub-box would therefore shift every
+        node, changing routes.  Snapping the box OUTWARD to the whole-board
+        coarse grid (origin == ``board_bbox`` min, cell == ``coarse``) makes
+        the localized coarse cells -- and hence the derived fine nodes -- align
+        exactly with the whole-board lattice, so a route that stays inside the
+        box is identical to the un-localized build.  The result is clamped to
+        the board bbox and kept non-degenerate (at least one coarse cell).
+        """
+        rx0, ry0, rx1, ry1 = box
+        lo_x, hi_x = min(rx0, rx1), max(rx0, rx1)
+        lo_y, hi_y = min(ry0, ry1), max(ry0, ry1)
+        bx0, by0, bx1, by1 = board_bbox
+        # Clamp the requested box into the board before snapping.
+        lo_x = min(max(lo_x, bx0), bx1)
+        lo_y = min(max(lo_y, by0), by1)
+        hi_x = min(max(hi_x, bx0), bx1)
+        hi_y = min(max(hi_y, by0), by1)
+        if coarse <= 0:
+            return (bx0, by0, bx1, by1)
+        # Snap outward to the whole-board coarse grid (origin at the board min).
+        lo_x = bx0 + math.floor((lo_x - bx0) / coarse) * coarse
+        lo_y = by0 + math.floor((lo_y - by0) / coarse) * coarse
+        hi_x = bx0 + math.ceil((hi_x - bx0) / coarse) * coarse
+        hi_y = by0 + math.ceil((hi_y - by0) / coarse) * coarse
+        # Clamp back to the board (snapping out can only overshoot the board
+        # edge, never the interior origin) and guarantee a non-empty extent.
+        lo_x, lo_y = max(lo_x, bx0), max(lo_y, by0)
+        hi_x, hi_y = min(hi_x, bx1), min(hi_y, by1)
+        if hi_x <= lo_x:
+            hi_x = min(bx1, lo_x + coarse)
+        if hi_y <= lo_y:
+            hi_y = min(by1, lo_y + coarse)
+        return (lo_x, lo_y, hi_x, hi_y)
 
     def _lattice_coupled_connections(
         self,
@@ -2661,11 +2740,22 @@ class Autorouter:
         # this the lattice sees the non-listed pads but not the traces between
         # them and legally crosses foreign copper -> segment-segment shorts.
         fixed_copper = [r for r in self.existing_routes if r.net not in self.nets]
+        # Issue #4472: per-link wall-clock deadline.  ``--complete`` stamps a
+        # per-link budget so each completion search aborts within a bounded
+        # budget instead of grinding (issue #4434's >10-minute non-termination)
+        # -- the deadline scales with the number of links being closed so a
+        # small cohort stays bounded while a larger set is still given
+        # proportional headroom.  ``None`` preserves the unbudgeted behaviour.
+        deadline: float | None = None
+        if self._lattice_link_budget_s and self._lattice_link_budget_s > 0:
+            link_count = max(1, len(connections) + len(coupled))
+            deadline = time.monotonic() + self._lattice_link_budget_s * link_count
         routes_by_key, stats = pf.route_netset(
             connections,
             coupled=coupled,
             fixed_copper=fixed_copper,
             max_iterations=max_iterations,
+            deadline=deadline,
         )
         self._lattice_negotiation_stats = stats
 
