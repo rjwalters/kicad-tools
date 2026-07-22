@@ -4213,6 +4213,85 @@ class DiffPairRouter:
         # No feasible rung: keep nominal (ladder head), degrade gracefully.
         return gap_ladder[0]
 
+    @staticmethod
+    def _offset_corner_join(
+        pseg_start: tuple[float, float],
+        pseg_end: tuple[float, float],
+        a: tuple[float, float],
+        b: tuple[float, float],
+        side: float,
+        d: float,
+        resolution: float,
+    ) -> tuple[str, tuple[float, float] | None]:
+        """Decide how two consecutive parallel-offset segments join at a corner.
+
+        Issue #4460 (Phase 2 of #4409): a fixed-side parallel offset of a
+        bending guide self-overlaps on the INSIDE of every bend.  ``pseg_*``
+        are the endpoints of the previously emitted offset segment (its end
+        ``pseg_end`` is the running ``prev_pt``); ``a``/``b`` are the current
+        offset segment's endpoints.  ``side`` is the lateral offset sign and
+        ``d`` the nominal center spacing (used only to bound convex spikes).
+
+        Returns ``(mode, point)``:
+
+        * ``("none", None)`` -- the offset endpoints already meet (gap below
+          half a grid cell); the caller just appends the current segment.
+        * ``("miter", mx)`` -- clip/extend the previous segment's END to
+          ``mx`` and start the current segment at ``mx``.  This is the correct
+          join for a CONCAVE (inside) corner: the offset lines cross and the
+          intersection de-folds the overlap.  The concave miter apex always
+          lies on the offset side of the guide, so it can never dive across
+          the guide centerline the way a straight bevel chord does at a sharp
+          inside bend (the pre-fix bevel fallback dropped a fold segment clear
+          across the guide, a full-trace-width local self-cross).  For CONVEX
+          (outside) corners the miter is still used, but only when its spike
+          stays within ``2*d + gap`` (a sharp outside turn otherwise grows an
+          unbounded spike).
+        * ``("bevel", None)`` -- insert a straight chord ``pseg_end -> a``.
+          Reached only for convex corners whose miter spike is out of bounds
+          (the chord stays on the offset side there) or degenerate geometry.
+
+        Pure geometry -- no grid / obstacle state -- so it is unit-testable in
+        isolation (see ``tests/test_diffpair_shadow.py``).
+        """
+        gap = math.hypot(a[0] - pseg_end[0], a[1] - pseg_end[1])
+        if gap <= resolution / 2:
+            return ("none", None)
+
+        d1x, d1y = pseg_end[0] - pseg_start[0], pseg_end[1] - pseg_start[1]
+        d2x, d2y = b[0] - a[0], b[1] - a[1]
+        # Turn handedness: cross(prev_dir, cur_dir).  The offset lies on the
+        # INSIDE of the turn (segments fold/overlap) when the guide bends
+        # toward the offset side, i.e. ``cross * side > 0``.
+        cross = d1x * d2y - d1y * d2x
+        concave = cross * side > 1e-12
+
+        denom = d1x * d2y - d1y * d2x
+        if abs(denom) <= 1e-9:
+            # Parallel offset lines: no intersection to miter to.
+            return ("bevel", None)
+        t = ((a[0] - pseg_end[0]) * d2y - (a[1] - pseg_end[1]) * d2x) / denom
+        cand = (pseg_end[0] + d1x * t, pseg_end[1] + d1y * t)
+
+        if concave:
+            # De-fold unconditionally (no spike bound): the concave miter
+            # apex stays on the offset side and clipping to it removes the
+            # self-crossing fold.  Guard only against the pathological
+            # near-reversal where the intersection would push BEHIND the
+            # previous segment's start (which would flip its direction);
+            # there, fall back to the bevel rather than emit a reversed spur.
+            plen2 = d1x * d1x + d1y * d1y
+            if plen2 > 1e-18:
+                tp = ((cand[0] - pseg_start[0]) * d1x + (cand[1] - pseg_start[1]) * d1y) / plen2
+                if tp > 1e-6:
+                    return ("miter", cand)
+            return ("bevel", None)
+
+        # Convex corner: bound the miter spike (sharp outside turns).
+        if math.hypot(cand[0] - pseg_end[0], cand[1] - pseg_end[1]) <= 2.0 * d + gap:
+            return ("miter", cand)
+        return ("bevel", None)
+
     def _shadow_route_pair(
         self,
         pair: DifferentialPair,
@@ -4461,50 +4540,44 @@ class DiffPairRouter:
                                 ok = False
                                 break
                         else:
-                            gap = math.hypot(a[0] - prev_pt[0], a[1] - prev_pt[1])
-                            if gap > grid.resolution / 2:
-                                # Issue #3508: MITER the corner join.  A
-                                # straight bevel chord between the two
-                                # offset endpoints passes INSIDE the
-                                # corner (d*cos(45deg) ~ 0.75*d at a 90
-                                # degree turn), shaving the coupled gap
-                                # below the intra-pair clearance -- the
-                                # measured one-mild-violation-per-pair
-                                # Phase B churn.  Extending both offset
-                                # segments to their line intersection
-                                # keeps the full offset everywhere.
-                                mx = None
-                                if elements and elements[-1][0] == "seg":
-                                    pseg = elements[-1]
-                                    d1x, d1y = pseg[3] - pseg[1], pseg[4] - pseg[2]
-                                    d2x, d2y = b[0] - a[0], b[1] - a[1]
-                                    denom = d1x * d2y - d1y * d2x
-                                    if abs(denom) > 1e-9:
-                                        t = (
-                                            (a[0] - pseg[3]) * d2y - (a[1] - pseg[4]) * d2x
-                                        ) / denom
-                                        cand = (
-                                            pseg[3] + d1x * t,
-                                            pseg[4] + d1y * t,
-                                        )
-                                        # Bound the miter spike (sharp
-                                        # angles) to ~2 gaps.
-                                        if (
-                                            math.hypot(
-                                                cand[0] - prev_pt[0],
-                                                cand[1] - prev_pt[1],
-                                            )
-                                            <= 2.0 * d + gap
-                                        ):
-                                            mx = cand
-                                if mx is not None:
-                                    pseg = elements[-1]
+                            # Issue #3508 / #4460: join the corner between the
+                            # previous offset segment and this one.  A straight
+                            # bevel chord between the two offset endpoints cuts
+                            # INSIDE the corner (d*cos(45deg) ~ 0.75*d at a 90
+                            # degree turn), shaving the coupled gap below the
+                            # intra-pair clearance; worse, at a SHARP inside
+                            # (concave) bend the offset polyline folds over
+                            # itself and the bevel dives a fold segment clear
+                            # across the guide centerline (a full-trace-width
+                            # local self-cross).  ``_offset_corner_join`` mitres
+                            # inside corners to the offset-line intersection
+                            # (de-folding without ever crossing the guide) and
+                            # keeps the spike bound only for convex corners.
+                            if elements and elements[-1][0] == "seg":
+                                pseg = elements[-1]
+                                mode, mx = self._offset_corner_join(
+                                    (pseg[1], pseg[2]),
+                                    (pseg[3], pseg[4]),
+                                    a,
+                                    b,
+                                    side,
+                                    d,
+                                    grid.resolution,
+                                )
+                                if mode == "miter" and mx is not None:
                                     elements[-1] = ("seg", pseg[1], pseg[2], mx[0], mx[1], pseg[5])
                                     a = mx
-                                else:
+                                elif mode == "bevel":
                                     elements.append(
                                         ("seg", prev_pt[0], prev_pt[1], a[0], a[1], sec_layer)
                                     )
+                            elif (
+                                math.hypot(a[0] - prev_pt[0], a[1] - prev_pt[1])
+                                > grid.resolution / 2
+                            ):
+                                elements.append(
+                                    ("seg", prev_pt[0], prev_pt[1], a[0], a[1], sec_layer)
+                                )
                     elements.append(("seg", a[0], a[1], b[0], b[1], sec_layer))
                     prev_pt = b
                     prev_layer = sec_layer

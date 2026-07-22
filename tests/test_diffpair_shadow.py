@@ -217,6 +217,122 @@ def test_point_segment_distance_beyond_endpoint():
 
 
 # ---------------------------------------------------------------------------
+# 4b. inside-bend self-overlap mitigation (#4460)
+# ---------------------------------------------------------------------------
+#
+# ``_offset_corner_join`` decides how two consecutive fixed-side parallel
+# offset segments meet.  At a sharp INSIDE (concave) bend the offset polyline
+# folds over itself; the old straight-bevel fallback then dove a fold segment
+# clear across the guide centerline (a full-trace-width local self-cross).
+# These tests pin the corrected behaviour: concave corners mitre to the
+# offset-line intersection (staying on the offset side, never crossing the
+# guide) while convex spikes stay bounded.
+
+
+def _offset_endpoints(p0, p1, side, d):
+    """Offset a guide segment ``p0->p1`` by ``d`` on the given lateral side.
+
+    Mirrors the offset formula in ``_shadow_route_pair`` (normal is
+    ``(-u_y, u_x) * side``), so the corner-join inputs match what the
+    constructor actually feeds the helper.
+    """
+    ux, uy = p1[0] - p0[0], p1[1] - p0[1]
+    length = math.hypot(ux, uy)
+    ux, uy = ux / length, uy / length
+    nx, ny = -uy * side, ux * side
+    return (p0[0] + d * nx, p0[1] + d * ny), (p1[0] + d * nx, p1[1] + d * ny)
+
+
+def test_offset_corner_join_sharp_concave_mitres_without_crossing_guide():
+    """A sharp inside bend mitres to the intersection, staying off the guide.
+
+    Guide reverses direction near 180 deg (V0->V East, then V->V2 back to the
+    upper-left).  With the old ``2*d + gap`` spike bound this concave corner
+    exceeded the bound and fell back to a straight bevel from ``prev_pt`` to
+    ``a`` -- a chord that crosses the guide centerline (y == 0).  The fix
+    mitres instead; the apex must stay strictly on the offset side (y > 0).
+    """
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    d = 0.25
+    v0, v, v2 = (-10.0, 0.0), (0.0, 0.0), (-8.0, 1.0)
+    pseg_start, pseg_end = _offset_endpoints(v0, v, +1.0, d)
+    a, b = _offset_endpoints(v, v2, +1.0, d)
+
+    mode, mx = DiffPairRouter._offset_corner_join(
+        pseg_start, pseg_end, a, b, side=+1.0, d=d, resolution=0.05
+    )
+
+    assert mode == "miter"
+    assert mx is not None
+    # The offset side is +y here; a correct de-fold apex never crosses to the
+    # far (guide/partner) side.
+    assert mx[1] > 0.0
+    # The straight bevel the fix REPLACES would have crossed the guide: the
+    # chord prev_pt -> a spans from +y to -y.
+    assert pseg_end[1] > 0.0 > a[1]
+
+
+def test_offset_corner_join_sharp_convex_stays_bounded_as_bevel():
+    """A sharp OUTSIDE bend keeps the spike bound and falls back to a bevel.
+
+    Same near-reversal geometry on the opposite lateral side is convex; its
+    miter spike is unbounded, so the helper must NOT emit it (that would be a
+    long copper spur).  It degrades to the bevel, which stays on the offset
+    side for a convex corner.
+    """
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    d = 0.25
+    v0, v, v2 = (-10.0, 0.0), (0.0, 0.0), (-8.0, 1.0)
+    pseg_start, pseg_end = _offset_endpoints(v0, v, -1.0, d)
+    a, b = _offset_endpoints(v, v2, -1.0, d)
+
+    mode, mx = DiffPairRouter._offset_corner_join(
+        pseg_start, pseg_end, a, b, side=-1.0, d=d, resolution=0.05
+    )
+
+    assert mode == "bevel"
+    assert mx is None
+
+
+def test_offset_corner_join_gentle_convex_mitres():
+    """A 90 deg outside corner is within the spike bound -> mitre (unchanged)."""
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    d = 0.25
+    # East then North: a right-angle turn.  Offset side +1 (left of travel)
+    # is the OUTSIDE of this left turn's partner... pick the convex side.
+    v0, v, v2 = (-10.0, 0.0), (0.0, 0.0), (0.0, 10.0)
+    pseg_start, pseg_end = _offset_endpoints(v0, v, -1.0, d)
+    a, b = _offset_endpoints(v, v2, -1.0, d)
+
+    mode, mx = DiffPairRouter._offset_corner_join(
+        pseg_start, pseg_end, a, b, side=-1.0, d=d, resolution=0.05
+    )
+
+    assert mode == "miter"
+    assert mx is not None
+
+
+def test_offset_corner_join_collinear_needs_no_join():
+    """Collinear continuation (endpoints already meet) returns ``none``."""
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    d = 0.25
+    v0, v, v2 = (-10.0, 0.0), (0.0, 0.0), (10.0, 0.0)
+    pseg_start, pseg_end = _offset_endpoints(v0, v, +1.0, d)
+    a, b = _offset_endpoints(v, v2, +1.0, d)
+
+    mode, mx = DiffPairRouter._offset_corner_join(
+        pseg_start, pseg_end, a, b, side=+1.0, d=d, resolution=0.05
+    )
+
+    assert mode == "none"
+    assert mx is None
+
+
+# ---------------------------------------------------------------------------
 # 5. mid-route asymmetric moves
 # ---------------------------------------------------------------------------
 
