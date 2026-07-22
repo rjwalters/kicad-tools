@@ -273,8 +273,22 @@ NB_MODULE(router_cpp, m) {
 
     // Pathfinder class
     nb::class_<Pathfinder>(m, "Pathfinder")
+        // Issue #4485: ``Pathfinder`` stores ``Grid3D& grid_`` -- a bare C++
+        // reference to the ``Grid3D`` argument.  Without a keep-alive policy
+        // nanobind is free to garbage-collect the Python ``Grid3D`` wrapper as
+        // soon as the caller drops its last reference (e.g. the common
+        // ``Pathfinder(Grid3D(...), rules).route(...)`` idiom, where the grid
+        // is an unnamed temporary).  That frees the underlying ``cells_``
+        // storage and leaves ``grid_`` dangling; the next ``route()`` reads
+        // freed heap, producing the nondeterministic segment-count instability
+        // reported in #4485 (confirmed as a heap-use-after-free by
+        // AddressSanitizer at ``pathfinder.cpp`` ``grid_.at(...)``).
+        // ``keep_alive<1, 2>`` ties the grid's lifetime (patient, arg index 2)
+        // to the newly-constructed Pathfinder (nurse, index 1 = the implicit
+        // ``self``/instance slot of the ``__init__`` binding).
         .def(nb::init<Grid3D&, const DesignRules&, bool>(),
-             "grid"_a, "rules"_a, "diagonal_routing"_a = true)
+             "grid"_a, "rules"_a, "diagonal_routing"_a = true,
+             nb::keep_alive<1, 2>())
         // Issue #4346: ``start_pad_bounds`` / ``end_pad_bounds`` are bound via a
         // thin lambda taking ``std::optional<PadBounds>`` defaulting to
         // ``nb::none()`` instead of a materialized ``PadBounds{}`` default arg.
@@ -491,11 +505,17 @@ NB_MODULE(router_cpp, m) {
     // the string-keyed rejection histogram out of the C++ search (previously
     // Python-only), surfaced on ``CoupledRouteResult::rejections``.
     nb::class_<CoupledPathfinder>(m, "CoupledPathfinder")
+        // Issue #4485: like ``Pathfinder``, ``CoupledPathfinder`` holds a bare
+        // ``Grid3D& grid_`` reference, so the grid argument must outlive the
+        // pathfinder.  ``keep_alive<1, 2>`` ties the grid (patient, arg index
+        // 2) to the constructed CoupledPathfinder (nurse, index 1) to prevent
+        // the same dangling-reference use-after-free.
         .def(nb::init<Grid3D&, const DesignRules&, int, int, int, int, int,
                       double, double>(),
              "grid"_a, "rules"_a, "target_spacing_cells"_a, "min_spacing_cells"_a,
              "trace_half_width_cells"_a, "via_extra_cells"_a, "via_drill_cells"_a,
-             "spacing_penalty_factor"_a, "heuristic_weight"_a)
+             "spacing_penalty_factor"_a, "heuristic_weight"_a,
+             nb::keep_alive<1, 2>())
         .def("route", &CoupledPathfinder::route,
              "p_start_x"_a, "p_start_y"_a, "n_start_x"_a, "n_start_y"_a,
              "start_layer"_a,
