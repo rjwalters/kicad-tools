@@ -236,11 +236,15 @@ if [[ -n "$WORKTREE_PATH_OVERRIDE" ]]; then
   fi
   _WT_ABS="$(cd "$WORKTREE_PATH_OVERRIDE" 2>/dev/null && pwd -P)" || \
     error "--worktree-path could not be resolved: $WORKTREE_PATH_OVERRIDE"
-  # Verify the path is actually a worktree of this repo. `git worktree list`
-  # prints absolute paths in column 1; awk on $1 is robust to trailing
-  # metadata columns. We compare against the resolved absolute path.
+  # Verify the path is actually a worktree of this repo. Each porcelain stanza
+  # begins with a literal `worktree ` prefix (9 chars) followed by the
+  # unquoted, unescaped absolute path — which may contain spaces. Parse the
+  # path with substr($0, 10), NOT $2/whitespace-split (which truncates at the
+  # first space). Caveat: a path containing a literal newline would still break
+  # this line-oriented parse; `--porcelain -z` (NUL-delimited) would be needed
+  # for full robustness, but spaces are the realistic failure mode (#3717).
   if ! git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | \
-       awk -v p="$_WT_ABS" '/^worktree / { if ($2 == p) { found=1; exit } } END { exit !found }'; then
+       awk -v p="$_WT_ABS" '/^worktree / { if (substr($0, 10) == p) { found=1; exit } } END { exit !found }'; then
     error "--worktree-path is not a registered worktree of this repository: $WORKTREE_PATH_OVERRIDE (resolved: $_WT_ABS)"
   fi
   WORKTREE_PATH_OVERRIDE="$_WT_ABS"
@@ -276,6 +280,119 @@ fi
 info "Merging PR #$PR_NUMBER: $PR_TITLE"
 info "Branch: $PR_BRANCH"
 
+# ---------------------------------------------------------------------------
+# Partial-increment label reset (#3667).
+#
+# A PR that implements only a slice of a family/epic issue references it with a
+# NON-closing keyword — `Part of #N` / `Contributes to #N` (convention in
+# builder-pr.md) — deliberately so the issue survives the merge for further
+# work. GitHub never auto-closes such an issue, and the merge path otherwise
+# leaves `loom:building` orphaned on it: the #2838 "skip label cleanup on close"
+# decision only reasoned about the `Closes #N` auto-close case, where GitHub
+# closes the issue and stale labels on closed items are harmless. Nothing else
+# reclaims the label until a time-gated `/sweep all` stale-claim pass (>=2h),
+# and non-aggressive sweeps hard-skip the still-`loom:building` issue
+# indefinitely (issue #3667).
+#
+# Here — at the deterministic merge choke point — we swap each such still-open,
+# still-`loom:building` referenced issue back to `loom:issue`, mirroring
+# orphan_recovery.py's recover_issue() label-reset semantics (loom:building ->
+# loom:issue, i.e. return to the ready queue). No liveness check is needed: a
+# merge just happened on the PR that necessarily came from whoever held the
+# claim, so the current increment's work is provably done — a deterministic,
+# not heuristic, signal. Closing keywords (`Closes`/`Fixes`/`Resolves`) are NOT
+# matched — GitHub auto-closes those and the #2838 no-cleanup path stays
+# untouched.
+#
+# GitHub-only for v1 (guarded on FORGE_TYPE); merge-pr.sh already branches on
+# forge type elsewhere. Every step is best-effort and must never fail the merge.
+
+# Reset a single referenced issue's labels if — verified fresh at merge time —
+# it is still open and still carries loom:building. Idempotent: a no-op when the
+# issue is already closed, already lacks loom:building (e.g. re-claimed by a
+# second builder), or is actually a PR.
+_reset_one_partial_issue() {
+  local issue_num="$1"
+  local issue_json issue_state issue_labels
+
+  # Fresh (uncached) read so we see the label state AS OF the merge, not as of
+  # PR creation. Plain `gh api` is uncached; use it directly (not $GH, which may
+  # be gh-cached) to avoid a stale cached view masking a fresh re-claim.
+  issue_json="$(gh api "repos/$REPO_NWO/issues/$issue_num" 2>/dev/null || echo '{}')"
+
+  # The GitHub issues endpoint also returns PRs (a PR is an issue with a
+  # .pull_request member). Never mutate a PR that slipped through the regex.
+  if [[ "$(echo "$issue_json" | jq -r 'has("pull_request")')" == "true" ]]; then
+    return 0
+  fi
+
+  issue_state="$(echo "$issue_json" | jq -r '.state // ""')"
+  if [[ "$issue_state" != "open" ]]; then
+    info "Partial-increment reset: issue #$issue_num is not open (state='${issue_state:-unknown}') — skipping"
+    return 0
+  fi
+
+  issue_labels="$(echo "$issue_json" | jq -r '.labels[]?.name' 2>/dev/null || true)"
+  if ! printf '%s\n' "$issue_labels" | grep -qx 'loom:building'; then
+    info "Partial-increment reset: issue #$issue_num is not loom:building — skipping (idempotent)"
+    return 0
+  fi
+
+  info "Partial-increment reset: PR #$PR_NUMBER merged as a partial slice of #$issue_num; returning it to the ready queue"
+  if gh issue edit "$issue_num" \
+       --repo "$REPO_NWO" \
+       --remove-label "loom:building" \
+       --add-label "loom:issue" >/dev/null 2>&1; then
+    success "Issue #$issue_num: loom:building -> loom:issue (partial increment; issue remains open)"
+    local ts comment
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment="## Partial Increment Merged
+
+PR #$PR_NUMBER merged with a non-closing \`Part of\` / \`Contributes to\` reference, so this issue remains **open** for further work.
+
+**Action taken**:
+- Removed \`loom:building\` label
+- Added \`loom:issue\` label to return to the ready queue
+
+This issue is now available for the next increment (a subsequent \`/loom:sweep\` will treat it as ready rather than in-flight).
+
+---
+*Reset by merge-pr.sh (#3667) at $ts*"
+    gh issue comment "$issue_num" --repo "$REPO_NWO" --body "$comment" >/dev/null 2>&1 || \
+      warning "Could not post partial-increment comment on issue #$issue_num (label swap still applied)"
+  else
+    warning "Could not reset labels on issue #$issue_num (partial increment) — may need manual 'gh issue edit'"
+  fi
+}
+
+# Parse the merged PR body for non-closing partial-increment references and
+# reset each referenced issue. Best-effort; returns 0 unconditionally.
+_reset_partial_increment_labels() {
+  [[ "$FORGE_TYPE" == "github" ]] || return 0
+
+  local pr_body
+  pr_body="$(echo "$PR_JSON" | jq -r '.body // ""')"
+  [[ -n "$pr_body" ]] || return 0
+
+  # Extract issue numbers referenced with a NON-closing partial-increment
+  # keyword: "Part of #N" / "Contributes to #N" (case-insensitive), deduped.
+  # grep -oiE emits e.g. "Part of #123"; a second grep strips to the number.
+  local refs
+  refs="$(printf '%s\n' "$pr_body" \
+    | grep -oiE '(Part of|Contributes to)[[:space:]]+#[0-9]+' \
+    | grep -oE '[0-9]+' \
+    | sort -u || true)"
+  [[ -n "$refs" ]] || return 0
+
+  local issue_num
+  while IFS= read -r issue_num; do
+    [[ -n "$issue_num" ]] || continue
+    _reset_one_partial_issue "$issue_num"
+  done <<< "$refs"
+
+  return 0
+}
+
 # Handle auto-merge mode
 #
 # The auto-merge path now mirrors the sync path's resilience patterns:
@@ -297,6 +414,13 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
   MAX_MERGE_RETRIES=3
   MERGE_RETRY_DELAY=5
   AUTO_MERGE_OK=false
+
+  # Bounded poll window for the UNSTABLE-because-checks-are-still-running case
+  # (#3664). Reuses the same env-var names/semantics as the Gitea auto-merge
+  # poller (loom-tools/src/loom_tools/auto_merge.py) so both forges share
+  # configuration. Defaults match that CLI: 30s interval, 600s ceiling.
+  LOOM_AUTO_MERGE_POLL_INTERVAL="${LOOM_AUTO_MERGE_POLL_INTERVAL:-30}"
+  LOOM_AUTO_MERGE_TIMEOUT="${LOOM_AUTO_MERGE_TIMEOUT:-600}"
 
   for MERGE_ATTEMPT in $(seq 1 $MAX_MERGE_RETRIES); do
     AUTO_MERGE_OUTPUT=""
@@ -337,6 +461,45 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
       fi
     fi
 
+    # No-required-checks fallback (#3720). When the repo defines ZERO required
+    # status checks, GitHub's enablePullRequestAutoMerge mutation is rejected
+    # outright — there is nothing to queue the merge behind. The rejection
+    # string for that case matches NEITHER the "is in clean status" NOR the
+    # "is in unstable status" grep below, so it previously fell through to the
+    # generic terminal error at the bottom of this loop (issue #3720: docs-only
+    # PRs #4400/#4399 were UNSTABLE from non-required pending jobs and could not
+    # enable auto-merge, yet a plain synchronous merge succeeded because they
+    # were MERGEABLE).
+    #
+    # This fallback is deliberately STRING-INDEPENDENT (it never inspects
+    # AUTO_MERGE_OUTPUT) and self-gating: it fires only when
+    #   (1) the base branch has NO required status check contexts, AND
+    #   (2) the PR is mergeable (.mergeable == true).
+    # In that case an immediate synchronous merge is exactly equivalent to a
+    # server-side auto-merge — there is no required check to wait for. It
+    # preserves the #3664/#3486/#3678 required-check gating BY CONSTRUCTION:
+    # with ANY required check present, the contexts list is non-empty and this
+    # branch is skipped, leaving the UNSTABLE classifier below in charge. A
+    # lookup failure (nonzero exit) fails closed (skip → preserve existing
+    # behavior). We re-fetch PR state fresh because REST `.mergeable` is null
+    # until GitHub computes it — the initial fetch may predate that.
+    _NRC_RECHECK_JSON="$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')"
+    _NRC_BASE_REF="$(echo "$_NRC_RECHECK_JSON" | jq -r '.base.ref // empty')"
+    _NRC_MERGEABLE="$(echo "$_NRC_RECHECK_JSON" | jq -r '.mergeable // empty')"
+    if [[ -n "$_NRC_BASE_REF" ]] && [[ "$_NRC_MERGEABLE" == "true" ]]; then
+      _NRC_REQUIRED=""
+      _NRC_LOOKUP_RC=0
+      _NRC_REQUIRED="$(forge_get_required_status_check_contexts "$REPO_NWO" "$_NRC_BASE_REF" "$GH" 2>/dev/null)" || _NRC_LOOKUP_RC=$?
+      if [[ "$_NRC_LOOKUP_RC" -eq 0 ]] && [[ -z "$_NRC_REQUIRED" ]]; then
+        info "PR #$PR_NUMBER: repo has no required status checks and PR is mergeable; falling back to immediate merge"
+        unset _NRC_RECHECK_JSON _NRC_BASE_REF _NRC_MERGEABLE _NRC_REQUIRED _NRC_LOOKUP_RC 2>/dev/null || true
+        AUTO_MERGE=false      # let the synchronous-merge block below run
+        AUTO_MERGE_OK=true    # bypass the post-loop "after N attempts" guard
+        break
+      fi
+    fi
+    unset _NRC_RECHECK_JSON _NRC_BASE_REF _NRC_MERGEABLE _NRC_REQUIRED _NRC_LOOKUP_RC 2>/dev/null || true
+
     # PR is already CLEAN — GitHub's enablePullRequestAutoMerge mutation rejects
     # this state with "Pull request Pull request is in clean status" (the
     # doubled-word prefix is from GitHub's GraphQL error formatter). Match on
@@ -350,17 +513,32 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
     fi
 
     # PR is UNSTABLE — GitHub's enablePullRequestAutoMerge mutation rejects this
-    # state with "Pull request Pull request is in unstable status" when one or
-    # more rollup checks are red. The auto-merge call would deadlock indefinitely
-    # waiting for those checks to go green, but if every failing check is
-    # informational (NOT in branch protection's requiredStatusCheckContexts)
-    # the immediate-merge path would succeed. Detect that case and fall through;
-    # otherwise preserve the existing UNSTABLE refusal so we never bypass a
-    # genuinely required check. Sibling of the CLEAN-fallback above. See #3486.
+    # state with "Pull request Pull request is in unstable status". GitHub emits
+    # the SAME string whether the rollup is red (a check FAILED) or merely yellow
+    # (checks still QUEUED/IN_PROGRESS). We resolve the PR's head-SHA check-runs
+    # and distinguish, in precedence order:
+    #
+    #   (a) A required check has genuinely FAILED  -> refuse (terminal error),
+    #       without waiting out the pending timeout.
+    #   (b) A check is still QUEUED/IN_PROGRESS    -> the merge state will settle
+    #       (conclusion == null, so it never shows    on its own; poll until it
+    #       up as "failing"). This is the #3664       resolves to (a)/(c)/CLEAN,
+    #       "checks still running" case.               bounded by
+    #                                                   LOOM_AUTO_MERGE_TIMEOUT.
+    #   (c) Every FAILED check is informational    -> immediate-merge fallback
+    #       (NOT in branch protection) and nothing     (#3486, unchanged).
+    #       is pending.
+    #   (d) Nothing failed, nothing pending, and   -> genuine "unknown gap"
+    #       we never observed a pending check          (e.g. commit-status, not
+    #       (e.g. commit-status failures the           check-run, failures) ->
+    #       check-runs API omits).                     refuse (terminal),
+    #                                                   preserving the #3486
+    #                                                   defensive hard-error.
+    #
+    # Once the checks we waited on all pass, the PR is effectively CLEAN and we
+    # fall through to immediate merge (mirroring the CLEAN-fallback above).
+    # Sibling of the CLEAN-fallback above. See #3371, #3486, #3664.
     if echo "$AUTO_MERGE_OUTPUT" | grep -q "is in unstable status"; then
-      # Resolve the failing check names from the rollup against the PR's head
-      # SHA, then compute (failing_checks) \ (required_contexts). If the set
-      # difference equals failing_checks, every failure is informational.
       _UNSTABLE_HEAD_SHA="$(echo "$PR_JSON" | jq -r '.head.sha // empty')"
       _UNSTABLE_BASE_REF="$(echo "$PR_JSON" | jq -r '.base.ref // empty')"
       if [[ -z "$_UNSTABLE_HEAD_SHA" ]] || [[ -z "$_UNSTABLE_BASE_REF" ]]; then
@@ -369,61 +547,154 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
         error "Failed to enable auto-merge for PR #$PR_NUMBER: $AUTO_MERGE_OUTPUT"
       fi
 
-      _UNSTABLE_FAILING_RAW="$(forge_get_check_runs "$REPO_NWO" "$_UNSTABLE_HEAD_SHA" 2>/dev/null || echo '{"check_runs":[]}')"
-      # Names of failing check runs (conclusion=failure OR conclusion=timed_out).
-      # Sort + uniq to dedupe re-runs with the same context.
-      _UNSTABLE_FAILING="$(echo "$_UNSTABLE_FAILING_RAW" | \
-        jq -r '[.check_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled" or .conclusion == "action_required") | .name] | unique | .[]' 2>/dev/null || true)"
+      _UNSTABLE_FALLBACK_TO_MERGE=false
+      _UNSTABLE_OBSERVED_PENDING=false
+      _UNSTABLE_DEADLINE=$(( $(date +%s) + LOOM_AUTO_MERGE_TIMEOUT ))
 
-      if [[ -z "$_UNSTABLE_FAILING" ]]; then
-        # No failing checks were enumerated — could be a transient API gap or
-        # commit-status (vs check-run) failures. Be safe and keep the existing
-        # error path.
+      while true; do
+        # Fetch the check-runs rollup, capturing the helper's own exit status
+        # separately from the JSON payload. A transient fetch failure (network
+        # blip, 5xx, Gitea `return 1`) must NOT be collapsed into the same
+        # `{"check_runs":[]}` shape a legitimately empty rollup produces —
+        # doing so lets a fetch error masquerade as "no failing, no pending"
+        # and, once a pending check has been observed, take the resolved-green
+        # immediate-merge branch on a commit whose real check state is unknown
+        # (#3678). Retry once to absorb a single blip, then route a persistent
+        # failure into the SAME bounded pending-wait path used by branch (b)
+        # below so the LOOM_AUTO_MERGE_TIMEOUT bound still applies.
+        _UNSTABLE_FETCH_RC=0
+        _UNSTABLE_FAILING_RAW="$(forge_get_check_runs "$REPO_NWO" "$_UNSTABLE_HEAD_SHA" 2>/dev/null)" || _UNSTABLE_FETCH_RC=$?
+        if [[ "$_UNSTABLE_FETCH_RC" -ne 0 ]]; then
+          _UNSTABLE_FETCH_RC=0
+          _UNSTABLE_FAILING_RAW="$(forge_get_check_runs "$REPO_NWO" "$_UNSTABLE_HEAD_SHA" 2>/dev/null)" || _UNSTABLE_FETCH_RC=$?
+        fi
+        if [[ "$_UNSTABLE_FETCH_RC" -ne 0 ]]; then
+          # Fetch is failing (twice). Treat as still-pending and keep polling,
+          # reusing the (b) branch's merged-concurrently recheck + deadline
+          # guard so this never bypasses the bounded-wait/timeout semantics.
+          warning "Failed to fetch check-runs for PR #$PR_NUMBER (rc=$_UNSTABLE_FETCH_RC); treating as still-pending and continuing to poll"
+          _UNSTABLE_RECHECK_JSON="$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')"
+          if [[ "$(echo "$_UNSTABLE_RECHECK_JSON" | jq -r '.merged // false')" == "true" ]]; then
+            warning "PR #$PR_NUMBER merged by another process while waiting for checks"
+            AUTO_MERGE_OK=true
+            break
+          fi
+          if [[ "$(date +%s)" -ge "$_UNSTABLE_DEADLINE" ]]; then
+            error "Timed out after ${LOOM_AUTO_MERGE_TIMEOUT}s waiting for check-runs to become fetchable for PR #$PR_NUMBER (last fetch rc=$_UNSTABLE_FETCH_RC). Re-run the merge once the forge API is healthy, or raise LOOM_AUTO_MERGE_TIMEOUT."
+          fi
+          info "PR #$PR_NUMBER is UNSTABLE: check-runs fetch failing (rc=$_UNSTABLE_FETCH_RC); waiting ${LOOM_AUTO_MERGE_POLL_INTERVAL}s for the forge API (timeout ${LOOM_AUTO_MERGE_TIMEOUT}s)..."
+          sleep "$LOOM_AUTO_MERGE_POLL_INTERVAL"
+          continue
+        fi
+        # Names of failing check runs (terminal non-success conclusions).
+        # Sort + uniq to dedupe re-runs with the same context.
+        _UNSTABLE_FAILING="$(echo "$_UNSTABLE_FAILING_RAW" | \
+          jq -r '[.check_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled" or .conclusion == "action_required") | .name] | unique | .[]' 2>/dev/null || true)"
+        # Names of checks that are still running (queued or in_progress → not
+        # yet completed, conclusion == null). These never appear in
+        # _UNSTABLE_FAILING; they are the #3664 "still running" case.
+        _UNSTABLE_PENDING="$(echo "$_UNSTABLE_FAILING_RAW" | \
+          jq -r '[.check_runs[] | select(.status != "completed") | .name] | unique | .[]' 2>/dev/null || true)"
+
+        if [[ -n "$_UNSTABLE_FAILING" ]]; then
+          # Some check FAILED — classify against branch protection. A nonzero
+          # exit from the helper signals a lookup failure (Gitea 5xx, network
+          # error, missing token, unknown forge) — fail closed and refuse.
+          _UNSTABLE_REQUIRED=""
+          _UNSTABLE_LOOKUP_RC=0
+          _UNSTABLE_REQUIRED="$(forge_get_required_status_check_contexts "$REPO_NWO" "$_UNSTABLE_BASE_REF" "$GH" 2>/dev/null)" || _UNSTABLE_LOOKUP_RC=$?
+          if [[ "$_UNSTABLE_LOOKUP_RC" -ne 0 ]]; then
+            warning "Failed to resolve required status checks for $_UNSTABLE_BASE_REF (rc=$_UNSTABLE_LOOKUP_RC); preserving UNSTABLE refusal"
+            error "Failed to enable auto-merge for PR #$PR_NUMBER: $AUTO_MERGE_OUTPUT"
+          fi
+
+          # Set difference: failing_checks \ required_contexts (informational)
+          # and failing_checks ∩ required_contexts (overlap).
+          _UNSTABLE_INFORMATIONAL="$(comm -23 \
+            <(printf '%s\n' "$_UNSTABLE_FAILING" | sort -u) \
+            <(printf '%s\n' "$_UNSTABLE_REQUIRED" | sort -u))"
+          _UNSTABLE_OVERLAP="$(comm -12 \
+            <(printf '%s\n' "$_UNSTABLE_FAILING" | sort -u) \
+            <(printf '%s\n' "$_UNSTABLE_REQUIRED" | sort -u))"
+
+          if [[ -n "$_UNSTABLE_OVERLAP" ]]; then
+            # (a) A branch-protection-required check has failed. The PR can
+            # never merge on this SHA — refuse now, without waiting on any
+            # still-pending checks.
+            error "Failed to enable auto-merge for PR #$PR_NUMBER: $AUTO_MERGE_OUTPUT"
+          fi
+
+          if [[ -z "$_UNSTABLE_PENDING" ]]; then
+            # (c) Every failing check is informational and nothing is pending.
+            # Log the names, then fall through to the synchronous-merge path.
+            _UNSTABLE_COUNT="$(printf '%s\n' "$_UNSTABLE_INFORMATIONAL" | wc -l | tr -d ' ')"
+            info "Falling back to immediate merge: ${_UNSTABLE_COUNT} informational check(s) failing (not in branch protection):"
+            printf '%s\n' "$_UNSTABLE_INFORMATIONAL" | while IFS= read -r _ctx; do
+              [[ -n "$_ctx" ]] && info "    - $_ctx"
+            done
+            _UNSTABLE_FALLBACK_TO_MERGE=true
+            break
+          fi
+          # Informational failures but other checks are still running — don't
+          # merge until everything settles. Fall through to the pending wait.
+        fi
+
+        if [[ -n "$_UNSTABLE_PENDING" ]]; then
+          # (b) Checks still running. Wait, bounded by LOOM_AUTO_MERGE_TIMEOUT.
+          _UNSTABLE_OBSERVED_PENDING=true
+
+          # A concurrent merger may have completed the PR while we waited.
+          _UNSTABLE_RECHECK_JSON="$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')"
+          if [[ "$(echo "$_UNSTABLE_RECHECK_JSON" | jq -r '.merged // false')" == "true" ]]; then
+            warning "PR #$PR_NUMBER merged by another process while waiting for checks"
+            AUTO_MERGE_OK=true
+            break
+          fi
+
+          if [[ "$(date +%s)" -ge "$_UNSTABLE_DEADLINE" ]]; then
+            _UNSTABLE_PENDING_COUNT="$(printf '%s\n' "$_UNSTABLE_PENDING" | wc -l | tr -d ' ')"
+            error "Timed out after ${LOOM_AUTO_MERGE_TIMEOUT}s waiting for ${_UNSTABLE_PENDING_COUNT} pending check(s) on PR #$PR_NUMBER to complete (still queued/in_progress). Re-run the merge once CI settles, or raise LOOM_AUTO_MERGE_TIMEOUT."
+          fi
+
+          _UNSTABLE_PENDING_COUNT="$(printf '%s\n' "$_UNSTABLE_PENDING" | wc -l | tr -d ' ')"
+          info "PR #$PR_NUMBER is UNSTABLE: ${_UNSTABLE_PENDING_COUNT} check(s) still running; waiting ${LOOM_AUTO_MERGE_POLL_INTERVAL}s for CI (timeout ${LOOM_AUTO_MERGE_TIMEOUT}s)..."
+          sleep "$LOOM_AUTO_MERGE_POLL_INTERVAL"
+          continue
+        fi
+
+        # Nothing failing, nothing pending.
+        if [[ "$_UNSTABLE_OBSERVED_PENDING" == "true" ]]; then
+          # The checks we waited on all resolved green — the PR is now
+          # effectively CLEAN. Fall through to immediate merge.
+          info "PR #$PR_NUMBER checks resolved green; falling back to immediate merge"
+          _UNSTABLE_FALLBACK_TO_MERGE=true
+          break
+        fi
+        # (d) Never observed a pending check and none failed — a transient API
+        # gap or commit-status (vs check-run) failure the check-runs API omits.
+        # Be safe and keep the existing #3486 defensive error path.
         error "Failed to enable auto-merge for PR #$PR_NUMBER: $AUTO_MERGE_OUTPUT"
-      fi
+      done
 
-      # Required contexts on the merge-target branch. Empty output means there
-      # is no branch protection rule (or no required checks configured), so
-      # every failing check is informational. A nonzero exit from the helper
-      # signals a lookup failure (e.g. Gitea 5xx, network error, missing token,
-      # or an unknown forge) — fail closed and preserve the UNSTABLE refusal.
-      _UNSTABLE_REQUIRED=""
-      _UNSTABLE_LOOKUP_RC=0
-      _UNSTABLE_REQUIRED="$(forge_get_required_status_check_contexts "$REPO_NWO" "$_UNSTABLE_BASE_REF" "$GH" 2>/dev/null)" || _UNSTABLE_LOOKUP_RC=$?
-      if [[ "$_UNSTABLE_LOOKUP_RC" -ne 0 ]]; then
-        warning "Failed to resolve required status checks for $_UNSTABLE_BASE_REF (rc=$_UNSTABLE_LOOKUP_RC); preserving UNSTABLE refusal"
-        unset _UNSTABLE_LOOKUP_RC
-        error "Failed to enable auto-merge for PR #$PR_NUMBER: $AUTO_MERGE_OUTPUT"
-      fi
-      unset _UNSTABLE_LOOKUP_RC
+      unset _UNSTABLE_HEAD_SHA _UNSTABLE_BASE_REF _UNSTABLE_FAILING_RAW \
+        _UNSTABLE_FAILING _UNSTABLE_PENDING _UNSTABLE_REQUIRED \
+        _UNSTABLE_INFORMATIONAL _UNSTABLE_OVERLAP _UNSTABLE_COUNT \
+        _UNSTABLE_PENDING_COUNT _UNSTABLE_DEADLINE _UNSTABLE_RECHECK_JSON \
+        _UNSTABLE_LOOKUP_RC _UNSTABLE_FETCH_RC _UNSTABLE_OBSERVED_PENDING 2>/dev/null || true
 
-      # Compute set difference: failing_checks \ required_contexts.
-      # `comm -23 <failing> <required>` lists lines unique to failing.
-      _UNSTABLE_INFORMATIONAL="$(comm -23 \
-        <(printf '%s\n' "$_UNSTABLE_FAILING" | sort -u) \
-        <(printf '%s\n' "$_UNSTABLE_REQUIRED" | sort -u))"
-      _UNSTABLE_OVERLAP="$(comm -12 \
-        <(printf '%s\n' "$_UNSTABLE_FAILING" | sort -u) \
-        <(printf '%s\n' "$_UNSTABLE_REQUIRED" | sort -u))"
-
-      if [[ -z "$_UNSTABLE_OVERLAP" ]] && [[ -n "$_UNSTABLE_INFORMATIONAL" ]]; then
-        # Every failing check is informational. Log a clear INFO message
-        # naming them, then fall through to the synchronous-merge path.
-        _UNSTABLE_COUNT="$(printf '%s\n' "$_UNSTABLE_INFORMATIONAL" | wc -l | tr -d ' ')"
-        info "Falling back to immediate merge: ${_UNSTABLE_COUNT} informational check(s) failing (not in branch protection):"
-        printf '%s\n' "$_UNSTABLE_INFORMATIONAL" | while IFS= read -r _ctx; do
-          [[ -n "$_ctx" ]] && info "    - $_ctx"
-        done
+      if [[ "$_UNSTABLE_FALLBACK_TO_MERGE" == "true" ]]; then
+        unset _UNSTABLE_FALLBACK_TO_MERGE
         AUTO_MERGE=false      # let the synchronous-merge block below run
         AUTO_MERGE_OK=true    # bypass the post-loop "after N attempts" guard
-        unset _UNSTABLE_HEAD_SHA _UNSTABLE_BASE_REF _UNSTABLE_FAILING_RAW _UNSTABLE_FAILING _UNSTABLE_REQUIRED _UNSTABLE_INFORMATIONAL _UNSTABLE_OVERLAP _UNSTABLE_COUNT
+        break                 # exit the outer MERGE_ATTEMPT for-loop
+      fi
+      unset _UNSTABLE_FALLBACK_TO_MERGE
+
+      # The wait loop set AUTO_MERGE_OK=true only if the PR merged concurrently;
+      # break the outer loop to reach the shared cleanup block.
+      if [[ "$AUTO_MERGE_OK" == "true" ]]; then
         break
       fi
-
-      # At least one failing check IS branch-protection-required — preserve
-      # the existing UNSTABLE refusal so we never silently bypass a required
-      # gate. Fall through to the error path below.
-      unset _UNSTABLE_HEAD_SHA _UNSTABLE_BASE_REF _UNSTABLE_FAILING_RAW _UNSTABLE_FAILING _UNSTABLE_REQUIRED _UNSTABLE_INFORMATIONAL _UNSTABLE_OVERLAP
     fi
 
     # Other auto-merge errors — fail immediately (no retry would help)
@@ -549,9 +820,23 @@ success "PR #$PR_NUMBER merged successfully"
 
 fi  # end synchronous-merge path (AUTO_MERGE != "true")
 
-# NOTE: Label cleanup on linked issues is intentionally skipped.
+# Partial-increment label reset (#3667). Runs only after a confirmed merge (both
+# the synchronous path above and the auto-merge server-side-completed fall-
+# through reach here; the auto-merge-queued and dry-run paths exit earlier).
+# Best-effort — never fails the merge. See the function definitions above.
+_reset_partial_increment_labels || true
+
+# NOTE: Label cleanup on linked issues is intentionally skipped for the
+# `Closes #N` / `Fixes #N` / `Resolves #N` auto-close case.
 # Labels on closed/merged items are harmless — all agents filter by open state.
 # See: https://github.com/rjwalters/loom/issues/2838
+#
+# EXCEPTION (#3667): non-closing `Part of #N` / `Contributes to #N` partial-
+# increment references leave the referenced issue OPEN after merge, so its
+# `loom:building` label would otherwise be orphaned. The
+# _reset_partial_increment_labels call above handles exactly that case by
+# swapping loom:building -> loom:issue on the still-open referenced issue. The
+# `Closes`-keyword path below is unchanged.
 #
 # NOTE: This script does NOT close linked issues. Issue auto-close is GitHub's
 # responsibility — GitHub's PR parser closes issues referenced via `Closes #N`,
@@ -594,13 +879,31 @@ fi
 _worktree_branch_for() {
   local target="$1" target_abs
   target_abs="$(cd "$target" 2>/dev/null && pwd -P)" || target_abs="$target"
+  # The `worktree ` path line (prefix = 9 chars) may contain spaces, so parse
+  # it with substr($0, 10) rather than $2 (which truncates at the first space).
+  # The `branch ` line is safe with $2 — git ref names cannot contain spaces.
+  # Caveat: a path with a literal newline would still break this line-oriented
+  # parse; `--porcelain -z` would be needed for full robustness (#3717).
   git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | \
     awk -v p="$target_abs" '
-      /^worktree / { wt=$2; br=""; next }
+      /^worktree / { wt=substr($0, 10); br=""; next }
       /^branch /   { br=$2 }
-      /^$/         { if (wt == p && br != "") { sub(/^refs\/heads\//, "", br); print br; exit } }
-      END          { if (wt == p && br != "") { sub(/^refs\/heads\//, "", br); print br } }
+      /^$/         { if (wt == p && br != "" && !found) { sub(/^refs\/heads\//, "", br); print br; found=1; exit } }
+      END          { if (wt == p && br != "" && !found) { sub(/^refs\/heads\//, "", br); print br } }
     '
+}
+
+# Print the absolute path of the PRIMARY (main) worktree — the FIRST `worktree`
+# entry of `git worktree list --porcelain`. Git always lists the main working
+# tree first, so `exit` after the first match is correct. Prints nothing on
+# error (e.g. not a git repo). Used by _remove_loom_worktree to hard-refuse
+# removing the primary checkout (#3710).
+_primary_worktree_path() {
+  # Parse the path via substr($0, 10) (strip the literal `worktree ` prefix, 9
+  # chars) so a primary checkout under a space-containing path is not truncated
+  # at the first space. Newline-in-path caveat: see _worktree_branch_for (#3717).
+  git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | \
+    awk '/^worktree / { print substr($0, 10); exit }'
 }
 
 # Walk porcelain output for a worktree whose branch matches the given branch
@@ -608,12 +911,15 @@ _worktree_branch_for() {
 # bare entries (they have no `branch refs/heads/...` line).
 _find_worktree_by_branch() {
   local want_branch="$1"
+  # `worktree ` path parsed via substr($0, 10) (space-safe); `branch ` via $2
+  # (ref names cannot contain spaces). Newline-in-path caveat: see
+  # _worktree_branch_for (#3717).
   git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | \
     awk -v want="refs/heads/${want_branch}" '
-      /^worktree / { wt=$2; br=""; next }
+      /^worktree / { wt=substr($0, 10); br=""; next }
       /^branch /   { br=$2 }
-      /^$/         { if (br == want) { print wt; exit } }
-      END          { if (br == want) { print wt } }
+      /^$/         { if (br == want && !found) { print wt; found=1; exit } }
+      END          { if (br == want && !found) { print wt } }
     '
 }
 
@@ -649,6 +955,29 @@ _remove_loom_worktree() {
     info "No worktree found at $worktree_path"
     return 0
   fi
+  # Resolve to a canonical absolute path once; reused for both the primary-
+  # worktree guard immediately below and the "is our CWD inside it?" check
+  # further down.
+  local worktree_real
+  worktree_real="$(cd "$worktree_path" 2>/dev/null && pwd -P || echo "$worktree_path")"
+  # Hard guard (#3710): NEVER attempt to remove the primary/main worktree — the
+  # FIRST entry of `git worktree list --porcelain` — regardless of a
+  # .loom-managed sentinel, the checked-out branch, --worktree-path, or a
+  # customized worktree.root. This is the single choke point for all three
+  # removal call-sites (default issue/pr path, --worktree-path override, and the
+  # non-standard-path discovery fallback). Without it, a repo whose primary
+  # checkout (a) sits at a non-standard path relative to a customized
+  # worktree.root, (b) carries a .loom-managed sentinel, and (c) has the PR
+  # branch checked out will reach `git worktree remove` on the main working
+  # tree: git fails safe ("Could not remove worktree"), but the attempt is a
+  # logic error and emits a misleading Removing/Could-not-remove pair. Refuse
+  # here, before any sentinel or CWD handling.
+  local primary_real
+  primary_real="$(_primary_worktree_path)"
+  if [[ -n "$primary_real" ]] && [[ "$worktree_real" == "$primary_real" ]]; then
+    warning "Refusing to remove the primary/main worktree at $worktree_real (never removable regardless of .loom-managed sentinel, branch, or worktree.root)"
+    return 0
+  fi
   if [[ "$allow_unmanaged" != "true" ]] && [[ ! -f "$worktree_path/.loom-managed" ]]; then
     warning "Worktree at $worktree_path lacks .loom-managed sentinel — refusing to remove (user-owned)"
     return 0
@@ -664,9 +993,9 @@ _remove_loom_worktree() {
     attached_branch="$(_worktree_branch_for "$worktree_path")"
   fi
   # If our shell is inside the worktree we're removing, hop out first.
-  local current_dir worktree_real in_worktree=false
+  # ($worktree_real was already resolved above for the primary-worktree guard.)
+  local current_dir in_worktree=false
   current_dir="$(pwd -P 2>/dev/null || pwd)"
-  worktree_real="$(cd "$worktree_path" 2>/dev/null && pwd -P || echo "$worktree_path")"
   if [[ "$current_dir" == "$worktree_real"* ]]; then
     in_worktree=true
     cd "$REPO_ROOT"

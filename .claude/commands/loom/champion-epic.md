@@ -63,6 +63,8 @@ Check each of the 6 criteria above. If ANY criterion fails, skip to Step 4 (reje
 
 If all 6 criteria pass:
 
+> **Serialize this phase-issue creation loop against any other issue-creating agent (#3707).** Do not run the `gh issue create` loop below while another issue-creating agent (Architect / Curator-decomposition / another Champion epic-phase run) is filing issues in the same repo — concurrent `gh issue create` bursts race on server-assigned issue numbers and cross-contaminate bodies. One filer must finish its full burst before the next starts. See `sweep.md` → "Execution Model → Only Builders parallelize" for the invariant.
+
 1. **Create Phase 1 issues** with `loom:architect` label:
 
 ```bash

@@ -2,12 +2,12 @@
 # validate-toolchain.sh - Validate loom-tools commands are available
 #
 # Validates that essential loom-tools commands are installed and accessible
-# before the spawn loop (Tier 2) enters its main loop. Provides tiered
-# validation with critical vs optional commands.
+# before Tier 2 dispatch (/loom:sweep / loom-daemon) drives worker roles.
+# Provides tiered validation with critical vs optional commands.
 #
 # Exit codes:
 #   0 - All critical commands available (optional warnings may exist)
-#   1 - Critical commands missing (spawn loop cannot start)
+#   1 - Critical commands missing (dispatch cannot start)
 #   2 - Invalid arguments
 #
 # Usage:
@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-# Critical commands - spawn loop cannot function without these
+# Critical commands - /loom:sweep / loom-daemon dispatch cannot function without these
 CRITICAL_COMMANDS=(
     "loom-cleanup"
     "loom-orphan-recovery"
@@ -306,13 +306,13 @@ output_text() {
         degraded)
             echo -e "${YELLOW}Status: DEGRADED${NC} - Optional commands missing"
             echo ""
-            echo "The spawn loop will continue with degraded functionality."
+            echo "Dispatch will continue with degraded functionality."
             echo "Some features (stuck detection, health monitoring) may not work."
             ;;
         critical)
             echo -e "${RED}Status: CRITICAL${NC} - Essential commands missing"
             echo ""
-            echo "The spawn loop cannot start without these commands."
+            echo "Dispatch cannot start without these commands."
             echo ""
             echo "To install loom-tools, run:"
             echo "  pip install -e ./loom-tools"

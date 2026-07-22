@@ -134,6 +134,31 @@ assert_eq "CWD_DELETED" "$result" "cwd deleted -> CWD_DELETED"
 result=$(classify_error "" 2)
 assert_eq "RECOVERABLE" "$result" "unknown exit=2 -> RECOVERABLE"
 
+# --- MODEL_REFUSAL vectors (issue #3702) ---
+# A model safety-classifier refusal (stop_reason "refusal") on a non-zero-exit
+# run classifies as MODEL_REFUSAL — a routing error the sweep orchestrator
+# handles by dropping one ladder rung without consuming a Doctor cycle.
+
+# Vector #19: JSON-shaped stop_reason refusal + exit=1 → MODEL_REFUSAL
+result=$(classify_error '{"type":"message","stop_reason":"refusal"}' 1)
+assert_eq "MODEL_REFUSAL" "$result" 'stop_reason:"refusal" + exit=1 -> MODEL_REFUSAL'
+
+# Vector #20: spaced stop_reason = refusal + exit=1 → MODEL_REFUSAL
+result=$(classify_error "turn ended: stop_reason: refusal (safety)" 1)
+assert_eq "MODEL_REFUSAL" "$result" "spaced stop_reason refusal + exit=1 -> MODEL_REFUSAL"
+
+# Vector #21 (REGRESSION, #3233): clean exit (exit 0) whose output merely
+# contains the word "refusal" is STILL SUCCESS — exit-code-first ordering wins
+# over any substring, including the new refusal match.
+result=$(classify_error '{"stop_reason":"refusal"}' 0)
+assert_eq "SUCCESS" "$result" 'exit=0 with stop_reason:"refusal" is SUCCESS (#3233 exit-code-first)'
+
+# Vector #22: plain word "refusal" without a stop_reason on exit=1 is NOT a
+# refusal classification — the match is anchored to the stop_reason key, so an
+# unrelated failure mentioning the word falls through to the catch-all.
+result=$(classify_error "connection reset; will not retry (refusal to reconnect)" 1)
+assert_eq "RECOVERABLE" "$result" "bare 'refusal' word (no stop_reason) + exit=1 -> RECOVERABLE"
+
 # ============================================================
 # Section 2: spawn-claude.sh dispatch (with stub `claude`)
 # ============================================================
@@ -284,6 +309,103 @@ else
 fi
 assert_contains "spawn-claude: model=default" "$output" \
     "structured model=default log line emitted for empty LOOM_MODEL (#3482)"
+
+# ============================================================
+# Section 4: effort selection (issue #3705)
+#
+# Mirrors the model precedence chain for the `claude --effort <level>`
+# session knob, all observable cases:
+#   1. LOOM_EFFORT alone produces --effort in the exec'd args
+#   2. explicit --effort arg beats LOOM_EFFORT env
+#   3. --effort=value form also beats LOOM_EFFORT env
+#   4. no env + no arg produces NO --effort at all (session default
+#      preserved — the zero-behavior-change acceptance criterion)
+#   5. empty LOOM_EFFORT is treated as unset — no --effort emitted
+# ============================================================
+
+echo ""
+echo "Testing spawn-claude.sh effort selection (#3705)..."
+
+# Case 1: LOOM_EFFORT env produces --effort in args
+output=$(LOOM_WORKSPACE="$TEST_WS" PATH="$STUB_DIR:$PATH" \
+    LOOM_EFFORT="xhigh" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "stub-claude args=-p ping --effort xhigh" "$output" \
+    "LOOM_EFFORT env injects --effort into claude args"
+assert_contains "spawn-claude: effort=xhigh (from LOOM_EFFORT)" "$output" \
+    "structured effort log line emitted for LOOM_EFFORT case (#3705)"
+
+# Case 2: explicit --effort arg wins over LOOM_EFFORT env
+output=$(LOOM_WORKSPACE="$TEST_WS" PATH="$STUB_DIR:$PATH" \
+    LOOM_EFFORT="xhigh" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" --effort high 2>&1 || true)
+assert_contains "stub-claude args=-p ping --effort high" "$output" \
+    "explicit --effort arg wins over LOOM_EFFORT env"
+assert_contains "spawn-claude: effort=high (from --effort arg)" "$output" \
+    "structured effort log line emitted for explicit --effort arg case (#3705)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$output" != *"--effort xhigh"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: LOOM_EFFORT value is not injected when explicit --effort present"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: LOOM_EFFORT value is not injected when explicit --effort present"
+    echo "    In: '$output'"
+fi
+
+# Case 3: --effort=value form also suppresses LOOM_EFFORT injection
+output=$(LOOM_WORKSPACE="$TEST_WS" PATH="$STUB_DIR:$PATH" \
+    LOOM_EFFORT="xhigh" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" --effort=high 2>&1 || true)
+assert_contains "stub-claude args=-p ping --effort=high" "$output" \
+    "--effort=value form wins over LOOM_EFFORT env"
+assert_contains "spawn-claude: effort=high (from --effort arg)" "$output" \
+    "structured effort log line emitted for --effort=value form (#3705)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$output" != *"--effort xhigh"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: --effort=value suppresses LOOM_EFFORT injection"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: --effort=value suppresses LOOM_EFFORT injection"
+    echo "    In: '$output'"
+fi
+
+# Case 4 (zero-behavior-change criterion): no env + no arg => no --effort
+output=$(LOOM_WORKSPACE="$TEST_WS" PATH="$STUB_DIR:$PATH" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$output" == *"stub-claude args=-p ping"* && "$output" != *"--effort"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: no LOOM_EFFORT + no --effort arg emits NO --effort (session default preserved)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: no LOOM_EFFORT + no --effort arg emits NO --effort (session default preserved)"
+    echo "    In: '$output'"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$output" != *"spawn-claude: effort="* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: no effort log line emitted when nothing configured (#3705)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: no effort log line emitted when nothing configured (#3705)"
+    echo "    In: '$output'"
+fi
+
+# Case 5: empty LOOM_EFFORT is treated as unset — no --effort emitted
+output=$(LOOM_WORKSPACE="$TEST_WS" PATH="$STUB_DIR:$PATH" \
+    LOOM_EFFORT="" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$output" == *"stub-claude args=-p ping"* && "$output" != *"--effort"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: empty LOOM_EFFORT emits NO --effort"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: empty LOOM_EFFORT emits NO --effort"
+    echo "    In: '$output'"
+fi
 
 # ============================================================
 # Summary

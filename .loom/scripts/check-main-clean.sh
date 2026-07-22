@@ -15,14 +15,36 @@
 # from the repo root or from a worktree.
 #
 # Usage:
-#   ./.loom/scripts/check-main-clean.sh            # check main worktree, exit 3 if dirty
-#   ./.loom/scripts/check-main-clean.sh --help     # show usage
+#   ./.loom/scripts/check-main-clean.sh                  # check main worktree, exit 3 if dirty
+#   ./.loom/scripts/check-main-clean.sh --snapshot FILE  # record main's porcelain state to FILE, exit 0
+#   ./.loom/scripts/check-main-clean.sh --baseline FILE  # check main, ignoring dirt recorded in FILE
+#   ./.loom/scripts/check-main-clean.sh --help           # show usage
+#
+# Baseline mechanism (#3648):
+#   The plain (no-arg) check treats ANY uncommitted change on main as builder
+#   contamination. That false-positives when the main worktree carried
+#   pre-existing, unrelated dirt (a regenerated lockfile, a scratch edit) before
+#   the sweep even started. The baseline mechanism lets a caller (e.g. /loom:sweep)
+#   snapshot main's porcelain state ONCE at sweep start, then pass that snapshot
+#   as a --baseline on each post-wave check. Only changes that appeared AFTER the
+#   snapshot (set difference on exact porcelain lines) are treated as
+#   contamination; pre-existing dirt is ignored.
+#
+#     ./.loom/scripts/check-main-clean.sh --snapshot .loom/main-clean-baseline.txt   # once, before wave 1
+#     ./.loom/scripts/check-main-clean.sh --baseline .loom/main-clean-baseline.txt   # after each wave
+#
+#   Fail-safe: if the --baseline FILE is missing or unreadable, the check warns
+#   to stderr and falls back to the plain whole-status behavior (never a silent
+#   pass). With NO --baseline/--snapshot argument, behavior is byte-for-byte
+#   identical to the pre-#3648 whole-status hard-fail — the builder.md /
+#   builder-worktree.md manual call sites depend on that contract.
 #
 # Exit codes:
-#   0 - Main worktree is clean (no uncommitted changes).
+#   0 - Main worktree is clean (or, in --baseline mode, only pre-existing dirt
+#       remains); or a --snapshot completed successfully.
 #   2 - Usage error or could not resolve the main worktree (not a git repo).
 #   3 - Main worktree is DIRTY: uncommitted changes detected (the contamination
-#       this guard exists to catch).
+#       this guard exists to catch). In --baseline mode, only NEW changes count.
 #
 # Notes:
 #   - "Dirty" means `git status --porcelain` on the MAIN worktree returns any
@@ -38,8 +60,13 @@ EXIT_USAGE=2
 EXIT_MAIN_DIRTY=3
 
 usage() {
-    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'
 }
+
+# ---- Argument parsing ----------------------------------------------------
+# Modes: plain (no args, legacy back-compat), snapshot, baseline.
+MODE="plain"
+MODE_FILE=""
 
 case "${1:-}" in
     -h|--help)
@@ -48,6 +75,24 @@ case "${1:-}" in
         ;;
     "")
         ;;
+    --snapshot)
+        if [[ -z "${2:-}" ]]; then
+            echo "check-main-clean.sh: --snapshot requires a file argument" >&2
+            echo "Run with --help for usage." >&2
+            exit "$EXIT_USAGE"
+        fi
+        MODE="snapshot"
+        MODE_FILE="$2"
+        ;;
+    --baseline)
+        if [[ -z "${2:-}" ]]; then
+            echo "check-main-clean.sh: --baseline requires a file argument" >&2
+            echo "Run with --help for usage." >&2
+            exit "$EXIT_USAGE"
+        fi
+        MODE="baseline"
+        MODE_FILE="$2"
+        ;;
     *)
         echo "check-main-clean.sh: unknown argument: $1" >&2
         echo "Run with --help for usage." >&2
@@ -55,6 +100,7 @@ case "${1:-}" in
         ;;
 esac
 
+# ---- Resolve the main worktree root --------------------------------------
 # Resolve the canonical git common dir, then the main worktree root (its parent).
 # This works from the repo root AND from inside any worktree.
 common_dir=$(git rev-parse --git-common-dir 2>/dev/null || true)
@@ -74,7 +120,47 @@ fi
 
 status=$(git -C "$main_root" status --porcelain 2>/dev/null || true)
 
-if [[ -n "$status" ]]; then
+# ---- Snapshot mode: record and exit --------------------------------------
+if [[ "$MODE" == "snapshot" ]]; then
+    # Ensure the parent directory exists so callers can point at .loom/ transients.
+    snap_dir=$(dirname "$MODE_FILE")
+    if [[ -n "$snap_dir" && ! -d "$snap_dir" ]]; then
+        mkdir -p "$snap_dir" 2>/dev/null || true
+    fi
+    if ! printf '%s\n' "$status" > "$MODE_FILE" 2>/dev/null; then
+        echo "check-main-clean.sh: could not write snapshot to '$MODE_FILE'" >&2
+        exit "$EXIT_USAGE"
+    fi
+    echo "check-main-clean.sh: snapshot of main worktree written to $MODE_FILE ($main_root)"
+    exit "$EXIT_OK"
+fi
+
+# ---- Baseline mode: subtract pre-existing dirt ---------------------------
+# Only lines that appear in the current status but NOT in the baseline are
+# treated as new (builder) contamination. A missing/unreadable baseline falls
+# back to the plain whole-status behavior (fail-safe, never a silent pass).
+effective_status="$status"
+ignored=0
+if [[ "$MODE" == "baseline" ]]; then
+    if [[ -r "$MODE_FILE" ]]; then
+        # Set difference: current porcelain lines minus baseline lines.
+        # comm -13 prints lines unique to the second (current) input.
+        effective_status=$(comm -13 \
+            <(sort "$MODE_FILE") \
+            <(printf '%s\n' "$status" | sort) \
+            | sed '/^$/d')
+        pre_existing=$(printf '%s\n' "$status" | sed '/^$/d' | grep -c '' || true)
+        new_count=$(printf '%s\n' "$effective_status" | sed '/^$/d' | grep -c '' || true)
+        ignored=$(( pre_existing - new_count ))
+        if [[ "$ignored" -lt 0 ]]; then ignored=0; fi
+    else
+        echo "WARNING: check-main-clean.sh: baseline file '$MODE_FILE' is missing or unreadable." >&2
+        echo "         Falling back to whole-status check (fail-safe)." >&2
+        effective_status="$status"
+    fi
+fi
+
+if [[ -n "$effective_status" ]]; then
     echo "ERROR: MAIN worktree is dirty (uncommitted changes detected)." >&2
     echo "       Main worktree: $main_root" >&2
     echo "" >&2
@@ -83,12 +169,22 @@ if [[ -n "$status" ]]; then
     echo "       Builders MUST capture the absolute worktree path once and use" >&2
     echo "       absolute paths for every Write/Edit/Bash file operation." >&2
     echo "" >&2
+    if [[ "$ignored" -gt 0 ]]; then
+        echo "       ($ignored pre-existing change(s) ignored via baseline $MODE_FILE)" >&2
+        echo "" >&2
+    fi
     echo "       Offending changes:" >&2
     while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
         echo "         $line" >&2
-    done <<< "$status"
+    done <<< "$effective_status"
     exit "$EXIT_MAIN_DIRTY"
 fi
 
-echo "check-main-clean.sh: main worktree is clean ($main_root)"
+if [[ "$ignored" -gt 0 ]]; then
+    echo "check-main-clean.sh: main worktree carries only pre-existing dirt, no new contamination ($main_root)"
+    echo "check-main-clean.sh: $ignored pre-existing change(s) ignored via baseline $MODE_FILE"
+else
+    echo "check-main-clean.sh: main worktree is clean ($main_root)"
+fi
 exit "$EXIT_OK"

@@ -34,6 +34,15 @@ boards/*/*/output/board.json
 .env
 .env.*
 !.env.example
+
+# Repo Skills machine-local install metadata (absolute source path + timestamp)
+.claude/skills/repo/.install-local.json
+
+# Loom model-cost experiment (canary A/B, #3725/#3731)
+# The CANARY confirmation MUST stay uncommitted by design -- a copied/committed
+# config can never confirm canary status. Local outcome-chain stats too.
+.loom/CANARY
+.loom/stats/
 # >>> loom-managed (do not edit) >>>
 # Loom runtime state (don't commit these)
 .loom-in-use
@@ -67,6 +76,3 @@ boards/*/*/output/board.json
 .loom/*.sock
 .loom/logs/
 # <<< loom-managed <<<
-
-# Repo Skills machine-local install metadata (absolute source path + timestamp)
-.claude/skills/repo/.install-local.json

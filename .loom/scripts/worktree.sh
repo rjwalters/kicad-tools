@@ -1145,8 +1145,14 @@ if _try_worktree_add; then
         log_worktree_size "$ABS_WORKTREE_PATH" "Sparse worktree size"
     fi
 
-    # Set git hooks path so .githooks/ works in worktrees (no npx/husky needed)
-    git -C "$ABS_WORKTREE_PATH" config core.hooksPath .githooks
+    # Set git hooks path so .githooks/ works in worktrees (no npx/husky needed).
+    # Only when the repo actually ships a .githooks/ dir — otherwise pointing
+    # core.hooksPath at a missing dir silently disables all hooks (git treats a
+    # nonexistent hooksPath as "no hooks"). $WORKTREE_REPO_ROOT is the main repo
+    # root captured at L824 (cwd is the main workspace here, not the worktree).
+    if [[ -d "$WORKTREE_REPO_ROOT/.githooks" ]]; then
+        git -C "$ABS_WORKTREE_PATH" config core.hooksPath .githooks
+    fi
 
     # Store return-to directory if provided
     if [[ -n "$RETURN_TO_DIR" ]]; then

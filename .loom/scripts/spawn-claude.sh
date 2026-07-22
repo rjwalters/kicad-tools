@@ -38,6 +38,15 @@
 #                          in the passthrough args always wins. When neither
 #                          is set, NO --model flag is emitted and the session/
 #                          CLI default is preserved.
+#   LOOM_EFFORT            Reasoning-effort level to pass as `claude --effort
+#                          <value>` (issue #3705). Mirrors LOOM_MODEL: an
+#                          explicit `--effort` in the passthrough args wins;
+#                          when neither is set, NO --effort flag is emitted and
+#                          the session/CLI default is preserved. This sets a
+#                          session-default effort for the whole spawned child —
+#                          the sweep escalation ladder's per-rung `@effort`
+#                          cannot be threaded here because the in-session Task
+#                          tool exposes no effort parameter (see sweep.md).
 
 set -euo pipefail
 
@@ -152,6 +161,54 @@ elif [[ -n "${LOOM_MODEL:-}" ]]; then
     log_info "spawn-claude: model=$LOOM_MODEL (from LOOM_MODEL)"
 else
     log_info "spawn-claude: model=default"
+fi
+
+# --- Effort selection (issue #3705) ---
+# Mirrors the model block above for the `claude --effort <level>` session knob.
+# Precedence: explicit `--effort` in the passthrough args > LOOM_EFFORT env >
+# nothing (session/CLI default — no --effort flag emitted at all).
+#
+# This is the ONLY per-call reasoning-effort surface available in this
+# environment: the `claude` CLI exposes `--effort`, but the in-session Task
+# tool (the sweep's per-role subagent dispatch, one level deep) exposes NO
+# effort parameter. So spawn-claude/daemon can set a *session-default* effort
+# for a whole `/loom:sweep` child; the escalation ladder's per-rung `@effort`
+# still degrades to the bare model at Task-tool dispatch time (see
+# `sweep.md` → "Effort graceful degradation").
+#
+# Observability: exactly ONE structured `spawn-claude: effort=<value>` line
+# is emitted only when an effort is actually resolved (explicit arg or env).
+# When nothing is configured, NO effort line is emitted and NO --effort flag
+# is appended — byte-for-byte identical to pre-#3705 behavior.
+_explicit_effort=""
+_has_effort_arg=false
+_prev_was_effort_flag=false
+for _arg in ${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}; do
+    if [[ "$_prev_was_effort_flag" == "true" ]]; then
+        _explicit_effort="$_arg"
+        _prev_was_effort_flag=false
+        continue
+    fi
+    case "$_arg" in
+        --effort)
+            _has_effort_arg=true
+            _prev_was_effort_flag=true
+            ;;
+        --effort=*)
+            _has_effort_arg=true
+            _explicit_effort="${_arg#--effort=}"
+            ;;
+    esac
+done
+
+if [[ "$_has_effort_arg" == "true" ]]; then
+    if [[ -n "${LOOM_EFFORT:-}" ]]; then
+        log_info "spawn-claude: explicit --effort in args wins over LOOM_EFFORT='$LOOM_EFFORT'"
+    fi
+    log_info "spawn-claude: effort=${_explicit_effort:-default} (from --effort arg)"
+elif [[ -n "${LOOM_EFFORT:-}" ]]; then
+    PASSTHROUGH_ARGS+=(--effort "$LOOM_EFFORT")
+    log_info "spawn-claude: effort=$LOOM_EFFORT (from LOOM_EFFORT)"
 fi
 
 # --- Locate loom_tools package source ---
