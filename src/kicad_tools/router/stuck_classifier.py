@@ -345,6 +345,13 @@ class StuckNetDiagnosis:
     # is warranted (PLACEMENT_BOUND / CONGESTION_SATURATED).
     topology: str = ""
     recommendation: list[RankedAction] = field(default_factory=list)
+    # Issue #4466 (Phase 1 of #3438): the measured facing-row orientation that
+    # fed the ladder, surfaced so the classifier->delta translator
+    # (:mod:`kicad_tools.router.placement_delta`) can name the reversed part
+    # (``secondary_ref``) without recomputing it.  Populated only for the two
+    # bundle topologies (SELF_CROSSING / CO_ORIENTED); ``None`` otherwise.  Kept
+    # OUT of :meth:`to_dict` so existing JSON output paths are byte-unchanged.
+    bundle_orientation: BundleOrientation | None = None
 
     @property
     def classification_value(self) -> str:
@@ -944,6 +951,9 @@ def classify_stuck_nets_from_pcb(
                     )
                 if orientation.verdict == ORIENT_CO_ORIENTED:
                     diag.topology = TOPOLOGY_CO_ORIENTED
+            # Surface the measured orientation (issue #4466) so the delta
+            # translator need not recompute it.  ``None`` for foreign-cluster.
+            diag.bundle_orientation = orientation
             confidence = _grade_confidence(target_group)
             diag.recommendation = _build_recommendation(
                 classification=diag.classification,
