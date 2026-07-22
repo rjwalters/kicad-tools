@@ -3109,6 +3109,24 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--complete",
+        action="store_true",
+        default=False,
+        help=(
+            "Completion pass (Issue #4471, epic #4465): auto-detect the "
+            "currently-unconnected signal nets and route ONLY those links, "
+            "treating every other net's copper as a fixed obstacle. Implies "
+            "--preserve-existing and, unless you override --route-engine, "
+            "selects the lattice engine with --strategy basic (the "
+            "route-only-listed-links path the #4280 gate permits; a "
+            "negotiated strategy is coerced to basic with a printed notice "
+            "rather than rejected). Existing copper is never deleted (the "
+            "#4413 copper-loss guard is active). Mutually exclusive with "
+            "--nets / --skip-nets (--complete chooses the net set itself). A "
+            "board with nothing left to connect is a safe no-op."
+        ),
+    )
+    route_parser.add_argument(
         "--region",
         metavar="X1,Y1,X2,Y2",
         help=(

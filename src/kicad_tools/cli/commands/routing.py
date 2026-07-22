@@ -397,6 +397,13 @@ def run_route_command(args) -> int:
     # store_true defaulting to False, so only forward when the user set it.
     if getattr(args, "preserve_existing", False):
         sub_argv.append("--preserve-existing")
+    # Issue #4471 (epic #4465): forward --complete (auto-detect + route only
+    # the currently-unconnected signal links on the lattice fixed-obstacle
+    # path).  Declared on BOTH parsers as store_true defaulting to False, so
+    # only forward when the user set it -- flag-off argv stays byte-identical
+    # and tests/test_cli_parser_drift.py stays green.
+    if getattr(args, "complete", False):
+        sub_argv.append("--complete")
     grid_val = str(args.grid)
     if grid_val.lower() != "auto":
         sub_argv.extend(["--grid", grid_val])
