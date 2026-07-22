@@ -453,6 +453,18 @@ def rescue_partial_nets(
     stripped_total = strip_net_copper(routed_path, partial)
     _log(f"   Stripped {stripped_total} stale copper block(s) for {len(partial)} net(s)")
 
+    # Issue #4469: accumulate a concrete failure reason per stranded net so the
+    # loop can print a reason table instead of the opaque "FAILED (no output
+    # produced)".  Reasons are parsed from the rescue subprocess's captured
+    # output by :func:`classify_rescue_failure` (diagnose-only, never re-routes).
+    from kicad_tools.router.rescue_diagnostics import (
+        RescueFailureReason,
+        classify_rescue_failure,
+        format_rescue_reason_table,
+    )
+
+    failure_reasons: list[RescueFailureReason] = []
+
     for net in partial:
         skip = [n for n in all_nets if n != net]
         tmp_out = routed_path.with_name(routed_path.stem + "_rescue.kicad_pcb")
@@ -460,7 +472,11 @@ def rescue_partial_nets(
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         if not tmp_out.exists():
-            _log(f"   Rescue {net}: FAILED (no output produced)")
+            reason = classify_rescue_failure(
+                net, result.stdout or "", result.stderr or "", output_produced=False
+            )
+            failure_reasons.append(reason)
+            _log(f"   Rescue {net}: FAILED -- {reason.category.value}: {reason.detail}")
             results[net] = False
             continue
 
@@ -471,10 +487,14 @@ def rescue_partial_nets(
             _log(f"   Rescue {net}: SUCCESS (fully connected)")
             results[net] = True
         else:
+            reason = classify_rescue_failure(
+                net, result.stdout or "", result.stderr or "", output_produced=True
+            )
+            failure_reasons.append(reason)
             removed = strip_net_copper(routed_path, [net])
             _log(
-                f"   Rescue {net}: failed (exit {result.returncode}); "
-                f"stripped {removed} stub block(s)"
+                f"   Rescue {net}: FAILED -- {reason.category.value}: {reason.detail} "
+                f"(exit {result.returncode}; stripped {removed} stub block(s))"
             )
             results[net] = False
 
@@ -489,4 +509,9 @@ def rescue_partial_nets(
 
     rescued = sum(1 for ok in results.values() if ok)
     _log(f"\n   Rescue summary: {rescued}/{len(results)} net(s) rescued")
+    # Issue #4469 AC1: emit the per-stranded-net reason table (replaces the old
+    # opaque "FAILED (no output produced)" line).
+    table = format_rescue_reason_table(failure_reasons)
+    if table:
+        _log(table)
     return results
