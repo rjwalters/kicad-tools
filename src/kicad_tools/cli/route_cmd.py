@@ -4511,6 +4511,11 @@ def route_with_layer_escalation(
                     # Issue #4148: region-bounded routing.  When set, cells
                     # outside the board-relative box are marked as obstacles.
                     region=getattr(args, "_region_box", None),
+                    # Issue #4472 (epic #4465, Phase 2): --complete localizes the
+                    # lattice build + static masks to the region box, and bounds
+                    # each link's search with a per-link wall-clock budget.
+                    localize_lattice_to_region=getattr(args, "_complete_localized", False),
+                    lattice_link_budget_s=getattr(args, "_complete_link_budget_s", None),
                     # Issue #4170 (Phase 2b-1): board-relative boundary stub
                     # terminals whose tip cells are carved open as same-net
                     # reconnection targets (None when no --region / no stubs).
@@ -5457,6 +5462,11 @@ def route_with_rule_relaxation(
                     load_existing_routes=getattr(args, "preserve_existing", False),
                     # Issue #4148: region-bounded routing (see main()).
                     region=getattr(args, "_region_box", None),
+                    # Issue #4472 (epic #4465, Phase 2): --complete localizes the
+                    # lattice build + static masks to the region box, and bounds
+                    # each link's search with a per-link wall-clock budget.
+                    localize_lattice_to_region=getattr(args, "_complete_localized", False),
+                    lattice_link_budget_s=getattr(args, "_complete_link_budget_s", None),
                     # Issue #4170 (Phase 2b-1): board-relative boundary stub
                     # terminals whose tip cells are carved open as same-net
                     # reconnection targets (None when no --region / no stubs).
@@ -7626,6 +7636,11 @@ def route_with_combined_escalation(
                         load_existing_routes=getattr(args, "preserve_existing", False),
                         # Issue #4148: region-bounded routing (see main()).
                         region=getattr(args, "_region_box", None),
+                        # Issue #4472 (epic #4465, Phase 2): --complete localizes the
+                        # lattice build + static masks to the region box, and bounds
+                        # each link's search with a per-link wall-clock budget.
+                        localize_lattice_to_region=getattr(args, "_complete_localized", False),
+                        lattice_link_budget_s=getattr(args, "_complete_link_budget_s", None),
                         # Issue #4170 (Phase 2b-1): board-relative boundary stub
                         # terminals whose tip cells are carved open as same-net
                         # reconnection targets (None when no --region / no stubs).
@@ -8786,6 +8801,165 @@ def _resolve_complete_nets(args, pcb_path: Path) -> int:
     if not getattr(args, "quiet", False):
         preview = ", ".join(stranded)
         print(f"--complete: routing {len(stranded)} unconnected signal net(s): {preview}")
+    return 0
+
+
+# Issue #4472 (epic #4465, Phase 2): --complete localization tunables.
+#
+# The per-link escape margin grows each stranded net's pad-to-pad bbox by
+# enough room for a legal escape stub + a via site + clearance on every side,
+# so the localized lattice still contains the route the un-localized build
+# would find.  3.0 mm comfortably covers a jlcpcb via land (~0.6 mm) plus a
+# short escape neck and clearance; the box is additionally snapped OUTWARD to
+# the whole-board coarse grid inside the router, adding up to one coarse cell
+# of headroom per side.
+_COMPLETE_BBOX_MARGIN_MM = 3.0
+# A stranded net whose own pad span exceeds this fraction of the board's
+# corresponding dimension defeats localization (its box is ~the whole board);
+# it is REPORTED (expand-and-continue) rather than silently mis-bounded.
+_COMPLETE_OVERSIZE_FRACTION = 0.9
+# Default per-link wall-clock budget (seconds) when --per-net-timeout is
+# disabled (0) -- e.g. under --deterministic-budget.  Kept as a safety
+# backstop so a completion search still aborts within a bounded budget.
+_COMPLETE_LINK_BUDGET_DEFAULT_S = 60.0
+
+
+def _resolve_complete_link_budget(args) -> float:
+    """Per-link wall-clock budget (seconds) for a ``--complete`` pass.
+
+    Issue #4472.  Reuses the existing wall-clock plumbing: an explicit
+    ``--per-net-timeout`` (the per-net A* cutoff) doubles as the per-link
+    completion budget; when it is disabled (``0``, e.g. under
+    ``--deterministic-budget``) a bounded default backstop is used so the
+    search still aborts within a budget rather than grinding (issue #4434).
+    """
+    t = getattr(args, "per_net_timeout", None)
+    if t and t > 0:
+        return float(t)
+    return _COMPLETE_LINK_BUDGET_DEFAULT_S
+
+
+def _apply_complete_localization(args, pcb_path: Path) -> int:
+    """Localize a ``--complete`` pass to a per-link bounding box (Issue #4472).
+
+    Computes the union of the stranded nets' pad bounding boxes (board-relative,
+    matching ``--region``), grows it by an escape margin, and stamps it on
+    ``args._region_box`` so the EXISTING ``--region`` plumbing carries it into
+    ``load_pcb_for_routing`` -- there ``localize_lattice_to_region`` confines the
+    octilinear lattice build + static masks to that pocket instead of the whole
+    board.  Also stamps the per-link wall-clock budget.  A user-supplied
+    ``--region`` is respected verbatim (the lattice localizes to it instead).
+
+    Per-net reasonableness (expand-or-decline AC): a stranded net whose pads
+    span more than :data:`_COMPLETE_OVERSIZE_FRACTION` of a board dimension
+    cannot benefit from localization; it is REPORTED and the union box is
+    expanded to include it (correctness preserved) rather than silently
+    mis-bounded.  No-op when ``--complete`` is absent or found nothing stranded.
+    """
+    if not getattr(args, "complete", False):
+        return 0
+    if getattr(args, "_complete_noop", False):
+        return 0
+
+    # Arm the localization flag + per-link budget regardless of how the box is
+    # sourced (auto-computed here, or a user-supplied --region parsed later).
+    args._complete_localized = True
+    args._complete_link_budget_s = _resolve_complete_link_budget(args)
+
+    # A user-supplied --region wins: honor their explicit spatial bound and let
+    # the lattice localize to it (the box is stamped later by
+    # _parse_and_apply_region).  Do not compute an auto box on top of it.
+    if getattr(args, "region", None):
+        return 0
+
+    quiet = getattr(args, "quiet", False)
+    try:
+        from kicad_tools.schema.pcb import PCB as _SchemaPCB
+
+        pcb = _SchemaPCB.load(str(pcb_path))
+    except Exception as e:  # pragma: no cover - load errors surface later too
+        # Non-fatal: fall back to the whole-board build (still correct, slower).
+        if not quiet:
+            print(f"--complete: could not localize the lattice build ({e}); using whole board.")
+        return 0
+
+    stranded = {n for n in (args.nets.split(",") if getattr(args, "nets", None) else []) if n}
+    if not stranded:
+        return 0
+
+    # Board outline bbox (board-relative, matching the --region convention).
+    outline = pcb.get_board_outline()
+    board_box = None
+    if outline:
+        board_box = (
+            min(p[0] for p in outline),
+            min(p[1] for p in outline),
+            max(p[0] for p in outline),
+            max(p[1] for p in outline),
+        )
+
+    # Collect each stranded net's pad positions (board-relative).
+    pads_by_net: dict[str, list[tuple[float, float]]] = {}
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            net_name = getattr(pad, "net_name", "") or ""
+            if net_name not in stranded:
+                continue
+            pos = pcb.get_pad_position(fp.reference, pad.number)
+            if pos is None:
+                continue
+            pads_by_net.setdefault(net_name, []).append((pos[0], pos[1]))
+
+    if not pads_by_net:
+        if not quiet:
+            print("--complete: no pad geometry found for the stranded nets; using whole board.")
+        return 0
+
+    board_w = (board_box[2] - board_box[0]) if board_box else float("inf")
+    board_h = (board_box[3] - board_box[1]) if board_box else float("inf")
+
+    oversized: list[str] = []
+    ux0 = uy0 = float("inf")
+    ux1 = uy1 = float("-inf")
+    for net_name, pts in pads_by_net.items():
+        nx0 = min(p[0] for p in pts)
+        ny0 = min(p[1] for p in pts)
+        nx1 = max(p[0] for p in pts)
+        ny1 = max(p[1] for p in pts)
+        if (nx1 - nx0) > _COMPLETE_OVERSIZE_FRACTION * board_w or (
+            ny1 - ny0
+        ) > _COMPLETE_OVERSIZE_FRACTION * board_h:
+            oversized.append(net_name)
+        ux0, uy0 = min(ux0, nx0), min(uy0, ny0)
+        ux1, uy1 = max(ux1, nx1), max(uy1, ny1)
+
+    m = _COMPLETE_BBOX_MARGIN_MM
+    box = (ux0 - m, uy0 - m, ux1 + m, uy1 + m)
+    if board_box:
+        box = (
+            max(box[0], board_box[0]),
+            max(box[1], board_box[1]),
+            min(box[2], board_box[2]),
+            min(box[3], board_box[3]),
+        )
+    args._region_box = box
+    # A localized build re-routes only the stranded pocket against fixed copper;
+    # a whole-board cached result must not be reused (mirrors --region).
+    args.no_cache = True
+
+    if not quiet:
+        print(
+            "--complete: localized lattice build to "
+            f"({box[0]:.2f}, {box[1]:.2f})-({box[2]:.2f}, {box[3]:.2f}) mm "
+            f"(+{m:.1f} mm escape margin); per-link budget "
+            f"{args._complete_link_budget_s:.0f}s."
+        )
+        if oversized:
+            print(
+                "--complete: WARNING: net(s) span most of the board and cannot "
+                f"benefit from localization (box expanded to include them): "
+                f"{', '.join(sorted(oversized))}"
+            )
     return 0
 
 
@@ -10760,6 +10934,17 @@ def main(argv: list[str] | None = None) -> int:
         if rc != 0:
             return rc
 
+    # Issue #4472 (epic #4465, Phase 2): localize a --complete pass to a
+    # per-link bounding box.  Runs AFTER --region so a user-supplied box wins
+    # (the lattice localizes to it); otherwise the union of the stranded nets'
+    # pad bboxes + escape margin is stamped on ``args._region_box`` and the
+    # per-link wall-clock budget is armed.  No-op unless --complete is active.
+    args._complete_localized = False
+    args._complete_link_budget_s = None
+    _loc_rc = _apply_complete_localization(args, pcb_path)
+    if _loc_rc != 0:
+        return _loc_rc
+
     # Issue #3154: advisory schematic/PCB drift banner.  Non-blocking -- the
     # hard gate lives behind 'kct check --netlist-sync'.  Skips silently when
     # no schematic is discovered, when in sync, or when --no-sync-check / --quiet.
@@ -11440,6 +11625,11 @@ def main(argv: list[str] | None = None) -> int:
                 load_existing_routes=getattr(args, "preserve_existing", False),
                 # Issue #4148: region-bounded routing (see main()).
                 region=getattr(args, "_region_box", None),
+                # Issue #4472 (epic #4465, Phase 2): --complete localizes the
+                # lattice build + static masks to the region box, and bounds
+                # each link's search with a per-link wall-clock budget.
+                localize_lattice_to_region=getattr(args, "_complete_localized", False),
+                lattice_link_budget_s=getattr(args, "_complete_link_budget_s", None),
                 # Issue #4170 (Phase 2b-1): board-relative boundary stub
                 # terminals whose tip cells are carved open as same-net
                 # reconnection targets (None when no --region / no stubs).
@@ -11503,6 +11693,11 @@ def main(argv: list[str] | None = None) -> int:
                 load_existing_routes=getattr(args, "preserve_existing", False),
                 # Issue #4148: region-bounded routing (see main()).
                 region=getattr(args, "_region_box", None),
+                # Issue #4472 (epic #4465, Phase 2): --complete localizes the
+                # lattice build + static masks to the region box, and bounds
+                # each link's search with a per-link wall-clock budget.
+                localize_lattice_to_region=getattr(args, "_complete_localized", False),
+                lattice_link_budget_s=getattr(args, "_complete_link_budget_s", None),
                 # Issue #4170 (Phase 2b-1): board-relative boundary stub
                 # terminals whose tip cells are carved open as same-net
                 # reconnection targets (None when no --region / no stubs).
