@@ -8234,10 +8234,32 @@ def _validate_route_engine_strategy(args) -> int:
     if engine == "grid":
         return 0
 
+    # Issue #4471 (epic #4465): --complete carve-out.  --complete is a
+    # route-only-the-currently-unconnected-links contract -- it dispatches
+    # through the SAME basic/lattice-netset path the #4280 gate protects (route
+    # only ``self.nets`` against fixed foreign copper), NOT the whole-netset
+    # negotiation the gate exists to guard.  So rather than REJECT a non-basic
+    # (typically the default ``negotiated``) strategy under --complete, coerce
+    # it to basic with a printed notice.  The other modifiers (--two-phase /
+    # --multi-resolution / --escape-routing) genuinely bypass the netset path
+    # and remain hard conflicts even under --complete.
+    complete_mode = bool(getattr(args, "complete", False))
+
     conflicts: list[str] = []
     if args.strategy != "basic":
-        default_note = " (the default)" if args.strategy == "negotiated" else ""
-        conflicts.append(f"--strategy {args.strategy}{default_note}")
+        if complete_mode:
+            coerced_from = args.strategy
+            args.strategy = "basic"
+            if not getattr(args, "quiet", False):
+                default_note = " (the default)" if coerced_from == "negotiated" else ""
+                print(
+                    f"  --complete: coercing --strategy {coerced_from}{default_note} to "
+                    "basic (completion runs the lattice netset driver on the "
+                    "listed links, not whole-netset negotiation)"
+                )
+        else:
+            default_note = " (the default)" if args.strategy == "negotiated" else ""
+            conflicts.append(f"--strategy {args.strategy}{default_note}")
     if getattr(args, "two_phase", False):
         conflicts.append("--two-phase")
     if getattr(args, "multi_resolution", False):
@@ -8662,6 +8684,111 @@ def _offboard_preflight(pcb_path: Path) -> int:
     return 2
 
 
+def _apply_complete_mode_defaults(args, parser) -> None:
+    """Apply the ``--complete`` mode implications (Issue #4471, epic #4465).
+
+    ``--complete`` is a *route-only-the-currently-unconnected-links* contract:
+    it auto-detects the stranded signal nets (later, in
+    :func:`_resolve_complete_nets`, which needs the validated board path) and
+    routes ONLY those against all other copper held as fixed obstacles.  Two
+    implications must be stamped BEFORE the #4280 engine/strategy gate runs so
+    the gate sees the coherent combination:
+
+    * ``--preserve-existing`` -- every other net's copper is loaded as an
+      immovable obstacle and re-emitted verbatim.  This also arms the #4413
+      copper-loss guard on the terminal write (``guard_copper_loss`` is keyed
+      off ``args.preserve_existing`` at every save site).
+    * the lattice engine -- unless the user explicitly overrode
+      ``--route-engine`` (a non-default value), completion dispatches through
+      the lattice netset driver (``core.py:_negotiate_lattice_netset``), which
+      already routes ONLY ``self.nets`` against
+      ``fixed_copper = existing_routes not in self.nets`` (#4355).
+
+    ``--strategy`` is intentionally NOT coerced here: the gate
+    (:func:`_validate_route_engine_strategy`) owns the coercion so the printed
+    notice lives beside the rule it relaxes.  No-op when ``--complete`` is
+    absent -- a plain ``kct route`` is byte-identical.
+    """
+    if not getattr(args, "complete", False):
+        return
+    # --complete implies --preserve-existing (idempotent; an explicit
+    # --preserve-existing is a harmless no-op).
+    args.preserve_existing = True
+    # Select the lattice engine unless the user explicitly picked an engine.
+    # argparse cannot distinguish an explicit ``--route-engine grid`` from the
+    # default, so "still at the default" is treated as "not overridden" and
+    # flipped to lattice; any explicit mesh/lattice choice is respected as-is.
+    engine_default = parser.get_default("route_engine")
+    if getattr(args, "route_engine", engine_default) == engine_default:
+        args.route_engine = "lattice"
+        if not getattr(args, "quiet", False):
+            print(
+                "  --complete: routing unconnected links on the lattice engine "
+                "(override with --route-engine)"
+            )
+
+
+def _resolve_complete_nets(args, pcb_path: Path) -> int:
+    """Auto-detect the unconnected signal nets for ``--complete`` (Issue #4471).
+
+    Runs the existing detection helper
+    (:func:`~kicad_tools.router.partial_rescue.partially_connected_signal_nets`
+    with ``include_unrouted=True``) to find every signal net whose pads are not
+    all trace-connected, then stamps ``args.nets`` with exactly those net names
+    so the established #4322 route-only machinery (:func:`_resolve_route_only_nets`)
+    inverts them into the ``--skip-nets`` + ``--preserve-existing`` fixed-obstacle
+    path.  The lattice netset driver then routes ONLY those nets against all
+    other copper.
+
+    Mutually exclusive with ``--nets`` / ``--skip-nets``: ``--complete`` chooses
+    the routable set itself, so a hand-enumerated set would contradict it.
+
+    Returns 0 on success (or when ``--complete`` is absent).  When the board has
+    no unconnected signal nets, sets ``args._complete_noop`` and returns 0 so
+    the caller can short-circuit to a safe no-op write (never a full re-route).
+    A non-zero return (with a printed error) signals a usage/validation error.
+    """
+    if not getattr(args, "complete", False):
+        return 0
+
+    if getattr(args, "nets", None) or getattr(args, "skip_nets", None):
+        print(
+            "Error: --complete auto-detects the nets to route and is mutually "
+            "exclusive with --nets / --skip-nets (--complete chooses the "
+            "routable set itself).",
+            file=sys.stderr,
+        )
+        return 2
+
+    from kicad_tools.router.partial_rescue import partially_connected_signal_nets
+
+    manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
+    try:
+        stranded = partially_connected_signal_nets(
+            pcb_path,
+            manufacturer=manufacturer,
+            include_unrouted=True,
+        )
+    except Exception as e:  # pragma: no cover - detection should not raise
+        print(f"Error detecting unconnected nets for --complete: {e}", file=sys.stderr)
+        return 1
+
+    if not stranded:
+        args._complete_noop = True
+        if not getattr(args, "quiet", False):
+            print(
+                "--complete: no unconnected signal nets detected; the board is "
+                "already fully connected (nothing to route)."
+            )
+        return 0
+
+    args.nets = ",".join(stranded)
+    if not getattr(args, "quiet", False):
+        preview = ", ".join(stranded)
+        print(f"--complete: routing {len(stranded)} unconnected signal net(s): {preview}")
+    return 0
+
+
 def _resolve_route_only_nets(args, pcb_path: Path) -> int:
     """Resolve ``--nets`` (route ONLY the listed nets) -- Issue #4322.
 
@@ -9068,6 +9195,24 @@ def main(argv: list[str] | None = None) -> int:
             "Preserves manually-routed nets, skipped nets' geometry, and "
             "standalone stitch vias across a route pass. Default off (full "
             "re-route, existing copper is replaced by freshly routed nets)."
+        ),
+    )
+    parser.add_argument(
+        "--complete",
+        action="store_true",
+        default=False,
+        help=(
+            "Completion pass (Issue #4471, epic #4465): auto-detect the "
+            "currently-unconnected signal nets and route ONLY those links, "
+            "treating every other net's copper as a fixed obstacle. Implies "
+            "--preserve-existing and, unless you override --route-engine, "
+            "selects the lattice engine with --strategy basic (the "
+            "route-only-listed-links path the #4280 gate permits; a "
+            "negotiated strategy is coerced to basic with a printed notice "
+            "rather than rejected). Existing copper is never deleted (the "
+            "#4413 copper-loss guard is active). Mutually exclusive with "
+            "--nets / --skip-nets. A board with nothing left to connect is a "
+            "safe no-op."
         ),
     )
     parser.add_argument(
@@ -10487,6 +10632,12 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    # Issue #4471 (epic #4465): stamp the --complete mode implications
+    # (--preserve-existing + the lattice engine, unless the user overrode
+    # --route-engine) BEFORE the #4280 gate so the gate sees the coherent
+    # route-only-listed-links combination.  No-op when --complete is absent.
+    _apply_complete_mode_defaults(args, parser)
+
     # Issue #4280: hard compatibility gate for --route-engine mesh|lattice.
     # Runs before ANY other work (env stamping, board loading, escalation
     # dispatch) so an inert engine flag can never silently ship grid copper.
@@ -10555,6 +10706,30 @@ def main(argv: list[str] | None = None) -> int:
 
     if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
+
+    # Issue #4471 (epic #4465): resolve --complete BEFORE --nets.  Auto-detects
+    # the currently-unconnected signal nets and stamps ``args.nets`` with
+    # exactly those, so the #4322 route-only machinery below inverts them into
+    # the --skip-nets + --preserve-existing fixed-obstacle path (the lattice
+    # netset driver then routes ONLY those links).  A board with nothing left
+    # to connect sets ``args._complete_noop`` and is written back unchanged --
+    # never a full re-route.
+    args._complete_noop = False
+    _complete_rc = _resolve_complete_nets(args, pcb_path)
+    if _complete_rc != 0:
+        return _complete_rc
+    if getattr(args, "_complete_noop", False):
+        # Nothing stranded: preserve the board exactly.  Reuse the atomic
+        # writer with an empty route fragment (writes original content back)
+        # and the #4413 copper-loss guard armed -- a trivially-passing check
+        # that keeps the no-op path on the same guarded write as a real pass.
+        output_path = (
+            Path(args.output) if args.output else pcb_path.with_stem(pcb_path.stem + "_routed")
+        )
+        _write_routed_pcb(pcb_path, output_path, "", guard_copper_loss=True)
+        if not getattr(args, "quiet", False):
+            print(f"  Wrote {output_path} (unchanged)")
+        return 0
 
     # Issue #4322: resolve --nets (route ONLY the listed nets) by inverting it
     # into the --skip-nets machinery.  Validates mutual exclusion with
