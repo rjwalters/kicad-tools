@@ -8,6 +8,7 @@
 #   pnpm worktree <issue-number> <branch>              # Create worktree with custom branch name
 #   pnpm worktree <issue-number> --sparse <paths...>   # Cone-mode sparse checkout
 #   pnpm worktree <issue-number> --full                # Convert sparse worktree to full
+#   pnpm worktree remove <issue-number> [--keep-branch]# Remove one managed worktree
 #   pnpm worktree --check                              # Check if currently in a worktree
 #   pnpm worktree --json <issue-number>                # Machine-readable output
 #   pnpm worktree --return-to <dir> <issue-number>     # Store return directory
@@ -299,6 +300,198 @@ cleanup_partial_worktree_state() {
 }
 
 # --------------------------------------------------------------------------
+# Operator-facing single-worktree removal (issue #3769)
+# --------------------------------------------------------------------------
+#
+# `worktree.sh remove <N>` (alias `--remove <N>`) is the sanctioned path for an
+# operator to remove exactly one managed worktree on demand — e.g. a dead
+# builder's stale checkout that pushed nothing and needs to be re-created off an
+# updated base. Before this verb existed, the only single-worktree removal was
+# `git worktree remove` directly, which CLAUDE.md forbids because running it
+# while the shell is inside/near the worktree corrupts shell state.
+#
+# The guard order deliberately mirrors merge-pr.sh's private
+# `_remove_loom_worktree()` (defaults/scripts/merge-pr.sh:1129-1199), scoped to
+# the `issue-<N>` path convention only (no --worktree-path override, no
+# discovery fallback — those belong to merge-pr.sh's distinct call-sites):
+#   1. Idempotent no-op if the worktree dir is absent (still prune).
+#   2. Refuse to remove a dir lacking the .loom-managed sentinel (user-owned).
+#   3. Discover the attached branch BEFORE removal (the porcelain entry vanishes
+#      once the worktree is gone).
+#   4. Hop out of the worktree first if our cwd is inside it (CWD-safety).
+#   5. `git worktree remove --force`; warn (don't hard-fail) on failure.
+#   6. `git branch -d` the attached branch (safe delete, refuses on unmerged
+#      commits) unless --keep-branch.
+#   7. `git worktree prune`.
+#
+# `loom-clean` remains the bulk/stale-cleanup path across all closed issues;
+# this verb targets one specific issue's worktree.
+
+# Print the short branch name attached to a worktree path, parsed from
+# `git worktree list --porcelain`. Robust to custom branch names (worktree.sh
+# <N> <custom-branch> allows a non-`feature/issue-<N>` branch). Mirrors
+# merge-pr.sh's _worktree_branch_for(). Prints nothing for a detached/bare
+# worktree or on error.
+_worktree_attached_branch() {
+    local repo_root="$1" target="$2" target_abs
+    target_abs="$(cd "$target" 2>/dev/null && pwd -P)" || target_abs="$target"
+    # The `worktree ` path line (prefix = 9 chars) may contain spaces, so parse
+    # it with substr($0, 10) rather than $2. The `branch ` line is safe with $2
+    # (git ref names cannot contain spaces).
+    git -C "$repo_root" worktree list --porcelain 2>/dev/null | \
+        awk -v p="$target_abs" '
+            /^worktree / { wt=substr($0, 10); br=""; next }
+            /^branch /   { br=$2 }
+            /^$/         { if (wt == p && br != "" && !found) { sub(/^refs\/heads\//, "", br); print br; found=1; exit } }
+            END          { if (wt == p && br != "" && !found) { sub(/^refs\/heads\//, "", br); print br } }
+        '
+}
+
+# remove_worktree_command [--keep-branch] [--json] <issue-number>
+#
+# Invoked from the early arg dispatch below. Returns 0 on success (including the
+# idempotent no-op) and 1 on refusal / usage error / removal failure.
+remove_worktree_command() {
+    local issue_number="" keep_branch=false json=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --keep-branch) keep_branch=true; shift ;;
+            --json)        json=true; shift ;;
+            --*)
+                print_error "Unknown flag for remove: $1"
+                echo ""
+                echo "Usage: pnpm worktree remove <issue-number> [--keep-branch] [--json]"
+                return 1
+                ;;
+            *)
+                if [[ -z "$issue_number" ]]; then
+                    issue_number="$1"; shift
+                else
+                    print_error "Unexpected argument: $1"
+                    return 1
+                fi
+                ;;
+        esac
+    done
+
+    if [[ -z "$issue_number" ]]; then
+        print_error "remove requires an issue number"
+        echo ""
+        echo "Usage: pnpm worktree remove <issue-number> [--keep-branch] [--json]"
+        return 1
+    fi
+    if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+        print_error "Issue number must be numeric (got: '$issue_number')"
+        echo ""
+        echo "Usage: pnpm worktree remove <issue-number> [--keep-branch] [--json]"
+        return 1
+    fi
+
+    # In --json mode, human-readable status goes to stderr so stdout carries
+    # only the final JSON document (stdout-purity, mirrors the main script's
+    # fd-3 plumbing). print_error already writes to stderr, safe in both modes.
+    _rm_info()    { if [[ "$json" == true ]]; then echo -e "${BLUE}ℹ $*${NC}" >&2; else print_info "$*"; fi; }
+    _rm_success() { if [[ "$json" == true ]]; then echo -e "${GREEN}✓ $*${NC}" >&2; else print_success "$*"; fi; }
+    _rm_warning() { if [[ "$json" == true ]]; then echo -e "${YELLOW}⚠ $*${NC}" >&2; else print_warning "$*"; fi; }
+    _rm_json() {
+        # $1=success(bool) $2=removed(bool) $3=branchStatus
+        [[ "$json" == true ]] || return 0
+        printf '{"success": %s, "issueNumber": %s, "worktreePath": "%s", "removed": %s, "branch": "%s", "branchStatus": "%s"}\n' \
+            "$1" "$issue_number" "$worktree_path" "$2" "${attached_branch:-}" "$3"
+    }
+
+    # Resolve the repo root even when invoked from inside a worktree: the git
+    # common dir's parent is always the main workspace.
+    local git_common repo_root
+    if ! git_common=$(git rev-parse --git-common-dir 2>/dev/null); then
+        print_error "Not inside a git repository"
+        return 1
+    fi
+    repo_root=$(cd "$(dirname "$git_common")" 2>/dev/null && pwd) || repo_root="$(pwd)"
+
+    local worktree_root_dir worktree_path
+    worktree_root_dir="$(loom_worktree_root "$repo_root")"
+    worktree_path="$worktree_root_dir/issue-$issue_number"
+    local attached_branch=""
+
+    # 1. Idempotent no-op if the worktree dir is absent (still prune any stale
+    #    registration, matching the "prunes git worktree registration" AC).
+    if [[ ! -d "$worktree_path" ]]; then
+        git -C "$repo_root" worktree prune 2>/dev/null || true
+        _rm_info "No worktree found at $worktree_path — nothing to remove"
+        _rm_json true false "absent"
+        return 0
+    fi
+
+    # 2. Sentinel guard: refuse to remove a user-owned / non-managed worktree.
+    if [[ ! -f "$worktree_path/.loom-managed" ]]; then
+        print_error "Worktree at $worktree_path lacks .loom-managed sentinel — refusing to remove (user-owned)"
+        _rm_json false false "untouched"
+        return 1
+    fi
+
+    # 3. Discover the attached branch BEFORE removal (porcelain entry vanishes
+    #    once the worktree is gone).
+    attached_branch="$(_worktree_attached_branch "$repo_root" "$worktree_path")" || attached_branch=""
+
+    # 4. CWD-safety: if our shell is inside the worktree, hop out first.
+    local worktree_real current_dir in_worktree=false
+    worktree_real="$(cd "$worktree_path" 2>/dev/null && pwd -P)" || worktree_real="$worktree_path"
+    current_dir="$(pwd -P 2>/dev/null || pwd)"
+    if [[ "$current_dir" == "$worktree_real"* ]]; then
+        in_worktree=true
+        cd "$repo_root" 2>/dev/null || true
+    fi
+
+    # 5. Remove the worktree.
+    _rm_info "Removing worktree: $worktree_path"
+    local removed=false
+    if git -C "$repo_root" worktree remove "$worktree_path" --force >/dev/null 2>&1; then
+        removed=true
+        _rm_success "Worktree removed"
+        if [[ "$in_worktree" == true ]]; then
+            _rm_warning "Your shell's working directory was inside the removed worktree."
+            _rm_warning "Run this command to fix:  cd $repo_root"
+        fi
+    else
+        _rm_warning "Could not remove worktree at $worktree_path"
+    fi
+
+    # 6. Branch cleanup (unless --keep-branch). Deferred until after removal so
+    #    the worktree's checkout lock on the branch is released first.
+    local branch_status="none"
+    if [[ "$keep_branch" == true ]]; then
+        if [[ -n "$attached_branch" ]]; then
+            _rm_info "Keeping local branch '$attached_branch' (--keep-branch)"
+            branch_status="kept"
+        fi
+    elif [[ "$removed" == true && -n "$attached_branch" ]]; then
+        if ! git -C "$repo_root" show-ref --verify --quiet "refs/heads/$attached_branch"; then
+            _rm_info "Local branch '$attached_branch' does not exist — skipping branch delete"
+            branch_status="absent"
+        elif git -C "$repo_root" branch -d "$attached_branch" >/dev/null 2>&1; then
+            _rm_success "Local branch '$attached_branch' deleted"
+            branch_status="deleted"
+        else
+            _rm_warning "Could not delete local branch '$attached_branch' (may have unmerged commits — use 'git branch -D' if intentional)"
+            branch_status="unmerged"
+        fi
+    fi
+
+    # 7. Prune the git worktree registration.
+    git -C "$repo_root" worktree prune 2>/dev/null || true
+
+    if [[ "$removed" == true ]]; then
+        _rm_json true true "$branch_status"
+        return 0
+    else
+        _rm_json false false "$branch_status"
+        return 1
+    fi
+}
+
+# --------------------------------------------------------------------------
 # Sparse-checkout helpers
 # --------------------------------------------------------------------------
 #
@@ -436,8 +629,10 @@ This script helps AI agents safely create and manage git worktrees.
 Usage:
   pnpm worktree <issue-number>                          Create worktree for issue
   pnpm worktree <issue-number> <branch>                 Create worktree with custom branch
+  pnpm worktree <issue-number> --base <branch>          Branch off <branch> (stacked PR, #3729)
   pnpm worktree <issue-number> --sparse <paths...>      Cone-mode sparse checkout
   pnpm worktree <issue-number> --full                   Convert sparse worktree to full
+  pnpm worktree remove <issue-number> [--keep-branch]   Remove one managed worktree
   pnpm worktree --check                                 Check if in a worktree
   pnpm worktree --json <issue-number>                   Machine-readable JSON output
   pnpm worktree --return-to <dir> <issue-number>        Store return directory
@@ -452,6 +647,11 @@ Examples:
     Creates: .loom/worktrees/issue-42
     Branch: feature/fix-bug
 
+  pnpm worktree 42 --base feature/issue-41
+    Creates: .loom/worktrees/issue-42
+    Branch: feature/issue-42, branched off feature/issue-41 instead of the
+    default branch (stacked-PR mode, #3729). Used by /loom:sweep --depends-on.
+
   pnpm worktree 42 --sparse src/lib defaults/scripts
     Creates a sparse worktree containing only the listed paths plus the
     always-included safety set (.claude/, .loom/, .githooks/, scripts/, and
@@ -460,6 +660,18 @@ Examples:
   pnpm worktree 42 --full
     Converts an existing sparse worktree back to a full checkout
     (no-op on an already-full worktree).
+
+  pnpm worktree remove 42
+    Removes the managed worktree .loom/worktrees/issue-42 and deletes its local
+    branch (safe delete — refuses on unmerged commits). This is the sanctioned
+    single-worktree removal path so you never need 'git worktree remove'
+    directly. It honors the .loom-managed sentinel (refuses to remove a
+    user-provisioned worktree), is idempotent (clear no-op if absent), and
+    prunes the git worktree registration. Use 'loom-clean' for bulk/stale
+    cleanup across all closed issues.
+
+  pnpm worktree remove 42 --keep-branch
+    Same as above but leaves the local feature branch intact.
 
   pnpm worktree --check
     Shows current worktree status
@@ -562,6 +774,17 @@ if [[ "$1" == "--check" ]]; then
     exit $?
 fi
 
+# Operator-facing single-worktree removal verb (issue #3769). Dispatched HERE,
+# before the generic numeric-issue-number validation below, so `remove <N>` /
+# `--remove <N>` is not rejected as "Issue number must be numeric". The handler
+# parses its own args (issue number + optional --keep-branch / --json).
+if [[ "$1" == "remove" || "$1" == "--remove" ]]; then
+    shift
+    # Left of && so set -e does not abort on a non-zero return from the handler.
+    remove_worktree_command "$@" && exit 0
+    exit 1
+fi
+
 # Check for --json flag
 JSON_OUTPUT=false
 RETURN_TO_DIR=""
@@ -630,6 +853,11 @@ SPARSE_MODE=false
 FULL_MODE=false
 SPARSE_PATHS=()
 CUSTOM_BRANCH=""
+# Base-branch override (#3729, stacked-PR v1). When set via `--base <branch>`,
+# the new feature branch is created from (and stale worktrees reset to) that
+# branch instead of origin/$DEFAULT_BRANCH. `/loom:sweep --depends-on <parent>`
+# passes `--base feature/issue-<parent>` so the child stacks on the parent.
+BASE_BRANCH=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -645,6 +873,14 @@ while [[ $# -gt 0 ]]; do
         --full)
             FULL_MODE=true
             shift
+            ;;
+        --base)
+            BASE_BRANCH="$2"
+            if [[ -z "$BASE_BRANCH" ]]; then
+                print_error "--base requires a branch name"
+                exit 1
+            fi
+            shift 2
             ;;
         --*)
             print_error "Unknown flag: $1"
@@ -809,6 +1045,38 @@ fi
 # Uses fetch-only to avoid conflicts with worktrees that have it checked out
 fetch_latest_main
 
+# ─── Base-branch resolution (#3729, stacked-PR v1) ──────────────────────────
+# By default a new feature branch is created from origin/$DEFAULT_BRANCH. When
+# --base <branch> is passed (e.g. `--base feature/issue-<parent>` from
+# /loom:sweep --depends-on), resolve a ref for that base and use it instead so
+# the child branch stacks on top of the parent's branch. Prefer the pushed
+# origin/<base>, fall back to a local <base>. Hard-fail if neither resolves —
+# an explicit base that can't be found is worse than silently branching off
+# main (which would un-stack the child).
+BASE_REF="origin/$DEFAULT_BRANCH"
+BASE_DISPLAY="$DEFAULT_BRANCH"
+if [[ -n "$BASE_BRANCH" ]]; then
+    git fetch origin "$BASE_BRANCH" 2>/dev/null || true
+    if git show-ref --verify --quiet "refs/remotes/origin/$BASE_BRANCH"; then
+        BASE_REF="origin/$BASE_BRANCH"
+        BASE_DISPLAY="origin/$BASE_BRANCH"
+    elif git show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
+        BASE_REF="$BASE_BRANCH"
+        BASE_DISPLAY="$BASE_BRANCH"
+    else
+        if [[ "$JSON_OUTPUT" == "true" ]]; then
+            echo '{"success": false, "error": "base-branch-not-found", "baseBranch": "'"$BASE_BRANCH"'"}' >&3
+        else
+            print_error "Requested --base '$BASE_BRANCH' not found as origin/$BASE_BRANCH or a local branch."
+            echo "  Ensure the parent sweep has created/pushed feature/issue-<parent> before stacking a child on it."
+        fi
+        exit 1
+    fi
+    if [[ "$JSON_OUTPUT" != "true" ]]; then
+        print_info "Stacked worktree base: $BASE_DISPLAY (from --base $BASE_BRANCH)"
+    fi
+fi
+
 # Determine branch name
 if [[ -n "$CUSTOM_BRANCH" ]]; then
     BRANCH_NAME="feature/$CUSTOM_BRANCH"
@@ -882,9 +1150,11 @@ if [[ -d "$WORKTREE_PATH" ]]; then
 
     # Check if it's registered with git
     if git worktree list | grep -q "$WORKTREE_PATH"; then
-        # Check if worktree is stale: no commits ahead of main and behind main
-        local_commits_ahead=$(git -C "$WORKTREE_PATH" rev-list --count "origin/$DEFAULT_BRANCH..HEAD" 2>/dev/null) || local_commits_ahead="0"
-        local_commits_behind=$(git -C "$WORKTREE_PATH" rev-list --count "HEAD..origin/$DEFAULT_BRANCH" 2>/dev/null) || local_commits_behind="0"
+        # Check if worktree is stale: no commits ahead of the base and behind it.
+        # For a stacked child (--base), staleness is measured against the parent
+        # branch (BASE_REF), not the default branch (#3729).
+        local_commits_ahead=$(git -C "$WORKTREE_PATH" rev-list --count "$BASE_REF..HEAD" 2>/dev/null) || local_commits_ahead="0"
+        local_commits_behind=$(git -C "$WORKTREE_PATH" rev-list --count "HEAD..$BASE_REF" 2>/dev/null) || local_commits_behind="0"
         local_uncommitted=$(git -C "$WORKTREE_PATH" status --porcelain 2>/dev/null) || local_uncommitted=""
 
         if [[ "$local_commits_ahead" -gt 0 || -n "$local_uncommitted" ]]; then
@@ -907,18 +1177,18 @@ if [[ -d "$WORKTREE_PATH" ]]; then
             # Stale worktree: no commits ahead, no uncommitted changes
             # Reset in place instead of removing (avoids CWD corruption)
             if [[ "$JSON_OUTPUT" != "true" ]]; then
-                print_warning "Stale worktree detected (0 commits ahead, $local_commits_behind behind $DEFAULT_BRANCH, no uncommitted changes)"
-                print_info "Resetting worktree in place to origin/$DEFAULT_BRANCH..."
+                print_warning "Stale worktree detected (0 commits ahead, $local_commits_behind behind $BASE_DISPLAY, no uncommitted changes)"
+                print_info "Resetting worktree in place to $BASE_DISPLAY..."
             fi
 
             # Back-fill/refresh the Loom sentinel on both reset outcomes: the
             # worktree remains usable either way, so keep it cleanup-eligible
             # (#3548).
             write_loom_sentinel "$WORKTREE_PATH"
-            if git -C "$WORKTREE_PATH" fetch origin "$DEFAULT_BRANCH" 2>/dev/null && \
-               git -C "$WORKTREE_PATH" reset --hard "origin/$DEFAULT_BRANCH" 2>/dev/null; then
+            if git -C "$WORKTREE_PATH" fetch origin "${BASE_BRANCH:-$DEFAULT_BRANCH}" 2>/dev/null && \
+               git -C "$WORKTREE_PATH" reset --hard "$BASE_REF" 2>/dev/null; then
                 if [[ "$JSON_OUTPUT" != "true" ]]; then
-                    print_success "Stale worktree reset to origin/$DEFAULT_BRANCH"
+                    print_success "Stale worktree reset to $BASE_DISPLAY"
                     echo ""
                     print_info "To use this worktree: cd $WORKTREE_PATH"
                 fi
@@ -953,11 +1223,12 @@ if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
 
     CREATE_ARGS=("$WORKTREE_PATH" "$BRANCH_NAME")
 else
-    # Create new branch from the default branch
+    # Create new branch from the base ref (origin/$DEFAULT_BRANCH by default, or
+    # the --base override for a stacked child — #3729).
     if [[ "$JSON_OUTPUT" != "true" ]]; then
-        print_info "Creating new branch from $DEFAULT_BRANCH"
+        print_info "Creating new branch from $BASE_DISPLAY"
     fi
-    CREATE_ARGS=("$WORKTREE_PATH" "-b" "$BRANCH_NAME" "origin/$DEFAULT_BRANCH")
+    CREATE_ARGS=("$WORKTREE_PATH" "-b" "$BRANCH_NAME" "$BASE_REF")
 fi
 
 # In sparse mode, defer file materialization until after we configure the cone.

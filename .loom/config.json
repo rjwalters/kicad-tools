@@ -28,7 +28,11 @@
     "auto_create_issues": false,
     "min_session_duration": 300,
     "upstream_repo": "rjwalters/loom",
-    "categories": ["bug", "enhancement", "documentation"]
+    "categories": [
+      "bug",
+      "enhancement",
+      "documentation"
+    ]
   },
   "terminals": [
     {

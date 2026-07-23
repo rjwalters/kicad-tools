@@ -302,6 +302,41 @@ assert "write doctor-done with --attempt 6 (raised cap)" "$CHECKPOINT" write 71 
 out=$("$CHECKPOINT" attempt 71)
 assert_eq "attempt command reads back 6" "6" "$out"
 
+# --- Stable per-sweep-run task_id (#3768) ---
+# sweep.md now threads a stable RUN_ID as --task-id at every call site. The
+# checkpoint round-trips an arbitrary stable id, and the omitted-flag fallback
+# still yields a parseable checkpoint (last-resort only).
+
+# 35. A stable run id passed as --task-id round-trips into the JSON verbatim.
+STABLE_RID="sweep-20260722T231500Z-84213-a3f9c1"
+assert "write with stable RUN_ID task-id" "$CHECKPOINT" write 80 builder-done --task-id "$STABLE_RID" --pr-number 800
+out=$("$CHECKPOINT" read 80)
+if echo "$out" | grep -q "\"task_id\": \"$STABLE_RID\""; then
+    echo "PASS: stable RUN_ID persisted verbatim as task_id"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: stable RUN_ID task_id missing/wrong: $out" >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# 36. Legacy sweep-<pid> task_id still parses cleanly (free-form field, no schema change).
+"$CHECKPOINT" write 81 curator-done --task-id "sweep-12345" >/dev/null
+out=$("$CHECKPOINT" phase 81)
+assert_eq "legacy sweep-<pid> task_id checkpoint still reads phase" "curator-done" "$out"
+
+# 37. Omitted --task-id falls back to a parseable (clearly-labelled fallback) id.
+"$CHECKPOINT" write 82 curator-done >/dev/null
+out=$("$CHECKPOINT" read 82)
+if echo "$out" | grep -Eq '"task_id": "sweep-run-fallback-[0-9]+"'; then
+    echo "PASS: omitted --task-id uses labelled fallback default"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: fallback task_id default unexpected: $out" >&2
+    FAIL=$((FAIL + 1))
+fi
+out=$("$CHECKPOINT" phase 82)
+assert_eq "fallback-default checkpoint still reads phase" "curator-done" "$out"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]] || exit 1

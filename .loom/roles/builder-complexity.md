@@ -33,8 +33,10 @@ gh issue comment 812 --body "This issue is complex (>6 hours). Decomposed into:
 - #YYY: Part 2 (1.5 hours)
 - #ZZZ: Part 3 (2 hours)"
 
-# 3. Close parent issue or remove loom:building
-gh issue close 812  # OR: gh issue edit 812 --remove-label "loom:building"
+# 3. Mark the parent blocked — humans close it once children are filed.
+#    NEVER close a parent issue yourself; the decomposition comment above
+#    is the record, loom:blocked is the terminal state.
+gh issue edit 812 --remove-label "loom:building" --add-label "loom:blocked"
 
 # 4. (Optional) Pick up a sub-issue once a Curator has enhanced it
 #    Sub-issues are born at loom:triage. A separate Curator pass produces
@@ -42,7 +44,7 @@ gh issue close 812  # OR: gh issue edit 812 --remove-label "loom:building"
 #    yourself to a sub-issue you just created -- that would skip both
 #    Curator review and the human-approval gate.
 gh issue edit XXX --add-label "loom:triage"
-# Then exit and let the Curator/Shepherd pipeline pick it up.
+# Then exit and let the Curator/sweep pipeline pick it up.
 ```
 
 **DON'T DO THIS** (abandon without path forward):
@@ -150,7 +152,7 @@ Before decomposing an issue into sub-issues:
    ```
 
 4. **Compare findings to issue requirements**:
-   - **Fully implemented** -> Close issue as already complete with evidence
+   - **Fully implemented** (verified — you can cite files/lines/tests) -> this is the "Already covered" close case from `builder.md` → "Issues Are Suggestions". Comment the evidence as your rationale, then **close the issue** (`gh issue close <N> --reason "not planned"`); do NOT create duplicate sub-issues. **Under `/loom:sweep` orchestration**, prefer the `.no-changes-needed` marker instead of closing directly so orchestration finalizes the lifecycle (see `builder.md` → "Signaling No Changes Needed"). If the "already implemented" call is **ambiguous** (you cannot fully verify, or it hides a still-pending human decision), do NOT close — route it to `loom:blocked` with a comment per the guardrails.
    - **Partially implemented** -> Create sub-issues only for missing parts
    - **Not implemented** -> Proceed with decomposition as planned
 
@@ -162,7 +164,7 @@ Large issue requiring decomposition
 1. AUDIT: Search codebase for existing implementations
 |
 2. ASSESS:
-   |-- Fully implemented? -> Close issue with evidence
+   |-- Fully implemented (verified)? -> Close with evidence as rationale ("Already covered"); under /loom:sweep use the .no-changes-needed marker. Ambiguous -> loom:blocked with a comment.
    |-- Partially implemented? -> Create sub-issues for gaps only
    +-- Not implemented? -> Proceed with decomposition
 |
@@ -193,7 +195,10 @@ $ find . -name "*_test*" | xargs grep -l constraint
 # Audit shows: All features fully implemented with tests
 
 # Step 4: Decision
-# -> Close issue #341 as already implemented
+# -> Comment the evidence above as the rationale, then CLOSE issue #341 as
+#    "Already covered" (gh issue close 341 --reason "not planned"). Under
+#    /loom:sweep, write a .no-changes-needed marker instead and let orchestration
+#    finalize. If the "already implemented" call is ambiguous, use loom:blocked + a comment.
 # -> Do NOT create sub-issues (would be duplicates)
 # -> Create separate issue for actual gaps: "Add SQLSTATE codes to constraint errors"
 ```
@@ -269,7 +274,7 @@ Before claiming an issue, estimate the work required:
 **If Complex (6-12 hours, clear path)**:
 1. Assess carefully - can you complete it in one focused session?
 2. If YES: Claim and implement (larger PRs are fine if cohesive)
-3. If NO: Break down into 2-4 sub-issues, close parent with explanation
+3. If NO: Break down into 2-4 sub-issues, mark parent `loom:blocked` with an explanation (humans close)
 4. Prefer completing work over creating more issues
 
 **If Intractable (> 12 hours or unclear)**:
@@ -326,10 +331,18 @@ EOF
 )"
 ```
 
-**Step 3: Close Parent Issue**
+**Step 3: Mark Parent Blocked (don't close a decomposition-parent yourself)**
+
+Record the decomposition in a comment, then move the parent to `loom:blocked`. A
+freshly-decomposed **parent** is a tracking issue for its children, so it is **not**
+a close candidate — a human (or Curator, per `curator.md` item 4) closes it once the
+children are filed and curated. This is the decomposition-parent exception, not a
+blanket rule: for a **non-parent** issue you verify is already implemented, close it
+with a rationale per `builder.md` → "Issues Are Suggestions" (or the `.no-changes-needed`
+marker under `/loom:sweep`).
 
 ```bash
-gh issue close <parent-number> --comment "$(cat <<'EOF'
+gh issue comment <parent-number> --body "$(cat <<'EOF'
 Decomposed into smaller sub-issues for incremental implementation:
 
 - #<phase1-number>: Phase 1 (1-2 hours)
@@ -339,6 +352,7 @@ Decomposed into smaller sub-issues for incremental implementation:
 Each sub-issue references this parent for full context. Curator will enhance them with implementation details.
 EOF
 )"
+gh issue edit <parent-number> --remove-label "loom:building" --add-label "loom:blocked"
 ```
 
 ### Real-World Example
@@ -361,8 +375,9 @@ gh issue create --title "Integrate activity logging into /builder and /judge"
 gh issue create --title "Add activity querying to /loom heuristic"
 # -> Issue #536 (1-2 hours, depends on #535)
 
-# Close parent
-gh issue close 524 --comment "Decomposed into #534, #535, #536"
+# Mark parent blocked — a human closes it once the children are curated
+gh issue comment 524 --body "Decomposed into #534, #535, #536"
+gh issue edit 524 --remove-label "loom:building" --add-label "loom:blocked"
 ```
 
 **Benefits**:

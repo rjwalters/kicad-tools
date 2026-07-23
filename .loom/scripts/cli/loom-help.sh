@@ -171,8 +171,8 @@ show_command_help() {
             fi
             ;;
         status)
-            if [[ -n "$REPO_ROOT" && -f "$REPO_ROOT/.loom/scripts/loom-status.sh" ]]; then
-                exec "$REPO_ROOT/.loom/scripts/loom-status.sh" --help
+            if [[ -n "$CLI_DIR" && -f "$CLI_DIR/loom-status.sh" ]]; then
+                exec "$CLI_DIR/loom-status.sh" --help
             else
                 echo -e "${RED}Error: status command not installed${NC}"
                 exit 1

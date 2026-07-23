@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
-# loom scale - Dynamic agent scaling
+# loom scale - Dynamic agent scaling (LEGACY: tmux Manual-Orchestration-Mode)
+#
+# DEPRECATED (#3811): this script scales tmux-session-based agents for the
+# hands-on Manual Orchestration Mode. It is NOT the autonomous daemon's scaling
+# mechanism. The Rust `loom-daemon` work finder now scales concurrent autonomous
+# sweeps automatically, work-driven: min(token-pool size, disk headroom,
+# LOOM_WORK_FINDER_MAX_CONCURRENT), recomputed every tick. To tune autonomous
+# concurrency, set those env vars instead of using this script:
+#   LOOM_WORK_FINDER=1                     Enable the daemon work-finder loop.
+#   LOOM_WORK_FINDER_MAX_CONCURRENT=<N>    Operator ceiling on concurrent sweeps.
+# See .loom/docs/daemon-reference.md -> "Autonomous work finder".
+#
+# The `shepherd` role no longer exists (removed in v0.10.0); use `builder` or
+# another live role name if you drive tmux agents manually.
 #
 # Usage:
 #   loom scale <role> <count>     Scale role to target count
@@ -7,9 +20,9 @@
 #   loom scale --help             Show help
 #
 # Examples:
-#   loom scale shepherd 3         Scale shepherd agents to 3
-#   loom scale shepherd 0         Stop all shepherds
 #   loom scale builder 2          Scale builder agents to 2
+#   loom scale builder 0          Stop all builder agents
+#   loom scale judge 1            Scale judge agents to 1
 
 set -euo pipefail
 
@@ -70,7 +83,17 @@ fi
 # Show help
 show_help() {
     cat <<EOF
-${BOLD}loom scale - Dynamic agent scaling${NC}
+${BOLD}loom scale - Dynamic agent scaling (LEGACY: tmux Manual Orchestration Mode)${NC}
+
+${YELLOW}DEPRECATED (#3811):${NC}
+    This scales tmux-session agents for hands-on Manual Orchestration Mode. It is
+    NOT the autonomous daemon's scaling mechanism. The Rust loom-daemon work
+    finder scales concurrent autonomous sweeps automatically, work-driven:
+    min(token-pool size, disk headroom, LOOM_WORK_FINDER_MAX_CONCURRENT),
+    recomputed every tick. To tune AUTONOMOUS concurrency, set:
+        LOOM_WORK_FINDER=1                    Enable the daemon work-finder loop.
+        LOOM_WORK_FINDER_MAX_CONCURRENT=<N>   Operator ceiling on concurrent sweeps.
+    See .loom/docs/daemon-reference.md -> "Autonomous work finder".
 
 ${YELLOW}USAGE:${NC}
     loom scale <role> <count>     Scale role to target count
@@ -84,13 +107,14 @@ ${YELLOW}OPTIONS:${NC}
     --status          Show current scale for each role
 
 ${YELLOW}EXAMPLES:${NC}
-    loom scale shepherd 3         Scale shepherd agents to 3
-    loom scale shepherd 0         Stop all shepherds
     loom scale builder 2          Scale builder agents to 2
+    loom scale builder 0          Stop all builder agents
+    loom scale judge 1            Scale judge agents to 1
     loom scale --status           Show current agent counts
 
 ${YELLOW}ROLES:${NC}
-    Common roles: shepherd, builder, judge, curator, champion, architect
+    Common roles: builder, judge, curator, champion, architect
+    (the 'shepherd' role was removed in v0.10.0)
 
 ${YELLOW}HOW IT WORKS:${NC}
     Scale up:
@@ -143,7 +167,7 @@ get_max_role_number() {
 
     while read -r session; do
         if [[ -n "$session" ]]; then
-            # Extract number from session name (e.g., loom-shepherd-3 -> 3)
+            # Extract number from session name (e.g., loom-builder-3 -> 3)
             local num
             num=$(echo "$session" | grep -oE '[0-9]+$' || echo "0")
             if [[ "$num" -gt "$max" ]]; then

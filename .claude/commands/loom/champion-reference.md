@@ -14,8 +14,11 @@ This section documents how Champion handles non-standard situations during PR au
 
 **Handling**:
 ```bash
-# gh pr checks returns "no checks reported"
-if echo "$CHECKS" | grep -q "no checks reported"; then
+# With no checks, `gh pr checks --json bucket,name` prints "no checks reported..."
+# to STDERR, exits non-zero, and emits EMPTY stdout. Detect via empty stdout
+# (robust) rather than matching error text. CHECKS captured with 2>/dev/null.
+CHECKS=$(gh pr checks "$PR_NUMBER" --json bucket,name 2>/dev/null)
+if [ -z "$CHECKS" ] || [ "$(echo "$CHECKS" | jq 'length')" = "0" ]; then
   echo "PASS: No CI checks required"
   # Continue to merge
 fi
@@ -33,8 +36,8 @@ fi
 
 **Handling**:
 ```bash
-# Check for pending/running checks
-PENDING=$(echo "$CHECKS" | jq -r '.[] | select(.status == "IN_PROGRESS" or .status == "QUEUED") | .name')
+# Check for pending/running checks (bucket == "pending")
+PENDING=$(echo "$CHECKS" | jq -r '.[] | select(.bucket == "pending") | .name')
 if [ -n "$PENDING" ]; then
   echo "SKIP: CI checks still running - will retry next iteration"
   # Skip this PR, try again later
@@ -97,11 +100,11 @@ if [ "$HOURS_AGO" -gt 24 ]; then
 fi
 ```
 
-**Decision**: **Skip and comment** - do not merge stale PRs.
+**Decision**: **Comment once, then route out of the queue** - do not merge stale PRs, and do not re-comment every cron tick.
 
 **Rationale**: Main branch may have evolved significantly. Stale PRs should be rebased or re-reviewed.
 
-**Recommended action**: Remove `loom:pr` label on stale PRs, request rebase from Builder.
+**Action** (single authoritative policy — implemented in `champion-pr-merge.md` → "PR Rejection Workflow → Stale PR"): post the stale notice **once**, guarded by an idempotency marker (`<!-- champion:stale-pr-notice -->`) so the 10-minute cron does not spam the PR, and **swap `loom:pr` → `loom:changes-requested`** to route the PR to Doctor for a rebase/refresh. This removes `loom:pr` (unlike the transient-failure path, which keeps it), because a stale PR cannot clear itself and must leave the auto-merge queue. See `champion-pr-merge.md` for the exact commands.
 
 ---
 
@@ -117,15 +120,15 @@ fi
 
 ---
 
-### Edge Case 7: PR with `loom:manual-merge` Added Mid-Evaluation
+### Edge Case 7: PR with `loom:pr` Removed Mid-Evaluation
 
-**Scenario**: Human adds `loom:manual-merge` label while Champion is evaluating the PR.
+**Scenario**: Human removes the `loom:pr` label (or adds `loom:changes-requested`) to hold a PR while Champion is evaluating it.
 
-**Handling**: Label check (#1) runs first, catches override immediately.
+**Handling**: Label check (#1) runs first, catches the missing `loom:pr` immediately.
 
-**Decision**: **Skip immediately** - respect human override.
+**Decision**: **Skip immediately** - a PR without `loom:pr` is not a merge candidate.
 
-**Rationale**: Champion re-fetches labels at start of each evaluation, race condition window is minimal.
+**Rationale**: Champion re-fetches labels at start of each evaluation, so the human hold takes effect on the next evaluation; the race-condition window is minimal.
 
 ---
 
@@ -164,16 +167,17 @@ done
 
 **Handling**:
 ```bash
-# Any non-SUCCESS conclusion fails the check
-FAILING=$(echo "$CHECKS" | jq -r '.[] | select(.conclusion != "SUCCESS" and .conclusion != null) | .name')
+# A "fail" or "cancel" bucket blocks the merge; "pending" defers; "pass" and
+# "skipping" are acceptable. (gh buckets: pass, fail, pending, skipping, cancel.)
+FAILING=$(echo "$CHECKS" | jq -r '.[] | select(.bucket == "fail" or .bucket == "cancel") | .name')
 if [ -n "$FAILING" ]; then
   echo "FAIL: Some checks did not pass"
 fi
 ```
 
-**Decision**: **Fail if any check is not SUCCESS** - conservative approach.
+**Decision**: **Fail on any `fail`/`cancel` bucket; defer on `pending`** - conservative but not falsely blocking.
 
-**Rationale**: "Skipped" or "Neutral" conclusions indicate incomplete validation.
+**Rationale**: A `skipping` bucket (a conditionally-skipped job) is not a failure and does not block auto-merge; only `fail`/`cancel` block and `pending` defers.
 
 ---
 
@@ -275,9 +279,7 @@ gh issue create --title "Follow-on: Work identified in PR #$PR_NUMBER" --label "
 | Standard TODOs | 3+ | Create consolidated |
 | Below threshold | < 3 TODOs, no sections | Skip |
 
-**Force Mode Behavior**:
-- Normal mode: Create with `loom:curated` label (goes to Champion evaluation)
-- Force mode: Create with `loom:issue` label (goes directly to Builder queue)
+**Follow-on Issue Labeling**: Follow-on issues are created with the `loom:curated` label (goes to Champion evaluation).
 
 **Edge Cases Within Follow-on**:
 
@@ -285,7 +287,6 @@ gh issue create --title "Follow-on: Work identified in PR #$PR_NUMBER" --label "
 2. **TODO without colon**: Pattern requires `TODO:` not just `TODO` to avoid false positives
 3. **Multi-line TODOs**: Only first line captured, truncated at 200 chars
 4. **Duplicate follow-on issue exists**: Search before creation, skip if found
-5. **Force mode with no daemon state file**: Fall back to `loom:curated` label
 
 ---
 
@@ -297,11 +298,11 @@ gh issue create --title "Follow-on: Work identified in PR #$PR_NUMBER" --label "
 | Pending CI checks | Skip | Defer to next iteration |
 | Force-push after approval | Allow | If criteria still pass |
 | Merge conflicts | Fail | Comment and skip |
-| Stale PR (>24h) | Fail | Comment and skip |
+| Stale PR (>24h) | Route to Doctor | Comment once (idempotent marker), swap `loom:pr` → `loom:changes-requested` |
 | Test-only changes | Allow | Standard criteria apply |
-| Manual-merge override | Skip | Respect human decision |
+| Human holds PR (removes `loom:pr`) | Skip | Not a merge candidate without `loom:pr` |
 | Multiple linked issues | Allow | Verify all closed |
-| Mixed-state CI | Fail | Require all SUCCESS |
+| Mixed-state CI | Fail on `fail`/`cancel` | `pending` defers; `skipping` is OK |
 | Unknown critical file | Miss | Needs pattern update |
 | Exactly at size limit | Allow | Limit is inclusive |
 | API rate limit | Error | Comment and continue |
@@ -312,290 +313,11 @@ gh issue create --title "Follow-on: Work identified in PR #$PR_NUMBER" --label "
 
 ## Complete Auto-Merge Workflow Script
 
-This section provides the full end-to-end implementation integrating all steps.
+**The auto-merge workflow lives in a single source of truth: [`champion-pr-merge.md`](champion-pr-merge.md).**
 
-```bash
-#!/bin/bash
-# Complete Champion PR auto-merge workflow
-# Usage: champion_automerge <pr-number>
+This file previously carried a second, full copy of the end-to-end merge script. That duplicate diverged from `champion-pr-merge.md` over time (it lacked Step 5.5 Follow-on Issue Creation and repeated the same bugs — invalid `gh pr checks --json` fields, etc.), forcing every fix to be applied twice. It has been removed to eliminate the drift (issue #3781).
 
-PR_NUMBER=$1
-
-if [ -z "$PR_NUMBER" ]; then
-  echo "Usage: $0 <pr-number>"
-  exit 1
-fi
-
-echo "========================================="
-echo "Champion Auto-Merge Workflow: PR #$PR_NUMBER"
-echo "========================================="
-echo ""
-
-# ============================================
-# STEP 1: Verify Safety Criteria
-# ============================================
-
-echo "STEP 1/5: Verifying safety criteria..."
-echo ""
-
-# Criterion 1: Label Check
-LABELS=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' | tr '\n' ' ')
-if ! echo "$LABELS" | grep -q "loom:pr"; then
-  echo "FAIL: Missing loom:pr label"
-  exit 1
-fi
-if echo "$LABELS" | grep -q "loom:manual-merge"; then
-  echo "SKIP: Has loom:manual-merge label (human override)"
-  exit 1
-fi
-echo "PASS: Label check"
-
-# Criterion 2: Size Check
-FORCE_MODE=$(cat .loom/daemon-state.json 2>/dev/null | jq -r '.force_mode // false')
-PR_DATA=$(gh pr view "$PR_NUMBER" --json additions,deletions)
-ADDITIONS=$(echo "$PR_DATA" | jq -r '.additions')
-DELETIONS=$(echo "$PR_DATA" | jq -r '.deletions')
-TOTAL=$((ADDITIONS + DELETIONS))
-if [ "$FORCE_MODE" != "true" ]; then
-  HAS_AUTO_MERGE_OK=$(gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | any(. == "loom:auto-merge-ok")')
-  if [ "$HAS_AUTO_MERGE_OK" != "true" ]; then
-    SIZE_LIMIT=$(jq -r '.champion.auto_merge_max_lines // 200' .loom/config.json 2>/dev/null || echo 200)
-    if [ "$TOTAL" -gt "$SIZE_LIMIT" ]; then
-      echo "FAIL: Too large ($TOTAL lines, limit is $SIZE_LIMIT)"
-      exit 1
-    fi
-  fi
-fi
-echo "PASS: Size check ($TOTAL lines)"
-
-# Criterion 3: Critical File Exclusion
-if [ "$FORCE_MODE" != "true" ]; then
-  FILES=$(gh pr view "$PR_NUMBER" --json files --jq -r '.files[].path')
-  CRITICAL_PATTERNS=(
-    "Cargo.toml"
-    "loom-daemon/Cargo.toml"
-    "loom-api/Cargo.toml"
-    "package.json"
-    ".github/workflows/"
-    ".sql"
-    "migration"
-  )
-  for file in $FILES; do
-    for pattern in "${CRITICAL_PATTERNS[@]}"; do
-      if [[ "$file" == *"$pattern"* ]]; then
-        echo "FAIL: Critical file modified: $file"
-        exit 1
-      fi
-    done
-  done
-fi
-echo "PASS: No critical files modified"
-
-# Criterion 4: Merge Conflict Check
-MERGEABLE=$(gh pr view "$PR_NUMBER" --json mergeable --jq -r '.mergeable')
-if [ "$MERGEABLE" != "MERGEABLE" ]; then
-  echo "FAIL: Not mergeable (state: $MERGEABLE)"
-  exit 1
-fi
-echo "PASS: No merge conflicts"
-
-# Criterion 5: Recency Check
-UPDATED_AT=$(gh pr view "$PR_NUMBER" --json updatedAt --jq -r '.updatedAt')
-UPDATED_TS=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$UPDATED_AT" +%s 2>/dev/null || \
-             date -d "$UPDATED_AT" +%s 2>/dev/null)
-NOW_TS=$(date +%s)
-HOURS_AGO=$(( (NOW_TS - UPDATED_TS) / 3600 ))
-if [ "$FORCE_MODE" = "true" ]; then
-  RECENCY_LIMIT=72
-else
-  RECENCY_LIMIT=24
-fi
-if [ "$HOURS_AGO" -gt "$RECENCY_LIMIT" ]; then
-  echo "FAIL: Stale PR (updated $HOURS_AGO hours ago)"
-  exit 1
-fi
-echo "PASS: Recently updated ($HOURS_AGO hours ago)"
-
-# Criterion 6: CI Status Check
-CHECKS=$(gh pr checks "$PR_NUMBER" --json name,conclusion,status 2>&1)
-if ! echo "$CHECKS" | grep -q "no checks reported"; then
-  FAILING=$(echo "$CHECKS" | jq -r '.[] | select(.conclusion != "SUCCESS" and .conclusion != null) | .name')
-  PENDING=$(echo "$CHECKS" | jq -r '.[] | select(.status == "IN_PROGRESS" or .status == "QUEUED") | .name')
-  if [ -n "$FAILING" ]; then
-    echo "FAIL: CI checks failing:"
-    echo "$FAILING"
-    exit 1
-  fi
-  if [ -n "$PENDING" ]; then
-    echo "SKIP: CI checks still running:"
-    echo "$PENDING"
-    exit 1
-  fi
-fi
-echo "PASS: All CI checks passing"
-
-echo ""
-echo "All safety criteria passed"
-echo ""
-
-# ============================================
-# STEP 2: Post Pre-Merge Comment
-# ============================================
-
-echo "STEP 2/5: Posting pre-merge comment..."
-echo ""
-
-# Determine CI status text
-if echo "$CHECKS" | grep -q "no checks reported"; then
-  CI_STATUS="No CI checks required"
-else
-  CI_STATUS="All CI checks passing"
-fi
-
-# Post comment
-gh pr comment "$PR_NUMBER" --body "$(cat <<EOF
-**Champion Auto-Merge**
-
-This PR meets all safety criteria for automatic merging:
-
-- Judge approved (\`loom:pr\` label)
-- Size check passed ($TOTAL lines: +$ADDITIONS/-$DELETIONS)
-- No critical files modified
-- No merge conflicts
-- Updated recently ($HOURS_AGO hours ago)
-- $CI_STATUS
-- No manual-merge override
-
-**Proceeding with squash merge...** If this was merged in error, you can revert with:
-\`git revert <commit-sha>\`
-
----
-*Automated by Champion role*
-EOF
-)"
-
-echo "Posted pre-merge comment"
-echo ""
-
-# ============================================
-# STEP 3: Execute Merge
-# ============================================
-
-echo "STEP 3/5: Executing squash merge..."
-echo ""
-
-# Ensure we're on main so .loom/scripts exists (issue #2289)
-git checkout main 2>/dev/null || true
-
-# Use merge-pr.sh for worktree-safe merge via GitHub API
-./.loom/scripts/merge-pr.sh "$PR_NUMBER" --auto || {
-  echo "Merge failed!"
-  exit 1
-}
-echo "Successfully merged PR #$PR_NUMBER"
-echo ""
-
-# ============================================
-# STEP 4: Verify Issue Closure
-# ============================================
-
-echo "STEP 4/5: Verifying linked issue closure..."
-echo ""
-
-# Use GitHub's own parser via closingIssuesReferences (see issue #3267).
-# Correctly excludes `Updates #N` and substring traps like `Discloses #N`.
-source "$(git rev-parse --show-toplevel)/.loom/scripts/lib/forge-helpers.sh"
-forge_detect
-LINKED_ISSUES=$(forge_pr_close_targets "$PR_NUMBER")
-
-if [ -z "$LINKED_ISSUES" ]; then
-  echo "No linked issues found - skipping closure verification"
-else
-  echo "Found linked issues: $LINKED_ISSUES"
-  for issue in $LINKED_ISSUES; do
-    echo "Checking issue #$issue..."
-    ISSUE_STATE=$(gh issue view "$issue" --json state --jq -r '.state' 2>&1)
-    if [ "$ISSUE_STATE" = "CLOSED" ]; then
-      echo "Issue #$issue is closed"
-    else
-      echo "Issue #$issue still open - closing manually..."
-      gh issue close "$issue" --comment "Closed by PR #$PR_NUMBER (auto-merged by Champion)"
-      echo "Manually closed issue #$issue"
-    fi
-  done
-fi
-
-echo ""
-
-# ============================================
-# STEP 5: Unblock Dependent Issues
-# ============================================
-
-echo "STEP 5/5: Checking for dependent issues to unblock..."
-echo ""
-
-for closed_issue in $LINKED_ISSUES; do
-  echo "Checking for issues blocked by #$closed_issue..."
-  BLOCKED_ISSUES=$(gh issue list --label "loom:blocked" --state open --json number,body --jq ".[] | select(.body | test(\"(Blocked by|Depends on|Requires) #$closed_issue\"; \"i\")) | .number")
-
-  if [ -z "$BLOCKED_ISSUES" ]; then
-    echo "  No issues found blocked by #$closed_issue"
-    continue
-  fi
-
-  for blocked in $BLOCKED_ISSUES; do
-    echo "  Checking if #$blocked can be unblocked..."
-    BLOCKED_BODY=$(gh issue view "$blocked" --json body --jq -r '.body')
-    ALL_DEPS=$(echo "$BLOCKED_BODY" | grep -Eo "(Blocked by|Depends on|Requires) #[0-9]+" | grep -Eo "[0-9]+" | sort -u)
-
-    ALL_RESOLVED=true
-    for dep in $ALL_DEPS; do
-      DEP_STATE=$(gh issue view "$dep" --json state --jq -r '.state' 2>/dev/null)
-      if [ "$DEP_STATE" != "CLOSED" ]; then
-        echo "    Still blocked: dependency #$dep is still open"
-        ALL_RESOLVED=false
-        break
-      fi
-    done
-
-    if [ "$ALL_RESOLVED" = true ]; then
-      echo "    All dependencies resolved - unblocking #$blocked"
-      gh issue edit "$blocked" --remove-label "loom:blocked" --add-label "loom:issue"
-      gh issue comment "$blocked" --body "**Unblocked** by merge of PR #$PR_NUMBER (resolved #$closed_issue)
-
-All dependencies are now resolved. This issue is ready for implementation.
-
----
-*Automated by Champion role*"
-      echo "    Unblocked issue #$blocked"
-    fi
-  done
-done
-
-echo ""
-echo "========================================="
-echo "Champion auto-merge complete!"
-echo "========================================="
-echo ""
-echo "Summary:"
-echo "- PR #$PR_NUMBER: Merged successfully"
-echo "- Lines changed: $TOTAL (+$ADDITIONS/-$DELETIONS)"
-echo "- Linked issues: ${LINKED_ISSUES:-none}"
-echo ""
-exit 0
-```
-
-**Usage**:
-
-```bash
-# Auto-merge a single PR
-./champion_automerge.sh 123
-
-# Use in Champion iteration loop
-for pr in $(gh pr list --label="loom:pr" --json number --jq '.[].number' | head -3); do
-  ./champion_automerge.sh "$pr" || echo "Failed to merge PR #$pr, continuing..."
-done
-```
+For the authoritative, end-to-end implementation — the 6 safety criteria, the pre-merge comment, the squash merge via `merge-pr.sh`, linked-issue closure verification, dependent-issue unblocking, and Step 5.5 Follow-on Issue Creation — see **`champion-pr-merge.md`**. The edge cases and decision matrix above remain here as the reference for non-standard situations; they describe *behavior*, and defer to `champion-pr-merge.md` for the *script*.
 
 ---
 
@@ -631,9 +353,6 @@ gh pr view <number> --json state,mergeable,statusCheckRollup
 
 # View linked issues (uses GitHub's authoritative parser; `Updates #N` is excluded)
 gh pr view <number> --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
-
-# Check daemon state
-cat .loom/daemon-state.json | jq '.force_mode'
 
 # List blocked issues
 gh issue list --label "loom:blocked" --state open

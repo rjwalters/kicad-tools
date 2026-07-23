@@ -73,6 +73,30 @@ TERMINAL_ID="${LOOM_TERMINAL_ID:-}"
 # Note: WORKSPACE may fail if CWD is invalid at startup - recover_cwd handles this
 WORKSPACE="${LOOM_WORKSPACE:-$(pwd 2>/dev/null || echo "$HOME")}"
 
+# Python interpreter + active-account tracking for account rotation (#3738).
+LOOM_PYTHON="${LOOM_PYTHON:-python3}"
+# The account name whose OAuth token is currently exported. spawn-claude.sh
+# exports LOOM_TOKEN_NAME before exec'ing this wrapper; when the wrapper is
+# invoked directly (token pre-set by some other caller) it is derived by
+# content-matching the token against the pool at rotation time.
+ACTIVE_TOKEN_NAME="${LOOM_TOKEN_NAME:-}"
+
+# Directory of this script — used to source the shared error classifier and to
+# locate the loom_tools package for the mark-bad / re-select calls (#3738).
+_WRAPPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source the shared error classifier so the wrapper's account-exhaustion
+# detection stays byte-identical to spawn-claude's classification — the two
+# patterns must NOT drift (issue #3738). Resolved relative to this script so it
+# works from both the installed .loom/scripts copy and the tracked
+# defaults/scripts source. If absent (older install), is_account_exhaustion
+# falls back to an inline regex.
+if [[ -f "${_WRAPPER_DIR}/lib/classify-error.sh" ]]; then
+    # shellcheck source=lib/classify-error.sh
+    # shellcheck disable=SC1091
+    source "${_WRAPPER_DIR}/lib/classify-error.sh"
+fi
+
 # Whether --dangerously-skip-permissions was passed (detected in main())
 SKIP_PERMISSIONS_MODE=false
 
@@ -842,6 +866,167 @@ is_transient_error() {
     return 1
 }
 
+# --- Account rotation on usage/session-limit exhaustion (issue #3738) ---
+#
+# When the active OAuth account hits a session / weekly / usage limit, the
+# right response is NOT to die (the historical behaviour: the RATE_LIMIT_ABORT
+# sentinel was classified fatal, killing the whole worker) and NOT to burn a
+# transient-backoff retry against the same, now-exhausted account. Instead we
+# mark the account exhausted, re-run Loom token selection (which now skips it),
+# and retry on a fresh account WITHOUT consuming a MAX_RETRIES attempt. The
+# pool is finite and each rotation marks one account bad, so this terminates:
+# when selection reports no eligible account we emit a distinct
+# ACCOUNT_POOL_EXHAUSTED sentinel and exit non-zero.
+
+# Return 0 if the captured output indicates the active account is exhausted.
+is_account_exhaustion() {
+    local output="$1"
+    local exit_code="${2:-1}"
+
+    # The output/startup monitors kill the CLI and emit this sentinel on the
+    # interactive usage/plan-limit modal and the 100%-weekly banner. Treat it
+    # as exhaustion regardless of what the classifier makes of the text.
+    if echo "${output}" | grep -q "RATE_LIMIT_ABORT"; then
+        return 0
+    fi
+
+    # Otherwise defer to the shared classifier (widened TOKEN_EXHAUSTED set).
+    # Fall back to an inline regex if the classifier lib was not sourced.
+    if declare -F classify_error >/dev/null 2>&1; then
+        [[ "$(classify_error "${output}" "${exit_code}")" == "TOKEN_EXHAUSTED" ]]
+        return
+    fi
+    [[ "${exit_code}" -ne 0 ]] && echo "${output}" \
+        | grep -qiE "hit your (limit|session limit|weekly limit)|hit\.your\.limit|monthly usage limit|out of extra usage"
+}
+
+# Echo a short human phrase describing why the account was considered
+# exhausted (used as the .bad_tokens reason string).
+_exhaustion_phrase() {
+    local output="$1"
+    if echo "${output}" | grep -q "RATE_LIMIT_ABORT"; then
+        echo "usage/plan limit modal (RATE_LIMIT_ABORT)"
+        return
+    fi
+    local m
+    m="$(echo "${output}" | grep -ioE "hit your (limit|session limit|weekly limit)|monthly usage limit|out of extra usage|used 100% of your weekly limit" | head -1)"
+    echo "${m:-usage limit}"
+}
+
+# Resolve the workspace whose .loom/tokens/ holds the account pool. Mirrors
+# spawn-claude.sh: LOOM_WORKSPACE wins, else the canonical repo root (so a
+# worktree shares the main checkout's token pool), else the wrapper's WORKSPACE.
+_resolve_token_workspace() {
+    if [[ -n "${LOOM_WORKSPACE:-}" ]]; then
+        printf '%s\n' "${LOOM_WORKSPACE}"
+        return
+    fi
+    local gcd
+    if gcd="$(git rev-parse --git-common-dir 2>/dev/null)"; then
+        [[ "${gcd}" = /* ]] || gcd="$(cd "${gcd}" && pwd 2>/dev/null || echo "${gcd}")"
+        printf '%s\n' "$(dirname "${gcd}")"
+        return
+    fi
+    printf '%s\n' "${WORKSPACE}"
+}
+
+# Resolve the loom_tools package source (for the mark_bad / select calls).
+# Script-relative first (repo layout), then $WORKSPACE fallback.
+_resolve_package_path() {
+    local ws="$1"
+    if [[ -n "${LOOM_PACKAGE_PATH:-}" ]]; then
+        printf '%s\n' "${LOOM_PACKAGE_PATH}"
+        return
+    fi
+    local rel
+    rel="$(cd "${_WRAPPER_DIR}/../../loom-tools/src" 2>/dev/null && pwd || echo "")"
+    if [[ -n "${rel}" && -d "${rel}/loom_tools/tokens" ]]; then
+        printf '%s\n' "${rel}"
+        return
+    fi
+    printf '%s\n' "${ws}/loom-tools/src"
+}
+
+# Fallback identification of the active account when LOOM_TOKEN_NAME is unset:
+# content-match the exported token against .loom/tokens/*.token. Deterministic
+# (exact content compare) — deliberately avoids lean-genius's `ls -t | head -1`
+# mtime heuristic, which mispicks the wrong account under concurrent spawns.
+_derive_token_name() {
+    local ws="$1" tok="$2"
+    [[ -n "${tok}" ]] || return 1
+    local tokens_dir="${ws}/.loom/tokens" f content
+    [[ -d "${tokens_dir}" ]] || return 1
+    for f in "${tokens_dir}"/*.token; do
+        [[ -e "${f}" ]] || continue
+        content="$(cat "${f}" 2>/dev/null)"
+        if [[ "${content}" == "${tok}" ]]; then
+            basename "${f}" .token
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Mark the active account exhausted in .loom/tokens/.bad_tokens, then re-run
+# Loom token selection (which now skips it) and re-export
+# CLAUDE_CODE_OAUTH_TOKEN. Reuses the existing Loom primitives
+# (loom_tools.tokens.bad_tokens.mark_bad + loom_tools.tokens.select) rather
+# than reimplementing lean-genius's raw file-glob. Returns 0 on success (a new
+# account is exported), 1 when the pool has no eligible account left.
+rotate_exhausted_account() {
+    local reason="$1"
+    local ws pkg
+    ws="$(_resolve_token_workspace)"
+    pkg="$(_resolve_package_path "${ws}")"
+
+    if [[ -z "${ACTIVE_TOKEN_NAME}" ]]; then
+        ACTIVE_TOKEN_NAME="$(_derive_token_name "${ws}" "${CLAUDE_CODE_OAUTH_TOKEN:-}" || true)"
+    fi
+
+    if [[ -n "${ACTIVE_TOKEN_NAME}" ]]; then
+        local _mb
+        set +e
+        PYTHONPATH="${pkg}${PYTHONPATH:+:$PYTHONPATH}" "${LOOM_PYTHON}" - \
+            "${ws}" "${ACTIVE_TOKEN_NAME}" "exhausted: ${reason}" <<'PY' 2>/dev/null
+import sys
+from loom_tools.tokens.bad_tokens import mark_bad
+mark_bad(sys.argv[1], sys.argv[2], sys.argv[3])
+PY
+        _mb=$?
+        set -e
+        if [[ ${_mb} -eq 0 ]]; then
+            log_info "Marked account '${ACTIVE_TOKEN_NAME}' exhausted in .bad_tokens (${reason})"
+        else
+            log_warn "Could not record '${ACTIVE_TOKEN_NAME}' in .bad_tokens (continuing to re-select)"
+        fi
+    else
+        log_warn "Active account name unknown — cannot mark it bad; re-selecting anyway"
+    fi
+
+    local sel_json _sel_rc
+    set +e
+    sel_json="$(PYTHONPATH="${pkg}${PYTHONPATH:+:$PYTHONPATH}" \
+        "${LOOM_PYTHON}" -m loom_tools.tokens.select --workspace "${ws}" --json 2>/dev/null)"
+    _sel_rc=$?
+    set -e
+    if [[ ${_sel_rc} -ne 0 || -z "${sel_json}" ]]; then
+        return 1
+    fi
+
+    local new_key new_name
+    new_key="$(printf '%s' "${sel_json}" | "${LOOM_PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)["key"])' 2>/dev/null || echo "")"
+    new_name="$(printf '%s' "${sel_json}" | "${LOOM_PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)["name"])' 2>/dev/null || echo "")"
+    if [[ -z "${new_key}" ]]; then
+        return 1
+    fi
+
+    export CLAUDE_CODE_OAUTH_TOKEN="${new_key}"
+    ACTIVE_TOKEN_NAME="${new_name}"
+    export LOOM_TOKEN_NAME="${new_name}"
+    log_info "Rotated OAuth account → '${new_name}' (token tail=…${new_key: -4})"
+    return 0
+}
+
 # Check if error output specifically indicates an MCP/plugin failure.
 # Used to map exhausted-retry exits to exit code 7 so the Python retry
 # layer can recognize MCP failures even when the wrapper's own retries
@@ -1254,6 +1439,12 @@ run_with_retry() {
     local attempt=1
     local exit_code=0
     local output=""
+    # Account-rotation bookkeeping (#3738). Rotations do NOT consume a
+    # MAX_RETRIES attempt; this independent cap is a loop guard for the
+    # pathological case where the active account can't be identified and marked
+    # bad, so re-selection could otherwise keep returning it forever.
+    local rotations=0
+    local max_rotations="${LOOM_MAX_ACCOUNT_ROTATIONS:-20}"
 
     # Recover CWD if it was deleted before we started
     if ! recover_cwd; then
@@ -1438,6 +1629,36 @@ run_with_retry() {
         fi
 
         log_warn "Claude CLI exited with code ${exit_code}"
+
+        # Account exhaustion (session / weekly / usage limit) → rotate to a
+        # different account and retry WITHOUT consuming a MAX_RETRIES attempt
+        # (#3738). Rotation is not transient backoff: charging it against
+        # MAX_RETRIES could burn the whole retry budget before every account
+        # gets a fair shot. Terminates when the pool has no eligible account,
+        # with a distinct ACCOUNT_POOL_EXHAUSTED sentinel (not the generic
+        # "Max retries exceeded" path below).
+        if is_account_exhaustion "${output}" "${exit_code}"; then
+            rotations=$((rotations + 1))
+            if [[ "${rotations}" -gt "${max_rotations}" ]]; then
+                log_error "Account rotation cap (${max_rotations}) exceeded — aborting to avoid a loop"
+                echo "# ACCOUNT_POOL_EXHAUSTED" >&2
+                clear_retry_state
+                return 1
+            fi
+            local _exh_phrase
+            _exh_phrase="$(_exhaustion_phrase "${output}")"
+            log_warn "Account exhaustion detected (${_exh_phrase}) — rotating account (attempt ${attempt}/${MAX_RETRIES} NOT consumed)"
+            if rotate_exhausted_account "${_exh_phrase}"; then
+                write_retry_state "running" "${attempt}"
+                # Retry the SAME attempt number on the fresh account.
+                continue
+            fi
+            log_error "Whole account pool exhausted — every account is marked bad or rate-limited."
+            log_error "Retry after the soonest account reset, or run 'loom-tokens unblock <name>'."
+            echo "# ACCOUNT_POOL_EXHAUSTED" >&2
+            clear_retry_state
+            return 1
+        fi
 
         # Check if this is a transient error worth retrying
         if ! is_transient_error "${output}" "${exit_code}"; then

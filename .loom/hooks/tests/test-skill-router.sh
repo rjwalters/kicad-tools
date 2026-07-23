@@ -182,6 +182,27 @@ outB=$(run_hook "please implement the new feature")
 ctxB=$(context_of "$outB")
 assert_contains "no session_id -> table included again (graceful)" "$ctxB" "Available Loom agents:"
 
+# --- Session-marker dir pruning (#3793) -------------------------------------
+# Stale markers (>7d) are pruned opportunistically on hook entry; fresh markers
+# survive. The prune runs inside the session-dedup branch (a route matched and
+# session_id is supplied).
+reset_markers
+SEEN_DIR_S="$TMPROOT/.loom/logs/skill-router-seen"
+mkdir -p "$SEEN_DIR_S"
+touch -t 202001010000 "$SEEN_DIR_S/stale-old-session"   # ~2020 -> older than 7d
+touch "$SEEN_DIR_S/fresh-session"                        # now -> within 7d
+run_hook "please implement the new feature" "sess-prune-s" >/dev/null
+if [[ ! -e "$SEEN_DIR_S/stale-old-session" ]]; then
+    pass "skill-router: stale (>7d) marker pruned on hook entry"
+else
+    fail "skill-router: stale (>7d) marker pruned on hook entry"
+fi
+if [[ -e "$SEEN_DIR_S/fresh-session" ]]; then
+    pass "skill-router: fresh marker survives prune"
+else
+    fail "skill-router: fresh marker survives prune"
+fi
+
 # --- Never non-zero / never invalid JSON ------------------------------------
 for probe in "the weather is quite nice today" "please implement the new feature" "review this PR" "/builder x y z"; do
     out=$(run_hook "$probe" "sess-probe")

@@ -183,6 +183,12 @@ if [[ -n "$SESSION_ID" ]]; then
     SESSION_KEY=$(printf '%s' "$SESSION_ID" | tr -c 'A-Za-z0-9._-' '_')
     SEEN_DIR="${MAIN_ROOT}/.loom/logs/skill-router-seen"
     SEEN_MARKER="${SEEN_DIR}/${SESSION_KEY}"
+    # Opportunistic best-effort prune (#3793): every session adds one marker here
+    # and nothing else prunes them, so a busy orchestration repo would accumulate
+    # stale empty files without bound. Drop markers older than 7 days on hook
+    # entry. Fail-open — any error (missing dir, permission) never fails the hook
+    # and never changes the dedup decision below.
+    find "$SEEN_DIR" -type f -mtime +7 -delete 2>/dev/null || true
     if [[ -f "$SEEN_MARKER" ]]; then
         INCLUDE_TABLE=0
     else
