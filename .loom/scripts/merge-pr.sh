@@ -17,7 +17,16 @@
 #                          branch via `git branch -d` (refuses on unmerged
 #                          commits — Git's own safety check).
 #   --dry-run              Show what would happen without merging
-#   --auto                 Enable auto-merge instead of immediate merge
+#   --auto                 Enable auto-merge instead of immediate merge. On a
+#                          repo with GitHub auto-merge disabled
+#                          (allow_auto_merge:false) this degrades gracefully to
+#                          wait-for-checks-then-merge (immediate if CLEAN)
+#                          instead of failing (#3820).
+#   --allow-stacked-children
+#                          Bypass the pre-merge merge-ordering guard when the
+#                          parent branch (feature/issue-N) still has open
+#                          stacked child PRs targeting it (operator asserts the
+#                          children are already reconciled). See #3747 item 2.
 #
 # By default, the local worktree is cleaned up after a successful merge.
 # Pass --no-cleanup-worktree to skip this (e.g., when other terminals may
@@ -76,7 +85,22 @@ Options:
                          the matching local branch via 'git branch -d'
                          (Git refuses on unmerged commits).
   --dry-run              Show what would happen without merging
-  --auto                 Enable auto-merge instead of immediate merge
+  --auto                 Enable auto-merge instead of immediate merge. When the
+                         repository has GitHub auto-merge disabled
+                         (allow_auto_merge:false), this is detected up front and
+                         degrades gracefully to wait-for-checks-then-merge
+                         (immediate if already CLEAN) rather than failing (#3820).
+  --allow-stacked-children
+                         Bypass the pre-merge merge-ordering guard. That guard
+                         hard-blocks merging a stacked PARENT PR (branch
+                         feature/issue-N) while it still has open stacked CHILD
+                         PRs targeting its branch, because the repo's
+                         delete_branch_on_merge setting would delete the parent
+                         branch synchronously during the merge and leave the
+                         children unable to rebase onto it (see #3747 item 2).
+                         Pass this flag only after you have manually reconciled
+                         (or verified) the children — the operator asserts
+                         responsibility, mirroring --worktree-path.
   -h, --help             Show this help and exit
 
 By default, the local worktree is cleaned up after a successful merge.
@@ -120,7 +144,8 @@ Examples:
     Shows what would happen without merging
 
   ./.loom/scripts/merge-pr.sh 123 --auto
-    Enables auto-merge instead of merging immediately
+    Enables auto-merge instead of merging immediately (on a repo with
+    auto-merge disabled, waits for checks then merges synchronously)
 
   ./.loom/scripts/merge-pr.sh 123 --no-cleanup-worktree
     Merges PR but leaves the local worktree in place
@@ -194,6 +219,7 @@ CLEANUP_WORKTREE=true
 DRY_RUN=false
 AUTO_MERGE=false
 WORKTREE_PATH_OVERRIDE=""
+ALLOW_STACKED_CHILDREN=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -211,6 +237,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run) DRY_RUN=true; shift ;;
     --auto) AUTO_MERGE=true; shift ;;
+    --allow-stacked-children) ALLOW_STACKED_CHILDREN=true; shift ;;
     -*)  error "Unknown option: $1" ;;
     *)
       if [[ -z "$PR_NUMBER" ]]; then
@@ -223,7 +250,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -z "$PR_NUMBER" ]] && error "Usage: merge-pr.sh <pr-number> [--no-cleanup-worktree] [--worktree-path <dir>] [--dry-run] [--auto]"
+[[ -z "$PR_NUMBER" ]] && error "Usage: merge-pr.sh <pr-number> [--no-cleanup-worktree] [--worktree-path <dir>] [--dry-run] [--auto] [--allow-stacked-children]"
 [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || error "PR number must be numeric: $PR_NUMBER"
 
 # Validate --worktree-path early (before any network calls) so bad input
@@ -276,6 +303,89 @@ fi
 if [[ "$PR_STATE" == "closed" ]]; then
   error "PR #$PR_NUMBER is closed (not merged)"
 fi
+
+# ---------------------------------------------------------------------------
+# Pre-merge merge-ordering guard (#3747, stacked-PR v2 item 2).
+#
+# Runs BEFORE both the auto-merge and synchronous-merge paths (that is why it is
+# defined and invoked here, above the "Merging PR" line — not next to item 1's
+# POST-merge _auto_reconcile_stacked_children at the bottom of the merge flow).
+#
+# The race it closes: when a stacked PARENT PR (branch feature/issue-<N>)
+# squash-merges, item 1's post-merge _auto_reconcile_stacked_children rebases any
+# open CHILD PRs off the now-squashed parent branch onto the default branch. That
+# rebase (reconcile-stack.sh's `git rebase --onto <default> <parent-branch>
+# <child-branch>`) needs <parent-branch> to still resolve as a ref. But Loom's own
+# recommended repo setting — delete_branch_on_merge:true, applied by
+# setup-repository-settings.sh — makes GitHub delete feature/issue-<parent>
+# SYNCHRONOUSLY as part of the merge API call itself, before merge-pr.sh even
+# reaches the "merged successfully" log line, let alone the post-merge reconcile
+# step. Once the ref is gone a fresh fetch won't see it and the rebase's <upstream>
+# fails to resolve. Item 1's post-merge pass can therefore race and LOSE against
+# the repo's own settings. This guard refuses to let the parent merge happen at
+# all while that race exists.
+#
+# This is orthogonal to item 1's loom:building safe/unsafe split: a "safe" child
+# is just as exposed to branch deletion as an "unsafe" one, so the guard keys
+# PURELY on "does an open child PR still target this branch", never on the child's
+# label. Discovery reuses item 1's live-forge-query shape (`gh pr list --base
+# <parent> --state open`), NOT the ephemeral daemon registry.
+#
+# Default is a hard block (error, exit 1) — a normal, recoverable failure that
+# Champion's cron retries next tick, exactly like every other merge-blocking
+# condition in this file. --allow-stacked-children bypasses it (operator asserts
+# the children are reconciled). --dry-run still runs the guard and REPORTS the
+# would-be block, but honors the dry-run contract (never exits 1).
+_check_no_open_stacked_children() {
+  # Only GitHub, and only a parent PR on a feature/issue-<N> branch, can have
+  # stacked children — identical guard conditions to
+  # _auto_reconcile_stacked_children. No-op (byte-for-byte unchanged behavior)
+  # otherwise.
+  [[ "$FORGE_TYPE" == "github" ]] || return 0
+  [[ "$PR_BRANCH" =~ ^feature/issue-([0-9]+)$ ]] || return 0
+
+  # Live forge discovery — NEVER the daemon registry. Same call/shape item 1
+  # already makes; plain `gh` (uncached) so we see child PRs as of right now.
+  local children_json count child_list
+  children_json="$(gh pr list --repo "$REPO_NWO" --base "$PR_BRANCH" --state open \
+    --json number,headRefName 2>/dev/null || echo '[]')"
+  [[ -n "$children_json" ]] || return 0
+  count="$(echo "$children_json" | jq 'length' 2>/dev/null || echo 0)"
+  [[ "$count" -gt 0 ]] || return 0
+
+  # Comma-separated "#N" list for the operator-facing message.
+  child_list="$(echo "$children_json" \
+    | jq -r '[.[].number | "#" + tostring] | join(", ")' 2>/dev/null || echo '')"
+
+  # Operator opt-in bypass (mirrors the --worktree-path sentinel-bypass precedent):
+  # the operator asserts responsibility for having reconciled/verified the children.
+  if [[ "$ALLOW_STACKED_CHILDREN" == "true" ]]; then
+    warning "Merge-ordering guard: --allow-stacked-children set; proceeding despite $count open stacked child PR(s) ($child_list) targeting '$PR_BRANCH' (operator asserts they are reconciled)"
+    return 0
+  fi
+
+  local msg
+  msg="Merge blocked: PR #$PR_NUMBER's branch '$PR_BRANCH' still has $count open stacked child PR(s) ($child_list) targeting it.
+
+Merging now would race the repo's delete_branch_on_merge setting: GitHub deletes '$PR_BRANCH' synchronously during the merge, before the child PR(s) can be rebased/retargeted onto the default branch — leaving reconcile-stack.sh's rebase unable to resolve the parent branch ref (#3747 item 2).
+
+Reconcile each child first (from a clean checkout), then re-run this merge:
+  ./.loom/scripts/reconcile-stack.sh <child-pr> $PR_BRANCH
+
+Or, if you have already verified/reconciled them, re-run with --allow-stacked-children to bypass this guard."
+
+  # --dry-run still runs the guard and reports the would-be outcome, but honors
+  # the dry-run contract (dry-run always exits 0). A real run hard-blocks.
+  if [[ "$DRY_RUN" == "true" ]]; then
+    warning "[dry-run] Would BLOCK merge of PR #$PR_NUMBER: $count open stacked child PR(s) ($child_list) still target '$PR_BRANCH'. Re-run with --allow-stacked-children to override, or reconcile the children first."
+    return 0
+  fi
+
+  error "$msg"
+}
+
+# Invoke the guard before either merge path attempts the actual merge API call.
+_check_no_open_stacked_children
 
 info "Merging PR #$PR_NUMBER: $PR_TITLE"
 info "Branch: $PR_BRANCH"
@@ -393,6 +503,266 @@ _reset_partial_increment_labels() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# Automated stacked-PR reconciliation on parent merge (#3747, stacked-PR v2,
+# item 1 of the v2 epic — the remaining five items stay deferred).
+#
+# When a stacked PARENT PR (branch feature/issue-<N>) squash-merges, any CHILD
+# PRs based on the parent branch still carry the parent's now-squashed pre-merge
+# commits. reconcile-stack.sh performs the git surgery — `git rebase --onto
+# <default> <parent-branch> <child-branch>`, `push --force-with-lease`, retarget
+# the child PR base to the default branch — that strips them. v1 (#3729) shipped
+# reconcile-stack.sh as a STANDALONE, operator-invoked script and deliberately
+# left merge-pr.sh untouched. This v2 slice fires it AUTOMATICALLY here — a
+# best-effort, GitHub-only step gated so it never races a live Builder that still
+# holds the child branch checked out.
+#
+# Discovery is via a LIVE forge query (`gh pr list --base <parent>`), NOT the
+# ephemeral loom-daemon SweepRegistry: terminal registry entries are
+# garbage-collected ~1h after transition and the registry only exists at all when
+# loom-daemon is running, but this function may run from Champion's cron or an
+# interactive /loom:sweep merge with no daemon present (see
+# .loom/docs/daemon-reference.md → "Stacked-PR dependency").
+#
+# Safe/unsafe split per child, gated on the child ISSUE's loom:building label
+# (fresh, uncached `gh api` read, mirroring _reset_one_partial_issue's freshness
+# discipline):
+#   - Safe   (child issue NOT loom:building): no live claim on the child, so
+#            invoke reconcile-stack.sh directly.
+#   - Unsafe (child issue still loom:building): a live Builder likely has the
+#            child branch checked out in its own worktree; an out-of-band rebase
+#            + force-with-lease would corrupt its in-progress work. Skip the
+#            auto-rebase and post a comment noting reconciliation is deferred
+#            until the Builder finishes (a later parent-merge-triggered pass, or
+#            a manual reconcile-stack.sh run, picks it up).
+#
+# Idempotent by construction: once a child's base is retargeted away from the
+# parent branch, `gh pr list --base <parent>` returns zero rows, so re-runs are
+# no-ops and nothing double-fires.
+#
+# Every step is best-effort and must NEVER change merge-pr.sh's exit code — the
+# parent merge already happened. Runs BEFORE branch deletion so the parent
+# branch ref still resolves as reconcile-stack.sh's rebase <upstream> argument.
+
+# Reconcile (or defer) one discovered child PR. Best-effort; returns 0.
+_reconcile_one_stacked_child() {
+  local child_pr="$1" child_branch="$2" parent_branch="$3"
+
+  # Derive the child ISSUE number from its head branch (feature/issue-<N>) so we
+  # can check its live claim label. A child branch that is not a feature/issue-N
+  # branch has no loom:building claim to race, so it is treated as safe.
+  local child_issue=""
+  if [[ "$child_branch" =~ ^feature/issue-([0-9]+)$ ]]; then
+    child_issue="${BASH_REMATCH[1]}"
+  fi
+
+  # Fresh (uncached) label read — mirrors _reset_one_partial_issue: use plain
+  # `gh api` (not $GH, which may be gh-cached) so a stale cached view cannot mask
+  # a live re-claim. A read failure is treated as "not building" (safe) since the
+  # reconcile itself is best-effort and force-with-lease still protects the branch.
+  local building="false"
+  if [[ -n "$child_issue" ]]; then
+    local issue_json issue_labels
+    issue_json="$(gh api "repos/$REPO_NWO/issues/$child_issue" 2>/dev/null || echo '{}')"
+    issue_labels="$(echo "$issue_json" | jq -r '.labels[]?.name' 2>/dev/null || true)"
+    if printf '%s\n' "$issue_labels" | grep -qx 'loom:building'; then
+      building="true"
+    fi
+  fi
+
+  if [[ "$building" == "true" ]]; then
+    # Unsafe: defer, do not rebase.
+    info "Stacked reconcile: child PR #$child_pr (issue #$child_issue) is still loom:building — deferring auto-rebase to avoid racing a live Builder"
+    local ts comment
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment="## Stacked parent merged — reconciliation deferred
+
+Parent branch \`$parent_branch\` squash-merged, but this child's issue #$child_issue is still \`loom:building\` — a Builder likely has this branch checked out. Auto-reconciliation was **skipped** to avoid racing that in-progress work with an out-of-band \`git rebase --onto\` + \`push --force-with-lease\`.
+
+**What happens next**: once issue #$child_issue is no longer \`loom:building\`, a subsequent parent-merge-triggered pass will reconcile this PR automatically. You can also reconcile it by hand now (from a clean checkout, only once the Builder has finished):
+
+\`\`\`
+./.loom/scripts/reconcile-stack.sh $child_pr $parent_branch
+\`\`\`
+
+---
+*Deferred by merge-pr.sh (#3747) at $ts*"
+    gh pr comment "$child_pr" --repo "$REPO_NWO" --body "$comment" >/dev/null 2>&1 || \
+      warning "Could not post deferred-reconciliation comment on PR #$child_pr"
+    return 0
+  fi
+
+  # Safe: no live claim — run the existing reconcile script unmodified. Do NOT
+  # re-implement the rebase/force-with-lease/retarget logic inline.
+  info "Stacked reconcile: parent '$parent_branch' merged; reconciling child PR #$child_pr onto the default branch"
+  if "$SCRIPT_DIR/reconcile-stack.sh" "$child_pr" "$parent_branch"; then
+    success "Stacked reconcile: child PR #$child_pr reconciled onto the default branch"
+  else
+    warning "Stacked reconcile: reconcile-stack.sh failed for child PR #$child_pr (rebase conflict, rejected force-with-lease push, or retarget failure). The parent merge is unaffected — reconcile manually: ./.loom/scripts/reconcile-stack.sh $child_pr $parent_branch"
+  fi
+  return 0
+}
+
+# Discover open child PRs stacked on the just-merged parent branch and reconcile
+# (or defer) each. Best-effort; returns 0 unconditionally.
+_auto_reconcile_stacked_children() {
+  [[ "$FORGE_TYPE" == "github" ]] || return 0
+
+  # Only a parent PR on a feature/issue-<N> branch can have stacked children.
+  [[ "$PR_BRANCH" =~ ^feature/issue-([0-9]+)$ ]] || return 0
+
+  # Live forge discovery — NEVER the daemon registry. Plain `gh` (uncached) so we
+  # see child PRs as of the merge, not a cached list snapshot.
+  local children_json
+  children_json="$(gh pr list --repo "$REPO_NWO" --base "$PR_BRANCH" --state open \
+    --json number,headRefName 2>/dev/null || echo '[]')"
+  [[ -n "$children_json" ]] || return 0
+
+  local count
+  count="$(echo "$children_json" | jq 'length' 2>/dev/null || echo 0)"
+  [[ "$count" -gt 0 ]] || return 0
+
+  info "Stacked reconcile: found $count open child PR(s) based on '$PR_BRANCH'"
+
+  if [[ ! -x "$SCRIPT_DIR/reconcile-stack.sh" ]]; then
+    warning "Stacked reconcile: reconcile-stack.sh not found or not executable at $SCRIPT_DIR — skipping auto-reconciliation"
+    return 0
+  fi
+
+  local rows child_pr child_branch
+  rows="$(echo "$children_json" | jq -r '.[] | "\(.number)\t\(.headRefName)"' 2>/dev/null || true)"
+  while IFS=$'\t' read -r child_pr child_branch; do
+    [[ -n "$child_pr" ]] || continue
+    _reconcile_one_stacked_child "$child_pr" "$child_branch" "$PR_BRANCH"
+  done <<< "$rows"
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Repo-level "Allow auto-merge" disabled — proactive wait-then-merge (#3820).
+#
+# When the repository's GitHub "Allow auto-merge" setting is OFF
+# (`gh api repos/{nwo} --jq .allow_auto_merge` == false), the server-side
+# auto-merge queue can NEVER be enabled — enablePullRequestAutoMerge is rejected
+# regardless of PR state. The reactive #3763 fallback catches that post-mutation
+# rejection, but only degrades gracefully when the PR is ALREADY immediately
+# mergeable; when auto-merge is disabled AND the PR is not yet CLEAN (checks
+# still running / .mergeable not yet computed), #3763's mergeability recheck sees
+# `.mergeable != true` and preserves the terminal error, so the PR never merges
+# (the reported failure on a repo with allow_auto_merge:false).
+#
+# This function is entered PROACTIVELY from the repo-setting probe below (so we
+# never attempt the doomed mutation at all) and degrades `--auto` to
+# "wait-for-checks-then-merge, or immediate merge if already CLEAN": it polls the
+# head-SHA check-runs (bounded by LOOM_AUTO_MERGE_TIMEOUT, same knobs as the
+# UNSTABLE fallback) until they settle, then returns 0 so the caller flips to the
+# synchronous-merge path. Unlike the UNSTABLE branch it also handles the
+# already-CLEAN case (nothing failing, nothing pending) by returning 0 for an
+# immediate merge rather than hitting that branch's defensive "unknown gap" error.
+#
+# Contract:
+#   - returns 0  → safe to proceed to the synchronous-merge path (caller flips
+#                  AUTO_MERGE=false). Also returned if the PR merged concurrently
+#                  while waiting (the synchronous path's own race-detection then
+#                  no-ops cleanly).
+#   - calls error() (exit 1) → a required status check failed, or the wait timed
+#                  out. A normal recoverable failure Champion's cron retries.
+# GitHub-only by construction (only invoked when the GitHub-only probe returns
+# "false"). Requires LOOM_AUTO_MERGE_POLL_INTERVAL / LOOM_AUTO_MERGE_TIMEOUT set.
+_wait_for_checks_then_sync_merge() {
+  local head_sha base_ref
+  head_sha="$(echo "$PR_JSON" | jq -r '.head.sha // empty')"
+  base_ref="$(echo "$PR_JSON" | jq -r '.base.ref // empty')"
+
+  # Without the head SHA we cannot reason about checks — proceed to the
+  # synchronous merge, which will itself reject if a required check blocks it.
+  if [[ -z "$head_sha" ]]; then
+    info "PR #$PR_NUMBER: head SHA unavailable; proceeding directly to synchronous merge"
+    return 0
+  fi
+
+  local deadline
+  deadline=$(( $(date +%s) + LOOM_AUTO_MERGE_TIMEOUT ))
+
+  while true; do
+    # A concurrent merger may have completed the PR while we waited.
+    local recheck_json
+    recheck_json="$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')"
+    if [[ "$(echo "$recheck_json" | jq -r '.merged // false')" == "true" ]]; then
+      warning "PR #$PR_NUMBER merged by another process while waiting for checks"
+      return 0
+    fi
+
+    # Fetch the check-runs rollup for the head SHA. Retry once to absorb a blip,
+    # then treat a persistent fetch failure as still-pending (bounded wait),
+    # mirroring the UNSTABLE fallback's #3678 discipline.
+    local fetch_rc=0 runs_raw
+    runs_raw="$(forge_get_check_runs "$REPO_NWO" "$head_sha" 2>/dev/null)" || fetch_rc=$?
+    if [[ "$fetch_rc" -ne 0 ]]; then
+      fetch_rc=0
+      runs_raw="$(forge_get_check_runs "$REPO_NWO" "$head_sha" 2>/dev/null)" || fetch_rc=$?
+    fi
+    if [[ "$fetch_rc" -ne 0 ]]; then
+      if [[ "$(date +%s)" -ge "$deadline" ]]; then
+        error "Timed out after ${LOOM_AUTO_MERGE_TIMEOUT}s waiting for check-runs to become fetchable for PR #$PR_NUMBER (repo has auto-merge disabled). Re-run once the forge API is healthy, or raise LOOM_AUTO_MERGE_TIMEOUT."
+      fi
+      warning "Failed to fetch check-runs for PR #$PR_NUMBER (rc=$fetch_rc); treating as still-pending and continuing to poll"
+      sleep "$LOOM_AUTO_MERGE_POLL_INTERVAL"
+      continue
+    fi
+
+    # Failing (terminal non-success) and pending (not yet completed) check names.
+    local failing pending
+    failing="$(echo "$runs_raw" | \
+      jq -r '[.check_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled" or .conclusion == "action_required") | .name] | unique | .[]' 2>/dev/null || true)"
+    pending="$(echo "$runs_raw" | \
+      jq -r '[.check_runs[] | select(.status != "completed") | .name] | unique | .[]' 2>/dev/null || true)"
+
+    if [[ -n "$failing" ]]; then
+      # A check failed — classify against branch protection. A required failing
+      # check can never merge on this SHA; refuse now. A lookup failure fails
+      # closed (refuse), mirroring the UNSTABLE fallback.
+      local required lookup_rc=0
+      required="$(forge_get_required_status_check_contexts "$REPO_NWO" "$base_ref" "$GH" 2>/dev/null)" || lookup_rc=$?
+      if [[ "$lookup_rc" -ne 0 ]]; then
+        error "Failed to resolve required status checks for $base_ref (rc=$lookup_rc); refusing to merge PR #$PR_NUMBER with failing check(s) while auto-merge is disabled"
+      fi
+      local overlap
+      overlap="$(comm -12 \
+        <(printf '%s\n' "$failing" | sort -u) \
+        <(printf '%s\n' "$required" | sort -u))"
+      if [[ -n "$overlap" ]]; then
+        error "Cannot merge PR #$PR_NUMBER: a required status check has failed ($(printf '%s' "$overlap" | tr '\n' ' ')). Fix the check and re-run the merge."
+      fi
+      if [[ -z "$pending" ]]; then
+        # Only informational (non-required) checks failing and nothing pending →
+        # a synchronous merge is safe (matches the UNSTABLE #3486 fallback).
+        info "PR #$PR_NUMBER: only informational (non-required) check(s) failing; proceeding to synchronous merge"
+        return 0
+      fi
+      # Informational failures but other checks still running — fall through to
+      # the pending wait below.
+    fi
+
+    if [[ -n "$pending" ]]; then
+      if [[ "$(date +%s)" -ge "$deadline" ]]; then
+        local n; n="$(printf '%s\n' "$pending" | wc -l | tr -d ' ')"
+        error "Timed out after ${LOOM_AUTO_MERGE_TIMEOUT}s waiting for ${n} pending check(s) on PR #$PR_NUMBER to complete (repo has auto-merge disabled). Re-run once CI settles, or raise LOOM_AUTO_MERGE_TIMEOUT."
+      fi
+      local n; n="$(printf '%s\n' "$pending" | wc -l | tr -d ' ')"
+      info "PR #$PR_NUMBER: ${n} check(s) still running (repo auto-merge disabled); waiting ${LOOM_AUTO_MERGE_POLL_INTERVAL}s for CI (timeout ${LOOM_AUTO_MERGE_TIMEOUT}s)..."
+      sleep "$LOOM_AUTO_MERGE_POLL_INTERVAL"
+      continue
+    fi
+
+    # Nothing failing (or only informational), nothing pending → effectively
+    # CLEAN. Proceed to the synchronous merge.
+    info "PR #$PR_NUMBER: checks settled (repo auto-merge disabled); proceeding to synchronous merge"
+    return 0
+  done
+}
+
 # Handle auto-merge mode
 #
 # The auto-merge path now mirrors the sync path's resilience patterns:
@@ -406,8 +776,27 @@ _reset_partial_increment_labels() {
 #
 # See issue #3279.
 if [[ "$AUTO_MERGE" == "true" ]]; then
+  # Bounded poll window for the UNSTABLE-because-checks-are-still-running case
+  # (#3664). Reuses the same env-var names/semantics as the Gitea auto-merge
+  # poller (loom-tools/src/loom_tools/auto_merge.py) so both forges share
+  # configuration. Defaults match that CLI: 30s interval, 600s ceiling.
+  # (Also consumed by the #3820 auto-merge-disabled wait path below.)
+  LOOM_AUTO_MERGE_POLL_INTERVAL="${LOOM_AUTO_MERGE_POLL_INTERVAL:-30}"
+  LOOM_AUTO_MERGE_TIMEOUT="${LOOM_AUTO_MERGE_TIMEOUT:-600}"
+
+  # Proactive repo-level "Allow auto-merge" probe (#3820). Read the setting once
+  # (GitHub only; Gitea and any probe failure return "unknown", preserving
+  # existing behavior fail-safe). When it is explicitly disabled, the server-side
+  # auto-merge queue can never be enabled, so skip the doomed mutation entirely
+  # and degrade `--auto` to wait-for-checks-then-merge (immediate if CLEAN).
+  REPO_AUTO_MERGE_ALLOWED="$(forge_check_auto_merge_allowed "$REPO_NWO" "$GH" 2>/dev/null || echo unknown)"
+
   if [[ "$DRY_RUN" == "true" ]]; then
-    info "[dry-run] Would enable auto-merge for PR #$PR_NUMBER"
+    if [[ "$REPO_AUTO_MERGE_ALLOWED" == "false" ]]; then
+      info "[dry-run] Repository 'Allow auto-merge' is disabled; would wait for checks then merge PR #$PR_NUMBER synchronously (immediate if already CLEAN)"
+    else
+      info "[dry-run] Would enable auto-merge for PR #$PR_NUMBER"
+    fi
     exit 0
   fi
 
@@ -415,14 +804,22 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
   MERGE_RETRY_DELAY=5
   AUTO_MERGE_OK=false
 
-  # Bounded poll window for the UNSTABLE-because-checks-are-still-running case
-  # (#3664). Reuses the same env-var names/semantics as the Gitea auto-merge
-  # poller (loom-tools/src/loom_tools/auto_merge.py) so both forges share
-  # configuration. Defaults match that CLI: 30s interval, 600s ceiling.
-  LOOM_AUTO_MERGE_POLL_INTERVAL="${LOOM_AUTO_MERGE_POLL_INTERVAL:-30}"
-  LOOM_AUTO_MERGE_TIMEOUT="${LOOM_AUTO_MERGE_TIMEOUT:-600}"
+  # #3820: repo has auto-merge disabled → wait for checks, then fall through to
+  # the synchronous-merge path instead of attempting the enable mutation. The
+  # wait function either returns 0 (proceed) or error()s out terminally. Setting
+  # AUTO_MERGE_OK=true lets the post-loop "after N attempts" guard pass; the loop
+  # itself is short-circuited by the AUTO_MERGE guard on its first iteration.
+  if [[ "$REPO_AUTO_MERGE_ALLOWED" == "false" ]]; then
+    info "PR #$PR_NUMBER: repository 'Allow auto-merge' is disabled; --auto will wait for checks then merge synchronously (immediate if already CLEAN)"
+    _wait_for_checks_then_sync_merge
+    AUTO_MERGE=false
+    AUTO_MERGE_OK=true
+  fi
 
   for MERGE_ATTEMPT in $(seq 1 $MAX_MERGE_RETRIES); do
+    # #3820: when the repo-level probe already converted --auto to a synchronous
+    # merge (AUTO_MERGE flipped false above), do NOT attempt the enable mutation.
+    [[ "$AUTO_MERGE" == "true" ]] || break
     AUTO_MERGE_OUTPUT=""
     # Prefer loom-auto-merge CLI (forge-agnostic, with poll-and-merge for Gitea)
     if command -v loom-auto-merge &>/dev/null; then
@@ -499,6 +896,42 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
       fi
     fi
     unset _NRC_RECHECK_JSON _NRC_BASE_REF _NRC_MERGEABLE _NRC_REQUIRED _NRC_LOOKUP_RC 2>/dev/null || true
+
+    # Repo-level "Allow auto-merge" disabled fallback (#3763). When the
+    # repository's "Allow auto-merge" setting is OFF, GitHub rejects the
+    # enablePullRequestAutoMerge mutation outright with
+    # "Auto merge is not allowed for this repository". Unlike the CLEAN/UNSTABLE
+    # rejections below (which describe the PR's own mergeStateStatus), this is a
+    # STATIC, repo-level condition — no amount of polling or branch-updating will
+    # change it. It also matches NEITHER the "is in clean status" NOR the
+    # "is in unstable status" grep below, so before #3763 it fell through to the
+    # generic terminal error at the bottom of this loop even when the PR was
+    # immediately mergeable (the observed failure: a CLEAN, Judge-approved PR
+    # aborting instead of merging).
+    #
+    # A single re-check of the PR's mergeability decides the outcome: if the PR
+    # is already immediately mergeable (.mergeable == true), a synchronous merge
+    # is exactly equivalent to the server-side auto-merge the caller requested,
+    # so flip to the immediate-merge path. If it is NOT mergeable, preserve the
+    # terminal error rather than silently bypassing a genuine merge blocker. We
+    # re-fetch PR state fresh (uncached) because REST `.mergeable` is null until
+    # GitHub computes it — the initial fetch may predate that. No poll loop is
+    # needed here (unlike the UNSTABLE fallback): the condition is repo-static.
+    if echo "$AUTO_MERGE_OUTPUT" | grep -q "Auto merge is not allowed for this repository"; then
+      _AMD_RECHECK_JSON="$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')"
+      _AMD_MERGEABLE="$(echo "$_AMD_RECHECK_JSON" | jq -r '.mergeable // empty')"
+      if [[ "$_AMD_MERGEABLE" == "true" ]]; then
+        info "PR #$PR_NUMBER: repo-level auto-merge is disabled but PR is mergeable; falling back to immediate merge"
+        unset _AMD_RECHECK_JSON _AMD_MERGEABLE 2>/dev/null || true
+        AUTO_MERGE=false      # let the synchronous-merge block below run
+        AUTO_MERGE_OK=true    # bypass the post-loop "after N attempts" guard
+        break
+      fi
+      unset _AMD_RECHECK_JSON _AMD_MERGEABLE 2>/dev/null || true
+      # Not immediately mergeable — preserve the terminal error (do NOT bypass a
+      # genuine merge blocker just because auto-merge happens to be disabled).
+      error "Failed to enable auto-merge for PR #$PR_NUMBER: $AUTO_MERGE_OUTPUT"
+    fi
 
     # PR is already CLEAN — GitHub's enablePullRequestAutoMerge mutation rejects
     # this state with "Pull request Pull request is in clean status" (the
@@ -825,6 +1258,12 @@ fi  # end synchronous-merge path (AUTO_MERGE != "true")
 # through reach here; the auto-merge-queued and dry-run paths exit earlier).
 # Best-effort — never fails the merge. See the function definitions above.
 _reset_partial_increment_labels || true
+
+# Automated stacked-PR reconciliation (#3747, stacked-PR v2 item 1). Runs at the
+# same confirmed-merge choke point, and BEFORE branch deletion below so the
+# parent branch ref still resolves as reconcile-stack.sh's rebase <upstream>
+# argument. Best-effort — never fails the merge. See the function above.
+_auto_reconcile_stacked_children || true
 
 # NOTE: Label cleanup on linked issues is intentionally skipped for the
 # `Closes #N` / `Fixes #N` / `Resolves #N` auto-close case.

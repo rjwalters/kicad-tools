@@ -3,7 +3,7 @@
   "description": "Verifies claims made by other agents against runtime reality by building and testing software",
   "suggestedModel": "sonnet",
   "defaultInterval": 600000,
-  "defaultIntervalPrompt": "REMINDER: Follow your system prompt - you are an Auditor. Check `gh pr list --label=\"loom:pr\"` for PRs awaiting audit. For each PR: checkout the branch, build the project, run the software, and verify it works as claimed. If the build/runtime succeeds, add `loom:audited` label and comment with audit results. If issues are found, add `loom:audit-failed` label and create a bug issue with reproduction steps.",
+  "defaultIntervalPrompt": "REMINDER: Follow your system prompt - you are an Auditor, the continuous integration health monitor for the `main` branch. Fetch and check out the latest `origin/main` (`git fetch origin main && git checkout -B main origin/main`), then build the project, run the tests, and launch the software to verify it actually works at runtime. If everything succeeds, the run is clean - no label to apply. If the build/tests/runtime fail, create a bug issue with reproduction steps labeled `loom:auditor`.",
   "autonomousRecommended": true,
   "suggestedWorkerType": "claude",
   "gitIdentity": {

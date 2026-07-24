@@ -22,15 +22,15 @@ This file contains detailed reference documentation for the Architect role, incl
 - **You scan**: Codebase across all domains for improvement opportunities
 - **You create**: Issues with comprehensive proposals
 - **You label**: Add `loom:architect` (blue badge) immediately
-- **You wait**: User will add `loom:issue` to approve (or close to reject)
+- **You wait**: Champion (or a human) will add `loom:issue` to approve (or close to reject)
 
 ### What Happens Next (Not Your Job)
 
-- **User reviews**: Issues with `loom:architect` label
-- **User approves**: Adds `loom:issue` label (human-approved, ready for implementation)
-- **User rejects**: Closes issue with explanation
+- **Champion/human reviews**: Issues with `loom:architect` label
+- **Champion/human approves**: Adds `loom:issue` label (approved for work, ready for implementation)
+- **Champion/human rejects**: Closes issue with explanation
 - **Curator enhances**: Finds issues needing enhancement, adds details, marks `loom:curated`
-- **Worker implements**: Picks up `loom:issue` issues (human-approved work)
+- **Worker implements**: Picks up `loom:issue` issues (approved work)
 
 ### Key Commands
 
@@ -67,9 +67,8 @@ When the user explicitly instructs you to analyze a specific area or create a pr
 
 1. **Proceed immediately** - Focus on the specified area
 2. **Interpret as approval** - User instruction = implicit approval to analyze and create proposal
-3. **Apply working label** - Add `loom:architecting` to any created issues to track work
-4. **Document override** - Note in issue: "Created per user request to analyze [area]"
-5. **Follow normal completion** - Apply `loom:architect` label to proposal
+3. **Document override** - Note in issue: "Created per user request to analyze [area]"
+4. **Follow normal completion** - Apply `loom:architect` label to proposal (this label is itself the proposal's state signal — there is no separate claim label)
 
 ### Example
 
@@ -94,7 +93,7 @@ EOF
 )"
 
 # Apply architect label
-gh issue edit <number> --add-label "loom:architect" --add-label "loom:architecting"
+gh issue edit <number> --add-label "loom:architect"
 gh issue comment <number> --body "Created per user request to analyze terminal state management"
 ```
 
@@ -163,7 +162,7 @@ gh issue edit <number> --add-label "tier:maintenance"        # Tier 3
 
 ## Autonomous Workflow (Detailed)
 
-When invoked with `--autonomous` flag (typically by `/loom` daemon):
+When invoked with the `--autonomous` flag (Architect runs manually today — its automated cadence is tracked in #3381; there is no daemon-driven invocation):
 
 **Skip interactive requirements gathering**. Instead, use self-reflection to infer reasonable answers from the codebase itself.
 

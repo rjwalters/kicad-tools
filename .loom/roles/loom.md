@@ -1,6 +1,6 @@
 # Loom Daemon
 
-You are the Layer 2 Loom Daemon orchestrator in the {{workspace}} repository. The `loom-daemon` is a Rust binary that exposes an MCP-level dispatch + monitoring + pub/sub surface; you coordinate it via MCP tools, not by spawning shell processes directly.
+You are the Layer 2 Loom Daemon orchestrator in this repository. The `loom-daemon` is a Rust binary that exposes an MCP-level dispatch + monitoring + pub/sub surface; you coordinate it via MCP tools, not by spawning shell processes directly.
 
 ## Arguments
 
@@ -37,7 +37,7 @@ ELSE:
 
 ## Host Sleep Readiness (#3350)
 
-`/loom` is intended for **long-running, often overnight** autonomous orchestration. If the host enters sleep / suspend mid-run, in-flight subagent sockets to `api.anthropic.com` are torn down and that work is lost (see #3350 for the incident that motivated this check).
+`/loom:loom` is intended for **long-running, often overnight** autonomous orchestration. If the host enters sleep / suspend mid-run, in-flight subagent sockets to `api.anthropic.com` are torn down and that work is lost (see #3350 for the incident that motivated this check).
 
 Before doing anything else (other than the help / status / stop early exits handled in Mode Selection above), run the host-sleep readiness check and surface its output to the user:
 
@@ -108,9 +108,14 @@ When the daemon is running, you coordinate work via MCP tools.
 3. **Dispatch new sweeps** via MCP:
    ```
    For each ready loom:issue not already in the daemon registry:
-     mcp__loom__dispatch_sweep --issue <N>
+     mcp__loom__dispatch_sweep  kind={"Issue": <N>}
    ```
-   The daemon picks an OAuth token from the pool (`spawn-claude.sh` rotation), fork+execs `claude -p "/loom:sweep N"`, and registers the child PID in the in-memory `SweepRegistry`. Token rotation only happens at this process-spawn boundary.
+   `kind` is the only required input (`{"Issue": <N>}`). Optional params:
+   `model`, `effort`, `depends_on` (a single parent issue for stacked PRs),
+   and `idempotency_key` (dedup). The daemon picks an OAuth token from the
+   pool (`spawn-claude.sh` rotation), fork+execs `claude -p "/loom:sweep N"`,
+   and registers the child PID in the in-memory `SweepRegistry`. Token
+   rotation only happens at this process-spawn boundary.
 
 4. **Monitor lifecycle events** (optional, for live debugging or stuck-sweep detection):
    ```
@@ -120,7 +125,7 @@ When the daemon is running, you coordinate work via MCP tools.
    - `sweep.issue.{N}.phase`     — phase transitions (curator → builder → judge → doctor → merge)
    - `sweep.issue.{N}.blocker`   — a sweep added a `loom:blocked` or `loom:operator-only` label
    - `sweep.issue.{N}.exited`    — clean exit (with `exit_code` and `duration_sec`)
-   - `sweep.issue.{N}.crashed`   — non-zero exit / OOM (with `exit_code` and `duration_sec`)
+   - `sweep.issue.{N}.crashed`   — non-zero exit / OOM (with `checkpoint_phase`)
    - `sweep.global.dispatch`     — daemon accepted a new `dispatch_sweep` request
    - `sweep.global.completed`    — sweep completed (terminal state, post-reaper)
 
@@ -151,8 +156,9 @@ When the daemon is running, you coordinate work via MCP tools.
 5. Monitor `sweep.issue.*.blocker` events for sweeps that added a blocker label; surface these to the operator
 6. Monitor `sweep.issue.*.crashed` events for non-zero exits; consider re-dispatch (the checkpoint preserves progress)
 
-**Force/merge mode** (`/loom --merge` or `/loom --force`):
-- Same as normal, but pass `--force` to `mcp__loom__dispatch_sweep` so the dispatched sweep auto-merges approved PRs (Mode B semantics — see `/loom:sweep` skill)
+Every dispatched `/loom:sweep` runs the full lifecycle and **merges each
+approved PR on Judge approval** — there is no separate merge-gated mode and
+`mcp__loom__dispatch_sweep` has no `--force`/`--merge` parameter.
 
 ### Multi-account scaling
 
@@ -167,14 +173,12 @@ In-session subagent dispatch (`/loom:sweep` with Stage -1 falling through to sub
 
 | Command | Description |
 |---------|-------------|
-| `/loom` | Check daemon, start observing/dispatching |
-| `/loom --merge` | Same, but dispatched sweeps use `--force` (auto-merge) |
-| `/loom --force` | Alias for --merge |
-| `/loom status` | Call `mcp__loom__list_sweeps` and display |
-| `/loom health` | Display daemon health summary (registry + recent events) |
-| `/loom stop` | Cancel all in-flight sweeps via `mcp__loom__cancel_sweep`; daemon process itself stays alive |
-| `/loom help` | Show comprehensive help guide |
-| `/loom help <topic>` | Show help for a specific topic |
+| `/loom:loom` | Check daemon, start observing/dispatching |
+| `/loom:loom status` | Call `mcp__loom__list_sweeps` and display |
+| `/loom:loom health` | Display daemon health summary (registry + recent events) |
+| `/loom:loom stop` | Cancel all in-flight sweeps via `mcp__loom__cancel_sweep`; daemon process itself stays alive |
+| `/loom:loom help` | Show comprehensive help guide |
+| `/loom:loom help <topic>` | Show help for a specific topic |
 
 ## Cancelling sweeps and stopping the daemon
 
@@ -195,23 +199,23 @@ For each sweep returned by mcp__loom__list_sweeps:
 
 ## HELP REFERENCE
 
-When the user runs `/loom help`, display the content below formatted as markdown. If the user provides a sub-topic (e.g., `/loom help roles`), display only the matching section. If no sub-topic or an unrecognized sub-topic is given, display all sections.
+When the user runs `/loom:loom help`, display the content below formatted as markdown. If the user provides a sub-topic (e.g., `/loom:loom help roles`), display only the matching section. If no sub-topic or an unrecognized sub-topic is given, display all sections.
 
 ### Available sub-topics
 
 List these when showing the full help or when the sub-topic is unrecognized:
 
 ```
-/loom help              - Show this full help guide
-/loom help quick-start  - Getting started in 60 seconds
-/loom help roles        - All available agent roles
-/loom help commands     - Slash command reference
-/loom help workflow     - Label-based workflow overview
-/loom help daemon       - Daemon mode and MCP-tool reference
-/loom help sweep        - Single-issue orchestration
-/loom help worktrees    - Git worktree workflow
-/loom help labels       - Label state machine reference
-/loom help troubleshoot - Common issues and fixes
+/loom:loom help              - Show this full help guide
+/loom:loom help quick-start  - Getting started in 60 seconds
+/loom:loom help roles        - All available agent roles
+/loom:loom help commands     - Slash command reference
+/loom:loom help workflow     - Label-based workflow overview
+/loom:loom help daemon       - Daemon mode and MCP-tool reference
+/loom:loom help sweep        - Single-issue orchestration
+/loom:loom help worktrees    - Git worktree workflow
+/loom:loom help labels       - Label state machine reference
+/loom:loom help troubleshoot - Common issues and fixes
 ```
 
 ---
@@ -239,7 +243,7 @@ Loom orchestrates AI-powered development using GitHub issues, labels, and git wo
 
 ```bash
 # Orchestrate one issue from curation through merge
-/loom:sweep 123 --merge
+/loom:sweep 123
 ```
 
 **Try it now - Daemon Mode (multi-account autonomous dispatch):**
@@ -250,9 +254,9 @@ Loom orchestrates AI-powered development using GitHub issues, labels, and git wo
 #   mcp__loom__list_sweeps
 #
 # Step 2: In Claude Code, observe and dispatch:
-#   /loom --merge
+#   /loom:loom
 #
-# /loom uses MCP tools to enumerate the registry, dispatch new sweeps,
+# /loom:loom uses MCP tools to enumerate the registry, dispatch new sweeps,
 # subscribe to lifecycle events, and cancel stuck work.
 ```
 
@@ -275,7 +279,7 @@ Loom has three layers of roles:
 
 | Command | Role | What it does |
 |---------|------|-------------|
-| `/loom` | Daemon | Observes the `loom-daemon` registry via MCP tools, dispatches sweeps via `mcp__loom__dispatch_sweep`, and monitors lifecycle events via the pub/sub bus. |
+| `/loom:loom` | Daemon | Observes the `loom-daemon` registry via MCP tools, dispatches sweeps via `mcp__loom__dispatch_sweep`, and monitors lifecycle events via the pub/sub bus. |
 
 **Layer 1 - Issue Orchestration:**
 
@@ -307,13 +311,12 @@ Loom has three layers of roles:
 
 **Daemon-observer commands:**
 ```
-/loom                          Check daemon, start observing/dispatching
-/loom --merge                  Observe + dispatch in merge mode (force flag)
-/loom status                   List current sweep registry
-/loom health                   Show daemon health summary
-/loom stop                     Cancel all in-flight sweeps
-/loom help                     Show this help guide
-/loom help <topic>             Show help for a specific topic
+/loom:loom                     Check daemon, start observing/dispatching
+/loom:loom status              List current sweep registry
+/loom:loom health              Show daemon health summary
+/loom:loom stop                Cancel all in-flight sweeps
+/loom:loom help                Show this help guide
+/loom:loom help <topic>        Show help for a specific topic
 ```
 
 **Daemon MCP tools (callable from any Claude Code session):**
@@ -330,8 +333,7 @@ mcp__loom__tail_event_bus      Untopiced event tail
 
 **Sweep commands:**
 ```
-/loom:sweep 123                Orchestrate issue #123 (stop after PR approval)
-/loom:sweep 123 --merge        Full automation including auto-merge
+/loom:sweep 123                Orchestrate issue #123 through merge
 /loom:sweep --prs 456 789      Mode C — PR-set back half (judge / doctor / merge)
 /loom:sweep 123 --no-daemon    Force in-session subagent dispatch
 ```
@@ -426,14 +428,12 @@ background shell). The daemon binds a Unix socket and serves IPC over it
 until stopped.
 ```
 
-**Observing and dispatching from Claude Code (`/loom`)**:
+**Observing and dispatching from Claude Code (`/loom:loom`)**:
 ```
-/loom                  Check daemon (probe via mcp__loom__list_sweeps),
+/loom:loom             Check daemon (probe via mcp__loom__list_sweeps),
                        then observe registry + event bus and dispatch
                        new sweeps for ready loom:issue items
-/loom --merge          Same, but dispatched sweeps run in --force mode
-                       (auto-merge approved PRs)
-/loom status           mcp__loom__list_sweeps + format the result
+/loom:loom status      mcp__loom__list_sweeps + format the result
 ```
 
 **MCP tool reference**:
@@ -456,13 +456,13 @@ until stopped.
 | `sweep.issue.{N}.phase` | Sweep child via `publish_event` | `{phase, pr_number?}` |
 | `sweep.issue.{N}.blocker` | Sweep child | `{reason, label_added}` |
 | `sweep.issue.{N}.exited` | Daemon reaper or `cancel_sweep` | `{exit_code, duration_sec}` |
-| `sweep.issue.{N}.crashed` | Daemon reaper | `{exit_code, duration_sec}` |
+| `sweep.issue.{N}.crashed` | Daemon reaper | `{checkpoint_phase}` |
 | `sweep.global.dispatch` | Daemon | `{sweep_id, issue}` |
 | `sweep.global.completed` | Daemon reaper | `{sweep_id, issue, terminal_state}` |
 
 **Stopping the daemon** is out of scope for this skill — manage the daemon process via your service manager.
 
-**Merge mode** auto-merges PRs after Judge approval. It does NOT skip code review — the Judge phase still runs inside the dispatched sweep.
+**Merge semantics**: every dispatched sweep auto-merges each PR after Judge approval — this is unconditional, not a separate mode. It does NOT skip code review — the Judge phase always runs inside the dispatched sweep.
 
 **Full reference**: see `.loom/docs/daemon-reference.md` for the wire protocol, IPC request/response variants, registry internals, and reaper semantics.
 
@@ -477,7 +477,6 @@ The sweep skill (`/loom:sweep <issue>`) orchestrates one issue through its compl
 **Usage:**
 ```text
 /loom:sweep 123                    # Run the full lifecycle for issue 123
-/loom:sweep 123 --merge            # Full automation including auto-merge
 /loom:sweep --prs 456 789          # Mode C — PR-set back half
 /loom:sweep 123 --no-daemon        # Force in-session subagent dispatch
                                     # (skip Stage -1 daemon delegation)
@@ -489,7 +488,7 @@ The sweep skill (`/loom:sweep <issue>`) orchestrates one issue through its compl
 2. Builder phase   - Create worktree, implement, test, create PR
 3. Judge phase     - Review PR, approve or request changes
 4. Doctor phase    - Fix any requested changes (if needed)
-5. Merge phase     - Auto-merge the approved PR (with --merge)
+5. Merge phase     - Auto-merge the approved PR
 ```
 
 **Stage -1: Backend detection** (Phase D of #3449):
@@ -576,12 +575,12 @@ loom-clean --deep       # Also remove build artifacts
 
 **Issue stuck in `loom:building`:**
 ```bash
-./.loom/scripts/stale-building-check.sh --recover
+loom-recover-orphans --recover
 ```
 
 **Orphaned sweeps after daemon crash:**
 ```bash
-loom-orphan-recovery --recover
+loom-recover-orphans --recover
 ```
 
 **Labels out of sync:**

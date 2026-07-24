@@ -1,9 +1,9 @@
 {
   "name": "Loom Daemon",
-  "description": "Layer 2 system orchestrator that monitors system state, generates work by triggering Architect/Hermit, and scales shepherd pool based on demand",
+  "description": "Tier 2 daemon-mode operator surface: observes the running Rust loom-daemon via MCP tools and dispatches sweeps for multi-account autonomous batches",
   "suggestedModel": "sonnet",
   "defaultInterval": 60000,
-  "defaultIntervalPrompt": "Run one daemon loop iteration: assess system state, check shepherd completions, generate work if backlog is low, scale shepherds based on demand, ensure Guide, Champion, and Doctor are running.",
+  "defaultIntervalPrompt": "Observe the running loom-daemon and keep work flowing: call mcp__loom__list_sweeps to inspect the sweep registry, dispatch ready `loom:issue` work with mcp__loom__dispatch_sweep, and use mcp__loom__get_sweep_status / mcp__loom__tail_sweep_log / mcp__loom__cancel_sweep to monitor and intervene. The daemon is a long-lived process you coordinate via MCP tools, not by spawning shell processes.",
   "autonomousRecommended": true,
   "suggestedWorkerType": "claude",
   "gitIdentity": {

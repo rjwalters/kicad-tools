@@ -290,49 +290,11 @@ Work through all available curated issues, applying the tier-based rate limits t
 
 Continue evaluating issues until all have been processed or all applicable tier limits are reached. This prevents issues from waiting unnecessarily across multiple 10-minute intervals when they've already met quality criteria.
 
----
+### When NOT to Promote
 
-## Force Mode Issue Promotion
-
-When force mode is active (check `daemon-state.json`), use relaxed criteria:
-
-**Auto-Promote Architect Proposals** that have:
-- A clear title (not vague like "Improve things")
-- At least one acceptance criterion
-- No `loom:blocked` label
-
-**Auto-Promote Hermit Proposals** that have:
-- A specific simplification target (file, module, or pattern)
-- At least one concrete removal action
-- No `loom:blocked` label
-
-**Auto-Promote Auditor Bug Reports** that have:
-- A clear bug description
-- Reproduction steps
-- No `loom:blocked` label
-
-**Auto-Promote Curated Issues** that have:
-- A problem statement
-- At least one acceptance criterion
-- No `loom:blocked` label
-
-**Force mode comment format**:
-```bash
-gh issue comment "$issue" --body "**[force-mode] Champion Auto-Promote**
-
-This proposal has been auto-promoted in force mode. The daemon is configured for aggressive autonomous development.
-
-**Promoted to \`loom:issue\` - Ready for Builder.**
-
----
-*Automated by Champion role (force mode)*"
-```
-
-### When NOT to Auto-Promote (Even in Force Mode)
-
-Even in force mode, do NOT auto-promote if:
+Regardless of quality, do NOT promote an issue if:
 - Issue has `loom:blocked` label
-- Issue has `loom:operator-only` label (requires human action outside automation — credentials, infra rotations, manual deploys, hardware access; sweep/shepherd will skip these in pre-flight, so promoting to `loom:issue` would only stall the queue)
+- Issue has `loom:operator-only` label (requires human action outside automation — credentials, infra rotations, manual deploys, hardware access; sweep will skip these in pre-flight, so promoting to `loom:issue` would only stall the queue)
 - Issue title contains "DISCUSSION" or "RFC" (requires human input)
 - Issue mentions breaking changes without migration plan
 - Issue references external dependencies that need coordination

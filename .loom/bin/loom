@@ -94,10 +94,7 @@ case "${1:-help}" in
         ;;
     status)
         shift
-        # Use existing loom-status.sh if available
-        if [[ -f "$REPO_ROOT/.loom/scripts/loom-status.sh" ]]; then
-            exec "$REPO_ROOT/.loom/scripts/loom-status.sh" "$@"
-        elif [[ -f "$CLI_DIR/loom-status.sh" ]]; then
+        if [[ -f "$CLI_DIR/loom-status.sh" ]]; then
             exec "$CLI_DIR/loom-status.sh" "$@"
         else
             echo -e "${RED}Error: loom-status.sh not found${NC}" >&2

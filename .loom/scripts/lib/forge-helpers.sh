@@ -357,6 +357,41 @@ forge_check_auto_delete() {
   fi
 }
 
+# Check whether the repository has GitHub's "Allow auto-merge" setting enabled.
+# Usage: forge_check_auto_merge_allowed NWO [GH_CMD]
+# Returns on stdout: "true", "false", or "unknown".
+#
+# GitHub only: reads the repo-level `allow_auto_merge` flag. When it is false,
+# GitHub rejects the enablePullRequestAutoMerge mutation outright — no PR-level
+# state (CLEAN/UNSTABLE) will ever let it succeed — so callers that want to
+# degrade gracefully (wait-for-checks-then-merge) can detect it up front rather
+# than reacting to the post-mutation error string (#3820).
+#
+# Gitea returns "unknown" (there is no equivalent single repo flag consumed
+# here; Gitea auto-merge goes through loom-auto-merge's own poll-and-merge, which
+# this probe must not perturb). A probe failure (network/auth/unexpected value)
+# also returns "unknown" so callers preserve their existing behavior fail-safe.
+forge_check_auto_merge_allowed() {
+  local nwo="$1"
+  local gh_cmd="${2:-gh}"
+
+  if [[ "$FORGE_TYPE" != "github" ]]; then
+    echo "unknown"
+    return 0
+  fi
+
+  local val
+  val="$("$gh_cmd" api "repos/$nwo" --jq '.allow_auto_merge' 2>/dev/null)" || {
+    echo "unknown"
+    return 0
+  }
+  case "$val" in
+    true)  echo "true" ;;
+    false) echo "false" ;;
+    *)     echo "unknown" ;;
+  esac
+}
+
 # Delete a remote branch.
 # Usage: forge_delete_branch NWO BRANCH_NAME
 # GitHub: DELETE /repos/{nwo}/git/refs/heads/{branch}

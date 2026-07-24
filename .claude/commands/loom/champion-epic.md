@@ -68,8 +68,13 @@ If all 6 criteria pass:
 1. **Create Phase 1 issues** with `loom:architect` label:
 
 ```bash
-# For each issue in Phase 1
+# For each issue in Phase 1.
+# NOTE: emit the machine-checkable phase marker `<!-- loom:epic:<epic-number>:phase:1 -->`
+# in the body. Phase-completion detection searches for this exact token (see
+# "Detecting Phase Completion"), NOT the natural-language "**Epic**: / **Phase**:"
+# prose — which drifts and is unreliable for GitHub `--search in:body`.
 gh issue create --title "[Epic #<epic>] <Issue Title>" --body "$(cat <<'EOF'
+<!-- loom:epic:<epic-number>:phase:1 -->
 **Epic**: #<epic-number> - <Epic Title>
 **Phase**: 1 of N
 **Phase Goal**: <phase 1 goal from epic>
@@ -146,11 +151,16 @@ When all issues in a phase are closed, Champion creates the next phase's issues.
 EPIC_NUMBER=123
 PHASE=1
 
-# Get all issues with loom:epic-phase that reference this epic and phase
+# Get all issues with loom:epic-phase that reference this epic and phase.
+# Search for the machine-generated marker emitted into each phase-issue body
+# (see Step 3): `<!-- loom:epic:<epic>:phase:<n> -->`. This is an exact,
+# drift-free token — unlike the old natural-language "Epic: #N Phase: N"
+# phrase, which never matched the "**Epic**: #N" / "**Phase**: 1 of N" prose
+# the body template actually emits.
 PHASE_ISSUES=$(gh issue list \
   --label="loom:epic-phase" \
   --state=all \
-  --search="Epic: #$EPIC_NUMBER Phase: $PHASE in:body" \
+  --search="loom:epic:$EPIC_NUMBER:phase:$PHASE in:body" \
   --json number,state \
   --jq '.')
 
@@ -166,7 +176,7 @@ fi
 ### Creating Next Phase Issues
 
 When Phase N completes, create Phase N+1 issues following the same pattern as Step 3 above, but with:
-- Updated phase number
+- Updated phase number — **including the marker**: emit `<!-- loom:epic:<epic-number>:phase:<N+1> -->` in each new body so phase-completion detection can find them
 - Dependencies referencing Phase N completion
 - Updated epic comment showing progress
 
@@ -205,35 +215,6 @@ Total PRs merged: N
 **Approve at most 1 epic per iteration.**
 
 Epics generate multiple issues, so limit epic approvals to prevent overwhelming the backlog. Phase progression (creating next phase issues) does not count against this limit.
-
----
-
-## Force Mode Epic Behavior
-
-In force mode, epics are evaluated with relaxed criteria:
-- Skip detailed criteria checking
-- Auto-approve if epic has at least 2 phases and clear issue list
-- Create Phase 1 issues immediately
-- Add `[force-mode]` prefix to all comments
-
-```bash
-if [ "$FORCE_MODE" = "true" ]; then
-    # Minimal epic validation
-    BODY=$(gh issue view "$epic" --json body --jq '.body')
-    HAS_PHASES=$(echo "$BODY" | grep -c "### Phase")
-
-    if [ "$HAS_PHASES" -ge 2 ]; then
-        # Auto-approve and create Phase 1 issues
-        create_phase_issues "$epic" 1
-        gh issue comment "$epic" --body "**[force-mode] Epic Auto-Approved**
-
-Phase 1 issues created. Epic will progress automatically.
-
----
-*Automated by Champion role (force mode)*"
-    fi
-fi
-```
 
 ---
 

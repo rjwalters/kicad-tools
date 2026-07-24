@@ -88,52 +88,6 @@ This review happens BEFORE creating your worktree:
 4. Create worktree
 5. Implement (using patterns learned from review)
 
-## Write PR Body Before Running Tests
-
-**CRITICAL**: Before running the test suite, write your PR description to `.loom/pr-body.md`.
-
-This ensures a high-quality PR description is preserved even if context runs out during testing. The shepherd uses this file when creating the PR automatically.
-
-### Why This Matters
-
-The builder commonly exhausts its context window during test verification. When this happens, the shepherd creates the PR automatically — but it can only generate a boilerplate description unless you've pre-written the body.
-
-### How to Write the PR Body
-
-After implementing your changes (but BEFORE running tests):
-
-```bash
-cat > .loom/pr-body.md << 'EOF'
-## Summary
-[1-2 sentences describing what this PR does and why]
-
-## Changes
-- [Key change 1 - what you changed and why]
-- [Key change 2]
-- [Key change 3]
-
-## Acceptance Criteria Verification
-
-| Criterion | Status | Verification |
-|-----------|--------|--------------|
-| [Criterion from issue] | ✅ | [How you verified it] |
-
-## Test Plan
-- [ ] [Test 1]
-- [ ] [Test 2]
-
-Closes #N
-EOF
-```
-
-Replace `#N` with the actual issue number. Write this BEFORE running `pnpm check:ci` or any test suite. Use `Part of #N` instead of `Closes #N` when this PR is a **partial increment** of a family/epic issue (see "Partial increments" below).
-
-### When to Update It
-
-If you discover additional changes during testing, update `.loom/pr-body.md` to reflect them before committing.
-
----
-
 ## Test Output: Truncate for Token Efficiency
 
 **IMPORTANT**: When running tests, truncate verbose output to conserve tokens in long-running sessions.
@@ -229,7 +183,7 @@ During orchestration, incomplete PRs cause:
 - CI failures when criteria are missed
 - Manual intervention mid-workflow
 - Wasted review cycles
-- Shepherd/Judge time spent on fixable issues
+- Sweep/Judge time spent on fixable issues
 
 **Example failure**: Issue #1441 listed 4 shellcheck warnings to fix. Builder fixed 3/4, missed `cli/loom-start.sh:47`, requiring manual fixes after CI failed.
 
@@ -297,7 +251,7 @@ Root cause verification (for process/behavior issues):
 - [ ] If documentation-only: justified why docs will change behavior this time
 
 Local verification:
-- [ ] `pnpm check:ci` passes (or equivalent)
+- [ ] The project's check command passes (see `buildGate.command` in `.loom/config.json`, or the repo's documented CI command, e.g. `pnpm check:ci`)
 - [ ] Relevant tests pass
 - [ ] Each criterion has explicit verification (not "I think it works")
 ```
@@ -360,14 +314,14 @@ cargo fmt --all -- --check
 
 1. **Defense in depth** - Pre-commit hooks can fail silently in worktrees or with PATH issues
 2. **Early feedback** - Catch errors immediately instead of after CI failure
-3. **Save a Doctor cycle** - `pnpm check:ci` includes compilation; catching it early avoids a fix cycle
+3. **Save a Doctor cycle** - the project's check command (`buildGate.command` in `.loom/config.json`, e.g. `pnpm check:ci`) includes compilation; catching it early avoids a fix cycle
 4. **Async pitfalls** - Common Rust async errors (e.g., holding `MutexGuard` across `.await`) are only caught by the compiler, not by reading code
 
 **Add to your pre-PR checklist when modifying Rust:**
 
 ```markdown
 Local verification:
-- [ ] `pnpm check:ci` passes
+- [ ] The project's check command passes (`buildGate.command` in `.loom/config.json`, e.g. `pnpm check:ci`)
 - [ ] `cargo check` returns 0 (Rust files only)
 - [ ] `cargo clippy` returns 0 (Rust files only)
 - [ ] `cargo fmt --all -- --check` returns 0 (Rust files only)
@@ -450,7 +404,7 @@ fix: standardize timestamp format to ISO 8601 UTC across log scripts
 feat: add workspace snapshot caching for daemon state
 refactor: rename instant-exit to low-output terminology
 docs: update troubleshooting guide for worktree cleanup
-fix: prevent duplicate label transitions in shepherd phase validator
+fix: prevent duplicate label transitions in sweep phase validation
 ```
 
 ### Issue Title Prefix Mapping
@@ -505,7 +459,7 @@ git diff --stat
 git diff
 
 # Step 2: Describe what the code change does
-git commit -m "fix: validate PR title format in shepherd phase validator"
+git commit -m "fix: validate PR title format in sweep phase validation"
 
 # NOT: git commit -m "feat: implement changes for issue #2678"
 # NOT: git commit -m "fix: address issue #2557"
@@ -513,7 +467,7 @@ git commit -m "fix: validate PR title format in shepherd phase validator"
 
 ### Commit Message Anti-Patterns
 
-These patterns are **WRONG** — the shepherd will reject PRs with titles matching them:
+These patterns are **WRONG** — sweep phase validation will reject PRs with titles matching them:
 
 | Anti-Pattern | Why It's Wrong |
 |-------------|---------------|
@@ -532,7 +486,7 @@ These patterns are **WRONG** — the shepherd will reject PRs with titles matchi
 > family/epic issue (see "Partial increments" below).
 > A closing keyword is required for:
 > 1. GitHub to auto-close the issue when the PR merges
-> 2. **Shepherd orchestration to detect your PR during phase validation**
+> 2. **Sweep orchestration to detect your PR during phase validation**
 >
 > A partial-increment PR intentionally omits the closing keyword so the family/epic issue
 > stays open — it still references the issue with `Part of #N` so the PR is discoverable.
@@ -639,7 +593,7 @@ When creating a PR, verify:
 3. PR description references the issue: `Closes #X` for a full implementation, or `Part of #X` for a declared partial increment (not "Issue #X" or "Addresses #X") — same reference in the commit message
 4. Issue number is correct
 5. PR has `loom:review-requested` label
-6. All CI checks pass (`pnpm check:ci` locally)
+6. All CI checks pass locally (the project's check command — `buildGate.command` in `.loom/config.json`, e.g. `pnpm check:ci`)
 7. PR description includes verification table for each criterion
 8. Tests added/updated as needed
 

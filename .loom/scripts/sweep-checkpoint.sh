@@ -13,12 +13,21 @@
 # Checkpoint file format (atomic write via .tmp + mv):
 #   {
 #     "phase": "<curator-done|builder-done|judge-done|doctor-done|merge-done>",
-#     "task_id": "<task identifier, e.g. sweep PID>",
+#     "task_id": "<stable per-sweep-run id>",
 #     "timestamp": "<ISO 8601 UTC>",
 #     "pr_number": <int or null>,
 #     "attempt": <int, optional - omitted when not provided; absent means attempt 1>,
 #     "model": "<string, optional - omitted when not provided; absent means default/unknown>"
 #   }
+#
+# The "task_id" field (#3768) identifies the sweep RUN that wrote the checkpoint.
+# It must be a STABLE per-sweep-run id (generated once at sweep start — see
+# sweep-run-registry.sh), NOT the PID of a Bash subshell. The historical
+# `sweep-$$` default was the wrong mental model: `$$` is re-evaluated per Bash
+# tool call within a single sweep, so it could not distinguish one sweep's
+# checkpoints from a concurrent peer sweep's. Callers (defaults/.claude/commands/
+# loom/sweep.md) now pass a stable `--task-id "$RUN_ID"`; the field is free-form,
+# so legacy checkpoints carrying a `sweep-<pid>` task_id still parse cleanly.
 #
 # The "attempt" field (#3481) is forward-compat bookkeeping for model
 # escalation: attempt 1 is the first Builder pass, attempt 2 is the Doctor
@@ -124,7 +133,11 @@ cmd_write() {
         esac
     done
 
-    [[ -z "$task_id" ]] && task_id="sweep-$$"
+    # Last-resort fallback ONLY: sweep.md always passes a stable --task-id "$RUN_ID"
+    # (see sweep-run-registry.sh). This default exists so a bare/manual write still
+    # produces a parseable checkpoint; `sweep-run-$$` is deliberately labelled a
+    # fallback rather than masquerading as a stable per-run id.
+    [[ -z "$task_id" ]] && task_id="sweep-run-fallback-$$"
     if [[ "$pr_number" != "null" && ! "$pr_number" =~ ^[0-9]+$ ]]; then
         echo "ERROR: --pr-number must be a positive integer or 'null'" >&2
         exit 1

@@ -8,9 +8,12 @@
 #   ./loom.sh --stop        # Send graceful shutdown signal
 #   ./loom.sh --help        # Show all options
 #
-# This script is a thin wrapper around .loom/scripts/start-daemon.sh.
-# Run it from a terminal OUTSIDE Claude Code so that worker sessions
-# (builder, judge, etc.) are not spawned as Claude Code descendants.
+# This script is a thin wrapper around .loom/scripts/start-daemon.sh, which now
+# delegates to the tmux-based `.loom/bin/loom start`. Agents are spawned via
+# `tmux new-session -d` on a dedicated `-L loom` socket, so they are reparented
+# to the tmux server (not the invoking shell) and survive its exit. That makes
+# this safe to run from inside a Claude Code session — worker sessions are never
+# descendants of the session that launched them.
 
 set -euo pipefail
 

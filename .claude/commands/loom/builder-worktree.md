@@ -339,7 +339,7 @@ done
 ### When to Use Parallel Mode
 
 **Use atomic claiming when:**
-- Multiple Builder agents run simultaneously (Daemon Mode with shepherd pool)
+- Multiple Builder agents run simultaneously (Daemon Mode dispatching parallel sweeps)
 - Risk of two agents picking the same issue
 - Need graceful shutdown capability
 

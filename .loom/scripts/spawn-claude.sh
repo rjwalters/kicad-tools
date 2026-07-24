@@ -300,6 +300,12 @@ PY
     fi
 
     export CLAUDE_CODE_OAUTH_TOKEN="$_token"
+    # Export the selected account name so a downstream claude-wrapper.sh knows
+    # which account the exported token belongs to. This is what lets the
+    # wrapper mark exactly the right account bad when it rotates on a
+    # usage/session-limit fault (issue #3738) instead of guessing from file
+    # mtimes. Harmless for the direct-`claude` dispatch path.
+    export LOOM_TOKEN_NAME="$_name"
     log_info "spawn-claude: using OAuth account '$_name' (mode=$_mode)"
 fi
 

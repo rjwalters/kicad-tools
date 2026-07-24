@@ -47,6 +47,7 @@ boards/*/*/output/board.json
 # Loom runtime state (don't commit these)
 .loom-in-use
 .loom-checkpoint
+.loom-managed
 .loom/.daemon.pid
 .loom/.daemon.log
 .loom/daemon.sock
@@ -54,6 +55,8 @@ boards/*/*/output/board.json
 .loom/daemon-metrics.json
 .loom/loom-source-path
 .loom/spawn-loop-state.json
+.loom/spawn-loop.pid
+.loom/stop-spawn-loop
 .loom/issue-failures.json
 .loom/interventions/
 .loom/worktrees/
@@ -61,9 +64,14 @@ boards/*/*/output/board.json
 .loom/mcp-command.json
 .loom/activity.db
 .loom/claims/
+.loom/locks/
 .loom/signals/
 .loom/status/
 .loom/retry-state/
+.loom/exit-codes/
+.loom/sweep-checkpoint/
+.loom/sweep-run/
+.loom/stats/
 .loom/diagnostics/
 .loom/guide-docs-state.json
 .loom/metrics_state.json
@@ -72,6 +80,9 @@ boards/*/*/output/board.json
 .loom/metrics/
 .loom/usage-cache.json
 .loom/claude-config/
+.loom/tokens/
+.loom/accounts.env
+.loom/CANARY
 .loom/*.log
 .loom/*.sock
 .loom/logs/

@@ -58,7 +58,10 @@ assert_eq() {
 assert_contains() {
     local haystack="$1" needle="$2" msg="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    # Here-string, not a pipe, so grep -q exiting early on a match cannot
+    # SIGPIPE printf and (under set -o pipefail) flip the pipeline non-zero
+    # despite a match — a size-sensitive flake on large haystacks (#3820).
+    if grep -qF -- "$needle" <<<"$haystack"; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
         echo -e "  ${GREEN}PASS${NC}: $msg"
     else
@@ -72,7 +75,7 @@ assert_contains() {
 assert_not_contains() {
     local haystack="$1" needle="$2" msg="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if ! printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    if ! grep -qF -- "$needle" <<<"$haystack"; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
         echo -e "  ${GREEN}PASS${NC}: $msg"
     else

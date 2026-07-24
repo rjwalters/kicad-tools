@@ -1,6 +1,6 @@
 # Version Bump + Tag (generic)
 
-You are bumping the version of {{workspace}} — a **generic project**, not necessarily Loom itself.
+You are bumping the version of this repository — a **generic project**, not necessarily Loom itself.
 
 ## When to use this skill
 
@@ -58,27 +58,13 @@ If **no** version-bearing files are found, stop and tell the operator:
 
 > No version sources detected in this project. Supported shapes are: `package.json`, `Cargo.toml`, `pyproject.toml`, `setup.py`/`setup.cfg`, top-level shell script with `VERSION="X.Y.Z"`, and `CLAUDE.md` / `README.md` with `**Version**: X.Y.Z`. If your project uses a different shape, add one of these conventions first.
 
-## Phase 2: Ensure `CHANGELOG.md` exists with `[Unreleased]`
+## Phase 2: Update `CHANGELOG.md` if present (optional)
 
 Look for `CHANGELOG.md` at the repository root.
 
+- **If absent entirely**: skip this phase — no prompt, no scaffold. `/loom:bump` never creates a `CHANGELOG.md`; that's `/repo:release`'s job (per the no-CHANGELOG positioning above). Proceed straight to Phase 3.
 - **If present and contains `## [Unreleased]`**: continue.
-- **If present but missing `## [Unreleased]`**: ask the operator to add one, or offer to insert it just below the file header.
-- **If absent entirely**: offer to scaffold a minimal Keep-a-Changelog header. Ask first — do not write without confirmation.
-
-Suggested scaffold:
-
-```markdown
-# Changelog
-
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-```
+- **If present but missing `## [Unreleased]`**: ask the operator to add one, or offer to insert it just below the file header. (This fixes an existing changelog — it is not scaffolding a new one.)
 
 ## Phase 3: Compute the new version (semver bump)
 
@@ -97,7 +83,9 @@ Show the operator the computed new version and ask for confirmation.
 
 ## Phase 4: Draft the changelog entry
 
-This is a **human-in-the-loop** step. **Never auto-generate the changelog content from commits.** Open `CHANGELOG.md`, find the `## [Unreleased]` section, and:
+**If `CHANGELOG.md` does not exist, skip this phase entirely** — the quick-bump has no changelog step in that case (Phase 2 already skipped for the same reason). Proceed to Phase 5.
+
+Otherwise, this is a **human-in-the-loop** step. **Never auto-generate the changelog content from commits.** Open `CHANGELOG.md`, find the `## [Unreleased]` section, and:
 
 1. If the operator has already written content under `## [Unreleased]`, present it and ask whether to use it as-is or edit.
 2. If the section is empty, ask the operator to dictate the entry. Suggest the categories from Keep a Changelog: `### Added`, `### Changed`, `### Fixed`, `### Removed`, `### Deprecated`, `### Security`.
@@ -365,7 +353,7 @@ Once `scripts/version.sh` exists, invoke it:
 This will:
 1. Update every file in `VERSION_FILES` to the new version.
 2. Refresh `Cargo.lock` (if present).
-3. Stage the changes plus `CHANGELOG.md`.
+3. Stage the changes plus `CHANGELOG.md`, if present.
 4. Create a commit `chore: bump version to X.Y.Z`.
 5. Create an annotated tag `vX.Y.Z`.
 
@@ -394,11 +382,12 @@ git push origin HEAD
 git push origin "v$NEW_VERSION"
 ```
 
-Then create the GitHub Release. Use the just-promoted changelog block as the release notes:
+Then create the GitHub Release. If a `CHANGELOG.md` exists, use the just-promoted changelog block as the release notes; if it does not (the no-changelog quick-bump case), skip the extraction and pass a short operator-supplied note (or `--generate-notes`) instead:
 
 ```bash
-# Extract the most recent ## [X.Y.Z] - DATE block from CHANGELOG.md
-notes=$(awk '/^## \['"$NEW_VERSION"'\]/{flag=1; next} /^## \[/{flag=0} flag' CHANGELOG.md)
+# Extract the most recent ## [X.Y.Z] - DATE block from CHANGELOG.md (only if it exists)
+notes=""
+[ -f "CHANGELOG.md" ] && notes=$(awk '/^## \['"$NEW_VERSION"'\]/{flag=1; next} /^## \[/{flag=0} flag' CHANGELOG.md)
 
 gh release create "v$NEW_VERSION" \
   --title "v$NEW_VERSION" \
@@ -426,6 +415,7 @@ Release v$NEW_VERSION complete
 
 ## Notes and constraints
 
+- **CHANGELOG work is conditional on an existing `CHANGELOG.md`.** Phases 2 and 4 only run when a `CHANGELOG.md` already exists in the repo; `/loom:bump` never creates one — that's `/repo:release`'s job. When absent, both phases are skipped cleanly (no prompt, no scaffold), keeping the quick-bump quick.
 - **Do not auto-generate CHANGELOG content from commits.** The `## [Unreleased]` content comes from the operator. The skill only *promotes* the existing `[Unreleased]` heading to `[X.Y.Z] - DATE`.
 - **Do not publish to package registries.** Tag + GitHub Release only.
 - **For the full release methodology, defer to `/repo:release`.** That command (from [rjwalters/repo](https://github.com/rjwalters/repo)) owns the CHANGELOG/version-drift gates and GitHub Release flow, and honors `scripts/version.sh`. `/loom:bump` is the lightweight quick-bump counterpart.
