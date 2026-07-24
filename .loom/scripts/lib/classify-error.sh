@@ -74,8 +74,15 @@ classify_error() {
         return
     fi
 
-    # Token exhausted (quota used up) — rotate to a different token
-    if echo "$output" | grep -qiE "hit your (limit|weekly limit)|hit.your.limit"; then
+    # Token exhausted (quota / session / weekly / usage limit) — rotate to a
+    # different token. The phrase set is widened (issue #3738) to cover the
+    # multi-word-gap variants the Claude CLI actually emits — "hit your
+    # session limit", "hit your weekly limit", an org's "monthly usage limit",
+    # and "out of extra usage". A naive `hit.your.limit` pattern misses the
+    # "session"/multi-word forms (there is filler between "your" and "limit").
+    # This regex is kept in lockstep with claude-wrapper.sh, which sources this
+    # file rather than duplicating the pattern (issue #3738).
+    if echo "$output" | grep -qiE "hit your (limit|session limit|weekly limit)|hit\.your\.limit|monthly usage limit|out of extra usage"; then
         echo "TOKEN_EXHAUSTED"
         return
     fi

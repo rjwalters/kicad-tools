@@ -2,14 +2,23 @@
 # These labels coordinate the Loom AI agent workflow
 # Sync with: .loom/scripts/sync-labels.sh (from the installed repo root)
 # Or manually: gh label create/edit commands
+#
+# SOURCE OF TRUTH / PARITY CONTRACT (#3896):
+#   .github/labels.yml (this repo's live label registry) and
+#   defaults/.github/labels.yml (the installer template copied into fresh
+#   installs) are kept BYTE-IDENTICAL. A fresh install must ship exactly the
+#   label set Loom itself uses, so there are NO intentional differences between
+#   the two files. Edit ONE file, then mirror the change to the other so they
+#   match exactly. CI enforces parity via defaults/scripts/check-labels-drift.sh
+#   (installer-tests job) — the build fails on any drift.
 
 # Core Workflow States
 - name: loom:triage
-  description: New issue awaiting Curator enhancement
+  description: "New issue awaiting Curator enhancement. Applied by: humans or any agent filing a new issue (intake label)."
   color: "9CA3AF"  # gray-400 - neutral initial state
 
 - name: loom:issue
-  description: Approved for work by human (ready for Builder to claim)
+  description: "Approved for work by human (ready for Builder to claim). Applied by: humans or Champion."
   color: "3B82F6"  # blue-500
 
 # DEPRECATED: loom:in-progress removed (use role-specific labels)
@@ -20,44 +29,64 @@
 
 # Role-Specific Workflow Labels
 - name: loom:building
-  description: Builder is implementing this issue
+  description: "Builder is implementing this issue. Applied by: Builder/Shepherd only (claim label)."
   color: "F59E0B"  # amber-500 - matches other in-progress states
 
 - name: loom:curating
-  description: Curator is enhancing this issue
+  description: "Curator is enhancing this issue. Applied by: Curator only (claim label)."
   color: "F59E0B"  # amber-500 - matches other in-progress states
 
 - name: loom:treating
-  description: Doctor is fixing this bug or addressing PR feedback
+  description: "Doctor is fixing this bug or addressing PR feedback. Applied by: Doctor only (claim label)."
   color: "F59E0B"  # amber-500 - matches other in-progress states
 
 - name: loom:reviewing
-  description: Judge is actively reviewing this PR
+  description: "Judge is actively reviewing this PR. Applied by: Judge only (claim label)."
   color: "F59E0B"  # amber-500 - matches other in-progress states
 
 - name: loom:review-requested
-  description: PR ready for Judge to review
+  description: "PR ready for Judge to review. Applied by: Builder when opening PR."
   color: "10B981"  # emerald-500
 
 - name: loom:changes-requested
-  description: "PR requires changes before re-review (Judge requested modifications)"
+  description: "PR requires changes before re-review (Judge requested modifications). Applied by: Judge."
   color: "F59E0B"  # amber-500 - matches other "action required" labels
 
+- name: loom:merge-conflict
+  description: "PR has merge conflicts requiring resolution"
+  color: "DC2626"  # red-600 - indicates broken state
+
+- name: loom:auto-merge-ok
+  description: Override size limit for auto-merge (applied by Judge or human)
+  color: "10B981"  # emerald-500 - signals safe to proceed
+
+- name: loom:ci-failure
+  description: "PR has failing CI checks"
+  color: "DC2626"  # red-600 - indicates broken state
+
 - name: loom:pr
-  description: PR approved by Judge, ready for human to merge
+  description: "PR approved by Judge, ready for Champion auto-merge. Applied by: Judge."
   color: "3B82F6"  # blue-500
 
 # Agent Proposal Labels
 - name: loom:architect
-  description: Architect proposal awaiting user approval
+  description: "Architect proposal awaiting user approval. Applied by: Architect only."
   color: "9333EA"  # purple (violet-600)
 
 - name: loom:hermit
-  description: Hermit removal/simplification proposal awaiting user approval
+  description: "Hermit removal/simplification proposal awaiting user approval. Applied by: Hermit only."
   color: "9333EA"  # purple (violet-600)
 
+- name: loom:auditor
+  description: "Bug discovered by Auditor during main branch validation. Applied by: Auditor only."
+  color: "d93f0b"  # red - indicates runtime/build issue
+
+- name: loom:auditor-capability-request
+  description: Auditor capability request for enhanced validation tooling
+  color: "6366F1"  # indigo-500 - indicates meta/tooling request
+
 - name: loom:curated
-  description: "Curator-enriched. Additive marker; coexists with loom:issue (highest-quality state for Builders)"
+  description: "Curator-enriched, awaiting human approval. Additive marker; coexists with loom:issue (highest-quality state for Builders). Applied by: Curator only."
   color: "10B981"  # emerald-500
 
 # Status Labels
@@ -68,6 +97,19 @@
 - name: loom:urgent
   description: Critical/blocking issue requiring immediate attention
   color: "DC2626"  # red-600
+
+- name: loom:abort
+  description: Signal to abort shepherd for this issue (returns to loom:issue)
+  color: "F97316"  # orange-500 - warning/signal color
+
+# loom:operator-only vs loom:blocked: operator-only = a human must act OUTSIDE
+# automation (credentials, infra, hardware) and sweep/shepherd skip it entirely;
+# blocked = waiting on a dependency but otherwise automatable. Keep the
+# description at/under GitHub's 100-char label-description limit so sync-labels.sh
+# can create it (a longer description fails with HTTP 422 and the label never syncs).
+- name: loom:operator-only
+  description: "Requires human action outside automation (credentials, infra, hardware); sweep/shepherd skip"
+  color: "F97316"  # orange-500 - operator-action signal (matches loom:abort)
 
 # Epic Labels
 - name: loom:epic
@@ -90,3 +132,11 @@
 - name: tier:maintenance
   description: Cleanup, refactoring, or improvements not tied to current goals
   color: "D4C5F9"  # purple - lower priority
+
+# External Contribution Gate
+# Not part of the loom: workflow. Builders MUST skip issues carrying this label
+# (see builder.md "Ignore External Issues") — a non-collaborator submission needs
+# maintainer approval before Curator/Builder process it.
+- name: external
+  description: "Submitted by a non-collaborator; requires maintainer approval before Curator/Builder process it. Applied by: humans only."
+  color: "E5E7EB"  # gray-200 - external/hold marker

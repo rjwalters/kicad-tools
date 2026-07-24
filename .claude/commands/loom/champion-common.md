@@ -8,8 +8,8 @@ This file contains shared utilities, protocols, and information used across all 
 
 After evaluating both queues:
 
-1. Report PRs evaluated and merged (max 3)
-2. Report issues evaluated and promoted (max 2)
+1. Report PRs evaluated and merged
+2. Report issues evaluated and promoted
 3. Report rejections with reasons
 4. List merged PR numbers and promoted issue numbers with links
 
@@ -49,7 +49,7 @@ Next Steps: 2 PRs merged, 2 issues promoted, 2 items await human review
 ### Human Override
 
 Humans can always:
-- Add `loom:manual-merge` label to prevent PR auto-merge
+- Hold a PR from auto-merge by removing its `loom:pr` label — Champion only merges PRs still labeled `loom:pr` — or add `loom:changes-requested` to send it back for changes
 - Remove `loom:issue` and re-add `loom:curated` to reject issue promotion
 - Add `loom:issue` directly to bypass Champion review
 - Close issues/PRs marked for Champion review
@@ -68,9 +68,9 @@ This role is designed for **autonomous operation** with a recommended interval o
 
 When running autonomously:
 1. Check for `loom:pr` PRs (Priority 1)
-2. Evaluate up to 3 PRs (oldest first), merge safe ones
+2. Drain the queue — evaluate every qualifying PR (oldest first) and merge safe ones until the queue is empty (see `champion-pr-merge.md` §"PR Auto-Merge Batch Processing"; PR merging has no numeric per-iteration cap)
 3. If no PRs, check for `loom:curated` issues (Priority 2)
-4. Evaluate up to 2 issues (oldest first), promote qualifying ones
+4. Evaluate all qualifying issues (oldest first) and promote them, bounded only by the tier-based promotion limits in `champion-issue-promo.md` (Tier 1 unlimited / Tier 2 up to 2 per iteration / Tier 3 up to 1, gated at 5 backlog)
 5. Report results and stop
 
 ### Quality Over Quantity
@@ -111,49 +111,9 @@ PR Lifecycle:
 
 ## Terminal Probe Protocol
 
-Loom uses an intelligent probe system to detect what's running in each terminal. When you receive a probe command, respond according to this protocol.
+When you receive a probe command, respond with: `AGENT:Champion:<brief-task>` — e.g. `AGENT:Champion:merging-PR-123`.
 
-### When You See This Probe
-
-```bash
-# Terminal Probe: Are you an AI agent? If yes, respond with "AGENT:<role>:<primary-task>". If you're a bash shell, this is just a comment.
-true
-```
-
-### How to Respond
-
-**Format**: `AGENT:<your-role>:<brief-task-description>`
-
-**Examples** (adapt to your role):
-- `AGENT:Champion:merging-PR-123`
-- `AGENT:Champion:promoting-issue-456`
-- `AGENT:Champion:awaiting-work`
-
-### Role Name
-
-Use "Champion" as your role name.
-
-### Task Description
-
-Keep it brief (3-6 words) and descriptive:
-- Use present-tense verbs: "merging", "promoting", "evaluating"
-- Include issue/PR number if working on one: "merging-PR-123"
-- Use hyphens between words: "promoting-issue-456"
-- If idle: "awaiting-work" or "checking-queues"
-
-### Why This Matters
-
-- **Debugging**: Helps diagnose agent launch issues
-- **Monitoring**: Shows what each terminal is doing
-- **Verification**: Confirms agents launched successfully
-- **Future Features**: Enables agent status dashboards
-
-### Important Notes
-
-- **Don't overthink it**: Just respond with the format above
-- **Be consistent**: Always use the same format
-- **Be honest**: If you're idle, say so
-- **Be brief**: Task description should be 3-6 words max
+**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](probe-protocol.md).**
 
 ---
 

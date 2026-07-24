@@ -35,12 +35,85 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo ".")"
 HOOK_ERROR_LOG="${SCRIPT_DIR}/../logs/hook-errors.log"
 
+# Decision telemetry log (issue #3771) — a SEPARATE JSONL file from
+# HOOK_ERROR_LOG. At runtime SCRIPT_DIR is the installed hook's own directory
+# (.loom/hooks/), so this resolves to .loom/logs/guard-decisions.log in a real
+# install. LOOM_GUARD_DECISION_LOG_FILE overrides the path (a test seam; also
+# lets an operator point the log elsewhere). Off by default — see
+# decision_log_enabled() below.
+DECISION_LOG="${LOOM_GUARD_DECISION_LOG_FILE:-${SCRIPT_DIR}/../logs/guard-decisions.log}"
+
 # Log a diagnostic error message (best-effort, never fails the script)
 log_hook_error() {
     local msg="$1"
     # Ensure log directory exists
     mkdir -p "$(dirname "$HOOK_ERROR_LOG")" 2>/dev/null || true
     echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [guard-destructive] $msg" >> "$HOOK_ERROR_LOG" 2>/dev/null || true
+}
+
+# =============================================================================
+# DECISION TELEMETRY (issue #3771) — one JSONL record per deny/ask decision.
+#
+# Append a machine-readable record to DECISION_LOG each time the guard denies or
+# asks, so false-positive friction becomes measurable (which patterns fire, how
+# often, before/after a precision fix). Deliberately does NOT log `allow`: the
+# #3687 read-only fast path's zero-overhead silent-allow must stay silent, and
+# allow-logging would swamp the log with the ~99% common case.
+#
+# STABLE SCHEMA (the contract #3772's reader/aggregation tooling stacks on — do
+# NOT rename fields without considering that dependency), one JSON object per
+# line:
+#   {"ts":"<UTC>","decision":"deny"|"ask","pattern":"<tag>",
+#    "tier":"catastrophic"|"ask","command":"<redacted>"}
+#     ts       — UTC timestamp, same format as log_hook_error's date -u call.
+#     decision — "deny" or "ask".
+#     pattern  — a short, stable rule tag (NOT the full free-text reason). For
+#                the pattern-array loops it is the matched pattern; the non-loop
+#                sites pass a static tag (e.g. "sql-ddl", "rm-protected-path").
+#     tier     — "catastrophic" for deny, "ask" for ask.
+#     command  — the command string, REDACTED via strip_literal_text() so no raw
+#                --body/-m/--title/--notes/--comment secret value is persisted.
+#
+# Best-effort like log_hook_error: gated by the lazy decision_log_enabled()
+# toggle, and a log-write failure (permission denied, disk full, missing dir)
+# NEVER changes the deny/ask decision and NEVER causes a non-zero exit. Callers
+# invoke it as `log_guard_decision ... || true` so it can never trip the ERR
+# trap.
+#
+# One-liner to summarize fires by pattern (AC — full tooling is #3772):
+#   jq -r '.pattern' .loom/logs/guard-decisions.log | sort | uniq -c | sort -rn
+# =============================================================================
+log_guard_decision() {
+    # Args: <decision> <tier> <pattern-tag>. The command is read from the global
+    # $COMMAND and redacted here. Returns 0 unconditionally.
+    decision_log_enabled || return 0
+    local decision="$1" tier="$2" tag="${3:-$1}"
+    local ts redacted line
+    ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || ts=""
+    # Redact quoted --body/-m/--title/--notes/--comment values (same redactor the
+    # pattern-matching tiers use) so no raw secret text is persisted to a log that
+    # aggregates across sessions. Fall back to raw only if redaction produced
+    # nothing (awk unavailable) — impossible in practice since jq is required and
+    # awk is used throughout.
+    redacted=$(strip_literal_text "$COMMAND" 2>/dev/null) || redacted=""
+    [[ -n "$redacted" ]] || redacted="$COMMAND"
+    # Build the JSONL record with jq so all escaping is correct. If jq fails,
+    # skip the write entirely rather than hand-roll a line that might mis-escape.
+    line=$(jq -cn \
+        --arg ts "$ts" \
+        --arg decision "$decision" \
+        --arg pattern "$tag" \
+        --arg tier "$tier" \
+        --arg command "$redacted" \
+        '{ts:$ts, decision:$decision, pattern:$pattern, tier:$tier, command:$command}' \
+        2>/dev/null) || return 0
+    [[ -n "$line" ]] || return 0
+    mkdir -p "$(dirname "$DECISION_LOG")" 2>/dev/null || true
+    # Group the append so a FAILED >> redirection (unwritable/nonexistent dir)
+    # has its bash-level error caught by the group's stderr redirect too — a bare
+    # `>> "$f" 2>/dev/null` does not suppress the redirection-open error itself.
+    { printf '%s\n' "$line" >> "$DECISION_LOG"; } 2>/dev/null || true
+    return 0
 }
 
 # Top-level error trap: on ANY unexpected error, output valid JSON "allow"
@@ -92,6 +165,15 @@ fi
 #      disjoint from every existing deny/ask pattern:
 #        git status|log|diff|show  (bare — `git -C /p status` is NOT admitted)
 #        ls  grep  rg
+#        jq  wc  head  tail        (pure read-only text/JSON filters — none has
+#          an in-place-mutation flag, so any args are admitted, #3772)
+#        test  [  [[               (boolean file/string test builtins — no
+#          mutation surface at all, #3772)
+#        find                      (admitted for any args EXCEPT when a dangerous
+#          action-primary is present: -delete, -exec, -execdir, -ok, -okdir,
+#          -fls, -fprint, -fprint0, -fprintf. Any of those disqualifies eligibility
+#          and falls through to the full path — structural, not content-scanned,
+#          so a future `find -delete` deny rule is never silently bypassed, #3772)
 #        gh <noun> view|list       (never delete/close/archive/…)
 #        aws <service> describe*|get*|list*  and  aws s3 ls   (mirrors the
 #          verb-anchoring already in CLOUD_ASK_PATTERNS: those verbs are never
@@ -189,6 +271,31 @@ fastpath_builtin_admits() {
     (( n >= 1 )) || return 1
     case "${t[0]}" in
         ls|grep|rg)
+            return 0
+            ;;
+        jq|wc|head|tail)
+            # Pure read-only text/JSON filters. None writes files or takes an
+            # in-place-mutation flag (jq has no `-i`; wc/head/tail never mutate),
+            # so any arguments are admitted with no sub-form check.
+            return 0
+            ;;
+        test|'['|'[[')
+            # Boolean file/string test builtins — no mutation surface at all.
+            return 0
+            ;;
+        find)
+            # find is read-only UNLESS a dangerous action-primary is present.
+            # Structurally exclude the write/delete/exec primaries: if ANY token
+            # exactly matches one, decline eligibility (fall through to the full
+            # path). Pure bash-builtin string compares, zero forks.
+            local i
+            for (( i = 1; i < n; i++ )); do
+                case "${t[i]}" in
+                    -delete|-exec|-execdir|-ok|-okdir|-fls|-fprint|-fprint0|-fprintf)
+                        return 1
+                        ;;
+                esac
+            done
             return 0
             ;;
         git)
@@ -350,6 +457,107 @@ cloud_guard_enabled() {
         _CLOUD_GUARD_CACHE="$enabled"
     fi
     [[ "$_CLOUD_GUARD_CACHE" == "true" ]]
+}
+
+# =============================================================================
+# Reversible-GitHub ask toggle — default OFF (opt-IN; inverse polarity, #3757).
+#
+# `gh pr close`, `gh issue close`, and `gh label delete` change shared state but
+# are trivially reversible — `gh pr reopen`, `gh issue reopen`, and recreating a
+# label (a repo with labels.yml restores in one `gh label sync`). A guard whose
+# purpose is preventing irreversible loss should not add confirmation friction to
+# these: an autonomous agent that closes its own issue/PR as part of a normal
+# lifecycle would otherwise stall on a prompt (or, headless, block entirely). So
+# they are NO LONGER in the ungated ASK_PATTERNS array; a repo that still wants
+# the confirmation can opt IN here. The genuinely hard-to-reverse ops
+# (`gh release delete` — published artifacts/tags; `git clean -fd` / `git
+# checkout .` / `git restore .` — untracked/uncommitted loss) STAY in the ungated
+# ask tier and are unaffected by this toggle.
+#
+# This is the INVERSE polarity of sql_guard_enabled()/cloud_guard_enabled():
+# those default ON (guard active) and are opted OUT; this one defaults OFF (no
+# ask) and is opted IN — because enabling it ADDS friction rather than removing
+# it. So the default and the absent-key resolution are `false`, not `true`.
+#
+# Resolution order (highest precedence first):
+#   1. LOOM_GUARD_REVERSIBLE_GH env var (1/true/yes enables the ask,
+#      0/false/no forces it off)
+#   2. .loom/config.json  ->  guards.reversibleGh  (default false when absent)
+#   3. Default: false (no ask)
+#
+# Mirrors cloud_guard_enabled()'s lazy/cached shape: cached in
+# _REVERSIBLE_GH_GUARD_CACHE, invoked LAZILY only after a reversible-gh pattern
+# has already matched so the jq config read never touches the hot path for the
+# common (non-matching) case. The config read is best-effort: any parse failure
+# falls through to guard-OFF (the default), never blocking.
+# =============================================================================
+_REVERSIBLE_GH_GUARD_CACHE=""
+reversible_gh_guard_enabled() {
+    if [[ -z "$_REVERSIBLE_GH_GUARD_CACHE" ]]; then
+        local enabled=false
+        if [[ -n "$REPO_ROOT" && -f "$REPO_ROOT/.loom/config.json" ]]; then
+            # jq // is alternative-on-null, not default-on-missing, so use
+            # if/then/else to treat only an explicit `true` as enabled (a
+            # missing guards.reversibleGh key stays off). On malformed JSON jq
+            # exits non-zero and the `||` fallback restores the guard-OFF default.
+            enabled=$(jq -r 'if .guards.reversibleGh == true then "true" else "false" end' "$REPO_ROOT/.loom/config.json" 2>/dev/null) || enabled=false
+            [[ -n "$enabled" ]] || enabled=false
+        fi
+        # Env override wins over config.
+        case "${LOOM_GUARD_REVERSIBLE_GH:-}" in
+            0|false|no)  enabled=false ;;
+            1|true|yes)  enabled=true ;;
+        esac
+        _REVERSIBLE_GH_GUARD_CACHE="$enabled"
+    fi
+    [[ "$_REVERSIBLE_GH_GUARD_CACHE" == "true" ]]
+}
+
+# =============================================================================
+# Decision-telemetry toggle — default OFF (opt-IN; inverse polarity, #3771).
+#
+# The deny/ask decision log (log_guard_decision() near the top of this file) is
+# OFF by default: it writes a new persistent, cross-session artifact of redacted
+# commands, so — mirroring the other opt-in data-collection features in Loom
+# (transcript archival #3726, the model-cost experiment #3725) — a zero-config
+# install sees NO new file and NO behaviour change. An operator enables it to
+# measure guard-hook friction.
+#
+# Same INVERSE polarity as reversible_gh_guard_enabled(): defaults false, the
+# absent-key resolution is false, and only an explicit `true` (config) or a
+# truthy env value enables it.
+#
+# Resolution order (highest precedence first):
+#   1. LOOM_GUARD_DECISION_LOG env var (1/true/yes/on enables; 0/false/no/off
+#      disables). Overrides config.
+#   2. .loom/config.json  ->  guards.decisionLog  (default false when absent).
+#   3. Default: false (no decision log written).
+#
+# Resolved LAZILY and cached in _DECISION_LOG_CACHE, invoked only from inside
+# log_guard_decision() (i.e. only once a deny/ask is about to fire), exactly like
+# the other toggles — so the config read NEVER touches the hot path for the ~99%
+# of commands that neither deny nor ask, and in particular never runs on the
+# #3687 read-only fast path (which exits before any deny/ask). The config read is
+# best-effort: any parse failure falls through to guard-OFF (the default).
+# =============================================================================
+_DECISION_LOG_CACHE=""
+decision_log_enabled() {
+    if [[ -z "$_DECISION_LOG_CACHE" ]]; then
+        local enabled=false
+        if [[ -n "$REPO_ROOT" && -f "$REPO_ROOT/.loom/config.json" ]]; then
+            # Only an explicit `true` enables; a missing key or malformed JSON
+            # (jq non-zero, caught by ||) stays OFF — inverse of sql_guard_enabled().
+            enabled=$(jq -r 'if .guards.decisionLog == true then "true" else "false" end' "$REPO_ROOT/.loom/config.json" 2>/dev/null) || enabled=false
+            [[ -n "$enabled" ]] || enabled=false
+        fi
+        # Env override wins over config.
+        case "${LOOM_GUARD_DECISION_LOG:-}" in
+            0|false|no|off)   enabled=false ;;
+            1|true|yes|on)    enabled=true ;;
+        esac
+        _DECISION_LOG_CACHE="$enabled"
+    fi
+    [[ "$_DECISION_LOG_CACHE" == "true" ]]
 }
 
 # =============================================================================
@@ -527,6 +735,82 @@ resolve_default_branch() {
     return 0
 }
 
+# =============================================================================
+# QUOTE-AWARE COMMAND SEGMENTATION (#3755)
+#
+# The three segment parsers below (parse_force_ops, lifecycle_or_cloud_reason,
+# extract_rm_targets) split a command string on the shell separators ; | & && ||
+# to find each simple command's command word. The historical split was a naive
+#   gsub(/&&|\|\||[;|&]/, "\n")
+# over the raw string, which has NO lexer — so a `|`-alternation INSIDE a quoted
+# argument (e.g. `grep -E "lifecycle|halt|poweroff"`) was split as if it were a
+# real pipe, manufacturing a phantom segment whose command word is the bare word
+# `halt` and hard-denying a completely read-only command.
+#
+# `qsplit()` replaces that gsub: it walks the string tracking single-/double-quote
+# state and emits a newline for a separator ONLY when it is OUTSIDE a quoted span.
+# A quoted span is treated as inert (its separators are preserved as literal
+# text) ONLY when it carries no command substitution — no `$(` and no backtick —
+# mirroring strip_literal_text()'s #3679 safety floor: a smuggled
+# `"$(a|halt)"` keeps its separators ACTIVE so the genuine protection is intact.
+# The token VALUES are preserved verbatim (unlike a redaction approach), so
+# extract_rm_targets still sees the real `rm` targets. Best-effort like
+# strip_literal_text(): backslash-escaped quotes and an unterminated quote fall
+# back to the old separator-active behaviour, never widening a deny into an allow.
+#
+# Shared as a single awk source string so the three parsers cannot drift.
+# =============================================================================
+_QSPLIT_AWK='
+function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ) {
+    SQ = sprintf("%c", 39)   # single quote
+    DQ = sprintf("%c", 34)   # double quote
+    out = ""
+    n = length(s)
+    i = 1
+    while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == DQ || c == SQ) {
+            qc = c
+            ci = 0
+            for (j = i + 1; j <= n; j++) {
+                if (substr(s, j, 1) == qc) { ci = j; break }
+            }
+            if (ci == 0) {
+                # Unterminated quote: fall back to separator-active processing so
+                # a stray quote never suppresses a real split (never widen a deny).
+                out = out c
+                i++
+                continue
+            }
+            inner = substr(s, i + 1, ci - i - 1)
+            if (index(inner, "$(") == 0 && index(inner, "`") == 0) {
+                # Inert quoted span: copy verbatim, separators inside are literal.
+                out = out substr(s, i, ci - i + 1)
+                i = ci + 1
+                continue
+            }
+            # Span carries command substitution: keep separators ACTIVE (copy the
+            # opening quote and keep walking char-by-char so a `|` inside splits).
+            out = out c
+            i++
+            continue
+        }
+        if (c == ";") { out = out "\n"; i++; continue }
+        if (c == "&") {
+            if (i < n && substr(s, i + 1, 1) == "&") { out = out "\n"; i += 2; continue }
+            out = out "\n"; i++; continue
+        }
+        if (c == "|") {
+            if (i < n && substr(s, i + 1, 1) == "|") { out = out "\n"; i += 2; continue }
+            out = out "\n"; i++; continue
+        }
+        out = out c
+        i++
+    }
+    return out
+}
+'
+
 # Parse force-op segments out of a command, emitting one TAB-separated
 # "<cpath>\t<target>" line per genuine git force-push / hard-reset. Portable awk
 # only (mirrors extract_rm_targets / lifecycle_or_cloud_reason segment parsing):
@@ -546,11 +830,11 @@ resolve_default_branch() {
 #   - reset --hard: always emitted with <target> = "@HEAD@".
 # The caller resolves "@HEAD@" to the checked-out branch and applies the mode.
 parse_force_ops() {
-    printf '%s' "$1" | awk '
+    printf '%s' "$1" | awk "$_QSPLIT_AWK"'
     BEGIN { SEP = sprintf("%c", 31) }  # US (unit separator) — non-whitespace so
                                        # bash read does not trim an empty cpath.
     {
-        gsub(/&&|\|\||[;|&]/, "\n")
+        $0 = qsplit($0)   # quote-aware segmentation (#3755)
         n = split($0, segs, "\n")
         for (i = 1; i <= n; i++) {
             seg = segs[i]
@@ -615,12 +899,16 @@ parse_force_ops() {
 }
 
 # Redact the quoted VALUES of known text-carrying flags (--body, -m/--message,
-# --title, --notes) so a dangerous-looking phrase quoted INSIDE such a value no
-# longer trips the raw ALWAYS_BLOCK_PATTERNS substring scan. Used ONLY to build
-# COMMAND_NO_LITERAL_TEXT for that one loop (mirrors the COMMAND_NO_COMMENT
-# precedent); every other scan keeps reading the raw command. This kills the
-# #3679 false positive where `gh pr comment --body "…git push --force origin
-# main…"` / `git commit -m "…"` hard-denied even though nothing executes.
+# --title, --notes, --comment) so a dangerous-looking phrase quoted INSIDE such a
+# value no longer trips the raw ALWAYS_BLOCK_PATTERNS substring scan (catastrophic
+# tier) or the ASK_PATTERNS scan (ask tier, #3756). Used ONLY to build the
+# literal-redacted working copies for those two loops (mirrors the
+# COMMAND_NO_COMMENT precedent); every other scan keeps reading the raw command.
+# This kills the #3679 false positive where `gh pr comment --body "…git push
+# --force origin main…"` / `git commit -m "…"` hard-denied even though nothing
+# executes, and (#3756) the analogous ask-tier false ask where an ask-phrase like
+# `gh issue close` quoted inside a `--comment`/`--body` value prompted for
+# confirmation despite no such command actually being run.
 #
 # Safety floor preserved two ways:
 #   - `-c` is deliberately NOT a text-carrying flag, so `bash -c '<payload>'`
@@ -639,12 +927,27 @@ strip_literal_text() {
     BEGIN {
         SQ = sprintf("%c", 39)   # single quote
         DQ = sprintf("%c", 34)   # double quote
-        # boundary + text-carrying flag + optional (ws / = / ws) + quoted span
-        re = "(^|[ \t])(--message|--body|--notes|--title|-m)[ \t]*=?[ \t]*(" \
+        # boundary + text-carrying flag + optional (ws / = / ws) + quoted span.
+        # The leading boundary class includes a newline so a `--body` that begins
+        # a continuation line is still recognized; the quoted-span classes
+        # ([^"]* / [^'"'"']*) already match a newline, so a MULTI-LINE quoted
+        # value is captured as one span once the whole command is slurped below.
+        re = "(^|[ \t\n])(--message|--body|--notes|--title|--comment|-m)[ \t]*=?[ \t]*(" \
              DQ "[^" DQ "]*" DQ "|" SQ "[^" SQ "]*" SQ ")"
+        buf = ""
     }
-    {
-        s = $0
+    # MULTI-LINE REDACTION (#3898): slurp the whole (possibly multi-line) command
+    # into one buffer, preserving embedded newlines, then redact ONCE in END so a
+    # quoted flag value that spans several lines is treated as a single inert
+    # span. The old per-line ($0) processing split a multi-line `gh issue create
+    # --body "…"` body at each newline, leaving a dangerous phrase quoted on an
+    # interior line un-redacted — which then tripped the catastrophic scan on
+    # documentation text that merely MENTIONS a dangerous command (the meta
+    # false-positive that blocked filing #3898). Single-line input is
+    # byte-for-byte identical to the previous behaviour.
+    { buf = buf (NR > 1 ? "\n" : "") $0 }
+    END {
+        s = buf
         out = ""
         while (match(s, re)) {
             pre     = substr(s, 1, RSTART - 1)
@@ -660,6 +963,9 @@ strip_literal_text() {
             qchar = substr(matched, qpos, 1)
             inner = substr(matched, qpos + 1, length(matched) - qpos - 1) # between the quotes
             # Redact ONLY provably inert text (no command substitution / backtick).
+            # gsub(/./) leaves embedded newlines untouched (awk `.` never matches a
+            # newline), so a multi-line span stays SAME-LENGTH and byte offsets of
+            # the surrounding command are preserved.
             if (index(inner, "$(") == 0 && index(inner, "`") == 0) {
                 gsub(/./, "X", inner)
             }
@@ -671,8 +977,17 @@ strip_literal_text() {
 }
 
 # Helper: output a deny decision and exit
+#
+# Optional second arg is a short, STABLE rule tag (issue #3771) recorded as the
+# decision log's `pattern` field; it defaults to "deny" (a function-name-derived
+# fallback) so this stays backward-compatible with call sites that don't pass
+# one. Telemetry is emitted BEFORE the JSON decision so a logging hiccup can
+# never suppress the deny, and the `|| true` guarantees it never trips the ERR
+# trap. Deny is always the "catastrophic" tier.
 deny() {
     local reason="$1"
+    local tag="${2:-deny}"
+    log_guard_decision "deny" "catastrophic" "$tag" || true
     if jq -n --arg reason "$reason" '{
         hookSpecificOutput: {
             hookEventName: "PreToolUse",
@@ -690,8 +1005,14 @@ deny() {
 }
 
 # Helper: output an ask decision and exit
+#
+# Same optional rule-tag convention as deny() (issue #3771); defaults to "ask".
+# Ask is always the "ask" tier. Telemetry is best-effort and emitted before the
+# JSON decision.
 ask() {
     local reason="$1"
+    local tag="${2:-ask}"
+    log_guard_decision "ask" "ask" "$tag" || true
     if jq -n --arg reason "$reason" '{
         hookSpecificOutput: {
             hookEventName: "PreToolUse",
@@ -781,22 +1102,23 @@ ALWAYS_BLOCK_PATTERNS=(
 )
 
 # Build a literal-text-redacted working copy ONLY for the catastrophic scan
-# below, so a force-push-to-main phrase quoted inside a --body/-m/--title/--notes
-# value no longer false-positives (#3679). The awk only runs when one of those
-# flags is actually present, keeping it off the hot path (mirrors the
-# COMMAND_NO_COMMENT `#`-present guard). `-c` is intentionally excluded so
-# `bash -c '<payload>'` payloads still reach the raw scan; spans carrying `$(` /
-# backtick are left intact so command-substitution smuggling still hard-denies.
+# below, so a force-push-to-main phrase quoted inside a
+# --body/-m/--title/--notes/--comment value no longer false-positives (#3679,
+# --comment added #3756). The awk only runs when one of those flags is actually
+# present, keeping it off the hot path (mirrors the COMMAND_NO_COMMENT
+# `#`-present guard). `-c` is intentionally excluded so `bash -c '<payload>'`
+# payloads still reach the raw scan; spans carrying `$(` / backtick are left
+# intact so command-substitution smuggling still hard-denies.
 COMMAND_NO_LITERAL_TEXT="$COMMAND"
 if [[ "$COMMAND" == *"--body"* || "$COMMAND" == *"--message"* || \
       "$COMMAND" == *"--title"* || "$COMMAND" == *"--notes"* || \
-      "$COMMAND" == *"-m"* ]]; then
+      "$COMMAND" == *"--comment"* || "$COMMAND" == *"-m"* ]]; then
     COMMAND_NO_LITERAL_TEXT=$(strip_literal_text "$COMMAND")
 fi
 
 for pattern in "${ALWAYS_BLOCK_PATTERNS[@]}"; do
     if echo "$COMMAND_NO_LITERAL_TEXT" | grep -qiE "$pattern"; then
-        deny "BLOCKED: Command matches dangerous pattern: $pattern"
+        deny "BLOCKED: Command matches dangerous pattern: $pattern" "catastrophic:$pattern"
     fi
 done
 
@@ -818,6 +1140,27 @@ if [[ "$COMMAND" == *"#"* ]]; then
     COMMAND_NO_COMMENT=$(printf '%s\n' "$COMMAND" | sed -E 's/(^|[[:space:]])#.*$//')
 else
     COMMAND_NO_COMMENT="$COMMAND"
+fi
+
+# =============================================================================
+# ASK-TIER WORKING COPY (#3756) — comment-stripped AND literal-text redacted.
+#
+# The ASK_PATTERNS loop below needs BOTH narrowings the catastrophic tier's two
+# copies provide separately: COMMAND_NO_COMMENT's `#`-comment stripping AND
+# strip_literal_text()'s quoted-flag-value redaction (the #3679 fix the ask tier
+# never received). Building the ask copy from COMMAND_NO_COMMENT (not raw
+# $COMMAND) preserves the comment-stripping the ask tier already relied on, then
+# redacts --body/-m/--title/--notes/--comment values so an ask-phrase quoted
+# inside such a value (e.g. `gh pr comment --body "…gh issue close…"`) no longer
+# false-asks. The strip only runs when a text-carrying flag is present, keeping
+# it off the hot path. Never feeds the catastrophic scan (that keeps reading the
+# raw command), so this can only NARROW an ask, never miss a hard deny.
+# =============================================================================
+COMMAND_ASK_SCAN="$COMMAND_NO_COMMENT"
+if [[ "$COMMAND_NO_COMMENT" == *"--body"* || "$COMMAND_NO_COMMENT" == *"--message"* || \
+      "$COMMAND_NO_COMMENT" == *"--title"* || "$COMMAND_NO_COMMENT" == *"--notes"* || \
+      "$COMMAND_NO_COMMENT" == *"--comment"* || "$COMMAND_NO_COMMENT" == *"-m"* ]]; then
+    COMMAND_ASK_SCAN=$(strip_literal_text "$COMMAND_NO_COMMENT")
 fi
 
 # =============================================================================
@@ -845,9 +1188,9 @@ fi
 lifecycle_or_cloud_reason() {
     # Emit a deny reason (one per line) for every segment whose command word is a
     # system-lifecycle command or an az/gcloud delete. Portable awk only.
-    printf '%s' "$1" | awk '
+    printf '%s' "$1" | awk "$_QSPLIT_AWK"'
     {
-        gsub(/&&|\|\||[;|&]/, "\n")
+        $0 = qsplit($0)   # quote-aware segmentation (#3755)
         n = split($0, segs, "\n")
         for (i = 1; i <= n; i++) {
             seg = segs[i]
@@ -898,7 +1241,7 @@ lifecycle_or_cloud_reason() {
 
 _LIFECYCLE_REASON=$(lifecycle_or_cloud_reason "$COMMAND_NO_COMMENT" | head -1)
 if [[ -n "$_LIFECYCLE_REASON" ]]; then
-    deny "BLOCKED: $_LIFECYCLE_REASON"
+    deny "BLOCKED: $_LIFECYCLE_REASON" "lifecycle-or-cloud-delete"
 fi
 
 # =============================================================================
@@ -913,7 +1256,7 @@ fi
 SQL_DDL_PATTERN='DROP DATABASE|DROP TABLE|DROP SCHEMA|TRUNCATE TABLE'
 if echo "$COMMAND_NO_COMMENT" | grep -qiE "$SQL_DDL_PATTERN" && sql_guard_enabled; then
     matched=$(echo "$COMMAND_NO_COMMENT" | grep -oiE "$SQL_DDL_PATTERN" | head -1)
-    deny "BLOCKED: Command matches dangerous pattern: ${matched:-SQL DDL statement}"
+    deny "BLOCKED: Command matches dangerous pattern: ${matched:-SQL DDL statement}" "sql-ddl"
 fi
 
 # =============================================================================
@@ -941,9 +1284,9 @@ extract_rm_targets() {
     # Emit one rm-target token per line for every local `rm -r/-f` invocation.
     # Portable awk only (no GNU/BSD-specific escapes); replaces the shell
     # separators with newlines, then inspects each simple command.
-    printf '%s' "$1" | awk '
+    printf '%s' "$1" | awk "$_QSPLIT_AWK"'
     {
-        gsub(/&&|\|\||[;|&]/, "\n")
+        $0 = qsplit($0)   # quote-aware segmentation (#3755)
         n = split($0, segs, "\n")
         for (i = 1; i <= n; i++) {
             seg = segs[i]
@@ -1060,7 +1403,7 @@ if echo "$COMMAND" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
             if [[ "$ABS_PATH" == "/" ]] || \
                [[ -n "$HOME" && "$ABS_PATH" == "$HOME" ]] || \
                [[ "$ABS_PATH" =~ ^/[^/]+$ ]]; then
-                deny "BLOCKED: rm on protected system path: $ABS_PATH"
+                deny "BLOCKED: rm on protected system path: $ABS_PATH" "rm-protected-path"
             fi
 
             # Opt-in repo-scoped strict mode (guards.rmScope:"repo" /
@@ -1116,7 +1459,7 @@ if echo "$COMMAND" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
                 fi
 
                 if [[ "$IN_SCOPE" == false ]]; then
-                    deny "BLOCKED: rm target outside repo scope (LOOM_RM_SCOPE=repo): $ABS_PATH"
+                    deny "BLOCKED: rm target outside repo scope (LOOM_RM_SCOPE=repo): $ABS_PATH" "rm-scope-outside-repo"
                 fi
             fi
         fi
@@ -1133,7 +1476,7 @@ fi
 # path for non-SQL commands.
 if echo "$COMMAND_NO_COMMENT" | grep -qiE 'DELETE[[:space:]]+FROM[[:space:]]+' && \
    ! echo "$COMMAND_NO_COMMENT" | grep -qiE 'WHERE[[:space:]]+'; then
-    sql_guard_enabled && deny "BLOCKED: DELETE FROM without WHERE clause"
+    sql_guard_enabled && deny "BLOCKED: DELETE FROM without WHERE clause" "sql-delete-no-where"
 fi
 
 # =============================================================================
@@ -1163,7 +1506,7 @@ if [[ "$COMMAND_NO_COMMENT" == *git* ]] && \
         if [[ -n "$_FORCE_OPS" ]]; then
             if [[ "$_FORCE_MODE" == "all" ]]; then
                 # Preserve pre-#3674 behaviour byte-for-byte: any force op asks.
-                ask "Command requires confirmation: $COMMAND"
+                ask "Command requires confirmation: $COMMAND" "force-op:all"
             fi
             # "protected" mode: ask only for protected-branch or ambiguous
             # targets; allow own working branches. resolve_default_branch() plus
@@ -1180,14 +1523,14 @@ if [[ "$COMMAND_NO_COMMENT" == *git* ]] && \
                     if [[ -z "$_fbranch" ]]; then
                         # Detached HEAD / unresolved identity is ambiguous — ask,
                         # never silently allow (fail toward asking).
-                        ask "Command requires confirmation: $COMMAND (force operation on a detached or unresolved branch)"
+                        ask "Command requires confirmation: $COMMAND (force operation on a detached or unresolved branch)" "force-op:detached"
                     fi
                     _ftarget="$_fbranch"
                 fi
                 _fdefault=$(resolve_default_branch "$_fcwd")
                 if [[ "$_ftarget" == "main" || "$_ftarget" == "master" ]] || \
                    { [[ -n "$_fdefault" && "$_ftarget" == "$_fdefault" ]]; }; then
-                    ask "Command requires confirmation: $COMMAND (force operation targets protected branch '$_ftarget')"
+                    ask "Command requires confirmation: $COMMAND (force operation targets protected branch '$_ftarget')" "force-op:protected"
                 fi
             done <<< "$_FORCE_OPS"
             # No protected/ambiguous target matched — fall through to allow.
@@ -1207,45 +1550,90 @@ ASK_PATTERNS=(
     # autonomous agent can force-push / hard-reset its own working branch without
     # a stall while protected-branch force ops still ask. git clean / checkout .
     # / restore . stay here — they are not force ops and have no branch scope.
-    'git clean -fd'
-    'git checkout \.'
-    'git restore \.'
+    #
+    # COMMAND-POSITION ANCHORING (#3756): every entry is prefixed with
+    # `(^|[;&|[:space:]])`, mirroring ALWAYS_BLOCK_PATTERNS's `gh repo delete`
+    # anchor (#3553), so the phrase only fires at start-of-command or after a
+    # shell separator — an ask-phrase that merely appears inside another
+    # command's quoted argument (e.g. `jq -n '{cmd:"gh issue close 123"}'`, the
+    # phrase preceded by `"`) no longer false-asks. Entries whose command is a
+    # multi-word phrase (`kubectl rollout restart`, `git checkout \.`) are
+    # anchored at the FIRST token only — the phrase's leading command word — per
+    # the `gh repo delete` precedent. (Like the catastrophic tier, this anchor
+    # cannot distinguish a real separator from a whitespace INSIDE a quoted
+    # string, so a mid-quote prose mention such as `echo "… gh pr close …"` still
+    # matches on its leading space — an accepted limitation shared with the
+    # ALWAYS_BLOCK tier; command-word segment classification is #3757's scope.)
+    '(^|[;&|[:space:]])git clean -fd'
+    '(^|[;&|[:space:]])git checkout \.'
+    '(^|[;&|[:space:]])git restore \.'
 
-    # GitHub operations that modify shared state
-    'gh pr close'
-    'gh issue close'
-    'gh release delete'
-    'gh label delete'
+    # GitHub operations that are genuinely hard to reverse. `gh release delete`
+    # removes published artifacts/tags — it STAYS an ungated ask. The reversible
+    # GitHub state changes (`gh pr close`, `gh issue close`, `gh label delete`)
+    # were REMOVED from this array (#3757): they are trivially undone (gh pr
+    # reopen / gh issue reopen / recreate the label) and are only asked for when
+    # a repo opts IN via guards.reversibleGh (REVERSIBLE_GH_ASK_PATTERNS below).
+    '(^|[;&|[:space:]])gh release delete'
 
     # NOTE: cloud CLI (aws) + docker ASK patterns are NOT in this ungated array.
     # They live in CLOUD_ASK_PATTERNS below, gated by cloud_guard_enabled() so
     # cloud-dev repos can opt down (LOOM_GUARD_CLOUD=0 / guards.cloudCli:false).
 
     # Service management
-    'systemctl restart'
-    'systemctl stop'
-    'systemctl disable'
+    '(^|[;&|[:space:]])systemctl restart'
+    '(^|[;&|[:space:]])systemctl stop'
+    '(^|[;&|[:space:]])systemctl disable'
 
     # Kubernetes operations
-    'kubectl delete'
-    'kubectl rollout restart'
-    'kubectl drain'
+    '(^|[;&|[:space:]])kubectl delete'
+    '(^|[;&|[:space:]])kubectl rollout restart'
+    '(^|[;&|[:space:]])kubectl drain'
 
     # SkyPilot infrastructure
-    'sky down'
-    'sky stop'
+    '(^|[;&|[:space:]])sky down'
+    '(^|[;&|[:space:]])sky stop'
 
     # Credential exposure
-    'printenv.*SECRET'
-    'printenv.*TOKEN'
-    'printenv.*KEY'
-    'cat.*/\.ssh/'
-    'cat.*/\.aws/credentials'
+    '(^|[;&|[:space:]])printenv.*SECRET'
+    '(^|[;&|[:space:]])printenv.*TOKEN'
+    '(^|[;&|[:space:]])printenv.*KEY'
+    '(^|[;&|[:space:]])cat.*/\.ssh/'
+    '(^|[;&|[:space:]])cat.*/\.aws/credentials'
 )
 
 for pattern in "${ASK_PATTERNS[@]}"; do
-    if echo "$COMMAND_NO_COMMENT" | grep -qE "$pattern"; then
-        ask "Command requires confirmation: $COMMAND"
+    if echo "$COMMAND_ASK_SCAN" | grep -qE "$pattern"; then
+        ask "Command requires confirmation: $COMMAND" "ask:$pattern"
+    fi
+done
+
+# =============================================================================
+# REVERSIBLE-GITHUB ASK patterns — gated by the reversible-gh guard toggle (#3757)
+#
+# Kept OUT of the ungated ASK_PATTERNS array (mirroring the CLOUD_ASK_PATTERNS
+# split) because these GitHub state changes are trivially reversible and should
+# NOT prompt by default — an autonomous agent closing its own issue/PR as part of
+# a normal lifecycle would otherwise stall. reversible_gh_guard_enabled() defaults
+# OFF and is consulted only AFTER a pattern matches, so the config read stays off
+# the hot path for non-matching commands (mirrors the SQL DDL / cloud blocks).
+#
+# These entries are anchored (#3756) and scanned against COMMAND_ASK_SCAN — the
+# comment-stripped, literal-text-redacted ask working copy — exactly as they were
+# while living in ASK_PATTERNS, so #3756's redaction still applies when the toggle
+# is opted IN (an ask-phrase quoted inside a --body/--comment value does not
+# false-ask). `gh release delete` deliberately stays in the ungated ASK_PATTERNS
+# above (hard to reverse) and is NOT gated here.
+# =============================================================================
+REVERSIBLE_GH_ASK_PATTERNS=(
+    '(^|[;&|[:space:]])gh pr close'
+    '(^|[;&|[:space:]])gh issue close'
+    '(^|[;&|[:space:]])gh label delete'
+)
+
+for pattern in "${REVERSIBLE_GH_ASK_PATTERNS[@]}"; do
+    if echo "$COMMAND_ASK_SCAN" | grep -qE "$pattern" && reversible_gh_guard_enabled; then
+        ask "Command requires confirmation: $COMMAND (set guards.reversibleGh:true in .loom/config.json to keep this ask; it is off by default because the op is trivially reversible)" "reversible-gh:$pattern"
     fi
 done
 
@@ -1272,7 +1660,7 @@ done
 if echo "$COMMAND_NO_COMMENT" | grep -qE '(^|[;&|(]|[[:space:]])git[[:space:]]+read-tree'; then
     # Isolated form (GIT_INDEX_FILE=... git read-tree ...) is allowed.
     if ! echo "$COMMAND_NO_COMMENT" | grep -qE 'GIT_INDEX_FILE='; then
-        ask "Command requires confirmation: $COMMAND (a bare 'git read-tree' empties the real staging index with no reflog trace; use 'git merge-tree --write-tree <base> <branch>' for a merge preview, or isolate with GIT_INDEX_FILE=\$(mktemp))"
+        ask "Command requires confirmation: $COMMAND (a bare 'git read-tree' empties the real staging index with no reflog trace; use 'git merge-tree --write-tree <base> <branch>' for a merge preview, or isolate with GIT_INDEX_FILE=\$(mktemp))" "git-read-tree"
     fi
 fi
 
@@ -1321,7 +1709,7 @@ CLOUD_ASK_PATTERNS=(
 
 for pattern in "${CLOUD_ASK_PATTERNS[@]}"; do
     if echo "$COMMAND_NO_COMMENT" | grep -qE "$pattern" && cloud_guard_enabled; then
-        ask "Command requires confirmation: $COMMAND (set guards.cloudCli:false in .loom/config.json if this repo manages cloud infra as a first-class workflow)"
+        ask "Command requires confirmation: $COMMAND (set guards.cloudCli:false in .loom/config.json if this repo manages cloud infra as a first-class workflow)" "cloud-cli:$pattern"
     fi
 done
 

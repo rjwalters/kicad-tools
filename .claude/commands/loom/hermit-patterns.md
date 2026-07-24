@@ -508,7 +508,7 @@ rg "^pub struct \w+ \{\}$" --type rust -n
 
 ```bash
 # Frontend: Check for unused npm packages
-cd {{workspace}}
+cd <repo-root>
 npx depcheck
 
 # Backend: Check Cargo.toml vs actual usage
@@ -700,6 +700,16 @@ EOF
 
 ## Goal Discovery Scripts
 
+> **Why these scripts are duplicated across role files (intentional).** The
+> `discover_project_goals()` and `check_backlog_balance()` snippets below also
+> appear in `architect-patterns.md` and (a trimmed variant) in `guide.md`. This
+> is deliberate **per-role prompt isolation**, not accidental copy-paste: each
+> role agent loads only its own prompt-file family at runtime (a Hermit reads
+> `hermit.md` + `hermit-patterns.md`; a cron Guide reads only `guide.md`), and
+> there is no shared file an agent can `source`. A cross-file pointer would force
+> a role to load another role's prompt, breaking self-containment. Keep each copy
+> standalone; if you change the goal-discovery logic, update all three.
+
 ### Goal Discovery Function
 
 Run goal discovery at the START of every autonomous scan:
@@ -780,39 +790,47 @@ check_backlog_balance
 - **Warning**: No goal-advancing issues, or maintenance dominates
 - **Action**: If unhealthy, focus simplification proposals on Tier 1 opportunities
 
-### Parallel Execution Example
+### Check Randomization Across Passes
 
-When running autonomously (every 15 minutes), each Hermit run randomly selects ONE check:
+Hermit runs manually — one pass at a time, with no cron cadence and no
+`loom-hermit.yml` workflow. On each pass, randomly select ONE check so that
+repeated passes over time cover different pattern classes without re-filing the
+same finding:
 
 ```bash
-# 5 Hermits running simultaneously at 3:00 PM
-
-# Hermit Terminal 1 (random selection: dead-code)
-cd {{workspace}}
+# Pass 1 (random selection: dead-code)
+cd <repo-root>
 rg "export.*function|export.*class" -n
 # Check which exports are never imported
 # -> Found unused function, create issue
 
-# Hermit Terminal 2 (random selection: random-file)
+# Pass 2 (random selection: random-file)
 mcp__loom__get_random_file
 cat <file-path>
 # -> Found over-engineered class, create issue
 
-# Hermit Terminal 3 (random selection: unused-dependencies)
+# Pass 3 (random selection: unused-dependencies)
 npx depcheck
 # -> Found @types/jsdom, create issue
 
-# Hermit Terminal 4 (random selection: commented-code)
+# Pass 4 (random selection: commented-code)
 rg "^\\s*//.*{|^\\s*//.*function" -n
 # -> Found old commented functions, create issue
 
-# Hermit Terminal 5 (random selection: old-todos)
+# Pass 5 (random selection: old-todos)
 rg "TODO|FIXME" -n --context 2
 git log --all --format=%cd --date=short <file> | head -1
 # -> Found TODOs from 2023, create issue
 
-# Result: All 5 Hermits performed different checks, no duplicates!
+# Result: each pass performed a different check — coverage without duplicates.
 ```
+
+> **Never run these passes concurrently.** Issue creation must be serialized
+> (#3707): concurrent `gh issue create` bursts race on server-assigned issue
+> numbers and cross-contaminate bodies. Randomizing the *check* spreads coverage
+> across *sequential* passes; it does not make parallel issue-creating Hermits
+> safe. One issue-creating agent must finish its entire burst before the next
+> starts.
 
 ---
 
@@ -936,7 +954,7 @@ EOF
 
 ```bash
 gh issue comment <number> --body "$(cat <<'EOF'
-<!-- CRITIC-SUGGESTION -->
+<!-- HERMIT-SUGGESTION -->
 ## Simplification Opportunity
 
 While reviewing this issue, I identified potential bloat that could simplify the implementation:
@@ -976,7 +994,7 @@ rg "functionName" --type ts
 3. [Updated test plan if needed]
 
 ---
-*This is a Critic suggestion to reduce complexity. The assignee can choose to adopt, adapt, or ignore this recommendation.*
+*This is a Hermit suggestion to reduce complexity. The assignee can choose to adopt, adapt, or ignore this recommendation.*
 EOF
 )"
 ```
@@ -985,7 +1003,7 @@ EOF
 
 ```bash
 gh issue comment 42 --body "$(cat <<'EOF'
-<!-- CRITIC-SUGGESTION -->
+<!-- HERMIT-SUGGESTION -->
 ## Simplification Opportunity
 
 While reviewing issue #42 (Add user profile editor), I identified potential bloat that could simplify the implementation:
@@ -1035,7 +1053,7 @@ We already use inline validation elsewhere. No need for a class-based abstractio
 3. Test validation within component tests
 
 ---
-*This is a Critic suggestion to reduce complexity. The assignee can choose to adopt, adapt, or ignore this recommendation.*
+*This is a Hermit suggestion to reduce complexity. The assignee can choose to adopt, adapt, or ignore this recommendation.*
 EOF
 )"
 ```
@@ -1044,11 +1062,11 @@ EOF
 
 ## Example Analysis Session
 
-Here's what a typical Critic session looks like:
+Here's what a typical Hermit session looks like:
 
 ```bash
 # 1. Check for unused dependencies
-$ cd {{workspace}}
+$ cd <repo-root>
 $ npx depcheck
 
 Unused dependencies:
@@ -1099,7 +1117,7 @@ $ rg "LDAP|ldap" --type ts
 
 # LDAP is mentioned in the plan but not used anywhere
 # This is a simplification opportunity - comment on the issue
-$ gh issue comment 42 --body "<!-- CRITIC-SUGGESTION --> ..."
+$ gh issue comment 42 --body "<!-- HERMIT-SUGGESTION --> ..."
 
 # Result:
 # - Created 3 standalone issues (unused deps, dead code, commented code)
@@ -1153,7 +1171,7 @@ gh issue list --search "authentication" --state=open
 
 # Add simplification comment to issue
 gh issue comment <number> --body "$(cat <<'EOF'
-<!-- CRITIC-SUGGESTION -->
+<!-- HERMIT-SUGGESTION -->
 ...
 EOF
 )"

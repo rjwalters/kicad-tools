@@ -159,6 +159,41 @@ assert_eq "SUCCESS" "$result" 'exit=0 with stop_reason:"refusal" is SUCCESS (#32
 result=$(classify_error "connection reset; will not retry (refusal to reconnect)" 1)
 assert_eq "RECOVERABLE" "$result" "bare 'refusal' word (no stop_reason) + exit=1 -> RECOVERABLE"
 
+# --- Widened TOKEN_EXHAUSTED vectors (issue #3738) ---
+# The Claude CLI emits several usage/session/weekly/monthly limit phrasings.
+# A naive `hit.your.limit`-style pattern misses the multi-word-gap variants
+# ("hit your SESSION limit", "monthly usage limit", "out of extra usage") —
+# each is verified individually, not just the legacy short form (#10/#11).
+
+# Vector #23: session limit (the exact canary phrase) → TOKEN_EXHAUSTED
+result=$(classify_error "You've hit your session limit · resets 4pm" 1)
+assert_eq "TOKEN_EXHAUSTED" "$result" "hit your session limit -> TOKEN_EXHAUSTED (#3738)"
+
+# Vector #24: full weekly-limit phrasing with reset suffix → TOKEN_EXHAUSTED
+result=$(classify_error "You've hit your weekly limit · resets Monday 9am" 1)
+assert_eq "TOKEN_EXHAUSTED" "$result" "hit your weekly limit (full phrasing) -> TOKEN_EXHAUSTED (#3738)"
+
+# Vector #25: org monthly usage limit → TOKEN_EXHAUSTED
+result=$(classify_error "You've hit your org's monthly usage limit" 1)
+assert_eq "TOKEN_EXHAUSTED" "$result" "monthly usage limit -> TOKEN_EXHAUSTED (#3738)"
+
+# Vector #26: out of extra usage → TOKEN_EXHAUSTED
+result=$(classify_error "You're out of extra usage · resets 4pm" 1)
+assert_eq "TOKEN_EXHAUSTED" "$result" "out of extra usage -> TOKEN_EXHAUSTED (#3738)"
+
+# Vector #27: plain "You've hit your limit" still classifies (legacy short form)
+result=$(classify_error "You've hit your limit" 1)
+assert_eq "TOKEN_EXHAUSTED" "$result" "legacy 'hit your limit' still -> TOKEN_EXHAUSTED (#3738)"
+
+# Vector #28 (REGRESSION, #3233): exit-0 output mentioning a limit phrase in
+# prose is STILL SUCCESS — exit-code-first ordering wins over the new patterns.
+result=$(classify_error "Note: agents pause when they hit your session limit." 0)
+assert_eq "SUCCESS" "$result" "exit=0 mentioning 'hit your session limit' is SUCCESS (#3233/#3738)"
+
+# Vector #29 (REGRESSION): exit-0 with "out of extra usage" in prose → SUCCESS
+result=$(classify_error "The plan was out of extra usage headroom last week." 0)
+assert_eq "SUCCESS" "$result" "exit=0 mentioning 'out of extra usage' is SUCCESS (#3233/#3738)"
+
 # ============================================================
 # Section 2: spawn-claude.sh dispatch (with stub `claude`)
 # ============================================================
@@ -405,6 +440,142 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "  ${RED}FAIL${NC}: empty LOOM_EFFORT emits NO --effort"
     echo "    In: '$output'"
+fi
+
+# ============================================================
+# Section 5: claude-wrapper.sh account rotation on exhaustion (#3738)
+#
+# On a session/usage-limit fault the wrapper must mark the active account bad,
+# re-select a fresh account, and retry WITHOUT consuming a MAX_RETRIES attempt.
+# When the whole pool is exhausted it must emit a distinct sentinel (not the
+# generic "Max retries exceeded" path) and exit non-zero.
+# ============================================================
+
+echo ""
+echo "Testing claude-wrapper.sh account rotation (#3738)..."
+
+WRAPPER="$SCRIPTS_DIR/claude-wrapper.sh"
+PKG_SRC="$(cd "$SCRIPTS_DIR/../../loom-tools/src" 2>/dev/null && pwd || echo "")"
+
+if [[ -z "$PKG_SRC" || ! -d "$PKG_SRC/loom_tools/tokens" ]]; then
+    echo "  (skipping rotation tests — loom_tools package not found)"
+else
+  # --- Fixture: 2-account pool; stub exhausts alpha, succeeds on beta ---
+  ROT_WS="$(mktemp -d)"
+  mkdir -p "$ROT_WS/.loom/tokens"
+  chmod 700 "$ROT_WS/.loom/tokens"
+  printf '%s' "tok-alpha" > "$ROT_WS/.loom/tokens/alpha.token"
+  printf '%s' "tok-beta"  > "$ROT_WS/.loom/tokens/beta.token"
+  chmod 600 "$ROT_WS/.loom/tokens/"*.token
+
+  ROT_STUB="$(mktemp -d)"
+  cat > "$ROT_STUB/claude" <<'STUB'
+#!/usr/bin/env bash
+# Only the real prompt run (contains "-p") drives rotation; any preflight
+# subcommands (auth/mcp/version) succeed quietly.
+case " $* " in
+  *" -p "*) ;;
+  *) exit 0 ;;
+esac
+if [[ "${CLAUDE_CODE_OAUTH_TOKEN}" == "tok-alpha" ]]; then
+    echo "You've hit your session limit · resets 4pm"
+    exit 1
+fi
+echo "stub-claude success on token=${CLAUDE_CODE_OAUTH_TOKEN}"
+exit 0
+STUB
+  chmod +x "$ROT_STUB/claude"
+
+  # Force the first account to alpha (as spawn-claude would). MAX_RETRIES=1:
+  # if rotation consumed a MAX_RETRIES attempt, beta would never be tried.
+  set +e
+  rot_out=$(
+    LOOM_WORKSPACE="$ROT_WS" \
+    LOOM_TOKEN_NAME="alpha" \
+    CLAUDE_CODE_OAUTH_TOKEN="tok-alpha" \
+    LOOM_PACKAGE_PATH="$PKG_SRC" \
+    LOOM_MAX_RETRIES=1 \
+    LOOM_SHEPHERD_TASK_ID="test-rotation" \
+    LOOM_STARTUP_MONITOR_WINDOW=1 \
+    PATH="$ROT_STUB:$PATH" \
+    bash "$WRAPPER" -p "ping" 2>&1
+  )
+  rot_rc=$?
+  set -e
+
+  assert_contains "stub-claude success on token=tok-beta" "$rot_out" \
+      "wrapper rotates from exhausted alpha to beta and succeeds"
+  assert_eq "0" "$rot_rc" \
+      "wrapper exits 0 after rotation (MAX_RETRIES=1 not consumed by rotation)"
+
+  bad_file="$ROT_WS/.loom/tokens/.bad_tokens"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ -f "$bad_file" ]] && grep -qw "alpha" "$bad_file" && ! grep -qw "beta" "$bad_file"; then
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      echo -e "  ${GREEN}PASS${NC}: .bad_tokens records exhausted alpha but not beta"
+  else
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      echo -e "  ${RED}FAIL${NC}: .bad_tokens records exhausted alpha but not beta"
+      echo "    .bad_tokens: $(cat "$bad_file" 2>/dev/null || echo '<missing>')"
+  fi
+
+  # --- Whole-pool exhaustion: both accounts exhaust → ACCOUNT_POOL_EXHAUSTED ---
+  ROT_WS2="$(mktemp -d)"
+  mkdir -p "$ROT_WS2/.loom/tokens"
+  chmod 700 "$ROT_WS2/.loom/tokens"
+  printf '%s' "tok-a" > "$ROT_WS2/.loom/tokens/a.token"
+  printf '%s' "tok-b" > "$ROT_WS2/.loom/tokens/b.token"
+  chmod 600 "$ROT_WS2/.loom/tokens/"*.token
+
+  ROT_STUB2="$(mktemp -d)"
+  cat > "$ROT_STUB2/claude" <<'STUB'
+#!/usr/bin/env bash
+case " $* " in
+  *" -p "*) ;;
+  *) exit 0 ;;
+esac
+echo "You've hit your session limit · resets 4pm"
+exit 1
+STUB
+  chmod +x "$ROT_STUB2/claude"
+
+  set +e
+  rot2_out=$(
+    LOOM_WORKSPACE="$ROT_WS2" \
+    LOOM_TOKEN_NAME="a" \
+    CLAUDE_CODE_OAUTH_TOKEN="tok-a" \
+    LOOM_PACKAGE_PATH="$PKG_SRC" \
+    LOOM_MAX_RETRIES=1 \
+    LOOM_SHEPHERD_TASK_ID="test-rotation" \
+    LOOM_STARTUP_MONITOR_WINDOW=1 \
+    PATH="$ROT_STUB2:$PATH" \
+    bash "$WRAPPER" -p "ping" 2>&1
+  )
+  rot2_rc=$?
+  set -e
+
+  assert_contains "ACCOUNT_POOL_EXHAUSTED" "$rot2_out" \
+      "whole-pool exhaustion emits the ACCOUNT_POOL_EXHAUSTED sentinel"
+  assert_contains "Whole account pool exhausted" "$rot2_out" \
+      "whole-pool exhaustion logs a distinct (non-'Max retries') message"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ "$rot2_rc" -ne 0 ]]; then
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      echo -e "  ${GREEN}PASS${NC}: whole-pool exhaustion exits non-zero"
+  else
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      echo -e "  ${RED}FAIL${NC}: whole-pool exhaustion exits non-zero"
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ "$rot2_out" != *"Max retries"* ]]; then
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      echo -e "  ${GREEN}PASS${NC}: whole-pool exhaustion avoids the generic Max-retries path"
+  else
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      echo -e "  ${RED}FAIL${NC}: whole-pool exhaustion avoids the generic Max-retries path"
+  fi
+
+  rm -rf "$ROT_WS" "$ROT_STUB" "$ROT_WS2" "$ROT_STUB2"
 fi
 
 # ============================================================

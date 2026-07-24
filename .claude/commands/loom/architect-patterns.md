@@ -419,6 +419,14 @@ This issue requires the users table from Phase 1.
 
 ## Goal Discovery Script
 
+> **Why this script is duplicated across role files (intentional).** The
+> `discover_project_goals()` and `check_backlog_balance()` snippets here also
+> appear in `hermit-patterns.md` and (a trimmed variant) in `guide.md`. This is
+> deliberate **per-role prompt isolation**: each role agent loads only its own
+> prompt-file family at runtime, and there is no shared file an agent can
+> `source`, so a cross-file pointer would break role self-containment. Keep each
+> copy standalone; if you change the goal-discovery logic, update all three.
+
 Full script for discovering project goals:
 
 ```bash

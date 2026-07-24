@@ -62,37 +62,40 @@ Create `.claude/settings.local.json` for personal preferences:
 
 Local settings override team settings for that specific configuration key.
 
-## MCP Servers
+## MCP Server
 
-The project includes two MCP servers configured in `.mcp.json`:
+Loom provides a single **unified `mcp-loom` MCP server** (configured in
+`.mcp.json`) that consolidates log monitoring, terminal management, and UI/state
+control. It replaces the historical trio of separate `loom-logs` /
+`loom-terminals` / `loom-ui` servers. Representative tools by category:
 
-### loom-logs
-Monitor Loom application logs:
+**Log tools**:
 - `tail_daemon_log` - View daemon logs (`~/.loom/daemon.log`)
 - `list_terminal_logs` - List terminal output files
 - `tail_terminal_log` - View specific terminal output
 
-### loom-terminals
-Interact with Loom terminal sessions:
+**Terminal tools**:
 - `list_terminals` - List all active terminals
 - `get_terminal_output` - Read terminal output
 - `get_selected_terminal` - Get current terminal info
 - `send_terminal_input` - Execute commands in terminals
+- `create_terminal` / `configure_terminal` / `restart_terminal` - Manage terminal sessions
 
-### loom-ui
-Interact with the Loom application UI and state:
+**UI / state tools**:
 - `read_console_log` - View browser console output (JavaScript errors, console.log statements)
 - `read_state_file` - Read current application state (.loom/state.json)
 - `read_config_file` - Read terminal configurations (.loom/config.json)
-- `trigger_start` - Trigger workspace start with confirmation dialog (factory reset with 6 terminals)
+- `trigger_start` - Trigger workspace start with confirmation dialog
 - `trigger_force_start` - Trigger force start without confirmation (immediate reset)
 
-**Label State Machine Reset**: When workspace is started (via `trigger_start` or `trigger_force_start`), the `reset_github_labels` daemon command automatically resets the GitHub label state machine:
+**Label State Machine Reset**: When the workspace is started (via `trigger_start` or `trigger_force_start`), the `reset_github_labels` daemon command automatically resets the GitHub label state machine:
 - Removes `loom:building` from all open issues (workers can reclaim them)
 - Replaces `loom:reviewing` with `loom:review-requested` on all open PRs (reviewer can re-review)
 - This ensures a clean state when restarting the workspace with fresh agent terminals
 
-**Note**: When you first open the project, Claude Code will prompt you to approve these MCP servers. You can also enable them automatically by setting `"enableAllProjectMcpServers": true` in your `.claude/settings.local.json`.
+See the mcp-loom package README for the full tool catalog.
+
+**Note**: When you first open the project, Claude Code will prompt you to approve the MCP server. You can also enable it automatically by setting `"enableAllProjectMcpServers": true` in your `.claude/settings.local.json`.
 
 ## Slash Commands
 
@@ -100,26 +103,30 @@ The `commands/` directory contains slash commands that define Loom roles. Each c
 
 ### Available Commands
 
+Commands under `.claude/commands/loom/` are invoked in the namespaced
+`/loom:<role>` form (Claude Code 2.1+ requires this for subdirectory commands —
+see #3345):
+
 | Command | Role | Purpose |
 |---------|------|---------|
-| `/builder` | Builder | Implements features for `loom:issue` issues and creates PRs |
-| `/judge` | Judge | Reviews PRs with `loom:review-requested` label |
-| `/curator` | Curator | Enhances issues and marks them as `loom:curated` |
-| `/architect` | Architect | Creates architectural proposals with `loom:architect` |
-| `/hermit` | Hermit | Identifies bloat and creates simplification issues |
-| `/doctor` | Doctor | Addresses PR feedback and resolves conflicts |
-| `/guide` | Guide | Triages issues and applies `loom:urgent` to top 3 |
-| `/champion` | Champion | Auto-merges approved PRs with `loom:pr` label |
+| `/loom:builder` | Builder | Implements features for `loom:issue` issues and creates PRs |
+| `/loom:judge` | Judge | Reviews PRs with `loom:review-requested` label |
+| `/loom:curator` | Curator | Enhances issues and marks them as `loom:curated` |
+| `/loom:architect` | Architect | Creates architectural proposals with `loom:architect` |
+| `/loom:hermit` | Hermit | Identifies bloat and creates simplification issues |
+| `/loom:doctor` | Doctor | Addresses PR feedback and resolves conflicts |
+| `/loom:guide` | Guide | Triages issues and applies `loom:urgent` to top 3 |
+| `/loom:champion` | Champion | Auto-merges approved PRs with `loom:pr` label |
 | `/loom:help` | Help | Read-only overview of the installed `/loom:*` commands; `/loom:help <command>` describes one |
-| `/loom help` | Help | Comprehensive help guide with sub-topics (roles, workflow, commands, etc.) |
+| `/loom:help <topic>` | Help | Comprehensive help guide with sub-topics (roles, workflow, commands, etc.) |
 
 ### How Slash Commands Work
 
 **Manual Invocation**: Use slash commands to assume a role:
 ```bash
-/builder    # Assume Builder role, find and implement a loom:issue
-/judge      # Assume Judge role, review a PR with loom:review-requested
-/loom help  # Show comprehensive Loom help guide
+/loom:builder    # Assume Builder role, find and implement a loom:issue
+/loom:judge      # Assume Judge role, review a PR with loom:review-requested
+/loom:help       # Show comprehensive Loom help guide
 ```
 
 Each slash command contains the complete role definition, including:
@@ -139,7 +146,8 @@ The roles work together following the label-based workflow:
 6. **builder** implements → creates PR with `loom:review-requested`
 7. **judge** reviews → approves or requests changes
 8. **doctor** fixes feedback → transitions back to `loom:review-requested`
-9. **User merges** → issue auto-closes
+9. **judge** approves → adds `loom:pr`
+10. **champion** auto-merges the `loom:pr` PR → issue auto-closes via `Closes #N`
 
 ### Creating Custom Commands
 
@@ -157,19 +165,25 @@ The `agents/` directory contains custom subagent definitions for Loom roles. The
 
 ### Available Subagents
 
-| Subagent | Model | Purpose |
-|----------|-------|---------|
-| `loom-builder` | opus | Implement features and fixes |
-| `loom-judge` | opus | Review pull requests |
-| `loom-curator` | sonnet | Enhance and organize issues |
-| `loom-doctor` | sonnet | Fix bugs and address PR feedback |
-| `loom-champion` | sonnet | Evaluate proposals, auto-merge PRs |
-| `loom-architect` | opus | Create architectural proposals |
-| `loom-hermit` | sonnet | Identify simplification opportunities |
-| `loom-guide` | sonnet | Prioritize and triage issues |
-| `loom-auditor` | sonnet | Verify runtime behavior of built software |
+| Subagent | Purpose |
+|----------|---------|
+| `loom-builder` | Implement features and fixes |
+| `loom-judge` | Review pull requests |
+| `loom-curator` | Enhance and organize issues |
+| `loom-doctor` | Fix bugs and address PR feedback |
+| `loom-champion` | Evaluate proposals, auto-merge PRs |
+| `loom-architect` | Create architectural proposals |
+| `loom-hermit` | Identify simplification opportunities |
+| `loom-guide` | Prioritize and triage issues |
+| `loom-auditor` | Validate main branch build/runtime |
+| `loom-daemon` | Observe/dispatch the Rust `loom-daemon` via MCP tools |
 
-> **Note**: the `loom-shepherd` subagent was removed in v0.10.0 along with the `/shepherd` slash command — see [the migration guide](https://github.com/rjwalters/loom/blob/main/docs/migration/v0.10.0-shepherd-deprecation.md). Use `/loom:sweep <issue>` (Tier 1) for the equivalent lifecycle. The `loom-daemon` subagent is preserved and now documents the shell-level daemon surface (`./.loom/scripts/daemon.sh` + tmux + token rotation) rather than the deleted Python brain.
+The stubs do not carry a `model:` frontmatter field — a subagent's model is
+resolved through the model-selection precedence chain (role JSON
+`suggestedModel`, workspace override, or explicit dispatch param), not the stub.
+See CLAUDE.md → "Model Selection Strategy".
+
+> **Note**: the `loom-shepherd` subagent was removed in v0.10.0 along with the `/shepherd` slash command — see [the migration guide](https://github.com/rjwalters/loom/blob/main/docs/migration/v0.10.0-shepherd-deprecation.md). Use `/loom:sweep <issue>` (Tier 1) for the equivalent lifecycle. The `loom-daemon` subagent is preserved and now documents the Rust `loom-daemon` binary's MCP dispatch surface (`mcp__loom__dispatch_sweep` / `mcp__loom__list_sweeps` …) rather than the deleted Python brain.
 
 ### How Subagents Work
 
@@ -180,13 +194,13 @@ Subagents are specialized AI assistants that run in their own context window. Ea
 
 **Using Subagents with Task**:
 
-The Loom Shepherd (or daemon) can spawn subagents for each phase. The recommended pattern is **native dispatch** -- pass the Loom role directly as `subagent_type`. Claude Code resolves `loom-<role>` against the `.claude/agents/loom-*.md` agent definitions that ship with Loom:
+The `/loom:sweep` orchestrator (or the Rust `loom-daemon`) can dispatch subagents for each phase. The recommended pattern is **native dispatch** -- pass the Loom role directly as `subagent_type`. Claude Code resolves `loom-<role>` against the `.claude/agents/loom-*.md` agent definitions that ship with Loom:
 
 ```python
 # Spawn builder subagent with fresh context using native dispatch.
 # subagent_type matches the agent definition name (loom-builder, loom-judge,
 # loom-doctor, loom-curator, loom-champion, loom-architect, loom-hermit,
-# loom-guide, loom-auditor, loom-shepherd).
+# loom-guide, loom-auditor).
 result = Task(
     description="Builder phase for issue #123",
     prompt="Implement issue #123",
@@ -195,7 +209,7 @@ result = Task(
 )
 ```
 
-The agent definition wires the correct system prompt, tool allowlist, and model preference, so the caller only needs to supply the task-specific prompt (e.g., the issue number).
+The agent definition wires the correct system prompt and tool allowlist, so the caller only needs to supply the task-specific prompt (e.g., the issue number). The model is not set by the stub — it comes from the model-selection precedence chain (see CLAUDE.md → "Model Selection Strategy").
 
 **Legacy pattern** (`subagent_type="general-purpose"` + a slash command in the prompt) still works for environments where the `loom-*` agent definitions are not installed, but prefer native dispatch when available:
 
@@ -222,12 +236,12 @@ result = Task(
 | Feature | Slash Commands | Subagents |
 |---------|----------------|-----------|
 | Context | Shared with main conversation | Isolated, fresh context |
-| Invocation | `/builder 123` | `Task(subagent_type="loom-builder", prompt="Implement issue #123")` (legacy: `subagent_type="general-purpose"` + `/builder 123`) |
+| Invocation | `/loom:builder 123` | `Task(subagent_type="loom-builder", prompt="Implement issue #123")` (legacy: `subagent_type="general-purpose"` + `/loom:builder 123`) |
 | Use case | Manual orchestration | Automated orchestration |
 | Visibility | In main conversation | Spawned as separate task |
 
 **Use slash commands** for manual orchestration mode where you want direct control.
-**Use subagents** for automated orchestration where shepherds coordinate roles with fresh context per phase.
+**Use subagents** for automated orchestration where `/loom:sweep` (or `loom-daemon`) coordinates roles with fresh context per phase.
 
 ## Documentation
 

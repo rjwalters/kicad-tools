@@ -59,6 +59,70 @@ EXIT_OK=0
 EXIT_USAGE=2
 EXIT_MAIN_DIRTY=3
 
+# ---- Loom-owned transient state paths (#3778) ----------------------------
+# Runtime bookkeeping the sweep orchestrator itself writes under .loom/ during a
+# run (checkpoints, the token pool, stats, locks, exit-codes, …). These are
+# gitignored in Loom's *source* .gitignore, but a consumer repo's installed
+# loom-managed .gitignore block can drift out of sync and omit newer entries —
+# so the same transient surfaces as an untracked path and false-positives this
+# backstop as "builder contamination" (observed in rjwalters/anvil, #3778).
+# Rather than depend on the consumer's .gitignore being current, exclude the
+# known Loom-owned transient paths internally, unconditionally. None of these is
+# source a builder should ever be writing to main, so filtering them can never
+# mask real contamination. Prefixes ending in "/" match a directory subtree; the
+# others match an exact path. Keep roughly in sync with the loom-managed block in
+# Loom's source .gitignore.
+LOOM_OWNED_PREFIXES=(
+    ".loom/sweep-checkpoint/"
+    ".loom/sweep-run/"
+    ".loom/tokens/"
+    ".loom/accounts.env"
+    ".loom/exit-codes/"
+    ".loom/stats/"
+    ".loom/CANARY"
+    ".loom/spawn-loop.pid"
+    ".loom/spawn-loop-state.json"
+    ".loom/stop-spawn-loop"
+    ".loom/locks/"
+    ".loom/logs/"
+    ".loom/worktrees/"
+    ".loom-managed"
+)
+
+# is_loom_owned <repo-relative-path> -> 0 if the path is a Loom-owned transient.
+is_loom_owned() {
+    local path="$1" prefix
+    for prefix in "${LOOM_OWNED_PREFIXES[@]}"; do
+        if [[ "$prefix" == */ ]]; then
+            [[ "$path" == "$prefix"* ]] && return 0
+        else
+            [[ "$path" == "$prefix" ]] && return 0
+        fi
+    done
+    return 1
+}
+
+# filter_loom_owned <porcelain-text> -> the same text with Loom-owned transient
+# lines removed. Parses each `git status --porcelain` v1 line (2 status chars +
+# space + path; rename lines carry "old -> new" and are keyed on the new path).
+filter_loom_owned() {
+    local in="$1" line path out=""
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        path="${line:3}"
+        if [[ "$path" == *" -> "* ]]; then
+            path="${path##* -> }"
+        fi
+        path="${path%\"}"
+        path="${path#\"}"
+        if is_loom_owned "$path"; then
+            continue
+        fi
+        out+="$line"$'\n'
+    done <<< "$in"
+    printf '%s' "${out%$'\n'}"
+}
+
 usage() {
     sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'
 }
@@ -119,6 +183,11 @@ if [[ ! -d "$main_root" ]]; then
 fi
 
 status=$(git -C "$main_root" status --porcelain 2>/dev/null || true)
+
+# Exclude Loom-owned transient state paths regardless of the consumer's
+# .gitignore currency (#3778) — applied before snapshot/baseline/plain logic so
+# every mode sees a consistently-filtered view.
+status=$(filter_loom_owned "$status")
 
 # ---- Snapshot mode: record and exit --------------------------------------
 if [[ "$MODE" == "snapshot" ]]; then

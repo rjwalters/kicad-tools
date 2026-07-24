@@ -8,7 +8,9 @@
 #
 # Behavior:
 #   1. Check for .loom/context/ directory — exit silently if absent (opt-in)
-#   2. Always inject universal.md if it exists
+#   2. Inject universal.md if it exists, ONCE PER SESSION by default (mirrors
+#      skill-router.sh's #3609 per-session table dedup). The universal_frequency
+#      config knob ("session" default / "always" back-compat) controls this.
 #   3. Inject roles/<LOOM_ROLE>.md if LOOM_ROLE env var is set
 #   4. Inject topics/<name>.md when prompt matches filename or sidecar .pattern file
 #   5. Cap total output at configurable max (default 8000 chars)
@@ -52,6 +54,11 @@ fi
 # Extract prompt
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null) || PROMPT=""
 
+# Extract session_id (used for once-per-session universal.md dedup; optional — a
+# missing/empty value degrades gracefully, see the PER-SESSION UNIVERSAL DEDUP
+# block below)
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || SESSION_ID=""
+
 # If no prompt, nothing to do
 if [[ -z "$PROMPT" ]]; then
     exit 0
@@ -94,6 +101,9 @@ MAX_CONTEXT_CHARS=8000
 INJECT_UNIVERSAL=true
 INJECT_ROLE=true
 INJECT_TOPICS=true
+# Frequency of universal.md injection: "session" (once per session, new default
+# as of #3758) or "always" (every matching prompt, legacy back-compat behavior).
+UNIVERSAL_FREQUENCY=session
 
 # Read config if it exists
 if [[ -f "$CONFIG_FILE" ]] && jq empty "$CONFIG_FILE" 2>/dev/null; then
@@ -108,6 +118,9 @@ if [[ -f "$CONFIG_FILE" ]] && jq empty "$CONFIG_FILE" 2>/dev/null; then
     INJECT_UNIVERSAL=$(jq -r 'if .inject_universal == false then "false" else "true" end' "$CONFIG_FILE" 2>/dev/null) || INJECT_UNIVERSAL=true
     INJECT_ROLE=$(jq -r 'if .inject_role == false then "false" else "true" end' "$CONFIG_FILE" 2>/dev/null) || INJECT_ROLE=true
     INJECT_TOPICS=$(jq -r 'if .inject_topics == false then "false" else "true" end' "$CONFIG_FILE" 2>/dev/null) || INJECT_TOPICS=true
+    # Only "always" opts back into per-prompt injection; anything else (including
+    # a missing key or malformed value) falls through to the "session" default.
+    UNIVERSAL_FREQUENCY=$(jq -r 'if .universal_frequency == "always" then "always" else "session" end' "$CONFIG_FILE" 2>/dev/null) || UNIVERSAL_FREQUENCY=session
 fi
 
 # =============================================================================
@@ -148,9 +161,45 @@ append_context() {
 }
 
 # --- Universal context ---
+# =============================================================================
+# PER-SESSION UNIVERSAL DEDUP (#3758)
+# =============================================================================
+# universal.md is verbatim project-wide context that a session needs at most
+# once. By default (universal_frequency="session") we inject it on the first
+# matching prompt of a session and skip it thereafter, keyed on the session_id
+# present on stdin — exactly mirroring skill-router.sh's #3609 table dedup, but
+# in its own marker namespace (the two hooks are independent opt-ins and must
+# not share state). universal_frequency="always" restores the legacy per-prompt
+# behavior. A missing/empty session_id degrades gracefully: we cannot dedup, so
+# universal.md is included on each matching turn (the legacy behavior).
 if [[ "$INJECT_UNIVERSAL" == "true" ]] && [[ -f "${CONTEXT_DIR}/universal.md" ]]; then
-    UNIVERSAL_CONTENT=$(cat "${CONTEXT_DIR}/universal.md" 2>/dev/null) || UNIVERSAL_CONTENT=""
-    append_context "Project Context" "$UNIVERSAL_CONTENT"
+    INCLUDE_UNIVERSAL=1
+    if [[ "$UNIVERSAL_FREQUENCY" != "always" ]] && [[ -n "$SESSION_ID" ]]; then
+        # Sanitize to filename-safe characters so the marker is a single
+        # predictable file (never a path traversal, never a nested directory).
+        SESSION_KEY=$(printf '%s' "$SESSION_ID" | tr -c 'A-Za-z0-9._-' '_')
+        SEEN_DIR="${MAIN_ROOT}/.loom/logs/methodology-inject-seen"
+        SEEN_MARKER="${SEEN_DIR}/${SESSION_KEY}"
+        # Opportunistic best-effort prune (#3793): every session adds one marker
+        # here and nothing else prunes them, so a busy orchestration repo would
+        # accumulate stale empty files without bound. Drop markers older than 7
+        # days on hook entry. Fail-open — any error (missing dir, permission)
+        # never fails the hook and never changes the dedup decision below.
+        find "$SEEN_DIR" -type f -mtime +7 -delete 2>/dev/null || true
+        if [[ -f "$SEEN_MARKER" ]]; then
+            INCLUDE_UNIVERSAL=0
+        else
+            # Best-effort marker creation; a failure here never fails the hook
+            # and simply means universal.md may be re-injected on a later turn.
+            mkdir -p "$SEEN_DIR" 2>/dev/null || true
+            : > "$SEEN_MARKER" 2>/dev/null || true
+        fi
+    fi
+
+    if [[ "$INCLUDE_UNIVERSAL" -eq 1 ]]; then
+        UNIVERSAL_CONTENT=$(cat "${CONTEXT_DIR}/universal.md" 2>/dev/null) || UNIVERSAL_CONTENT=""
+        append_context "Project Context" "$UNIVERSAL_CONTENT"
+    fi
 fi
 
 # --- Role-specific context ---
@@ -159,17 +208,22 @@ if [[ "$INJECT_ROLE" == "true" ]]; then
 
     # Fallback: detect role from prompt preamble (slash commands)
     if [[ -z "$ROLE" ]]; then
+        # Match both the unnamespaced (/builder) and namespaced (/loom:builder)
+        # forms for every role (#3793). Claude Code 2.1+ requires the namespaced
+        # /loom:<role> form for subdirectory commands (#3345), so an interactive
+        # `/loom:builder 123` must inject builder context too. /loom:sweep has no
+        # unnamespaced counterpart (sweep.md was always namespace-only).
         case "$PROMPT" in
-            /builder*) ROLE="builder" ;;
-            /judge*)   ROLE="judge" ;;
-            /curator*) ROLE="curator" ;;
-            /doctor*)  ROLE="doctor" ;;
-            /architect*) ROLE="architect" ;;
-            /hermit*)  ROLE="hermit" ;;
-            /champion*) ROLE="champion" ;;
-            /guide*)   ROLE="guide" ;;
-            /auditor*) ROLE="auditor" ;;
-            /loom:sweep*) ROLE="sweep" ;;
+            /builder*|/loom:builder*)     ROLE="builder" ;;
+            /judge*|/loom:judge*)         ROLE="judge" ;;
+            /curator*|/loom:curator*)     ROLE="curator" ;;
+            /doctor*|/loom:doctor*)       ROLE="doctor" ;;
+            /architect*|/loom:architect*) ROLE="architect" ;;
+            /hermit*|/loom:hermit*)       ROLE="hermit" ;;
+            /champion*|/loom:champion*)   ROLE="champion" ;;
+            /guide*|/loom:guide*)         ROLE="guide" ;;
+            /auditor*|/loom:auditor*)     ROLE="auditor" ;;
+            /loom:sweep*)                 ROLE="sweep" ;;
         esac
     fi
 
