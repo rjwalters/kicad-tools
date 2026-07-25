@@ -968,6 +968,8 @@ If `--dry-run` was supplied, **this stage runs before any mutation** and EXITs a
 
 1a. **Resolve stacking edges (only when `AUTO_STACK=true`).** Detect `Depends on #A` / `Requires #A` edges, keep only those whose `#A` is a member of this candidate set, reduce to a single parent per child (first-match-wins), drop cyclic edges — all per "Auto-stack detection and wave ordering". Populate the per-issue `DEPENDS_ON[N]` map. When zero edges survive, the run proceeds exactly as if `--auto-stack` were absent.
 
+1b. **Warn on out-of-set dependency references (unconditional, Modes A/B).** Run the detect-and-warn pass described in "Out-of-set dependency detect-and-warn (v2 item 4, #3747)": `./.loom/scripts/warn-out-of-set-deps.sh --candidates "<resolved candidate numbers>" --depends-on "<operator --depends-on values, if any>"`. For each candidate whose body declares `Depends on`/`Requires`/`Part of #A` where `#A` is **open**, **not** in this sweep's candidate set, and **not** covered by an operator `--depends-on`, it emits a non-blocking advisory warning (stderr/log; also surfaced in the candidate-set preview in interactive/Mode B contexts). This runs regardless of `--auto-stack` — it never modifies the candidate set (detection + advisory only) and never blocks the sweep. In the `--dry-run` plan the warnings are printed above the wave listing.
+
 2. **Compute wave partition.** Partition the candidate list into waves of size `--builders-per-wave`, or the Stage -1 resolved auto wave size when the flag was omitted (see "Resolve auto wave size"), preserving input order. Record `(issue, wave_index, total_waves)` for each candidate. Apply the same silent-clamp and pre-flight-skip rules that the live path uses (closed / `loom:building` / `loom:blocked` issues are tagged as "would skip" in the plan but still appear in the output for transparency). **When stacking edges were resolved in step 1a, first reorder** so every parent's wave is at or before its child's wave (a parent/child pair may share a wave — the child still branches off the parent's branch, not the shared pre-wave `main` snapshot) per "Auto-stack detection and wave ordering", then partition the reordered list.
 
 3. **Print the plan.** Emit a table or block per the issue-set format below.
@@ -1448,7 +1450,7 @@ The step is **best-effort** — a reconciliation failure never fails the parent 
 
 **Rebase-on-parent-amend now ships too (v2 item 3, #3747).** Items 1 and 2 both handle the *parent-merge* moment; item 3 closes the far more common *pre-merge* case: while a stacked parent's PR (`feature/issue-<parent>`) is still open under review and Doctor amends the parent branch (interactive rewrite or additive commits + force-with-lease), any child that branched off the parent's *pre-amend* tip goes silently stale. The standalone `./.loom/scripts/rebase-stacked-children.sh feature/issue-<parent>` discovers open child PRs with the same live-forge query (`gh pr list --base feature/issue-<parent> --state open`), detects staleness per child via `git merge-base --is-ancestor origin/<parent> origin/<child>` (up-to-date children are skipped), and reuses item 1's safe/unsafe split on the child **issue's** `loom:building` label: safe stale children are rebased onto the parent's current tip (`git rebase origin/<parent> <child>` + `git push --force-with-lease`, **base NOT retargeted** — the child stays stacked on the parent), while unsafe children (issue still `loom:building`) get a deferred-rebase comment instead. It is manual-first (like v1's `reconcile-stack.sh`): **Doctor runs it as a documented workflow step 9a** after pushing to a `feature/issue-<N>` branch (see `doctor.md`), best-effort — a failure never fails the Doctor's own work. `--dry-run` previews the per-child outcome.
 
-**Deferred (v2 epic #3747, not yet implemented):** **dependency auto-detection** (broader cross-reference union-probe form — the narrower same-`/loom:sweep`-candidate-set case already ships as `--auto-stack`, #3759; see the section below), **diamonds / multi-parent**, and **auto-detach**. (The **merge-ordering guard** shipped as v2 item 2, and **rebase-on-parent-amend** as v2 item 3 — see above.)
+**Epic #3747 status (complete):** all four v2 items shipped — the **merge-ordering guard** (item 2), **rebase-on-parent-amend** (item 3, above), and **out-of-set dependency detect-and-warn** (item 4 — the *safe* half of broad dependency-awareness; see "Out-of-set dependency detect-and-warn" below). The two remaining v1-deferred ideas were **decided won't-do** (operator, 2026-07-23): **diamonds / multi-parent** (kept single-parent by design — `depends_on: Option<u32>`; reopen via a fresh issue if a real diamond need appears) and **auto-detach** (proving non-dependence is unreliable — an operator action, not automated). The unsafe **auto-expansion** form of dependency auto-detection is likewise rejected: item 4 ships *detection + advisory only*, never silently reaching out to external issues.
 
 ### Auto-stack detection and wave ordering (`--auto-stack`, #3759)
 
@@ -1477,6 +1479,30 @@ A matched `#A` becomes a **stacking edge only when `#A` is also a member of this
 **6. Operator confirmation — reuse the existing gate.** When `--auto-stack` finds ≥1 edge, the "Detected stacking pairs" block (see the Stage 0 dry-run output spec) is printed as part of the same candidate-set display Mode B / `--dry-run` already show before awaiting confirmation. **Mode A** (explicit numeric list, today's no-prompt fast path) gains a confirmation prompt **only when `--auto-stack` actually found ≥1 edge** — a zero-edge `--auto-stack` run on Mode A stays prompt-free (identical to the flag being absent). Declining exits cleanly, matching every other gate in this skill. Mode B already prompts, so this adds only the stacking block to its existing display.
 
 **Explicitly out of scope for v1** (do not attempt here): file-overlap-heuristic auto-detection (#3729 rejected file paths as a topology signal — the reactive #3647 in-wave overlap-and-revalidate gate stays the backstop for *accidental* same-file collisions this feature doesn't stack); diamonds / multi-parent stacks; cross-`/loom:sweep` coordination (two independently-running sweeps stacking each other's candidates is #3768's scope — this feature only ever stacks within one sweep invocation's own resolved candidate set); `Part of #A` / `Blocked by #A` timeline cross-reference detection; and any change to `merge-pr.sh` / `reconcile-stack.sh` / `worktree.sh` (reconciliation is reused unchanged).
+
+### Out-of-set dependency detect-and-warn (v2 item 4, #3747)
+
+This is the **safe** half of broad dependency-awareness: the *detection* of dependency references that point **outside** the sweep's resolved candidate set, **without** the unsafe auto-expansion `--auto-stack`'s "same-candidate-set only" restriction (above) deliberately forbids. It runs **unconditionally** in Modes A and B (there is no flag to enable it — an out-of-set dependency is always worth surfacing), and it **never modifies the candidate set**. Where `--auto-stack` acts on **in-set** `Depends on`/`Requires` edges (to *stack* them), this pass warns on **out-of-set** `Depends on`/`Requires`/`Part of` references (to *surface* them). Mode C never runs it (no Builder phase / candidate issues to stack).
+
+**Mechanism.** During candidate-set resolution, for each resolved candidate issue, scan its `body` for dependency references and warn on any that would build against a base the sweep isn't producing:
+
+```bash
+# Reuses guide.md's parse_dependencies vocabulary (the same convention #3759's
+# --auto-stack derives from), restricted to the three DECLARATION phrases:
+./.loom/scripts/warn-out-of-set-deps.sh \
+    --candidates "<resolved candidate issue numbers>" \
+    --depends-on "<operator --depends-on values, if any>"
+```
+
+- **Parser reuse (not a second parser).** `warn-out-of-set-deps.sh` REUSES the exact `(Depends on|Requires|Part of) #[0-9]+` vocabulary — a restriction of guide.md's `parse_dependencies` — rather than introducing a divergent parser. It EXCLUDES `Blocked by` (that phrase drives the distinct `loom:blocked` unblock machinery), exactly as `--auto-stack` does.
+- **Warn condition.** For each referenced `#A` that is **open** AND **not** a member of this sweep's resolved candidate set AND **not** already covered by an operator `--depends-on`, emit a clear advisory warning, e.g.:
+  `warning: issue #B declares "Depends on #A", but #A is not in this sweep's candidate set — pass --depends-on <A> or include #A to stack them; otherwise #B may build against a stale base.`
+- **No auto-expansion — the load-bearing safety property stays intact.** The candidate set is **never** auto-grown to include `#A`; the tool never probes/expands to external issues beyond the single openness check on a referenced number. This is detection + advisory *only* — the inverse (auto-adding un-named external issues) was **rejected** (operator, 2026-07-23) precisely because it would break the same-set guarantee.
+- **Non-blocking.** The warning never stops the sweep — the helper always exits `0`. In Mode A's no-prompt fast path the warnings go to **stderr/log** (never a prompt); in interactive/Mode B contexts they may also appear alongside the candidate-set preview before the confirmation gate.
+- **Silent cases (no warning).** An **in-set** reference (that is `--auto-stack`'s domain), a reference already covered by an operator **`--depends-on`**, a **closed** dependency (nothing stale to build on), and a self-reference all produce **no** warning.
+- **Dedup.** At most **one** warning per `(candidate, dependency)` pair, even if the body names the same dependency via multiple phrases.
+
+The helper is covered by `defaults/scripts/tests/test-warn-out-of-set-deps.sh` (out-of-set open → warns; in-set → silent; `--depends-on`-covered → silent; closed → silent; dedup; non-blocking exit 0).
 
 ### 5. Judge phase (sequential per PR within the wave)
 
@@ -1779,14 +1805,16 @@ The following six topics are the **entire** event vocabulary for v0.10.0. New to
 
 | Topic | Publisher | Payload (JSON) |
 |-------|-----------|----------------|
-| `sweep.issue.{N}.phase` | Sweep child via `PublishEvent` | `{"phase": "<phase-name>", "pr_number": <int or null>}` |
-| `sweep.issue.{N}.blocker` | Sweep child | `{"reason": "<short-text>", "label_added": "<label>"}` |
-| `sweep.issue.{N}.exited` | Daemon reaper | `{"exit_code": <int or null>, "duration_sec": <int>}` |
-| `sweep.issue.{N}.crashed` | Daemon reaper | `{"checkpoint_phase": "<phase-name or null>"}` |
+| `sweep.issue.{N}.phase` | Sweep child via `PublishEvent` | `{"phase": "<phase-name>", "pr_number": <int or null>, "repo": "<workspace-root>"?}` |
+| `sweep.issue.{N}.blocker` | Sweep child | `{"reason": "<short-text>", "label_added": "<label>", "repo": "<workspace-root>"?}` |
+| `sweep.issue.{N}.exited` | Daemon reaper | `{"exit_code": <int or null>, "duration_sec": <int>, "repo": "<workspace-root>"?}` |
+| `sweep.issue.{N}.crashed` | Daemon reaper | `{"checkpoint_phase": "<phase-name or null>", "repo": "<workspace-root>"?}` |
 | `sweep.global.dispatch` | Daemon | `{"sweep_id": "<id>", "kind": {"type": "Issue", "value": <N>}}` |
 | `sweep.global.completed` | Daemon | `{"sweep_id": "<id>", "outcome": "exited" | "crashed"}` |
 
 `{N}` is the issue number (a positive integer). Phase names match the sweep-checkpoint schema (#3373): `curator`, `builder`, `judge`, `doctor`, `merge`, etc.
+
+**`repo` field (optional, #3929)**: the four `sweep.issue.{N}.*` payloads carry an additive `repo` field naming the owning managed-workspace root, so a subscriber on the shared bus can disambiguate two managed repos that each dispatched a sweep for issue #N (the topic string is issue-scoped only). The **daemon stamps `repo` automatically** on the events it emits (`exited` / `crashed`). For the **child-published** `phase` / `blocker` events, include `repo` in the payload sourced from the `LOOM_WORKSPACE` env var the daemon exports to the sweep child at dispatch (e.g. `{"phase": "builder", "pr_number": 501, "repo": "$LOOM_WORKSPACE"}`). `repo` is optional and backward-compatible — omitting it is byte-for-byte the pre-#3929 behavior, and single-repo subscribers ignore it.
 
 ### How to publish — IPC contract
 
