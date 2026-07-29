@@ -9,10 +9,13 @@ per-stage ``kct route`` command construction.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from kicad_tools.router.partial_rescue import (
+    CompletionResult,
     RescueConfig,
+    UnroutableLink,
     all_net_names,
     build_rescue_command,
     complete_unfinished_nets,
@@ -254,6 +257,143 @@ def test_build_rescue_command_deterministic_budget_replaces_per_net_timeout(
     assert "--preserve-existing" in cmd
 
 
+# ---------------------------------------------------------------------------
+# build_rescue_command completion shape (issue #4478, epic #4465 Phase 5)
+# ---------------------------------------------------------------------------
+
+
+def test_build_rescue_command_complete_shape(tmp_path: Path) -> None:
+    """complete=True shells ``kct route --complete`` -- NOT the grid-engine shape.
+
+    The completion shape must (a) emit ``--complete``, (b) NOT emit
+    ``--skip-nets``/``--nets`` (which trip the mutual-exclusivity guard,
+    route_cmd.py:8805), and (c) NOT emit ``--auto-layers`` (completion routes
+    within the committed layer stack -- issue #4477).
+    """
+    report = tmp_path / "report.json"
+    cmd = build_rescue_command(
+        tmp_path / "routed.kicad_pcb",
+        tmp_path / "out.kicad_pcb",
+        # A skip list is passed but MUST be ignored in complete mode.
+        ["SCL", "NRST"],
+        RescueConfig(manufacturer="jlcpcb-tier1", seed=7, stage_timeout_s=600),
+        complete=True,
+        complete_report=report,
+    )
+    assert "--complete" in cmd
+    # Mutual-exclusivity guard (route_cmd.py:8805): never combine --complete
+    # with a hand-enumerated net set.
+    assert "--skip-nets" not in cmd
+    assert "--nets" not in cmd
+    # Completion works within the committed layer stack (#4477): no whole-board
+    # layer escalation.
+    assert "--auto-layers" not in cmd
+    # --preserve-existing is still present (harmless: --complete implies it).
+    assert "--preserve-existing" in cmd
+    # The Phase 4 structured report is requested at the given path.
+    assert cmd[cmd.index("--complete-report") + 1] == str(report)
+    # Recipe knobs still flow through.
+    assert cmd[cmd.index("--manufacturer") + 1] == "jlcpcb-tier1"
+    assert cmd[cmd.index("--seed") + 1] == "7"
+    assert cmd[cmd.index("--timeout") + 1] == "600"
+
+
+def test_build_rescue_command_complete_omits_report_when_none(tmp_path: Path) -> None:
+    cmd = build_rescue_command(
+        tmp_path / "a.kicad_pcb",
+        tmp_path / "b.kicad_pcb",
+        [],
+        RescueConfig(),
+        complete=True,
+    )
+    assert "--complete" in cmd
+    assert "--complete-report" not in cmd
+
+
+def test_build_rescue_command_default_is_grid_rescue_shape(tmp_path: Path) -> None:
+    """complete defaults False: the single-net rescue shape is byte-unchanged."""
+    cmd = build_rescue_command(
+        tmp_path / "a.kicad_pcb",
+        tmp_path / "b.kicad_pcb",
+        ["X", "Y"],
+        RescueConfig(),
+    )
+    assert "--complete" not in cmd
+    assert "--complete-report" not in cmd
+    assert "--auto-layers" in cmd
+    assert cmd[cmd.index("--skip-nets") + 1] == "X,Y"
+
+
+def test_build_rescue_command_golden_argv_unchanged(tmp_path: Path) -> None:
+    """AC item 4: the default (single-net rescue) argv is byte-identical to the
+    pre-#4478 shape -- boards that never hit the completion path are unaffected."""
+    routed = tmp_path / "routed.kicad_pcb"
+    out = tmp_path / "routed_rescue.kicad_pcb"
+    cmd = build_rescue_command(
+        routed,
+        out,
+        ["SCL", "NRST"],
+        RescueConfig(
+            manufacturer="jlcpcb-tier1",
+            backend="cpp",
+            seed=42,
+            stage_timeout_s=300,
+            per_net_timeout_s=60,
+            starting_layers=4,
+            max_layers=4,
+            micro_via_in_pad_fallback=True,
+        ),
+    )
+    assert cmd == [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "route",
+        str(routed),
+        "--output",
+        str(out),
+        "--preserve-existing",
+        "--auto-layers",
+        "--starting-layers",
+        "4",
+        "--max-layers",
+        "4",
+        "--manufacturer",
+        "jlcpcb-tier1",
+        "--micro-via-in-pad-fallback",
+        "--backend",
+        "cpp",
+        "--seed",
+        "42",
+        "--timeout",
+        "300",
+        "--per-net-timeout",
+        "60",
+        "--skip-nets",
+        "SCL,NRST",
+    ]
+
+
+def test_unroutable_link_from_report_entry() -> None:
+    entry = {
+        "net": "/OC_TRIP_N",
+        "reason": "no-path",
+        "link": {"start": "U1-3", "end": "R4-1"},
+        "deadline_hit": False,
+        "blocking_copper": ["/V_BUS", "/GND"],
+        "nearest_blocker_mm": 0.1234,
+        "stuck_classification": "walled",
+        "tier_limit_note": "manufacturer 'x' does not support via-in-pad",
+    }
+    lk = UnroutableLink.from_report_entry(entry)
+    assert lk.net == "/OC_TRIP_N"
+    assert lk.reason == "no-path"
+    assert lk.start == "U1-3" and lk.end == "R4-1"
+    assert lk.blocking_copper == ("/V_BUS", "/GND")
+    assert lk.nearest_blocker_mm == 0.1234
+    assert lk.stuck_classification == "walled"
+
+
 def test_rescue_failed_stage_strips_stubs(tmp_path: Path, monkeypatch) -> None:
     """A failed rescue must leave the target net with NO copper (#3470)."""
     pcb = _write_pcb(tmp_path)
@@ -406,3 +546,128 @@ def test_completion_no_progress_restores_backup(tmp_path: Path, monkeypatch) -> 
     # copper back).
     assert pcb.read_text() == original
     assert not list(tmp_path.glob("*_prepass*"))
+
+
+# ---------------------------------------------------------------------------
+# complete_unfinished_nets: --complete rewiring + report propagation (#4478)
+# ---------------------------------------------------------------------------
+
+
+def test_completion_shells_complete_not_skip_nets(tmp_path: Path, monkeypatch) -> None:
+    """Every completion subprocess must use ``--complete`` and NO skip list (#4478).
+
+    This is the core of the rewiring: the completion driver no longer shells
+    the coarse grid engine via ``--skip-nets``; it shells ``kct route
+    --complete`` (lattice engine).  The mutual-exclusivity guard
+    (route_cmd.py:8805) means the argv must never combine ``--complete`` with
+    ``--skip-nets``/``--nets``.
+    """
+    pcb = _write_pcb(tmp_path)
+    captured: list[list[str]] = []
+
+    detections = iter([["SDA"], []])
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.partially_connected_signal_nets",
+        lambda *a, **k: next(detections),
+    )
+
+    def _fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        out = Path(cmd[cmd.index("--output") + 1])
+        out.write_text(Path(cmd[4]).read_text())
+        return _Result()
+
+    monkeypatch.setattr("kicad_tools.router.partial_rescue.subprocess.run", _fake_run)
+
+    complete_unfinished_nets(pcb, RescueConfig(), max_passes=3, quiet=True)
+
+    assert captured, "a completion subprocess should have been launched"
+    for cmd in captured:
+        assert "--complete" in cmd
+        # The mutual-exclusivity guard must never be tripped from this path.
+        assert "--skip-nets" not in cmd
+        assert "--nets" not in cmd
+        assert "--complete-report" in cmd
+
+
+def test_completion_report_propagates_unroutable_links(tmp_path: Path, monkeypatch) -> None:
+    """A pass that leaves a link open surfaces the per-link report to the caller.
+
+    The fake ``kct route --complete`` writes a Phase-4 ``--complete-report``
+    naming one still-unroutable link with blocking copper.  The returned
+    :class:`CompletionResult` must expose it (closed vs. unroutable-with-
+    blockers propagation, AC item 3).
+    """
+    pcb = _write_pcb(tmp_path)
+
+    # Pass 1: two unfinished -> one remains (progress, kept).  Pass 2 detects
+    # the single remainder is unchanged from a prior detection so the loop
+    # would continue, but we stop it by reporting no further progress.
+    detections = iter([["SCL", "SDA"], ["SDA"], ["SDA"], ["SDA"]])
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.partially_connected_signal_nets",
+        lambda *a, **k: next(detections),
+    )
+
+    def _fake_run(cmd, **kwargs):
+        class _Result:
+            returncode = 8  # --complete: one or more links remain unroutable
+            stdout = ""
+            stderr = ""
+
+        # Land SCL's copper (net 2) so the unfinished count drops 2 -> 1.
+        src = Path(cmd[4]).read_text()
+        out = Path(cmd[cmd.index("--output") + 1])
+        marker = "\t(segment\n\t\t(start 7 7)\n\t\t(net 2)\n\t)\n"
+        out.write_text(src.replace("(kicad_pcb\n", "(kicad_pcb\n" + marker, 1))
+        # Emit the structured Phase-4 report for the still-open SDA link.
+        report = Path(cmd[cmd.index("--complete-report") + 1])
+        report.write_text(
+            json.dumps(
+                {
+                    "unroutable_links": [
+                        {
+                            "net": "SDA",
+                            "reason": "no-path",
+                            "link": {"start": "U1-1", "end": "U2-1"},
+                            "deadline_hit": False,
+                            "blocking_copper": ["SCL"],
+                            "nearest_blocker_mm": 0.15,
+                            "stuck_classification": "walled",
+                        }
+                    ]
+                }
+            )
+        )
+        return _Result()
+
+    monkeypatch.setattr("kicad_tools.router.partial_rescue.subprocess.run", _fake_run)
+
+    result = complete_unfinished_nets(pcb, RescueConfig(), max_passes=1, quiet=True)
+
+    assert isinstance(result, CompletionResult)
+    assert result.history == [(2, 1)]
+    assert len(result.unroutable_links) == 1
+    link = result.unroutable_links[0]
+    assert link.net == "SDA"
+    assert link.blocking_copper == ("SCL",)  # non-empty -> "blocked by copper"
+    assert link.stuck_classification == "walled"
+    # No report side-file left behind.
+    assert not list(tmp_path.glob("*_complete_report*"))
+
+
+def test_completion_result_is_list_compatible() -> None:
+    """CompletionResult forwards list ops so legacy ``== [...]`` callers work."""
+    r = CompletionResult(history=[(2, 1), (1, 0)])
+    assert r == [(2, 1), (1, 0)]
+    assert len(r) == 2
+    assert list(r) == [(2, 1), (1, 0)]
+    assert r[0] == (2, 1)
+    assert bool(r) is True
+    assert bool(CompletionResult()) is False
