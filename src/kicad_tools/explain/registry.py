@@ -21,6 +21,23 @@ logger = logging.getLogger(__name__)
 # Default specs directory
 SPECS_DIR = Path(__file__).parent / "specs"
 
+# Default manufacturer used to resolve a rule's *primary* spec reference when
+# the caller doesn't specify one (matches the "jlcpcb" default used
+# throughout the rest of the CLI, e.g. --manufacturer help text).
+DEFAULT_MANUFACTURER = "jlcpcb"
+
+
+def normalize_manufacturer(name: str) -> str:
+    """Normalize a manufacturer name/id to a stable lookup key.
+
+    Args:
+        name: Manufacturer name or id (e.g. "JLCPCB", "OSH Park", "jlcpcb")
+
+    Returns:
+        Lowercase key with whitespace stripped (e.g. "jlcpcb", "oshpark")
+    """
+    return name.lower().replace(" ", "").replace("-", "").replace("_", "")
+
 
 class ExplanationRegistry:
     """Registry of rule explanations.
@@ -152,7 +169,11 @@ class ExplanationRegistry:
             logger.warning("PyYAML not installed, skipping YAML spec loading")
             return
 
-        for yaml_file in specs_dir.glob("*.yaml"):
+        # Sort so load order (and therefore which manufacturer's rule text
+        # "wins" on merge below) is deterministic across OSes/filesystems.
+        # ``Path.glob`` order depends on directory-entry order, which is not
+        # guaranteed and can differ between local runs and CI.
+        for yaml_file in sorted(specs_dir.glob("*.yaml")):
             try:
                 cls._load_yaml_file(yaml_file)
             except Exception as e:
@@ -187,6 +208,7 @@ class ExplanationRegistry:
             data: Parsed YAML data
         """
         manufacturer = data.get("manufacturer", "")
+        manufacturer_key = normalize_manufacturer(manufacturer)
         base_url = data.get("url", "")
         version = data.get("last_updated", "")
 
@@ -197,6 +219,7 @@ class ExplanationRegistry:
                 section=rule_data.get("spec_section", ""),
                 url=base_url,
                 version=version,
+                manufacturer=manufacturer_key,
             )
 
             # Build fix templates from values if available
@@ -208,6 +231,37 @@ class ExplanationRegistry:
                         fix_templates.append(
                             f"For {layer_type.replace('_', ' ')} boards: adjust to {value}"
                         )
+
+            existing = cls._explanations.get(rule_id)
+            if existing is not None:
+                # Multiple manufacturer YAML files may define the same
+                # rule_id (e.g. "trace_clearance" in both jlcpcb.yaml and
+                # oshpark.yaml). Rather than letting the last-loaded file
+                # silently clobber the previous one -- which made
+                # explain()'s choice of "the" spec reference depend on
+                # filesystem iteration order -- merge this manufacturer's
+                # reference into the existing rule's spec_references list so
+                # callers can select deterministically by manufacturer.
+                if any(ref.manufacturer == manufacturer_key for ref in existing.spec_references):
+                    continue
+
+                is_default = manufacturer_key == DEFAULT_MANUFACTURER
+                primary_is_default = bool(existing.spec_references) and (
+                    existing.spec_references[0].manufacturer == DEFAULT_MANUFACTURER
+                )
+                if is_default and not primary_is_default:
+                    # Promote this manufacturer's rule text to primary so the
+                    # "canonical" wording for a rule is always the default
+                    # manufacturer's, regardless of file load order.
+                    existing.title = rule_data.get("title", rule_id)
+                    existing.explanation = rule_data.get("explanation", "").strip()
+                    existing.fix_templates = fix_templates
+                    existing.related_rules = rule_data.get("related_rules", [])
+                    existing.severity = rule_data.get("severity", "error")
+                    existing.spec_references.insert(0, spec_ref)
+                else:
+                    existing.spec_references.append(spec_ref)
+                continue
 
             explanation = RuleExplanation(
                 rule_id=rule_id,

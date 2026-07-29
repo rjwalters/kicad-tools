@@ -65,7 +65,7 @@ from .rationale import (
     record_decision,
     save_decisions,
 )
-from .registry import ExplanationRegistry
+from .registry import DEFAULT_MANUFACTURER, ExplanationRegistry, normalize_manufacturer
 
 if TYPE_CHECKING:
     pass
@@ -165,8 +165,13 @@ def explain(
         explanation, context, current_value, required_value, unit
     )
 
-    # Get primary spec reference
-    spec_ref = explanation.spec_references[0] if explanation.spec_references else None
+    # Resolve the spec reference deterministically. A rule (e.g.
+    # "trace_clearance") can have references from multiple manufacturers
+    # (JLCPCB, OSH Park, ...); pick the one matching context["manufacturer"]
+    # when given, otherwise fall back to the registry's default manufacturer,
+    # and only fall back to positional [0] if neither is present. This must
+    # not depend on registry/YAML load order.
+    spec_ref = _resolve_spec_reference(explanation.spec_references, context.get("manufacturer"))
 
     return ExplanationResult(
         rule=explanation.rule_id,
@@ -382,6 +387,38 @@ def _generate_fix_suggestions(
             )
 
     return suggestions
+
+
+def _resolve_spec_reference(
+    spec_references: list[SpecReference],
+    manufacturer: str | None,
+) -> SpecReference | None:
+    """Deterministically pick the spec reference for a rule.
+
+    Args:
+        spec_references: All spec references registered for the rule (may
+            include one entry per manufacturer, e.g. JLCPCB and OSH Park).
+        manufacturer: Explicit manufacturer requested via context, if any.
+
+    Returns:
+        The matching SpecReference, the registry's default-manufacturer
+        reference, the first reference, or None if the list is empty. The
+        result never depends on registry/YAML load order.
+    """
+    if not spec_references:
+        return None
+
+    if manufacturer:
+        key = normalize_manufacturer(manufacturer)
+        for ref in spec_references:
+            if ref.manufacturer == key:
+                return ref
+
+    for ref in spec_references:
+        if ref.manufacturer == DEFAULT_MANUFACTURER:
+            return ref
+
+    return spec_references[0]
 
 
 def _get_rule_id_from_violation(violation: Any) -> str:

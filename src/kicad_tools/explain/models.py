@@ -17,12 +17,16 @@ class SpecReference:
         section: Section within the spec (e.g., "PCB Specifications > Minimum Clearance")
         url: URL to the specification document
         version: Version or date of the specification
+        manufacturer: Normalized manufacturer key this reference belongs to
+            (e.g. "jlcpcb", "oshpark"), empty for non-manufacturer references
+            such as interface specs.
     """
 
     name: str
     section: str = ""
     url: str = ""
     version: str = ""
+    manufacturer: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -31,6 +35,7 @@ class SpecReference:
             "section": self.section,
             "url": self.url,
             "version": self.version,
+            "manufacturer": self.manufacturer,
         }
 
 

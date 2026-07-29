@@ -222,10 +222,30 @@ class TestExplainFunction:
             explain("completely_unknown_rule_xyz123")
 
     def test_explain_with_spec_reference(self):
-        """Test that explain results include spec references."""
+        """Test that explain results include spec references.
+
+        "trace_clearance" is defined by multiple manufacturer spec files
+        (JLCPCB, OSH Park), so pin the manufacturer explicitly rather than
+        assuming spec_references[0] happens to be JLCPCB -- that ordering
+        depends on registry load order, not on this test's intent.
+        """
+        result = explain("trace_clearance", context={"manufacturer": "jlcpcb"})
+        assert result.spec_reference is not None
+        assert "JLCPCB" in result.spec_reference.name
+
+    def test_explain_with_spec_reference_default_manufacturer(self):
+        """explain() with no manufacturer in context should resolve
+        deterministically to the registry's default manufacturer (JLCPCB),
+        independent of registry iteration/load order."""
         result = explain("trace_clearance")
         assert result.spec_reference is not None
         assert "JLCPCB" in result.spec_reference.name
+
+    def test_explain_with_spec_reference_other_manufacturer(self):
+        """explain() should honor an explicit non-default manufacturer."""
+        result = explain("trace_clearance", context={"manufacturer": "oshpark"})
+        assert result.spec_reference is not None
+        assert "OSH Park" in result.spec_reference.name
 
 
 class TestExplainNetConstraints:
