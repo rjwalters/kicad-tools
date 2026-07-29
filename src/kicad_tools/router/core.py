@@ -2790,7 +2790,7 @@ class Autorouter:
         # (a memory-pressure optimization) -- a ``--complete`` unroutable-link
         # report built after that point would otherwise see ``None`` and lose
         # every decline reason.  This plain dict is cheap to retain.
-        self._lattice_failure_reasons: dict[object, str] = dict(pf.failure_reasons)
+        self._lattice_failure_reasons = dict(pf.failure_reasons)
 
         # Issue #4271: the shortfall must be DIAGNOSABLE from the run output
         # (honest decline census), not buried on the pathfinder object.
