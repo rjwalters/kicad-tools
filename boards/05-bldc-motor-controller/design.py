@@ -3065,6 +3065,22 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # sanctioned "require explicit opt-in" remedy: the unsafe grid is now a
         # deliberate, documented choice instead of a silent default.
         "--allow-unsafe-grid",
+        # Issue #4474 (Phase 4, epic #4410): congestion-aware escape-corridor
+        # reservation.  Before the general negotiation, the escape pre-phase
+        # clusters U3 (DRV8301, HTSSOP-56) pins by face/destination -- with
+        # the post-Kelvin (#4499) topology so the five ISENSE sense taps aim
+        # at their R10-R12 shunt pads rather than the raw net centroid -- sizes
+        # a corridor per cluster from the CongestionEstimator demand, assigns
+        # clusters to distinct layers of the 4-layer stack, and SOFT-reserves
+        # the corridor cells.  The intent is to give U3's congested south
+        # sense band (ISENSE/PWM/SL_x) a reserved escape channel instead of
+        # letting it lose the negotiation greedily.  SOFT (attractor-only)
+        # reservation, so it biases the owning nets onto their channel without
+        # fencing any unrelated net out of the long span.  Opt-in per the
+        # #4051 rollout convention (default OFF elsewhere; byte-identical when
+        # absent).  Measurement (reach vs 29/36, rescue NO_LEGAL_ESCAPE +
+        # CONGESTION deltas for the sense band) is tracked on #4474.
+        "--escape-corridor-reservation",
         "--skip-nets",
         ",".join(skip_nets),
     ]

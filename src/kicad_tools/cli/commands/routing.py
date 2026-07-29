@@ -462,6 +462,11 @@ def run_route_command(args) -> int:
         sub_argv.append("--cross-package-pair-corridor")
     if getattr(args, "slack_corridor_widening", False):
         sub_argv.append("--slack-corridor-widening")
+    # Issue #4474 (epic #4410): forward --escape-corridor-reservation.  Both
+    # parsers declare it as store_true defaulting to False, so only forward
+    # when the user set it (byte-identical when absent).
+    if getattr(args, "escape_corridor_reservation", False):
+        sub_argv.append("--escape-corridor-reservation")
     max_ripups_val = getattr(args, "max_ripups_per_net", None)
     if max_ripups_val is not None:
         sub_argv.extend(["--max-ripups-per-net", str(max_ripups_val)])

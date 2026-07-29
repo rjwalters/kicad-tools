@@ -3314,6 +3314,23 @@ def _add_route_parser(subparsers) -> None:
             "(byte-identical when absent)."
         ),
     )
+    route_parser.add_argument(
+        "--escape-corridor-reservation",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable congestion-aware escape-corridor reservation for dense "
+            "high-pin-count parts (Issue #4474, epic #4410).  Before the "
+            "general negotiation, clusters each dense part's pins by "
+            "face/destination (post-Kelvin, so ISENSE taps aim at their "
+            "shunt pad), sizes a corridor per cluster from the "
+            "CongestionEstimator demand, assigns clusters to distinct "
+            "layers, and SOFT-reserves the corridor cells so a congested "
+            "cluster (e.g. board-05's U3 south sense band) gets a reserved "
+            "channel instead of competing greedily.  Default OFF "
+            "(byte-identical when absent)."
+        ),
+    )
     # Issue #3054 (Phase 2 of #3045): wire region-based parallelism through to
     # ``route_all_negotiated``.  Opt-in (default off) so existing scripts and
     # CI runs see byte-identical routes; when set, the negotiated loop

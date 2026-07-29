@@ -3561,6 +3561,22 @@ def _apply_slack_corridor_widening(router: "Autorouter", args) -> None:
         router.enable_slack_corridor_widening = True
 
 
+def _apply_escape_corridor_reservation(router: "Autorouter", args) -> None:
+    """Enable congestion-aware escape-corridor reservation when requested (Issue #4474).
+
+    Off by default (mirrors ``enable_bundle_river_planner`` / the #4051
+    precedent).  When ``--escape-corridor-reservation`` is passed, set the
+    router's ``enable_escape_corridor_reservation`` flag so the escape
+    pre-phase plans and SOFT-reserves demand-sized per-cluster corridors for
+    dense high-pin-count parts BEFORE the general negotiation (via
+    ``EscapeCorridorPlanner``, driven by the ``CongestionEstimator``).  A
+    no-op when the flag is absent, so production routing is byte-identical to
+    pre-#4474 main.
+    """
+    if getattr(args, "escape_corridor_reservation", False):
+        router.enable_escape_corridor_reservation = True
+
+
 def _targeted_ripup_budget(args) -> int:
     """Resolve ``--max-ripups-per-net`` for the negotiated targeted path.
 
@@ -4565,6 +4581,7 @@ def route_with_layer_escalation(
         _apply_monotone_certificate_order(router, args)
         _apply_cross_package_pair_corridor(router, args)
         _apply_slack_corridor_widening(router, args)
+        _apply_escape_corridor_reservation(router, args)
 
         # Issue #3171: inject boosted analog routing class for --analog-nets /
         # --auto-analog selected nets (pour/ground nets are left untouched).
@@ -5506,6 +5523,7 @@ def route_with_rule_relaxation(
         _apply_monotone_certificate_order(router, args)
         _apply_cross_package_pair_corridor(router, args)
         _apply_slack_corridor_widening(router, args)
+        _apply_escape_corridor_reservation(router, args)
 
         # Issue #3171: inject boosted analog routing class for --analog-nets /
         # --auto-analog selected nets (pour/ground nets are left untouched).
@@ -7685,6 +7703,7 @@ def route_with_combined_escalation(
             _apply_monotone_certificate_order(router, args)
             _apply_cross_package_pair_corridor(router, args)
             _apply_slack_corridor_widening(router, args)
+            _apply_escape_corridor_reservation(router, args)
 
             # Issue #3171: inject boosted analog routing class for --analog-nets
             # / --auto-analog selected nets (pour/ground nets left untouched).
@@ -9815,6 +9834,22 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--escape-corridor-reservation",
+        action="store_true",
+        help=(
+            "Enable congestion-aware escape-corridor reservation for dense "
+            "high-pin-count parts (Issue #4474, epic #4410).  Before the "
+            "general negotiation, clusters each dense part's pins by "
+            "face/destination (post-Kelvin, so ISENSE taps aim at their "
+            "shunt pad), sizes a corridor per cluster from the "
+            "CongestionEstimator demand, assigns clusters to distinct "
+            "layers, and SOFT-reserves the corridor cells so a congested "
+            "cluster (e.g. board-05's U3 south sense band) gets a reserved "
+            "channel instead of competing greedily.  Default OFF "
+            "(byte-identical to prior behaviour when absent)."
+        ),
+    )
+    parser.add_argument(
         "--max-ripups-per-net",
         type=int,
         default=None,
@@ -11912,6 +11947,7 @@ def main(argv: list[str] | None = None) -> int:
     _apply_monotone_certificate_order(router, args)
     _apply_cross_package_pair_corridor(router, args)
     _apply_slack_corridor_widening(router, args)
+    _apply_escape_corridor_reservation(router, args)
 
     # Issue #3171: inject boosted analog routing class for --analog-nets /
     # --auto-analog selected nets (pour/ground nets are left untouched).

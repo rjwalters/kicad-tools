@@ -1058,6 +1058,23 @@ class Autorouter:
         # geometric-only segment heuristic.  Set True to opt in.
         self.enable_slack_corridor_widening = False
 
+        # Issue #4474 (Phase 4, epic #4410): congestion-aware escape-corridor
+        # reservation for dense high-pin-count parts.  When True, the escape
+        # pre-phase runs ``EscapeCorridorPlanner`` (``escape_corridor.py``)
+        # over each detected dense package BEFORE the general negotiation:
+        # it clusters the part's pins by face/destination (post-Kelvin, so
+        # ISENSE taps aim at their shunt pad), sizes a corridor per cluster
+        # from ``CongestionEstimator`` demand, assigns clusters to distinct
+        # layers, and SOFT-reserves the corridor cells so the congested
+        # cluster (e.g. U3's south sense band) gets a reserved channel
+        # instead of competing greedily.  Flag-off (default) is byte-identical
+        # to pre-#4474 main: the planner is never constructed and no cells are
+        # reserved.  Set True to opt in.
+        self.enable_escape_corridor_reservation = False
+        # Populated by ``_reserve_escape_corridors`` when the flag is on so
+        # tests / diagnostics can inspect the per-package plans after a run.
+        self._escape_corridor_plans: list[Any] = []
+
         # Issue #4084: records the most recent certificate classification
         # per qualifying byte-lane group (group name -> MonotoneCertificate)
         # so callers/tests can inspect the feasibility decision and failure
@@ -4142,6 +4159,90 @@ class Autorouter:
             pour_net_ids=pour_ids,
         )
         return self._congestion_estimator
+
+    def _reserve_escape_corridors(self, dense_packages: list[PackageInfo]) -> None:
+        """Plan + SOFT-reserve congestion-aware escape corridors (Issue #4474).
+
+        Runs ``EscapeCorridorPlanner`` over each detected dense package
+        BEFORE the escape main pass and the general negotiation, so the
+        congested clusters (e.g. board-05's U3 south sense band) get a
+        demand-sized reserved channel instead of competing greedily.  Only
+        invoked when ``enable_escape_corridor_reservation`` is set -- the
+        method is otherwise never called, keeping flag-off byte-identical to
+        pre-#4474 main.
+
+        Each package's reservation is advisory and wrapped so a failure
+        degrades to the pre-#4474 behaviour (no reservation) rather than
+        aborting routing.
+        """
+        from .escape_corridor import EscapeCorridorPlanner
+        from .kelvin import detect_kelvin_topology
+
+        if not dense_packages:
+            return
+
+        estimator = self._ensure_congestion_estimator()
+
+        # Board-wide net_id -> [(x, y), ...] map (ALL pads on each net) so the
+        # planner can resolve each net's off-package destination.  Iterate the
+        # sorted pad keys for determinism (required for --seed reproducibility).
+        net_pad_positions: dict[int, list[tuple[float, float]]] = {}
+        net_pad_objs: dict[int, list[Pad]] = {}
+        for key in sorted(self.pads):
+            pad = self.pads[key]
+            nid = int(pad.net)
+            if nid == 0:
+                continue
+            net_pad_positions.setdefault(nid, []).append((pad.x, pad.y))
+            net_pad_objs.setdefault(nid, []).append(pad)
+
+        # Post-Kelvin (#4499) destinations: an ISENSE sense tap terminates AT
+        # its shunt/sense-resistor pad, so resolve the Kelvin root per net and
+        # aim that net's cluster corridor at the shunt rather than the raw net
+        # centroid.  ``detect_kelvin_topology`` gates on the current-sense
+        # name pattern AND a shunt root pad, so ordinary nets that merely pass
+        # through a resistor are NOT redirected -- they stay absent here.
+        kelvin_roots: dict[int, tuple[float, float]] = {}
+        for nid, pad_objs in net_pad_objs.items():
+            if len(pad_objs) < 2:
+                continue
+            try:
+                topo = detect_kelvin_topology(pad_objs)
+            except Exception:
+                topo = None
+            if topo is not None:
+                root = pad_objs[topo.root_index]
+                kelvin_roots[nid] = (root.x, root.y)
+
+        planner = EscapeCorridorPlanner(
+            self.grid,
+            estimator,
+            net_pad_positions=net_pad_positions,
+            kelvin_roots=kelvin_roots,
+        )
+
+        # Mutate the existing list in place (do NOT rebind) so a lazily-built
+        # escape router that already captured this reference still sees the
+        # reserved plans regardless of build order.
+        self._escape_corridor_plans.clear()
+        for pkg in dense_packages:
+            try:
+                plan = planner.plan_and_reserve(pkg, soft=True)
+            except Exception:
+                logger.debug(
+                    "Escape-corridor reservation failed for package %s; "
+                    "continuing without it",
+                    getattr(pkg, "ref", "?"),
+                    exc_info=True,
+                )
+                continue
+            self._escape_corridor_plans.append(plan)
+            if plan.total_reserved_cells > 0:
+                print(
+                    f"  Escape corridors ({pkg.ref}): {plan.cluster_count} cluster(s), "
+                    f"{plan.total_reserved_cells} cells reserved across "
+                    f"layers {sorted(plan.layers_used())} (Issue #4474)"
+                )
 
     # ------------------------------------------------------------------
     # Impedance-driven sizing activation
@@ -15913,6 +16014,13 @@ class Autorouter:
                 # (default OFF).  When OFF the pair continuation corridor
                 # keeps its fixed padding, byte-identical to pre-#4085.
                 enable_slack_corridor_widening=self.enable_slack_corridor_widening,
+                # Issue #4474 (Phase 4): congestion-aware escape-corridor
+                # reservation gate (default OFF) + the per-package plans the
+                # escape pre-phase reserved on the grid.  When OFF the plan
+                # list is empty and the escape router honours no reserved
+                # channel, byte-identical to pre-#4474.
+                enable_escape_corridor_reservation=self.enable_escape_corridor_reservation,
+                escape_corridor_plans=self._escape_corridor_plans,
                 # Issue #3428: board-wide net-id -> pad-position map so the
                 # fine-pitch QFP in-pad rescue can aim its inner stub at
                 # the net's actual routing target instead of the parity-
@@ -16616,6 +16724,15 @@ class Autorouter:
 
         # Phase 1: Detect and route dense packages
         dense_packages = self.detect_dense_packages()
+
+        # Issue #4474 (Phase 4, epic #4410): congestion-aware escape-corridor
+        # reservation.  When opted in, reserve demand-sized per-cluster
+        # corridors on the grid BEFORE the escape main pass and the general
+        # negotiation, so the congested clusters get a reserved channel.
+        # Gated OFF by default; when off this block is skipped entirely and
+        # behaviour is byte-identical to pre-#4474 main.
+        if getattr(self, "enable_escape_corridor_reservation", False):
+            self._reserve_escape_corridors(dense_packages)
 
         already_escaped = self._escapes_generated_this_run
         if dense_packages and not already_escaped:

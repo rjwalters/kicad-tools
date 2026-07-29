@@ -1099,6 +1099,8 @@ class EscapeRouter:
         enable_cross_package_pair_corridor: bool = False,
         net_name_to_id: dict[str, int] | None = None,
         enable_slack_corridor_widening: bool = False,
+        enable_escape_corridor_reservation: bool = False,
+        escape_corridor_plans: list | None = None,
     ):
         """Initialize the escape router.
 
@@ -1253,6 +1255,24 @@ class EscapeRouter:
         self.enable_slack_corridor_widening: bool = bool(enable_slack_corridor_widening)
         self.pair_corridor_slack_widened: int = 0
         self.pair_corridor_slack_budget_mm: float = 0.0
+        # Issue #4474 (Phase 4, epic #4410): congestion-aware escape-corridor
+        # reservation gate + the per-package plans reserved on the grid before
+        # the escape main pass.  The reservations live on ``self.grid`` (SOFT
+        # attractor cells), so the per-pin escape A* already honours them via
+        # the grid's corridor attractor -- this flag/plan reference is the
+        # explicit record that the escape router is consuming them, and lets
+        # tests assert the reservation reached the escape phase without
+        # monkey-patching.  Empty/absent (default) => no reserved channels.
+        self.enable_escape_corridor_reservation: bool = bool(
+            enable_escape_corridor_reservation
+        )
+        # ``is not None`` (not ``or``) so a live-but-currently-empty plan list
+        # keeps its identity: the escape router may be built during the escape
+        # pre-phase BEFORE ``_reserve_escape_corridors`` has populated it, and
+        # must observe the plans once they are appended in place.
+        self.escape_corridor_plans: list = (
+            escape_corridor_plans if escape_corridor_plans is not None else []
+        )
         # Issue #4086: board-wide net-name -> net-id map used ONLY to
         # resolve the off-package partner's net id for the cross-package
         # corridor owner set.  Empty map => owner set is this leg alone.
