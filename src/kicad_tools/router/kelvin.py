@@ -227,9 +227,7 @@ def build_kelvin_star_edges(pad_objs: list[Pad], root_index: int) -> list[tuple[
     """
     rx, ry = pad_objs[root_index].x, pad_objs[root_index].y
     edges = [(root_index, k) for k in range(len(pad_objs)) if k != root_index]
-    edges.sort(
-        key=lambda e: abs(rx - pad_objs[e[1]].x) + abs(ry - pad_objs[e[1]].y)
-    )
+    edges.sort(key=lambda e: abs(rx - pad_objs[e[1]].x) + abs(ry - pad_objs[e[1]].y))
     return edges
 
 

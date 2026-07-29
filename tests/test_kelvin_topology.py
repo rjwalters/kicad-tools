@@ -340,9 +340,7 @@ class TestBoard05ISenseNets:
     def test_multi_pad_isense_nets_route_kelvin(self):
         pads_by_net = self._sense_pads_by_net()
         multi = {
-            n: pads
-            for n, pads in pads_by_net.items()
-            if n.startswith("ISENSE_") and len(pads) >= 3
+            n: pads for n, pads in pads_by_net.items() if n.startswith("ISENSE_") and len(pads) >= 3
         }
         assert multi, "expected at least one multi-pad ISENSE net"
         for name, pads in multi.items():
