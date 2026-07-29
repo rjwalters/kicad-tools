@@ -15766,7 +15766,7 @@ class Autorouter:
 
     def route_with_placement_delta_feedback(
         self,
-        pcb: any = None,
+        pcb: Any = None,
         max_adjustments: int = 3,
         use_negotiated: bool = True,
         verbose: bool = True,
