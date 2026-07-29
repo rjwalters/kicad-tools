@@ -1103,6 +1103,16 @@ class Autorouter:
         # best routes found so far.  ``None`` preserves the unbudgeted
         # (iteration-capped only) behaviour.
         self._lattice_link_budget_s: float | None = None
+        # Issue #4477 (epic #4465, Phase 4): pad endpoints (``"REF.PIN"``) for
+        # every connection dispatched into the lattice negotiation, keyed by
+        # the SAME key ``pf.failure_reasons`` uses.  Lets a ``--complete``
+        # unroutable-link report name exactly which two pads a failed
+        # connection joins.  Populated by :meth:`_negotiate_lattice_netset`.
+        self._lattice_connection_endpoints: dict[object, tuple[str, str]] = {}
+        # Issue #4477: per-connection decline reasons, copied off the
+        # pathfinder (see :meth:`_negotiate_lattice_netset`) so they survive
+        # ``_release_routing_engine_state`` nulling ``_lattice_pathfinder``.
+        self._lattice_failure_reasons: dict[object, str] = {}
 
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
@@ -2722,6 +2732,21 @@ class Autorouter:
             for seq, other in enumerate(pads[1:]):
                 connections.append(((net, seq), anchor, other, net_class))
 
+        # Issue #4477: remember each connection's pad endpoints keyed exactly
+        # as ``pf.failure_reasons`` keys them, so an unroutable-link report
+        # can name the pads a failed connection joins without re-deriving pad
+        # topology from the bare key.
+        endpoints: dict[object, tuple[str, str]] = {
+            key: (f"{anchor.ref}.{anchor.pin}", f"{other.ref}.{other.pin}")
+            for key, anchor, other, _net_class in connections
+        }
+        for pc in coupled:
+            endpoints[pc.key] = (
+                f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}",
+                f"{pc.pad_p_b.ref}.{pc.pad_p_b.pin}",
+            )
+        self._lattice_connection_endpoints = endpoints
+
         if not connections and not coupled:
             return {}
 
@@ -2758,6 +2783,14 @@ class Autorouter:
             deadline=deadline,
         )
         self._lattice_negotiation_stats = stats
+        # Issue #4477 (epic #4465, Phase 4): copy the per-connection decline
+        # diagnosis onto the ROUTER (not just the pathfinder) because
+        # ``_release_routing_engine_state`` (#4292) nulls
+        # ``router._lattice_pathfinder`` before the CLI's post-route tail runs
+        # (a memory-pressure optimization) -- a ``--complete`` unroutable-link
+        # report built after that point would otherwise see ``None`` and lose
+        # every decline reason.  This plain dict is cheap to retain.
+        self._lattice_failure_reasons: dict[object, str] = dict(pf.failure_reasons)
 
         # Issue #4271: the shortfall must be DIAGNOSABLE from the run output
         # (honest decline census), not buried on the pathfinder object.

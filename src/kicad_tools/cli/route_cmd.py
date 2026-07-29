@@ -8699,13 +8699,13 @@ def _offboard_preflight(pcb_path: Path) -> int:
     return 2
 
 
-def _apply_complete_mode_defaults(args, parser) -> None:
+def _apply_complete_mode_defaults(args, parser, argv: list[str] | None = None) -> None:
     """Apply the ``--complete`` mode implications (Issue #4471, epic #4465).
 
     ``--complete`` is a *route-only-the-currently-unconnected-links* contract:
     it auto-detects the stranded signal nets (later, in
     :func:`_resolve_complete_nets`, which needs the validated board path) and
-    routes ONLY those against all other copper held as fixed obstacles.  Two
+    routes ONLY those against all other copper held as fixed obstacles.  Three
     implications must be stamped BEFORE the #4280 engine/strategy gate runs so
     the gate sees the coherent combination:
 
@@ -8718,6 +8718,16 @@ def _apply_complete_mode_defaults(args, parser) -> None:
       the lattice netset driver (``core.py:_negotiate_lattice_netset``), which
       already routes ONLY ``self.nets`` against
       ``fixed_copper = existing_routes not in self.nets`` (#4355).
+    * ``--auto-layers`` OFF (issue #4477) -- ``--auto-layers`` defaults to
+      True and, left alone, silently routes a completion pass through
+      :func:`route_with_layer_escalation` -- a WHOLE-BOARD reimplementation
+      of the routing loop with its own exit-code tail that never runs the
+      per-link deadline + blocking-copper report this phase adds, and that
+      re-attempts the ENTIRE board at 2/4/6 layers on failure, contradicting
+      "route ONLY these already-placed links against the board's existing
+      layer stack".  Disabled under ``--complete`` unless the user passed
+      ``--auto-layers``/``--no-auto-layers`` explicitly (mirrors the
+      ``--auto-pcb-size`` implies ``--auto-layers`` precedent below).
 
     ``--strategy`` is intentionally NOT coerced here: the gate
     (:func:`_validate_route_engine_strategy`) owns the coercion so the printed
@@ -8740,6 +8750,19 @@ def _apply_complete_mode_defaults(args, parser) -> None:
             print(
                 "  --complete: routing unconnected links on the lattice engine "
                 "(override with --route-engine)"
+            )
+    _argv = argv if argv is not None else sys.argv
+    if (
+        "--auto-layers" not in _argv
+        and "--no-auto-layers" not in _argv
+        and getattr(args, "auto_layers", False)
+    ):
+        args.auto_layers = False
+        if not getattr(args, "quiet", False):
+            print(
+                "  --complete: disabling --auto-layers (completion routes "
+                "against the board's existing layer stack; pass --auto-layers "
+                "to override)"
             )
 
 
@@ -8961,6 +8984,177 @@ def _apply_complete_localization(args, pcb_path: Path) -> int:
                 f"{', '.join(sorted(oversized))}"
             )
     return 0
+
+
+def _net_name_for_lattice_key(router: "Autorouter", key: object) -> str:
+    """Resolve a lattice ``failure_reasons``/endpoints key to a net name.
+
+    Issue #4477.  Singles are keyed ``(net_id, seq)`` (issue #4278); coupled
+    diff pairs are keyed ``("pair", p_net_id, n_net_id)`` (issue #4270).  Any
+    other shape (defensive) falls back to ``str(key)`` rather than raising --
+    a reporting helper must never break the completion pass it is reporting
+    on.
+    """
+    if isinstance(key, tuple) and len(key) == 3 and key[0] == "pair":
+        _tag, p_id, n_id = key
+        p_name = router.net_names.get(p_id, str(p_id))
+        n_name = router.net_names.get(n_id, str(n_id))
+        return f"{p_name}/{n_name}"
+    if isinstance(key, tuple) and len(key) == 2:
+        net_id, _seq = key
+        return router.net_names.get(net_id, str(net_id))
+    return str(key)
+
+
+def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | None:
+    """Structured, machine-readable unroutable-link report for ``--complete``.
+
+    Issue #4477 (epic #4465, Phase 4).  Combines two pieces of diagnosis that
+    already exist independently:
+
+    * **Timing** -- the lattice netset negotiation's per-connection decline
+      reason (``LatticePathfinder.failure_reasons``, issue #4278) plus the
+      per-link wall-clock budget stats (``LatticeNegotiationStats``,
+      issue #4472): elapsed time, the granted budget, and whether the
+      deadline was hit.  A connection never reached before the deadline is
+      declined with the honest reason ``"deadline-exceeded"`` (see
+      :meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`).
+    * **Blocking copper** -- the SAME obstruction enumeration
+      ``kct net-status --why`` prints
+      (:func:`~kicad_tools.router.stuck_classifier.classify_stuck_nets`),
+      run read-only against *pcb_path* (the resolved working board at this
+      point in the pipeline -- by the time this is called it may be the
+      ``-o``/auto-pour staged copy rather than the literal ``args.pcb`` file,
+      but a link that failed to route received no new copper, so its
+      immediate surroundings are geometrically identical to the original
+      input -- the ``--preserve-existing`` + #4413 copper-loss guard
+      invariant this whole feature depends on).
+
+    Returns ``None`` when there is nothing to report: either every
+    ``--complete`` link routed cleanly, or the completion pass did not run
+    the lattice engine (e.g. an explicit ``--route-engine`` override), which
+    is the only engine this per-link diagnosis is wired to (issue #4465's
+    staged design backs completion with the lattice engine).
+
+    Reads ``router._lattice_failure_reasons`` -- a plain dict copied off the
+    pathfinder at negotiation time -- rather than
+    ``router._lattice_pathfinder.failure_reasons`` directly, because
+    ``_release_routing_engine_state`` (#4292) nulls ``_lattice_pathfinder``
+    before the CLI's post-route tail (where this function is called) runs.
+    """
+    stats = getattr(router, "_lattice_negotiation_stats", None)
+    if stats is None:
+        return None
+    reasons: dict[object, str] = dict(getattr(router, "_lattice_failure_reasons", {}) or {})
+    if not reasons:
+        return None
+
+    endpoints: dict[object, tuple[str, str]] = (
+        getattr(router, "_lattice_connection_endpoints", {}) or {}
+    )
+
+    # Tier-limit context (Phase 3, issue #4475, not yet built): surface
+    # whether the configured manufacturer supports via-in-pad at all, so a
+    # consumer can flag "this link may need a capability this fab tier
+    # lacks" even before Phase 3's last-resort ordering lands a precise
+    # per-link tier-limit reason.  Informational only -- never asserted as
+    # the definitive cause of a specific decline.
+    mfr = getattr(getattr(router, "rules", None), "manufacturer", None)
+    via_in_pad_supported: bool | None = None
+    if mfr:
+        try:
+            from kicad_tools.router.mfr_limits import get_mfr_limits
+
+            via_in_pad_supported = bool(get_mfr_limits(mfr).via_in_pad_supported)
+        except Exception:
+            via_in_pad_supported = None
+    tier_limit_note: str | None = None
+    if via_in_pad_supported is False:
+        tier_limit_note = (
+            f"manufacturer '{mfr}' does not support via-in-pad; a walled SMD "
+            "pad may require it to close (Phase 3, issue #4475's last-resort "
+            "via-in-pad ordering, is not applied by this build)"
+        )
+
+    try:
+        from kicad_tools.router.stuck_classifier import classify_stuck_nets
+
+        diag_by_net = {d.net_name: d for d in classify_stuck_nets(pcb_path).diagnoses}
+    except Exception:
+        diag_by_net = {}
+
+    links: list[dict] = []
+    for key in sorted(reasons, key=lambda k: _net_name_for_lattice_key(router, k)):
+        reason = reasons[key]
+        net_name = _net_name_for_lattice_key(router, key)
+        ep = endpoints.get(key)
+        diag = diag_by_net.get(net_name)
+        entry: dict = {
+            "net": net_name,
+            "reason": reason,
+            "link": {"start": ep[0], "end": ep[1]} if ep else None,
+            "deadline_hit": bool(reason == "deadline-exceeded" or stats.deadline_hit),
+            "elapsed_s": round(stats.elapsed_s, 3),
+            "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+            "blocking_copper": list(diag.blocking_nets) if diag else [],
+            "nearest_blocker_mm": (
+                round(diag.nearest_blocker_mm, 4)
+                if diag and diag.nearest_blocker_mm is not None
+                else None
+            ),
+            "stuck_classification": diag.classification.value if diag else None,
+            "stuck_evidence": diag.evidence if diag else "",
+        }
+        if tier_limit_note is not None:
+            entry["tier_limit_note"] = tier_limit_note
+        links.append(entry)
+
+    return {
+        "pcb": str(pcb_path),
+        "manufacturer": mfr,
+        "via_in_pad_supported": via_in_pad_supported,
+        "deadline_hit": stats.deadline_hit,
+        "elapsed_s": round(stats.elapsed_s, 3),
+        "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+        "unroutable_links": links,
+    }
+
+
+def _print_complete_link_report(report: dict) -> None:
+    """Human-readable rendering of :func:`_build_complete_link_report`."""
+    links = report["unroutable_links"]
+    budget_note = (
+        f" of a {report['budget_s']:.1f}s budget" if report["budget_s"] is not None else ""
+    )
+    deadline_note = " -- deadline exceeded" if report["deadline_hit"] else ""
+    print()
+    print(
+        f"--complete: {len(links)} unroutable link(s) "
+        f"(elapsed {report['elapsed_s']:.1f}s{budget_note}{deadline_note}):"
+    )
+    for entry in links:
+        link = entry["link"]
+        ep = f"{link['start']} <-> {link['end']}" if link else "(pads unknown)"
+        print(f"  [{entry['net']}] {ep} -- {entry['reason']}")
+        if entry["blocking_copper"]:
+            nearest = entry["nearest_blocker_mm"]
+            nearest_note = f" (nearest {nearest:.3f}mm)" if nearest is not None else ""
+            print(f"      blocking copper: {', '.join(entry['blocking_copper'])}{nearest_note}")
+        if entry["stuck_classification"]:
+            print(
+                f"      classification: {entry['stuck_classification'].upper()} "
+                f"-- {entry['stuck_evidence']}"
+            )
+        if entry.get("tier_limit_note"):
+            print(f"      tier limit: {entry['tier_limit_note']}")
+    print()
+
+
+def _write_complete_report(report: dict, path: str) -> None:
+    """Persist :func:`_build_complete_link_report` as JSON at *path*."""
+    import json
+
+    Path(path).write_text(json.dumps(report, indent=2) + "\n")
 
 
 def _resolve_route_only_nets(args, pcb_path: Path) -> int:
@@ -9328,6 +9522,7 @@ def main(argv: list[str] | None = None) -> int:
               3  routing meets threshold but DRC violations remain
               4  partial routing AND segment-segment clearance violations
               5  interrupted by SIGINT with partial results saved
+              8  --complete: one or more unroutable links remain (issue #4477)
         """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -9387,6 +9582,20 @@ def main(argv: list[str] | None = None) -> int:
             "#4413 copper-loss guard is active). Mutually exclusive with "
             "--nets / --skip-nets. A board with nothing left to connect is a "
             "safe no-op."
+        ),
+    )
+    parser.add_argument(
+        "--complete-report",
+        metavar="PATH",
+        help=(
+            "Issue #4477 (epic #4465, Phase 4): write the structured, "
+            "machine-readable --complete unroutable-link report to PATH as "
+            "JSON (net, link pad endpoints, elapsed vs the per-link "
+            "deadline, and blocking copper reusing the 'kct net-status "
+            "--why' obstruction enumeration). Only written when --complete "
+            "left one or more links unroutable; a human-readable summary is "
+            "always printed regardless of this flag. Ignored without "
+            "--complete."
         ),
     )
     parser.add_argument(
@@ -10810,7 +11019,7 @@ def main(argv: list[str] | None = None) -> int:
     # (--preserve-existing + the lattice engine, unless the user overrode
     # --route-engine) BEFORE the #4280 gate so the gate sees the coherent
     # route-only-listed-links combination.  No-op when --complete is absent.
-    _apply_complete_mode_defaults(args, parser)
+    _apply_complete_mode_defaults(args, parser, argv)
 
     # Issue #4280: hard compatibility gate for --route-engine mesh|lattice.
     # Runs before ANY other work (env stamping, board loading, escalation
@@ -13296,6 +13505,24 @@ def main(argv: list[str] | None = None) -> int:
             nets_to_route_ids=multi_pad_net_ids,
         )
 
+    # Issue #4477 (epic #4465, Phase 4): ``--complete`` blocking-copper
+    # reporting.  Built from *pcb_path* -- the resolved working board -- so
+    # the blocking-copper enumeration matches ``kct net-status --why``
+    # exactly (a link that failed to route left no new copper behind, so its
+    # surroundings are unchanged from the original input).  ``None`` when
+    # every link routed cleanly or the completion pass did not run the
+    # lattice engine (no per-link diagnosis is wired up elsewhere).
+    _complete_report = None
+    if getattr(args, "complete", False) and not all_nets_routed:
+        _complete_report = _build_complete_link_report(router, pcb_path)
+        if _complete_report is not None:
+            if not quiet:
+                _print_complete_link_report(_complete_report)
+            if getattr(args, "complete_report", None):
+                _write_complete_report(_complete_report, args.complete_report)
+                if not quiet:
+                    print(f"  --complete: unroutable-link report written to {args.complete_report}")
+
     # Exit codes:
     # 0 = Routing meets --min-completion threshold AND (DRC passed OR DRC not run)
     # 1 = Fatal failure — no nets routed, no useful output
@@ -13318,6 +13545,14 @@ def main(argv: list[str] | None = None) -> int:
     #     regressions without parsing the full route log.  The
     #     AUTOFIX_SKIPPED_BUDGET_EXHAUSTED stderr token is emitted on
     #     this path.
+    # 8 = ``--complete`` left one or more previously-unconnected links
+    #     unroutable (issue #4477).  Distinct from -- and checked BEFORE --
+    #     the generic --min-completion threshold codes below: --complete
+    #     routes ONLY a small, explicitly-identified set of stranded links,
+    #     so a lenient --min-completion must never mask "the link this run
+    #     was specifically asked to close never closed".  See the per-link
+    #     report printed above (and optionally written via
+    #     --complete-report) for WHY and what copper is blocking.
     #
     # The --min-completion flag (default 0.95) controls the success threshold.
     # With --min-completion 0.80, routing 85% of nets returns exit code 0.
@@ -13350,6 +13585,15 @@ def main(argv: list[str] | None = None) -> int:
     if stats["nets_routed"] == 0 and nets_to_route > 0:
         # Nothing was routed — treat as fatal failure
         return 1
+
+    # Issue #4477: --complete exits nonzero whenever a link it was asked to
+    # close remains unroutable, independent of --min-completion (a whole-
+    # board convenience threshold that must not paper over a completion
+    # pass that failed at the ONE thing it was asked to do).  Checked after
+    # the "nothing routed at all" fatal path (which keeps its own exit 1)
+    # but before every generic threshold-based code below.
+    if getattr(args, "complete", False) and not all_nets_routed:
+        return 8
     elif meets_threshold and drc_passed and seg_seg_violation_count == 0:
         return 0
     elif meets_threshold and (not drc_passed or seg_seg_violation_count > 0):

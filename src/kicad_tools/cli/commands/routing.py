@@ -404,6 +404,11 @@ def run_route_command(args) -> int:
     # and tests/test_cli_parser_drift.py stays green.
     if getattr(args, "complete", False):
         sub_argv.append("--complete")
+    # Issue #4477 (epic #4465, Phase 4): forward --complete-report (the
+    # structured unroutable-link report path).  Both parsers declare it; see
+    # tests/test_cli_parser_drift.py.
+    if getattr(args, "complete_report", None):
+        sub_argv.extend(["--complete-report", args.complete_report])
     grid_val = str(args.grid)
     if grid_val.lower() != "auto":
         sub_argv.extend(["--grid", grid_val])

@@ -3127,6 +3127,20 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--complete-report",
+        metavar="PATH",
+        help=(
+            "Issue #4477 (epic #4465, Phase 4): write the structured, "
+            "machine-readable --complete unroutable-link report to PATH as "
+            "JSON (net, link pad endpoints, elapsed vs the per-link "
+            "deadline, and blocking copper reusing the 'kct net-status "
+            "--why' obstruction enumeration). Only written when --complete "
+            "left one or more links unroutable; a human-readable summary is "
+            "always printed regardless of this flag. Ignored without "
+            "--complete."
+        ),
+    )
+    route_parser.add_argument(
         "--region",
         metavar="X1,Y1,X2,Y2",
         help=(

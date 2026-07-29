@@ -87,6 +87,15 @@ class LatticeNegotiationStats:
     routed: int
     total: int
     lattice_builds: int
+    # Issue #4477 (epic #4465, Phase 4): bounded per-link termination
+    # reporting.  ``deadline_hit`` is True when ``deadline`` (issue #4472) cut
+    # the negotiation short before every connection was attempted;
+    # ``elapsed_s`` is the wall-clock the WHOLE negotiation took;
+    # ``budget_s`` is the budget the caller granted (``None`` when the
+    # negotiation ran unbudgeted, preserving the pre-#4472 behaviour).
+    deadline_hit: bool = False
+    elapsed_s: float = 0.0
+    budget_s: float | None = None
 
     @property
     def completion(self) -> float:
@@ -1609,6 +1618,10 @@ class LatticePathfinder:
         aborts within a per-link budget instead of grinding (issue #4434).
         ``None`` preserves the pre-#4472 unbudgeted (iteration-capped) loop.
         """
+        # Issue #4477: wall-clock the WHOLE negotiation (not just the
+        # deadline check) so a report can honestly say "elapsed Xs of a Ys
+        # budget" even on a run that never hits the deadline.
+        start_time = time.monotonic()
         self._set_fixed_copper(fixed_copper)
         self.build()
         pairs = list(coupled or [])
@@ -1641,6 +1654,19 @@ class LatticePathfinder:
             # budget is spent; the best pass seen so far is returned below.
             if deadline is not None and time.monotonic() >= deadline:
                 deadline_hit = True
+                # Issue #4477: if NO pass ever ran (the budget was already
+                # spent before the first attempt -- e.g. an extremely tight
+                # budget on a large cohort), ``best_reasons`` would otherwise
+                # stay empty and the caller could not report WHY every link
+                # is unroutable.  Synthesize an honest "never attempted"
+                # decline for each connection so the report is never blank.
+                if best_count < 0:
+                    best_count = 0
+                    for _length, kind, item in items:
+                        key = item.key if kind == 1 else item[0]
+                        best_reasons[key] = "deadline-exceeded"
+                        if kind == 1:
+                            best_pair_outcomes[key] = "deadline-exceeded"
                 break
             iterations_run = it + 1
             committed = self._fresh_committed()
@@ -1649,11 +1675,21 @@ class LatticePathfinder:
             pair_outcomes: dict[object, str] = {}
             routed_items = 0
             failed: list[tuple[int, Any]] = []
-            for _length, kind, item in items:
+            for _idx, (_length, kind, item) in enumerate(items):
                 # Issue #4472: abort mid-pass on the deadline too, so a single
                 # slow search inside one pass cannot overrun the budget.
                 if deadline is not None and time.monotonic() >= deadline:
                     deadline_hit = True
+                    # Issue #4477: every connection from here to the end of
+                    # this pass was never attempted -- stamp them honestly as
+                    # "deadline-exceeded" rather than silently omitting them
+                    # from ``reasons`` (which would make an unroutable link
+                    # undiagnosable in the completion report).
+                    for _length2, kind2, item2 in items[_idx:]:
+                        key2 = item2.key if kind2 == 1 else item2[0]
+                        reasons[key2] = "deadline-exceeded"
+                        if kind2 == 1:
+                            pair_outcomes[key2] = "deadline-exceeded"
                     break
                 if kind == 1:
                     pres, preason = self._route_pair_impl(
@@ -1754,12 +1790,20 @@ class LatticePathfinder:
 
         self.failure_reasons = best_reasons
         self.pair_outcomes = best_pair_outcomes
+        # Issue #4477: the budget the CALLER granted for this call is the
+        # remaining time between the deadline and this call's start -- an
+        # honest "elapsed of a Ys budget" figure even when the deadline was
+        # never reached.  ``None`` when the negotiation ran unbudgeted.
+        budget_s = max(0.0, deadline - start_time) if deadline is not None else None
         stats = LatticeNegotiationStats(
             iterations=iterations_run,
             converged=converged,
             routed=best_count if best_count >= 0 else 0,
             total=len(connections) + len(pairs),
             lattice_builds=self.lattice_builds,
+            deadline_hit=deadline_hit,
+            elapsed_s=time.monotonic() - start_time,
+            budget_s=budget_s,
         )
         return best_routes, stats
 
