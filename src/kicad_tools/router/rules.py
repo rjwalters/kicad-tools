@@ -112,6 +112,27 @@ class DesignRules:
     # writes localized to route_cmd.py's escalation wrapper).
     auto_mfr_tier_in_progress: bool = False
 
+    # Via-in-pad as a LAST-RESORT attach on the lattice engine (Issue #4475,
+    # epic #4465 Phase 3).  Issue #4284 made the lattice engine's
+    # ``LatticePathfinder._via_ok`` admit a same-net via barrel on an SMD pad
+    # whenever the fab tier supports it (``MfrLimits.via_in_pad_supported``),
+    # but that gate is OPPORTUNISTIC: the unified A* search may pick a
+    # via-in-pad site even when an in-layer route or a free-space (off-pad)
+    # via exists elsewhere, simply because it happened to be on the
+    # cheapest path.  When this flag is ``True``, ``_route_impl`` instead
+    # runs a staged search per connection: (a)+(b) in-layer / free-space-via
+    # route with via-in-pad forced OFF regardless of tier; only when that
+    # stage finds no path does (c) retry with via-in-pad admitted -- and
+    # only on a tier where :attr:`manufacturer` supports it (the hard floor
+    # is unconditional: a tier without ``via_in_pad_supported`` never reaches
+    # stage (c), and the connection is declined with an explicit
+    # ``"via-in-pad-tier-unsupported"`` reason instead of a generic
+    # ``"no-path"`` so Phase 4 reporting (epic #4465) can name the real
+    # constraint).  Default ``False`` preserves the pre-#4475 opportunistic
+    # #4284 behavior bit-for-bit -- mirrors the opt-in-by-default-off
+    # semantics of ``--micro-via-in-pad-fallback`` (escape.py / #3118).
+    via_in_pad_last_resort: bool = False
+
     # Per-component clearance overrides (Issue #1016)
     # Maps component reference (e.g., "U1") to clearance in mm
     # Use for fine-pitch ICs where tighter clearance is needed between pins

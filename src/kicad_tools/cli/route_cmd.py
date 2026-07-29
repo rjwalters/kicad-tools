@@ -4225,6 +4225,11 @@ def route_with_layer_escalation(
         # to a HARD constraint for the ampacity-free case (nets with a declared
         # ``target_ampacity`` are hard-blocked regardless of this flag).
         strict_layers=getattr(args, "strict_layers", False),
+        # Issue #4475 (epic #4465 Phase 3): stage the lattice engine's
+        # same-net via-in-pad attach as a LAST RESORT (in-layer / free-space
+        # via first) instead of the #4284 opportunistic tier-only gate.
+        # Default off preserves that pre-#4475 behaviour bit-for-bit.
+        via_in_pad_last_resort=getattr(args, "via_in_pad_last_resort", False),
     )
 
     # Parse skip nets
@@ -5442,6 +5447,10 @@ def route_with_rule_relaxation(
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
             strict_layers=getattr(args, "strict_layers", False),
+            # Issue #4475 (epic #4465 Phase 3): stage via-in-pad as a
+            # LAST RESORT on the lattice engine. Default off is
+            # bit-for-bit pre-#4475.
+            via_in_pad_last_resort=getattr(args, "via_in_pad_last_resort", False),
         )
 
         # Load PCB
@@ -7616,6 +7625,10 @@ def route_with_combined_escalation(
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
                 strict_layers=getattr(args, "strict_layers", False),
+                # Issue #4475 (epic #4465 Phase 3): stage via-in-pad as a
+                # LAST RESORT on the lattice engine. Default off is
+                # bit-for-bit pre-#4475.
+                via_in_pad_last_resort=getattr(args, "via_in_pad_last_resort", False),
             )
 
             # Load PCB
@@ -10795,6 +10808,21 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--via-in-pad-last-resort",
+        action="store_true",
+        dest="via_in_pad_last_resort",
+        default=False,
+        help=(
+            "Issue #4475 (epic #4465 Phase 3): on the lattice engine, stage "
+            "a same-net via-in-pad attach as a LAST RESORT (in-layer / "
+            "free-space via first) instead of the #4284 opportunistic "
+            "tier-only gate.  A tier without via_in_pad_supported never "
+            "reaches the retry -- the link declines with an explicit "
+            "'via-in-pad-tier-unsupported' reason.  Default off preserves "
+            "the pre-#4475 opportunistic behaviour bit-for-bit."
+        ),
+    )
+    parser.add_argument(
         "--show-congestion",
         action="store_true",
         help=(
@@ -11534,6 +11562,11 @@ def main(argv: list[str] | None = None) -> int:
         # to a HARD constraint for the ampacity-free case (nets with a declared
         # ``target_ampacity`` are hard-blocked regardless of this flag).
         strict_layers=getattr(args, "strict_layers", False),
+        # Issue #4475 (epic #4465 Phase 3): stage the lattice engine's
+        # same-net via-in-pad attach as a LAST RESORT (in-layer / free-space
+        # via first) instead of the #4284 opportunistic tier-only gate.
+        # Default off preserves that pre-#4475 behaviour bit-for-bit.
+        via_in_pad_last_resort=getattr(args, "via_in_pad_last_resort", False),
     )
 
     # Import progress helpers

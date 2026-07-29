@@ -3966,6 +3966,30 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--via-in-pad-last-resort",
+        action="store_true",
+        dest="route_via_in_pad_last_resort",
+        default=False,
+        help=(
+            "Issue #4475 (epic #4465 Phase 3): on the lattice engine "
+            "(--route-engine lattice, the engine --complete selects), stage "
+            "a same-net via-in-pad attach as a LAST RESORT rather than an "
+            "opportunistic one.  Without this flag, a fab tier that "
+            "supports via-in-pad (jlcpcb-tier1, pcbway) may land a via on a "
+            "pad whenever it happens to be the cheapest path -- the #4284 "
+            "behaviour.  With it, the search first tries an in-layer route "
+            "or a free-space (off-pad) via layer change with via-in-pad "
+            "forced OFF; only when NO such route exists does it retry with "
+            "the pad-site via admitted, and only on a tier that supports "
+            "it.  A tier without via-in-pad support never reaches the "
+            "retry -- the link is reported unroutable with an explicit "
+            "'via-in-pad-tier-unsupported' reason rather than a generic "
+            "decline.  Default off preserves the pre-#4475 opportunistic "
+            "behaviour bit-for-bit (mirrors --micro-via-in-pad-fallback's "
+            "opt-in-by-default-off semantics)."
+        ),
+    )
+    route_parser.add_argument(
         "--differential-pairs",
         action="store_true",
         help=(

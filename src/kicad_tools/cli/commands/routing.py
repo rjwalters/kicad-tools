@@ -705,6 +705,17 @@ def run_route_command(args) -> int:
                 ),
             ]
         )
+    # Issue #4475 (epic #4465 Phase 3): forward --via-in-pad-last-resort to
+    # the inner route command.  The inner main() sets
+    # DesignRules.via_in_pad_last_resort so the lattice engine stages a
+    # same-net via-in-pad attach as a last resort instead of the #4284
+    # opportunistic tier-only gate.  Outer parser uses the
+    # ``route_via_in_pad_last_resort`` dest, inner uses
+    # ``via_in_pad_last_resort``; check both for forward-compat.
+    if getattr(args, "route_via_in_pad_last_resort", False) or getattr(
+        args, "via_in_pad_last_resort", False
+    ):
+        sub_argv.append("--via-in-pad-last-resort")
     # Issue #2464: Forward differential pair routing flags
     if getattr(args, "differential_pairs", False):
         sub_argv.append("--differential-pairs")

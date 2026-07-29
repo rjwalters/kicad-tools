@@ -729,7 +729,14 @@ class LatticePathfinder:
         except Exception:
             return False
 
-    def _via_ok(self, key: NodeKey, net: int, committed: CommittedCopper) -> bool:
+    def _via_ok(
+        self,
+        key: NodeKey,
+        net: int,
+        committed: CommittedCopper,
+        *,
+        via_in_pad_override: bool | None = None,
+    ) -> bool:
         """Through-via legality at a lattice node.
 
         Static part: the via body (inflated beyond the trace keep-out by
@@ -743,6 +750,17 @@ class LatticePathfinder:
         only when the fab tier supports it (:attr:`_via_in_pad_allowed`).
         Dynamic part: committed copper on all layers + committed vias
         (:meth:`CommittedCopper.via_clear`).
+
+        ``via_in_pad_override`` (issue #4475, epic #4465 Phase 3) lets a
+        caller bypass the tier gate for the SAME-net window hit: ``None``
+        (default) preserves the pre-#4475 :attr:`_via_in_pad_allowed`
+        tier-only check byte-for-byte; ``False`` forces the same-net hit
+        illegal regardless of tier (the last-resort search's stage (a)+(b)
+        pass, which must never land a via-in-pad); ``True`` forces it legal
+        regardless of tier (a DIAGNOSTIC-ONLY probe used to name the
+        tier-limit decline reason -- callers must never emit a route found
+        this way). The unconditional OTHER-net grown-rect veto below is
+        never affected by this override.
         """
         lattice = self.build()
         obstacles = self.obstacles
@@ -778,7 +796,12 @@ class LatticePathfinder:
                 # layer change moves off the pad onto the escape stub.
                 # Other-net falls through to the unconditional grown-rect
                 # veto below.
-                if pad.net == net and not self._via_in_pad_allowed:
+                allow_via_in_pad = (
+                    self._via_in_pad_allowed
+                    if via_in_pad_override is None
+                    else via_in_pad_override
+                )
+                if pad.net == net and not allow_via_in_pad:
                     return False
             if pad.net == net:
                 continue
@@ -823,6 +846,98 @@ class LatticePathfinder:
         stubs_override: tuple[list, list] | None = None,
         exempt_pads: frozenset[int] | None = None,
     ) -> tuple[_RouteResult | None, str]:
+        """Route one connection, staging via-in-pad as a last resort (#4475).
+
+        Thin orchestrator around :meth:`_route_search` (the actual A*
+        implementation). When :attr:`DesignRules.via_in_pad_last_resort` is
+        off (the default -- byte-for-byte pre-#4475 behavior), this simply
+        forwards to a single :meth:`_route_search` call with the legacy
+        tier-only via-in-pad gate (#4284): a same-net pad-site via is legal
+        whenever the fab tier allows it, opportunistically, in the SAME
+        unified search as every other edge.
+
+        When the flag is on (and the connection is via-eligible: planar
+        fat-agent runs never get vias at all, so staging is a no-op for
+        them), the search runs in stages:
+
+        (a)+(b) In-layer route / free-space (off-pad) via layer change,
+            with via-in-pad forced OFF regardless of tier. If this stage
+            finds a path, it is returned immediately -- the pad is closed
+            WITHOUT a via-in-pad whenever any other route exists.
+        (c) Only reached when stage (a)+(b) fails.  The fab tier is the
+            hard floor here (#4284): on a tier that does not support
+            via-in-pad, stage (c) is never attempted.  Instead a cheap
+            DIAGNOSTIC-ONLY re-run (via-in-pad forced legal, its result
+            always discarded -- never emitted) checks whether the pad-site
+            via is the actual reason the link is stuck, so the decline can
+            be reported with the explicit ``"via-in-pad-tier-unsupported"``
+            reason (feeds Phase 4 reporting, epic #4465) rather than a
+            generic ``"no-path"``.  When the tier DOES support via-in-pad,
+            stage (c) retries with the tier-gated legality (identical to
+            the single-stage legacy path) and its outcome -- success or
+            failure -- is returned as-is.
+        """
+        fat = extra_clearance > 0.0 or partner_net is not None
+        last_resort = (
+            self.rules.via_in_pad_last_resort
+            and allow_vias
+            and not fat
+            and self.num_layers > 1
+        )
+        search_kwargs: dict[str, Any] = {
+            "committed": committed,
+            "history": history,
+            "present": present,
+            "allow_vias": allow_vias,
+            "extra_clearance": extra_clearance,
+            "partner_net": partner_net,
+            "stub_layers": stub_layers,
+            "stubs_override": stubs_override,
+            "exempt_pads": exempt_pads,
+        }
+        if not last_resort:
+            return self._route_search(start, end, net_class, **search_kwargs)
+
+        # Stage (a)+(b): via-in-pad forced OFF regardless of tier.
+        result, reason = self._route_search(
+            start, end, net_class, via_in_pad_override=False, **search_kwargs
+        )
+        if result is not None:
+            return result, reason
+
+        # Stage (c): the tier gate is the hard floor.  A tier without
+        # via-in-pad support never reaches it -- report the tier-limit
+        # reason (only when a diagnostic re-run proves via-in-pad would
+        # actually have closed the link; otherwise the honest stage-(a)+(b)
+        # decline reason stands, e.g. a pad-escape failure unrelated to
+        # vias at all).
+        if not self._via_in_pad_allowed:
+            diag_result, _diag_reason = self._route_search(
+                start, end, net_class, via_in_pad_override=True, **search_kwargs
+            )
+            if diag_result is not None:
+                return None, "via-in-pad-tier-unsupported"
+            return None, reason
+
+        return self._route_search(start, end, net_class, via_in_pad_override=None, **search_kwargs)
+
+    def _route_search(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: object | None,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        allow_vias: bool = True,
+        extra_clearance: float = 0.0,
+        partner_net: int | None = None,
+        stub_layers: tuple[int, ...] | None = None,
+        stubs_override: tuple[list, list] | None = None,
+        exempt_pads: frozenset[int] | None = None,
+        via_in_pad_override: bool | None = None,
+    ) -> tuple[_RouteResult | None, str]:
         """A* over the (node, layer) graph; returns ``(result, reason)``.
 
         Octilinear geometric edge costs + ``via_cost`` per layer hop +
@@ -838,6 +953,8 @@ class LatticePathfinder:
         run that cannot complete on one layer declines honestly).
         ``stubs_override`` lets :meth:`_route_pair_impl` supply parity-
         filtered stub sets (``(stubs_a, stubs_b)``) instead of recomputing.
+        ``via_in_pad_override`` (issue #4475) is forwarded verbatim to every
+        :meth:`_via_ok` call this search makes; see that method's docstring.
         """
         lattice = self.build()
         obstacles = self.obstacles
@@ -1000,7 +1117,9 @@ class LatticePathfinder:
             if allow_vias and self.num_layers > 1:
                 vok = via_ok.get(key)
                 if vok is None:
-                    vok = self._via_ok(key, net, committed)
+                    vok = self._via_ok(
+                        key, net, committed, via_in_pad_override=via_in_pad_override
+                    )
                     via_ok[key] = vok
                 if vok:
                     # Via edges join matching nodes on ADJACENT layers only
