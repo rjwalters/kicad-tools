@@ -333,6 +333,148 @@ def test_offset_corner_join_collinear_needs_no_join():
 
 
 # ---------------------------------------------------------------------------
+# 4c. shadow-aware guide re-routing: non-adjacent self-approach detection (#4460)
+# ---------------------------------------------------------------------------
+#
+# ``_offset_corner_join`` (approach 1, #4490) de-folds ADJACENT concave
+# corners.  It structurally cannot separate guide legs ~20 segments apart that
+# loop back within the parallel-offset clearance (USB3_RX1's arc ~2.1mm vs
+# ~3.0mm in board 06).  ``_guide_self_approaches`` (approach 2, #4460) finds
+# those non-adjacent loop-backs so the caller can re-route the guide away from
+# itself.  These tests pin the detector: it FIRES on a hairpin loop-back,
+# stays SILENT on a straight/gentle guide, and IGNORES adjacent corners.
+
+
+def _diffpair_router(resolution: float = 0.1):
+    from kicad_tools.router.core import Autorouter
+
+    rules = DesignRules()
+    rules.grid_resolution = resolution
+    router = Autorouter(width=20.0, height=10.0, rules=rules)
+    return router._diffpair
+
+
+def _gseg(x1, y1, x2, y2, layer=Layer.F_CU) -> Segment:
+    """A guide segment with an explicit layer (module-scoped ``_seg`` is
+    redefined later in this file without a ``layer`` kwarg)."""
+    return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=layer, net=1, net_name="P")
+
+
+def test_guide_self_approaches_detects_hairpin_loopback():
+    """A guide that doubles back within the offset clearance is flagged."""
+    dpr = _diffpair_router()
+    # East 5mm, up 0.3mm, back West 5mm at y=0.3: the two long legs run
+    # parallel 0.3mm apart -- far in arc length, close in space.
+    route = Route(net=1, net_name="USB3_RX1")
+    route.segments.append(_gseg(0.0, 0.0, 5.0, 0.0))
+    route.segments.append(_gseg(5.0, 0.0, 5.0, 0.3))
+    route.segments.append(_gseg(5.0, 0.3, 0.0, 0.3))
+    approaches = dpr._guide_self_approaches(route, spacing_cells=3, proximity=0.5)
+    assert len(approaches) >= 1
+    # The boost site sits between the two parallel legs (y ~ 0.15).
+    ax, ay = approaches[0]
+    assert 0.0 < ay < 0.3
+
+
+def test_guide_self_approaches_silent_on_straight_guide():
+    """A straight guide never self-approaches -> no boost sites."""
+    dpr = _diffpair_router()
+    route = Route(net=1, net_name="USB3_RX1")
+    route.segments.append(_gseg(0.0, 0.0, 5.0, 0.0))
+    route.segments.append(_gseg(5.0, 0.0, 10.0, 0.0))
+    assert dpr._guide_self_approaches(route, spacing_cells=3, proximity=0.5) == []
+
+
+def test_guide_self_approaches_ignores_adjacent_corner():
+    """An adjacent right-angle corner is arc-close, so it is NOT a loop-back.
+
+    Consecutive segments share an endpoint and are handled by the corner join
+    (#4490); the arc-length floor must exclude them so approach 2 does not
+    double-count approach 1's territory.
+    """
+    dpr = _diffpair_router()
+    route = Route(net=1, net_name="USB3_RX1")
+    route.segments.append(_gseg(0.0, 0.0, 5.0, 0.0))
+    route.segments.append(_gseg(5.0, 0.0, 5.0, 5.0))
+    assert dpr._guide_self_approaches(route, spacing_cells=3, proximity=0.5) == []
+
+
+def test_guide_self_approaches_clusters_overlapping_sites():
+    """A long parallel loop-back collapses to a small number of boost sites."""
+    dpr = _diffpair_router()
+    route = Route(net=1, net_name="USB3_RX1")
+    # Many short colinear segments on the outbound leg, then the return leg:
+    # every outbound/return midpoint pair is within clearance, but clustering
+    # keeps the boost set small (not one site per pair).
+    x = 0.0
+    while x < 5.0:
+        route.segments.append(_gseg(x, 0.0, x + 0.5, 0.0))
+        x += 0.5
+    route.segments.append(_gseg(5.0, 0.0, 5.0, 0.3))
+    x = 5.0
+    while x > 0.0:
+        route.segments.append(_gseg(x, 0.3, x - 0.5, 0.3))
+        x -= 0.5
+    approaches = dpr._guide_self_approaches(route, spacing_cells=3, proximity=0.5)
+    assert 1 <= len(approaches) <= 12
+
+
+def test_guide_self_approaches_detects_board06_style_loopback():
+    """The board-06 USB3_RX1 geometry: legs ~d apart, ~0.9mm of arc apart.
+
+    The offending pair in the shadow taxonomy sits ~0.4mm (~one offset gap)
+    apart in space but ~0.9mm apart in arc (ratio ~2.25).  This pins that the
+    detector fires at the REAL geometry, not just the exaggerated hairpin --
+    the earlier detour-ratio of 4.0 silently missed it and left board-06 at
+    4/9.
+    """
+    dpr = _diffpair_router(resolution=0.05)  # board-06 grid resolution
+    route = Route(net=1, net_name="USB3_RX1")
+    # Outbound leg, a tight U at the tip, and a return leg 0.4mm away.
+    route.segments.append(_gseg(0.0, 0.0, 0.9, 0.0))
+    route.segments.append(_gseg(0.9, 0.0, 0.9, 0.4))
+    route.segments.append(_gseg(0.9, 0.4, 0.0, 0.4))
+    # spacing_cells=8 @ res 0.05 -> d=0.4, proximity=0.4+0.2=0.6; the two long
+    # legs sit exactly one gap apart, ~0.9mm apart in arc (ratio ~2.25).
+    approaches = dpr._guide_self_approaches(route, spacing_cells=8)
+    assert len(approaches) >= 1
+
+
+def test_guide_self_approaches_silent_on_gentle_curve():
+    """A smooth quarter-turn is NOT a loop-back (arc ~ chord, ratio ~1).
+
+    Nearby points on a gentle bend fall within the proximity window but their
+    along-path separation matches their straight-line separation, so the
+    detour ratio excludes them -- the mechanism must not penalize ordinary
+    bends (Test Plan edge case).
+    """
+    dpr = _diffpair_router()
+    route = Route(net=1, net_name="USB3_RX1")
+    # A 90-degree arc of radius 3mm, sampled every ~15 degrees.
+    import math as _m
+
+    r = 3.0
+    prev = None
+    for k in range(7):
+        ang = _m.radians(15 * k)
+        pt = (r * _m.sin(ang), r - r * _m.cos(ang))
+        if prev is not None:
+            route.segments.append(_gseg(prev[0], prev[1], pt[0], pt[1]))
+        prev = pt
+    assert dpr._guide_self_approaches(route, spacing_cells=3, proximity=0.5) == []
+
+
+def test_guide_self_approaches_ignores_cross_layer():
+    """Legs on different layers cannot overlap in copper -> not flagged."""
+    dpr = _diffpair_router()
+    route = Route(net=1, net_name="USB3_RX1")
+    route.segments.append(_gseg(0.0, 0.0, 5.0, 0.0, layer=Layer.F_CU))
+    route.segments.append(_gseg(5.0, 0.0, 5.0, 0.3, layer=Layer.F_CU))
+    route.segments.append(_gseg(5.0, 0.3, 0.0, 0.3, layer=Layer.B_CU))
+    assert dpr._guide_self_approaches(route, spacing_cells=3, proximity=0.5) == []
+
+
+# ---------------------------------------------------------------------------
 # 5. mid-route asymmetric moves
 # ---------------------------------------------------------------------------
 

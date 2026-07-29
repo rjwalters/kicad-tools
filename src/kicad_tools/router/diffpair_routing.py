@@ -153,6 +153,24 @@ _SHADOW_PER_PAIR_BUDGET_S: float = float(os.environ.get("KCT_SHADOW_PER_PAIR_BUD
 _SHADOW_GAP_BAND_STEPS: int = int(os.environ.get("KCT_SHADOW_GAP_BAND_STEPS", "5"))
 _SHADOW_GAP_MAX_TOL_FRAC: float = float(os.environ.get("KCT_SHADOW_GAP_MAX_TOL_FRAC", "0.15"))
 
+# Issue #4460 (approach 2): a guide polyline "self-approach" is a non-adjacent
+# loop-back -- two segments whose midpoints are close in space but far apart
+# along the path.  The primary gate is the proximity window plus an
+# ``arc_sep >= proximity`` floor: on an open (non-looping) curve, points far
+# enough apart in arc are also far in space, so only a genuine fold back within
+# the offset clearance satisfies both.  This ratio is a mild extra guard that
+# rejects near-straight runs whose arc barely exceeds their chord (ratio ~1);
+# a fold within the offset clearance has arc/chord >= ~2 (USB3_RX1's offending
+# pair: ~0.9mm of arc over ~0.4mm of chord, ratio ~2.25).
+_GUIDE_SELF_APPROACH_DETOUR_RATIO: float = float(
+    os.environ.get("KCT_GUIDE_SELF_APPROACH_DETOUR_RATIO", "1.5")
+)
+# Issue #4460 (approach 2): how many times to stack the per-site avoidance
+# boost when re-routing a guide away from a shadow pinch.  Each pass adds a
+# fixed cost over the boosted neighbourhood; one pass is too weak to divert the
+# A* out of a dense escape fan, so accumulate several.
+_GUIDE_BIAS_BOOST_REPEATS: int = int(os.environ.get("KCT_GUIDE_BIAS_BOOST_REPEATS", "6"))
+
 
 # ---------------------------------------------------------------------------
 # Issue #3023 Phase A: intra-pair clearance violation detection
@@ -2907,6 +2925,11 @@ class DiffPairRouter:
         # taxonomy classification (a :class:`CoupledPairReport`).  Both are
         # diagnostic-only and never influence routing decisions.
         self._last_shadow_decline_reason: str | None = None
+        # Issue #4460 (approach 2): world-coordinate midpoints where the most
+        # recent ``_shadow_route_pair`` attempt's parallel offset overlapped
+        # the guide (the self-check pinch points).  ``_shadow_with_guide_bias``
+        # boosts the guide A*'s cost at these sites to steer the re-route away.
+        self._last_shadow_overlap_locations: list[tuple[float, float]] = []
         self._last_coupled_pair_report: CoupledPairReport | None = None
         # Issue #3089: True iff the most-recent call to
         # ``route_differential_pair_coupled`` returned because the
@@ -4292,6 +4315,156 @@ class DiffPairRouter:
             return ("miter", cand)
         return ("bevel", None)
 
+    def _shadow_with_guide_bias(
+        self,
+        pair: DifferentialPair,
+        spec: CoupledSegmentSpec,
+        pathfinder: CoupledPathfinder,
+        guide: Route,
+        start_pad: Pad,
+        end_pad: Pad,
+        spacing_cells: int,
+        swap_roles: bool,
+        probe_timeout: float | None,
+        overlap_sites: list[tuple[float, float]] | None = None,
+    ) -> tuple[Route, Route] | None:
+        """Retry shadow construction after biasing the guide away from a pinch.
+
+        Issue #4460 (approach 2).  Called as a LAST resort, only when both
+        normal shadow attempts (guide + swapped guide) have already failed, so
+        it can never displace or starve a working construction.  It re-routes
+        ``guide`` with the per-net A* avoidance cost boosted at two kinds of
+        site, then retries the parallel-shadow construction on the new guide:
+
+          1. GUIDE self-approaches -- non-adjacent polyline loop-backs the
+             offset has no room to shadow (generic; empty on guides that do not
+             fold, e.g. board 06's escape fans -- see
+             :meth:`_guide_self_approaches`).
+          2. ``overlap_sites`` -- the MEASURED pinch points where the failed
+             attempt's parallel offset overlapped the guide (sharp inside
+             bends, wrong-side tails), recorded by :meth:`_shadow_route_pair`.
+
+        Returns the constructed ``(p_route, n_route)`` or ``None`` when there
+        are no boost sites, the biased re-route fails, or the shadow still
+        cannot be built.  Fully gated behind the caller's
+        ``enable_shadow_construction`` check, so with shadow construction off
+        (the default) this never runs and committed artifacts are
+        byte-identical.
+        """
+        approaches = list(self._guide_self_approaches(guide, spacing_cells))
+        if overlap_sites:
+            approaches.extend(overlap_sites)
+        if not approaches:
+            return None
+        # Boost radius sized to the offset gap so the re-routed guide clears
+        # the parallel offset.  ``_boost_avoidance_at`` triples the passed
+        # cell count internally; target a boosted radius of ~``d``.
+        grid = self.autorouter.grid
+        d = spacing_cells * grid.resolution
+        # ``_boost_avoidance_at`` triples this internally; target a boosted
+        # radius of ~2*d so the re-route is pushed clear of the offset band.
+        radius_cells = max(1, int(round(2.0 * d / grid.resolution / 3.0)))
+        biased_guide = self._single_ended_guide_route(
+            start_pad,
+            end_pad,
+            per_net_timeout=probe_timeout,
+            avoid_locations=approaches,
+            avoid_radius_cells=radius_cells,
+        )
+        if biased_guide is None or not biased_guide.segments:
+            return None
+        return self._shadow_route_pair(
+            pair, spec, pathfinder, biased_guide, spacing_cells, swap_roles=swap_roles
+        )
+
+    def _guide_self_approaches(
+        self,
+        guide: Route,
+        spacing_cells: int,
+        proximity: float | None = None,
+    ) -> list[tuple[float, float]]:
+        """Locate non-adjacent self-approaches in a single-ended guide.
+
+        Issue #4460 (approach 2).  The geometric shadow constructor offsets
+        each guide section perpendicular by the coupled center-to-center
+        spacing ``d``.  Where the guide polyline LOOPS BACK on itself -- two
+        segments far apart in path order but geometrically within ``~d`` of
+        each other -- the inward offset lands on top of the distant leg (a
+        full-trace-width local self-cross), and neither global offset side is
+        clean because the fold bends both ways.  The per-vertex miter clip of
+        #4490 (adjacent segments only) structurally cannot separate legs that
+        are far apart in path order; only the GUIDE giving the offset room
+        fixes it.
+
+        This detector returns the world-coordinate midpoints of each such
+        loop-back so the caller can boost the A* avoidance cost there and
+        re-route the guide (see :meth:`_single_ended_guide_route`'s
+        ``avoid_locations``).  It is GENERIC: any pair whose guide loops back
+        within the offset clearance benefits, not a board-specific hack.  (On
+        board 06's escape-fan guides this returns nothing -- those guides do
+        not fold; their shadow failures are sharp-bend pinches caught instead
+        by the measured ``overlap_sites`` the caller also boosts.)
+
+        Two segments count as a self-approach when they are on the same layer,
+        their centerline midpoints come within ``proximity`` center-to-center
+        (``proximity`` defaults to ``d + trace_width`` -- below which the
+        inward offset would overlap the far leg), AND the path DETOURS between
+        them: the along-path arc separation exceeds
+        ``_GUIDE_SELF_APPROACH_DETOUR_RATIO`` times the straight-line distance
+        (and an absolute ``proximity`` floor).  The detour ratio distinguishes
+        a genuine loop-back (arc >> chord) from an ordinary gentle bend (arc ~
+        chord, ratio ~1) and from the immediately-adjacent corner the #4490
+        join already handles (ratio ~1).  Returned locations are clustered so a
+        long loop-back collapses to a handful of boost sites.
+        """
+        segs = list(guide.segments)
+        if len(segs) < 3:
+            return []
+        grid = self.autorouter.grid
+        d = spacing_cells * grid.resolution
+        s_width = max((s.width for s in segs), default=0.2)
+        if proximity is None:
+            proximity = d + s_width
+        # Cumulative arc length at each segment midpoint.
+        mids: list[tuple[float, float, float, int]] = []  # (mx, my, arc, layer_idx)
+        arc = 0.0
+        for s in segs:
+            seg_len = math.hypot(s.x2 - s.x1, s.y2 - s.y1)
+            mx = (s.x1 + s.x2) / 2.0
+            my = (s.y1 + s.y2) / 2.0
+            mids.append((mx, my, arc + seg_len / 2.0, grid.layer_to_index(s.layer.value)))
+            arc += seg_len
+        approaches: list[tuple[float, float]] = []
+        n = len(mids)
+        for i in range(n):
+            mxi, myi, arci, li = mids[i]
+            for j in range(i + 1, n):
+                mxj, myj, arcj, lj = mids[j]
+                if li != lj:
+                    continue
+                if abs(mxi - mxj) > proximity or abs(myi - myj) > proximity:
+                    continue
+                straight = math.hypot(mxi - mxj, myi - myj)
+                if straight >= proximity:
+                    continue
+                arc_sep = arcj - arci
+                # Detour test: the path must wander much farther between the
+                # two points than their direct spacing (a real loop-back), and
+                # be at least a proximity-width apart along the path (excludes
+                # the adjacent corner the #4490 join owns).
+                if arc_sep < proximity:
+                    continue
+                if arc_sep < _GUIDE_SELF_APPROACH_DETOUR_RATIO * straight:
+                    continue
+                loc = ((mxi + mxj) / 2.0, (myi + myj) / 2.0)
+                # Cluster: skip a site within ``proximity`` of one already kept
+                # so a long loop-back yields a handful of boost sites, not one
+                # per segment pair.
+                if any(math.hypot(loc[0] - kx, loc[1] - ky) < proximity for kx, ky in approaches):
+                    continue
+                approaches.append(loc)
+        return approaches
+
     def _shadow_route_pair(
         self,
         pair: DifferentialPair,
@@ -4333,6 +4506,8 @@ class DiffPairRouter:
         Returns ``(p_route, n_route)`` -- NOT committed; the caller
         runs the #3320 severe-overlap gate and the normal commit path.
         """
+        # Issue #4460 (approach 2): fresh overlap-location log for this attempt.
+        self._last_shadow_overlap_locations = []
         if not guide.segments:
             return None
         grid = self.autorouter.grid
@@ -4843,6 +5018,17 @@ class DiffPairRouter:
                     f"other side"
                 )
                 self._last_shadow_decline_reason = "overlap"  # #4459
+                # Issue #4460 (approach 2): record WHERE the offset overlapped
+                # the guide so a guide re-route can be biased away from it.  The
+                # midpoint of the two offending segments localises the pinch;
+                # ``_shadow_with_guide_bias`` boosts the A* cost there.
+                vp, vn = violation.p_segment, violation.n_segment
+                self._last_shadow_overlap_locations.append(
+                    (
+                        (vp.x1 + vp.x2 + vn.x1 + vn.x2) / 4.0,
+                        (vp.y1 + vp.y2 + vn.y1 + vn.y2) / 4.0,
+                    )
+                )
                 continue
             # Issue #3508 (second pass): full physical-overlap check
             # (via-vs-seg / via-vs-via / seg-vs-seg) mirroring the
@@ -4919,6 +5105,8 @@ class DiffPairRouter:
         start_pad: Pad,
         end_pad: Pad,
         per_net_timeout: float | None = None,
+        avoid_locations: list[tuple[float, float]] | None = None,
+        avoid_radius_cells: int = 1,
     ) -> Route | None:
         """Route one side of a pair single-ended to seed a corridor mask.
 
@@ -4944,7 +5132,26 @@ class DiffPairRouter:
         unconstrained coupled search) or when the pathfinder raises.
         """
         try:
-            return self.autorouter.router.route(start_pad, end_pad, per_net_timeout=per_net_timeout)
+            router = self.autorouter.router
+            # Issue #4460 (approach 2): when the caller has identified where a
+            # PRIOR guide self-approached within the shadow-offset clearance
+            # (a non-adjacent polyline loop-back the #4490 per-vertex miter
+            # cannot fix), boost the A* cost around those locations so this
+            # re-route steers the guide's own legs apart and leaves the
+            # parallel offset room.  The costs are transient -- the ``finally``
+            # clause below clears them, so a boosted probe cannot leak
+            # cost-shaping into later searches.  With ``avoid_locations`` unset
+            # (the default and the only path when shadow construction is off)
+            # this is a no-op and the probe is byte-identical to before.
+            if avoid_locations and hasattr(router, "_boost_avoidance_at"):
+                # ``_boost_avoidance_at`` adds a fixed cost per call over a
+                # ``3 * radius_cells`` neighbourhood; repeat it to accumulate a
+                # penalty strong enough to divert the A* out of a congested
+                # pinch (a single pass is too weak on board 06's escape fan).
+                for loc in avoid_locations:
+                    for _ in range(_GUIDE_BIAS_BOOST_REPEATS):
+                        router._boost_avoidance_at(loc, avoid_radius_cells)
+            return router.route(start_pad, end_pad, per_net_timeout=per_net_timeout)
         except Exception as exc:  # pragma: no cover — defensive
             logger.debug(
                 "corridor guide route raised for %r -> %r: %s",
@@ -5350,8 +5557,17 @@ class DiffPairRouter:
             # for the board 06 run-4 measurements (stranded shadow
             # tails, via-on-partner intersections, corridor
             # competition stranding later single-ended nets).
+            # Issue #4460 (approach 2): the P/N guides and the per-side overlap
+            # pinch points from the normal shadow attempts, captured so a
+            # guide-biased re-route can run as a LAST-resort fallback (after
+            # both normal attempts fail) without displacing a working attempt
+            # or spending its per-pair budget.
+            n_guide: Route | None = None
+            p_overlap_sites: list[tuple[float, float]] = []
+            n_overlap_sites: list[tuple[float, float]] = []
             if self.enable_shadow_construction and guide_route is not None and guide_route.segments:
                 shadow = self._shadow_route_pair(pair, spec, pathfinder, guide_route, spacing_cells)
+                p_overlap_sites = list(self._last_shadow_overlap_locations)
                 if shadow is not None:
                     result = shadow
                     coupled_phase = "shadow"
@@ -5393,12 +5609,75 @@ class DiffPairRouter:
                     shadow = self._shadow_route_pair(
                         pair, spec, pathfinder, n_guide, spacing_cells, swap_roles=True
                     )
+                    n_overlap_sites = list(self._last_shadow_overlap_locations)
                     if shadow is not None:
                         result = shadow
                         coupled_phase = "shadow-swapped"
                         print(
                             "    [coupled-shadow] pair constructed as N guide + parallel P shadow"
                         )
+
+            # Issue #4460 (approach 2): guide-biased re-route, LAST resort.
+            # Runs only when BOTH normal shadow attempts have failed, so it can
+            # never displace or starve a working (swapped) construction.  It
+            # re-routes the guide with the A* cost boosted at (a) any
+            # non-adjacent guide self-approach and (b) the measured overlap
+            # pinch points from the failed attempt, so the parallel offset gets
+            # room, then retries the shadow.  Generic: any pair whose offset
+            # pinched its guide benefits.  Fully gated on shadow construction,
+            # so flag-off behaviour is unchanged.
+            if (
+                result is None
+                and self.enable_shadow_construction
+                and guide_route is not None
+                and guide_route.segments
+            ):
+                # Bound the biased re-route probe by the REMAINING per-pair
+                # shadow budget so this last-resort pass cannot extend the
+                # per-pair wall-clock past ``_SHADOW_PER_PAIR_BUDGET_S`` (the
+                # normal attempts may already have spent most of it).
+                bias_timeout = probe_timeout
+                if per_pair_timeout is not None and probe_timeout is not None:
+                    bias_timeout = max(
+                        0.5,
+                        min(
+                            probe_timeout, _SHADOW_PER_PAIR_BUDGET_S - (time.monotonic() - spec_t0)
+                        ),
+                    )
+                biased = self._shadow_with_guide_bias(
+                    pair,
+                    spec,
+                    pathfinder,
+                    guide_route,
+                    spec.p_start,
+                    spec.p_end,
+                    spacing_cells,
+                    False,
+                    bias_timeout,
+                    p_overlap_sites,
+                )
+                phase_label = "shadow-guide-biased"
+                if biased is None and n_guide is not None and n_guide.segments:
+                    biased = self._shadow_with_guide_bias(
+                        pair,
+                        spec,
+                        pathfinder,
+                        n_guide,
+                        spec.n_start,
+                        spec.n_end,
+                        spacing_cells,
+                        True,
+                        bias_timeout,
+                        n_overlap_sites,
+                    )
+                    phase_label = "shadow-swapped-guide-biased"
+                if biased is not None:
+                    result = biased
+                    coupled_phase = phase_label
+                    print(
+                        "    [coupled-shadow] pair constructed via guide-biased "
+                        f"re-route ({phase_label})"
+                    )
 
             # Issue #3987 (unit 2a of #3921): when the shadow constructor is
             # ON, a pair is EITHER a validated parallel shadow (ms) OR it is
