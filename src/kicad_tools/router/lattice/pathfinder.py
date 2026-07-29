@@ -797,9 +797,7 @@ class LatticePathfinder:
                 # Other-net falls through to the unconditional grown-rect
                 # veto below.
                 allow_via_in_pad = (
-                    self._via_in_pad_allowed
-                    if via_in_pad_override is None
-                    else via_in_pad_override
+                    self._via_in_pad_allowed if via_in_pad_override is None else via_in_pad_override
                 )
                 if pad.net == net and not allow_via_in_pad:
                     return False
@@ -879,10 +877,7 @@ class LatticePathfinder:
         """
         fat = extra_clearance > 0.0 or partner_net is not None
         last_resort = (
-            self.rules.via_in_pad_last_resort
-            and allow_vias
-            and not fat
-            and self.num_layers > 1
+            self.rules.via_in_pad_last_resort and allow_vias and not fat and self.num_layers > 1
         )
         search_kwargs: dict[str, Any] = {
             "committed": committed,
@@ -1117,9 +1112,7 @@ class LatticePathfinder:
             if allow_vias and self.num_layers > 1:
                 vok = via_ok.get(key)
                 if vok is None:
-                    vok = self._via_ok(
-                        key, net, committed, via_in_pad_override=via_in_pad_override
-                    )
+                    vok = self._via_ok(key, net, committed, via_in_pad_override=via_in_pad_override)
                     via_ok[key] = vok
                 if vok:
                     # Via edges join matching nodes on ADJACENT layers only

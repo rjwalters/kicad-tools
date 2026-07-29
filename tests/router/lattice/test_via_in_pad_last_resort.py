@@ -284,7 +284,15 @@ _OUTLINE_RECT = """  (gr_rect (start 0.0 0.0) (end 20.0 20.0)
 
 
 def _footprint(
-    ref: str, x: float, y: float, w: float, h: float, net: int, net_name: str, layer: str, uuid_n: int
+    ref: str,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    net: int,
+    net_name: str,
+    layer: str,
+    uuid_n: int,
 ) -> str:
     return f"""  (footprint "kct:Pad"
     (layer "{layer}")
