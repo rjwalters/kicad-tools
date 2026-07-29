@@ -38,6 +38,7 @@ class StrategyType(Enum):
 
     MOVE_COMPONENT = "move_component"  # Move a single component
     MOVE_MULTIPLE = "move_multiple"  # Move multiple components
+    ROTATE_COMPONENT = "rotate_component"  # Rotate a single component in place
     ADD_VIA = "add_via"  # Add via to change layers
     CHANGE_LAYER = "change_layer"  # Route on different layer
     REROUTE_NET = "reroute_net"  # Reroute a single net

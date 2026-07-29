@@ -88,7 +88,13 @@ from .parallel import (
     find_independent_groups,
 )
 from .path import create_intra_ic_routes, reduce_pads_after_intra_ic
-from .placement_feedback import PlacementFeedbackLoop, PlacementFeedbackResult
+from .placement_feedback import (
+    PlacementDeltaFeedbackLoop,
+    PlacementDeltaFeedbackResult,
+    PlacementFeedbackLoop,
+    PlacementFeedbackResult,
+    write_placement_delta_json,
+)
 from .primitives import Obstacle, Pad, Route, Via
 from .rules import (
     DEFAULT_NET_CLASS_MAP,
@@ -15757,6 +15763,99 @@ class Autorouter:
             timeout=timeout,
             per_net_timeout=per_net_timeout,
         )
+
+    def route_with_placement_delta_feedback(
+        self,
+        pcb: any = None,
+        max_adjustments: int = 3,
+        use_negotiated: bool = True,
+        verbose: bool = True,
+        fixed_refs: set[str] | list[str] | None = None,
+        max_movement: float | None = 5.0,
+        timeout: float | None = None,
+        per_net_timeout: float | None = None,
+        enable_placement_delta_feedback: bool = True,
+        delta_output_path: str | None = None,
+        delta_proposer: Any = None,
+        min_confidence: float = 0.5,
+        stagnation_patience: int = 3,
+        outer_timeout: float | None = None,
+    ) -> PlacementDeltaFeedbackResult | PlacementFeedbackResult:
+        """Close the router<->placement loop with classifier-driven deltas (#4467).
+
+        Phase 2 of the board-07 feedback epic (#3438).  Runs the
+        :class:`~kicad_tools.router.placement_feedback.PlacementDeltaFeedbackLoop`:
+        each iteration classifies the current placement, translates every
+        PLACEMENT_BOUND / CONGESTION_SATURATED diagnosis into a
+        :class:`~kicad_tools.router.placement_delta.PlacementDelta` (Phase 1,
+        #4466), applies the top applyable delta (including ``rotate_180`` to
+        de-reverse a facing part), re-routes, and keeps the change only on a
+        strict routed-net increase -- otherwise reverts placement + routes
+        atomically.
+
+        Args:
+            pcb: The PCB whose placement the loop may mutate.  Required for
+                placement deltas; when ``None`` the loop only routes.
+            max_adjustments: Maximum delta apply/keep-or-revert iterations.
+            use_negotiated: Use negotiated-congestion routing for each pass.
+            verbose: Print per-iteration progress.
+            fixed_refs: Component refs that must never move (anchors); a delta
+                targeting one is skipped with a logged reason.
+            max_movement: Hard cap on per-component translate distance (mm); a
+                delta exceeding it is skipped.  Rotations keep the centre fixed
+                and are never budget-limited.
+            timeout / per_net_timeout: Forwarded to the negotiated router.
+            enable_placement_delta_feedback: Default-on toggle (A/B + bisection
+                guard).  When ``False`` this delegates to
+                :meth:`route_with_placement_feedback` for byte-identical prior
+                behavior and writes no delta artifact.
+            delta_output_path: When set, write ``<path>`` as the
+                ``_placement_delta.json`` artifact (applied + proposed deltas,
+                round-trippable via :meth:`PlacementDelta.from_dict`).
+            delta_proposer: Optional ``Callable[[PCB], list[PlacementDelta]]``
+                override for the classifier pipeline (used by tests).
+            min_confidence / stagnation_patience / outer_timeout: Forwarded to
+                the legacy loop only when the toggle is off.
+
+        Returns:
+            A :class:`PlacementDeltaFeedbackResult` when the delta loop runs, or
+            a :class:`PlacementFeedbackResult` when the toggle is off.
+        """
+        if not enable_placement_delta_feedback:
+            # Bisection guard: exact prior behavior, no delta artifact written.
+            return self.route_with_placement_feedback(
+                pcb=pcb,
+                max_adjustments=max_adjustments,
+                use_negotiated=use_negotiated,
+                min_confidence=min_confidence,
+                verbose=verbose,
+                fixed_refs=fixed_refs,
+                max_movement=max_movement,
+                timeout=timeout,
+                per_net_timeout=per_net_timeout,
+                stagnation_patience=stagnation_patience,
+                outer_timeout=outer_timeout,
+            )
+
+        loop = PlacementDeltaFeedbackLoop(
+            router=self,
+            pcb=pcb,
+            verbose=verbose,
+            fixed_refs=fixed_refs,
+            max_movement=max_movement,
+            delta_proposer=delta_proposer,
+        )
+        result = loop.run_delta(
+            max_adjustments=max_adjustments,
+            use_negotiated=use_negotiated,
+            timeout=timeout,
+            per_net_timeout=per_net_timeout,
+        )
+        if delta_output_path is not None:
+            write_placement_delta_json(
+                delta_output_path, result.applied_deltas, result.proposed_deltas
+            )
+        return result
 
     # =========================================================================
     # Escape Routing API (Dense Packages)

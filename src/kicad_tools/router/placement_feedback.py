@@ -9,18 +9,23 @@ routing failures.
 from __future__ import annotations
 
 import copy
+import json
 import math
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.placement_delta import PlacementDelta
     from kicad_tools.router.primitives import Route
     from kicad_tools.schema.pcb import PCB
 
 from kicad_tools.recovery import (
+    Action,
     ApplicationResult,
+    Difficulty,
     ResolutionStrategy,
     StrategyApplicator,
     StrategyGenerator,
@@ -1031,3 +1036,462 @@ class PlacementFeedbackLoop:
             "difficulty": strategy.difficulty.value,
             "risks": risks,
         }
+
+
+@dataclass
+class PlacementDeltaFeedbackResult:
+    """Result of the classifier-driven placement-delta feedback loop (#4467).
+
+    Distinct from :class:`PlacementFeedbackResult` (the blocker-geometry loop):
+    this records the concrete :class:`~kicad_tools.router.placement_delta.PlacementDelta`
+    objects the classifier proposed and which of them the driver *kept* (a delta
+    is kept only when applying it + re-routing strictly increased the routed-net
+    count; otherwise it is reverted atomically and never appears in
+    ``applied_deltas``).
+
+    Attributes:
+        success: Whether all nets are routed in the returned state.
+        routes: Final list of routes (the best state observed).
+        iterations: Number of routing passes performed.
+        applied_deltas: Deltas that were applied AND kept (strict improvement).
+        proposed_deltas: Every delta the classifier proposed across iterations,
+            whether or not it was applied (superset of ``applied_deltas``).
+        skipped_deltas / skip_reasons: Parallel lists recording deltas the
+            selector declined (anchored ref, over ``max_movement``, unsafe, or a
+            non-applyable ``reorder_pins`` kind) and the one-line reason, so the
+            "skipped with a logged reason" contract is observable in tests.
+        failed_nets: Net IDs still unrouted in the returned state.
+        placement_diff: Per-component before/after positions for kept moves.
+        exit_reason: ``pd_converged`` | ``pd_reverted`` | ``pd_no_delta`` |
+            ``pd_no_pcb`` | ``pd_apply_failed`` | ``pd_max_iter``.
+    """
+
+    success: bool
+    routes: list[Route]
+    iterations: int
+    applied_deltas: list[PlacementDelta] = field(default_factory=list)
+    proposed_deltas: list[PlacementDelta] = field(default_factory=list)
+    skipped_deltas: list[PlacementDelta] = field(default_factory=list)
+    skip_reasons: list[str] = field(default_factory=list)
+    failed_nets: list[int] = field(default_factory=list)
+    placement_diff: list[PlacementDiffEntry] = field(default_factory=list)
+    exit_reason: str = "pd_max_iter"
+
+    def summary(self) -> str:
+        lines = [
+            "Placement-Delta Feedback Result:",
+            f"  Success: {self.success}",
+            f"  Iterations: {self.iterations}",
+            f"  Exit reason: {self.exit_reason}",
+            f"  Routes: {len(self.routes)}",
+            f"  Deltas proposed: {len(self.proposed_deltas)}",
+            f"  Deltas kept:     {len(self.applied_deltas)}",
+            f"  Deltas skipped:  {len(self.skipped_deltas)}",
+            f"  Failed nets: {len(self.failed_nets)}",
+        ]
+        for delta in self.applied_deltas:
+            lines.append(f"    kept: {delta.target_ref} {delta.kind} ({delta.net_name})")
+        for delta, reason in zip(self.skipped_deltas, self.skip_reasons, strict=False):
+            lines.append(f"    skipped: {delta.target_ref} {delta.kind} -- {reason}")
+        return "\n".join(lines)
+
+
+def write_placement_delta_json(
+    path: str | Path,
+    applied: list[PlacementDelta],
+    proposed: list[PlacementDelta],
+) -> dict[str, Any]:
+    """Write the ``<output>_placement_delta.json`` artifact (issue #4467).
+
+    Serializes the applied (kept) and proposed deltas via
+    :meth:`PlacementDelta.to_dict` so a propose-only recipe can reload them with
+    :meth:`PlacementDelta.from_dict` and apply them deterministically without
+    re-running the loop.  Returns the serialized dict for convenience/testing.
+    """
+    data = {
+        "applied": [d.to_dict() for d in applied],
+        "proposed": [d.to_dict() for d in proposed],
+    }
+    Path(path).write_text(json.dumps(data, indent=2))
+    return data
+
+
+class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
+    """Classifier-driven placement-delta feedback loop (issue #4467).
+
+    Phase 2 of the board-07 router<->placement epic (#3438).  Where the base
+    :class:`PlacementFeedbackLoop` is driven by ``analyze_routing_failure`` ->
+    ``recovery.StrategyGenerator`` (blocker geometry, translation-only), this
+    subclass is driven by the stuck-net *classifier*
+    (:func:`~kicad_tools.router.stuck_classifier.classify_stuck_nets_from_pcb`)
+    and Phase-1's translator
+    (:func:`~kicad_tools.router.placement_delta.deltas_from_result`).  That lets
+    it execute the ``rotate_180`` (de-reverse a reversed facing QFN) move the
+    classifier recommends -- a move the blocker-geometry loop cannot express.
+
+    Relationship to the file-based, subprocess-driven
+    :mod:`kicad_tools.router.placement_nudge` (#3865): both classify stuck nets
+    and gate a placement change on re-routed reach, but ``placement_nudge``
+    operates on a routed ``.kicad_pcb`` file via a chorus-runner subprocess and
+    is translation-only.  This loop runs *in process* on the live
+    :class:`~kicad_tools.router.core.Autorouter`, consumes typed
+    :class:`~kicad_tools.router.placement_delta.PlacementDelta` objects
+    (including ``rotate_180``), and reuses the base loop's monotone best-snapshot
+    machinery for atomic keep/revert.
+
+    Each outer iteration:
+
+    1. classify the current PCB placement, translate every PLACEMENT_BOUND /
+       CONGESTION_SATURATED diagnosis into a :class:`PlacementDelta`;
+    2. select the top applyable delta (skip ``reorder_pins`` -- no pad-remap
+       applicator exists yet -- and any delta whose target is anchored, exceeds
+       ``max_movement``, or is unsafe, each with a logged reason);
+    3. apply it to BOTH the PCB footprint (via
+       :class:`~kicad_tools.recovery.StrategyApplicator`) and the router's flat
+       pad coordinates, then clear routes and re-route;
+    4. keep the change only on a **strict** routed-net increase; otherwise revert
+       placement + router pads + routes atomically.
+    """
+
+    def __init__(
+        self,
+        router: Autorouter,
+        pcb: PCB | None = None,
+        verbose: bool = True,
+        fixed_refs: set[str] | list[str] | None = None,
+        max_movement: float | None = 5.0,
+        delta_proposer: Callable[[PCB], list[PlacementDelta]] | None = None,
+    ):
+        super().__init__(
+            router=router,
+            pcb=pcb,
+            verbose=verbose,
+            fixed_refs=fixed_refs,
+            max_movement=max_movement,
+        )
+        # Injectable so tests can drive the keep/revert logic with a known delta
+        # without constructing a full classifier fixture.  Defaults to the real
+        # classifier -> translator pipeline.
+        self._delta_proposer = delta_proposer
+
+    # --- delta proposal / selection ----------------------------------------
+
+    def _propose_deltas(self) -> list[PlacementDelta]:
+        """Classify the current PCB and translate diagnoses into deltas."""
+        if self.pcb is None:
+            return []
+        if self._delta_proposer is not None:
+            return list(self._delta_proposer(self.pcb))
+        from kicad_tools.router.placement_delta import deltas_from_result
+        from kicad_tools.router.stuck_classifier import classify_stuck_nets_from_pcb
+
+        result = classify_stuck_nets_from_pcb(self.pcb)
+        return deltas_from_result(self.pcb, result)
+
+    def _strategy_from_delta(self, delta: PlacementDelta) -> ResolutionStrategy | None:
+        """Build a recovery ``ResolutionStrategy`` for an applyable delta.
+
+        Returns ``None`` for kinds with no Phase-2 applicator (``reorder_pins``)
+        or when the target footprint is missing.
+        """
+        fp = self._find_footprint(delta.target_ref)
+        if fp is None:
+            return None
+        if delta.kind == "translate":
+            old_x, old_y = fp.position[0], fp.position[1]
+            return ResolutionStrategy(
+                type=StrategyType.MOVE_COMPONENT,
+                difficulty=Difficulty.MEDIUM,
+                confidence=1.0,
+                actions=[
+                    Action(
+                        type="move",
+                        target=delta.target_ref,
+                        params={"x": old_x + delta.dx, "y": old_y + delta.dy},
+                    )
+                ],
+                affected_components=[delta.target_ref],
+                affected_nets=[delta.net_name],
+            )
+        if delta.kind == "rotate_180":
+            return ResolutionStrategy(
+                type=StrategyType.ROTATE_COMPONENT,
+                difficulty=Difficulty.MEDIUM,
+                confidence=1.0,
+                actions=[
+                    Action(
+                        type="rotate",
+                        target=delta.target_ref,
+                        params={"rotation_delta": delta.rotation_delta},
+                    )
+                ],
+                affected_components=[delta.target_ref],
+                affected_nets=[delta.net_name],
+            )
+        # reorder_pins (rationale-only in Phase 1) and any unknown kind.
+        return None
+
+    def _select_delta(
+        self,
+        deltas: list[PlacementDelta],
+        skipped: list[PlacementDelta],
+        skip_reasons: list[str],
+    ) -> tuple[PlacementDelta, ResolutionStrategy] | None:
+        """Return the first applyable ``(delta, strategy)``, logging skips.
+
+        Honors the ladder's omissions by construction: ``deltas`` only ever
+        contains moves the classifier's translator emitted, so a suppressed
+        action (e.g. ``WIDEN_CHANNEL`` for a reversed bus) is never present to
+        select.  Records every declined delta + reason on the parallel
+        ``skipped`` / ``skip_reasons`` lists so the skip is observable.
+        """
+
+        def _skip(delta: PlacementDelta, reason: str) -> None:
+            skipped.append(delta)
+            skip_reasons.append(reason)
+            if self.verbose:
+                print(f"  Skipping delta {delta.target_ref} ({delta.kind}): {reason}")
+
+        for delta in deltas:
+            if delta.kind == "reorder_pins":
+                _skip(delta, "reorder_pins has no Phase-2 applicator (pad-remap not implemented)")
+                continue
+            if delta.target_ref in self.fixed_refs:
+                _skip(delta, f"target {delta.target_ref} is anchored (fixed_refs)")
+                continue
+            strategy = self._strategy_from_delta(delta)
+            if strategy is None:
+                _skip(delta, f"no applyable strategy for kind={delta.kind!r}")
+                continue
+            if self._strategy_touches_fixed_refs(strategy):
+                _skip(delta, "strategy touches an anchored ref")
+                continue
+            if not self._strategy_within_movement_budget(strategy):
+                cap = f"{self.max_movement:.2f}mm" if self.max_movement is not None else "n/a"
+                _skip(delta, f"move exceeds max_movement cap ({cap})")
+                continue
+            if self.pcb is not None and not self._strategy_applicator.is_safe_to_apply(
+                strategy, self.pcb
+            ):
+                _skip(delta, "unsafe to apply (board bounds)")
+                continue
+            return delta, strategy
+        return None
+
+    # --- router-pad synchronization ----------------------------------------
+
+    def _router_pads(self) -> list[Any]:
+        """Flat list of the router's Pad objects (``all_pads`` if present)."""
+        pads = getattr(self.router, "all_pads", None)
+        if pads:
+            return list(pads)
+        return list(getattr(self.router, "pads", {}).values())
+
+    def _snapshot_router_pads(self) -> list[tuple[Any, float, float]]:
+        """Capture each router Pad object's ``(x, y)`` for atomic restore."""
+        return [(pad, pad.x, pad.y) for pad in self._router_pads()]
+
+    def _restore_router_pads(self, snapshot: list[tuple[Any, float, float]]) -> None:
+        """Restore router Pad coordinates captured by :meth:`_snapshot_router_pads`.
+
+        Only pad coordinates are restored -- the routing grid is rebuilt from
+        these coordinates by ``_clear_routes`` at the top of the next routing
+        pass, so no explicit grid reset is needed here (and the final best-state
+        restore does not re-route).
+        """
+        for pad, x, y in snapshot:
+            pad.x = x
+            pad.y = y
+
+    def _apply_delta_to_router_pads(self, delta: PlacementDelta) -> None:
+        """Mutate the router's flat pad coordinates to match an applied delta.
+
+        The router routes against its own ``Pad`` objects (board-frame ``x``/
+        ``y``), NOT the PCB footprints, so a PCB-only mutation would leave the
+        re-route geometrically unchanged.  This mirrors the pad transform
+        ``optim.router_factory`` applies for candidate placements:
+
+        * ``translate`` -> shift every pad of the target ref by ``(dx, dy)``;
+        * ``rotate_180`` -> point-reflect every pad of the target ref through the
+          footprint origin (a 180-degree rotation about the origin is exactly a
+          reflection through it), matching what the PCB-frame classifier sees
+          after ``fp.rotation += 180``.
+        """
+        pads = self._router_pads()
+        if delta.kind == "translate":
+            for pad in pads:
+                if getattr(pad, "ref", "") == delta.target_ref:
+                    pad.x += delta.dx
+                    pad.y += delta.dy
+        elif delta.kind == "rotate_180":
+            fp = self._find_footprint(delta.target_ref)
+            if fp is None:
+                return
+            cx, cy = fp.position[0], fp.position[1]
+            for pad in pads:
+                if getattr(pad, "ref", "") == delta.target_ref:
+                    pad.x = 2.0 * cx - pad.x
+                    pad.y = 2.0 * cy - pad.y
+
+    # --- driver ------------------------------------------------------------
+
+    def run_delta(
+        self,
+        max_adjustments: int = 3,
+        use_negotiated: bool = True,
+        timeout: float | None = None,
+        per_net_timeout: float | None = None,
+    ) -> PlacementDeltaFeedbackResult:
+        """Run the classifier-driven placement-delta feedback loop.
+
+        Args:
+            max_adjustments: Maximum number of delta apply/keep-or-revert
+                iterations to attempt after the initial routing pass.
+            use_negotiated: Use negotiated-congestion routing (vs plain
+                ``route_all``) for every routing pass.
+            timeout / per_net_timeout: Forwarded to the negotiated router so each
+                re-route respects the caller's wall-clock budget.
+
+        Returns:
+            A :class:`PlacementDeltaFeedbackResult`.  The returned routes/placement
+            are always the best (highest routed-net) state observed -- a
+            non-improving delta is reverted atomically (placement, router pads,
+            and routes all restored).
+        """
+        negotiated_kwargs: dict[str, Any] = {}
+        if timeout is not None:
+            negotiated_kwargs["timeout"] = timeout
+        if per_net_timeout is not None:
+            negotiated_kwargs["per_net_timeout"] = per_net_timeout
+
+        def _route() -> list[Route]:
+            self._clear_routes()
+            if use_negotiated:
+                return self.router.route_all_negotiated(**negotiated_kwargs)
+            return self.router.route_all()
+
+        def _routed_count() -> int:
+            total = len(self.router.nets) - 1  # -1 for net 0
+            return total - len(self.router.get_failed_nets())
+
+        applied: list[PlacementDelta] = []
+        proposed: list[PlacementDelta] = []
+        skipped: list[PlacementDelta] = []
+        skip_reasons: list[str] = []
+
+        if self.verbose:
+            print("\n=== Placement-Delta Feedback Loop (classifier-driven) ===")
+            print(f"  Max adjustments: {max_adjustments}")
+            if self.fixed_refs:
+                print(f"  Anchored refs:   {', '.join(sorted(self.fixed_refs))}")
+            if self.max_movement is not None:
+                print(f"  Max movement:    {self.max_movement:.2f}mm")
+
+        # Initial routing pass establishes the baseline / best state.
+        _route()
+        total_nets = len(self.router.nets) - 1
+        best_count = _routed_count()
+        best_routes = copy.deepcopy(list(self.router.routes))
+        best_placement = self._snapshot_placement()
+        best_pads = self._snapshot_router_pads()
+
+        if self.verbose:
+            print(f"  Baseline: routed {best_count}/{total_nets} nets")
+
+        exit_reason = "pd_max_iter"
+        iteration = 0
+        for iteration in range(max_adjustments):
+            if not self.router.get_failed_nets():
+                exit_reason = "pd_converged"
+                break
+            if self.pcb is None:
+                exit_reason = "pd_no_pcb"
+                break
+
+            deltas = self._propose_deltas()
+            proposed.extend(deltas)
+            selection = self._select_delta(deltas, skipped, skip_reasons)
+            if selection is None:
+                exit_reason = "pd_no_delta"
+                if self.verbose:
+                    print("  No applyable placement delta; stopping.")
+                break
+            delta, strategy = selection
+
+            # Snapshot the pre-apply state so a non-improving delta reverts
+            # atomically (placement + router pads + routes together).
+            pre_placement = self._snapshot_placement()
+            pre_pads = self._snapshot_router_pads()
+            pre_routes = copy.deepcopy(list(self.router.routes))
+            pre_count = _routed_count()
+
+            # Record the pre-move position (once) for the placement diff.
+            self._snapshot_positions([delta.target_ref])
+
+            if self.verbose:
+                print(
+                    f"\n--- Iteration {iteration} --- applying {delta.kind} "
+                    f"to {delta.target_ref} (net {delta.net_name})"
+                )
+
+            result = self._strategy_applicator.apply_strategy(self.pcb, strategy)
+            if not result.success:
+                exit_reason = "pd_apply_failed"
+                if self.verbose:
+                    print(f"  Delta application failed: {result.message}")
+                break
+            # Keep the router's flat pad geometry in lockstep with the PCB.
+            self._apply_delta_to_router_pads(delta)
+
+            _route()
+            new_count = _routed_count()
+
+            if new_count > pre_count:
+                applied.append(delta)
+                if self.verbose:
+                    print(f"  Kept: routed {pre_count} -> {new_count} (strict improvement)")
+                if new_count > best_count:
+                    best_count = new_count
+                    best_routes = copy.deepcopy(list(self.router.routes))
+                    best_placement = self._snapshot_placement()
+                    best_pads = self._snapshot_router_pads()
+            else:
+                # Revert atomically: placement, router pads, and routes.
+                self._restore_placement(pre_placement)
+                self._restore_router_pads(pre_pads)
+                self.router.routes = pre_routes
+                exit_reason = "pd_reverted"
+                if self.verbose:
+                    print(
+                        f"  Reverted: routed {pre_count} -> {new_count} "
+                        f"(no strict improvement); placement + routes restored"
+                    )
+                break
+
+        # Restore the best observed state (routes + placement + router pads
+        # together) so the returned result is monotone in routed-net count.
+        current_count = _routed_count()
+        if best_count > current_count:
+            self.router.routes = copy.deepcopy(best_routes)
+            self._restore_placement(best_placement)
+            self._restore_router_pads(best_pads)
+
+        failed_nets = self.router.get_failed_nets()
+        if self.verbose:
+            print("\n=== Placement-Delta Feedback Complete ===")
+            print(f"  Deltas kept: {len(applied)}  proposed: {len(proposed)}")
+            print(f"  Final failed nets: {len(failed_nets)}")
+            print(f"  Exit reason: {exit_reason}")
+
+        return PlacementDeltaFeedbackResult(
+            success=len(failed_nets) == 0,
+            routes=list(self.router.routes),
+            iterations=iteration + 1,
+            applied_deltas=applied,
+            proposed_deltas=proposed,
+            skipped_deltas=skipped,
+            skip_reasons=skip_reasons,
+            failed_nets=failed_nets,
+            placement_diff=self._build_placement_diff(),
+            exit_reason=exit_reason,
+        )

@@ -226,12 +226,20 @@ from .parallel import (
     resolve_parallel_conflicts,
 )
 from .pathfinder import AStarNode, Router
+from .placement_delta import (
+    PlacementDelta,
+    delta_from_diagnosis,
+    deltas_from_result,
+)
 from .placement_feedback import (
     PlacementAdjustment,
+    PlacementDeltaFeedbackLoop,
+    PlacementDeltaFeedbackResult,
     PlacementDiffEntry,
     PlacementFeedbackLoop,
     PlacementFeedbackResult,
     detect_pf_stagnation,
+    write_placement_delta_json,
 )
 from .preflight import (
     OffGridReport,
@@ -496,6 +504,13 @@ __all__ = [
     "PlacementAdjustment",
     "PlacementDiffEntry",
     "detect_pf_stagnation",
+    # Classifier-driven placement-delta feedback (#4467)
+    "PlacementDeltaFeedbackLoop",
+    "PlacementDeltaFeedbackResult",
+    "PlacementDelta",
+    "delta_from_diagnosis",
+    "deltas_from_result",
+    "write_placement_delta_json",
     # Escape Routing (dense packages)
     "EscapeRouter",
     "EscapeRoute",

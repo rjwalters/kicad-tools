@@ -82,6 +82,8 @@ class StrategyApplicator:
             return self._apply_move_component(pcb, strategy)
         elif strategy.type == StrategyType.MOVE_MULTIPLE:
             return self._apply_move_multiple(pcb, strategy)
+        elif strategy.type == StrategyType.ROTATE_COMPONENT:
+            return self._apply_rotate_component(pcb, strategy)
         else:
             return ApplicationResult(
                 success=False,
@@ -177,6 +179,67 @@ class StrategyApplicator:
             message=f"Moved {len(moved)} components: " + "; ".join(messages),
         )
 
+    def _apply_rotate_component(self, pcb: PCB, strategy: ResolutionStrategy) -> ApplicationResult:
+        """Apply a single-component in-place rotation strategy (issue #4467).
+
+        Rotates the footprint about its own origin (``fp.position`` is
+        unchanged) by ``rotation_delta`` degrees.  This is the geometric
+        realization of the classifier's ``DE_REVERSE_BUNDLE`` verdict --
+        flipping a reversed facing pad column (``rotation_delta == 180``) so a
+        self-crossing bundle stops crossing.
+
+        Only the footprint-level orientation is written here.  The board-frame
+        pad positions the classifier reads are derived from ``fp.position`` +
+        ``fp.rotation`` applied to each pad's local offset (see
+        ``stuck_classifier._iter_board_pads``), so bumping ``fp.rotation`` is
+        sufficient for the PCB view.  The Phase-2 driver separately re-syncs the
+        router's flat pad coordinates before re-routing.
+        """
+        if not strategy.actions:
+            return ApplicationResult(
+                success=False,
+                components_moved=[],
+                message="No actions in strategy",
+            )
+
+        action = strategy.actions[0]
+        if action.type != "rotate":
+            return ApplicationResult(
+                success=False,
+                components_moved=[],
+                message=f"Expected rotate action, got {action.type}",
+            )
+
+        ref = action.target
+        rotation_delta = action.params.get("rotation_delta")
+        if rotation_delta is None:
+            return ApplicationResult(
+                success=False,
+                components_moved=[],
+                message="Missing rotation_delta in rotate action params",
+            )
+
+        fp = self._find_footprint(pcb, ref)
+        if fp is None:
+            return ApplicationResult(
+                success=False,
+                components_moved=[],
+                message=f"Component {ref} not found",
+            )
+
+        old_rotation = float(getattr(fp, "rotation", 0.0))
+        new_rotation = (old_rotation + float(rotation_delta)) % 360.0
+        fp.rotation = new_rotation
+
+        return ApplicationResult(
+            success=True,
+            components_moved=[ref],
+            message=(
+                f"Rotated {ref} by {float(rotation_delta):.1f} deg "
+                f"({old_rotation:.1f} -> {new_rotation:.1f})"
+            ),
+        )
+
     def is_safe_to_apply(self, strategy: ResolutionStrategy, pcb: PCB) -> bool:
         """Check if applying a strategy is safe.
 
@@ -193,6 +256,17 @@ class StrategyApplicator:
         Returns:
             True if the strategy is safe to apply.
         """
+        # ROTATE_COMPONENT keeps the footprint centre fixed (rotation about the
+        # origin), so board-bounds / move-distance checks do not apply -- only
+        # the target's existence matters (issue #4467).
+        if strategy.type == StrategyType.ROTATE_COMPONENT:
+            for action in strategy.actions:
+                if action.type != "rotate":
+                    continue
+                if self._find_footprint(pcb, action.target) is None:
+                    return False
+            return True
+
         if strategy.type not in [StrategyType.MOVE_COMPONENT, StrategyType.MOVE_MULTIPLE]:
             return False
 

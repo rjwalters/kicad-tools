@@ -108,6 +108,29 @@ class PlacementDelta:
             "confidence": self.confidence,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> PlacementDelta:
+        """Reconstruct a :class:`PlacementDelta` from :meth:`to_dict` output.
+
+        The round-trip counterpart required by Phase 2 (#4467): the
+        ``<output>_placement_delta.json`` artifact stores each delta via
+        :meth:`to_dict`, and a propose-only recipe reloads them via this
+        classmethod to apply them deterministically without re-running the
+        classifier.  Missing optional keys fall back to the dataclass
+        defaults so a hand-written or older artifact still loads.
+        """
+        return cls(
+            net_name=data["net_name"],
+            target_ref=data["target_ref"],
+            kind=data["kind"],
+            dx=float(data.get("dx", 0.0)),
+            dy=float(data.get("dy", 0.0)),
+            rotation_delta=float(data.get("rotation_delta", 0.0)),
+            source_action=data.get("source_action", ""),
+            rationale=data.get("rationale", ""),
+            confidence=data.get("confidence", ""),
+        )
+
 
 def delta_from_diagnosis(pcb: PCB, diag: StuckNetDiagnosis) -> PlacementDelta | None:
     """Translate one classifier diagnosis into a concrete placement delta.
