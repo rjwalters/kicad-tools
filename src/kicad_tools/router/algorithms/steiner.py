@@ -350,6 +350,8 @@ def build_rsmt(
     pad_objs: list[Pad],
     congestion_fn: Callable[[float, float, float, float], float] | None = None,
     snap_fn: Callable[[float, float], tuple[float, float]] | None = None,
+    *,
+    allow_kelvin: bool = True,
 ) -> tuple[list[Pad], list[tuple[int, int]]]:
     """Build Rectilinear Steiner Minimum Tree.
 
@@ -378,6 +380,17 @@ def build_rsmt(
             with ``PADS_OFF_GRID: steiner@(...)`` — the softstart
             SRC_POS / BUS_LINE / SCAP_POS+ / VRECT signature.  Terminal
             pads are never snapped, only synthetic points.
+        allow_kelvin: When True (default), recognise current-sense /
+            Kelvin sense nets (Issue #4473) and route them as a *star
+            rooted at the shunt/sense-resistor pad* instead of an
+            arbitrary RSMT.  A Kelvin sense tap must connect AT the shunt
+            pad (the Kelvin point) and must not share the high-current
+            segment; the generic RSMT's arbitrary Steiner branch points
+            violate that.  Detection is conservative (net-name pattern
+            AND a resolvable shunt resistor pad) so ordinary nets are
+            untouched -- see :mod:`kicad_tools.router.kelvin`.  Set False
+            to force the plain RSMT (used by tests exercising the RSMT
+            path directly).
 
     Returns:
         (extended_pads, edges) where extended_pads includes original
@@ -392,6 +405,17 @@ def build_rsmt(
 
     if n == 2:
         return list(pad_objs), [(0, 1)]
+
+    # Issue #4473: Kelvin / current-sense nets get a constrained star
+    # topology (sense trace connects AT the Kelvin point, no shared
+    # high-current segment) instead of an arbitrary RSMT.  Returns None
+    # for every non-sense net, so this is a no-op for ordinary nets.
+    if allow_kelvin:
+        from ..kelvin import build_kelvin_topology
+
+        kelvin = build_kelvin_topology(pad_objs)
+        if kelvin is not None:
+            return kelvin
 
     # Extract coordinates
     terminals = [(p.x, p.y) for p in pad_objs]

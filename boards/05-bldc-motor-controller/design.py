@@ -2921,6 +2921,19 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     but re-routing each residual net ALONE against the committed copper
     of everything else lands a subset.  See that function's docstring
     for the mechanism and bounds.
+
+    Issue #4473 (2026-07) -- Kelvin / current-sense topology model.  The
+    five ISENSE nets are 4-pad Kelvin structures (shunt R10-R12, op-amp
+    SP/SN input, low-side FET-source tap, ADC PA0-2).  ``build_rsmt``
+    previously synthesised arbitrary Steiner branch points on them
+    (undifferentiated equipotentials), so the sense tap could merge into
+    the shunt->load high-current segment.  The router now recognises
+    current-sense nets by convention (net-name pattern + a shunt-resistor
+    root pad) and routes them as a *star rooted at the shunt pad* (the
+    Kelvin point): every sense terminal connects AT the shunt pad and no
+    sense edge shares the high-current segment.  This is a GENERIC
+    capability -- see ``kicad_tools.router.kelvin`` -- not a board-05
+    special case; board-05's R10-R12 shunts resolve as the Kelvin roots.
     """
     print("\n" + "=" * 60)
     print(
