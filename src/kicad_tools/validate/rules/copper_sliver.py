@@ -18,29 +18,22 @@ slivers and then used an area floor to discard numerical corner specks.
 That over-reported on the repository's routed boards.  This implementation
 uses the same angle-and-width semantics as KiCad instead.
 
-**Threshold:** there is no ``min_copper_width_mm`` / ``min_sliver_mm``
-field on :class:`~kicad_tools.manufacturers.DesignRules`.  KiCad's
-"minimum copper width" / sliver threshold is the same physical quantity
-as the manufacturer's minimum reproducible trace width, so this rule
-gates against ``design_rules.min_trace_width_mm`` (Issue #3843
-deliberately does NOT add a new DesignRules field -- that would be scope
-creep across all six manufacturer YAMLs).  If a future issue wants a
-distinct, looser sliver threshold, it can add the field then.
+**Threshold:** KiCad's sliver-tip discriminator is independent of the
+manufacturer's minimum trace width.  Stock KiCad uses an advanced-config
+``DRCSliverWidthTolerance`` default of 0.08 mm, a 0.0008 mm minimum adjacent
+edge length, and considers only outlines with more than five vertices.  This
+rule mirrors those native defaults directly; substituting a fab profile's
+``min_trace_width_mm`` creates false negatives in the 0.08--fab-width band.
 
 **Severity:** ``kicad-cli`` classifies ``copper_sliver`` as a *warning*
 (fab-process advisory, not a guaranteed short).  This rule emits
 ``severity="warning"`` to match and to avoid turning a soft fab note
 into a hard CI gate.
 
-**Performance:** ``buffer(+/-r)`` cost scales with vertex count, and a
-full ground pour can have thousands of vertices after clearance carving.
-This rule unions all copper on a layer *once*, then runs a *single*
-``buffer(-r).buffer(r)`` with ``join_style="mitre"`` (round joins
-tessellate arcs and explode vertex count; mitre keeps vertex count near
-the input and is correct for a straight-line width test).  Empty layers
-and ``min_trace_width_mm <= 0`` short-circuit.  The check has its own
-CLI category so it can be skipped on very large pours via
-``--skip copper_sliver``.
+**Performance:** the rule unions all copper on a layer once, simplifies
+collinear fill vertices below DRC precision, then walks each polygon ring.
+Empty layers short-circuit.  The check has its own CLI category so it can be
+skipped on very large pours via ``--skip copper_sliver``.
 """
 
 from __future__ import annotations
@@ -60,13 +53,19 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
 
+KICAD_SLIVER_WIDTH_TOLERANCE_MM = 0.08
+KICAD_SLIVER_MINIMUM_LENGTH_MM = 0.0008
+KICAD_SLIVER_MINIMUM_VERTEX_COUNT = 6
+KICAD_SLIVER_ANGLE_TOLERANCE_DEG = 20.0
+
+
 class CopperSliverRule(DRCRule):
     """Flag acute copper sliver tips on each copper layer.
 
     For each copper layer, union filled zones, tracks, pads, vias, and
     filled footprint copper into one geometry.  Report acute convex tips
     whose angle is below KiCad's 20-degree threshold and whose opposite
-    chord exceeds ``min_trace_width_mm``.
+    chord exceeds KiCad's independent 0.08 mm sliver-width tolerance.
 
     Reuses :func:`_collect_zone_fills` /
     :func:`_repair_fill_polygon` from
@@ -80,8 +79,8 @@ class CopperSliverRule(DRCRule):
     rule_id = "copper_sliver"
     name = "Copper Sliver"
     description = (
-        "Detects thin copper slivers (regions narrower than the minimum "
-        "reproducible copper width) via a per-layer morphological open."
+        "Detects thin copper slivers using KiCad-compatible acute-tip "
+        "angle, chord-width, minimum-edge, and vertex-count thresholds."
     )
 
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
@@ -89,8 +88,9 @@ class CopperSliverRule(DRCRule):
 
         Args:
             pcb: The PCB to check.
-            design_rules: Design rules from the manufacturer profile.
-                ``min_trace_width_mm`` is used as the sliver threshold.
+            design_rules: Design rules from the manufacturer profile. Kept in
+                the common rule interface; native sliver thresholds are
+                independent of the profile's minimum trace width.
 
         Returns:
             DRCResults containing ``copper_sliver`` warnings, one per
@@ -105,17 +105,17 @@ class CopperSliverRule(DRCRule):
         results.rules_checked = 1
         results.rules_checked_by_rule[self.rule_id] = 1
 
-        min_width = design_rules.min_trace_width_mm
-        if min_width <= 0:
-            # No reproducible-width spec to gate against -- nothing to do.
-            return results
-
         # Build per-layer copper geometry: union of all filled-zone copper
         # (the source of softstart's 16 slivers) plus track/pad/via copper.
         copper_by_layer = self._collect_copper_by_layer(pcb)
 
         for layer_name, geoms in copper_by_layer.items():
-            self._check_layer(layer_name, geoms, min_width, results)
+            self._check_layer(
+                layer_name,
+                geoms,
+                KICAD_SLIVER_WIDTH_TOLERANCE_MM,
+                results,
+            )
 
         return results
 
@@ -125,8 +125,8 @@ class CopperSliverRule(DRCRule):
         Slivers are a single-net geometric property, so this unions *all*
         copper on a layer regardless of net (no per-net split).  The
         union must include **every** copper feature on the layer -- zone
-        fills, tracks, pads and via barrels -- so the morphological open
-        sees the same connected copper KiCad does.  Omitting pad/via
+        fills, tracks, pads and via barrels -- so the acute-tip pass sees
+        the same connected copper KiCad does.  Omitting pad/via
         copper is a false-positive source: a fill that necks down to a
         pad reads as a sliver when the pad's own copper (which makes the
         neck wide enough) is missing from the union (the pad/via copper
@@ -182,8 +182,8 @@ class CopperSliverRule(DRCRule):
                     or len(graphic.points) < 3
                 ):
                     continue
-                from shapely import affinity  # type: ignore[import-untyped]
-                from shapely.geometry import Polygon  # type: ignore[import-untyped]
+                from shapely import affinity
+                from shapely.geometry import Polygon
 
                 poly = Polygon(graphic.points)
                 if fp.rotation:
@@ -210,7 +210,7 @@ class CopperSliverRule(DRCRule):
         self,
         layer_name: str,
         geoms: list[Any],
-        min_width: float,
+        sliver_width_tolerance: float,
         results: DRCResults,
     ) -> None:
         """Union one layer's copper and emit KiCad-style acute sliver tips."""
@@ -239,34 +239,36 @@ class CopperSliverRule(DRCRule):
             return
 
         for component in self._iter_polygons(geom, Polygon, MultiPolygon, GeometryCollection):
-            for tip, angle, opposite_width in self._iter_sliver_tips(component, min_width):
+            for tip, angle, opposite_width in self._iter_sliver_tips(
+                component, sliver_width_tolerance
+            ):
                 results.add(
                     DRCViolation(
                         rule_id=self.rule_id,
                         severity="warning",
                         message=(
-                            f"Copper sliver on {layer_name}: region narrower than "
-                            f"minimum copper width {min_width:.3f}mm "
+                            f"Copper sliver on {layer_name}: acute tip exceeds "
+                            f"native chord tolerance {sliver_width_tolerance:.3f}mm "
                             f"(tip angle {angle:.1f}°, "
                             f"opposite width {opposite_width:.3f}mm)"
                         ),
                         location=(round(tip[0], 3), round(tip[1], 3)),
                         layer=layer_name,
                         actual_value=round(opposite_width, 4),
-                        required_value=min_width,
+                        required_value=sliver_width_tolerance,
                     )
                 )
 
     @staticmethod
     def _iter_sliver_tips(
-        component: Any, min_width: float
+        component: Any, sliver_width_tolerance: float
     ) -> Iterator[tuple[tuple[float, float], float, float]]:
         """Yield acute convex vertices using KiCad's angle/width semantics."""
-        angle_limit = 20.0
+        angle_limit = KICAD_SLIVER_ANGLE_TOLERANCE_DEG
         rings = [component.exterior, *component.interiors]
         for ring in rings:
             coords = list(ring.coords)[:-1]
-            if len(coords) < 3:
+            if len(coords) < KICAD_SLIVER_MINIMUM_VERTEX_COUNT:
                 continue
             for index, current in enumerate(coords):
                 previous = coords[index - 1]
@@ -275,7 +277,7 @@ class CopperSliverRule(DRCRule):
                     continue
                 arm1 = math.hypot(previous[0] - current[0], previous[1] - current[1])
                 arm2 = math.hypot(following[0] - current[0], following[1] - current[1])
-                if arm1 <= DRC_TOLERANCE or arm2 <= DRC_TOLERANCE:
+                if arm1 < KICAD_SLIVER_MINIMUM_LENGTH_MM or arm2 < KICAD_SLIVER_MINIMUM_LENGTH_MM:
                     continue
                 dot = (previous[0] - current[0]) * (following[0] - current[0]) + (
                     previous[1] - current[1]
@@ -283,15 +285,19 @@ class CopperSliverRule(DRCRule):
                 cosine = max(-1.0, min(1.0, dot / (arm1 * arm2)))
                 angle = math.degrees(math.acos(cosine))
                 opposite_width = math.hypot(following[0] - previous[0], following[1] - previous[1])
-                if angle < angle_limit and opposite_width > min_width:
+                if angle < angle_limit and opposite_width > sliver_width_tolerance:
                     yield (current, angle, opposite_width)
 
     @staticmethod
     def _chord_is_locally_inside(coords: list[tuple[float, float]], tip_index: int) -> bool:
         """Match KiCad's local-inside guard for the chord across a tip."""
 
-        def area(p, q, r):
-            return (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
+        def area(
+            p: tuple[float, float],
+            q: tuple[float, float],
+            r: tuple[float, float],
+        ) -> float:
+            return float((q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1]))
 
         count = len(coords)
         a = (tip_index - 1) % count

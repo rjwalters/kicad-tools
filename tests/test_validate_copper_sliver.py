@@ -11,9 +11,10 @@ Covers the acceptance scenarios from the issue:
 - Long narrow ribbon -> not flagged.
 - Normal solid pour -> not flagged.
 - Normal (>= min-width) isthmus -> not flagged.
-- Threshold boundary (neck at ~min_width passes, clearly below fails).
-- Empty PCB / layer with no copper / ``min_trace_width_mm == 0`` -> no
-  violations, no exceptions.
+- Native threshold boundary (0.07 mm passes, 0.10 mm is flagged independently
+  of the manufacturer's 0.127 mm trace-width floor).
+- KiCad's 0.0008 mm adjacent-edge and six-vertex guards.
+- Empty PCB / layer with no copper -> no violations, no exceptions.
 - Violation metadata (rule_id / severity / layer / location).
 - ``ViolationType.from_string("copper_sliver")`` resolves to
   ``COPPER_SLIVER`` with category ``MANUFACTURING``.
@@ -23,13 +24,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from kicad_tools.drc.violation import ViolationCategory, ViolationType
 from kicad_tools.schema.pcb import PCB
-from kicad_tools.validate.rules.copper_sliver import CopperSliverRule
+from kicad_tools.validate.rules.copper_sliver import (
+    KICAD_SLIVER_MINIMUM_LENGTH_MM,
+    KICAD_SLIVER_WIDTH_TOLERANCE_MM,
+    CopperSliverRule,
+)
 
 # ---------------------------------------------------------------------------
 # Minimal stubs mirroring the fields the rule reads
@@ -178,7 +184,7 @@ class TestSliverDetection:
         x, y = v.location
         assert x == pytest.approx(10.0)
         assert y == pytest.approx(15.0)
-        assert v.required_value == pytest.approx(0.127)
+        assert v.required_value == pytest.approx(KICAD_SLIVER_WIDTH_TOLERANCE_MM)
 
 
 # ---------------------------------------------------------------------------
@@ -225,18 +231,63 @@ class TestNoFalsePositives:
 
 
 class TestThresholdBoundary:
-    def test_neck_at_min_width_passes(self):
-        # bridge exactly at min width -> open preserves it -> no sliver.
-        zone = _zone_with_fill(_acute_tip(base_width=0.127))
+    def test_tip_below_native_chord_tolerance_passes(self):
+        zone = _zone_with_fill(_acute_tip(base_width=0.07))
         results = _run(min_trace_width=0.127, zones=[zone])
         slivers = [v for v in results.violations if v.rule_id == "copper_sliver"]
         assert slivers == []
 
-    def test_tip_base_above_min_width_fails(self):
-        zone = _zone_with_fill(_acute_tip(base_width=0.2))
+    def test_tip_between_native_and_manufacturer_thresholds_fails(self):
+        # KiCad's 0.08 mm sliver tolerance is independent of the 0.127 mm
+        # manufacturer trace-width floor.
+        zone = _zone_with_fill(_acute_tip(base_width=0.10))
         results = _run(min_trace_width=0.127, zones=[zone])
         slivers = [v for v in results.violations if v.rule_id == "copper_sliver"]
         assert len(slivers) == 1
+
+    def test_outline_with_at_most_five_vertices_is_ignored(self, monkeypatch):
+        monkeypatch.setattr(CopperSliverRule, "_chord_is_locally_inside", lambda *_: True)
+        coords = [(1.0, 0.1), (0.0, 0.0), (1.0, -0.1), (2.0, -1.0), (2.0, 1.0)]
+        component = SimpleNamespace(
+            exterior=SimpleNamespace(coords=[*coords, coords[0]]),
+            interiors=[],
+        )
+
+        assert list(CopperSliverRule._iter_sliver_tips(component, 0.08)) == []
+
+    @pytest.mark.parametrize(
+        ("adjacent_length", "detected"),
+        [
+            (KICAD_SLIVER_MINIMUM_LENGTH_MM - 0.0001, False),
+            (KICAD_SLIVER_MINIMUM_LENGTH_MM, True),
+        ],
+    )
+    def test_native_minimum_adjacent_length_guard(
+        self,
+        monkeypatch,
+        adjacent_length: float,
+        detected: bool,
+    ):
+        monkeypatch.setattr(
+            CopperSliverRule,
+            "_chord_is_locally_inside",
+            lambda _coords, index: index == 1,
+        )
+        coords = [
+            (adjacent_length, adjacent_length * 0.01),
+            (0.0, 0.0),
+            (1.0, -0.01),
+            (2.0, -1.0),
+            (3.0, 0.0),
+            (2.0, 1.0),
+        ]
+        component = SimpleNamespace(
+            exterior=SimpleNamespace(coords=[*coords, coords[0]]),
+            interiors=[],
+        )
+
+        tips = list(CopperSliverRule._iter_sliver_tips(component, 0.08))
+        assert bool(tips) is detected
 
 
 # ---------------------------------------------------------------------------
@@ -255,15 +306,15 @@ class TestEdgeCases:
         results = _run(min_trace_width=0.127, zones=[zone])
         assert [v for v in results.violations if v.layer == "B.Cu"] == []
 
-    def test_zero_min_trace_width_short_circuits(self):
-        zone = _zone_with_fill(_dumbbell(bridge_width=0.05))
+    def test_zero_manufacturer_trace_width_does_not_disable_native_sliver_check(self):
+        zone = _zone_with_fill(_acute_tip(base_width=0.10))
         results = _run(min_trace_width=0.0, zones=[zone])
-        assert results.violations == []
+        assert sum(v.rule_id == "copper_sliver" for v in results.violations) == 1
 
-    def test_negative_min_trace_width_short_circuits(self):
-        zone = _zone_with_fill(_dumbbell(bridge_width=0.05))
+    def test_negative_manufacturer_trace_width_does_not_change_native_threshold(self):
+        zone = _zone_with_fill(_acute_tip(base_width=0.10))
         results = _run(min_trace_width=-1.0, zones=[zone])
-        assert results.violations == []
+        assert sum(v.rule_id == "copper_sliver" for v in results.violations) == 1
 
     def test_rules_checked_counter(self):
         zone = _zone_with_fill(_solid_square())
@@ -311,6 +362,31 @@ def test_positive_control_matches_native_copper_sliver_count():
     assert native.ran
     assert native.all_by_type.get("copper_sliver", 0) > 0
     assert internal_count >= native.all_by_type["copper_sliver"]
+
+
+@pytest.mark.integration
+def test_point_one_mm_acute_tip_matches_native_count(tmp_path: Path):
+    """The native-positive 0.10 mm chord is not lost at a 0.127 mm fab floor."""
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.drc.geometric import run_geometric_drc
+
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("kicad-cli not installed")
+
+    threshold_fixture = tmp_path / "copper_sliver_010.kicad_pcb"
+    threshold_fixture.write_text(
+        POSITIVE_FIXTURE.read_text()
+        .replace("(xy 20 25.1)", "(xy 20 25.05)")
+        .replace("(xy 20 24.9)", "(xy 20 24.95)")
+    )
+    native = run_geometric_drc(threshold_fixture, kicad_cli=cli)
+    internal = CopperSliverRule().check(PCB.load(threshold_fixture), _make_design_rules(0.127))
+    internal_count = sum(v.rule_id == "copper_sliver" for v in internal.violations)
+
+    assert native.ran
+    assert native.all_by_type.get("copper_sliver", 0) == 1
+    assert internal_count == 1
 
 
 @pytest.mark.integration
