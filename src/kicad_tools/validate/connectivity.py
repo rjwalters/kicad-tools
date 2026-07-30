@@ -79,7 +79,7 @@ class ConnectivityIssue:
         """Validate severity and issue_type values."""
         if self.severity not in ("error", "warning"):
             raise ValueError(f"severity must be 'error' or 'warning', got {self.severity!r}")
-        valid_types = ("unrouted", "partial", "isolated")
+        valid_types = ("unrouted", "partial", "isolated", "zone_island")
         if self.issue_type not in valid_types:
             raise ValueError(f"issue_type must be one of {valid_types}, got {self.issue_type!r}")
 
@@ -170,6 +170,11 @@ class ConnectivityResult:
         return [i for i in self.issues if i.issue_type == "isolated"]
 
     @property
+    def zone_islands(self) -> list[ConnectivityIssue]:
+        """Filled zone islands with no same-net copper attachment."""
+        return [i for i in self.issues if i.issue_type == "zone_island"]
+
+    @property
     def unconnected_pad_count(self) -> int:
         """Total number of unconnected pads."""
         return sum(len(i.unconnected_pads) for i in self.issues)
@@ -221,6 +226,8 @@ class ConnectivityResult:
             parts.append(f"  Partial connections: {len(self.partial)}")
         if self.isolated:
             parts.append(f"  Isolated pads: {len(self.isolated)}")
+        if self.zone_islands:
+            parts.append(f"  Orphaned zone islands: {len(self.zone_islands)}")
         parts.append(f"  Total unconnected pads: {self.unconnected_pad_count}")
 
         return "\n".join(parts)
@@ -278,6 +285,13 @@ class ConnectivityValidator:
         """
         result = ConnectivityResult()
 
+        # Issue #4498: #4176 tightened pad/track contact, but remained a
+        # pad-partition model.  A filled zone island containing no pad was
+        # consequently invisible.  Report those islands explicitly before
+        # evaluating the pad graph.
+        for issue in self._find_orphaned_zone_islands():
+            result.add(issue)
+
         # Get all non-empty nets (skip net 0 which is unconnected)
         nets = {n: net for n, net in self.pcb.nets.items() if n != 0 and net.name}
 
@@ -329,6 +343,78 @@ class ConnectivityValidator:
         result.connected_nets = connected_count
         result.zone_connected_nets = zone_connected_count
         return result
+
+    def _find_orphaned_zone_islands(self) -> list[ConnectivityIssue]:
+        """Return one issue per fill island touching no same-net conductor.
+
+        This deliberately runs only on the Shapely geometry path.  The
+        label-based fallback cannot distinguish a filled island from its zone
+        boundary without manufacturing false positives.
+        """
+        if not _has_shapely():
+            return []
+
+        from kicad_tools.geometry.copper import segment_copper_polygon
+
+        issues: list[ConnectivityIssue] = []
+        for zone_index, zone in enumerate(self.pcb.zones):
+            if not zone.filled_polygons or not zone.net_number:
+                continue
+            net = self.pcb.nets.get(zone.net_number)
+            net_name = net.name if net is not None else zone.net_name
+
+            pads: list[tuple[list[str], Any]] = []
+            for fp in self.pcb.footprints:
+                for pad in fp.pads:
+                    if pad.net_number != zone.net_number:
+                        continue
+                    geom = self._pad_copper_polygon(fp, pad)
+                    if geom is not None:
+                        pads.append((pad.layers, geom))
+
+            for fill_index, fill_pts in enumerate(zone.filled_polygons):
+                region = self._fill_solid_region(fill_pts)
+                if region is None:
+                    continue
+                layer = zone.filled_polygon_layer(fill_index)
+                anchored = any(
+                    self._pad_layer_matches_zone(layers, layer) and region.intersects(geom)
+                    for layers, geom in pads
+                )
+                if not anchored:
+                    for via in self.pcb.vias:
+                        if via.net_number != zone.net_number or layer not in self._via_bridged_layers(
+                            via.layers
+                        ):
+                            continue
+                        radius = max(getattr(via, "size", 0.0) or 0.0, 0.0) / 2.0
+                        geom = self._via_copper_geom(via.position, radius)
+                        if geom is not None and region.intersects(geom):
+                            anchored = True
+                            break
+                if not anchored:
+                    for seg in self.pcb.segments:
+                        if seg.net_number != zone.net_number or seg.layer != layer:
+                            continue
+                        geom = segment_copper_polygon(seg.start, seg.end, seg.width)
+                        if geom is not None and region.intersects(geom):
+                            anchored = True
+                            break
+                if anchored:
+                    continue
+
+                island_id = f"zone[{zone_index}].fill[{fill_index}]@{layer}"
+                issues.append(
+                    ConnectivityIssue(
+                        severity="error",
+                        issue_type="zone_island",
+                        net_name=net_name,
+                        message=f"Orphaned filled-zone island {island_id} has no same-net attachment",
+                        suggestion="Remove the island or connect it to a same-net pad, track, or via",
+                        islands=((island_id,),),
+                    )
+                )
+        return issues
 
     def extract_pad_partition(self) -> list[frozenset[str]]:
         """Extract the *physical* pad partition from routed copper.

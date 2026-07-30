@@ -11,6 +11,53 @@ from kicad_tools.validate.connectivity import (
     ConnectivityValidator,
 )
 
+ORPHANED_ZONE_ISLAND_PCB = """(kicad_pcb
+  (version 20240108) (generator "test") (generator_version "8.0")
+  (general (thickness 1.6)) (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "") (net 1 "GND")
+  (footprint "Test:Pad" (layer "F.Cu") (at 2 2)
+    (property "Reference" "J1" (at 0 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND")))
+  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (hatch edge 0.5) (connect_pads (clearance 0.2)) (min_thickness 0.2)
+    (fill yes)
+    (polygon (pts (xy 0 0) (xy 12 0) (xy 12 4) (xy 0 4)))
+    (filled_polygon (layer "F.Cu")
+      (pts (xy 1 1) (xy 3 1) (xy 3 3) (xy 1 3)))
+    (filled_polygon (layer "F.Cu")
+      (pts (xy 9 1) (xy 11 1) (xy 11 3) (xy 9 3))))
+)"""
+
+
+def test_reports_orphaned_zone_fill_island(tmp_path: Path) -> None:
+    """A pad-less fill is visible instead of being dropped with synthetic nodes."""
+    pytest.importorskip("shapely")
+    pcb_path = tmp_path / "orphan.kicad_pcb"
+    pcb_path.write_text(ORPHANED_ZONE_ISLAND_PCB)
+
+    result = ConnectivityValidator(pcb_path).validate()
+
+    assert len(result.zone_islands) == 1
+    assert result.zone_islands[0].net_name == "GND"
+    assert "fill[1]@F.Cu" in result.zone_islands[0].message
+    assert result.to_dict()["issues"][0]["issue_type"] == "zone_island"
+
+
+def test_connected_zone_fill_island_stays_clean(tmp_path: Path) -> None:
+    """Every island bonded to a same-net conductor produces no false positive."""
+    pytest.importorskip("shapely")
+    pcb_path = tmp_path / "bonded.kicad_pcb"
+    pcb_path.write_text(
+        ORPHANED_ZONE_ISLAND_PCB.replace(
+            '(pts (xy 9 1) (xy 11 1) (xy 11 3) (xy 9 3))',
+            '(pts (xy 1 1) (xy 3 1) (xy 3 3) (xy 1 3))',
+        )
+    )
+
+    assert ConnectivityValidator(pcb_path).validate().zone_islands == []
+
 # PCB with fully connected nets (all pads connected via tracks)
 FULLY_CONNECTED_PCB = """(kicad_pcb
   (version 20240108)
