@@ -378,7 +378,9 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
 
     violations: list[DRCViolation] = []
 
-    for item in data.get("violations", []):
+    # KiCad stores connectivity relationships in a sibling top-level array,
+    # not in ``violations``.  Parse both through the same typed representation.
+    for item in [*data.get("violations", []), *data.get("unconnected_items", [])]:
         type_str = item.get("type", "unknown")
         message = item.get("description", "")
         severity = Severity.from_string(item.get("severity", "error"))

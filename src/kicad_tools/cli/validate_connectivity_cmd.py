@@ -73,7 +73,9 @@ def main(argv: list[str] | None = None) -> int:
     # Run validation
     try:
         validator = ConnectivityValidator(pcb_path)
-        result = validator.validate()
+        # Prefer KiCad's refill-time per-item graph when available; the
+        # validator degrades to its internal graph in KiCad-less installs.
+        result = validator.validate(reconcile_native=True)
     except Exception as e:
         print(f"Error during validation: {e}", file=sys.stderr)
         return 1

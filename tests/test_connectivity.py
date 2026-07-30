@@ -46,17 +46,42 @@ def test_reports_orphaned_zone_fill_island(tmp_path: Path) -> None:
 
 
 def test_connected_zone_fill_island_stays_clean(tmp_path: Path) -> None:
-    """Every island bonded to a same-net conductor produces no false positive."""
+    """Spatially distinct islands bonded to distinct pads stay clean."""
     pytest.importorskip("shapely")
     pcb_path = tmp_path / "bonded.kicad_pcb"
     pcb_path.write_text(
         ORPHANED_ZONE_ISLAND_PCB.replace(
-            '(pts (xy 9 1) (xy 11 1) (xy 11 3) (xy 9 3))',
-            '(pts (xy 1 1) (xy 3 1) (xy 3 3) (xy 1 3))',
+            "  (zone (net 1)",
+            """  (footprint "Test:Pad" (layer "F.Cu") (at 10 2)
+    (property "Reference" "J2" (at 0 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND")))
+  (segment (start 2 2) (end 10 2) (width 0.3) (layer "F.Cu") (net 1))
+  (zone (net 1)""",
         )
     )
 
     assert ConnectivityValidator(pcb_path).validate().zone_islands == []
+
+
+@pytest.mark.parametrize(
+    ("relative_board", "expected"),
+    [
+        ("boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb", 12),
+        ("boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb", 57),
+    ],
+)
+def test_native_fleet_relationship_parity(relative_board: str, expected: int) -> None:
+    """The native-gated path reproduces committed board03/05 relationships."""
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if find_kicad_cli() is None:
+        pytest.skip("kicad-cli is not installed")
+    board = Path(__file__).parents[1] / relative_board
+    result = ConnectivityValidator(board).validate(reconcile_native=True)
+
+    assert len(result.issues) == expected
+    assert all(len(issue.islands) == 2 for issue in result.issues)
+
 
 # PCB with fully connected nets (all pads connected via tracks)
 FULLY_CONNECTED_PCB = """(kicad_pcb
