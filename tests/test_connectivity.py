@@ -1154,6 +1154,22 @@ class TestZeroFillZoneConnectivity:
 class TestConnectivityCLI:
     """Tests for connectivity validation CLI."""
 
+    @staticmethod
+    def _twelve_unconnected_items() -> ConnectivityResult:
+        """Model board03's native-reconciled result without requiring KiCad."""
+        issues = [
+            ConnectivityIssue(
+                severity="error",
+                issue_type="zone_island",
+                net_name="GND",
+                message=f"Missing connection between native items {index} and {index + 1}",
+                suggestion="Connect the items reported by kicad-cli",
+                islands=((f"item-{index}",), (f"item-{index + 1}",)),
+            )
+            for index in range(12)
+        ]
+        return ConnectivityResult(issues=issues, total_nets=13, connected_nets=1)
+
     def test_cli_fully_connected(self, fully_connected_pcb: Path):
         """Test CLI with fully connected PCB."""
         from kicad_tools.cli.validate_connectivity_cmd import main
@@ -1189,6 +1205,40 @@ class TestConnectivityCLI:
         captured = capsys.readouterr()
         assert "Connectivity:" in captured.out
         assert "Nets connected:" in captured.out
+
+    @pytest.mark.parametrize("output_format", ["table", "summary", "json"])
+    def test_cli_reports_twelve_reconciled_items(
+        self,
+        output_format: str,
+        fully_connected_pcb: Path,
+        capsys,
+        monkeypatch,
+    ):
+        """Every CLI format exposes board03's 12 reconciled relationships."""
+        import json
+
+        from kicad_tools.cli.validate_connectivity_cmd import main
+
+        result = self._twelve_unconnected_items()
+        monkeypatch.setattr(ConnectivityValidator, "validate", lambda self, **kwargs: result)
+
+        exit_code = main([str(fully_connected_pcb), "--format", output_format])
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        if output_format == "json":
+            data = json.loads(captured.out)
+            assert data["summary"]["zone_island_count"] == 12
+            assert len(data["issues"]) == 12
+            assert {issue["issue_type"] for issue in data["issues"]} == {"zone_island"}
+        else:
+            assert "12" in captured.out
+            assert "0 unconnected pads" not in captured.out
+            if output_format == "table":
+                assert "UNCONNECTED ZONE/ITEM RELATIONSHIPS (12)" in captured.out
+                assert captured.out.count("[X] ERROR:") == 12
+            else:
+                assert "Unconnected items: 12" in captured.out
 
     def test_cli_errors_only(self, partially_connected_pcb: Path, capsys):
         """Test CLI with --errors-only flag."""

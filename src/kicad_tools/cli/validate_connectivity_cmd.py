@@ -134,6 +134,10 @@ def output_table(
         "unrouted": ("UNROUTED CONNECTIONS", result.unrouted),
         "partial": ("PARTIAL CONNECTIONS (ISLANDS)", result.partial),
         "isolated": ("ISOLATED PADS", result.isolated),
+        "zone_island": (
+            "UNCONNECTED ZONE/ITEM RELATIONSHIPS",
+            result.zone_islands,
+        ),
     }
 
     for category_id, (label, issues) in categories.items():
@@ -148,7 +152,13 @@ def output_table(
 
     print(f"\n{'=' * 60}")
     if result.error_count > 0:
-        print(f"CONNECTIVITY ISSUES FOUND - {result.unconnected_pad_count} unconnected pads")
+        details = []
+        if result.zone_islands:
+            details.append(f"{len(result.zone_islands)} unconnected item relationships")
+        if result.unconnected_pad_count:
+            details.append(f"{result.unconnected_pad_count} unconnected pads")
+        detail = ", ".join(details) or f"{result.error_count} connectivity errors"
+        print(f"CONNECTIVITY ISSUES FOUND - {detail}")
     else:
         print("CONNECTIVITY OK - Review warnings if present")
 
@@ -193,6 +203,7 @@ def output_json(result: ConnectivityResult, pcb_path: Path) -> None:
             "unrouted_count": len(result.unrouted),
             "partial_count": len(result.partial),
             "isolated_count": len(result.isolated),
+            "zone_island_count": len(result.zone_islands),
             "unconnected_pads": result.unconnected_pad_count,
         },
         "issues": [i.to_dict() for i in result.issues],
@@ -214,11 +225,14 @@ def output_summary(result: ConnectivityResult, pcb_path: Path) -> None:
         print(f"Partial:           {len(result.partial)}")
     if result.isolated:
         print(f"Isolated:          {len(result.isolated)}")
+    if result.zone_islands:
+        print(f"Unconnected items: {len(result.zone_islands)}")
 
     print("-" * 40)
     print(f"Total errors:      {result.error_count}")
     print(f"Total warnings:    {result.warning_count}")
-    print(f"Unconnected pads:  {result.unconnected_pad_count}")
+    if result.unconnected_pad_count:
+        print(f"Unconnected pads:  {result.unconnected_pad_count}")
 
 
 if __name__ == "__main__":
