@@ -54,6 +54,9 @@ class GeometricDRCResult:
         by_type: ``{kicad-cli type_str: count}`` for the error-severity
             violations (unnamespaced; callers that need a namespace add
             their own prefix).
+        all_by_type: ``{kicad-cli type_str: count}`` across all severities.
+            This includes warning-only checks such as ``copper_sliver`` while
+            preserving ``by_type``'s error-only contract for existing gates.
         note: A human-readable note describing the outcome -- always set
             for skip paths (e.g. the "kicad-cli not found" fallback) and
             ``None`` on a clean successful run.
@@ -66,6 +69,7 @@ class GeometricDRCResult:
     ran: bool = False
     error_count: int = 0
     by_type: dict[str, int] = field(default_factory=dict)
+    all_by_type: dict[str, int] = field(default_factory=dict)
     note: str | None = None
     reason: str = REASON_OK
 
@@ -90,10 +94,10 @@ def run_geometric_drc(
     timeout: int = 120,
     kicad_cli: Path | None = None,
 ) -> GeometricDRCResult:
-    """Run ``kicad-cli pcb drc`` and summarize its error-severity findings.
+    """Run ``kicad-cli pcb drc`` and summarize findings by severity.
 
     kicad-cli loads the sibling ``<board>.kicad_pro`` emitted by ``kct
-    export`` (issue #3720), so a ``--severity-error`` run checks against
+    export`` (issue #3720), so error-severity findings are checked against
     the manufacturer's fab-accurate rules with ``lib_footprint_mismatch``
     / ``isolated_copper`` already downgraded below error severity.
 
@@ -148,7 +152,10 @@ def run_geometric_drc(
             "--refill-zones",
             "--format",
             "json",
-            "--severity-error",
+            # Request all severities so warning-only native checks such as
+            # copper_sliver can be reconciled.  ``by_type`` below remains
+            # error-only for backward compatibility with existing gates.
+            "--severity-all",
             "--units",
             "mm",
             "--output",
@@ -168,18 +175,21 @@ def run_geometric_drc(
 
         report = DRCReport.load(report_path)
 
-        # --severity-error already filters to errors, but guard defensively
-        # in case a future kicad-cli emits mixed severities.
         cli_errors = [v for v in report.violations if v.is_error]
 
         by_type: dict[str, int] = {}
         for v in cli_errors:
             by_type[v.type_str] = by_type.get(v.type_str, 0) + 1
 
+        all_by_type: dict[str, int] = {}
+        for v in report.violations:
+            all_by_type[v.type_str] = all_by_type.get(v.type_str, 0) + 1
+
         return GeometricDRCResult(
             ran=True,
             error_count=len(cli_errors),
             by_type=by_type,
+            all_by_type=all_by_type,
             note=None,
             reason=REASON_OK,
         )

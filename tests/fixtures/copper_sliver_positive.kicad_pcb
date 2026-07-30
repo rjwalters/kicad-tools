@@ -1,0 +1,53 @@
+(kicad_pcb
+  (version 20240108)
+  (generator "pcbnew")
+  (general
+    (thickness 1.6)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (36 "B.SilkS" user "b.silkscreen")
+    (37 "F.SilkS" user "f.silkscreen")
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (gr_rect
+    (start 5 5)
+    (end 35 35)
+    (stroke
+      (width 0.05)
+      (type solid)
+    )
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "10e5364e-7525-44b5-9276-4ce06974df6e")
+  )
+  (footprint "CopperSliverPositive"
+    (layer "F.Cu")
+    (uuid "a457ae6c-6bd6-4f40-984e-0a4cb09c0cee")
+    (at 0 0)
+    (attr board_only)
+    (fp_poly
+      (pts
+        (xy 20 20)
+        (xy 30 20)
+        (xy 30 30)
+        (xy 20 30)
+        (xy 20 25.1)
+        (xy 10 25)
+        (xy 20 24.9)
+      )
+      (stroke
+        (width 0)
+        (type solid)
+      )
+      (fill solid)
+      (layer "F.Cu")
+      (uuid "a966c6e7-257b-465b-9f9b-bcf33df9228f")
+    )
+  )
+)

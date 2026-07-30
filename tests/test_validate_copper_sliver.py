@@ -1,17 +1,14 @@
 """Tests for the copper-sliver DRC rule (Issue #3843).
 
-``CopperSliverRule`` detects thin filaments of copper narrower than the
-manufacturer's minimum reproducible copper width via a per-layer
-morphological open (``buffer(-r).buffer(r)`` with
-``r = min_trace_width_mm / 2``); the residual ``original - opened`` is the
-sliver set.  ``kicad-cli pcb drc`` flags ``copper_sliver`` warnings that
+``CopperSliverRule`` detects acute copper tips using KiCad-compatible
+angle-and-width semantics.  ``kicad-cli pcb drc`` flags ``copper_sliver`` warnings that
 ``kct check`` previously missed because no rule inspected the *internal
 width* of a single copper region.
 
 Covers the acceptance scenarios from the issue:
 
-- Synthetic thin sliver (two blobs joined by a sub-min-width bridge) ->
-  flagged.
+- Synthetic acute copper tip -> flagged.
+- Long narrow ribbon -> not flagged.
 - Normal solid pour -> not flagged.
 - Normal (>= min-width) isthmus -> not flagged.
 - Threshold boundary (neck at ~min_width passes, clearly below fails).
@@ -25,11 +22,13 @@ Covers the acceptance scenarios from the issue:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from kicad_tools.drc.violation import ViolationCategory, ViolationType
+from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.rules.copper_sliver import CopperSliverRule
 
 # ---------------------------------------------------------------------------
@@ -132,6 +131,20 @@ def _dumbbell(bridge_width: float):
     ]
 
 
+def _acute_tip(base_width: float = 0.2):
+    """A rectangle with one long, acute copper tip on its left edge."""
+    half = base_width / 2.0
+    return [
+        (20.0, 10.0),
+        (30.0, 10.0),
+        (30.0, 20.0),
+        (20.0, 20.0),
+        (20.0, 15.0 + half),
+        (10.0, 15.0),
+        (20.0, 15.0 - half),
+    ]
+
+
 def _zone_with_fill(points, layer="F.Cu"):
     return _FakeZone(net_number=1, net_name="GND", layer=layer, filled_polygons=[points])
 
@@ -142,31 +155,29 @@ def _zone_with_fill(points, layer="F.Cu"):
 
 
 class TestSliverDetection:
-    def test_thin_bridge_is_flagged(self):
-        # bridge 0.05 mm wide, min width 0.127 mm -> sliver
-        zone = _zone_with_fill(_dumbbell(bridge_width=0.05))
+    def test_acute_tip_is_flagged(self):
+        zone = _zone_with_fill(_acute_tip())
         results = _run(min_trace_width=0.127, zones=[zone])
         slivers = [v for v in results.violations if v.rule_id == "copper_sliver"]
-        assert len(slivers) >= 1, "thin bridge should be flagged as a sliver"
+        assert len(slivers) >= 1, "acute copper tip should be flagged as a sliver"
 
-    def test_thin_bridge_flagged_exactly_once(self):
-        zone = _zone_with_fill(_dumbbell(bridge_width=0.05))
+    def test_acute_tip_flagged_exactly_once(self):
+        zone = _zone_with_fill(_acute_tip())
         results = _run(min_trace_width=0.127, zones=[zone])
         slivers = [v for v in results.violations if v.rule_id == "copper_sliver"]
-        # A single neck yields a single residual region.
+        # A single acute tip yields one warning.
         assert len(slivers) == 1
 
     def test_violation_metadata(self):
-        zone = _zone_with_fill(_dumbbell(bridge_width=0.05))
+        zone = _zone_with_fill(_acute_tip())
         results = _run(min_trace_width=0.127, zones=[zone])
         v = next(v for v in results.violations if v.rule_id == "copper_sliver")
         assert v.severity == "warning"
         assert v.layer == "F.Cu"
         assert v.location is not None
         x, y = v.location
-        # Bridge centroid sits near (15, 15).
-        assert 10.0 <= x <= 20.0
-        assert 14.0 <= y <= 16.0
+        assert x == pytest.approx(10.0)
+        assert y == pytest.approx(15.0)
         assert v.required_value == pytest.approx(0.127)
 
 
@@ -201,6 +212,12 @@ class TestNoFalsePositives:
         slivers = [v for v in results.violations if v.rule_id == "copper_sliver"]
         assert slivers == []
 
+    def test_long_narrow_ribbon_passes(self):
+        zone = _zone_with_fill(_dumbbell(bridge_width=0.04))
+        results = _run(min_trace_width=0.127, zones=[zone])
+        slivers = [v for v in results.violations if v.rule_id == "copper_sliver"]
+        assert slivers == []
+
 
 # ---------------------------------------------------------------------------
 # Scenario: threshold boundary
@@ -210,13 +227,13 @@ class TestNoFalsePositives:
 class TestThresholdBoundary:
     def test_neck_at_min_width_passes(self):
         # bridge exactly at min width -> open preserves it -> no sliver.
-        zone = _zone_with_fill(_dumbbell(bridge_width=0.127))
+        zone = _zone_with_fill(_acute_tip(base_width=0.127))
         results = _run(min_trace_width=0.127, zones=[zone])
         slivers = [v for v in results.violations if v.rule_id == "copper_sliver"]
         assert slivers == []
 
-    def test_neck_clearly_below_min_width_fails(self):
-        zone = _zone_with_fill(_dumbbell(bridge_width=0.04))
+    def test_tip_base_above_min_width_fails(self):
+        zone = _zone_with_fill(_acute_tip(base_width=0.2))
         results = _run(min_trace_width=0.127, zones=[zone])
         slivers = [v for v in results.violations if v.rule_id == "copper_sliver"]
         assert len(slivers) == 1
@@ -271,3 +288,54 @@ class TestViolationTypeWiring:
         from kicad_tools.drc.violation import _TYPE_CATEGORY_MAP
 
         assert _TYPE_CATEGORY_MAP[ViolationType.COPPER_SLIVER] is ViolationCategory.MANUFACTURING
+
+
+POSITIVE_FIXTURE = Path(__file__).parent / "fixtures" / "copper_sliver_positive.kicad_pcb"
+REPO_ROOT = Path(__file__).parent.parent
+
+
+@pytest.mark.integration
+def test_positive_control_matches_native_copper_sliver_count():
+    """Every warning in the native positive control remains detected internally."""
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.drc.geometric import run_geometric_drc
+
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("kicad-cli not installed")
+
+    native = run_geometric_drc(POSITIVE_FIXTURE, kicad_cli=cli)
+    internal = CopperSliverRule().check(PCB.load(POSITIVE_FIXTURE), _make_design_rules())
+    internal_count = sum(v.rule_id == "copper_sliver" for v in internal.violations)
+
+    assert native.ran
+    assert native.all_by_type.get("copper_sliver", 0) > 0
+    assert internal_count >= native.all_by_type["copper_sliver"]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "board",
+    [
+        "boards/00-simple-led/output/simple_led_routed.kicad_pcb",
+        "boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb",
+        "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
+        "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb",
+    ],
+)
+def test_repository_board_count_matches_native(board: str):
+    """Known divergent boards agree with refill-aware native warning counts."""
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.drc.geometric import run_geometric_drc
+
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("kicad-cli not installed")
+
+    path = REPO_ROOT / board
+    native = run_geometric_drc(path, kicad_cli=cli)
+    internal = CopperSliverRule().check(PCB.load(path), _make_design_rules())
+    internal_count = sum(v.rule_id == "copper_sliver" for v in internal.violations)
+
+    assert native.ran
+    assert internal_count == native.all_by_type.get("copper_sliver", 0)
