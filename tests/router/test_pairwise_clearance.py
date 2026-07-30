@@ -232,7 +232,7 @@ def test_attach_zone_exempts_only_terminating_pair_inside_zone() -> None:
     table = _table({"/AC_LINE": 150.0, "/GND": 0.0, "/SENSE": 0.0})
     zone = AttachZone(0.0, -1.0, 5.0, 1.0, frozenset({"AC_LINE", "GND"}))
     moving = Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")])
-    attached = Route(net=2, net_name="/GND", segments=[_seg(0, 0.3, 5, 0.3, 2, "/GND")])
+    attached = Route(net=2, net_name="/GND", segments=[_seg(0, 0.4, 5, 0.4, 2, "/GND")])
 
     # Rated package owns both nets: the pair may neck down to the DRU floor.
     assert route_pairwise_violation(moving, 1, [attached], table, attach_zones=(zone,)) is None
@@ -240,6 +240,45 @@ def test_attach_zone_exempts_only_terminating_pair_inside_zone() -> None:
     # An unrelated LV net merely crossing the courtyard receives no waiver.
     crossing = Route(net=3, net_name="/SENSE", segments=[_seg(0, 0.3, 5, 0.3, 3, "/SENSE")])
     assert route_pairwise_violation(moving, 1, [crossing], table, attach_zones=(zone,)) is not None
+
+
+def test_attach_zone_never_waives_below_dru_floor() -> None:
+    """The rated-package neck may reach, but never cross, the 0.2 mm DRU."""
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    zone = AttachZone(0.0, -1.0, 5.0, 1.0, frozenset({"AC_LINE", "GND"}))
+    moving = Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")])
+    # 0.25 mm centre distance minus two 0.1 mm radii = 0.05 mm edge gap.
+    foreign = Route(net=2, net_name="/GND", segments=[_seg(0, 0.25, 5, 0.25, 2, "/GND")])
+
+    violation = route_pairwise_violation(moving, 1, [foreign], table, dru=0.2, attach_zones=(zone,))
+    assert violation is not None
+    assert violation.actual_mm == pytest.approx(0.05)
+
+
+def test_attach_zone_uses_closest_gap_not_long_segment_midpoint() -> None:
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    zone = AttachZone(-1.0, -1.0, 1.0, 1.0, frozenset({"AC_LINE", "GND"}))
+
+    # The foreign midpoint is inside the zone, but the entire closest overlap
+    # with the short candidate is outside: this must not receive a waiver.
+    outside = Route(net=1, net_name="/AC_LINE", segments=[_seg(8, 0, 9, 0, 1, "/AC_LINE")])
+    long_foreign = Route(net=2, net_name="/GND", segments=[_seg(-10, 0.4, 10, 0.4, 2, "/GND")])
+    assert (
+        route_pairwise_violation(outside, 1, [long_foreign], table, attach_zones=(zone,))
+        is not None
+    )
+
+    # Reversing the geometry proves a legitimate short in-zone neck is waived
+    # even though the other segment extends far outside the zone.
+    long_candidate = Route(
+        net=1,
+        net_name="/AC_LINE",
+        segments=[_seg(-10, 0, 10, 0, 1, "/AC_LINE")],
+    )
+    inside = Route(net=2, net_name="/GND", segments=[_seg(-0.5, 0.4, 0.5, 0.4, 2, "/GND")])
+    assert (
+        route_pairwise_violation(long_candidate, 1, [inside], table, attach_zones=(zone,)) is None
+    )
 
 
 def test_attach_zone_does_not_exempt_same_pair_outside_zone() -> None:
@@ -268,6 +307,33 @@ def test_build_attach_zones_falls_back_to_pad_bounds_without_courtyard() -> None
     assert zone.max_x == pytest.approx(11.1)
     assert zone.min_y == pytest.approx(19.2)
     assert zone.max_y == pytest.approx(20.8)
+
+
+def test_build_attach_zones_rotates_pad_extents_without_courtyard() -> None:
+    footprint = SimpleNamespace(
+        position=(10.0, 20.0),
+        rotation=90.0,
+        graphics=[],
+        pads=[
+            SimpleNamespace(
+                position=(-1.0, 0.0),
+                size=(2.0, 0.4),
+                rotation=90.0,
+                net_name="/AC_LINE",
+            ),
+            SimpleNamespace(
+                position=(1.0, 0.0),
+                size=(2.0, 0.4),
+                rotation=90.0,
+                net_name="/GND",
+            ),
+        ],
+    )
+
+    (zone,) = build_attach_zones([footprint], margin=0.5)
+    assert (zone.min_x, zone.min_y, zone.max_x, zone.max_y) == pytest.approx(
+        (9.3, 17.5, 10.7, 22.5)
+    )
 
 
 def test_build_attach_zones_uses_courtyard_bbox_and_margin() -> None:

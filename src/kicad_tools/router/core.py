@@ -936,6 +936,9 @@ class Autorouter:
         self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
         self.layer_stack = layer_stack
         self._force_python = force_python
+        # Populated by the PCB loader and consumed only when pairwise voltage
+        # rules are enabled, to derive rated-footprint attach zones.
+        self._pairwise_attach_zone_pcb_path: str | None = None
         # Issue #2610: stored so _create_grid_and_routers can pass it to
         # create_hybrid_router on the initial construction.
         self._max_search_iterations = int(max_search_iterations) if max_search_iterations else 0

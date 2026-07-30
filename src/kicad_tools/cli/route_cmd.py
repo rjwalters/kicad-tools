@@ -3664,7 +3664,7 @@ def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -
     )
     pcb_path = getattr(router, "_pairwise_attach_zone_pcb_path", None)
     pathfinder = getattr(router, "router", None)
-    if pcb_path is not None and hasattr(pathfinder, "set_attach_zones"):
+    if pathfinder is not None and pcb_path is not None and hasattr(pathfinder, "set_attach_zones"):
         pathfinder.set_attach_zones(build_attach_zones(PCB.load(pcb_path).footprints))
 
     if not quiet:

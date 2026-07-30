@@ -39,6 +39,7 @@ byte-identically.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable, Mapping, NamedTuple, Sequence
 
@@ -97,7 +98,7 @@ def build_attach_zones(
     bounding box, including pad extents.  Empty/unconnected/single-net
     footprints cannot exempt a pair and are omitted.
     """
-    from shapely.geometry import Polygon
+    from shapely.geometry import Polygon  # type: ignore[import-untyped]
 
     from kicad_tools.geometry.courtyard import _courtyard_polygon, _fp_transform
 
@@ -111,17 +112,22 @@ def build_attach_zones(
         for side in ("F", "B"):
             polygon = _courtyard_polygon(footprint, side, Polygon)
             if polygon is not None:
-                bounds.append(tuple(float(value) for value in polygon.bounds))
+                min_x, min_y, max_x, max_y = polygon.bounds
+                bounds.append((float(min_x), float(min_y), float(max_x), float(max_y)))
 
         if not bounds:
             transform = _fp_transform(footprint)
             for pad in footprint.pads:
                 x, y = transform(pad.position)
-                # AABB is deliberately conservative for rotated pads.  It may
-                # be smaller than the true rotated outline, but never invents
-                # a courtyard-sized waiver around a footprint lacking one.
-                half_w = pad.size[0] / 2.0
-                half_h = pad.size[1] / 2.0
+                # Pad rotation is absolute in the board frame (it already
+                # includes the parent footprint rotation).  Project all four
+                # rectangular corners onto board axes so the fallback never
+                # excludes rotated pad copper.
+                angle = math.radians(-getattr(pad, "rotation", 0.0))
+                cos_rot = math.cos(angle)
+                sin_rot = math.sin(angle)
+                half_w = abs(cos_rot) * pad.size[0] / 2.0 + abs(sin_rot) * pad.size[1] / 2.0
+                half_h = abs(sin_rot) * pad.size[0] / 2.0 + abs(cos_rot) * pad.size[1] / 2.0
                 bounds.append((x - half_w, y - half_h, x + half_w, y + half_h))
         if not bounds:
             continue
@@ -283,6 +289,67 @@ def _segment_edge_gap(seg_a: Segment, seg_b: Segment) -> float:
     return centre - seg_a.width / 2.0 - seg_b.width / 2.0
 
 
+def _closest_gap_midpoint(seg_a: Segment, seg_b: Segment) -> tuple[float, float]:
+    """Return the midpoint between the closest points on two line segments."""
+    ux, uy = seg_a.x2 - seg_a.x1, seg_a.y2 - seg_a.y1
+    vx, vy = seg_b.x2 - seg_b.x1, seg_b.y2 - seg_b.y1
+    wx, wy = seg_a.x1 - seg_b.x1, seg_a.y1 - seg_b.y1
+    a = ux * ux + uy * uy
+    b = ux * vx + uy * vy
+    c = vx * vx + vy * vy
+    d = ux * wx + uy * wy
+    e = vx * wx + vy * wy
+
+    if a <= 1e-15 and c <= 1e-15:
+        return ((seg_a.x1 + seg_b.x1) / 2.0, (seg_a.y1 + seg_b.y1) / 2.0)
+    if a <= 1e-15:
+        t = max(0.0, min(1.0, e / c))
+        closest_b = (seg_b.x1 + t * vx, seg_b.y1 + t * vy)
+        return ((seg_a.x1 + closest_b[0]) / 2.0, (seg_a.y1 + closest_b[1]) / 2.0)
+    if c <= 1e-15:
+        s = max(0.0, min(1.0, -d / a))
+        closest_a = (seg_a.x1 + s * ux, seg_a.y1 + s * uy)
+        return ((closest_a[0] + seg_b.x1) / 2.0, (closest_a[1] + seg_b.y1) / 2.0)
+
+    denominator = a * c - b * b
+    s_num, s_den = denominator, denominator
+    t_num, t_den = denominator, denominator
+
+    if denominator <= 1e-15:
+        s_num, s_den = 0.0, 1.0
+        t_num, t_den = e, c
+    else:
+        s_num = b * e - c * d
+        t_num = a * e - b * d
+        if s_num < 0.0:
+            s_num, t_num, t_den = 0.0, e, c
+        elif s_num > s_den:
+            s_num, t_num, t_den = s_den, e + b, c
+
+    if t_num < 0.0:
+        t_num = 0.0
+        if -d < 0.0:
+            s_num, s_den = 0.0, 1.0
+        elif -d > a:
+            s_num, s_den = 1.0, 1.0
+        else:
+            s_num, s_den = -d, a
+    elif t_num > t_den:
+        t_num = t_den
+        if -d + b < 0.0:
+            s_num, s_den = 0.0, 1.0
+        elif -d + b > a:
+            s_num, s_den = 1.0, 1.0
+        else:
+            s_num, s_den = -d + b, a
+
+    s = 0.0 if abs(s_num) <= 1e-15 else s_num / s_den
+    t = 0.0 if abs(t_num) <= 1e-15 else t_num / t_den
+    closest_a = (seg_a.x1 + s * ux, seg_a.y1 + s * uy)
+    closest_b = (seg_b.x1 + t * vx, seg_b.y1 + t * vy)
+    return ((closest_a[0] + closest_b[0]) / 2.0, (closest_a[1] + closest_b[1]) / 2.0)
+
+
 def segment_pair_violation(
     seg_a: Segment,
     seg_b: Segment,
@@ -323,9 +390,10 @@ def segment_pair_violation(
     gap = _segment_edge_gap(seg_a, seg_b)
     if gap >= required - tolerance:
         return None
-    gap_x = (seg_b.x1 + seg_b.x2) / 2.0
-    gap_y = (seg_b.y1 + seg_b.y2) / 2.0
-    if _attach_zone_exempts(attach_zones, gap_x, gap_y, a_name, b_name):
+    gap_x, gap_y = _closest_gap_midpoint(seg_a, seg_b)
+    if gap >= floor - tolerance and _attach_zone_exempts(
+        attach_zones, gap_x, gap_y, a_name, b_name
+    ):
         return None
     return PairwiseViolation(
         net_a=a_name,
