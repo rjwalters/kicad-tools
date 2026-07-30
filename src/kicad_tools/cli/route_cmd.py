@@ -3648,7 +3648,11 @@ def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -
     if required is None or voltages is None:
         return
 
-    from kicad_tools.router.pairwise_clearance import PairwiseClearanceTable
+    from kicad_tools.router.pairwise_clearance import (
+        PairwiseClearanceTable,
+        build_attach_zones,
+    )
+    from kicad_tools.schema.pcb import PCB
 
     rules = getattr(router, "rules", None)
     if rules is None:
@@ -3658,6 +3662,10 @@ def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -
         net_voltages=voltages,
         required_by_pair=required,
     )
+    pcb_path = getattr(router, "_pairwise_attach_zone_pcb_path", None)
+    pathfinder = getattr(router, "router", None)
+    if pcb_path is not None and hasattr(pathfinder, "set_attach_zones"):
+        pathfinder.set_attach_zones(build_attach_zones(PCB.load(pcb_path).footprints))
 
     if not quiet:
         from kicad_tools.cli.progress import flush_print

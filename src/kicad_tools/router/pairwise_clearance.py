@@ -40,17 +40,112 @@ byte-identically.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable, Mapping, NamedTuple
+from typing import TYPE_CHECKING, Iterable, Mapping, NamedTuple, Sequence
 
 from kicad_tools.core.geometry import segment_to_segment_distance
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.router.primitives import Route, Segment
+    from kicad_tools.schema.pcb import Footprint
 
 # A pairwise conflict is only reported when the edge-to-edge gap falls short of
 # the requirement by more than this tolerance (mm).  Mirrors the census'
 # ``_PASS_TOLERANCE`` -- a sub-micron shortfall is FP noise, not a real defect.
 _PASS_TOLERANCE = 1e-4
+
+# Extra necking distance beyond the footprint courtyard (or pad-bounds
+# fallback).  Kept as data rather than CLI policy so the same flat regions can
+# cross the Python/C++ boundary in Phase 2.
+ATTACH_ZONE_MARGIN_MM = 0.5
+
+
+@dataclass(frozen=True)
+class AttachZone:
+    """Layer-agnostic rated-footprint necking region.
+
+    ``net_names`` contains every connected net terminating on the footprint.
+    Pairwise widening is waived only when the gap point is inside the bbox and
+    *both* nets are members; the scalar DRU check has already run separately.
+    """
+
+    min_x: float
+    min_y: float
+    max_x: float
+    max_y: float
+    net_names: frozenset[str]
+
+    def exempts(self, x: float, y: float, net_a: str, net_b: str) -> bool:
+        a = _norm_net_key(net_a)
+        b = _norm_net_key(net_b)
+        return (
+            self.min_x <= x <= self.max_x
+            and self.min_y <= y <= self.max_y
+            and a in self.net_names
+            and b in self.net_names
+        )
+
+
+def build_attach_zones(
+    footprints: Iterable[Footprint],
+    *,
+    margin: float = ATTACH_ZONE_MARGIN_MM,
+) -> tuple[AttachZone, ...]:
+    """Build flat courtyard-bbox attach zones once for a routing session.
+
+    The canonical courtyard polygon resolver supplies geometry when possible.
+    Footprints without a resolvable courtyard fall back to the transformed pad
+    bounding box, including pad extents.  Empty/unconnected/single-net
+    footprints cannot exempt a pair and are omitted.
+    """
+    from shapely.geometry import Polygon
+
+    from kicad_tools.geometry.courtyard import _courtyard_polygon, _fp_transform
+
+    zones: list[AttachZone] = []
+    for footprint in footprints:
+        names = frozenset(_norm_net_key(pad.net_name) for pad in footprint.pads if pad.net_name)
+        if len(names) < 2:
+            continue
+
+        bounds: list[tuple[float, float, float, float]] = []
+        for side in ("F", "B"):
+            polygon = _courtyard_polygon(footprint, side, Polygon)
+            if polygon is not None:
+                bounds.append(tuple(float(value) for value in polygon.bounds))
+
+        if not bounds:
+            transform = _fp_transform(footprint)
+            for pad in footprint.pads:
+                x, y = transform(pad.position)
+                # AABB is deliberately conservative for rotated pads.  It may
+                # be smaller than the true rotated outline, but never invents
+                # a courtyard-sized waiver around a footprint lacking one.
+                half_w = pad.size[0] / 2.0
+                half_h = pad.size[1] / 2.0
+                bounds.append((x - half_w, y - half_h, x + half_w, y + half_h))
+        if not bounds:
+            continue
+
+        zones.append(
+            AttachZone(
+                min(b[0] for b in bounds) - margin,
+                min(b[1] for b in bounds) - margin,
+                max(b[2] for b in bounds) + margin,
+                max(b[3] for b in bounds) + margin,
+                names,
+            )
+        )
+    return tuple(zones)
+
+
+def _attach_zone_exempts(
+    zones: Sequence[AttachZone],
+    x: float,
+    y: float,
+    net_a: str,
+    net_b: str,
+) -> bool:
+    return any(zone.exempts(x, y, net_a, net_b) for zone in zones)
 
 
 def _norm_net_key(name: str) -> str:
@@ -196,6 +291,7 @@ def segment_pair_violation(
     net_a_name: str | None = None,
     net_b_name: str | None = None,
     dru: float | None = None,
+    attach_zones: Sequence[AttachZone] = (),
     tolerance: float = _PASS_TOLERANCE,
 ) -> PairwiseViolation | None:
     """Check one segment pair against its derived pairwise requirement.
@@ -227,13 +323,17 @@ def segment_pair_violation(
     gap = _segment_edge_gap(seg_a, seg_b)
     if gap >= required - tolerance:
         return None
+    gap_x = (seg_b.x1 + seg_b.x2) / 2.0
+    gap_y = (seg_b.y1 + seg_b.y2) / 2.0
+    if _attach_zone_exempts(attach_zones, gap_x, gap_y, a_name, b_name):
+        return None
     return PairwiseViolation(
         net_a=a_name,
         net_b=b_name,
         actual_mm=gap,
         required_mm=required,
-        x=(seg_b.x1 + seg_b.x2) / 2.0,
-        y=(seg_b.y1 + seg_b.y2) / 2.0,
+        x=gap_x,
+        y=gap_y,
     )
 
 
@@ -245,6 +345,7 @@ def route_pairwise_violation(
     *,
     id_to_name: Mapping[int, str] | None = None,
     dru: float | None = None,
+    attach_zones: Sequence[AttachZone] = (),
     tolerance: float = _PASS_TOLERANCE,
 ) -> PairwiseViolation | None:
     """Find the first pairwise-clearance shortfall for a freshly-routed net.
@@ -286,6 +387,7 @@ def route_pairwise_violation(
                     net_a_name=moving_name,
                     net_b_name=foreign_name,
                     dru=floor,
+                    attach_zones=attach_zones,
                     tolerance=tolerance,
                 )
                 if violation is not None:

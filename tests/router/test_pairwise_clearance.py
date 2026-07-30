@@ -17,12 +17,16 @@ Covers:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from kicad_tools.creepage.standards import StandardLookupError
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.pairwise_clearance import (
+    AttachZone,
     PairwiseClearanceTable,
+    build_attach_zones,
     build_pairwise_clearance_table,
     find_pairwise_violations,
     route_pairwise_violation,
@@ -224,6 +228,71 @@ def test_route_pairwise_violation_resolves_names_from_ids() -> None:
     assert v is not None
 
 
+def test_attach_zone_exempts_only_terminating_pair_inside_zone() -> None:
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0, "/SENSE": 0.0})
+    zone = AttachZone(0.0, -1.0, 5.0, 1.0, frozenset({"AC_LINE", "GND"}))
+    moving = Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")])
+    attached = Route(net=2, net_name="/GND", segments=[_seg(0, 0.3, 5, 0.3, 2, "/GND")])
+
+    # Rated package owns both nets: the pair may neck down to the DRU floor.
+    assert route_pairwise_violation(moving, 1, [attached], table, attach_zones=(zone,)) is None
+
+    # An unrelated LV net merely crossing the courtyard receives no waiver.
+    crossing = Route(net=3, net_name="/SENSE", segments=[_seg(0, 0.3, 5, 0.3, 3, "/SENSE")])
+    assert route_pairwise_violation(moving, 1, [crossing], table, attach_zones=(zone,)) is not None
+
+
+def test_attach_zone_does_not_exempt_same_pair_outside_zone() -> None:
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    zone = AttachZone(0.0, -1.0, 5.0, 1.0, frozenset({"AC_LINE", "GND"}))
+    moving = Route(net=1, net_name="/AC_LINE", segments=[_seg(10, 0, 15, 0, 1, "/AC_LINE")])
+    foreign = Route(net=2, net_name="/GND", segments=[_seg(10, 0.3, 15, 0.3, 2, "/GND")])
+    assert route_pairwise_violation(moving, 1, [foreign], table, attach_zones=(zone,)) is not None
+
+
+def test_build_attach_zones_falls_back_to_pad_bounds_without_courtyard() -> None:
+    footprint = SimpleNamespace(
+        position=(10.0, 20.0),
+        rotation=0.0,
+        graphics=[],
+        pads=[
+            SimpleNamespace(position=(-0.4, 0.0), size=(0.4, 0.6), net_name="/AC_LINE"),
+            SimpleNamespace(position=(0.4, 0.0), size=(0.4, 0.6), net_name="/GND"),
+        ],
+    )
+    zones = build_attach_zones([footprint], margin=0.5)
+    assert len(zones) == 1
+    zone = zones[0]
+    assert zone.net_names == frozenset({"AC_LINE", "GND"})
+    assert zone.min_x == pytest.approx(8.9)
+    assert zone.max_x == pytest.approx(11.1)
+    assert zone.min_y == pytest.approx(19.2)
+    assert zone.max_y == pytest.approx(20.8)
+
+
+def test_build_attach_zones_uses_courtyard_bbox_and_margin() -> None:
+    footprint = SimpleNamespace(
+        position=(10.0, 20.0),
+        rotation=0.0,
+        graphics=[
+            SimpleNamespace(
+                layer="F.CrtYd",
+                graphic_type="rect",
+                start=(-1.0, -2.0),
+                end=(1.0, 2.0),
+            )
+        ],
+        pads=[
+            SimpleNamespace(position=(-0.4, 0.0), size=(0.4, 0.6), net_name="/AC_LINE"),
+            SimpleNamespace(position=(0.4, 0.0), size=(0.4, 0.6), net_name="/GND"),
+        ],
+    )
+    (zone,) = build_attach_zones([footprint], margin=0.5)
+    assert (zone.min_x, zone.min_y, zone.max_x, zone.max_y) == pytest.approx(
+        (8.5, 17.5, 11.5, 22.5)
+    )
+
+
 def test_find_pairwise_violations_board_scan() -> None:
     table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
     routes = [
@@ -248,7 +317,17 @@ def test_route_pairwise_violation_none_table_noop() -> None:
     # A ``None`` table means the scalar path -- the helper is a no-op.
     moving = Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")])
     foreign = Route(net=2, net_name="/GND", segments=[_seg(0, 0.1, 5, 0.1, 2, "/GND")])
-    assert route_pairwise_violation(moving, 1, [foreign], None) is None  # type: ignore[arg-type]
+    zone = AttachZone(0, 0, 5, 1, frozenset({"AC_LINE", "GND"}))
+    assert (
+        route_pairwise_violation(
+            moving,
+            1,
+            [foreign],
+            None,
+            attach_zones=(zone,),  # type: ignore[arg-type]
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------

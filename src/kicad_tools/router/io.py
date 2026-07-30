@@ -3799,6 +3799,11 @@ def load_pcb_for_routing(
         strategy=strategy,
     )
 
+    # Issue #4506: retain the source path so the voltage-map activation helper
+    # can build attach regions from the canonical board model.  Do not parse it
+    # here: absent --voltage-map the loading path remains byte-for-byte inert.
+    router._pairwise_attach_zone_pcb_path = str(pcb_path)
+
     # Issue #3371 / P_FP3 -- fine-pitch escape region detection.  Must run
     # BEFORE pads land on the grid so the per-pad halos
     # (``_clearance_for_pin_pitch``) reflect the in-region escape clearance

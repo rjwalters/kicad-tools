@@ -397,6 +397,7 @@ class Router:
         # by default -- when unset, the partner branch is dormant and
         # behavior matches pre-#2559 (single-clearance) routing.
         self._net_name_to_id: dict[str, int] = {}
+        self._attach_zones = ()
 
         # Issue #2929: Per-A*-call wall-clock instrumentation.  When
         # ``_per_call_timing_enabled`` is True, every ``route()`` invocation
@@ -1272,6 +1273,10 @@ class Router:
         disables partner detection (everything falls back to ``clearance``).
         """
         self._net_name_to_id = dict(mapping)
+
+    def set_attach_zones(self, zones) -> None:
+        """Install precomputed rated-footprint necking regions."""
+        self._attach_zones = tuple(zones)
 
     def _resolve_partner_net_id(self, net_name: str) -> int | None:
         """Look up the integer net id of the diff-pair partner of *net_name*.
@@ -3791,6 +3796,7 @@ class Router:
                     self.grid.routes,
                     pairwise,
                     id_to_name=id_to_name,
+                    attach_zones=self._attach_zones,
                 )
                 is not None
             ):

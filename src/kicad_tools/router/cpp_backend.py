@@ -971,6 +971,7 @@ class CppPathfinder:
         # returns ``None`` and the C++ search uses the wider inter-pair
         # ``clearance`` for every other net (the pre-Phase-1C contract).
         self._net_name_to_id: dict[str, int] = {}
+        self._attach_zones = ()
 
         # Issue #2929: Per-A*-call wall-clock instrumentation, mirroring the
         # Python pathfinder's instrumentation surface so callers can audit
@@ -1165,6 +1166,12 @@ class CppPathfinder:
         ``clearance`` for every other net).
         """
         self._net_name_to_id = dict(mapping)
+
+    def set_attach_zones(self, zones) -> None:
+        """Install precomputed rated-footprint necking regions."""
+        self._attach_zones = tuple(zones)
+        if self._py_router is not None:
+            self._py_router.set_attach_zones(self._attach_zones)
 
     def _resolve_partner_net_id(self, net_name: str) -> int | None:
         """Look up the integer net id of the diff-pair partner of *net_name*.
@@ -2270,6 +2277,7 @@ class CppPathfinder:
                 py_grid.routes,
                 pairwise,
                 id_to_name=id_to_name,
+                attach_zones=self._attach_zones,
             )
             if violation is not None:
                 return (violation.x, violation.y)
@@ -2587,6 +2595,7 @@ class CppPathfinder:
                 net_class_map=self._net_class_map,
                 diagonal_routing=self._diagonal_routing,
             )
+            self._py_router.set_attach_zones(self._attach_zones)
 
         # Issue #3438: keep the fallback router's relief-probe mode in
         # lock-step with the C++ side (set via ``set_relief_mode``).
