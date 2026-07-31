@@ -323,6 +323,94 @@ class TestCandidateLadder:
 
 
 # --------------------------------------------------------------------------- #
+# 2d. Board bounds are compared in the footprints' own frame                    #
+# --------------------------------------------------------------------------- #
+
+
+_OFFSET_BOARD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (gr_rect (start 93.5 40) (end 203.5 135) (layer "Edge.Cuts") (width 0.1))
+  (net 0 "")
+  (net 1 "DQ2")
+  (footprint "U_QFN" (layer "F.Cu") (at 113.5 65)
+    (property "Reference" "U1")
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "DQ2"))
+  )
+)
+"""
+
+
+class TestBoardBoundsFrame:
+    """``fp.position`` is board-relative; Edge.Cuts is sheet-absolute.
+
+    Comparing the two directly (the #3861 defect class) made every footprint on
+    a board with a non-zero origin read as out of bounds, which silently
+    rejected EVERY translate strategy with "unsafe (board bounds)" -- measured
+    on board-07, 8/8 footprints falsely outside their own outline.
+    """
+
+    def test_bounds_are_board_relative(self, tmp_path: Path):
+        from kicad_tools.recovery import StrategyApplicator
+
+        pcb = _load(tmp_path, _OFFSET_BOARD)
+        assert pcb.board_origin == (93.5, 40.0)
+
+        bounds = StrategyApplicator()._get_board_bounds(pcb)
+        assert bounds is not None
+        assert (bounds.min_x, bounds.min_y) == (0.0, 0.0)
+        assert (bounds.max_x, bounds.max_y) == (110.0, 95.0)
+
+    def test_translate_on_an_offset_board_is_safe_to_apply(self, tmp_path: Path):
+        from kicad_tools.recovery import (
+            Action,
+            Difficulty,
+            ResolutionStrategy,
+            StrategyApplicator,
+            StrategyType,
+        )
+
+        pcb = _load(tmp_path, _OFFSET_BOARD)
+        fp = next(f for f in pcb.footprints if f.reference == "U1")
+        strategy = ResolutionStrategy(
+            type=StrategyType.MOVE_COMPONENT,
+            difficulty=Difficulty.MEDIUM,
+            confidence=1.0,
+            actions=[
+                Action(
+                    type="move",
+                    target="U1",
+                    params={"x": fp.position[0] + 2.0, "y": fp.position[1] - 1.0},
+                )
+            ],
+        )
+        assert StrategyApplicator().is_safe_to_apply(strategy, pcb) is True
+
+    def test_a_move_off_the_board_is_still_rejected(self, tmp_path: Path):
+        from kicad_tools.recovery import (
+            Action,
+            Difficulty,
+            ResolutionStrategy,
+            StrategyApplicator,
+            StrategyType,
+        )
+
+        pcb = _load(tmp_path, _OFFSET_BOARD)
+        strategy = ResolutionStrategy(
+            type=StrategyType.MOVE_COMPONENT,
+            difficulty=Difficulty.MEDIUM,
+            confidence=1.0,
+            actions=[Action(type="move", target="U1", params={"x": -5.0, "y": 20.0})],
+        )
+        assert StrategyApplicator().is_safe_to_apply(strategy, pcb) is False
+
+
+# --------------------------------------------------------------------------- #
 # 3. CLI wiring: flags + placement persistence                                 #
 # --------------------------------------------------------------------------- #
 

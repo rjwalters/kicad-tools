@@ -439,12 +439,31 @@ class StrategyApplicator:
         return None
 
     def _get_board_bounds(self, pcb: PCB) -> Rectangle | None:
-        """Get the board outline bounds."""
+        """Get the board outline bounds, in the SAME frame as ``fp.position``.
+
+        Frame correctness is load-bearing (issue #4468, the #3861 defect class):
+        :class:`~kicad_tools.schema.pcb.PCB` resolves footprint positions into
+        **board-relative** coordinates (relative to ``pcb.board_origin``) but
+        leaves board graphics in **sheet-absolute** coordinates.  Comparing a
+        board-relative ``fp.position`` against sheet-absolute Edge.Cuts bounds
+        makes every footprint on any board with a non-zero origin read as
+        "outside the board", so :meth:`is_safe_to_apply` rejected EVERY
+        translate strategy with "unsafe (board bounds)".  Measured on board-07
+        (origin ``(93.5, 40.0)``): outline bounds ``x:[93.5, 203.5]`` vs
+        footprints at ``x:[15, 85]`` -- 8/8 footprints falsely out of bounds,
+        which silently disabled the whole MOVE_COMPONENT recovery path there.
+
+        The Edge.Cuts coordinates are therefore shifted by ``-board_origin``.
+        The no-outline fallback below already derives its bounds from
+        ``fp.position`` and so is already in the right frame.
+        """
         # Try to find board outline from edge cuts
         min_x = float("inf")
         min_y = float("inf")
         max_x = float("-inf")
         max_y = float("-inf")
+
+        origin_x, origin_y = getattr(pcb, "board_origin", (0.0, 0.0))
 
         found = False
         for item in pcb.graphic_items:
@@ -454,15 +473,15 @@ class StrategyApplicator:
                 found = True
                 # Get coordinates from the item
                 if hasattr(item, "start") and hasattr(item, "end"):
-                    min_x = min(min_x, item.start[0], item.end[0])
-                    min_y = min(min_y, item.start[1], item.end[1])
-                    max_x = max(max_x, item.start[0], item.end[0])
-                    max_y = max(max_y, item.start[1], item.end[1])
+                    min_x = min(min_x, item.start[0] - origin_x, item.end[0] - origin_x)
+                    min_y = min(min_y, item.start[1] - origin_y, item.end[1] - origin_y)
+                    max_x = max(max_x, item.start[0] - origin_x, item.end[0] - origin_x)
+                    max_y = max(max_y, item.start[1] - origin_y, item.end[1] - origin_y)
                 elif hasattr(item, "center") and hasattr(item, "radius"):
-                    min_x = min(min_x, item.center[0] - item.radius)
-                    min_y = min(min_y, item.center[1] - item.radius)
-                    max_x = max(max_x, item.center[0] + item.radius)
-                    max_y = max(max_y, item.center[1] + item.radius)
+                    min_x = min(min_x, item.center[0] - origin_x - item.radius)
+                    min_y = min(min_y, item.center[1] - origin_y - item.radius)
+                    max_x = max(max_x, item.center[0] - origin_x + item.radius)
+                    max_y = max(max_y, item.center[1] - origin_y + item.radius)
 
         if not found:
             # Fall back to component bounds with margin
