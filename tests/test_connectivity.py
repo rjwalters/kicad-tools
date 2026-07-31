@@ -66,7 +66,7 @@ def test_connected_zone_fill_island_stays_clean(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("relative_board", "expected"),
     [
-        ("boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb", 12),
+        ("boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb", 15),
         ("boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb", 57),
     ],
 )
@@ -165,8 +165,17 @@ def test_board03_connectivity_and_geometry_contracts_native(tmp_path) -> None:
     """The same dual contract on the real committed board-03 artifact.
 
     board-03 is the fleet's canonical case: ``kicad-cli pcb drc
-    --refill-zones`` reports 12 ``unconnected_items`` and 0 geometric
+    --refill-zones`` reports 15 ``unconnected_items`` and 0 geometric
     errors.  kct must report both numbers, on the same board, at once.
+
+    The count was 12 until issue #4450 re-seated J1 (rotated 180 degrees to
+    face its plug opening off the north board edge) and J2 (walked west to
+    the perimeter).  Both moves change where the GND/VCC/VBUS pours can
+    reach, so the committed artifact now carries 15 orphaned fill islands
+    instead of 12.  This is a measurement of the committed board, not a
+    behavioural threshold -- re-measure it whenever the board is
+    regenerated.  Geometric DRC stays at 0, which is the invariant this
+    test actually guards.
     """
     import shutil
 
@@ -191,7 +200,7 @@ def test_board03_connectivity_and_geometry_contracts_native(tmp_path) -> None:
     connectivity = ConnectivityValidator(board).validate(reconcile_native=True)
     geometric = run_geometric_drc(board)
 
-    assert len(connectivity.issues) == 12, (
+    assert len(connectivity.issues) == 15, (
         f"board-03 connectivity relationships changed: {len(connectivity.issues)}"
     )
     assert geometric.ran is True, f"geometric DRC did not run: {geometric.note}"

@@ -7,7 +7,7 @@ C3,100nF,Capacitor_SMD:C_0402_1005Metric,40.0000mm,42.0000mm,0.0,Top
 C4,100nF,Capacitor_SMD:C_0402_1005Metric,46.0000mm,12.0000mm,0.0,Top
 C5,22pF,Capacitor_SMD:C_0402_1005Metric,19.5600mm,26.0000mm,0.0,Top
 C6,22pF,Capacitor_SMD:C_0402_1005Metric,24.4400mm,26.0000mm,0.0,Top
-J1,USB-C,Connector_USB:USB_C_Receptacle_GCT_USB4105,40.0000mm,8.0000mm,0.0,Top
+J1,USB-C,Connector_USB:USB_C_Receptacle_GCT_USB4105,40.0000mm,8.4000mm,180.0,Top
 R10,10k,Resistor_SMD:R_0402_1005Metric,27.0000mm,32.5000mm,0.0,Top
 R11,10k,Resistor_SMD:R_0402_1005Metric,27.0000mm,34.0000mm,0.0,Top
 R12,10k,Resistor_SMD:R_0402_1005Metric,27.0000mm,40.0000mm,0.0,Top

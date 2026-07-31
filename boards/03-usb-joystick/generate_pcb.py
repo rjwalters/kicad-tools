@@ -199,12 +199,27 @@ def generate_mcu() -> str:
         # VBUS moves to pin26 (it's a power net stitched via the VBUS
         # pour, so its perpendicular escape from the U1 north edge
         # has no routing-corridor consequences).
+        #
+        # Issue #4450 MIRRORS that mapping.  J1 is now rotated 180 degrees
+        # so its plug opening faces off the north board edge, and a
+        # connector's pinout is fixed to its shell: turning the receptacle
+        # around physically swaps which side each contact lands on.  J1's
+        # MCU-side sources now read, west to east,
+        #     CC2 (147.5), D- (148.25), D+ (148.75), CC1 (149.5) mm,
+        # the mirror of the pre-#4450 order.  Keeping the old U1 mapping
+        # would force the whole USB belt into a full crossover -- measured
+        # as ~4 mm of D+/D- routed-length skew, i.e. a `diffpair_length_skew`
+        # DRC error.  Re-mirroring U1's sink pins keeps the stubs parallel
+        # and the pair length-matched, exactly as #2527's original
+        # routing-aware repinning intended.  ``generate_schematic.py``'s
+        # ``mcu_pins`` map carries the SAME swap -- change them together or
+        # the schematic<->PCB netlist reconciliation (#3764) breaks.
         25: ("GND", 3),
         26: ("VBUS", 1),
-        27: ("USB_CC2", 7),
-        28: ("USB_D-", 5),
-        29: ("USB_D+", 4),
-        30: ("USB_CC1", 6),
+        27: ("USB_CC1", 6),
+        28: ("USB_D+", 4),
+        29: ("USB_D-", 5),
+        30: ("USB_CC2", 7),
         31: ("GND", 3),  # Unused input tied to GND
         32: ("GND", 3),
     }
@@ -272,10 +287,57 @@ def generate_mcu() -> str:
   )"""
 
 
+# --- J1 USB-C body geometry (issue #4450) -------------------------------
+#
+# The demo footprint below authors only pads.  The physical receptacle is a
+# TOP-MOUNT HORIZONTAL body that reaches ~7.4 mm past the SMT tails to its
+# plug opening, which is why the pad row alone cannot say where the connector
+# ends.  These numbers are the real KiCad courtyard of
+# ``Connector_USB:USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal``
+# (local (-5.32, -4.76) .. (5.32, 4.18)) translated into THIS footprint's
+# frame by the +3.70884 mm pad-centroid delta that ``kct pcb add-3d-models``
+# already bakes into the model ``(offset (xyz 0 -3.70884 0))`` -- i.e. exactly
+# the extent of the 3D body the render draws, rounded to 0.05 mm.
+USB_C_COURTYARD_HALF_WIDTH = 5.32  # mm, +/-X about the footprint origin
+USB_C_COURTYARD_BACK = 1.05  # mm behind the A row (-Y at rotation 0)
+USB_C_COURTYARD_FRONT = 7.90  # mm to the plug opening (+Y at rotation 0)
+
+# Mating-face direction of this footprint at rotation 0, in the KiCad board
+# frame: +Y (south).  Same convention as
+# ``optim.edge_placement.EdgeConstraint.mating_face_offset_deg``.
+USB_C_MATING_FACE_DEG = 90.0
+
+# Clearance from the plug opening to Edge.Cuts.  Must be > the placement
+# analyzer's ``min_edge_clearance`` (0.3 mm) and <= its
+# ``edge_connector_max_inset`` (2.0 mm) so J1 reads as perimeter-mounted
+# rather than either overhanging or marooned in the interior.
+USB_C_EDGE_INSET = 0.5
+
+
 def generate_usb_connector() -> str:
-    """Generate USB Type-C connector footprint."""
+    """Generate USB Type-C connector footprint.
+
+    Issue #4450: the receptacle used to sit at ``BOARD_ORIGIN_Y + 8`` with
+    rotation 0.  At rotation 0 this footprint's plug opening faces +Y --
+    straight at the board interior -- so the 3D render showed a USB-C mouth
+    pointing at the buttons with ~7 mm of bare PCB between it and the north
+    edge: a board no cable can be plugged into, and an
+    ``EDGE_CONNECTOR_PLACEMENT`` conflict from ``kct placement check``.
+
+    It is now rotated 180 degrees (mouth facing -Y, i.e. off the north edge,
+    the outward normal of that edge) and positioned so the courtyard FRONT --
+    the plug opening, not the pad row -- lands ``USB_C_EDGE_INSET`` inside
+    Edge.Cuts.  The SMT tails end up ~7 mm inboard, which is correct for a
+    top-mount horizontal receptacle: the connector body occupies that strip
+    instead of leaving it bare.  The courtyard rectangle below is what makes
+    that legible to every downstream checker; without it the footprint claims
+    to be only its pad field and the body extent is invisible.
+    """
     x = BOARD_ORIGIN_X + 40  # Center of board
-    y = BOARD_ORIGIN_Y + 8  # Near top edge
+    # Plug opening USB_C_EDGE_INSET inside the north edge; the pads follow
+    # USB_C_COURTYARD_FRONT mm further inboard because the footprint is
+    # rotated 180 degrees.
+    y = BOARD_ORIGIN_Y + USB_C_COURTYARD_FRONT + USB_C_EDGE_INSET
 
     # Simplified USB-C with main pins.
     #
@@ -328,6 +390,17 @@ def generate_usb_connector() -> str:
         # - Vertical: 1.0mm spacing - 0.35mm height = 0.65mm gap (A/B rows)
         # Note: DRC uses max dimension for clearance, so keep both dimensions small
         py = 0 if pin.startswith("A") else 1.0
+        # Coordinates stay in the connector's OWN frame (issue #4450): the
+        # 3D body is aligned to the pad field by ``kct pcb add-3d-models``,
+        # which measures the footprint's pad-field orientation against the
+        # library source and compensates its ``(model (rotate ...))`` for any
+        # difference.  Pre-rotating the pad coordinates here to "keep the
+        # copper where it was" therefore cancels the footprint's own 180
+        # rotation as far as the 3D body is concerned, and the render puts
+        # the mouth right back in the board interior -- measured, not
+        # assumed.  Authoring the pads in the library convention and letting
+        # the footprint rotation do the work is what actually turns the
+        # connector around.
         pads.append(
             f'    (pad "{pin}" smd rect (at {px:.2f} {py:.2f}) (size 0.25 0.35) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
         )
@@ -361,7 +434,7 @@ def generate_usb_connector() -> str:
     return f"""  (footprint "Connector_USB:USB_C_Receptacle_GCT_USB4105"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
-    (at {x} {y})
+    (at {x} {y} 180)
     (attr smd)
     (locked yes)
     (fp_text reference "J1" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
@@ -369,6 +442,9 @@ def generate_usb_connector() -> str:
     )
     (fp_text value "USB-C" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_rect (start {-USB_C_COURTYARD_HALF_WIDTH} {-USB_C_COURTYARD_BACK}) (end {USB_C_COURTYARD_HALF_WIDTH} {USB_C_COURTYARD_FRONT})
+      (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd") (uuid "{generate_uuid()}")
     )
 {pads_str}
   )"""
@@ -389,8 +465,31 @@ def generate_joystick() -> str:
     channel; J2-1 (GND) at absolute x = ``BOARD_ORIGIN_X + 9`` still
     sits 9 mm inside the PCB west edge (``BOARD_ORIGIN_X``), so the
     joystick body's south-edge overhang for user grip is preserved.
+
+    Issue #4450: ``BOARD_ORIGIN_X + 13`` left the pad field 7.9 mm inside
+    the west edge, which ``kct placement check`` (correctly) reported as an
+    ``EDGE_CONNECTOR_PLACEMENT`` conflict -- a module whose docstring says
+    its body overhangs the edge for the user to grip cannot be marooned 8 mm
+    inboard.  It now sits at ``BOARD_ORIGIN_X + 6.5``: pad 1 lands at
+    ``BOARD_ORIGIN_X + 2.5`` and the pads-bbox courtyard 1.45 mm inside
+    Edge.Cuts -- inside ``edge_connector_max_inset`` (2.0 mm) and clear of
+    ``min_edge_clearance`` (0.3 mm).  It also widens rather than narrows the
+    #2943 channel: J2-5 (JOY_BTN) moves from ``BOARD_ORIGIN_X + 17`` to
+    ``BOARD_ORIGIN_X + 10.5``, i.e. further from the west-side crystal Y1.
+
+    **6.5 is pinned by routability, not by taste**, and the admissible band
+    is narrow: the edge rule allows ``BOARD_ORIGIN_X + 5.35 .. + 7.05``, and
+    inside that band only 6.5 routes 13/13 DRC-clean under the canonical
+    seed-42 recipe.  Measured against the final (rotated-J1) placement:
+    5.5 -> 11/13, 6.0 -> 10/13, 6.5 -> 13/13 PASS, 7.0 -> 12/13 (a JOY_X pad
+    stranded at the filter column, ``blocked_path``).  Re-solve this seat
+    against the router if anything upstream of it moves; do not nudge it.
+
+    Unlike J1 there is no lateral mating face to rotate: the joystick's
+    accessible axis is +Z (the thumbstick the user grips), so only the
+    perimeter-adjacency half of the edge-connector rule applies here.
     """
-    x = BOARD_ORIGIN_X + 13  # Left side of board (nudged west by 2mm per #2943)
+    x = BOARD_ORIGIN_X + 6.5  # West edge (#2943 nudge, then #4450 edge-seat)
     y = BOARD_ORIGIN_Y + 35
 
     # Analog joystick module pinout, matching the canonical

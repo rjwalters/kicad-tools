@@ -43,6 +43,14 @@ class PlacementConfig:
 
     # Edge constraint parameters
     edge_stiffness: float = 50.0  # Spring constant for edge constraints
+    # Torsion-spring constant for the edge ORIENTATION constraint (issue
+    # #4450): rotates an edge-constrained connector that carries a
+    # mating-face hint until its mating face points along the assigned
+    # edge's outward normal (so a USB / barrel-jack / RJ45 mouth faces
+    # off-board and a cable can physically plug in).  Only applies to
+    # constraints with ``mating_face_offset_deg`` set; edge constraints
+    # without the hint stay translation-only.
+    edge_orientation_stiffness: float = 20.0
 
     # Convergence
     energy_threshold: float = 0.01  # Stop when system energy below this

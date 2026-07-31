@@ -7,7 +7,9 @@ at board edges during placement optimization.
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -25,6 +27,12 @@ __all__ = [
     "BoardEdges",
     "detect_edge_components",
     "get_board_edges",
+    "compute_edge_force",
+    "compute_edge_orientation_torque",
+    "edge_orientation_potential_energy",
+    "mating_face_direction",
+    "mating_face_misalignment_deg",
+    "resolve_target_edge",
 ]
 
 
@@ -100,6 +108,13 @@ class EdgeConstraint:
         slide: If True, component can slide along edge during optimization
         corner_priority: If True, prefer corner positions (for mounting holes)
         offset_mm: Inset from edge in mm (e.g., for clearance)
+        mating_face_offset_deg: Direction the component's mating face points
+            in the footprint's OWN frame at rotation 0, in degrees in the
+            KiCad board frame (x right, y down): 0 = +X (east), 90 = +Y
+            (south), 180 = -X (west), 270 = -Y (north).  ``None`` (the
+            default) means "this component has no off-board mating face",
+            and the constraint stays translation-only exactly as before
+            (issue #4450).
     """
 
     reference: str
@@ -108,6 +123,12 @@ class EdgeConstraint:
     slide: bool = True
     corner_priority: bool = False
     offset_mm: float = 0.0
+    # Mating-face direction hint, in the footprint's own 0-degree frame.
+    # A USB / barrel jack / RJ45 whose plug opening faces +Y at rotation 0
+    # (the KiCad ``Connector_USB`` receptacle convention, verified against
+    # ``USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal``: SMT tails
+    # at y=-3.68, body/courtyard extending to y=+4.18) sets 90.0.
+    mating_face_offset_deg: float | None = None
 
     def __post_init__(self):
         """Validate edge value."""
@@ -384,6 +405,7 @@ def detect_edge_components(
     include_test_points: bool = True,
     include_switches: bool = True,
     include_leds: bool = False,
+    mating_faces: Mapping[str, float] | None = None,
 ) -> list[EdgeConstraint]:
     """
     Auto-detect components that should be placed at board edges.
@@ -402,11 +424,18 @@ def detect_edge_components(
         include_test_points: Include test points (TP*)
         include_switches: Include switches (SW*, BTN*)
         include_leds: Include LEDs (LED*, D*)
+        mating_faces: Optional ``{reference: mating_face_offset_deg}`` map
+            supplying the off-board mating direction of specific connectors
+            (issue #4450).  Detection cannot infer a mating face from a
+            reference designator, so the hint is caller-supplied metadata;
+            references absent from the map get translation-only constraints
+            exactly as before.
 
     Returns:
         List of EdgeConstraint objects for detected edge components
     """
     constraints: list[EdgeConstraint] = []
+    faces: Mapping[str, float] = mating_faces or {}
 
     for fp in pcb.footprints:
         ref = fp.reference
@@ -420,6 +449,7 @@ def detect_edge_components(
                     edge="any",
                     slide=True,
                     corner_priority=False,
+                    mating_face_offset_deg=faces.get(ref),
                 )
             )
         elif include_mounting_holes and _is_mounting_hole(ref, fp_name):
@@ -459,6 +489,172 @@ def detect_edge_components(
     return constraints
 
 
+def resolve_target_edge(
+    component: Component,
+    constraint: EdgeConstraint,
+    board_edges: BoardEdges,
+) -> Edge:
+    """Resolve which board edge a constraint applies to.
+
+    ``edge="any"`` resolves to the edge nearest the component's current
+    position; a named edge resolves to that edge.  Shared by
+    :func:`compute_edge_force` and :func:`compute_edge_orientation_torque`
+    so the translation and the orientation terms can never disagree about
+    which edge a component is being pulled to (issue #4450).
+    """
+    if constraint.edge == "any":
+        return board_edges.nearest_edge(component.position())
+    return board_edges.get_edge(constraint.edge)
+
+
+def mating_face_direction(offset_deg: float, rotation_deg: float) -> Vector2D:
+    """Board-frame unit vector the mating face points along.
+
+    ``offset_deg`` is the mating-face direction in the footprint's own
+    0-degree frame; ``rotation_deg`` is the component's current rotation.
+
+    KiCad applies a footprint's orientation as a **negated** angle relative
+    to standard CCW math (verified against pcbnew in issue #3739, and the
+    convention every consumer of the placement result uses -- the courtyard
+    transform in :mod:`kicad_tools.geometry.courtyard`, the pad transform in
+    :class:`~kicad_tools.placement.analyzer.PlacementAnalyzer`, and KiCad
+    itself).  A footprint rotation therefore *subtracts* from a local
+    heading: a mouth pointing +Y (south) at rotation 0 points +X (east) at
+    rotation 90.
+
+    Note that :meth:`Component.update_pin_positions` rotates the optimizer's
+    own cached pin offsets the other way; that pre-existing sign
+    inconsistency inside :mod:`kicad_tools.optim` is out of scope here.  The
+    mating-face frame deliberately follows KiCad, because the acceptance
+    criterion is the *exported board* -- the angle written back by
+    ``update_footprint_position`` has to put the real connector mouth
+    off-board.
+    """
+    theta = math.radians(offset_deg - rotation_deg)
+    return Vector2D(math.cos(theta), math.sin(theta))
+
+
+def mating_face_misalignment_deg(
+    component: Component,
+    constraint: EdgeConstraint,
+    board_edges: BoardEdges,
+) -> float | None:
+    """Signed angle (deg, in [-180, 180)) from the mating face to the outward normal.
+
+    Measured board-frame heading of the outward normal minus the board-frame
+    heading of the mating face.  Because a KiCad rotation *subtracts* from a
+    local heading (see :func:`mating_face_direction`), a positive value means
+    the component's rotation must **decrease** to bring the mating face onto
+    the outward normal.  Returns ``None`` when the constraint carries no
+    mating-face hint.
+    """
+    if constraint.mating_face_offset_deg is None:
+        return None
+
+    target_edge = resolve_target_edge(component, constraint, board_edges)
+    normal = target_edge.normal
+    normal_deg = math.degrees(math.atan2(normal.y, normal.x))
+    face_deg = constraint.mating_face_offset_deg - component.rotation
+
+    # Wrap into [-180, 180)
+    delta = (normal_deg - face_deg + 180.0) % 360.0 - 180.0
+    return delta
+
+
+def compute_edge_orientation_torque(
+    component: Component,
+    constraint: EdgeConstraint,
+    board_edges: BoardEdges,
+    stiffness: float = 20.0,
+    tolerance_deg: float = 1.0,
+) -> tuple[float, bool]:
+    """
+    Compute torque that turns an edge connector's mating face off-board.
+
+    Translation alone is not enough to make an off-board connector usable:
+    a USB-C receptacle sitting *at* the perimeter but with its plug opening
+    pointing at the board interior still cannot accept a cable (issue
+    #4450).  This is the rotational companion to :func:`compute_edge_force`.
+
+    Near alignment the torque is the torsion spring implied by the
+    orientation potential ``E(theta) = -k * cos(phi - m + theta)`` — where
+    ``m`` is the constraint's ``mating_face_offset_deg``, ``theta`` the
+    component rotation and ``phi`` the heading of the assigned edge's
+    outward :attr:`Edge.normal` — giving
+    ``tau = -dE/dtheta = -k * sin(phi - m + theta) = -k * sin(delta)``.  This
+    mirrors :meth:`Component.compute_rotation_potential_torque`, whose
+    90-degree wells (``-k * sin(4*theta)``) it is summed with: both are zero
+    at every cardinal orientation, so a cardinal connector facing off-board
+    is a joint minimum of the two potentials.
+
+    Beyond 90 degrees of misalignment the magnitude **saturates** at ``k``
+    instead of following ``sin`` back down to zero.  A pure cosine potential
+    has an unstable equilibrium at exactly 180 degrees where ``sin`` — and
+    therefore the torque — vanishes, which is precisely the board-03 failure
+    mode this constraint exists to fix (a connector whose mouth points at the
+    board interior is 180 degrees out).  Saturating keeps the restoring
+    torque at full strength through the back-facing half-turn, so a mouth-in
+    connector actually flips instead of resting on the potential's peak.  The
+    curve is continuous at +/-90 (``sin(90) = 1``); the only discontinuity is
+    the sign flip at exactly +/-180, which
+    :func:`mating_face_misalignment_deg` resolves deterministically to -180.
+
+    Args:
+        component: The component to orient
+        constraint: Edge constraint for this component
+        board_edges: Board edge definitions
+        stiffness: Torsion spring constant
+        tolerance_deg: Misalignment below which the face counts as aligned
+
+    Returns:
+        Tuple of (torque, is_facing_outward).  ``(0.0, True)`` when the
+        constraint carries no ``mating_face_offset_deg`` hint, so
+        constraints written before this feature keep their translation-only
+        behavior exactly.
+    """
+    delta = mating_face_misalignment_deg(component, constraint, board_edges)
+    if delta is None:
+        return 0.0, True
+
+    if abs(delta) <= 90.0:
+        magnitude = math.sin(math.radians(delta))
+    else:
+        magnitude = math.copysign(1.0, delta)
+
+    return -stiffness * magnitude, abs(delta) <= tolerance_deg
+
+
+def edge_orientation_potential_energy(
+    component: Component,
+    constraint: EdgeConstraint,
+    board_edges: BoardEdges,
+    stiffness: float = 20.0,
+) -> float:
+    """
+    Potential energy of the edge-orientation constraint (issue #4450).
+
+    The integral of :func:`compute_edge_orientation_torque`: ``k * (1 -
+    cos(delta))`` inside the 90-degree well, continued linearly at slope
+    ``k`` per radian beyond it to match the saturated torque.  Zero when the
+    mating face points straight off-board, ``~2.57 * k`` when it points at
+    the board interior.
+
+    This term MUST be part of :meth:`PlacementOptimizer.compute_energy` or
+    the simulation declares convergence — its threshold sees only linear
+    velocity and the other potentials — while a connector is still
+    mid-flip, freezing it facing the wrong way.  Returns ``0.0`` for
+    constraints with no mating-face hint.
+    """
+    delta = mating_face_misalignment_deg(component, constraint, board_edges)
+    if delta is None:
+        return 0.0
+
+    magnitude = abs(delta)
+    if magnitude <= 90.0:
+        return stiffness * (1.0 - math.cos(math.radians(magnitude)))
+    return stiffness * (1.0 + math.radians(magnitude - 90.0))
+
+
 def compute_edge_force(
     component: Component,
     constraint: EdgeConstraint,
@@ -482,12 +678,7 @@ def compute_edge_force(
     """
     pos = component.position()
 
-    # Determine target edge
-    if constraint.edge == "any":
-        # Find nearest edge
-        target_edge = board_edges.nearest_edge(pos)
-    else:
-        target_edge = board_edges.get_edge(constraint.edge)
+    target_edge = resolve_target_edge(component, constraint, board_edges)
 
     # Find closest point on edge to component
     edge_vec = target_edge.end - target_edge.start
