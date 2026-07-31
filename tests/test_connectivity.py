@@ -83,6 +83,124 @@ def test_native_fleet_relationship_parity(relative_board: str, expected: int) ->
     assert all(len(issue.islands) == 2 for issue in result.issues)
 
 
+def _fake_kicad_cli_drc(payload: dict):
+    """Return a ``subprocess.run`` stand-in that emits ``payload`` as the report.
+
+    Both ``run_geometric_drc`` and the connectivity native path shell the
+    same ``kicad-cli pcb drc --format json`` command with an output path
+    argument, so one fake feeds both consumers the *identical* report --
+    which is exactly what the dual-contract assertion needs.
+    """
+    import json
+    import subprocess
+
+    def _run(cmd, *args, **kwargs):
+        argv = [str(c) for c in cmd]
+        for flag in ("-o", "--output"):
+            if flag in argv:
+                Path(argv[argv.index(flag) + 1]).write_text(json.dumps(payload))
+                break
+        return subprocess.CompletedProcess(argv, 5, stdout="", stderr="")
+
+    return _run
+
+
+def _unconnected_payload(count: int) -> dict:
+    """A KiCad-shaped JSON report with ``count`` connectivity relationships."""
+    return {
+        "source": "board.kicad_pcb",
+        "violations": [],
+        "unconnected_items": [
+            {
+                "type": "unconnected_items",
+                "severity": "error",
+                "description": "Missing connection between items",
+                "items": [
+                    {"description": "Zone [GND] on F.Cu", "pos": {"x": float(i), "y": 1.0}},
+                    {"description": f"Pad {i} [GND] of U1 on B.Cu", "pos": {"x": 2.0, "y": 2.0}},
+                ],
+            }
+            for i in range(count)
+        ],
+        "schematic_parity": [],
+    }
+
+
+def test_connectivity_and_geometry_contracts_hold_simultaneously(tmp_path, monkeypatch) -> None:
+    """Issue #4498 boundary: one kicad-cli report, two independent verdicts.
+
+    A board03-shaped report (12 ``unconnected_items``, no geometric
+    violations) must produce **12** connectivity relationships for
+    :class:`ConnectivityValidator` AND **0** errors for
+    :func:`run_geometric_drc` -- the geometry-only consumers that gate
+    "this board is geometrically DRC clean" must not acquire those 12 as
+    geometric violations.
+    """
+    import subprocess
+
+    import kicad_tools.cli.runner as runner_mod
+    from kicad_tools.drc import run_geometric_drc
+
+    pytest.importorskip("shapely")
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(ORPHANED_ZONE_ISLAND_PCB)
+
+    monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda *a, **k: Path("/usr/bin/kicad-cli"))
+    monkeypatch.setattr(subprocess, "run", _fake_kicad_cli_drc(_unconnected_payload(12)))
+
+    # Contract 1 -- connectivity sees all 12 relationships.
+    result = ConnectivityValidator(board).validate(reconcile_native=True)
+    assert len(result.issues) == 12
+    assert {issue.issue_type for issue in result.issues} == {"zone_island"}
+    assert result.error_count == 12
+
+    # Contract 2 -- geometry-only consumers see zero, from the same report.
+    geo = run_geometric_drc(board)
+    assert geo.ran is True
+    assert geo.error_count == 0, f"connectivity leaked into geometric DRC: {geo.by_type}"
+    assert "unconnected_items" not in geo.by_type
+
+
+def test_board03_connectivity_and_geometry_contracts_native(tmp_path) -> None:
+    """The same dual contract on the real committed board-03 artifact.
+
+    board-03 is the fleet's canonical case: ``kicad-cli pcb drc
+    --refill-zones`` reports 12 ``unconnected_items`` and 0 geometric
+    errors.  kct must report both numbers, on the same board, at once.
+    """
+    import shutil
+
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.drc import run_geometric_drc
+
+    if find_kicad_cli() is None:
+        pytest.skip("kicad-cli is not installed")
+    src = Path(__file__).parents[1] / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
+    if not src.exists():
+        pytest.skip(f"committed routed board not found at {src!s}")
+
+    # Copy into tmp_path so kicad-cli's .kicad_prl sidecar never lands in
+    # the committed board tree.
+    board = tmp_path / src.name
+    shutil.copy(src, board)
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        sidecar = src.with_suffix(suffix)
+        if sidecar.exists():
+            shutil.copy(sidecar, board.with_suffix(suffix))
+
+    connectivity = ConnectivityValidator(board).validate(reconcile_native=True)
+    geometric = run_geometric_drc(board)
+
+    assert len(connectivity.issues) == 12, (
+        f"board-03 connectivity relationships changed: {len(connectivity.issues)}"
+    )
+    assert geometric.ran is True, f"geometric DRC did not run: {geometric.note}"
+    assert geometric.error_count == 0, (
+        "board-03 is geometrically clean; connectivity relationships must not "
+        f"be counted as geometric violations: {geometric.by_type}"
+    )
+
+
 # PCB with fully connected nets (all pads connected via tracks)
 FULLY_CONNECTED_PCB = """(kicad_pcb
   (version 20240108)

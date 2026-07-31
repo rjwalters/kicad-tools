@@ -16,18 +16,56 @@ if TYPE_CHECKING:
 
 @dataclass
 class DRCReport:
-    """Parsed DRC report from KiCad."""
+    """Parsed DRC report from KiCad.
+
+    ``violations`` holds **geometric** DRC findings only.  KiCad's JSON
+    report carries connectivity relationships (ratsnest "missing
+    connection" entries) in a sibling top-level ``unconnected_items``
+    array; those are parsed into the dedicated :attr:`unconnected_items`
+    collection instead of being merged into ``violations`` (issue #4498).
+
+    Keeping the two collections separate preserves the established
+    geometric-DRC contract: every consumer of ``violations`` /
+    :attr:`error_count` (``run_geometric_drc``, the route gate, the audit
+    reconciliation, the "board is geometrically clean" regressions) keeps
+    asking exactly the question it asked before, while connectivity
+    consumers (:class:`~kicad_tools.validate.connectivity.ConnectivityValidator`)
+    read the connectivity collection explicitly.
+    """
 
     source_file: str
     created_at: datetime | None
     pcb_name: str
     violations: list[DRCViolation] = field(default_factory=list)
     footprint_errors: int = 0
+    #: Connectivity relationships from KiCad's ``unconnected_items`` array.
+    #: Deliberately NOT part of ``violations`` -- see the class docstring.
+    unconnected_items: list[DRCViolation] = field(default_factory=list)
 
     @property
     def violation_count(self) -> int:
-        """Total number of violations."""
+        """Total number of geometric violations."""
         return len(self.violations)
+
+    @property
+    def unconnected_item_count(self) -> int:
+        """Number of connectivity relationships reported by KiCad."""
+        return len(self.unconnected_items)
+
+    def connectivity_items(self) -> list[DRCViolation]:
+        """Return every connectivity ("missing connection") entry.
+
+        Combines the dedicated :attr:`unconnected_items` collection (KiCad
+        JSON reports) with any ``unconnected_items``-typed entry that a
+        *text*-format report placed in ``violations`` -- the text ``.rpt``
+        format has a single flat violation list, and that legacy shape is
+        unchanged.  The two sources are disjoint by construction, so
+        nothing is double counted.
+        """
+        return [
+            *self.unconnected_items,
+            *(v for v in self.violations if v.type == ViolationType.UNCONNECTED_ITEMS),
+        ]
 
     @property
     def error_count(self) -> int:
@@ -105,6 +143,9 @@ class DRCReport:
             pcb_name=self.pcb_name,
             violations=result.kept,
             footprint_errors=self.footprint_errors,
+            # Connectivity relationships are not geometric violations and
+            # are carried through the geometric filter pipeline untouched.
+            unconnected_items=list(self.unconnected_items),
         )
 
     def summary(self) -> dict:
@@ -377,10 +418,18 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
             created_at = datetime.fromisoformat(data["date"])
 
     violations: list[DRCViolation] = []
+    unconnected: list[DRCViolation] = []
 
     # KiCad stores connectivity relationships in a sibling top-level array,
-    # not in ``violations``.  Parse both through the same typed representation.
-    for item in [*data.get("violations", []), *data.get("unconnected_items", [])]:
+    # not in ``violations``.  Both are parsed through the same typed
+    # representation, but they land in *separate* collections: merging them
+    # would silently redefine every geometric-DRC consumer of
+    # ``DRCReport.violations`` / ``error_count`` as a combined
+    # geometry+connectivity check (issue #4498).
+    for item, is_connectivity in [
+        *((v, False) for v in data.get("violations", [])),
+        *((u, True) for u in data.get("unconnected_items", [])),
+    ]:
         type_str = item.get("type", "unknown")
         message = item.get("description", "")
         severity = Severity.from_string(item.get("severity", "error"))
@@ -448,7 +497,10 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
         from kicad_tools.feedback import generate_drc_suggestions
 
         violation.suggestions = generate_drc_suggestions(violation)
-        violations.append(violation)
+        if is_connectivity:
+            unconnected.append(violation)
+        else:
+            violations.append(violation)
 
     return DRCReport(
         source_file=source_file,
@@ -456,6 +508,7 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
         pcb_name=pcb_name,
         violations=violations,
         footprint_errors=data.get("footprint_errors", 0),
+        unconnected_items=unconnected,
     )
 
 

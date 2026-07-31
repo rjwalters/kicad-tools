@@ -106,6 +106,116 @@ class TestDRCViolation:
         assert unconnected[0].is_connection
 
 
+class TestUnconnectedItemsReportingBoundary:
+    """Issue #4498: connectivity items must not become geometric violations.
+
+    KiCad's JSON report carries ratsnest relationships in a top-level
+    ``unconnected_items`` array.  They are parsed into the dedicated
+    :attr:`DRCReport.unconnected_items` collection so that every consumer
+    of ``violations`` / ``error_count`` (``run_geometric_drc``, the route
+    gate, the "board is geometrically clean" regressions) keeps asking
+    the same geometric question it asked before.
+    """
+
+    @staticmethod
+    def _json_report(tmp_path: Path, *, violations: list, unconnected: list) -> DRCReport:
+        import json
+
+        path = tmp_path / "report.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "$schema": "https://schemas.kicad.org/drc.v1.json",
+                    "source": "board.kicad_pcb",
+                    "violations": violations,
+                    "unconnected_items": unconnected,
+                    "schematic_parity": [],
+                }
+            )
+        )
+        return DRCReport.load(path)
+
+    @staticmethod
+    def _unconnected(index: int) -> dict:
+        return {
+            "type": "unconnected_items",
+            "severity": "error",
+            "description": "Missing connection between items",
+            "items": [
+                {"description": "Zone [GND] on F.Cu", "pos": {"x": float(index), "y": 1.0}},
+                {"description": f"Pad {index} [GND] of U1 on B.Cu", "pos": {"x": 2.0, "y": 2.0}},
+            ],
+        }
+
+    @staticmethod
+    def _clearance() -> dict:
+        return {
+            "type": "clearance",
+            "severity": "error",
+            "description": "Clearance violation (clearance 0.2000 mm; actual 0.1000 mm)",
+            "items": [{"description": "Track [VCC] on F.Cu", "pos": {"x": 5.0, "y": 5.0}}],
+        }
+
+    def test_unconnected_items_are_not_geometric_violations(self, tmp_path: Path):
+        """A JSON report of pure connectivity items is geometrically clean."""
+        report = self._json_report(
+            tmp_path, violations=[], unconnected=[self._unconnected(i) for i in range(12)]
+        )
+
+        # Geometric contract: unchanged, still zero.
+        assert report.violations == []
+        assert report.violation_count == 0
+        assert report.error_count == 0
+        assert report.by_type(ViolationType.UNCONNECTED_ITEMS) == []
+
+        # Connectivity contract: the 12 relationships are available.
+        assert report.unconnected_item_count == 12
+        assert len(report.connectivity_items()) == 12
+        assert all(v.type == ViolationType.UNCONNECTED_ITEMS for v in report.unconnected_items)
+        assert all(v.is_connection for v in report.unconnected_items)
+        assert report.unconnected_items[0].nets == ["GND"]
+
+    def test_geometric_violations_still_counted_alongside_connectivity(self, tmp_path: Path):
+        """Geometry keeps counting geometry; connectivity is not added in."""
+        report = self._json_report(
+            tmp_path,
+            violations=[self._clearance()],
+            unconnected=[self._unconnected(i) for i in range(12)],
+        )
+
+        assert report.violation_count == 1
+        assert report.error_count == 1
+        assert report.violations[0].type == ViolationType.CLEARANCE
+        assert report.unconnected_item_count == 12
+
+    def test_text_report_connectivity_shape_is_unchanged(self, sample_drc_report: Path):
+        """The flat text ``.rpt`` format keeps its legacy single-list shape."""
+        report = DRCReport.load(sample_drc_report)
+
+        # Text reports have no sibling array -- the entries stay in
+        # ``violations`` exactly as before #4498 ...
+        assert report.unconnected_items == []
+        assert len(report.by_type(ViolationType.UNCONNECTED_ITEMS)) == 1
+        # ... and ``connectivity_items()`` still finds them (no double count).
+        assert len(report.connectivity_items()) == 1
+
+    def test_apply_filters_preserves_connectivity_items(self, tmp_path: Path):
+        """Geometric filtering never silently drops connectivity items."""
+        from kicad_tools.validate.filters import ViolationFilter
+
+        report = self._json_report(
+            tmp_path,
+            violations=[self._clearance()],
+            unconnected=[self._unconnected(i) for i in range(3)],
+        )
+        filtered = report.apply_filters(
+            [ViolationFilter(type_pattern="clearance", action="ignore")]
+        )
+
+        assert filtered.violation_count == 0
+        assert filtered.unconnected_item_count == 3
+
+
 class TestDRCReportQueries:
     """Tests for DRC report query methods."""
 

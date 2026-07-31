@@ -381,7 +381,6 @@ class ConnectivityValidator:
 
         from kicad_tools.cli.runner import find_kicad_cli
         from kicad_tools.drc import DRCReport
-        from kicad_tools.drc.violation import ViolationType
 
         kicad_cli = find_kicad_cli()
         if kicad_cli is None:
@@ -408,8 +407,12 @@ class ConnectivityValidator:
                 return None
             report = DRCReport.load(report_file.name)
 
+        # Connectivity relationships live in the report's dedicated
+        # ``unconnected_items`` collection, NOT in ``violations`` -- the
+        # geometric collection keeps its pre-#4498 meaning for every
+        # ``run_geometric_drc`` consumer.
         issues: list[ConnectivityIssue] = []
-        for index, violation in enumerate(report.by_type(ViolationType.UNCONNECTED_ITEMS)):
+        for index, violation in enumerate(report.connectivity_items()):
             item_ids = tuple(violation.items) or (f"native-unconnected[{index}]",)
             issues.append(
                 ConnectivityIssue(
