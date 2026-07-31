@@ -982,6 +982,13 @@ class CppPathfinder:
         self._pairwise_cpp_payload: (
             tuple[list[int], list[list[float]], list] | Literal[False] | None
         ) = None
+        # Issue #4530: tracks whether the *currently cached* payload above has
+        # actually been pushed to the live ``Grid3D``.  ``Grid3D::pairwise_active_``
+        # only records "some matrix was ever installed on this grid", not "the
+        # current one is installed", so it cannot be used to gate the reinstall
+        # after a mid-session net-map / attach-zone change.  Cleared alongside
+        # ``_pairwise_cpp_payload`` in both invalidating setters.
+        self._pairwise_cpp_installed: bool = False
 
         # Issue #2929: Per-A*-call wall-clock instrumentation, mirroring the
         # Python pathfinder's instrumentation surface so callers can audit
@@ -1179,12 +1186,16 @@ class CppPathfinder:
         # Issue #4510: the C++ domain matrix / attach zones are keyed by net
         # ID, translated through this map -- rebuild them on the next validate.
         self._pairwise_cpp_payload = None
+        # Issue #4530: the rebuilt payload must be re-pushed to the C++ grid.
+        self._pairwise_cpp_installed = False
 
     def set_attach_zones(self, zones) -> None:
         """Install precomputed rated-footprint necking regions."""
         self._attach_zones = tuple(zones)
         # Issue #4510: invalidate the translated C++ zone payload.
         self._pairwise_cpp_payload = None
+        # Issue #4530: the rebuilt payload must be re-pushed to the C++ grid.
+        self._pairwise_cpp_installed = False
         if self._py_router is not None:
             self._py_router.set_attach_zones(self._attach_zones)
 
@@ -1201,9 +1212,11 @@ class CppPathfinder:
         means the setters are never called and the C++ validator behaves
         byte-identically to the pre-#4510 code path.  The translated payload is
         cached (it depends only on the table, the reverse net map and the
-        zones, all fixed for a routing session) and re-pushed whenever the grid
-        reports itself dormant -- which is exactly the case after the C++ grid
-        has been rebuilt underneath us.
+        zones) and re-pushed whenever either (a) the grid reports itself
+        dormant -- exactly the case after the C++ grid has been rebuilt
+        underneath us -- or (b) the cache was invalidated by a mid-session
+        net-map / attach-zone change (Issue #4530), tracked explicitly via
+        :attr:`_pairwise_cpp_installed`.
         """
         impl = getattr(self._grid, "_impl", None)
         if impl is None or not hasattr(impl, "set_pairwise_domains"):
@@ -1237,13 +1250,20 @@ class CppPathfinder:
             payload = (domains.net_to_domain, domains.matrix, cpp_zones)
             self._pairwise_cpp_payload = payload
 
-        # ``pairwise_active`` is False on a freshly-built grid, so this both
-        # installs on first use and reinstalls after a grid rebuild -- without
-        # re-pushing the matrix on every single validation call.
-        if not impl.pairwise_active:
+        # ``pairwise_active`` is False on a freshly-built grid, so it installs
+        # on first use and reinstalls after a grid rebuild.  But it latches
+        # True once any matrix is pushed and never resets on the same grid, so
+        # it cannot detect a payload rebuilt after a mid-session invalidation
+        # (Issue #4530).  ``_pairwise_cpp_installed`` closes that gap: it is
+        # cleared by both invalidating setters and set True only once the
+        # freshly-(re)built payload has been pushed -- so a rebuilt payload is
+        # re-pushed even while ``pairwise_active`` is already True, without
+        # re-pushing on every single validation call.
+        if not impl.pairwise_active or not self._pairwise_cpp_installed:
             net_to_domain, matrix, cpp_zones = payload
             impl.set_pairwise_domains(net_to_domain, matrix)
             impl.set_attach_zones(cpp_zones)
+            self._pairwise_cpp_installed = True
 
     def _resolve_partner_net_id(self, net_name: str) -> int | None:
         """Look up the integer net id of the diff-pair partner of *net_name*.
