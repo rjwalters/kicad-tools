@@ -356,7 +356,7 @@ class PlacementFeedbackLoop:
         # placement -- the saved artifact can contain opens/DRC at the new
         # pad positions.  Snapshot the placement ALONGSIDE the routes and
         # restore them together so the best snapshot is atomic.
-        best_placement_snapshot: dict[str, tuple[tuple[float, float], float]] = (
+        best_placement_snapshot: dict[str, tuple[tuple[float, float], float, list[float]]] = (
             self._snapshot_placement()
         )
 
@@ -919,16 +919,27 @@ class PlacementFeedbackLoop:
             rotation = float(getattr(fp, "rotation", 0.0))
             self._original_positions[ref] = ((pos[0], pos[1]), rotation)
 
-    def _snapshot_placement(self) -> dict[str, tuple[tuple[float, float], float]]:
-        """Capture every footprint's (x, y) position and rotation.
+    def _snapshot_placement(
+        self,
+    ) -> dict[str, tuple[tuple[float, float], float, list[float]]]:
+        """Capture every footprint's (x, y) position, rotation, and pad angles.
 
         Issue #3504: used to take an atomic best snapshot of the
         component placement alongside the best routes.  Returns a mapping
-        ``ref -> ((x, y), rotation)``.  When no PCB is attached (routing-
-        strategies-only mode) this returns an empty dict, which makes
-        ``_restore_placement`` a no-op.
+        ``ref -> ((x, y), rotation, [pad_rotation, ...])``.  When no PCB is
+        attached (routing-strategies-only mode) this returns an empty dict,
+        which makes ``_restore_placement`` a no-op.
+
+        Issue #4518: the per-pad rotations are captured alongside the
+        footprint-level rotation so that a reverted (non-improving) delta
+        restores each pad's ABSOLUTE ``(at x y ANGLE)`` orientation too.  The
+        applicator's ``rotate_180`` bumps every pad's ``.rotation`` in lockstep
+        with ``fp.rotation`` (see ``StrategyApplicator._apply_rotate_component``),
+        so restoring only the footprint angle would leave pad angles stale in the
+        other direction on revert.  Pads are captured in ``fp.pads`` list order,
+        which is stable, so restore round-trips by index.
         """
-        snapshot: dict[str, tuple[tuple[float, float], float]] = {}
+        snapshot: dict[str, tuple[tuple[float, float], float, list[float]]] = {}
         if self.pcb is None:
             return snapshot
         for fp in getattr(self.pcb, "footprints", []):
@@ -937,14 +948,17 @@ class PlacementFeedbackLoop:
                 continue
             pos = fp.position
             rotation = float(getattr(fp, "rotation", 0.0))
-            snapshot[ref] = ((pos[0], pos[1]), rotation)
+            pad_rotations = [
+                float(pad.rotation) for pad in getattr(fp, "pads", []) if hasattr(pad, "rotation")
+            ]
+            snapshot[ref] = ((pos[0], pos[1]), rotation, pad_rotations)
         return snapshot
 
     def _restore_placement(
         self,
-        snapshot: dict[str, tuple[tuple[float, float], float]],
+        snapshot: dict[str, tuple[tuple[float, float], float, list[float]]],
     ) -> None:
-        """Restore footprint positions/rotations from a placement snapshot.
+        """Restore footprint positions/rotations/pad angles from a snapshot.
 
         Issue #3504: counterpart to :meth:`_snapshot_placement`.  Writes
         the captured ``(x, y)`` and rotation back onto each footprint so
@@ -952,6 +966,11 @@ class PlacementFeedbackLoop:
         were computed against.  Refs present in the PCB but absent from the
         snapshot are left untouched (defensive against footprints added
         mid-loop, which does not happen in practice).
+
+        Issue #4518: also restores each pad's absolute ``.rotation`` from the
+        captured list (matched by ``fp.pads`` list order) so a reverted delta
+        leaves pad angles exactly as they were pre-delta, not just the
+        footprint-level rotation.
         """
         if self.pcb is None or not snapshot:
             return
@@ -959,10 +978,17 @@ class PlacementFeedbackLoop:
             ref = getattr(fp, "reference", None)
             if ref is None or ref not in snapshot:
                 continue
-            (x, y), rotation = snapshot[ref]
+            (x, y), rotation, pad_rotations = snapshot[ref]
             fp.position = (x, y)
             if hasattr(fp, "rotation"):
                 fp.rotation = rotation
+            pads = [pad for pad in getattr(fp, "pads", []) if hasattr(pad, "rotation")]
+            # strict=False: capture and restore both filter on the same
+            # ``hasattr(pad, "rotation")`` predicate over the same stable
+            # ``fp.pads`` list, so lengths match in practice; tolerate a
+            # mismatch defensively rather than raising mid-revert.
+            for pad, pad_rotation in zip(pads, pad_rotations, strict=False):
+                pad.rotation = pad_rotation
 
     def _build_placement_diff(self) -> list[PlacementDiffEntry]:
         """Build the placement diff from snapshotted original positions.

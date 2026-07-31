@@ -188,12 +188,18 @@ class StrategyApplicator:
         flipping a reversed facing pad column (``rotation_delta == 180``) so a
         self-crossing bundle stops crossing.
 
-        Only the footprint-level orientation is written here.  The board-frame
-        pad positions the classifier reads are derived from ``fp.position`` +
-        ``fp.rotation`` applied to each pad's local offset (see
-        ``stuck_classifier._iter_board_pads``), so bumping ``fp.rotation`` is
-        sufficient for the PCB view.  The Phase-2 driver separately re-syncs the
-        router's flat pad coordinates before re-routing.
+        Both the footprint-level orientation AND every pad's absolute angle are
+        updated here.  The board-frame pad *positions* the classifier reads are
+        derived from ``fp.position`` + ``fp.rotation`` applied to each pad's
+        local offset (see ``stuck_classifier._iter_board_pads``), so bumping
+        ``fp.rotation`` is sufficient for that view.  But each pad's ``(at x y
+        ANGLE)`` third token is the pad's ABSOLUTE board-frame orientation (see
+        ``schema/pcb.py`` ``Pad.rotation`` and the #3902 fix), so it must be
+        bumped by the same ``rotation_delta`` or serializing the mutated PCB
+        leaves every pad angle stale -- reintroducing the #3902 defect class for
+        non-180-symmetric pad shapes (chamfered roundrect, trapezoid, custom).
+        The Phase-2 driver separately re-syncs the router's flat pad coordinates
+        (which carry no rotation of their own) before re-routing.
         """
         if not strategy.actions:
             return ApplicationResult(
@@ -230,6 +236,18 @@ class StrategyApplicator:
         old_rotation = float(getattr(fp, "rotation", 0.0))
         new_rotation = (old_rotation + float(rotation_delta)) % 360.0
         fp.rotation = new_rotation
+
+        # A pad's ``(at x y ANGLE)`` third token is the pad's ABSOLUTE board-frame
+        # orientation and already includes the parent footprint's rotation, so it
+        # must be advanced by the same delta.  ``Footprint.__setattr__`` for
+        # ``rotation`` only rewrites the footprint's own ``(at ...)`` token and is
+        # unaware of pads (schema/pcb.py), so without this loop the pad angles go
+        # stale on serialization (the #3902 defect class).  Guard with getattr/
+        # hasattr since test doubles (MockFootprint) may carry pads without a
+        # ``.rotation`` attribute.
+        for pad in getattr(fp, "pads", []):
+            if hasattr(pad, "rotation"):
+                pad.rotation = (float(pad.rotation) + float(rotation_delta)) % 360.0
 
         return ApplicationResult(
             success=True,

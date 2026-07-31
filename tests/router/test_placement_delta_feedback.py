@@ -38,16 +38,80 @@ from kicad_tools.router import (
 from tests.router.test_placement_delta import _facing_rows_bundle_board, _load
 
 # --------------------------------------------------------------------------- #
+# Real-PCB fixture with a non-180-symmetric rotated-pad footprint (#4518)      #
+# --------------------------------------------------------------------------- #
+
+# A footprint (UB) whose pads carry a nonzero ABSOLUTE ``(at x y ANGLE)`` third
+# token (45 deg) on an oval/roundrect shape -- so a stale pad angle after a
+# footprint rotation is a real geometry error, not a 180-symmetric no-op.  A
+# routable net (N1: A<->B) plus a persistently-unroutable net (BOX, boxed in by
+# its own copper) let the composed delta loop reach the apply/keep-or-revert
+# branch on a REAL ``Autorouter`` instead of short-circuiting on convergence.
+_ROTATED_PAD_BOARD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "")
+  (net 1 "N1")
+  (net 2 "BOX")
+  (footprint "R" (layer "F.Cu") (at 2 10)
+    (property "Reference" "A")
+    (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "N1"))
+  )
+  (footprint "R" (layer "F.Cu") (at 10 10)
+    (property "Reference" "B")
+    (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "N1"))
+  )
+  (footprint "BOX" (layer "F.Cu") (at 10 10)
+    (property "Reference" "BX")
+    (pad "1" smd rect (at 0 -1.5) (size 1.4 1.4) (layers "F.Cu") (net 2 "BOX"))
+    (pad "2" smd rect (at 0 1.5) (size 1.4 1.4) (layers "F.Cu") (net 2 "BOX"))
+    (pad "3" smd rect (at -1.5 0) (size 1.4 1.4) (layers "F.Cu") (net 2 "BOX"))
+    (pad "4" smd rect (at 1.5 0) (size 1.4 1.4) (layers "F.Cu") (net 2 "BOX"))
+  )
+  (footprint "chamf" (layer "F.Cu") (at 16 16)
+    (property "Reference" "UB")
+    (pad "1" smd roundrect (at 0 -0.6 45) (size 0.6 0.3) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd roundrect (at 0 0.6 45) (size 0.6 0.3) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+
+def _rotated_pad_board(tmp_path: Path):
+    """Load ``_ROTATED_PAD_BOARD`` as a real :class:`PCB`."""
+    return _load(tmp_path, _ROTATED_PAD_BOARD)
+
+
+# --------------------------------------------------------------------------- #
 # Lightweight test doubles                                                     #
 # --------------------------------------------------------------------------- #
 
 
+class MockPad:
+    """Minimal pad stub carrying only the ``.rotation`` the applicator and the
+    snapshot/restore path read (issue #4518)."""
+
+    def __init__(self, rotation: float = 0.0):
+        self.rotation = rotation
+
+
 class MockFootprint:
-    def __init__(self, reference: str, x: float, y: float, rotation: float = 0.0):
+    def __init__(
+        self,
+        reference: str,
+        x: float,
+        y: float,
+        rotation: float = 0.0,
+        pad_rotations: list[float] | None = None,
+    ):
         self.reference = reference
         self.position = (x, y)
         self.rotation = rotation
-        self.pads: list = []
+        # Default empty (existing tests): the applicator/snapshot pad loops are
+        # no-ops.  Pass ``pad_rotations`` to exercise the #4518 pad-angle sync.
+        self.pads: list = [MockPad(r) for r in (pad_rotations or [])]
 
 
 class MockPCB:
@@ -197,6 +261,83 @@ class TestApplicatorRotate:
         # A rotation targeting a missing ref is not safe.
         assert applicator.is_safe_to_apply(strategy, MockPCB([])) is False
 
+    # ----- #4518: absolute pad-angle sync ---------------------------------- #
+
+    @staticmethod
+    def _rotate_strategy(ref: str, delta: float) -> ResolutionStrategy:
+        return ResolutionStrategy(
+            type=StrategyType.ROTATE_COMPONENT,
+            difficulty=Difficulty.MEDIUM,
+            confidence=1.0,
+            actions=[Action(type="rotate", target=ref, params={"rotation_delta": delta})],
+        )
+
+    def test_rotate_bumps_mock_pad_rotations(self):
+        """#4518: every pad's ``.rotation`` advances by the same delta as the
+        footprint's, in lockstep."""
+        applicator = StrategyApplicator()
+        fp = MockFootprint("U5", 10.0, 20.0, rotation=0.0, pad_rotations=[45.0, 90.0])
+        pcb = MockPCB([fp])
+        applicator.apply_strategy(pcb, self._rotate_strategy("U5", 180.0))
+        assert fp.rotation == 180.0
+        assert [pad.rotation for pad in fp.pads] == [225.0, 270.0]
+
+    def test_rotate_pad_rotation_wraps_modulo_360(self):
+        """A pad starting at a nonzero angle wraps past 360 like the footprint."""
+        applicator = StrategyApplicator()
+        fp = MockFootprint("U5", 0.0, 0.0, rotation=270.0, pad_rotations=[200.0])
+        pcb = MockPCB([fp])
+        applicator.apply_strategy(pcb, self._rotate_strategy("U5", 180.0))
+        assert fp.rotation == 90.0  # (270 + 180) % 360
+        assert fp.pads[0].rotation == 20.0  # (200 + 180) % 360
+
+    def test_rotate_tolerates_pad_without_rotation_attr(self):
+        """A pad stub lacking ``.rotation`` (older schema / test double) must not
+        raise via the ``hasattr`` guard, and a zero-pad footprint is fine too."""
+        applicator = StrategyApplicator()
+
+        class _BarePad:  # no ``.rotation`` attribute
+            pass
+
+        fp = MockFootprint("U5", 0.0, 0.0, rotation=0.0)
+        fp.pads = [_BarePad()]
+        pcb = MockPCB([fp])
+        result = applicator.apply_strategy(pcb, self._rotate_strategy("U5", 180.0))
+        assert result.success is True
+        assert fp.rotation == 180.0
+        assert not hasattr(fp.pads[0], "rotation")
+
+        empty = MockFootprint("U6", 0.0, 0.0)
+        result2 = applicator.apply_strategy(MockPCB([empty]), self._rotate_strategy("U6", 90.0))
+        assert result2.success is True
+        assert empty.rotation == 90.0
+
+    def test_rotate_syncs_absolute_pad_angles_on_real_pcb(self, tmp_path: Path):
+        """#4518 core: on a REAL ``PCB``/``Pad``, rotating UB 180 deg advances
+        every pad's absolute ``(at x y ANGLE)`` third token, and the change
+        survives a save + reload round-trip (the serialization path #3902 warned
+        about).  UB's pads start at 45 deg on a non-180-symmetric roundrect."""
+        applicator = StrategyApplicator()
+        pcb = _rotated_pad_board(tmp_path)
+        ub = next(fp for fp in pcb.footprints if fp.reference == "UB")
+        assert [pad.rotation for pad in ub.pads] == [45.0, 45.0]
+
+        result = applicator.apply_strategy(pcb, self._rotate_strategy("UB", 180.0))
+        assert result.success is True
+        assert ub.rotation == 180.0
+        assert [pad.rotation for pad in ub.pads] == [225.0, 225.0]
+
+        # Serialize + reparse: the absolute pad angles must persist (proving the
+        # dataclass write reached the S-expression tree, not just memory).
+        out = tmp_path / "rotated_out.kicad_pcb"
+        pcb.save(str(out))
+        from kicad_tools.schema.pcb import PCB
+
+        reloaded = PCB.load(str(out))
+        ub2 = next(fp for fp in reloaded.footprints if fp.reference == "UB")
+        assert ub2.rotation == 180.0
+        assert [pad.rotation for pad in ub2.pads] == [225.0, 225.0]
+
 
 # --------------------------------------------------------------------------- #
 # PlacementDelta.from_dict round-trip (#4467)                                  #
@@ -271,6 +412,46 @@ class TestDeltaFeedbackKeepRevert:
         assert result.failed_nets == [2]
         # No spurious diff entry for a reverted move.
         assert result.placement_diff == []
+
+    def test_reverted_delta_restores_pad_rotations(self):
+        """#4518 coupled defect: a reverted (non-improving) delta must restore
+        each pad's absolute ``.rotation`` -- not only ``fp.rotation``.  Without
+        the snapshot/restore fix the pad angles would stay bumped (225) while the
+        footprint reverts to 0, leaving the board stale in the *other* direction.
+        """
+        fps = [MockFootprint("UB", 10.0, 10.0, rotation=0.0, pad_rotations=[45.0, 45.0])]
+        pcb = MockPCB(fps)
+        router = FakeRouter([FakePad(12.0, 10.0, "UB", "2")], 2, _rotate_never_helps)
+        loop = PlacementDeltaFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            delta_proposer=lambda _pcb: [_rotate_delta()],
+        )
+        result = loop.run_delta(max_adjustments=3)
+        assert result.applied_deltas == []
+        assert result.exit_reason == "pd_reverted"
+        # Both the footprint AND every pad angle are back to pre-delta values.
+        assert pcb.footprints[0].rotation == 0.0
+        assert [pad.rotation for pad in pcb.footprints[0].pads] == [45.0, 45.0]
+
+    def test_kept_delta_bumps_pad_rotations(self):
+        """#4518: when a rotate delta is KEPT, the applicator's pad-angle bump
+        survives through the loop (footprint 180 -> pads +180)."""
+        fps = [MockFootprint("UB", 10.0, 10.0, rotation=0.0, pad_rotations=[45.0, 90.0])]
+        pcb = MockPCB(fps)
+        router = FakeRouter([FakePad(12.0, 10.0, "UB", "2")], 2, _rotate_fixes_net2)
+        loop = PlacementDeltaFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            delta_proposer=lambda _pcb: [_rotate_delta()],
+        )
+        result = loop.run_delta(max_adjustments=3)
+        assert result.success is True
+        assert [d.target_ref for d in result.applied_deltas] == ["UB"]
+        assert pcb.footprints[0].rotation == 180.0
+        assert [pad.rotation for pad in pcb.footprints[0].pads] == [225.0, 270.0]
 
 
 # --------------------------------------------------------------------------- #
@@ -426,3 +607,101 @@ class TestAutorouterEntryPoint:
         # Bisection guard: legacy result type, no delta artifact written.
         assert isinstance(result, PlacementFeedbackResult)
         assert not out.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Composed path: real Autorouter + real PCB (#4518 AC integration)             #
+# --------------------------------------------------------------------------- #
+
+
+class TestComposedDeltaFeedbackIntegration:
+    """End-to-end: drive ``route_with_placement_delta_feedback`` with a REAL
+    ``Autorouter`` and a REAL parsed ``PCB`` (not ``FakeRouter``/``MockPCB``),
+    apply a ``rotate_180`` to UB, and confirm the composed apply ->
+    ``_apply_delta_to_router_pads`` -> ``_reset_for_new_trial`` grid rebuild ->
+    keep-or-revert cycle leaves UB's pad angles consistent with ``fp.rotation``
+    -- and that the board round-trips through serialization.  This closes the
+    "composed path is never exercised end to end" gap from the issue body.
+    """
+
+    @staticmethod
+    def _build_router(pcb):
+        import math
+
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.layers import Layer
+
+        router = Autorouter(width=20, height=20)
+        for fp in pcb.footprints:
+            # KiCad applies footprint orientation as a negated angle vs standard
+            # CCW math (see router/io.py::route_pcb); mirror that so the router's
+            # flat board-frame pads match what the classifier/PCB view expects.
+            rot_rad = math.radians(-fp.rotation)
+            cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+            pads = []
+            for pad in fp.pads:
+                px, py = pad.position
+                rx = px * cos_r - py * sin_r
+                ry = px * sin_r + py * cos_r
+                pads.append(
+                    {
+                        "number": pad.number,
+                        "x": fp.position[0] + rx,
+                        "y": fp.position[1] + ry,
+                        "width": pad.size[0],
+                        "height": pad.size[1],
+                        "net": pad.net_number,
+                        "net_name": pad.net_name,
+                        "layer": Layer.F_CU,
+                    }
+                )
+            router.add_component(fp.reference, pads)
+        return router
+
+    def test_composed_rotate_preserves_pad_angle_consistency(self, tmp_path: Path):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = _rotated_pad_board(tmp_path)
+        router = self._build_router(pcb)
+
+        ub = next(fp for fp in pcb.footprints if fp.reference == "UB")
+        fp_before = ub.rotation
+        pad_before = [pad.rotation for pad in ub.pads]
+        assert pad_before == [45.0, 45.0]
+
+        # The BOX net is boxed in by its own copper and never routes, so the loop
+        # does not short-circuit on convergence -- it reaches the apply branch,
+        # rotates UB, re-routes, and (since UB is off-net) reverts.
+        result = router.route_with_placement_delta_feedback(
+            pcb=pcb,
+            max_adjustments=2,
+            verbose=False,
+            delta_proposer=lambda _pcb: [
+                PlacementDelta(
+                    net_name="BOX",
+                    target_ref="UB",
+                    kind="rotate_180",
+                    rotation_delta=180.0,
+                    source_action="de_reverse_bundle",
+                )
+            ],
+        )
+        assert isinstance(result, PlacementDeltaFeedbackResult)
+        # AC(a): the delta was actually proposed/considered (composed path ran),
+        # and the outcome is either a strict improvement or an atomic revert.
+        assert len(result.proposed_deltas) >= 1
+        assert result.applied_deltas or result.exit_reason == "pd_reverted"
+
+        # AC(b): for EVERY pad, the applied absolute-angle delta equals the
+        # applied footprint-rotation delta -- consistent whether kept or reverted.
+        fp_delta = (ub.rotation - fp_before) % 360.0
+        for pad, before in zip(ub.pads, pad_before, strict=True):
+            assert (pad.rotation - before) % 360.0 == fp_delta
+
+        # And the consistency survives serialize + reparse (the KiCad view).
+        out = tmp_path / "composed_out.kicad_pcb"
+        pcb.save(str(out))
+        reloaded = PCB.load(str(out))
+        ub2 = next(fp for fp in reloaded.footprints if fp.reference == "UB")
+        assert ub2.rotation == ub.rotation
+        assert [pad.rotation for pad in ub2.pads] == [pad.rotation for pad in ub.pads]

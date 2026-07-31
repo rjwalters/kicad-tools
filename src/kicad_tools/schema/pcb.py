@@ -269,6 +269,36 @@ class Pad:
     # Corner-radius ratio for ``roundrect`` pads: radius = rratio * min(w, h).
     # KiCad's default is 0.25 when ``(roundrect_rratio ...)`` is absent.
     roundrect_rratio: float = 0.25
+    # Back-reference to the ``(pad ...)`` S-expression node, linked by
+    # :meth:`PCB._link_footprint_sexp_nodes` after parsing so that assigning
+    # ``pad.rotation`` keeps the ``(at x y ANGLE)`` third token in sync with the
+    # Python value (issue #4518).  Without this a mutation like
+    # ``StrategyApplicator._apply_rotate_component`` bumping ``pad.rotation``
+    # would update the dataclass field but never reach ``PCB.save`` (which
+    # serialises the raw S-expression tree), leaving stale absolute pad angles
+    # -- the #3902 defect class.  ``compare=False`` keeps dataclass equality
+    # value-based (as the existing pad round-trip tests expect).
+    _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # Store the Python value first via the default mechanism.
+        super().__setattr__(name, value)
+
+        # Only ``rotation`` mirrors into the S-expression tree.  During
+        # ``__init__`` (and for pads never linked to a node, e.g. freshly
+        # instantiated library pads or test doubles) ``_sexp_node`` is None and
+        # this is a no-op -- matching ``Footprint.__setattr__``'s guard.
+        if name != "rotation":
+            return
+        sexp_node: SExp | None = self.__dict__.get("_sexp_node")
+        if sexp_node is None:
+            return
+        at_node = sexp_node.find_child("at")
+        if at_node is not None:
+            if len(at_node.children) >= 3:
+                at_node.set_value(2, value)
+            elif value != 0.0:
+                at_node.add(value)
 
     @property
     def net(self) -> int:
@@ -2364,6 +2394,19 @@ class PCB:
                 # both _sexp_node and _board_origin are in place.
                 object.__setattr__(fp, "_board_origin", self._board_origin)
                 object.__setattr__(fp, "_sexp_node", child)
+
+                # Issue #4518: link each Pad to its own ``(pad ...)`` node so
+                # that assigning ``pad.rotation`` syncs the absolute ``(at x y
+                # ANGLE)`` third token into the S-expression tree ``save()``
+                # serialises.  ``Footprint.from_sexp`` appends pads in
+                # ``find_all("pad")`` order, so matching that same traversal
+                # here keeps the Python list and the node list index-aligned.
+                pad_nodes = child.find_all("pad")
+                # strict=False: ``fp.pads`` and the ``(pad ...)`` node list are
+                # both built from the same ``find_all("pad")`` traversal, so
+                # they align; tolerate a rare mismatch rather than raising.
+                for pad_obj, pad_node in zip(fp.pads, pad_nodes, strict=False):
+                    object.__setattr__(pad_obj, "_sexp_node", pad_node)
 
                 # Migrate the legacy KiCad-6 in-attr 'locked' token to
                 # the modern top-level ``(locked yes)`` form. KiCad 10's
