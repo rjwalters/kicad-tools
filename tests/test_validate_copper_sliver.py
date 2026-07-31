@@ -13,7 +13,8 @@ Covers the acceptance scenarios from the issue:
 - Normal (>= min-width) isthmus -> not flagged.
 - Native threshold boundary (0.07 mm passes, 0.10 mm is flagged independently
   of the manufacturer's 0.127 mm trace-width floor).
-- KiCad's 0.0008 mm adjacent-edge and six-vertex guards.
+- KiCad's six-vertex guard and its 0.0008 mm tiny-vertex *traversal*
+  (component-wise, walk past -- never drop the candidate tip).
 - Empty PCB / layer with no copper -> no violations, no exceptions.
 - Violation metadata (rule_id / severity / layer / location).
 - ``ViolationType.from_string("copper_sliver")`` resolves to
@@ -22,6 +23,7 @@ Covers the acceptance scenarios from the issue:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -151,6 +153,23 @@ def _acute_tip(base_width: float = 0.2):
     ]
 
 
+def _acute_tip_with_micro_vertices(*offsets: tuple[float, float], base_width: float = 0.2):
+    """``_acute_tip`` with numerical micro-vertices next to the acute tip.
+
+    Each ``offsets`` entry is a ``(dx, dy)`` displacement from the tip at
+    ``(10, 15)``; the vertices are inserted between the tip and the lower
+    arm, i.e. directly adjacent to the tip, exactly like the kink that
+    reproduced the native/internal false negative.  The offsets are chosen
+    to deviate from the tip-to-arm chord by more than the rule's
+    collinear-simplify tolerance so the vertices genuinely survive into
+    ``_iter_sliver_tips``.
+    """
+    points = _acute_tip(base_width)
+    tip_index = points.index((10.0, 15.0))
+    kinks = [(10.0 + dx, 15.0 + dy) for dx, dy in offsets]
+    return [*points[: tip_index + 1], *kinks, *points[tip_index + 1 :]]
+
+
 def _zone_with_fill(points, layer="F.Cu"):
     return _FakeZone(net_number=1, net_name="GND", layer=layer, filled_polygons=[points])
 
@@ -255,39 +274,81 @@ class TestThresholdBoundary:
 
         assert list(CopperSliverRule._iter_sliver_tips(component, 0.08)) == []
 
-    @pytest.mark.parametrize(
-        ("adjacent_length", "detected"),
-        [
-            (KICAD_SLIVER_MINIMUM_LENGTH_MM - 0.0001, False),
-            (KICAD_SLIVER_MINIMUM_LENGTH_MM, True),
-        ],
-    )
-    def test_native_minimum_adjacent_length_guard(
-        self,
-        monkeypatch,
-        adjacent_length: float,
-        detected: bool,
-    ):
-        monkeypatch.setattr(
-            CopperSliverRule,
-            "_chord_is_locally_inside",
-            lambda _coords, index: index == 1,
-        )
+
+# ---------------------------------------------------------------------------
+# Scenario: KiCad's tiny-vertex traversal (native minimum-length semantics)
+#
+# Native KiCad does not *drop* a candidate tip whose immediate neighbour is
+# closer than 0.0008 mm -- it walks past such micro-vertices (component-wise
+# smallness test) until it finds usable arms.  These tests exercise the real
+# traversal on real geometry; nothing is monkeypatched away.
+# ---------------------------------------------------------------------------
+
+
+class TestMicroVertexTraversal:
+    def test_micro_vertex_adjacent_to_tip_does_not_hide_sliver(self):
+        """A 0.0005 mm kink beside the tip must not mask the sliver."""
+        zone = _zone_with_fill(_acute_tip_with_micro_vertices((0.0005, -0.0003)))
+        results = _run(min_trace_width=0.127, zones=[zone])
+        slivers = [v for v in results.violations if v.rule_id == "copper_sliver"]
+        assert len(slivers) == 1
+
+    def test_smallness_predicate_is_component_wise_not_euclidean(self):
+        """``abs(dx) < min and abs(dy) < min`` -- hypot would exceed the floor.
+
+        The kink sits 0.00099 mm from the tip by Euclidean distance (above
+        the 0.0008 mm floor) but is component-wise tiny in both axes, so
+        native KiCad still traverses past it.  A ``hypot`` predicate would
+        accept it as a usable arm and lose the sliver.
+        """
+        offset = (0.0007, -0.0007)
+        assert math.hypot(*offset) > KICAD_SLIVER_MINIMUM_LENGTH_MM
+        assert max(abs(offset[0]), abs(offset[1])) < KICAD_SLIVER_MINIMUM_LENGTH_MM
+
+        zone = _zone_with_fill(_acute_tip_with_micro_vertices(offset))
+        results = _run(min_trace_width=0.127, zones=[zone])
+        slivers = [v for v in results.violations if v.rule_id == "copper_sliver"]
+        assert len(slivers) == 1
+
+    def test_micro_vertex_chain_yields_one_marker_at_the_tip(self):
+        """A run of micro-vertices is one acute corner, not one per vertex."""
+        zone = _zone_with_fill(_acute_tip_with_micro_vertices((0.0003, -0.0003), (0.0006, -0.0006)))
+        results = _run(min_trace_width=0.127, zones=[zone])
+        slivers = [v for v in results.violations if v.rule_id == "copper_sliver"]
+        assert len(slivers) == 1
+        x, y = slivers[0].location
+        assert (x, y) == pytest.approx((10.0, 15.0), abs=1e-3)
+
+    def test_traversal_resolves_arms_past_tiny_neighbours(self):
+        """Unit-level: the resolved arms skip the micro-vertex entirely."""
         coords = [
-            (adjacent_length, adjacent_length * 0.01),
+            (20.0, 10.0),
+            (10.0, 15.0),
+            (10.0005, 14.9997),
+            (20.0, 20.0),
+        ]
+        assert CopperSliverRule._resolve_arm_index(coords, 1, 1) == 3
+        assert CopperSliverRule._resolve_arm_index(coords, 1, -1) == 0
+        # From the micro-vertex the traversal walks back over the tip too.
+        assert CopperSliverRule._resolve_arm_index(coords, 2, -1) == 0
+
+    def test_degenerate_ring_inside_minimum_length_yields_no_tips(self):
+        """A speck smaller than the minimum length everywhere is not a tip."""
+        coords = [
             (0.0, 0.0),
-            (1.0, -0.01),
-            (2.0, -1.0),
-            (3.0, 0.0),
-            (2.0, 1.0),
+            (0.0002, 0.0),
+            (0.0004, 0.0001),
+            (0.0004, 0.0003),
+            (0.0002, 0.0004),
+            (0.0, 0.0002),
         ]
         component = SimpleNamespace(
             exterior=SimpleNamespace(coords=[*coords, coords[0]]),
             interiors=[],
         )
 
-        tips = list(CopperSliverRule._iter_sliver_tips(component, 0.08))
-        assert bool(tips) is detected
+        assert CopperSliverRule._resolve_arm_index(coords, 0, 1) is None
+        assert list(CopperSliverRule._iter_sliver_tips(component, 0.08)) == []
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +448,48 @@ def test_point_one_mm_acute_tip_matches_native_count(tmp_path: Path):
     assert native.ran
     assert native.all_by_type.get("copper_sliver", 0) == 1
     assert internal_count == 1
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("kink", "label"),
+    [
+        # Sub-0.0008 mm kink adjacent to the acute tip: the exact false
+        # negative that a "drop the candidate" minimum-length guard loses
+        # (internal/native 0/1) and that the native traversal keeps at 1/1.
+        ("        (xy 10.0005 24.9997)\n", "single micro-vertex"),
+        # Component-wise smallness: 0.00099 mm away by hypot -- above the
+        # 0.0008 mm floor -- yet tiny in both axes, so native walks past it.
+        ("        (xy 10.0007 24.9993)\n", "diagonal micro-vertex"),
+        # A run of micro-vertices is still one acute corner, one marker.
+        (
+            "        (xy 10.0003 24.9997)\n        (xy 10.0006 24.9994)\n",
+            "micro-vertex chain",
+        ),
+    ],
+)
+def test_micro_vertex_beside_tip_matches_native_count(kink: str, label: str, tmp_path: Path):
+    """Micro-vertices next to the committed positive tip stay 1/1 vs kicad-cli."""
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.drc.geometric import run_geometric_drc
+
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("kicad-cli not installed")
+
+    source = POSITIVE_FIXTURE.read_text()
+    tip = "        (xy 10 25)\n"
+    assert tip in source
+    fixture = tmp_path / "copper_sliver_micro_vertex.kicad_pcb"
+    fixture.write_text(source.replace(tip, tip + kink))
+
+    native = run_geometric_drc(fixture, kicad_cli=cli)
+    internal = CopperSliverRule().check(PCB.load(fixture), _make_design_rules())
+    internal_count = sum(v.rule_id == "copper_sliver" for v in internal.violations)
+
+    assert native.ran
+    assert native.all_by_type.get("copper_sliver", 0) == 1, label
+    assert internal_count == 1, label
 
 
 @pytest.mark.integration

@@ -25,6 +25,15 @@ edge length, and considers only outlines with more than five vertices.  This
 rule mirrors those native defaults directly; substituting a fab profile's
 ``min_trace_width_mm`` creates false negatives in the 0.08--fab-width band.
 
+**Minimum length is a traversal, not a drop.**  Native KiCad does not
+discard a candidate tip whose immediate neighbour is closer than
+0.0008 mm -- it *walks past* such micro-vertices until it finds usable
+prior/next arms, using a component-wise smallness test
+(``abs(dx) < min_len and abs(dy) < min_len``, not Euclidean distance).
+Dropping instead of traversing lets a single numerical kink beside an
+acute tip hide a sliver that ``kicad-cli`` reports.  See
+:meth:`CopperSliverRule._resolve_arm_index`.
+
 **Severity:** ``kicad-cli`` classifies ``copper_sliver`` as a *warning*
 (fab-process advisory, not a guaranteed short).  This rule emits
 ``severity="warning"`` to match and to avoid turning a soft fab note
@@ -260,24 +269,80 @@ class CopperSliverRule(DRCRule):
                 )
 
     @staticmethod
+    def _resolve_arm_index(coords: list[tuple[float, float]], index: int, step: int) -> int | None:
+        """Walk past adjacent *tiny* vertices to the first usable arm vertex.
+
+        Mirrors KiCad's native ``do { pt = CPoint( --prevIdx ); } while (…)``
+        traversal in its sliver test provider.  Two details of the native
+        semantics are load-bearing and are reproduced exactly:
+
+        * **The smallness predicate is component-wise**
+          (``abs(dx) < min_len and abs(dy) < min_len``), *not* Euclidean.
+          A vertex offset by ``(0.0007, 0.0007)`` mm is 0.00099 mm away --
+          above the 0.0008 mm floor by hypot, yet native KiCad still treats
+          it as a numerical micro-vertex and walks past it.
+        * **A tiny neighbour is skipped, never used to drop the candidate.**
+          Dropping the tip (the previous behaviour here) lets a single
+          numerical micro-vertex adjacent to an acute tip *hide* a real
+          sliver that native KiCad reports -- a false negative.
+
+        Args:
+            coords: Ring vertices without the closing duplicate.
+            index: Index of the tip whose arm is being resolved.
+            step: ``-1`` to walk backwards (prior arm), ``+1`` forwards.
+
+        Returns:
+            The index of the first vertex that is not component-wise tiny
+            relative to ``coords[index]``, or ``None`` when the whole ring
+            collapses inside the minimum length (a degenerate speck).
+        """
+        count = len(coords)
+        x, y = coords[index]
+        for offset in range(1, count):
+            candidate = (index + step * offset) % count
+            cx, cy = coords[candidate]
+            if (
+                abs(cx - x) >= KICAD_SLIVER_MINIMUM_LENGTH_MM
+                or abs(cy - y) >= KICAD_SLIVER_MINIMUM_LENGTH_MM
+            ):
+                return candidate
+        return None
+
+    @staticmethod
     def _iter_sliver_tips(
         component: Any, sliver_width_tolerance: float
     ) -> Iterator[tuple[tuple[float, float], float, float]]:
         """Yield acute convex vertices using KiCad's angle/width semantics."""
         angle_limit = KICAD_SLIVER_ANGLE_TOLERANCE_DEG
+        resolve = CopperSliverRule._resolve_arm_index
         rings = [component.exterior, *component.interiors]
         for ring in rings:
             coords = list(ring.coords)[:-1]
             if len(coords) < KICAD_SLIVER_MINIMUM_VERTEX_COUNT:
                 continue
+            # One marker per acute corner: every vertex of a micro-vertex
+            # chain at the same tip resolves to the *same* pair of usable
+            # arms, and native KiCad emits a single ``copper_sliver`` for
+            # that corner (verified against kicad-cli).  Keying on the
+            # resolved arm pair collapses the chain without merging two
+            # genuinely distinct tips, which resolve to different arms.
+            seen_arms: set[tuple[int, int]] = set()
             for index, current in enumerate(coords):
-                previous = coords[index - 1]
-                following = coords[(index + 1) % len(coords)]
-                if not CopperSliverRule._chord_is_locally_inside(coords, index):
+                prior_index = resolve(coords, index, -1)
+                next_index = resolve(coords, index, 1)
+                if prior_index is None or next_index is None:
+                    continue
+                if (prior_index, next_index) in seen_arms:
+                    continue
+                previous = coords[prior_index]
+                following = coords[next_index]
+                if not CopperSliverRule._chord_is_locally_inside(
+                    coords, prior_index, index, next_index
+                ):
                     continue
                 arm1 = math.hypot(previous[0] - current[0], previous[1] - current[1])
                 arm2 = math.hypot(following[0] - current[0], following[1] - current[1])
-                if arm1 < KICAD_SLIVER_MINIMUM_LENGTH_MM or arm2 < KICAD_SLIVER_MINIMUM_LENGTH_MM:
+                if arm1 <= 0.0 or arm2 <= 0.0:
                     continue
                 dot = (previous[0] - current[0]) * (following[0] - current[0]) + (
                     previous[1] - current[1]
@@ -286,11 +351,23 @@ class CopperSliverRule(DRCRule):
                 angle = math.degrees(math.acos(cosine))
                 opposite_width = math.hypot(following[0] - previous[0], following[1] - previous[1])
                 if angle < angle_limit and opposite_width > sliver_width_tolerance:
+                    seen_arms.add((prior_index, next_index))
                     yield (current, angle, opposite_width)
 
     @staticmethod
-    def _chord_is_locally_inside(coords: list[tuple[float, float]], tip_index: int) -> bool:
-        """Match KiCad's local-inside guard for the chord across a tip."""
+    def _chord_is_locally_inside(
+        coords: list[tuple[float, float]],
+        prior_index: int,
+        tip_index: int,
+        next_index: int,
+    ) -> bool:
+        """Match KiCad's local-inside guard for the chord across a tip.
+
+        ``prior_index`` / ``next_index`` are the *resolved* arm vertices
+        (see :meth:`_resolve_arm_index`), so the guard is evaluated on the
+        same neighbourhood the angle test uses instead of on raw index
+        neighbours that may be numerical micro-vertices.
+        """
 
         def area(
             p: tuple[float, float],
@@ -299,11 +376,16 @@ class CopperSliverRule(DRCRule):
         ) -> float:
             return float((q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1]))
 
-        count = len(coords)
-        a = (tip_index - 1) % count
-        b = (tip_index + 1) % count
-        previous = (a - 1) % count
-        following = (a + 1) % count
+        a = prior_index
+        b = next_index
+        # The vertex preceding the prior arm, resolved with the same
+        # tiny-vertex traversal; ``following`` is the tip itself, exactly
+        # as in the native index arithmetic (a + 1 == tip when no micro
+        # vertices intervene).
+        previous = CopperSliverRule._resolve_arm_index(coords, a, -1)
+        if previous is None:
+            return False
+        following = tip_index
         if area(coords[previous], coords[a], coords[following]) < 0:
             return (
                 area(coords[a], coords[b], coords[following]) >= 0
