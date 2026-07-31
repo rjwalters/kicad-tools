@@ -4339,7 +4339,8 @@ def verify_output_connectivity(
     # Header net table, used to resolve a name-only reference back to its id
     # so both dialects key ``segments_by_net`` identically.
     name_to_id = {
-        m.group(2): int(m.group(1)) for m in re.finditer(r'\(net\s+(\d+)\s+"([^"]*)"\)', pcb_content)
+        m.group(2): int(m.group(1))
+        for m in re.finditer(r'\(net\s+(\d+)\s+"([^"]*)"\)', pcb_content)
     }
 
     def _block_net_id(block: str) -> int | None:
