@@ -2778,6 +2778,148 @@ def _run_placement_feedback(
     return diff_data
 
 
+def _placement_delta_path(args, pcb_path: Path) -> Path:
+    """Resolve the path of the ``<output>_placement_delta.json`` artifact."""
+    if getattr(args, "output", None):
+        output_path = Path(args.output)
+    else:
+        output_path = pcb_path.with_stem(pcb_path.stem + "_routed")
+    return output_path.with_suffix("").with_name(output_path.stem + "_placement_delta.json")
+
+
+def _run_placement_delta_feedback(
+    router,
+    pcb_path: Path,
+    output_path: Path,
+    args,
+    quiet: bool,
+) -> Path | None:
+    """Drive the classifier-driven placement-DELTA feedback loop (issue #4468).
+
+    Phase 3 of epic #3438.  Where :func:`_run_placement_feedback` drives the
+    blocker-geometry loop (translations only), this drives
+    :meth:`Autorouter.route_with_placement_delta_feedback`: classify the routed
+    board, translate each ``PLACEMENT_BOUND`` / ``CONGESTION_SATURATED``
+    diagnosis into a concrete :class:`PlacementDelta`, apply the top applyable
+    one (including the ``rotate_180`` de-reverse the geometry loop cannot
+    express), re-route, and keep it only on a strict routed-net increase.
+
+    Placement persistence (the second half of the composed path): when a delta
+    is KEPT, the routed copper the router produced is geometrically valid only
+    against the MOVED footprints.  ``_write_routed_pcb`` re-reads its placement
+    from the source PCB on disk, so the mutated board is written to
+    ``output_path`` and that path is returned for the caller to use as the
+    placement source.  Without this, the saved artifact would pair moved-pad
+    copper with the original footprint positions -- copper to nowhere.
+
+    Args:
+        router: The ``Autorouter`` whose state the loop mutates in place.
+        pcb_path: Path to the PCB the routing pass read (already staged).
+        output_path: Final routed-output path; also the placement staging
+            target when a delta is kept.
+        args: Parsed CLI args (must include ``placement_delta_feedback*``).
+        quiet: When True, suppress all stdout output.
+
+    Returns:
+        ``output_path`` when a kept delta was persisted there (the caller must
+        rebind its placement source), otherwise ``None`` (nothing moved -- keep
+        using ``pcb_path``).
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    if _deadline_expired(args):
+        if not quiet:
+            print("\n--- Classifier-Driven Placement-Delta Feedback ---")
+            print("  Skipping: total wall-clock deadline reached (--timeout, issue #2802)")
+        return None
+
+    if not quiet:
+        print("\n--- Classifier-Driven Placement-Delta Feedback (issue #4468) ---")
+        failed = router.get_failed_nets()
+        print(f"  Initial pass left {len(failed)} unrouted net(s); attempting delta feedback")
+
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as exc:
+        if not quiet:
+            print(f"  Warning: could not load PCB for delta feedback ({exc}); skipping")
+        return None
+
+    anchored = _resolve_placement_feedback_anchors(pcb, args, quiet=quiet)
+    if not quiet and anchored:
+        print(f"  Anchored refs ({len(anchored)}): {', '.join(sorted(anchored))}")
+
+    budget = int(getattr(args, "placement_delta_feedback_budget", 3) or 3)
+    max_movement = float(getattr(args, "placement_feedback_max_movement", 5.0) or 5.0)
+    use_negotiated = getattr(args, "strategy", "negotiated") == "negotiated"
+    timeout = _budgeted_timeout(args)
+    per_net_timeout = getattr(args, "per_net_timeout", None)
+    loop_verbose = (not quiet) and bool(getattr(args, "verbose", False))
+
+    # Pour/plane nets are carried by copper fill, not traces; the classifier
+    # must not diagnose them as stuck signal nets.
+    excluded_nets = frozenset(
+        n.strip() for n in (getattr(args, "skip_nets", None) or "").split(",") if n.strip()
+    )
+
+    delta_path = _placement_delta_path(args, pcb_path)
+    with contextlib.suppress(OSError):
+        delta_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        result = router.route_with_placement_delta_feedback(
+            pcb=pcb,
+            max_adjustments=budget,
+            use_negotiated=use_negotiated,
+            verbose=loop_verbose,
+            fixed_refs=anchored,
+            max_movement=max_movement,
+            timeout=timeout,
+            per_net_timeout=per_net_timeout,
+            delta_output_path=str(delta_path),
+            excluded_nets=excluded_nets,
+            # The routing pass that produced ``router.routes`` just finished;
+            # re-routing an identical baseline would double the wall clock.
+            reuse_existing_routes=True,
+        )
+    except Exception as exc:
+        if not quiet:
+            print(f"  Warning: placement-delta feedback failed ({exc}); keeping initial routes")
+        return None
+
+    applied = list(getattr(result, "applied_deltas", []))
+    if not quiet:
+        print(f"  Feedback iterations: {result.iterations}")
+        print(f"  Exit reason:        {getattr(result, 'exit_reason', 'n/a')}")
+        print(f"  Deltas proposed:    {len(getattr(result, 'proposed_deltas', []))}")
+        print(f"  Deltas kept:        {len(applied)}")
+        for delta in applied:
+            print(f"    kept: {delta.target_ref} {delta.kind} (net {delta.net_name})")
+        for delta, reason in zip(
+            getattr(result, "skipped_deltas", []),
+            getattr(result, "skip_reasons", []),
+            strict=False,
+        ):
+            print(f"    skipped: {delta.target_ref} {delta.kind} -- {reason}")
+        print(f"  Final failed nets:  {len(result.failed_nets)}")
+        print(f"  Placement delta saved to: {delta_path}")
+
+    if not applied:
+        return None
+
+    # A kept delta moved real copper's reference geometry -- persist the moved
+    # placement so the saved board matches the routes.
+    try:
+        pcb.save(output_path)
+    except Exception as exc:
+        if not quiet:
+            print(f"  Warning: could not persist moved placement ({exc}); routes may not match")
+        return None
+    if not quiet:
+        print(f"  Moved placement persisted to: {output_path}")
+    return Path(output_path)
+
+
 def _maybe_run_placement_feedback_escalation(
     final_result,
     successful_result,
@@ -12890,6 +13032,29 @@ def main(argv: list[str] | None = None) -> int:
                 args=args,
                 quiet=quiet,
             )
+
+        # Issue #4468 (epic #3438 Phase 3): classifier-driven placement-DELTA
+        # feedback.  Runs after (and independently of) the geometry loop above:
+        # it consumes the stuck-net classifier's ranked fix ladder and can
+        # execute the ``rotate_180`` de-reverse move the geometry loop cannot
+        # express.  When a delta is KEPT the helper persists the moved
+        # placement to ``output_path`` and returns it, so the terminal
+        # ``_write_routed_pcb`` reads its footprints from the board the routes
+        # were actually computed against.
+        if (
+            getattr(args, "placement_delta_feedback", False)
+            and router.routes is not None
+            and router.get_failed_nets()
+        ):
+            _moved_placement_path = _run_placement_delta_feedback(
+                router=router,
+                pcb_path=pcb_path,
+                output_path=output_path,
+                args=args,
+                quiet=quiet,
+            )
+            if _moved_placement_path is not None:
+                pcb_path = _moved_placement_path
 
         _rss.mark("post-negotiation")
 

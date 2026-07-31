@@ -85,6 +85,15 @@ warn_if_stale()
 # spec key.
 SUPPORTS_STEP_ROUTE = True
 
+# Issue #4468 (epic #3438 Phase 3): run the classifier-driven placement-delta
+# feedback loop as part of this board's route step.  Declared as module-level
+# constants (rather than inlined in the ``kct route`` argv) so the A/B
+# measurement the issue's acceptance criteria demand is a one-line edit and the
+# recipe's cost contract is stated in one place.  See the block adjacent to the
+# ``cmd`` list in ``route_pcb`` for the empirical record.
+PLACEMENT_DELTA_FEEDBACK = True
+PLACEMENT_DELTA_FEEDBACK_BUDGET = 1
+
 
 # =============================================================================
 # Per-Group Net Class Declarations
@@ -1632,6 +1641,37 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         str(sidecar_path),
         "--length-match-groups",
     ]
+
+    # Issue #4468 (epic #3438 Phase 3): classifier-driven placement-delta
+    # feedback.  When the negotiated pass leaves nets unrouted, the router
+    # classifies the ROUTED board, translates each PLACEMENT_BOUND /
+    # CONGESTION_SATURATED diagnosis into one concrete placement delta,
+    # applies the top applyable one, re-routes, and keeps it ONLY on a strict
+    # routed-net increase (otherwise placement, pads and routes revert
+    # atomically).  This is the loop epic #3438 exists to close, run against
+    # this board's real ``Autorouter`` + real ``PCB``.
+    #
+    # Cost contract (why the budget is 1, not the CLI default 3): every
+    # iteration costs one full board-07 re-route (~11 min locally, ~2x that on
+    # a 2-core CI runner), and ``run_delta`` stops at the FIRST non-improving
+    # delta.  With the baseline reused from the pass that just finished, the
+    # worst case is exactly ONE extra re-route; each additional budget unit
+    # would only be spent after a delta that already improved reach.
+    #
+    # Empirical result on this board (see PR for #4468): the classifier's
+    # ranked ladder is honoured end to end -- DQ3/DQ4 diagnose
+    # PLACEMENT_BOUND / self_crossing_bundle and propose ``rotate_180`` on U2
+    # (the reversed facing part), MIPI_DAT0_N / TMDS_D0_N / TMDS_D1_N propose
+    # bounded ``translate`` moves -- and the improve-or-revert guarantee is
+    # what decides whether any of them survives.  The delta artifact is
+    # emitted at ``<output>_placement_delta.json`` for every run, so the
+    # proposal set is auditable even when nothing is kept.
+    if PLACEMENT_DELTA_FEEDBACK:
+        cmd += [
+            "--placement-delta-feedback",
+            "--placement-delta-feedback-budget",
+            str(PLACEMENT_DELTA_FEEDBACK_BUDGET),
+        ]
 
     # Issue #3146: Pin PYTHONHASHSEED for the subprocess so any string-
     # keyed dict/set iteration in the negotiated router (net_order

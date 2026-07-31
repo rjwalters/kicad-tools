@@ -1161,6 +1161,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         fixed_refs: set[str] | list[str] | None = None,
         max_movement: float | None = 5.0,
         delta_proposer: Callable[[PCB], list[PlacementDelta]] | None = None,
+        excluded_nets: frozenset[str] | set[str] | list[str] | None = None,
     ):
         super().__init__(
             router=router,
@@ -1173,11 +1174,73 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         # without constructing a full classifier fixture.  Defaults to the real
         # classifier -> translator pipeline.
         self._delta_proposer = delta_proposer
+        # Nets the router was told to skip (pour/plane nets).  They are carried
+        # by copper fill rather than traces, so classifying them as stuck signal
+        # nets would propose placement moves for a non-problem (issue #4468).
+        self.excluded_nets: frozenset[str] = frozenset(excluded_nets or ())
 
     # --- delta proposal / selection ----------------------------------------
 
+    def _routed_pcb_view(self) -> PCB | None:
+        """Materialize ``self.pcb`` + the router's CURRENT copper for classification.
+
+        Issue #4468 (the composed-path gap Phase 2 could not see with a
+        ``FakeRouter``): the stuck-net classifier is a *routed-board*
+        diagnostic.  It reads ``NetStatusAnalyzer`` for the incomplete nets and
+        the committed segments/vias for the blocker geometry that separates
+        ``CONGESTION_SATURATED`` from ``PLACEMENT_BOUND``.  ``self.pcb`` is the
+        **unrouted** input board (the CLI loads it from the staged input so the
+        loop can mutate footprints), so classifying it directly reports every
+        signal net as stuck with zero blockers -- the diagnosis, and therefore
+        every proposed delta, would describe a board that does not exist.
+
+        This builds a throwaway view: the live placement (including any delta
+        applied so far) serialized out, the router's current routes merged in,
+        re-parsed.  Read-only with respect to ``self.pcb`` -- the returned PCB
+        is never the object the applicator mutates.
+
+        Returns ``self.pcb`` unchanged when the router has no routes yet (there
+        is nothing to merge) or when the view cannot be built, so the loop
+        degrades to the pre-#4468 behavior instead of failing.
+        """
+        if self.pcb is None:
+            return None
+        routes = getattr(self.router, "routes", None)
+        if not routes:
+            return self.pcb
+
+        import tempfile
+
+        from kicad_tools.router.io import merge_routes_into_pcb
+        from kicad_tools.schema.pcb import PCB as _PCB
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="kct-placement-delta-") as tmpdir:
+                placement_path = Path(tmpdir) / "placement.kicad_pcb"
+                self.pcb.save(placement_path)
+                # A board that already carries copper (``--preserve-existing``
+                # style inputs) would otherwise end up with the router's routes
+                # merged ON TOP of the stale copper, double-counting geometry.
+                if self.pcb.segments or self.pcb.vias:
+                    staged = _PCB.load(placement_path)
+                    staged.strip_traces(keep_zones=True)
+                    staged.save(placement_path)
+                text = placement_path.read_text()
+                # Issue #4416 dialect parity: emit ``(net "NAME")`` copper for a
+                # name-only board so the merged view parses back with net
+                # attribution intact.
+                name_only = bool(getattr(self.pcb, "_net_name_only_dialect", False))
+                route_sexp = self.router.to_sexp(skip_cleanup=True, name_only=name_only)
+                view_path = Path(tmpdir) / "routed_view.kicad_pcb"
+                view_path.write_text(merge_routes_into_pcb(text, route_sexp))
+                return _PCB.load(view_path)
+        except Exception as exc:  # pragma: no cover - defensive only
+            if self.verbose:
+                print(f"  Warning: could not build routed view for classification ({exc})")
+            return self.pcb
+
     def _propose_deltas(self) -> list[PlacementDelta]:
-        """Classify the current PCB and translate diagnoses into deltas."""
+        """Classify the current routed state and translate diagnoses into deltas."""
         if self.pcb is None:
             return []
         if self._delta_proposer is not None:
@@ -1185,8 +1248,11 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         from kicad_tools.router.placement_delta import deltas_from_result
         from kicad_tools.router.stuck_classifier import classify_stuck_nets_from_pcb
 
-        result = classify_stuck_nets_from_pcb(self.pcb)
-        return deltas_from_result(self.pcb, result)
+        view = self._routed_pcb_view()
+        if view is None:
+            return []
+        result = classify_stuck_nets_from_pcb(view, excluded_nets=self.excluded_nets)
+        return deltas_from_result(view, result)
 
     def _strategy_from_delta(self, delta: PlacementDelta) -> ResolutionStrategy | None:
         """Build a recovery ``ResolutionStrategy`` for an applyable delta.
@@ -1341,6 +1407,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         use_negotiated: bool = True,
         timeout: float | None = None,
         per_net_timeout: float | None = None,
+        reuse_existing_routes: bool = False,
     ) -> PlacementDeltaFeedbackResult:
         """Run the classifier-driven placement-delta feedback loop.
 
@@ -1351,6 +1418,13 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 ``route_all``) for every routing pass.
             timeout / per_net_timeout: Forwarded to the negotiated router so each
                 re-route respects the caller's wall-clock budget.
+            reuse_existing_routes: When True and the router already carries
+                routes, adopt them as the baseline instead of re-routing from
+                scratch (issue #4468).  The CLI invokes this loop immediately
+                after a completed routing pass, so the baseline re-route is a
+                full duplicate of work already done -- on board-07 that is
+                ~11 min of wall clock for a bit-identical result.  Leave False
+                (the default) when the caller has not routed yet.
 
         Returns:
             A :class:`PlacementDeltaFeedbackResult`.  The returned routes/placement
@@ -1387,8 +1461,13 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             if self.max_movement is not None:
                 print(f"  Max movement:    {self.max_movement:.2f}mm")
 
-        # Initial routing pass establishes the baseline / best state.
-        _route()
+        # Initial routing pass establishes the baseline / best state.  When the
+        # caller already routed (the CLI path), reuse that state verbatim.
+        if reuse_existing_routes and getattr(self.router, "routes", None):
+            if self.verbose:
+                print("  Reusing the caller's existing routes as the baseline (no re-route)")
+        else:
+            _route()
         total_nets = len(self.router.nets) - 1
         best_count = _routed_count()
         best_routes = copy.deepcopy(list(self.router.routes))
