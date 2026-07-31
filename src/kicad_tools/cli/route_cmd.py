@@ -2827,10 +2827,22 @@ def _run_placement_delta_feedback(
     """
     from kicad_tools.schema.pcb import PCB
 
-    if _deadline_expired(args):
+    # An explicit per-iteration budget (``--placement-delta-feedback-timeout``)
+    # is the loop's OWN allocation: it survives an exhausted routing deadline
+    # and gives each delta's re-route the SAME wall clock the initial pass got.
+    # That equality is load-bearing for the keep/revert decision -- a re-route
+    # granted less budget than the baseline would under-route for reasons that
+    # have nothing to do with the placement change and revert every delta.
+    loop_timeout_raw = getattr(args, "placement_delta_feedback_timeout", None)
+    loop_timeout = float(loop_timeout_raw) if loop_timeout_raw is not None else None
+
+    if loop_timeout is None and _deadline_expired(args):
         if not quiet:
             print("\n--- Classifier-Driven Placement-Delta Feedback ---")
-            print("  Skipping: total wall-clock deadline reached (--timeout, issue #2802)")
+            print(
+                "  Skipping: routing wall-clock deadline reached (--timeout, issue #2802); "
+                "pass --placement-delta-feedback-timeout to give the loop its own budget"
+            )
         return None
 
     if not quiet:
@@ -2852,7 +2864,7 @@ def _run_placement_delta_feedback(
     budget = int(getattr(args, "placement_delta_feedback_budget", 3) or 3)
     max_movement = float(getattr(args, "placement_feedback_max_movement", 5.0) or 5.0)
     use_negotiated = getattr(args, "strategy", "negotiated") == "negotiated"
-    timeout = _budgeted_timeout(args)
+    timeout = loop_timeout if loop_timeout is not None else _budgeted_timeout(args)
     per_net_timeout = getattr(args, "per_net_timeout", None)
     loop_verbose = (not quiet) and bool(getattr(args, "verbose", False))
 
@@ -10771,6 +10783,21 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--placement-delta-feedback-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Per-iteration wall-clock budget for the placement-delta feedback "
+            "loop's re-routes, in seconds. This is the loop's OWN allocation: "
+            "it survives an already-exhausted --timeout and gives each delta's "
+            "re-route the same budget the initial pass got (an unequal budget "
+            "would revert every delta for reasons unrelated to the placement "
+            "change). Default: share whatever remains of --timeout, and skip "
+            "the loop entirely when nothing remains. Issue #4468."
+        ),
+    )
+    parser.add_argument(
         "--no-optimize",
         action="store_true",
         help=(
@@ -12545,6 +12572,22 @@ def main(argv: list[str] | None = None) -> int:
     cache_key = None
     cached_result = None
     use_cache = not args.no_cache
+
+    # Issue #4468: the routing cache stores ROUTES ONLY -- it has no notion of
+    # component placement.  The placement-delta feedback loop may move a
+    # footprint, so (a) a cache HIT would bypass the loop entirely and (b) the
+    # entry it would write pairs post-move copper with the pre-move placement,
+    # which a later hit would restore as copper to nowhere.  Requesting the
+    # loop therefore disables the cache for this run rather than risking a
+    # geometrically invalid board.
+    if use_cache and getattr(args, "placement_delta_feedback", False):
+        use_cache = False
+        if not quiet:
+            flush_print(
+                "\n--- Checking routing cache ---\n"
+                "  Disabled: --placement-delta-feedback may move components and "
+                "the cache stores routes without placement (issue #4468)"
+            )
 
     if use_cache:
         from kicad_tools.router import CacheKey, RoutingCache

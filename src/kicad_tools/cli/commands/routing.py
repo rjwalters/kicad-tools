@@ -655,6 +655,13 @@ def run_route_command(args) -> int:
                 str(args.placement_delta_feedback_budget),
             ]
         )
+    if getattr(args, "placement_delta_feedback_timeout", None) is not None:
+        sub_argv.extend(
+            [
+                "--placement-delta-feedback-timeout",
+                str(args.placement_delta_feedback_timeout),
+            ]
+        )
     if getattr(args, "export_failed_nets", None):
         sub_argv.extend(["--export-failed-nets", args.export_failed_nets])
     if getattr(args, "no_cache", False):

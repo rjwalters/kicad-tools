@@ -3890,6 +3890,19 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--placement-delta-feedback-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Per-iteration wall-clock budget for the placement-delta feedback "
+            "loop's re-routes, in seconds. The loop's own allocation: it "
+            "survives an already-exhausted --timeout and gives each delta's "
+            "re-route the same budget the initial pass got. Default: share "
+            "whatever remains of --timeout. Issue #4468."
+        ),
+    )
+    route_parser.add_argument(
         "--export-failed-nets",
         metavar="PATH",
         help=(

@@ -93,6 +93,7 @@ SUPPORTS_STEP_ROUTE = True
 # ``cmd`` list in ``route_pcb`` for the empirical record.
 PLACEMENT_DELTA_FEEDBACK = True
 PLACEMENT_DELTA_FEEDBACK_BUDGET = 1
+PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S = 600
 
 
 # =============================================================================
@@ -1671,6 +1672,15 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             "--placement-delta-feedback",
             "--placement-delta-feedback-budget",
             str(PLACEMENT_DELTA_FEEDBACK_BUDGET),
+            # The initial negotiated pass CONSUMES the whole ``--timeout 600``
+            # budget on this board (measured 607-630 s), so without an explicit
+            # allocation the loop is skipped before it starts.  Granting each
+            # delta's re-route the SAME 600 s the initial pass got is also what
+            # makes the keep/revert decision meaningful: a re-route on a smaller
+            # budget would under-route for budget reasons and revert every delta
+            # regardless of whether the placement change helped.
+            "--placement-delta-feedback-timeout",
+            str(PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S),
         ]
 
     # Issue #3146: Pin PYTHONHASHSEED for the subprocess so any string-
