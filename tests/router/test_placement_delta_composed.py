@@ -168,6 +168,63 @@ class TestBaselineReuse:
 
 
 # --------------------------------------------------------------------------- #
+# 2b. Revert also restores the ROUTING GRID                                     #
+# --------------------------------------------------------------------------- #
+
+
+class GridFakeRouter(FakeRouter):
+    """``FakeRouter`` with the grid internals the real ``Autorouter`` exposes."""
+
+    def __init__(self, pads, total_nets, failed_predicate):
+        super().__init__(pads, total_nets, failed_predicate)
+        self.grid_marks: list = []
+
+    def _reset_for_new_trial(self):
+        self.grid_marks = []
+        self.routes = []
+
+    def _mark_route(self, route):
+        self.grid_marks.append(route)
+
+
+class TestRevertRestoresGrid:
+    def test_reverted_delta_rebuilds_the_grid_from_the_restored_routes(self):
+        """A revert must leave the grid describing the routes the caller keeps.
+
+        The CLI's post-loop stages (optimize, DRC nudge, pre-save clearance)
+        read ``router.grid``.  Measured on board-07: a stale grid cost a net
+        after optimize even though the routes themselves were restored.
+        """
+        pads = [FakePad(12.0, 10.0, "UB", "2")]
+        router = GridFakeRouter(pads, 2, _rotate_never_helps)
+        baseline = [object()]
+        router.routes = list(baseline)
+
+        loop = PlacementDeltaFeedbackLoop(
+            router=router,
+            pcb=MockPCB([MockFootprint("UB", 10.0, 10.0)]),
+            verbose=False,
+            delta_proposer=lambda _pcb: [
+                PlacementDelta(
+                    net_name="DQ2", target_ref="UB", kind="rotate_180", rotation_delta=180.0
+                )
+            ],
+        )
+        result = loop.run_delta(max_adjustments=1, reuse_existing_routes=True)
+
+        assert result.exit_reason == "pd_reverted"
+        assert result.applied_deltas == []
+        # Grid rebuilt from exactly the restored routes, and the routes survive
+        # the ``_reset_for_new_trial`` that rebuilding performs.
+        assert router.grid_marks == router.routes
+        assert len(router.routes) == len(baseline)
+
+
+def _rotate_never_helps(_router) -> list[int]:
+    return [2]
+
+
+# --------------------------------------------------------------------------- #
 # 3. CLI wiring: flags + placement persistence                                 #
 # --------------------------------------------------------------------------- #
 
