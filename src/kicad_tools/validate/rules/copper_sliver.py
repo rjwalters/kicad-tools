@@ -316,6 +316,24 @@ class CopperSliverRule(DRCRule):
         angle_limit = KICAD_SLIVER_ANGLE_TOLERANCE_DEG
         resolve = CopperSliverRule._resolve_arm_index
         rings = [component.exterior, *component.interiors]
+
+        # Keyhole/pinch guard (issue #4521): ``make_valid()`` /
+        # ``unary_union`` can leave a hole ring touching the exterior ring
+        # (or another hole) at exactly one shared coordinate -- a
+        # topologically degenerate "keyhole" pinch.  ``_iter_sliver_tips``
+        # walks ``[exterior, *interiors]`` independently, so it evaluates
+        # the interior ring's local neighbourhood on its own and finds a
+        # spurious acute tip from the hole's own shape rather than from real
+        # copper thinness at that location.  Native KiCad's outline set does
+        # not walk such a pinch as a tip.  Any coordinate shared by two
+        # rings of this component is a topological join, not a copper tip --
+        # collect those coordinates so the walk below can skip them.
+        ring_membership: dict[tuple[float, float], int] = {}
+        for ring in rings:
+            for pt in set(list(ring.coords)[:-1]):
+                ring_membership[pt] = ring_membership.get(pt, 0) + 1
+        pinch_coords = {pt for pt, count in ring_membership.items() if count > 1}
+
         for ring in rings:
             coords = list(ring.coords)[:-1]
             if len(coords) < KICAD_SLIVER_MINIMUM_VERTEX_COUNT:
@@ -334,6 +352,10 @@ class CopperSliverRule(DRCRule):
                     continue
                 if (prior_index, next_index) in seen_arms:
                     continue
+                if current in pinch_coords:
+                    # Keyhole/pinch join shared with another ring -- not a
+                    # real copper tip (see ``pinch_coords`` above, #4521).
+                    continue
                 previous = coords[prior_index]
                 following = coords[next_index]
                 if not CopperSliverRule._chord_is_locally_inside(
@@ -351,6 +373,24 @@ class CopperSliverRule(DRCRule):
                 angle = math.degrees(math.acos(cosine))
                 opposite_width = math.hypot(following[0] - previous[0], following[1] - previous[1])
                 if angle < angle_limit and opposite_width > sliver_width_tolerance:
+                    # Union-seam guard (issue #4521): a genuine acute sliver
+                    # protrudes above its opposite chord by at least the
+                    # sliver width tolerance.  Where a same-net track buffer
+                    # fuses into a zone fill, ``unary_union`` leaves an acute
+                    # seam whose two arms are wildly mismatched in length and
+                    # nearly collinear with the chord -- its perpendicular
+                    # height above the chord is ~0, so it is not real copper
+                    # thinness.  Symmetric acute tips that pass the width test
+                    # always have height >> tolerance (height >= chord /
+                    # (2*tan(angle/2)) > 2.8*chord for angle < 20 deg), so
+                    # this drops the seam without hiding a real sliver.
+                    cross = abs(
+                        (following[0] - previous[0]) * (current[1] - previous[1])
+                        - (following[1] - previous[1]) * (current[0] - previous[0])
+                    )
+                    tip_height = cross / opposite_width
+                    if tip_height <= sliver_width_tolerance:
+                        continue
                     seen_arms.add((prior_index, next_index))
                     yield (current, angle, opposite_width)
 

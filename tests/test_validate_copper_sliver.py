@@ -402,6 +402,127 @@ class TestViolationTypeWiring:
         assert _TYPE_CATEGORY_MAP[ViolationType.COPPER_SLIVER] is ViolationCategory.MANUFACTURING
 
 
+# ---------------------------------------------------------------------------
+# Scenario: board-06 false-positive guards (issue #4521)
+#
+# kicad-cli reports 0 copper_sliver on board 06 while the internal rule
+# over-reported 2, from two geometrically distinct artifacts of the shapely
+# copper union that native KiCad's integer-nm poly-set union does not create:
+#
+#   1. Union seam -- a same-net track buffer fuses into a zone fill and leaves
+#      an acute tip whose arms are wildly mismatched and nearly collinear with
+#      the chord (tiny perpendicular height above the opposite chord).
+#   2. Keyhole pinch -- make_valid()/unary_union leaves a hole ring touching
+#      the exterior ring at exactly one shared coordinate, and the independent
+#      per-ring tip walk finds a spurious acute tip on the hole's own shape.
+#
+# These tests exercise the guards directly and, crucially, assert that the
+# guards do NOT suppress genuine slivers (no false negatives traded).
+# ---------------------------------------------------------------------------
+
+
+def _component(exterior, interiors=None):
+    """Build a minimal polygon-like object for ``_iter_sliver_tips``."""
+    return SimpleNamespace(
+        exterior=SimpleNamespace(coords=[*exterior, exterior[0]]),
+        interiors=[SimpleNamespace(coords=[*ring, ring[0]]) for ring in (interiors or [])],
+    )
+
+
+class TestUnionSeamGuard:
+    def test_near_collinear_asymmetric_seam_is_not_flagged(self, monkeypatch):
+        """A near-collinear seam (tip height ~0) is not a real sliver.
+
+        The tip is acute (arms nearly parallel) and its opposite chord is
+        wide (> 0.08 mm), so it clears the angle and width tests, but the
+        tip lies almost on the line joining its two resolved arms -- its
+        perpendicular height above that chord is ~0.  This is the In1.Cu
+        union-seam false positive on board 06.
+        """
+        monkeypatch.setattr(CopperSliverRule, "_chord_is_locally_inside", lambda *_: True)
+        # tip (1,1) is collinear with resolved arms (0,0) and (0.96,0.96).
+        seam = [(0.0, 0.0), (1.0, 1.0), (0.96, 0.96), (2.0, 0.0), (1.5, -0.5), (0.5, -0.5)]
+        assert list(CopperSliverRule._iter_sliver_tips(_component(seam), 0.08)) == []
+
+    def test_genuine_acute_wedge_with_real_height_is_still_flagged(self, monkeypatch):
+        """A symmetric acute wedge protrudes far above its chord -> sliver.
+
+        Same angle/width regime as the seam above, but the tip apex is 10 mm
+        from the opposite chord, so the height guard keeps it.  This proves
+        the seam guard is not blanket suppression.
+        """
+        monkeypatch.setattr(CopperSliverRule, "_chord_is_locally_inside", lambda *_: True)
+        wedge = [
+            (10.0, 0.05),
+            (0.0, 0.0),  # apex tip, 10 mm from the (x=10) chord
+            (10.0, -0.05),
+            (11.0, -0.05),
+            (11.0, 0.05),
+            (10.5, 0.05),
+        ]
+        tips = list(CopperSliverRule._iter_sliver_tips(_component(wedge), 0.08))
+        assert len(tips) == 1
+        assert tips[0][0] == pytest.approx((0.0, 0.0))
+
+
+class TestKeyholePinchGuard:
+    def test_hole_touching_exterior_at_shared_vertex_is_not_flagged(self, monkeypatch):
+        """A coordinate shared by two rings is a pinch join, not a tip."""
+        monkeypatch.setattr(CopperSliverRule, "_chord_is_locally_inside", lambda *_: True)
+        exterior = [(0, 0), (5.0, 0.0), (10, 0), (10, 10), (5, 10), (0, 10)]
+        # Interior hole whose acute tip sits at (5, 0) -- exactly on the
+        # exterior ring (the keyhole pinch).
+        interior = [(4.9, 1.0), (5.0, 0.0), (5.1, 1.0), (6.0, 1.0), (6.0, 2.0), (4.0, 2.0)]
+        assert (
+            list(CopperSliverRule._iter_sliver_tips(_component(exterior, [interior]), 0.08)) == []
+        )
+
+    def test_genuine_interior_tip_not_shared_with_exterior_is_flagged(self, monkeypatch):
+        """An interior-ring acute tip NOT shared with the exterior survives.
+
+        Guards against the pinch fix silently dropping real interior-ring
+        slivers -- only exact cross-ring coordinate sharing is suppressed.
+        """
+        monkeypatch.setattr(CopperSliverRule, "_chord_is_locally_inside", lambda *_: True)
+        # Exterior no longer contains (5, 0), so the tip is not a pinch join.
+        exterior = [(0, 0), (4.0, 0.0), (10, 0), (10, 10), (5, 10), (0, 10)]
+        interior = [(4.9, 1.0), (5.0, 0.0), (5.1, 1.0), (6.0, 1.0), (6.0, 2.0), (4.0, 2.0)]
+        tips = list(CopperSliverRule._iter_sliver_tips(_component(exterior, [interior]), 0.08))
+        assert len(tips) == 1
+        assert tips[0][0] == pytest.approx((5.0, 0.0))
+
+
+class TestTwoTipCaseStillDetected:
+    def test_two_genuine_acute_tips_both_survive(self):
+        """A shape with two genuine acute tips still reports 2 (2/2).
+
+        Guards the fix against over-correcting the union/tip-walk into
+        blanket suppression -- both distinct tips must remain detected
+        through the full union + simplify + walk pipeline.
+        """
+        # A central rectangle with a symmetric acute spike on the left and
+        # the right (mirror of the single-tip ``_acute_tip`` fixture).
+        two_spike = [
+            (20, 10),
+            (30, 10),
+            (30, 14.95),
+            (40, 15),  # right spike tip
+            (30, 15.05),
+            (30, 20),
+            (20, 20),
+            (20, 15.05),
+            (10, 15),  # left spike tip
+            (20, 14.95),
+        ]
+        zone = _zone_with_fill(two_spike)
+        results = _run(min_trace_width=0.127, zones=[zone])
+        slivers = [v for v in results.violations if v.rule_id == "copper_sliver"]
+        assert len(slivers) == 2
+        located = {v.location for v in slivers}
+        assert (40.0, 15.0) in located
+        assert (10.0, 15.0) in located
+
+
 POSITIVE_FIXTURE = Path(__file__).parent / "fixtures" / "copper_sliver_positive.kicad_pcb"
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -499,6 +620,10 @@ def test_micro_vertex_beside_tip_matches_native_count(kink: str, label: str, tmp
         "boards/00-simple-led/output/simple_led_routed.kicad_pcb",
         "boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb",
         "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
+        # Board 06 previously over-reported two false positives vs kicad-cli's
+        # zero (issue #4521): a union-seam acute tip on In1.Cu and a keyhole
+        # pinch on B.Cu.  Both must now agree at 0/0.
+        "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb",
         "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb",
     ],
 )
