@@ -117,6 +117,42 @@ from .tuning import (
 from .via_conflict import ViaConflictManager
 from .zones import ZoneManager
 
+# ---------------------------------------------------------------------------
+# Escape-corridor reservation tuning (#4519)
+# ---------------------------------------------------------------------------
+# The congestion-aware escape-corridor planner (#4474) exposes two selectivity
+# knobs that PR #4509 left at their permissive library defaults, which reserved
+# every cluster over every layer and regressed board-05's blocking gate.  These
+# constants make a reservation a *selective, bounded* signal when a caller opts
+# into ``enable_escape_corridor_reservation``; they are internal tuning, not a
+# user-facing CLI surface (the only board-facing flag stays the boolean
+# ``--escape-corridor-reservation``).
+#
+# ``min_reserve_demand_frac`` is a fraction of the MOST-CONGESTED cluster's
+# demand in each package's plan: a cluster reserves a channel only when its
+# aggregated demand exceeds this fraction of the plan's peak cluster demand, so
+# only the genuinely congested clusters (e.g. board-05 U3's south sense band)
+# get a channel instead of every face of a dense part.  Self-calibrating per
+# package (no absolute magic number).  0.7 was calibrated against board-05's
+# measured per-cluster demands (U3 clusters ~52-142, U10 ~20-58): it trims U3
+# from 9/9 -> 2/9 and U10 from 11/11 -> 8/11 reserving clusters (#4519).  A
+# fraction of the estimator's *per-tile* peak was tried first and rejected --
+# ``cluster.demand`` aggregates several pin tiles and sums above the single-tile
+# peak on a dense part, so a per-tile fraction failed to trim anything.
+_ESCAPE_CORRIDOR_MIN_RESERVE_DEMAND_FRAC = 0.7
+# ``max_corridor_length_mm`` caps a corridor to a local escape channel a few mm
+# long instead of the board-spanning band a full destination-distance corridor
+# produced under PR #4509.  A few mm is enough to clear a dense part's immediate
+# escape congestion without reaching across the board.  This is the dominant
+# footprint lever: on board-05 it drops total reserved cells from ~25.9k (the
+# PR #4509 regression) toward ~5k even before the selectivity/inner-layer trims.
+_ESCAPE_CORRIDOR_MAX_LENGTH_MM = 5.0
+# Restrict escape corridors to the INNER routable layers (#4519, Scope item 3),
+# keeping the outer component layers free of escape attractors.  On board-05's
+# 4-layer stack this confines reservations to layers [1, 2] instead of spanning
+# all four; degrades gracefully to the outer layers on a 2-layer board.
+_ESCAPE_CORRIDOR_INNER_LAYERS_ONLY = True
+
 
 @dataclass
 class RoutingFailure:
@@ -2707,7 +2743,7 @@ class Autorouter:
             (ip_a, in_a), (ip_b, in_b) = chosen
             nc = self.net_class_map.get(p_name) or self.net_class_map.get(n_name)
             if nc is None:
-                nc = synth_routing.get(net_to_class.get(p_name, ""), None)
+                nc = synth_routing.get(net_to_class.get(p_name, ""))
             if nc is None:
                 self._lattice_pair_outcomes[pair_name] = "no-net-class"
                 continue
@@ -4277,6 +4313,23 @@ class Autorouter:
             estimator,
             net_pad_positions=net_pad_positions,
             kelvin_roots=kelvin_roots,
+            # Selectivity + length + layer tuning (#4519).  PR #4509 reserved
+            # every cluster over all four layers (U3 9/9, U10 11/11, ~25.9k
+            # SOFT cells) because these knobs sat at their permissive library
+            # defaults -- a SOFT attractor everywhere carries no discriminating
+            # signal and can pull unrelated nets into the congested band.  The
+            # three constants below make a reservation a *selective, bounded,
+            # inner-layer* signal (measured on board-05: ~25.9k cells over
+            # [0,1,2,3] -> ~2.9k cells over [1,2]):
+            #   * min_reserve_demand_frac: only clusters near the peak-congested
+            #     cluster reserve a channel (an uncongested face is a no-op).
+            #   * max_corridor_length_mm: caps a corridor to a local escape
+            #     channel a few mm long instead of a board-spanning band.
+            #   * inner_layers_only: keeps escape attractors off the outer
+            #     component layers.
+            min_reserve_demand_frac=_ESCAPE_CORRIDOR_MIN_RESERVE_DEMAND_FRAC,
+            max_corridor_length_mm=_ESCAPE_CORRIDOR_MAX_LENGTH_MM,
+            inner_layers_only=_ESCAPE_CORRIDOR_INNER_LAYERS_ONLY,
         )
 
         # Mutate the existing list in place (do NOT rebind) so a lazily-built

@@ -170,6 +170,36 @@ class EscapeCorridorPlanner:
             (before the demand multiplier).
         max_corridor_length_mm: Optional cap on how far a corridor extends
             from the launch point (defaults to the destination distance).
+        min_reserve_demand: Absolute demand floor -- a cluster whose
+            aggregated ``CongestionEstimator`` demand is at or below this
+            value is skipped (no reservation).  The permissive ``0.0``
+            default only skips exactly-zero-demand clusters; a real board
+            wants a positive floor (or ``min_reserve_demand_frac``) so only
+            genuinely congested clusters reserve a channel (#4519).
+        min_reserve_demand_frac: Selectivity floor expressed as a fraction of
+            the *most-congested cluster's* demand in the plan (#4519).  A
+            cluster is skipped unless its demand exceeds
+            ``min_reserve_demand_frac * max(cluster.demand for the plan)`` --
+            i.e. only clusters near the peak-congested one reserve a channel,
+            which is the "only the congested cluster gets a channel" intent.
+            This is scale-free (self-calibrating per package) and, unlike a
+            fraction of the estimator's *per-tile* peak, actually discriminates
+            on a real board: ``cluster.demand`` aggregates several pin tiles,
+            so on a dense part every face's cluster typically sums above the
+            single-tile peak and a per-tile fraction fails to trim anything
+            (measured on board-05's U3/U10, #4519).  The effective threshold
+            is ``max(min_reserve_demand, min_reserve_demand_frac *
+            max_cluster_demand)``.  Defaults to ``0.0`` (no relative gating)
+            so the library default reserves every nonzero-demand cluster; a
+            production caller (``router/core.py``) supplies a positive
+            fraction to make the reservation selective.
+        inner_layers_only: When True, restrict corridor layer assignment to
+            the stack's INNER routable layers (#4519, Scope item 3), keeping
+            the outer component layers free of escape attractors.  Degrades
+            gracefully to all routable layers when the stack has no inner
+            layers (e.g. a 2-layer board).  Defaults to False (assign over
+            all routable layers, inner-preferred) so existing callers are
+            unchanged.
     """
 
     def __init__(
@@ -182,6 +212,8 @@ class EscapeCorridorPlanner:
         cells_per_pin: float = 1.0,
         max_corridor_length_mm: float | None = None,
         min_reserve_demand: float = 0.0,
+        min_reserve_demand_frac: float = 0.0,
+        inner_layers_only: bool = False,
     ) -> None:
         self.grid = grid
         self.congestion = congestion_estimator
@@ -190,6 +222,8 @@ class EscapeCorridorPlanner:
         self.cells_per_pin = float(cells_per_pin)
         self.max_corridor_length_mm = max_corridor_length_mm
         self.min_reserve_demand = float(min_reserve_demand)
+        self.min_reserve_demand_frac = float(min_reserve_demand_frac)
+        self.inner_layers_only = bool(inner_layers_only)
 
     # ------------------------------------------------------------------
     # Public API
@@ -216,6 +250,11 @@ class EscapeCorridorPlanner:
         unrelated nets (the #4087 hard-fence hazard).  Reservation is
         advisory: a cluster with no owner nets or no cells is skipped.
         """
+        # Selectivity threshold (#4519).  Combine the absolute floor with the
+        # relative floor (a fraction of the most-congested cluster's demand) so
+        # a reservation is a *selective* signal -- only genuinely congested
+        # clusters reserve a channel, not every face of a dense part.
+        threshold = self._reserve_threshold(plan.clusters)
         total = 0
         for cluster in plan.clusters:
             if cluster.layer_idx is None or not cluster.corridor_cells or not cluster.net_ids:
@@ -225,8 +264,9 @@ class EscapeCorridorPlanner:
             # reserved channel -- reserving one would only fence copper for
             # no benefit.  Skip it (no-op) when demand is at/under the
             # threshold.  When no estimator was supplied the planner runs in
-            # demand-agnostic mode and reserves every cluster.
-            if self.congestion is not None and cluster.demand <= self.min_reserve_demand:
+            # demand-agnostic mode and reserves every cluster (the threshold
+            # is only consulted when a congestion estimator is present).
+            if self.congestion is not None and cluster.demand <= threshold:
                 continue
             count = self.grid.reserve_corridor_cells(
                 layer_idx=cluster.layer_idx,
@@ -416,6 +456,29 @@ class EscapeCorridorPlanner:
             total += self.congestion.get_tile_demand(row, col)
         return total
 
+    def _reserve_threshold(self, clusters: list[EscapeCluster]) -> float:
+        """Effective per-cluster demand floor for the :meth:`reserve` gate.
+
+        Combines the absolute :attr:`min_reserve_demand` floor with the
+        relative :attr:`min_reserve_demand_frac` floor (a fraction of the
+        most-congested cluster's demand in this plan).  A cluster reserves a
+        channel only when its aggregated demand strictly exceeds this value
+        (#4519).
+
+        The relative term self-calibrates per package: it ranks each cluster
+        against the plan's peak cluster demand, so the gate keeps only the
+        clusters nearest the congestion peak regardless of the board's
+        absolute demand magnitude -- no global magic number.  A per-tile peak
+        does not work here because ``cluster.demand`` aggregates several tiles
+        and typically sums above the single-tile peak on a dense part (#4519).
+        """
+        threshold = self.min_reserve_demand
+        if self.min_reserve_demand_frac > 0.0 and clusters:
+            max_demand = max((c.demand for c in clusters), default=0.0)
+            if max_demand > 0.0:
+                threshold = max(threshold, self.min_reserve_demand_frac * max_demand)
+        return threshold
+
     def _peak_demand(self) -> float:
         """Peak per-tile demand across the estimator (0 when unavailable)."""
         if self.congestion is None:
@@ -458,6 +521,12 @@ class EscapeCorridorPlanner:
         layers where a dense part's in-pad vias drop to, keeping the outer
         (component) layers freer.  Falls back to whatever routable layers
         exist (2-layer boards have only outer layers).
+
+        When :attr:`inner_layers_only` is set (#4519, Scope item 3), the
+        outer layers are dropped entirely so escape attractors never land on
+        the component layers -- unless the stack has no inner layers (a
+        2-layer board), in which case the outer layers are retained so
+        assignment does not degrade to an empty set.
         """
         stack = getattr(self.grid, "layer_stack", None)
         get_routable = getattr(self.grid, "get_routable_indices", None)
@@ -472,5 +541,7 @@ class EscapeCorridorPlanner:
             outer = set(stack.get_outer_layer_indices())
             inner = [i for i in routable if i not in outer]
             outers = [i for i in routable if i in outer]
+            if self.inner_layers_only and inner:
+                return inner
             return inner + outers
         return routable

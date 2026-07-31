@@ -236,6 +236,201 @@ def test_zero_demand_estimator_is_noop_reservation(grid_4layer: RoutingGrid) -> 
 
 
 # =============================================================================
+# 2b. Selectivity threshold (#4519): only genuinely congested clusters reserve
+# =============================================================================
+
+
+def _make_ns_pair() -> tuple[PackageInfo, dict[int, list[tuple[float, float]]]]:
+    """A minimal 2-pin part: one pin escaping N, one escaping S, far apart so
+    each lands in a distinct congestion tile (no face/tile overlap)."""
+    n_pad = Pad(x=CENTER, y=5.0, width=0.25, height=0.25, net=1, net_name="N_NET", ref="U9")
+    s_pad = Pad(x=CENTER, y=25.0, width=0.25, height=0.25, net=2, net_name="S_NET", ref="U9")
+    npp = {
+        1: [(CENTER, 5.0), (CENTER, 1.0)],  # off-package pad due north
+        2: [(CENTER, 25.0), (CENTER, 29.0)],  # off-package pad due south
+    }
+    pkg = make_package([n_pad, s_pad], ref="U9")
+    return pkg, npp
+
+
+def _south_hot_estimator(pkg: PackageInfo, s_pad_xy: tuple[float, float]) -> CongestionEstimator:
+    """Estimator with demand 100 in ONLY the tile holding ``s_pad_xy``."""
+    tgrid = TileGrid.from_board(0.0, 0.0, BOARD, BOARD, target_tiles=100)
+    demand = [[0.0] * tgrid.cols for _ in range(tgrid.rows)]
+    col, row = tgrid.tile_at(*s_pad_xy)
+    demand[row][col] = 100.0
+    est = CongestionEstimator(grid=tgrid)
+    est.demand = demand
+    return est
+
+
+def test_relative_threshold_reserves_only_congested_cluster(
+    grid_4layer: RoutingGrid,
+) -> None:
+    """#4519: with a relative-to-peak floor, only the congested (south) cluster
+    reserves a channel; the uncongested cluster is a no-op.
+
+    Without the floor (default 0.0) every nonzero-demand cluster reserves --
+    the PR #4509 over-reservation.  With ``min_reserve_demand_frac`` set, a
+    cluster reserves only when ``cluster.demand / peak_tile_demand`` exceeds
+    the fraction, so a diffuse low-demand face is skipped.
+    """
+    pkg, npp = _make_ns_pair()
+    est = _south_hot_estimator(pkg, (CENTER, 25.0))
+
+    # Baseline: no relative floor -> both clusters reserve (the over-reservation
+    # -- even the zero-demand north cluster is not skipped, only exactly-zero is,
+    # and the north tile IS exactly zero here so it is skipped; use a tiny base
+    # to demonstrate the permissive path reserves a diffuse cluster too).
+    est_base = _south_hot_estimator(pkg, (CENTER, 25.0))
+    n_col, n_row = est_base.grid.tile_at(CENTER, 5.0)
+    est_base.demand[n_row][n_col] = 1.0  # tiny nonzero north demand
+    permissive = EscapeCorridorPlanner(grid_4layer, est_base, net_pad_positions=npp)
+    permissive_plan = permissive.plan_and_reserve(pkg)
+    assert {c.face for c in permissive_plan.clusters if c.reserved_cell_count > 0} == {"N", "S"}
+
+    # Selective: a 0.5 * peak floor keeps only the south hotspot cluster.
+    grid_2 = RoutingGrid(
+        BOARD, BOARD, grid_4layer.rules, origin_x=0, origin_y=0, layer_stack=grid_4layer.layer_stack
+    )
+    selective = EscapeCorridorPlanner(
+        grid_2, est, net_pad_positions=npp, min_reserve_demand_frac=0.5
+    )
+    selective_plan = selective.plan_and_reserve(pkg)
+    reserved_faces = {c.face for c in selective_plan.clusters if c.reserved_cell_count > 0}
+    assert reserved_faces == {"S"}
+    assert selective_plan.total_reserved_cells > 0
+    assert selective_plan.total_reserved_cells < permissive_plan.total_reserved_cells
+
+
+def test_cluster_below_relative_threshold_is_skipped(grid_4layer: RoutingGrid) -> None:
+    """A nonzero-but-below-threshold cluster reserves zero cells; one above it
+    reserves a nonzero count (the selectivity contract, #4519)."""
+    pads, npp = make_dense_qfn()
+    pkg = make_package(pads)
+    est = uniform_estimator(peak_south=100.0, base=2.0)
+    planner = EscapeCorridorPlanner(
+        grid_4layer, est, net_pad_positions=npp, min_reserve_demand_frac=0.5
+    )
+    plan = planner.plan_and_reserve(pkg)
+    threshold = planner._reserve_threshold(plan.clusters)
+    south = next(c for c in plan.clusters if c.face == "S")
+    north = next(c for c in plan.clusters if c.face == "N")
+    # North sits in base-demand tiles (well under 0.5 * the peak cluster) -> skipped.
+    assert north.demand <= threshold
+    assert north.reserved_cell_count == 0
+    # South is the peak-congested cluster -> above threshold, reserves cells.
+    assert south.demand > threshold
+    assert south.reserved_cell_count > 0
+
+
+def test_relative_threshold_ignored_without_estimator(grid_4layer: RoutingGrid) -> None:
+    """Demand-agnostic mode (no estimator) reserves every cluster regardless of
+    the relative floor -- the gate is only consulted when an estimator exists."""
+    pads, npp = make_dense_qfn()
+    pkg = make_package(pads)
+    planner = EscapeCorridorPlanner(
+        grid_4layer, None, net_pad_positions=npp, min_reserve_demand_frac=0.9
+    )
+    plan = planner.plan_and_reserve(pkg)
+    assert plan.total_reserved_cells > 0
+    reserved_faces = {c.face for c in plan.clusters if c.reserved_cell_count > 0}
+    assert reserved_faces == {"N", "S", "E", "W"}
+
+
+# =============================================================================
+# 2c. Corridor-length cap (#4519): a corridor stays a local escape channel
+# =============================================================================
+
+
+def test_max_corridor_length_caps_reserved_extent(grid_4layer: RoutingGrid) -> None:
+    """A corridor with ``max_corridor_length_mm`` set never extends past the cap
+    from the cluster origin along the escape direction (#4519)."""
+    # A far destination (dest_dist large) would otherwise span most of the board.
+    pads, npp = make_dense_qfn(dest_dist=12.0)
+    pkg = make_package(pads)
+    est = uniform_estimator(base=5.0)
+
+    cap_mm = 2.0
+    capped = EscapeCorridorPlanner(
+        grid_4layer, est, net_pad_positions=npp, max_corridor_length_mm=cap_mm
+    )
+    capped_plan = capped.plan(pkg)
+
+    for cluster in capped_plan.clusters:
+        dx, dy = cluster.escape_dir
+        ox, oy = cluster.origin
+        for gx, gy in cluster.corridor_cells:
+            wx, wy = grid_4layer.grid_to_world(gx, gy)
+            # Longitudinal distance (projection onto the escape direction).
+            along = (wx - ox) * dx + (wy - oy) * dy
+            # Allow one grid resolution of slack for cell-center quantization.
+            assert along <= cap_mm + grid_4layer.resolution
+
+
+def test_uncapped_corridor_reaches_farther_than_capped(grid_4layer: RoutingGrid) -> None:
+    """The cap is load-bearing: an uncapped corridor reserves strictly more
+    cells than a short-capped one for the same far destination (#4519)."""
+    pads, npp = make_dense_qfn(dest_dist=12.0)
+    pkg = make_package(pads)
+    est = uniform_estimator(base=5.0)
+
+    capped = EscapeCorridorPlanner(
+        grid_4layer, est, net_pad_positions=npp, max_corridor_length_mm=2.0
+    )
+    capped_plan = capped.plan_and_reserve(pkg)
+
+    grid_b = RoutingGrid(
+        BOARD, BOARD, grid_4layer.rules, origin_x=0, origin_y=0, layer_stack=grid_4layer.layer_stack
+    )
+    uncapped = EscapeCorridorPlanner(grid_b, est, net_pad_positions=npp)
+    uncapped_plan = uncapped.plan_and_reserve(pkg)
+
+    assert capped_plan.total_reserved_cells < uncapped_plan.total_reserved_cells
+
+
+# =============================================================================
+# 3b. Inner-layer restriction (#4519, Scope item 3)
+# =============================================================================
+
+
+def test_inner_layers_only_confines_to_inner_layers(grid_4layer: RoutingGrid) -> None:
+    """With ``inner_layers_only`` set, no cluster is assigned an outer
+    (component) layer on a 4-layer stack (#4519)."""
+    pads, npp = make_dense_qfn()
+    pkg = make_package(pads)
+    est = uniform_estimator(base=5.0)  # all clusters congested
+    outer = set(grid_4layer.layer_stack.get_outer_layer_indices())
+
+    planner = EscapeCorridorPlanner(grid_4layer, est, net_pad_positions=npp, inner_layers_only=True)
+    plan = planner.plan_and_reserve(pkg)
+    used = plan.layers_used()
+    assert used  # something was assigned
+    assert used.isdisjoint(outer)  # never an outer/component layer
+
+    # Sanity: without the flag the same clusters DO spread onto outer layers.
+    grid_b = RoutingGrid(
+        BOARD, BOARD, grid_4layer.rules, origin_x=0, origin_y=0, layer_stack=grid_4layer.layer_stack
+    )
+    unrestricted = EscapeCorridorPlanner(grid_b, est, net_pad_positions=npp)
+    unrestricted_plan = unrestricted.plan_and_reserve(pkg)
+    assert unrestricted_plan.layers_used() & outer
+
+
+def test_inner_layers_only_degrades_on_2layer(grid_2layer: RoutingGrid) -> None:
+    """A 2-layer board has no inner layers; ``inner_layers_only`` must not
+    crash or reserve nothing -- it falls back to the outer routable layers."""
+    pads, npp = make_dense_qfn()
+    pkg = make_package(pads)
+    est = uniform_estimator(base=5.0)
+    planner = EscapeCorridorPlanner(grid_2layer, est, net_pad_positions=npp, inner_layers_only=True)
+    plan = planner.plan_and_reserve(pkg)  # must not raise
+    used = plan.layers_used()
+    assert used
+    assert used.issubset(set(grid_2layer.get_routable_indices()))
+
+
+# =============================================================================
 # 3. Layer assignment
 # =============================================================================
 
