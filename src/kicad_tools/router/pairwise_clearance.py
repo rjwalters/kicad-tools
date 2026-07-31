@@ -261,6 +261,114 @@ def build_pairwise_clearance_table(
     )
 
 
+class CppDomainMatrix(NamedTuple):
+    """C++-consumable form of a :class:`PairwiseClearanceTable` (Issue #4510).
+
+    Attributes:
+        net_to_domain: Indexed by net id; entry is the net's domain index or
+            ``-1`` when the net participates in no widening pair.  Net ids
+            beyond the list's length are domain-less by construction.
+        matrix: Dense symmetric ``matrix[dom_a][dom_b]`` of *widening* values
+            (mm).  Entries are the raw creepage requirement WITHOUT the DRU
+            floor, so the C++ validator's ``max(effective_scalar, matrix[a][b])``
+            never raises a pair above its scalar rule unless HV widening
+            genuinely applies -- matching
+            :func:`segment_pair_violation`'s ``required <= floor`` skip.
+    """
+
+    net_to_domain: list[int]
+    matrix: list[list[float]]
+
+
+def build_cpp_domain_matrix(
+    table: PairwiseClearanceTable | None,
+    net_name_to_id: Mapping[str, int],
+) -> CppDomainMatrix | None:
+    """Project a pairwise table onto integer net ids for ``Grid3D`` (Issue #4510).
+
+    ``Grid3D`` has no string table, so the net-name-keyed
+    :attr:`PairwiseClearanceTable.required_by_pair` must be re-expressed as a
+    per-net domain-id array plus a dense domain-pair matrix.  Phase 1 treats
+    each net as its own domain, so the "domains" here are exactly the nets that
+    participate in at least one widening pair AND resolve to a board net id.
+
+    Returns ``None`` when nothing needs widening (no table, an empty matrix, or
+    fewer than two resolvable participating nets) -- the dormant signal that
+    keeps the C++ setter uncalled and ``validate_route`` byte-identical.
+    """
+    if table is None:
+        return None
+    pairs = table.required_by_pair
+    if not pairs:
+        return None
+
+    participating: set[str] = set()
+    for (net_a, net_b), required in pairs.items():
+        if required > 0.0:
+            participating.add(net_a)
+            participating.add(net_b)
+    if not participating:
+        return None
+
+    # A board net name may carry a leading ``/``; the table keys never do.  Two
+    # distinct board nets can in principle normalise to the same key, so every
+    # matching id joins the same domain.
+    ids_by_key: dict[str, list[int]] = {}
+    for name, net_id in net_name_to_id.items():
+        key = _norm_net_key(name)
+        if key in participating and int(net_id) >= 0:
+            ids_by_key.setdefault(key, []).append(int(net_id))
+    if len(ids_by_key) < 2:
+        return None
+
+    domain_keys = sorted(ids_by_key)  # deterministic domain indices
+    domain_index = {key: i for i, key in enumerate(domain_keys)}
+
+    max_id = max(net_id for ids in ids_by_key.values() for net_id in ids)
+    net_to_domain = [-1] * (max_id + 1)
+    for key, ids in ids_by_key.items():
+        for net_id in ids:
+            net_to_domain[net_id] = domain_index[key]
+
+    size = len(domain_keys)
+    matrix = [[0.0] * size for _ in range(size)]
+    for (net_a, net_b), required in pairs.items():
+        i = domain_index.get(net_a)
+        j = domain_index.get(net_b)
+        if i is None or j is None:
+            continue
+        value = float(required)
+        matrix[i][j] = value
+        matrix[j][i] = value
+
+    return CppDomainMatrix(net_to_domain=net_to_domain, matrix=matrix)
+
+
+def attach_zones_to_net_ids(
+    zones: Sequence[AttachZone],
+    net_name_to_id: Mapping[str, int],
+) -> list[tuple[float, float, float, float, list[int]]]:
+    """Translate net-name-keyed attach zones to net-id tuples (Issue #4510).
+
+    ``Grid3D`` works in integer net ids, so :attr:`AttachZone.net_names` must be
+    resolved through the router's reverse map before crossing into C++.  A zone
+    may legitimately span more than two nets (a 3-pad rated connector); zones
+    that resolve to fewer than two ids cannot exempt any pair and are dropped.
+    """
+    ids_by_key: dict[str, list[int]] = {}
+    for name, net_id in net_name_to_id.items():
+        if int(net_id) >= 0:
+            ids_by_key.setdefault(_norm_net_key(name), []).append(int(net_id))
+
+    out: list[tuple[float, float, float, float, list[int]]] = []
+    for zone in zones:
+        net_ids = sorted({nid for key in zone.net_names for nid in ids_by_key.get(key, ())})
+        if len(net_ids) < 2:
+            continue
+        out.append((zone.min_x, zone.min_y, zone.max_x, zone.max_y, net_ids))
+    return out
+
+
 class PairwiseViolation(NamedTuple):
     """A single post-route pairwise-clearance shortfall (Issue #4431).
 

@@ -77,6 +77,20 @@ NB_MODULE(router_cpp, m) {
         .def_rw("violation_y", &ValidationResult::violation_y)
         .def_rw("violation_type", &ValidationResult::violation_type);
 
+    // AttachZone struct (Issue #4510 / #4506)
+    //
+    // Net-id-translated mirror of the ``AttachZone`` frozen dataclass in
+    // ``router/pairwise_clearance.py``.  Python constructs these once per
+    // routing session (``cpp_backend.py::_sync_pairwise_domains_to_cpp``) and
+    // installs them via ``Grid3D.set_attach_zones``.
+    nb::class_<AttachZone>(m, "AttachZone")
+        .def(nb::init<>())
+        .def_rw("min_x", &AttachZone::min_x)
+        .def_rw("min_y", &AttachZone::min_y)
+        .def_rw("max_x", &AttachZone::max_x)
+        .def_rw("max_y", &AttachZone::max_y)
+        .def_rw("net_ids", &AttachZone::net_ids);
+
     // PadBounds struct
     nb::class_<PadBounds>(m, "PadBounds")
         .def(nb::init<>())
@@ -267,6 +281,30 @@ NB_MODULE(router_cpp, m) {
              "/ Phase 1C: when partner_net >= 0 and intra_pair_clearance >= 0, "
              "comparisons against partner_net use intra_pair_clearance instead "
              "of trace_clearance (defaults preserve pre-#2559 behavior).")
+        // Pairwise (HV-isolation) domain clearance -- Issue #4510 / #4431 Phase 2a
+        .def("set_pairwise_domains", &Grid3D::set_pairwise_domains,
+             "net_to_domain"_a, "matrix"_a,
+             "Install the per-net domain-id array (indexed by net id, -1 = no "
+             "domain) plus the dense symmetric domain-pair required-clearance "
+             "matrix in mm.  Dormant by default: until this is called (or when "
+             "called with empty containers) validate_route() behaves exactly as "
+             "before.  Matrix entries are pure WIDENING values -- the validator "
+             "applies max(effective_scalar, matrix[dom_a][dom_b]).")
+        .def("set_attach_zones", &Grid3D::set_attach_zones, "zones"_a,
+             "Install rated-footprint attach zones (Issue #4506) whose bbox + "
+             "net-id membership waives the pairwise WIDENING (never the scalar "
+             "floor) for a pair terminating on the same domain-bridging "
+             "footprint.  Empty vector (the default) clears them.")
+        .def_prop_ro("pairwise_active", &Grid3D::pairwise_active)
+        .def_prop_ro("attach_zone_count", &Grid3D::attach_zone_count)
+        .def("pairwise_required_clearance", &Grid3D::pairwise_required_clearance,
+             "net_a"_a, "net_b"_a,
+             "Required pairwise clearance (mm) between two net ids; 0.0 when "
+             "dormant or when either net has no domain.")
+        .def("attach_zone_exempts", &Grid3D::attach_zone_exempts,
+             "x"_a, "y"_a, "net_a"_a, "net_b"_a,
+             "True when an installed attach zone contains (x, y) and lists BOTH "
+             "net ids among its members.")
         .def_prop_ro("pad_count", &Grid3D::pad_count)
         .def_prop_ro("stored_segment_count", &Grid3D::stored_segment_count)
         .def_prop_ro("stored_via_count", &Grid3D::stored_via_count);

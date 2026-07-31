@@ -463,6 +463,164 @@ void Grid3D::clear_stored_routes() {
     stored_vias_.clear();
 }
 
+// ---------------------------------------------------------------------------
+// Pairwise (HV-isolation) domain clearance -- Issue #4510 / Epic #4431 Phase 2a
+// ---------------------------------------------------------------------------
+
+void Grid3D::set_pairwise_domains(const std::vector<int>& net_to_domain,
+                                  const std::vector<std::vector<float>>& matrix) {
+    domain_count_ = static_cast<int>(matrix.size());
+    net_domain_ = net_to_domain;
+    domain_matrix_.clear();
+
+    if (domain_count_ <= 0 || net_domain_.empty()) {
+        // Dormant: restore the pre-#4510 behaviour exactly.
+        pairwise_active_ = false;
+        domain_count_ = 0;
+        net_domain_.clear();
+        return;
+    }
+
+    domain_matrix_.reserve(static_cast<size_t>(domain_count_) * domain_count_);
+    for (const auto& row : matrix) {
+        for (int j = 0; j < domain_count_; ++j) {
+            domain_matrix_.push_back(
+                j < static_cast<int>(row.size()) ? row[static_cast<size_t>(j)] : 0.0f);
+        }
+    }
+    pairwise_active_ = true;
+}
+
+void Grid3D::set_attach_zones(const std::vector<AttachZone>& zones) {
+    attach_zones_ = zones;
+}
+
+float Grid3D::pairwise_required_clearance(int net_a, int net_b) const {
+    if (!pairwise_active_) return 0.0f;
+    if (net_a < 0 || net_b < 0) return 0.0f;
+    const size_t n = net_domain_.size();
+    if (static_cast<size_t>(net_a) >= n || static_cast<size_t>(net_b) >= n) return 0.0f;
+    const int da = net_domain_[static_cast<size_t>(net_a)];
+    const int db = net_domain_[static_cast<size_t>(net_b)];
+    if (da < 0 || db < 0 || da >= domain_count_ || db >= domain_count_) return 0.0f;
+    return domain_matrix_[static_cast<size_t>(da) * static_cast<size_t>(domain_count_) +
+                          static_cast<size_t>(db)];
+}
+
+bool Grid3D::attach_zone_exempts(float x, float y, int net_a, int net_b) const {
+    for (const auto& zone : attach_zones_) {
+        if (x < zone.min_x || x > zone.max_x || y < zone.min_y || y > zone.max_y) continue;
+        bool has_a = false;
+        bool has_b = false;
+        for (int nid : zone.net_ids) {
+            if (nid == net_a) has_a = true;
+            if (nid == net_b) has_b = true;
+        }
+        if (has_a && has_b) return true;
+    }
+    return false;
+}
+
+namespace {
+
+// Closest point on segment (x1,y1)-(x2,y2) to the point (px, py).
+// Mirrors the projection/clamp used by ``point_to_segment_distance``.
+inline std::pair<float, float> closest_point_on_segment(
+    float px, float py, float x1, float y1, float x2, float y2) {
+    const float dx = x2 - x1;
+    const float dy = y2 - y1;
+    const float len_sq = dx * dx + dy * dy;
+    if (len_sq <= 1e-15f) return {x1, y1};
+    float t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
+    t = std::max(0.0f, std::min(1.0f, t));
+    return {x1 + t * dx, y1 + t * dy};
+}
+
+// Midpoint between the closest points of two line segments.  Port of
+// ``_closest_gap_midpoint`` in ``router/pairwise_clearance.py`` so the C++
+// attach-zone consult keys off the SAME gap point as the Python validator
+// (a long segment's own midpoint is not the gap point -- see
+// ``test_attach_zone_uses_closest_gap_not_long_segment_midpoint``).
+inline std::pair<float, float> closest_gap_midpoint(
+    float ax1, float ay1, float ax2, float ay2,
+    float bx1, float by1, float bx2, float by2) {
+    const float ux = ax2 - ax1, uy = ay2 - ay1;
+    const float vx = bx2 - bx1, vy = by2 - by1;
+    const float wx = ax1 - bx1, wy = ay1 - by1;
+    const float a = ux * ux + uy * uy;
+    const float b = ux * vx + uy * vy;
+    const float c = vx * vx + vy * vy;
+    const float d = ux * wx + uy * wy;
+    const float e = vx * wx + vy * wy;
+
+    if (a <= 1e-15f && c <= 1e-15f) {
+        return {(ax1 + bx1) / 2.0f, (ay1 + by1) / 2.0f};
+    }
+    if (a <= 1e-15f) {
+        const float t = std::max(0.0f, std::min(1.0f, e / c));
+        return {(ax1 + bx1 + t * vx) / 2.0f, (ay1 + by1 + t * vy) / 2.0f};
+    }
+    if (c <= 1e-15f) {
+        const float s = std::max(0.0f, std::min(1.0f, -d / a));
+        return {(ax1 + s * ux + bx1) / 2.0f, (ay1 + s * uy + by1) / 2.0f};
+    }
+
+    const float denominator = a * c - b * b;
+    float s_num = denominator, s_den = denominator;
+    float t_num = denominator, t_den = denominator;
+
+    if (denominator <= 1e-15f) {
+        s_num = 0.0f;
+        s_den = 1.0f;
+        t_num = e;
+        t_den = c;
+    } else {
+        s_num = b * e - c * d;
+        t_num = a * e - b * d;
+        if (s_num < 0.0f) {
+            s_num = 0.0f;
+            t_num = e;
+            t_den = c;
+        } else if (s_num > s_den) {
+            s_num = s_den;
+            t_num = e + b;
+            t_den = c;
+        }
+    }
+
+    if (t_num < 0.0f) {
+        t_num = 0.0f;
+        if (-d < 0.0f) {
+            s_num = 0.0f;
+            s_den = 1.0f;
+        } else if (-d > a) {
+            s_num = 1.0f;
+            s_den = 1.0f;
+        } else {
+            s_num = -d;
+            s_den = a;
+        }
+    } else if (t_num > t_den) {
+        t_num = t_den;
+        if (-d + b < 0.0f) {
+            s_num = 0.0f;
+            s_den = 1.0f;
+        } else if (-d + b > a) {
+            s_num = 1.0f;
+            s_den = 1.0f;
+        } else {
+            s_num = -d + b;
+            s_den = a;
+        }
+    }
+
+    const float s = std::abs(s_num) <= 1e-15f ? 0.0f : s_num / s_den;
+    const float t = std::abs(t_num) <= 1e-15f ? 0.0f : t_num / t_den;
+    return {(ax1 + s * ux + bx1 + t * vx) / 2.0f, (ay1 + s * uy + by1 + t * vy) / 2.0f};
+}
+
+}  // namespace
+
 ValidationResult Grid3D::validate_route(
     const std::vector<Segment>& segments,
     const std::vector<Via>& vias,
@@ -484,6 +642,28 @@ ValidationResult Grid3D::validate_route(
     // the branch is dormant (default), validation behaves exactly as before.
     bool partner_active =
         (partner_net >= 0) && (partner_net != exclude_net) && (intra_pair_clearance >= 0.0f);
+
+    // Issue #4510 / Epic #4431 Phase 2a: pairwise (HV-isolation) widening.
+    // Dormant unless ``set_pairwise_domains`` installed a matrix, in which
+    // case the required clearance for a domain-known pair becomes
+    // ``max(effective_scalar, matrix[dom_a][dom_b])``.  The gap point is
+    // computed LAZILY (only when a widening actually applies) so the common
+    // no-voltage-map board pays a single bool test per comparison.
+    //
+    // ``gap_point`` is a nullary callable returning the (x, y) mid-gap
+    // coordinate consulted by the attach-zone exemption (#4506): a rated
+    // domain-bridging footprint may neck the pair down to the scalar floor
+    // inside its courtyard, but never below it -- the exemption skips only
+    // the widening, never ``base``.
+    const bool pairwise_on = pairwise_active_;
+    auto widen = [&](float base, int foreign_net, auto&& gap_point) -> float {
+        if (!pairwise_on) return base;
+        const float required = pairwise_required_clearance(exclude_net, foreign_net);
+        if (required <= base) return base;
+        const std::pair<float, float> p = gap_point();
+        if (attach_zone_exempts(p.first, p.second, exclude_net, foreign_net)) return base;
+        return required;
+    };
 
     // Helper: check if a ref_hash is in the exclusion set
     auto is_excluded_ref = [&](uint32_t ref_hash) -> bool {
@@ -601,6 +781,17 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
+            // Issue #4510: widen for a cross-domain (HV) pair.  The gap point
+            // is the midpoint between the pad centre and the closest point on
+            // the candidate segment's centreline -- the pad analogue of the
+            // Python validator's closest-approach midpoint.
+            required_clearance = widen(required_clearance, pad.net, [&]() {
+                const auto cp = closest_point_on_segment(
+                    pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
+                return std::pair<float, float>((pad.x + cp.first) / 2.0f,
+                                               (pad.y + cp.second) / 2.0f);
+            });
+
             if (clearance < required_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = pad.x;
@@ -630,10 +821,19 @@ ValidationResult Grid3D::validate_route(
 
             // Issue #2559 / Phase 1C: tighter clearance for the diff-pair
             // partner only.  All other foreign nets keep the wider rule.
-            float effective_clearance =
-                (partner_active && other.net == partner_net)
-                ? intra_pair_clearance
-                : trace_clearance;
+            const bool is_partner = partner_active && other.net == partner_net;
+            float effective_clearance = is_partner ? intra_pair_clearance : trace_clearance;
+
+            // Issue #4510: the partner branch keeps PRECEDENCE -- it tightens
+            // *within* a declared pair, whereas the matrix widens *across*
+            // domains; a net that is both the diff-pair partner and formally
+            // cross-domain stays at ``intra_pair_clearance``.
+            if (!is_partner) {
+                effective_clearance = widen(effective_clearance, other.net, [&]() {
+                    return closest_gap_midpoint(seg.x1, seg.y1, seg.x2, seg.y2,
+                                                other.x1, other.y1, other.x2, other.y2);
+                });
+            }
 
             if (clearance < effective_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
@@ -659,10 +859,18 @@ ValidationResult Grid3D::validate_route(
             }
 
             // Issue #2559 / Phase 1C: tighter clearance for the partner.
-            float effective_clearance =
-                (partner_active && sv.net == partner_net)
-                ? intra_pair_clearance
-                : trace_clearance;
+            const bool is_partner = partner_active && sv.net == partner_net;
+            float effective_clearance = is_partner ? intra_pair_clearance : trace_clearance;
+
+            // Issue #4510: cross-domain widening (partner branch wins).
+            if (!is_partner) {
+                effective_clearance = widen(effective_clearance, sv.net, [&]() {
+                    const auto cp = closest_point_on_segment(
+                        sv.x, sv.y, seg.x1, seg.y1, seg.x2, seg.y2);
+                    return std::pair<float, float>((sv.x + cp.first) / 2.0f,
+                                                   (sv.y + cp.second) / 2.0f);
+                });
+            }
 
             if (clearance < effective_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
@@ -701,7 +909,16 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            if (clearance < via_clearance - CLEARANCE_EPSILON_MM) {
+            // Issue #4510: cross-domain widening for the candidate via vs a
+            // stored foreign segment (no diff-pair partner branch here).
+            const float effective_clearance = widen(via_clearance, seg.net, [&]() {
+                const auto cp = closest_point_on_segment(
+                    via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2);
+                return std::pair<float, float>((via.x + cp.first) / 2.0f,
+                                               (via.y + cp.second) / 2.0f);
+            });
+
+            if (clearance < effective_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = via.x;
                 result.violation_y = via.y;
@@ -727,7 +944,13 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            if (clearance < via_clearance - CLEARANCE_EPSILON_MM) {
+            // Issue #4510: cross-domain widening for via-vs-via.  The gap
+            // point is the midpoint of the two via centres.
+            const float effective_clearance = widen(via_clearance, sv.net, [&]() {
+                return std::pair<float, float>((via.x + sv.x) / 2.0f, (via.y + sv.y) / 2.0f);
+            });
+
+            if (clearance < effective_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = via.x;
                 result.violation_y = via.y;

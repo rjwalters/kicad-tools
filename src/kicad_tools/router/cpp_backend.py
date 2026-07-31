@@ -23,7 +23,7 @@ import logging
 import math
 import os
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     import numpy as np
@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 17
+_REQUIRED_CPP_BUILD_VERSION = 18
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -973,6 +973,16 @@ class CppPathfinder:
         self._net_name_to_id: dict[str, int] = {}
         self._attach_zones = ()
 
+        # Issue #4510 / Epic #4431 Phase 2a: lazily-built C++ payload for the
+        # pairwise (HV-isolation) domain matrix + net-id-translated attach
+        # zones.  ``None`` = not built yet; ``False`` = built and found empty
+        # (nothing to install -- the C++ validator stays dormant).  Invalidated
+        # whenever the reverse net map or the attach zones change, since both
+        # feed the translation.
+        self._pairwise_cpp_payload: (
+            tuple[list[int], list[list[float]], list] | Literal[False] | None
+        ) = None
+
         # Issue #2929: Per-A*-call wall-clock instrumentation, mirroring the
         # Python pathfinder's instrumentation surface so callers can audit
         # deadline behavior regardless of which backend handles the call.
@@ -1166,12 +1176,74 @@ class CppPathfinder:
         ``clearance`` for every other net).
         """
         self._net_name_to_id = dict(mapping)
+        # Issue #4510: the C++ domain matrix / attach zones are keyed by net
+        # ID, translated through this map -- rebuild them on the next validate.
+        self._pairwise_cpp_payload = None
 
     def set_attach_zones(self, zones) -> None:
         """Install precomputed rated-footprint necking regions."""
         self._attach_zones = tuple(zones)
+        # Issue #4510: invalidate the translated C++ zone payload.
+        self._pairwise_cpp_payload = None
         if self._py_router is not None:
             self._py_router.set_attach_zones(self._attach_zones)
+
+    def _sync_pairwise_domains_to_cpp(self) -> None:
+        """Install the pairwise domain matrix + attach zones on the C++ grid.
+
+        Issue #4510 / Epic #4431 Phase 2a.  ``Grid3D::validate_route`` gains
+        cross-domain (HV-isolation) widening only when a domain matrix has been
+        installed; this is where :attr:`DesignRules.pairwise_clearance` and
+        :attr:`_attach_zones` cross the Python/C++ boundary, translated from
+        net *names* to the integer net ids the grid speaks.
+
+        Fully dormant without a voltage map: no ``pairwise_clearance`` table
+        means the setters are never called and the C++ validator behaves
+        byte-identically to the pre-#4510 code path.  The translated payload is
+        cached (it depends only on the table, the reverse net map and the
+        zones, all fixed for a routing session) and re-pushed whenever the grid
+        reports itself dormant -- which is exactly the case after the C++ grid
+        has been rebuilt underneath us.
+        """
+        impl = getattr(self._grid, "_impl", None)
+        if impl is None or not hasattr(impl, "set_pairwise_domains"):
+            return  # Stale .so without the #4510 surface -- stay dormant.
+
+        payload = self._pairwise_cpp_payload
+        if payload is False:
+            return  # Already determined: nothing to install.
+
+        if payload is None:
+            table = getattr(self._rules, "pairwise_clearance", None)
+            if table is None:
+                return  # No voltage map -- leave the cache unset (may arrive later).
+            from .pairwise_clearance import attach_zones_to_net_ids, build_cpp_domain_matrix
+
+            domains = build_cpp_domain_matrix(table, self._net_name_to_id)
+            if domains is None:
+                self._pairwise_cpp_payload = False
+                return
+            cpp_zones = []
+            for min_x, min_y, max_x, max_y, net_ids in attach_zones_to_net_ids(
+                self._attach_zones, self._net_name_to_id
+            ):
+                zone = router_cpp.AttachZone()
+                zone.min_x = min_x
+                zone.min_y = min_y
+                zone.max_x = max_x
+                zone.max_y = max_y
+                zone.net_ids = net_ids
+                cpp_zones.append(zone)
+            payload = (domains.net_to_domain, domains.matrix, cpp_zones)
+            self._pairwise_cpp_payload = payload
+
+        # ``pairwise_active`` is False on a freshly-built grid, so this both
+        # installs on first use and reinstalls after a grid rebuild -- without
+        # re-pushing the matrix on every single validation call.
+        if not impl.pairwise_active:
+            net_to_domain, matrix, cpp_zones = payload
+            impl.set_pairwise_domains(net_to_domain, matrix)
+            impl.set_attach_zones(cpp_zones)
 
     def _resolve_partner_net_id(self, net_name: str) -> int | None:
         """Look up the integer net id of the diff-pair partner of *net_name*.
@@ -2218,6 +2290,15 @@ class CppPathfinder:
             if partner_id is not None:
                 partner_net_id = int(partner_id)
                 intra_pair_clearance = float(net_class.effective_intra_pair_clearance())
+
+        # Issue #4510 / Epic #4431 Phase 2a: install the pairwise (HV) domain
+        # matrix and the net-id-translated rated-footprint attach zones on the
+        # C++ grid alongside the partner plumbing above, so ``validate_route``
+        # enforces max(effective_scalar, matrix[dom_a][dom_b]) itself instead
+        # of relying solely on the Python post-check below (which sees only
+        # trace-vs-trace copper, not pads and vias).  No-op without a voltage
+        # map.
+        self._sync_pairwise_domains_to_cpp()
 
         vresult = self._grid._impl.validate_route(
             cpp_segs,

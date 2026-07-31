@@ -179,7 +179,17 @@ namespace router {
 // crossing net onto its inner-layer channel while leaving the mandatory
 // crossings legal.  Old .so files lack ``reserved_soft`` and the new
 // ``reserve_cell`` signature; the version bump forces a rebuild.
-constexpr int ROUTER_CPP_BUILD_VERSION = 17;
+// Version 18 (Issue #4510, Phase 2a of epic #4431): pairwise (HV-isolation)
+// domain clearance in ``Grid3D::validate_route``.  ``Grid3D`` gains two
+// dormant-by-default setters -- ``set_pairwise_domains(net_to_domain, matrix)``
+// (a per-net domain-id array plus a dense domain-pair -> required-clearance
+// matrix in mm) and ``set_attach_zones(zones)`` (the net-id-translated
+// rated-footprint necking regions from #4506) -- plus the new ``AttachZone``
+// struct below.  When the setters are never called the validator behaves
+// byte-identically to version 17.  Old .so files lack both bindings, so the
+// Python plumbing in ``cpp_backend.py`` would silently no-op against a stale
+// build; the version bump forces a rebuild via ``kct build-native``.
+constexpr int ROUTER_CPP_BUILD_VERSION = 18;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -545,6 +555,24 @@ struct StoredVia {
     float drill;
     float diameter;
     int net;
+};
+
+// Rated-footprint attach zone for pairwise clearance (Issue #4510 / #4506).
+//
+// Layer-agnostic axis-aligned bounding box plus the set of net ids that
+// terminate on the rated footprint.  Mirrors the frozen ``AttachZone``
+// dataclass in ``src/kicad_tools/router/pairwise_clearance.py``, except the
+// net *names* of the Python shape are translated to integer net ids by
+// ``cpp_backend.py`` before crossing the boundary (``Grid3D`` has no string
+// table).  A zone may legitimately span more than two nets (a 3-pad rated
+// connector), so membership is tested per-candidate-pair: BOTH nets of the
+// pair must be members for the widening to be waived.
+struct AttachZone {
+    float min_x = 0.0f;
+    float min_y = 0.0f;
+    float max_x = 0.0f;
+    float max_y = 0.0f;
+    std::vector<int> net_ids;
 };
 
 // Validation result (Issue #2439)

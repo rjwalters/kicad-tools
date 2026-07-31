@@ -280,6 +280,15 @@ public:
     //              partner_net use intra_pair_clearance instead of
     //              trace_clearance.  Defaults preserve pre-#2559 behavior.
     // intra_pair_clearance: tighter clearance applied only to the partner.
+    //
+    // Issue #4510 / Epic #4431 Phase 2a: when ``set_pairwise_domains`` has
+    // installed a domain matrix, the required clearance for a pair whose
+    // BOTH nets have a known domain becomes
+    // ``max(effective_scalar, matrix[dom_a][dom_b])``.  The diff-pair
+    // partner relaxation keeps precedence (it *tightens within* a pair; the
+    // matrix *widens across* domains), and an installed attach zone
+    // (``set_attach_zones``) covering the gap point waives the widening --
+    // never the scalar floor.
     ValidationResult validate_route(
         const std::vector<Segment>& segments,
         const std::vector<Via>& vias,
@@ -290,6 +299,48 @@ public:
         float min_drill_clearance,
         int partner_net = -1,
         float intra_pair_clearance = 0.0f) const;
+
+    // -----------------------------------------------------------------------
+    // Pairwise (HV-isolation) domain clearance -- Issue #4510, Phase 2a of
+    // epic #4431.  Both setters are DORMANT by default: until one is called
+    // the validator behaves byte-identically to the pre-#4510 code path.
+    // -----------------------------------------------------------------------
+
+    // Install the per-net domain-id array plus the dense domain-pair
+    // clearance matrix (mm).
+    //
+    // net_to_domain: indexed by net id; entry is the net's domain index, or
+    //                -1 for "no domain" (the overwhelming majority of nets on
+    //                a board with a partial voltage map).  Net ids beyond the
+    //                array's length are treated as domain-less.
+    // matrix:        ``matrix[dom_a][dom_b]`` is the REQUIRED clearance (mm)
+    //                between the two domains -- a pure *widening* value, i.e.
+    //                0.0 for pairs that need no HV widening beyond the scalar
+    //                floor.  Must be square and symmetric; Python builds it
+    //                from ``PairwiseClearanceTable.required_by_pair``.
+    //
+    // Passing empty containers returns the grid to the dormant state.
+    void set_pairwise_domains(const std::vector<int>& net_to_domain,
+                              const std::vector<std::vector<float>>& matrix);
+
+    // Install the rated-footprint attach zones (Issue #4506) used to waive
+    // the pairwise widening (never the scalar floor) inside a domain-bridging
+    // footprint's necking region.  Zones are computed once per routing
+    // session on the Python side; passing an empty vector clears them.
+    void set_attach_zones(const std::vector<AttachZone>& zones);
+
+    // True once a non-empty domain matrix has been installed.
+    bool pairwise_active() const { return pairwise_active_; }
+    size_t attach_zone_count() const { return attach_zones_.size(); }
+
+    // Required pairwise clearance (mm) between two net ids.  Returns 0.0 when
+    // the matrix is dormant, when either net id is out of range, or when
+    // either net has no domain -- so ``max(scalar, this)`` is the scalar.
+    float pairwise_required_clearance(int net_a, int net_b) const;
+
+    // True when an installed attach zone contains ``(x, y)`` AND has BOTH
+    // ``net_a`` and ``net_b`` among its member net ids.
+    bool attach_zone_exempts(float x, float y, int net_a, int net_b) const;
 
     // Accessors for validation data sizes (for testing/debugging)
     size_t pad_count() const { return pads_.size(); }
@@ -328,6 +379,16 @@ private:
     std::vector<PadInfo> pads_;
     std::vector<StoredSegment> stored_segments_;
     std::vector<StoredVia> stored_vias_;
+
+    // Pairwise (HV-isolation) domain clearance storage (Issue #4510).
+    // ``pairwise_active_`` is the grid-wide fast-path flag: when false the
+    // widening branch in validate_route() is skipped entirely, so boards
+    // without a voltage map keep byte-identical behaviour and cost.
+    bool pairwise_active_ = false;
+    int domain_count_ = 0;
+    std::vector<int> net_domain_;        // net id -> domain index (-1 = none)
+    std::vector<float> domain_matrix_;   // row-major domain_count_ x domain_count_
+    std::vector<AttachZone> attach_zones_;
 };
 
 }  // namespace router
