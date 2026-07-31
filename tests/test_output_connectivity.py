@@ -210,3 +210,110 @@ class TestVerifyOutputConnectivity:
 
         assert result[1]["connected"] is False
         assert result[1]["connected_pads"] == 0
+
+
+# ---------------------------------------------------------------------------
+# KiCad-10 name-only net dialect + linear-time scan (Issue #4476)
+# ---------------------------------------------------------------------------
+
+
+def _named_seg_sexp(x1: float, y1: float, x2: float, y2: float, net_name: str) -> str:
+    """A segment in the KiCad-10 name-only dialect: ``(net "NAME")``."""
+    return (
+        f"(segment\n\t\t(start {x1:.4f} {y1:.4f})\n\t\t(end {x2:.4f} {y2:.4f})\n"
+        f'\t\t(width 0.2)\n\t\t(layer "F.Cu")\n\t\t(uuid "u")\n\t\t(net "{net_name}")\n\t)'
+    )
+
+
+def _named_via_sexp(x: float, y: float, net_name: str) -> str:
+    return (
+        f"(via\n\t\t(at {x:.4f} {y:.4f})\n\t\t(size 0.6)\n\t\t(drill 0.3)\n"
+        f'\t\t(layers "F.Cu" "B.Cu")\n\t\t(uuid "u")\n\t\t(net "{net_name}")\n\t)'
+    )
+
+
+def _wrap_named_pcb(fragments: str, *, net_table: dict[int, str]) -> str:
+    """Wrap fragments in a PCB whose header declares the numeric net table."""
+    table = "\n  ".join(f'(net {nid} "{name}")' for nid, name in sorted(net_table.items()))
+    return f"(kicad_pcb (version 20241229)\n  {table}\n  {fragments}\n)"
+
+
+class TestNameOnlyNetDialect:
+    """Issue #4476: verification must read the ``(net "NAME")`` dialect.
+
+    ``route_cmd._board_uses_name_only_dialect`` (#4416) re-emits route copper
+    in whatever dialect the input board uses, and board-05 IS a name-only
+    board (its zones are written that way).  The pre-#4476 numeric-only
+    pattern matched nothing on such a board, so the post-save verification
+    silently saw zero copper -- and, because its lazy gaps then scanned to
+    end-of-file per ``(segment`` token, took minutes to say so.
+    """
+
+    def test_named_segment_connects_a_net(self):
+        pcb = _wrap_named_pcb(_named_seg_sexp(0.0, 0.0, 5.0, 0.0, "NET1"), net_table={1: "NET1"})
+        pads = [_pad(0.0, 0.0, 1, "U1", "1"), _pad(5.0, 0.0, 1, "U1", "2")]
+
+        result = verify_output_connectivity(pcb, {1: pads})
+
+        assert result[1]["connected"] is True
+        assert result[1]["connected_pads"] == 2
+
+    def test_named_via_bridges_two_segments(self):
+        frags = "\n  ".join(
+            [
+                _named_seg_sexp(0.0, 0.0, 5.0, 0.0, "NET1"),
+                _named_via_sexp(5.0, 0.0, "NET1"),
+                _named_seg_sexp(5.0, 0.0, 10.0, 0.0, "NET1"),
+            ]
+        )
+        pcb = _wrap_named_pcb(frags, net_table={1: "NET1"})
+        pads = [_pad(0.0, 0.0, 1, "U1", "1"), _pad(10.0, 0.0, 1, "U2", "1")]
+
+        result = verify_output_connectivity(pcb, {1: pads})
+
+        assert result[1]["connected"] is True
+
+    def test_named_segment_on_wrong_net_does_not_help(self):
+        pcb = _wrap_named_pcb(
+            _named_seg_sexp(0.0, 0.0, 5.0, 0.0, "NET2"), net_table={1: "NET1", 2: "NET2"}
+        )
+        pads = [_pad(0.0, 0.0, 1, "U1", "1"), _pad(5.0, 0.0, 1, "U1", "2")]
+
+        result = verify_output_connectivity(pcb, {1: pads})
+
+        assert result[1]["connected"] is False
+        assert result[1]["connected_pads"] == 0
+
+    def test_unknown_net_name_is_ignored_not_crashed(self):
+        """A name absent from the header table is skipped, never an exception."""
+        pcb = _wrap_named_pcb(_named_seg_sexp(0.0, 0.0, 5.0, 0.0, "GHOST"), net_table={1: "NET1"})
+        pads = [_pad(0.0, 0.0, 1, "U1", "1"), _pad(5.0, 0.0, 1, "U1", "2")]
+
+        result = verify_output_connectivity(pcb, {1: pads})
+
+        assert result[1]["connected"] is False
+
+    def test_scan_is_linear_on_a_large_unmatched_board(self):
+        """Regression guard for the >4-minute board-05 stall.
+
+        700 name-only segments in a 500 KB board: the pre-#4476 pattern made
+        each ``(segment`` token scan to end-of-file hunting for a numeric
+        ``(net N)``.  The block-scoped scan is linear, so this completes in
+        well under a second.
+        """
+        import time
+
+        frags = "\n  ".join(
+            _named_seg_sexp(float(i), 0.0, float(i) + 1.0, 0.0, "NET1") for i in range(700)
+        )
+        # Pad the board out with unrelated text so a runaway scan is expensive.
+        filler = "\n".join(
+            f'  (gr_line (start {i} 0) (end {i} 1) (layer "Edge.Cuts"))' for i in range(3000)
+        )
+        pcb = _wrap_named_pcb(frags + "\n" + filler, net_table={1: "NET1"})
+        assert len(pcb) > 200_000
+
+        pads = [_pad(0.0, 0.0, 1, "U1", "1"), _pad(700.0, 0.0, 1, "U2", "1")]
+        started = time.monotonic()
+        verify_output_connectivity(pcb, {1: pads})
+        assert time.monotonic() - started < 5.0

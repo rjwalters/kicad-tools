@@ -4312,44 +4312,68 @@ def verify_output_connectivity(
     """
     from .observability import _pt, _UnionFind
 
-    # Parse segments from PCB content: (segment (start X Y) (end X Y) ... (net N) ...)
-    seg_pattern = re.compile(
-        r"\(segment\s+"
-        r".*?\(start\s+([\d.+-]+)\s+([\d.+-]+)\)"
-        r".*?\(end\s+([\d.+-]+)\s+([\d.+-]+)\)"
-        r".*?\(net\s+(\d+)\)"
-        r".*?\)",
-        re.DOTALL,
-    )
+    # Issue #4476: scan each ``(segment ...)`` / ``(via ...)`` block FIRST and
+    # read its fields inside that block, instead of one mega-pattern whose
+    # lazy ``.*?`` gaps span the whole file.
+    #
+    # The old ordered pattern (``\(segment\s+.*?\(start...\).*?\(net\s+(\d+)\)``
+    # under DOTALL) required a NUMERIC net ref.  On a KiCad-10 name-only board
+    # -- the ``(net "GND")`` dialect ``route_cmd._board_uses_name_only_dialect``
+    # detects and re-emits (#4416); board-05 is one, because its zones are
+    # written in that dialect -- no segment ever matches, so each ``(segment``
+    # start makes the lazy gap scan to the end of the file looking for a
+    # numeric ``(net N)``.  Measured on board-05's 510 KB / 699-segment
+    # completion output: >4 minutes for this one call (the router's post-save
+    # tail appeared to hang), and the verification silently saw ZERO copper.
+    #
+    # ``[^()]*\([^()]*\)`` matches a segment/via body exactly (these blocks
+    # nest at most one level deep), so the scan is linear and cannot backtrack
+    # across the file.
+    seg_block_re = re.compile(r"\(segment\b(?:[^()]*\([^()]*\))*[^()]*\)")
+    via_block_re = re.compile(r"\(via\b(?:[^()]*\([^()]*\))*[^()]*\)")
+    start_re = re.compile(r"\(start\s+([\d.+-]+)\s+([\d.+-]+)\)")
+    end_re = re.compile(r"\(end\s+([\d.+-]+)\s+([\d.+-]+)\)")
+    at_re = re.compile(r"\(at\s+([\d.+-]+)\s+([\d.+-]+)\)")
+    # Both dialects: ``(net 12)`` and the name-only ``(net "GND")``.
+    net_ref_re = re.compile(r'\(net\s+(?:(\d+)|"((?:[^"\\]|\\.)*)")\s*\)')
+    # Header net table, used to resolve a name-only reference back to its id
+    # so both dialects key ``segments_by_net`` identically.
+    name_to_id = {
+        m.group(2): int(m.group(1)) for m in re.finditer(r'\(net\s+(\d+)\s+"([^"]*)"\)', pcb_content)
+    }
 
-    # Parse vias: (via (at X Y) ... (net N) ...)
-    # NOTE (#3447 sweep): unlike the ordered regexes fixed in #3446
-    # (parse_vias) and #3447 (_remove_conflicting_vias), this pattern
-    # uses lazy ``.*?`` wildcards between fields, so it tolerates
-    # KiCad-8 field order (uuid before net) and via type tokens
-    # (micro/blind/buried).  Checked and intentionally left as-is.
-    via_pattern = re.compile(
-        r"\(via\s+"
-        r".*?\(at\s+([\d.+-]+)\s+([\d.+-]+)\)"
-        r".*?\(net\s+(\d+)\)"
-        r".*?\)",
-        re.DOTALL,
-    )
+    def _block_net_id(block: str) -> int | None:
+        m = net_ref_re.search(block)
+        if m is None:
+            return None
+        if m.group(1) is not None:
+            return int(m.group(1))
+        return name_to_id.get(m.group(2).replace('\\"', '"'))
 
     # Group parsed segments by net
     segments_by_net: dict[int, list[tuple[tuple[float, float], tuple[float, float]]]] = {}
-    for m in seg_pattern.finditer(pcb_content):
-        x1, y1, x2, y2 = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
-        net_id = int(m.group(5))
+    for block_match in seg_block_re.finditer(pcb_content):
+        block = block_match.group(0)
+        s_m = start_re.search(block)
+        e_m = end_re.search(block)
+        net_id = _block_net_id(block)
+        if s_m is None or e_m is None or net_id is None:
+            continue
+        x1, y1 = float(s_m.group(1)), float(s_m.group(2))
+        x2, y2 = float(e_m.group(1)), float(e_m.group(2))
         segments_by_net.setdefault(net_id, []).append(
             (_pt(x1, y1, tolerance), _pt(x2, y2, tolerance))
         )
 
     # Group parsed vias by net
     vias_by_net: dict[int, list[tuple[float, float]]] = {}
-    for m in via_pattern.finditer(pcb_content):
-        x, y = float(m.group(1)), float(m.group(2))
-        net_id = int(m.group(3))
+    for block_match in via_block_re.finditer(pcb_content):
+        block = block_match.group(0)
+        at_m = at_re.search(block)
+        net_id = _block_net_id(block)
+        if at_m is None or net_id is None:
+            continue
+        x, y = float(at_m.group(1)), float(at_m.group(2))
         vias_by_net.setdefault(net_id, []).append(_pt(x, y, tolerance))
 
     result: dict[int, dict] = {}
