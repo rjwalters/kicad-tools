@@ -27,6 +27,7 @@ If no output directory is specified, files are written to ./output/
 import subprocess
 import sys
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
@@ -3182,20 +3183,37 @@ def rescue_partial_nets(routed_path: Path) -> dict[str, bool]:
     return shared_rescue_partial_nets(routed_path, _RESCUE_CONFIG)
 
 
-# Wall budget for ONE batch-completion pass (Issue #4476).  The board-05 CI
-# job (``board-05-routing-regression``) has a 90-minute ceiling and a fresh
-# regen already spends ~45-55 min on the main pass + the per-net rescue loop,
-# so the completion phase is capped at ``_COMPLETION_MAX_PASSES *
-# _COMPLETION_PASS_TIMEOUT_S`` (2 x 360 s = 12 min) of routing plus its
-# checker overhead.  Two passes are enough to see whether the batch is
-# productive at all: ``complete_unfinished_nets`` stops early on convergence
-# AND on the first no-progress pass (restoring the pre-pass board
-# byte-for-byte), so the worst case is only paid when passes keep closing
-# nets.  Per #3880/#3894 this phase, like the rest of board 05, deliberately
-# stays on the wall-clock cutoff -- ``_RESCUE_CONFIG`` sets no
-# ``deterministic_budget``.
-_COMPLETION_MAX_PASSES = 2
-_COMPLETION_PASS_TIMEOUT_S = 360
+# Batch-completion budget (Issue #4476).  The board-05 CI job
+# (``board-05-routing-regression``) has a 90-minute ceiling and a fresh regen
+# already spends ~30-40 min on the main pass, so the completion phase runs
+# exactly ONE pass.
+#
+# What actually bounds a ``--complete`` pass is NOT ``--timeout`` (the grid
+# engine's whole-route wall budget, kept below only as a backstop): it is the
+# lattice engine's per-link deadline, which ``route_cmd._resolve_complete_
+# link_budget`` derives from ``--per-net-timeout`` as
+# ``per_net_timeout * link_count`` (issues #4472/#4501).  Board-05's stranded
+# cohort is ~8 nets / ~18 links, so at ``_RESCUE_CONFIG.per_net_timeout_s``
+# (60 s) the negotiation aborts after at most ~18 min, plus a few minutes of
+# board load / emit / zone fill.  ONE pass therefore costs <= ~25 min, which
+# fits the job's remaining headroom; a second pass would not.  Measured
+# 2026-07-31 on a fresh host regen: one pass took the board from 11 -> 6
+# blocking nets, closing ISENSE_A+, ISENSE_B+, PWM_BH, PWM_CH and PWM_CL.
+#
+# Per #3880/#3894 this phase, like the rest of board 05, deliberately stays on
+# the wall-clock cutoff -- ``_RESCUE_CONFIG`` sets no ``deterministic_budget``.
+# Do NOT raise the pass count without a CI-measured wall-clock.
+_COMPLETION_MAX_PASSES = 1
+_COMPLETION_PASS_TIMEOUT_S = 900
+
+# Completion-pass knobs: board-05's rescue config verbatim (manufacturer, seed,
+# per-net cutoff, layer stack, micro-via-in-pad fallback -- all unchanged) plus
+# ``--skip-drc``.  The completion subprocess's own post-route DRC is pure
+# overhead here: it re-validates a board that design.py goes on to repair
+# (step 7a, #4470) and re-check (step 9) anyway, and on this board that
+# validation costs minutes of the CI budget.  Skipping it changes no emitted
+# copper -- ``kct route`` writes the routed PCB before the DRC step.
+_COMPLETION_CONFIG = replace(_RESCUE_CONFIG, extra_args=("--skip-drc",))
 
 
 def complete_unfinished_nets(routed_path: Path) -> CompletionResult:
@@ -3203,7 +3221,8 @@ def complete_unfinished_nets(routed_path: Path) -> CompletionResult:
 
     Thin wrapper over the shared
     :func:`kicad_tools.router.partial_rescue.complete_unfinished_nets`,
-    invoked with this board's knobs (:data:`_RESCUE_CONFIG`, unchanged).
+    invoked with this board's knobs (:data:`_COMPLETION_CONFIG` -- the rescue
+    config verbatim plus ``--skip-drc``).
 
     Why this runs AFTER :func:`rescue_partial_nets` (issue #4476):
 
@@ -3236,7 +3255,7 @@ def complete_unfinished_nets(routed_path: Path) -> CompletionResult:
     """
     return shared_complete_unfinished_nets(
         routed_path,
-        _RESCUE_CONFIG,
+        _COMPLETION_CONFIG,
         max_passes=_COMPLETION_MAX_PASSES,
         pass_timeout_s=_COMPLETION_PASS_TIMEOUT_S,
     )

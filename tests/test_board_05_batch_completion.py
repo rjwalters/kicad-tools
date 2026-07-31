@@ -97,14 +97,15 @@ def test_main_runs_batch_completion_after_solo_rescue_and_before_stitch() -> Non
     )
 
 
-def test_completion_budget_fits_the_ci_wall_clock_envelope() -> None:
-    """The completion phase must stay well inside the 90-min CI job budget.
+def test_completion_runs_exactly_one_pass() -> None:
+    """The completion phase must stay inside the 90-min CI job budget.
 
-    A fresh board-05 regen already spends ~45-55 min on the main pass plus
-    the solo rescue loop, so the batch phase's worst case
-    (``_COMPLETION_MAX_PASSES * _COMPLETION_PASS_TIMEOUT_S``) is capped at 15
-    minutes of routing.  Raising it needs a CI-measured wall-clock, not a
-    guess (#3880/#3894 history).
+    What bounds a ``--complete`` pass is the lattice per-link deadline
+    (``--per-net-timeout`` x link count, issues #4472/#4501), not
+    ``--timeout``: board-05's ~18 stranded links at 60 s each cap ONE pass at
+    ~18 min of negotiation.  A fresh regen already spends ~30-40 min before
+    this phase, so a second pass would not fit.  Raising the pass count needs
+    a CI-measured wall-clock, not a guess (the #3880/#3894 history).
     """
     tree = _design_tree()
     consts: dict[str, int] = {}
@@ -114,14 +115,40 @@ def test_completion_budget_fits_the_ci_wall_clock_envelope() -> None:
                 if isinstance(target, ast.Name) and isinstance(node.value.value, int):
                     consts[target.id] = node.value.value
 
-    assert "_COMPLETION_MAX_PASSES" in consts
-    assert "_COMPLETION_PASS_TIMEOUT_S" in consts
-    worst_case_s = consts["_COMPLETION_MAX_PASSES"] * consts["_COMPLETION_PASS_TIMEOUT_S"]
-    assert 0 < worst_case_s <= 900, (
-        f"Batch completion worst case is {worst_case_s}s; the board-05 CI job "
-        "budget (90 min total, ~45-55 min already spent) does not have room "
-        "for more than ~15 min of completion routing."
+    assert consts.get("_COMPLETION_MAX_PASSES") == 1, (
+        "board-05 runs exactly one batch-completion pass; more does not fit "
+        "the 90-minute board-05-routing-regression budget (Issue #4476)."
     )
+    assert 0 < consts.get("_COMPLETION_PASS_TIMEOUT_S", 0) <= 900
+
+
+def test_completion_config_keeps_the_board_rescue_knobs() -> None:
+    """The completion pass must reuse ``_RESCUE_CONFIG``, not re-declare knobs.
+
+    manufacturer / seed / per-net cutoff / layer stack / micro-via-in-pad are
+    load-bearing board-05 history (#3425/#3118/#3880/#3894); the completion
+    config is that config plus ``--skip-drc`` (design.py runs its own DRC at
+    step 9, so the subprocess's is pure CI-budget overhead).
+    """
+    tree = _design_tree()
+    assign = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "_COMPLETION_CONFIG" for t in node.targets)
+    )
+    source = ast.unparse(assign.value)
+    assert source.startswith("replace(_RESCUE_CONFIG"), (
+        "_COMPLETION_CONFIG must be derived from _RESCUE_CONFIG via "
+        f"dataclasses.replace so the board's knobs cannot drift; got: {source}"
+    )
+    assert "--skip-drc" in source
+    # No re-declaration of the load-bearing knobs.
+    for knob in ("manufacturer", "seed", "per_net_timeout_s", "deterministic_budget"):
+        assert f"{knob}=" not in source, (
+            f"_COMPLETION_CONFIG must not override {knob} (Issue #4476 keeps "
+            "board-05's rescue knobs unchanged)."
+        )
 
 
 def test_design_does_not_enable_escape_corridor_reservation() -> None:
