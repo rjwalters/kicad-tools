@@ -574,14 +574,17 @@ class PlacementFeedbackLoop:
         # a strictly better state was observed earlier in the run.
         #
         # We restore by reassigning ``self.router.routes`` to a deep copy
-        # of the best snapshot.  Note: the grid state is NOT restored.
-        # That is intentional -- the grid is reset by ``_clear_routes()``
-        # at the top of every iteration, so no caller relies on grid
-        # state being consistent with ``self.router.routes`` after the
-        # placement-feedback loop returns.  ``get_failed_nets()`` derives
-        # solely from ``self.router.routes`` (core.py:8320), so restoring
-        # the routes is sufficient to make the reported failed-net count
-        # consistent with the restored snapshot.
+        # of the best snapshot.  ``get_failed_nets()`` derives solely from
+        # ``self.router.routes`` (core.py:8320), so that alone makes the
+        # reported failed-net count consistent with the snapshot.
+        #
+        # Issue #4468: the grid IS also rebuilt now.  The original note here
+        # claimed "no caller relies on grid state after the loop returns" --
+        # board-07 disproved it: the CLI's trace optimize builds its collision
+        # checker from ``router.grid``, and the DRC nudge and pre-save
+        # clearance validation read it too, so a grid still describing the
+        # discarded iteration silently degrades the copper the loop just
+        # promised to restore (measured there as a lost net after optimize).
         #
         # Issue #3504: ALSO restore the component placement captured
         # alongside the routes.  The restored routes were computed against
@@ -606,9 +609,11 @@ class PlacementFeedbackLoop:
             # Deep-copy the snapshot so the loop's internal best state
             # cannot be mutated through ``self.router.routes`` after
             # this call returns.
-            self.router.routes = copy.deepcopy(best_routes_snapshot)
             # Issue #3504: restore the placement those routes belong to.
+            # Placement first, so the grid rebuild below re-adds the pads at
+            # the coordinates the restored routes were computed against.
             self._restore_placement(best_placement_snapshot)
+            self._rebuild_grid_for_routes(copy.deepcopy(best_routes_snapshot))
 
         # Final failure analysis -- computed AFTER restoration so the
         # result reflects the restored state, not the live last-iteration
@@ -638,6 +643,40 @@ class PlacementFeedbackLoop:
     def _clear_routes(self) -> None:
         """Clear all routes and reset the routing grid."""
         self.router._reset_for_new_trial()
+
+    def _rebuild_grid_for_routes(self, routes: list[Route]) -> None:
+        """Re-derive the routing grid from the CURRENT pads + *routes* (issue #4468).
+
+        Restoring ``router.routes`` and the pad coordinates is not a complete
+        revert: the routing **grid** still carries the occupancy and clearance
+        halos of the reverted attempt.  Nothing inside the loop notices (the next
+        pass calls ``_clear_routes`` first), but everything the CLI runs AFTER
+        the loop does -- trace optimize builds its collision checker from
+        ``router.grid``, and the DRC nudge and pre-save clearance validation read
+        it too.  Measured on board-07: with a stale grid the reverted run
+        optimized to 1096 segments and lost a net to the post-optimize
+        cross-net-short backstop (25/31) where the untouched baseline optimized
+        the SAME raw copper to 708 segments and kept 26/31.
+
+        Rebuilding is the same two steps the router itself performs between
+        trials: reset the grid from the (restored) pads, then re-mark every
+        restored route.  A router without those internals (test doubles) is left
+        alone -- the loop's own semantics do not depend on the grid.
+        """
+        reset = getattr(self.router, "_reset_for_new_trial", None)
+        mark = getattr(self.router, "_mark_route", None)
+        if reset is not None and mark is not None:
+            try:
+                reset()
+                for route in routes:
+                    mark(route)
+            except Exception as exc:  # pragma: no cover - defensive only
+                if self.verbose:
+                    print(f"  Warning: could not rebuild the routing grid after revert ({exc})")
+        # Assigned last (and unconditionally): ``_reset_for_new_trial`` clears
+        # ``router.routes``, and a router without the grid internals still owes
+        # the caller the restored routes.
+        self.router.routes = routes
 
     def _find_best_placement_strategy(
         self,
@@ -1411,40 +1450,6 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         for pad, x, y in snapshot:
             pad.x = x
             pad.y = y
-
-    def _rebuild_grid_for_routes(self, routes: list[Route]) -> None:
-        """Re-derive the routing grid from the CURRENT pads + *routes* (issue #4468).
-
-        Restoring ``router.routes`` and the pad coordinates is not a complete
-        revert: the routing **grid** still carries the occupancy and clearance
-        halos of the reverted attempt.  Nothing inside the loop notices (the next
-        pass calls ``_clear_routes`` first), but everything the CLI runs AFTER
-        the loop does -- trace optimize builds its collision checker from
-        ``router.grid``, and the DRC nudge and pre-save clearance validation read
-        it too.  Measured on board-07: with a stale grid the reverted run
-        optimized to 1096 segments and lost a net to the post-optimize
-        cross-net-short backstop (25/31) where the untouched baseline optimized
-        the SAME raw copper to 708 segments and kept 26/31.
-
-        Rebuilding is the same two steps the router itself performs between
-        trials: reset the grid from the (restored) pads, then re-mark every
-        restored route.  A router without those internals (test doubles) is left
-        alone -- the loop's own semantics do not depend on the grid.
-        """
-        reset = getattr(self.router, "_reset_for_new_trial", None)
-        mark = getattr(self.router, "_mark_route", None)
-        if reset is not None and mark is not None:
-            try:
-                reset()
-                for route in routes:
-                    mark(route)
-            except Exception as exc:  # pragma: no cover - defensive only
-                if self.verbose:
-                    print(f"  Warning: could not rebuild the routing grid after revert ({exc})")
-        # Assigned last (and unconditionally): ``_reset_for_new_trial`` clears
-        # ``router.routes``, and a router without the grid internals still owes
-        # the caller the restored routes.
-        self.router.routes = routes
 
     def _apply_delta_to_router_pads(self, delta: PlacementDelta) -> None:
         """Mutate the router's flat pad coordinates to match an applied delta.
