@@ -176,6 +176,16 @@ class RescueConfig:
     #: fill, which the trace-connectivity checker does not credit).
     excluded_nets: frozenset[str] = field(default_factory=frozenset)
     micro_via_in_pad_fallback: bool = False
+    #: Issue #4528: emit ``--allow-unsafe-grid`` on every rescue/completion
+    #: ``kct route`` subprocess.  A board whose MAIN pass opts into the
+    #: memory-forced coarse grid (grid > clearance/2, the #3911 auto-grid
+    #: safety gate) MUST set this so the rescue subprocess inherits the same
+    #: documented opt-in -- otherwise ``kct route`` refuses the grid and exits
+    #: 1 before routing anything, and the rescue loop reports bogus
+    #: ``no_output`` failures for every net.  Off by default: a board that
+    #: never opts into the unsafe grid on its main pass emits byte-identical
+    #: rescue argv (no flag).
+    allow_unsafe_grid: bool = False
     #: Extra args appended verbatim to each ``kct route`` invocation.
     extra_args: tuple[str, ...] = ()
 
@@ -350,6 +360,14 @@ def build_rescue_command(
     )
     if config.micro_via_in_pad_fallback:
         cmd.append("--micro-via-in-pad-fallback")
+    # Issue #4528: inherit the main pass's #3911 auto-grid opt-in.  The gate
+    # itself is grid-engine-only, but ``kct route`` accepts the flag regardless
+    # of engine, so it is safe to emit for both the rescue (grid A*) and the
+    # completion (lattice) shape.  Without it, a board whose main pass forced a
+    # coarse grid sees every rescue subprocess exit 1 at the CLI gate before
+    # routing anything (bogus ``no_output`` failures).
+    if config.allow_unsafe_grid:
+        cmd.append("--allow-unsafe-grid")
     cmd.extend(
         [
             "--backend",

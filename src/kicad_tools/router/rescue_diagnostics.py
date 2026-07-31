@@ -69,6 +69,7 @@ class RescueFailureCategory(Enum):
     BUDGET_EXHAUSTED = "budget_exhausted"
     CLEARANCE_INFIDELITY = "clearance_infidelity"
     CONGESTION = "congestion"
+    CLI_REFUSED = "cli_refused"
     NO_OUTPUT = "no_output"
     UNKNOWN = "unknown"
 
@@ -97,6 +98,13 @@ class RescueFailureCategory(Enum):
             "congestion": (
                 "congestion -- too many competing traces in the corridor for a "
                 "single-net solo pass to thread"
+            ),
+            "cli_refused": (
+                "CLI refused -- the rescue subprocess declined at a CLI "
+                "validation gate before routing anything (e.g. the #3911 "
+                "auto-grid safety gate rejecting a memory-forced coarse grid); "
+                "NOT a crash/OOM -- the recipe must forward the corresponding "
+                "opt-in flag (e.g. --allow-unsafe-grid) to the rescue stage"
             ),
             "no_output": (
                 "no output produced -- the rescue subprocess wrote no PCB file "
@@ -141,6 +149,38 @@ _ESCAPE_SIGNATURES = (
     "no open sector",
     "could not escape",
 )
+
+# Issue #4528: exit-1 CLI-validation-gate declines.  Each entry is a tuple of
+# substrings that MUST ALL be present in the captured stdout+stderr to match --
+# an AND-of-substrings signature keeps a match specific to the real refusal
+# message and avoids false positives from an unrelated stray token.  These gates
+# print a precise reason to stderr and return exit 1 BEFORE writing any PCB
+# file, so ``output_produced`` is False even though nothing crashed.  Open-ended
+# so other exit-1 CLI gates can be added without another restructure.
+#
+# The auto-grid refusal (route_cmd.py, #3911) is emitted verbatim as
+# ``Error: Auto-grid selected {N}mm, coarser than clearance/2 ({M}mm), ...``.
+_CLI_REFUSAL_SIGNATURES: tuple[tuple[str, ...], ...] = (
+    ("Error: Auto-grid selected", "clearance/2"),
+)
+
+
+def _match_cli_refusal(text: str) -> str:
+    """Return the matched CLI-refusal line, or ``""`` when no signature matches.
+
+    A signature matches when EVERY substring in one of its tuples is present in
+    *text*.  Returns the first line of *text* that contains the first substring
+    of the matched signature (the ``Error: ...`` line), so the reason table can
+    show the router's own words instead of a fabricated ``crash / OOM`` label.
+    """
+    for signature in _CLI_REFUSAL_SIGNATURES:
+        if all(sub in text for sub in signature):
+            anchor = signature[0]
+            for line in text.splitlines():
+                if anchor in line:
+                    return line.strip()
+            return anchor
+    return ""
 
 
 @dataclass
@@ -249,6 +289,21 @@ def classify_rescue_failure(
     )
 
     if not output_produced:
+        # Issue #4528: a missing PCB file is NOT necessarily a crash/OOM.  A CLI
+        # validation gate (e.g. the #3911 auto-grid safety gate) prints a
+        # precise reason to stderr and returns exit 1 BEFORE writing anything.
+        # Inspect the captured output for a known refusal signature before
+        # falling back to the generic (and here misleading) NO_OUTPUT label.
+        refusal_line = _match_cli_refusal(text)
+        if refusal_line:
+            return RescueFailureReason(
+                net=net,
+                category=RescueFailureCategory.CLI_REFUSED,
+                detail=f"{RescueFailureCategory.CLI_REFUSED.label} [{refusal_line}]",
+                pads_connected=pads_connected,
+                escape_note=escape_note,
+                grid_infidelity=grid_infidelity,
+            )
         return RescueFailureReason(
             net=net,
             category=RescueFailureCategory.NO_OUTPUT,

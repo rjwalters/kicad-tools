@@ -257,6 +257,47 @@ def test_build_rescue_command_deterministic_budget_replaces_per_net_timeout(
     assert "--preserve-existing" in cmd
 
 
+def test_build_rescue_command_emits_allow_unsafe_grid_when_set(tmp_path: Path) -> None:
+    """Issue #4528: a board whose main pass opts into the coarse grid must
+    forward ``--allow-unsafe-grid`` to the rescue subprocess, or the #3911
+    auto-grid gate refuses the grid and exits 1 before routing anything."""
+    cmd = build_rescue_command(
+        tmp_path / "a.kicad_pcb",
+        tmp_path / "b.kicad_pcb",
+        ["SCL", "NRST"],
+        RescueConfig(allow_unsafe_grid=True),
+    )
+    assert "--allow-unsafe-grid" in cmd
+
+
+def test_build_rescue_command_emits_allow_unsafe_grid_in_complete_shape(
+    tmp_path: Path,
+) -> None:
+    """Issue #4528: the flag propagates to the completion (lattice) shape too --
+    ``_COMPLETION_CONFIG`` inherits it via ``dataclasses.replace(_RESCUE_CONFIG)``."""
+    cmd = build_rescue_command(
+        tmp_path / "a.kicad_pcb",
+        tmp_path / "b.kicad_pcb",
+        [],
+        RescueConfig(allow_unsafe_grid=True),
+        complete=True,
+    )
+    assert "--allow-unsafe-grid" in cmd
+    assert "--complete" in cmd
+
+
+def test_build_rescue_command_omits_allow_unsafe_grid_by_default(tmp_path: Path) -> None:
+    """Issue #4528: a board that does NOT opt into the unsafe grid emits
+    byte-identical rescue argv (no flag) -- the knob is off by default."""
+    cmd = build_rescue_command(
+        tmp_path / "a.kicad_pcb",
+        tmp_path / "b.kicad_pcb",
+        ["X"],
+        RescueConfig(),
+    )
+    assert "--allow-unsafe-grid" not in cmd
+
+
 # ---------------------------------------------------------------------------
 # build_rescue_command completion shape (issue #4478, epic #4465 Phase 5)
 # ---------------------------------------------------------------------------
