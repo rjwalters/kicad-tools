@@ -162,20 +162,16 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 | Metric | Value |
 |--------|-------|
 | Signal Net Completion | 100.0% (13/13) |
-| Overall Completion | 93.8% |
-| Complete Nets | 15 / 16 |
+| Overall Completion | 100.0% |
+| Complete Nets | 16 / 16 |
 | Zone-Connected Nets | 3 |
-| Incomplete Nets | 1 |
-| Unconnected Pads | 1 |
+| Incomplete Nets | 0 |
+| Unconnected Pads | 0 |
 
 ### Zone-Connected Nets
 
 - GND
 - VBUS
-- VCC
-
-### Incomplete Nets
-
 - VCC
 
 

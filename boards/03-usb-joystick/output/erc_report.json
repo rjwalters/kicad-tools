@@ -1,7 +1,7 @@
 {
     "$schema": "https://schemas.kicad.org/erc.v1.json",
     "coordinate_units": "mm",
-    "date": "2026-07-31T09:36:31",
+    "date": "2026-07-31T11:20:03",
     "ignored_checks": [
         {
             "description": "Global label only appears once in the schematic",
@@ -29,7 +29,7 @@
     "sheets": [
         {
             "path": "/",
-            "uuid_path": "/3e933430-7aee-490f-b368-bae26cc54027",
+            "uuid_path": "/502a1cac-c0c7-4c93-8756-1cfb27b132c3",
             "violations": [
                 {
                     "description": "Footprint 'USB_C_Receptacle_GCT_USB4105' not found in library 'Connector_USB'",
@@ -40,7 +40,7 @@
                                 "x": 0.508,
                                 "y": 0.508
                             },
-                            "uuid": "8556aeb8-8760-4c6a-ae8b-14417c683285"
+                            "uuid": "2442f9d7-c672-4b21-a019-5e8944d26f68"
                         }
                     ],
                     "severity": "warning",
@@ -55,7 +55,7 @@
                                 "x": 0.508,
                                 "y": 1.016
                             },
-                            "uuid": "d8d41573-2379-4c55-aa01-6c012330335c"
+                            "uuid": "c2292147-4a14-4e3c-b4ec-65450b9d4336"
                         }
                     ],
                     "severity": "warning",
@@ -70,7 +70,7 @@
                                 "x": 1.27,
                                 "y": 0.9525
                             },
-                            "uuid": "b810f039-13d9-4208-a471-a0c19757229f"
+                            "uuid": "c5cbfdda-594a-454b-9adf-c80cfcc2cd9b"
                         }
                     ],
                     "severity": "warning",

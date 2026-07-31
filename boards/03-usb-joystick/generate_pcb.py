@@ -485,6 +485,19 @@ def generate_joystick() -> str:
     stranded at the filter column, ``blocked_path``).  Re-solve this seat
     against the router if anything upstream of it moves; do not nudge it.
 
+    **The acceptance metric for a seat is BOTH legs**: ``kct route``'s
+    13/13 signal nets *and* ``kct net-status`` reporting ``Complete: 16``
+    on the routed board.  The four measurements above scored only the
+    router's signal nets, which excludes the pour-served power nets
+    (VCC/GND/VBUS) by design -- so 6.5 initially shipped 13/13 while
+    ``J2.1`` (VCC) sat outside the VCC island and was electrically
+    floating.  The seat is unchanged, because the three alternatives
+    already fail the routing leg and a *stricter* second leg cannot admit
+    them; what changed is that the VCC island in
+    :func:`generate_power_pours` now follows J2 west so 6.5 satisfies both
+    legs (13/13 signal nets, 16/16 complete nets).  When re-solving this
+    seat, move the pour with the connector and score both legs.
+
     Unlike J1 there is no lateral mating face to rotate: the joystick's
     accessible axis is +Z (the thumbstick the user grips), so only the
     perimeter-adjacency half of the edge-connector rule applies here.
@@ -871,13 +884,22 @@ def generate_power_pours() -> str:
 
     # VCC island: bounding box of all VCC pads + margin.  Issue #3764
     # moved J2 pin 1 to VCC (matching the schematic block's pin order),
-    # so the joystick VCC pad now sits at x = BOARD_ORIGIN_X + 9 (J2 at
-    # +13, pin-1 offset -4) with a 1.6 mm dia through-hole footprint
-    # spanning x = 8.2..9.8.  Extend the west edge to +8.0 so the VCC
-    # pour overlaps that pad and J2.1 is not left stranded by DRC
-    # connectivity.  (The GND pour on the same area keeps J2.2 = GND
-    # connected via thermal relief.)
-    vcc_x1 = BOARD_ORIGIN_X + 8.0
+    # so the joystick VCC pad follows J2 westward.  Issue #4450 seated J2
+    # at BOARD_ORIGIN_X + 6.5 (was +13), which moves pin 1 (offset -4)
+    # from x = +9 to x = +2.5 -- a 1.6 mm dia through-hole pad spanning
+    # x = 1.7..3.3.  The island's west edge MUST follow it: at the old
+    # +8.0 the pour no longer overlapped the pad and `kct net-status`
+    # reported ``VCC (1 pads unconnected) -- J2.1 needs via to plane``
+    # (15/16 complete nets) even though signal routing stayed 13/13 and
+    # geometric DRC stayed 0 -- neither gate sees a pour-served pad.
+    # +1.2 clears the pad's west copper edge by 0.5 mm and still leaves
+    # 1.2 mm to Edge.Cuts (min_edge_clearance is 0.3).  Whenever J2
+    # moves, re-check `kct net-status` on the routed board: 16/16 is the
+    # acceptance metric for this pour, not the router's signal-net count.
+    # (The GND pour on the same area keeps J2.2 = GND connected: J2's
+    # pads are through-hole, so pin 2 bonds to the B.Cu GND plane, which
+    # the priority-2 VCC island on F.Cu does not touch.)
+    vcc_x1 = BOARD_ORIGIN_X + 1.2
     vcc_y1 = BOARD_ORIGIN_Y + 26.5
     vcc_x2 = BOARD_ORIGIN_X + 49.0
     vcc_y2 = BOARD_ORIGIN_Y + 44.0
