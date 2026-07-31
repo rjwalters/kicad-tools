@@ -163,9 +163,7 @@ def test_known_open_no_longer_open_passes_with_note(tmp_path, monkeypatch, capsy
     helper = _load_helper()
     pcb = _write_pcb(tmp_path)
     monkeypatch.setattr(helper, "analyze_unconnected", lambda _p: (0, []))
-    exit_code, message = helper.check_pcb(
-        pcb, max_unconnected=0, known_open_nets={"DQ3"}
-    )
+    exit_code, message = helper.check_pcb(pcb, max_unconnected=0, known_open_nets={"DQ3"})
     assert exit_code == 0
     assert "no longer" in message.lower()
 
@@ -209,12 +207,8 @@ def _floating_power_net_result():
         net_number=1,
         net_name="VCC",
         total_pads=2,
-        connected_pads=[
-            PadInfo("U1", "1", (10.0, 10.0), is_connected=True, layers=["F.Cu"])
-        ],
-        unconnected_pads=[
-            PadInfo("J2", "1", (2.5, 35.0), is_connected=False, layers=["F.Cu"])
-        ],
+        connected_pads=[PadInfo("U1", "1", (10.0, 10.0), is_connected=True, layers=["F.Cu"])],
+        unconnected_pads=[PadInfo("J2", "1", (2.5, 35.0), is_connected=False, layers=["F.Cu"])],
     )
     result = NetStatusResult(nets=[vcc], total_nets=1)
     return result
