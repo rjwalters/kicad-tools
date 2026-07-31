@@ -527,9 +527,7 @@ def test_backend_reinstalls_domains_after_net_id_remap() -> None:
     backend.set_net_name_to_id({"/AC_LINE": 1, "/GND": 2})
     backend._sync_pairwise_domains_to_cpp()
     assert cpp_grid._impl.pairwise_active is True
-    assert cpp_grid._impl.pairwise_required_clearance(1, 2) == pytest.approx(
-        IEC_150V_PD2_IIIA_MM
-    )
+    assert cpp_grid._impl.pairwise_required_clearance(1, 2) == pytest.approx(IEC_150V_PD2_IIIA_MM)
 
     # Renumber the same nets: the rebuilt payload must reach the C++ grid even
     # though ``pairwise_active`` is already ``True`` from the first push.
@@ -538,9 +536,7 @@ def test_backend_reinstalls_domains_after_net_id_remap() -> None:
 
     # New ids now carry the widening (this is the assertion that fails today,
     # returning 0.0 instead of 1.6).
-    assert cpp_grid._impl.pairwise_required_clearance(7, 8) == pytest.approx(
-        IEC_150V_PD2_IIIA_MM
-    )
+    assert cpp_grid._impl.pairwise_required_clearance(7, 8) == pytest.approx(IEC_150V_PD2_IIIA_MM)
     # And the old ids no longer report phantom widening (the stale-values half).
     assert cpp_grid._impl.pairwise_required_clearance(1, 2) == pytest.approx(0.0)
 
