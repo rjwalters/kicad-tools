@@ -995,6 +995,20 @@ jobs:
           cp -r /tmp/board00-ci/. /tmp/board00-staging/00-simple-led/output/
           uv run kct board-metrics /tmp/board00-staging/00-simple-led
 
+      - name: Assert plane-net completion (no floating pads, #4531)
+        # Gate on the RAW total_unconnected_pads of the freshly-routed PCB.
+        # A floating power/plane pad (e.g. a VCC pin with no track and no
+        # reachable pour) passes DRC/LVS/router "N/N nets" but is
+        # electrically broken -- and blocking_incomplete_count would
+        # name-exclude it (power/plane nets), so this gate uses the raw
+        # count instead (see scripts/ci/check_net_status.py). Board 05 is
+        # intentionally NOT gated here; it keeps its own dedicated
+        # check_board_05_blocking.py gate (#3775/#3766/#3829).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board00-ci/simple_led_routed.kicad_pcb
+
       - name: Assert artifacts + lvs.json + board.json fields
         # The gate-side asserter: presence of every required artifact,
         # lvs.json clean=true, and board.json status=ok / drc_violations=0
@@ -1074,6 +1088,15 @@ jobs:
           mkdir -p /tmp/board01-staging/01-voltage-divider/output
           cp -r /tmp/board01-ci/. /tmp/board01-staging/01-voltage-divider/output/
           uv run kct board-metrics /tmp/board01-staging/01-voltage-divider
+
+      - name: Assert plane-net completion (no floating pads, #4531)
+        # See board-00's step: raw total_unconnected_pads gate; catches a
+        # floating power/plane pad that blocking_incomplete_count would
+        # name-exclude (scripts/ci/check_net_status.py).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board01-ci/voltage_divider_routed.kicad_pcb
 
       - name: Assert artifacts + lvs.json + board.json fields
         # Reuse the generalized board-00 asserter with --stem so it derives
@@ -1161,6 +1184,15 @@ jobs:
           mkdir -p /tmp/board02-staging/02-charlieplex-led/output
           cp -r /tmp/board02-ci/. /tmp/board02-staging/02-charlieplex-led/output/
           uv run kct board-metrics /tmp/board02-staging/02-charlieplex-led
+
+      - name: Assert plane-net completion (no floating pads, #4531)
+        # See board-00's step: raw total_unconnected_pads gate; catches a
+        # floating power/plane pad that blocking_incomplete_count would
+        # name-exclude (scripts/ci/check_net_status.py).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board02-ci/charlieplex_3x3_routed.kicad_pcb
 
       - name: Assert artifacts + lvs.json + board.json fields
         # Reuse the generalized board-00 asserter with --stem so it derives
@@ -1288,6 +1320,17 @@ jobs:
           mkdir -p /tmp/board03-staging/03-usb-joystick/output
           cp -r /tmp/board03-ci/. /tmp/board03-staging/03-usb-joystick/output/
           uv run kct board-metrics /tmp/board03-staging/03-usb-joystick
+
+      - name: Assert plane-net completion (no floating pads, #4531)
+        # THIS is the board from the #4531 repro: PR #4525 committed a
+        # board-03 artifact with J2.1 (VCC) floating -- no track, no
+        # reachable pour -- and all 16 CI checks passed. This raw
+        # total_unconnected_pads gate is the assertion that would have
+        # red-lighted that break (scripts/ci/check_net_status.py).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board03-ci/usb_joystick_routed.kicad_pcb
 
       - name: Assert artifacts + lvs.json clean (LVS-only)
         # --lvs-only: assert artifact presence + lvs.json clean=true +
@@ -1425,6 +1468,15 @@ jobs:
           cp -r /tmp/board06-ci/. /tmp/board06-staging/06-diffpair-test/output/
           uv run kct board-metrics /tmp/board06-staging/06-diffpair-test
 
+      - name: Assert plane-net completion (no floating pads, #4531)
+        # See board-00's step: raw total_unconnected_pads gate; catches a
+        # floating power/plane pad that blocking_incomplete_count would
+        # name-exclude (scripts/ci/check_net_status.py).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board06-ci/diffpair_test_routed.kicad_pcb
+
       - name: Assert artifacts + LVS clean (#4012)
         # --lvs-only: assert lvs.json clean=true + board.json lvs_clean=true,
         # but NOT status:ok / drc_violations:0 (board 06 carries allowlisted
@@ -1558,6 +1610,20 @@ jobs:
           mkdir -p /tmp/board07-staging/07-matchgroup-test/output
           cp -r /tmp/board07-ci/. /tmp/board07-staging/07-matchgroup-test/output/
           uv run kct board-metrics /tmp/board07-staging/07-matchgroup-test
+
+      - name: Assert plane-net completion (known opens tolerated, #4531)
+        # Raw total_unconnected_pads gate (scripts/ci/check_net_status.py).
+        # Board 07 routes PARTIAL by design: 5 seed-invariant unroutable
+        # nets (#3438/#4012). --known-open-nets excludes THOSE nets' pads
+        # from the gated count while still failing on an unconnected pad on
+        # any OTHER net -- so a DIFFERENT net silently going open is still
+        # caught (tighter than raising --max-unconnected to their pad
+        # count). The set mirrors the --lvs-known-opens above.
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            --known-open-nets "DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N" \
+            /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
 
       - name: Assert artifacts + honest known-opens LVS state (#4012)
         # --lvs-known-opens: lvs.json must be present, clean=false, NOT
@@ -1880,6 +1946,15 @@ jobs:
           mkdir -p /tmp/board04-staging/04-stm32-devboard/output
           cp -r /tmp/board04-ci/. /tmp/board04-staging/04-stm32-devboard/output/
           uv run kct board-metrics /tmp/board04-staging/04-stm32-devboard
+
+      - name: Assert plane-net completion (no floating pads, #4531)
+        # See board-00's step: raw total_unconnected_pads gate; catches a
+        # floating power/plane pad that blocking_incomplete_count would
+        # name-exclude (scripts/ci/check_net_status.py).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board04-ci/stm32_devboard_routed.kicad_pcb
 
       - name: Assert artifacts + lvs.json clean (LVS-only)
         # --lvs-only: assert artifact presence + lvs.json clean=true +
