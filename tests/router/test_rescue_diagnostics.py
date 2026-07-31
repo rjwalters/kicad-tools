@@ -110,9 +110,7 @@ def test_cli_refusal_classified_distinct_from_no_output() -> None:
     routing anything -- it is NOT the crash/OOM ``no_output`` case, even though
     ``output_produced`` is False.
     """
-    r = classify_rescue_failure(
-        "ISENSE_A+", "", _AUTO_GRID_REFUSAL_STDERR, output_produced=False
-    )
+    r = classify_rescue_failure("ISENSE_A+", "", _AUTO_GRID_REFUSAL_STDERR, output_produced=False)
     assert r.category is RescueFailureCategory.CLI_REFUSED
     assert r.category is not RescueFailureCategory.NO_OUTPUT
     # The real router line is surfaced instead of a fabricated crash/OOM label.
@@ -121,9 +119,7 @@ def test_cli_refusal_classified_distinct_from_no_output() -> None:
 
 def test_cli_refusal_signature_on_stdout_also_matches() -> None:
     """The signature is checked against combined stdout+stderr."""
-    r = classify_rescue_failure(
-        "PWM_CL", _AUTO_GRID_REFUSAL_STDERR, "", output_produced=False
-    )
+    r = classify_rescue_failure("PWM_CL", _AUTO_GRID_REFUSAL_STDERR, "", output_produced=False)
     assert r.category is RescueFailureCategory.CLI_REFUSED
 
 
