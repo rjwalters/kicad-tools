@@ -77,6 +77,7 @@ from .failure_analysis import (
     RootCauseAnalyzer,
 )
 from .grid import RoutingGrid
+from .kelvin import detect_kelvin_topology
 from .layers import Layer, LayerStack
 from .length import LengthTracker, LengthViolation
 from .match_group_length import MatchGroup, MatchGroupTracker
@@ -362,6 +363,41 @@ def _format_pad_ref(pad: Pad) -> str:
         return pad.ref
     # Steiner point or other synthetic pad — identify by position
     return f"steiner@({pad.x:.3f},{pad.y:.3f})"
+
+
+def _star_topology_pads(pads: list[Pad]) -> tuple[Pad, list[Pad]]:
+    """Pick the star hub + terminal order for a net's lattice/mesh connections.
+
+    Issue #4476: the lattice (:meth:`Autorouter._negotiate_lattice_netset`) and
+    mesh (:meth:`Autorouter._negotiate_mesh_netset`) drivers historically built
+    each multi-pad net's connection set as a naive star rooted at ``pads[0]``
+    -- the first pad in dict-insertion order.  For a **Kelvin** current-sense
+    net that is wrong for exactly the reason
+    :mod:`kicad_tools.router.kelvin` documents: the sense tap must connect *at*
+    the shunt pad, so an arbitrary hub re-introduces the load-current IR drop
+    into the measurement.  Phase 3 (#4473/#4499) fixed this for the negotiated
+    grid path (``build_rsmt`` -> ``MSTRouter``) but not for these two engines --
+    and ``kct route --complete`` (and therefore
+    :func:`kicad_tools.router.partial_rescue.complete_unfinished_nets`) drives
+    the **lattice** engine.
+
+    Returns ``(anchor, terminals)``:
+
+    * Recognised Kelvin sense net (``detect_kelvin_topology`` gates on BOTH the
+      current-sense name pattern AND a resolvable shunt/sense-resistor pad) ->
+      the shunt pad as anchor, with the remaining terminals in the Kelvin
+      star's shortest-first order.
+    * Anything else -> ``(pads[0], pads[1:])``, byte-identical to the
+      pre-#4476 behaviour, so ordinary nets are untouched.
+    """
+    if len(pads) >= 3:
+        try:
+            topo = detect_kelvin_topology(pads)
+        except Exception:  # pragma: no cover - detection must never break routing
+            topo = None
+        if topo is not None:
+            return pads[topo.root_index], [pads[t] for _root, t in topo.edges]
+    return pads[0], list(pads[1:])
 
 
 # Issue #3433: greedy vertex-cover selection for the demote-to-partial
@@ -2439,6 +2475,10 @@ class Autorouter:
         per-net topology), runs the PathFinder/VPR portal negotiation once, and
         buckets the winning routes by net id.  Mesh triangulation happens once
         for the whole board inside :meth:`MeshPathfinder.route_netset`.
+
+        Issue #4476: the star's hub comes from :func:`_star_topology_pads`, so
+        a recognised Kelvin current-sense net is rooted at its shunt pad rather
+        than at the arbitrary first pad; every other net is unchanged.
         """
         pf = self._ensure_mesh_pathfinder()
 
@@ -2449,8 +2489,11 @@ class Autorouter:
             pads = [self.pads[k] for k in pad_keys if k in self.pads]
             if len(pads) < 2:
                 continue
-            anchor = pads[0]
-            for seq, other in enumerate(pads[1:]):
+            # Issue #4476: a recognised Kelvin sense net roots its star at the
+            # shunt pad, not the arbitrary first pad (see
+            # ``_star_topology_pads``); ordinary nets keep ``pads[0]``.
+            anchor, terminals = _star_topology_pads(pads)
+            for seq, other in enumerate(terminals):
                 if anchor.layer != other.layer:
                     continue  # single-layer: skip cross-layer connections
                 connections.append(((net, seq), anchor, other, None))
@@ -2718,6 +2761,16 @@ class Autorouter:
         DECLINES with a reason (reported below and in
         :attr:`_lattice_pair_outcomes`) -- it is never split into uncoupled
         legs.
+
+        Kelvin sense nets (issue #4476): the non-coupled star's hub comes from
+        :func:`_star_topology_pads`, so a recognised current-sense net is
+        rooted at its shunt pad.  This is the engine ``kct route --complete``
+        (and therefore
+        :func:`kicad_tools.router.partial_rescue.complete_unfinished_nets`)
+        drives, so a batch completion pass now preserves the same Kelvin
+        guarantee ``build_rsmt``/:class:`MSTRouter` give the negotiated grid
+        pass.  The coupled ``reserved`` branch keeps its nearest-endpoint
+        anchor selection untouched.
         """
         pf = self._ensure_lattice_pathfinder()
 
@@ -2754,8 +2807,13 @@ class Autorouter:
                     connections.append(((net, seq), anchor, other, net_class))
                 continue
             pads = [p for _k, p in keyed]
-            anchor = pads[0]
-            for seq, other in enumerate(pads[1:]):
+            # Issue #4476: Kelvin sense nets root the star at the shunt pad so
+            # ``--complete`` (which drives THIS engine) preserves the Phase-3
+            # (#4473/#4499) guarantee the negotiated grid pass already has.
+            # Only the non-coupled branch: the diff-pair ``reserved`` branch
+            # above keeps its nearest-endpoint anchor selection untouched.
+            anchor, terminals = _star_topology_pads(pads)
+            for seq, other in enumerate(terminals):
                 connections.append(((net, seq), anchor, other, net_class))
 
         # Issue #4477: remember each connection's pad endpoints keyed exactly

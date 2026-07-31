@@ -33,7 +33,10 @@ from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.pcb.center_sheet import centered_origin
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
-from kicad_tools.router.partial_rescue import RescueConfig
+from kicad_tools.router.partial_rescue import CompletionResult, RescueConfig
+from kicad_tools.router.partial_rescue import (
+    complete_unfinished_nets as shared_complete_unfinished_nets,
+)
 from kicad_tools.router.partial_rescue import rescue_partial_nets as shared_rescue_partial_nets
 from kicad_tools.schematic.blocks import (
     CurrentSenseShunt,
@@ -3179,6 +3182,66 @@ def rescue_partial_nets(routed_path: Path) -> dict[str, bool]:
     return shared_rescue_partial_nets(routed_path, _RESCUE_CONFIG)
 
 
+# Wall budget for ONE batch-completion pass (Issue #4476).  The board-05 CI
+# job (``board-05-routing-regression``) has a 90-minute ceiling and a fresh
+# regen already spends ~45-55 min on the main pass + the per-net rescue loop,
+# so the completion phase is capped at ``_COMPLETION_MAX_PASSES *
+# _COMPLETION_PASS_TIMEOUT_S`` (2 x 360 s = 12 min) of routing plus its
+# checker overhead.  Two passes are enough to see whether the batch is
+# productive at all: ``complete_unfinished_nets`` stops early on convergence
+# AND on the first no-progress pass (restoring the pre-pass board
+# byte-for-byte), so the worst case is only paid when passes keep closing
+# nets.  Per #3880/#3894 this phase, like the rest of board 05, deliberately
+# stays on the wall-clock cutoff -- ``_RESCUE_CONFIG`` sets no
+# ``deterministic_budget``.
+_COMPLETION_MAX_PASSES = 2
+_COMPLETION_PASS_TIMEOUT_S = 360
+
+
+def complete_unfinished_nets(routed_path: Path) -> CompletionResult:
+    """Batch-complete the nets the solo rescue loop could not close (#4476).
+
+    Thin wrapper over the shared
+    :func:`kicad_tools.router.partial_rescue.complete_unfinished_nets`,
+    invoked with this board's knobs (:data:`_RESCUE_CONFIG`, unchanged).
+
+    Why this runs AFTER :func:`rescue_partial_nets` (issue #4476):
+
+    The solo rescue reroutes each residual net ALONE against every other
+    net's PRESERVED (immutable) copper.  In board-05's saturated U3 south
+    sense band that is exactly the wrong shape -- the relief machinery
+    correctly reports "blocked only by non-rippable copper" and rolls back,
+    so a fresh regen logs ``Rescue ISENSE_A+: FAILED (no output produced)``
+    for the whole stranded cohort (ISENSE_A+/A-/B+/B-/C-, PWM_BH, PWM_CH).
+    The batch pass instead routes the WHOLE unfinished cohort together via
+    ``kct route --complete``, so those nets can still negotiate with each
+    other while the finished nets stay protected -- and ``--complete`` drives
+    the LATTICE engine, which (unlike the grid A*) can thread a walled SMD
+    pocket and place a last-resort via-in-pad.  Since #4476 that engine also
+    roots a Kelvin sense net's star at the shunt pad
+    (:func:`kicad_tools.router.core._star_topology_pads`), so the five ISENSE
+    nets keep the Kelvin topology through completion instead of getting an
+    arbitrary ``pads[0]`` hub.
+
+    Safety is inherited from the shared function, not re-implemented here: a
+    byte-for-byte pre-pass backup is restored whenever a pass fails to reduce
+    the unfinished-net count (so a failed completion never leaves stranded
+    stub copper and never makes the board worse), and each pass strips the
+    target nets' stale copper before routing.
+
+    Returns the :class:`~kicad_tools.router.partial_rescue.CompletionResult`:
+    ``.history`` is the ``(before, after)`` unfinished-count progression and
+    ``.unroutable_links`` names the still-open links with a concrete reason
+    (``blocking_copper``) instead of the solo loop's opaque "no output".
+    """
+    return shared_complete_unfinished_nets(
+        routed_path,
+        _RESCUE_CONFIG,
+        max_passes=_COMPLETION_MAX_PASSES,
+        pass_timeout_s=_COMPLETION_PASS_TIMEOUT_S,
+    )
+
+
 def emit_phase1_diagnostics(routed_path: Path) -> None:
     """Print the board-05 Phase-1 ground-truth diagnostics (issue #4469).
 
@@ -3644,6 +3707,31 @@ def main() -> int:
                 # Every residual net rescued -- the board is fully routed
                 # even though step 6's exit code reported partial.
                 route_success = True
+
+            # Step 6b-batch: whatever the SOLO rescue could not close is
+            # handed to the batch completion pass (Issue #4476).  A net
+            # rerouted alone against the U3 south band's immutable copper is
+            # "blocked only by non-rippable copper" and rolls back; routing
+            # the whole unfinished cohort together via ``kct route --complete``
+            # (lattice engine, Kelvin-rooted since #4476) keeps negotiation
+            # alive among exactly those nets.  Safe to layer on top of the
+            # solo loop: a pass that does not reduce the unfinished count
+            # restores the pre-pass board byte-for-byte, so this can only
+            # improve reach -- never strand copper.  See
+            # complete_unfinished_nets().
+            completion = complete_unfinished_nets(routed_path)
+            if completion.history and completion.history[-1][1] == 0:
+                # The batch pass closed every remaining unfinished net.
+                route_success = True
+            if completion.unroutable_links:
+                print("\n   Links still unroutable after batch completion:")
+                for link in completion.unroutable_links:
+                    detail = f" [{link.reason}]" if link.reason else ""
+                    if link.blocking_copper:
+                        detail += f" blocked by {', '.join(link.blocking_copper)}"
+                    if link.nearest_blocker_mm is not None:
+                        detail += f" (nearest {link.nearest_blocker_mm:.3f} mm)"
+                    print(f"     {link.net}: {link.start} -> {link.end}{detail}")
 
             # Step 6b-diagnostics: board-05 Phase-1 ground-truth instrumentation
             # (Issue #4469).  Prints the grid-fidelity report + per-net stranding
