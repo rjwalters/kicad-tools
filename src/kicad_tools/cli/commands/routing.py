@@ -404,6 +404,13 @@ def run_route_command(args) -> int:
     # and tests/test_cli_parser_drift.py stays green.
     if getattr(args, "complete", False):
         sub_argv.append("--complete")
+    # Issue #4476: forward --complete-exclude-nets (pour/plane nets --complete
+    # must not route -- their connectivity comes from a filled zone the trace
+    # checker cannot credit).  Declared on BOTH parsers with an empty-string
+    # default, so an unset flag forwards nothing and the argv stays
+    # byte-identical (tests/test_cli_parser_drift.py).
+    if getattr(args, "complete_exclude_nets", ""):
+        sub_argv.extend(["--complete-exclude-nets", args.complete_exclude_nets])
     # Issue #4477 (epic #4465, Phase 4): forward --complete-report (the
     # structured unroutable-link report path).  Both parsers declare it; see
     # tests/test_cli_parser_drift.py.

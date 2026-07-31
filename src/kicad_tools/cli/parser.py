@@ -3127,6 +3127,21 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--complete-exclude-nets",
+        metavar="NAMES",
+        default="",
+        help=(
+            "Issue #4476: comma-separated net names --complete must NOT "
+            "route, even when the connectivity checker reports them "
+            "unconnected. Intended for pour/plane-carried nets (GND, +3V3, "
+            "board-05's PHASE_A/B/C): their connectivity comes from a filled "
+            "zone, which trace connectivity does not credit, so without this "
+            "--complete would lay traces on nets the recipe deliberately "
+            "skips. Empty (the default) preserves the auto-detected set "
+            "exactly. Ignored without --complete."
+        ),
+    )
+    route_parser.add_argument(
         "--complete-report",
         metavar="PATH",
         help=(
