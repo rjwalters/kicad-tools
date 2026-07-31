@@ -1701,3 +1701,250 @@ def test_shadow_select_gap_degrades_to_nominal_when_no_rung_feasible():
         "no feasible rung must degrade to the nominal gap (ladder head), not "
         "silently ship a blocked offset -- the downstream self-check gates apply"
     )
+
+
+# ---------------------------------------------------------------------------
+# 10. partner-aware rescue tails (issue #4460, approach 2)
+# ---------------------------------------------------------------------------
+#
+# The shadow constructor's rescue tails connect the trimmed offset body to the
+# real pads.  The partner (guide) is NOT in the routing grid during shadow
+# construction, so an obstacle-only screen cannot see it.  Measured on board 06
+# BEFORE this change: every shadow ``self-check overlap`` decline traced to a
+# tail drawn on top of the guide (centre-to-centre 0.018-0.035 mm).  These
+# tests pin the two mechanisms that fixed it -- partner clearance as a
+# CANDIDATE FILTER inside ``_synthesize_tail`` (rather than a post-hoc veto on
+# the single winner) and the ``_tail_partner_clear`` two-tier screen the A*
+# fallback is validated against.
+
+
+class _AllClearPathfinder:
+    """Pathfinder stand-in: fixed trace width, nothing obstacle-blocked.
+
+    Isolates the tail synthesizer's CANDIDATE SELECTION from grid state, so a
+    rejected candidate can only have been rejected by the partner screen.
+    """
+
+    def __init__(self, width: float = 0.2) -> None:
+        self._width = width
+
+    def _get_trace_width_for_net(self, net_name: str) -> float:
+        return self._width
+
+    def _is_cell_blocked(self, gx: int, gy: int, layer_idx: int, net: int) -> bool:
+        return False
+
+
+def _tail_pads(head_xy, goal_xy):
+    from kicad_tools.router.primitives import Pad
+
+    head = Pad(
+        x=head_xy[0],
+        y=head_xy[1],
+        width=0.3,
+        height=0.3,
+        net=2,
+        net_name="USB3_TX1-",
+        layer=Layer.F_CU,
+    )
+    goal = Pad(
+        x=goal_xy[0],
+        y=goal_xy[1],
+        width=0.3,
+        height=0.3,
+        net=2,
+        net_name="USB3_TX1-",
+        layer=Layer.F_CU,
+    )
+    return head, goal
+
+
+def _crossing_partner() -> list[Segment]:
+    """A guide leg that crosses the straight head->goal corridor mid-way."""
+    return [_gseg(6.5, 4.5, 6.5, 5.5)]
+
+
+def test_synthesize_tail_without_partner_takes_the_direct_candidate():
+    """Baseline: with no partner supplied the first clear candidate wins."""
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    tail = dpr._synthesize_tail(_AllClearPathfinder(), head, goal, 0)
+    assert tail is not None
+    assert len(tail.segments) == 1
+    seg = tail.segments[0]
+    assert (seg.x1, seg.y1, seg.x2, seg.y2) == (5.0, 5.0, 8.0, 5.0)
+
+
+def test_synthesize_tail_detours_around_partner_instead_of_giving_up():
+    """A partner across the direct corridor selects a later detour candidate.
+
+    Before #4460 the partner screen ran only on the winning candidate, so this
+    geometry produced ``None`` and the caller fell through to a partner-blind
+    A* tail.  The 20+ U-detour candidates were never consulted.
+    """
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = _crossing_partner()
+    clearance = 0.5
+    tail = dpr._synthesize_tail(
+        _AllClearPathfinder(),
+        head,
+        goal,
+        0,
+        partner_segments=partner,
+        partner_clearance=clearance,
+    )
+    assert tail is not None, "a legal detour exists; the synthesizer must find it"
+    assert len(tail.segments) > 1, "the direct candidate crosses the partner"
+    for seg in tail.segments:
+        assert (
+            dpr._min_distance_to_partner(seg.x1, seg.y1, seg.x2, seg.y2, partner, seg.layer)
+            >= clearance - 1e-9
+        )
+    # Endpoints are still exactly head -> goal (the tail must land on the pad).
+    assert (tail.segments[0].x1, tail.segments[0].y1) == (5.0, 5.0)
+    assert (tail.segments[-1].x2, tail.segments[-1].y2) == (8.0, 5.0)
+
+
+def test_synthesize_tail_returns_none_when_no_candidate_clears_partner():
+    """An unreachable clearance still declines -- the caller then re-anchors."""
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = _crossing_partner()
+    tail = dpr._synthesize_tail(
+        _AllClearPathfinder(),
+        head,
+        goal,
+        0,
+        partner_segments=partner,
+        partner_clearance=50.0,
+    )
+    assert tail is None
+
+
+def _tail_with(y: float, width: float = 0.2) -> Route:
+    route = Route(net=2, net_name="USB3_TX1-")
+    route.segments.append(
+        Segment(x1=5.0, y1=y, x2=8.0, y2=y, width=width, layer=Layer.F_CU, net=2, net_name="N")
+    )
+    return route
+
+
+def test_tail_partner_clear_physical_tier_rejects_touching_copper():
+    """Tier B (``clearance <= 0``) is the copper-edge bound the gates enforce."""
+    dpr = _diffpair_router()
+    partner = [_gseg(4.0, 5.15, 9.0, 5.15)]  # both widths 0.2 -> edges meet at 0.2
+    assert dpr._tail_partner_clear(_tail_with(5.0), partner, 0.0) is False
+    assert dpr._tail_partner_clear(_tail_with(5.4), partner, 0.0) is True
+
+
+def test_tail_partner_clear_strict_tier_demands_intra_pair_clearance():
+    """Tier A additionally demands the coupled centre-to-centre spacing."""
+    dpr = _diffpair_router()
+    partner = [_gseg(4.0, 5.25, 9.0, 5.25)]
+    assert dpr._tail_partner_clear(_tail_with(5.0), partner, 0.0) is True
+    assert dpr._tail_partner_clear(_tail_with(5.0), partner, 0.4) is False
+    assert dpr._tail_partner_clear(_tail_with(5.0), partner, 0.2) is True
+
+
+def test_tail_partner_clear_ignores_partner_on_another_layer():
+    """Segments on different layers cannot short -- not a tail violation."""
+    dpr = _diffpair_router()
+    partner = [_gseg(4.0, 5.0, 9.0, 5.0, layer=Layer.B_CU)]
+    assert dpr._tail_partner_clear(_tail_with(5.0), partner, 0.4) is True
+
+
+def test_tail_partner_clear_catches_via_barrel_over_partner():
+    """A tail VIA spans every layer, so it must clear partner copper anywhere."""
+    dpr = _diffpair_router()
+    tail = Route(net=2, net_name="USB3_TX1-")
+    tail.vias.append(
+        Via(x=6.0, y=5.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=2)
+    )
+    partner = [_gseg(4.0, 5.0, 9.0, 5.0, layer=Layer.B_CU)]
+    assert dpr._tail_partner_clear(tail, partner, 0.0) is False
+    far = [_gseg(4.0, 7.0, 9.0, 7.0, layer=Layer.B_CU)]
+    assert dpr._tail_partner_clear(tail, far, 0.0) is True
+
+
+def test_partner_boost_sites_are_local_spaced_and_bounded():
+    """Boost sites cover only the tail corridor, tiled at the clearance pitch."""
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = [_gseg(0.0, 5.3, 20.0, 5.3)]
+    seg_clear = 0.4
+    sites = dpr._partner_boost_sites(head, goal, partner, seg_clear)
+    assert sites, "partner copper runs through the corridor -> sites expected"
+    pad = 2.0 * seg_clear + 0.5
+    for sx, sy in sites:
+        assert 5.0 - pad <= sx <= 8.0 + pad
+        assert 5.0 - pad <= sy <= 8.0 + pad
+    for i, (ax, ay) in enumerate(sites):
+        for bx, by in sites[i + 1 :]:
+            assert math.hypot(ax - bx, ay - by) >= seg_clear - 1e-9
+    assert len(sites) <= 40
+
+
+def test_partner_boost_sites_empty_without_partner():
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    assert dpr._partner_boost_sites(head, goal, [], 0.4) == []
+    assert dpr._partner_boost_sites(head, goal, [_gseg(0.0, 5.3, 20.0, 5.3)], 0.0) == []
+
+
+def _stub_probe(dpr, result):
+    """Replace the per-net guide probe, recording how it was called."""
+    calls: list[tuple] = []
+
+    def fake(start, end, per_net_timeout=None, avoid_locations=None, avoid_radius_cells=1):
+        calls.append((per_net_timeout, avoid_locations, avoid_radius_cells))
+        return result
+
+    dpr._single_ended_guide_route = fake  # type: ignore[method-assign]
+    return calls
+
+
+def test_fallback_tail_route_without_partner_is_the_plain_probe():
+    """Flag-OFF inertness guard: no partner -> the pre-#4460 call, verbatim.
+
+    ``partner_segments`` is supplied ONLY by the shadow constructor, so with
+    ``enable_shadow_construction`` off this is the whole of the fallback path.
+    It must issue exactly one unbiased probe and return its result untouched.
+    """
+    dpr = _diffpair_router()
+    probe_route = Route(net=2, net_name="USB3_TX1-")
+    probe_route.segments.append(_gseg(5.0, 5.0, 8.0, 5.0))
+    calls = _stub_probe(dpr, probe_route)
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    assert dpr._fallback_tail_route(head, goal, None, 0.0) is probe_route
+    assert calls == [(10.0, None, 1)]
+
+
+def test_fallback_tail_route_keeps_a_partner_clean_probe_unchanged():
+    """A tail that already holds the coupled clearance is returned as-is."""
+    dpr = _diffpair_router()
+    probe_route = Route(net=2, net_name="USB3_TX1-")
+    probe_route.segments.append(_gseg(5.0, 5.0, 8.0, 5.0))
+    calls = _stub_probe(dpr, probe_route)
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = [_gseg(4.0, 6.0, 9.0, 6.0)]
+    assert dpr._fallback_tail_route(head, goal, partner, 0.4) is probe_route
+    assert len(calls) == 1, "a clean probe must not trigger the biased re-route"
+
+
+def test_fallback_tail_route_discards_a_tail_drawn_on_the_partner():
+    """The measured board-06 failure: an A* tail on top of the guide.
+
+    Before #4460 this copper was emitted and the whole shadow side was then
+    declined by the self-check.  Now it is discarded, so the constructor's
+    anchor-stepping loop gets to retry from a deeper body anchor.
+    """
+    dpr = _diffpair_router()
+    probe_route = Route(net=2, net_name="USB3_TX1-")
+    probe_route.segments.append(_gseg(5.0, 5.0, 8.0, 5.0))
+    calls = _stub_probe(dpr, probe_route)
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = [_gseg(4.0, 5.02, 9.0, 5.02)]  # centre-to-centre 0.02mm
+    assert dpr._fallback_tail_route(head, goal, partner, 0.4) is None
+    assert len(calls) == 2, "an overlapping probe must trigger the biased re-route"
+    assert calls[1][1], "the retry must carry partner boost sites"
