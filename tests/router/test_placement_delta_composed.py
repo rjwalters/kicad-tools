@@ -225,6 +225,74 @@ def _rotate_never_helps(_router) -> list[int]:
 
 
 # --------------------------------------------------------------------------- #
+# 2c. A reverted probe advances down the ladder                                 #
+# --------------------------------------------------------------------------- #
+
+
+class TestCandidateLadder:
+    """The classifier ranks a LADDER; the top rung failing says nothing about
+    the rungs below it.  A reverted probe must therefore advance to the next
+    UNPROBED move while budget remains -- under the same keep-if-improves
+    guarantee, so a wider search can cost wall clock but never reach."""
+
+    def _pads(self):
+        return [FakePad(12.0, 10.0, "UA", "1"), FakePad(20.0, 10.0, "UB", "2")]
+
+    def _loop(self, deltas, failed_predicate):
+        router = GridFakeRouter(self._pads(), 2, failed_predicate)
+        router.routes = [object()]
+        loop = PlacementDeltaFeedbackLoop(
+            router=router,
+            pcb=MockPCB([MockFootprint("UA", 10.0, 10.0), MockFootprint("UB", 22.0, 10.0)]),
+            verbose=False,
+            delta_proposer=lambda _pcb: list(deltas),
+        )
+        return loop, router
+
+    def test_second_candidate_is_probed_after_the_first_reverts(self):
+        # Net 2 is routed only once UB's pad has moved off x=20.
+        def failed(router):
+            return [] if abs(router.pads[("UB", "2")].x - 20.0) > 1e-6 else [2]
+
+        first = PlacementDelta(net_name="DQ3", target_ref="UA", kind="translate", dx=1.0, dy=0.0)
+        second = PlacementDelta(net_name="DQ4", target_ref="UB", kind="translate", dx=2.0, dy=0.0)
+        loop, router = self._loop([first, second], failed)
+
+        result = loop.run_delta(max_adjustments=3, reuse_existing_routes=True)
+
+        assert [d.target_ref for d in result.applied_deltas] == ["UB"]
+        assert result.exit_reason != "pd_no_delta"
+        # UA's probe was reverted, so its footprint is back where it started.
+        assert next(f for f in loop.pcb.footprints if f.reference == "UA").position == (10.0, 10.0)
+
+    def test_identical_moves_are_probed_once(self):
+        # Board-07's DQ3 and DQ4 both propose the SAME 180-degree rotation of
+        # U2; the second is not a new experiment.
+        dup = [
+            PlacementDelta(net_name=net, target_ref="UB", kind="rotate_180", rotation_delta=180.0)
+            for net in ("DQ3", "DQ4")
+        ]
+        loop, router = self._loop(dup, _rotate_never_helps)
+
+        result = loop.run_delta(max_adjustments=5, reuse_existing_routes=True)
+
+        assert result.applied_deltas == []
+        assert result.exit_reason == "pd_reverted"
+        # One probe: one re-route, not five.
+        assert router.route_calls == 1
+
+    def test_budget_one_preserves_stop_at_first_revert(self):
+        first = PlacementDelta(net_name="DQ3", target_ref="UA", kind="translate", dx=1.0, dy=0.0)
+        second = PlacementDelta(net_name="DQ4", target_ref="UB", kind="translate", dx=2.0, dy=0.0)
+        loop, router = self._loop([first, second], _rotate_never_helps)
+
+        result = loop.run_delta(max_adjustments=1, reuse_existing_routes=True)
+
+        assert router.route_calls == 1
+        assert result.exit_reason == "pd_reverted"
+
+
+# --------------------------------------------------------------------------- #
 # 3. CLI wiring: flags + placement persistence                                 #
 # --------------------------------------------------------------------------- #
 

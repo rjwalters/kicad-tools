@@ -1096,6 +1096,25 @@ class PlacementDeltaFeedbackResult:
         return "\n".join(lines)
 
 
+def _delta_key(delta: PlacementDelta) -> tuple[str, str, float, float, float]:
+    """Identity of the MOVE a delta encodes (issue #4468).
+
+    Two diagnoses often propose the identical move -- board-07's DQ3 and DQ4
+    both ask for the same 180-degree rotation of U2 -- and a reverted probe
+    leaves the board where the classifier will propose it again.  Keying on the
+    geometry (not the net or the target alone) makes "already probed" mean
+    "this exact placement change was tried", so two different translates of the
+    same part remain two distinct probes.
+    """
+    return (
+        delta.target_ref,
+        delta.kind,
+        round(delta.dx, 4),
+        round(delta.dy, 4),
+        round(delta.rotation_delta, 4),
+    )
+
+
 def write_placement_delta_json(
     path: str | Path,
     applied: list[PlacementDelta],
@@ -1507,6 +1526,12 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
 
         exit_reason = "pd_max_iter"
         iteration = 0
+        # Moves already probed.  A reverted delta puts the board back exactly
+        # where it was, so the classifier re-proposes the SAME ladder on the
+        # next iteration; without this the loop would probe one candidate
+        # forever.  Keyed on the move itself (not the target) so two different
+        # translates of one part are two distinct probes (issue #4468).
+        probed: set[tuple[str, str, float, float, float]] = set()
         for iteration in range(max_adjustments):
             if not self.router.get_failed_nets():
                 exit_reason = "pd_converged"
@@ -1517,13 +1542,18 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
 
             deltas = self._propose_deltas()
             proposed.extend(deltas)
-            selection = self._select_delta(deltas, skipped, skip_reasons)
+            candidates = [d for d in deltas if _delta_key(d) not in probed]
+            selection = self._select_delta(candidates, skipped, skip_reasons)
             if selection is None:
-                exit_reason = "pd_no_delta"
+                # A revert already recorded the loop's outcome; running out of
+                # UNPROBED candidates afterwards does not change it.
+                if exit_reason != "pd_reverted":
+                    exit_reason = "pd_no_delta"
                 if self.verbose:
                     print("  No applyable placement delta; stopping.")
                 break
             delta, strategy = selection
+            probed.add(_delta_key(delta))
 
             # Snapshot the pre-apply state so a non-improving delta reverts
             # atomically (placement + router pads + routes together).
@@ -1577,7 +1607,15 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                         f"  Reverted: routed {pre_count} -> {new_count} "
                         f"(no strict improvement); placement + routes + grid restored"
                     )
-                break
+                # Continue with the NEXT unprobed candidate while budget
+                # remains (issue #4468): the classifier ranks a LADDER, and
+                # the top rung failing says nothing about the rungs below it.
+                # The keep-if-improves guarantee is unchanged -- every probe
+                # still has to beat the baseline to survive -- so a wider
+                # search costs wall clock, never reach.  ``max_adjustments``
+                # is the bound; callers that want the old stop-at-first-revert
+                # behaviour pass ``max_adjustments=1``.
+                continue
 
         # Restore the best observed state (routes + placement + router pads +
         # grid together) so the returned result is monotone in routed-net count.
