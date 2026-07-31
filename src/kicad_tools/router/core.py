@@ -4230,8 +4230,7 @@ class Autorouter:
                 plan = planner.plan_and_reserve(pkg, soft=True)
             except Exception:
                 logger.debug(
-                    "Escape-corridor reservation failed for package %s; "
-                    "continuing without it",
+                    "Escape-corridor reservation failed for package %s; continuing without it",
                     getattr(pkg, "ref", "?"),
                     exc_info=True,
                 )

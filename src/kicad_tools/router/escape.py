@@ -1263,9 +1263,7 @@ class EscapeRouter:
         # explicit record that the escape router is consuming them, and lets
         # tests assert the reservation reached the escape phase without
         # monkey-patching.  Empty/absent (default) => no reserved channels.
-        self.enable_escape_corridor_reservation: bool = bool(
-            enable_escape_corridor_reservation
-        )
+        self.enable_escape_corridor_reservation: bool = bool(enable_escape_corridor_reservation)
         # ``is not None`` (not ``or``) so a live-but-currently-empty plan list
         # keeps its identity: the escape router may be built during the escape
         # pre-phase BEFORE ``_reserve_escape_corridors`` has populated it, and
