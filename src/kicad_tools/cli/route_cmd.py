@@ -10737,6 +10737,39 @@ def main(argv: list[str] | None = None) -> int:
             "(only the per-iteration --timeout applies). Issue #2606."
         ),
     )
+    # Issue #4468 (epic #3438 Phase 3): classifier-driven placement-DELTA
+    # feedback.  Mirror of the outer parser flags in parser.py + the
+    # forwarding shim in commands/routing.py; all three sites must stay in
+    # sync per ``tests/test_cli_parser_drift.py``.
+    parser.add_argument(
+        "--placement-delta-feedback",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "After the initial routing pass, if any nets remain unrouted, run "
+            "the classifier-driven placement-DELTA feedback loop: classify the "
+            "routed board, translate each PLACEMENT_BOUND / CONGESTION_SATURATED "
+            "diagnosis into a concrete placement delta (translate or 180-degree "
+            "rotation), apply the top applyable one, re-route, and keep it only "
+            "on a strict routed-net increase (default: disabled).  Connectors "
+            "(refs starting with 'J' or 'P') and locked footprints are never "
+            "moved; --placement-feedback-anchor / --placement-feedback-no-anchor "
+            "and --placement-feedback-max-movement apply to this loop too.  "
+            "Writes <output>_placement_delta.json.  Issue #4468."
+        ),
+    )
+    parser.add_argument(
+        "--placement-delta-feedback-budget",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Maximum number of apply/keep-or-revert delta iterations when "
+            "--placement-delta-feedback is set (default: 3). Each iteration "
+            "applies one delta and re-routes from scratch; the loop stops at "
+            "the first delta that does not strictly improve reach."
+        ),
+    )
     parser.add_argument(
         "--no-optimize",
         action="store_true",

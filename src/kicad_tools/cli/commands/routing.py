@@ -643,6 +643,18 @@ def run_route_command(args) -> int:
                 str(args.placement_feedback_outer_timeout),
             ]
         )
+    # Issue #4468: forward the classifier-driven placement-DELTA feedback
+    # flags.  Budget is forwarded only when non-default so a run that never
+    # asked for the loop stays byte-identical to the pre-#4468 sub-invocation.
+    if getattr(args, "placement_delta_feedback", False):
+        sub_argv.append("--placement-delta-feedback")
+    if getattr(args, "placement_delta_feedback_budget", 3) != 3:
+        sub_argv.extend(
+            [
+                "--placement-delta-feedback-budget",
+                str(args.placement_delta_feedback_budget),
+            ]
+        )
     if getattr(args, "export_failed_nets", None):
         sub_argv.extend(["--export-failed-nets", args.export_failed_nets])
     if getattr(args, "no_cache", False):
