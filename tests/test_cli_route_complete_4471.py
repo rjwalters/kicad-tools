@@ -131,6 +131,48 @@ class TestResolveCompleteNets:
         assert rc == 2
         assert "mutually exclusive" in capsys.readouterr().err
 
+    def test_exclude_nets_are_passed_to_the_detector(self, monkeypatch, capsys):
+        """Issue #4476: pour/plane nets named by --complete-exclude-nets are
+        withheld from the auto-detected routable set.
+
+        A filled zone carries their connectivity, which the TRACE checker does
+        not credit -- so without this they look stranded and --complete lays
+        traces on nets the recipe routes as copper pours.
+        """
+        import kicad_tools.router.partial_rescue as pr
+
+        seen: dict = {}
+
+        def _spy(_path, *, manufacturer, excluded_nets, include_unrouted):
+            seen["excluded"] = excluded_nets
+            return [n for n in ("/NET_A", "GND", "PHASE_A") if n not in excluded_nets]
+
+        monkeypatch.setattr(pr, "partially_connected_signal_nets", _spy)
+        args = _complete_args(complete_exclude_nets="GND, PHASE_A ,")
+        rc = _resolve_complete_nets(args, Path("dummy.kicad_pcb"))
+
+        assert rc == 0
+        # Whitespace trimmed, empty entries dropped.
+        assert seen["excluded"] == frozenset({"GND", "PHASE_A"})
+        assert args.nets == "/NET_A"
+        assert "excluding 2 pour/plane net(s)" in capsys.readouterr().out
+
+    def test_exclude_nets_defaults_to_no_exclusions(self, monkeypatch):
+        """Absent/empty flag keeps the pre-#4476 auto-detected set exactly."""
+        import kicad_tools.router.partial_rescue as pr
+
+        seen: dict = {}
+
+        def _spy(_path, *, manufacturer, excluded_nets, include_unrouted):
+            seen["excluded"] = excluded_nets
+            return ["/NET_A"]
+
+        monkeypatch.setattr(pr, "partially_connected_signal_nets", _spy)
+        # No ``complete_exclude_nets`` attribute at all (older namespaces).
+        rc = _resolve_complete_nets(_complete_args(), Path("dummy.kicad_pcb"))
+        assert rc == 0
+        assert seen["excluded"] == frozenset()
+
     def test_noop_when_complete_absent(self, monkeypatch):
         import kicad_tools.router.partial_rescue as pr
 

@@ -331,6 +331,14 @@ def build_rescue_command(
     stack -- issue #4477).  When *complete_report* is given, the structured
     per-link JSON report (issue #4477 Phase 4) is written there for the caller
     to consume.
+
+    Issue #4476: ``--complete``'s auto-detection re-runs the same TRACE
+    connectivity checker, which knows nothing about ``config.excluded_nets`` --
+    so a pour/plane-carried net (board-05's ``PHASE_A/B/C``, ``GND``) looks
+    "unconnected" and the completion pass would lay traces on nets the recipe
+    routes as copper zones.  The completion shape therefore forwards the
+    exclusions as ``--complete-exclude-nets``.  A config with no exclusions
+    emits no flag, so its argv is byte-identical to pre-#4476.
     """
     cmd = [
         sys.executable,
@@ -390,6 +398,14 @@ def build_rescue_command(
         # #4478: --complete self-selects the stranded nets; a skip/nets list
         # would trip the mutual-exclusivity guard.  Never emit one here.
         cmd.append("--complete")
+        # Issue #4476: --complete's own auto-detection uses the same trace
+        # connectivity checker but knows nothing about ``excluded_nets``, so
+        # without this the completion pass lays traces on the pour/plane nets
+        # the caller deliberately excluded (board-05's PHASE_A/B/C, GND, ...).
+        # Emitted only when the caller HAS exclusions, so the argv of a
+        # config without them is byte-identical to pre-#4476.
+        if config.excluded_nets:
+            cmd.extend(["--complete-exclude-nets", ",".join(sorted(config.excluded_nets))])
         if complete_report is not None:
             cmd.extend(["--complete-report", str(complete_report)])
     else:

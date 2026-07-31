@@ -351,6 +351,52 @@ def test_build_rescue_command_complete_omits_report_when_none(tmp_path: Path) ->
     assert "--complete-report" not in cmd
 
 
+def test_build_rescue_command_complete_forwards_excluded_pour_nets(tmp_path: Path) -> None:
+    """Issue #4476: ``--complete`` must not route the caller's pour/plane nets.
+
+    ``--complete`` re-detects the stranded set with the same TRACE connectivity
+    checker, which credits nothing to a filled zone -- so board-05's
+    PHASE_A/B/C (routed as copper pours, deliberately in ``--skip-nets`` on the
+    main pass) look unconnected and would get traces.  The exclusions ride
+    along as ``--complete-exclude-nets``.
+    """
+    cmd = build_rescue_command(
+        tmp_path / "a.kicad_pcb",
+        tmp_path / "b.kicad_pcb",
+        [],
+        RescueConfig(excluded_nets=frozenset({"GND", "PHASE_B", "PHASE_A"})),
+        complete=True,
+    )
+    # Sorted for determinism across runs (frozenset iteration order is not).
+    assert cmd[cmd.index("--complete-exclude-nets") + 1] == "GND,PHASE_A,PHASE_B"
+    # Still not a hand-enumerated routable set -- the guard stays satisfied.
+    assert "--skip-nets" not in cmd
+    assert "--nets" not in cmd
+
+
+def test_build_rescue_command_complete_omits_exclusions_when_empty(tmp_path: Path) -> None:
+    """No exclusions -> no flag, so the pre-#4476 completion argv is unchanged."""
+    cmd = build_rescue_command(
+        tmp_path / "a.kicad_pcb",
+        tmp_path / "b.kicad_pcb",
+        [],
+        RescueConfig(),
+        complete=True,
+    )
+    assert "--complete-exclude-nets" not in cmd
+
+
+def test_build_rescue_command_grid_shape_ignores_exclusions(tmp_path: Path) -> None:
+    """The single-net rescue shape never emits the completion-only flag."""
+    cmd = build_rescue_command(
+        tmp_path / "a.kicad_pcb",
+        tmp_path / "b.kicad_pcb",
+        ["X"],
+        RescueConfig(excluded_nets=frozenset({"GND"})),
+    )
+    assert "--complete-exclude-nets" not in cmd
+
+
 def test_build_rescue_command_default_is_grid_rescue_shape(tmp_path: Path) -> None:
     """complete defaults False: the single-net rescue shape is byte-unchanged."""
     cmd = build_rescue_command(

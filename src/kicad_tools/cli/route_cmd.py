@@ -8841,10 +8841,21 @@ def _resolve_complete_nets(args, pcb_path: Path) -> int:
     from kicad_tools.router.partial_rescue import partially_connected_signal_nets
 
     manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
+    # Issue #4476: pour/plane-carried nets are "unconnected" to a TRACE
+    # connectivity checker by construction (their continuity comes from a
+    # filled zone), so without an exclusion list --complete lays traces on
+    # exactly the nets a recipe deliberately routes as copper pours.  Empty by
+    # default -- the auto-detected set is unchanged for every existing caller.
+    excluded = frozenset(
+        n.strip()
+        for n in (getattr(args, "complete_exclude_nets", "") or "").split(",")
+        if n.strip()
+    )
     try:
         stranded = partially_connected_signal_nets(
             pcb_path,
             manufacturer=manufacturer,
+            excluded_nets=excluded,
             include_unrouted=True,
         )
     except Exception as e:  # pragma: no cover - detection should not raise
@@ -8864,6 +8875,10 @@ def _resolve_complete_nets(args, pcb_path: Path) -> int:
     if not getattr(args, "quiet", False):
         preview = ", ".join(stranded)
         print(f"--complete: routing {len(stranded)} unconnected signal net(s): {preview}")
+        if excluded:
+            print(
+                f"--complete: excluding {len(excluded)} pour/plane net(s): {', '.join(sorted(excluded))}"
+            )
     return 0
 
 
@@ -9622,6 +9637,21 @@ def main(argv: list[str] | None = None) -> int:
             "#4413 copper-loss guard is active). Mutually exclusive with "
             "--nets / --skip-nets. A board with nothing left to connect is a "
             "safe no-op."
+        ),
+    )
+    parser.add_argument(
+        "--complete-exclude-nets",
+        metavar="NAMES",
+        default="",
+        help=(
+            "Issue #4476: comma-separated net names --complete must NOT "
+            "route, even when the connectivity checker reports them "
+            "unconnected. Intended for pour/plane-carried nets (GND, +3V3, "
+            "board-05's PHASE_A/B/C): their connectivity comes from a filled "
+            "zone, which trace connectivity does not credit, so without this "
+            "--complete would lay traces on nets the recipe deliberately "
+            "skips. Empty (the default) preserves the auto-detected set "
+            "exactly. Ignored without --complete."
         ),
     )
     parser.add_argument(
