@@ -3941,6 +3941,43 @@ class TestRemoveConflictingViasFieldOrder:
         result = _remove_conflicting_vias(txt, 0.2)
         assert result == txt
 
+    def test_name_only_dialect_conflict_detected(self):
+        """Issue #4529: co-located vias on different nets are detected even when
+        the blocks reference their net by name -- ``(net "A")`` / ``(net "B")``
+        -- as a KiCad-10 name-only board (issue #4416) emits.  Before the fix
+        the numeric-only ``(net N)`` match skipped every via here and the
+        conflict was silently kept."""
+        from kicad_tools.router.io import _remove_conflicting_vias
+
+        txt = """(kicad_pcb
+  (net 0 "")
+  (net 1 "A")
+  (net 2 "B")
+  (via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (uuid "v1") (net "A"))
+  (via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (uuid "v2") (net "B"))
+)"""
+        result = _remove_conflicting_vias(txt, 0.2)
+        assert result.count("(via") == 1, (
+            "name-only via blocks must participate in conflict detection"
+        )
+        # First via (net "A") kept, later conflicting via (net "B") removed.
+        assert '(net "A")' in result
+        assert '(uuid "v2")' not in result
+        assert _validate_sexp_parentheses(result)
+
+    def test_name_only_dialect_same_net_kept(self):
+        """Two co-located name-only vias on the SAME net are not removed."""
+        from kicad_tools.router.io import _remove_conflicting_vias
+
+        txt = """(kicad_pcb
+  (net 0 "")
+  (net 1 "A")
+  (via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (uuid "v1") (net "A"))
+  (via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (uuid "v2") (net "A"))
+)"""
+        result = _remove_conflicting_vias(txt, 0.2)
+        assert result.count("(via") == 2
+
 
 class TestExtractBoardDimensionsGrLine:
     """Issue #3805: board dimensions/origin from gr_line Edge.Cuts outline."""

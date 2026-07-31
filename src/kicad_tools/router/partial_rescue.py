@@ -250,12 +250,21 @@ def strip_net_copper(pcb_path: Path, net_names: list[str]) -> int:
     partial route does not poison the rescue A* (and so a FAILED rescue
     leaves no stub copper behind -- the #3470 overlap-stub lesson).
     """
+    # Issue #4529: resolve each copper block's net through the shared
+    # dialect-aware helper so name-only KiCad-10 boards -- whose blocks
+    # reference their net as ``(net "NAME")`` rather than ``(net N)`` --
+    # strip correctly.  Before this, the numeric-only ``re.search`` matched
+    # nothing on such a board and this function silently returned 0 (the
+    # #3470 stranded-stub invariant then quietly did not hold).
+    from .optimizer.pcb import parse_net_names, resolve_block_net
+
     text = pcb_path.read_text()
-    net_ids = {
-        m.group(1)
-        for m in re.finditer(r'\(net (\d+) "([^"]+)"\)', text)
-        if m.group(2) in set(net_names)
-    }
+    # The header net table is always numeric-and-named regardless of the
+    # board's copper-block dialect, so map target names -> numeric ids.
+    net_name_by_id = parse_net_names(text)
+    name_to_id = {name: nid for nid, name in net_name_by_id.items()}
+    target_names = set(net_names)
+    net_ids = {nid for nid, name in net_name_by_id.items() if name in target_names}
     if not net_ids:
         return 0
 
@@ -276,8 +285,8 @@ def strip_net_copper(pcb_path: Path, net_names: list[str]) -> int:
         if end < len(text) and text[end] == "\n":
             end += 1
         block = text[start:end]
-        net_match = re.search(r"\(net (\d+)\)", block)
-        if net_match and net_match.group(1) in net_ids:
+        resolved = resolve_block_net(block, net_name_by_id, name_to_id)
+        if resolved is not None and resolved[0] in net_ids:
             spans.append((start, end))
 
     for start, end in sorted(spans, reverse=True):

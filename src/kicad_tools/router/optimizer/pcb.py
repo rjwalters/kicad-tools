@@ -127,6 +127,15 @@ def _resolve_block_net(
     return None
 
 
+# Public alias so the other copper-block scanners
+# (``partial_rescue.strip_net_copper``, ``io._remove_conflicting_vias``,
+# ``quantize``) resolve both net-reference dialects through this single
+# implementation instead of each re-deriving a numeric-only ``(net N)``
+# regex -- the bug class fixed by issue #4529.  Kept as a thin alias so
+# existing in-module callers of ``_resolve_block_net`` are unaffected.
+resolve_block_net = _resolve_block_net
+
+
 def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
     """Parse segments from PCB file text, grouped by net name.
 

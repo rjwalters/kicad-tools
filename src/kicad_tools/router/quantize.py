@@ -387,6 +387,14 @@ def verify_segment_45(
 #: 2-space-indented serializations, with ``(uuid ...)`` either before or
 #: after ``(net ...)`` (hand-patched artifacts use the latter order).
 #: Group 1 is the leading indentation.
+#:
+#: Issue #4529: the net field accepts BOTH the numeric ``(net N)`` form and
+#: the name-only ``(net "NAME")`` dialect emitted on a KiCad-10 name-based
+#: board (issue #4416).  Group 9 captures the numeric id, group 10 the
+#: quoted name (exactly one is non-None); group 11 is the trailing uuid.
+#: Before the alternation was added this pattern matched ZERO segments on a
+#: name-only board, so ``segment_angle_census`` silently reported ``(0, [])``
+#: and ``quantize_pcb_file`` silently repaired nothing.
 _SEGMENT_BLOCK_RE = re.compile(
     r"^([ \t]+)\(segment\s*\n"
     r"\s*\(start ([-\d.]+) ([-\d.]+)\)\s*\n"
@@ -394,7 +402,7 @@ _SEGMENT_BLOCK_RE = re.compile(
     r"\s*\(width ([-\d.]+)\)\s*\n"
     r"\s*\(layer \"([^\"]+)\"\)\s*\n"
     r"(?:\s*\(uuid \"([^\"]+)\"\)\s*\n)?"
-    r"\s*\(net (\d+)\)\s*\n"
+    r"\s*(?:\(net (\d+)\)|\(net \"([^\"]+)\"\))\s*\n"
     r"(?:\s*\(uuid \"([^\"]+)\"\)\s*\n)?"
     r"[ \t]*\)",
     re.MULTILINE,
@@ -477,6 +485,13 @@ def segment_angle_census(
     so a fresh route that the guard passes also passes the census ratchet.
     """
     text = Path(pcb_path).read_text()
+    # Issue #4529: name-only ``(net "NAME")`` blocks carry no numeric id, so
+    # resolve the reported ``net`` field through the always-numeric header
+    # table (a name absent from the table falls back to id 0 rather than
+    # dropping the segment from the census).
+    from .optimizer.pcb import parse_net_names
+
+    name_to_id = {name: nid for nid, name in parse_net_names(text).items()}
     total = 0
     bad: list[dict] = []
     for m in _SEGMENT_BLOCK_RE.finditer(text):
@@ -486,13 +501,15 @@ def segment_angle_census(
             continue
         off = off_angle_degrees(x2 - x1, y2 - y1)
         if off > tol_deg:
+            net_num = m.group(9)
+            net_id = int(net_num) if net_num is not None else name_to_id.get(m.group(10), 0)
             bad.append(
                 {
                     "start": (x1, y1),
                     "end": (x2, y2),
                     "layer": m.group(7),
-                    "net": int(m.group(9)),
-                    "uuid": m.group(8) or m.group(10),
+                    "net": net_id,
+                    "uuid": m.group(8) or m.group(11),
                     "off_deg": off,
                 }
             )
@@ -556,8 +573,14 @@ def quantize_pcb_file(
         indent = m.group(1)
         x1, y1 = Decimal(m.group(2)), Decimal(m.group(3))
         x2, y2 = Decimal(m.group(4)), Decimal(m.group(5))
-        width, layer, net = m.group(6), m.group(7), m.group(9)
-        seg_uuid = m.group(8) or m.group(10)
+        width, layer = m.group(6), m.group(7)
+        # Issue #4529: re-emit the net field in the SAME dialect the block
+        # used -- numeric ``(net N)`` (group 9) or name-only ``(net "NAME")``
+        # (group 10) -- so a name-based board is not silently flipped to
+        # numeric (which KiCad-10 would then read as a different net).
+        net_num, net_name_ref = m.group(9), m.group(10)
+        net_field = f"(net {net_num})" if net_num is not None else f'(net "{net_name_ref}")'
+        seg_uuid = m.group(8) or m.group(11)
         dx = float(x2 - x1)
         dy = float(y2 - y1)
         if (dx == 0 and dy == 0) or is_45_aligned(dx, dy, tol_deg):
@@ -587,7 +610,7 @@ def quantize_pcb_file(
             ]
             if block_uuid is not None:
                 lines.append(f'{inner}(uuid "{block_uuid}")')
-            lines.append(f"{inner}(net {net})")
+            lines.append(f"{inner}{net_field}")
             lines.append(f"{indent})")
             return "\n".join(lines)
 

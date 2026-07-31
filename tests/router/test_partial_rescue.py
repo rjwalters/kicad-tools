@@ -99,6 +99,69 @@ def test_strip_net_copper_never_touches_zones(tmp_path: Path) -> None:
     assert "(zone" in pcb.read_text()
 
 
+# Issue #4529: the SAME board, re-emitted in the KiCad-10 name-only dialect
+# (segments/vias reference their net as ``(net "NAME")`` rather than the
+# numeric ``(net N)``; the header net table stays numeric-and-named).  The
+# stripper must produce IDENTICAL results on both dialects -- before the fix
+# it matched nothing here and silently returned 0.
+_PCB_TEXT_NAME_ONLY = (
+    "(kicad_pcb\n"
+    '\t(net 0 "")\n'
+    '\t(net 1 "SDA")\n'
+    '\t(net 2 "SCL")\n'
+    '\t(net 3 "NRST")\n'
+    "\t(segment\n"
+    "\t\t(start 1 1)\n"
+    "\t\t(end 2 2)\n"
+    "\t\t(width 0.2)\n"
+    '\t\t(layer "F.Cu")\n'
+    '\t\t(net "SDA")\n'
+    "\t)\n"
+    "\t(segment\n"
+    "\t\t(start 2 2)\n"
+    "\t\t(end 3 3)\n"
+    "\t\t(width 0.2)\n"
+    '\t\t(layer "F.Cu")\n'
+    '\t\t(net "SCL")\n'
+    "\t)\n"
+    "\t(via\n"
+    "\t\t(at 2 2)\n"
+    "\t\t(size 0.6)\n"
+    '\t\t(net "SCL")\n'
+    "\t)\n"
+    "\t(zone\n"
+    '\t\t(net "SDA")\n'
+    '\t\t(layer "B.Cu")\n'
+    "\t)\n"
+    ")\n"
+)
+
+
+def test_strip_net_copper_name_only_dialect_matches_numeric(tmp_path: Path) -> None:
+    """Issue #4529: a name-only ``(net "SCL")`` board strips the same copper
+    the numeric ``(net 2)`` board does -- not a silent zero."""
+    pcb = tmp_path / "name_only.kicad_pcb"
+    pcb.write_text(_PCB_TEXT_NAME_ONLY)
+    removed = strip_net_copper(pcb, ["SCL"])
+    # SCL had one segment + one via -- identical to the numeric-dialect case.
+    assert removed == 2
+    text = pcb.read_text()
+    assert text.count("(segment") == 1
+    assert "(via" not in text
+    # The SDA segment and the SDA-referencing zone survive untouched.
+    assert '(net "SDA")' in text
+    assert "(zone" in text
+
+
+def test_strip_net_copper_name_only_unknown_net_is_noop(tmp_path: Path) -> None:
+    """A name absent from the header table strips nothing (and never raises)."""
+    pcb = tmp_path / "name_only.kicad_pcb"
+    pcb.write_text(_PCB_TEXT_NAME_ONLY)
+    before = pcb.read_text()
+    assert strip_net_copper(pcb, ["DOES_NOT_EXIST"]) == 0
+    assert pcb.read_text() == before
+
+
 def _fake_check_payload() -> str:
     return json.dumps(
         {

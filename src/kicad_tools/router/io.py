@@ -4209,22 +4209,34 @@ def _remove_conflicting_vias(pcb_text: str, clearance: float) -> str:
     # output and conflict detection silently no-opped.  It also missed
     # ``(via micro ...)`` / ``blind`` / ``buried`` blocks (#3118),
     # whose type token sits between ``via`` and ``(at ...)``.
-    from .optimizer.pcb import _extract_balanced_blocks
+    from .optimizer.pcb import (
+        _extract_balanced_blocks,
+        parse_net_names,
+        resolve_block_net,
+    )
 
     _re_at = re.compile(r"\(at\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)")
-    _re_net = re.compile(r"\(net\s+(\d+)\)")
+
+    # Issue #4529: resolve each via's net through the shared dialect-aware
+    # helper.  The previous numeric-only ``(net N)`` match skipped EVERY via
+    # on a name-only KiCad-10 board (whose blocks use ``(net "NAME")``), so
+    # co-located same-pad vias on different nets were never detected as
+    # conflicting.  The header net table is always numeric-and-named, so it
+    # supplies the name -> id reverse map.
+    net_name_by_id = parse_net_names(pcb_text)
+    name_to_id = {name: nid for nid, name in net_name_by_id.items()}
 
     # Collect all vias with their positions, nets, and block spans
     vias: list[tuple[float, float, int, tuple[int, int]]] = []
     for start, end, block in _extract_balanced_blocks(pcb_text, "via"):
         m_at = _re_at.search(block)
-        m_net = _re_net.search(block)
+        resolved = resolve_block_net(block, net_name_by_id, name_to_id)
         # Both core fields are required; skip malformed blocks.
-        if not (m_at and m_net):
+        if not (m_at and resolved):
             continue
         x = float(m_at.group(1))
         y = float(m_at.group(2))
-        net = int(m_net.group(1))
+        net = resolved[0]
         vias.append((x, y, net, (start, end)))
 
     if len(vias) < 2:

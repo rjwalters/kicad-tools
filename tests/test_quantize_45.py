@@ -145,6 +145,23 @@ SEG_BLOCK_ALIGNED = """\t(segment
 \t)
 """
 
+# Issue #4529: the same off-angle segment as SEG_BLOCK_UUID_BEFORE_NET but in
+# the KiCad-10 name-only dialect -- ``(net "SIG")`` instead of ``(net N)`` --
+# exactly as issue #4416's dialect-mirrored emission writes it.  A numeric
+# header net table (always numeric-and-named) accompanies it so the census can
+# resolve the reported net id.
+NET_TABLE_NAME_ONLY = '\t(net 0 "")\n\t(net 7 "SIG")\n'
+
+SEG_BLOCK_NAME_ONLY = """\t(segment
+\t\t(start 170.4 125.5)
+\t\t(end 171.19 125.46)
+\t\t(width 0.4)
+\t\t(layer "F.Cu")
+\t\t(uuid "00000000-0000-0000-0000-00000000000a")
+\t\t(net "SIG")
+\t)
+"""
+
 
 class TestQuantizePcbFile:
     def _board(self, tmp_path: Path, *blocks: str) -> Path:
@@ -164,6 +181,37 @@ class TestQuantizePcbFile:
         total, bad = segment_angle_census(pcb)
         assert total == 5  # two doglegged (2 legs each) + 1 untouched
         assert bad == []
+
+    def test_name_only_dialect_census_and_quantize(self, tmp_path):
+        """Issue #4529: a name-only ``(net "SIG")`` board must be censused and
+        repaired, not silently seen as zero segments.  The off-angle segment is
+        counted (with its net resolved through the header table) and rewritten
+        into a two-leg dogleg that keeps the name-only dialect."""
+        pcb = self._board(tmp_path, NET_TABLE_NAME_ONLY, SEG_BLOCK_NAME_ONLY)
+
+        # Census sees the off-angle name-only segment -- NOT a silent (0, []).
+        total, bad = segment_angle_census(pcb)
+        assert total == 1
+        assert len(bad) == 1
+        assert bad[0]["net"] == 7  # resolved "SIG" -> id 7 via the header table
+        assert bad[0]["uuid"] == "00000000-0000-0000-0000-00000000000a"
+
+        # Quantize repairs it (non-zero), preserving endpoints and dialect.
+        replaced = quantize_pcb_file(pcb)
+        assert len(replaced) == 1
+        text = pcb.read_text()
+        assert text.count("(segment") == 2
+        assert "(start 170.4 125.5)" in text
+        assert "(end 171.19 125.46)" in text
+        # The net dialect is preserved on BOTH legs -- never flipped to numeric
+        # (which a KiCad-10 name-only board would misread as a different net).
+        assert text.count('(net "SIG")') == 2
+        assert "(net 7)" not in text
+
+        # Post-repair census is clean.
+        total2, bad2 = segment_angle_census(pcb)
+        assert total2 == 2
+        assert bad2 == []
 
     def test_endpoints_preserved(self, tmp_path):
         pcb = self._board(tmp_path, SEG_BLOCK_UUID_BEFORE_NET)
