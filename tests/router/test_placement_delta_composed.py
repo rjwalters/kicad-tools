@@ -281,6 +281,36 @@ class TestCandidateLadder:
         # One probe: one re-route, not five.
         assert router.route_calls == 1
 
+    def test_reverted_probes_carry_their_measurement(self, tmp_path: Path):
+        """A run that keeps nothing must still say WHAT it tried and what it measured.
+
+        Without this a plateau claim is unfalsifiable: "0 kept" reads the same
+        whether the loop probed four placements or never ran.
+        """
+        import json
+
+        from kicad_tools.router import write_placement_delta_json
+
+        delta = PlacementDelta(
+            net_name="DQ3", target_ref="UB", kind="rotate_180", rotation_delta=180.0
+        )
+        loop, router = self._loop([delta], _rotate_never_helps)
+        result = loop.run_delta(max_adjustments=2, reuse_existing_routes=True)
+
+        assert [d.target_ref for d in result.reverted_deltas] == ["UB"]
+        assert result.reverted_counts == [(1, 1)]
+        assert "reverted: UB rotate_180" in result.summary()
+
+        out = tmp_path / "board_routed_placement_delta.json"
+        write_placement_delta_json(
+            out, result.applied_deltas, result.proposed_deltas, result.reverted_evidence()
+        )
+        payload = json.loads(out.read_text())
+        assert payload["applied"] == []
+        assert payload["reverted"][0]["target_ref"] == "UB"
+        assert payload["reverted"][0]["routed_before"] == 1
+        assert payload["reverted"][0]["routed_after"] == 1
+
     def test_budget_one_preserves_stop_at_first_revert(self):
         first = PlacementDelta(net_name="DQ3", target_ref="UA", kind="translate", dx=1.0, dy=0.0)
         second = PlacementDelta(net_name="DQ4", target_ref="UB", kind="translate", dx=2.0, dy=0.0)

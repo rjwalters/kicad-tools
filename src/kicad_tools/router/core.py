@@ -16021,7 +16021,10 @@ class Autorouter:
         )
         if delta_output_path is not None:
             write_placement_delta_json(
-                delta_output_path, result.applied_deltas, result.proposed_deltas
+                delta_output_path,
+                result.applied_deltas,
+                result.proposed_deltas,
+                result.reverted_evidence(),
             )
         return result
 

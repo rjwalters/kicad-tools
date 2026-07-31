@@ -1073,6 +1073,12 @@ class PlacementDeltaFeedbackResult:
     proposed_deltas: list[PlacementDelta] = field(default_factory=list)
     skipped_deltas: list[PlacementDelta] = field(default_factory=list)
     skip_reasons: list[str] = field(default_factory=list)
+    # Issue #4468: probes that WERE applied and re-routed but did not strictly
+    # improve reach, with their measured before/after routed-net counts.  A
+    # skipped delta was never tried; a reverted one was, and the measurement is
+    # the evidence for "the loop plateaued here".
+    reverted_deltas: list[PlacementDelta] = field(default_factory=list)
+    reverted_counts: list[tuple[int, int]] = field(default_factory=list)
     failed_nets: list[int] = field(default_factory=list)
     placement_diff: list[PlacementDiffEntry] = field(default_factory=list)
     exit_reason: str = "pd_max_iter"
@@ -1086,14 +1092,30 @@ class PlacementDeltaFeedbackResult:
             f"  Routes: {len(self.routes)}",
             f"  Deltas proposed: {len(self.proposed_deltas)}",
             f"  Deltas kept:     {len(self.applied_deltas)}",
+            f"  Deltas reverted: {len(self.reverted_deltas)}",
             f"  Deltas skipped:  {len(self.skipped_deltas)}",
             f"  Failed nets: {len(self.failed_nets)}",
         ]
         for delta in self.applied_deltas:
             lines.append(f"    kept: {delta.target_ref} {delta.kind} ({delta.net_name})")
+        for delta, counts in zip(self.reverted_deltas, self.reverted_counts, strict=False):
+            lines.append(
+                f"    reverted: {delta.target_ref} {delta.kind} ({delta.net_name}) "
+                f"-- routed {counts[0]} -> {counts[1]}"
+            )
         for delta, reason in zip(self.skipped_deltas, self.skip_reasons, strict=False):
             lines.append(f"    skipped: {delta.target_ref} {delta.kind} -- {reason}")
         return "\n".join(lines)
+
+    def reverted_evidence(self) -> list[dict[str, Any]]:
+        """Serializable ``reverted`` payload for the delta artifact (#4468)."""
+        out: list[dict[str, Any]] = []
+        for delta, counts in zip(self.reverted_deltas, self.reverted_counts, strict=False):
+            entry = delta.to_dict()
+            entry["routed_before"] = counts[0]
+            entry["routed_after"] = counts[1]
+            out.append(entry)
+        return out
 
 
 def _delta_key(delta: PlacementDelta) -> tuple[str, str, float, float, float]:
@@ -1119,6 +1141,7 @@ def write_placement_delta_json(
     path: str | Path,
     applied: list[PlacementDelta],
     proposed: list[PlacementDelta],
+    reverted: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Write the ``<output>_placement_delta.json`` artifact (issue #4467).
 
@@ -1126,10 +1149,17 @@ def write_placement_delta_json(
     :meth:`PlacementDelta.to_dict` so a propose-only recipe can reload them with
     :meth:`PlacementDelta.from_dict` and apply them deterministically without
     re-running the loop.  Returns the serialized dict for convenience/testing.
+
+    Issue #4468 adds ``reverted``: the probes that were actually applied and
+    re-routed but did not strictly improve reach, each with its measured
+    before/after routed-net count.  Without it a run that keeps nothing is
+    indistinguishable from a run that never tried, which is exactly the
+    evidence a "the loop plateaued here" claim needs.
     """
     data = {
         "applied": [d.to_dict() for d in applied],
         "proposed": [d.to_dict() for d in proposed],
+        "reverted": list(reverted or []),
     }
     Path(path).write_text(json.dumps(data, indent=2))
     return data
@@ -1499,6 +1529,8 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         proposed: list[PlacementDelta] = []
         skipped: list[PlacementDelta] = []
         skip_reasons: list[str] = []
+        reverted: list[PlacementDelta] = []
+        reverted_counts: list[tuple[int, int]] = []
 
         if self.verbose:
             print("\n=== Placement-Delta Feedback Loop (classifier-driven) ===")
@@ -1601,6 +1633,8 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 self._restore_placement(pre_placement)
                 self._restore_router_pads(pre_pads)
                 self._rebuild_grid_for_routes(pre_routes)
+                reverted.append(delta)
+                reverted_counts.append((pre_count, new_count))
                 exit_reason = "pd_reverted"
                 if self.verbose:
                     print(
@@ -1640,6 +1674,8 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             proposed_deltas=proposed,
             skipped_deltas=skipped,
             skip_reasons=skip_reasons,
+            reverted_deltas=reverted,
+            reverted_counts=reverted_counts,
             failed_nets=failed_nets,
             placement_diff=self._build_placement_diff(),
             exit_reason=exit_reason,

@@ -2907,6 +2907,15 @@ def _run_placement_delta_feedback(
         print(f"  Deltas kept:        {len(applied)}")
         for delta in applied:
             print(f"    kept: {delta.target_ref} {delta.kind} (net {delta.net_name})")
+        for delta, counts in zip(
+            getattr(result, "reverted_deltas", []),
+            getattr(result, "reverted_counts", []),
+            strict=False,
+        ):
+            print(
+                f"    reverted: {delta.target_ref} {delta.kind} (net {delta.net_name}) "
+                f"-- routed {counts[0]} -> {counts[1]}"
+            )
         for delta, reason in zip(
             getattr(result, "skipped_deltas", []),
             getattr(result, "skip_reasons", []),

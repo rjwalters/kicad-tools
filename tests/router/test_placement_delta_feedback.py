@@ -408,7 +408,9 @@ class TestAutorouterEntryPoint:
         assert isinstance(result, PlacementDeltaFeedbackResult)
         assert out.exists()
         payload = json.loads(out.read_text())
-        assert payload == {"applied": [], "proposed": []}
+        # ``reverted`` added by #4468: an empty run is now explicitly "nothing
+        # proposed, nothing probed" rather than silently ambiguous.
+        assert payload == {"applied": [], "proposed": [], "reverted": []}
 
     def test_toggle_off_delegates_to_legacy_loop(self, tmp_path: Path):
         from kicad_tools.router.core import Autorouter
