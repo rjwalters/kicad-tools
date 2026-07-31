@@ -170,6 +170,11 @@ _GUIDE_SELF_APPROACH_DETOUR_RATIO: float = float(
 # fixed cost over the boosted neighbourhood; one pass is too weak to divert the
 # A* out of a dense escape fan, so accumulate several.
 _GUIDE_BIAS_BOOST_REPEATS: int = int(os.environ.get("KCT_GUIDE_BIAS_BOOST_REPEATS", "6"))
+# Issue #4460: opt-in verbose provenance for shadow self-check declines.  When
+# set, every ``self-check overlap`` decline prints WHICH part of the assembled
+# shadow (start tail / body / end tail) produced the offending segment and where
+# it sits relative to the guide.  Diagnostic-only; off by default.
+_SHADOW_DEBUG: bool = os.environ.get("KCT_SHADOW_DEBUG", "0") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +310,25 @@ def _count_off_angle_segments(route: Route | None) -> int:
             continue  # exact 45
         off += 1
     return off
+
+
+def _segments_within(a: Segment, b: Segment, margin: float) -> bool:
+    """Cheap axis-aligned-bounding-box overlap test with ``margin`` (issue #4460).
+
+    A conservative pre-filter for the sampled centreline-distance checks: when
+    the two segments' AABBs do not come within ``margin``, no point of ``a`` can
+    be within ``margin`` of ``b``, so the expensive sampling is skipped.  Never
+    rejects a genuinely-close pair (the AABB is a superset of the segment).
+    """
+    if min(a.x1, a.x2) - margin > max(b.x1, b.x2):
+        return False
+    if max(a.x1, a.x2) + margin < min(b.x1, b.x2):
+        return False
+    if min(a.y1, a.y2) - margin > max(b.y1, b.y2):
+        return False
+    if max(a.y1, a.y2) + margin < min(b.y1, b.y2):
+        return False
+    return True
 
 
 def classify_coupled_pair_outcome(
@@ -3547,7 +3571,13 @@ class DiffPairRouter:
         return True
 
     def _synthesize_tail(
-        self, pathfinder: CoupledPathfinder, head: Pad, goal: Pad, layer_idx: int
+        self,
+        pathfinder: CoupledPathfinder,
+        head: Pad,
+        goal: Pad,
+        layer_idx: int,
+        partner_segments: list[Segment] | None = None,
+        partner_clearance: float = 0.0,
     ) -> Route | None:
         """Geometric head->pad tail on the head's layer (issue #3508).
 
@@ -3557,6 +3587,19 @@ class DiffPairRouter:
         directly -- a straight segment, or an axis-aligned dogleg --
         and validate every covered grid cell with
         :meth:`_segment_cells_clear`.
+
+        Issue #4460: when ``partner_segments`` is supplied the partner
+        (diff-pair guide) copper is part of the CANDIDATE FILTER, not a
+        post-hoc veto on the single winner.  The partner is not in the grid,
+        so ``_segment_cells_clear`` cannot see it; screening only the first
+        obstacle-clear candidate threw away the 20+ remaining U-detours
+        whenever that one candidate happened to hug the guide, and the caller
+        fell through to a partner-BLIND A* tail that ran on top of the guide
+        (measured on board 06: every shadow ``self-check overlap`` decline
+        traced to such a tail, centre-to-centre 0.018-0.035 mm).  Requiring
+        ``partner_clearance`` centre-to-centre inside the loop makes the
+        detour repertoire actually reachable.  With no partner supplied
+        (``partner_clearance`` 0) the selection is unchanged.
         """
         grid = self.autorouter.grid
         goal_layer_idx = grid.layer_to_index(goal.layer.value)
@@ -3564,6 +3607,25 @@ class DiffPairRouter:
             return None  # layer mismatch: leave to the A* fallback
         width = pathfinder._get_trace_width_for_net(head.net_name)
         layer = Layer(grid.index_to_layer(layer_idx))
+
+        # Issue #4460: narrow the partner list ONCE to same-layer copper inside
+        # the candidate envelope (the widest U-detour is +/-3.2 mm).  Guides
+        # reach ~900 segments; screening 27 candidates against all of them
+        # would dominate the constructor's runtime.
+        near_partner: list[Segment] = []
+        if partner_segments and partner_clearance > 0.0:
+            reach = 3.2 + partner_clearance + grid.resolution
+            lo_x, hi_x = min(head.x, goal.x) - reach, max(head.x, goal.x) + reach
+            lo_y, hi_y = min(head.y, goal.y) - reach, max(head.y, goal.y) + reach
+            near_partner = [
+                ps
+                for ps in partner_segments
+                if ps.layer == layer
+                and min(ps.x1, ps.x2) <= hi_x
+                and max(ps.x1, ps.x2) >= lo_x
+                and min(ps.y1, ps.y2) <= hi_y
+                and max(ps.y1, ps.y2) >= lo_y
+            ]
 
         candidates: list[list[tuple[float, float, float, float]]] = [
             [(head.x, head.y, goal.x, goal.y)],  # direct
@@ -3607,6 +3669,14 @@ class DiffPairRouter:
                 self._segment_cells_clear(pathfinder, x1, y1, x2, y2, layer_idx, head.net)
                 for x1, y1, x2, y2 in segs
             ):
+                # Issue #4460: the partner (guide) is not in the grid -- screen
+                # it here so a candidate that hugs it loses to a later detour.
+                if near_partner and any(
+                    self._min_distance_to_partner(x1, y1, x2, y2, near_partner, layer)
+                    < partner_clearance
+                    for x1, y1, x2, y2 in segs
+                ):
+                    continue
                 route = Route(net=head.net, net_name=head.net_name)
                 for x1, y1, x2, y2 in segs:
                     if abs(x2 - x1) < 0.01 and abs(y2 - y1) < 0.01:
@@ -3938,6 +4008,144 @@ class DiffPairRouter:
                     return route
         return None
 
+    def _tail_partner_clear(
+        self,
+        tail: Route,
+        partner_segments: list[Segment],
+        clearance: float,
+    ) -> bool:
+        """Does ``tail`` keep clear of the partner (guide) copper? (issue #4460)
+
+        Two bounds, selected by ``clearance``:
+
+        * ``clearance > 0`` -- the intra-pair CLEARANCE bound (centre-to-centre
+          ``trace_width + intra_pair_clearance``), i.e. a properly-coupled
+          tail.  Via barrels additionally keep the manufacturer trace
+          clearance to partner copper on any layer.
+        * ``clearance <= 0`` -- the PHYSICAL-overlap bound only (copper edges
+          must not intersect).  This is exactly what the constructor's
+          self-check gate (``find_intra_pair_clearance_violations`` /
+          ``_pair_has_physical_overlap``) demands, so a tail passing it can
+          never be the reason a side is declined.
+
+        The partner is never in the routing grid during shadow construction,
+        so this geometric screen is the only thing standing between a
+        partner-blind A* tail and copper drawn on top of the guide.
+        """
+        rules = self.autorouter.rules
+        strict = clearance > 0.0
+        for seg in tail.segments:
+            for ps in partner_segments:
+                if ps.layer != seg.layer:
+                    continue
+                need = clearance if strict else (seg.width + ps.width) / 2.0
+                # Cheap AABB reject first: guides run to 900 segments and the
+                # sampled distance below is the hot loop of every tail screen.
+                if not _segments_within(seg, ps, need):
+                    continue
+                if (
+                    self._min_distance_to_partner(seg.x1, seg.y1, seg.x2, seg.y2, [ps], seg.layer)
+                    < need
+                ):
+                    return False
+        for via in tail.vias:
+            bound = via.diameter / 2.0 + (rules.trace_clearance if strict else 0.0)
+            for ps in partner_segments:
+                if self._point_segment_distance(via.x, via.y, ps) < bound + ps.width / 2.0:
+                    return False
+        return True
+
+    def _partner_boost_sites(
+        self,
+        head: Pad,
+        goal: Pad,
+        partner_segments: list[Segment],
+        seg_clear: float,
+        max_sites: int = 40,
+    ) -> list[tuple[float, float]]:
+        """Sample partner copper inside the tail's neighbourhood (issue #4460).
+
+        Returned world points feed ``_single_ended_guide_route``'s
+        ``avoid_locations`` so the fallback tail's A* pays to run along the
+        guide instead of treating it as free space.  Only partner copper near
+        the head->goal corridor is sampled (a whole 900-segment escape guide
+        would boost the entire board), points are spaced by ``seg_clear`` so
+        the boosted neighbourhoods tile rather than stack, and the count is
+        capped so the boost pass stays cheap.
+        """
+        if not partner_segments or seg_clear <= 0.0:
+            return []
+        pad = 2.0 * seg_clear + 0.5
+        lo_x, hi_x = min(head.x, goal.x) - pad, max(head.x, goal.x) + pad
+        lo_y, hi_y = min(head.y, goal.y) - pad, max(head.y, goal.y) + pad
+        step = max(self.autorouter.grid.resolution, seg_clear)
+        sites: list[tuple[float, float]] = []
+        for ps in partner_segments:
+            seg_len = math.hypot(ps.x2 - ps.x1, ps.y2 - ps.y1)
+            n_steps = max(1, int(math.ceil(seg_len / step)))
+            for i in range(n_steps + 1):
+                t = i / n_steps
+                px = ps.x1 + (ps.x2 - ps.x1) * t
+                py = ps.y1 + (ps.y2 - ps.y1) * t
+                if not (lo_x <= px <= hi_x and lo_y <= py <= hi_y):
+                    continue
+                if any(math.hypot(px - sx, py - sy) < step for sx, sy in sites):
+                    continue
+                sites.append((px, py))
+                if len(sites) >= max_sites:
+                    return sites
+        return sites
+
+    def _fallback_tail_route(
+        self,
+        head: Pad,
+        goal: Pad,
+        partner_segments: list[Segment] | None,
+        seg_clear: float,
+    ) -> Route | None:
+        """Partner-aware last-resort A* tail (issue #4460).
+
+        Order is deliberately conservative: the UNBIASED probe runs first and
+        is returned unchanged whenever it already keeps the intra-pair
+        clearance, so every tail that was acceptable before this change is
+        byte-identical.  Only a tail that fails that bound triggers the
+        guide-biased re-route, and only a tail that additionally fails the
+        PHYSICAL-overlap bound is discarded outright -- handing the decision
+        back to the caller's anchor-stepping retry instead of emitting copper
+        the self-check gate is guaranteed to reject.
+        """
+
+        def _probe(avoid: list[tuple[float, float]] | None, radius: int) -> Route | None:
+            r = self._single_ended_guide_route(
+                head,
+                goal,
+                per_net_timeout=10.0,
+                avoid_locations=avoid,
+                avoid_radius_cells=radius,
+            )
+            return r if (r is not None and r.segments) else None
+
+        plain = _probe(None, 1)
+        if not partner_segments:
+            return plain
+        if plain is not None and self._tail_partner_clear(plain, partner_segments, seg_clear):
+            return plain
+        biased: Route | None = None
+        sites = self._partner_boost_sites(head, goal, partner_segments, seg_clear)
+        if sites:
+            radius_cells = max(
+                1, int(round(seg_clear / max(self.autorouter.grid.resolution, 1e-9) / 3.0))
+            )
+            biased = _probe(sites, radius_cells)
+            if biased is not None and self._tail_partner_clear(biased, partner_segments, seg_clear):
+                return biased
+        # Neither reaches the coupled clearance: settle for any tail that at
+        # least does not physically overlap the guide (the self-check bound).
+        for cand in (plain, biased):
+            if cand is not None and self._tail_partner_clear(cand, partner_segments, 0.0):
+                return cand
+        return None
+
     def _tail_route(
         self,
         pathfinder: CoupledPathfinder,
@@ -3955,27 +4163,32 @@ class DiffPairRouter:
         in the grid) are rejected geometrically, and a two-via crossing
         tail is attempted before giving up -- the polarity-swap pairs'
         terminal crossover.
+
+        Issue #4460: the last-resort per-net A* fallback is now partner-AWARE
+        too.  The guide is not grid copper, so an unbiased A* tail routes
+        straight along (and through) it; every board-06 shadow ``self-check
+        overlap`` decline was such a tail.  The fallback is therefore
+        re-routed with the guide's neighbourhood cost-boosted and the result
+        is VALIDATED against the partner: a tail that physically overlaps the
+        guide is discarded rather than emitted, which lets the caller's
+        anchor-stepping loop retry from a deeper body anchor instead of
+        spending the attempt on copper the self-check will reject anyway.
         """
-        tail = self._synthesize_tail(pathfinder, head, goal, layer_idx)
-        if tail is not None and partner_segments:
-            seg_clear = self._pair_seg_clearance(pathfinder, head.net_name)
-            for seg in tail.segments:
-                if (
-                    self._min_distance_to_partner(
-                        seg.x1, seg.y1, seg.x2, seg.y2, partner_segments, seg.layer
-                    )
-                    < seg_clear
-                ):
-                    tail = None
-                    break
+        seg_clear = self._pair_seg_clearance(pathfinder, head.net_name) if partner_segments else 0.0
+        tail = self._synthesize_tail(
+            pathfinder,
+            head,
+            goal,
+            layer_idx,
+            partner_segments=partner_segments,
+            partner_clearance=seg_clear,
+        )
         if tail is None and partner_segments:
             tail = self._synthesize_crossing_tail(
                 pathfinder, head, goal, layer_idx, partner_segments
             )
         if tail is None:
-            tail = self._single_ended_guide_route(head, goal, per_net_timeout=10.0)
-            if tail is not None and not tail.segments:
-                tail = None
+            tail = self._fallback_tail_route(head, goal, partner_segments, seg_clear)
         if tail is None:
             print(
                 f"    [coupled-rescue] {label} tail unroutable for {pair_name} "
@@ -4464,6 +4677,68 @@ class DiffPairRouter:
                     continue
                 approaches.append(loc)
         return approaches
+
+    def _debug_shadow_overlap(
+        self,
+        pair_name: str,
+        side: float,
+        violation: IntraPairClearanceViolation,
+        shadow_route: Route,
+        guide: Route,
+        n_start_tail: int,
+        n_body: int,
+        n_end_tail: int,
+        swap_roles: bool,
+    ) -> None:
+        """Print provenance for a shadow self-check overlap (``KCT_SHADOW_DEBUG``)."""
+        shadow_seg = violation.p_segment if swap_roles else violation.n_segment
+        guide_seg = violation.n_segment if swap_roles else violation.p_segment
+
+        def _key(s):
+            return (round(s.x1, 6), round(s.y1, 6), round(s.x2, 6), round(s.y2, 6))
+
+        idx = -1
+        for k, s in enumerate(shadow_route.segments):
+            if _key(s) == _key(shadow_seg):
+                idx = k
+                break
+        if idx < 0:
+            part = "post-quantize(unmatched)"
+        elif idx < n_start_tail:
+            part = f"start-tail[{idx}/{n_start_tail}]"
+        elif idx < n_start_tail + n_body:
+            part = f"body[{idx - n_start_tail}/{n_body}]"
+        else:
+            part = f"end-tail[{idx - n_start_tail - n_body}/{n_end_tail}]"
+        gidx = -1
+        garc = 0.0
+        arc = 0.0
+        for k, s in enumerate(guide.segments):
+            if _key(s) == _key(guide_seg):
+                gidx = k
+                garc = arc
+            arc += math.hypot(s.x2 - s.x1, s.y2 - s.y1)
+        smid = ((shadow_seg.x1 + shadow_seg.x2) / 2, (shadow_seg.y1 + shadow_seg.y2) / 2)
+        # Nearest guide segment (by arc) to the shadow midpoint, to tell an
+        # ADJACENT pinch (the offset's own guide segment) from a NON-ADJACENT
+        # collision (a distant leg of the same guide).
+        best = (float("inf"), -1, 0.0)
+        arc = 0.0
+        for k, s in enumerate(guide.segments):
+            if s.layer == shadow_seg.layer:
+                dd = self._point_segment_distance(smid[0], smid[1], s)
+                if dd < best[0]:
+                    best = (dd, k, arc)
+            arc += math.hypot(s.x2 - s.x1, s.y2 - s.y1)
+        print(
+            f"    [shadow-debug] {pair_name} side={side:+.0f} "
+            f"worst={violation.actual_clearance_mm:+.3f}mm part={part} "
+            f"shadow_seg=({shadow_seg.x1:.3f},{shadow_seg.y1:.3f})->"
+            f"({shadow_seg.x2:.3f},{shadow_seg.y2:.3f}) L={shadow_seg.layer.value} "
+            f"w={shadow_seg.width:.3f} | guide_seg_idx={gidx}/{len(guide.segments)} "
+            f"arc={garc:.2f} | nearest_guide_idx={best[1]} nearest_arc={best[2]:.2f} "
+            f"nearest_d={best[0]:.3f}"
+        )
 
     def _shadow_route_pair(
         self,
@@ -5018,6 +5293,18 @@ class DiffPairRouter:
                     f"other side"
                 )
                 self._last_shadow_decline_reason = "overlap"  # #4459
+                if _SHADOW_DEBUG:
+                    self._debug_shadow_overlap(
+                        pair.name,
+                        side,
+                        violation,
+                        shadow_route,
+                        guide,
+                        len(start_tail.segments),
+                        len([e for e in kept if e[0] == "seg"]),
+                        len(end_tail.segments),
+                        swap_roles,
+                    )
                 # Issue #4460 (approach 2): record WHERE the offset overlapped
                 # the guide so a guide re-route can be biased away from it.  The
                 # midpoint of the two offending segments localises the pinch;

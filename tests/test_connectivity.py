@@ -66,7 +66,7 @@ def test_connected_zone_fill_island_stays_clean(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("relative_board", "expected"),
     [
-        ("boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb", 12),
+        ("boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb", 13),
         ("boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb", 57),
     ],
 )
@@ -165,8 +165,26 @@ def test_board03_connectivity_and_geometry_contracts_native(tmp_path) -> None:
     """The same dual contract on the real committed board-03 artifact.
 
     board-03 is the fleet's canonical case: ``kicad-cli pcb drc
-    --refill-zones`` reports 12 ``unconnected_items`` and 0 geometric
+    --refill-zones`` reports 13 ``unconnected_items`` and 0 geometric
     errors.  kct must report both numbers, on the same board, at once.
+
+    The relationships are asserted **by kind**, because the two kinds mean
+    very different things (issue #4531):
+
+    * **zone <-> zone** -- an orphaned fill island: a puddle of pour copper
+      that no same-net pad reaches.  Cosmetic; the count moves whenever the
+      placement moves, so it is a *measurement* of the committed artifact
+      and is re-baselineable on regeneration.
+    * **pad <-> zone** -- a genuine electrical break: a component pin that
+      the plane no longer reaches.  This is a defect, never a baseline, and
+      MUST stay at zero.  Issue #4450 originally re-seated J2 west without
+      following the VCC island west with it, which stranded ``J2.1`` (the
+      joystick's power pin) as exactly such a relationship while the
+      router still reported 13/13 signal nets and geometric DRC still
+      reported 0 -- neither of those gates can see a pour-served pad.
+      ``kct net-status`` on the committed board must read 16/16 complete.
+
+    Geometric DRC stays at 0, which is the other invariant this test guards.
     """
     import shutil
 
@@ -191,7 +209,23 @@ def test_board03_connectivity_and_geometry_contracts_native(tmp_path) -> None:
     connectivity = ConnectivityValidator(board).validate(reconcile_native=True)
     geometric = run_geometric_drc(board)
 
-    assert len(connectivity.issues) == 12, (
+    # Split the relationships by kind: every island endpoint kicad-cli
+    # reports is either a zone fill ("Zone [NET] on LAYER, ...") or a pad
+    # ("PTH pad 1 [VCC] of J2", "SMD pad ...").
+    def _is_zone(endpoint: str) -> bool:
+        return endpoint.startswith("Zone ")
+
+    endpoints = [tuple(island[0] for island in issue.islands) for issue in connectivity.issues]
+    pad_to_zone = [pair for pair in endpoints if not all(_is_zone(end) for end in pair)]
+    zone_to_zone = [pair for pair in endpoints if all(_is_zone(end) for end in pair)]
+
+    # A pad the plane cannot reach is an unpowered part, not a fill artifact.
+    assert pad_to_zone == [], (
+        "board-03 has pad<->zone connectivity breaks (a pour-served pad is "
+        f"stranded -- check `kct net-status`): {pad_to_zone}"
+    )
+    assert len(zone_to_zone) == 13, f"board-03 orphaned fill islands changed: {len(zone_to_zone)}"
+    assert len(connectivity.issues) == 13, (
         f"board-03 connectivity relationships changed: {len(connectivity.issues)}"
     )
     assert geometric.ran is True, f"geometric DRC did not run: {geometric.note}"

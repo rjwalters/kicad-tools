@@ -385,13 +385,19 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
         "22": "GND",
         "23": "GND",
         "24": "VCC",
-        # Top (pins 25-32): USB belt (matches the routed north-edge order)
+        # Top (pins 25-32): USB belt (matches the routed north-edge order).
+        # Issue #4450 mirrored pins 27-30 when J1 was rotated 180 degrees to
+        # face its plug opening off the north board edge -- the receptacle's
+        # contacts swap sides with the shell, so U1's sink pins follow to
+        # keep the USB stubs parallel and D+/D- length-matched.  MUST stay
+        # identical to ``generate_pcb.py``'s ``pin_nets`` map (#3764
+        # schematic<->PCB netlist reconciliation).
         "25": "GND",
         "26": "VBUS",
-        "27": "USB_CC2",
-        "28": "USB_D-",
-        "29": "USB_D+",
-        "30": "USB_CC1",
+        "27": "USB_CC1",
+        "28": "USB_D+",
+        "29": "USB_D-",
+        "30": "USB_CC2",
         "31": "GND",  # Unused input tied to GND
         "32": "GND",
     }
@@ -437,7 +443,8 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
         "D+": "USB_D+",
         "D-": "USB_D-",
         # CC1/CC2 are distinct configuration-channel nets routed to the
-        # MCU (U1 pins 30/27).  The PCB exposes them as USB_CC1/USB_CC2.
+        # MCU (U1 pins 27/30 post-#4450).  The PCB exposes them as
+        # USB_CC1/USB_CC2.
         "CC1": "USB_CC1",
         "CC2": "USB_CC2",
         # Connector shield tied to GND (PCB S1/S2 mounting tabs -> GND).

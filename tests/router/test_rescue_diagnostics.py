@@ -93,6 +93,61 @@ def test_no_output_produced() -> None:
     assert r.category is RescueFailureCategory.NO_OUTPUT
 
 
+# Real #3911 auto-grid refusal, printed to stderr with exit 1 BEFORE any PCB
+# file is written (so ``output_produced`` is False even though nothing crashed).
+_AUTO_GRID_REFUSAL_STDERR = (
+    "Error: Auto-grid selected 0.1mm, coarser than clearance/2 (0.075mm), "
+    "because the memory budget cap (max_cells=2,000,000) forced a coarser grid.\n"
+    "The router's own safety rule rejects this grid; routing WILL produce "
+    "clearance-violating vias/segments (DRC shorts).\n"
+)
+
+
+def test_cli_refusal_classified_distinct_from_no_output() -> None:
+    """Issue #4528: an auto-grid CLI refusal with no PCB output is CLI_REFUSED.
+
+    The subprocess declined at the #3911 validation gate and exited 1 before
+    routing anything -- it is NOT the crash/OOM ``no_output`` case, even though
+    ``output_produced`` is False.
+    """
+    r = classify_rescue_failure("ISENSE_A+", "", _AUTO_GRID_REFUSAL_STDERR, output_produced=False)
+    assert r.category is RescueFailureCategory.CLI_REFUSED
+    assert r.category is not RescueFailureCategory.NO_OUTPUT
+    # The real router line is surfaced instead of a fabricated crash/OOM label.
+    assert "Auto-grid selected 0.1mm" in r.detail
+
+
+def test_cli_refusal_signature_on_stdout_also_matches() -> None:
+    """The signature is checked against combined stdout+stderr."""
+    r = classify_rescue_failure("PWM_CL", _AUTO_GRID_REFUSAL_STDERR, "", output_produced=False)
+    assert r.category is RescueFailureCategory.CLI_REFUSED
+
+
+def test_genuine_no_output_still_classifies_as_no_output() -> None:
+    """Issue #4528 regression guard: empty output + no refusal signature is a
+    genuine crash/OOM-before-save and must keep the NO_OUTPUT label."""
+    r = classify_rescue_failure("ISENSE_C-", "", "", output_produced=False)
+    assert r.category is RescueFailureCategory.NO_OUTPUT
+    # A partial-but-unrelated log with no refusal signature is also NO_OUTPUT.
+    r2 = classify_rescue_failure(
+        "ISENSE_C-", "some unrelated crash traceback\n", "", output_produced=False
+    )
+    assert r2.category is RescueFailureCategory.NO_OUTPUT
+
+
+def test_format_rescue_reason_table_renders_cli_refused() -> None:
+    """Issue #4528: the new CLI_REFUSED category renders (label + detail)."""
+    reason = classify_rescue_failure(
+        "ISENSE_A+", "", _AUTO_GRID_REFUSAL_STDERR, output_produced=False
+    )
+    table = format_rescue_reason_table([reason])
+    assert "ISENSE_A+" in table
+    assert "cli_refused" in table
+    assert "CLI refused" in table
+    # Not mislabeled as a crash/OOM no-output case.
+    assert "no_output" not in table
+
+
 def test_unknown_when_no_signature() -> None:
     r = classify_rescue_failure("FOO", "some unrelated log line\n", "", output_produced=True)
     assert r.category is RescueFailureCategory.UNKNOWN

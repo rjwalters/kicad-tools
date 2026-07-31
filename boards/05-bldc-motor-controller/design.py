@@ -3127,6 +3127,15 @@ _RESCUE_EXCLUDED_NETS = frozenset(
 #     PR #3886).  Re-enable deterministic_budget here only together with the
 #     main pass, once a CI-terminating iteration ceiling is measured.
 #   * 4-layer, cpp backend, jlcpcb-tier1 -- same as the main pass.
+#   * ``allow_unsafe_grid=True`` (Issue #4528): the main pass opts into the
+#     memory-forced 0.1mm coarse grid via ``--allow-unsafe-grid`` (see the
+#     long #3911 comment on the main-pass ``cmd`` above, ~line 3053).  Every
+#     rescue knob is supposed to match the main pass, and this one was silently
+#     missing: without it ``kct route`` refuses the same grid at its #3911
+#     safety gate and every rescue subprocess exits 1 BEFORE routing anything,
+#     so the whole solo rescue loop reported bogus ``no_output`` failures for
+#     8/8 nets and had been dead since #3911 landed.  Board 05 knowingly
+#     accepts the coarse-grid DRC risk here exactly as it does on the main pass.
 _RESCUE_CONFIG = RescueConfig(
     manufacturer="jlcpcb-tier1",
     backend="cpp",
@@ -3137,6 +3146,7 @@ _RESCUE_CONFIG = RescueConfig(
     max_layers=4,
     excluded_nets=_RESCUE_EXCLUDED_NETS,
     micro_via_in_pad_fallback=True,
+    allow_unsafe_grid=True,
 )
 
 

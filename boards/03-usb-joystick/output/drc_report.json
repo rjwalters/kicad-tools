@@ -1,12 +1,13 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.claude/worktrees/agent-ad6fa686b6d3e80e2/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-4450/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 2,
   "summary": {
     "errors": 0,
-    "warnings": 20,
+    "warnings": 18,
     "infos": 2,
-    "rules_checked": 34,
+    "waived": 0,
+    "rules_checked": 36,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -17,36 +18,6 @@
     "passed": true
   },
   "violations": [
-    {
-      "rule_id": "copper_sliver",
-      "type": "copper_sliver",
-      "severity": "warning",
-      "message": "Copper sliver on F.Cu: region narrower than minimum copper width 0.127mm (approx width 0.085mm, area 0.1942mm^2)",
-      "location": [
-        38.266,
-        38.867
-      ],
-      "layer": "F.Cu",
-      "actual_value": 0.0852,
-      "required_value": 0.127,
-      "items": [],
-      "nets": []
-    },
-    {
-      "rule_id": "copper_sliver",
-      "type": "copper_sliver",
-      "severity": "warning",
-      "message": "Copper sliver on F.Cu: region narrower than minimum copper width 0.127mm (approx width 0.032mm, area 0.0665mm^2)",
-      "location": [
-        29.0,
-        33.258
-      ],
-      "layer": "F.Cu",
-      "actual_value": 0.0319,
-      "required_value": 0.127,
-      "items": [],
-      "nets": []
-    },
     {
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
@@ -60,56 +31,26 @@
       "nets": [
         "USB_D+",
         "USB_D-"
-      ]
+      ],
+      "status": "info",
+      "waived": false
     },
     {
       "rule_id": "diffpair_routing_continuity",
       "type": "diffpair_routing_continuity",
       "severity": "info",
-      "message": "Engaged differential pair USB_D+/USB_D- coupled 92.5% of its length (>= 70.0% required)",
+      "message": "Engaged differential pair USB_D+/USB_D- coupled 92.7% of its length (>= 70.0% required)",
       "location": null,
       "layer": null,
-      "actual_value": 0.9253,
+      "actual_value": 0.9275,
       "required_value": 0.7,
       "items": [],
       "nets": [
         "USB_D+",
         "USB_D-"
-      ]
-    },
-    {
-      "rule_id": "silkscreen_text_height",
-      "type": "silkscreen_text_height",
-      "severity": "warning",
-      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C6",
-      "location": [
-        24.439999999999998,
-        26.0
       ],
-      "layer": "F.SilkS",
-      "actual_value": 0.5,
-      "required_value": 1.0,
-      "items": [
-        "C6 (reference)"
-      ],
-      "nets": []
-    },
-    {
-      "rule_id": "silkscreen_text_height",
-      "type": "silkscreen_text_height",
-      "severity": "warning",
-      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C5",
-      "location": [
-        19.560000000000002,
-        26.0
-      ],
-      "layer": "F.SilkS",
-      "actual_value": 0.5,
-      "required_value": 1.0,
-      "items": [
-        "C5 (reference)"
-      ],
-      "nets": []
+      "status": "info",
+      "waived": false
     },
     {
       "rule_id": "silkscreen_text_height",
@@ -117,8 +58,8 @@
       "severity": "warning",
       "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C10",
       "location": [
-        29.0,
-        32.5
+        137.5,
+        90.0
       ],
       "layer": "F.SilkS",
       "actual_value": 0.5,
@@ -126,7 +67,9 @@
       "items": [
         "C10 (reference)"
       ],
-      "nets": []
+      "nets": [],
+      "status": "warning",
+      "waived": false
     },
     {
       "rule_id": "silkscreen_text_height",
@@ -134,8 +77,8 @@
       "severity": "warning",
       "message": "Silkscreen text height 0.50mm < minimum 1.00mm on R11",
       "location": [
-        27.0,
-        34.0
+        135.5,
+        91.5
       ],
       "layer": "F.SilkS",
       "actual_value": 0.5,
@@ -143,92 +86,9 @@
       "items": [
         "R11 (reference)"
       ],
-      "nets": []
-    },
-    {
-      "rule_id": "silkscreen_text_height",
-      "type": "silkscreen_text_height",
-      "severity": "warning",
-      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on SW2",
-      "location": [
-        35.0,
-        52.0
-      ],
-      "layer": "F.SilkS",
-      "actual_value": 0.8,
-      "required_value": 1.0,
-      "items": [
-        "SW2 (reference)"
-      ],
-      "nets": []
-    },
-    {
-      "rule_id": "silkscreen_text_height",
-      "type": "silkscreen_text_height",
-      "severity": "warning",
-      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C11",
-      "location": [
-        29.0,
-        34.0
-      ],
-      "layer": "F.SilkS",
-      "actual_value": 0.5,
-      "required_value": 1.0,
-      "items": [
-        "C11 (reference)"
-      ],
-      "nets": []
-    },
-    {
-      "rule_id": "silkscreen_text_height",
-      "type": "silkscreen_text_height",
-      "severity": "warning",
-      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on SW4",
-      "location": [
-        65.0,
-        52.0
-      ],
-      "layer": "F.SilkS",
-      "actual_value": 0.8,
-      "required_value": 1.0,
-      "items": [
-        "SW4 (reference)"
-      ],
-      "nets": []
-    },
-    {
-      "rule_id": "silkscreen_text_height",
-      "type": "silkscreen_text_height",
-      "severity": "warning",
-      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on R10",
-      "location": [
-        27.0,
-        32.5
-      ],
-      "layer": "F.SilkS",
-      "actual_value": 0.5,
-      "required_value": 1.0,
-      "items": [
-        "R10 (reference)"
-      ],
-      "nets": []
-    },
-    {
-      "rule_id": "silkscreen_text_height",
-      "type": "silkscreen_text_height",
-      "severity": "warning",
-      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C2",
-      "location": [
-        48.0,
-        28.0
-      ],
-      "layer": "F.SilkS",
-      "actual_value": 0.5,
-      "required_value": 1.0,
-      "items": [
-        "C2 (reference)"
-      ],
-      "nets": []
+      "nets": [],
+      "status": "warning",
+      "waived": false
     },
     {
       "rule_id": "silkscreen_text_height",
@@ -236,8 +96,8 @@
       "severity": "warning",
       "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C4",
       "location": [
-        46.0,
-        12.0
+        154.5,
+        69.5
       ],
       "layer": "F.SilkS",
       "actual_value": 0.5,
@@ -245,75 +105,104 @@
       "items": [
         "C4 (reference)"
       ],
-      "nets": []
+      "nets": [],
+      "status": "warning",
+      "waived": false
     },
     {
       "rule_id": "silkscreen_text_height",
       "type": "silkscreen_text_height",
       "severity": "warning",
-      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on SW1",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C11",
       "location": [
-        20.0,
-        52.0
-      ],
-      "layer": "F.SilkS",
-      "actual_value": 0.8,
-      "required_value": 1.0,
-      "items": [
-        "SW1 (reference)"
-      ],
-      "nets": []
-    },
-    {
-      "rule_id": "silkscreen_text_height",
-      "type": "silkscreen_text_height",
-      "severity": "warning",
-      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C3",
-      "location": [
-        40.0,
-        42.0
+        137.5,
+        91.5
       ],
       "layer": "F.SilkS",
       "actual_value": 0.5,
       "required_value": 1.0,
       "items": [
-        "C3 (reference)"
+        "C11 (reference)"
       ],
-      "nets": []
+      "nets": [],
+      "status": "warning",
+      "waived": false
     },
     {
       "rule_id": "silkscreen_text_height",
       "type": "silkscreen_text_height",
       "severity": "warning",
-      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on Y1",
+      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on SW2",
       "location": [
-        22.0,
-        30.0
+        143.5,
+        109.5
       ],
       "layer": "F.SilkS",
       "actual_value": 0.8,
       "required_value": 1.0,
       "items": [
-        "Y1 (reference)"
+        "SW2 (reference)"
       ],
-      "nets": []
+      "nets": [],
+      "status": "warning",
+      "waived": false
     },
     {
       "rule_id": "silkscreen_text_height",
       "type": "silkscreen_text_height",
       "severity": "warning",
-      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on SW3",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C5",
       "location": [
-        50.0,
-        52.0
+        128.06,
+        83.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "C5 (reference)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on SW4",
+      "location": [
+        173.5,
+        109.5
       ],
       "layer": "F.SilkS",
       "actual_value": 0.8,
       "required_value": 1.0,
       "items": [
-        "SW3 (reference)"
+        "SW4 (reference)"
       ],
-      "nets": []
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C6",
+      "location": [
+        132.94,
+        83.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "C6 (reference)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
     },
     {
       "rule_id": "silkscreen_text_height",
@@ -321,8 +210,8 @@
       "severity": "warning",
       "message": "Silkscreen text height 0.50mm < minimum 1.00mm on R12",
       "location": [
-        27.0,
-        40.0
+        135.5,
+        97.5
       ],
       "layer": "F.SilkS",
       "actual_value": 0.5,
@@ -330,7 +219,85 @@
       "items": [
         "R12 (reference)"
       ],
-      "nets": []
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on Y1",
+      "location": [
+        130.5,
+        87.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.8,
+      "required_value": 1.0,
+      "items": [
+        "Y1 (reference)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C3",
+      "location": [
+        148.5,
+        99.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "C3 (reference)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on R10",
+      "location": [
+        135.5,
+        90.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "R10 (reference)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on SW3",
+      "location": [
+        158.5,
+        109.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.8,
+      "required_value": 1.0,
+      "items": [
+        "SW3 (reference)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
     },
     {
       "rule_id": "silkscreen_text_height",
@@ -338,8 +305,8 @@
       "severity": "warning",
       "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C1",
       "location": [
-        32.0,
-        28.0
+        140.5,
+        85.5
       ],
       "layer": "F.SilkS",
       "actual_value": 0.5,
@@ -347,43 +314,87 @@
       "items": [
         "C1 (reference)"
       ],
-      "nets": []
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C2",
+      "location": [
+        156.5,
+        85.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "C2 (reference)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on SW1",
+      "location": [
+        128.5,
+        109.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.8,
+      "required_value": 1.0,
+      "items": [
+        "SW1 (reference)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
     },
     {
       "rule_id": "silk_over_copper",
       "type": "silk_over_copper",
       "severity": "warning",
-      "message": "Silkscreen R11 (reference) overlaps exposed copper of R10 pad 1",
+      "message": "Silkscreen R11 (reference) overlaps exposed copper of R10 pad 2",
       "location": [
-        27.0,
-        32.8
+        135.5,
+        90.3
       ],
       "layer": "F.SilkS",
       "actual_value": null,
       "required_value": null,
       "items": [
         "R11 (reference)",
-        "R10 pad 1"
+        "R10 pad 2"
       ],
-      "nets": []
+      "nets": [],
+      "status": "warning",
+      "waived": false
     },
     {
       "rule_id": "silk_over_copper",
       "type": "silk_over_copper",
       "severity": "warning",
-      "message": "Silkscreen C11 (reference) overlaps exposed copper of C10 pad 1",
+      "message": "Silkscreen C11 (reference) overlaps exposed copper of C10 pad 2",
       "location": [
-        29.0,
-        32.8
+        137.5,
+        90.3
       ],
       "layer": "F.SilkS",
       "actual_value": null,
       "required_value": null,
       "items": [
         "C11 (reference)",
-        "C10 pad 1"
+        "C10 pad 2"
       ],
-      "nets": []
+      "nets": [],
+      "status": "warning",
+      "waived": false
     }
   ]
 }

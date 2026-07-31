@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,10 @@ from kicad_tools.optim.edge_placement import (
     BoardEdges,
     EdgeConstraint,
     compute_edge_force,
+    compute_edge_orientation_torque,
     detect_edge_components,
+    edge_orientation_potential_energy,
+    mating_face_misalignment_deg,
 )
 from kicad_tools.optim.geometry import Polygon, Vector2D
 from kicad_tools.optim.thermal import (
@@ -185,6 +189,7 @@ class PlacementOptimizer:
         record_decisions: bool = False,
         perf_config: PerformanceConfig | None = None,
         allow_estimated_outline: bool = False,
+        mating_faces: Mapping[str, float] | None = None,
     ) -> PlacementOptimizer:
         """
         Create optimizer from a loaded PCB.
@@ -208,6 +213,11 @@ class PlacementOptimizer:
                 off-board (issue #3804). When False (the default) an
                 unparseable Edge.Cuts raises ``ValueError`` so the failure is
                 visible rather than silently producing a bogus boundary.
+            mating_faces: Optional ``{reference: mating_face_offset_deg}`` map
+                forwarded to ``edge_detect`` so auto-detected connectors are
+                also rotated to face off-board (issue #4450). Ignored when
+                ``edge_detect`` is False; references not in the map keep the
+                translation-only edge behavior.
 
         Raises:
             ValueError: If the board outline cannot be parsed from Edge.Cuts
@@ -367,7 +377,7 @@ class PlacementOptimizer:
         all_constraints: list[EdgeConstraint] = []
 
         if edge_detect:
-            all_constraints.extend(detect_edge_components(pcb))
+            all_constraints.extend(detect_edge_components(pcb, mating_faces=mating_faces))
 
         if edge_constraints:
             all_constraints.extend(edge_constraints)
@@ -1801,6 +1811,24 @@ class PlacementOptimizer:
                 )
                 forces[comp.ref] = forces[comp.ref] + edge_force
 
+                # Edge ORIENTATION torque (issue #4450): pulling an off-board
+                # connector to the perimeter is not enough -- a USB-C mouth
+                # facing the board interior still cannot accept a cable.  When
+                # the constraint carries a mating-face hint, add a torsion
+                # spring that turns the mating face along the assigned edge's
+                # outward normal.  Summed alongside the 90-degree
+                # rotation-potential torque above (both have a well at every
+                # cardinal orientation, so they agree at the solution).
+                # Constraints without a hint contribute exactly 0.0, keeping
+                # pre-#4450 edge constraints translation-only.
+                orientation_torque, _ = compute_edge_orientation_torque(
+                    comp,
+                    constraint,
+                    self.board_edges,
+                    stiffness=self.config.edge_orientation_stiffness,
+                )
+                torques[comp.ref] += orientation_torque
+
         return forces, torques
 
     def compute_forces(self) -> dict[str, Vector2D]:
@@ -1903,6 +1931,24 @@ class PlacementOptimizer:
         for comp in self.components:
             if not comp.fixed:
                 potential += comp.rotation_potential_energy(self.config.rotation_stiffness)
+
+        # Edge-orientation potential energy (issue #4450).  Without this term
+        # ``run()`` -- whose convergence test reads energy plus LINEAR velocity
+        # only -- declares the system settled while an edge connector is still
+        # mid-flip, freezing it with its mating face pointing at the board
+        # interior.  Contributes exactly 0.0 for edge constraints with no
+        # mating-face hint, so hintless boards see an unchanged energy trace.
+        for comp in self.components:
+            if comp.fixed:
+                continue
+            constraint = self._edge_constraints.get(comp.ref)
+            if constraint is not None:
+                potential += edge_orientation_potential_energy(
+                    comp,
+                    constraint,
+                    self.board_edges,
+                    stiffness=self.config.edge_orientation_stiffness,
+                )
 
         return kinetic + potential
 
@@ -2076,6 +2122,17 @@ class PlacementOptimizer:
         """
         Snap all component rotations to nearest grid angle.
 
+        Edge-constrained components carrying a ``mating_face_offset_deg`` hint
+        snap to the grid angle that points their mating face **off-board**
+        rather than to the nearest one (issue #4450).  Snapping is where a
+        continuous rotation becomes a discrete manufacturing decision, so it
+        is also where the off-board-facing requirement must be resolved: the
+        board boundary's own alignment torque has equal-depth wells 180
+        degrees apart (a rectangle looks the same either way round), so the
+        soft orientation torque alone can leave a connector resting in the
+        mouth-inward well.  Choosing the outward grid slot here makes the
+        outcome deterministic instead of dependent on how far the torque got.
+
         Args:
             grid: Rotation grid in degrees (default: config.rotation_grid)
         """
@@ -2086,11 +2143,43 @@ class PlacementOptimizer:
         for comp in self.components:
             if comp.fixed:
                 continue
-            # Snap to nearest grid angle
-            slot = round(comp.rotation / grid) * grid % 360
+            constraint = self._edge_constraints.get(comp.ref)
+            if constraint is not None and constraint.mating_face_offset_deg is not None:
+                slot = self._outward_facing_slot(comp, constraint, grid)
+            else:
+                # Snap to nearest grid angle
+                slot = round(comp.rotation / grid) * grid % 360
             comp.rotation = slot
             comp.angular_velocity = 0.0
             comp.update_pin_positions()
+
+    def _outward_facing_slot(
+        self, comp: Component, constraint: EdgeConstraint, grid: float
+    ) -> float:
+        """Grid angle whose mating face best matches the edge's outward normal.
+
+        Ties (e.g. a 90-degree grid with a 45-degree-off normal) break toward
+        the slot nearest the component's current rotation, so the choice stays
+        stable across repeated snaps.
+        """
+        slots = [i * grid % 360 for i in range(max(1, int(round(360.0 / grid))))]
+        original = comp.rotation
+
+        best_slot = slots[0]
+        best_key = None
+        for slot in slots:
+            comp.rotation = slot
+            delta = mating_face_misalignment_deg(comp, constraint, self.board_edges)
+            misalignment = abs(delta) if delta is not None else 0.0
+            # Distance from the pre-snap rotation, as the tie-break.
+            drift = abs((slot - original + 180.0) % 360.0 - 180.0)
+            key = (round(misalignment, 6), drift)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_slot = slot
+
+        comp.rotation = original
+        return best_slot
 
     def snap_positions(self, grid: float | None = None):
         """

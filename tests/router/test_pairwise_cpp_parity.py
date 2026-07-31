@@ -510,6 +510,149 @@ def test_backend_sync_is_noop_without_voltage_map() -> None:
 
 
 @requires_cpp
+def test_backend_reinstalls_domains_after_net_id_remap() -> None:
+    """Issue #4530: a net-id remap mid-session must re-push the rebuilt payload.
+
+    ``Grid3D::pairwise_active_`` latches ``True`` after the first install and
+    never resets on the same grid, so before the fix the second (rebuilt)
+    payload was silently never pushed -- the new ids reported ``0.0`` and the
+    stale old ids kept their phantom widening.  This mirrors repro case 1 in the
+    issue body.
+    """
+    py_grid, rules = _backend_grid_and_rules()
+    rules.pairwise_clearance = _table()
+    cpp_grid = CppGrid.from_routing_grid(py_grid)
+    backend = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+
+    backend.set_net_name_to_id({"/AC_LINE": 1, "/GND": 2})
+    backend._sync_pairwise_domains_to_cpp()
+    assert cpp_grid._impl.pairwise_active is True
+    assert cpp_grid._impl.pairwise_required_clearance(1, 2) == pytest.approx(IEC_150V_PD2_IIIA_MM)
+
+    # Renumber the same nets: the rebuilt payload must reach the C++ grid even
+    # though ``pairwise_active`` is already ``True`` from the first push.
+    backend.set_net_name_to_id({"/AC_LINE": 7, "/GND": 8})
+    backend._sync_pairwise_domains_to_cpp()
+
+    # New ids now carry the widening (this is the assertion that fails today,
+    # returning 0.0 instead of 1.6).
+    assert cpp_grid._impl.pairwise_required_clearance(7, 8) == pytest.approx(IEC_150V_PD2_IIIA_MM)
+    # And the old ids no longer report phantom widening (the stale-values half).
+    assert cpp_grid._impl.pairwise_required_clearance(1, 2) == pytest.approx(0.0)
+
+
+@requires_cpp
+def test_backend_reinstalls_attach_zones_after_mid_session_change() -> None:
+    """Issue #4530: recomputing attach zones after a validate must re-push them.
+
+    ``set_attach_zones()`` has its own invalidation path independent of the
+    net-map setter; a zone recomputed mid-session (after the first sync has
+    already latched ``pairwise_active``) must still install on the live grid.
+    """
+    py_grid, rules = _backend_grid_and_rules()
+    rules.pairwise_clearance = _table()
+    cpp_grid = CppGrid.from_routing_grid(py_grid)
+    backend = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+    backend.set_net_name_to_id(dict(NET_NAMES))
+
+    backend.set_attach_zones((AttachZone(0.0, -1.0, 5.0, 1.0, frozenset({"AC_LINE", "GND"})),))
+    backend._sync_pairwise_domains_to_cpp()
+    assert cpp_grid._impl.pairwise_active is True
+    assert cpp_grid._impl.attach_zone_exempts(2.5, 0.0, HV_NET, LV_NET) is True
+    assert cpp_grid._impl.attach_zone_exempts(15.0, 15.0, HV_NET, LV_NET) is False
+
+    # Move the rated footprint's zone; the new zone must install even though
+    # ``pairwise_active`` latched ``True`` on the first sync.
+    backend.set_attach_zones((AttachZone(10.0, 10.0, 20.0, 20.0, frozenset({"AC_LINE", "GND"})),))
+    backend._sync_pairwise_domains_to_cpp()
+    assert cpp_grid._impl.attach_zone_count == 1
+    assert cpp_grid._impl.attach_zone_exempts(15.0, 15.0, HV_NET, LV_NET) is True
+    assert cpp_grid._impl.attach_zone_exempts(2.5, 0.0, HV_NET, LV_NET) is False
+
+
+class _CountingImpl:
+    """Wraps the real C++ grid impl to count pairwise/zone push calls."""
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.domain_pushes = 0
+        self.zone_pushes = 0
+
+    @property
+    def pairwise_active(self):
+        return self._real.pairwise_active
+
+    def set_pairwise_domains(self, net_to_domain, matrix):
+        self.domain_pushes += 1
+        return self._real.set_pairwise_domains(net_to_domain, matrix)
+
+    def set_attach_zones(self, zones):
+        self.zone_pushes += 1
+        return self._real.set_attach_zones(zones)
+
+
+@requires_cpp
+def test_backend_sync_pushes_once_per_distinct_payload() -> None:
+    """Issue #4530 steady state: repeated syncs push exactly once per payload.
+
+    Guards against a naive fix that unconditionally re-pushes on every
+    ``_sync_pairwise_domains_to_cpp()`` (i.e. every ``validate_route``), which
+    would regress the hot path ``Autorouter._prepare_routing()`` exercises with
+    an identical net map on every pass.
+    """
+    py_grid, rules = _backend_grid_and_rules()
+    rules.pairwise_clearance = _table()
+    cpp_grid = CppGrid.from_routing_grid(py_grid)
+    backend = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+    # Intercept the C++ push calls after construction so the counter sees only
+    # the syncs under test.
+    spy = _CountingImpl(cpp_grid._impl)
+    cpp_grid._impl = spy
+    backend.set_net_name_to_id(dict(NET_NAMES))
+
+    backend._sync_pairwise_domains_to_cpp()
+    backend._sync_pairwise_domains_to_cpp()
+    backend._sync_pairwise_domains_to_cpp()
+    assert spy.domain_pushes == 1
+    assert spy.zone_pushes == 1
+
+    # A materially different mapping triggers exactly one additional push, not
+    # one per subsequent sync.
+    backend.set_net_name_to_id({"/AC_LINE": 7, "/GND": 8})
+    backend._sync_pairwise_domains_to_cpp()
+    backend._sync_pairwise_domains_to_cpp()
+    assert spy.domain_pushes == 2
+    assert spy.zone_pushes == 2
+
+
+@requires_cpp
+def test_backend_sync_dormant_payload_never_touches_grid() -> None:
+    """Issue #4530: a rebuilt-but-``False`` payload must not flip the flag.
+
+    When there is no widening pair (all nets equal potential), the payload
+    resolves to ``False`` and the early-return must leave both the C++ grid and
+    ``_pairwise_cpp_installed`` untouched -- byte-identical pre-#4510 behaviour.
+    """
+    py_grid, rules = _backend_grid_and_rules()
+    # A flat voltage map -> build_cpp_domain_matrix returns None -> payload False.
+    rules.pairwise_clearance = build_pairwise_clearance_table(
+        {"/AC_LINE": 0.0, "/GND": 0.0}, dru=DRU
+    )
+    cpp_grid = CppGrid.from_routing_grid(py_grid)
+    backend = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+    spy = _CountingImpl(cpp_grid._impl)
+    cpp_grid._impl = spy
+    backend.set_net_name_to_id({"/AC_LINE": 1, "/GND": 2})
+
+    backend._sync_pairwise_domains_to_cpp()
+    assert backend._pairwise_cpp_payload is False
+    assert backend._pairwise_cpp_installed is False
+    assert spy.domain_pushes == 0
+    assert spy.zone_pushes == 0
+    assert spy.pairwise_active is False
+
+
+@requires_cpp
 def test_backend_validate_route_rejects_hv_trace_beside_lv_pad() -> None:
     """End-to-end: the C++ matrix catches a pad the Python post-check cannot.
 
