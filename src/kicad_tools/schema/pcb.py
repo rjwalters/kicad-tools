@@ -295,10 +295,15 @@ class Pad:
             return
         at_node = sexp_node.find_child("at")
         if at_node is not None:
+            # ``rotation`` is always numeric; narrow to ``float`` so the SExp
+            # mutators receive their declared ``float`` type rather than the
+            # ``object`` of ``__setattr__``'s signature (keeps mypy at baseline,
+            # matching ``Footprint.__setattr__``'s already-baselined pattern).
+            angle = float(value)  # type: ignore[arg-type]
             if len(at_node.children) >= 3:
-                at_node.set_value(2, value)
-            elif value != 0.0:
-                at_node.add(value)
+                at_node.set_value(2, angle)
+            elif angle != 0.0:
+                at_node.add(angle)
 
     @property
     def net(self) -> int:

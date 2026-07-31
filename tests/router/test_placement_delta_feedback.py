@@ -631,7 +631,18 @@ class TestComposedDeltaFeedbackIntegration:
         from kicad_tools.router.core import Autorouter
         from kicad_tools.router.layers import Layer
 
-        router = Autorouter(width=20, height=20)
+        # Bound each per-net A* to a fixed node-expansion budget (issue #3881).
+        # The BOX net is deliberately unroutable (boxed in by its own copper);
+        # without a cap the C++ pathfinder gives up and falls back to pure-Python
+        # A*, which exhaustively scans the grid and blows past CI's 60s per-test
+        # timeout (10-100x slower -- the fallback path from the #3438 loop).  A
+        # positive ``per_net_iterations`` makes the C++ search give up
+        # DETERMINISTICALLY at the cap (returning FAILURE_ITERATION_LIMIT) and
+        # tells the loop to SKIP the Python fallback for the capped net -- so BOX
+        # still fails (the loop reaches the apply/keep-or-revert branch as
+        # intended) but does so in milliseconds, machine-independently.  20k is
+        # far more than the short straight N1 net needs to route.
+        router = Autorouter(width=20, height=20, per_net_iterations=20_000)
         for fp in pcb.footprints:
             # KiCad applies footprint orientation as a negated angle vs standard
             # CCW math (see router/io.py::route_pcb); mirror that so the router's
