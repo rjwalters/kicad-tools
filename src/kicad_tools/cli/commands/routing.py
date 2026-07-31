@@ -524,9 +524,17 @@ def run_route_command(args) -> int:
     # Issue #2388: --auto-layers is now enabled by default.  Forward only
     # the user's explicit choice (so the default takes effect when neither
     # is passed and --no-auto-layers is honored when disabled).
-    auto_layers_attr = getattr(args, "auto_layers", True)
+    # Issue #4502: the outer parser is tri-state (default=None), so an
+    # explicit ``--auto-layers`` is now distinguishable from "unset" and
+    # must be forwarded literally -- the inner argv-sniffing sites
+    # (_apply_complete_mode_defaults, and the --auto-layers/--layers
+    # conflict check) key off the token being present in this sub_argv.
+    auto_layers_attr = getattr(args, "auto_layers", None)
     if auto_layers_attr is False:
         sub_argv.append("--no-auto-layers")
+    elif auto_layers_attr is True:
+        sub_argv.append("--auto-layers")
+    # None (unset): forward nothing; the inner parser's own default=True applies.
     if getattr(args, "max_layers", 6) != 6:
         sub_argv.extend(["--max-layers", str(args.max_layers)])
     # Issue #3400: forward --starting-layers when explicitly supplied.

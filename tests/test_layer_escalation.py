@@ -15,9 +15,9 @@ class TestLayerEscalationCLIParameters:
     """Tests for --auto-layers parameter handling in route command."""
 
     def test_auto_layers_default_not_forwarded(self):
-        """auto-layers is the default (Issue #2388) so it is NOT forwarded
-        to the underlying CLI when set to True; --no-auto-layers IS
-        forwarded when explicitly disabled."""
+        """auto-layers unset (Issue #4502 tri-state ``None``) is NOT forwarded
+        to the underlying CLI; the inner parser's own ``default=True`` applies.
+        --no-auto-layers IS forwarded when explicitly disabled."""
         from kicad_tools.cli.commands.routing import run_route_command
 
         args = SimpleNamespace(
@@ -39,7 +39,7 @@ class TestLayerEscalationCLIParameters:
             layers="auto",
             force=False,
             no_optimize=False,
-            auto_layers=True,  # default value
+            auto_layers=None,  # unset (outer parser default, Issue #4502)
             max_layers=6,
             min_completion=0.95,
         )
@@ -49,8 +49,49 @@ class TestLayerEscalationCLIParameters:
             run_route_command(args)
 
             call_args = mock_main.call_args[0][0]
-            # Default value: do not forward (the underlying CLI also defaults to True).
+            # Unset: do not forward (the underlying CLI also defaults to True).
             assert "--auto-layers" not in call_args
+            assert "--no-auto-layers" not in call_args
+
+    def test_explicit_auto_layers_forwarded_when_enabled(self):
+        """--auto-layers is forwarded when auto_layers=True (Issue #4502).
+
+        With the outer parser's tri-state default, ``True`` means the user
+        explicitly typed ``--auto-layers``; the token must reach the inner
+        argv so route_cmd's argv-sniffing sites can observe the override.
+        """
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            output=None,
+            strategy="negotiated",
+            skip_nets=None,
+            grid=0.25,
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            mc_trials=10,
+            iterations=15,
+            verbose=False,
+            dry_run=True,
+            quiet=True,
+            power_nets=None,
+            layers="auto",
+            force=False,
+            no_optimize=False,
+            auto_layers=True,  # user explicitly enabled
+            max_layers=6,
+            min_completion=0.95,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--auto-layers" in call_args
             assert "--no-auto-layers" not in call_args
 
     def test_no_auto_layers_forwarded_when_disabled(self):

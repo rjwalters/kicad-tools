@@ -3513,10 +3513,19 @@ def _add_route_parser(subparsers) -> None:
         dest="no_optimize",
         help="Alias for --no-optimize (keep raw grid-step segments for debugging)",
     )
+    # Issue #4502: tri-state default.  ``BooleanOptionalAction`` with
+    # ``default=True`` collapses "user typed --auto-layers" and "user typed
+    # nothing" into the same ``True``, so ``run_route_command`` could never
+    # forward an explicit ``--auto-layers`` to the inner parser -- and the
+    # inner argv-sniffing sites (``_apply_complete_mode_defaults`` and the
+    # ``--auto-layers``/``--layers`` conflict check) were blind to it.  With
+    # ``default=None`` the value is True only when explicitly enabled, False
+    # only when explicitly disabled, and None when unset; the inner
+    # route_cmd parser remains the canonical owner of the ``True`` default.
     route_parser.add_argument(
         "--auto-layers",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help=(
             "Automatically escalate layer count on routing failure "
             "(default: enabled). Tries 2 -> 4 -> 6 layers until routing "
