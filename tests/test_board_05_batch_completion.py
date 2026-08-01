@@ -17,7 +17,12 @@ finished nets stay protected.
 These are cheap static (AST) guards -- KiCad-independent, no routing -- that
 pin the wiring and its ordering.  The routing outcome itself is asserted by
 the ``board-05-routing-regression`` CI job
-(``scripts/ci/check_board_05_blocking.py --max-blocking 11``).
+(``scripts/ci/check_board_05_blocking.py --max-blocking 7``).
+
+This module also guards the #3912 exit-code gate: ``main()`` must call
+``evaluate_pipeline_gate(...)`` with ``route_allowance=0`` (a literal ``0``)
+so a PARTIAL route makes ``design.py`` exit non-zero instead of silently
+shipping a worse board (Issue #4479).
 """
 
 from __future__ import annotations
@@ -148,6 +153,46 @@ def test_completion_config_keeps_the_board_rescue_knobs() -> None:
         assert f"{knob}=" not in source, (
             f"_COMPLETION_CONFIG must not override {knob} (Issue #4476 keeps "
             "board-05's rescue knobs unchanged)."
+        )
+
+
+def test_main_pipeline_gate_pins_route_allowance_zero() -> None:
+    """The #3912 exit-code gate must keep ``route_allowance=0`` (a literal 0).
+
+    ``main()`` calls ``evaluate_pipeline_gate(...)`` (design.py ~line 3832)
+    with ``route_allowance=0`` so a PARTIAL route makes ``design.py`` exit
+    non-zero rather than silently shipping a board worse than the committed
+    0-blocking artifact.  Pinning the *literal* ``0`` -- not a variable that
+    could be reassigned elsewhere -- turns "verify the gate holds" into a
+    durable regression guard: any future edit that loosens the allowance to
+    tolerate PARTIAL (a non-zero literal, or a mutable name) fails CI
+    immediately (Issue #4479, #3912).
+    """
+    fn = _main_fn(_design_tree())
+    gate_calls = [
+        node
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "evaluate_pipeline_gate"
+    ]
+    assert gate_calls, (
+        "main() must call evaluate_pipeline_gate() -- the #3912 exit-code gate "
+        "that fails design.py on a PARTIAL route (Issue #4479/#3912)."
+    )
+    for call in gate_calls:
+        allowance = next(
+            (kw.value for kw in call.keywords if kw.arg == "route_allowance"),
+            None,
+        )
+        assert allowance is not None, (
+            "evaluate_pipeline_gate(...) must pass route_allowance explicitly (Issue #4479/#3912)."
+        )
+        assert isinstance(allowance, ast.Constant) and allowance.value == 0, (
+            "evaluate_pipeline_gate(...) must pass route_allowance=0 as a "
+            "literal 0 (not a variable that could be silently loosened) so a "
+            "PARTIAL route always fails the gate (Issue #4479/#3912). Got: "
+            f"{ast.unparse(allowance)}"
         )
 
 

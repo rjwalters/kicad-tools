@@ -2963,8 +2963,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # FET->motor PHASE pads are scattered across the whole board, so a
     # bounding-box pour island shorts against the rail pours.  Net: PHASE
     # connectivity is placement-bound on this board and needs a targeted
-    # U3-south relayout (tracked as a follow-up).  Left skipped here until
-    # that placement work lands so the committed routing does not regress.
+    # U3-south relayout / escape-channel relief -- now tracked concretely as
+    # #4548 (re-add board-05's escape-corridor reservation opt-in after CI
+    # blocking-count validation), which targets exactly this PHASE_A/B/C
+    # south-escape-channel congestion.  Left skipped here until #4548 lands so
+    # the committed routing does not regress.
     skip_nets = ["+24V", "+5V", "+3V3", "GND", "PHASE_A", "PHASE_B", "PHASE_C"]
 
     cmd = [

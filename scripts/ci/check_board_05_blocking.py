@@ -2,63 +2,62 @@
 """Board-05 blocking-net baseline gate for CI (issue #3822).
 
 Board-05 (BLDC motor controller) is the only demo board whose routing
-changes cannot be validated on the local macOS development host: the
-committed CI-generated artifact reaches **7 blocking signal nets**, but an
-unmodified local regen of the same recipe/seed/backend reaches ~11 (the
-macOS host router reaches fewer nets than the Linux CI router on the
-identical recipe). See the recipe note in
+changes cannot be validated on the local macOS development host: an
+unmodified local regen of the recipe reaches fewer nets than the Linux CI
+router on the identical recipe/seed/backend (host-vs-CI reach divergence,
+#3822). See the recipe note in
 ``boards/05-bldc-motor-controller/design.py`` (~lines 2870-2871).
 
-CI re-route is NONDETERMINISTIC (9-10 blocking); threshold is a TEMPORARY loose bound of 11
--------------------------------------------------------------------------------------------
-The committed on-disk artifact is 7 blocking, but that 7-blocking board is
-NOT reproducible from the current recipe -- a fresh full re-route INSIDE
-CI (kicad/kicad:10.0, timeout raised to 90 min so it runs to completion)
-is ALSO nondeterministic at its floor: it measures
-**blocking_incomplete_count = 9 OR 10 depending on the run** (observed:
-main re-routes to 9, the PR #3835 branch -- whose router code is identical
-to main -- re-routed to 10 on two consecutive CI runs). The blocking nets
-hover around: ISENSE_A+, ISENSE_A-, ISENSE_B+, ISENSE_B-, ISENSE_C-,
-PHASE_A, PHASE_B, PHASE_C, PWM_BH (+ HALL_A intermittently). The 7 -> 9/10
-gap between the committed artifact and a fresh CI re-route is the board-05
-routing reproducibility regression tracked in **#3775 / #3766 / #3829**.
+Phase 5 lowered the fresh-regen floor from 9-10 to 6; threshold is now 7
+----------------------------------------------------------------------
+The **committed** on-disk artifact
+(``boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb``)
+is hand-verified at **0 blocking** signal nets (PR #4003, DRC-clean and
+LVS-clean). That gold artifact is NOT reproducible from a fully-unattended
+regen yet. A fresh full re-route INSIDE CI (kicad/kicad:10.0, timeout
+raised to 90 min so it runs to completion) measured
+**blocking_incomplete_count = 6** on commit 2de4089a -- with the Phase-5
+Kelvin-star rooting + batch-completion + rescue-revival wiring active
+(PR #4527 / #4532; CI run 30666373355). The residual blocking cohort is
+``ISENSE_A-, ISENSE_B-, ISENSE_C-, PHASE_A, PHASE_B, PHASE_C``. That is a
+large win over the pre-Phase-5 floor of 9-10 (historically nondeterministic
+run-to-run), but still short of the committed artifact's 0.
 
-``--max-blocking`` therefore defaults to **11** -- a TEMPORARY loose bound
-chosen to stop CI flakiness. The previous default of 9 sat EXACTLY on the
-nondeterministic 9-vs-10 boundary, so a coin-flip re-route red-lighted PRs
-that never touched the router (issue #3836, observed on PR #3835). 11 is a
-safe margin above the observed CI ceiling of 10, so the gate stops flaking
-while remaining a hard assertion (no ``continue-on-error``) that still
-catches GROSS regressions (anything > 11 blocking).
+``--max-blocking`` therefore defaults to **7** -- one net of safety margin
+above the Phase-5-measured CI ceiling of 6, the same "+1 above the observed
+ceiling" methodology the previous loose bound of 11 (10 + 1) used. This
+locks in Phase 5's gain (11 -> 7) while tolerating board-05's historical
+run-to-run nondeterminism, so the gate stops flaking while remaining a hard
+assertion (no ``continue-on-error``) that still catches GROSS regressions
+(anything > 7 blocking).
 
-This is a deliberately LOOSE, temporary bound -- not the end state. The
-proper fix is to make the board-05 re-route DETERMINISTIC (pin seed /
-iteration order) and then tighten ``--max-blocking`` back toward 7 (the
-committed artifact) and ultimately 0, locking in each gain. That work is
-tracked in **#3775 / #3766 / #3829**.
+This bound is still not the end state. As #4548 (re-add
+``--escape-corridor-reservation`` after CI blocking-count validation, which
+targets the PHASE_A/B/C south-escape congestion) and a dedicated follow-up
+for the ISENSE ``-``-leg residuals land, tighten ``--max-blocking`` further
+toward 0, locking in each gain.
 
 Validation path for board-05 routing changes
 ---------------------------------------------
 Regenerate board-05 **in the CI environment** (the ``kicad/kicad:10.0``
 container) and let the board-05 CI job assert
-``blocking_incomplete_count <= 11`` via this gate. A LOCAL run of this gate
-after a full host regen reports ~11 -- that is the documented host-vs-CI
-reach divergence (#3822), NOT a defect in this script or the job. The
-authoritative verdict is the PR's own CI run.
+``blocking_incomplete_count <= 7`` via this gate. A LOCAL run of this gate
+after a full host regen reports more blocking nets -- that is the documented
+host-vs-CI reach divergence (#3822), NOT a defect in this script or the job.
+The authoritative verdict is the PR's own CI run.
 
 This gate loads the routed board-05 PCB and asserts that the number of
-blocking incomplete nets does not exceed ``--max-blocking`` (default 11).
+blocking incomplete nets does not exceed ``--max-blocking`` (default 7).
 It reuses :class:`kicad_tools.analysis.net_status.NetStatusAnalyzer` --
 whose ``blocking_incomplete_count`` "Mirrors
 ``scripts/ci/check_routed_drc.py:_count_blocking_errors``", i.e. it applies
 the same advisory/plane-residual filtering the DRC gate uses -- rather than
 re-deriving the metric.
 
-The ``--max-blocking`` threshold is a CLI argument (default 11, a temporary
-loose bound above the observed nondeterministic CI ceiling of 10) so future
-PRs (#3775 PHASE relayout, #3766 complete the blocking nets, #3829 make the
-re-route deterministic) can tighten it to 7, ... 0 as they land routing
-improvements, locking in each gain.
+The ``--max-blocking`` threshold is a CLI argument (default 7, one net above
+the Phase-5-measured CI ceiling of 6) so future PRs (#4548 escape-corridor
+reservation, the ISENSE ``-``-leg follow-up) can tighten it toward 0 as
+they land routing improvements, locking in each gain.
 
 Exit codes (mirrors ``scripts/ci/check_routed_drc.py``):
     0 -- Blocking count within threshold (job passes).
@@ -75,35 +74,35 @@ import argparse
 import sys
 from pathlib import Path
 
-# TEMPORARY loose bound (issue #3836). A fresh full re-route of board-05
-# (kicad/kicad:10.0, 90-min timeout) is NONDETERMINISTIC at its floor: it
-# reaches 9 OR 10 blocking nets depending on the run (observed: main=9,
-# PR #3835 branch=10 twice, with identical router code). The committed
-# on-disk artifact is 7, which is itself not reproducible from the current
-# recipe. The previous default of 9 sat exactly on the 9-vs-10 boundary and
-# intermittently red-lighted unrelated PRs. 11 is a safe margin above the
-# observed CI ceiling of 10, so the gate stops flaking while still catching
-# gross regressions (> 11). The proper fix is a DETERMINISTIC re-route, after
-# which this should be tightened back toward 7 then 0 -- tracked in
-# #3775 / #3766 / #3829.
+# Phase-5 bound (issue #4479). A fresh full re-route of board-05
+# (kicad/kicad:10.0, 90-min timeout) measured blocking_incomplete_count = 6
+# on commit 2de4089a, with Phase 5's Kelvin-star rooting + batch-completion +
+# rescue-revival wiring active (PR #4527 / #4532; CI run 30666373355). The
+# residual cohort is ISENSE_A-, ISENSE_B-, ISENSE_C-, PHASE_A, PHASE_B,
+# PHASE_C. That is a large win over the pre-Phase-5 floor of 9-10 (which was
+# nondeterministic run-to-run), though still short of the committed artifact's
+# 0 blocking (hand-verified, PR #4003). 7 is one net of safety margin above
+# the measured CI ceiling of 6 -- the same "+1 above the observed ceiling"
+# methodology the previous loose bound of 11 (10 + 1) used -- so the gate
+# stops flaking while still catching gross regressions (> 7). Tighten further
+# toward 0 as #4548 (escape-corridor reservation) and the ISENSE -leg
+# follow-up land.
 #
-# Issue #3887 (SUPERSEDED by #3894): #3887 moved board-05's main pass + rescue
-# loop from the wall-clock --per-net-timeout cutoff to a fixed per-net
-# ITERATION budget, claiming determinism. That claim did not hold up on CI.
-#
-# Issue #3894: REVERTED #3887's deterministic per-net ITERATION budget on
-# board 05 back to the pre-#3887 wall-clock recipe (--per-net-timeout 60 /
-# --timeout 900). #3887's budget did LESS total routing work than the
-# wall-clock outer rip-up/reroute loop, so it completed FEWER nets and
-# REGRESSED this count to 12-15 (vs the historical wall-clock 9-10); the
-# byte-determinism it promised was also never actually achieved on CI.
-# Restoring the wall-clock recipe returns board 05 to its known-GREEN state
-# (<=11). The threshold STAYS at 11: the wall-clock re-route is nondeterministic
-# run-to-run (~9-10), and per #3822 the CI-measured blocking_incomplete_count is
-# authoritative, so any tightening toward the documented target of 7 is a
-# deliberate follow-up gated on a genuine board-05 determinism fix
-# (#3775 / #3766 / #3829), NOT a locally-guessed number.
-DEFAULT_MAX_BLOCKING = 11
+# History (why the bound was 11 before Phase 5):
+# Issue #3836: the pre-Phase-5 wall-clock re-route was NONDETERMINISTIC at 9-10
+# blocking (observed main=9, PR #3835 branch=10 twice, identical router code);
+# a default of 9 sat exactly on the 9-vs-10 boundary and intermittently
+# red-lighted unrelated PRs, so it was loosened to 11 (10 + 1).
+# Issue #3887 (SUPERSEDED by #3894): moved board-05's main pass + rescue loop
+# from the wall-clock --per-net-timeout cutoff to a fixed per-net ITERATION
+# budget, claiming determinism. That claim did not hold up on CI.
+# Issue #3894: REVERTED #3887's per-net ITERATION budget back to the wall-clock
+# recipe (--per-net-timeout 60 / --timeout 900); #3887's budget did LESS total
+# routing work and REGRESSED the count to 12-15. Per #3822 the CI-measured
+# blocking_incomplete_count is authoritative, so this bound is only tightened
+# on CI-measured evidence (as it is here for Phase 5), NOT a locally-guessed
+# number.
+DEFAULT_MAX_BLOCKING = 7
 
 
 def annotate_error(file: str, message: str) -> None:
@@ -185,16 +184,15 @@ def check_pcb(pcb_path: Path, max_blocking: int) -> tuple[int, str]:
     return (
         2,
         f"Board-05 blocking-net regression: {count} blocking incomplete net(s) "
-        f"exceeds --max-blocking={max_blocking}. This threshold is a TEMPORARY "
-        f"loose bound (issue #3836): board-05's CI re-route is NONDETERMINISTIC "
-        f"(9-10 blocking) and diverges from the committed artifact (7), so the "
-        f"default of 11 sits a safe margin above the observed CI ceiling of 10 "
-        f"to stop flakiness. The gate still catches GROSS regressions (> 11). "
-        f"The proper fix is a DETERMINISTIC re-route, then tightening this back "
-        f"toward 7 then 0 -- tracked in #3775/#3766/#3829. Either fix the "
-        f"routing or, if the floor truly moved, adjust --max-blocking in the CI "
-        f"job with reviewer sign-off. NOTE: a LOCAL macOS run routes board-05 to "
-        f"~11 blocking nets; this gate is CI-validated only (#3822)."
+        f"exceeds --max-blocking={max_blocking}. The default of 7 is one net "
+        f"above the Phase-5-measured CI ceiling of 6 (issue #4479): board-05's "
+        f"CI re-route reaches 6 blocking with Phase 5 active, while the committed "
+        f"artifact is 0 blocking (PR #4003). The gate still catches GROSS "
+        f"regressions (> 7). Tighten this further toward 0 as #4548 (escape- "
+        f"corridor reservation) and the ISENSE -leg follow-up land. Either fix "
+        f"the routing or, if the floor truly moved, adjust --max-blocking in the "
+        f"CI job with reviewer sign-off. NOTE: a LOCAL macOS run routes board-05 "
+        f"to more blocking nets; this gate is CI-validated only (#3822)."
         f"{names_suffix}",
     )
 
@@ -215,11 +213,11 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MAX_BLOCKING,
         help=(
             "Maximum allowed blocking_incomplete_count before the gate fails "
-            f"(default: {DEFAULT_MAX_BLOCKING}, a TEMPORARY loose bound above "
-            "the observed nondeterministic CI ceiling of 10; board-05's CI "
-            "re-route is nondeterministic at 9-10 and diverges from the "
-            "committed artifact of 7 -- issue #3836). Tighten this back toward "
-            "7/0 once the re-route is made deterministic (#3775/#3766/#3829)."
+            f"(default: {DEFAULT_MAX_BLOCKING}, one net above the Phase-5- "
+            "measured CI ceiling of 6; board-05's CI re-route reaches 6 blocking "
+            "with Phase 5 active and diverges from the committed 0-blocking "
+            "artifact -- issue #4479). Tighten this further toward 0 as #4548 "
+            "and the ISENSE -leg follow-up land."
         ),
     )
     args = parser.parse_args(argv)
