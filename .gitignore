@@ -39,6 +39,13 @@ boards/*/*/output/board.json
 # Repo Skills machine-local install metadata (absolute source path + timestamp)
 .claude/skills/repo/.install-local.json
 
+# Repo Skills runtime artifacts (transient by design -- never commit)
+# handoff.md is a one-shot session baton written by /repo:handoff and deleted
+# after the next session absorbs it; logs/ holds hook-errors.log and the
+# opt-in guard-decisions.log telemetry.
+.claude/handoff.md
+.claude/skills/repo/logs/
+
 # Loom model-cost experiment (canary A/B, #3725/#3731)
 # The CANARY confirmation MUST stay uncommitted by design -- a copied/committed
 # config can never confirm canary status. Local outcome-chain stats too.
