@@ -1740,6 +1740,24 @@ class CppPathfinder:
                 saved_routable_layers = list(self._routable_layers)
                 self.set_routable_layers(narrowed_routable)
 
+        # Issue #4511 / Epic #4431 Phase 2b: search-time pairwise (HV-isolation)
+        # avoidance.  Phase 2a wired ``_sync_pairwise_domains_to_cpp()`` only
+        # into the post-route ``validate_route`` call site, so the domain matrix
+        # was never installed on the live grid *before* the A* search ran --
+        # ``Grid3D::pairwise_active()`` read False throughout the search and the
+        # new domain-aware blocking kernels silently no-op'd in production.
+        # Push the matrix here, once per route() call, so the search sees it.
+        # The call is idempotent and fully dormant without a voltage map (it
+        # returns after a single ``pairwise_clearance is None`` check), so the
+        # no-voltage-map hot path is unaffected.
+        self._sync_pairwise_domains_to_cpp()
+        # Give the C++ search the routing net's copper half-extents so the
+        # cross-domain widening measures its widened radius from the SAME
+        # half-width the scalar ``trace_radius_cells`` used (0.0 => rules
+        # fallback on a stale .so without the #4511 setter).
+        if hasattr(self._impl, "set_search_pair_widths"):
+            self._impl.set_search_pair_widths(net_trace_width / 2.0, net_via_size / 2.0)
+
         try:
             result = self._impl.route_resumable(
                 start.x,

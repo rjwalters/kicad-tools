@@ -338,6 +338,13 @@ public:
     // either net has no domain -- so ``max(scalar, this)`` is the scalar.
     float pairwise_required_clearance(int net_a, int net_b) const;
 
+    // Issue #4511: the largest widening value in the installed domain matrix
+    // (mm), or 0.0 when dormant.  The search-time pairwise avoidance
+    // (``Pathfinder``) sizes its widened blocking kernel from this bound so
+    // it never scans further than any domain pair could ever require.  Cached
+    // by ``set_pairwise_domains`` -- an O(1) read on the A* hot path.
+    float max_pairwise_clearance() const { return max_pairwise_clearance_; }
+
     // True when an installed attach zone contains ``(x, y)`` AND has BOTH
     // ``net_a`` and ``net_b`` among its member net ids.
     bool attach_zone_exempts(float x, float y, int net_a, int net_b) const;
@@ -389,6 +396,9 @@ private:
     std::vector<int> net_domain_;        // net id -> domain index (-1 = none)
     std::vector<float> domain_matrix_;   // row-major domain_count_ x domain_count_
     std::vector<AttachZone> attach_zones_;
+    // Issue #4511: cached max widening across the installed matrix (mm); 0.0
+    // when dormant.  Consumed by the search-time widened kernel sizing.
+    float max_pairwise_clearance_ = 0.0f;
 };
 
 }  // namespace router

@@ -202,6 +202,20 @@ class PairwiseClearanceTable:
         key = (a, b) if a <= b else (b, a)
         return max(self.dru, self.required_by_pair.get(key, 0.0))
 
+    def max_required_clearance(self) -> float:
+        """Largest resolved requirement across every HV pair (mm).
+
+        Issue #4511 / Epic #4431 Phase 2b: the search-time spatial index must
+        return every candidate within the *widest* pairwise requirement, not
+        just the scalar floor, or the domain-aware blocking kernels never see
+        the foreign HV copper they must widen against.  Returns :attr:`dru`
+        when no pair needs widening (the dormant / no-voltage-map case), so a
+        board without HV pairs inflates its R-tree exactly as before.
+        """
+        if not self.required_by_pair:
+            return self.dru
+        return max(self.dru, max(self.required_by_pair.values()))
+
 
 def build_pairwise_clearance_table(
     net_voltages: Mapping[str, float],

@@ -32,7 +32,7 @@ from kicad_tools.router.pairwise_clearance import (
     find_pairwise_violations,
 )
 from kicad_tools.router.primitives import Pad, Route, Segment
-from kicad_tools.router.rules import DesignRules
+from kicad_tools.router.rules import DesignRules, NetClassRouting
 
 requires_cpp = pytest.mark.skipif(
     not is_cpp_available(),
@@ -685,3 +685,313 @@ def test_backend_validate_route_rejects_hv_trace_beside_lv_pad() -> None:
     backend.set_attach_zones((AttachZone(0.0, -1.0, 5.0, 1.0, frozenset({"AC_LINE", "GND"})),))
     cpp_grid._impl.set_pairwise_domains([], [])  # force a fresh install
     assert backend._validate_route_clearance(route, start, end, 1) is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b (#4511): search-time pairwise avoidance -- domain-aware A* blocking
+# ---------------------------------------------------------------------------
+#
+# Phase 2a (above) taught the authoritative *post-route validator* about
+# cross-domain (HV-isolation) clearance, but left the A* search HV-blind: it
+# kept proposing HV-through-LV paths that validation then rejected, thrashing
+# the negotiator instead of converging.  Phase 2b restores the exact
+# search<->validate mirror by widening the search-time blocking kernels
+# (``cross_domain_trace_blocked`` / ``cross_domain_via_blocked``) and adds a
+# soft avoidance gradient (``pairwise_avoidance_cost``) so an HV board routes
+# to completion.
+
+
+def _cpp_rules(trace_width: float = TRACE_WIDTH, clearance: float = DRU):
+    from kicad_tools.router import router_cpp
+
+    rules = router_cpp.DesignRules()
+    rules.trace_width = trace_width
+    rules.trace_clearance = clearance
+    rules.via_diameter = 0.6
+    rules.via_clearance = clearance
+    rules.grid_resolution = 0.1
+    rules.cost_straight = 1.0
+    return rules
+
+
+def _pathfinder(grid):
+    from kicad_tools.router import router_cpp
+
+    pf = router_cpp.Pathfinder(grid, _cpp_rules(), True)
+    # Copper half-extents the widening measures from (trace_width/2, via/2).
+    pf.set_search_pair_widths(TRACE_WIDTH / 2.0, 0.3)
+    return pf
+
+
+# The IEC 150 V / PD2 / IIIa requirement is 1.6 mm; at 0.1 mm resolution the
+# scalar trace radius (override) is 3 cells and the widened HV<->LV radius is
+# ceil((0.1 + 1.6) / 0.1) = 17 cells.  A foreign cell 8 cells away therefore
+# sits in the annulus: inside the widening, outside the scalar disc.
+SCALAR_RADIUS = 3
+
+
+@requires_cpp
+def test_search_blocks_hv_trace_beside_lv_copper_in_annulus() -> None:
+    """A cross-domain cell in the widened annulus HARD-blocks the placement."""
+    grid = _cpp_grid()
+    _install_domains(grid)
+    pf = _pathfinder(grid)
+    # LV copper 8 cells (0.8 mm) above the candidate centreline: well inside
+    # the 17-cell widened radius, well outside the 3-cell scalar radius.
+    grid.mark_blocked(100, 108, 0, LV_NET, False, False)
+    assert pf.cross_domain_trace_blocked(100, 100, 0, HV_NET, SCALAR_RADIUS) is True
+    # The public ``is_trace_blocked`` now folds the annulus check in too.
+    assert pf.is_trace_blocked(100, 100, 0, HV_NET, False, SCALAR_RADIUS) is True
+
+
+@requires_cpp
+def test_search_allows_hv_trace_clear_of_lv_requirement() -> None:
+    """A cross-domain cell beyond the widened radius does not block."""
+    grid = _cpp_grid()
+    _install_domains(grid)
+    pf = _pathfinder(grid)
+    # 18 cells (1.8 mm) away -> edge gap 1.7 mm >= 1.6 mm requirement.
+    grid.mark_blocked(100, 118, 0, LV_NET, False, False)
+    assert pf.cross_domain_trace_blocked(100, 100, 0, HV_NET, SCALAR_RADIUS) is False
+
+
+@requires_cpp
+def test_search_same_domain_copper_not_widened() -> None:
+    """Equal-potential (same-domain) copper never trips the widening."""
+    grid = _cpp_grid()
+    _install_domains(grid)
+    pf = _pathfinder(grid)
+    grid.mark_blocked(100, 108, 0, HV_TAP_NET, False, False)
+    assert pf.cross_domain_trace_blocked(100, 100, 0, HV_NET, SCALAR_RADIUS) is False
+
+
+@requires_cpp
+def test_search_net0_copper_never_widened() -> None:
+    """Net 0 (pour / unconnected convention) carries no domain -> no widening."""
+    grid = _cpp_grid()
+    _install_domains(grid)
+    pf = _pathfinder(grid)
+    grid.mark_blocked(100, 108, 0, 0, False, False)
+    assert pf.cross_domain_trace_blocked(100, 100, 0, HV_NET, SCALAR_RADIUS) is False
+
+
+@requires_cpp
+def test_search_attach_zone_waives_widening() -> None:
+    """A rated footprint's attach zone waives the search-time widening (#4506)."""
+    grid = _cpp_grid()
+    _install_domains(grid)
+    grid.set_attach_zones([_cpp_zone(0.0, 0.0, 20.0, 20.0, [HV_NET, LV_NET])])
+    pf = _pathfinder(grid)
+    grid.mark_blocked(100, 108, 0, LV_NET, False, False)
+    # Inside the zone: the pair may neck down, so the annulus no longer blocks.
+    assert pf.cross_domain_trace_blocked(100, 100, 0, HV_NET, SCALAR_RADIUS) is False
+    # A zone that does not list BOTH nets grants no waiver.
+    other = _cpp_grid()
+    _install_domains(other)
+    other.set_attach_zones([_cpp_zone(0.0, 0.0, 20.0, 20.0, [HV_NET, HV_TAP_NET])])
+    pf2 = _pathfinder(other)
+    other.mark_blocked(100, 108, 0, LV_NET, False, False)
+    assert pf2.cross_domain_trace_blocked(100, 100, 0, HV_NET, SCALAR_RADIUS) is True
+
+
+@requires_cpp
+def test_search_dormant_without_matrix() -> None:
+    """No domain matrix -> the annulus check is a hard no-op (fast path)."""
+    grid = _cpp_grid()  # never install domains
+    pf = _pathfinder(grid)
+    grid.mark_blocked(100, 108, 0, LV_NET, False, False)
+    assert grid.pairwise_active is False
+    assert pf.cross_domain_trace_blocked(100, 100, 0, HV_NET, SCALAR_RADIUS) is False
+    assert pf.is_trace_blocked(100, 100, 0, HV_NET, False, SCALAR_RADIUS) is False
+    assert pf.pairwise_avoidance_cost(100, 100, 0, HV_NET) == pytest.approx(0.0)
+
+
+@requires_cpp
+def test_search_via_blocked_by_cross_domain_copper() -> None:
+    """The via kernel widens for cross-domain copper the scalar disc misses."""
+    grid = _cpp_grid()
+    _install_domains(grid)
+    pf = _pathfinder(grid)
+    # LV copper 10 cells away on a layer the via column spans.
+    grid.mark_blocked(100, 110, 1, LV_NET, False, False)
+    assert pf.cross_domain_via_blocked(100, 100, HV_NET) is True
+    # Same-domain copper does not.
+    clear = _cpp_grid()
+    _install_domains(clear)
+    pf2 = _pathfinder(clear)
+    clear.mark_blocked(100, 110, 1, HV_TAP_NET, False, False)
+    assert pf2.cross_domain_via_blocked(100, 100, HV_NET) is False
+
+
+@requires_cpp
+def test_search_avoidance_cost_gradient_near_hv() -> None:
+    """The soft gradient is positive just beyond the hard block, zero far away."""
+    grid = _cpp_grid()
+    _install_domains(grid)
+    pf = _pathfinder(grid)
+    # Hard radius = 17; band = ceil(1.6*0.5/0.1)=8 -> gradient out to 25 cells.
+    grid.mark_blocked(100, 120, 0, LV_NET, False, False)  # 20 cells: in the band
+    assert pf.pairwise_avoidance_cost(100, 100, 0, HV_NET) > 0.0
+    # Far away (well beyond the band): no soft cost.
+    far = _cpp_grid()
+    _install_domains(far)
+    pf2 = _pathfinder(far)
+    far.mark_blocked(100, 150, 0, LV_NET, False, False)  # 50 cells away
+    assert pf2.pairwise_avoidance_cost(100, 100, 0, HV_NET) == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Convergence proof (headline): a two-domain board routes clean end-to-end
+# ---------------------------------------------------------------------------
+
+
+def _seg_rect_gap(seg, x1, x2, y1, y2) -> float:
+    """Min distance (mm) from a segment centreline to an axis-aligned rect."""
+    import math
+
+    best = float("inf")
+    for i in range(101):
+        t = i / 100.0
+        px = seg.x1 + t * (seg.x2 - seg.x1)
+        py = seg.y1 + t * (seg.y2 - seg.y1)
+        cx = min(max(px, x1), x2)
+        cy = min(max(py, y1), y2)
+        best = min(best, math.hypot(px - cx, py - cy))
+    return best
+
+
+def _route_two_domain_board(with_pairwise: bool):
+    """Route one HV net across a board with an LV wall on both layers.
+
+    Returns ``(route, used_python_fallback)``.  The LV wall spans BOTH copper
+    layers so the HV net cannot simply dip to the other layer -- it must detour
+    in-plane, where the pairwise widening is observable.
+    """
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.primitives import Pad as PyPad
+
+    rules = DesignRules(
+        trace_width=TRACE_WIDTH,
+        trace_clearance=DRU,
+        via_diameter=0.6,
+        via_clearance=DRU,
+        grid_resolution=0.1,
+    )
+    if with_pairwise:
+        rules.pairwise_clearance = build_pairwise_clearance_table({"HV": 150.0, "LV": 0.0}, dru=DRU)
+    grid = RoutingGrid(width=30.0, height=20.0, rules=rules, layer_stack=LayerStack.two_layer())
+    start = PyPad(x=3.0, y=10.0, width=0.6, height=0.6, net=1, net_name="HV", layer=Layer.F_CU)
+    end = PyPad(x=27.0, y=10.0, width=0.6, height=0.6, net=1, net_name="HV", layer=Layer.F_CU)
+    grid.add_pad(start)
+    grid.add_pad(end)
+    for layer in (Layer.F_CU, Layer.B_CU):
+        grid.add_pad(
+            PyPad(x=15.0, y=10.0, width=6.0, height=0.6, net=2, net_name="LV", layer=layer)
+        )
+    nc = NetClassRouting(name="HV", trace_width=TRACE_WIDTH, clearance=DRU)
+    cpp_grid = CppGrid.from_routing_grid(grid)
+    pf = CppPathfinder(cpp_grid, rules, diagonal_routing=True, net_class_map={"HV": nc})
+    pf.set_net_name_to_id({"HV": 1, "LV": 2})
+
+    fallback = {"used": False}
+    original = pf._try_python_fallback
+
+    def _spy(*args, **kwargs):
+        fallback["used"] = True
+        return original(*args, **kwargs)
+
+    pf._try_python_fallback = _spy
+    route = pf.route(start, end, net_class=nc)
+    return route, fallback["used"]
+
+
+# The LV wall rectangle in world mm (both layers): x in [12, 18], y in [9.7, 10.3].
+_LV_RECT = (12.0, 18.0, 9.7, 10.3)
+_REQUIRED = IEC_150V_PD2_IIIA_MM  # 1.6 mm
+
+
+@requires_cpp
+def test_two_domain_board_converges_with_search_time_avoidance() -> None:
+    """Headline convergence proof (#4511).
+
+    The SAME geometry, routed by the SAME C++ search, with and without the
+    pairwise domain matrix installed:
+
+    * WITHOUT the matrix (the pre-#4511 / 2a-only state) the HV-blind search
+      hugs the LV wall at the scalar floor -- an isolation violation.
+    * WITH the matrix the domain-aware search detours to keep the full 1.6 mm
+      creepage -- it CONVERGES to a clean route, no negotiator thrash, no
+      Python fallback.
+    """
+    blind_route, blind_fb = _route_two_domain_board(with_pairwise=False)
+    assert blind_route is not None
+    assert blind_fb is False, "baseline must be a pure C++ search result"
+    blind_gap = min(_seg_rect_gap(s, *_LV_RECT) for s in blind_route.segments)
+    blind_edge = blind_gap - TRACE_WIDTH / 2.0
+    # The HV-blind route hugs the LV wall: nowhere near the 1.6 mm requirement.
+    assert blind_edge < _REQUIRED
+
+    hv_route, hv_fb = _route_two_domain_board(with_pairwise=True)
+    assert hv_route is not None, "domain-aware search failed to converge"
+    assert hv_fb is False, "convergence must come from the C++ search, not fallback"
+    hv_gap = min(_seg_rect_gap(s, *_LV_RECT) for s in hv_route.segments)
+    hv_edge = hv_gap - TRACE_WIDTH / 2.0
+    # The domain-aware route clears the full creepage requirement.
+    assert hv_edge >= _REQUIRED - 1e-3, f"HV edge gap {hv_edge:.3f} < required {_REQUIRED}"
+
+
+@requires_cpp
+def test_route_installs_pairwise_matrix_before_search() -> None:
+    """The #4511 critical gap: ``route()`` must push the matrix onto the grid.
+
+    Phase 2a wired ``_sync_pairwise_domains_to_cpp`` only into the post-route
+    ``validate_route`` site, so the domain-aware kernels silently no-op'd during
+    the search.  After a route with a voltage map the live grid must report the
+    matrix active; without one it stays dormant.
+    """
+    hv_route, _ = _route_two_domain_board(with_pairwise=True)
+    assert hv_route is not None
+    # Re-run to inspect the grid state directly.
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.primitives import Pad as PyPad
+
+    rules = DesignRules(
+        trace_width=TRACE_WIDTH, trace_clearance=DRU, via_clearance=DRU, grid_resolution=0.1
+    )
+    rules.pairwise_clearance = build_pairwise_clearance_table({"HV": 150.0, "LV": 0.0}, dru=DRU)
+    grid = RoutingGrid(width=30.0, height=20.0, rules=rules, layer_stack=LayerStack.two_layer())
+    start = PyPad(x=3.0, y=10.0, width=0.6, height=0.6, net=1, net_name="HV", layer=Layer.F_CU)
+    end = PyPad(x=27.0, y=10.0, width=0.6, height=0.6, net=1, net_name="HV", layer=Layer.F_CU)
+    grid.add_pad(start)
+    grid.add_pad(end)
+    nc = NetClassRouting(name="HV", trace_width=TRACE_WIDTH, clearance=DRU)
+    cpp_grid = CppGrid.from_routing_grid(grid)
+    pf = CppPathfinder(cpp_grid, rules, diagonal_routing=True, net_class_map={"HV": nc})
+    pf.set_net_name_to_id({"HV": 1, "LV": 2})
+    assert cpp_grid._impl.pairwise_active is False  # not yet synced
+    pf.route(start, end, net_class=nc)
+    assert cpp_grid._impl.pairwise_active is True  # route() synced it before searching
+
+
+@requires_cpp
+def test_no_voltage_map_route_leaves_grid_dormant() -> None:
+    """Backward compat: without a voltage map the search-time path is inert."""
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.primitives import Pad as PyPad
+
+    rules = DesignRules(
+        trace_width=TRACE_WIDTH, trace_clearance=DRU, via_clearance=DRU, grid_resolution=0.1
+    )
+    grid = RoutingGrid(width=30.0, height=20.0, rules=rules, layer_stack=LayerStack.two_layer())
+    start = PyPad(x=3.0, y=10.0, width=0.6, height=0.6, net=1, net_name="HV", layer=Layer.F_CU)
+    end = PyPad(x=27.0, y=10.0, width=0.6, height=0.6, net=1, net_name="HV", layer=Layer.F_CU)
+    grid.add_pad(start)
+    grid.add_pad(end)
+    nc = NetClassRouting(name="HV", trace_width=TRACE_WIDTH, clearance=DRU)
+    cpp_grid = CppGrid.from_routing_grid(grid)
+    pf = CppPathfinder(cpp_grid, rules, diagonal_routing=True, net_class_map={"HV": nc})
+    pf.set_net_name_to_id({"HV": 1, "LV": 2})
+    route = pf.route(start, end, net_class=nc)
+    assert route is not None
+    assert cpp_grid._impl.pairwise_active is False
+    assert cpp_grid._impl.max_pairwise_clearance == pytest.approx(0.0)

@@ -405,6 +405,15 @@ class DesignRules:
             clearances.extend(self.component_clearances.values())
         if self.fine_pitch_clearance is not None:
             clearances.append(self.fine_pitch_clearance)
+        # Issue #4511 / Epic #4431 Phase 2b: a pairwise (HV-isolation) matrix
+        # can require far wider clearance than any scalar rule.  Fold its widest
+        # requirement into the envelope so the R-tree returns every candidate
+        # the domain-aware search-time blocking kernels must widen against.
+        # Dormant (no voltage map) -> ``pairwise_clearance`` is None and this is
+        # a no-op, so boards without HV pairs inflate exactly as before.
+        pairwise = getattr(self, "pairwise_clearance", None)
+        if pairwise is not None:
+            clearances.append(pairwise.max_required_clearance())
         return max(clearances)
 
     def stitch_via_halo_radius(self) -> float:

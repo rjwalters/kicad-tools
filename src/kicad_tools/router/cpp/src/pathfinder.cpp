@@ -305,7 +305,10 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                 }
             }
         }
-        return false;
+        // Issue #4511: the scalar disc is clear -- consult the cross-domain
+        // (HV-isolation) annulus.  No-op unless the grid has an active
+        // pairwise matrix that widens beyond ``radius``.
+        return cross_domain_trace_blocked(x, y, layer, net, radius);
     }
 
     // Slow path: per-net radius override.  Iterate the square and filter
@@ -371,7 +374,9 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
             }
         }
     }
-    return false;
+    // Issue #4511: cross-domain (HV-isolation) annulus check -- see the fast
+    // path above.  No-op unless a widening pairwise matrix is installed.
+    return cross_domain_trace_blocked(x, y, layer, net, radius);
 }
 
 // Issue #3226: Pad-exit relaxation safety check.  See header for the full
@@ -409,7 +414,11 @@ bool Pathfinder::is_foreign_pad_metal_within_radius(int x, int y, int layer,
                 return true;
             }
         }
-        return false;
+        // Issue #4511: also refuse the pad-exit relaxation when cross-domain
+        // (HV) copper sits in the widened annulus beyond ``radius`` -- so a
+        // relaxed exit step cannot hug foreign HV metal below the pairwise
+        // requirement.  No-op unless a widening pairwise matrix is installed.
+        return cross_domain_trace_blocked(x, y, layer, net, radius);
     }
 
     // Slow path: caller-supplied radius differs from the cached default;
@@ -433,7 +442,8 @@ bool Pathfinder::is_foreign_pad_metal_within_radius(int x, int y, int layer,
             }
         }
     }
-    return false;
+    // Issue #4511: cross-domain annulus tail (see the fast path above).
+    return cross_domain_trace_blocked(x, y, layer, net, radius);
 }
 
 bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
@@ -519,6 +529,158 @@ float Pathfinder::relief_conflict_cost(int x, int y, int layer, int net) const {
         return relief_conflict_penalty_;
     }
     return 0.0f;
+}
+
+// Issue #4511 / Epic #4431 Phase 2b: search-time pairwise (HV-isolation)
+// avoidance helpers.  See the header for the full contract.  Every one of
+// these short-circuits on ``grid_.pairwise_active()`` so the no-voltage-map
+// hot path pays a single boolean test -- the same fast-path gate #4071 used
+// for reservations.
+int Pathfinder::pairwise_wide_radius_cells(float half_mm) const {
+    const float cmax = grid_.max_pairwise_clearance();
+    if (cmax <= 0.0f) return 0;
+    return std::max(
+        1, static_cast<int>(std::ceil((half_mm + cmax) / grid_.resolution())));
+}
+
+bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
+                                            int scalar_radius) const {
+    if (!grid_.pairwise_active()) return false;
+
+    // The scalar kernel already covered every cell within ``scalar_radius``.
+    // Cross-domain widening only needs the ANNULUS out to the widest pair.
+    const float res = grid_.resolution();
+    const float half_mm = (search_trace_half_width_mm_ > 0.0f)
+                              ? search_trace_half_width_mm_
+                              : rules_.trace_width / 2.0f;
+    const int wide_radius = pairwise_wide_radius_cells(half_mm);
+    if (wide_radius <= scalar_radius) return false;  // matrix never widens here
+
+    const int scalar_sq = scalar_radius * scalar_radius;
+    const int wide_sq = wide_radius * wide_radius;
+    const auto cw = grid_.grid_to_world(x, y);
+
+    for (int dy = -wide_radius; dy <= wide_radius; ++dy) {
+        for (int dx = -wide_radius; dx <= wide_radius; ++dx) {
+            const int dist_sq = dx * dx + dy * dy;
+            // Annulus only: the inner disc is the scalar kernel's job.
+            if (dist_sq <= scalar_sq || dist_sq > wide_sq) continue;
+            const int cx = x + dx, cy = y + dy;
+            if (!grid_.is_valid(cx, cy, layer)) continue;  // OOB is scalar's job
+            const auto& cell = grid_.at(cx, cy, layer);
+            // Only foreign real-net copper can trip a cross-domain rule; net 0
+            // (pour / unconnected convention) never carries a domain.
+            if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+            const float required = grid_.pairwise_required_clearance(net, cell.net);
+            if (required <= 0.0f) continue;  // same domain / no widening
+            // Widened radius for THIS specific pair (<= wide_radius).  A cell
+            // inside the annulus but outside this pair's requirement is fine.
+            const int pair_r = std::max(
+                1, static_cast<int>(std::ceil((half_mm + required) / res)));
+            if (dist_sq > pair_r * pair_r) continue;
+            // Attach-zone exemption (#4506) at the approximate gap midpoint:
+            // a rated domain-bridging footprint may neck the pair down to the
+            // scalar floor inside its courtyard -- but the scalar floor was
+            // already enforced by the caller's inner scan, so waiving the
+            // widening here is safe (mirrors ``validate_route``'s ``widen``).
+            const auto fw = grid_.grid_to_world(cx, cy);
+            const float mx = (cw.first + fw.first) * 0.5f;
+            const float my = (cw.second + fw.second) * 0.5f;
+            if (grid_.attach_zone_exempts(mx, my, net, cell.net)) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Pathfinder::cross_domain_via_blocked(int x, int y, int net) const {
+    if (!grid_.pairwise_active()) return false;
+
+    const float res = grid_.resolution();
+    const float half_mm = (search_via_half_diam_mm_ > 0.0f)
+                              ? search_via_half_diam_mm_
+                              : rules_.via_diameter / 2.0f;
+    const int wide_radius = pairwise_wide_radius_cells(half_mm);
+    const int scalar_radius = via_half_cells_;
+    if (wide_radius <= scalar_radius) return false;
+
+    const int scalar_sq = scalar_radius * scalar_radius;
+    const int wide_sq = wide_radius * wide_radius;
+    const auto cw = grid_.grid_to_world(x, y);
+
+    for (int layer = 0; layer < grid_.layers(); ++layer) {
+        for (int dy = -wide_radius; dy <= wide_radius; ++dy) {
+            for (int dx = -wide_radius; dx <= wide_radius; ++dx) {
+                const int dist_sq = dx * dx + dy * dy;
+                if (dist_sq <= scalar_sq || dist_sq > wide_sq) continue;
+                const int cx = x + dx, cy = y + dy;
+                if (!grid_.is_valid(cx, cy, layer)) continue;
+                const auto& cell = grid_.at(cx, cy, layer);
+                if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+                const float required =
+                    grid_.pairwise_required_clearance(net, cell.net);
+                if (required <= 0.0f) continue;
+                const int pair_r = std::max(
+                    1, static_cast<int>(std::ceil((half_mm + required) / res)));
+                if (dist_sq > pair_r * pair_r) continue;
+                const auto fw = grid_.grid_to_world(cx, cy);
+                const float mx = (cw.first + fw.first) * 0.5f;
+                const float my = (cw.second + fw.second) * 0.5f;
+                if (grid_.attach_zone_exempts(mx, my, net, cell.net)) continue;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+float Pathfinder::pairwise_avoidance_cost(int x, int y, int layer,
+                                          int net) const {
+    if (!grid_.pairwise_active()) return 0.0f;
+
+    const float res = grid_.resolution();
+    const float half_mm = (search_trace_half_width_mm_ > 0.0f)
+                              ? search_trace_half_width_mm_
+                              : rules_.trace_width / 2.0f;
+    const int hard_radius = pairwise_wide_radius_cells(half_mm);
+    if (hard_radius <= 0) return 0.0f;
+
+    // Soft gradient band: a margin proportional to the widening, so the search
+    // is nudged to keep ~half the pairwise clearance of slack beyond the hard
+    // limit.  Bounded and thin -- the extra cells scanned are HV-board only.
+    const int band = std::max(
+        1, static_cast<int>(std::ceil(grid_.max_pairwise_clearance() * 0.5f / res)));
+    const int halo_radius = hard_radius + band;
+    const int hard_sq = hard_radius * hard_radius;
+    const int halo_sq = halo_radius * halo_radius;
+
+    float cost = 0.0f;
+    for (int dy = -halo_radius; dy <= halo_radius; ++dy) {
+        for (int dx = -halo_radius; dx <= halo_radius; ++dx) {
+            const int dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= hard_sq || dist_sq > halo_sq) continue;  // band only
+            const int cx = x + dx, cy = y + dy;
+            if (!grid_.is_valid(cx, cy, layer)) continue;
+            const auto& cell = grid_.at(cx, cy, layer);
+            if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+            if (grid_.pairwise_required_clearance(net, cell.net) <= 0.0f) continue;
+            // Linear decay: strongest just outside the hard radius, zero at the
+            // band edge.  Scaled to ``cost_straight`` so a cell hugging the
+            // hard limit costs ~1 extra step of detour -- enough to steer,
+            // not enough to distort the optimum route away from a clean lane.
+            const float d = std::sqrt(static_cast<float>(dist_sq));
+            float frac = (static_cast<float>(halo_radius) - d) /
+                         static_cast<float>(band);
+            if (frac < 0.0f) frac = 0.0f;
+            if (frac > 1.0f) frac = 1.0f;
+            cost += rules_.cost_straight * frac;
+            // One cross-domain neighbour is enough to establish the gradient;
+            // avoid over-penalising a cell flanked by a long HV run.
+            break;
+        }
+        if (cost > 0.0f) break;
+    }
+    return cost;
 }
 
 bool Pathfinder::is_via_blocked(int x, int y, int net, bool allow_sharing,
@@ -686,7 +848,23 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
         float dyw = candidate_y - sv.y;
         float distance = std::sqrt(dxw * dxw + dyw * dyw);
         float clearance = distance - candidate_radius - sv.diameter / 2.0f;
-        if (clearance < clearance_required) {
+        // Issue #4511: widen the required via-vs-via clearance for a
+        // cross-domain (HV) pair, mirroring ``validate_route``'s via-via
+        // widening (grid.cpp) -- attach-zone exemption at the gap midpoint
+        // waives only the widening, never the scalar ``via_clearance``.
+        float required = clearance_required;
+        if (grid_.pairwise_active()) {
+            const float pair_req =
+                grid_.pairwise_required_clearance(net, sv.net);
+            if (pair_req > required) {
+                const float mx = (candidate_x + sv.x) * 0.5f;
+                const float my = (candidate_y + sv.y) * 0.5f;
+                if (!grid_.attach_zone_exempts(mx, my, net, sv.net)) {
+                    required = pair_req;
+                }
+            }
+        }
+        if (clearance < required) {
             out_blocking_net = sv.net;
             out_world_x = candidate_x;
             out_world_y = candidate_y;
@@ -694,7 +872,11 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
         }
     }
 
-    return false;
+    // Issue #4511: the scalar via disc + via-vs-via geometry are clear --
+    // consult the cross-domain (HV-isolation) annulus against foreign copper
+    // cells the scalar disc could not reach.  No-op unless a widening pairwise
+    // matrix is installed.
+    return cross_domain_via_blocked(x, y, net);
 }
 
 float Pathfinder::heuristic(int x, int y, int layer,
@@ -1212,10 +1394,15 @@ RouteResult Pathfinder::route(
             float attractor_bonus = grid_.corridor_attractor_bonus(
                 nx, ny, nlayer, net, rules_.cost_corridor_attractor);
 
+            // Issue #4511 Scope 2: soft cross-domain (HV) avoidance gradient
+            // (mirrors the resumable loop).  Zero unless a widening pairwise
+            // matrix is installed.
+            float pairwise_cost = pairwise_avoidance_cost(nx, ny, nlayer, net);
+
             float positive_step_cost =
                 cost_mult * rules_.cost_straight +
                 turn_cost + congestion_cost + negotiated_cost +
-                avoidance + pad_channel_cost;
+                avoidance + pad_channel_cost + pairwise_cost;
             if (attractor_bonus > 0.0f) {
                 positive_step_cost =
                     std::max(0.0f, positive_step_cost - attractor_bonus);
@@ -1784,10 +1971,18 @@ RouteResult Pathfinder::run_astar_loop() {
             float attractor_bonus = grid_.corridor_attractor_bonus(
                 nx, ny, nlayer, search_net_, rules_.cost_corridor_attractor);
 
+            // Issue #4511 Scope 2: soft cross-domain (HV) avoidance gradient.
+            // Zero unless a widening pairwise matrix is installed AND foreign
+            // HV copper sits in the thin band just beyond the hard-block
+            // radius -- steers A* to keep isolation margin before the hard
+            // block bites, so an HV board converges instead of thrashing.
+            float pairwise_cost =
+                pairwise_avoidance_cost(nx, ny, nlayer, search_net_);
+
             float positive_step_cost =
                 cost_mult * rules_.cost_straight +
                 turn_cost + congestion_cost + negotiated_cost +
-                avoidance + pad_channel_cost;
+                avoidance + pad_channel_cost + pairwise_cost;
             if (attractor_bonus > 0.0f) {
                 positive_step_cost =
                     std::max(0.0f, positive_step_cost - attractor_bonus);

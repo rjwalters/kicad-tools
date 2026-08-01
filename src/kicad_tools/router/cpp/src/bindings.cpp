@@ -305,6 +305,9 @@ NB_MODULE(router_cpp, m) {
              "x"_a, "y"_a, "net_a"_a, "net_b"_a,
              "True when an installed attach zone contains (x, y) and lists BOTH "
              "net ids among its members.")
+        .def_prop_ro("max_pairwise_clearance", &Grid3D::max_pairwise_clearance,
+             "Issue #4511: the widest widening (mm) in the installed domain "
+             "matrix, 0.0 when dormant.  Sizes the search-time widened kernel.")
         .def_prop_ro("pad_count", &Grid3D::pad_count)
         .def_prop_ro("stored_segment_count", &Grid3D::stored_segment_count)
         .def_prop_ro("stored_via_count", &Grid3D::stored_via_count);
@@ -503,6 +506,29 @@ NB_MODULE(router_cpp, m) {
              "zero-overflow hard failure can produce a min-conflict probe "
              "path whose crossed owner nets feed the targeted rip-up.")
         .def_prop_ro("relief_mode", &Pathfinder::relief_mode)
+        .def("set_search_pair_widths", &Pathfinder::set_search_pair_widths,
+             "trace_half_width_mm"_a, "via_half_diam_mm"_a,
+             "Issue #4511 / Epic #4431 Phase 2b: set the routing net's copper "
+             "half-extents (mm) the search-time pairwise (HV-isolation) "
+             "widening measures from -- trace_width/2 and via_diameter/2.  Call "
+             "once per net before route()/route_resumable(); 0.0 (the default) "
+             "falls back to the global rules widths.  Dormant unless the grid "
+             "has an installed pairwise domain matrix.")
+        .def("cross_domain_trace_blocked",
+             &Pathfinder::cross_domain_trace_blocked,
+             "x"_a, "y"_a, "layer"_a, "net"_a, "scalar_radius"_a,
+             "Issue #4511: True when foreign cross-domain (HV) copper in the "
+             "widened annulus beyond ``scalar_radius`` (and not attach-zone "
+             "exempt) would violate the pairwise clearance.  Exposed for the "
+             "Phase 2b search<->validate mirror regression tests.")
+        .def("cross_domain_via_blocked", &Pathfinder::cross_domain_via_blocked,
+             "x"_a, "y"_a, "net"_a,
+             "Issue #4511: via sibling of ``cross_domain_trace_blocked`` -- "
+             "scans the widened annulus across every layer.")
+        .def("pairwise_avoidance_cost", &Pathfinder::pairwise_avoidance_cost,
+             "x"_a, "y"_a, "layer"_a, "net"_a,
+             "Issue #4511 Scope 2: the soft cross-domain avoidance cost (0.0 "
+             "when dormant or no HV copper in the gradient band).")
         .def_prop_ro("iterations", &Pathfinder::get_iterations)
         .def_prop_ro("nodes_explored", &Pathfinder::get_nodes_explored);
 

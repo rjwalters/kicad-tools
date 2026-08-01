@@ -225,6 +225,55 @@ public:
     void set_relief_mode(bool enabled) { relief_mode_ = enabled; }
     bool relief_mode() const { return relief_mode_; }
 
+    // Issue #4511 / Epic #4431 Phase 2b: per-net copper half-extents (mm) the
+    // search-time pairwise (HV-isolation) widening measures its widened
+    // clearance radius from.  ``trace_half_width_mm`` is the routing net's
+    // trace_width/2; ``via_half_diam_mm`` its via_diameter/2.  Set once per
+    // net by the Python backend before ``route()`` / ``route_resumable()`` so
+    // the cross-domain kernel widens from the SAME half-extent the scalar
+    // radius used (parity with the per-net ``trace_radius_cells`` override).
+    // 0.0 (the default) falls back to the global ``rules_`` widths -- which is
+    // exactly the pre-#4511 behaviour for callers that never set them (unit
+    // tests, the one-shot ``route()`` path).  Dormant unless the grid has an
+    // installed pairwise matrix (``Grid3D::pairwise_active()``).
+    void set_search_pair_widths(float trace_half_width_mm,
+                                float via_half_diam_mm) {
+        search_trace_half_width_mm_ = trace_half_width_mm;
+        search_via_half_diam_mm_ = via_half_diam_mm;
+    }
+
+    // Issue #4511 / Epic #4431 Phase 2b: search-time pairwise (HV-isolation)
+    // avoidance.  All of these are HARD no-ops (single ``pairwise_active()``
+    // boolean) when the grid carries no domain matrix, so the no-voltage-map
+    // hot path is byte-identical to pre-#4511.  Public for the Phase 2b
+    // search<->validate mirror regression tests (like the #3456 predicates).
+    //
+    // ``cross_domain_trace_blocked`` extends the scalar trace-clearance kernel
+    // (``is_trace_blocked``) into the ANNULUS between the scalar radius and the
+    // widest domain-pair radius: a foreign cell whose domain requires a wider
+    // clearance than the scalar floor -- and that is not waived by a rated
+    // footprint's attach zone -- HARD-blocks the placement, restoring the exact
+    // search<->validate mirror that Phase 2a (#4510) temporarily relaxed.
+    bool cross_domain_trace_blocked(int x, int y, int layer, int net,
+                                    int scalar_radius) const;
+
+    // Via sibling of ``cross_domain_trace_blocked`` -- scans the widened
+    // annulus across every layer (a via is a vertical column) for cross-domain
+    // copper the scalar via disc could not see.
+    bool cross_domain_via_blocked(int x, int y, int net) const;
+
+    // Soft avoidance gradient (Scope 2): a bounded additive A* cost applied in
+    // a thin band just BEYOND the hard-block radius so the search proactively
+    // keeps HV<->LV margin (soft cost before hard block) instead of hugging the
+    // hard limit and thrashing the negotiator.  0.0 when dormant / no
+    // cross-domain copper in the band.
+    float pairwise_avoidance_cost(int x, int y, int layer, int net) const;
+
+    // Shared helper: the widened cross-domain radius (cells) for a routing net
+    // of copper half-extent ``half_mm`` against the WIDEST installed domain
+    // pair.  Used to size the annulus scans above.  Returns 0 when dormant.
+    int pairwise_wide_radius_cells(float half_mm) const;
+
     // Check if diagonal move cuts through obstacles.
     //
     // Public for binding + unit-test access (Issue #3456): the
@@ -303,6 +352,12 @@ private:
     // corridors instead of an instant empty-frontier abort.
     bool relief_mode_ = false;
     float relief_conflict_penalty_ = 20.0f;
+
+    // Issue #4511 / Epic #4431 Phase 2b: per-net copper half-extents (mm) for
+    // the search-time pairwise widening.  See ``set_search_pair_widths``.  0.0
+    // => fall back to the global ``rules_`` widths.
+    float search_trace_half_width_mm_ = 0.0f;
+    float search_via_half_diam_mm_ = 0.0f;
 
     // Issue #3438: per-step relief penalty helper.  Returns
     // ``relief_conflict_penalty_`` when (x, y, layer) holds a foreign-net

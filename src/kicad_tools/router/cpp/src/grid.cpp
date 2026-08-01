@@ -472,6 +472,7 @@ void Grid3D::set_pairwise_domains(const std::vector<int>& net_to_domain,
     domain_count_ = static_cast<int>(matrix.size());
     net_domain_ = net_to_domain;
     domain_matrix_.clear();
+    max_pairwise_clearance_ = 0.0f;
 
     if (domain_count_ <= 0 || net_domain_.empty()) {
         // Dormant: restore the pre-#4510 behaviour exactly.
@@ -484,8 +485,12 @@ void Grid3D::set_pairwise_domains(const std::vector<int>& net_to_domain,
     domain_matrix_.reserve(static_cast<size_t>(domain_count_) * domain_count_);
     for (const auto& row : matrix) {
         for (int j = 0; j < domain_count_; ++j) {
-            domain_matrix_.push_back(
-                j < static_cast<int>(row.size()) ? row[static_cast<size_t>(j)] : 0.0f);
+            const float v =
+                j < static_cast<int>(row.size()) ? row[static_cast<size_t>(j)] : 0.0f;
+            domain_matrix_.push_back(v);
+            // Issue #4511: cache the widest widening so the search-time kernel
+            // knows the maximum radius any domain pair could ever demand.
+            if (v > max_pairwise_clearance_) max_pairwise_clearance_ = v;
         }
     }
     pairwise_active_ = true;
