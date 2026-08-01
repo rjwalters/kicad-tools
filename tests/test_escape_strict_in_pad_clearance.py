@@ -59,11 +59,19 @@ def _build_router(manufacturer: str | None = "jlcpcb-tier1") -> EscapeRouter:
 
 @pytest.fixture(autouse=True)
 def _clear_env_strict(monkeypatch):
-    """Clear the env var before each test so the default state is
-    deterministic; tests that need it set use monkeypatch to set it
+    """Clear the env vars before each test so the default state is
+    deterministic; tests that need one set use monkeypatch to set it
     explicitly.
+
+    ``KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK`` must be cleared too: it is
+    read from the *process* env by ``EscapeRouter.__init__``, and
+    ``route_cmd.main()`` stamps it sticky-by-design without restoring it.
+    Under pytest-xdist that leaves a worker permanently poisoned, so these
+    tests would take the micro-via rescue branch instead of the strict-defer
+    branch they assert on (mirrors ``tests/test_escape_micro_via_fallback.py``).
     """
     monkeypatch.delenv("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE", raising=False)
+    monkeypatch.delenv("KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK", raising=False)
     yield
 
 
