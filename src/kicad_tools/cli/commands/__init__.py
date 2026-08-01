@@ -22,6 +22,7 @@ from .build import run_build_command
 from .config import run_config_command, run_interactive_command
 from .create_pcb import run_create_pcb_command
 from .creepage import run_creepage_command
+from .creepage_export_rules import run_creepage_export_rules_command
 from .datasheet import run_datasheet_command
 from .decisions import run_decisions_command
 from .doctor import run_doctor_command
@@ -88,6 +89,7 @@ __all__ = [
     # Validation
     "run_check_command",
     "run_creepage_command",
+    "run_creepage_export_rules_command",
     "run_validate_command",
     "run_validate_footprints_command",
     "run_fix_footprints_command",

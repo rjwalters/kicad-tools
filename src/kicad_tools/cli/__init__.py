@@ -58,6 +58,7 @@ from .commands import (
     run_constraints_command,
     run_create_pcb_command,
     run_creepage_command,
+    run_creepage_export_rules_command,
     run_datasheet_command,
     run_decisions_command,
     run_doctor_command,
@@ -290,6 +291,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "creepage":
         return run_creepage_command(args)
+
+    elif args.command == "creepage-export-rules":
+        return run_creepage_export_rules_command(args)
 
     elif args.command == "sch":
         return run_sch_command(args)

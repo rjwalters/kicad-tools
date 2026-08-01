@@ -142,6 +142,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_bom_parser(subparsers)
     _add_check_parser(subparsers)
     _add_creepage_parser(subparsers)
+    _add_creepage_export_rules_parser(subparsers)
     _add_sch_parser(subparsers)
     _add_pcb_parser(subparsers)
     _add_lib_parser(subparsers)
@@ -565,6 +566,92 @@ def _add_creepage_parser(subparsers) -> None:
         choices=["table", "json"],
         default="table",
         help="Output format (default: table)",
+    )
+
+
+def _add_creepage_export_rules_parser(subparsers) -> None:
+    """Add creepage-export-rules parser (referee-enforceable HV rule export, #4508).
+
+    A NEW SIBLING top-level command (NOT a subcommand of the flat ``kct creepage
+    <pcb>`` census): emits voltage-domain netclasses into ``<project>.kicad_pro``
+    and pairwise clearance ``(rule ...)`` clauses into ``<project>.kicad_dru`` so
+    ``kicad-cli pcb drc`` can independently confirm the pairwise HV<->LV creepage
+    requirement.
+    """
+    p = subparsers.add_parser(
+        "creepage-export-rules",
+        help=(
+            "Export voltage-domain netclasses + pairwise HV clearance (rule) "
+            "clauses so kicad-cli DRC enforces creepage (Issue #4508)"
+        ),
+    )
+    p.add_argument("project", help="Path to the .kicad_pro project file")
+    p.add_argument(
+        "--pcb",
+        dest="pcb",
+        default=None,
+        help=(
+            "Path to the .kicad_pcb board (nets + footprints).  Defaults to the "
+            "project's sibling <project>.kicad_pcb."
+        ),
+    )
+    p.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to their RMS working "
+            "potential (volts), same format as `kct creepage --voltage-map`.  "
+            "Without it the command is a clean no-op (nothing written)."
+        ),
+    )
+    p.add_argument(
+        "--standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for the derived per-pair minima (default: iec60664).",
+    )
+    p.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree (default: 2, typical indoor/office FR-4).",
+    )
+    p.add_argument(
+        "--material-group",
+        dest="material_group",
+        choices=["I", "II", "IIIa", "IIIb"],
+        default="IIIa",
+        help="Insulation material group by CTI (default: IIIa, conservative FR-4).",
+    )
+    p.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        help=(
+            "Minimum |dV| (volts) for a domain pair to receive a pairwise rule "
+            "(default 30.0 -- aligned with the census/placement HV threshold)."
+        ),
+    )
+    p.add_argument(
+        "--dru-floor",
+        dest="dru_floor",
+        type=float,
+        default=None,
+        help=(
+            "Board-wide DRU clearance floor (mm).  Domain pairs at/below this "
+            "require nothing extra (no rule).  Defaults to the project's "
+            "min_clearance, else 0.2mm."
+        ),
+    )
+    p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Print the derived netclasses + rules without writing any files.",
     )
 
 
