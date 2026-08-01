@@ -117,6 +117,15 @@ NEAR_MISS_RESCUE_CELLS: int = int(os.environ.get("KCT_COUPLED_RESCUE_CELLS", "60
 # continuity thresholds.
 _SHADOW_MAX_TRIM_MM: float = float(os.environ.get("KCT_SHADOW_MAX_TRIM_MM", "5.0"))
 
+# Issue #4462: the largest separation between two consecutive parallel-offset
+# endpoints that may be treated as "already coincident" and joined by snapping
+# rather than by emitting a connector.  One 0.1 um serialization quantum: below
+# it the two endpoints round to the same 4-dp coordinate in the .kicad_pcb, so
+# snapping is exact and free.  ANY larger separation must be joined with real
+# copper -- an unjoined sub-grid-cell step is a break in the polyline, which
+# costs the whole coupled pair via the #3540 transactional strand guard.
+_OFFSET_JOIN_COINCIDENT_MM: float = 1e-4
+
 # Issue #3987 (unit 2a of #3921): hard per-pair wall-clock budget for the
 # shadow-construction coupled attempt.  When ``enable_shadow_construction``
 # is on, a pair is routed either as a validated parallel shadow (ms) or it
@@ -4815,6 +4824,75 @@ class DiffPairRouter:
             route.segments[:] = rebuilt
         return added_total
 
+    def _close_shadow_chain(
+        self,
+        route: Route,
+        pathfinder: CoupledPathfinder,
+    ) -> int:
+        """Enforce chain-connectivity on an assembled shadow polyline (#4462).
+
+        The constructed shadow is ``start tail + trimmed body + end tail``, and
+        every one of those pieces is built independently.  A gap of even a few
+        microns between two consecutive segments is invisible to the clearance
+        and census gates but fatal downstream: the #3540 transactional strand
+        guard runs :func:`validate_net_connectivity`, which unions segment
+        endpoints snapped onto a 0.01 mm lattice, so a broken chain reads as
+        "1/2 pads reached" and the ENTIRE coupled pair is ripped and re-routed
+        single-ended -- losing a pair whose copper was otherwise good (measured
+        on board-06: MIPI_CLK, MIPI_D0 and PCIE_RX, all three already
+        length-matched to under 0.45 mm by #4553's constructor).
+
+        Two repairs, both conservative:
+
+        * a gap within one serialization quantum is closed by SNAPPING the
+          following segment's start onto the previous segment's end, so the two
+          coordinates are bit-identical and no rounding boundary can separate
+          them; and
+        * a larger gap, up to one grid cell, is closed by inserting a real
+          connector segment -- but only when that connector is obstacle-clear
+          and planar (same layer).
+
+        Anything else is left exactly as it is today (the strand guard remains
+        the backstop).  Returns the number of repairs made.
+        """
+        segs = route.segments
+        if len(segs) < 2:
+            return 0
+        res = self.autorouter.grid.resolution
+        out: list[Segment] = [segs[0]]
+        repairs = 0
+        for cur in segs[1:]:
+            prev = out[-1]
+            gap = math.hypot(cur.x1 - prev.x2, cur.y1 - prev.y2)
+            if gap <= _OFFSET_JOIN_COINCIDENT_MM:
+                if gap > 0.0:
+                    cur.x1, cur.y1 = prev.x2, prev.y2
+                    repairs += 1
+                out.append(cur)
+                continue
+            if cur.layer == prev.layer and gap <= res:
+                li = self.autorouter.grid.layer_to_index(cur.layer.value)
+                if self._segment_cells_clear(
+                    pathfinder, prev.x2, prev.y2, cur.x1, cur.y1, li, cur.net
+                ):
+                    out.append(
+                        Segment(
+                            x1=prev.x2,
+                            y1=prev.y2,
+                            x2=cur.x1,
+                            y2=cur.y1,
+                            width=cur.width,
+                            layer=cur.layer,
+                            net=cur.net,
+                            net_name=cur.net_name,
+                        )
+                    )
+                    repairs += 1
+            out.append(cur)
+        if repairs:
+            route.segments[:] = out
+        return repairs
+
     def _quantize_shadow_segments(
         self,
         route: Route,
@@ -5089,8 +5167,9 @@ class DiffPairRouter:
 
         Returns ``(mode, point)``:
 
-        * ``("none", None)`` -- the offset endpoints already meet (gap below
-          half a grid cell); the caller just appends the current segment.
+        * ``("none", None)`` -- the offset endpoints already meet to within one
+          serialization quantum; the caller snaps the current segment's start
+          onto ``pseg_end`` (an exact-coordinate no-op join) and appends it.
         * ``("miter", mx)`` -- clip/extend the previous segment's END to
           ``mx`` and start the current segment at ``mx``.  This is the correct
           join for a CONCAVE (inside) corner: the offset lines cross and the
@@ -5103,15 +5182,37 @@ class DiffPairRouter:
           stays within ``2*d + gap`` (a sharp outside turn otherwise grows an
           unbounded spike).
         * ``("bevel", None)`` -- insert a straight chord ``pseg_end -> a``.
-          Reached only for convex corners whose miter spike is out of bounds
-          (the chord stays on the offset side there) or degenerate geometry.
+          Reached for convex corners whose miter spike is out of bounds (the
+          chord stays on the offset side there), for degenerate geometry, and
+          for SUB-CELL steps (below).
 
         Pure geometry -- no grid / obstacle state -- so it is unit-testable in
         isolation (see ``tests/test_diffpair_shadow.py``).
         """
         gap = math.hypot(a[0] - pseg_end[0], a[1] - pseg_end[1])
-        if gap <= resolution / 2:
+        if gap <= _OFFSET_JOIN_COINCIDENT_MM:
             return ("none", None)
+        if gap <= resolution / 2:
+            # Issue #4462: a SUB-CELL step, not a coincidence.  Consecutive
+            # collinear guide segments that select different rungs of the
+            # variable-gap ladder (``_shadow_select_gap``, #3990) offset to
+            # endpoints separated by the rung difference -- perpendicular to
+            # travel and, on board-06's 0.05 mm grid, 0.024 mm.  This used to
+            # return ``"none"``, and the caller then appended the current
+            # segment starting at ``a`` while the previous one ended at
+            # ``pseg_end``: a literal 0.024 mm BREAK in the emitted polyline.
+            # The pair still constructed (both landing tails reached their
+            # pads), but ``validate_net_connectivity`` snaps endpoints onto a
+            # 0.01 mm lattice, so the net split into two components and the
+            # #3540 transactional strand guard ripped the whole coupled pair
+            # (measured: MIPI_CLK, MIPI_D0 and PCIE_RX, all three with
+            # construction-time skew already under 0.45 mm).
+            #
+            # Join it with a chord rather than a miter: at this scale the two
+            # offset lines are near-parallel, so the miter apex is numerically
+            # unbounded, while the chord is exactly the (typically axis-
+            # aligned) step itself.
+            return ("bevel", None)
 
         d1x, d1y = pseg_end[0] - pseg_start[0], pseg_end[1] - pseg_start[1]
         d2x, d2y = b[0] - a[0], b[1] - a[1]
@@ -5296,6 +5397,55 @@ class DiffPairRouter:
                     continue
                 approaches.append(loc)
         return approaches
+
+    def _debug_strand(
+        self,
+        pair_name: str,
+        net_id: int,
+        info: dict,
+        routes: list[Route],
+        net_pads: dict[int, list[Pad]],
+    ) -> None:
+        """Print why a committed pair net failed the #3540 connectivity claim."""
+        net_routes = [r for r in routes if r.net == net_id]
+        print(
+            f"    [coupled-strand] {pair_name} net={net_id} "
+            f"stranded={info.get('stranded_pads', [])} routes={len(net_routes)}"
+        )
+        for pad in net_pads.get(net_id, []):
+            best = float("inf")
+            for r in net_routes:
+                for s in r.segments:
+                    for px, py in ((s.x1, s.y1), (s.x2, s.y2)):
+                        best = min(best, math.hypot(px - pad.x, py - pad.y))
+            print(
+                f"      pad {getattr(pad, 'ref', '?')}.{getattr(pad, 'pin', '?')} "
+                f"@({pad.x:.3f},{pad.y:.3f}) nearest_endpoint={best:.4f}mm"
+            )
+        for ri, r in enumerate(net_routes):
+            if not r.segments:
+                continue
+            first, last = r.segments[0], r.segments[-1]
+            print(
+                f"      route[{ri}] segs={len(r.segments)} vias={len(r.vias)} "
+                f"start=({first.x1:.3f},{first.y1:.3f}) end=({last.x2:.3f},{last.y2:.3f})"
+            )
+            # Report every chain break inside the route (the union-find only
+            # links endpoints that snap to the same 0.01 mm bucket).
+            for k in range(len(r.segments) - 1):
+                a, b = r.segments[k], r.segments[k + 1]
+                gap = math.hypot(b.x1 - a.x2, b.y1 - a.y2)
+                if gap > 0.005:
+                    on_via = any(
+                        math.hypot(v.x - a.x2, v.y - a.y2) < 0.005
+                        and math.hypot(v.x - b.x1, v.y - b.y1) < 0.005
+                        for v in r.vias
+                    )
+                    print(
+                        f"        break@seg{k} gap={gap:.4f}mm "
+                        f"({a.x2:.3f},{a.y2:.3f})->({b.x1:.3f},{b.y1:.3f}) "
+                        f"layers={a.layer.value}/{b.layer.value} via_bridged={on_via}"
+                    )
 
     def _debug_shadow_overlap(
         self,
@@ -5655,13 +5805,28 @@ class DiffPairRouter:
                                     elements.append(
                                         ("seg", prev_pt[0], prev_pt[1], a[0], a[1], sec_layer)
                                     )
+                                else:
+                                    # Issue #4462: ``"none"`` means the two
+                                    # endpoints agree to within a serialization
+                                    # quantum -- make them agree EXACTLY, so the
+                                    # polyline is chain-connected bit-for-bit
+                                    # and no endpoint-snapping connectivity
+                                    # check can split the net at a rounding
+                                    # boundary.
+                                    a = prev_pt
                             elif (
                                 math.hypot(a[0] - prev_pt[0], a[1] - prev_pt[1])
-                                > grid.resolution / 2
+                                > _OFFSET_JOIN_COINCIDENT_MM
                             ):
+                                # Issue #4462: the post-via re-entry join had the
+                                # same sub-cell hole as the corner join above --
+                                # a step under half a grid cell was silently left
+                                # unjoined.  Emit the connector for any real gap.
                                 elements.append(
                                     ("seg", prev_pt[0], prev_pt[1], a[0], a[1], sec_layer)
                                 )
+                            else:
+                                a = prev_pt
                     elements.append(("seg", a[0], a[1], b[0], b[1], sec_layer))
                     prev_pt = b
                     prev_layer = sec_layer
@@ -5892,8 +6057,17 @@ class DiffPairRouter:
             # (#3975) -- validate.  A residual off-angle segment (no clear
             # dogleg variant) degrades gracefully; it is not silently
             # shipped as a short.
+            # Issue #4462: close any residual break BEFORE the dogleg pass, so
+            # the quantizer (which preserves each segment's own endpoints) is
+            # working on an already-connected chain.
+            chain_repairs = self._close_shadow_chain(shadow_route, pathfinder)
             pre_quant_len = _route_copper_length(shadow_route)
             self._quantize_shadow_segments(shadow_route, pathfinder)
+            if _SHADOW_DEBUG and chain_repairs:
+                print(
+                    f"    [coupled-shadow-chain] {pair.name} side={side:+.0f} "
+                    f"closed {chain_repairs} polyline break(s)"
+                )
             if _SHADOW_DEBUG:
                 guide_len = sum(math.hypot(g.x2 - g.x1, g.y2 - g.y1) for g in guide.segments)
                 print(
@@ -7221,6 +7395,8 @@ class DiffPairRouter:
                         info.get("connected_pads", 0),
                         info.get("total_pads", 0),
                     )
+                    if _SHADOW_DEBUG:
+                        self._debug_strand(pair.name, net_id, info, routes, net_pads_for_check)
                 # Roll back: unmark every committed route for this pair and
                 # drop it from the autorouter's route list, leaving a clean
                 # grid for whichever fallback handles the pair next.  No

@@ -333,6 +333,201 @@ def test_offset_corner_join_collinear_needs_no_join():
 
 
 # ---------------------------------------------------------------------------
+# 4b-bis. sub-cell offset steps must be JOINED, not dropped (#4462)
+# ---------------------------------------------------------------------------
+#
+# ``_shadow_select_gap`` (#3990) picks the parallel-offset gap PER SEGMENT from
+# an impedance-band ladder.  Two consecutive COLLINEAR guide segments that pick
+# different rungs offset to endpoints separated perpendicular to travel by the
+# rung difference -- on board-06's 0.05 mm grid, 0.024 mm.  ``_offset_corner_join``
+# used to answer ``"none"`` ("the endpoints already meet") for any gap under half
+# a grid cell, and the caller then started the next segment 0.024 mm away from
+# where the previous one ended: a literal break in the emitted polyline.
+#
+# The break is invisible to the clearance/census gates but fatal downstream --
+# ``validate_net_connectivity`` unions endpoints snapped to a 0.01 mm lattice,
+# so the net reads "1/2 pads reached" and the #3540 transactional strand guard
+# rips the WHOLE coupled pair.  Measured on board-06: MIPI_CLK, MIPI_D0 and
+# PCIE_RX, all three already length-matched to under 0.45 mm by #4553.
+
+
+def test_offset_corner_join_subcell_step_is_bevelled_not_dropped():
+    """A sub-half-cell perpendicular step is real copper, not a coincidence."""
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    # Collinear eastward guide; the second segment offsets 0.024 mm further out
+    # (a different rung of the variable-gap ladder).
+    pseg_start, pseg_end = (0.0, 0.250), (5.0, 0.250)
+    a, b = (5.0, 0.274), (10.0, 0.274)
+
+    mode, mx = DiffPairRouter._offset_corner_join(
+        pseg_start, pseg_end, a, b, side=+1.0, d=0.25, resolution=0.05
+    )
+
+    # 0.024 < resolution/2 == 0.025 -- the exact board-06 signature.
+    assert math.hypot(a[0] - pseg_end[0], a[1] - pseg_end[1]) < 0.05 / 2
+    assert mode == "bevel"
+    assert mx is None
+
+
+def test_offset_corner_join_none_only_within_a_serialization_quantum():
+    """``none`` is reserved for endpoints that serialize to the same coordinate."""
+    from kicad_tools.router.diffpair_routing import (
+        _OFFSET_JOIN_COINCIDENT_MM,
+        DiffPairRouter,
+    )
+
+    pseg_start, pseg_end = (0.0, 0.25), (5.0, 0.25)
+
+    def _mode(dy: float) -> str:
+        a = (5.0, 0.25 + dy)
+        b = (10.0, 0.25 + dy)
+        return DiffPairRouter._offset_corner_join(
+            pseg_start, pseg_end, a, b, side=+1.0, d=0.25, resolution=0.05
+        )[0]
+
+    assert _mode(0.0) == "none"
+    assert _mode(_OFFSET_JOIN_COINCIDENT_MM / 2.0) == "none"
+    # One order of magnitude above the quantum is already real copper.
+    assert _mode(_OFFSET_JOIN_COINCIDENT_MM * 10.0) == "bevel"
+
+
+def _chain_router_and_pathfinder(resolution: float = 0.05):
+    from kicad_tools.router.core import Autorouter
+
+    rules = DesignRules()
+    rules.grid_resolution = resolution
+    router = Autorouter(width=20.0, height=20.0, rules=rules)
+    pf = CoupledPathfinder(grid=router.grid, rules=rules, target_spacing_cells=4)
+    return router._diffpair, pf
+
+
+def _chain_route(points, net: int = 7) -> Route:
+    route = Route(net=net, net_name="MIPI_CLK-")
+    for k in range(len(points) - 1):
+        (x1, y1), (x2, y2) = points[k], points[k + 1]
+        route.segments.append(
+            Segment(
+                x1=x1,
+                y1=y1,
+                x2=x2,
+                y2=y2,
+                width=0.1,
+                layer=Layer.F_CU,
+                net=net,
+                net_name="MIPI_CLK-",
+            )
+        )
+    return route
+
+
+def test_close_shadow_chain_is_a_noop_on_a_connected_polyline():
+    dpr, pf = _chain_router_and_pathfinder()
+    route = _chain_route([(2.0, 2.0), (4.0, 2.0), (6.0, 4.0), (8.0, 4.0)])
+    before = [(s.x1, s.y1, s.x2, s.y2) for s in route.segments]
+
+    assert dpr._close_shadow_chain(route, pf) == 0
+    assert [(s.x1, s.y1, s.x2, s.y2) for s in route.segments] == before
+
+
+def test_close_shadow_chain_inserts_a_connector_for_a_subcell_break():
+    """The board-06 signature: a 0.024 mm break is closed with real copper."""
+    dpr, pf = _chain_router_and_pathfinder()
+    route = _chain_route([(2.0, 2.0), (4.0, 2.0)])
+    route.segments.append(
+        Segment(
+            x1=4.0,
+            y1=2.024,
+            x2=6.0,
+            y2=2.024,
+            width=0.1,
+            layer=Layer.F_CU,
+            net=7,
+            net_name="MIPI_CLK-",
+        )
+    )
+
+    assert dpr._close_shadow_chain(route, pf) == 1
+    pts = [(s.x1, s.y1) for s in route.segments] + [(route.segments[-1].x2, route.segments[-1].y2)]
+    for k in range(len(route.segments) - 1):
+        a, b = route.segments[k], route.segments[k + 1]
+        assert math.hypot(b.x1 - a.x2, b.y1 - a.y2) == 0.0
+    assert pts[0] == (2.0, 2.0)
+    assert pts[-1] == (6.0, 2.024)
+
+
+def test_close_shadow_chain_snaps_a_sub_quantum_gap_to_bit_equality():
+    dpr, pf = _chain_router_and_pathfinder()
+    route = _chain_route([(2.0, 2.0), (4.0, 2.0)])
+    route.segments.append(
+        Segment(
+            x1=4.0,
+            y1=2.00002,
+            x2=6.0,
+            y2=2.0,
+            width=0.1,
+            layer=Layer.F_CU,
+            net=7,
+            net_name="MIPI_CLK-",
+        )
+    )
+
+    assert dpr._close_shadow_chain(route, pf) == 1
+    # Snapped, not connector-ed: still two segments, endpoints bit-identical.
+    assert len(route.segments) == 2
+    assert route.segments[1].y1 == route.segments[0].y2
+
+
+def test_close_shadow_chain_leaves_a_large_gap_alone():
+    """Beyond one grid cell the strand guard, not a blind connector, decides."""
+    dpr, pf = _chain_router_and_pathfinder()
+    route = _chain_route([(2.0, 2.0), (4.0, 2.0)])
+    route.segments.append(
+        Segment(
+            x1=4.0, y1=3.0, x2=6.0, y2=3.0, width=0.1, layer=Layer.F_CU, net=7, net_name="MIPI_CLK-"
+        )
+    )
+
+    assert dpr._close_shadow_chain(route, pf) == 0
+    assert len(route.segments) == 2
+
+
+def test_subcell_break_strands_a_net_and_closing_it_restores_connectivity():
+    """Pins the whole bug->symptom chain the #3540 rollback reacted to."""
+    from kicad_tools.router.observability import validate_net_connectivity
+    from kicad_tools.router.primitives import Pad
+
+    dpr, pf = _chain_router_and_pathfinder()
+    route = _chain_route([(2.0, 2.0), (4.0, 2.0)])
+    route.segments.append(
+        Segment(
+            x1=4.0,
+            y1=2.024,
+            x2=6.0,
+            y2=2.024,
+            width=0.1,
+            layer=Layer.F_CU,
+            net=7,
+            net_name="MIPI_CLK-",
+        )
+    )
+    pads = [
+        Pad(x=2.0, y=2.0, width=0.3, height=0.3, layer=Layer.F_CU, net=7, net_name="MIPI_CLK-"),
+        Pad(x=6.0, y=2.024, width=0.3, height=0.3, layer=Layer.F_CU, net=7, net_name="MIPI_CLK-"),
+    ]
+
+    broken = validate_net_connectivity([route], {7: pads})[7]
+    assert broken["connected"] is False
+    assert broken["connected_pads"] == 1
+
+    dpr._close_shadow_chain(route, pf)
+
+    fixed = validate_net_connectivity([route], {7: pads})[7]
+    assert fixed["connected"] is True
+    assert fixed["connected_pads"] == 2
+
+
+# ---------------------------------------------------------------------------
 # 4c. shadow-aware guide re-routing: non-adjacent self-approach detection (#4460)
 # ---------------------------------------------------------------------------
 #
