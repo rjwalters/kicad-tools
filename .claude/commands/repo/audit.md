@@ -48,6 +48,14 @@ Run each of the following checks and compile results into a single report:
 - Local branches whose PRs are merged
 - Orphaned or stale worktrees
 
+### Out of scope: host posture (see [[host-optimize]])
+
+This is a repo-scoped audit. The **host** a machine presents to heavy build
+workloads — Gatekeeper scan churn, backup-agent interference, build-tree bloat,
+sudo/concurrency posture — is not checked here. For a build host, run
+[[host-optimize]] instead; unlike this read-only audit, that command applies its
+safe-tier fixes by default.
+
 ## Output Format
 
 Present findings as a table grouped by category:

@@ -15,15 +15,22 @@ to update the stale ones.
 ## Usage
 
 ```
-/repo:update-tools             # Report, then offer updates
-/repo:update-tools --check     # Report only
-/repo:update-tools loom        # Only check/update one tool
+/repo:update-tools               # Report, then offer updates (commit + land on the default branch)
+/repo:update-tools --check       # Report only, never writes
+/repo:update-tools loom          # Only check/update one tool
+/repo:update-tools --no-commit   # Update the working tree but leave it uncommitted for review
 ```
 
 An update runs the tool's own installer (executing code from its source repo
 and rewriting `.claude/`), so unlike the safe-fix hygiene commands this one is
 **not** auto-applied — it reports and confirms before updating. `--check` is
 the report-only form.
+
+Once an update is confirmed, it is committed and landed on the default branch
+(`main`) by default — it does **not** push, and it never folds a pre-existing
+dirty working tree into the update commit. Pass `--no-commit` (alias
+`--stage-only`) to restore the old behavior of leaving the changes uncommitted
+for manual review. See step 5 and the Safety Rules for details.
 
 ## Steps
 
@@ -114,9 +121,66 @@ git -C <source> pull --ff-only
 If the source clone has local modifications or `--ff-only` fails, report it
 and skip that tool rather than resolving on your own.
 
-After updating, re-read each metadata file to confirm the new version, and
-show a summary of what changed in the repo (`git status --short`) so the user
-can review and commit the update.
+After updating, re-read each metadata file to confirm the new version and show
+a summary of what changed (`git status --short`).
+
+### 5. Land the update (default)
+
+A confirmed tool bump is a safe, reversible, version-controlled change (the
+installer is idempotent and re-runnable), so by default `update-tools` **commits
+it and lands it on the default branch** rather than stopping at an uncommitted
+diff. It **never** pushes — pushing is outward-facing and stays a separate,
+explicit action (Safety Rule 5). Pass `--no-commit` (alias `--stage-only`) to
+skip this step and leave the working-tree changes uncommitted for manual review
+instead (the old behavior).
+
+Land each tool's bump as its own commit:
+
+1. **Isolate the installer's footprint.** Snapshot the working tree *before*
+   running the installer so a pre-existing dirty tree is never folded into the
+   update commit:
+
+   ```bash
+   pre=$(mktemp); post=$(mktemp)
+   git -C <this-repo> status --porcelain | sed 's/^...//' | sort > "$pre"
+   # ... run the tool's installer (step 4, above) ...
+   git -C <this-repo> status --porcelain | sed 's/^...//' | sort > "$post"
+   # Paths the installer actually changed = post minus pre:
+   comm -13 "$pre" "$post" > changed.txt
+   ```
+
+   Stage **only** those paths (`git -C <this-repo> add -- $(cat changed.txt)`),
+   never `git add -A`. If `changed.txt` is empty the installer was a no-op —
+   report "already current" and skip the commit for that tool.
+
+2. **Commit + land on the default branch, without committing straight to it:**
+
+   ```bash
+   DEFAULT=$(git -C <this-repo> symbolic-ref --quiet --short refs/remotes/origin/HEAD | sed 's#^origin/##')
+   DEFAULT=${DEFAULT:-main}
+   CUR=$(git -C <this-repo> symbolic-ref --short HEAD)
+   MSG="chore(tooling): update <tool> <old>→<new>"
+
+   if [ "$CUR" = "$DEFAULT" ]; then
+     # On the default branch: commit on a short-lived branch, then fast-forward
+     # merge it in — lands on the default branch without a straight-to-main commit.
+     tmp="tooling/update-<tool>-<new>"
+     git -C <this-repo> checkout -b "$tmp"
+     git -C <this-repo> commit -m "$MSG"
+     git -C <this-repo> checkout "$DEFAULT"
+     git -C <this-repo> merge --ff-only "$tmp"
+     git -C <this-repo> branch -d "$tmp"
+   else
+     # Already on a feature branch: commit here and report where it landed —
+     # do NOT switch branches mid-session and disturb the user's working state.
+     git -C <this-repo> commit -m "$MSG"
+     echo "Landed the update on '$CUR' (not '$DEFAULT') — you are on a feature branch."
+   fi
+   ```
+
+3. **Report** the resulting commit (`git -C <this-repo> log --oneline -1`) and
+   remind the user it has **not** been pushed (run `git push` explicitly to
+   share it).
 
 ## Safety Rules
 
@@ -125,5 +189,11 @@ can review and commit the update.
    marker blocks; hand-copying breaks reinstall idempotency
 3. **Never resolve source-repo git problems silently** (diverged clone, dirty
    tree) — report and skip
-4. **The update touches the working tree** — leave the changes uncommitted for
-   the user to review
+4. **Land the update, don't just stage it** — by default commit the installer's
+   changes and land them on the default branch with a per-tool
+   `chore(tooling): update <tool> <old>→<new>` message. Stage **only** the paths
+   the installer actually changed — never fold a pre-existing dirty working tree
+   into the update commit. `--no-commit` / `--stage-only` restores the old
+   leave-it-uncommitted-for-review behavior.
+5. **Never push** — landing on the local default branch is reversible; pushing is
+   outward-facing and stays a separate, explicit action the user runs themselves.

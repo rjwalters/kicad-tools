@@ -29,6 +29,26 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/skills/repo/hooks/session-start-handoff.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/skills/repo/hooks/session-start-handoff.sh"
+          }
+        ]
+      }
     ]
   },
   "permissions": {
