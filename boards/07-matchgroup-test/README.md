@@ -130,37 +130,33 @@ empirical: route the board, count errors, add ~20% headroom, then
 record in `.github/routed-drc-tolerance.yml`.  Phase 3N (#2726) will
 tighten iteratively as upstream router improvements land.
 
-## Routing Plateau (4 seed-invariant opens)
+## Routing Plateau (5 seed-invariant opens)
 
 **Status: intentional, evidence-backed plateau.**  Board 07 routes
-**27/31 signal nets** (~87.1% by net count); the committed
-`output/lvs.json` honestly records `clean: false` with exactly **4 open
+**26/31 signal nets** (~83.9% by net count); the committed
+`output/lvs.json` honestly records `clean: false` with exactly **5 open
 copper mismatches**.  This is a genuine placement/topology limit, not an
 untracked gap and not a router-knob that has been left unturned.  The
 gallery renders board 07 as `partial`/`lvs` for exactly this reason, and
 that chip is the intended honest state (the audit is real:
 `copper_bound_pad_count: 244`, `copper_vacuous: false` --- cf. #4011).
 
-> **Moved from 26/31 to 27/31 by #4468** (epic #3438 Phase 3): the route
-> step now runs the classifier-driven placement-delta feedback loop, which
-> keeps a single bounded 2 mm translate of `U3`.  The open SET changed as
-> well as its size --- see "Placement-delta feedback" below for the
-> before/after table and the per-probe measurements.
-
-### The 4 opens
+### The 5 opens
 
 | Net | Pad A | Pad B | Bundle |
 |-----|-------|-------|--------|
-| `DQS_N`       | U1.31 | U2.7  | DDR data byte (DQS pair) |
-| `MIPI_DAT0_P` | J1.3  | U3.3  | MIPI CSI |
+| `DQ3`         | U1.28 | U2.4  | DDR data byte |
+| `DQ4`         | U1.32 | U2.8  | DDR data byte |
+| `MIPI_DAT0_N` | J1.4  | U3.4  | MIPI CSI |
 | `TMDS_D0_N`   | J2.2  | U4.B2 | HDMI TMDS |
 | `TMDS_D1_N`   | J2.5  | U4.B4 | HDMI TMDS |
 
-Three verifiers agree on this exact set: `kct net-status --why`,
+This is the same set re-measured by the #4049 epic dossier; the older
+#3438 thread cited a 3-net subset before the board was re-spun.  Three
+verifiers agree on this exact set: `kct net-status --why`,
 `output/lvs.json` (`copper_mismatches`), and the KiCad cross-gate
-`kicad-cli pcb drc --refill-zones` (4 unconnected pads at the same four
-pads).  The two TMDS opens are unchanged from the pre-#4468 set; the DDR
-and MIPI members moved (see below).
+`kicad-cli pcb drc --refill-zones` (5 unconnected pads at the same five
+pads).
 
 ### Placement-delta feedback (#4468, epic #3438 Phase 3)
 
@@ -170,47 +166,71 @@ The route step runs `kct route --placement-delta-feedback
 `generate_design.py`).  Each iteration classifies the **routed** board,
 translates every `PLACEMENT_BOUND` / `CONGESTION_SATURATED` diagnosis into
 one concrete placement delta, applies the top unprobed one, re-routes, and
-keeps it **only** on a strict routed-net increase --- otherwise placement,
-router pads, routes and the routing grid revert atomically.
+keeps it only when the re-route **strictly increases the routed-net count
+AND does not increase the router's clearance-violation count** ---
+otherwise placement, router pads, routes and the routing grid revert
+atomically.
 
-Measured solo, seed 42, C++ backend built, `PYTHONHASHSEED=42`:
+**Measured verdict: the reach stays at 26/31, and that is a decision, not
+a failure to find anything.**  Solo, seed 42, C++ backend built,
+`PYTHONHASHSEED=42`, the loop emits a delta for every one of the 5 open
+nets and probes the top two:
 
-| Run | Reach | Open set |
-|-----|-------|----------|
-| loop **OFF** (pre-#4468 `main`) | **26/31** | `DQ3`, `DQ4`, `MIPI_DAT0_N`, `TMDS_D0_N`, `TMDS_D1_N` |
-| loop **ON** (shipping)          | **27/31** | `DQS_N`, `MIPI_DAT0_P`, `TMDS_D0_N`, `TMDS_D1_N` |
+| # | Probe | Routed | Clearance violations | Verdict |
+|---|-------|--------|----------------------|---------|
+| 0 | `U2` `rotate_180` --- from `DQ3`'s `DE_REVERSE_BUNDLE` verdict | 25 -> **16** | 0 -> **1489** | reverted |
+| 1 | `U3` translate `(-0.77, -1.85)` mm --- from `MIPI_DAT0_N`'s `MOVE_PART` | 25 -> **26** | 0 -> **2** | reverted (clearance) |
 
-`DQ3`, `DQ4` and `MIPI_DAT0_N` close; `DQS_N` and `MIPI_DAT0_P` open in
-their place --- a net gain of one, and both new opens are the *partner
-leg* of a pair whose other leg now routes (the N-1 invariant this board
-has shown since #3438).
-
-Per-probe evidence, emitted every run to
-`output/matchgroup_test_routed_placement_delta.json`:
-
-| # | Probe | Verdict |
-|---|-------|---------|
-| 0 | `U2` `rotate_180` (from `DQ3`'s `DE_REVERSE_BUNDLE` verdict) | reverted, routed 25 -> **16** |
-| 1 | `U3` translate `(-0.77, -1.85)` mm (from `MIPI_DAT0_N`'s `MOVE_PART`) | **kept**, routed 25 -> **26** |
-| 2 | `U2` translate `(1.96, -0.39)` mm | reverted, routed 26 -> 25 (budget-4 probe; outside the shipping budget) |
-| 3 | `U3` translate `(2.00, 0.00)` mm | reverted, routed 26 -> 25 (budget-4 probe; outside the shipping budget) |
-
-Probe 0 is the interesting negative result: the classifier is **right**
-that the DDR byte is reversed at `U2` (it measures 28/28 facing pad pairs
-inverted), but a 180-degree rotation is not the move that fixes it --- it
-de-reverses the pad ORDER while moving the whole facing column to the far
-side of the package, so the byte must then wrap around a 7x7 mm QFN.  The
-keep-if-improves guarantee catches this (25 -> 16) and reverts.  The
+Probe 0 is the informative negative result.  The classifier is **right**
+that the DDR byte is reversed at `U2` --- it measures 28/28 facing pad
+pairs inverted between `U1` and `U2` --- but a 180-degree rotation is not
+the move that fixes it: it de-reverses the pad ORDER while relocating the
+whole facing column to the *far* side of the package, so the byte then has
+to wrap around a 7x7 mm QFN.  Reach collapses to 16/31.  The
 geometrically correct move is a **mirror** of the pad column, which KiCad
 expresses only as a layer flip and which the Phase-1 translator therefore
-does not emit.
+never emits.
 
-The shipping budget is **2** because probe 1 is where the gain is: probes
-2 and 3 were measured at budget 4 and both revert, so the extra two full
-re-routes buy nothing.  Each budget unit costs one complete board-07
-re-route (~10 min locally); budget 2 measured **36m45s** end-to-end at
-budget 4 and roughly two-thirds of that at budget 2, against ~16 min for
-the loop-off recipe.
+Probe 1 is the real finding.  A single bounded 2 mm translate of `U3`
+**does** close `MIPI_DAT0_N` --- 26/31 -> 27/31 --- but the extra copper it
+lets into the DDR channel costs manufacturability.  Measured on that
+27/31 artifact:
+
+* two segment-to-pad clearances drop under the jlcpcb floor
+  (0.076 mm and 0.094 mm against a 0.102 mm minimum, at the `U1` DDR
+  escape), taking blocking DRC from 10 to 13 on the same host; and
+* the `ADDR_BUS` length-match tuner, which normally drives that group's
+  skew to **0.000 mm**, is left at **11.03 mm** --- a
+  `match_group_length_skew` error on the very board that exists to
+  exercise that rule.
+
+Shipping it would have required widening
+`.github/routed-drc-tolerance.yml`'s board-07 floor from 8 to 13.  Trading
+a DRC allowlist widening for one net is not an improvement on a
+match-group/DRC testbench, so the loop's acceptance test now requires
+*both* a reach gain and no clearance regression, and this delta is
+refused.  The refusal is recorded, with its measurements, in
+`output/matchgroup_test_routed_placement_delta.json` (the `reverted`
+section carries `routed_before` / `routed_after` and `revert_reason`) so
+the decision is auditable rather than invisible.
+
+Two useful side effects of running the loop, both measured on the same
+host:
+
+* the delta artifact is emitted on **every** run, so the classifier's
+  per-net proposal for each open net is a build output rather than a
+  one-off investigation; and
+* blocking DRC on the shipped artifact measures **8** (equal to the
+  committed allowlist floor) versus **10** for a loop-off local regen ---
+  the loop's atomic revert now also rebuilds the routing grid, which the
+  post-loop optimize/DRC-nudge stages read.
+
+The shipping budget is **2**: probe 0 is the classifier's top-ranked rung
+and probe 1 is the one that is only marginally short of acceptable, so if a
+future router change removes those two clearances the loop will take the
+net automatically.  Each budget unit costs one complete board-07 re-route;
+the whole route step measures **27m05s** locally against ~16 min for the
+loop-off recipe.
 
 ### Fresh per-net verdict (`kct net-status --incomplete --why`)
 

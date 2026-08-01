@@ -1647,26 +1647,44 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # feedback.  When the negotiated pass leaves nets unrouted, the router
     # classifies the ROUTED board, translates each PLACEMENT_BOUND /
     # CONGESTION_SATURATED diagnosis into one concrete placement delta,
-    # applies the top applyable one, re-routes, and keeps it ONLY on a strict
-    # routed-net increase (otherwise placement, pads and routes revert
-    # atomically).  This is the loop epic #3438 exists to close, run against
-    # this board's real ``Autorouter`` + real ``PCB``.
+    # applies the top unprobed one, re-routes, and keeps it ONLY when the
+    # re-route strictly increases the routed-net count AND does not increase
+    # the clearance-violation count (otherwise placement, router pads, routes
+    # and the routing grid revert atomically).  This is the loop epic #3438
+    # exists to close, run against this board's real ``Autorouter`` + ``PCB``.
     #
-    # Cost contract (why the budget is 1, not the CLI default 3): every
-    # iteration costs one full board-07 re-route (~11 min locally, ~2x that on
-    # a 2-core CI runner), and ``run_delta`` stops at the FIRST non-improving
-    # delta.  With the baseline reused from the pass that just finished, the
-    # worst case is exactly ONE extra re-route; each additional budget unit
-    # would only be spent after a delta that already improved reach.
+    # MEASURED VERDICT (solo, seed 42, C++ backend, PYTHONHASHSEED=42) --
+    # reach stays 26/31, by decision rather than for lack of a candidate.
+    # The loop emits a delta for all 5 open nets and probes the top two:
     #
-    # Empirical result on this board (see PR for #4468): the classifier's
-    # ranked ladder is honoured end to end -- DQ3/DQ4 diagnose
-    # PLACEMENT_BOUND / self_crossing_bundle and propose ``rotate_180`` on U2
-    # (the reversed facing part), MIPI_DAT0_N / TMDS_D0_N / TMDS_D1_N propose
-    # bounded ``translate`` moves -- and the improve-or-revert guarantee is
-    # what decides whether any of them survives.  The delta artifact is
-    # emitted at ``<output>_placement_delta.json`` for every run, so the
-    # proposal set is auditable even when nothing is kept.
+    #   probe 0  U2 rotate_180 (DQ3's DE_REVERSE_BUNDLE verdict)
+    #            routed 25 -> 16, clearance violations 0 -> 1489   REVERTED
+    #   probe 1  U3 translate (-0.77, -1.85) mm (MIPI_DAT0_N's MOVE_PART)
+    #            routed 25 -> 26, clearance violations 0 -> 2      REVERTED
+    #
+    # Probe 0: the classifier is RIGHT that the DDR byte is reversed at U2
+    # (28/28 facing pad pairs invert), but a 180-degree rotation de-reverses
+    # the pad ORDER while moving the facing column to the FAR side of the
+    # package -- the byte then has to wrap a 7x7 mm QFN.  The correct move is
+    # a mirror, which KiCad expresses only as a layer flip.
+    #
+    # Probe 1: a genuine +1 net (26/31 -> 27/31, MIPI_DAT0_N closes) that
+    # costs manufacturability -- two U1-escape clearances drop to 0.076 /
+    # 0.094 mm against the 0.102 mm jlcpcb floor (blocking DRC 10 -> 13) and
+    # the ADDR_BUS length-match tuner is left at 11.03 mm skew instead of
+    # 0.000 mm.  Taking it would have meant widening the board-07 floor in
+    # .github/routed-drc-tolerance.yml from 8 to 13 -- a bad trade on a
+    # match-group/DRC testbench -- so the loop refuses it and records the
+    # refusal (with both measurements) in the delta artifact.
+    #
+    # Budget 2 is deliberate: probe 0 is the classifier's top rung and probe
+    # 1 is the one that is only marginally short of acceptable, so a future
+    # router change that removes those two clearances makes the loop take the
+    # net automatically.  Each budget unit costs one full board-07 re-route;
+    # the whole route step measures 27m05s locally vs ~16 min loop-off (the
+    # CI jobs carry a 90-minute allowance for it).  The delta artifact is
+    # emitted at ``<output>_placement_delta.json`` on every run, so the
+    # proposal set is auditable even though nothing is kept today.
     if PLACEMENT_DELTA_FEEDBACK:
         cmd += [
             "--placement-delta-feedback",
