@@ -24,6 +24,28 @@ Prints, for the certificate flag OFF (identity baseline) and ON:
 
 Pure in-process; no CLI subprocess (the flag is not exposed on ``kct
 route``).  Uses the negotiated router with the C++ backend when built.
+
+Why this harness does NOT exercise placement-delta feedback (#4468)
+-------------------------------------------------------------------
+Measured 2026-07-31 on `main` + #4468, C++ backend built: this harness
+reaches **11/11 with the certificate flag both OFF and ON**.  There is no
+stuck net, so the placement-delta feedback loop (#4467/#4468) has nothing
+to propose here and wiring it in would be measuring a no-op.
+
+That is not a contradiction with the full board stranding DDR members --
+it is the harness's stated idealization showing through.  ``build_isolated_router``
+places each net's two pads at the SAME ``y`` on both columns (co-oriented,
+per the note above), whereas board 07's real ``U1`` right column and ``U2``
+left column carry the byte in opposite order: the stuck-net classifier
+measures **28/28 facing pad pairs inverted** between them on the real
+board.  The isolated bundle is therefore the *already-de-reversed* geometry
+-- which is exactly why it routes 11/11 -- while the full board's DDR opens
+are a property of the reversal plus the surrounding foreign copper, neither
+of which this harness models.
+
+The full-board placement-delta measurement (and the negative result for the
+``rotate_180`` de-reversal move) is recorded in ``README.md`` under
+"Placement-delta feedback".
 """
 
 from __future__ import annotations
