@@ -530,6 +530,12 @@ Notes and caveats:
 
 ### Unified CLI (`kct` or `kicad-tools`)
 
+The commands below are the ones most workflows reach for. The authoritative
+full list (every command and subcommand) lives in
+[CLI Reference → Commands Overview](docs/reference/cli.md#commands-overview).
+
+**Inspection and validation**
+
 | Command | Description |
 |---------|-------------|
 | `kct symbols <schematic>` | List symbols with filtering |
@@ -539,18 +545,50 @@ Notes and caveats:
 | `kct drc <pcb>` | Run design rules check (requires kicad-cli) |
 | `kct check <pcb>` | Pure Python DRC (no kicad-cli needed) |
 | `kct creepage <pcb>` | HV surface-path (creepage) audit vs IEC 60664-1 / 62368-1 |
-| `kct analyze <pcb>` | Signal-integrity + current-sense analog layout lint |
-| `kct route <pcb>` | Autoroute a PCB (`--nets`/`--skip-nets` to select nets) |
-| `kct reason <pcb>` | LLM-driven PCB layout reasoning |
-| `kct placement <pcb>` | Detect and optimize component placement |
-| `kct optimize-placement <pcb>` | CMA-ES/Bayesian global placement optimization |
+| `kct creepage-export-rules <project>` | Export voltage-domain netclasses + pairwise HV clearance rules so kicad-cli DRC enforces creepage |
+| `kct analyze <pcb>` | Signal-integrity, current-sense, and electrical-rating layout lint |
+| `kct audit <project>` | Manufacturing readiness audit (ERC, DRC, connectivity, compatibility) |
+| `kct impedance <subcommand>` | Transmission line impedance calculations |
+
+**Layout and routing**
+
+| Command | Description |
+|---------|-------------|
+| `kct route <pcb>` | Autoroute a PCB (`--nets`/`--skip-nets` to select nets, `--complete` to finish one) |
 | `kct route-auto <pcb>` | Orchestrator-based multi-strategy autorouting |
 | `kct optimize-traces <pcb>` | Optimize routed traces |
+| `kct placement <pcb>` | Detect and optimize component placement |
+| `kct optimize-placement <pcb>` | CMA-ES/Bayesian global placement optimization |
+| `kct zones <subcommand>` | Add copper pour zones (and `hv-keepout` plane voids) |
+| `kct stitch <pcb>` | Auto-add stitching vias for plane connections |
+| `kct reason <pcb>` | LLM-driven PCB layout reasoning |
+
+**Repair**
+
+| Command | Description |
+|---------|-------------|
+| `kct fix-drc <pcb>` | Automated DRC violation repair (clearance + drill) |
+| `kct fix-erc <schematic>` | Automated ERC violation repair (PWR_FLAG + no-connect) |
+| `kct fix-vias <pcb>` | Fix vias to meet manufacturer specifications (incl. off-pad relocation) |
+| `kct pipeline <input>` | End-to-end repair pipeline for existing PCBs |
+
+**Parts and manufacturing**
+
+| Command | Description |
+|---------|-------------|
 | `kct datasheet <subcommand>` | Search, download, parse datasheets |
 | `kct parts <subcommand>` | LCSC/JLCPCB part lookup, cache, offline catalog sync |
 | `kct export <pcb>` | Manufacturing bundle export (gerbers, BOM, CPL) |
 | `kct mfr <subcommand>` | Manufacturer rule profiles (apply-rules, validate) |
+| `kct spec <subcommand>` | Project specification (`.kct`) management |
 | `kct fleet status` | Routing + manufacturing readiness across all boards |
+
+**Environment**
+
+| Command | Description |
+|---------|-------------|
+| `kct doctor` | Diagnose kicad-tools installation health (version-record drift) |
+| `kct build-native` | Build the C++ router backend for 10-100x faster routing |
 | `kct mcp serve` | Start MCP server for AI agent integration |
 
 All commands support `--format json` for machine-readable output.
@@ -594,50 +632,54 @@ All commands support `--format json` for machine-readable output.
 | `mcp` | MCP server for AI agent integration |
 | `layout` | Layout preservation for PCB regeneration |
 
-## What's New (v0.16.0, July 2026)
+## What's New (v0.19.0, July 2026)
 
-Recent additions an agent reading these docs cold should know about:
+Recent additions an agent reading these docs cold should know about. Older
+entries live in [CHANGELOG.md](CHANGELOG.md).
 
-- **Router feasibility & coupling flags on `kct route`** — `--monotone-certificate-order`
-  (certify a bundle's escape feasibility and derive a constructive net order),
-  `--cross-package-pair-corridor`, and `--slack-corridor-widening` (all default
-  off). Coupled diff-pair attempts that all budget-exit now early-abort to a
-  plain single-ended route instead of degrading the result.
-- **JLCPCB parts stack** — `kct parts sync-catalog` mirrors the full jlcparts
-  dataset for offline lookups; set `JLCPCB_ACCESS_KEY`/`JLCPCB_SECRET_KEY` to
-  use the official open-platform API (see Parts Lookup below).
-- **`kct check --refill-zones`** — refill zone fills via kicad-cli before the
-  pure-Python checks, killing stale-fill clearance false positives; a loud
-  advisory now fires when copper is measured against possibly-stale fills.
-- **Hierarchical-schematic LVS** — multi-sheet designs are no longer vacuous.
-- **`/kct:tapeout` skill** — one command that produces a complete, fab-ready
-  export bundle or refuses loudly.
-- **`kct fleet status`** — survey routing + manufacturing readiness across every
-  board in `boards/`. The "are we ship-ready?" entry point. See
-  [Manufacturing Export → ship-ready check](docs/guides/manufacturing-export.md#are-we-ship-ready-kct-fleet-status).
-- **`kct route --auto-layers` / `--auto-mfr-tier`** — automatic layer-count
-  and manufacturer-tier escalation when routing hits a wall. `--auto-layers`
-  defaults to **enabled**; opt out with `--no-auto-layers`. See
-  [Routing → Strategy Escalation](docs/guides/routing.md#strategy-escalation).
-- **`kct route --checkpoint-interval`** — atomic best-so-far writes every N
-  seconds; SIGINT leaves a valid PCB on disk. See
-  [Routing → Long-Running Routes](docs/guides/routing.md#long-running-routes-checkpointing).
-- **`kct optimize-placement --anchor-weight`** — CMA-ES placement optimizer
-  biased toward locked footprints. The validated recipe (lock perimeter
-  parts only, weight `1.0`, `--allow-infeasible`) lifted board-05 BLDC from
-  40% → 60% routing completion. See
-  [Placement Optimization → Anchoring Perimeter Footprints](docs/guides/placement-optimization.md#anchoring-perimeter-footprints).
-- **`kct stitch --mfr` / `--copper`** — stackup-aware via dimensions; the
-  manufacturer YAML drives via geometry. See
-  [CLI Reference → stitch](docs/reference/cli.md#stitch).
-- **`kct build --step preflight-routing`** — routing-completeness gate that
-  blocks manufacturing artefacts when nets are unrouted. Override with
-  `--allow-incomplete`. See
-  [Manufacturing Export → Routing Completeness Preflight](docs/guides/manufacturing-export.md#routing-completeness-preflight).
-- **`Footprint.locked` + siblings round-trip** through `PCB.save` (locked,
-  dnp, exclude_from_pos_files, exclude_from_bom, plus preserved unknown
-  `(attr ...)` tokens). See
-  [API → Footprint attributes](docs/reference/api.md#footprint-attributes-locked-dnp-exclude_from).
+- **HV-isolation design loop** (v0.19.0) — `kct creepage --voltage-map` derives
+  each conductor pair's required creepage from its own `|ΔV|` instead of one
+  group working voltage; `kct zones hv-keepout` generates plane voids so inner
+  pours clear HV nets; `kct optimize-placement --voltage-map` / `--hv-domains`
+  place HV parts with a hard creepage-keepout feasibility term. The
+  `/kct:hv-isolation-loop` skill sequences the whole loop.
+- **`kct creepage-export-rules`** (since v0.19.0) — export voltage-domain
+  netclasses plus pairwise HV clearance `(rule ...)` clauses into the project so
+  `kicad-cli pcb drc` enforces creepage too, not just `kct creepage`.
+- **`kct check --emit-dru` / `--emit-drc-constraints`** (v0.19.0) — emit
+  `.kicad_dru` / `.kicad_pro` sidecars from the checker's already-resolved
+  `--mfr` floors, so `kicad-cli pcb drc` and `kct check` reason over identical
+  rules by construction.
+- **`kct analyze electrical-rating`** (v0.19.0) — deterministic, advisory
+  LED-overcurrent and capacitor voltage-derating checks sourced from schematic
+  fields; parts missing ratings are skipped, never failed.
+- **`kct fix-vias` off-pad relocation** (v0.19.0) — relocate via-in-pad and
+  plane-stitch vias off-pad while preserving connectivity, with THT
+  hole-to-hole clearance checking and multi-branch relocation.
+- **`kct doctor`** (v0.19.0) — diagnose an installation's version-record drift
+  (dependency pin, `.kct/install-metadata.json`, CLAUDE.md marker block).
+  Advisory by default; `--strict` exits non-zero so it can gate CI.
+- **`kct route --complete`** (since v0.19.0) — targeted completion pass: detect
+  the still-unconnected links and route only those, treating every other net's
+  copper as a fixed obstacle. Implies `--preserve-existing` and never deletes
+  copper; skip pour-carried nets with `--complete-exclude-nets`. See
+  [CLI Reference → route](docs/reference/cli.md#route).
+- **`kct creepage` HV audit + `kct analyze current-sense`** (v0.18.0) — per-pair
+  creepage census against IEC 60664-1 / 62368-1 tables (slot-aware, clearance
+  and creepage reported as distinct values), and an analog lint for
+  sense↔high-current parallel runs, sense-loop area, and Kelvin-tap integrity.
+  A below-standard HV pair fails the `kct audit` gate.
+- **Real `--nets NET[,NET...]` on `route` / `route-auto`** (v0.18.0) — route
+  only the listed nets (inverse of `--skip-nets`); non-listed copper is treated
+  as a fixed obstacle.
+- **Experimental routing substrates** (v0.17.0) — `--route-engine lattice`
+  (adaptive octilinear; 45°-legal copper by construction) and `--route-engine
+  mesh` (constrained-Delaunay navmesh), both default **off**. `--route-engine
+  grid` remains the default and is unchanged. See
+  [Routing Guide](docs/guides/routing.md).
+- **`kct net-status --why`** (v0.17.0) — ranked fix recommendations explaining
+  why each incomplete net is stuck, with pin-order-verified reversed-bundle
+  detection.
 
 ## Features
 

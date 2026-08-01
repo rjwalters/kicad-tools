@@ -29,6 +29,8 @@ kct [--help] [--version] <command> [options]
 | **Validation** | `erc` | ERC validation and analysis |
 | | `drc` | Parse DRC reports with manufacturer rules |
 | | `check` | Pure Python DRC (no kicad-cli) |
+| | `creepage` | HV creepage/clearance census (surface-path distance) |
+| | `creepage-export-rules` | Export voltage-domain netclasses + pairwise HV clearance rules so kicad-cli DRC enforces creepage |
 | | `validate` | Validation tools (schematic-to-PCB sync) |
 | | `validate-footprints` | Validate footprints for pad spacing issues |
 | | `net-status` | Report net connectivity status for a PCB |
@@ -84,6 +86,7 @@ kct [--help] [--version] <command> [options]
 | | `interactive` | Launch interactive REPL mode |
 | | `run` | Run a Python script with the kicad-tools interpreter |
 | | `build-native` | Build the C++ router backend (10-100x faster routing) |
+| | `doctor` | Diagnose kicad-tools installation health (version-record drift) |
 
 ---
 
@@ -627,6 +630,53 @@ Common flags (the full surface lives in `kct route --help`):
 | `--seed N` | Seed Python `random` for reproducible routing (#2589) |
 | `--auto-fix` / `--auto-fix-passes N` | Run `kct fix-drc` after routing on DRC failure |
 | `--skip-drc` | Skip post-route DRC validation |
+
+#### Targeted completion mode (`--complete`)
+
+`--complete` is a completion pass rather than a full route (epic #4465): it
+auto-detects the currently-unconnected signal nets and routes **only** those
+links, treating every other net's copper as a fixed obstacle. It implies
+`--preserve-existing`, never deletes existing copper, and is a safe no-op on a
+board with nothing left to connect. Unless you override `--route-engine`, it
+selects the lattice engine with `--strategy basic` (a negotiated strategy is
+coerced to `basic` with a printed notice). It is mutually exclusive with
+`--nets` / `--skip-nets` — `--complete` chooses the net set itself.
+
+| Option | Description |
+|--------|-------------|
+| `--complete` | Route only the unconnected links; all other copper is a fixed obstacle |
+| `--complete-exclude-nets NAMES` | Comma-separated nets `--complete` must not route even when reported unconnected — for pour/plane-carried nets (`GND`, `+3V3`, phase nets) whose connectivity comes from a filled zone. Ignored without `--complete`. |
+| `--complete-report PATH` | Write the structured unroutable-link report (net, link pad endpoints, elapsed vs the per-link deadline, blocking copper) as JSON. Only written when links remain unroutable; a human-readable summary always prints. Ignored without `--complete`. |
+| `--via-in-pad-last-resort` | On the lattice engine, stage a same-net via-in-pad attach as a last resort instead of an opportunistic one: the search first tries an in-layer route or an off-pad via layer change, and only retries with the pad-site via admitted when no such route exists (and only on a fab tier that supports via-in-pad). |
+
+Each link gets a bounded per-link deadline, so a single pathological net cannot
+consume the whole `--timeout`; links that exhaust it are reported as unroutable
+with their blocking copper rather than silently dropped.
+
+```bash
+# Finish a partially routed board without touching existing copper
+kct route board.kicad_pcb --complete \
+  --complete-exclude-nets 'GND,+3V3' \
+  --complete-report unroutable.json \
+  -o board_complete.kicad_pcb
+```
+
+#### Placement-delta feedback
+
+`--placement-delta-feedback` (default **off**) closes the loop between routing
+and placement. After the initial routing pass, if any nets remain unrouted, it
+classifies the routed board, translates each `PLACEMENT_BOUND` /
+`CONGESTION_SATURATED` diagnosis into a concrete placement delta (a translate or
+a 180° rotation), applies the top applyable one, re-routes, and keeps the change
+**only** on a strict routed-net increase. Connectors (`J*`, `P*`) and locked
+footprints are auto-anchored, and the applied deltas are written to
+`<output>_placement_delta.json`.
+
+| Option | Description |
+|--------|-------------|
+| `--placement-delta-feedback` / `--no-placement-delta-feedback` | Enable / explicitly disable the loop (default: disabled) |
+| `--placement-delta-feedback-budget N` | Maximum apply/keep-or-revert iterations (default: 3) |
+| `--placement-delta-feedback-timeout SECONDS` | Per-iteration wall-clock budget for the loop's re-routes; survives an already-exhausted `--timeout`. Default: share whatever remains of `--timeout`. |
 
 #### Feasibility / coupling flags (v0.15.0, all default off)
 
