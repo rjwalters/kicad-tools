@@ -1948,3 +1948,253 @@ def test_fallback_tail_route_discards_a_tail_drawn_on_the_partner():
     assert dpr._fallback_tail_route(head, goal, partner, 0.4) is None
     assert len(calls) == 2, "an overlapping probe must trigger the biased re-route"
     assert calls[1][1], "the retry must carry partner boost sites"
+
+
+# ---------------------------------------------------------------------------
+# Issue #4553: construction-time length symmetry primitives
+# ---------------------------------------------------------------------------
+#
+# Measured on board-06 (shadow-ON, seed 42) the constructed shadow is ALWAYS
+# the LONGER leg -- ``shadow - guide`` decomposes as parallel-offset excess
+# (+0.7..2.1mm) + landing tails (1.0..9.8mm) - body trims (0..5.2mm) + the
+# dogleg quantize tax (0.0..0.36mm, under 1%).  Two construction-time
+# primitives close that gap; both are pure geometry and tested here without a
+# board route.
+
+
+def _pts(*xy):
+    return [(float(x), float(y)) for x, y in xy]
+
+
+def _staircase(steps: int, step: float = 0.05, run: int = 1):
+    """A per-cell staircase -- exactly what the C++ per-net A* emits.
+
+    ``run`` axis cells then one diagonal cell, repeated.  ``run=1`` is the
+    pathological 2:1 slope (26.6 degrees, which no 45-legal polyline can
+    follow closely); larger ``run`` values are the shallow drifts real escape
+    routes make.
+    """
+    pts = [(0.0, 0.0)]
+    for _ in range(steps):
+        for _ in range(run):
+            x, y = pts[-1]
+            pts.append((x + step, y))
+        x, y = pts[-1]
+        pts.append((x + step, y + step))
+    return pts
+
+
+def test_simplify_45_polyline_preserves_endpoints_and_45_legality():
+    from kicad_tools.router.diffpair_routing import simplify_45_polyline
+    from kicad_tools.router.quantize import verify_segment_45
+
+    pts = _staircase(40)
+    out = simplify_45_polyline(pts, max_deviation=0.3)
+    assert out[0] == pts[0]
+    assert out[-1] == pts[-1]
+    for a, b in zip(out, out[1:], strict=False):
+        verify_segment_45(
+            round(a[0], 4), round(a[1], 4), round(b[0], 4), round(b[1], 4), strict=True
+        )
+
+
+def test_simplify_45_polyline_creates_long_straight_runs():
+    """The AC's structural requirement: a run the serpentine tuner can use.
+
+    The raw staircase's longest collinear run is one grid cell (0.05mm); after
+    compression a single diagonal + axis pair spans the whole run, which is far
+    above ``SerpentineConfig.min_segment_length`` (2.0mm).
+    """
+    from kicad_tools.router.diffpair_routing import simplify_45_polyline
+
+    pts = _staircase(20, run=8)  # a shallow eastward drift, ~9mm long
+    raw_longest = max(
+        math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:], strict=False)
+    )
+    assert raw_longest < 0.08, "the emitted path is one segment per grid cell"
+    out = simplify_45_polyline(pts, max_deviation=0.75)
+    longest = max(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(out, out[1:], strict=False))
+    assert longest >= 2.0
+    assert len(out) < len(pts)
+
+
+def test_simplify_45_polyline_deviation_bound_caps_an_off_45_slope():
+    """A 26.6-degree path cannot be followed by 45-legal copper.
+
+    The bound is what keeps compression honest: the run it can compress is
+    limited by how far the shortest 45-legal chord strays from the corridor
+    the router chose, so an off-45 slope compresses only a little.
+    """
+    from kicad_tools.router.diffpair_routing import _max_deviation, simplify_45_polyline
+
+    pts = _staircase(60, run=1)
+    out = simplify_45_polyline(pts, max_deviation=0.3)
+    assert len(out) < len(pts)
+    assert _max_deviation(pts, out) <= 0.3 + 1e-9
+
+
+def test_simplify_45_polyline_never_lengthens():
+    from kicad_tools.router.diffpair_routing import _polyline_length, simplify_45_polyline
+
+    pts = _staircase(30)
+    out = simplify_45_polyline(pts, max_deviation=0.3)
+    assert _polyline_length(out) <= _polyline_length(pts) + 1e-9
+
+
+def test_simplify_45_polyline_respects_the_deviation_bound():
+    """A deviation bound of zero permits only exact (collinear) merges."""
+    from kicad_tools.router.diffpair_routing import (
+        _max_deviation,
+        _polyline_length,
+        simplify_45_polyline,
+    )
+
+    pts = _staircase(20, run=1)
+    out = simplify_45_polyline(pts, max_deviation=0.0)
+    assert _max_deviation(pts, out) <= 1e-9
+    assert _polyline_length(out) == pytest.approx(_polyline_length(pts))
+
+
+def test_simplify_45_polyline_skips_a_blocked_shortcut():
+    """An obstacle across the compressed chord keeps the original path."""
+    from kicad_tools.router.diffpair_routing import simplify_45_polyline
+
+    pts = _staircase(20)
+
+    def blocked(_a, _b):
+        return False
+
+    assert simplify_45_polyline(pts, max_deviation=1.0, is_clear=blocked) == pts
+
+
+def test_simplify_45_polyline_handles_a_single_turn():
+    from kicad_tools.router.diffpair_routing import simplify_45_polyline
+
+    # Straight east then straight north -- already minimal, nothing to gain
+    # beyond merging, and the corner must survive (a shortcut across it would
+    # violate the deviation bound).
+    pts = _pts((0, 0), (1, 0), (2, 0), (3, 0), (3, 1), (3, 2), (3, 3))
+    out = simplify_45_polyline(pts, max_deviation=0.2)
+    assert out[0] == (0.0, 0.0)
+    assert out[-1] == (3.0, 3.0)
+    assert (3.0, 0.0) in out
+
+
+def test_lateral_jog_adds_exactly_twice_the_displacement():
+    from kicad_tools.router.diffpair_routing import _polyline_length, lateral_jog_polyline
+
+    pts = _pts((0, 0), (1, 0), (2, 0), (3, 0), (4, 0))
+    before = _polyline_length(pts)
+    out = lateral_jog_polyline(pts, 1, 3, 0.0, 0.5)
+    assert _polyline_length(out) == pytest.approx(before + 2 * 0.5)
+
+
+def test_lateral_jog_preserves_45_legality_on_a_staircase():
+    """The property a serpentine cannot offer: works on ANY polyline window.
+
+    Translation preserves each segment's displacement vector, so a 45-legal
+    staircase window stays 45-legal; the two connector legs are 45-legal
+    because the displacement is itself a grid direction.
+    """
+    from kicad_tools.router.diffpair_routing import lateral_jog_polyline
+    from kicad_tools.router.quantize import verify_segment_45
+
+    pts = _staircase(10)
+    out = lateral_jog_polyline(pts, 2, 12, 0.4, 0.4)
+    for a, b in zip(out, out[1:], strict=False):
+        verify_segment_45(
+            round(a[0], 4), round(a[1], 4), round(b[0], 4), round(b[1], 4), strict=True
+        )
+
+
+def test_lateral_jog_endpoints_are_untouched():
+    from kicad_tools.router.diffpair_routing import lateral_jog_polyline
+
+    pts = _pts((0, 0), (1, 0), (2, 0), (3, 0))
+    out = lateral_jog_polyline(pts, 1, 2, 0.0, -0.3)
+    assert out[0] == pts[0]
+    assert out[-1] == pts[-1]
+
+
+def test_lateral_jog_rejects_an_invalid_window():
+    from kicad_tools.router.diffpair_routing import lateral_jog_polyline
+
+    pts = _pts((0, 0), (1, 0), (2, 0))
+    with pytest.raises(ValueError):
+        lateral_jog_polyline(pts, 2, 1, 0.0, 0.2)
+
+
+def test_route_copper_length_matches_the_polyline():
+    from kicad_tools.router.diffpair_routing import _route_copper_length
+
+    route = Route(net=1, net_name="P")
+    route.segments.append(_gseg(0.0, 0.0, 3.0, 0.0))
+    route.segments.append(_gseg(3.0, 0.0, 3.0, 4.0))
+    assert _route_copper_length(route) == pytest.approx(7.0)
+
+
+def test_simplify_guide_route_compresses_a_staircase_guide():
+    """End-to-end on the router object: a staircase guide gains long runs."""
+    dpr = _diffpair_router(resolution=0.05)
+    pf = _make_pathfinder(grid=dpr.autorouter.grid, rules=dpr.autorouter.rules)
+    route = Route(net=1, net_name="P")
+    pts = _staircase(20, run=8)
+    for a, b in zip(pts, pts[1:], strict=False):
+        route.segments.append(_gseg(a[0] + 2.0, a[1] + 2.0, b[0] + 2.0, b[1] + 2.0))
+    out = dpr._simplify_guide_route(route, pf)
+    assert len(out.segments) < len(route.segments)
+    longest = max(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in out.segments)
+    assert longest >= 2.0
+    # Endpoints preserved exactly -- the guide still lands on its pads.
+    assert (out.segments[0].x1, out.segments[0].y1) == (
+        route.segments[0].x1,
+        route.segments[0].y1,
+    )
+    assert (out.segments[-1].x2, out.segments[-1].y2) == (
+        route.segments[-1].x2,
+        route.segments[-1].y2,
+    )
+
+
+def test_meander_lengthens_the_shorter_leg_away_from_its_partner():
+    """The construction-time closure: a short leg is grown, not the partner."""
+    dpr = _diffpair_router(resolution=0.05)
+    pf = _make_pathfinder(grid=dpr.autorouter.grid, rules=dpr.autorouter.rules)
+    short = Route(net=1, net_name="P")
+    short.segments.append(_gseg(2.0, 5.0, 12.0, 5.0))
+    partner = [_gseg(2.0, 5.4, 12.0, 5.4)]
+    before = sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in short.segments)
+    added = dpr._meander_route_to_length(short, partner, pf, 2.0, 0.3)
+    after = sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in short.segments)
+    assert added > 0.0
+    assert after == pytest.approx(before + added, abs=1e-6)
+    # Every tooth bulges AWAY from the partner (which sits at y = 5.3).
+    assert min(min(s.y1, s.y2) for s in short.segments) < 5.0
+    assert max(max(s.y1, s.y2) for s in short.segments) <= 5.0 + 1e-9
+
+
+def test_meander_output_is_census_clean():
+    from kicad_tools.router.quantize import verify_segment_45
+
+    dpr = _diffpair_router(resolution=0.05)
+    pf = _make_pathfinder(grid=dpr.autorouter.grid, rules=dpr.autorouter.rules)
+    short = Route(net=1, net_name="P")
+    pts = _staircase(80)
+    for a, b in zip(pts, pts[1:], strict=False):
+        short.segments.append(_gseg(a[0] + 2.0, a[1] + 5.0, b[0] + 2.0, b[1] + 5.0))
+    partner = [_gseg(2.0, 5.4, 12.0, 5.4)]
+    added = dpr._meander_route_to_length(short, partner, pf, 1.5, 0.3)
+    assert added > 0.0
+    for s in short.segments:
+        verify_segment_45(
+            round(s.x1, 4), round(s.y1, 4), round(s.x2, 4), round(s.y2, 4), strict=True
+        )
+
+
+def test_meander_is_a_no_op_when_nothing_is_owed():
+    dpr = _diffpair_router(resolution=0.05)
+    pf = _make_pathfinder(grid=dpr.autorouter.grid, rules=dpr.autorouter.rules)
+    short = Route(net=1, net_name="P")
+    short.segments.append(_gseg(2.0, 5.0, 12.0, 5.0))
+    assert dpr._meander_route_to_length(short, [_gseg(2.0, 5.3, 12.0, 5.3)], pf, 0.0, 0.3) == 0.0
+    assert len(short.segments) == 1

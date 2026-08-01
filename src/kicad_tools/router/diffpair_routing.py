@@ -23,7 +23,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from .core import Autorouter
     from .cpp_backend import CppCoupledPathfinder
@@ -176,6 +176,48 @@ _GUIDE_BIAS_BOOST_REPEATS: int = int(os.environ.get("KCT_GUIDE_BIAS_BOOST_REPEAT
 # it sits relative to the guide.  Diagnostic-only; off by default.
 _SHADOW_DEBUG: bool = os.environ.get("KCT_SHADOW_DEBUG", "0") == "1"
 
+# Issue #4553: guide pre-simplification.  The C++ per-net A* emits one segment
+# per grid cell, so a board-06 guide is a ~400-segment staircase whose longest
+# contiguous collinear run is ~0.3 mm.  Every micro-corner costs the parallel
+# offset a miter join, and the fragmentation starves every length tuner (which
+# needs a straight run of ``SerpentineConfig.min_segment_length`` = 2.0 mm to
+# insert a trombone).  Compressing the guide polyline BEFORE offsetting fixes
+# both at once -- and, unlike running the trace optimizer AFTER the pair is
+# committed (which board-06's recipe deliberately skips for diff-pair nets
+# because it straightens one leg and destroys the constant-gap geometry), it
+# keeps the pair coupled: the shadow is offset from the ALREADY-simplified
+# guide, so both legs get the same long runs.  ``MAX_DEV`` bounds how far the
+# compressed path may stray from the corridor the router chose.
+_SHADOW_SIMPLIFY_GUIDE: bool = os.environ.get("KCT_SHADOW_SIMPLIFY_GUIDE", "1") == "1"
+_SHADOW_SIMPLIFY_MAX_DEV_MM: float = float(os.environ.get("KCT_SHADOW_SIMPLIFY_MAX_DEV_MM", "0.75"))
+_SHADOW_SIMPLIFY_MAX_WINDOW: int = int(os.environ.get("KCT_SHADOW_SIMPLIFY_MAX_WINDOW", "80"))
+
+# Issue #4553: construction-time length symmetry.  Measured on board-06
+# (shadow-ON, seed 42), the constructed shadow is ALWAYS the LONGER leg --
+# ``shadow - guide`` decomposes as (parallel-offset excess +0.7..2.1 mm) +
+# (landing tails 1.0..9.8 mm) - (body trims 0..5.2 mm) + (dogleg quantize tax
+# 0.0..0.36 mm).  The tails dominate; the quantize tax is under 1%, so the
+# curated "dogleg tax is the dominant driver" hypothesis does NOT hold on the
+# measured data.  Two construction-time levers close the gap instead:
+#
+#   1. Guide compression (above) -- most of the tail/trim excess comes from
+#      shadow bodies that could not be offset cleanly off a 400-corner
+#      staircase, so the constructor fell back to deep trims and long rescue
+#      tails.  Offsetting a compressed guide removes that at the source.
+#   2. A BOUNDED LATERAL-JOG MEANDER on the SHORTER leg (see
+#      :func:`lateral_jog_polyline`), applied while the pair is still under
+#      construction and before the clearance self-check gates, for whatever
+#      residual remains.
+#
+# The meander is capped at ``MAX_FRAC`` of the leg it lengthens so a pair can
+# never be turned mostly-meander (which would sink the coupled fraction the
+# ``diffpair_routing_continuity`` rule measures).
+_SHADOW_LENGTH_MATCH: bool = os.environ.get("KCT_SHADOW_LENGTH_MATCH", "1") == "1"
+_SHADOW_MEANDER_MAX_FRAC: float = float(os.environ.get("KCT_SHADOW_MEANDER_MAX_FRAC", "0.25"))
+# Largest / smallest per-tooth lateral excursion, in grid cells.
+_SHADOW_MEANDER_MAX_CELLS: int = int(os.environ.get("KCT_SHADOW_MEANDER_MAX_CELLS", "12"))
+_SHADOW_MEANDER_MIN_CELLS: int = int(os.environ.get("KCT_SHADOW_MEANDER_MIN_CELLS", "3"))
+
 
 # ---------------------------------------------------------------------------
 # Issue #3023 Phase A: intra-pair clearance violation detection
@@ -288,6 +330,218 @@ class CoupledPairReport:
             f"off_angle_segs={self.off_angle_segments} "
             f"shadow={self.shadow_enabled}"
         )
+
+
+def _route_copper_length(route: Route | None) -> float:
+    """Total centreline copper length (mm) of a route's segments.
+
+    Issue #4553: the shadow constructor's length-symmetry work needs a single
+    definition of "how long is this leg" shared by the constructor, its
+    diagnostics and the unit tests.  Vias contribute no planar length.
+    """
+    if route is None:
+        return 0.0
+    return sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in route.segments)
+
+
+Point = tuple[float, float]
+
+# Issue #4553: the eight grid directions a 45-legal displacement may take.
+# Axis moves keep one coordinate; diagonal moves move both by the SAME
+# magnitude, so a translation along any of these is 45-legal by construction.
+_GRID_DIRS: tuple[Point, ...] = (
+    (1.0, 0.0),
+    (0.0, 1.0),
+    (-1.0, 0.0),
+    (0.0, -1.0),
+    (1.0, 1.0),
+    (1.0, -1.0),
+    (-1.0, 1.0),
+    (-1.0, -1.0),
+)
+
+
+def _point_seg_distance(px: float, py: float, a: Point, b: Point) -> float:
+    """Distance from ``(px, py)`` to the finite segment ``a -> b``."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    den = dx * dx + dy * dy
+    if den < 1e-18:
+        return math.hypot(px - a[0], py - a[1])
+    t = max(0.0, min(1.0, ((px - a[0]) * dx + (py - a[1]) * dy) / den))
+    return math.hypot(px - (a[0] + dx * t), py - (a[1] + dy * t))
+
+
+def _polyline_points(segments: list[Segment]) -> list[Point] | None:
+    """Ordered vertex list of a head-to-tail segment chain, or ``None``.
+
+    Issue #4553.  The shadow constructor's geometry passes operate on a
+    POLYLINE (a vertex list), not on a segment list: both the 45-legal
+    compression and the length-matching lateral jog are defined by moving
+    vertices.  Returns ``None`` when the input is not a single contiguous
+    chain (a branch or a break), so callers degrade to leaving it alone.
+    """
+    if not segments:
+        return None
+    pts: list[Point] = [(segments[0].x1, segments[0].y1)]
+    for seg in segments:
+        if math.hypot(seg.x1 - pts[-1][0], seg.y1 - pts[-1][1]) > 1e-6:
+            return None
+        pts.append((seg.x2, seg.y2))
+    return pts
+
+
+def _route_span(segments: list[Segment]) -> float:
+    """Total centreline length of a segment list (mm)."""
+    return sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segments)
+
+
+def _polyline_length(points: list[Point]) -> float:
+    """Total length of a polyline given as an ordered vertex list."""
+    return sum(
+        math.hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1])
+        for i in range(len(points) - 1)
+    )
+
+
+def _max_deviation(points: list[Point], polyline: list[Point]) -> float:
+    """Largest distance from any of ``points`` to ``polyline``."""
+    worst = 0.0
+    for px, py in points:
+        best = float("inf")
+        for k in range(len(polyline) - 1):
+            best = min(best, _point_seg_distance(px, py, polyline[k], polyline[k + 1]))
+        worst = max(worst, best)
+    return worst
+
+
+def simplify_45_polyline(
+    points: list[Point],
+    max_deviation: float,
+    is_clear: Callable[[Point, Point], bool] | None = None,
+    max_window: int = 80,
+) -> list[Point]:
+    """Compress a fine 45-legal staircase into long straight runs.
+
+    Issue #4553.  The C++ per-net A* emits one segment per grid cell, so a
+    guide route is a 400-segment staircase whose longest CONTIGUOUS collinear
+    run is a fraction of a millimetre.  Every one of those micro-corners costs
+    the parallel-offset shadow a miter join (``_offset_corner_join``), and the
+    fragmentation starves every downstream length tuner, which needs a
+    straight run of ``SerpentineConfig.min_segment_length`` to act.
+
+    This walks the polyline greedily and replaces the longest run
+    ``points[i..j]`` it can with the SHORTEST 45-legal path between the same
+    two vertices (:func:`quantize.dogleg_points` -- one exact diagonal leg plus
+    one exact axis leg, so the result is census-clean by construction), subject
+    to two bounds:
+
+    * every replaced interior vertex stays within ``max_deviation`` of the
+      replacement, so the compressed path never leaves the corridor the router
+      chose (a global shortcut could cut a corner the offset needs), and
+    * ``is_clear(a, b)`` accepts both replacement legs (obstacle validation;
+      when ``None`` no obstacle check is performed -- the pure-geometry mode
+      the unit tests use).
+
+    The shortest 45-legal path is never longer than the run it replaces, so
+    this pass can only SHORTEN a route; endpoints are always preserved.
+    """
+    if len(points) < 3:
+        return list(points)
+
+    out: list[Point] = [points[0]]
+    n = len(points)
+    i = 0
+    while i < n - 1:
+        best_j = -1
+        best_repl: list[Point] | None = None
+        j = i + 2
+        while j < n and (j - i) <= max_window:
+            repl: list[Point] | None = None
+            for axis_first in (False, True):
+                cand = dogleg_points(
+                    points[i][0], points[i][1], points[j][0], points[j][1], axis_first=axis_first
+                )
+                if _max_deviation(points[i + 1 : j], cand) > max_deviation:
+                    continue
+                if is_clear is not None and not all(
+                    is_clear(cand[k], cand[k + 1]) for k in range(len(cand) - 1)
+                ):
+                    continue
+                repl = cand
+                break
+            if repl is None:
+                break
+            best_j, best_repl = j, repl
+            j += 1
+        if best_repl is None:
+            out.append(points[i + 1])
+            i += 1
+        else:
+            out.extend(best_repl[1:])
+            i = best_j
+    return out
+
+
+def densify_polyline(points: list[Point], step: float) -> list[Point]:
+    """Insert collinear vertices so no edge is longer than ``step``.
+
+    Issue #4553.  The lateral-jog meander picks its window from the VERTEX
+    list, so a compressed polyline made of a few multi-millimetre edges would
+    offer nowhere to put a tooth.  Inserted vertices lie exactly on the edge
+    they subdivide, so the geometry -- and its 45-legality -- is unchanged.
+    """
+    if step <= 0.0 or len(points) < 2:
+        return list(points)
+    out: list[Point] = [points[0]]
+    for a, b in zip(points, points[1:], strict=False):
+        seg_len = math.hypot(b[0] - a[0], b[1] - a[1])
+        n = int(seg_len // step)
+        for k in range(1, n + 1):
+            t = (k * step) / seg_len
+            if t >= 1.0 - 1e-9:
+                break
+            out.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+        out.append(b)
+    return out
+
+
+def merge_collinear_points(points: list[Point]) -> list[Point]:
+    """Drop vertices that do not change the polyline's direction."""
+    if len(points) < 3:
+        return list(points)
+    out: list[Point] = [points[0]]
+    for k in range(1, len(points) - 1):
+        ax, ay = out[-1]
+        bx, by = points[k]
+        cx, cy = points[k + 1]
+        cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx)
+        dot = (bx - ax) * (cx - bx) + (by - ay) * (cy - by)
+        if abs(cross) > 1e-9 or dot < 0.0:
+            out.append(points[k])
+    out.append(points[-1])
+    return out
+
+
+def lateral_jog_polyline(points: list[Point], i: int, j: int, dx: float, dy: float) -> list[Point]:
+    """Translate the window ``points[i..j]`` by ``(dx, dy)``, adding length.
+
+    Issue #4553.  This is the construction-time length-matching primitive: the
+    sub-polyline between vertices ``i`` and ``j`` is displaced sideways and
+    rejoined to the untouched spine by two connector legs, so the result adds
+    EXACTLY ``2 * hypot(dx, dy)`` of copper.  Every displaced segment keeps its
+    original displacement vector (translation is direction-preserving), so a
+    45-legal window stays 45-legal; the two connector legs are 45-legal exactly
+    when ``(dx, dy)`` is itself axis-aligned or a true diagonal -- which is why
+    callers pick the displacement from :data:`_GRID_DIRS`.
+
+    Unlike a serpentine, this needs no straight SEGMENT -- only a window whose
+    endpoints are far enough apart for the two connector legs not to touch --
+    so it works on the fine staircases the router actually emits.
+    """
+    if not (0 <= i < j < len(points)):
+        raise ValueError(f"invalid jog window [{i}, {j}] for {len(points)} points")
+    moved = [(p[0] + dx, p[1] + dy) for p in points[i : j + 1]]
+    return points[: i + 1] + moved + points[j:]
 
 
 def _count_off_angle_segments(route: Route | None) -> int:
@@ -4196,6 +4450,371 @@ class DiffPairRouter:
             )
         return tail
 
+    def _rebuild_section(self, points: list[Point], template: Segment) -> list[Segment]:
+        """Materialise a polyline as segments carrying ``template``'s attributes."""
+        out: list[Segment] = []
+        for k in range(len(points) - 1):
+            ax, ay = points[k]
+            bx, by = points[k + 1]
+            if math.hypot(bx - ax, by - ay) < 1e-9:
+                continue
+            out.append(
+                Segment(
+                    x1=ax,
+                    y1=ay,
+                    x2=bx,
+                    y2=by,
+                    width=template.width,
+                    layer=template.layer,
+                    net=template.net,
+                    net_name=template.net_name,
+                )
+            )
+        return out
+
+    @staticmethod
+    def _segments_census_clean(segments: list[Segment]) -> bool:
+        """True when every segment passes the #3975 emission census AS WRITTEN."""
+        for seg in segments:
+            try:
+                verify_segment_45(
+                    round(seg.x1, 4),
+                    round(seg.y1, 4),
+                    round(seg.x2, 4),
+                    round(seg.y2, 4),
+                    strict=True,
+                )
+            except OffAngleSegmentError:
+                return False
+        return True
+
+    def _guide_sections(self, guide: Route) -> list[tuple[int, list[Segment]]]:
+        """Split a guide route into ordered single-layer sections."""
+        grid = self.autorouter.grid
+        sections: list[tuple[int, list[Segment]]] = []
+        for seg in guide.segments:
+            li = grid.layer_to_index(seg.layer.value)
+            if not sections or sections[-1][0] != li:
+                sections.append((li, []))
+            sections[-1][1].append(seg)
+        return sections
+
+    def _simplify_guide_route(self, guide: Route, pathfinder: CoupledPathfinder) -> Route:
+        """Compress the guide's per-cell staircase into long straight runs.
+
+        Issue #4553.  Runs :func:`simplify_45_polyline` over each single-layer
+        section of the guide, obstacle-validated against the same
+        ``_is_cell_blocked`` predicate the rest of the constructor uses, and
+        returns a NEW route (the caller's guide object is never mutated -- it
+        is reused by the swapped-role and guide-biased retries).
+
+        Why here and not in the trace optimizer: board-06's recipe deliberately
+        excludes diff-pair nets from ``optimize_routes_grid_synced`` because
+        straightening one leg of an already-committed pair destroys the
+        constant-gap geometry.  Simplifying the guide BEFORE the shadow is
+        offset from it has the opposite effect -- the shadow inherits the same
+        long runs, so the pair stays coupled AND both legs gain the straight
+        runs a downstream skew tuner needs.
+
+        A section whose compression is not census-clean or whose endpoints
+        moved is kept verbatim: graceful degradation, never a silent break.
+        """
+        if not _SHADOW_SIMPLIFY_GUIDE or not guide.segments:
+            return guide
+        simplified: list[Segment] = []
+        changed = False
+        for li, sec in self._guide_sections(guide):
+            pts = _polyline_points(sec)
+            if pts is None or len(pts) < 3:
+                simplified.extend(sec)
+                continue
+            net = sec[0].net
+
+            def _clear(a: Point, b: Point, _li: int = li, _net: int = net) -> bool:
+                return self._segment_cells_clear(pathfinder, a[0], a[1], b[0], b[1], _li, _net)
+
+            new_pts = simplify_45_polyline(
+                pts,
+                _SHADOW_SIMPLIFY_MAX_DEV_MM,
+                _clear,
+                max_window=_SHADOW_SIMPLIFY_MAX_WINDOW,
+            )
+            new_segs = self._rebuild_section(new_pts, sec[0])
+            if (
+                len(new_pts) >= 2
+                and new_pts[0] == pts[0]
+                and new_pts[-1] == pts[-1]
+                and new_segs
+                and self._segments_census_clean(new_segs)
+            ):
+                simplified.extend(new_segs)
+                changed = changed or len(new_segs) != len(sec)
+            else:
+                simplified.extend(sec)
+        if not changed:
+            return guide
+        out = Route(net=guide.net, net_name=guide.net_name)
+        out.segments.extend(simplified)
+        out.vias.extend(guide.vias)
+        return out
+
+    @staticmethod
+    def _away_from_partner(mid: Point, partner_segments: list[Segment]) -> Point | None:
+        """Unit vector pointing from the nearest partner copper toward ``mid``."""
+        if not partner_segments:
+            return None
+        near = min(
+            partner_segments,
+            key=lambda s: _point_seg_distance(mid[0], mid[1], (s.x1, s.y1), (s.x2, s.y2)),
+        )
+        ax, ay, bx, by = near.x1, near.y1, near.x2, near.y2
+        den = (bx - ax) ** 2 + (by - ay) ** 2
+        if den < 1e-18:
+            cx, cy = ax, ay
+        else:
+            t = max(0.0, min(1.0, ((mid[0] - ax) * (bx - ax) + (mid[1] - ay) * (by - ay)) / den))
+            cx, cy = ax + (bx - ax) * t, ay + (by - ay) * t
+        vx, vy = mid[0] - cx, mid[1] - cy
+        norm = math.hypot(vx, vy)
+        if norm < 1e-9:
+            return None
+        return (vx / norm, vy / norm)
+
+    def _length_match_constructed_pair(
+        self,
+        pair: DifferentialPair,
+        guide_route: Route,
+        shadow_route: Route,
+        pathfinder: CoupledPathfinder,
+        min_partner_center: float,
+    ) -> float:
+        """Equalise a freshly-constructed pair's two legs (issue #4553).
+
+        Called from :meth:`_shadow_route_pair` while both routes are still
+        UNCOMMITTED, so lengthening either leg is transactional -- if the
+        clearance gates that run immediately afterwards reject the side, the
+        meandered copper goes away with it.
+
+        Meanders the shorter leg toward the longer one, leaving half the pair's
+        ``max_length_delta`` as headroom for the downstream Phase-3I tuner, and
+        never adds more than ``_SHADOW_MEANDER_MAX_FRAC`` of that leg's own
+        length.  Returns the millimetres actually added.
+        """
+        tol = float(getattr(getattr(pair, "rules", None), "max_length_delta", 0.0) or 0.0)
+        headroom = max(0.05, tol * 0.5)
+        g_len = _route_copper_length(guide_route)
+        s_len = _route_copper_length(shadow_route)
+        delta = s_len - g_len
+        if abs(delta) <= headroom:
+            return 0.0
+        shorter, partner = (
+            (guide_route, shadow_route) if delta > 0.0 else (shadow_route, guide_route)
+        )
+        need = min(
+            abs(delta) - headroom,
+            _SHADOW_MEANDER_MAX_FRAC * _route_copper_length(shorter),
+        )
+        if need <= 1e-6:
+            return 0.0
+        added = self._meander_route_to_length(
+            shorter,
+            list(partner.segments),
+            pathfinder,
+            need,
+            min_partner_center,
+        )
+        if _SHADOW_DEBUG:
+            print(
+                f"    [coupled-shadow-match] {pair.name} delta={delta:+.3f} "
+                f"need={need:.3f} added={added:.3f} "
+                f"residual={abs(delta) - added:.3f}"
+            )
+        return added
+
+    def _meander_route_to_length(
+        self,
+        route: Route,
+        partner_segments: list[Segment],
+        pathfinder: CoupledPathfinder,
+        target_add: float,
+        min_partner_center: float,
+    ) -> float:
+        """Add ``target_add`` mm to ``route`` with bounded lateral-jog teeth.
+
+        Issue #4553 (the construction-time half of the fix).  The measured
+        board-06 asymmetry is 0.8-6.8 mm of EXCESS on the constructed shadow,
+        which no downstream trombone tuner can absorb -- and the tuner cannot
+        even engage, because neither leg carries a straight SEGMENT long enough
+        to host a serpentine.  This closes the gap from the other side: it
+        lengthens the SHORTER leg while the pair is still under construction,
+        using :func:`lateral_jog_polyline` teeth that need only a window whose
+        endpoints are far enough apart -- no straight segment required.
+
+        Every tooth is validated before it is kept:
+
+        * the 45-census (:func:`verify_segment_45`, strict) on the connector
+          legs and the whole displaced window,
+        * the grid raster (``_is_cell_blocked``) for foreign copper, pad halos
+          and keepouts,
+        * the partner-clearance floor (``min_partner_center``, centre-to-centre)
+          against the partner polyline -- teeth are pushed AWAY from the
+          partner, so the coupled gap can only widen, and
+        * self-clearance against the parts of this route the tooth did not
+          move.
+
+        Teeth are spaced by at least one trace pitch so the comb never shorts
+        to itself, and the total added length is capped by the caller.  Returns
+        the length actually added (0.0 when nothing legal was found -- graceful
+        degradation, the pair simply stays skewed as it does today).
+        """
+        if target_add <= 1e-6 or not route.segments:
+            return 0.0
+        grid = self.autorouter.grid
+        res = grid.resolution
+        rules = self.autorouter.rules
+        # Longest sections first: teeth belong on the coupled body, not on a
+        # short landing tail crammed into a pad halo.
+        sections = self._guide_sections(route)
+        order = sorted(range(len(sections)), key=lambda k: -_route_span(sections[k][1]))
+        added_total = 0.0
+        for idx in order:
+            if added_total >= target_add - 1e-6:
+                break
+            layer_idx, sec = sections[idx]
+            raw_pts = _polyline_points(sec)
+            if raw_pts is None or len(raw_pts) < 2:
+                continue
+            width = sec[0].width
+            net = sec[0].net
+            template = sec[0]
+            pitch = width + rules.trace_clearance
+            # A compressed body is a handful of multi-millimetre edges; densify
+            # so the tooth walker has vertices to anchor windows on.
+            pts = densify_polyline(raw_pts, max(res, pitch / 2.0))
+            if len(pts) < 3:
+                continue
+            others = [s for k, (_, ss) in enumerate(sections) if k != idx for s in ss]
+
+            def _tooth_ok(
+                new_pts: list[Point],
+                lo: int,
+                hi: int,
+                _t: Segment = template,
+                _li: int = layer_idx,
+                _net: int = net,
+                _others: list[Segment] = others,
+                _w: float = width,
+            ) -> bool:
+                probe = self._rebuild_section(new_pts[lo : hi + 1], _t)
+                if not probe or not self._segments_census_clean(probe):
+                    return False
+                for s in probe:
+                    if not self._segment_cells_clear(pathfinder, s.x1, s.y1, s.x2, s.y2, _li, _net):
+                        return False
+                    if (
+                        self._min_distance_to_partner(
+                            s.x1, s.y1, s.x2, s.y2, partner_segments, _t.layer
+                        )
+                        < min_partner_center
+                    ):
+                        return False
+                    for o in _others:
+                        if o.layer != _t.layer:
+                            continue
+                        if self._point_segment_distance(s.x1, s.y1, o) < _w:
+                            return False
+                        if self._point_segment_distance(s.x2, s.y2, o) < _w:
+                            return False
+                return True
+
+            out: list[Point] = [pts[0]]
+            n = len(pts)
+            i = 0
+            section_added = 0.0
+            while i < n - 1 and added_total < target_add - 1e-6:
+                j = i + 1
+                while (
+                    j < n - 1 and math.hypot(pts[j][0] - pts[i][0], pts[j][1] - pts[i][1]) < pitch
+                ):
+                    j += 1
+                if j >= n - 1:
+                    break
+                mid = pts[(i + j) // 2]
+                away = self._away_from_partner(mid, partner_segments)
+                # The tooth must actually leave the spine: a displacement along
+                # the window's own chord folds the "tooth" back onto the trace
+                # instead of adding usable copper.
+                chord = math.hypot(pts[j][0] - pts[i][0], pts[j][1] - pts[i][1])
+                cux = (pts[j][0] - pts[i][0]) / chord if chord > 1e-9 else 0.0
+                cuy = (pts[j][1] - pts[i][1]) / chord if chord > 1e-9 else 0.0
+                chosen: tuple[float, float] | None = None
+                if away is not None:
+                    # Most-outward grid direction first (no closure over the
+                    # loop variable: score eagerly, then sort the tuples).
+                    scored = sorted(
+                        (-(u[0] * away[0] + u[1] * away[1]) / math.hypot(u[0], u[1]), u)
+                        for u in _GRID_DIRS
+                    )
+                    for ux, uy in [u for _, u in scored[:3]]:
+                        if ux * away[0] + uy * away[1] <= 0.0:
+                            continue
+                        norm = math.hypot(ux, uy)
+                        if abs(ux / norm * cuy - uy / norm * cux) < 0.3:
+                            continue  # too nearly along the spine
+                        unit = norm * res
+                        want = int(round((target_add - added_total) / (2.0 * unit)))
+                        hi_cells = max(
+                            _SHADOW_MEANDER_MIN_CELLS, min(_SHADOW_MEANDER_MAX_CELLS, want)
+                        )
+                        for cells in range(hi_cells, _SHADOW_MEANDER_MIN_CELLS - 1, -1):
+                            dx, dy = ux * cells * res, uy * cells * res
+                            cand = lateral_jog_polyline(pts, i, j, dx, dy)
+                            if _tooth_ok(cand, i, j + 2):
+                                chosen = (dx, dy)
+                                break
+                        if chosen is not None:
+                            break
+                if chosen is None:
+                    out.append(pts[i + 1])
+                    i += 1
+                    continue
+                dx, dy = chosen
+                out.extend((p[0] + dx, p[1] + dy) for p in pts[i : j + 1])
+                out.append(pts[j])
+                section_added += 2.0 * math.hypot(dx, dy)
+                added_total += 2.0 * math.hypot(dx, dy)
+                # Skip one pitch of spine before the next tooth so the comb
+                # cannot short to itself.
+                k = j
+                while (
+                    k < n - 1 and math.hypot(pts[k][0] - pts[j][0], pts[k][1] - pts[j][1]) < pitch
+                ):
+                    k += 1
+                out.extend(pts[j + 1 : k + 1])
+                i = k
+            out.extend(pts[i + 1 :])
+            # Undo the densification: collinear runs collapse back to single
+            # segments so the meandered leg keeps the long straight runs the
+            # downstream tuner needs.
+            merged = merge_collinear_points(out)
+            new_segs = self._rebuild_section(merged, template)
+            if new_segs and self._segments_census_clean(new_segs):
+                sections[idx] = (layer_idx, new_segs)
+                # Report the MEASURED gain, not the per-tooth bookkeeping, so
+                # the caller's residual is the truth even if a tooth collapsed
+                # during the collinear merge.
+                added_total = (
+                    added_total
+                    - section_added
+                    + (_polyline_length(merged) - _polyline_length(raw_pts))
+                )
+        rebuilt: list[Segment] = []
+        for _, sec in sections:
+            rebuilt.extend(sec)
+        if added_total > 1e-6:
+            route.segments[:] = rebuilt
+        return added_total
+
     def _quantize_shadow_segments(
         self,
         route: Route,
@@ -4748,6 +5367,7 @@ class DiffPairRouter:
         guide: Route,
         spacing_cells: int,
         swap_roles: bool = False,
+        simplify_guide: bool = True,
     ) -> tuple[Route, Route] | None:
         """Construct the pair as guide + validated parallel shadow.
 
@@ -4787,6 +5407,20 @@ class DiffPairRouter:
             return None
         grid = self.autorouter.grid
         rules = self.autorouter.rules
+        # Issue #4553: compress the guide's per-cell staircase FIRST, so the
+        # parallel offset is taken from a polyline with long straight runs.
+        # The caller's ``guide`` object is left untouched (it is reused by the
+        # swapped-role and guide-biased retries); everything below reads the
+        # simplified copy.  If NO offset side survives on the compressed guide,
+        # the whole construction is retried verbatim on the original polyline
+        # (see the tail of this method), so compression can never cost a pair
+        # that used to construct.
+        raw_guide = guide
+        if simplify_guide:
+            guide = self._simplify_guide_route(guide, pathfinder)
+        guide_was_simplified = guide is not raw_guide
+        if not guide.segments:
+            return None
         if swap_roles:
             shadow_start, shadow_end = spec.p_start, spec.p_end
         else:
@@ -5258,12 +5892,46 @@ class DiffPairRouter:
             # (#3975) -- validate.  A residual off-angle segment (no clear
             # dogleg variant) degrades gracefully; it is not silently
             # shipped as a short.
+            pre_quant_len = _route_copper_length(shadow_route)
             self._quantize_shadow_segments(shadow_route, pathfinder)
+            if _SHADOW_DEBUG:
+                guide_len = sum(math.hypot(g.x2 - g.x1, g.y2 - g.y1) for g in guide.segments)
+                print(
+                    f"    [coupled-shadow-len] {pair.name} side={side:+.0f} "
+                    f"swap={swap_roles} guide={guide_len:.3f} "
+                    f"shadow={_route_copper_length(shadow_route):.3f} "
+                    f"(pre_quant={pre_quant_len:.3f}) "
+                    f"body_raw={arc_total:.3f} body_kept={a1_eff - a0_eff:.3f} "
+                    f"trim0={a0_eff:.3f} trim1={arc_total - a1_eff:.3f} "
+                    f"tail0={_route_copper_length(start_tail):.3f} "
+                    f"tail1={_route_copper_length(end_tail):.3f}"
+                )
 
             guide_net_pad = spec.n_start if swap_roles else spec.p_start
             guide_route_obj = Route(net=guide_net_pad.net, net_name=guide_net_pad.net_name)
             guide_route_obj.segments.extend(guide.segments)
             guide_route_obj.vias.extend(guide.vias)
+
+            # Issue #4553: make the pair length-symmetric BY CONSTRUCTION.
+            # The parallel offset, the shadow's via jogs and its independently
+            # synthesized landing tails leave the constructed shadow 0.8-6.8 mm
+            # LONGER than the guide on board-06 -- a construction-time deficit
+            # no bounded downstream trombone can absorb.  Close it here, while
+            # the pair is still uncommitted and before the clearance gates
+            # below run, by meandering the SHORTER leg away from its partner.
+            # Bounded by ``_SHADOW_MEANDER_MAX_FRAC`` of that leg so a pair can
+            # never become mostly-meander (the coupled fraction the
+            # ``diffpair_routing_continuity`` rule measures stays healthy), and
+            # every tooth is 45-census / grid / partner validated, so a pair
+            # with no legal room simply stays skewed as it does today.
+            if _SHADOW_LENGTH_MATCH:
+                self._length_match_constructed_pair(
+                    pair,
+                    guide_route_obj,
+                    shadow_route,
+                    pathfinder,
+                    intra_floor + s_width / 2.0 + guide_width / 2.0,
+                )
 
             if swap_roles:
                 p_route, n_route = shadow_route, guide_route_obj
@@ -5331,6 +5999,20 @@ class DiffPairRouter:
                 continue
             return p_route, n_route
 
+        # Issue #4553: both offset sides declined on the COMPRESSED guide.
+        # Retry once on the original per-cell polyline so the construction
+        # rate can only ever improve -- the compressed guide is a different
+        # (usually easier, occasionally tighter) corridor, never a mandate.
+        if guide_was_simplified:
+            return self._shadow_route_pair(
+                pair,
+                spec,
+                pathfinder,
+                raw_guide,
+                spacing_cells,
+                swap_roles=swap_roles,
+                simplify_guide=False,
+            )
         return None
 
     def _rescue_near_miss_coupled(
