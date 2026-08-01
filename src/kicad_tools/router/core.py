@@ -15940,6 +15940,7 @@ class Autorouter:
         outer_timeout: float | None = None,
         excluded_nets: frozenset[str] | set[str] | list[str] | None = None,
         reuse_existing_routes: bool = False,
+        require_no_clearance_regression: bool = True,
     ) -> PlacementDeltaFeedbackResult | PlacementFeedbackResult:
         """Close the router<->placement loop with classifier-driven deltas (#4467).
 
@@ -15980,6 +15981,10 @@ class Autorouter:
             reuse_existing_routes: Adopt the router's existing routes as the
                 loop baseline instead of re-routing from scratch (issue #4468);
                 set by callers that just completed a routing pass.
+            require_no_clearance_regression: Keep a delta only when it also
+                does not increase the router's clearance-violation count
+                (issue #4468) -- reach alone is the wrong acceptance test for
+                a placement change.
             min_confidence / stagnation_patience / outer_timeout: Forwarded to
                 the legacy loop only when the toggle is off.
 
@@ -16018,6 +16023,7 @@ class Autorouter:
             timeout=timeout,
             per_net_timeout=per_net_timeout,
             reuse_existing_routes=reuse_existing_routes,
+            require_no_clearance_regression=require_no_clearance_regression,
         )
         if delta_output_path is not None:
             write_placement_delta_json(

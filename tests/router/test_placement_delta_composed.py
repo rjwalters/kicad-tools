@@ -311,6 +311,72 @@ class TestCandidateLadder:
         assert payload["reverted"][0]["routed_before"] == 1
         assert payload["reverted"][0]["routed_after"] == 1
 
+    def test_a_reach_gain_that_costs_clearance_is_rejected(self, monkeypatch):
+        """Reach alone is the wrong acceptance test for a placement change.
+
+        Measured on board-07: a kept 2 mm translate bought one net
+        (26/31 -> 27/31) while pushing two DDR-channel clearances under the
+        jlcpcb floor and breaking the ADDR_BUS length match -- a trade the
+        routed-DRC allowlist would have had to be WIDENED to absorb.
+        """
+
+        def improves(router):
+            return [] if abs(router.pads[("UB", "2")].x - 20.0) > 1e-6 else [2]
+
+        delta = PlacementDelta(net_name="DQ3", target_ref="UB", kind="translate", dx=2.0, dy=0.0)
+        loop, router = self._loop([delta], improves)
+
+        # Clearance count climbs the moment the delta lands.
+        counts = iter([4, 6])
+        monkeypatch.setattr(
+            PlacementDeltaFeedbackLoop,
+            "_clearance_violation_count",
+            lambda _self: next(counts, 6),
+        )
+
+        result = loop.run_delta(max_adjustments=1, reuse_existing_routes=True)
+
+        assert result.applied_deltas == [], "a DRC-regressing delta must not be kept"
+        assert result.reverted_reasons == ["clearance violations 4 -> 6"]
+        # Reverted atomically despite the reach gain.
+        assert next(f for f in loop.pcb.footprints if f.reference == "UB").position == (
+            22.0,
+            10.0,
+        )
+        assert router.pads[("UB", "2")].x == pytest.approx(20.0)
+
+    def test_the_guard_can_be_turned_off(self, monkeypatch):
+        def improves(router):
+            return [] if abs(router.pads[("UB", "2")].x - 20.0) > 1e-6 else [2]
+
+        delta = PlacementDelta(net_name="DQ3", target_ref="UB", kind="translate", dx=2.0, dy=0.0)
+        loop, router = self._loop([delta], improves)
+        monkeypatch.setattr(
+            PlacementDeltaFeedbackLoop, "_clearance_violation_count", lambda _self: 99
+        )
+
+        result = loop.run_delta(
+            max_adjustments=1,
+            reuse_existing_routes=True,
+            require_no_clearance_regression=False,
+        )
+        assert [d.target_ref for d in result.applied_deltas] == ["UB"]
+
+    def test_unmeasurable_clearance_does_not_block_a_keep(self, monkeypatch):
+        """A router that cannot report clearances disables the guard, not the loop."""
+
+        def improves(router):
+            return [] if abs(router.pads[("UB", "2")].x - 20.0) > 1e-6 else [2]
+
+        delta = PlacementDelta(net_name="DQ3", target_ref="UB", kind="translate", dx=2.0, dy=0.0)
+        loop, router = self._loop([delta], improves)
+        monkeypatch.setattr(
+            PlacementDeltaFeedbackLoop, "_clearance_violation_count", lambda _self: None
+        )
+
+        result = loop.run_delta(max_adjustments=1, reuse_existing_routes=True)
+        assert [d.target_ref for d in result.applied_deltas] == ["UB"]
+
     def test_budget_one_preserves_stop_at_first_revert(self):
         first = PlacementDelta(net_name="DQ3", target_ref="UA", kind="translate", dx=1.0, dy=0.0)
         second = PlacementDelta(net_name="DQ4", target_ref="UB", kind="translate", dx=2.0, dy=0.0)

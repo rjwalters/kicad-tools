@@ -1118,6 +1118,7 @@ class PlacementDeltaFeedbackResult:
     # the evidence for "the loop plateaued here".
     reverted_deltas: list[PlacementDelta] = field(default_factory=list)
     reverted_counts: list[tuple[int, int]] = field(default_factory=list)
+    reverted_reasons: list[str] = field(default_factory=list)
     failed_nets: list[int] = field(default_factory=list)
     placement_diff: list[PlacementDiffEntry] = field(default_factory=list)
     exit_reason: str = "pd_max_iter"
@@ -1137,10 +1138,15 @@ class PlacementDeltaFeedbackResult:
         ]
         for delta in self.applied_deltas:
             lines.append(f"    kept: {delta.target_ref} {delta.kind} ({delta.net_name})")
-        for delta, counts in zip(self.reverted_deltas, self.reverted_counts, strict=False):
+        for delta, counts, reason in zip(
+            self.reverted_deltas,
+            self.reverted_counts,
+            self.reverted_reasons or [""] * len(self.reverted_deltas),
+            strict=False,
+        ):
             lines.append(
                 f"    reverted: {delta.target_ref} {delta.kind} ({delta.net_name}) "
-                f"-- routed {counts[0]} -> {counts[1]}"
+                f"-- routed {counts[0]} -> {counts[1]}" + (f" ({reason})" if reason else "")
             )
         for delta, reason in zip(self.skipped_deltas, self.skip_reasons, strict=False):
             lines.append(f"    skipped: {delta.target_ref} {delta.kind} -- {reason}")
@@ -1149,10 +1155,16 @@ class PlacementDeltaFeedbackResult:
     def reverted_evidence(self) -> list[dict[str, Any]]:
         """Serializable ``reverted`` payload for the delta artifact (#4468)."""
         out: list[dict[str, Any]] = []
-        for delta, counts in zip(self.reverted_deltas, self.reverted_counts, strict=False):
+        for delta, counts, reason in zip(
+            self.reverted_deltas,
+            self.reverted_counts,
+            self.reverted_reasons or [""] * len(self.reverted_deltas),
+            strict=False,
+        ):
             entry = delta.to_dict()
             entry["routed_before"] = counts[0]
             entry["routed_after"] = counts[1]
+            entry["revert_reason"] = reason
             out.append(entry)
         return out
 
@@ -1451,6 +1463,23 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             pad.x = x
             pad.y = y
 
+    def _clearance_violation_count(self) -> int | None:
+        """Router-level clearance-violation count, or ``None`` when unavailable.
+
+        The same lightweight pre-save validator the CLI runs before writing the
+        routed board (:func:`kicad_tools.router.io.validate_routes`), so the
+        loop's accept/reject decision is measured with the same instrument the
+        pipeline will judge the output by.  Returns ``None`` for routers without
+        the state the validator needs (test doubles), which disables the
+        no-regression guard rather than failing the loop.
+        """
+        try:
+            from kicad_tools.router.io import validate_routes
+
+            return len(validate_routes(self.router))
+        except Exception:
+            return None
+
     def _apply_delta_to_router_pads(self, delta: PlacementDelta) -> None:
         """Mutate the router's flat pad coordinates to match an applied delta.
 
@@ -1490,6 +1519,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         timeout: float | None = None,
         per_net_timeout: float | None = None,
         reuse_existing_routes: bool = False,
+        require_no_clearance_regression: bool = True,
     ) -> PlacementDeltaFeedbackResult:
         """Run the classifier-driven placement-delta feedback loop.
 
@@ -1507,6 +1537,15 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 full duplicate of work already done -- on board-07 that is
                 ~11 min of wall clock for a bit-identical result.  Leave False
                 (the default) when the caller has not routed yet.
+            require_no_clearance_regression: Keep a delta only if it ALSO does
+                not increase the router's clearance-violation count (issue
+                #4468).  Reach alone is the wrong acceptance test for a
+                placement change: measured on board-07, a kept 2 mm translate
+                bought one net (26/31 -> 27/31) while pushing two DDR-channel
+                clearances under the jlcpcb floor and breaking the ADDR_BUS
+                length-match the board exists to exercise -- a trade the
+                routed-DRC allowlist would have had to be WIDENED to absorb.
+                Set False to restore the reach-only Phase-2 criterion.
 
         Returns:
             A :class:`PlacementDeltaFeedbackResult`.  The returned routes/placement
@@ -1536,6 +1575,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         skip_reasons: list[str] = []
         reverted: list[PlacementDelta] = []
         reverted_counts: list[tuple[int, int]] = []
+        reverted_reasons: list[str] = []
 
         if self.verbose:
             print("\n=== Placement-Delta Feedback Loop (classifier-driven) ===")
@@ -1598,6 +1638,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             pre_pads = self._snapshot_router_pads()
             pre_routes = copy.deepcopy(list(self.router.routes))
             pre_count = _routed_count()
+            pre_violations = self._clearance_violation_count()
 
             # Record the pre-move position (once) for the placement diff.
             self._snapshot_positions([delta.target_ref])
@@ -1619,8 +1660,16 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
 
             _route()
             new_count = _routed_count()
+            post_violations = self._clearance_violation_count()
 
-            if new_count > pre_count:
+            regressed_drc = (
+                require_no_clearance_regression
+                and pre_violations is not None
+                and post_violations is not None
+                and post_violations > pre_violations
+            )
+
+            if new_count > pre_count and not regressed_drc:
                 applied.append(delta)
                 if self.verbose:
                     print(f"  Kept: routed {pre_count} -> {new_count} (strict improvement)")
@@ -1638,13 +1687,19 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 self._restore_placement(pre_placement)
                 self._restore_router_pads(pre_pads)
                 self._rebuild_grid_for_routes(pre_routes)
+                reason = (
+                    f"clearance violations {pre_violations} -> {post_violations}"
+                    if regressed_drc
+                    else "no strict routed-net increase"
+                )
                 reverted.append(delta)
                 reverted_counts.append((pre_count, new_count))
+                reverted_reasons.append(reason)
                 exit_reason = "pd_reverted"
                 if self.verbose:
                     print(
                         f"  Reverted: routed {pre_count} -> {new_count} "
-                        f"(no strict improvement); placement + routes + grid restored"
+                        f"({reason}); placement + routes + grid restored"
                     )
                 # Continue with the NEXT unprobed candidate while budget
                 # remains (issue #4468): the classifier ranks a LADDER, and
@@ -1681,6 +1736,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             skip_reasons=skip_reasons,
             reverted_deltas=reverted,
             reverted_counts=reverted_counts,
+            reverted_reasons=reverted_reasons,
             failed_nets=failed_nets,
             placement_diff=self._build_placement_diff(),
             exit_reason=exit_reason,
