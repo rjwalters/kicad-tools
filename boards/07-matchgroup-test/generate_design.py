@@ -92,7 +92,7 @@ SUPPORTS_STEP_ROUTE = True
 # recipe's cost contract is stated in one place.  See the block adjacent to the
 # ``cmd`` list in ``route_pcb`` for the empirical record.
 PLACEMENT_DELTA_FEEDBACK = True
-PLACEMENT_DELTA_FEEDBACK_BUDGET = 1
+PLACEMENT_DELTA_FEEDBACK_BUDGET = 2
 PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S = 600
 
 

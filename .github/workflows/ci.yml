@@ -747,7 +747,19 @@ jobs:
     # diffpair-routing-regression job (also timeout-minutes: 30) rather than a
     # special exception, and does NOT weaken any correctness gate -- the pour
     # connectivity + DRC allowlist floors are unchanged.
-    timeout-minutes: 30
+    #
+    # Issue #4468 (epic #3438 Phase 3) re-measure: the board-07 route step now
+    # performs up to THREE full negotiated passes -- the baseline pass plus the
+    # two ``--placement-delta-feedback-budget 2`` probes, each granted its own
+    # 600 s budget so a probe's re-route is compared against the baseline on
+    # equal terms.  That is what buys the reach improvement this job now gates
+    # (26/31 -> 27/31, known opens tightened 5 -> 4).  Measured locally solo:
+    # 36m45s at budget 4 (5 passes) vs ~16 min for the loop-off recipe.
+    # Bumped 30 -> 90 for the extra passes plus 2-core-runner variance; this is
+    # a WALL-CLOCK allowance, not a correctness threshold -- the pour
+    # connectivity gate and the DRC allowlist floor are unchanged or tightened.
+    # 90 min matches the precedent already set by board-05-routing-regression.
+    timeout-minutes: 90
     # Issue #3146 closure: the matrix-scoped soft-fail
     # (``continue-on-error: ${{ matrix.board == 'boards/07-matchgroup-test' }}``)
     # that PR #3145 installed pending matchgroup-routing
@@ -1492,34 +1504,51 @@ jobs:
     # Issue #3779 (LVS honestly dirty per #4012): end-to-end gate for
     # board 07 ("matchgroup-test").  The fixture schematic is now FULLY
     # WIRED (#4012: 244/244 pads bound), so the copper comparator carries
-    # real evidence -- and board 07 routes PARTIAL by design (5
-    # seed-invariant unroutable nets, #3438: DQ3, DQ4, MIPI_DAT0_N,
+    # real evidence -- and board 07 routes PARTIAL by design (4
+    # seed-invariant unroutable nets, #3438: DQS_N, MIPI_DAT0_P,
     # TMDS_D0_N, TMDS_D1_N), so the HONEST verdict is ``clean: false``
-    # with exactly those 5 opens.  (Before #4012 the schematic bound 0
+    # with exactly those 4 opens.  (Before #4012 the schematic bound 0
     # pins and the #4006 vacuity guard masked these real opens behind a
     # "LVS not run" verdict; before #4006, a zero-evidence ``clean=true``
     # masked them entirely.)  The recipe emits ``lvs.json`` with
     # ``require_clean=False`` (the opens are expected); this job asserts
     # the exact known-opens contract:
     #
-    # * ``check_copper_lvs.py --expect-opens DQ3,...`` on a fresh
-    #   out-of-process re-check: ONLY kind='open', on EXACTLY those 5
+    # * ``check_copper_lvs.py --expect-opens DQS_N,...`` on a fresh
+    #   out-of-process re-check: ONLY kind='open', on EXACTLY those 4
     #   nets -- a short, a new open, or a net becoming routable all fail;
-    # * ``check_board_00_e2e.py --lvs-known-opens DQ3,...``: lvs.json
-    #   carries the same 5 opens (label leg clean) and board.json renders
-    #   the honest ``lvs_clean: false`` (gallery: "LVS: 5 mismatches",
+    # * ``check_board_00_e2e.py --lvs-known-opens DQS_N,...``: lvs.json
+    #   carries the same 4 opens (label leg clean) and board.json renders
+    #   the honest ``lvs_clean: false`` (gallery: "LVS: 4 mismatches",
     #   status 'partial').
+    #
+    # Issue #4468 (epic #3438 Phase 3) TIGHTENED this contract from 5
+    # known opens to 4.  The route step now runs the classifier-driven
+    # placement-delta feedback loop, which keeps one bounded 2 mm
+    # translate of U3: DQ3 / DQ4 / MIPI_DAT0_N close and DQS_N /
+    # MIPI_DAT0_P open in their place, a measured net gain of one
+    # (26/31 -> 27/31).  The list is a MAXIMUM, so this is a tightening,
+    # never a widening -- if a further improvement lands, shrink it again
+    # rather than leaving slack.
     #
     # NEW, ADDITIVE gate -- does NOT replace the
     # ``matchgroup-routing-regression`` job.  Board 07 carries allowlisted
     # DRC residuals (.github/routed-drc-tolerance.yml) and routes PARTIAL
     # by design, so no Overall: PASSED / status:ok / drc_violations:0
-    # assertions apply.  If #3438 ever makes the 5 nets routable, graduate
+    # assertions apply.  If #3438 ever makes the 4 nets routable, graduate
     # this job to --lvs-only + a plain copper-clean assertion.
     # Advisory until a repo admin adds it to branch protection.
     name: Board 07 End-to-End (LVS known opens)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Issue #4468: the route step now performs up to THREE full negotiated
+    # passes (the baseline pass plus ``--placement-delta-feedback-budget 2``
+    # probes, each with its own 600 s budget) instead of one.  Measured
+    # locally solo: 36m45s at budget 4 (5 passes) vs ~16 min for the
+    # loop-off recipe; budget 2 is ~2/3 of the budget-4 figure.  This is a
+    # wall-clock allowance, NOT a correctness threshold -- every gate below
+    # is unchanged or tightened.  90 min matches the precedent set by
+    # ``board-05-routing-regression``.
+    timeout-minutes: 90
     container:
       image: kicad/kicad:10.0
       options: --user 0:0
@@ -1553,9 +1582,9 @@ jobs:
         run: uv run kct build-native
 
       - name: Regenerate board 07 from recipe (--step all, clean tmp directory)
-        # PARTIAL routing is expected on this board (5 unroutable nets,
-        # #3438), so the recipe exits non-zero -- tolerate it (|| true).
-        # The recipe emits lvs.json with the honest clean=false / 5-opens
+        # PARTIAL routing is expected on this board (4 unroutable nets,
+        # #3438/#4468), so the recipe exits non-zero -- tolerate it (|| true).
+        # The recipe emits lvs.json with the honest clean=false / 4-opens
         # verdict (#4012, require_clean=False because the opens are
         # expected).  The asserters below are the gate.
         run: |
@@ -1572,10 +1601,10 @@ jobs:
         # Re-run compare_copper_netlist in a process the CI job controls (NOT
         # the recipe) on the REGENERATED schematic + routed PCB.  Board 07's
         # schematic is fully wired (#4012: 244/244 pads bound) and the board
-        # routes PARTIAL by design, so the honest verdict is exactly the 5
-        # seed-invariant opens (#3438): --expect-opens asserts that set and
-        # nothing else.  A copper short, a NEW open, a vacuous verdict (the
-        # schematic regressed to unwired), or one of the 5 becoming routable
+        # routes PARTIAL by design, so the honest verdict is exactly the 4
+        # seed-invariant opens (#3438/#4468): --expect-opens asserts that set
+        # and nothing else.  A copper short, a NEW open, a vacuous verdict (the
+        # schematic regressed to unwired), or one of the 4 becoming routable
         # all fail the gate.  Entrypoint from #3838.
         run: |
           set -euo pipefail
@@ -1584,7 +1613,7 @@ jobs:
             /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
             > /tmp/board07-copper.json
           uv run python scripts/ci/check_copper_lvs.py \
-            --expect-opens "DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N" \
+            --expect-opens "DQS_N,MIPI_DAT0_P,TMDS_D0_N,TMDS_D1_N" \
             /tmp/board07-copper.json
 
       - name: Independent DRC re-check within allowlist (out-of-process, issue #3840)
@@ -1613,8 +1642,8 @@ jobs:
 
       - name: Assert plane-net completion (known opens tolerated, #4531)
         # Raw total_unconnected_pads gate (scripts/ci/check_net_status.py).
-        # Board 07 routes PARTIAL by design: 5 seed-invariant unroutable
-        # nets (#3438/#4012). --known-open-nets excludes THOSE nets' pads
+        # Board 07 routes PARTIAL by design: 4 seed-invariant unroutable
+        # nets (#3438/#4012/#4468). --known-open-nets excludes THOSE nets' pads
         # from the gated count while still failing on an unconnected pad on
         # any OTHER net -- so a DIFFERENT net silently going open is still
         # caught (tighter than raising --max-unconnected to their pad
@@ -1622,22 +1651,22 @@ jobs:
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_net_status.py \
-            --known-open-nets "DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N" \
+            --known-open-nets "DQS_N,MIPI_DAT0_P,TMDS_D0_N,TMDS_D1_N" \
             /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
 
       - name: Assert artifacts + honest known-opens LVS state (#4012)
         # --lvs-known-opens: lvs.json must be present, clean=false, NOT
         # vacuous, with ONLY kind='open' copper mismatches on exactly the
-        # 5 seed-invariant unroutable nets (#3438) and an empty
+        # 4 seed-invariant unroutable nets (#3438/#4468) and an empty
         # label-mismatch list; board.json must carry the honest
-        # lvs_clean=false (gallery: "LVS: 5 mismatches").  No
+        # lvs_clean=false (gallery: "LVS: 4 mismatches").  No
         # status/drc_violations assertions (allowlisted DRC residuals ->
         # status='partial').
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
             --stem matchgroup_test \
-            --lvs-known-opens "DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N" \
+            --lvs-known-opens "DQS_N,MIPI_DAT0_P,TMDS_D0_N,TMDS_D1_N" \
             /tmp/board07-staging/07-matchgroup-test
 
   board-05-routing-regression:
