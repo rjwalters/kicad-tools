@@ -2668,3 +2668,415 @@ def test_close_shadow_chain_refuses_a_connector_through_a_pad_halo():
 
     assert dpr._close_shadow_chain(route, pf) == 0
     assert len(route.segments) == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #4572: coupling-aware landing-tail synthesis
+# ---------------------------------------------------------------------------
+# The shadow constructor trims the coupled body at both ends and reconnects to
+# the real pads with ``_synthesize_tail``.  Every gate that tail passed was a
+# legality FLOOR (raster-clear, ``partner_clearance`` minimum distance, exact
+# foreign-pad clearance); NOTHING preferred a tail that ran alongside the
+# partner.  So the first legal candidate in the fixed shape enumeration won,
+# and its copper was uncoupled -- on BOTH legs, because
+# ``diffpair_routing_continuity`` scores a pair as ``(frac_a + frac_b) / 2``
+# and the partner copper the tail failed to follow is uncoupled too.
+#
+# These tests pin the fix at the unit level: the candidate list is EXTENDED
+# with partner-anchored detours and ORDERED by the exact coupled fraction the
+# DRC rule measures, while every legality gate stays exactly where it was.
+
+
+def _horizontal_partner(y: float, x1: float = 4.0, x2: float = 9.0) -> list[Segment]:
+    """A guide run parallel to the direct head->goal corridor, offset in y."""
+    return [_gseg(x1, y, x2, y)]
+
+
+def _copper_element(x1: float, y1: float, x2: float, y2: float, width: float = 0.2):
+    """A DRC-side ``CopperElement`` for the same geometry the router emits.
+
+    ``CopperElement.from_segment`` consumes the SCHEMA's segment type; the
+    router's :class:`~kicad_tools.router.primitives.Segment` is a different
+    class, so the element is built field-by-field here.
+    """
+    from kicad_tools.validate.rules.clearance import CopperElement
+
+    return CopperElement(
+        element_type="segment",
+        layer=Layer.F_CU.value,
+        net_number=2,
+        geometry=(x1, y1, x2, y2, width),
+        reference="Trace",
+        net_name="N",
+    )
+
+
+def test_coupling_constants_match_the_drc_rule():
+    """Drift guard: the constructor optimizes the rule's EXACT predicate.
+
+    ``diffpair_routing.py`` mirrors these two values rather than importing
+    them (``router`` keeps no module-level ``validate`` dependency), so this
+    test is the thing that stops the two definitions of "coupled" drifting.
+    """
+    from kicad_tools.router.diffpair_routing import (
+        _COUPLING_PARALLEL_TOL_DEG,
+        _COUPLING_WINDOW_MM,
+    )
+    from kicad_tools.validate.rules.diffpair_routing_continuity import (
+        DEFAULT_COUPLING_WINDOW_MM,
+        DEFAULT_PARALLEL_TOLERANCE_DEG,
+    )
+
+    assert _COUPLING_WINDOW_MM == DEFAULT_COUPLING_WINDOW_MM
+    assert _COUPLING_PARALLEL_TOL_DEG == DEFAULT_PARALLEL_TOLERANCE_DEG
+
+
+def test_spans_coupled_fraction_agrees_with_the_drc_rule():
+    """The constructor's scorer and the DRC rule must return the same verdict.
+
+    Same geometry, two independent implementations: the router's span-level
+    scorer and ``DiffPairRoutingContinuityRule._coupled_length``.
+    """
+    from kicad_tools.router.diffpair_routing import _spans_coupled_fraction
+    from kicad_tools.validate.rules.diffpair_routing_continuity import (
+        DiffPairRoutingContinuityRule,
+    )
+
+    partner = _horizontal_partner(6.0)
+    rule = DiffPairRoutingContinuityRule()
+
+    # Three own-spans: coupled (0.3 mm edge gap), too far (0.8 mm edge gap),
+    # and perpendicular (never coupled regardless of distance).
+    cases = [
+        ([(5.0, 5.5, 8.0, 5.5)], 1.0),
+        ([(5.0, 5.0, 8.0, 5.0)], 0.0),
+        ([(5.0, 5.5, 5.0, 4.0)], 0.0),
+    ]
+    for spans, expected in cases:
+        assert _spans_coupled_fraction(spans, 0.2, Layer.F_CU, partner) == pytest.approx(expected)
+
+        own = [_copper_element(x1, y1, x2, y2) for x1, y1, x2, y2 in spans]
+        partner_elems = [_copper_element(ps.x1, ps.y1, ps.x2, ps.y2) for ps in partner]
+        total = sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in spans)
+        assert rule._coupled_length(own, partner_elems) / total == pytest.approx(expected)
+
+
+def test_synthesize_tail_prefers_the_candidate_that_parallels_the_partner():
+    """Two legal candidates; the one inside the coupling window must win.
+
+    ``head -> goal`` is a straight 3 mm corridor at ``y = 5.0`` and the guide
+    runs parallel at ``y = 6.0``.  The DIRECT candidate is legal (1.0 mm
+    centre-to-centre, well above the 0.4 mm clearance floor) but sits 0.8 mm
+    edge-to-edge from the guide -- outside the 0.5 mm coupling window, so the
+    continuity rule scores it as 100% UNCOUPLED.  A detour that walks the
+    corridor closer to the guide is equally legal and fully coupled.
+    """
+    from kicad_tools.router.diffpair_routing import _spans_coupled_fraction
+
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = _horizontal_partner(6.0)
+
+    tail = dpr._synthesize_tail(
+        _AllClearPathfinder(),
+        head,
+        goal,
+        0,
+        partner_segments=partner,
+        partner_clearance=0.4,
+    )
+
+    assert tail is not None
+    spans = [(s.x1, s.y1, s.x2, s.y2) for s in tail.segments]
+    # NOT the direct candidate (which the pre-#4572 first-legal-wins order
+    # returned) -- it is the uncoupled one.
+    assert spans != [(5.0, 5.0, 8.0, 5.0)]
+    # The bulk of the tail is copper the continuity rule counts as coupled.
+    assert _spans_coupled_fraction(spans, 0.2, Layer.F_CU, partner) > 0.5
+    # Legality is untouched: the clearance floor still holds everywhere.
+    for seg in tail.segments:
+        assert (
+            dpr._min_distance_to_partner(seg.x1, seg.y1, seg.x2, seg.y2, partner, seg.layer)
+            >= 0.4 - 1e-9
+        )
+    # ... and the tail still lands exactly on head and goal.
+    assert (tail.segments[0].x1, tail.segments[0].y1) == (5.0, 5.0)
+    assert (tail.segments[-1].x2, tail.segments[-1].y2) == (8.0, 5.0)
+
+
+def test_synthesize_tail_keeps_the_direct_candidate_when_nothing_can_couple():
+    """No reachable partner copper => the historical shape order is preserved.
+
+    The guide here is 6 mm away: no candidate in the (bounded) detour lattice
+    can reach its coupling window, so every candidate scores 0.0 and the
+    STABLE sort leaves the enumeration exactly as it was before #4572.
+    """
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = _horizontal_partner(11.0)
+
+    tail = dpr._synthesize_tail(
+        _AllClearPathfinder(),
+        head,
+        goal,
+        0,
+        partner_segments=partner,
+        partner_clearance=0.4,
+    )
+
+    assert tail is not None
+    assert len(tail.segments) == 1
+    seg = tail.segments[0]
+    assert (seg.x1, seg.y1, seg.x2, seg.y2) == (5.0, 5.0, 8.0, 5.0)
+
+
+def test_coupling_preference_never_bypasses_the_partner_clearance_floor():
+    """Preference re-ORDERS candidates; it must never re-GATE them.
+
+    The best-coupled placement here would be a hair off the guide, but the
+    clearance floor is 0.9 mm centre-to-centre -- above the 0.7 mm ceiling at
+    which copper can still be inside the 0.5 mm coupling window.  Every
+    surviving candidate is therefore uncoupled, and the one that ships must
+    still respect the floor.
+    """
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = _horizontal_partner(6.0)
+
+    tail = dpr._synthesize_tail(
+        _AllClearPathfinder(),
+        head,
+        goal,
+        0,
+        partner_segments=partner,
+        partner_clearance=0.9,
+    )
+
+    assert tail is not None
+    for seg in tail.segments:
+        assert (
+            dpr._min_distance_to_partner(seg.x1, seg.y1, seg.x2, seg.y2, partner, seg.layer)
+            >= 0.9 - 1e-9
+        )
+
+
+def test_coupling_preference_never_bypasses_the_foreign_pad_gate():
+    """The best-coupled candidate is a pad short; the gate must still veto it.
+
+    A foreign pad sits directly on the best-coupled corridor.  #4573's exact
+    ``clearance_pad_segment`` screen runs INSIDE the candidate loop, so
+    re-ordering the loop must not let a violating candidate through: the
+    synthesizer has to fall through to the next-best legal one.
+    """
+    dpr = _pad_gate_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = _horizontal_partner(6.0)
+    # Foreign pad centred on the y = 5.6 corridor (the tightest coupled wall).
+    dpr.autorouter.grid.add_pad(_pad_at(6.5, 5.6, net=99, name="OTHER"))
+
+    tail = dpr._synthesize_tail(
+        _AllClearPathfinder(),
+        head,
+        goal,
+        0,
+        partner_segments=partner,
+        partner_clearance=0.4,
+    )
+
+    assert tail is not None
+    for seg in tail.segments:
+        assert dpr._segment_pad_clear(seg) is True
+
+
+def test_partner_parallel_candidates_land_inside_the_coupling_window():
+    """Every generated wall is both legal-by-floor and coupled-by-window."""
+    from kicad_tools.router.diffpair_routing import (
+        _COUPLING_WINDOW_MM,
+        _spans_coupled_fraction,
+    )
+
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = _horizontal_partner(6.0)
+    clearance = 0.4
+
+    cands = dpr._partner_parallel_tail_candidates(head, goal, partner, 0.2, clearance)
+
+    assert cands, "a parallel partner run in reach must produce candidates"
+    for spans in cands:
+        wall_y = spans[1][1]
+        centre = abs(wall_y - 6.0)
+        assert centre >= clearance - 1e-9, "below the intra-pair clearance floor"
+        assert centre - 0.2 <= _COUPLING_WINDOW_MM + 1e-9, "outside the coupling window"
+        # The long run is what the rule scores; it must be genuinely coupled.
+        assert _spans_coupled_fraction([spans[1]], 0.2, Layer.F_CU, partner) == pytest.approx(1.0)
+
+
+def test_partner_parallel_candidates_ignore_an_out_of_reach_partner():
+    """A guide beyond the detour envelope contributes no candidates."""
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+
+    assert dpr._partner_parallel_tail_candidates(head, goal, [], 0.2, 0.4) == []
+    assert (
+        dpr._partner_parallel_tail_candidates(head, goal, _horizontal_partner(20.0), 0.2, 0.4) == []
+    )
+
+
+# --- Issue #4572: guide-following landing tails -----------------------------
+# The axis-aligned repertoire (direct / dogleg / U-detour) cannot parallel a
+# partner that runs diagonally, so in a dense pad field ``_synthesize_tail``
+# declines and the caller falls through to a partner-BLIND A* probe -- an
+# 84-to-92-segment staircase that is 100% uncoupled on BOTH legs (measured on
+# board-06's USB3_TX1 / USB3_TX2 landings).  The partner, though, already IS a
+# legal path through that field: offsetting ITS slice is a tail that is coupled
+# by construction.
+
+
+def _elbow_partner() -> list[Segment]:
+    """A 45-degree run into a horizontal one -- unreachable for axis-aligned
+    detours, trivially followable as an offset."""
+    return [_gseg(4.0, 4.0, 6.0, 6.0), _gseg(6.0, 6.0, 8.0, 6.0)]
+
+
+def test_following_tail_offsets_the_partners_own_landing_run():
+    dpr = _diffpair_router()
+    partner = _elbow_partner()
+    # head sits one coupled gap off the partner's start, on the -1 side.
+    head, goal = _tail_pads((4.283, 3.717), (8.0, 5.6))
+
+    tail = dpr._synthesize_following_tail(_AllClearPathfinder(), head, goal, 0, partner, 0.4)
+
+    assert tail is not None, "the partner's own run is followable here"
+    assert (tail.segments[0].x1, tail.segments[0].y1) == (4.283, 3.717)
+    assert (tail.segments[-1].x2, tail.segments[-1].y2) == (8.0, 5.6)
+    # The followed run is coupled; only the short landing hop onto the pad
+    # (synthesized by the ordinary axis-aligned lander) is not.
+    assert dpr._tail_coupled_fraction(tail, partner) > 0.8
+    for seg in tail.segments:
+        assert (
+            dpr._min_distance_to_partner(seg.x1, seg.y1, seg.x2, seg.y2, partner, seg.layer)
+            >= 0.4 - 1e-9
+        )
+
+
+def test_following_tail_declines_a_detour_far_longer_than_the_direct_hop():
+    """Coupling is not worth an unbounded excursion (it would cost skew)."""
+    dpr = _diffpair_router()
+    # A partner that loops far away between the two anchors.
+    partner = [
+        _gseg(4.0, 4.0, 4.0, 1.0),
+        _gseg(4.0, 1.0, 9.0, 1.0),
+        _gseg(9.0, 1.0, 9.0, 4.0),
+    ]
+    head, goal = _tail_pads((4.4, 4.0), (9.4, 4.0))
+
+    assert (
+        dpr._synthesize_following_tail(_AllClearPathfinder(), head, goal, 0, partner, 0.4) is None
+    )
+
+
+def test_following_tail_needs_a_partner_and_a_clearance_floor():
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((4.283, 3.717), (8.0, 5.6))
+
+    assert dpr._synthesize_following_tail(_AllClearPathfinder(), head, goal, 0, [], 0.4) is None
+    assert (
+        dpr._synthesize_following_tail(_AllClearPathfinder(), head, goal, 0, _elbow_partner(), 0.0)
+        is None
+    )
+
+
+def test_tail_route_lands_coupled_copper_on_a_diagonal_partner():
+    """End-to-end: the tail the constructor actually ships must be coupled."""
+    dpr = _diffpair_router()
+    partner = _elbow_partner()
+    head, goal = _tail_pads((4.283, 3.717), (8.0, 5.6))
+
+    tail = dpr._tail_route(
+        _AllClearPathfinder(),
+        head,
+        goal,
+        0,
+        "shadow-end",
+        "USB3_TX1",
+        partner_segments=partner,
+    )
+
+    assert tail is not None
+    assert dpr._tail_coupled_fraction(tail, partner) > 0.6
+
+
+def test_tail_route_is_unchanged_when_the_partner_is_out_of_reach():
+    """No coupling available anywhere => the historical direct tail ships."""
+    dpr = _diffpair_router()
+    partner = _horizontal_partner(11.0)
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+
+    tail = dpr._tail_route(
+        _AllClearPathfinder(),
+        head,
+        goal,
+        0,
+        "shadow-end",
+        "USB3_TX1",
+        partner_segments=partner,
+    )
+
+    assert tail is not None
+    assert len(tail.segments) == 1
+    seg = tail.segments[0]
+    assert (seg.x1, seg.y1, seg.x2, seg.y2) == (5.0, 5.0, 8.0, 5.0)
+
+
+def test_truncated_follow_gives_up_the_walled_in_last_stretch():
+    """A pad wall on the partner's final approach must not kill the whole tail."""
+    dpr = _pad_gate_router()
+    partner = _elbow_partner()
+    head, goal = _tail_pads((4.283, 3.717), (8.0, 5.6))
+    # Foreign pad squarely on the offset of the partner's LAST stretch.
+    dpr.autorouter.grid.add_pad(_pad_at(7.6, 5.6, net=99, name="OTHER"))
+
+    tail = dpr._synthesize_following_tail(_AllClearPathfinder(), head, goal, 0, partner, 0.4)
+
+    if tail is not None:
+        # Whatever ships must still clear the pad exactly (#4573's gate).
+        for seg in tail.segments:
+            assert dpr._segment_pad_clear(seg) is True
+
+
+def test_following_tail_is_chain_connected_end_to_end():
+    """A spliced tail that does not MEET is copper that strands the net.
+
+    The follow path assembles lead-in + offset run + landing.  Each piece is
+    produced independently, and ``_synthesize_tail`` silently drops a
+    sub-0.01 mm span -- harmless at a pad, a real break mid-splice (measured:
+    PCIE_RX stranded at U3.32 and the whole pair ripped by the #3540
+    transactional strand guard).
+    """
+    dpr = _diffpair_router()
+    partner = _elbow_partner()
+    head, goal = _tail_pads((4.283, 3.717), (8.0, 5.6))
+
+    tail = dpr._synthesize_following_tail(_AllClearPathfinder(), head, goal, 0, partner, 0.4)
+
+    assert tail is not None
+    assert dpr._route_is_chained(tail, head, goal)
+
+
+def test_route_is_chained_rejects_a_subcell_hole():
+    """The chain predicate must fire on exactly the #4462-class break."""
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((0.0, 0.0), (2.0, 0.0))
+    route = Route(net=2, net_name="USB3_TX1-")
+    route.segments.append(
+        Segment(x1=0.0, y1=0.0, x2=1.0, y2=0.0, width=0.2, layer=Layer.F_CU, net=2, net_name="N")
+    )
+    route.segments.append(
+        Segment(x1=1.005, y1=0.0, x2=2.0, y2=0.0, width=0.2, layer=Layer.F_CU, net=2, net_name="N")
+    )
+
+    assert dpr._route_is_chained(route, head, goal) is False
+    # Closing the 5 um hole makes it a chain again.
+    route.segments[1].x1 = 1.0
+    assert dpr._route_is_chained(route, head, goal) is True
