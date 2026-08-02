@@ -227,6 +227,41 @@ _SHADOW_MEANDER_MAX_FRAC: float = float(os.environ.get("KCT_SHADOW_MEANDER_MAX_F
 _SHADOW_MEANDER_MAX_CELLS: int = int(os.environ.get("KCT_SHADOW_MEANDER_MAX_CELLS", "12"))
 _SHADOW_MEANDER_MIN_CELLS: int = int(os.environ.get("KCT_SHADOW_MEANDER_MIN_CELLS", "3"))
 
+# Issue #4571: exact foreign-pad clearance gate for constructed copper.
+#
+# Every shadow validation gate rasterises against ``_is_cell_blocked``, whose
+# pad halo is INTENTIONALLY shrunk in fine-pitch corridors (``RoutingGrid.
+# _clearance_for_pin_pitch``, "full manufacturer clearance is validated in
+# post-routing DRC").  For single-ended nets that promise is kept by
+# ``Autorouter._demote_pad_clearance_violation_nets`` (exact, but only demotes
+# above one grid resolution) plus ``drc_verify_and_nudge`` (the sub-resolution
+# remainder) -- and ``drc_verify_and_nudge`` unconditionally SKIPS diff-pair
+# nets (#3508: the nudge helpers are not partner-aware).  So constructed
+# coupled copper had no stage, coarse or exact, that agreed with the
+# ``clearance_pad_segment`` DRC predicate, and shipped sub-resolution pad
+# grazes and outright pad overlaps (measured on board-06 shadow-ON, seed 42:
+# MIPI_CLK- over MIPI_D0+/MIPI_D0- pads at 0.037 mm and over its own partner's
+# MIPI_CLK+ pads at 0.015 mm).
+#
+# The gate below re-uses the exact-geometry primitives the single-ended
+# backstop uses (``RoutingGrid.worst_segment_pad_deficit`` /
+# ``worst_via_pad_deficit``) at construction time, with ``exclude_net`` ONLY --
+# no ``exclude_refs``.  Passing the net's own component refs (the way the
+# single-ended backstop does) would hand the pads of a P/N pair that shares one
+# connector ref straight to the #3545 same-component carve-out and silently
+# re-exempt the partner's pad on exactly the fine-pitch connectors this gate
+# exists for.
+#
+# ``_SHADOW_PAD_DEFICIT_EPS`` is a geometric noise floor (a serialization
+# quantum), NOT a clearance relaxation: it must stay far below the grid
+# resolution, because unlike the single-ended path there is no downstream
+# repair pass to absorb whatever this gate lets through.
+_SHADOW_PAD_DEFICIT_EPS: float = 1e-4
+# Chunk length used to localise WHERE along a body segment a pad deficit sits,
+# so the existing end-trim machinery can shave a grazing landing instead of
+# declining the whole side.
+_SHADOW_PAD_PROBE_STEP_MM: float = 0.2
+
 
 # ---------------------------------------------------------------------------
 # Issue #3023 Phase A: intra-pair clearance violation detection
@@ -3205,8 +3240,10 @@ class DiffPairRouter:
         # Issue #4459 (Phase 1 of #4409): ground-truth instrumentation for the
         # coupled diff-pair search.  ``_last_shadow_decline_reason`` records the
         # LAST reason the geometric shadow constructor declined a side
-        # ("overlap" -- self-check / physical P/N overlap, or "blockage" --
-        # no legal via site / mid-route obstacle / unreachable pad tail);
+        # ("overlap" -- self-check / physical P/N overlap, "blockage" --
+        # no legal via site / mid-route obstacle / unreachable pad tail, or
+        # "pad-clearance" -- constructed copper inside a foreign pad's
+        # clearance halo, #4571);
         # reset per spec, set inside ``_shadow_route_pair``.
         # ``_last_coupled_pair_report`` holds the most-recent per-pair
         # taxonomy classification (a :class:`CoupledPairReport`).  Both are
@@ -3833,6 +3870,173 @@ class DiffPairRouter:
                 return False
         return True
 
+    # ------------------------------------------------------------------
+    # Issue #4571: exact foreign-pad clearance gate for constructed copper
+    # ------------------------------------------------------------------
+
+    def _pad_component_pitches(self) -> dict[str, float] | None:
+        """Ref -> min pin pitch map for the exact pad-clearance primitives.
+
+        Mirrors what ``Autorouter._demote_pad_clearance_violation_nets``
+        feeds ``worst_segment_pad_deficit`` so the constructor's gate and
+        the single-ended finalization backstop agree on the REQUIRED
+        clearance for every component (fine-pitch relaxations included).
+        """
+        try:
+            return self.autorouter.component_pitches
+        except Exception:  # pragma: no cover - defensive (test doubles)
+            return None
+
+    def _span_pad_deficit(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer_idx: int,
+        net: int,
+        width: float,
+    ) -> float:
+        """Worst exact clearance deficit of a candidate span vs FOREIGN pads.
+
+        Issue #4571.  ``> 0`` means the span would violate the
+        ``clearance_pad_segment`` predicate against some pad that is not on
+        ``net`` -- including the diff-pair PARTNER's pads, which are a
+        foreign net and therefore fully checked.
+
+        Deliberately called with ``exclude_net`` only and NO
+        ``exclude_refs``: the #3545 same-component carve-out would otherwise
+        exempt the partner's pad whenever P and N share a fine-pitch
+        connector ref (the board-06 FFC case this gate exists for).
+        """
+        grid = self.autorouter.grid
+        probe = Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=width,
+            layer=Layer(grid.index_to_layer(layer_idx)),
+            net=net,
+            net_name="",
+        )
+        deficit, _loc = grid.worst_segment_pad_deficit(
+            probe,
+            exclude_net=net,
+            component_pitches=self._pad_component_pitches(),
+        )
+        return deficit
+
+    def _span_pad_clear(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer_idx: int,
+        net: int,
+        width: float,
+    ) -> bool:
+        """True when a candidate span keeps foreign-pad clearance (#4571)."""
+        return (
+            self._span_pad_deficit(x1, y1, x2, y2, layer_idx, net, width) <= _SHADOW_PAD_DEFICIT_EPS
+        )
+
+    def _segment_pad_clear(self, seg: Segment) -> bool:
+        """True when an assembled segment keeps foreign-pad clearance (#4571)."""
+        grid = self.autorouter.grid
+        return self._span_pad_clear(
+            seg.x1,
+            seg.y1,
+            seg.x2,
+            seg.y2,
+            grid.layer_to_index(seg.layer.value),
+            seg.net,
+            seg.width,
+        )
+
+    def _via_pad_deficit(self, via: Via) -> float:
+        """Worst exact clearance deficit of a via vs FOREIGN pads (#4571)."""
+        deficit, _loc = self.autorouter.grid.worst_via_pad_deficit(
+            via,
+            exclude_net=via.net,
+            component_pitches=self._pad_component_pitches(),
+        )
+        return deficit
+
+    def _route_pad_violation(
+        self,
+        route: Route,
+    ) -> tuple[float, tuple[float, float] | None]:
+        """Worst foreign-pad clearance deficit over an assembled route (#4571).
+
+        Returns ``(worst_deficit, worst_pad_location)``; ``worst_deficit <=
+        _SHADOW_PAD_DEFICIT_EPS`` means the route is clean.
+        """
+        grid = self.autorouter.grid
+        pitches = self._pad_component_pitches()
+        worst = 0.0
+        worst_loc: tuple[float, float] | None = None
+        for seg in route.segments:
+            deficit, loc = grid.worst_segment_pad_deficit(
+                seg,
+                exclude_net=seg.net,
+                component_pitches=pitches,
+            )
+            if deficit > worst:
+                worst, worst_loc = deficit, loc
+        for via in route.vias:
+            deficit, loc = grid.worst_via_pad_deficit(
+                via,
+                exclude_net=via.net,
+                component_pitches=pitches,
+            )
+            if deficit > worst:
+                worst, worst_loc = deficit, loc
+        return worst, worst_loc
+
+    def _pad_deficit_arcs(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer_idx: int,
+        net: int,
+        width: float,
+        arc0: float,
+    ) -> list[float]:
+        """Arc positions along a span whose copper violates a foreign pad.
+
+        Issue #4571.  The blockage scan in :meth:`_shadow_route_pair`
+        localises RASTER blockages by arc length so the existing end-trim
+        machinery can shave a grazing landing (and only an INTERIOR blockage
+        fails the side).  This is the exact-pad-clearance sibling: the whole
+        span is probed first (one pass over the pad list) and only a span
+        that actually violates is subdivided, so the common clean case costs
+        a single call.
+        """
+        if self._span_pad_clear(x1, y1, x2, y2, layer_idx, net, width):
+            return []
+        span_len = math.hypot(x2 - x1, y2 - y1)
+        n_chunks = max(1, int(math.ceil(span_len / _SHADOW_PAD_PROBE_STEP_MM)))
+        arcs: list[float] = []
+        for i in range(n_chunks):
+            t0 = i / n_chunks
+            t1 = (i + 1) / n_chunks
+            cx1 = x1 + (x2 - x1) * t0
+            cy1 = y1 + (y2 - y1) * t0
+            cx2 = x1 + (x2 - x1) * t1
+            cy2 = y1 + (y2 - y1) * t1
+            if not self._span_pad_clear(cx1, cy1, cx2, cy2, layer_idx, net, width):
+                arcs.append(arc0 + span_len * (t0 + t1) / 2.0)
+        # A violation the chunking could not localise (e.g. a span shorter
+        # than one chunk) still has to be reported, or the caller would treat
+        # the span as clean.
+        if not arcs:
+            arcs.append(arc0 + span_len / 2.0)
+        return arcs
+
     def _synthesize_tail(
         self,
         pathfinder: CoupledPathfinder,
@@ -3937,6 +4141,19 @@ class DiffPairRouter:
                 if near_partner and any(
                     self._min_distance_to_partner(x1, y1, x2, y2, near_partner, layer)
                     < partner_clearance
+                    for x1, y1, x2, y2 in segs
+                ):
+                    continue
+                # Issue #4571: the grid raster's pad halo is shrunk in
+                # fine-pitch corridors, so a cell-clear landing tail can still
+                # sit inside (or on top of) a foreign pad -- and a diff-pair
+                # net gets no downstream nudge repair.  Screen every candidate
+                # with the exact DRC-equivalent predicate here, INSIDE the
+                # loop, so the remaining detours stay reachable instead of the
+                # constructor accepting the first raster-clear candidate and
+                # shipping a short.
+                if any(
+                    not self._span_pad_clear(x1, y1, x2, y2, layer_idx, head.net, width)
                     for x1, y1, x2, y2 in segs
                 ):
                     continue
@@ -4268,6 +4485,14 @@ class DiffPairRouter:
                                 net_name=head.net_name,
                             )
                         )
+                    # Issue #4571: the crossover's stubs, its alt-layer
+                    # crossing and BOTH via barrels are only raster-validated
+                    # above, and the raster's pad halo is shrunk in fine-pitch
+                    # corridors.  Screen the assembled candidate with the exact
+                    # DRC-equivalent pad predicate so a violating crossover
+                    # loses to a later via-site candidate instead of shipping.
+                    if self._route_pad_violation(route)[0] > _SHADOW_PAD_DEFICIT_EPS:
+                        continue
                     return route
         return None
 
@@ -4388,7 +4613,20 @@ class DiffPairRouter:
             )
             return r if (r is not None and r.segments) else None
 
+        # Issue #4571: the A* probe validates against the grid raster, whose
+        # pad halo is shrunk in fine-pitch corridors, and a diff-pair net is
+        # excluded from ``drc_verify_and_nudge`` -- so a raster-clear fallback
+        # tail is the constructor's most direct route to a pad short.  Discard
+        # any probe result whose copper violates the exact pad predicate; the
+        # caller's anchor-stepping retry then gets the attempt instead.
+        def _pad_ok(cand: Route | None) -> bool:
+            return cand is not None and self._route_pad_violation(cand)[0] <= (
+                _SHADOW_PAD_DEFICIT_EPS
+            )
+
         plain = _probe(None, 1)
+        if not _pad_ok(plain):
+            plain = None
         if not partner_segments:
             return plain
         if plain is not None and self._tail_partner_clear(plain, partner_segments, seg_clear):
@@ -4400,6 +4638,8 @@ class DiffPairRouter:
                 1, int(round(seg_clear / max(self.autorouter.grid.resolution, 1e-9) / 3.0))
             )
             biased = _probe(sites, radius_cells)
+            if not _pad_ok(biased):
+                biased = None
             if biased is not None and self._tail_partner_clear(biased, partner_segments, seg_clear):
                 return biased
         # Neither reaches the coupled clearance: settle for any tail that at
@@ -4720,6 +4960,12 @@ class DiffPairRouter:
                 for s in probe:
                     if not self._segment_cells_clear(pathfinder, s.x1, s.y1, s.x2, s.y2, _li, _net):
                         return False
+                    # Issue #4571: a meander tooth is constructed copper on a
+                    # net the downstream nudge repair skips -- validate it
+                    # against the exact foreign-pad predicate, not only the
+                    # (fine-pitch-shrunk) raster halo.
+                    if not self._span_pad_clear(s.x1, s.y1, s.x2, s.y2, _li, _net, _w):
+                        return False
                     if (
                         self._min_distance_to_partner(
                             s.x1, s.y1, s.x2, s.y2, partner_segments, _t.layer
@@ -4872,8 +5118,12 @@ class DiffPairRouter:
                 continue
             if cur.layer == prev.layer and gap <= res:
                 li = self.autorouter.grid.layer_to_index(cur.layer.value)
+                # Issue #4571: the inserted connector is real copper -- hold it
+                # to the exact foreign-pad predicate too, not just the raster.
                 if self._segment_cells_clear(
                     pathfinder, prev.x2, prev.y2, cur.x1, cur.y1, li, cur.net
+                ) and self._span_pad_clear(
+                    prev.x2, prev.y2, cur.x1, cur.y1, li, cur.net, cur.width
                 ):
                     out.append(
                         Segment(
@@ -4977,6 +5227,14 @@ class DiffPairRouter:
                         gx, gy = grid.world_to_grid(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)
                         if pathfinder._is_cell_blocked(gx, gy, _li, _seg.net):
                             return False
+                    # Issue #4571: the dogleg's perpendicular bulge is NEW
+                    # copper on a net the downstream nudge repair skips, and
+                    # the raster it was just checked against carries the
+                    # shrunk fine-pitch pad halo.  A variant that swings a leg
+                    # into a foreign pad's clearance halo loses to the other
+                    # variant (or the segment is kept as-is, unchanged).
+                    if not self._span_pad_clear(x1, y1, x2, y2, _li, _seg.net, _seg.width):
+                        return False
                 return True
 
             chosen_mid: tuple[float, float] | None = None
@@ -5855,6 +6113,27 @@ class DiffPairRouter:
             blocked_arcs: list[float] = []
             for e in elements:
                 if e[0] == "via":
+                    # Issue #4571: a shadow via is exempt from the raster scan
+                    # (its site was chosen with the via predicate), but that
+                    # predicate reads the same shrunk pad halo.  Report a via
+                    # whose barrel violates the exact pad predicate at ITS arc
+                    # position, so the trim/interior logic below treats it like
+                    # any other blockage.
+                    _, vx0, vy0, vl0, vl1 = e
+                    probe_via = Via(
+                        x=vx0,
+                        y=vy0,
+                        drill=rules.via_drill,
+                        diameter=rules.via_diameter,
+                        layers=(
+                            Layer(grid.index_to_layer(vl0)),
+                            Layer(grid.index_to_layer(vl1)),
+                        ),
+                        net=s_net,
+                        net_name=s_net_name,
+                    )
+                    if self._via_pad_deficit(probe_via) > _SHADOW_PAD_DEFICIT_EPS:
+                        blocked_arcs.append(arc)
                     continue
                 _, x1, y1, x2, y2, li = e
                 seg_len = math.hypot(x2 - x1, y2 - y1)
@@ -5866,6 +6145,12 @@ class DiffPairRouter:
                     gx, gy = grid.world_to_grid(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)
                     if pathfinder._is_cell_blocked(gx, gy, li, s_net):
                         blocked_arcs.append(arc + seg_len * t)
+                # Issue #4571: exact pad-clearance sibling of the raster scan.
+                # Reported as ARCS (not as an outright rejection) so a body
+                # end grazing a connector pad field is TRIMMED into the landing
+                # tail -- the same graceful path the raster blockages take --
+                # and only an interior pad violation fails the side.
+                blocked_arcs.extend(self._pad_deficit_arcs(x1, y1, x2, y2, li, s_net, s_width, arc))
                 arc += seg_len
             trim_start = 0.0
             trim_end = 0.0
@@ -6170,6 +6455,32 @@ class DiffPairRouter:
                     f"other side"
                 )
                 self._last_shadow_decline_reason = "overlap"  # #4459
+                continue
+            # Issue #4571 (third pass): FOREIGN-PAD clearance self-check.  The
+            # two gates above compare copper to copper only -- segment to
+            # segment and via to segment/via -- so neither can see a landing
+            # tail drawn across the sibling pin's PAD (the board-06 FFC case:
+            # MIPI_CLK- copper over MIPI_D0+/MIPI_D0- pads at 0.037 mm and over
+            # its own partner MIPI_CLK+'s pads at 0.015 mm).  The exact
+            # ``clearance_pad_segment``-equivalent primitives close that
+            # quadrant here, at the same "fail this side over to the other"
+            # point, using ``exclude_net`` only so the partner's pads on a
+            # shared fine-pitch connector ref are never carve-out-exempted.
+            #
+            # Only the CONSTRUCTED leg is gated: the guide is ordinary
+            # single-ended copper produced (and validated) by the per-net
+            # router, and it keeps the single-ended finalization backstops.
+            # Declining a side over a pre-existing guide graze would cost
+            # coupling without fixing anything the constructor introduced.
+            pad_deficit, pad_loc = self._route_pad_violation(shadow_route)
+            if pad_deficit > _SHADOW_PAD_DEFICIT_EPS:
+                loc_str = f" near ({pad_loc[0]:.3f}, {pad_loc[1]:.3f})" if pad_loc else ""
+                print(
+                    f"    [coupled-shadow] side={side:+.0f} foreign-pad "
+                    f"clearance deficit {pad_deficit:.3f}mm{loc_str} for "
+                    f"{pair.name}; trying other side"
+                )
+                self._last_shadow_decline_reason = "pad-clearance"  # #4571
                 continue
             return p_route, n_route
 

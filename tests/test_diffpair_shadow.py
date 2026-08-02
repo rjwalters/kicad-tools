@@ -2393,3 +2393,278 @@ def test_meander_is_a_no_op_when_nothing_is_owed():
     short.segments.append(_gseg(2.0, 5.0, 12.0, 5.0))
     assert dpr._meander_route_to_length(short, [_gseg(2.0, 5.3, 12.0, 5.3)], pf, 0.0, 0.3) == 0.0
     assert len(short.segments) == 1
+
+
+# ---------------------------------------------------------------------------
+# 13. exact foreign-pad clearance gate for constructed copper (issue #4571)
+# ---------------------------------------------------------------------------
+#
+# Every shadow validation gate rasterises against ``_is_cell_blocked``, whose
+# pad halo is deliberately SHRUNK in fine-pitch corridors on the documented
+# promise that "full manufacturer clearance is validated in post-routing DRC".
+# For a diff-pair net that promise is never kept: the single-ended finalization
+# backstop only demotes deficits larger than one grid resolution, and
+# ``drc_verify_and_nudge`` (which would mop up the sub-resolution remainder)
+# unconditionally SKIPS coupled nets (#3508 -- the nudge helpers are not
+# partner-aware).  The constructor's own self-checks compare copper to copper
+# only, never copper to PAD.  Measured consequence on board-06 shadow-ON:
+# MIPI_CLK- copper over the MIPI_D0+/MIPI_D0- pads (0.037 mm) and over its own
+# partner MIPI_CLK+'s pads (0.015 mm) -- real shorts, all BELOW the 0.05 mm
+# floor the single-ended backstop would have caught.
+#
+# These tests pin the gate at the primitive level: sub-resolution grazes are
+# rejected, own-net pads stay legal (a tail must be able to land), and the
+# #3545 same-component carve-out can never re-exempt the PARTNER's pad on a
+# shared fine-pitch connector ref.
+
+
+def _pad_gate_router(resolution: float = 0.05):
+    from kicad_tools.router.core import Autorouter
+
+    rules = DesignRules()
+    rules.grid_resolution = resolution
+    router = Autorouter(width=20.0, height=10.0, rules=rules)
+    return router._diffpair
+
+
+def _pad_at(x, y, net, name, ref="J1", pin="1", size=0.3):
+    from kicad_tools.router.primitives import Pad
+
+    return Pad(
+        x=x,
+        y=y,
+        width=size,
+        height=size,
+        layer=Layer.F_CU,
+        net=net,
+        net_name=name,
+        ref=ref,
+        pin=pin,
+    )
+
+
+# Geometry used throughout: a 0.3 x 0.3 pad reads as a 0.15 mm radius disc, a
+# 0.2 mm trace contributes 0.1 mm of half-width, and the default manufacturer
+# clearance is 0.2 mm.  A centreline 0.42 mm from the pad centre therefore has
+# 0.17 mm of edge clearance -- a 0.03 mm deficit, i.e. BELOW the 0.05 mm grid
+# resolution the single-ended backstop uses as its floor.
+_GRAZE_DY = 0.42
+_GRAZE_DEFICIT = 0.03
+
+
+def test_span_pad_clear_rejects_a_subresolution_foreign_pad_graze():
+    dpr = _pad_gate_router()
+    dpr.autorouter.grid.add_pad(_pad_at(5.0, 5.0, net=99, name="MIPI_D0+"))
+
+    deficit = dpr._span_pad_deficit(3.0, 5.0 + _GRAZE_DY, 7.0, 5.0 + _GRAZE_DY, 0, 7, 0.2)
+    assert deficit == pytest.approx(_GRAZE_DEFICIT, abs=1e-9)
+    # The whole point of the gate: this is smaller than one grid cell, so the
+    # single-ended finalization backstop's ``nudge_reach`` floor would let it
+    # ship, and ``drc_verify_and_nudge`` never runs on a coupled net.
+    assert deficit < dpr.autorouter.grid.resolution
+    assert dpr._span_pad_clear(3.0, 5.0 + _GRAZE_DY, 7.0, 5.0 + _GRAZE_DY, 0, 7, 0.2) is False
+
+
+def test_span_pad_clear_accepts_copper_outside_the_halo():
+    dpr = _pad_gate_router()
+    dpr.autorouter.grid.add_pad(_pad_at(5.0, 5.0, net=99, name="MIPI_D0+"))
+
+    assert dpr._span_pad_clear(3.0, 6.5, 7.0, 6.5, 0, 7, 0.2) is True
+
+
+def test_span_pad_clear_ignores_the_segments_own_net_pad():
+    """A landing tail MUST be able to reach (and sit on) its own pad."""
+    dpr = _pad_gate_router()
+    dpr.autorouter.grid.add_pad(_pad_at(5.0, 5.0, net=7, name="MIPI_CLK-"))
+
+    # Straight through the middle of its own pad: legal, by definition.
+    assert dpr._span_pad_clear(3.0, 5.0, 7.0, 5.0, 0, 7, 0.2) is True
+
+
+def test_span_pad_clear_flags_a_pad_on_a_different_layer_only_when_shared():
+    dpr = _pad_gate_router()
+    dpr.autorouter.grid.add_pad(_pad_at(5.0, 5.0, net=99, name="MIPI_D0+"))
+
+    b_cu = dpr.autorouter.grid.layer_to_index(Layer.B_CU.value)
+    # Same geometry on the opposite layer: an SMD pad cannot be violated.
+    assert dpr._span_pad_clear(3.0, 5.0, 7.0, 5.0, b_cu, 7, 0.2) is True
+
+
+def test_partner_pad_on_a_shared_connector_ref_is_not_carveout_exempt():
+    """The #3545 same-component carve-out must never hide a PARTNER pad.
+
+    Diff-pair P and N legs routinely land on the same fine-pitch connector
+    ``ref`` (board-06's FFC carries both MIPI_CLK+ and MIPI_CLK-).  Reusing
+    ``worst_segment_pad_deficit`` the way the single-ended backstop does --
+    with ``exclude_refs`` set to the net's own component refs -- hands the
+    partner's pad straight to the carve-out and silences exactly the
+    intra-pair overlap this gate exists to catch.
+    """
+    dpr = _pad_gate_router()
+    grid = dpr.autorouter.grid
+    # Both pair legs on one fine-pitch (0.4 mm pitch) connector ref.
+    grid.add_pad(_pad_at(5.0, 5.0, net=8, name="MIPI_CLK+", ref="J1", pin="1"))
+    grid.add_pad(_pad_at(5.4, 5.0, net=7, name="MIPI_CLK-", ref="J1", pin="2"))
+    assert grid._component_is_fine_pitch("J1") is True
+
+    seg = Segment(
+        x1=3.0,
+        y1=5.0 + _GRAZE_DY,
+        x2=7.0,
+        y2=5.0 + _GRAZE_DY,
+        width=0.2,
+        layer=Layer.F_CU,
+        net=7,
+        net_name="MIPI_CLK-",
+    )
+    # The single-ended backstop's call shape: the carve-out silences it.
+    exempted, _ = grid.worst_segment_pad_deficit(seg, exclude_net=7, exclude_refs={"J1"})
+    assert exempted == 0.0
+    # The constructor's gate passes ``exclude_net`` ONLY -- the partner's pad
+    # (and MIPI_CLK-'s own pad, which is same-net and correctly skipped) is
+    # measured exactly.
+    assert dpr._span_pad_deficit(seg.x1, seg.y1, seg.x2, seg.y2, 0, 7, 0.2) == pytest.approx(
+        _GRAZE_DEFICIT, abs=1e-9
+    )
+    assert dpr._segment_pad_clear(seg) is False
+
+
+def test_route_pad_violation_reports_the_worst_segment_deficit():
+    dpr = _pad_gate_router()
+    dpr.autorouter.grid.add_pad(_pad_at(5.0, 5.0, net=99, name="MIPI_D0+"))
+
+    route = Route(net=7, net_name="MIPI_CLK-")
+    route.segments.append(
+        Segment(
+            x1=3.0,
+            y1=5.0 + _GRAZE_DY,
+            x2=7.0,
+            y2=5.0 + _GRAZE_DY,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=7,
+            net_name="MIPI_CLK-",
+        )
+    )
+    deficit, loc = dpr._route_pad_violation(route)
+    assert deficit == pytest.approx(_GRAZE_DEFICIT, abs=1e-9)
+    assert loc == (5.0, 5.0)
+
+
+def test_route_pad_violation_covers_the_via_quadrant():
+    """A shadow via barrel inside a foreign pad halo is a violation too."""
+    dpr = _pad_gate_router()
+    rules = dpr.autorouter.rules
+    dpr.autorouter.grid.add_pad(_pad_at(5.0, 5.0, net=99, name="MIPI_D0+"))
+
+    clean = Route(net=7, net_name="MIPI_CLK-")
+    clean.vias.append(
+        Via(
+            x=8.0,
+            y=5.0,
+            drill=rules.via_drill,
+            diameter=rules.via_diameter,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=7,
+            net_name="MIPI_CLK-",
+        )
+    )
+    assert dpr._route_pad_violation(clean)[0] == 0.0
+
+    grazing = Route(net=7, net_name="MIPI_CLK-")
+    grazing.vias.append(
+        Via(
+            x=5.0,
+            y=5.0 + 0.15 + rules.via_diameter / 2 + 0.15,
+            drill=rules.via_drill,
+            diameter=rules.via_diameter,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=7,
+            net_name="MIPI_CLK-",
+        )
+    )
+    deficit, loc = dpr._route_pad_violation(grazing)
+    assert deficit == pytest.approx(0.05, abs=1e-9)
+    assert loc == (5.0, 5.0)
+
+
+def test_pad_deficit_arcs_localise_the_violating_end_of_a_span():
+    """Violations are reported as ARCS so the end-trim can shave them.
+
+    A body segment that only grazes a connector pad at one END must not fail
+    the whole side -- the existing trim machinery consumes the offending arc
+    into the landing tail, exactly as it does for raster blockages.
+    """
+    dpr = _pad_gate_router()
+    dpr.autorouter.grid.add_pad(_pad_at(2.5, 5.0, net=99, name="MIPI_D0+"))
+
+    arcs = dpr._pad_deficit_arcs(2.0, 5.0 + _GRAZE_DY, 12.0, 5.0 + _GRAZE_DY, 0, 7, 0.2, 0.0)
+    assert arcs, "the span grazes the pad; the scan must report it"
+    # 10 mm span, pad at its head: every offending arc sits in the first 20%.
+    assert max(arcs) < 2.0
+
+
+def test_pad_deficit_arcs_is_empty_for_a_clean_span():
+    dpr = _pad_gate_router()
+    dpr.autorouter.grid.add_pad(_pad_at(2.5, 5.0, net=99, name="MIPI_D0+"))
+
+    assert dpr._pad_deficit_arcs(2.0, 7.0, 12.0, 7.0, 0, 7, 0.2, 0.0) == []
+
+
+def test_synthesize_tail_detours_around_a_foreign_pad_the_raster_cannot_see():
+    """The board-06 shape: a raster-clear landing tail drawn over a pad.
+
+    ``_AllClearPathfinder`` never blocks a cell, standing in for the
+    fine-pitch corridor where the grid halo is shrunk to ``min_trace_width /
+    2``.  Before #4571 the direct candidate won and shipped a pad short; now
+    the pad screen runs INSIDE the candidate loop, so a later detour wins.
+    """
+    dpr = _pad_gate_router()
+    dpr.autorouter.grid.add_pad(_pad_at(6.5, 5.0, net=99, name="MIPI_D0+"))
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+
+    tail = dpr._synthesize_tail(_AllClearPathfinder(), head, goal, 0)
+
+    assert tail is not None, "a legal detour exists; the synthesizer must find it"
+    assert len(tail.segments) > 1, "the direct candidate runs straight over the pad"
+    for seg in tail.segments:
+        assert dpr._segment_pad_clear(seg)
+    # Still lands exactly on the pads it was asked to connect.
+    assert (tail.segments[0].x1, tail.segments[0].y1) == (5.0, 5.0)
+    assert (tail.segments[-1].x2, tail.segments[-1].y2) == (8.0, 5.0)
+
+
+def test_synthesize_tail_is_unchanged_when_no_pad_is_near():
+    """No pad in reach -> the direct candidate still wins (byte-identical)."""
+    dpr = _pad_gate_router()
+    dpr.autorouter.grid.add_pad(_pad_at(6.5, 9.0, net=99, name="MIPI_D0+"))
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+
+    tail = dpr._synthesize_tail(_AllClearPathfinder(), head, goal, 0)
+
+    assert tail is not None
+    assert len(tail.segments) == 1
+    seg = tail.segments[0]
+    assert (seg.x1, seg.y1, seg.x2, seg.y2) == (5.0, 5.0, 8.0, 5.0)
+
+
+def test_close_shadow_chain_refuses_a_connector_through_a_pad_halo():
+    """Even a sub-cell repair connector is real copper and must clear pads."""
+    dpr, pf = _chain_router_and_pathfinder()
+    dpr.autorouter.grid.add_pad(_pad_at(4.02, 2.0, net=99, name="MIPI_D0+"))
+    route = _chain_route([(2.0, 2.0), (4.0, 2.0)])
+    route.segments.append(
+        Segment(
+            x1=4.0,
+            y1=2.024,
+            x2=6.0,
+            y2=2.024,
+            width=0.1,
+            layer=Layer.F_CU,
+            net=7,
+            net_name="MIPI_CLK-",
+        )
+    )
+
+    assert dpr._close_shadow_chain(route, pf) == 0
+    assert len(route.segments) == 2
