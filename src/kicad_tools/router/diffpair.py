@@ -636,10 +636,32 @@ class DifferentialPairConfig:
     #      guide polyline with the crossing-tail via-clear bound
     #      (``_shadow_route_pair`` ~3448-3465).
     #   3. Corridor competition stranding later single-ended nets.  This
-    #      one did NOT reproduce on the current (post-#3413-phase-6)
-    #      board-06 geometry: the 2026-07-08 seed-42 shadow-ON re-run
-    #      reached 15/15 single-ended nets at its best negotiated
-    #      snapshot -- MIPI_D0-/USB_CC1 were not stranded.
+    #      DOES reproduce on the current geometry -- the #3921-era note
+    #      this comment used to carry ("did NOT reproduce ... 15/15 at
+    #      its best negotiated snapshot") is WRONG as of the post-#4576
+    #      geometry and was corrected in #4463.  Measured 2026-08-02,
+    #      seed 42, main @ 0a8d724e: MIPI_D0+, MIPI_D0- AND USB_CC1 all
+    #      strand (18/21 reach).  The pre-phase's copper is NON-RIPPABLE
+    #      in the negotiated loop (it is not in that loop's
+    #      ``net_routes``), so every rip-up round, neighbourhood-radius
+    #      escalation and relief rescue rolled back with "blocked only by
+    #      non-rippable copper of <pair nets>" and the loop burned its
+    #      whole 10-iteration ceiling -- 362.3 s with the stranded set
+    #      unchanged from iteration 1.
+    #      PARTLY MITIGATED (#4463) by two mechanisms, both gated on this
+    #      flag so shadow-OFF runs are byte-identical:
+    #        * ``route_all_negotiated`` now ends the loop once its
+    #          stranded set is a zero-overflow fixed point (362.3 s ->
+    #          147.5 s on that run) instead of re-deriving the same
+    #          failure ten times; and
+    #        * ``DiffPairRouter._plan_corridor_yields`` /
+    #          ``_apply_corridor_yields`` rip the pairs whose copper sits
+    #          on a stranded net's path and re-run the main strategy once
+    #          with those nets freed, keeping the trade only when reach
+    #          improves.  On board 06 that recovers MIPI_D0 (18/21 ->
+    #          19/21 by yielding USB2_D + MIPI_CLK).  USB_CC1 remains
+    #          stranded: its corridor is contested even with the coupled
+    #          bodies gone.
     #
     # Issue #3921 (2026-07-08) re-measured shadow-ON end-to-end and found
     # TWO NEW blockers that keep the flag OFF on the current geometry:
@@ -650,19 +672,44 @@ class DifferentialPairConfig:
     #      partner (10 "self-check overlap" events, worst -0.165..-0.275 mm)
     #      or cannot clear an obstacle the guide threaded (12 "mid-route
     #      blockage" events).  Only MIPI_CLK/MIPI_D0/PCIE_RX construct.
-    #   B. Off-angle geometry + wall-time blowup.  The surviving shadow
-    #      segments serialize at 3.7-11.9 deg off the 0/45/90/135 set
-    #      (``OffAngleSegmentWarning`` from the #3975 emission guard), so a
-    #      committed shadow-ON artifact would fail the fleet 45-census; and
-    #      the 6 failed-shadow pairs fall back to a ~350 s coupled pre-phase
-    #      plus a negotiated phase that hits its 360 s backstop, blowing the
-    #      CI wall-clock (>1200 s vs ~150 s shadow-OFF, which reaches 21/21).
+    #   B. Off-angle geometry.  The surviving shadow segments serialize
+    #      off the 0/45/90/135 set (``OffAngleSegmentWarning`` from the
+    #      #3975 emission guard); the recipe's post-route quantization
+    #      pass repairs them, but a by-construction dogleg (#3907) is the
+    #      real fix.
     #
-    # Enabling this by default is therefore blocked on (i) a shadow-aware
-    # by-construction dogleg at the emission site (migrating
-    # ``_shadow_route_pair`` per #3907/#3975) and (ii) restoring the
-    # parallel-offset feasibility at the tightened widths -- both deeper
-    # than the corridor-competition rip-up this field was re-scoped for.
+    # WALL-CLOCK (re-measured 2026-08-02 under #4463; the old "~150 s
+    # shadow-OFF vs >1200 s shadow-ON" figures in this comment were stale
+    # and framed against the wrong budget).  The real envelope is the
+    # ``diffpair-routing-regression`` CI job's 30-minute ``timeout-minutes``
+    # ceiling, against which a GREEN shadow-OFF run historically lands at
+    # 14m22s-20m42s TOTAL job wall-clock -- roughly half of that budget is
+    # the post-route pipeline (pour fill/stitch/repair/re-fill, copper-union
+    # audit, DRC, mfg export), not diff-pair routing.  On this machine,
+    # ``generate_design.py --step route --seed 42`` measures (one machine,
+    # one build; ``KCT_CORRIDOR_YIELD=0`` reproduces the "before" row):
+    #
+    #     shadow OFF          : 587.9 s total, negotiated 361.5 s, 21/21
+    #     shadow ON, pre-#4463: 770.4 s total, negotiated 362.3 s, 18/21
+    #     shadow ON, post     : 1351.2 s total, negotiated 148.1 s +
+    #                           50.6 s planning + 300.5 s capped re-run,
+    #                           19/21
+    #
+    # So the negotiated phase itself is now WELL inside the 2x-of-shadow-OFF
+    # target (148.1 s vs 361.5 s; 448.6 s counting the recovery re-run), but
+    # the TOTAL shadow-ON job grew: the two pairs that yield stop being
+    # diff-pair nets, so they re-enter the optimizer / nudge / repair passes
+    # the shadow path excludes them from.  22.5 min of local wall-clock has
+    # no headroom against the job's 30-minute ceiling on a slower CI runner
+    # -- which is itself a reason the default stays OFF.  CI never runs this
+    # path today (the board-06 recipe gates it behind ``KCT_BOARD06_SHADOW``
+    # and CI does not set it).
+    #
+    # Enabling this by default is therefore still blocked on: the
+    # remaining corridor contention (USB_CC1 is not recoverable by
+    # yielding), the total shadow-ON wall-clock above, the open
+    # skew/continuity residuals (#4570, #4574, #4575, #4577), and a
+    # shadow-aware by-construction dogleg (#3907/#3975).
     # Set ``KCT_BOARD06_SHADOW=1`` on the board-06 recipe to reproduce the
     # shadow-ON run.  Default False keeps recipes on their pre-#3508
     # budget-exit behaviour (0/9 coupled, 21/21 single-ended reach).

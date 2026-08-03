@@ -143,6 +143,34 @@ _OFFSET_JOIN_COINCIDENT_MM: float = 1e-4
 # experimentation (KCT_SHADOW_PER_PAIR_BUDGET_S).
 _SHADOW_PER_PAIR_BUDGET_S: float = float(os.environ.get("KCT_SHADOW_PER_PAIR_BUDGET_S", "30.0"))
 
+# Issue #4463: budgets for the corridor-yield recovery
+# (``DiffPairRouter._plan_corridor_yields`` / ``_apply_corridor_yields``),
+# which runs after the main strategy when shadow construction is ON.  On
+# board 06 shadow-ON (seed 42) three nets sealed in by committed coupled
+# bodies cost the negotiated loop its full 10-iteration ceiling -- 362.3s to
+# arrive at the same 18/21 it had after iteration 1 -- because that copper is
+# non-rippable there.
+#
+#   * ``_CORRIDOR_GUARD_PROBE_S`` bounds one routability probe.  A probe that
+#     succeeds does so in well under a second; only the hopeless ones need
+#     bounding.
+#   * ``_CORRIDOR_GUARD_BUDGET_S`` bounds the whole planning pass -- past it
+#     the plan is truncated and the board keeps what the strategy produced.
+#   * ``_CORRIDOR_YIELD_RERUN_S`` caps the ONE strategy re-run performed after
+#     the yield.  Without a cap the re-run spends the recipe's full negotiated
+#     backstop a second time (measured: 363s, taking the job from 770s to
+#     1376s).  Applied via ``Autorouter._negotiated_timeout_cap`` and removed
+#     as soon as the re-run returns.
+#   * ``KCT_CORRIDOR_YIELD=0`` is the kill-switch for the whole #4463
+#     behaviour (both the negotiated loop's fixed-point exit and the
+#     plan/yield/re-run recovery); it restores the pre-#4463 shadow-ON
+#     pipeline exactly, which is how the before/after numbers above were
+#     measured on one build.  Shadow-OFF runs never reach either mechanism.
+_CORRIDOR_GUARD_PROBE_S: float = float(os.environ.get("KCT_CORRIDOR_GUARD_PROBE_S", "8.0"))
+_CORRIDOR_GUARD_BUDGET_S: float = float(os.environ.get("KCT_CORRIDOR_GUARD_BUDGET_S", "120.0"))
+_CORRIDOR_YIELD_RERUN_S: float = float(os.environ.get("KCT_CORRIDOR_YIELD_RERUN_S", "300.0"))
+_CORRIDOR_YIELD_ENABLED: bool = os.environ.get("KCT_CORRIDOR_YIELD", "1").strip() != "0"
+
 # Issue #3990 (unit 2b of #3921): variable-gap parallel offset.  The
 # geometric shadow constructor historically offset the WHOLE guide by a
 # single constant center-to-center gap ``d = spacing_cells * resolution``.
@@ -9500,6 +9528,399 @@ class DiffPairRouter:
 
         return all_routes, warnings, routed_net_ids
 
+    # ------------------------------------------------------------------
+    # Issue #4463: corridor-competition recovery
+    # ------------------------------------------------------------------
+
+    def _probe_net_routable(
+        self,
+        net_id: int,
+        per_net_timeout: float,
+    ) -> list[Route] | None:
+        """Probe whether ``net_id`` can be routed on the CURRENT grid.
+
+        Issue #4463.  Routes the net with the ordinary single-ended
+        router, checks that every pad of the net ended up in one
+        connected component, then **rolls the copper back off the grid**
+        so the probe leaves no trace.  Returns the (already-unmarked)
+        routes on success and ``None`` when the net could not be routed
+        or the produced copper left a pad stranded.
+
+        This is deliberately the same oracle the main strategy uses --
+        a real A* through the real obstacle field -- rather than a
+        cheaper reachability approximation, because the thing we need to
+        know is exactly "would the main strategy strand this net".
+
+        "Leaves no trace" covers ROUTER state as well as copper.  The
+        C++ backend memoizes per-net clearance-resume exhaustions and
+        skips the Python fallback on the SECOND one (#3923), so a probe
+        that legitimately fails against a sealed corridor would silently
+        make every later probe of the same net pessimistic -- the net
+        would look unrecoverable purely because we asked twice.  The
+        memo (and the failure log) is therefore snapshotted and restored
+        around every probe, which is what makes repeated probes of one
+        net answer the same question the main strategy would.
+        """
+        autorouter = self.autorouter
+        before = len(autorouter.routes)
+        failures_before = len(getattr(autorouter, "routing_failures", []))
+        backend = getattr(autorouter, "router", None)
+        resume_memo = getattr(backend, "_resume_clearance_exhaustions", None)
+        saved_memo = dict(resume_memo) if isinstance(resume_memo, dict) else None
+        routes: list[Route] = []
+        try:
+            routes = autorouter.route_net(net_id, per_net_timeout=per_net_timeout)
+        except Exception:  # pragma: no cover - defensive: a probe must never raise
+            logger.debug("[corridor-yield] probe raised for net %s", net_id, exc_info=True)
+            routes = []
+        finally:
+            if saved_memo is not None and isinstance(resume_memo, dict):
+                resume_memo.clear()
+                resume_memo.update(saved_memo)
+            failures = getattr(autorouter, "routing_failures", None)
+            if isinstance(failures, list) and len(failures) > failures_before:
+                del failures[failures_before:]
+
+        # Roll back every route the probe committed (both the ones it
+        # returned and anything else it appended -- e.g. MST sub-edges).
+        committed = list(autorouter.routes[before:])
+        del autorouter.routes[before:]
+        seen_ids = {id(r) for r in committed}
+        for route in routes:
+            if id(route) not in seen_ids:
+                committed.append(route)
+                seen_ids.add(id(route))
+        for route in committed:
+            with contextlib.suppress(Exception):
+                autorouter.grid.unmark_route(route)
+
+        if not routes:
+            return None
+
+        pad_keys = autorouter.nets.get(net_id, [])
+        net_pads = [autorouter.pads[k] for k in pad_keys if k in autorouter.pads]
+        if len(net_pads) >= 2:
+            conn = validate_net_connectivity(routes, {net_id: net_pads})
+            info = conn.get(net_id, {})
+            if not info.get("connected", False):
+                return None
+        return routes
+
+    @staticmethod
+    def _copper_conflicts(
+        routes_a: list[Route],
+        routes_b: list[Route],
+        clearance: float,
+    ) -> bool:
+        """Return True when two route sets have copper within ``clearance``.
+
+        Issue #4463.  Used to decide which committed coupled bodies stand
+        in the way of a stranded net's desired path: to run that path, any
+        copper closer to it than the clearance rule has to go, and copper
+        that is further away does not.  Vias count on every layer (a
+        through via is an obstacle on layers its owner never traced on).
+        """
+
+        def _segments(
+            routes: list[Route],
+        ) -> list[tuple[object | None, float, float, float, float, float]]:
+            out: list[tuple[object | None, float, float, float, float, float]] = []
+            for route in routes:
+                for seg in route.segments:
+                    layer = getattr(seg.layer, "value", seg.layer)
+                    out.append((layer, seg.x1, seg.y1, seg.x2, seg.y2, seg.width / 2.0))
+                for via in route.vias:
+                    # layer=None -> "every layer" (through-hole annulus)
+                    out.append((None, via.x, via.y, via.x, via.y, via.diameter / 2.0))
+            return out
+
+        segs_a = _segments(routes_a)
+        segs_b = _segments(routes_b)
+        for la, ax1, ay1, ax2, ay2, ra in segs_a:
+            for lb, bx1, by1, bx2, by2, rb in segs_b:
+                if la is not None and lb is not None and la != lb:
+                    continue
+                gap = _segment_to_segment_distance(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2)
+                if gap - ra - rb < clearance:
+                    return True
+        return False
+
+    def _net_is_connected(self, net_id: int) -> bool:
+        """Whether the copper committed so far connects every pad of a net.
+
+        Issue #4463.  Ground truth for the corridor-yield recovery: a net
+        with fewer than two routable pads is trivially "connected"; any
+        other net must have copper on the board that unions all of its
+        pads into one component (the same
+        :func:`validate_net_connectivity` oracle the #3540 transactional
+        shadow claim uses).
+        """
+        autorouter = self.autorouter
+        pad_keys = autorouter.nets.get(net_id, [])
+        net_pads = [autorouter.pads[k] for k in pad_keys if k in autorouter.pads]
+        if len(net_pads) < 2:
+            return True
+        routes = [r for r in autorouter.routes if r.net == net_id]
+        if not routes:
+            return False
+        conn = validate_net_connectivity(routes, {net_id: net_pads})
+        return bool(conn.get(net_id, {}).get("connected", False))
+
+    def _plan_corridor_yields(
+        self,
+        candidate_nets: list[int],
+        committed_pairs: list[tuple[DifferentialPair, list[Route]]],
+    ) -> tuple[list[tuple[DifferentialPair, list[Route]]], list[int]]:
+        """Which committed coupled bodies seal a still-unconnected net in?
+
+        Issue #4463 (corridor competition).  The coupled pre-phase claims
+        its corridors first and its copper is **non-rippable** for the
+        rest of the pipeline: the negotiated loop's ``net_routes`` holds
+        only the nets it routes itself, so a net whose only corridor a
+        committed coupled body sealed can never be recovered there.  Every
+        rip-up round, every neighbourhood-radius escalation and every
+        relief rescue rolls back with ``blocked only by non-rippable
+        copper of <pair nets>`` -- measured on board 06 shadow-ON (seed
+        42, main @ 0a8d724e): ``MIPI_D0+``, ``MIPI_D0-`` and ``USB_CC1``
+        stranded for all 10 iterations, 362.3 s spent in the negotiated
+        loop, final reach 18/21.
+
+        This planner answers the question the loop could not: for each net
+        the main strategy actually failed to connect, is there a path once
+        the coupled copper is out of the way, and if so which pairs sit on
+        it?  It works on GROUND TRUTH (what the strategy produced), it
+        commits nothing, and it leaves the board exactly as it found it --
+        the caller decides whether to act on the plan.
+
+        Per stranded net it probes at most twice: once with the coupled
+        copper lifted, and (only if that fails) once with the other
+        candidate nets' rippable copper lifted as well -- the relief
+        rescue's "rip the victims" step, except it may also cross the
+        coupled boundary the rescue cannot.  The fixed, small probe count
+        is deliberate: ``mark_route`` / ``unmark_route`` round-trips are
+        not perfectly symmetric in the router's auxiliary state, so a
+        design that probed once per (net, pair) combination would slowly
+        poison its own oracle.
+
+        Args:
+            candidate_nets: Every signal net that may be examined -- the
+                main strategy's nets plus the diff-pair nets (a pair the
+                pre-phase CLAIMED but left unconnected is itself a
+                corridor-competition victim, and it is not in the main
+                strategy's net list precisely because the claim removed
+                it).
+            committed_pairs: ``(pair, routes)`` for every pair whose
+                copper the coupled pre-phase committed.
+
+        Returns:
+            ``(pairs_to_yield, stranded_nets)`` -- the pairs whose copper
+            stands on some stranded net's path, and the stranded nets that
+            were examined.
+        """
+        autorouter = self.autorouter
+        grid = autorouter.grid
+        if not candidate_nets or not committed_pairs:
+            return [], []
+
+        stranded = [n for n in candidate_nets if not self._net_is_connected(n)]
+        if not stranded:
+            return [], []
+
+        names = getattr(autorouter, "net_names", {}) or {}
+
+        def _name(net_id: int) -> str:
+            return str(names.get(net_id, f"Net_{net_id}"))
+
+        def _unmark(routes: list[Route]) -> None:
+            for route in routes:
+                with contextlib.suppress(Exception):
+                    grid.unmark_route(route)
+
+        def _remark(routes: list[Route]) -> None:
+            for route in routes:
+                autorouter._mark_route(route)
+
+        def _restore(routes: list[Route]) -> None:
+            _remark(routes)
+            for route in routes:
+                if route not in autorouter.routes:
+                    autorouter.routes.append(route)
+
+        # The clearance a foreign trace must keep from the desired path,
+        # plus one grid cell of slack for the grid's own marking margin.
+        clearance = float(getattr(autorouter.rules, "trace_clearance", 0.2)) + float(
+            getattr(grid, "resolution", 0.1)
+        )
+        deadline = time.monotonic() + _CORRIDOR_GUARD_BUDGET_S
+        probe_timeout = _CORRIDOR_GUARD_PROBE_S
+        t0 = time.monotonic()
+        print(
+            f"\n  [corridor-yield] {len(stranded)} net(s) left unconnected by the "
+            f"main strategy: {', '.join(_name(n) for n in stranded)}"
+        )
+
+        planned: dict[int, tuple[DifferentialPair, list[Route]]] = {}
+        for net_id in stranded:
+            if time.monotonic() > deadline:
+                logger.warning(
+                    "DIFFPAIR_CORRIDOR_GUARD_BUDGET: corridor-yield planning hit "
+                    "its %.0fs budget with %d stranded net(s) unexamined "
+                    "(issue #4463)",
+                    _CORRIDOR_GUARD_BUDGET_S,
+                    len(stranded) - len(planned),
+                )
+                break
+
+            for _pair, routes in committed_pairs:
+                _unmark(routes)
+            desired = self._probe_net_routable(net_id, probe_timeout)
+
+            neighbour_routes: dict[int, list[Route]] = {}
+            if desired is None:
+                coupled_ids = {id(r) for _p, rts in committed_pairs for r in rts}
+                for other in candidate_nets:
+                    if other == net_id:
+                        continue
+                    owned = [
+                        r for r in autorouter.routes if r.net == other and id(r) not in coupled_ids
+                    ]
+                    if owned:
+                        neighbour_routes[other] = owned
+                        _unmark(owned)
+                        for route in owned:
+                            if route in autorouter.routes:
+                                autorouter.routes.remove(route)
+                desired = self._probe_net_routable(net_id, probe_timeout)
+
+            # Put the board back exactly as it was -- this is a plan, not a
+            # commitment.
+            for owned in neighbour_routes.values():
+                _restore(owned)
+            for _pair, routes in committed_pairs:
+                _remark(routes)
+
+            if desired is None:
+                print(
+                    f"    [corridor-yield] {_name(net_id)} stays unroutable with "
+                    f"every coupled corridor lifted -- not a corridor-competition "
+                    f"failure"
+                )
+                continue
+
+            blocking = [
+                (pair, routes)
+                for pair, routes in committed_pairs
+                if self._copper_conflicts(routes, desired, clearance)
+            ]
+            if not blocking:
+                print(
+                    f"    [corridor-yield] no coupled copper sits on "
+                    f"{_name(net_id)}'s path; nothing to yield for it"
+                )
+                continue
+            for pair, routes in blocking:
+                planned[id(pair)] = (pair, routes)
+            print(
+                f"    [corridor-yield] {_name(net_id)} is sealed in by "
+                f"{', '.join(p.name for p, _r in blocking)}"
+            )
+
+        print(
+            f"  [corridor-yield] planning took {time.monotonic() - t0:.1f}s; "
+            f"{len(planned)} pair(s) to yield"
+        )
+        return list(planned.values()), stranded
+
+    def _apply_corridor_yields(
+        self,
+        to_yield: list[tuple[DifferentialPair, list[Route]]],
+        candidate_nets: list[int],
+        non_diffpair_strategy: object,
+    ) -> tuple[bool, set[int], list[Route], list[Route]]:
+        """Rip the planned pairs, re-run the main strategy, keep only if it paid.
+
+        Issue #4463.  Landing the freed nets one at a time here does NOT
+        work: the corridor a coupled body was sealing is contested, so the
+        stranded net and the freed pair legs have to be arranged TOGETHER
+        -- which is precisely what the negotiated strategy does on a
+        shadow-OFF run (it reaches 21/21 on board 06 with these nets routed
+        single-ended).  So the pass rips the planned pairs, hands the board
+        back to the caller's strategy for one more pass, and scores the
+        result.
+
+        The trade is transactional on REACH: if the second pass does not
+        connect MORE of ``candidate_nets`` than the first left connected,
+        every route it produced is unmarked and the yielded coupled copper
+        is put back exactly as it was.  A pair that claims-but-strands
+        costs reach, a pair that yields costs only quality, and a yield
+        that buys neither is simply undone.
+
+        Returns:
+            ``(kept, released_net_ids, removed_routes, added_routes)``.
+        """
+        autorouter = self.autorouter
+        if not to_yield:
+            return False, set(), [], []
+
+        reach_before = sum(1 for n in candidate_nets if self._net_is_connected(n))
+        snapshot_ids = {id(r) for r in autorouter.routes}
+        yielded_routes = [r for _p, routes in to_yield for r in routes]
+        released_nets: set[int] = set()
+        for pair, routes in to_yield:
+            released_nets.update(pair.get_net_ids())
+            for route in routes:
+                with contextlib.suppress(Exception):
+                    autorouter.grid.unmark_route(route)
+                if route in autorouter.routes:
+                    autorouter.routes.remove(route)
+
+        print(
+            f"  [corridor-yield] {len(to_yield)} pair(s) yielded their corridor: "
+            f"{', '.join(p.name for p, _r in to_yield)}; re-running the main "
+            f"strategy for the freed nets"
+        )
+        autorouter._negotiated_timeout_cap = _CORRIDOR_YIELD_RERUN_S
+        try:
+            non_diffpair_strategy()  # type: ignore[operator]
+        finally:
+            autorouter._negotiated_timeout_cap = None
+            autorouter._budget_exit_diff_nets = set()
+
+        added_routes = [r for r in autorouter.routes if id(r) not in snapshot_ids]
+        reach_after = sum(1 for n in candidate_nets if self._net_is_connected(n))
+
+        if reach_after > reach_before:
+            logger.warning(
+                "DIFFPAIR_CORRIDOR_YIELD: %d coupled pair(s) yielded a sealed "
+                "corridor; reach %d -> %d of %d net(s): %s (issue #4463)",
+                len(to_yield),
+                reach_before,
+                reach_after,
+                len(candidate_nets),
+                ", ".join(p.name for p, _r in to_yield),
+            )
+            print(
+                f"  [corridor-yield] reach {reach_before} -> {reach_after} of "
+                f"{len(candidate_nets)} net(s); keeping the yield"
+            )
+            return True, released_nets, yielded_routes, added_routes
+
+        # The trade did not pay -- put the board back as the first pass left it.
+        for route in added_routes:
+            with contextlib.suppress(Exception):
+                autorouter.grid.unmark_route(route)
+            if route in autorouter.routes:
+                autorouter.routes.remove(route)
+        for route in yielded_routes:
+            autorouter._mark_route(route)
+            if route not in autorouter.routes:
+                autorouter.routes.append(route)
+        print(
+            f"  [corridor-yield] reach {reach_before} -> {reach_after} of "
+            f"{len(candidate_nets)} net(s); yield reverted"
+        )
+        return False, set(), [], []
+
     def route_all_with_diffpairs(
         self,
         diffpair_config: DifferentialPairConfig | None = None,
@@ -9589,6 +10010,9 @@ class DiffPairRouter:
         self._last_budget_exit_pair_names = []
         self._last_coupled_attempted_count = 0
         self._last_budget_exit_count = 0
+        # Issue #4463: pairs that yielded their corridor to unblock a
+        # single-ended net (empty unless the corridor guard fired).
+        self._last_corridor_yield_pair_names: list[str] = []
 
         if diffpair_config is None or not diffpair_config.enabled:
             return self.autorouter.route_all(net_order), []
@@ -9627,6 +10051,10 @@ class DiffPairRouter:
         # Track diff-pair nets that we successfully routed so the
         # caller can decide which nets to leave for the main strategy.
         coupled_routed_nets: set[int] = set()
+        # Issue #4463: (pair, routes) for every pair whose copper this
+        # pre-phase committed -- the yield candidates for the
+        # corridor-yield recovery that runs after the main strategy.
+        committed_pair_routes: list[tuple[DifferentialPair, list[Route]]] = []
 
         refused_diff_nets: set[int] = set()
         # Issue #3089: track diff-pair nets whose coupled search hit the
@@ -9743,6 +10171,10 @@ class DiffPairRouter:
                             f"unrouted stub edge; returning it to the main "
                             f"strategy (issue #3508)"
                         )
+                # Issue #4463: remember what this pair committed so the
+                # corridor-competition guard below can make it yield if its
+                # copper seals a corridor a later single-ended net needs.
+                committed_pair_routes.append((pair, list(pair_routes)))
             all_routes.extend(pair_routes)
             if warning:
                 warnings.append(warning)
@@ -9850,6 +10282,17 @@ class DiffPairRouter:
         # assigns an empty set (no promotion).
         self.autorouter._budget_exit_diff_nets = set(budget_exit_diff_nets)
 
+        # Issue #4463: tell the negotiated loop that this run carries coupled
+        # pre-phase copper it cannot rip.  With that flag set the loop stops
+        # once its stranded set is a zero-overflow fixed point instead of
+        # re-deriving the same failure for its whole iteration ceiling
+        # (board 06 shadow-ON seed 42: 10 iterations, 362.3s, no change) --
+        # the corridor-yield recovery below is what can actually free those
+        # nets.  Shadow-OFF runs never set it, so CI is untouched.
+        self.autorouter._coupled_prephase_stall_exit = bool(
+            _CORRIDOR_YIELD_ENABLED and self.enable_shadow_construction and committed_pair_routes
+        )
+
         non_diff_nets = [n for n in self.autorouter.nets if n not in diff_net_ids and n != 0]
         if non_diff_nets:
             print(f"\n--- Routing {len(non_diff_nets)} non-differential nets ---")
@@ -9895,6 +10338,45 @@ class DiffPairRouter:
                     # legacy per-net path too -- the priority lift
                     # is meaningful only for this strategy invocation.
                     self.autorouter._budget_exit_diff_nets = set()
+
+        # Issue #4463: corridor-yield recovery.  The main strategy has now
+        # told us -- on ground truth, not prediction -- which nets it could
+        # not connect.  Any of those that becomes routable once the coupled
+        # copper is lifted was stranded by corridor competition, so the pairs
+        # standing on its path yield their corridor and the strategy is run
+        # ONE more time with those nets back in the routable set.  Re-running
+        # the strategy (rather than landing the nets one by one here) is what
+        # makes the trade pay: the freed corridor is contested, and only the
+        # negotiated loop can arrange the freed pair legs and the stranded net
+        # together -- exactly what it does on a shadow-OFF run, which reaches
+        # 21/21 with those nets routed single-ended.  The whole trade is
+        # transactional on REACH: if the second pass does not connect more
+        # nets than the first, every route is restored.  Shadow-OFF runs skip
+        # this entirely, so CI and the committed artifacts are untouched.
+        if (
+            _CORRIDOR_YIELD_ENABLED
+            and self.enable_shadow_construction
+            and committed_pair_routes
+            and non_diffpair_strategy is not None
+        ):
+            # Candidates are the main strategy's nets PLUS the diff-pair nets:
+            # a pair the pre-phase claimed but left unconnected (board 06's
+            # MIPI_D0, whose shadow declined and whose legs the negotiated loop
+            # then failed) is itself a corridor-competition victim, and it is
+            # not in ``non_diff_nets`` precisely because the claim removed it.
+            candidate_nets = list(dict.fromkeys([*non_diff_nets, *sorted(diff_net_ids)]))
+            to_yield, _stranded = self._plan_corridor_yields(candidate_nets, committed_pair_routes)
+            kept, released_nets, removed_routes, added_routes = self._apply_corridor_yields(
+                to_yield, candidate_nets, non_diffpair_strategy
+            )
+            if kept:
+                diff_net_ids = diff_net_ids - released_nets
+                coupled_routed_nets -= released_nets
+                removed_ids = {id(r) for r in removed_routes}
+                all_routes = [r for r in all_routes if id(r) not in removed_ids]
+                all_routes.extend(added_routes)
+                self._last_corridor_yield_pair_names = [p.name for p, _r in to_yield]
+        self.autorouter._coupled_prephase_stall_exit = False
 
         # Issue #4095: surface the budget-exit pair set to the instance so
         # the CLI can warn that ``--differential-pairs`` fell back to

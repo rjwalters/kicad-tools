@@ -1411,6 +1411,18 @@ class Autorouter:
         # and cleared at the end of the main strategy.
         self._budget_exit_diff_nets: set[int] = set()
 
+        # Issue #4463: set by ``route_all_with_diffpairs`` for the duration of
+        # a shadow-ON main strategy.  Tells ``route_all_negotiated`` that the
+        # coupled pre-phase committed copper it cannot rip, so a stranded set
+        # that does not change across zero-overflow iterations is a fixed
+        # point the loop should stop grinding on (the caller's corridor-yield
+        # recovery is what can actually free those corridors).
+        self._coupled_prephase_stall_exit: bool = False
+        # Issue #4463: wall-clock cap applied to ``route_all_negotiated``'s
+        # ``timeout`` for the ONE strategy re-run the corridor-yield recovery
+        # performs.  ``None`` (normal) leaves the caller's timeout alone.
+        self._negotiated_timeout_cap: float | None = None
+
         # Routing failure tracking (Issue #688)
         self.routing_failures: list[RoutingFailure] = []
 
@@ -8595,6 +8607,17 @@ class Autorouter:
 
         start_time = time.time()
 
+        # Issue #4463: the corridor-yield recovery re-runs the caller's
+        # strategy a SECOND time after ripping the coupled bodies that sealed
+        # a net in.  That second pass must not be allowed to spend the
+        # recipe's full backstop again -- measured on board 06 shadow-ON, an
+        # uncapped re-run burned its whole 360s budget and took the job from
+        # 770s to 1376s for one recovered net.  The cap is set only for the
+        # duration of that re-run; a normal call never sees it.
+        _yield_cap = getattr(self, "_negotiated_timeout_cap", None)
+        if _yield_cap is not None:
+            timeout = min(timeout, float(_yield_cap)) if timeout else float(_yield_cap)
+
         # If hierarchical mode is requested, delegate to two-phase routing
         if hierarchical:
             return self.route_all_two_phase(
@@ -9008,6 +9031,12 @@ class Autorouter:
         # Issue #2274: Track consecutive stalls for neighborhood rip-up escalation
         neighborhood_stall_count = 0
         prev_routed_count = 0
+        # Issue #4463: consecutive zero-overflow iterations that ended with the
+        # SAME stranded-net set.  Only consulted when the coupled diff-pair
+        # pre-phase committed non-rippable copper ahead of this loop
+        # (``_coupled_prephase_stall_exit``); see the break site below.
+        prephase_stall_count = 0
+        prev_stranded_set: frozenset[int] | None = None
         full_reorder_used_this_iter = False
         # Issue #2514: Identify single-pad nets up front so the recovery
         # loop can distinguish "structurally unroutable" from "failed but
@@ -9489,6 +9518,49 @@ class Autorouter:
         # analysis: full state snapshots remain singleton, only the metric
         # tuple history is kept.
         iteration_trajectory: list[IterationMetrics] = [best_metrics]
+
+        def _prephase_corridor_fixed_point(stranded: list[int]) -> bool:
+            """Issue #4463: is the loop stuck on non-rippable pre-phase copper?
+
+            Called from BOTH branches (targeted and standard rip-up) at the
+            zero-overflow-but-stranded decision point.  When a coupled
+            diff-pair pre-phase committed copper ahead of this loop, that
+            copper is NON-RIPPABLE here -- it is not in ``net_routes``, so no
+            rip-up round, no neighborhood-radius escalation and no relief
+            rescue can free a corridor it sealed (every rescue rolls back with
+            "blocked only by non-rippable copper of ...").  With overflow
+            already at zero there is nothing left to negotiate either, so an
+            UNCHANGED stranded set across consecutive iterations is a fixed
+            point: further iterations can only re-derive the same failure at
+            escalating cost.  Board 06 shadow-ON seed 42 measured exactly
+            that -- the same 3 stranded nets for all 10 iterations, 362.3s,
+            final reach unchanged from iteration 1.
+
+            Returns True (caller breaks) only on the third consecutive
+            iteration with an identical stranded set, and only when the
+            caller set ``_coupled_prephase_stall_exit``.  Shadow-OFF runs --
+            i.e. every board in CI today -- never set it and keep the #3448
+            continue-to-the-ceiling behaviour byte-for-byte.
+            """
+            nonlocal prephase_stall_count, prev_stranded_set
+            if not getattr(self, "_coupled_prephase_stall_exit", False):
+                return False
+            current = frozenset(stranded)
+            if prev_stranded_set == current:
+                prephase_stall_count += 1
+            else:
+                prephase_stall_count = 0
+            prev_stranded_set = current
+            if prephase_stall_count < 2:
+                return False
+            flush_print(
+                f"  Coupled pre-phase corridor stall: the same {len(stranded)} "
+                f"net(s) have been stranded with zero overflow for "
+                f"{prephase_stall_count + 1} consecutive iterations and the "
+                f"blocking copper is non-rippable here -- ending the loop for "
+                f"corridor-yield recovery (issue #4463) ({elapsed_str()})"
+            )
+            return True
 
         def _capture_iteration_end(iter_index: int, overflow_val: int) -> None:
             """Issue #2803: end-of-iteration capture point.
@@ -10697,6 +10769,8 @@ class Autorouter:
                                 f"net(s) still stranded -- continuing "
                                 f"(Issue #3448): {', '.join(stranded_names)}"
                             )
+                            if _prephase_corridor_fixed_point(stranded_targeted):
+                                break
 
                         # Issue #2274: Neighborhood rip-up when stalled with 0
                         # overflow but unrouted nets remain.
@@ -11460,6 +11534,8 @@ class Autorouter:
                             f"still stranded -- continuing (Issue #3448): "
                             f"{', '.join(stranded_names_std)}"
                         )
+                        if _prephase_corridor_fixed_point(stranded_std):
+                            break
 
                     # Issue #2518: short-circuit out of the iteration loop if a
                     # nested per-net loop already tripped the wall-clock budget.

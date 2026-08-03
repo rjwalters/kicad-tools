@@ -2608,22 +2608,35 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # original artifact-quality defects are now FIXED on main -- stranded
     # shadow tails (#3665 transactional connectivity rollback) and shadow
     # vias intersecting the partner (#3667 full-polyline via validation).
-    # The re-scoped corridor-competition defect did NOT reproduce on the
-    # current (#3413-phase-6, tightened-width) geometry: the shadow-ON
-    # seed-42 re-run reached 15/15 single-ended nets at its best
-    # negotiated snapshot (MIPI_D0-/USB_CC1 not stranded).  But shadow-ON
-    # is still not shippable here for two deeper reasons:
-    #   * Convergence collapsed 6-7/9 -> 3/9.  The 0.225-0.275 mm coupled
-    #     widths make the geometric parallel offset infeasible for 6/9
-    #     pairs (self-check overlap -0.165..-0.275 mm; mid-route blockage).
-    #   * The surviving shadow segments are 3.7-11.9 deg off-angle
-    #     (#3975 OffAngleSegmentWarning -> would fail the 45-census if
-    #     committed) and the 6 fallbacks blow the wall-clock (>1200 s vs
-    #     ~150 s / 21-21 shadow-OFF; the negotiated 360 s backstop fires).
-    # Enabling by default needs a shadow-aware by-construction dogleg
-    # (#3907/#3975) plus a parallel-offset feasibility fix at the tight
-    # widths.  When BOTH land, flip the env default and the optimizer/nudge
-    # diff-pair protections below together.  See #3921 for the full data.
+    # Issue #4463 (2026-08-02 re-measure) CORRECTS the #3921-era claim that
+    # used to sit here -- "the corridor-competition defect did NOT reproduce
+    # ... 15/15 single-ended nets at its best negotiated snapshot".  It DOES
+    # reproduce on the post-#4576 geometry: the shadow-ON seed-42 run strands
+    # MIPI_D0+, MIPI_D0- AND USB_CC1 (18/21), because the coupled pre-phase's
+    # copper is non-rippable inside ``route_all_negotiated`` -- every rip-up
+    # round and relief rescue rolls back with "blocked only by non-rippable
+    # copper of <pair nets>" and the loop burns its full 10-iteration ceiling
+    # (362.3 s, stranded set unchanged from iteration 1).  #4463 added a
+    # zero-overflow fixed-point exit for that loop plus a corridor-yield
+    # recovery (rip the pairs sitting on a stranded net's path, re-run this
+    # strategy once, keep the trade only if reach improved), which takes the
+    # shadow-ON run to 19/21 with this negotiated phase down to 148.1 s
+    # (shadow-OFF measures 361.5 s / 21/21 / 587.9 s total on the same
+    # machine; shadow-ON totals 1351.2 s post-fix, so the total job -- not
+    # the negotiated phase -- is now the wall-clock problem).
+    # Shadow-ON is still not shippable here:
+    #   * Convergence is 5/9 (post-#4576).  The 0.225-0.275 mm coupled widths
+    #     make the geometric parallel offset infeasible for the rest
+    #     (self-check overlap; mid-route blockage; #4574 guide-missing).
+    #   * USB_CC1 still strands -- its corridor is contested even with the
+    #     coupled bodies gone.
+    #   * The surviving shadow segments are off-angle (#3975
+    #     OffAngleSegmentWarning; the post-route quantization pass repairs
+    #     them, #3907 is the by-construction fix) and skew/continuity
+    #     residuals (#4570/#4575/#4577) are still open.
+    # Enabling by default needs those to close.  When they do, flip the env
+    # default and the optimizer/nudge diff-pair protections below together.
+    # See #4409 (epic) and #4463 for the current data.
     import os as _os
 
     ENABLE_COUPLED_SHADOW = _os.environ.get("KCT_BOARD06_SHADOW", "0") == "1"
