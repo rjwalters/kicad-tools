@@ -5692,6 +5692,19 @@ class DiffPairRouter:
                 for v in vias
             ):
                 continue
+            # The relocated stretch is copper on a layer this leg was not on.
+            # It must keep the manufacturer clearance from the PARTNER's copper
+            # THERE -- the partner's own crossing tail dives to exactly these
+            # inner/bottom layers, and skipping this screen was measured as 12
+            # extra ``diffpair_clearance_intra`` errors on board-06 seed 42.
+            if partner_segments:
+                partner_w = max((p.width for p in partner_segments), default=rules.trace_width)
+                jog_bound = (seg.width + partner_w) / 2.0 + rules.trace_clearance
+                if (
+                    self._min_distance_to_partner(ax, ay, bx, by, partner_segments, jog_seg.layer)
+                    < jog_bound
+                ):
+                    continue
 
             def _piece(x1: float, y1: float, x2: float, y2: float, layer) -> Segment:
                 return Segment(
@@ -7911,13 +7924,30 @@ class DiffPairRouter:
             if not via_symmetric:
                 # Issue #4570: this side is otherwise legal but its two legs
                 # carry different vias.  Hold it back so the OTHER offset side
-                # (and the uncompressed-guide retry) get their chance to
-                # produce a symmetric pair; ``asym_fallback`` keeps it as the
-                # explicit last resort described at the end of this method.
+                # gets its chance to produce a symmetric pair;
+                # ``asym_fallback`` keeps it as the explicit last resort
+                # described just below the loop.
                 if asym_fallback is None:
                     asym_fallback = (p_route, n_route)
                 continue
             return p_route, n_route
+
+        # Issue #4570: no side of THIS guide is via-symmetric.  Take the
+        # asymmetric candidate here rather than after the uncompressed-guide
+        # retry below: the retry re-derives the whole body from a different
+        # corridor, and on board-06 letting it displace an already-legal
+        # candidate moved PCIE_RX onto geometry with 7 extra
+        # ``clearance_segment_via`` violations and a hole-to-hole failure.
+        # Symmetry is worth preferring a SIDE for; it is not worth trading a
+        # different pair's clearance for.
+        if asym_fallback is not None and not _SHADOW_VIA_SYMMETRY_STRICT:
+            print(
+                f"    [coupled-shadow] {pair.name} WARNING: shipping a "
+                f"via-ASYMMETRIC pair (no symmetric side and no legal mirror); "
+                f"expect a diffpair_length_skew error of the vias' drilled "
+                f"length -- issue #4570"
+            )
+            return asym_fallback
 
         # Issue #4553: both offset sides declined on the COMPRESSED guide.
         # Retry once on the original per-cell polyline so the construction
@@ -7936,27 +7966,16 @@ class DiffPairRouter:
             if retry is not None:
                 return retry
 
-        # Issue #4570: no side produced a via-symmetric pair.  ``STRICT`` drops
-        # the pair here (the electrically pure answer); the default keeps the
-        # best legal-but-asymmetric candidate, LOUDLY, because on board-06 the
-        # strict policy costs a routed net -- and an unrouted net (a
-        # ``connectivity`` error and an LVS open) is a worse ship than a
-        # ``diffpair_length_skew`` error the checker names in full.  Either way
-        # the outcome is recorded, never silent.
-        if asym_fallback is not None:
-            if _SHADOW_VIA_SYMMETRY_STRICT:
-                print(
-                    f"    [coupled-shadow] {pair.name} declined: no offset side "
-                    f"is via-symmetric (KCT_SHADOW_VIA_SYMMETRY_STRICT=1)"
-                )
-                return None
+        # Issue #4570: ``STRICT`` reaches here with an asymmetric candidate in
+        # hand and DROPS it (the electrically pure answer: an unmatched via is
+        # a mode-conversion and impedance discontinuity, not merely a length
+        # error).  See ``_SHADOW_VIA_SYMMETRY_STRICT`` for why that is not the
+        # default.
+        if asym_fallback is not None and _SHADOW_VIA_SYMMETRY_STRICT:
             print(
-                f"    [coupled-shadow] {pair.name} WARNING: shipping a "
-                f"via-ASYMMETRIC pair (no symmetric side and no legal mirror); "
-                f"expect a diffpair_length_skew error of the vias' drilled "
-                f"length -- issue #4570"
+                f"    [coupled-shadow] {pair.name} declined: no offset side "
+                f"is via-symmetric (KCT_SHADOW_VIA_SYMMETRY_STRICT=1)"
             )
-            return asym_fallback
         return None
 
     def _rescue_near_miss_coupled(

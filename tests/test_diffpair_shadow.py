@@ -3622,6 +3622,34 @@ def test_mirrored_z_jog_is_refused_over_a_foreign_pad():
         assert deficient.vias == []
 
 
+def test_mirrored_z_jog_is_refused_when_the_partner_occupies_the_jog_layer():
+    """The relocated stretch is screened on the layer it MOVES TO.
+
+    The partner's own crossing tail dives to exactly the layer the jog lands
+    on, so a mirror that only checks the barrels leaves same-layer P/N copper
+    at a fraction of the clearance (measured: 12 extra
+    ``diffpair_clearance_intra`` errors on board-06 seed 42).
+    """
+    dpr = _diffpair_router()
+    deficient, partner = _mirror_legs(dpr)
+    # Partner copper laid directly over the jog window, on the jog's layer.
+    partner.segments.append(
+        Segment(
+            x1=2.0,
+            y1=2.05,
+            x2=16.0,
+            y2=2.05,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=2,
+            net_name="USB_D-",
+        )
+    )
+
+    assert dpr._match_pair_via_signature(deficient, partner, _AllClearPathfinder(), 2) is False
+    assert deficient.vias == []
+
+
 def test_mirror_refuses_an_odd_via_excess():
     """A z-jog adds vias in PAIRS; an odd difference is refused, not papered over."""
     dpr = _diffpair_router()
