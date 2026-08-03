@@ -5518,6 +5518,13 @@ class DiffPairRouter:
         partner screen (#4460) -- so preferring it can never smuggle copper
         past a check the diving alternative would have failed.
 
+        The partner screen is the STRICT intra-pair bound, not the
+        physical-overlap floor the legacy fallback settles for: this probe runs
+        ahead of ``_synthesize_crossing_tail``, whose stubs already honour the
+        strict bound, so accepting a merely-non-overlapping planar tail here
+        would buy via symmetry with intra-pair clearance (measured on board-06
+        seed 42: ``diffpair_clearance_intra`` 7 -> 19).
+
         Returns ``None`` when the lock is unavailable (pure-Python backend),
         when no planar path exists, or when the candidate fails a gate.
         """
@@ -5536,11 +5543,8 @@ class DiffPairRouter:
             why = "lock-leaked-a-via"
         elif self._route_pad_violation(cand)[0] > _SHADOW_PAD_DEFICIT_EPS:
             why = "pad-deficit"
-        elif partner_segments and not (
-            self._tail_partner_clear(cand, partner_segments, seg_clear)
-            or self._tail_partner_clear(cand, partner_segments, 0.0)
-        ):
-            why = "partner-overlap"
+        elif partner_segments and not self._tail_partner_clear(cand, partner_segments, seg_clear):
+            why = "partner-clearance"
         if _SHADOW_DEBUG:
             print(f"    [coupled-planar-probe] layer={layer_idx} result={why or 'ok'}")
         return None if why else cand
