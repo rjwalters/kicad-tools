@@ -3730,3 +3730,230 @@ def test_shadow_entry_point_spy_is_not_vacuous(monkeypatch):
     make the shadow-OFF assertion pass for the wrong reason.
     """
     assert _spy_shadow_entry(monkeypatch, shadow_enabled=True).count("shadow") >= 1
+
+
+# --- Issue #4574: escape-channel-aware crossing-tail via sites ---------------
+# ``_synthesize_crossing_tail`` enumerates a fixed 3x5 lattice around each
+# endpoint and ships the FIRST candidate that survives the legality gauntlet.
+# The enumeration order carries no information about the board, so an all-layer
+# barrel routinely lands in the middle of a neighbouring fine-pitch pad's only
+# escape (board-06: MIPI_D0's corridor probe returns ``segments=0`` -- sealed,
+# not congested).  The remedy re-ORDERS the lattice by how deeply each barrel
+# intrudes on not-yet-routed pads' direct escapes; it adds no gate, and with an
+# empty/uninformative registry it must reproduce the first-legal result exactly.
+
+
+class _CrossingPathfinder:
+    """Pathfinder stand-in for the crossover lattice: nothing is blocked.
+
+    Isolates via-SITE SELECTION from grid state, so a site that loses can only
+    have lost to the ordering or to an explicit gate.
+    """
+
+    def __init__(self, width: float = 0.2) -> None:
+        self._width = width
+
+    def _get_trace_width_for_net(self, net_name: str) -> float:
+        return self._width
+
+    def _is_cell_blocked(self, gx: int, gy: int, layer_idx: int, net: int) -> bool:
+        return False
+
+    def _is_via_blocked(self, gx: int, gy: int, net: int) -> bool:
+        return False
+
+
+def _crossing_router(shadow: bool = True):
+    """A router whose crossover lattice has a second routable layer to dive to."""
+    from kicad_tools.router.core import Autorouter
+
+    rules = DesignRules()
+    rules.grid_resolution = 0.1
+    router = Autorouter(width=20.0, height=10.0, rules=rules)
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = shadow
+    return dpr
+
+
+def _register_unrouted_neighbour(
+    dpr,
+    pad_xy=(7.0, 5.6),
+    far_xy=(12.0, 5.6),
+    net: int = 9,
+    pitch: float = 0.5,
+) -> None:
+    """An unrouted two-pad net escaping east along ``y = pad_xy[1]``.
+
+    Registered on the AUTOROUTER (``pads`` / ``nets`` / ``component_pitches``)
+    and deliberately NOT on the grid, so the neighbour can only influence the
+    result through the preference -- never through the #4571 pad gate.
+    """
+    dpr.autorouter.pads[("J9", "1")] = _pad_at(
+        pad_xy[0], pad_xy[1], net=net, name="NEIGH", ref="J9", pin="1"
+    )
+    dpr.autorouter.pads[("U9", "1")] = _pad_at(
+        far_xy[0], far_xy[1], net=net, name="NEIGH", ref="U9", pin="1"
+    )
+    dpr.autorouter.nets[net] = [("J9", "1"), ("U9", "1")]
+    dpr.autorouter._component_pitches = {"J9": pitch, "U9": pitch}
+
+
+def _crossing_tail(dpr):
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    return dpr._synthesize_crossing_tail(_CrossingPathfinder(), head, goal, 0, [])
+
+
+def _via_sites(tail):
+    return [(pytest.approx(v.x), pytest.approx(v.y)) for v in tail.vias]
+
+
+def test_crossing_tail_first_legal_site_is_the_unscored_baseline():
+    """Control: with nothing to avoid, both barrels sit on the endpoints."""
+    tail = _crossing_tail(_crossing_router())
+
+    assert tail is not None
+    assert len(tail.vias) == 2
+    assert (tail.vias[0].x, tail.vias[0].y) == (5.0, 5.0)
+    assert (tail.vias[1].x, tail.vias[1].y) == (8.0, 5.0)
+
+
+def test_crossing_tail_steps_off_an_unrouted_pads_escape_channel():
+    """The seal this issue is about: the first-legal site plugs a neighbour.
+
+    The lattice's a=0/b=0 goal-side site sits 0.6 mm from the neighbour's
+    escape ray -- inside the 0.65 mm a foreign trace needs from the barrel --
+    so the neighbour's direct exit becomes illegal.  Later lattice sites are
+    equally legal and leave it open; one of those must ship instead.
+    """
+    from kicad_tools.router.diffpair_routing import _channel_seal_penalty
+
+    dpr = _crossing_router()
+    _register_unrouted_neighbour(dpr)
+    channels = dpr._escape_channel_registry(frozenset({2}))
+    keepout = dpr.autorouter.rules.via_diameter / 2 + dpr.autorouter.rules.trace_clearance + 0.2 / 2
+    # Pre-condition: the site the unscored loop ships really does seal it.
+    assert _channel_seal_penalty(8.0, 5.0, keepout, channels) > 0.0
+
+    tail = _crossing_tail(dpr)
+
+    assert tail is not None
+    assert (tail.vias[1].x, tail.vias[1].y) == (8.0, 4.4)
+    for via in tail.vias:
+        assert _channel_seal_penalty(via.x, via.y, keepout, channels) == 0.0
+
+
+def test_crossing_tail_scoring_is_inert_with_shadow_construction_off():
+    """AC-5: the stub-edge caller (``partner_segments=[]``, shadow OFF) is untouched.
+
+    Same board state as the test above -- only the flag differs -- so a
+    changed result here could only come from the scoring leaking onto the
+    default path.
+    """
+    dpr = _crossing_router(shadow=False)
+    _register_unrouted_neighbour(dpr)
+
+    tail = _crossing_tail(dpr)
+
+    assert tail is not None, "the stub-edge path must still synthesize a tail"
+    assert (tail.vias[1].x, tail.vias[1].y) == (8.0, 5.0)
+
+
+def test_crossing_tail_with_an_empty_registry_is_bit_for_bit_first_legal():
+    """AC-4: no unrouted neighbours -> the preference cannot change anything."""
+    scored = _crossing_tail(_crossing_router())
+    baseline = _crossing_tail(_crossing_router(shadow=False))
+
+    assert scored is not None and baseline is not None
+    assert _via_sites(scored) == _via_sites(baseline)
+    assert [(s.x1, s.y1, s.x2, s.y2, s.layer) for s in scored.segments] == [
+        (s.x1, s.y1, s.x2, s.y2, s.layer) for s in baseline.segments
+    ]
+
+
+def test_crossing_tail_breaks_uniform_penalty_ties_on_enumeration_order(monkeypatch):
+    """AC-4 / AC-6: when scoring cannot discriminate, first-legal still wins."""
+    import kicad_tools.router.diffpair_routing as dpr_mod
+
+    dpr = _crossing_router()
+    _register_unrouted_neighbour(dpr)
+    monkeypatch.setattr(dpr_mod, "_channel_seal_penalty", lambda x, y, keepout, channels: 1.0)
+
+    tail = _crossing_tail(dpr)
+
+    assert tail is not None
+    assert (tail.vias[1].x, tail.vias[1].y) == (8.0, 5.0)
+
+
+def test_crossing_tail_preference_never_bypasses_the_foreign_pad_gate():
+    """A zero-penalty site that is a pad short must still lose (#4571's lesson).
+
+    The site the preference wants -- (8.0, 4.4) -- is occupied by a foreign
+    pad ON THE GRID here, so the exact ``clearance_pad_segment`` screen inside
+    the candidate loop has to veto it and the loop has to fall through to the
+    next site the preference likes.
+    """
+    import kicad_tools.router.diffpair_routing as dpr_mod
+
+    dpr = _crossing_router()
+    _register_unrouted_neighbour(dpr)
+    dpr.autorouter.grid.add_pad(_pad_at(8.0, 4.4, net=99, name="OTHER"))
+
+    tail = _crossing_tail(dpr)
+
+    assert tail is not None
+    assert (tail.vias[1].x, tail.vias[1].y) != (8.0, 4.4)
+    assert dpr._route_pad_violation(tail)[0] <= dpr_mod._SHADOW_PAD_DEFICIT_EPS
+
+
+def test_escape_channel_registry_skips_routed_and_pitchless_nets():
+    """The registry is an UNROUTED-neighbour oracle, not a pad dump."""
+    dpr = _crossing_router()
+    _register_unrouted_neighbour(dpr)
+
+    assert len(dpr._escape_channel_registry(frozenset({2}))) == 2
+    # The net under construction (and its partner) never scores itself.
+    assert dpr._escape_channel_registry(frozenset({2, 9})) == []
+    # A component with no known pitch contributes no channel.
+    dpr.autorouter._component_pitches = {}
+    assert dpr._escape_channel_registry(frozenset({2})) == []
+    # Copper already committed for the net -> it is no longer waiting to escape.
+    dpr.autorouter._component_pitches = {"J9": 0.5, "U9": 0.5}
+    dpr.autorouter.routes.append(Route(net=9, net_name="NEIGH"))
+    assert dpr._escape_channel_registry(frozenset({2})) == []
+
+
+def test_escape_channel_registry_is_empty_without_autorouter_state():
+    """AC-4 degradation: test doubles and pitchless boards score nothing."""
+    dpr = _crossing_router()
+
+    assert dpr._escape_channel_registry(frozenset()) == []
+
+
+def test_channel_seal_penalty_only_fires_inside_the_channel():
+    """Behind the pad, past the reach, or clear laterally: all cost nothing."""
+    from kicad_tools.router.diffpair_routing import _channel_seal_penalty, _EscapeChannel
+
+    channel = [_EscapeChannel(x=0.0, y=0.0, ux=1.0, uy=0.0, reach=1.5)]
+
+    assert _channel_seal_penalty(-0.5, 0.0, 0.65, channel) == 0.0  # behind the pad
+    assert _channel_seal_penalty(2.0, 0.0, 0.65, channel) == 0.0  # past the reach
+    assert _channel_seal_penalty(0.75, 0.65, 0.65, channel) == 0.0  # clear laterally
+    # Dead centre in the channel is the deepest intrusion there is.
+    assert _channel_seal_penalty(0.75, 0.0, 0.65, channel) == pytest.approx(0.65)
+    # ...and the penalty decreases monotonically as the barrel steps aside.
+    assert _channel_seal_penalty(0.75, 0.3, 0.65, channel) == pytest.approx(0.35)
+
+
+def test_channel_seal_penalty_sums_over_every_channel_it_reaches():
+    """Two sealed neighbours are worse than one; the score is additive."""
+    from kicad_tools.router.diffpair_routing import _channel_seal_penalty, _EscapeChannel
+
+    channels = [
+        _EscapeChannel(x=0.0, y=0.0, ux=1.0, uy=0.0, reach=1.5),
+        _EscapeChannel(x=0.0, y=0.4, ux=1.0, uy=0.0, reach=1.5),
+    ]
+
+    one = _channel_seal_penalty(0.75, -0.4, 0.65, channels)
+    both = _channel_seal_penalty(0.75, 0.2, 0.65, channels)
+    assert one == pytest.approx(0.25)
+    assert both == pytest.approx(0.9)

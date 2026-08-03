@@ -20,7 +20,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -294,6 +294,73 @@ _SHADOW_PAD_DEFICIT_EPS: float = 1e-4
 # so the existing end-trim machinery can shave a grazing landing instead of
 # declining the whole side.
 _SHADOW_PAD_PROBE_STEP_MM: float = 0.2
+
+# Issue #4574: the constructed crossover's via sites are chosen FIRST-LEGAL out
+# of a fixed 3x5 lattice, so the winning site carries no information about what
+# the rest of the board still has to route.  An all-layer F.Cu<->B.Cu barrel is
+# an obstacle on EVERY layer for EVERY later net, and the lattice's preferred
+# sites sit -- by construction -- in the middle of the connector's escape field.
+# On board-06 that seals MIPI_D0's only channel (its corridor probe returns
+# ``guide_route=FAILED segments=0``, i.e. sealed rather than congested).
+#
+# The remedy is a PREFERENCE, never a new gate: every legality check keeps its
+# place and its veto, and the candidate lattice is merely re-ORDERED so that,
+# among sites that are already legal, one that leaves a not-yet-routed pad's
+# direct escape open is tried before one that plugs it.
+#
+# ``_ESCAPE_CHANNEL_REACH_PITCHES`` bounds how far out from a pad the escape is
+# treated as un-detourable, in multiples of that pad's own component pitch.
+# Close to a fine-pitch pad the neighbouring pads' halos leave no room to route
+# around a barrel; a few pitches out the net has the whole board to detour
+# through, so scoring there would be noise rather than signal.
+_ESCAPE_CHANNEL_REACH_PITCHES: float = 3.0
+
+
+class _EscapeChannel(NamedTuple):
+    """A not-yet-routed pad's direct escape ray (issue #4574).
+
+    ``(x, y)`` is the pad centre, ``(ux, uy)`` the unit direction toward the
+    rest of that net's pads (the shortest way out is the way it has to go),
+    and ``reach`` how far along that ray the channel is considered sealed by
+    a barrel rather than merely inconvenienced by one.
+    """
+
+    x: float
+    y: float
+    ux: float
+    uy: float
+    reach: float
+
+
+def _channel_seal_penalty(
+    x: float,
+    y: float,
+    keepout: float,
+    channels: list[_EscapeChannel],
+) -> float:
+    """How deeply a via barrel at ``(x, y)`` plugs other nets' escapes (#4574).
+
+    ``keepout`` is the centre-to-centre distance a foreign trace must keep
+    from the barrel (``via_diameter/2 + trace_clearance + trace_width/2``), so
+    a barrel closer than that to a channel's ray makes the pad's direct escape
+    illegal.  The penalty is the summed intrusion depth over every channel the
+    barrel reaches into -- ``0.0`` means the barrel leaves every modelled
+    escape exactly as it found it, which is the overwhelmingly common case and
+    the one that preserves today's first-legal behaviour verbatim.
+    """
+    penalty = 0.0
+    for ch in channels:
+        dx = x - ch.x
+        dy = y - ch.y
+        along = dx * ch.ux + dy * ch.uy
+        if along <= 0.0 or along >= ch.reach:
+            continue  # behind the pad, or far enough out to be detoured
+        lateral = abs(dx * ch.uy - dy * ch.ux)
+        if lateral >= keepout:
+            continue  # the direct escape still fits past this barrel
+        penalty += keepout - lateral
+    return penalty
+
 
 # Issue #4572: the constructor's landing tails are the pair's uncoupled copper.
 #
@@ -3636,6 +3703,75 @@ class DiffPairRouter:
                     drills.append((via.x, via.y, via.drill))
         return drills
 
+    def _escape_channel_registry(self, exclude_nets: frozenset[int]) -> list[_EscapeChannel]:
+        """Direct escape rays of pads whose net still has no copper (#4574).
+
+        Assembled ONCE per crossover -- the same shape as
+        :meth:`_collect_existing_drills` -- and then consulted per candidate
+        via site, so the 225-pair candidate loop never re-scans the pad list.
+
+        A net qualifies when it has at least two pads and no committed route
+        in ``autorouter.routes``: it still has to get out of its pads, and any
+        all-layer barrel dropped across that exit is a wall on every layer.
+        The "has no committed route" test is deliberately the cheap one --
+        :meth:`_net_is_connected` runs full connectivity validation per net,
+        which is far too heavy here, and over-reporting a net as unrouted only
+        adds a preference term, never a veto.
+
+        Each pad's escape direction is taken toward the mean of the REST of
+        its own net's pads: that is where the net has to go, it needs no
+        footprint-body geometry, and it is sign-unambiguous (unlike a
+        principal-axis normal, which cannot tell which side of a single pad
+        row is the outside).  The channel length is bounded by
+        ``_ESCAPE_CHANNEL_REACH_PITCHES`` pitches of the pad's own component,
+        so the notion of "sealed" scales with the pad field it belongs to.
+
+        Returns an empty list -- i.e. degrades to today's exact first-legal
+        behaviour -- whenever the autorouter state this needs is unavailable
+        (test doubles, the stub-edge caller's throwaway pathfinder, boards
+        with no pitch information).
+        """
+        autorouter = self.autorouter
+        pads = getattr(autorouter, "pads", None)
+        nets = getattr(autorouter, "nets", None)
+        if not pads or not nets:
+            return []
+        pitches = self._pad_component_pitches()
+        if not pitches:
+            return []
+        routed_nets = {route.net for route in getattr(autorouter, "routes", None) or ()}
+        channels: list[_EscapeChannel] = []
+        # ``sorted`` keeps the registry -- and therefore every penalty sum --
+        # independent of dict iteration order (AC-6 / #4536).
+        for net_id in sorted(nets):
+            if net_id in exclude_nets or net_id in routed_nets:
+                continue
+            members = [pads[key] for key in nets[net_id] if key in pads]
+            if len(members) < 2:
+                continue
+            others = len(members) - 1
+            sum_x = sum(pad.x for pad in members)
+            sum_y = sum(pad.y for pad in members)
+            for pad in members:
+                pitch = pitches.get(pad.ref, 0.0)
+                if pitch <= 0.0:
+                    continue  # no pitch known -> no fine-pitch escape to model
+                dx = (sum_x - pad.x) / others - pad.x
+                dy = (sum_y - pad.y) / others - pad.y
+                span = math.hypot(dx, dy)
+                if span < 1e-9:
+                    continue
+                channels.append(
+                    _EscapeChannel(
+                        x=pad.x,
+                        y=pad.y,
+                        ux=dx / span,
+                        uy=dy / span,
+                        reach=min(span, _ESCAPE_CHANNEL_REACH_PITCHES * pitch),
+                    )
+                )
+        return channels
+
     def _resolve_detection_inputs(
         self,
     ) -> tuple[dict | None, dict[str, str] | None, list | None]:
@@ -5227,163 +5363,196 @@ class DiffPairRouter:
         existing_drills = self._collect_existing_drills()
         min_h2h = getattr(rules, "min_hole_to_hole", 0.5)
 
-        for v1 in _via_candidates(head.x, head.y, 1.0):
-            for v2 in _via_candidates(goal.x, goal.y, -1.0):
-                # Issue #3855: replace the hardcoded 0.6mm center-to-center
-                # via-to-via check with an edge-to-edge ``min_hole_to_hole``
-                # check.  This single crossover's two vias must clear each
-                # other AND every other existing drill (other crossovers'
-                # fan-out vias + through-hole pad drills, any net).
-                edge_v1v2 = (
-                    math.hypot(v2[0] - v1[0], v2[1] - v1[1])
-                    - rules.via_drill / 2
-                    - rules.via_drill / 2
+        # Issue #4574: the candidate lattice is enumerated in a fixed order
+        # that carries no information about the board, so a site that happens
+        # to plug a neighbouring unrouted pad's only escape wins purely by
+        # being earlier in the tuple literals.  Re-ORDER the pairs by how
+        # deeply their barrels intrude on those escapes -- lowest intrusion
+        # first -- and leave every legality gate below exactly where it is.
+        #
+        # ``sort`` is stable, so pairs with equal penalty (and, when no
+        # channel is modelled at all, ALL pairs) keep their enumeration order:
+        # with an empty or uninformative registry this returns bit-for-bit
+        # what the un-scored first-legal loop returned.
+        #
+        # Scoring is confined to the shadow constructor -- the one caller
+        # whose barrels are placed speculatively into a live pad field.  The
+        # stub-edge completion path (issue #3508) runs with construction OFF
+        # and keeps its untouched default behaviour.
+        candidate_pairs = [
+            (v1, v2)
+            for v1 in _via_candidates(head.x, head.y, 1.0)
+            for v2 in _via_candidates(goal.x, goal.y, -1.0)
+        ]
+        if self.enable_shadow_construction:
+            exclude = {head.net}
+            exclude.update(ps.net for ps in partner_segments)
+            channels = self._escape_channel_registry(frozenset(exclude))
+            if channels:
+                seal_keepout = rules.via_diameter / 2 + rules.trace_clearance + width / 2
+                seal_cache: dict[tuple[float, float], float] = {}
+
+                def _site_penalty(site: tuple[float, float]) -> float:
+                    cached = seal_cache.get(site)
+                    if cached is None:
+                        cached = _channel_seal_penalty(site[0], site[1], seal_keepout, channels)
+                        seal_cache[site] = cached
+                    return cached
+
+                candidate_pairs.sort(
+                    key=lambda pair: _site_penalty(pair[0]) + _site_penalty(pair[1])
                 )
-                if edge_v1v2 < min_h2h:
-                    continue  # the two crossover vias too close drill-to-drill
-                if not drill_hole_to_hole_clear(
-                    v1[0], v1[1], rules.via_drill, existing_drills, min_h2h
+
+        for v1, v2 in candidate_pairs:
+            # Issue #3855: replace the hardcoded 0.6mm center-to-center
+            # via-to-via check with an edge-to-edge ``min_hole_to_hole``
+            # check.  This single crossover's two vias must clear each
+            # other AND every other existing drill (other crossovers'
+            # fan-out vias + through-hole pad drills, any net).
+            edge_v1v2 = (
+                math.hypot(v2[0] - v1[0], v2[1] - v1[1]) - rules.via_drill / 2 - rules.via_drill / 2
+            )
+            if edge_v1v2 < min_h2h:
+                continue  # the two crossover vias too close drill-to-drill
+            if not drill_hole_to_hole_clear(
+                v1[0], v1[1], rules.via_drill, existing_drills, min_h2h
+            ):
+                continue
+            if not drill_hole_to_hole_clear(
+                v2[0], v2[1], rules.via_drill, existing_drills, min_h2h
+            ):
+                continue
+            g1 = grid.world_to_grid(*v1)
+            g2 = grid.world_to_grid(*v2)
+            if pathfinder._is_via_blocked(g1[0], g1[1], head.net):
+                continue
+            if pathfinder._is_via_blocked(g2[0], g2[1], head.net):
+                continue
+            # Via barrels: distance to partner copper on ANY layer.
+            if (
+                self._min_distance_to_partner(v1[0], v1[1], v1[0], v1[1], partner_segments, None)
+                < via_clear
+            ):
+                continue
+            if (
+                self._min_distance_to_partner(v2[0], v2[1], v2[0], v2[1], partner_segments, None)
+                < via_clear
+            ):
+                continue
+            # Surface stubs must stay clear of same-layer partner copper.
+            if (
+                self._min_distance_to_partner(
+                    head.x, head.y, v1[0], v1[1], partner_segments, surface
+                )
+                < seg_clear
+            ):
+                continue
+            if (
+                self._min_distance_to_partner(
+                    v2[0], v2[1], goal.x, goal.y, partner_segments, surface
+                )
+                < seg_clear
+            ):
+                continue
+            if not self._segment_cells_clear(
+                pathfinder, head.x, head.y, v1[0], v1[1], layer_idx, head.net
+            ):
+                continue
+            if not self._segment_cells_clear(
+                pathfinder, v2[0], v2[1], goal.x, goal.y, layer_idx, head.net
+            ):
+                continue
+            for alt in routable:
+                if not self._segment_cells_clear(
+                    pathfinder, v1[0], v1[1], v2[0], v2[1], alt, head.net
                 ):
                     continue
-                if not drill_hole_to_hole_clear(
-                    v2[0], v2[1], rules.via_drill, existing_drills, min_h2h
-                ):
-                    continue
-                g1 = grid.world_to_grid(*v1)
-                g2 = grid.world_to_grid(*v2)
-                if pathfinder._is_via_blocked(g1[0], g1[1], head.net):
-                    continue
-                if pathfinder._is_via_blocked(g2[0], g2[1], head.net):
-                    continue
-                # Via barrels: distance to partner copper on ANY layer.
+                alt_layer = Layer(grid.index_to_layer(alt))
+                # Issue #3508 (second pass): the partner guide is
+                # NOT in the grid, so the alt-layer crossover must
+                # also be checked geometrically against partner
+                # copper ON THAT LAYER -- a via-bearing partner
+                # guide has inner-layer segments the cell check
+                # cannot see (measured: USB3_RX1/RX2 "physically
+                # overlapping copper" rips in the recipe's 6b
+                # repair even with nudge protection).
                 if (
                     self._min_distance_to_partner(
-                        v1[0], v1[1], v1[0], v1[1], partner_segments, None
-                    )
-                    < via_clear
-                ):
-                    continue
-                if (
-                    self._min_distance_to_partner(
-                        v2[0], v2[1], v2[0], v2[1], partner_segments, None
-                    )
-                    < via_clear
-                ):
-                    continue
-                # Surface stubs must stay clear of same-layer partner copper.
-                if (
-                    self._min_distance_to_partner(
-                        head.x, head.y, v1[0], v1[1], partner_segments, surface
+                        v1[0], v1[1], v2[0], v2[1], partner_segments, alt_layer
                     )
                     < seg_clear
                 ):
                     continue
-                if (
-                    self._min_distance_to_partner(
-                        v2[0], v2[1], goal.x, goal.y, partner_segments, surface
-                    )
-                    < seg_clear
-                ):
-                    continue
-                if not self._segment_cells_clear(
-                    pathfinder, head.x, head.y, v1[0], v1[1], layer_idx, head.net
-                ):
-                    continue
-                if not self._segment_cells_clear(
-                    pathfinder, v2[0], v2[1], goal.x, goal.y, layer_idx, head.net
-                ):
-                    continue
-                for alt in routable:
-                    if not self._segment_cells_clear(
-                        pathfinder, v1[0], v1[1], v2[0], v2[1], alt, head.net
-                    ):
-                        continue
-                    alt_layer = Layer(grid.index_to_layer(alt))
-                    # Issue #3508 (second pass): the partner guide is
-                    # NOT in the grid, so the alt-layer crossover must
-                    # also be checked geometrically against partner
-                    # copper ON THAT LAYER -- a via-bearing partner
-                    # guide has inner-layer segments the cell check
-                    # cannot see (measured: USB3_RX1/RX2 "physically
-                    # overlapping copper" rips in the recipe's 6b
-                    # repair even with nudge protection).
-                    if (
-                        self._min_distance_to_partner(
-                            v1[0], v1[1], v2[0], v2[1], partner_segments, alt_layer
-                        )
-                        < seg_clear
-                    ):
-                        continue
-                    route = Route(net=head.net, net_name=head.net_name)
-                    if math.hypot(v1[0] - head.x, v1[1] - head.y) > 0.01:
-                        route.segments.append(
-                            Segment(
-                                x1=head.x,
-                                y1=head.y,
-                                x2=v1[0],
-                                y2=v1[1],
-                                width=width,
-                                layer=surface,
-                                net=head.net,
-                                net_name=head.net_name,
-                            )
-                        )
-                    route.vias.append(
-                        Via(
-                            x=v1[0],
-                            y=v1[1],
-                            drill=rules.via_drill,
-                            diameter=rules.via_diameter,
-                            layers=(surface, alt_layer),
-                            net=head.net,
-                            net_name=head.net_name,
-                        )
-                    )
+                route = Route(net=head.net, net_name=head.net_name)
+                if math.hypot(v1[0] - head.x, v1[1] - head.y) > 0.01:
                     route.segments.append(
                         Segment(
-                            x1=v1[0],
-                            y1=v1[1],
-                            x2=v2[0],
-                            y2=v2[1],
+                            x1=head.x,
+                            y1=head.y,
+                            x2=v1[0],
+                            y2=v1[1],
                             width=width,
-                            layer=alt_layer,
+                            layer=surface,
                             net=head.net,
                             net_name=head.net_name,
                         )
                     )
-                    route.vias.append(
-                        Via(
-                            x=v2[0],
-                            y=v2[1],
-                            drill=rules.via_drill,
-                            diameter=rules.via_diameter,
-                            layers=(alt_layer, surface),
+                route.vias.append(
+                    Via(
+                        x=v1[0],
+                        y=v1[1],
+                        drill=rules.via_drill,
+                        diameter=rules.via_diameter,
+                        layers=(surface, alt_layer),
+                        net=head.net,
+                        net_name=head.net_name,
+                    )
+                )
+                route.segments.append(
+                    Segment(
+                        x1=v1[0],
+                        y1=v1[1],
+                        x2=v2[0],
+                        y2=v2[1],
+                        width=width,
+                        layer=alt_layer,
+                        net=head.net,
+                        net_name=head.net_name,
+                    )
+                )
+                route.vias.append(
+                    Via(
+                        x=v2[0],
+                        y=v2[1],
+                        drill=rules.via_drill,
+                        diameter=rules.via_diameter,
+                        layers=(alt_layer, surface),
+                        net=head.net,
+                        net_name=head.net_name,
+                    )
+                )
+                if math.hypot(goal.x - v2[0], goal.y - v2[1]) > 0.01:
+                    route.segments.append(
+                        Segment(
+                            x1=v2[0],
+                            y1=v2[1],
+                            x2=goal.x,
+                            y2=goal.y,
+                            width=width,
+                            layer=surface,
                             net=head.net,
                             net_name=head.net_name,
                         )
                     )
-                    if math.hypot(goal.x - v2[0], goal.y - v2[1]) > 0.01:
-                        route.segments.append(
-                            Segment(
-                                x1=v2[0],
-                                y1=v2[1],
-                                x2=goal.x,
-                                y2=goal.y,
-                                width=width,
-                                layer=surface,
-                                net=head.net,
-                                net_name=head.net_name,
-                            )
-                        )
-                    # Issue #4571: the crossover's stubs, its alt-layer
-                    # crossing and BOTH via barrels are only raster-validated
-                    # above, and the raster's pad halo is shrunk in fine-pitch
-                    # corridors.  Screen the assembled candidate with the exact
-                    # DRC-equivalent pad predicate so a violating crossover
-                    # loses to a later via-site candidate instead of shipping.
-                    if self._route_pad_violation(route)[0] > _SHADOW_PAD_DEFICIT_EPS:
-                        continue
-                    return route
+                # Issue #4571: the crossover's stubs, its alt-layer
+                # crossing and BOTH via barrels are only raster-validated
+                # above, and the raster's pad halo is shrunk in fine-pitch
+                # corridors.  Screen the assembled candidate with the exact
+                # DRC-equivalent pad predicate so a violating crossover
+                # loses to a later via-site candidate instead of shipping.
+                if self._route_pad_violation(route)[0] > _SHADOW_PAD_DEFICIT_EPS:
+                    continue
+                return route
         return None
 
     def _tail_partner_clear(
