@@ -3650,6 +3650,31 @@ def test_mirrored_z_jog_is_refused_when_the_partner_occupies_the_jog_layer():
     assert deficient.vias == []
 
 
+def test_mirror_is_opt_in_and_the_gate_does_not_depend_on_it(monkeypatch):
+    """Remediation B ships OFF; the gate still detects and records without it.
+
+    ``_mirror_z_jog``'s own board-06 measurement (one legal site, and taking it
+    landed that pair on the 0.100-vs-0.1016 mm intra-pair rung) says it needs a
+    site-selection policy first, so the default path never calls it.
+    """
+    import kicad_tools.router.diffpair_routing as dpr_mod
+
+    assert dpr_mod._SHADOW_VIA_MIRROR is False
+
+    called: list[int] = []
+    monkeypatch.setattr(
+        dpr_mod.DiffPairRouter,
+        "_match_pair_via_signature",
+        lambda self, *a, **k: called.append(1) or True,
+        raising=True,
+    )
+    dpr, result = _run_shadow_with_tails(monkeypatch, _stub_tail_route_diving)
+
+    assert called == [], "the mirror must not run with KCT_SHADOW_VIA_MIRROR unset"
+    assert result is not None
+    assert dpr._last_shadow_decline_reason == "via-skew", "detection is independent of the mirror"
+
+
 def test_mirror_refuses_an_odd_via_excess():
     """A z-jog adds vias in PAIRS; an odd difference is refused, not papered over."""
     dpr = _diffpair_router()

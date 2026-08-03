@@ -405,15 +405,28 @@ _SHADOW_VIA_SYMMETRY: bool = os.environ.get("KCT_SHADOW_VIA_SYMMETRY", "1") == "
 #
 # Why no remediation is legal on this board is worth recording: the landing
 # tails must CROSS the guide (``_synthesize_crossing_tail``'s deliberate
-# two-via crossover is the only legal tail -- every layer-locked planar probe
-# is rejected for physically overlapping the partner), and mirroring the pair
-# of vias onto the guide leg is blocked because the coupled gap (0.075-0.15 mm)
-# is far below the via-barrel-to-partner-copper bound (~0.6 mm), so a
-# centreline-preserving z-jog has nowhere legal to sit along the coupled body.
-# A LATERALLY OFFSET mirrored jog (the ``lateral_jog_polyline`` machinery the
-# #4553 meander already uses, pushed away from the partner) is the remaining
-# lever and is deliberately left as follow-up work.
+# two-via crossover is the only legal tail -- all 12 layer-locked planar probes
+# on the seed-42 run are rejected for breaking the intra-pair clearance against
+# the partner), and mirroring the pair of vias onto the guide leg is blocked
+# because the coupled gap (0.075-0.15 mm) is far below the
+# via-barrel-to-partner-copper bound (~0.6 mm), so a centreline-preserving
+# z-jog has nowhere legal to sit along the coupled body.  A LATERALLY OFFSET
+# mirrored jog (the ``lateral_jog_polyline`` machinery the #4553 meander
+# already uses, pushed away from the partner) is the remaining lever and is
+# deliberately left as follow-up work.
 _SHADOW_VIA_SYMMETRY_STRICT: bool = os.environ.get("KCT_SHADOW_VIA_SYMMETRY_STRICT", "0") == "1"
+# Remediation B (``_mirror_z_jog``): give the leg that is SHORT of vias the same
+# vias as its partner, as a centreline-preserving z-jog.
+#
+# Implemented and unit-tested, but OFF by default on the strength of its own
+# board-06 seed-42 measurement: exactly one pair (USB2_D) had a legal mirror
+# site, and taking it moved that pair onto geometry sitting exactly on the
+# 0.100-vs-0.1016 mm intra-pair rung -- ``diffpair_clearance_intra`` 7 -> 19 and
+# its own skew 5.430 -> 6.348 mm.  The mirror needs a site *selection* policy
+# (prefer an uncoupled stretch, and re-check the pair's marginal rungs after
+# splitting a segment) before it can be trusted by default; the gate and the
+# tail-side remediation do not depend on it.
+_SHADOW_VIA_MIRROR: bool = os.environ.get("KCT_SHADOW_VIA_MIRROR", "0") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -7794,7 +7807,7 @@ class DiffPairRouter:
                 guide_sig = _route_via_signature(guide_route_obj, n_layers)
                 shadow_sig = _route_via_signature(shadow_route, n_layers)
                 if guide_sig != shadow_sig:
-                    via_symmetric = self._match_pair_via_signature(
+                    via_symmetric = _SHADOW_VIA_MIRROR and self._match_pair_via_signature(
                         guide_route_obj, shadow_route, pathfinder, n_layers
                     )
                     print(
