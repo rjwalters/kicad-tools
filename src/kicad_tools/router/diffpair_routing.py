@@ -389,6 +389,31 @@ _TAIL_FOLLOW_MAX_RUNS_PER_SIDE: int = 2
 # difference) / (n - 1)``, which is zero exactly when the two legs'
 # ``(via count, sum |delta stack index|)`` signatures match, for ANY thickness.
 _SHADOW_VIA_SYMMETRY: bool = os.environ.get("KCT_SHADOW_VIA_SYMMETRY", "1") == "1"
+# What to do with a pair for which NEITHER offset side is via-symmetric and no
+# remediation is legal.
+#
+# ``STRICT`` drops it (the electrically pure answer: an unmatched via is a
+# mode-conversion and impedance discontinuity, not just a length error).  The
+# DEFAULT keeps the best legal candidate and says so loudly, because the strict
+# policy was measured on board-06 seed 42 shadow-ON and costs reach: 33 -> 26
+# total DRC errors but 19 -> 18 signal nets routed, and part of that "-7" is
+# vacuity -- ``diffpair_length_skew`` only fires on an ENGAGED pair, so a pair
+# that is dropped stops being measured (USB3_TX1's 3.412 mm skew error was
+# replaced by two ``connectivity`` errors and two LVS opens).  An unrouted net
+# is a worse ship than a skew error the checker names in full, so the default
+# ships the pair and the DRC keeps flagging it.
+#
+# Why no remediation is legal on this board is worth recording: the landing
+# tails must CROSS the guide (``_synthesize_crossing_tail``'s deliberate
+# two-via crossover is the only legal tail -- every layer-locked planar probe
+# is rejected for physically overlapping the partner), and mirroring the pair
+# of vias onto the guide leg is blocked because the coupled gap (0.075-0.15 mm)
+# is far below the via-barrel-to-partner-copper bound (~0.6 mm), so a
+# centreline-preserving z-jog has nowhere legal to sit along the coupled body.
+# A LATERALLY OFFSET mirrored jog (the ``lateral_jog_polyline`` machinery the
+# #4553 meander already uses, pushed away from the partner) is the remaining
+# lever and is deliberately left as follow-up work.
+_SHADOW_VIA_SYMMETRY_STRICT: bool = os.environ.get("KCT_SHADOW_VIA_SYMMETRY_STRICT", "0") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -5476,6 +5501,266 @@ class DiffPairRouter:
         finally:
             setter(saved)
 
+    def _planar_tail_probe(
+        self,
+        head: Pad,
+        goal: Pad,
+        layer_idx: int,
+        partner_segments: list[Segment] | None,
+        seg_clear: float,
+    ) -> Route | None:
+        """A landing tail that is PLANAR by construction (issue #4570).
+
+        Runs the per-net A* with the router's layer vector locked to
+        ``layer_idx``, so the search has no via expansion available at all.
+        The result is then held to exactly the gates every other tail
+        candidate passes -- the exact foreign-pad predicate (#4571) and the
+        partner screen (#4460) -- so preferring it can never smuggle copper
+        past a check the diving alternative would have failed.
+
+        Returns ``None`` when the lock is unavailable (pure-Python backend),
+        when no planar path exists, or when the candidate fails a gate.
+        """
+        with self._layer_locked_router(layer_idx) as locked:
+            cand = (
+                self._single_ended_guide_route(head, goal, per_net_timeout=10.0) if locked else None
+            )
+        why: str | None = None
+        if not locked:
+            why = "no-layer-lock"
+        elif cand is None or not cand.segments:
+            why = "no-planar-path"
+        elif cand.vias:
+            # Defensive: a lock that did not actually suppress via expansion
+            # buys nothing here.
+            why = "lock-leaked-a-via"
+        elif self._route_pad_violation(cand)[0] > _SHADOW_PAD_DEFICIT_EPS:
+            why = "pad-deficit"
+        elif partner_segments and not (
+            self._tail_partner_clear(cand, partner_segments, seg_clear)
+            or self._tail_partner_clear(cand, partner_segments, 0.0)
+        ):
+            why = "partner-overlap"
+        if _SHADOW_DEBUG:
+            print(f"    [coupled-planar-probe] layer={layer_idx} result={why or 'ok'}")
+        return None if why else cand
+
+    def _via_layer_multiset(
+        self, route: Route, num_copper_layers: int
+    ) -> collections.Counter[tuple]:
+        """Vias keyed by their (stack-ordered) layer pair (issue #4570)."""
+        out: collections.Counter[tuple] = collections.Counter()
+        for v in route.vias:
+            la, lb = v.layers
+            key = tuple(
+                sorted(
+                    (la, lb),
+                    key=lambda lay: DiffPairLengthTracker._stack_position(lay, num_copper_layers),
+                )
+            )
+            out[key] += 1
+        return out
+
+    def _mirror_z_jog(
+        self,
+        leg: Route,
+        layer_pair: tuple,
+        pathfinder: CoupledPathfinder,
+        partner_segments: list[Segment],
+        net: int,
+        net_name: str,
+    ) -> bool:
+        """Add a matching two-via z-jog to ``leg`` in place (issue #4570).
+
+        The other half of the via-symmetry fix: when the constructed leg needs
+        a via the partner cannot give up -- board-06's landing tails must
+        CROSS the guide, so ``_synthesize_crossing_tail``'s deliberate two-via
+        crossover is the only legal tail and no planar alternative exists --
+        the drilled length is equalised by giving the partner leg the same two
+        vias instead of taking them away.
+
+        The jog is deliberately **centreline-preserving**: a window in the
+        middle of one existing segment is re-emitted on the other layer of
+        ``layer_pair``, bracketed by two vias at the window's ends.  Plan-view
+        copper, and therefore the planar length the length matcher works on,
+        is unchanged; only the layer of a ~1 mm stretch moves.  That also
+        means no new angle is introduced, so the 45-census cannot regress.
+
+        Every piece is held to the SAME gates as all other constructed copper
+        before anything is mutated:
+
+        * ``drill_hole_to_hole_clear`` against the board-wide drill registry
+          (and between the jog's own two vias),
+        * ``_is_via_blocked`` (raster + drill envelope + no via-in-pad),
+        * ``_via_pad_deficit`` -- the exact foreign-pad predicate the raster
+          cannot see (the #4571 lesson),
+        * the raster and the exact pad predicate for the relocated stretch,
+        * via-barrel clearance to the partner on ANY layer.
+
+        Returns ``True`` only when the jog was applied.
+        """
+        from .via_clearance import drill_hole_to_hole_clear
+
+        grid = self.autorouter.grid
+        rules = self.autorouter.rules
+        la, lb = layer_pair
+        try:
+            idx_a = grid.layer_to_index(la.value)
+            idx_b = grid.layer_to_index(lb.value)
+        except Exception:  # pragma: no cover — defensive (unpopulated layer)
+            return False
+        routable = set(grid.get_routable_indices())
+        if idx_a not in routable or idx_b not in routable:
+            return False
+
+        min_h2h = getattr(rules, "min_hole_to_hole", 0.5)
+        # The window must be long enough for the two barrels to clear each
+        # other drill-to-drill, plus a little slack for the raster scan.
+        window = max(rules.via_drill + min_h2h + 2.0 * grid.resolution, 4.0 * grid.resolution)
+        existing = self._collect_existing_drills()
+        guide_width = max((s.width for s in leg.segments), default=rules.trace_width)
+        via_clear = rules.via_diameter / 2 + rules.trace_clearance + guide_width / 2
+
+        order = sorted(
+            range(len(leg.segments)),
+            key=lambda i: -math.hypot(
+                leg.segments[i].x2 - leg.segments[i].x1, leg.segments[i].y2 - leg.segments[i].y1
+            ),
+        )
+        for i in order:
+            seg = leg.segments[i]
+            length = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
+            if length < window + 4.0 * grid.resolution:
+                break  # sorted longest-first: nothing after this fits either
+            try:
+                seg_idx = grid.layer_to_index(seg.layer.value)
+            except Exception:  # pragma: no cover — defensive
+                continue
+            if seg_idx == idx_a:
+                jog_idx = idx_b
+            elif seg_idx == idx_b:
+                jog_idx = idx_a
+            else:
+                continue
+            ux = (seg.x2 - seg.x1) / length
+            uy = (seg.y2 - seg.y1) / length
+            t0 = (length - window) / 2.0
+            ax, ay = seg.x1 + ux * t0, seg.y1 + uy * t0
+            bx, by = seg.x1 + ux * (t0 + window), seg.y1 + uy * (t0 + window)
+
+            if not drill_hole_to_hole_clear(ax, ay, rules.via_drill, existing, min_h2h):
+                continue
+            if not drill_hole_to_hole_clear(bx, by, rules.via_drill, existing, min_h2h):
+                continue
+            ga = grid.world_to_grid(ax, ay)
+            gb = grid.world_to_grid(bx, by)
+            if pathfinder._is_via_blocked(ga[0], ga[1], net) or pathfinder._is_via_blocked(
+                gb[0], gb[1], net
+            ):
+                continue
+            vias = [
+                Via(
+                    x=vx,
+                    y=vy,
+                    drill=rules.via_drill,
+                    diameter=rules.via_diameter,
+                    layers=(la, lb),
+                    net=net,
+                    net_name=net_name,
+                )
+                for vx, vy in ((ax, ay), (bx, by))
+            ]
+            if any(self._via_pad_deficit(v) > _SHADOW_PAD_DEFICIT_EPS for v in vias):
+                continue
+            if not self._segment_cells_clear(pathfinder, ax, ay, bx, by, jog_idx, net):
+                continue
+            jog_seg = Segment(
+                x1=ax,
+                y1=ay,
+                x2=bx,
+                y2=by,
+                width=seg.width,
+                layer=Layer(grid.index_to_layer(jog_idx)),
+                net=net,
+                net_name=net_name,
+            )
+            if not self._segment_pad_clear(jog_seg):
+                continue
+            if partner_segments and any(
+                self._min_distance_to_partner(v.x, v.y, v.x, v.y, partner_segments, None)
+                < via_clear
+                for v in vias
+            ):
+                continue
+
+            def _piece(x1: float, y1: float, x2: float, y2: float, layer) -> Segment:
+                return Segment(
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                    width=seg.width,
+                    layer=layer,
+                    net=net,
+                    net_name=net_name,
+                )
+
+            leg.segments[i : i + 1] = [
+                _piece(seg.x1, seg.y1, ax, ay, seg.layer),
+                jog_seg,
+                _piece(bx, by, seg.x2, seg.y2, seg.layer),
+            ]
+            leg.vias.extend(vias)
+            return True
+        return False
+
+    def _match_pair_via_signature(
+        self,
+        guide_route: Route,
+        shadow_route: Route,
+        pathfinder: CoupledPathfinder,
+        num_copper_layers: int,
+    ) -> bool:
+        """Equalise the two legs' via signatures in place (issue #4570).
+
+        Returns ``True`` when the pair already matched or was remediated, and
+        ``False`` when it could not be -- in which case the caller declines the
+        side rather than shipping copper whose skew the planar length matcher
+        cannot see.
+
+        Only the leg that is SHORT of vias grows; the excess is never removed
+        here (the tail-side planar preference already tried that, upstream and
+        more cheaply).  An odd excess is refused outright: a z-jog adds vias in
+        pairs, and a pad-to-pad route on one surface layer cannot legally carry
+        an odd count, so an odd difference means something upstream is wrong
+        and must not be papered over.
+        """
+        guide_ms = self._via_layer_multiset(guide_route, num_copper_layers)
+        shadow_ms = self._via_layer_multiset(shadow_route, num_copper_layers)
+        if guide_ms == shadow_ms:
+            return True
+        for deficient, surplus in (
+            (guide_route, shadow_ms - guide_ms),
+            (shadow_route, guide_ms - shadow_ms),
+        ):
+            partner = shadow_route if deficient is guide_route else guide_route
+            for layer_pair, count in surplus.items():
+                if count % 2:
+                    return False
+                for _ in range(count // 2):
+                    if not self._mirror_z_jog(
+                        deficient,
+                        layer_pair,
+                        pathfinder,
+                        list(partner.segments),
+                        deficient.net,
+                        deficient.net_name,
+                    ):
+                        return False
+        return self._via_layer_multiset(guide_route, num_copper_layers) == (
+            self._via_layer_multiset(shadow_route, num_copper_layers)
+        )
+
     def _fallback_tail_route(
         self,
         head: Pad,
@@ -5539,19 +5824,10 @@ class DiffPairRouter:
         # via-asymmetric) is displaced -- and only by a layer-locked probe that
         # clears the very same gates.
         if prefer_planar_layer is not None and (plain is None or plain.vias):
-            with self._layer_locked_router(prefer_planar_layer) as locked:
-                planar = _probe(None, 1) if locked else None
-            if planar is not None and planar.vias:
-                # Defensive: a lock that did not actually suppress via
-                # expansion buys nothing here.
-                planar = None
-            if not _pad_ok(planar):
-                planar = None
-            if planar is not None and (
-                not partner_segments
-                or self._tail_partner_clear(planar, partner_segments, seg_clear)
-                or self._tail_partner_clear(planar, partner_segments, 0.0)
-            ):
+            planar = self._planar_tail_probe(
+                head, goal, prefer_planar_layer, partner_segments, seg_clear
+            )
+            if planar is not None:
                 plain = planar
 
         if not partner_segments:
@@ -5661,11 +5937,30 @@ class DiffPairRouter:
                 allow_expensive_landing=tail is None,
                 prefer_planar=prefer_planar,
             )
-            if following is not None and self._tail_is_better_coupled(
-                following, tail, partner_segments
+            if (
+                following is not None
+                # Issue #4570: never let a via-carrying follow displace a
+                # PLANAR incumbent when the partner leg has no via to match.
+                and not (prefer_planar and following.vias and tail is not None and not tail.vias)
+                and self._tail_is_better_coupled(following, tail, partner_segments)
             ):
                 tail = following
                 source = "follow"
+        # Issue #4570: the LAYER-LOCKED A* runs before the crossing tail when
+        # the partner leg has no via to match.  ``_synthesize_crossing_tail``
+        # is a deliberate TWO-via construction (the polarity-swap crossover),
+        # and it -- not the free-layer A* fallback -- is the dominant via
+        # source in the constructed tails measured on board-06: two promoted
+        # through-vias on one leg is exactly the 2 x 1.6 = 3.2 mm of invisible
+        # skew this issue is about.  Trying a planar tail first keeps the
+        # crossover available for the cases that genuinely need it (no planar
+        # path exists) while removing it wherever one does.
+        planar_probed = False
+        if prefer_planar and (tail is None or tail.vias):
+            planar = self._planar_tail_probe(head, goal, layer_idx, partner_segments, seg_clear)
+            planar_probed = True
+            if planar is not None:
+                tail, source = planar, "astar-planar"
         if tail is None and partner_segments:
             tail = self._synthesize_crossing_tail(
                 pathfinder, head, goal, layer_idx, partner_segments
@@ -5677,7 +5972,9 @@ class DiffPairRouter:
                 goal,
                 partner_segments,
                 seg_clear,
-                prefer_planar_layer=layer_idx if prefer_planar else None,
+                # A planar probe that already failed will not succeed a second
+                # time; do not pay for it twice.
+                prefer_planar_layer=(layer_idx if (prefer_planar and not planar_probed) else None),
             )
             source = "astar" if tail is not None else source
         if tail is None and following is not None:
@@ -6973,6 +7270,10 @@ class DiffPairRouter:
                 sections.append((li, []))
             sections[-1][1].append(seg)
         max_trim = _SHADOW_MAX_TRIM_MM
+        # Issue #4570: best legal-but-via-asymmetric candidate seen across both
+        # offset sides.  Only used once every side has failed to produce a
+        # symmetric pair -- see the end of this method.
+        asym_fallback: tuple[Route, Route] | None = None
 
         for side in (1.0, -1.0):
             elements: list[tuple] = []  # ('seg', x1,y1,x2,y2,layer) | ('via', x,y,l0,l1)
@@ -7453,23 +7754,40 @@ class DiffPairRouter:
             # (a) remediation stays transactional with the rest of the side and
             # (b) the length match runs on the FINAL geometry.
             #
-            # The remediation itself is upstream: the tails were asked for
-            # planar routing (``planar_tails``) precisely so this gate passes.
-            # When it did not work out, the side DECLINES rather than shipping
-            # an asymmetric pair -- a declined side fails over to the other
-            # offset side and then to the non-shadow path, which is a known
-            # outcome; invisible skew is not.
+            # Two remediations, in cost order:
+            #
+            #   A. the tails were already asked for PLANAR routing
+            #      (``planar_tails``, upstream) -- the cheapest fix, because it
+            #      removes copper instead of adding it;
+            #   B. when no planar tail is legal -- board-06's landing tails must
+            #      CROSS the guide, so the two-via crossover is the only tail
+            #      that exists -- the partner leg is given the SAME two vias, as
+            #      a centreline-preserving z-jog that clears every gate other
+            #      constructed copper clears.
+            #
+            # A side that is still asymmetric after both is REJECTED here and
+            # fails over to the other offset side (``via_symmetric`` below
+            # gates the ``return``).  Whether a pair with no symmetric side at
+            # all is dropped entirely or kept as an explicit last resort is
+            # ``_SHADOW_VIA_SYMMETRY_STRICT`` -- see the constant's comment for
+            # the board-06 measurement behind that default.
+            via_symmetric = True
             if _SHADOW_VIA_SYMMETRY:
                 n_layers = getattr(grid, "num_layers", 0) or 2
                 guide_sig = _route_via_signature(guide_route_obj, n_layers)
                 shadow_sig = _route_via_signature(shadow_route, n_layers)
                 if guide_sig != shadow_sig:
+                    via_symmetric = self._match_pair_via_signature(
+                        guide_route_obj, shadow_route, pathfinder, n_layers
+                    )
                     print(
                         f"    [coupled-shadow] side={side:+.0f} via-signature "
                         f"mismatch for {pair.name} (guide={guide_sig} "
-                        f"shadow={shadow_sig}); trying other side"
+                        f"shadow={shadow_sig}); "
+                        f"{'mirrored' if via_symmetric else 'unrepaired'}"
                     )
-                    self._last_shadow_decline_reason = "via-skew"  # #4570
+                    if not via_symmetric:
+                        self._last_shadow_decline_reason = "via-skew"  # #4570
                     if _SHADOW_DEBUG:
                         print(
                             f"    [coupled-shadow-via] {pair.name} "
@@ -7478,7 +7796,6 @@ class DiffPairRouter:
                             f"body_vias={len([e for e in kept if e[0] == 'via'])} "
                             f"planar_tails={planar_tails}"
                         )
-                    continue
 
             # Issue #4553: make the pair length-symmetric BY CONSTRUCTION.
             # The parallel offset, the shadow's via jogs and its independently
@@ -7591,6 +7908,15 @@ class DiffPairRouter:
                 )
                 self._last_shadow_decline_reason = "pad-clearance"  # #4571
                 continue
+            if not via_symmetric:
+                # Issue #4570: this side is otherwise legal but its two legs
+                # carry different vias.  Hold it back so the OTHER offset side
+                # (and the uncompressed-guide retry) get their chance to
+                # produce a symmetric pair; ``asym_fallback`` keeps it as the
+                # explicit last resort described at the end of this method.
+                if asym_fallback is None:
+                    asym_fallback = (p_route, n_route)
+                continue
             return p_route, n_route
 
         # Issue #4553: both offset sides declined on the COMPRESSED guide.
@@ -7598,7 +7924,7 @@ class DiffPairRouter:
         # rate can only ever improve -- the compressed guide is a different
         # (usually easier, occasionally tighter) corridor, never a mandate.
         if guide_was_simplified:
-            return self._shadow_route_pair(
+            retry = self._shadow_route_pair(
                 pair,
                 spec,
                 pathfinder,
@@ -7607,6 +7933,30 @@ class DiffPairRouter:
                 swap_roles=swap_roles,
                 simplify_guide=False,
             )
+            if retry is not None:
+                return retry
+
+        # Issue #4570: no side produced a via-symmetric pair.  ``STRICT`` drops
+        # the pair here (the electrically pure answer); the default keeps the
+        # best legal-but-asymmetric candidate, LOUDLY, because on board-06 the
+        # strict policy costs a routed net -- and an unrouted net (a
+        # ``connectivity`` error and an LVS open) is a worse ship than a
+        # ``diffpair_length_skew`` error the checker names in full.  Either way
+        # the outcome is recorded, never silent.
+        if asym_fallback is not None:
+            if _SHADOW_VIA_SYMMETRY_STRICT:
+                print(
+                    f"    [coupled-shadow] {pair.name} declined: no offset side "
+                    f"is via-symmetric (KCT_SHADOW_VIA_SYMMETRY_STRICT=1)"
+                )
+                return None
+            print(
+                f"    [coupled-shadow] {pair.name} WARNING: shipping a "
+                f"via-ASYMMETRIC pair (no symmetric side and no legal mirror); "
+                f"expect a diffpair_length_skew error of the vias' drilled "
+                f"length -- issue #4570"
+            )
+            return asym_fallback
         return None
 
     def _rescue_near_miss_coupled(
