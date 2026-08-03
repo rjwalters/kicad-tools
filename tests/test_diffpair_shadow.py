@@ -3476,19 +3476,14 @@ def test_symmetric_two_via_legs_are_not_misdiagnosed(monkeypatch):
     assert _route_via_signature(guide_leg, 4) == _route_via_signature(shadow_leg, 4)
 
 
-def test_via_symmetry_path_is_unreachable_with_shadow_construction_off(monkeypatch):
-    """Shadow-OFF inertness, asserted structurally (#4536: no byte-identity).
-
-    Every #4570 behaviour hangs off ONE gated entry point -- the
-    ``enable_shadow_construction`` guard in front of ``_shadow_route_pair``.
-    With the flag off that method is never called, so neither the symmetry
-    gate nor the planar-tail preference can run.
-    """
+def _spy_shadow_entry(monkeypatch, shadow_enabled: bool) -> list[str]:
+    """Drive the coupled pre-phase once and record whether #4570 code ran."""
     from kicad_tools.router.diffpair_routing import DiffPairRouter
 
     router, pair = _two_pad_coupled_router_and_pair()
     dpr = router._diffpair
     assert dpr.enable_shadow_construction is False, "the default must stay OFF"
+    dpr.enable_shadow_construction = shadow_enabled
 
     calls: list[str] = []
     monkeypatch.setattr(
@@ -3503,7 +3498,27 @@ def test_via_symmetry_path_is_unreachable_with_shadow_construction_off(monkeypat
         lambda self, layer_idx: calls.append("lock"),
         raising=True,
     )
-
     dpr.route_differential_pair_coupled(pair, per_pair_timeout=2.0, coupled_only=True)
+    return calls
 
-    assert calls == [], "shadow-OFF must reach neither the gate nor the layer lock"
+
+def test_via_symmetry_path_is_unreachable_with_shadow_construction_off(monkeypatch):
+    """Shadow-OFF inertness, asserted structurally (#4536: no byte-identity).
+
+    Every #4570 behaviour hangs off ONE gated entry point -- the
+    ``enable_shadow_construction`` guard in front of ``_shadow_route_pair``.
+    With the flag off that method is never called, so neither the symmetry
+    gate nor the planar-tail preference can run.
+    """
+    assert _spy_shadow_entry(monkeypatch, shadow_enabled=False) == [], (
+        "shadow-OFF must reach neither the gate nor the layer lock"
+    )
+
+
+def test_shadow_entry_point_spy_is_not_vacuous(monkeypatch):
+    """Positive control for the inertness test above.
+
+    Without this, a fixture that never reached the shadow branch at all would
+    make the shadow-OFF assertion pass for the wrong reason.
+    """
+    assert _spy_shadow_entry(monkeypatch, shadow_enabled=True).count("shadow") >= 1
