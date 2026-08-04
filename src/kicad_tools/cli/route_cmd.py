@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from kicad_tools.router import Autorouter, LayerStack
+    from kicad_tools.router.net_names import NetClassMapResolution
     from kicad_tools.router.pairwise_clearance import AttachZone, PairwiseViolation
     from kicad_tools.router.primitives import Route
 
@@ -3756,6 +3757,81 @@ def _targeted_ripup_budget(args) -> int:
     return budget if budget is not None else 3
 
 
+def _preserved_net_names(router: "Autorouter", exclude: "set[str]") -> list[str]:
+    """Board net names that only exist as *preserved* copper (Issue #4622).
+
+    ``router.existing_routes`` is populated by
+    ``load_pcb_for_routing(load_existing_routes=True)`` with one
+    :class:`~kicad_tools.router.primitives.Route` per net that already has
+    segments/vias on the input board, each carrying the board's real
+    ``net_name``.  On a filtered pass those names are exactly the ones
+    missing from ``router.net_names``.
+
+    Names already present in ``exclude`` (the routable domain) are dropped so
+    the two domains are disjoint, and duplicates are collapsed while
+    preserving iteration order.
+
+    ``existing_routes`` may be absent entirely (the CLI unit tests drive this
+    helper with a ``SimpleNamespace`` stub router), so the attribute is read
+    defensively.
+    """
+    seen: list[str] = []
+    for route in getattr(router, "existing_routes", None) or []:
+        name = getattr(route, "net_name", None)
+        if not name or name in exclude or name in seen:
+            continue
+        seen.append(name)
+    return seen
+
+
+def _resolve_net_class_map_domains(
+    router: "Autorouter", user_keys
+) -> "tuple[NetClassMapResolution, list[str]]":
+    """Resolve sidecar keys against the routable *then* the preserved domain.
+
+    Returns the merged :class:`NetClassMapResolution` plus the union of both
+    name domains (for the nearest-name hints in the unresolved diagnostic).
+
+    **Two-phase and strictly additive** (Issue #4622).  Phase 1 resolves every
+    key against ``router.net_names`` exactly as before.  Phase 2 re-resolves
+    *only* the keys phase 1 left unmatched, against the preserved-only names.
+
+    A naive union of the two domains would be one line shorter and would also
+    make the reported repro pass, but it is wrong: :func:`resolve_net_key`
+    matches on the suffix after the last ``/``, so a union can make a
+    currently-**resolved** key **ambiguous** — routable ``/HV/LINE`` plus
+    preserved ``/LV/LINE`` turns a bare ``LINE`` key ambiguous, and ambiguous
+    keys are deliberately applied to *neither* candidate.  That would silently
+    drop the clearance of a net that *is* being routed this pass: a new
+    instance of the very bug class this fixes.  Two-phase cannot do that,
+    because a key that resolved in phase 1 never reaches phase 2.
+
+    A key matching no net in *either* domain still lands in ``unmatched``, so
+    genuine typos keep producing the (never ``--quiet``-suppressed) warning.
+    """
+    from kicad_tools.router.net_names import (
+        NetClassMapResolution,
+        resolve_net_class_map_keys,
+    )
+
+    routable_names = list(router.net_names.values())
+    primary = resolve_net_class_map_keys(user_keys, routable_names)
+
+    preserved_names = _preserved_net_names(router, set(routable_names))
+    if not preserved_names or not primary.unmatched:
+        return primary, routable_names
+
+    secondary = resolve_net_class_map_keys(primary.unmatched, preserved_names)
+    merged = NetClassMapResolution(
+        # Domains are disjoint by construction, so no resolved board net can
+        # be claimed by both phases.
+        resolved={**primary.resolved, **secondary.resolved},
+        unmatched=list(secondary.unmatched),
+        ambiguous={**primary.ambiguous, **secondary.ambiguous},
+    )
+    return merged, routable_names + preserved_names
+
+
 def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False) -> None:
     """Merge the pre-loaded --net-class-map sidecar into the router (Issue #2996).
 
@@ -3778,26 +3854,33 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
     board net or matched ambiguously.  Ambiguous keys are applied to
     *neither* candidate — silently picking one would just relocate the bug.
 
+    Issue #4622: on a *filtered* pass (``--nets`` / ``--skip-nets`` /
+    ``--region`` / ``--complete``, i.e. every composition step) the loader
+    rewrites each skipped net's pads to ``net_num = 0``
+    (``router/io.py``), so preserved nets never enter ``router.net_names``.
+    Resolving only against ``router.net_names`` therefore dropped *every*
+    sidecar entry naming a preserved net — the ``merged 0/N sidecar
+    entries`` symptom — and preserved copper fell back to the DRU floor
+    instead of its requested class clearance.  The resolution domain is now
+    widened with the net names carried by ``router.existing_routes`` using a
+    **two-phase, additive** scheme (see :func:`_resolve_net_class_map_domains`).
+
     Idempotent and a no-op when the flag was not supplied.
     """
     loaded = getattr(args, "_loaded_net_class_map", None)
     if not loaded:
         return
 
-    from kicad_tools.router.net_names import (
-        nearest_net_names,
-        resolve_net_class_map_keys,
-    )
+    from kicad_tools.router.net_names import nearest_net_names
 
-    board_net_names = list(router.net_names.values())
-    resolution = resolve_net_class_map_keys(loaded.keys(), board_net_names)
+    resolution, diagnostic_net_names = _resolve_net_class_map_domains(router, loaded.keys())
 
     # Apply overrides rekeyed to the board's actual net names so
     # ``self.net_class_map.get(net_name)`` finds them at routing time.
     for board_net, user_key in resolution.resolved.items():
         router.net_class_map[board_net] = loaded[user_key]
 
-    _warn_unresolved_net_class_map(resolution, board_net_names, nearest_net_names)
+    _warn_unresolved_net_class_map(resolution, diagnostic_net_names, nearest_net_names)
 
     if not quiet:
         from kicad_tools.cli.progress import flush_print

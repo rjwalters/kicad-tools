@@ -521,6 +521,256 @@ class TestHierarchicalPrefixNormalization:
 
 
 # =============================================================================
+# Issue #4622: preserved (non-routed) nets are resolvable on a filtered pass
+# =============================================================================
+
+
+def _preserved_route(net: int, net_name: str):
+    """A minimal preserved ``Route`` as ``load_pcb_for_routing`` builds them."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    return Route(
+        net=net,
+        net_name=net_name,
+        segments=[Segment(x1=0.0, y1=0.0, x2=1.0, y2=0.0, width=0.2, net=net, layer=Layer.F_CU)],
+    )
+
+
+def _stub_router_with_preserved(
+    net_names: dict[int, str], preserved: dict[int, str]
+) -> SimpleNamespace:
+    """``_stub_router`` plus the ``existing_routes`` a preserved pass carries.
+
+    ``net_names`` is the *routable* set (what survives ``--nets`` /
+    ``--skip-nets``); ``preserved`` is the ``{net_id: net_name}`` of copper
+    reloaded from the input board.
+    """
+    return SimpleNamespace(
+        net_names=dict(net_names),
+        net_class_map={},
+        existing_routes=[_preserved_route(n, name) for n, name in preserved.items()],
+    )
+
+
+class TestPreservedNetResolutionDomain:
+    """A filtered pass must still resolve sidecar keys for PRESERVED nets.
+
+    Under ``--nets`` / ``--skip-nets`` the loader rewrites every skipped net's
+    pads to ``net_num = 0``, so those nets never enter ``router.net_names``.
+    Resolving only against ``net_names`` therefore dropped every sidecar entry
+    naming a preserved net (``merged 0/N sidecar entries``) and preserved
+    copper fell back to the DRU floor.
+
+    The fix resolves in **two phases** -- routable first, then the still
+    unmatched keys against the preserved-only names -- which is strictly
+    additive and so cannot turn an already-resolved key ambiguous.
+    """
+
+    def test_preserved_only_key_resolves(self, capsys):
+        """The reported defect: a key naming a preserved net now applies."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router_with_preserved({5: "NODE_A"}, {1: "LINE_A", 2: "LINE_B"})
+        loaded = {
+            "LINE_A": _sidecar_entry("HV", clearance=1.0),
+            "LINE_B": _sidecar_entry("HV", clearance=1.0),
+        }
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map["LINE_A"].clearance == pytest.approx(1.0)
+        assert router.net_class_map["LINE_B"].clearance == pytest.approx(1.0)
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_merged_count_reports_preserved_matches(self, capsys):
+        """The ``merged N/M`` line counts preserved matches (was ``0/4``)."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router_with_preserved(
+            {5: "NODE_A"}, {1: "LINE_A", 2: "LINE_B", 3: "LINE_C", 4: "LINE_D"}
+        )
+        loaded = {
+            name: _sidecar_entry("HV", clearance=1.0)
+            for name in ("LINE_A", "LINE_B", "LINE_C", "LINE_D")
+        }
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=False)
+
+        out = capsys.readouterr()
+        assert "merged 4/4 sidecar entries" in out.out
+        assert "WARNING" not in out.err
+
+    def test_routable_key_still_resolves(self, capsys):
+        """A key that resolved before the change still resolves identically."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router_with_preserved({5: "/NODE_A"}, {1: "LINE_A"})
+        loaded = {"NODE_A": _sidecar_entry("Sig", priority=3)}
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map["/NODE_A"].priority == 3
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_bare_key_matches_prefixed_preserved_net(self, capsys):
+        """Hierarchical preserved names ('/FUSED_LINE') take a bare key too."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router_with_preserved({5: "NODE_A"}, {1: "/FUSED_LINE"})
+        loaded = {"FUSED_LINE": _sidecar_entry("Heavy", priority=5)}
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map["/FUSED_LINE"].priority == 5
+        assert "FUSED_LINE" not in router.net_class_map
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_key_matching_neither_domain_still_warns(self, capsys):
+        """Hazard 3: widening the domain must not silence genuine typos."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router_with_preserved({5: "NODE_A"}, {1: "LINE_A"})
+        loaded = {
+            "LINE_A": _sidecar_entry("HV", clearance=1.0),
+            "LINE_TYPO": _sidecar_entry("HV", clearance=1.0),
+        }
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        # quiet=True is the softstart-rev-B condition: the warning must
+        # still reach stderr even with --quiet.
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map["LINE_A"].clearance == pytest.approx(1.0)
+        assert "LINE_TYPO" not in router.net_class_map
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "1/2 entries matched" in err
+        assert "LINE_TYPO" in err
+
+    def test_unmatched_hint_can_name_a_preserved_net(self, capsys):
+        """Nearest-name hints draw on BOTH domains, so preserved nets show up."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router_with_preserved({5: "NODE_A"}, {1: "/HV/FUSED_LINE"})
+        loaded = {"FUSED_LIN": _sidecar_entry("Heavy", priority=5)}  # typo
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        err = capsys.readouterr().err
+        assert "0/1 entries matched" in err
+        assert "/HV/FUSED_LINE" in err
+
+    def test_suffix_collision_does_not_regress_routable_match(self, capsys):
+        """Hazard 2: a routable match must NOT become ambiguous.
+
+        ``resolve_net_key`` matches on the suffix after the last ``/``, so a
+        naive union of the routable and preserved domains would make the bare
+        key ``LINE`` ambiguous between routable ``/HV/LINE`` and preserved
+        ``/LV/LINE`` -- and ambiguous keys are applied to *neither* net.  That
+        would silently drop the clearance of a net that IS being routed this
+        pass.  Two-phase resolution keeps the phase-1 match.
+        """
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router_with_preserved({5: "/HV/LINE"}, {1: "/LV/LINE"})
+        loaded = {"LINE": _sidecar_entry("HV", clearance=2.0)}
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        # The routable net keeps its clearance; the preserved net is untouched.
+        assert router.net_class_map["/HV/LINE"].clearance == pytest.approx(2.0)
+        assert "/LV/LINE" not in router.net_class_map
+        err = capsys.readouterr().err
+        assert "AMBIGUOUS" not in err
+        assert "WARNING" not in err
+
+    def test_ambiguous_within_preserved_domain_applied_to_neither(self, capsys):
+        """A key ambiguous among PRESERVED nets is still applied to neither."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router_with_preserved({5: "NODE_A"}, {1: "/HV/LINE", 2: "/LV/LINE"})
+        loaded = {"LINE": _sidecar_entry("HV", clearance=2.0)}
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert "/HV/LINE" not in router.net_class_map
+        assert "/LV/LINE" not in router.net_class_map
+        err = capsys.readouterr().err
+        assert "AMBIGUOUS" in err
+        assert "0/1 entries matched" in err
+
+    def test_missing_existing_routes_attribute_tolerated(self, capsys):
+        """Hazard 1: a router with no ``existing_routes`` must not blow up."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE"})  # no existing_routes attribute
+        assert not hasattr(router, "existing_routes")
+        loaded = {"FUSED_LINE": _sidecar_entry("Heavy", priority=5)}
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map["/FUSED_LINE"].priority == 5
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_empty_existing_routes_is_a_no_op(self, capsys):
+        """An unfiltered pass (no preserved copper) behaves exactly as before."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router_with_preserved({1: "/FUSED_LINE"}, {})
+        loaded = {
+            "FUSED_LINE": _sidecar_entry("Heavy", priority=5),
+            "TYPO": _sidecar_entry("Heavy", priority=5),
+        }
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map["/FUSED_LINE"].priority == 5
+        err = capsys.readouterr().err
+        assert "1/2 entries matched" in err
+
+    def test_preserved_net_also_routable_is_not_double_counted(self, capsys):
+        """A net that is BOTH routable and preserved resolves once, via phase 1."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        # ``--preserve-existing`` without a net filter loads every net's copper,
+        # so ``existing_routes`` and ``net_names`` overlap completely.
+        router = _stub_router_with_preserved({1: "LINE_A"}, {1: "LINE_A"})
+        loaded = {"LINE_A": _sidecar_entry("HV", clearance=1.0)}
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=False)
+
+        out = capsys.readouterr()
+        assert router.net_class_map["LINE_A"].clearance == pytest.approx(1.0)
+        assert "merged 1/1 sidecar entries" in out.out
+        assert "WARNING" not in out.err
+
+    def test_route_without_net_name_is_skipped(self, capsys):
+        """A preserved ``Route`` carrying no ``net_name`` never enters the domain."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router_with_preserved({5: "NODE_A"}, {1: "LINE_A"})
+        router.existing_routes[0].net_name = None
+        loaded = {"LINE_A": _sidecar_entry("HV", clearance=1.0)}
+        args = SimpleNamespace(_loaded_net_class_map=loaded)
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map == {}
+        assert "0/1 entries matched" in capsys.readouterr().err
+
+
+# =============================================================================
 # Issue #4587: KiCad layer NAMES in the sidecar resolve at preload
 # =============================================================================
 

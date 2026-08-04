@@ -120,6 +120,7 @@ def _run_route(
     preserve: bool,
     skip_nets: str | None = None,
     net_class_map_path: str | None = None,
+    extra_argv: list[str] | None = None,
 ) -> str:
     """Write ``pcb_text`` to a temp file, run ``kct route``, return output text.
 
@@ -145,6 +146,8 @@ def _run_route(
         argv += ["--net-class-map", net_class_map_path]
     if preserve:
         argv.append("--preserve-existing")
+    if extra_argv:
+        argv += extra_argv
 
     route_main(argv)
     assert out_path.exists(), "route did not produce an output file"
@@ -699,3 +702,198 @@ class TestPreserveExistingHardAvoidLayers:
         # HV route neither consumes nor mutates it).
         assert len(preserved.segments) == 2
         assert {s.layer.kicad_name for s in preserved.segments} == {"F.Cu", "B.Cu"}
+
+
+# ---------------------------------------------------------------------------
+# Issue #4622: --net-class-map entries for PRESERVED nets must resolve on a
+# filtered (--nets / --skip-nets) composition step.
+# ---------------------------------------------------------------------------
+
+
+class TestPreservedNetClassMapResolution:
+    """The CLI sidecar path on a *filtered* pass (Issue #4622).
+
+    ``--skip-nets`` makes ``load_pcb_for_routing`` rewrite every skipped net's
+    pads to ``net_num = 0``, so those nets never enter ``router.net_names``.
+    ``_apply_net_class_map_sidecar`` used to resolve sidecar keys against
+    ``router.net_names`` alone, so every entry naming a preserved net was
+    dropped -- ``Net-class map: merged 0/N sidecar entries`` -- and preserved
+    copper fell back to the board-global DRU floor instead of the requested
+    per-net clearance.
+
+    These tests drive the real ``route_main(argv)`` CLI on the filtered path;
+    a unit test against ``net_class_map`` alone would not have caught the
+    defect, because the resolution domain is only wrong once the loader has
+    zeroed the skipped nets.
+    """
+
+    @staticmethod
+    def _spy_sidecar(monkeypatch) -> list[dict]:
+        """Record the router state each ``_apply_net_class_map_sidecar`` produced."""
+        from kicad_tools.cli import route_cmd
+
+        original = route_cmd._apply_net_class_map_sidecar
+        seen: list[dict] = []
+
+        def _wrapper(router, args, quiet=False):
+            original(router, args, quiet=quiet)
+            seen.append(
+                {
+                    "net_class_map": dict(router.net_class_map),
+                    "routable": dict(router.net_names),
+                    "preserved": {
+                        r.net: r.net_name for r in getattr(router, "existing_routes", [])
+                    },
+                }
+            )
+
+        monkeypatch.setattr(route_cmd, "_apply_net_class_map_sidecar", _wrapper)
+        return seen
+
+    def test_sidecar_entry_for_skipped_net_resolves(self, tmp_path, board_text, monkeypatch):
+        """The reported defect: a sidecar key naming a SKIPPED net now applies.
+
+        Pre-fix the three preserved keys landed in ``unmatched`` and
+        ``router.net_class_map`` never gained their 1.0 mm clearance.
+        """
+        import json
+
+        seen = self._spy_sidecar(monkeypatch)
+
+        map_path = tmp_path / "netclass.json"
+        map_path.write_text(
+            json.dumps(
+                {
+                    net: {"name": "HV", "trace_width": 0.25, "clearance": 1.0}
+                    for net in ("LINE_B", "LINE_C", "LINE_D")
+                }
+            )
+        )
+
+        _run_route(
+            tmp_path,
+            board_text,
+            preserve=True,
+            skip_nets=_SKIP_ALL_BUT_LINE_A,
+            net_class_map_path=str(map_path),
+        )
+
+        assert seen, "the sidecar merge helper never ran on this CLI path"
+        state = seen[0]
+        # Precondition the defect depends on: the skipped nets are NOT in the
+        # routable domain, but they ARE carried as preserved copper.
+        assert "LINE_B" not in state["routable"].values()
+        assert "LINE_B" in state["preserved"].values()
+        # ...and their sidecar clearance nonetheless reached the router's map.
+        for net in ("LINE_B", "LINE_C", "LINE_D"):
+            assert net in state["net_class_map"], (
+                f"{net} is preserved copper on this filtered pass and its "
+                "--net-class-map entry was dropped (issue #4622)"
+            )
+            assert state["net_class_map"][net].clearance == pytest.approx(1.0)
+
+    def test_lattice_driver_receives_preserved_clearance(self, tmp_path, board_text, monkeypatch):
+        """End to end: the resolved clearance reaches the lattice pathfinder.
+
+        ``_negotiate_lattice_netset`` (PR #4597) turns a resolved
+        ``net_class_map`` entry into the ``{net_id: mm}`` ``fixed_clearance``
+        map the pathfinder seeds preserved copper with.  Pre-fix that map was
+        empty on every composition step however large the sidecar clearance.
+        """
+        import json
+
+        from kicad_tools.router.lattice.pathfinder import LatticePathfinder
+
+        captured: list[dict] = []
+        original_route_netset = LatticePathfinder.route_netset
+
+        def _wrapper(self, connections, **kwargs):
+            captured.append(dict(kwargs.get("fixed_clearance") or {}))
+            return original_route_netset(self, connections, **kwargs)
+
+        monkeypatch.setattr(LatticePathfinder, "route_netset", _wrapper)
+
+        map_path = tmp_path / "netclass.json"
+        map_path.write_text(
+            json.dumps({"LINE_B": {"name": "HV", "trace_width": 0.25, "clearance": 1.0}})
+        )
+
+        _run_route(
+            tmp_path,
+            board_text,
+            preserve=True,
+            skip_nets=_SKIP_ALL_BUT_LINE_A,
+            net_class_map_path=str(map_path),
+            extra_argv=["--route-engine", "lattice", "--strategy", "basic"],
+        )
+
+        assert captured, "the lattice pathfinder was never driven"
+        assert any(captured), (
+            "fixed_clearance handed to the lattice pathfinder was empty -- the "
+            "preserved net's --net-class-map clearance never resolved (#4622)"
+        )
+        assert any(1.0 in clr.values() for clr in captured if clr), (
+            "preserved copper was not seeded at the sidecar's 1.0 mm clearance"
+        )
+
+    def test_unresolvable_key_still_warns_under_quiet(
+        self, tmp_path, board_text, capsys, monkeypatch
+    ):
+        """Widening the domain must not silence a key matching NO net at all.
+
+        The warning is deliberately not suppressed by ``--quiet`` (the
+        softstart-rev-B silent-inertness incident); ``_run_route`` always
+        passes ``--quiet``, so this pins both properties at once.
+        """
+        import json
+
+        seen = self._spy_sidecar(monkeypatch)
+
+        map_path = tmp_path / "netclass.json"
+        map_path.write_text(
+            json.dumps(
+                {
+                    "LINE_B": {"name": "HV", "clearance": 1.0},  # preserved -> resolves
+                    "LINE_A": {"name": "HV", "clearance": 1.0},  # routable  -> resolves
+                    "NOT_A_NET": {"name": "HV", "clearance": 1.0},  # typo -> warns
+                }
+            )
+        )
+
+        _run_route(
+            tmp_path,
+            board_text,
+            preserve=True,
+            skip_nets=_SKIP_ALL_BUT_LINE_A,
+            net_class_map_path=str(map_path),
+        )
+
+        err = capsys.readouterr().err
+        assert "WARNING: net-class-map:" in err
+        assert "2/3 entries matched" in err
+        assert "NOT_A_NET" in err
+        assert seen and "NOT_A_NET" not in seen[0]["net_class_map"]
+
+    def test_preserved_resolution_does_not_disturb_skipped_geometry(self, tmp_path, board_text):
+        """#4413 non-regression: skipped copper stays byte-identical."""
+        import json
+
+        orig = parse_segments(board_text)
+
+        map_path = tmp_path / "netclass.json"
+        map_path.write_text(
+            json.dumps({"LINE_B": {"name": "HV", "trace_width": 0.25, "clearance": 1.0}})
+        )
+
+        out_text = _run_route(
+            tmp_path,
+            board_text,
+            preserve=True,
+            skip_nets=_SKIP_ALL_BUT_LINE_A,
+            net_class_map_path=str(map_path),
+        )
+        out = parse_segments(out_text)
+
+        for net in ("LINE_B", "LINE_C", "LINE_D", "NODE_A", "NODE_B", "NODE_C", "NODE_D"):
+            assert net in out
+            assert _geom_set(out[net]) == _geom_set(orig[net])

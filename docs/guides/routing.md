@@ -803,6 +803,34 @@ Practical consequence: **carry the HV entries in every step's map**, not just
 the step that routes them. A preserved net with no entry in the current step's
 map resolves to the global clearance exactly as before.
 
+This works through **both** ways of supplying the map — the `net_class_map` in
+a design/config script and the `--net-class-map <sidecar.json>` CLI flag.
+Sidecar keys naming a preserved net used to be dropped on every filtered pass
+(`--nets` / `--skip-nets` / `--region` / `--complete`), because the loader
+rewrites a skipped net's pads to net 0 and the key was resolved only against
+the nets being routed. The symptom was a
+`Net-class map: merged 0/N sidecar entries` line and DRU-floor spacing on
+preserved copper; that is fixed
+([#4622](https://github.com/rjwalters/kicad-tools/issues/4622)) — the merge
+line now reports the true count, and the run prints the usual
+`WARNING: net-class-map: …` only for keys that match no net at all.
+
+Two details worth knowing when writing the sidecar:
+
+- **A preserved net must already carry copper on the input board.** The
+  preserved-name domain comes from the segments and vias actually present in
+  the file being routed. A net that has pads but no copper yet is not
+  "preserved" — there is no earlier-step geometry to space against — so an
+  entry naming it matches nothing and is reported as unmatched. Route it in an
+  earlier step (or write the entry in the step that routes it) rather than
+  expecting the current step to hold a gap around nothing.
+- **Bare keys resolve against the nets being routed first.** Keys are matched
+  on the sheet-local suffix after the last `/`, so a bare `LINE` key with a
+  routable `/HV/LINE` and a preserved `/LV/LINE` on the board resolves to the
+  **routable** net; the preserved net is left alone. Write the fully-qualified
+  name when you mean the preserved one. A key ambiguous *within* one of the two
+  groups is still applied to neither and warns, as before.
+
 Not covered — document, do not assume:
 
 - **`--engine grid`** blocks preserved routes at
