@@ -1,0 +1,28 @@
+{
+  "nextAgentNumber": 3,
+  "autonomous": {
+    "workFinder": {
+      "enabled": true,
+      "intervalSecs": 60,
+      "maxConcurrent": 5
+    },
+    "perTokenConcurrency": 4,
+    "mainHealthGate": {
+      "enabled": true
+    }
+  },
+  "guards": {
+    "sqlDdl": true,
+    "cloudCli": false
+  },
+  "legacyOnly": "legacy-value",
+  "buildGate": {
+    "enabled": true,
+    "command": "make test"
+  },
+  "projectOnly": "project-value",
+  "overriddenByLocal": "local-value",
+  "worktree": {
+    "root": "/mnt/scratch"
+  }
+}

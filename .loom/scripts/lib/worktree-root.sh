@@ -59,6 +59,14 @@ _LOOM_WORKTREE_ROOT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # shellcheck source=./config-resolver.sh
 source "$_LOOM_WORKTREE_ROOT_LIB_DIR/config-resolver.sh"
 
+# _loom_root_unreadable <dir> — true if the path exists (stat succeeds) but
+# readdir fails (e.g. macOS TCC removable-volumes denial: stat/df keep
+# succeeding while `ls`/readdir returns EPERM). A `-d` check alone cannot
+# detect this state.
+_loom_root_unreadable() {
+    [[ -d "$1" ]] && ! command ls "$1" >/dev/null 2>&1
+}
+
 # loom_worktree_root <repo_root>
 #
 # Echoes the absolute worktree base directory. `repo_root` must be an absolute
@@ -69,7 +77,13 @@ loom_worktree_root() {
     # 1. Env var override — highest priority.
     if [[ -n "${LOOM_WORKTREE_ROOT:-}" ]]; then
         if [[ "$LOOM_WORKTREE_ROOT" == /* ]]; then
-            echo "${LOOM_WORKTREE_ROOT%/}/$(basename "$repo_root")"
+            local env_target="${LOOM_WORKTREE_ROOT%/}/$(basename "$repo_root")"
+            if _loom_root_unreadable "$env_target"; then
+                echo "loom_worktree_root: LOOM_WORKTREE_ROOT target exists but is unreadable (readdir failed, e.g. macOS TCC removable-volumes denial): '$env_target'; falling back to default" >&2
+                echo "$repo_root/.loom/worktrees"
+                return 0
+            fi
+            echo "$env_target"
             return 0
         fi
         echo "loom_worktree_root: LOOM_WORKTREE_ROOT must be an absolute path (got: '$LOOM_WORKTREE_ROOT'); falling back to default" >&2
@@ -84,7 +98,13 @@ loom_worktree_root() {
     cfg_root=$(loom_config_get "$repo_root" "worktree.root" "")
     if [[ -n "$cfg_root" ]]; then
         if [[ "$cfg_root" == /* ]]; then
-            echo "${cfg_root%/}/$(basename "$repo_root")"
+            local cfg_target="${cfg_root%/}/$(basename "$repo_root")"
+            if _loom_root_unreadable "$cfg_target"; then
+                echo "loom_worktree_root: worktree.root target exists but is unreadable (readdir failed, e.g. macOS TCC removable-volumes denial): '$cfg_target'; falling back to default" >&2
+                echo "$repo_root/.loom/worktrees"
+                return 0
+            fi
+            echo "$cfg_target"
             return 0
         fi
         echo "loom_worktree_root: worktree.root in the resolved config must be an absolute path (got: '$cfg_root'); falling back to default" >&2

@@ -88,6 +88,8 @@ trap cleanup EXIT
 #   9004 = GraphQL FAILS, REST returns a valid marker (fallback path)
 #   9005 = both GraphQL and REST FAIL (fetch error)
 #   9006 = GraphQL succeeds but returns an EMPTY body (successful fetch, no marker)
+#   9007 = body has prose mentioning the marker syntax BEFORE the real marker
+#          (#4840) -- the real marker must still be found
 FAKE_BIN="$WORKDIR/bin"
 mkdir -p "$FAKE_BIN"
 cat > "$FAKE_BIN/gh" <<'FAKEGH'
@@ -108,6 +110,12 @@ if [[ "$1" == "issue" && "$2" == "view" ]]; then
         9004) exit 1 ;;   # GraphQL quota exhausted -> forces REST fallback
         9005) exit 1 ;;   # GraphQL fails ...
         9006) echo "" ; exit 0 ;;
+        9007) echo "Meta issue about the complexity-marker feature itself, which
+legitimately quotes the marker syntax as literal example text before the real
+marker appears (#4840): \`<!-- loom:complexity=<tier> -->\`.
+
+<!-- loom:complexity=mechanical -->
+" ; exit 0 ;;
         *) echo "" ; exit 0 ;;
     esac
 fi
@@ -184,6 +192,20 @@ out="$(run_marker 9006 2>&1)"; rc=$?
 assert_eq "1" "$rc" "empty-but-successful fetch exits 1 (missing marker), not 2"
 assert_contains "BLOCKED: issue has no complexity marker" "$out" "empty-but-successful fetch prints the BLOCKED-missing text"
 assert_not_contains "could not fetch" "$out" "empty-but-successful fetch is not a fetch error"
+
+# -------- Test 8: prose mentioning the marker syntax before the real marker
+# -------- is ignored -> exit 0 (#4840) --------
+# The bug this issue reports: a body that *discusses* the marker syntax in
+# prose before the real marker (e.g. a meta issue about the complexity-marker
+# feature itself, quoting `<!-- loom:complexity=<tier> -->` as literal example
+# text) used to produce an empty first match that `head -1` picked over the
+# real marker later in the body, false-positively reporting BLOCKED even
+# though a valid marker was present.
+echo "Test 8: prose that mentions the marker syntax before the real marker is ignored -> exit 0"
+out="$(run_marker 9007 2>&1)"; rc=$?
+assert_eq "0" "$rc" "real marker found despite preceding prose mentions -> exit 0"
+assert_contains "is tagged mechanical" "$out" "real marker (mechanical) is reported, not the empty prose match"
+assert_not_contains "BLOCKED" "$out" "prose mention never triggers BLOCKED"
 
 # -------- Summary --------
 echo ""

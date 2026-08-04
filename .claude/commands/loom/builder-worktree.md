@@ -205,9 +205,16 @@ cd .loom/worktrees/issue-XX
 - Always use `./.loom/scripts/worktree.sh` to create branches
 - Prevents nested worktree issues
 
-**Don't run `git stash` in main and try to apply in worktrees**
-- Stash is local to the repository, not shared between worktrees
-- Each worktree has its own working directory
+**Don't use `git stash` for ad-hoc WIP handling in a worktree**
+- Stash (`refs/stash`) is **shared repo-wide across every linked worktree** —
+  the opposite of per-worktree isolation. Two parallel builders in different
+  worktrees can `git stash` and `git stash pop` each other's WIP, silently
+  swapping or overwriting uncommitted work (observed in production: kicad-tools
+  PRs #4524/#4526).
+- Use `./.loom/scripts/worktree.sh snapshot <issue-number>` instead — it
+  captures WIP as a patch file under
+  `<worktree-root>/.snapshots/issue-<N>-<timestamp>.patch`, scoped to your own
+  worktree, with no risk of collision with other builders' stashes.
 
 **Don't use `git push --force` without `--force-with-lease`**
 - `--force-with-lease` is safer - it fails if someone else pushed

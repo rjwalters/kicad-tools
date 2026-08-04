@@ -23,6 +23,7 @@ import logging
 import math
 import os
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -51,10 +52,17 @@ _REQUIRED_CPP_BUILD_VERSION = 18
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
+# Issue #4589: diagnostics captured at import time so ``get_backend_info()``
+# can report the numbers the staleness guard actually cares about, even after
+# the version guard below nulls out ``router_cpp``.
+_CPP_BUILD_VERSION: int | None = None
+_CPP_EXTENSION_PATH: str | None = None
 try:
     from . import router_cpp
 
     _CPP_AVAILABLE = True
+    _CPP_BUILD_VERSION = getattr(router_cpp, "BUILD_VERSION", None)
+    _CPP_EXTENSION_PATH = getattr(router_cpp, "__file__", None)
 except ImportError as e:
     _CPP_AVAILABLE = False
     _CPP_IMPORT_ERROR = str(e)
@@ -114,6 +122,184 @@ def is_cpp_available() -> bool:
     return _CPP_AVAILABLE
 
 
+# ---------------------------------------------------------------------------
+# Fresh-interpreter availability probe (Issue #4589)
+# ---------------------------------------------------------------------------
+#
+# ``kct build-native`` used to verify its own work with an in-process
+# ``sys.modules.pop`` + ``importlib.reload`` dance.  That cannot work for a C
+# extension: once ``router_cpp.*.so`` has been ``dlopen``'d, CPython keeps the
+# initialised module in a runtime-level extension cache keyed by
+# ``(filename, module name)`` which neither ``sys.modules.pop`` nor
+# ``importlib.invalidate_caches`` clears, and the loader will not re-read the
+# file.  The re-import therefore returns the *identical* module object, so the
+# probe reports on the PRE-build extension:
+#
+#   * version-stale rebuild  -> false NEGATIVE ("installed but not loading
+#     correctly") even though every later process loads it fine;
+#   * mtime-stale rebuild    -> false POSITIVE (the build is "verified"
+#     against code that was never loaded).
+#
+# The only reliable way to answer "what will the next process see?" is to ask
+# a *fresh* interpreter -- which is exactly what ``build-native --check``
+# already did implicitly by being a new process.  ``probe_backend_info()``
+# below is that single shared probe: ``--check`` and the post-build
+# verification both go through it, so they cannot disagree for the same
+# on-disk state.
+_PROBE_SOURCE = (
+    "import json, sys\n"
+    "from kicad_tools.router.cpp_backend import get_backend_info\n"
+    "sys.stdout.write(json.dumps(get_backend_info()))\n"
+)
+
+# Set once this process has replaced the on-disk extension (i.e. after
+# ``build_native()`` installs a new ``.so``).  From that moment the in-process
+# view is stale BY CONSTRUCTION and ``probe_backend_info()`` must spawn a
+# subprocess instead of trusting it.
+_EXTENSION_REPLACED = False
+
+
+def note_extension_replaced() -> None:
+    """Record that this process overwrote the on-disk ``router_cpp`` extension.
+
+    Called by ``build_native()`` right after installing a freshly compiled
+    ``.so``.  It permanently poisons the in-process fast path of
+    :func:`probe_backend_info` for this interpreter, because the already
+    ``dlopen``'d extension can no longer describe what is on disk.
+    """
+    global _EXTENSION_REPLACED
+    _EXTENSION_REPLACED = True
+
+
+def extension_replaced_in_process() -> bool:
+    """Whether this process has replaced the on-disk extension (see above)."""
+    return _EXTENSION_REPLACED
+
+
+def probe_backend_info(
+    *,
+    executable: str | None = None,
+    timeout: float = 60.0,
+    allow_in_process: bool = True,
+) -> dict:
+    """Return the backend info a *freshly started* interpreter would report.
+
+    This is the single availability probe shared by ``kct build-native``'s
+    post-build verification and ``kct build-native --check`` (Issue #4589).
+
+    The returned dict is exactly what :func:`get_backend_info` produces, plus a
+    ``"probe"`` sub-dict describing how the answer was obtained::
+
+        {"mode": "in-process" | "subprocess",
+         "interpreter": "/path/to/python",
+         "failed": bool,          # True only when the probe could not run
+         "error": str | None}     # populated when ``failed`` is True
+
+    Args:
+        executable: Interpreter to probe with (defaults to ``sys.executable``).
+        timeout: Seconds to wait for the subprocess probe.
+        allow_in_process: Permit the in-process fast path when it is provably
+            equivalent to a fresh interpreter -- that is, when this process has
+            not replaced the extension on disk (see
+            :func:`extension_replaced_in_process`).  Pass ``False`` to force a
+            subprocess (what the post-build verification does).
+
+    Never raises: a probe that cannot run reports ``probe.failed`` with the
+    real error text rather than claiming the extension is broken.
+    """
+    import json
+    import os
+    import pathlib
+    import subprocess
+    import sys
+
+    interpreter = executable or sys.executable
+
+    # Fast path: nothing has replaced the extension under this process, so the
+    # module state we already hold IS what a fresh interpreter would compute
+    # from the same files.  This keeps ``--check`` a sub-second, no-subprocess,
+    # no-compilation status query.
+    info: dict
+    if allow_in_process and not _EXTENSION_REPLACED:
+        info = get_backend_info()
+        info["probe"] = {
+            "mode": "in-process",
+            "interpreter": interpreter,
+            "failed": False,
+            "error": None,
+        }
+        return info
+
+    env = os.environ.copy()
+    # Make sure the child can import ``kicad_tools`` even when this process
+    # found it via a cwd-relative entry on ``sys.path``.
+    try:
+        import kicad_tools
+
+        pkg_parent = str(pathlib.Path(kicad_tools.__file__).resolve().parent.parent)
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = pkg_parent + (os.pathsep + existing if existing else "")
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    probe_meta = {
+        "mode": "subprocess",
+        "interpreter": interpreter,
+        "failed": False,
+        "error": None,
+    }
+
+    try:
+        completed = subprocess.run(
+            [interpreter, "-c", _PROBE_SOURCE],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except Exception as exc:
+        probe_meta["failed"] = True
+        probe_meta["error"] = f"{type(exc).__name__}: {exc}"
+        return _probe_failure_info(probe_meta)
+
+    if completed.returncode != 0:
+        probe_meta["failed"] = True
+        probe_meta["error"] = (
+            f"probe interpreter exited {completed.returncode}: "
+            f"{(completed.stderr or '').strip() or '<no stderr>'}"
+        )
+        return _probe_failure_info(probe_meta)
+
+    try:
+        info = json.loads(completed.stdout)
+    except Exception as exc:
+        probe_meta["failed"] = True
+        probe_meta["error"] = (
+            f"could not parse probe output ({type(exc).__name__}: {exc}): "
+            f"{(completed.stdout or '').strip()[:200]!r}"
+        )
+        return _probe_failure_info(probe_meta)
+
+    info["probe"] = probe_meta
+    return info
+
+
+def _probe_failure_info(probe_meta: dict) -> dict:
+    """Build the info dict returned when the probe itself could not run.
+
+    ``available`` is ``False`` (we genuinely do not know), but the reason
+    names the probe failure so callers never report a working extension as
+    broken on the strength of a subprocess that never ran.
+    """
+    return {
+        "backend": "unknown",
+        "version": "unknown",
+        "available": False,
+        "unavailable_reason": f"backend probe did not run: {probe_meta['error']}",
+        "probe": probe_meta,
+    }
+
+
 def get_cpp_unavailable_reason() -> str | None:
     """Get the reason why C++ backend is unavailable.
 
@@ -153,13 +339,29 @@ def _reload_cpp_backend() -> bool:
     safe case: the previous attempt never succeeded, so there is no
     initialised native module to clash with.
 
+    .. important:: **This only works when the extension was never
+       successfully imported in this process.**  Once ``router_cpp.*.so``
+       has been ``dlopen``'d, CPython's runtime extension cache returns the
+       *identical* module object on re-import, so a replaced ``.so`` (e.g. a
+       ``BUILD_VERSION``-mismatch rebuild) is invisible here -- the reload
+       re-reports the pre-build extension.  Never use the result of this
+       function to decide whether a *build* succeeded; use
+       :func:`probe_backend_info` (a fresh interpreter) for that.  This
+       function answers only the narrower question "can THIS process use the
+       backend now?" (Issue #4589).
+
     Returns:
-        ``True`` if the backend is available after reload, ``False`` otherwise.
+        ``True`` if the backend is available in *this process* after the
+        reload, ``False`` otherwise.
     """
-    global _CPP_AVAILABLE, _CPP_IMPORT_ERROR, router_cpp
+    global _CPP_AVAILABLE, _CPP_IMPORT_ERROR, router_cpp, _EXTENSION_REPLACED
 
     import importlib
     import sys as _sys
+
+    # ``importlib.reload`` re-executes this module's top level, which would
+    # reset the sticky "we replaced the .so" flag back to its initial False.
+    was_replaced = _EXTENSION_REPLACED
 
     # 1. Drop any stale negative/partial entry for the C++ extension itself.
     #    A failed ``from . import router_cpp`` at startup leaves a None or
@@ -182,6 +384,7 @@ def _reload_cpp_backend() -> bool:
         importlib.reload(module)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Failed to reload cpp_backend after build: %s", exc)
+        _EXTENSION_REPLACED = _EXTENSION_REPLACED or was_replaced
         return _CPP_AVAILABLE
 
     # Mirror the freshly-imported globals into this module's namespace so
@@ -190,6 +393,7 @@ def _reload_cpp_backend() -> bool:
     _CPP_AVAILABLE = getattr(module, "_CPP_AVAILABLE", False)
     _CPP_IMPORT_ERROR = getattr(module, "_CPP_IMPORT_ERROR", None)
     router_cpp = getattr(module, "router_cpp", None)
+    _EXTENSION_REPLACED = _EXTENSION_REPLACED or was_replaced
     return _CPP_AVAILABLE
 
 
@@ -258,19 +462,30 @@ def ensure_cpp_backend_available(
     if backend == "cpp":
         if is_cpp_available():
             return True, False, None
+        outcome: AutoBuildOutcome | None = None
         if allow_auto_build and _auto_build_allowed_by_env():
-            built = _attempt_auto_build(quiet=quiet)
-            if built:
+            outcome = _attempt_auto_build(quiet=quiet)
+            if outcome.available_in_process:
                 return True, False, None
         # Build either disallowed or failed -- preserve the original
         # hard-error behavior so ``--backend cpp`` never silently falls
-        # back to Python.
-        _emit(
-            "Error: C++ backend requested but not available.\n"
-            "Build the C++ extension or use --backend auto/python.\n"
-            "See README for build instructions.",
-            file=sys.stderr,
-        )
+        # back to Python.  Issue #4589: when the build DID succeed and only
+        # the in-process hot-swap was impossible, say so instead of the
+        # misleading "not available".
+        if outcome is not None and outcome.available_on_disk:
+            _emit(
+                "Error: the C++ backend was just built and a fresh interpreter loads it,\n"
+                "but this already-running process cannot swap in the replaced extension.\n"
+                "Re-run this command to use the C++ backend.",
+                file=sys.stderr,
+            )
+        else:
+            _emit(
+                "Error: C++ backend requested but not available.\n"
+                "Build the C++ extension or use --backend auto/python.\n"
+                "See README for build instructions.",
+                file=sys.stderr,
+            )
         return False, False, 1
 
     # --backend auto (default): try to auto-build if not available.
@@ -278,8 +493,14 @@ def ensure_cpp_backend_available(
         return True, False, None
 
     if allow_auto_build and _auto_build_allowed_by_env():
-        built = _attempt_auto_build(quiet=quiet)
-        if built:
+        outcome = _attempt_auto_build(quiet=quiet)
+        if outcome.available_in_process:
+            return True, False, None
+        if outcome.available_on_disk:
+            # Issue #4589: the extension IS installed -- _attempt_auto_build
+            # already explained why this process cannot use it.  Emitting
+            # "C++ router backend not installed" here would contradict
+            # ``kct build-native --check`` seconds later.
             return True, False, None
 
     # Backend still unavailable: emit the existing warning and continue
@@ -319,17 +540,44 @@ def _toolchain_available() -> bool:
     return any(shutil.which(compiler) is not None for compiler in ("clang++", "g++"))
 
 
-def _attempt_auto_build(*, quiet: bool) -> bool:
+@dataclass(frozen=True)
+class AutoBuildOutcome:
+    """Result of the silent ``kct route`` auto-build (Issue #4589).
+
+    Two *different* questions have to be answered separately, because a C
+    extension that was already ``dlopen``'d in this process cannot be swapped
+    out for a rebuilt file:
+
+    Attributes:
+        available_in_process: The running process can use the C++ backend now
+            (``is_cpp_available()`` is True after the reload).
+        available_on_disk: A *fresh interpreter* reports the backend as
+            available -- i.e. the build genuinely succeeded, even if this
+            process cannot hot-swap it.
+        reason: Human-readable explanation when ``available_on_disk`` is False.
+    """
+
+    available_in_process: bool
+    available_on_disk: bool
+    reason: str | None = None
+
+    def __bool__(self) -> bool:  # pragma: no cover - convenience
+        return self.available_in_process
+
+
+def _attempt_auto_build(*, quiet: bool) -> AutoBuildOutcome:
     """Run ``build_native(force=False)`` and reload this module on success.
 
-    Returns ``True`` if the C++ backend is available after the attempt
-    (either it was already built and the call short-circuited, or it
-    built successfully).  Returns ``False`` on any failure -- never
-    raises.
+    Never raises.  The ``build_native`` call short-circuits in milliseconds
+    when the backend is already loaded and up to date, so repeat invocations
+    are effectively free once the ``.so`` exists.
 
-    The ``build_native`` call short-circuits in milliseconds when the
-    backend is already loaded (see ``build_native_cmd.py:193-208``), so
-    repeat invocations are effectively free once the ``.so`` exists.
+    Issue #4589: the return value distinguishes "this process can use the
+    backend" from "the build succeeded".  Previously both collapsed into a
+    single ``False``, so a successful build that merely could not be
+    hot-swapped into the running interpreter was announced as a build failure
+    followed by ``C++ router backend not installed`` -- the same false
+    negative ``kct build-native`` printed.
     """
     if not _toolchain_available():
         if not quiet:
@@ -337,7 +585,11 @@ def _attempt_auto_build(*, quiet: bool) -> bool:
                 "Note: C++ router toolchain (cmake + clang++/g++) not found; skipping auto-build.",
                 flush=True,
             )
-        return False
+        return AutoBuildOutcome(
+            available_in_process=False,
+            available_on_disk=False,
+            reason="C++ toolchain (cmake + clang++/g++) not found",
+        )
 
     if not quiet:
         print(
@@ -355,16 +607,24 @@ def _attempt_auto_build(*, quiet: bool) -> bool:
                 f"Note: auto-build raised {type(exc).__name__}: {exc}; falling back to Python.",
                 flush=True,
             )
-        return False
+        return AutoBuildOutcome(
+            available_in_process=False,
+            available_on_disk=False,
+            reason=f"auto-build raised {type(exc).__name__}: {exc}",
+        )
 
     if not getattr(result, "success", False):
+        err = getattr(result, "error_message", None) or "unknown error"
         if not quiet:
-            err = getattr(result, "error_message", None) or "unknown error"
             print(
                 f"Note: C++ auto-build failed: {err}; falling back to Python.",
                 flush=True,
             )
-        return False
+        return AutoBuildOutcome(
+            available_in_process=False,
+            available_on_disk=False,
+            reason=f"auto-build failed: {err}",
+        )
 
     # Build succeeded -- reload this module so module-level globals
     # (``_CPP_AVAILABLE``, ``router_cpp``) reflect the freshly written
@@ -379,13 +639,34 @@ def _attempt_auto_build(*, quiet: bool) -> bool:
     # platform where dlopen of the new .so itself fails after the build
     # wrote it to disk).
     available = _reload_cpp_backend()
-    if not available and not quiet:
+    if available:
+        return AutoBuildOutcome(available_in_process=True, available_on_disk=True)
+
+    # The in-process reload could not pick it up.  Before blaming the build,
+    # ask the SAME fresh-interpreter probe ``kct build-native --check`` uses
+    # what is actually on disk (Issue #4589) -- an already-``dlopen``'d
+    # extension can never be replaced in-process, so this is the expected
+    # outcome of a version-guard rebuild, not a failure.
+    probe = probe_backend_info(allow_in_process=False)
+    if probe.get("available"):
+        if not quiet:
+            print(
+                "Note: the C++ backend was built successfully and verified in a fresh "
+                "interpreter, but this already-running process cannot load the replaced "
+                "extension (CPython keeps the original dlopen handle). Using Python for "
+                "THIS run only -- re-run the command to get the C++ backend.",
+                flush=True,
+            )
+        return AutoBuildOutcome(available_in_process=False, available_on_disk=True)
+
+    reason = probe.get("unavailable_reason") or "unknown reason"
+    if not quiet:
         print(
-            "Note: C++ build succeeded but module reload did not pick it up; "
-            "falling back to Python.",
+            f"Note: C++ build reported success but a fresh interpreter still cannot "
+            f"load the extension ({reason}); falling back to Python.",
             flush=True,
         )
-    return available
+    return AutoBuildOutcome(available_in_process=False, available_on_disk=False, reason=reason)
 
 
 def get_backend_info() -> dict:
@@ -393,10 +674,22 @@ def get_backend_info() -> dict:
 
     Returns a dictionary with:
         - backend: "cpp" or "python"
-        - version: version string
+        - version: version string (the extension's ``version()`` string, e.g.
+          ``"1.0.0"`` -- NOT the number the staleness guard checks)
+        - build_version: the compiled ``router_cpp.BUILD_VERSION`` integer, or
+          ``None`` when the extension could not be imported at all
+        - required_build_version: ``_REQUIRED_CPP_BUILD_VERSION`` -- the value
+          ``build_version`` must equal for the backend to be enabled
+        - extension_path: the ``.so``/``.pyd`` this interpreter actually
+          imported, or ``None``
         - available: True if C++ backend is available
         - unavailable_reason: Error message if C++ unavailable (only if available=False)
         - platform: Current platform info (for diagnostics)
+
+    Issue #4589: ``build_version`` / ``required_build_version`` /
+    ``extension_path`` are reported in BOTH the available and unavailable
+    branches, because "version 1.0.0" alone could not explain a
+    ``BUILD_VERSION``-mismatch disable.
     """
     import platform
     import sys
@@ -411,6 +704,9 @@ def get_backend_info() -> dict:
         return {
             "backend": "cpp",
             "version": router_cpp.version(),
+            "build_version": _CPP_BUILD_VERSION,
+            "required_build_version": _REQUIRED_CPP_BUILD_VERSION,
+            "extension_path": _CPP_EXTENSION_PATH,
             "available": True,
             "platform": platform_info,
         }
@@ -443,6 +739,9 @@ def get_backend_info() -> dict:
     result = {
         "backend": "python",
         "version": "pure-python",
+        "build_version": _CPP_BUILD_VERSION,
+        "required_build_version": _REQUIRED_CPP_BUILD_VERSION,
+        "extension_path": _CPP_EXTENSION_PATH,
         "available": False,
         "unavailable_reason": reason,
         "build_hint": build_hint,

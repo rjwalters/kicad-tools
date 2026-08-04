@@ -140,7 +140,7 @@ assert_contains "$unit_u" "ExecStart=$FAKE_BIN" "--unit is accepted and the unit
 # ============================================================================
 # placeholder fallback when no binary is found (still exits 0, valid preview)
 # ============================================================================
-ph_out="$(env -u SAFEHOUSED_BIN bash "$SVC_SCRIPT" --print-unit 2>/dev/null; echo "rc=$?")"
+ph_out="$(env -u SAFEHOUSED_BIN HOME="$(mktemp -d)" PATH="$(mktemp -d)" "$BASH" "$SVC_SCRIPT" --print-unit 2>/dev/null; echo "rc=$?")"
 assert_contains "$ph_out" "ExecStart=/path/to/safehoused" "missing-binary preview falls back to a placeholder ExecStart"
 assert_contains "$ph_out" "rc=0" "missing-binary preview still exits 0 (no side effects)"
 

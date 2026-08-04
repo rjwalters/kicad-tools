@@ -75,8 +75,13 @@ The ladder is configured in `.loom/config.json`:
 > `sonnet → sonnet@xhigh → opus → fable` step *down* a generation at the `opus`
 > rung. So every consumer keeps naming `opus` and a **single indirection point**
 > maps the logical tier to the concrete ID the dispatch should use — the
-> `/loom:sweep` skill via `./.loom/scripts/resolve-model.sh`, `loom_tools` via
-> `model_tiers`, and `loom-daemon` via `resolve_dispatch_model`. The shipped map
+> `/loom:sweep` skill via `./.loom/scripts/resolve-model.sh` and `loom-daemon`
+> via `resolve_dispatch_model`. (Issue #4809:
+> a **daemon-dispatched** single-issue sweep resolves through the sibling
+> `resolve_autonomous_dispatch_model`, which inserts the model-cost A/B
+> experiment's forced arm — when resolved-`experiment` mode confirms a canary —
+> ahead of `resolve_dispatch_model`'s own config/default sub-tiers; an explicit
+> dispatch `model` param still wins over both.) The shipped map
 > pins only the stale tier (`opus → claude-opus-5`); `sonnet`/`fable` and pinned
 > IDs pass through unchanged. Repoint or drop a pin per-repo with an additive
 > `.loom/config.json` → `sweep.modelAliases` object (no code change):

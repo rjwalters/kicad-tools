@@ -105,20 +105,30 @@ case "${1:-help}" in
         shift
         # The former Python daemon-diagnostic CLI was removed in epic #4081
         # phase 3 (#4274). Daemon/registry health is now reported natively by
-        # `loom-daemon status` (Issue #3891). Resolve the binary the same way the
-        # daemon update wrapper does: PATH first, then the local build outputs.
+        # `loom-daemon status` (Issue #3891). Resolve the binary via the
+        # shared loom_locate_daemon_bin() (lib/locate-daemon-bin.sh, #4875) so
+        # this command, loom-daemon-start.sh, loom-daemon-watchdog.sh,
+        # loom-daemon-update.sh and loom-status.sh all agree on which binary
+        # is "the" daemon CLI -- including the LOOM_DAEMON_BIN override (this
+        # branch previously had none) and the machine-level ~/.local/bin
+        # fallback (needed under a non-interactive `ssh host 'cmd'`, which
+        # never sources the login profile that would otherwise put
+        # ~/.local/bin on PATH).
+        _LOOM_LOCATE_BIN_LIB="$REPO_ROOT/.loom/scripts/lib/locate-daemon-bin.sh"
         loom_daemon_bin=""
-        if command -v loom-daemon &>/dev/null; then
-            loom_daemon_bin="$(command -v loom-daemon)"
-        elif [[ -x "$REPO_ROOT/loom-daemon/target/release/loom-daemon" ]]; then
-            loom_daemon_bin="$REPO_ROOT/loom-daemon/target/release/loom-daemon"
-        elif [[ -x "$REPO_ROOT/loom-daemon/target/debug/loom-daemon" ]]; then
-            loom_daemon_bin="$REPO_ROOT/loom-daemon/target/debug/loom-daemon"
+        if [[ -r "$_LOOM_LOCATE_BIN_LIB" ]]; then
+            # shellcheck source=/dev/null
+            source "$_LOOM_LOCATE_BIN_LIB"
+            loom_daemon_bin="$(loom_locate_daemon_bin "$REPO_ROOT")"
         fi
         if [[ -n "$loom_daemon_bin" ]]; then
             exec "$loom_daemon_bin" status "$@"
         else
-            echo -e "${RED}Error: health command requires the loom-daemon binary (build loom-daemon or add it to PATH)${NC}" >&2
+            echo -e "${RED}Error: health command requires the loom-daemon binary. Checked:${NC}" >&2
+            if [[ -r "$_LOOM_LOCATE_BIN_LIB" ]]; then
+                loom_daemon_bin_search_paths "$REPO_ROOT" | sed 's/^/  - /' >&2
+            fi
+            echo -e "${RED}Build it (cargo build --release -p loom-daemon), install it to one of the paths above, or set LOOM_DAEMON_BIN=/path/to/loom-daemon${NC}" >&2
             exit 1
         fi
         ;;

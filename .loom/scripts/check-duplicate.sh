@@ -161,7 +161,7 @@ INTEGRATION:
     Use in Architect/Hermit/Auditor roles before gh issue create:
 
     if ./.loom/scripts/check-duplicate.sh "My issue title"; then
-        gh issue create --title "My issue title" ...
+        ./.loom/scripts/create-issue.sh --title "My issue title" ...
     else
         echo "Potential duplicate detected, skipping creation"
     fi

@@ -196,9 +196,12 @@ class TestExportShipsImagesByDefault:
         assert "](images/" in md_text
         assert "](figures/" not in md_text
 
-        # manifest.json must checksum every shipped image.
+        # manifest.json must checksum every shipped image, keyed by its
+        # bundle-relative POSIX path (issue #4590).
         manifest = json.loads((out_dir / "manifest.json").read_text())
         for name in shipped:
-            assert name in manifest["files"], (
-                f"manifest missing image {name}; manifest files: {sorted(manifest['files'])}"
+            key = f"images/{name}"
+            assert key in manifest["files"], (
+                f"manifest missing image {key}; manifest files: {sorted(manifest['files'])}"
             )
+            assert (out_dir / key).exists()

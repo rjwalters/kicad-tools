@@ -49,6 +49,43 @@ only on a **breaking** wire change to the record shapes below. A backend should:
 - **never** silently coerce a missing `schema_version` to `0` — a record with no
   `schema_version` is malformed.
 
+## `/ingest` response (the bound-`host_id` echo)
+
+A push is a bare JSON array of envelopes; the backend answers a **2xx with a
+JSON object**:
+
+```json
+{ "accepted": 50, "host_id": "fleet-host-abc" }
+```
+
+| Field      | Type    | Notes |
+|------------|---------|-------|
+| `accepted` | integer | How many envelopes from this batch were persisted. Whole-batch semantics: a batch is either fully accepted or rejected with a non-2xx. |
+| `host_id`  | string  | **The host id the authenticated ingest key is bound to** — i.e. the identity the batch's rows were actually filed under. Added by issue #4830. |
+
+`host_id` here is *not* echoed from the request. Every record is persisted
+under the identity bound to the presented key, never the envelope's own
+(client-supplied, opaque) `host_id` field — so this echo is what a host was
+actually recorded as, which is exactly the value that differs when the wrong
+host's key file has been installed on a machine.
+
+**How the exporter uses it.** `loom-daemon`'s exporter compares this value
+against the identity the daemon resolved for itself (`$LOOM_HOST_ID`, else
+`$HOSTNAME`, else `hostname`) and on a disagreement logs a WARN **once per
+daemon lifetime** and reports an `observability DEGRADED` section in
+`loom-daemon health`. Nothing about the export changes: the batch stays acked
+and the backend keeps filing under the key's binding, which remains
+authoritative. See `dashboard/docs/deploy-runbook.md` §8.
+
+**Compatibility.** The field is purely additive — no `schema_version` rev is
+involved (that integer versions the *record* envelope, not this response).
+Both directions are safe:
+
+- an exporter that ignores the response body behaves exactly as before;
+- a backend that does not send `host_id` (anything predating #4830) is treated
+  by the exporter as "no identity to verify" and is **silently** skipped — it
+  never produces a recurring "cannot verify" warning.
+
 ## `RepoVisibility` contract — private by default
 
 Every record that references a repository carries a `visibility` tag, either
@@ -118,6 +155,21 @@ A sweep advanced to a new lifecycle phase (mirrors `sweep.issue.{N}.phase`).
 ```
 
 `phase` is a lifecycle name: `curator`, `builder`, `judge`, `doctor`, `merge`.
+
+**Source and cadence (#4863)**: `Event::SweepPhase` — the record's only upstream —
+is published by `SweepRegistry::sample_phase_transition`, which the reaper calls
+once per live sweep per `reap_once` tick (the 30s reaper timer, plus every
+read-path reap). It reads `.loom/sweep-checkpoint/issue-<N>.json` and publishes
+**only when the phase changed since the previous tick**, so a sweep sitting in a
+phase emits nothing further. The checkpoint's raw marker (`curator-done`,
+`judge-rejected`) is normalized to the lifecycle vocabulary above before it is
+published; an unrecognized marker passes through verbatim rather than being
+guessed at, so `phase` should be read as "one of the five names, or an unknown
+raw marker" — which is exactly how the dashboard types it
+(`SweepPhaseName | string`).
+
+Because the phase is polled rather than pushed, `entered_at` is the daemon's
+*observation* instant, an honest upper bound on the real transition time.
 
 ### `sweep.completed`
 
@@ -193,18 +245,37 @@ A point-in-time view of the multi-account token pool (host-level — no `repo` /
 Per account, `rank` / `usage_fraction` / `limit_window_reset_at` are omitted when
 unknown; `exhausted` is always present.
 
+Every field is read out of the pool's `.ranking` file, so each maps to one of its
+pipe-delimited columns (`name|status|5h_util|limit_reset` — see
+[`token-pool.md`](token-pool.md)): `rank` is the row's position, `usage_fraction`
+is `5h_util`, `exhausted` is derived from `status`, and `limit_window_reset_at`
+is `limit_reset`.
+
+`limit_window_reset_at` is the instant the window **currently gating that
+account** rolls over — the 7-day window for an `exhausted` account (when it
+regains capacity), the 5-hour window otherwise (the rollover `usage_fraction` is
+racing). The daemon resolves which one before writing, so a consumer never has to
+know: it is always "when this account's constraint lifts". It is also the only
+per-account field here that survives public redaction, aggregated across the pool
+into `next_limit_window_reset_at` (the earliest reset, naming no account). A row
+whose reset is absent or unparseable reports no reset at all rather than a
+fabricated instant, so consumers must treat `null`/absent as *unknown* — never as
+"resets now".
+
 ### `host.health`
 
-Host CPU/disk headroom, daemon version, and uptime (host-level — no `repo` /
-`visibility`). Every measured field is optional so an unmeasurable probe stays
-absent rather than being coerced to a fake zero (the daemon's "unknown != zero"
-contract; see `cpu_headroom.rs` / `disk_headroom.rs`).
+Host CPU/disk headroom, the emitting binary's identity, and uptime (host-level —
+no `repo` / `visibility`). Every measured field is optional so an unmeasurable
+probe stays absent rather than being coerced to a fake zero (the daemon's
+"unknown != zero" contract; see `cpu_headroom.rs` / `disk_headroom.rs`).
 
 ```json
 {
   "kind": "host.health",
   "captured_at": "2026-07-30T12:00:00Z",
   "daemon_version": "0.16.0",
+  "build_commit": "8c16fb5b",
+  "built_at": "2026-07-30T03:09:51Z",
   "uptime_sec": 86400,
   "logical_cpus": 28,
   "cpu_idle_fraction": 0.83,
@@ -216,6 +287,28 @@ contract; see `cpu_headroom.rs` / `disk_headroom.rs`).
 `cpu_idle_fraction`, `load_per_core`, and `worktree_root_free_gb` are omitted when
 unmeasurable. A consumer MUST treat an absent measurement as "unknown", never as
 zero/full.
+
+**Binary identity (`build_commit` / `built_at`, #4956).** `daemon_version` is
+`CARGO_PKG_VERSION`, so it only moves once per release: every build between two
+releases reports the same string, and a day-stale daemon is indistinguishable
+from current `main`. `build_commit` (the short git SHA the running binary was
+compiled from) and `built_at` (when it was compiled) are the precise identity —
+both come from the very same compile-time stamps `loom-daemon --version` prints
+(`LOOM_DAEMON_GIT_COMMIT` / `LOOM_DAEMON_BUILD_TIME`, baked in by `build.rs`), so
+the telemetry and the CLI can never disagree.
+
+- `build_commit` is always sent. `"unknown"` is a *meaningful* value, not a
+  missing measurement: it means the build host had no git (e.g. a
+  release-tarball build). A record from a pre-#4956 daemon has no field at all,
+  which decodes as an empty string.
+- `built_at` is **omitted** when the build-time stamp was unavailable — an
+  unknown build time is absent, never a fabricated instant, exactly like the
+  measured fields above.
+
+Both fields are additive and pass through public redaction unchanged (they
+describe the released binary, not any repo or operator — see
+`dashboard/src/redaction.ts`), so an older consumer that ignores unknown keys is
+unaffected.
 
 ## Persistence & read surface (`sweep.outcome`, Issue #4704)
 

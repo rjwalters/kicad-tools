@@ -2,16 +2,23 @@
 # Sync workflow labels from .github/labels.yml onto the forge.
 #
 # Creates (or updates) the Loom coordination labels defined in
-# .github/labels.yml and removes GitHub's noisy default labels. Run this
-# after a Quick / files-only install to create the labels the label-based
-# workflow depends on — a Quick install ships .github/labels.yml but does
-# NOT create the labels on the forge (see issue #3582).
+# .github/labels.yml. Run this after a Quick / files-only install to create
+# the labels the label-based workflow depends on — a Quick install ships
+# .github/labels.yml but does NOT create the labels on the forge (see issue
+# #3582).
+#
+# By default this is ADDITIVE ONLY (#5066): it never touches GitHub's default
+# labels (bug, documentation, duplicate, enhancement, good first issue, help
+# wanted, invalid, question, wontfix). Deleting those is destructive to
+# pre-existing repo data — it silently strips the label from every issue/PR
+# carrying it — so it requires the explicit --prune-defaults opt-in below.
 #
 # Supports both GitHub (via the gh CLI) and Gitea (via the forge API).
 #
 # Usage:
 #   .loom/scripts/sync-labels.sh [--] [WORKTREE_PATH]
 #   .loom/scripts/sync-labels.sh --repo OWNER/NAME [--dry-run] [--] [WORKTREE_PATH]
+#   .loom/scripts/sync-labels.sh --prune-defaults [--force] [--dry-run] [--] [WORKTREE_PATH]
 #
 #   WORKTREE_PATH  Directory containing .github/labels.yml and a git remote.
 #                  Defaults to the current directory. `--` ends option parsing,
@@ -29,11 +36,21 @@
 # --repo bypasses repository *resolution* (the target is named, not inferred
 # from a git remote) and is GitHub-only — an explicitly configured Gitea forge
 # (LOOM_FORGE_TYPE or forge.type in the resolved config) rejects it. Pair it
-# with --dry-run first: --repo makes the default-label deletions land on a repo
-# you are not standing in, so a typo'd NWO is worth previewing. A real (non
-# dry-run) --repo sync additionally preflights the named target with
-# `gh repo view` before deleting anything (#4524), because a dry run is
+# with --dry-run first: --repo makes any --prune-defaults deletions land on a
+# repo you are not standing in, so a typo'd NWO is worth previewing. A real
+# (non dry-run) --repo sync additionally preflights the named target with
+# `gh repo view` before mutating anything (#4524), because a bare dry run is
 # deliberately forge-free and so cannot tell a typo apart from a real repo.
+#
+# --prune-defaults (#5066) opts into the old (pre-#5066) unconditional
+# behavior of deleting GitHub's default labels — intended for a genuinely
+# greenfield repo where clearing those defaults is wanted. Before deleting a
+# default label that is still attached to at least one issue/PR, the script
+# either warns and skips it (no --force) or deletes it anyway after warning
+# (--force) — it never deletes an in-use label silently. Combined with
+# --dry-run, --prune-defaults reports which default labels are currently in
+# use (a read-only forge query) without deleting anything; a bare --dry-run
+# (no --prune-defaults) stays completely forge-free, as before.
 #
 # This is the installed-tree counterpart of the source-only
 # scripts/install/sync-labels.sh. It is self-contained apart from the
@@ -47,10 +64,14 @@ usage() {
   cat <<'EOF'
 Usage: sync-labels.sh [--] [WORKTREE_PATH]
        sync-labels.sh --repo OWNER/NAME [--dry-run] [--] [WORKTREE_PATH]
+       sync-labels.sh --prune-defaults [--force] [--dry-run] [--] [WORKTREE_PATH]
 
 Sync Loom workflow labels from .github/labels.yml onto the forge (GitHub or
-Gitea). Creates missing labels, updates existing ones to match labels.yml,
-and removes GitHub's default labels.
+Gitea). Creates missing labels and updates existing ones to match
+labels.yml. Additive by default — GitHub's default labels (bug,
+documentation, duplicate, enhancement, good first issue, help wanted,
+invalid, question, wontfix) are left untouched unless --prune-defaults is
+given.
 
 Arguments:
   WORKTREE_PATH     Directory containing .github/labels.yml (default: .)
@@ -61,6 +82,14 @@ Options:
                     WORKTREE_PATH's git remote. labels.yml is still read from
                     WORKTREE_PATH, so no checkout of the target is needed.
                     GitHub-only (uses the gh CLI).
+      --prune-defaults
+                    Opt in to deleting GitHub's default labels (the pre-#5066
+                    behavior). A default label still attached to any issue/PR
+                    is skipped with a warning listing the affected numbers,
+                    unless --force is also given.
+      --force       Combined with --prune-defaults, delete an in-use default
+                    label anyway (after warning). No effect without
+                    --prune-defaults.
       --dry-run     Print the label operations that would run and exit without
                     calling the forge. Recommended before a --repo run.
       --            End of options: every remaining argument is positional, so
@@ -72,6 +101,8 @@ EOF
 WORKTREE_PATH="."
 REPO_OVERRIDE=""
 DRY_RUN=0
+PRUNE_DEFAULTS=0
+FORCE_PRUNE=0
 POSITIONAL_SEEN=0
 # Set by `--`: from that point on every remaining argument is positional, even
 # one that starts with `-`. Without this the `--)` case below was a no-op shift
@@ -121,6 +152,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --prune-defaults)
+      PRUNE_DEFAULTS=1
+      shift
+      ;;
+    --force)
+      FORCE_PRUNE=1
       shift
       ;;
     --)
@@ -274,6 +313,56 @@ github_delete_label() {
   fi
 }
 
+# Numbers (one per line) of open+closed issues/PRs currently carrying `label`
+# on GitHub. GitHub's REST /issues endpoint returns both issues and pull
+# requests (PRs are "issues" in that API), so a single query covers both —
+# no separate /pulls call needed. Capped at 100 results (the max page size);
+# callers only need "is this in use" plus a representative sample, not an
+# exhaustive audit. Best-effort: any API failure (bad REPO, no access, rate
+# limit) is treated as "no known usage" rather than blocking the caller,
+# matching this script's existing warn-don't-block posture on delete
+# failures — an in-use check that can't run must never itself become the
+# reason a label silently fails to sync.
+github_label_usage() {
+  local label="$1"
+  gh api "repos/${REPO}/issues" \
+    -f state=all -f per_page=100 -f "labels=${label}" \
+    --jq '.[].number' 2>/dev/null || true
+}
+
+# Format a newline-separated list of issue/PR numbers as "#1 #2 #3", noting
+# when the list was truncated at github_label_usage's 100-result cap.
+join_usage_numbers() {
+  local numbers="$1" count list
+  count=$(printf '%s\n' "$numbers" | grep -c . || true)
+  list=$(printf '%s\n' "$numbers" | sed '/^$/d; s/^/#/' | paste -sd' ' -)
+  if [[ "$count" -ge 100 ]]; then
+    printf '%s (100+ shown, there may be more)' "$list"
+  else
+    printf '%s' "$list"
+  fi
+}
+
+# Delete a default label unless it is currently in use, in which case skip it
+# (warn) or delete it anyway (warn, then delete) depending on FORCE_PRUNE.
+# Never deletes an in-use label silently.
+github_maybe_delete_label() {
+  local label="$1"
+  local usage_numbers usage_list
+  usage_numbers="$(github_label_usage "$label")"
+  if [[ -n "$usage_numbers" ]]; then
+    usage_list="$(join_usage_numbers "$usage_numbers")"
+    if [[ "$FORCE_PRUNE" -eq 1 ]]; then
+      warning "Deleting in-use default label '$label' (--force): affects issue/PR $usage_list"
+      github_delete_label "$label"
+    else
+      warning "Refusing to delete in-use default label '$label': affects issue/PR $usage_list (pass --force to delete anyway)"
+    fi
+  else
+    github_delete_label "$label"
+  fi
+}
+
 github_sync_label() {
   local name="$1" description="$2" color="$3"
 
@@ -342,6 +431,50 @@ gitea_delete_label() {
     else
       warning "Could not delete label '$label'"
     fi
+  fi
+}
+
+# Gitea counterpart of github_label_usage: numbers (one per line) of
+# open+closed issues/PRs currently carrying `label`. Gitea's issues endpoint
+# filters by numeric label ID (not name) and, with type=all, includes both
+# issues and pull requests. Best-effort, same as the GitHub version: any
+# lookup failure (label not found, API error) reports "no known usage"
+# rather than blocking the caller.
+gitea_label_usage() {
+  local label="$1"
+  local label_id body
+  label_id=$(gitea_label_id "$label")
+  [[ -z "$label_id" ]] && return 0
+  body=$(gitea_api GET "repos/${FORGE_OWNER}/${FORGE_REPO}/issues?labels=${label_id}&state=all&type=all" 2>/dev/null) || return 0
+  echo "$body" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for item in data:
+    n = item.get('number')
+    if n is not None:
+        print(n)
+" 2>/dev/null || true
+}
+
+# Delete a default label unless it is currently in use, in which case skip it
+# (warn) or delete it anyway (warn, then delete) depending on FORCE_PRUNE.
+gitea_maybe_delete_label() {
+  local label="$1"
+  local usage_numbers usage_list
+  usage_numbers="$(gitea_label_usage "$label")"
+  if [[ -n "$usage_numbers" ]]; then
+    usage_list="$(join_usage_numbers "$usage_numbers")"
+    if [[ "$FORCE_PRUNE" -eq 1 ]]; then
+      warning "Deleting in-use default label '$label' (--force): affects issue/PR $usage_list"
+      gitea_delete_label "$label"
+    else
+      warning "Refusing to delete in-use default label '$label': affects issue/PR $usage_list (pass --force to delete anyway)"
+    fi
+  else
+    gitea_delete_label "$label"
   fi
 }
 
@@ -431,16 +564,43 @@ if [[ -n "$REPO_OVERRIDE" && "$DRY_RUN" -eq 0 ]]; then
   repo_override_preflight
 fi
 
-info "Removing default labels..."
-for label in "${DEFAULT_LABELS[@]}"; do
+# Additive by default (#5066): deleting GitHub's default labels is
+# destructive to pre-existing repo data (it strips the label from every
+# issue/PR carrying it), so it only happens with the explicit --prune-defaults
+# opt-in below.
+if [[ "$PRUNE_DEFAULTS" -eq 1 ]]; then
+  info "Pruning default labels (--prune-defaults)..."
+  for label in "${DEFAULT_LABELS[@]}"; do
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      # Unlike the bare-dry-run path below, --prune-defaults + --dry-run DOES
+      # contact the forge here: a read-only in-use lookup, so the preview can
+      # flag exactly which deletions would be skipped/need --force, per #5066's
+      # acceptance criteria. A bare --dry-run (no --prune-defaults) never
+      # reaches this branch at all, so it stays completely forge-free.
+      usage_numbers=""
+      if [[ "$FORGE_TYPE" == "github" ]]; then
+        usage_numbers="$(github_label_usage "$label")"
+      elif [[ "$FORGE_TYPE" == "gitea" ]]; then
+        usage_numbers="$(gitea_label_usage "$label")"
+      fi
+      if [[ -n "$usage_numbers" ]]; then
+        info "[dry-run] would delete default label: $label (IN USE: $(join_usage_numbers "$usage_numbers") — would be skipped without --force)"
+      else
+        info "[dry-run] would delete default label: $label"
+      fi
+    elif [[ "$FORGE_TYPE" == "github" ]]; then
+      github_maybe_delete_label "$label"
+    elif [[ "$FORGE_TYPE" == "gitea" ]]; then
+      gitea_maybe_delete_label "$label"
+    fi
+  done
+else
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    info "[dry-run] would delete default label: $label"
-  elif [[ "$FORGE_TYPE" == "github" ]]; then
-    github_delete_label "$label"
-  elif [[ "$FORGE_TYPE" == "gitea" ]]; then
-    gitea_delete_label "$label"
+    info "[dry-run] would leave default labels untouched (pass --prune-defaults to remove them): ${DEFAULT_LABELS[*]}"
+  else
+    info "Leaving default labels untouched (pass --prune-defaults to remove them): ${DEFAULT_LABELS[*]}"
   fi
-done
+fi
 
 # Sync Loom workflow labels
 info "Syncing Loom workflow labels..."

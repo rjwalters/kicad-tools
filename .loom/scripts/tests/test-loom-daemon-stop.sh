@@ -25,6 +25,31 @@ STOP_SCRIPT="$(cd "$SCRIPT_DIR/../cli" && pwd)/loom-daemon-stop.sh"
 # shellcheck source=lib/launchd-sandbox.sh
 source "$SCRIPT_DIR/lib/launchd-sandbox.sh"
 
+# Background-PID bookkeeping (#4773): every `sleep 30 &` decoy this suite
+# backgrounds as a stand-in "live daemon" for STOP_SCRIPT to kill is tracked
+# here too — each test already falls back to an inline `kill -9` when the
+# stop-under-test assertion fails, but that fallback (like the DECOY_PID
+# tracking above) never runs if the suite itself is interrupted first.
+# shellcheck source=lib/bg-proc-trap.sh
+source "$SCRIPT_DIR/lib/bg-proc-trap.sh"
+
+# Shared live-state sandbox (#5179, adopted here per #5191). This suite is the
+# HIGHEST-risk of the three lifecycle suites for this class of leak: it both
+# `rm -f`s and `kill`s the pid it reads, and several call sites below (tests
+# 1/2/3/6/7/8) pin ONLY LOOM_LAUNCHD_LABEL, not LOOM_SOCKET_PATH /
+# LOOM_AUTONOMY_MARKER / LOOM_MACHINE_CHECKOUT -- so pre-fix, an ambient
+# LOOM_MACHINE_CHECKOUT (as a Loom agent session exports) would have flipped
+# loom-daemon-stop.sh's DAEMON_STATE_HOME to the REAL $HOME/.loom, and the
+# script would `kill` whatever pid is recorded in the REAL production
+# .daemon.pid. The snapshot MUST run here -- before live_state_sandbox_init
+# below rewrites the LOOM_* state vars, and before any sub-invocation can
+# write/kill anything -- because it discovers WHICH paths are the live ones by
+# reading the ambient environment. The matching live_state_sandbox_assert_untouched
+# runs as the suite's final guard.
+# shellcheck source=lib/live-state-sandbox.sh
+source "$SCRIPT_DIR/lib/live-state-sandbox.sh"
+live_state_sandbox_snapshot
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
@@ -61,6 +86,16 @@ export LOOM_SYSTEMD_UNIT="loom-daemon-test-$$.service"
 
 WORKDIR="$(mktemp -d)"
 
+# ---------- live daemon state sandbox (#5179, adopted here per #5191) ----------
+# ONE helper owns every live-state path this suite could otherwise reach (see
+# lib/live-state-sandbox.sh for the full per-variable rationale). This is the
+# suite-wide FLOOR, not a replacement for every case: tests below that need a
+# specific fixture's OWN scratch HOME still pin LOOM_SOCKET_PATH /
+# LOOM_AUTONOMY_MARKER inline on their own invocation (a per-command assignment
+# always wins over this exported default, same precedence as before). This
+# only closes the call sites that do NOT pin them.
+live_state_sandbox_init "$WORKDIR/live-state"
+
 # Suite-level safety guard (#4078): a decoy process whose argv ends in
 # `/loom-daemon` — exactly what the stop script's label-blind `pgrep -f
 # '(^|/)loom-daemon$'` fallback would match. Every stop invocation below pins a
@@ -68,7 +103,16 @@ WORKDIR="$(mktemp -d)"
 # tier and leave this decoy alive. If ANY test in this suite regresses into a
 # by-name kill, this decoy dies and the final assertion fails loudly.
 DECOY_PID="$(launchd_sandbox_spawn_decoy "$WORKDIR")"
-trap 'kill "$DECOY_PID" 2>/dev/null; rm -rf "$WORKDIR"' EXIT
+bg_proc_track "$DECOY_PID"
+# bg_proc_reap kills every `sleep 30 &` decoy tracked via bg_proc_track below;
+# EXIT/INT/TERM (not just EXIT, #4773) so a hard interruption of this suite
+# still reaps them, not only the individual tests' own inline `kill` calls.
+# NOTE: a bare `trap CMD EXIT INT TERM` runs CMD on INT/TERM but does NOT stop
+# the script (bash only auto-exits after an EXIT-trap firing, not an INT/TERM
+# one) -- without the explicit `exit` below, a SIGTERM'd suite would clean up
+# once and then keep executing every remaining test, re-populating $WORKDIR.
+trap 'bg_proc_reap; rm -rf "$WORKDIR"' EXIT
+trap 'bg_proc_reap; rm -rf "$WORKDIR"; exit 1' INT TERM
 mkdir -p "$WORKDIR/.loom"
 
 # ---------- tests ----------
@@ -90,6 +134,7 @@ fi
 SLEEP_PID_FILE="$WORKDIR/.loom/.daemon.pid"
 ( sleep 30 & echo $! > "$SLEEP_PID_FILE" )
 sleep_pid=$(cat "$SLEEP_PID_FILE")
+bg_proc_track "$sleep_pid"
 ( cd "$WORKDIR" && LOOM_LAUNCHD_LABEL="$FAKE_LABEL" LOOM_DAEMON_STOP_GRACE_SECS=2 bash "$STOP_SCRIPT" >/dev/null 2>&1 )
 rc2=$?
 assert_eq "0" "$rc2" "live pid: stop exits 0"
@@ -114,6 +159,7 @@ fi
 # 3. --force skips the grace window (SIGKILL immediately).
 ( sleep 30 & echo $! > "$SLEEP_PID_FILE" )
 sleep_pid2=$(cat "$SLEEP_PID_FILE")
+bg_proc_track "$sleep_pid2"
 start_ts=$(date +%s)
 ( cd "$WORKDIR" && LOOM_LAUNCHD_LABEL="$FAKE_LABEL" bash "$STOP_SCRIPT" --force >/dev/null 2>&1 )
 end_ts=$(date +%s)
@@ -174,8 +220,10 @@ FAKE
     # Original daemon (killed by the stop) + a separate live "relaunched" daemon.
     ( sleep 30 & echo $! > "$SLEEP_PID_FILE" )
     orig_pid=$(cat "$SLEEP_PID_FILE")
+    bg_proc_track "$orig_pid"
     sleep 30 &
     relaunch_pid=$!
+    bg_proc_track "$relaunch_pid"
 
     stuck_out=$( cd "$WORKDIR" && PATH="$FAKE_BIN_DIR:$PATH" RELAUNCH_PID="$relaunch_pid" \
         LOOM_LAUNCHD_LABEL="$FAKE_LABEL" LOOM_DAEMON_STOP_GRACE_SECS=2 bash "$STOP_SCRIPT" 2>&1 )
@@ -320,6 +368,7 @@ fi
 printf 'started_at=x\n' > "$MARKER"
 ( sleep 30 & echo $! > "$WORKDIR/.loom/.daemon.pid" )
 live_pid=$(cat "$WORKDIR/.loom/.daemon.pid")
+bg_proc_track "$live_pid"
 ( cd "$WORKDIR" && LOOM_LAUNCHD_LABEL="$FAKE_LABEL" LOOM_AUTONOMY_MARKER="$MARKER" \
     LOOM_DAEMON_STOP_GRACE_SECS=2 bash "$STOP_SCRIPT" >/dev/null 2>&1 )
 kill -9 "$live_pid" 2>/dev/null || true
@@ -482,6 +531,7 @@ NON_REPO_DIR="$(mktemp -d)"
 
 ( sleep 30 & echo $! > "$MACHINE_HOME/.loom/.daemon.pid" )
 machine_pid=$(cat "$MACHINE_HOME/.loom/.daemon.pid")
+bg_proc_track "$machine_pid"
 out_machine=$( cd "$NON_REPO_DIR" && HOME="$MACHINE_HOME" LOOM_MACHINE_CHECKOUT="$MACHINE_CHECKOUT" \
     LOOM_LAUNCHD_LABEL="$FAKE_LABEL" LOOM_DAEMON_STOP_GRACE_SECS=2 bash "$STOP_SCRIPT" 2>&1 )
 rc_machine=$?
@@ -537,6 +587,26 @@ if launchd_sandbox_decoy_alive "$DECOY_PID"; then
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "${RED}✗${NC} suite-level decoy loom-daemon survived the whole stop suite"
+fi
+
+# ============================================================
+# Live daemon state guard (#5179, adopted here per #5191): every live `.loom`
+# state path reachable from the ambient environment (the real $HOME/.loom, the
+# live checkout's .loom, an ambient LOOM_PID_FILE / LOOM_WORKSPACE /
+# LOOM_MACHINE_CHECKOUT) must be byte-and-mtime identical to its pre-suite
+# snapshot -- and a path that was ABSENT must still be absent. This converts
+# "the real .daemon.pid got kill(2)'d" from "discovered by an operator on a
+# degraded host" into "caught by the suite".
+# ============================================================
+TESTS_RUN=$((TESTS_RUN + 1))
+if live_state_sandbox_assert_untouched; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} no live .loom daemon state path was written during the suite ($(live_state_sandbox_snapshot_size) paths guarded, #5191)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} a LIVE .loom daemon state path was written during this test run (#5191 regression!)"
+    echo "  sandbox in effect during the run:"
+    live_state_sandbox_describe | sed 's/^/    /'
 fi
 
 echo

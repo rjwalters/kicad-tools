@@ -397,7 +397,7 @@ Create 3-5 GitHub issues from the user's feature list so `/loom:sweep` has work 
 # Each issue gets the loom:issue label so builders can claim them
 
 # Issue 1: Project scaffolding (always included)
-gh issue create \
+./.loom/scripts/create-issue.sh \
   --title "Project scaffolding and build setup" \
   --label "loom:issue" \
   --label "tier:goal-advancing" \
@@ -415,7 +415,7 @@ BODY
 )"
 
 # Issue 2: Core component (always included)
-gh issue create \
+./.loom/scripts/create-issue.sh \
   --title "Core {{CORE_COMPONENT}} implementation" \
   --label "loom:issue" \
   --label "tier:goal-advancing" \
@@ -431,19 +431,19 @@ BODY
 )"
 
 # Issues 3-5: User-requested features
-gh issue create \
+./.loom/scripts/create-issue.sh \
   --title "{{FEATURE_1}}" \
   --label "loom:issue" \
   --label "tier:goal-advancing" \
   --body "## Summary\n\n{{FEATURE_1_DESCRIPTION}}\n\n## Acceptance Criteria\n\n- [ ] Feature implemented\n- [ ] Tests passing"
 
-gh issue create \
+./.loom/scripts/create-issue.sh \
   --title "{{FEATURE_2}}" \
   --label "loom:issue" \
   --label "tier:goal-supporting" \
   --body "## Summary\n\n{{FEATURE_2_DESCRIPTION}}\n\n## Acceptance Criteria\n\n- [ ] Feature implemented\n- [ ] Tests passing"
 
-gh issue create \
+./.loom/scripts/create-issue.sh \
   --title "{{FEATURE_3}}" \
   --label "loom:issue" \
   --label "tier:goal-supporting" \

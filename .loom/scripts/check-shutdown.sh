@@ -9,8 +9,17 @@
 #   0 - Shutdown signal detected (should exit gracefully)
 #   1 - No shutdown signal (continue normally)
 #
-# This script is used by shepherds to check for graceful shutdown signals
-# at phase boundaries during orchestration.
+# OPERATOR-MANUAL TOOL (not invoked by any current in-repo caller, #5277).
+# This script originally backed the Bash "shepherd" orchestration loop, which
+# was removed in v0.10.0 (docs/migration/v0.10.0-shepherd-deprecation.md) --
+# the Rust `loom-daemon` checks `.loom/stop-shepherds` directly
+# (`agent_session::spawn`) instead of shelling out here. It is kept, not
+# deleted, because CHANGELOG.md's v0.10.0 daemon-port entry explicitly
+# preserves its "name, flags, and graceful `gh`-fallback contract" as a
+# supported operator surface: run it by hand, or from a custom orchestration
+# script, to check the two live shutdown signals it still reads correctly --
+# the global `.loom/stop-shepherds` file and the per-issue `loom:abort`
+# label -- both of which remain part of the current label/signal taxonomy.
 
 set -e
 

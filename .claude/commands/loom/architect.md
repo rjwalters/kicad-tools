@@ -167,10 +167,19 @@ When creating a proposal:
 2. **Gather requirements** or **self-reflect** (autonomous mode)
 3. **Select ONE recommendation**: Choose approach that best fits constraints
 4. **Check for duplicates**: Run duplicate check before creating issue
-5. **Create the issue**: Use `gh issue create` with focused recommendation
-6. **Add labels**: `loom:architect` + tier label
+5. **Create the issue**: Use `./.loom/scripts/create-issue.sh` with focused recommendation
+6. **Add labels**: `loom:architect` + tier label — pass them as `--label` on the
+   creation command itself, never as a follow-up `gh issue edit`
 
 **For templates and examples**, read `.claude/commands/loom/architect-patterns.md`.
+
+> **File issues with `./.loom/scripts/create-issue.sh`, never a bare `gh issue create` (#5047).**
+> `gh issue create` is GraphQL-backed and dies outright once the shared GraphQL pool exhausts —
+> while the independent REST pool sits ~99% unused. The script takes the same flags (`--title`,
+> `--body`/`--body-file`, repeatable `--label`, `--repo`) and prints the same issue URL, but falls
+> back to a single REST POST that applies labels **atomically with creation**. Recipe and
+> rationale: `.loom/docs/gh-issue-create-rest-fallback.md`.
+> (`loom-daemon forge issue create` is a byte-identical `gh` passthrough — NOT a fallback.)
 
 > **Do not run concurrent Architects — serialize issue creation (#3707).** `gh issue create` returns a server-assigned number with no client-side coordination, so two Architects (or an Architect and a Curator-decomposition / Champion epic-phase run) filing issues at the same time in the same repo **race on issue numbers and cross-contaminate bodies**. Never place an issue-creating agent in a parallel wave; one issue-creating agent must finish its entire `gh issue create` burst before the next starts. See `sweep.md` → "Execution Model → Only Builders parallelize" for the full invariant. Parallel **Builders** (implementing already-filed issues) stay safe — only issue *creation* must be serialized.
 
@@ -182,7 +191,7 @@ When creating a proposal:
 # Check if similar issue already exists
 if ./.loom/scripts/check-duplicate.sh "Your proposed issue title" "Optional body text"; then
     # No duplicates found - safe to create
-    gh issue create --title "Your proposed issue title" ...
+    ./.loom/scripts/create-issue.sh --title "Your proposed issue title" ...
 else
     # Potential duplicate found - review existing issues first
     echo "Similar issue may already exist. Checking..."
@@ -205,14 +214,17 @@ TITLE="Your proposal title"
 BODY="Your proposal body..."
 
 if ./.loom/scripts/check-duplicate.sh "$TITLE" "$BODY"; then
-    # No duplicates - safe to create
-    gh issue create --title "$TITLE" --body "$(cat <<'EOF'
+    # No duplicates - safe to create. Labels ride along in the SAME call:
+    # a follow-up `gh issue edit --add-label` doubles the request count and
+    # can half-fail into an unlabelled issue no queue query finds.
+    ./.loom/scripts/create-issue.sh --title "$TITLE" \
+      --label "loom:architect" \
+      --label "tier:goal-advancing" \
+      --body "$(cat <<'EOF'
 [issue content - see architect-patterns.md for template]
 EOF
 )"
-    # Add labels
-    gh issue edit <number> --add-label "loom:architect"
-    gh issue edit <number> --add-label "tier:goal-advancing"  # or tier:goal-supporting or tier:maintenance
+    # tier label above is one of: tier:goal-advancing | tier:goal-supporting | tier:maintenance
 else
     echo "Skipping creation - potential duplicate found"
 fi
@@ -243,11 +255,8 @@ For large features that span multiple phases (4+ issues with dependencies), crea
 **For epic templates and workflow**, read `.claude/commands/loom/architect-patterns.md`.
 
 ```bash
-# Create epic issue
-gh issue create --title "Epic: [Title]" --body "..."
-
-# Add epic label (NOT loom:architect)
-gh issue edit <number> --add-label "loom:epic"
+# Create epic issue, with its label (NOT loom:architect) applied atomically
+./.loom/scripts/create-issue.sh --title "Epic: [Title]" --body "..." --label "loom:epic"
 ```
 
 ---

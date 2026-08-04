@@ -21,8 +21,16 @@
 # surface map — note the asymmetric source->target mapping):
 #   .loom/hooks/            <- defaults/hooks/            (top-level *.sh)
 #   .loom/scripts/          <- defaults/scripts/          (recursive)
-#   .loom/roles/            <- defaults/roles/            (recursive)
-#   .loom/docs/             <- defaults/docs/             (recursive; symlinks skipped)
+#   .loom/roles/            <- defaults/roles/            (recursive; SOURCE-side
+#                                                          symlinks resolved to
+#                                                          content, #5222 — all 17
+#                                                          defaults/roles/*.md are
+#                                                          symlinks to
+#                                                          .claude/commands/loom/*.md)
+#   .loom/docs/             <- defaults/docs/             (recursive; DESTINATION-side
+#                                                          symlinks skipped, e.g. this
+#                                                          dogfood repo's own
+#                                                          .loom/docs/*.md)
 #   .loom/runtimes/         <- defaults/runtimes/         (recursive; BACKFILLED if absent, #4688)
 #   .loom/bin/              <- defaults/.loom/bin/        (recursive; live consumer CLI)
 #   .claude/commands/loom/  <- defaults/.claude/commands/loom/ (recursive)
@@ -384,11 +392,15 @@ abs_file_path() {
 }
 
 # Octal permission bits of a path, or "" when unavailable (GNU stat, then BSD).
+# -L (dereference) so a symlinked source (e.g. defaults/roles/*.md -> the
+# .claude/commands/loom/*.md skillification target, #5222) reports the
+# REFERENT's mode rather than the symlink's own (typically 755/lrwxrwxrwx)
+# mode -- both GNU and BSD `stat` report the link's own bits without -L.
 file_mode() {
     local p="$1" m
-    m="$(stat -c '%a' "$p" 2>/dev/null)" || m=""
+    m="$(stat -L -c '%a' "$p" 2>/dev/null)" || m=""
     if [[ -z "$m" ]]; then
-        m="$(stat -f '%OLp' "$p" 2>/dev/null)" || m=""
+        m="$(stat -L -f '%OLp' "$p" 2>/dev/null)" || m=""
     fi
     printf '%s' "$m"
 }
@@ -573,6 +585,22 @@ apply_deferred_self_sync() {
 #                       ".claude/commands/loom", ".loom/bin").
 #   A missing src_dir is a silent no-op. Existing sync_one semantics (ignore
 #   list, symlink skip, idempotent copy, --dry-run) apply per file.
+#
+#   SOURCE-SIDE symlinks (#5222): all 17 defaults/roles/*.md files are
+#   symlinks to ../.claude/commands/loom/*.md (the skillification dedup, so
+#   the two copies of each role prompt never drift). Plain `find -type f`
+#   lstats each entry and a symlink never matches `-type f`, so those 17
+#   files silently fell out of the walk entirely -- not updated, not
+#   skipped, not counted -- and a consumer repo's installed .loom/roles/*.md
+#   (real file copies there, not symlinks) went stale forever while resync
+#   reported success. `find -L` dereferences before the type test, so a
+#   symlinked source is walked as the regular file it resolves to; `cp`
+#   (sync_one) and `cmp` both already dereference by default, so the
+#   destination gets the RESOLVED CONTENT, never a copied link. This is a
+#   source-side concern only -- the destination-side symlink guard in
+#   sync_one (`[[ -L "$dst" ]]`, protecting e.g. this dogfood repo's own
+#   .loom/roles/*.md and .loom/docs/*.md, which are themselves symlinks back
+#   into defaults/) is untouched and still runs first.
 resync_tree() {
     local src_dir="$1" dst_dir="$2" report_prefix="$3" defaults_prefix="$4"
     [[ -d "$src_dir" ]] || return 0
@@ -586,17 +614,24 @@ resync_tree() {
             continue
         fi
         sync_one "$src" "$dst_dir/$rel" "$report_prefix/$rel"
-    done < <(find "$src_dir" -type f -print0 2>/dev/null | sort -z)
+    done < <(find -L "$src_dir" -type f -print0 2>/dev/null | sort -z)
 }
 
-# ---------- canonical Repo Skills guard detection (#4041) ----------
+# ---------- canonical Repo Skills guard detection (#4041, #4894) ----------
 #
-# When the canonical generic guard (with the rjwalters/repo#29 fix) is installed
-# in this repo, Loom's vendored generic guard (guard-destructive-generic.sh) is
+# When the canonical generic guard is installed in this repo AND passes BOTH
+# runtime probes the guard-destructive.sh dispatcher requires — the
+# rjwalters/repo#29 VERSION marker and the `worktree-write-confinement`
+# CAPABILITY marker (proving it actually implements the Loom-only Bash-tool
+# write-confinement category, issue #4178, not just the unrelated repo#29 fix)
+# — Loom's vendored generic guard (guard-destructive-generic.sh) is
 # intentionally NOT installed — the guard-destructive.sh dispatcher defers to the
 # canonical guard at runtime. Resync must therefore neither resurrect the vendored
-# copy nor leave a stale one behind. Same marker probe the dispatcher/installer
-# use, so all three agree on which guard wins.
+# copy nor leave a stale one behind. Same two-probe check the dispatcher/installer
+# use, so all three agree on which guard wins (#4894: requiring only the version
+# probe here would strip the vendored fallback out from under the dispatcher the
+# moment a canonical guard picked up repo#29 without write-confinement, leaving
+# zero coverage instead of the intended fallback).
 #
 # Guard against #4403: the canonical Repo Skills guard is a LOCAL, typically
 # gitignored, per-host install (`.claude/skills/repo/`), but the vendored guard
@@ -619,7 +654,8 @@ resync_tree() {
 # firing entirely.
 CANONICAL_GUARD_PRESENT=0
 if [[ -r "$REPO_ROOT/.claude/skills/repo/hooks/guard-destructive.sh" ]] && \
-   grep -q 'repo#29' "$REPO_ROOT/.claude/skills/repo/hooks/guard-destructive.sh" 2>/dev/null; then
+   grep -q 'repo#29' "$REPO_ROOT/.claude/skills/repo/hooks/guard-destructive.sh" 2>/dev/null && \
+   grep -q 'worktree-write-confinement' "$REPO_ROOT/.claude/skills/repo/hooks/guard-destructive.sh" 2>/dev/null; then
     CANONICAL_GUARD_PRESENT=1
 fi
 

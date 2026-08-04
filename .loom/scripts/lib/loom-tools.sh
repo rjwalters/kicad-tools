@@ -16,9 +16,10 @@
 #     in defaults/scripts/ and source lib/script-helper.sh, NOT this file; or
 #   - deleted outright as a no-op / unreferenced module.
 #
-# The single surviving Python module is the opt-in `loom-search` semantic-search
-# feature (see defaults/docs/semantic-search.md). It is installed and invoked
-# directly, never through this library.
+# The last surviving Python module, the opt-in `loom-search` semantic-search
+# feature, was itself retired in #4970 (see defaults/docs/semantic-search.md)
+# per the operator's RETIRE decision on #4608 — there is no Python left in
+# this repo at all now.
 #
 # What is still live here: `_find_repo_root`, used by agent-spawn.sh and
 # agent-wait.sh. `run_loom_tool` survives only as a loud, non-silent failure

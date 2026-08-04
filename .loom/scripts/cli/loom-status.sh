@@ -16,7 +16,20 @@
 #   - Flags agents configured in .loom/config.json that are NOT running (in red),
 #     so a crashed / never-started agent is easy to spot.
 #   - Shows a work-queue summary (open loom:issue / loom:review-requested /
-#     loom:pr counts) when `gh` is available on a GitHub forge.
+#     loom:pr / loom:architect / loom:hermit / loom:curated / loom:auditor
+#     counts) when `gh` is available on a GitHub forge.
+#   - Surfaces MACHINE-DAEMON state for this workspace (#4793): this script
+#     only ever inspected the LOCAL tmux agent pool, so a repo actively
+#     managed by a separate machine-level `loom-daemon` fleet (autonomous
+#     work finder / role runner dispatching sweeps with zero local tmux
+#     sessions) used to read as "No agents running" -- misleadingly implying
+#     nothing would pick up open issues. When a `loom-daemon` binary can be
+#     located, this queries `loom-daemon status --json` (the same IPC surface
+#     `./.loom/bin/loom health` delegates to) for daemon liveness, whether
+#     this repo is a registered/managed workspace, its dispatch-gate state,
+#     and its in-flight sweep count -- and the empty-agent-pool message names
+#     its own scope explicitly ("local agent pool: none") instead of reading
+#     as a bare, fleet-wide "No agents running".
 #
 # Exits 0 whether or not any agents are running (an empty pool is not an error).
 
@@ -25,6 +38,8 @@ set -euo pipefail
 _LOOM_STATUS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/config-resolver.sh
 source "$_LOOM_STATUS_SCRIPT_DIR/../lib/config-resolver.sh"
+# shellcheck source=../lib/locate-daemon-bin.sh
+source "$_LOOM_STATUS_SCRIPT_DIR/../lib/locate-daemon-bin.sh"
 
 # Find repository root
 find_repo_root() {
@@ -54,6 +69,16 @@ if [[ -z "$REPO_ROOT" ]]; then
     echo "Error: Not in a Loom workspace (.loom directory not found)" >&2
     exit 1
 fi
+
+# Canonicalized (symlink-resolved) repo root, used ONLY to match this
+# workspace against the `root` paths `loom-daemon status --json` / the
+# `~/.loom/workspaces.json` registry report -- both normalize via Rust's
+# `std::fs::canonicalize` (`workspace_registry::normalize_path`), so a
+# non-canonical `REPO_ROOT` (e.g. a `/tmp` symlinked to `/private/tmp` on
+# macOS) would otherwise silently fail to match a repo the daemon DOES
+# manage. Falls back to the plain `REPO_ROOT` if canonicalization fails.
+REPO_ROOT_CANON="$(cd "$REPO_ROOT" 2>/dev/null && pwd -P 2>/dev/null)"
+[[ -n "$REPO_ROOT_CANON" ]] || REPO_ROOT_CANON="$REPO_ROOT"
 
 TMUX_SOCKET="loom"
 
@@ -125,8 +150,16 @@ ${YELLOW}OUTPUT:${NC}
     printed with their exact 'tmux -L loom kill-session' recovery command.
     Agents present in the config but not currently running are listed
     separately in ${RED}red${NC} so a crashed or never-started agent is easy to spot.
-    A Work Queue summary (open ${CYAN}loom:issue${NC} / ${CYAN}loom:review-requested${NC} /
-    ${CYAN}loom:pr${NC} counts) is shown when 'gh' is available on a GitHub forge.
+    A Machine Daemon section reports whether a separate machine-level
+    'loom-daemon' fleet manages this repo (liveness, registry membership,
+    dispatch-gate state, in-flight sweep count) -- since that daemon can be
+    actively dispatching work here even when the local agent pool above is
+    empty, shown when a 'loom-daemon' binary is resolvable (PATH or an
+    in-repo build). A Work Queue summary (open ${CYAN}loom:issue${NC} /
+    ${CYAN}loom:review-requested${NC} / ${CYAN}loom:pr${NC} counts, plus
+    pending-proposal counts for ${CYAN}loom:architect${NC} / ${CYAN}loom:hermit${NC} /
+    ${CYAN}loom:curated${NC} / ${CYAN}loom:auditor${NC}) is shown when 'gh' is
+    available on a GitHub forge.
 
 ${YELLOW}EXIT STATUS:${NC}
     Always 0 when the workspace resolves — an empty pool is not an error.
@@ -205,17 +238,33 @@ count_label() {
 # Build the work-queue object as compact JSON, or "null" when gh/label counts
 # are unavailable (gh missing, unauthenticated, or a non-GitHub forge). Never
 # errors — a missing forge just yields null so the section is omitted.
+#
+# Includes the pending-proposal labels (loom:architect / loom:hermit /
+# loom:curated / loom:auditor, #4793) alongside the original three -- without
+# these a non-empty proposal pipeline still rendered as an all-zero work
+# queue, which read as "nothing pending" even when several proposals were
+# awaiting Champion review.
 work_queue_json() {
     command -v jq &>/dev/null || { echo "null"; return 0; }
-    local issue rr pr
+    local issue rr pr architect hermit curated auditor
     issue=$(count_label issue "loom:issue") || { echo "null"; return 0; }
     rr=$(count_label pr "loom:review-requested") || { echo "null"; return 0; }
     pr=$(count_label pr "loom:pr") || { echo "null"; return 0; }
+    architect=$(count_label issue "loom:architect") || { echo "null"; return 0; }
+    hermit=$(count_label issue "loom:hermit") || { echo "null"; return 0; }
+    curated=$(count_label issue "loom:curated") || { echo "null"; return 0; }
+    auditor=$(count_label issue "loom:auditor") || { echo "null"; return 0; }
     jq -nc \
         --argjson issue "$issue" \
         --argjson review_requested "$rr" \
         --argjson pr "$pr" \
-        '{"loom:issue":$issue, "loom:review-requested":$review_requested, "loom:pr":$pr}'
+        --argjson architect "$architect" \
+        --argjson hermit "$hermit" \
+        --argjson curated "$curated" \
+        --argjson auditor "$auditor" \
+        '{"loom:issue":$issue, "loom:review-requested":$review_requested, "loom:pr":$pr,
+          "loom:architect":$architect, "loom:hermit":$hermit, "loom:curated":$curated,
+          "loom:auditor":$auditor}'
 }
 
 # Read the configured terminals as compact JSON array (or "[]"), resolved
@@ -228,6 +277,164 @@ read_terminals() {
     else
         echo "[]"
     fi
+}
+
+# ---- Machine daemon integration (#4793) ----------------------------------
+# This script only ever inspected the LOCAL tmux agent pool. The functions
+# below layer in the machine-level `loom-daemon` picture -- daemon liveness,
+# whether THIS repo is a registered/managed workspace, its dispatch-gate
+# state, and its in-flight sweep count -- by reusing the daemon's OWN
+# reporting surfaces rather than re-deriving any of that logic in bash:
+#   - `loom-daemon status --json` (the same IPC call `./.loom/bin/loom
+#     health` delegates to) is the primary source: when the daemon answers,
+#     its `install_state`/`per_repo` fields are authoritative.
+#   - `~/.loom/workspaces.json` (the on-disk registry `loom-daemon
+#     workspace add|remove|list` and the daemon itself read/write, override
+#     `LOOM_WORKSPACES_PATH`) is consulted ONLY as a fallback membership
+#     check when the daemon itself is unreachable -- a static file read
+#     still answers "is this repo registered?" even while the daemon is down.
+
+# Resolve the loom-daemon binary via the shared loom_locate_daemon_bin()
+# (lib/locate-daemon-bin.sh, #4875) — includes the machine-level
+# $LOOM_DAEMON_BIN_DIR (default ~/.local/bin) fallback, so this script,
+# loom-daemon-start.sh, loom-daemon-watchdog.sh, loom-daemon-update.sh, and
+# `./.loom/bin/loom health` all agree on which binary is "the" daemon CLI.
+# Preserves this function's original contract (thin wrapper): echoes the
+# resolved path and returns 0, or returns 1 with nothing echoed -- INCLUDING
+# the pre-#4875 behavior that an explicitly-set-but-non-executable
+# LOOM_DAEMON_BIN is a hard "not found" (unlike the other four call sites,
+# which fall through to PATH/machine-level/in-repo candidates in that case).
+# This script's own test suite uses LOOM_DAEMON_BIN=<bogus path> as a
+# deterministic "force no binary resolvable" sentinel that must NOT then pick
+# up a real installed binary via PATH or ~/.local/bin, so that contract is
+# preserved here explicitly rather than delegated wholesale.
+locate_daemon_bin() {
+    if [[ -n "${LOOM_DAEMON_BIN:-}" ]]; then
+        [[ -x "${LOOM_DAEMON_BIN}" ]] && { echo "${LOOM_DAEMON_BIN}"; return 0; }
+        return 1
+    fi
+    local bin
+    bin="$(unset LOOM_DAEMON_BIN; loom_locate_daemon_bin "$REPO_ROOT")"
+    [[ -n "$bin" ]] || return 1
+    echo "$bin"
+}
+
+# Query `loom-daemon status --json`. Echoes the JSON payload on success --
+# either a full DaemonStatusReport (daemon reachable) or the #4069
+# unreachable-error object (daemon not reachable; still carries an
+# `install_state` liveness classification: NotExpected / ExpectedButDead /
+# AliveStarting / AliveButUnresponsive) -- and echoes nothing when no
+# loom-daemon binary can be located at all, or `jq` is unavailable to parse
+# the result. Never propagates the daemon CLI's own exit code (it exits
+# non-zero on the unreachable path by design) so callers never abort under
+# `set -e`.
+daemon_status_json() {
+    command -v jq &>/dev/null || return 0
+    local bin
+    bin="$(locate_daemon_bin)" || return 0
+    "$bin" status --json 2>/dev/null || true
+}
+
+# Best-effort machine-registry membership check via a direct read of
+# ~/.loom/workspaces.json (or $LOOM_WORKSPACES_PATH), used ONLY as a
+# fallback when the daemon itself is unreachable -- a live daemon's own
+# `per_repo` array (from daemon_status_json) is authoritative and takes
+# precedence over this. Returns 0 (repo present) or 1 (absent / no registry
+# / no jq) -- never errors under `set -e`.
+registry_has_repo() {
+    command -v jq &>/dev/null || return 1
+    local registry_path="${LOOM_WORKSPACES_PATH:-$HOME/.loom/workspaces.json}"
+    [[ -f "$registry_path" ]] || return 1
+    jq -e --arg root "$REPO_ROOT_CANON" \
+        '(.workspaces // []) | any(.root == $root)' \
+        "$registry_path" >/dev/null 2>&1
+}
+
+# Populate the daemon_* globals this section's callers (emit_human /
+# emit_json) branch on, from a single daemon_status_json() call:
+#   daemon_bin_found     true|false  -- a loom-daemon binary was located
+#   daemon_reachable     true|false  -- the IPC round-trip succeeded
+#   daemon_manages_repo  true|false  -- this repo is a managed/registered
+#                                       workspace (per_repo match, or the
+#                                       registry-file fallback)
+#   daemon_in_flight     count of non-terminal sweeps for this repo (per_repo
+#                        match only; "0" when reachable but unmatched, empty
+#                        when unreachable)
+#   daemon_gate_halted   true|false|"" -- per-repo main-health gate state
+#                        (per_repo match only; empty when unreachable/unmatched)
+#   daemon_install_state NotExpected|ExpectedButDead|AliveStarting|
+#                        AliveButUnresponsive|"" (unreachable path only)
+#   daemon_liveness_detail  human-readable detail string (unreachable path only)
+#   daemon_roles         space-separated distinct role names this repo's
+#                        role-runner has ticked recently ("" when none/unreachable)
+collect_daemon_state() {
+    daemon_bin_found=false
+    daemon_reachable=false
+    daemon_manages_repo=false
+    daemon_in_flight=""
+    daemon_gate_halted=""
+    daemon_install_state=""
+    daemon_liveness_detail=""
+    daemon_roles=""
+
+    command -v jq &>/dev/null || return 0
+    locate_daemon_bin >/dev/null 2>&1 && daemon_bin_found=true
+    [[ "$daemon_bin_found" == "true" ]] || return 0
+
+    local json
+    json="$(daemon_status_json)"
+    [[ -n "$json" ]] || return 0
+
+    if echo "$json" | jq -e 'has("error") | not' >/dev/null 2>&1; then
+        daemon_reachable=true
+        local repo_entry
+        repo_entry="$(echo "$json" | jq -c --arg root "$REPO_ROOT_CANON" \
+            '[(.per_repo // [])[] | select(.root == $root)] | .[0] // empty' 2>/dev/null)"
+        if [[ -n "$repo_entry" && "$repo_entry" != "null" ]]; then
+            daemon_manages_repo=true
+            daemon_in_flight="$(echo "$repo_entry" | jq -r '.in_flight_count // 0' 2>/dev/null)"
+            daemon_gate_halted="$(echo "$repo_entry" | jq -r '.health_gate_halted // false' 2>/dev/null)"
+        fi
+        daemon_roles="$(echo "$json" | jq -r --arg root "$REPO_ROOT_CANON" \
+            '[(.role_tick_records // [])[] | select(.root == $root) | .role] | unique | join(" ")' 2>/dev/null)"
+    else
+        daemon_install_state="$(echo "$json" | jq -r '.install_state.state // empty' 2>/dev/null)"
+        daemon_liveness_detail="$(echo "$json" | jq -r '.install_state.liveness_detail // empty' 2>/dev/null)"
+    fi
+
+    if [[ "$daemon_manages_repo" != "true" ]] && registry_has_repo; then
+        daemon_manages_repo=true
+    fi
+}
+
+# Compact JSON rendering of the daemon_* globals collect_daemon_state()
+# populates, for `emit_json`'s `daemon` key. Must be called AFTER
+# collect_daemon_state.
+daemon_state_json_obj() {
+    command -v jq &>/dev/null || { echo "null"; return 0; }
+    local roles_json="[]"
+    if [[ -n "$daemon_roles" ]]; then
+        roles_json="$(printf '%s\n' "$daemon_roles" | tr ' ' '\n' | jq -R . | jq -sc 'map(select(. != ""))')"
+    fi
+    jq -nc \
+        --argjson binary_found "$daemon_bin_found" \
+        --argjson reachable "$daemon_reachable" \
+        --argjson manages_repo "$daemon_manages_repo" \
+        --arg in_flight "$daemon_in_flight" \
+        --arg gate_halted "$daemon_gate_halted" \
+        --arg install_state "$daemon_install_state" \
+        --arg liveness_detail "$daemon_liveness_detail" \
+        --argjson roles "$roles_json" \
+        '{
+            binary_found: $binary_found,
+            reachable: $reachable,
+            manages_repo: $manages_repo,
+            in_flight: (if $in_flight == "" then null else ($in_flight | tonumber?) end),
+            gate_halted: (if $gate_halted == "" then null elif $gate_halted == "true" then true else false end),
+            install_state: (if $install_state == "" then null else $install_state end),
+            liveness_detail: (if $liveness_detail == "" then null else $liveness_detail end),
+            roles: $roles
+          }'
 }
 
 # ---- JSON output ---------------------------------------------------------
@@ -263,10 +470,15 @@ emit_json() {
     local work_queue_json
     work_queue_json=$(work_queue_json)
 
+    collect_daemon_state
+    local daemon_json
+    daemon_json=$(daemon_state_json_obj)
+
     jq -nc \
         --argjson running "$running_json" \
         --argjson terminals "$terminals" \
         --argjson work_queue "$work_queue_json" \
+        --argjson daemon "$daemon_json" \
         '
         ($running | map(.id)) as $running_ids
         | {
@@ -293,7 +505,8 @@ emit_json() {
             unmanaged: ($running | map(select(.id as $rid
                 | ($terminals | map(.id) | index($rid)) | not))
                 | map({session: .session, id: .id, pid: .pid, uptime_seconds: .uptime_seconds, status: "unmanaged"})),
-            work_queue: $work_queue
+            work_queue: $work_queue,
+            daemon: $daemon
           }'
 }
 
@@ -338,9 +551,18 @@ emit_human() {
     local terminal_count
     terminal_count=$(echo "$terminals" | jq 'length' 2>/dev/null || echo 0)
 
+    # Machine-daemon state (#4793) -- collected up front so the "no local
+    # agents" branch below can name its own scope explicitly instead of
+    # reading as a bare, fleet-wide "No agents running".
+    collect_daemon_state
+
     # Running agents section
     if [[ ${#running_ids[@]} -eq 0 ]]; then
-        echo -e "${YELLOW}No agents running.${NC}"
+        if [[ "$daemon_manages_repo" == "true" ]]; then
+            echo -e "${YELLOW}local agent pool: none${NC} — ${CYAN}machine daemon manages this repo${NC} (see Machine Daemon below)"
+        else
+            echo -e "${YELLOW}No agents running.${NC}"
+        fi
     else
         echo -e "${GREEN}Running agents (${#running_ids[@]}):${NC}"
         echo ""
@@ -401,19 +623,58 @@ emit_human() {
         fi
     fi
 
+    # Machine Daemon section (#4793): the local tmux pool above is only ONE
+    # of two ways work gets picked up in this repo -- a separate
+    # machine-level `loom-daemon` fleet can independently dispatch sweeps
+    # here with zero local tmux sessions. Omitted entirely when no
+    # loom-daemon binary is resolvable at all (nothing to report, same
+    # graceful-degradation shape as the Work Queue section below).
+    if [[ "$daemon_bin_found" == "true" ]]; then
+        echo ""
+        echo -e "${BOLD}Machine Daemon:${NC}"
+        if [[ "$daemon_reachable" == "true" ]]; then
+            echo -e "  Daemon:    ${GREEN}alive${NC} (reachable over IPC)"
+            if [[ "$daemon_manages_repo" == "true" ]]; then
+                echo -e "  Registry:  ${GREEN}this repo is managed${NC} (in-flight sweeps: ${CYAN}${daemon_in_flight:-0}${NC})"
+                if [[ "$daemon_gate_halted" == "true" ]]; then
+                    echo -e "  Gate:      ${RED}HALTED${NC} (main-health gate is blocking dispatch for this repo)"
+                else
+                    echo -e "  Gate:      ${GREEN}open${NC} (dispatch not gated)"
+                fi
+                if [[ -n "$daemon_roles" ]]; then
+                    echo -e "  Roles:     ${CYAN}${daemon_roles// /, }${NC} (recently ticked by the role runner)"
+                fi
+            else
+                echo -e "  Registry:  ${YELLOW}this repo is NOT a registered/managed workspace${NC}"
+            fi
+        else
+            local state_desc="${daemon_install_state:-not running}"
+            echo -e "  Daemon:    ${YELLOW}unreachable${NC} (${state_desc}${daemon_liveness_detail:+: $daemon_liveness_detail})"
+            if [[ "$daemon_manages_repo" == "true" ]]; then
+                echo -e "  Registry:  ${CYAN}this repo IS registered${NC} in ~/.loom/workspaces.json, but the daemon is not answering — dispatch is currently NOT happening"
+            fi
+        fi
+        echo -e "  ${GRAY}(full detail: ./.loom/bin/loom health   or  loom-daemon status)${NC}"
+    fi
+
     # Work-queue depth section (open issue/PR counts by label). Omitted
     # entirely — never an error — when gh is unavailable or the forge is not
     # GitHub, so the script still exits 0 on any forge.
     local wq
     wq=$(work_queue_json)
     if [[ -n "$wq" && "$wq" != "null" ]]; then
-        local wq_issue wq_rr wq_pr
+        local wq_issue wq_rr wq_pr wq_architect wq_hermit wq_curated wq_auditor
         wq_issue=$(echo "$wq" | jq -r '."loom:issue"' 2>/dev/null)
         wq_rr=$(echo "$wq" | jq -r '."loom:review-requested"' 2>/dev/null)
         wq_pr=$(echo "$wq" | jq -r '."loom:pr"' 2>/dev/null)
+        wq_architect=$(echo "$wq" | jq -r '."loom:architect"' 2>/dev/null)
+        wq_hermit=$(echo "$wq" | jq -r '."loom:hermit"' 2>/dev/null)
+        wq_curated=$(echo "$wq" | jq -r '."loom:curated"' 2>/dev/null)
+        wq_auditor=$(echo "$wq" | jq -r '."loom:auditor"' 2>/dev/null)
         echo ""
         echo -e "${BOLD}Work Queue:${NC}"
         echo -e "  ${CYAN}loom:issue${NC} ${wq_issue}   ${CYAN}loom:review-requested${NC} ${wq_rr}   ${CYAN}loom:pr${NC} ${wq_pr}"
+        echo -e "  ${BOLD}Pending proposals:${NC} ${CYAN}loom:architect${NC} ${wq_architect}   ${CYAN}loom:hermit${NC} ${wq_hermit}   ${CYAN}loom:curated${NC} ${wq_curated}   ${CYAN}loom:auditor${NC} ${wq_auditor}"
     fi
 
     echo ""

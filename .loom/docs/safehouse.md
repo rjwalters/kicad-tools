@@ -99,7 +99,7 @@ class first, repo second**:
 
 | Tier | Room | Carries | Volume / notifications |
 |---|---|---|---|
-| 1 | `rooms.signal` (`loom-fleet`) | operator ↔ fleet conversation, every `handoff`, terminal `ack` / `completion`, future wave digests (#4217) | low, notifications **on**, cross-repo by design |
+| 1 | `rooms.signal` (`loom-fleet`) | operator ↔ fleet conversation, every `handoff`, terminal `ack` / `completion`, wave-dispatch `digest` roots (#4217) | low, notifications **on**, cross-repo by design |
 | 2 | `rooms.byRepo[<repo>]` (`fleet-<repo>`) | `task` (dispatch + phase transitions) and `chat` (worker chatter) | high, **muted** by default, opened while actively watching a repo |
 
 A Matrix **Space** ("2AM Fleet") grouping these rooms is tracked separately in the
@@ -112,13 +112,13 @@ safehouse repo — Loom creates no Space.
 - The kind → tier table is the whole routing decision:
   | Envelope `type` | Room |
   |---|---|
-  | `handoff`, `ack`, `completion` | signal |
+  | `handoff`, `ack`, `completion`, `digest` | signal |
   | `task`, `chat` | repo firehose |
   It is written as a **compile-time-exhaustive `match`** over an `EnvelopeKind`
-  enum (`safehouse.rs`), with no wildcard arm, so a future sixth envelope type
-  fails to compile (and a type added to only one of `KNOWN_TYPES` /
-  `EnvelopeKind` fails a test) rather than silently defaulting into the wrong
-  room.
+  enum (`safehouse.rs`), with no wildcard arm, so a future member fails to
+  compile (and a type added to only one of `KNOWN_TYPES` / `EnvelopeKind` fails
+  a test) rather than silently defaulting into the wrong room. `digest` (#4217)
+  is the newest member.
 - **Rooms are per-repo, not per-host.** Host attribution already rides the Matrix
   sender (per-host bot accounts), so a second host working the same repo posts
   into the same room.
@@ -165,7 +165,7 @@ alias it asked for).
 New template keys reach existing consumer configs via the installer deep-merge
 (template is the base, existing values win) — no migration needed. The tier
 ownership of the block is noted in
-[`docs/design/config-resolution-tiers.md`](../../docs/design/config-resolution-tiers.md).
+[`docs/design/config-resolution-tiers.md`](https://github.com/rjwalters/loom/blob/main/docs/design/config-resolution-tiers.md).
 
 ## Operator setup: provisioning the persona (requires a safehoused restart)
 
@@ -552,6 +552,39 @@ network, unauthenticated, timeout) degrades to narrating the dispatch line
 `sweep_id` (no issue number), and `SweepExited` already emits the completion
 `ack` with richer data — narrating both would double-post per completion.
 
+### Dispatch-digest batching (issue #4217)
+
+A work-finder tick can admit several issues in quick succession (observed: 7
+dispatches within seconds), and each one used to become its own `task`-kind
+thread root — an operator watching the signal-adjacent timeline saw N
+near-identical `#N · dispatch` lines at once. `run_sink` now buffers admitted
+`SweepGlobalDispatch(Issue)` events for a coalescing window
+(`LOOM_SAFEHOUSE_DISPATCH_DIGEST_WINDOW_MS`, default 30s, ms-precision test
+override) measured from the *first* buffered dispatch, then flushes:
+
+- **Exactly one buffered dispatch** ⇒ unchanged pre-#4217 behavior: the single
+  `task`-kind envelope (`<repo>#N · dispatch`, title-enriched per AC3 above),
+  repo-qualified `task_id`, routed via the normal per-repo firehose path.
+- **More than one** ⇒ **one** `digest`-kind envelope instead, grouped per repo
+  and counted, issue numbers ascending within a group, groups sorted by
+  descending count (ties alphabetical): `dispatched 7: loom×6 (#4028 #4106
+  #4144 #4157 #4162 #4164), vibesql×1 (#6173)`. No per-issue `task` envelope is
+  sent for these — each issue's own thread still starts from its first
+  *substantive* event (a `SweepPhase`/`SweepBlocker`/completion, all
+  unaffected by this batching), not from the dispatch. No `gh` title lookups
+  are made for a digest (would be N calls for one line).
+- **`digest` is a new envelope kind** (`KNOWN_TYPES`/`EnvelopeKind`'s sixth
+  member, #4217), routed to the signal room via `AttentionClass::Signal` —
+  never the per-repo firehose, since one digest can span several repos. Each
+  flushed digest gets a fresh `task_id` (`dispatch_digest_<seq>`) so
+  consecutive digests are separate thread roots, not one perpetual thread.
+- Buffering, grouping, and the window itself add no new failure mode: a
+  digest send is rejected/dropped exactly like any other envelope
+  (degradation contract unchanged), and the buffer lives only in `run_sink`'s
+  in-memory state — a daemon restart loses at most one in-flight window's
+  worth of not-yet-flushed dispatches, which simply narrate on the next
+  restart's own first dispatch instead.
+
 ### Completion envelopes → the public fleet feed (#4426)
 
 safehoused's egress subsystem mirrors well-formed **`completion`** envelopes out
@@ -740,11 +773,17 @@ what feeds the public fleet feed on 2amlogic.com. Loom is the producer:
 - `AF_UNIX`, **newline-delimited JSON**, one object per line, bidirectional.
 - Mandatory first request: `{"id":0,"op":"hello","persona":"<name>"}`.
 - `send` carries `to`/`type`/`body` and optional `task_id`/`room`/`meta`. `type`
-  is a closed enum `{chat,task,handoff,ack,completion}` owned by the safehouse
-  repo (loom invents no members); `task_id` must be `[A-Za-z0-9_]`; `meta` is
-  valid **only** on a `completion`, which in turn **requires** it (see above) —
-  all validated before sending. The daemon **stamps `from`** from the socket
-  identity — the client never sends one (no impersonation).
+  is a closed enum owned by the safehouse repo, currently
+  `{chat,task,handoff,ack,completion,digest}` — loom does not extend it
+  unilaterally; each member (most recently `completion` in #4553, `digest` in
+  #4217) is added in the same coordinated lockstep as the rest of this
+  protocol. `task_id` must be `[A-Za-z0-9_]`; `meta` is valid **only** on a
+  `completion`, which in turn **requires** it (see above) — all validated
+  before sending. A `send` whose `type` safehoused does not yet recognize is
+  rejected at the protocol layer like any other malformed request — the same
+  degradation contract as everything else in this module (warn once, drop,
+  sweep unaffected). The daemon **stamps `from`** from the socket identity —
+  the client never sends one (no impersonation).
 - Replies echo the request `id`. **Async push lines are interleaved on the same
   connection, carry an `event` key, and have no `id`** — the client
   demultiplexes by skipping any line with an `event` key. The **narration**
@@ -760,7 +799,10 @@ what feeds the public fleet feed on 2amlogic.com. Loom is the producer:
   attention-class routing layer: `RoomMap` (config/env), `EnvelopeKind` +
   `AttentionClass` (the exhaustive kind → tier table), `RoomRouter` (per-envelope
   room resolution, lazy `fleet-<repo>` creation, warn-once degradation) and
-  `SafehouseClient::send_to` / `create_room`.
+  `SafehouseClient::send_to` / `create_room`. Also (#4217) the dispatch-digest
+  batching in `run_sink`: `PendingDispatch`, `dispatch_digest_window()`,
+  `dispatch_envelope()` (the single-dispatch shape, unchanged), and
+  `build_dispatch_digest_envelope()` (the grouped burst root).
 - `loom-daemon/src/transcript_tokens.rs` — (#4699) the on-disk token source
   behind the completion envelope's `tokens` field: Claude Code's project-slug
   mangling, the `/loom:sweep <issue>` session match, mtime windowing and the

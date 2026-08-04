@@ -39,6 +39,14 @@
 #   4. Control: unchanged behavior for a genuine linked worktree — both the
 #      loom-managed (auto-removed) and user-owned (generic "lacks sentinel"
 #      advice, `git worktree remove` suggestion intact) cases.
+#   5. #5015 extension: the two-step advice above was previously the END of
+#      the story even when the tip-match safety check (already computed for
+#      the force-delete path) provably held. Now, when the primary
+#      checkout's tree is also clean, merge-pr.sh performs the checkout+
+#      delete itself rather than just printing instructions; a dirty tree
+#      keeps exactly the old print-only behavior. See also
+#      test-merge-pr-local-branch-cleanup.sh cases (g)-(j) for the
+#      opt-out-flag and active-stash edge cases.
 
 set -euo pipefail
 
@@ -118,6 +126,11 @@ git -C "$PRIMARY" config user.name "Test"
 echo "hello" > "$PRIMARY/README.md"
 git -C "$PRIMARY" add -A
 git -C "$PRIMARY" commit -q -m "initial"
+# Normalize the initial branch name so the test does not depend on the
+# runner's init.defaultBranch git config — _maybe_delete_local_branch()'s
+# auto-cleanup does `git checkout "$DEFAULT_BRANCH_NAME"` (main), which would
+# otherwise fail on runners where `git init` does not name the branch `main`.
+git -C "$PRIMARY" branch -M main
 
 # The merged PR's branch, checked out directly in the primary — NO
 # .loom-managed sentinel here (this is the real-world case: the primary
@@ -238,6 +251,68 @@ else
         fail "user-owned worktree advice regressed: $user_sim_out"
     fi
 fi
+
+# --- Test 5: primary-checkout auto-cleanup when it is PROVABLY safe (#5015) ---
+#
+# Test 3 above only exercises the "print manual instructions" path because it
+# calls _maybe_delete_local_branch without an expected_head_sha, so the
+# tip-match safety check never engages. This distinguishes that case from the
+# genuinely-safe one: a clean tree AND a tip matching the merged PR head SHA
+# completes the cleanup automatically instead of just printing advice. The
+# companion dirty-tree control confirms the two-step advice remains unchanged
+# whenever the tree is NOT provably clean.
+echo ""
+echo "Test 5: primary-checkout auto-cleanup when provably safe (#5015)"
+
+# shellcheck disable=SC2034
+CLEANUP_PRIMARY_CHECKOUT=true
+
+# (a) clean tree + tip matches the merged PR head SHA -> auto checkout+delete.
+git -C "$PRIMARY" checkout -q -b feature/issue-501
+echo "clean work" >> "$PRIMARY/README.md"
+git -C "$PRIMARY" commit -q -am "issue 501 work"
+CLEAN_TIP_SHA="$(git -C "$PRIMARY" rev-parse feature/issue-501)"
+
+set +e
+clean_out="$(_maybe_delete_local_branch "feature/issue-501" "$CLEAN_TIP_SHA" 2>&1)"
+clean_rc=$?
+set -e
+
+if [[ $clean_rc -eq 0 ]] \
+   && [[ "$clean_out" == *"deleted"* ]] \
+   && [[ "$clean_out" == *"safe force-delete"* ]] \
+   && [[ "$(git -C "$PRIMARY" branch --show-current)" == "main" ]] \
+   && ! git -C "$PRIMARY" show-ref --verify --quiet refs/heads/feature/issue-501; then
+    pass "(5a) clean tree + tip-matching head SHA auto-cleans the branch instead of printing advice"
+else
+    fail "(5a) expected auto-cleanup; rc=$clean_rc, out: $clean_out, branch: $(git -C "$PRIMARY" branch --show-current)"
+fi
+
+# (b) control: same setup but a DIRTY tree -> unchanged manual-instructions
+# behavior (this is the "leave current behavior unchanged when the tree is
+# dirty" acceptance criterion).
+git -C "$PRIMARY" checkout -q -b feature/issue-502
+echo "clean work" >> "$PRIMARY/README.md"
+git -C "$PRIMARY" commit -q -am "issue 502 work"
+DIRTY_TIP_SHA="$(git -C "$PRIMARY" rev-parse feature/issue-502)"
+echo "uncommitted" >> "$PRIMARY/README.md"
+
+set +e
+dirty_out="$(_maybe_delete_local_branch "feature/issue-502" "$DIRTY_TIP_SHA" 2>&1)"
+dirty_rc=$?
+set -e
+
+if [[ $dirty_rc -eq 0 ]] \
+   && [[ "$dirty_out" == *"checked out in the primary repository checkout"* ]] \
+   && [[ "$dirty_out" == *"checkout main"* ]] \
+   && [[ "$dirty_out" == *"branch -D feature/issue-502"* ]] \
+   && [[ "$(git -C "$PRIMARY" branch --show-current)" == "feature/issue-502" ]] \
+   && git -C "$PRIMARY" show-ref --verify --quiet refs/heads/feature/issue-502; then
+    pass "(5b) a dirty tree keeps the manual-instructions behavior unchanged, HEAD untouched"
+else
+    fail "(5b) expected unchanged manual-instructions behavior on a dirty tree; rc=$dirty_rc, out: $dirty_out"
+fi
+git -C "$PRIMARY" checkout -q -- README.md
 
 # --- Summary ---
 echo ""

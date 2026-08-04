@@ -22,6 +22,11 @@
 #      worktree root override (locks stay in the main repo).
 #   7. loom_worktree_root() unit behavior: relative override is rejected with a
 #      warning and falls back to the default.
+#   8. loom_worktree_root() unit behavior: a resolved override target that
+#      exists but is unreadable (chmod 000 — stat succeeds, readdir fails,
+#      e.g. macOS TCC removable-volumes EPERM) warns loudly and falls back to
+#      the default, for both the env-var and config-key branches. A
+#      nonexistent target still passes through unchanged (#5237).
 #
 # Pattern follows test-worktree-sentinel.sh / test-worktree-nested-symlinks.sh:
 # throwaway bare origin + repo in a mktemp dir, copy worktree.sh + lib/, run.
@@ -255,6 +260,53 @@ printf '{ "worktree": { "root": "also/relative" } }\n' > "$CFGREPO/.loom/config.
 r=$(loom_worktree_root "$CFGREPO" 2>/dev/null)
 assert_eq "$r" "$CFGREPO/.loom/worktrees" "relative config override falls back to default path"
 rm -rf "$CFGREPO"
+
+# --- Test 8: env-var override target unreadable (readdir EPERM) → falls back ---
+echo ""
+echo "Test 8: env-var override target exists but is unreadable (readdir EPERM) -> falls back"
+unset LOOM_WORKTREE_ROOT
+UNREADABLE_ENV_BASE=$(mktemp -d /tmp/loom-unread-env.XXXXXX)
+UNREADABLE_ENV_REPO_ROOT="/tmp/loom-unread-env-repo/reporoot"
+UNREADABLE_ENV_TARGET="$UNREADABLE_ENV_BASE/$(basename "$UNREADABLE_ENV_REPO_ROOT")"
+mkdir -p "$UNREADABLE_ENV_TARGET"
+chmod 000 "$UNREADABLE_ENV_TARGET"
+r=$(LOOM_WORKTREE_ROOT="$UNREADABLE_ENV_BASE" loom_worktree_root "$UNREADABLE_ENV_REPO_ROOT" 2>/dev/null)
+assert_eq "$r" "$UNREADABLE_ENV_REPO_ROOT/.loom/worktrees" "unreadable env-override target falls back to default path"
+if LOOM_WORKTREE_ROOT="$UNREADABLE_ENV_BASE" loom_worktree_root "$UNREADABLE_ENV_REPO_ROOT" 2>&1 >/dev/null | grep -q "unreadable"; then
+    pass "unreadable env-override target emits a stderr warning"
+else
+    fail "unreadable env-override target did not warn"
+fi
+chmod 755 "$UNREADABLE_ENV_TARGET"
+rm -rf "$UNREADABLE_ENV_BASE"
+
+# Sanity: a NONEXISTENT env-override target still passes through unchanged
+# (callers mkdir -p it later) — the readdir probe must not fire on a target
+# that simply doesn't exist yet.
+NONEXISTENT_ENV_BASE="/tmp/loom-nonexistent-env-base.$$"
+r=$(LOOM_WORKTREE_ROOT="$NONEXISTENT_ENV_BASE" loom_worktree_root "$UNREADABLE_ENV_REPO_ROOT" 2>/dev/null)
+assert_eq "$r" "$NONEXISTENT_ENV_BASE/$(basename "$UNREADABLE_ENV_REPO_ROOT")" "nonexistent env-override target still passes through unchanged"
+
+# --- Test 9: config-key override target unreadable (readdir EPERM) → falls back ---
+echo ""
+echo "Test 9: config-key override target exists but is unreadable (readdir EPERM) -> falls back"
+unset LOOM_WORKTREE_ROOT
+UNREADABLE_CFG_BASE=$(mktemp -d /tmp/loom-unread-cfg.XXXXXX)
+CFGREPO2=$(mktemp -d /tmp/loom-unread-cfgrepo.XXXXXX)
+mkdir -p "$CFGREPO2/.loom"
+printf '{ "worktree": { "root": "%s" } }\n' "$UNREADABLE_CFG_BASE" > "$CFGREPO2/.loom/config.json"
+UNREADABLE_CFG_TARGET="$UNREADABLE_CFG_BASE/$(basename "$CFGREPO2")"
+mkdir -p "$UNREADABLE_CFG_TARGET"
+chmod 000 "$UNREADABLE_CFG_TARGET"
+r=$(loom_worktree_root "$CFGREPO2" 2>/dev/null)
+assert_eq "$r" "$CFGREPO2/.loom/worktrees" "unreadable config-override target falls back to default path"
+if loom_worktree_root "$CFGREPO2" 2>&1 >/dev/null | grep -q "unreadable"; then
+    pass "unreadable config-override target emits a stderr warning"
+else
+    fail "unreadable config-override target did not warn"
+fi
+chmod 755 "$UNREADABLE_CFG_TARGET"
+rm -rf "$UNREADABLE_CFG_BASE" "$CFGREPO2"
 
 # --- Summary ---
 echo ""

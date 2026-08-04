@@ -33,6 +33,12 @@ SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FLEET_CHECK="$SCRIPTS_DIR/fleet-check.sh"
 PY="${LOOM_PYTHON:-python3}"
 
+# Background-PID bookkeeping (#4773): the mock AF_UNIX server backgrounded by
+# start_mock() (below) is tracked here so the EXIT/INT/TERM trap can reap it
+# even if this suite is killed before an in-body `wait "$MOCK_PID"` runs.
+# shellcheck source=lib/bg-proc-trap.sh
+source "$SCRIPT_DIR/lib/bg-proc-trap.sh"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -73,7 +79,15 @@ if ! command -v "$PY" >/dev/null 2>&1; then
 fi
 
 TMPDIR_TEST="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR_TEST"' EXIT
+# bg_proc_reap kills the mock server tracked via bg_proc_track in start_mock()
+# below (a backstop for a kill BEFORE the in-body `wait "$MOCK_PID"` runs);
+# EXIT/INT/TERM (not just EXIT, #4773) so a hard interruption of this suite
+# still reaps it. NOTE: a bare `trap CMD EXIT INT TERM` runs CMD on INT/TERM
+# but does NOT stop the script (only an EXIT-trap firing auto-exits) -- the
+# explicit `exit` below is required, else a SIGTERM'd suite would clean up
+# once and then keep running every remaining test case.
+trap 'bg_proc_reap; rm -rf "$TMPDIR_TEST"' EXIT
+trap 'bg_proc_reap; rm -rf "$TMPDIR_TEST"; exit 1' INT TERM
 
 # Mock AF_UNIX safehoused: accept one connection, reply ok to hello, then
 # reply to `check` per the scripted behavior for this record, and record
@@ -174,6 +188,7 @@ start_mock() {
     local sock="$1" rec="$2"
     "$PY" "$MOCK_PY" "$sock" "$rec" &
     MOCK_PID=$!
+    bg_proc_track "$MOCK_PID"
     local i=0
     while [[ ! -S "$sock" && $i -lt 50 ]]; do
         sleep 0.05

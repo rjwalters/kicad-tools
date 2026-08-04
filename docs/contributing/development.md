@@ -163,6 +163,51 @@ job rebuilds from a clean checkout and asserts the guard reports the
 backend as available, so a forgotten version bump or stale `.so` will fail
 CI rather than silently regress production.
 
+### How the build verifies itself (Issue #4589)
+
+`kct build-native` verifies the extension it just installed by running
+`get_backend_info()` in a **freshly spawned interpreter**
+(`cpp_backend.probe_backend_info()`), not by reloading the module in the
+process that did the build. This matters because a C extension cannot be
+re-imported from a replaced file in the same process: once
+`router_cpp.*.so` has been `dlopen`'d, CPython keeps the initialised module
+in a runtime extension cache that neither `sys.modules.pop()` nor
+`importlib.invalidate_caches()` clears, so the re-import returns the
+*identical* module object — describing the **pre-build** extension.
+
+`kct build-native --check` resolves availability through the same
+`probe_backend_info()` helper, so the two commands cannot report different
+answers for the same on-disk state. They previously could, in both
+directions:
+
+| Rebuild trigger | Old in-process probe | Reality |
+|---|---|---|
+| `BUILD_VERSION` mismatch | `Extension installed but not loading correctly` | fine — `--check` reported *available* seconds later |
+| source newer than `.so` (mtime) | `installed successfully!` | unverified — success was asserted against code the process never loaded |
+
+Practical consequences for contributors:
+
+- **A build failure warning now names the cause**: the
+  `unavailable_reason` (ImportError text / ABI mismatch / `BUILD_VERSION`
+  mismatch), the `.so` path probed, and the interpreter used.
+- **`--check` still compiles nothing** and stays sub-second in a warm venv;
+  it returns before `build_native()` is ever called. A multi-minute
+  `uv run kct build-native --check` in a fresh worktree is `uv sync`
+  creating the venv, not this command building.
+- **`--check` also prints `BUILD_VERSION`**, which is the number the
+  staleness guard actually checks — the `version 1.0.0` string is the
+  extension's own version and never changes on a bindings bump.
+- **`kct route`'s silent auto-build** goes through the same probe. When a
+  rebuild succeeds but the running process cannot hot-swap the replaced
+  extension, it now says exactly that ("re-run the command") instead of
+  announcing a 10-100x-slower Python fallback as if the build had failed.
+- The `.so` is installed with a temp file + `os.replace()`, so a
+  concurrently running process never reads a half-written image, and
+  `_find_installed_so()` resolves the extension suffix of the **running**
+  interpreter (`importlib.machinery.EXTENSION_SUFFIXES`) instead of the
+  first `glob` hit — a checkout carrying 312/313/314 builds side by side no
+  longer makes rebuild decisions against a `.so` it never loads.
+
 ---
 
 ## Running Tests

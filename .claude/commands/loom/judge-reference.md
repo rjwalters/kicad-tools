@@ -70,12 +70,13 @@ wrong tree. (Observed in PR #2818 review.)
 source root(s) to `PYTHONPATH` before invoking pytest, ensuring tests import the worktree's
 version. Use it everywhere you would otherwise call `python3 -m pytest`.
 
-> **Loom's own repo is not a Python repo.** Epic #4081 Phase 4 (#4557) retired the `loom-tools`
-> Python package; Loom's orchestration layer is the native `loom-daemon` binary plus bash. When
-> reviewing a Loom PR, the relevant suites are `cargo test --workspace` and the bash suites under
-> `defaults/scripts/tests/` + `scripts/test-installer.sh`. The only Python left is the opt-in
-> `loom-search` carve-out (`loom-tools/src/loom_tools/semantic_search.py`) — this Python section
-> applies to it, and to the other repos Loom orchestrates.
+> **Loom's own repo is not a Python repo — and has no Python at all.** Epic #4081 Phase 4 (#4557)
+> retired the `loom-tools` package's core, and #4970 finished the job by retiring its last
+> residue, the opt-in `loom-search` carve-out (per the operator's RETIRE decision on #4608).
+> Loom's orchestration layer is the native `loom-daemon` binary plus bash. When reviewing a Loom
+> PR, the relevant suites are `cargo test --workspace` and the bash suites under
+> `defaults/scripts/tests/` + `scripts/test-installer.sh`. This "Python Repositories" section
+> applies to the other repos Loom orchestrates, not to Loom's own repo.
 
 **Preferred: Use `pytest-testmon` when available**
 

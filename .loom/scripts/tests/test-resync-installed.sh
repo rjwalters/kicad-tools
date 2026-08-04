@@ -16,6 +16,9 @@
 #   (j) local-only custom role -> survives untouched
 #   (k) resync-ignore pins a new-surface file -> reported "skipped"
 #   (l) symlinked install target -> skipped, not clobbered
+#   (l2) symlinked SOURCE file -> resolved to its content (not a copied link),
+#        appears in the per-file report (updated/unchanged), destination-side
+#        symlink protection (l) is unaffected (#5222)
 #   (m) recorded loom_source gone -> clear error, exit 1
 #   (n) metadata re-stamp -> loom_version/loom_commit/last_resync present after apply
 # Canonical-guard-defer (#4041, #4403, #4566):
@@ -93,6 +96,10 @@ export GIT_COMMITTER_NAME="test" GIT_COMMITTER_EMAIL="test@example.com"
 #   .loom/scripts/custom-only.sh     (repo-specific, no defaults/ counterpart)
 # Widened surfaces (#4239):
 #   defaults/roles/builder.md            -> .loom/roles/builder.md (drift)
+#   defaults/roles/symlinked-role.md     -> .loom/roles/symlinked-role.md (SOURCE
+#                                            is a symlink to a sibling file, #5222 —
+#                                            mirrors defaults/roles/*.md -> ../.claude/
+#                                            commands/loom/*.md in the real repo)
 #   defaults/docs/troubleshooting.md     -> .loom/docs/troubleshooting.md (drift)
 #   defaults/.loom/bin/loom              -> .loom/bin/loom (drift)
 #   defaults/.claude/commands/loom/x.md  -> .claude/commands/loom/x.md (drift)
@@ -125,6 +132,12 @@ make_fixture() {
     printf 'ROLE-NEW\n' > "$repo/defaults/roles/builder.md"
     printf 'ROLE-OLD\n' > "$repo/.loom/roles/builder.md"
     printf 'CUSTOM-ROLE\n' > "$repo/.loom/roles/custom-role.md"   # local-only
+
+    # #5222: a SOURCE-side symlink, mirroring the real defaults/roles/*.md ->
+    # ../.claude/commands/loom/*.md skillification layout. sync_one/resync_tree
+    # must resolve this to its target's content, never copy the link itself.
+    printf 'SYMLINK-TARGET-CONTENT\n' > "$repo/defaults/roles/_symlink-target.md"
+    ln -s "_symlink-target.md" "$repo/defaults/roles/symlinked-role.md"
 
     printf 'DOC-NEW\n' > "$repo/defaults/docs/troubleshooting.md"
     printf 'DOC-OLD\n' > "$repo/.loom/docs/troubleshooting.md"
@@ -331,6 +344,69 @@ if [[ -L "$REPO/.loom/docs/troubleshooting.md" ]]; then
     pass "(l) symlink left intact (not clobbered into a regular file)"
 else
     fail "(l) symlink was clobbered"
+fi
+
+# --- (l2) symlinked SOURCE file is resolved to content, not silently skipped -
+#
+# #5222: defaults/roles/symlinked-role.md (built by make_fixture as a symlink
+# to the sibling defaults/roles/_symlink-target.md) mirrors the real repo's
+# defaults/roles/*.md -> ../.claude/commands/loom/*.md skillification layout.
+# Before the fix, plain `find -type f` lstats each entry, a symlink never
+# matches `-type f`, so this file fell out of the walk entirely -- never
+# reported, never copied -- while the consumer's install-metadata.json still
+# got re-stamped current. The regression check: the resolved destination must
+# be a REGULAR FILE with the target's content, not a symlink, and the file
+# must show up in the per-file report.
+echo "Test group 10b: symlinked SOURCE file is resolved to content (#5222)"
+REPO="$(make_fixture)"
+DRY_OUT="$(cd "$REPO" && bash "$SCRIPT" --dry-run 2>&1)"
+RC=$?
+if [[ $RC -eq 2 ]] && grep -q "roles/symlinked-role.md" <<<"$DRY_OUT"; then
+    pass "(l2) --dry-run reports the symlinked source file, not silently omitted"
+else
+    fail "(l2) --dry-run did not report roles/symlinked-role.md (rc=$RC)"
+fi
+if [[ ! -e "$REPO/.loom/roles/symlinked-role.md" ]]; then
+    pass "(l2) --dry-run created nothing for the symlinked source file"
+else
+    fail "(l2) --dry-run unexpectedly wrote .loom/roles/symlinked-role.md"
+fi
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]]; then pass "(l2) apply exits 0"; else fail "(l2) apply exits 0 (got $RC)"; fi
+if grep -q "roles/symlinked-role.md" <<<"$OUT"; then
+    pass "(l2) apply reports the symlinked source file in the per-file output"
+else
+    fail "(l2) apply did not report roles/symlinked-role.md"
+fi
+if [[ -f "$REPO/.loom/roles/symlinked-role.md" && ! -L "$REPO/.loom/roles/symlinked-role.md" ]]; then
+    pass "(l2) destination is a REGULAR FILE (not a copied symlink)"
+else
+    fail "(l2) destination is missing or is itself a symlink"
+fi
+if [[ "$(cat "$REPO/.loom/roles/symlinked-role.md" 2>/dev/null)" == "SYMLINK-TARGET-CONTENT" ]]; then
+    pass "(l2) destination content matches the symlink's RESOLVED target"
+else
+    fail "(l2) destination content does not match the resolved target"
+fi
+# Idempotent rerun: no drift once the symlinked source has been resolved once.
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]] && grep -q "Already in sync" <<<"$OUT"; then
+    pass "(l2) rerun is a clean no-op (symlinked source treated as unchanged)"
+else
+    fail "(l2) rerun was not a clean no-op (rc=$RC)"
+fi
+# The destination-side symlink protection case (l) must be completely
+# unaffected by resolving SOURCE-side symlinks.
+REPO2="$(make_fixture)"
+rm -f "$REPO2/.loom/docs/troubleshooting.md"
+ln -s "../../defaults/docs/troubleshooting.md" "$REPO2/.loom/docs/troubleshooting.md"
+(cd "$REPO2" && bash "$SCRIPT" >/dev/null 2>&1)
+if [[ -L "$REPO2/.loom/docs/troubleshooting.md" ]]; then
+    pass "(l2) destination-side symlink protection (l) still holds alongside the source-side fix"
+else
+    fail "(l2) destination-side symlink protection (l) regressed"
 fi
 
 # --- (m) recorded loom_source gone -> clear error, exit 1 --------------------
@@ -540,9 +616,16 @@ fi
 echo "Test group 12c: absent daemon binary -> loud warning, apply still exits 0 (#4280)"
 REPO="$(make_fixture)"
 # Force the resolver to find nothing: no LOOM_DAEMON_BIN, no PATH loom-daemon,
-# no build-output under the fixture's SOURCE_ROOT (the fixture repo).
-OUT="$(cd "$REPO" && env -u LOOM_DAEMON_BIN PATH="/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+# no build-output under the fixture's SOURCE_ROOT (the fixture repo), and no
+# machine-level install fallback (step 4 of loom_locate_daemon_bin) -- on a
+# host with a genuine machine-level Loom install, leaving $HOME/
+# LOOM_DAEMON_BIN_DIR untouched would let that step resolve the real binary
+# and defeat this fixture (#5183).
+NO_BIN_HOME="$(mktemp -d)"
+OUT="$(cd "$REPO" && env -u LOOM_DAEMON_BIN PATH="/usr/bin:/bin" HOME="$NO_BIN_HOME" \
+    LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT" 2>&1)"
 RC=$?
+rm -rf "$NO_BIN_HOME"
 if [[ $RC -eq 0 ]]; then
     pass "(#4280) apply still exits 0 when no daemon binary resolves"
 else
@@ -620,7 +703,7 @@ fi
 echo "Test group 14: canonical guard present + tracked vendored guard is preserved (#4403)"
 REPO="$(make_fixture)"
 mkdir -p "$REPO/.claude/skills/repo/hooks"
-printf '#!/usr/bin/env bash\n# rjwalters/repo#29 canonical guard\necho canonical\n' \
+printf '#!/usr/bin/env bash\n# rjwalters/repo#29 canonical guard\n# implements worktree-write-confinement\necho canonical\n' \
     > "$REPO/.claude/skills/repo/hooks/guard-destructive.sh"
 printf '#!/usr/bin/env bash\necho vendored\n' \
     > "$REPO/defaults/hooks/guard-destructive-generic.sh"
@@ -676,7 +759,7 @@ fi
 echo "Test group 15: canonical guard present + UNTRACKED vendored guard is still removed (#4403)"
 REPO="$(make_fixture)"
 mkdir -p "$REPO/.claude/skills/repo/hooks"
-printf '#!/usr/bin/env bash\n# rjwalters/repo#29 canonical guard\necho canonical\n' \
+printf '#!/usr/bin/env bash\n# rjwalters/repo#29 canonical guard\n# implements worktree-write-confinement\necho canonical\n' \
     > "$REPO/.claude/skills/repo/hooks/guard-destructive.sh"
 printf '#!/usr/bin/env bash\necho vendored\n' \
     > "$REPO/defaults/hooks/guard-destructive-generic.sh"
@@ -696,6 +779,32 @@ if grep -q "removed.*hooks/guard-destructive-generic.sh" <<<"$OUT"; then
     pass "(#4403) removal reported as before"
 else
     fail "(#4403) removal not reported"
+fi
+
+# --- (#4894) capability-gap canonical guard: vendored guard must be KEPT ----
+# The canonical guard carries the repo#29 VERSION marker but NOT the
+# write-confinement CAPABILITY marker (the Repo Skills 0.7.0 shape that
+# motivated #4894). Before #4894, CANONICAL_GUARD_PRESENT was version-only, so
+# this untracked vendored copy would have been removed here too — stripping
+# the dispatcher's fallback out from under it and leaving zero destructive-
+# command coverage, since the dispatcher (correctly, post-#4894) declines to
+# exec a canonical guard that fails the capability probe.
+echo "Test group 15b: canonical guard has version marker but NOT capability marker -> vendored guard is kept, not removed (#4894)"
+REPO="$(make_fixture)"
+mkdir -p "$REPO/.claude/skills/repo/hooks"
+printf '#!/usr/bin/env bash\n# rjwalters/repo#29 canonical guard ONLY\necho canonical\n' \
+    > "$REPO/.claude/skills/repo/hooks/guard-destructive.sh"
+printf '#!/usr/bin/env bash\necho vendored\n' \
+    > "$REPO/defaults/hooks/guard-destructive-generic.sh"
+printf '#!/usr/bin/env bash\necho vendored\n' \
+    > "$REPO/.loom/hooks/guard-destructive-generic.sh"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]]; then pass "(#4894) apply exits 0 with a capability-gap canonical guard present"; else fail "(#4894) apply exits 0 (got $RC)"; fi
+if [[ -f "$REPO/.loom/hooks/guard-destructive-generic.sh" ]]; then
+    pass "(#4894) vendored guard-destructive-generic.sh is KEPT (dispatcher's fallback preserved)"
+else
+    fail "(#4894) vendored guard-destructive-generic.sh was removed despite the canonical guard lacking write-confinement"
 fi
 
 # --- (#4563) refuse to run from a linked worktree ----------------------------

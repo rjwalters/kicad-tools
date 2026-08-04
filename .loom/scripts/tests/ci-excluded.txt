@@ -14,5 +14,4 @@
 
 test-install-reinstall-safety.sh  Already wired in the "Installer Integration Tests" job (#4188); excluded here to avoid double-running it.
 test-spawn-codex.sh  Already wired in the "Codex Adapter Smoke (mocked)" job (#4468), which adds adapter-specific hermeticity guards; excluded here to avoid double-running it.
-test-loom-daemon-update.sh  Non-hermetic: exercises the daemon update+rebuild lifecycle and hangs past 120s locally (waits on process/rebuild orchestration). Wiring it needs a portability/timeout pass — follow-up.
 test-spawn-claude.sh  Non-hermetic: spawn-claude.sh's token selection requires a built loom-daemon binary (#4228), absent on a fresh ubuntu runner (FATAL: no loom-daemon binary). Wiring it needs a cargo build step or a binary stub — follow-up.

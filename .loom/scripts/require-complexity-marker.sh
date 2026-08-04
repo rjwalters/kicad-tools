@@ -46,7 +46,18 @@ else
   echo "BLOCKED: could not fetch issue $REPO#$ISSUE body (both GraphQL and REST failed — likely GitHub API quota exhaustion). Retry or check quota; this is not a curation defect." >&2
   exit 2
 fi
-tier="$(printf '%s' "$body" | grep -o 'loom:complexity=[a-z]*' | head -1 | cut -d= -f2)"
+# Anchor to the canonical HTML-comment marker form (`<!-- loom:complexity=<tier>
+# -->`) rather than a bare `loom:complexity=[a-z]*` substring, and take the LAST
+# such match (#4840). A bare substring match also fires on prose that merely
+# *discusses* the marker syntax — e.g. an issue about the complexity-marker
+# feature itself quoting `` `<!-- loom:complexity=<tier> -->` `` as literal
+# example text. There the `<` right after `=` matches zero `[a-z]` chars,
+# producing an empty match that `head -1` picked over the real marker later in
+# the body, making a validly-marked issue look unmarked. Anchoring to the full
+# `<!-- ... -->` comment form excludes that placeholder text (the literal `<`
+# breaks the `-->` anchor), and `tail -1` picks the marker nearest the end of
+# the body, matching where the marker is conventionally placed.
+tier="$(printf '%s' "$body" | grep -oE '<!--[[:space:]]*loom:complexity=[a-z]*[[:space:]]*-->' | tail -1 | sed -E 's/.*complexity=([a-z]*).*/\1/')"
 
 case "$tier" in
   mechanical|routine|complex)

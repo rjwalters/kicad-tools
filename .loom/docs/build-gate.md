@@ -113,8 +113,7 @@ The gate is **opt-in**. Repos with no `buildGate` block in `.loom/config.json` s
 
 Loom's own `.loom/config.json` points `buildGate.command` at a committed
 wrapper script rather than a single-language one-liner, because this repo is
-polyglot (Rust + bash, plus an opt-in Python carve-out) and no single build tool
-covers it:
+polyglot (Rust + bash) and no single build tool covers it:
 
 ```json
 {
@@ -137,20 +136,22 @@ stages in order under `set -euo pipefail`, aborting on the first non-zero exit:
    `loom-daemon/tests/` are deliberately excluded here — see "Local gate vs.
    CI" below.
 2. `bash scripts/test-installer.sh` — the 131-case bash installer suite.
-3. **Best-effort only:** `python3 -m pytest tests/ -q` in `loom-tools/` with
-   `PYTHONPATH=src`, covering the opt-in
-   [`loom-search`](semantic-search.md) carve-out. **Skipped** — with a printed
-   note, not a failure — unless the host already has a `python3` that can
-   `import pytest`; it never runs `pip install` or materializes a `uv` venv.
-   Opt out explicitly with `LOOM_BUILD_GATE_SKIP_SEARCH=1`.
+3. `bash scripts/test-changelog.sh` — `scripts/changelog.sh`'s unit suite
+   (#5196), against a disposable scratch repo (`CHANGELOG_REPO_ROOT`); no
+   network, no dependency on this repo's own history.
 
-**The gate no longer requires a Python toolchain (epic #4081 Phase 4, #4557).**
-Stage 2 used to be `cd loom-tools && uv run pytest tests/ -q
---ignore=tests/integration` over the whole `loom_tools` package. That package was
-retired — everything it did is native in `loom-daemon` now — so that stage would
-fail against a deleted path. Only the `loom-search` module survived the deletion,
-and it is off the core daemon path, so its coverage moved to the non-blocking
-stage 3 above. See [ADR-0013](../../docs/adr/0013-loom-tools-python-retirement.md).
+**The gate requires no Python toolchain at all (epic #4081 Phase 4, #4557;
+finished by #4970).** Stage 2 used to be `cd loom-tools && uv run pytest
+tests/ -q --ignore=tests/integration` over the whole `loom_tools` package.
+That package was retired — everything it did is native in `loom-daemon`
+now — so that stage would fail against a deleted path. A third, best-effort
+stage covering the opt-in `loom-search` carve-out (`loom-tools/`'s last
+surviving module) survived that retirement, but `loom-search` itself was
+retired in #4970 per the operator's RETIRE decision on #4608 — see
+[semantic-search.md](semantic-search.md) — so there is nothing left for a
+Python-conditional stage to run, and it was removed rather than left as a
+permanent no-op. See
+[ADR-0013](https://github.com/rjwalters/loom/blob/main/docs/adr/0013-loom-tools-python-retirement.md).
 
 **`mcp-loom` (TypeScript) is intentionally excluded** from the gate: it needs
 `npm install`/`npm ci` in a fresh worktree (no guaranteed warm `node_modules`),
@@ -309,7 +310,7 @@ stage set the wrapper runs:
 
 | Tier | `LOOM_BUILD_GATE_TIER` | Stages | Cost |
 |------|------------------------|--------|------|
-| **full** (DEFAULT) | unset / `full` | `cargo test --lib --bins` + installer suite (+ best-effort `loom-search` pytest) | minutes, cold |
+| **full** (DEFAULT) | unset / `full` | `cargo test --lib --bins` + installer suite | minutes, cold |
 | **fast** | `fast` | `cargo build --workspace --lib --bins` (compile) + a `loom-daemon --version` startup smoke | a few minutes cold, no test execution |
 
 The default is unchanged when the variable is absent, so **CI parity, manual

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# check-main-freshness.sh - Warn when local default branch is behind origin.
+# check-main-freshness.sh - Warn when local default branch is behind OR ahead
+# of origin.
 #
 # This is a NON-BLOCKING, advisory check. During a long-running /loom:sweep
 # session, other PRs can merge to origin's default branch — and because the
@@ -9,6 +10,12 @@
 # recently-merged logic (see #3770 for the incident: worktree.sh --base (#3742)
 # and merge-pr.sh auto-reconcile (#3752) were absent from the copies the session
 # was actually running, even though both had merged to origin/main).
+#
+# Ahead is the more dangerous direction (#5182): worktree.sh sets
+# BASE_REF="origin/$DEFAULT_BRANCH", so every builder worktree branches off
+# origin, not local. Unpushed local commits are invisible to every builder
+# dispatched this session — a silent, wave-wide correctness gap, not just
+# stale tooling.
 #
 # It is invoked at the start of /loom:sweep, alongside check-host-sleep.sh
 # (#3350). It MUST NOT block — even if git / the network fails, it returns 0 and
@@ -58,7 +65,7 @@ for arg in "$@"; do
             QUIET=1
             ;;
         --help|-h)
-            sed -n '2,27p' "$0" | sed 's/^# //; s/^#//'
+            sed -n '2,33p' "$0" | sed 's/^# //; s/^#//'
             exit 0
             ;;
         *)
@@ -128,35 +135,62 @@ if ! git show-ref --verify --quiet "refs/remotes/$REMOTE_REF" 2>/dev/null; then
     exit 0
 fi
 
-# ---------- compute how far behind ----------
+# ---------- compute how far behind AND how far ahead ----------
 
 N="$(git rev-list --count "${BRANCH}..${REMOTE_REF}" 2>/dev/null || echo 0)"
 if ! [[ "$N" =~ ^[0-9]+$ ]]; then
     N=0
 fi
 
-if [[ "$N" -eq 0 ]]; then
+# Ahead is the dangerous direction (#5182): worktree.sh sets
+# BASE_REF="origin/$DEFAULT_BRANCH", so every builder worktree branches off
+# REMOTE_REF, not local BRANCH. Unpushed local commits are simply absent from
+# every builder's base — silently, with no error anywhere in the pipeline.
+A="$(git rev-list --count "${REMOTE_REF}..${BRANCH}" 2>/dev/null || echo 0)"
+if ! [[ "$A" =~ ^[0-9]+$ ]]; then
+    A=0
+fi
+
+if [[ "$N" -eq 0 && "$A" -eq 0 ]]; then
     info_oneliner "${GREEN}[freshness-check] local ${BRANCH} is up to date with ${REMOTE_REF}.${NC}"
     exit 0
 fi
 
-# ---------- N > 0: warn (non-blocking) ----------
+# ---------- behind and/or ahead: warn (non-blocking) ----------
 
-warn ""
-warn "${YELLOW}${BOLD}========================================================================${NC}"
-warn "${YELLOW}${BOLD}  WARNING: local ${BRANCH} is behind ${REMOTE_REF} (#3770)${NC}"
-warn "${YELLOW}${BOLD}========================================================================${NC}"
-warn "${YELLOW}Local ${BRANCH} is ${N} commit(s) behind ${REMOTE_REF}.${NC}"
-warn "${YELLOW}The installed .loom/scripts/ and .loom/hooks/ copies are synced from${NC}"
-warn "${YELLOW}defaults/ at install time, so this session may be executing STALE${NC}"
-warn "${YELLOW}orchestration scripts that silently lack recently-merged logic.${NC}"
-warn ""
-warn "${BOLD}Remediation (read-only advisory — this script never pulls for you):${NC}"
-warn "      ${BOLD}git merge --ff-only ${REMOTE_REF}${NC}"
-warn "  then refresh the installed .loom/ copies from defaults/ (#3777):"
-warn "      ${BOLD}./.loom/scripts/resync-installed.sh${NC}"
-warn "  (preview first with ${BOLD}--dry-run${NC}; it only touches files present in defaults/)."
-warn ""
+if [[ "$N" -gt 0 ]]; then
+    warn ""
+    warn "${YELLOW}${BOLD}========================================================================${NC}"
+    warn "${YELLOW}${BOLD}  WARNING: local ${BRANCH} is behind ${REMOTE_REF} (#3770)${NC}"
+    warn "${YELLOW}${BOLD}========================================================================${NC}"
+    warn "${YELLOW}Local ${BRANCH} is ${N} commit(s) behind ${REMOTE_REF}.${NC}"
+    warn "${YELLOW}The installed .loom/scripts/ and .loom/hooks/ copies are synced from${NC}"
+    warn "${YELLOW}defaults/ at install time, so this session may be executing STALE${NC}"
+    warn "${YELLOW}orchestration scripts that silently lack recently-merged logic.${NC}"
+    warn ""
+    warn "${BOLD}Remediation (read-only advisory — this script never pulls for you):${NC}"
+    warn "      ${BOLD}git merge --ff-only ${REMOTE_REF}${NC}"
+    warn "  then refresh the installed .loom/ copies from defaults/ (#3777):"
+    warn "      ${BOLD}./.loom/scripts/resync-installed.sh${NC}"
+    warn "  (preview first with ${BOLD}--dry-run${NC}; it only touches files present in defaults/)."
+    warn ""
+fi
+
+if [[ "$A" -gt 0 ]]; then
+    warn ""
+    warn "${YELLOW}${BOLD}========================================================================${NC}"
+    warn "${YELLOW}${BOLD}  WARNING: local ${BRANCH} is ahead of ${REMOTE_REF} (#5182)${NC}"
+    warn "${YELLOW}${BOLD}========================================================================${NC}"
+    warn "${YELLOW}Local ${BRANCH} is ${A} commit(s) ahead of ${REMOTE_REF} — unpushed.${NC}"
+    warn "${YELLOW}worktree.sh sets BASE_REF=\"origin/\$DEFAULT_BRANCH\", so every builder${NC}"
+    warn "${YELLOW}worktree branches off ${REMOTE_REF}, NOT local ${BRANCH}. These unpushed${NC}"
+    warn "${YELLOW}commits are invisible to every builder dispatched this session — a${NC}"
+    warn "${YELLOW}silent, wave-wide correctness gap, not just stale tooling.${NC}"
+    warn ""
+    warn "${BOLD}Remediation (read-only advisory — this script never pushes for you):${NC}"
+    warn "      ${BOLD}git push origin ${BRANCH}${NC}"
+    warn ""
+fi
 
 # ---------- stretch goal: best-effort installed-vs-defaults drift note ----------
 #
@@ -213,7 +247,13 @@ fi
 warn "${YELLOW}========================================================================${NC}"
 warn ""
 
-info_oneliner "${YELLOW}[freshness-check] WARNING: local ${BRANCH} is ${N} commit(s) behind ${REMOTE_REF}. See stderr for details.${NC}"
+if [[ "$N" -gt 0 && "$A" -gt 0 ]]; then
+    info_oneliner "${YELLOW}[freshness-check] WARNING: local ${BRANCH} has DIVERGED from ${REMOTE_REF} (${N} behind, ${A} ahead/unpushed). See stderr for details.${NC}"
+elif [[ "$N" -gt 0 ]]; then
+    info_oneliner "${YELLOW}[freshness-check] WARNING: local ${BRANCH} is ${N} commit(s) behind ${REMOTE_REF}. See stderr for details.${NC}"
+else
+    info_oneliner "${YELLOW}[freshness-check] WARNING: local ${BRANCH} is ${A} commit(s) ahead of ${REMOTE_REF} (unpushed). See stderr for details.${NC}"
+fi
 
 # Always succeed — this script is advisory only.
 exit 0

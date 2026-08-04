@@ -234,11 +234,14 @@ confusing than useful in machine mode.
 
 `loom restart` mirrors `start`/`stop` — same collision guard — and prefers a
 **drain-and-roll** restart: it first tries the daemon's own supervised restart
-IPC (`loom-daemon restart`, #4077), which never tears down in-flight sweep
-children (unlike a `launchctl bootout`). If that is unavailable (not
+IPC (`loom-daemon restart`, #4077), which can apply a code update without
+touching the loaded launchd job at all. If that is unavailable (not
 launchd-managed) or refused (not currently running, or a pre-#4077 binary), it
 falls back to a plain stop-then-start via the same checkout-resolved
-lifecycle-script delegates.
+lifecycle-script delegates — on launchd this does bootout+bootstrap the job,
+which no longer tears down in-flight sweeps on a current build (every sweep
+runs in its own process group, #5081), though it still cannot apply a plist
+`EnvironmentVariables` change without that reload (#4995).
 
 ### Sweep dispatch on a multi-repo worker host (#4299)
 

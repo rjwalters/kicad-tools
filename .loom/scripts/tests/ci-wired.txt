@@ -7,9 +7,28 @@
 # See ci-excluded.txt for the excluded suites and their reasons.
 # check-ci-suite-manifest.sh enforces that every test-*.sh is in exactly one
 # of these two files. Blank lines and lines beginning with `#` are ignored.
+#
+# Since #4769 this manifest also covers the Claude-path guard suites under
+# tests/hooks/ (repo root, NOT defaults/scripts/tests/ — Repo Skills' guard
+# tests live there, one directory per guard family they test). Entries for
+# suites outside this directory are qualified with their path relative to the
+# repo root (e.g. `tests/hooks/test-guard-destructive.sh`); run-ci-suites.sh
+# and check-ci-suite-manifest.sh both resolve a `/`-containing entry against
+# the repo root instead of this directory. They were confirmed hermetic (no
+# live forge/network calls — the `gh`/`curl` strings in them are guard-input
+# fixtures, never executed) before being wired in here.
+#
+# Since #4451 the manifest also covers defaults/hooks/tests/ — the remaining
+# unwired guard-hook suites (background-subagents, loom-workspace,
+# worktree-paths, methodology-inject, skill-router). Each copies its hook
+# under test into an isolated `mktemp -d` git tree and drives it purely via
+# stdin JSON + env vars (no live forge/network calls, no BSD-only sed/stat/
+# date flags), so they were confirmed hermetic and ubuntu-portable the same
+# way as the tests/hooks/ suites above before being wired in here.
 
 test-archive-transcripts.sh
 test-blame-issue.sh
+test-bounded-run.sh
 test-build-rs-watchset.sh
 test-build-slot.sh
 test-champion-critical-file-check.sh
@@ -25,28 +44,37 @@ test-config-resolver.sh
 test-config-tiers-cli-migration.sh
 test-default-branch.sh
 test-dependency-parse.sh
+test-detect-dependency-cycle.sh
 test-disk-headroom.sh
 test-fleet-check.sh
 test-fleet-send.sh
 test-forge-helpers.sh
+test-forge-helpers-rate-limit-fallback.sh
 test-gh-cached.sh
 test-github-app-token.sh
 test-gitignore-guard.sh
 test-guard-codex-bridge.sh
 test-guard-hook-schema.sh
 test-install-active-session.sh
+test-install-full-reinstall-no-target-mutation.sh
 test-install-pr-markers.sh
 test-install-source-guard.sh
 test-install-stash-scope.sh
+test-install-sync-labels.sh
 test-judge-fanout-experiment.sh
+test-live-state-sandbox.sh
+test-locate-daemon-bin.sh
 test-loom-daemon-launchd-plist.sh
 test-loom-daemon-start.sh
 test-loom-daemon-stop.sh
+test-loom-daemon-update.sh
 test-loom-daemon-watchdog.sh
 test-loom-dispatcher.sh
+test-loom-status.sh
 test-mcp-config.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
 test-merge-pr-auto-reconcile.sh
+test-merge-pr-dirty-worktree-guard.sh
 test-merge-pr-help.sh
 test-merge-pr-local-branch-cleanup.sh
 test-merge-pr-merge-ordering-guard.sh
@@ -68,7 +96,9 @@ test-require-complexity-marker.sh
 test-resolve-tier-model.sh
 test-resync-installed.sh
 test-safehoused-service.sh
+test-spawn-generic.sh
 test-spawn-worker.sh
+test-stale-claim-standdown-suppression.sh
 test-sweep-auto-stack.sh
 test-sweep-checkpoint.sh
 test-sweep-experiment.sh
@@ -76,13 +106,46 @@ test-sweep-pr-mode.sh
 test-sweep-run-registry.sh
 test-sync-labels-repo-flag.sh
 test-verify-install-scope.sh
+test-warn-operator-gated.sh
 test-warn-out-of-set-deps.sh
 test-worktree-base-override.sh
 test-worktree-concurrency.sh
 test-worktree-hookspath.sh
 test-worktree-json-purity.sh
 test-worktree-nested-symlinks.sh
+test-worktree-remote-branch-tracking.sh
 test-worktree-remove.sh
 test-worktree-root-override.sh
 test-worktree-sentinel-reinvoke.sh
 test-worktree-sentinel.sh
+test-worktree-snapshot.sh
+test-worktree-stash-baseline.sh
+
+# tests/hooks/ (repo root) — Claude-path guard suites, wired since #4769.
+tests/hooks/test-guard-destructive-dispatcher.sh
+tests/hooks/test-guard-destructive.sh
+tests/hooks/test-guard-loom-workflow.sh
+
+# defaults/hooks/tests/ — remaining unwired guard-hook suites, wired since #4451.
+defaults/hooks/tests/test-guard-background-subagents.sh
+defaults/hooks/tests/test-guard-loom-workspace.sh
+defaults/hooks/tests/test-guard-worktree-paths.sh
+defaults/hooks/tests/test-methodology-inject.sh
+defaults/hooks/tests/test-skill-router.sh
+
+# tests/install/ — installer/uninstaller unit suites, wired since #5275 (were
+# previously orphaned entirely — appeared in ci.yml only as a paths-filter
+# trigger, never as an invoked job step). All confirmed hermetic (no live
+# network/forge calls, fake/stub binaries only) and ubuntu-portable.
+tests/install/test-daemon-build-shortcut.sh
+tests/install/test-forge-detect.sh
+tests/install/test-git-repo-detection.sh
+tests/install/test-hooks-preserve.sh
+tests/install/test-provision-daemon.sh
+tests/install/test-uninstall-labels-block.sh
+tests/install/test-uninstall-preserve-siblings.sh
+
+# tests/hermit/ — the Hermit role's stateless-ceremony heuristic regression
+# guard, wired since #5275 (was previously orphaned, no CI runner at all).
+# Hermetic: python3 AST parsing over local fixtures only, no network.
+tests/hermit/test-stateless-ceremony.sh

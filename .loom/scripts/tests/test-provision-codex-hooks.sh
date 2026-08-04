@@ -19,6 +19,13 @@
 #   7. per-profile isolation: trusting profile A does not make profile B ready
 #   8. remove deletes ONLY Loom's entry and leaves credentials + user config
 #   9. credential hygiene: auth.json is never read, copied, or echoed
+#   10. trust-baseline diff (issue #5005): a NEW trusted_hash appearing after
+#       install reports trustSignal=baseline-diff; an idempotent reinstall of
+#       unchanged content never resets an already-established trust; a
+#       content-changing reinstall DOES require a fresh trust decision; a
+#       legacy receipt (no baseline field) falls back to trustSignal=
+#       legacy-coarse rather than losing readiness on a Loom upgrade, and the
+#       next install migrates it by grandfathering existing trust
 #
 # Usage: ./defaults/scripts/tests/test-provision-codex-hooks.sh
 
@@ -221,6 +228,70 @@ bash "$PROVISION" verify --codex-home "$P1" --workspace "$WORKSPACE" --bridge "$
 P5="$(new_profile erin)"
 trust_profile "$P5"
 [[ "$(verify_code "$P5")" == "78" ]] && pass "not installed -> exit 78 even when the profile is trusted" || fail "not installed -> exit 78 even when the profile is trusted"
+
+echo
+echo "=== trust baseline: a NEW trust decision vs. a stale existing one (issue #5005) ==="
+P8="$(new_profile grace2)"
+run_provision install --codex-home "$P8" --workspace "$WORKSPACE" --bridge "$BRIDGE" >/dev/null
+trust_profile "$P8"
+[[ "$(verify_code "$P8")" == "0" ]] && pass "trust-baseline: fresh install + trust -> ready" || fail "trust-baseline: fresh install + trust -> ready"
+jq -e '.trustSignal == "baseline-diff"' <<<"$(verify_json "$P8")" >/dev/null 2>&1 \
+    && pass "trust-baseline: verify JSON reports trustSignal=baseline-diff for a freshly trusted profile" \
+    || fail "trust-baseline: verify JSON reports trustSignal=baseline-diff (got $(verify_json "$P8"))"
+
+# An idempotent reinstall of UNCHANGED content must never erase the operator's
+# earlier trust decision by resetting the baseline to "whatever is trusted
+# right now" (which would already include that same decision, silently
+# un-counting it).
+run_provision install --codex-home "$P8" --workspace "$WORKSPACE" --bridge "$BRIDGE" >/dev/null
+[[ "$(verify_code "$P8")" == "0" ]] && pass "trust-baseline: idempotent reinstall of unchanged content stays ready" || fail "trust-baseline: idempotent reinstall of unchanged content stays ready"
+
+# A genuine content change (here: a different --workspace, which changes the
+# managed command's project-root and therefore the pinned entry) resets the
+# baseline: the OLD trusted_hash alone no longer satisfies readiness — a FRESH
+# trust decision is required for the new content.
+WORKSPACE2="$TMPROOT/workspace2"
+mkdir -p "$WORKSPACE2"
+run_provision install --codex-home "$P8" --workspace "$WORKSPACE2" --bridge "$BRIDGE" >/dev/null
+[[ "$(verify_code "$P8")" == "78" ]] \
+    && pass "trust-baseline: a content-changing reinstall requires a fresh trust decision" \
+    || fail "trust-baseline: a content-changing reinstall requires a fresh trust decision"
+jq -e '.trustSignal == "baseline-diff-no-new-trust"' <<<"$(verify_json "$P8")" >/dev/null 2>&1 \
+    && pass "trust-baseline: verify JSON reports trustSignal=baseline-diff-no-new-trust after a content change" \
+    || fail "trust-baseline: verify JSON reports trustSignal=baseline-diff-no-new-trust (got $(verify_json "$P8"))"
+# Re-trusting (a NEW hooks.state entry, simulating the operator accepting the
+# prompt again for the changed content) restores readiness.
+printf 'hooks.state."loom-managed".trusted_hash = "deadbeefcafe"\nhooks.state."loom-managed-2".trusted_hash = "freshtrust2"\n' > "$P8/config.toml"
+[[ "$(verify_code "$P8")" == "0" ]] \
+    && pass "trust-baseline: a fresh trust decision after a content change restores readiness" \
+    || fail "trust-baseline: a fresh trust decision after a content change restores readiness"
+
+echo
+echo "=== trust baseline: legacy-receipt migration (pre-#5005 profiles are not punished) ==="
+P10="$(new_profile henry)"
+run_provision install --codex-home "$P10" --workspace "$WORKSPACE" --bridge "$BRIDGE" >/dev/null
+trust_profile "$P10"
+# Simulate a receipt written by a Loom version that predates trust-baseline
+# tracking: strip the field a real pre-#5005 install would never have written.
+jq 'del(.loomManagedHook.trustBaselineHashes)' "$P10/loom-codex-hooks.json" > "$P10/loom-codex-hooks.json.tmp" \
+    && mv "$P10/loom-codex-hooks.json.tmp" "$P10/loom-codex-hooks.json"
+[[ "$(verify_code "$P10")" == "0" ]] \
+    && pass "trust-baseline: a legacy receipt (no baseline field) does not lose readiness" \
+    || fail "trust-baseline: a legacy receipt (no baseline field) does not lose readiness"
+jq -e '.trustSignal == "legacy-coarse"' <<<"$(verify_json "$P10")" >/dev/null 2>&1 \
+    && pass "trust-baseline: verify JSON reports trustSignal=legacy-coarse for a pre-#5005 receipt" \
+    || fail "trust-baseline: verify JSON reports trustSignal=legacy-coarse (got $(verify_json "$P10"))"
+
+# The NEXT install migrates the receipt (grandfathering existing trust rather
+# than resetting the baseline to "current", which would erase it) — readiness
+# must survive the migration.
+run_provision install --codex-home "$P10" --workspace "$WORKSPACE" --bridge "$BRIDGE" >/dev/null
+[[ "$(verify_code "$P10")" == "0" ]] \
+    && pass "trust-baseline: migrating a legacy receipt on reinstall preserves readiness" \
+    || fail "trust-baseline: migrating a legacy receipt on reinstall preserves readiness"
+jq -e '.loomManagedHook.trustBaselineHashes == []' "$P10/loom-codex-hooks.json" >/dev/null 2>&1 \
+    && pass "trust-baseline: migration grandfathers existing trust with an empty baseline" \
+    || fail "trust-baseline: migration grandfathers existing trust with an empty baseline (got $(cat "$P10/loom-codex-hooks.json"))"
 
 echo
 echo "=== per-profile isolation ==="

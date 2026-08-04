@@ -82,6 +82,18 @@ if it errors out instead of running.
 loom-clean --force  # Non-interactive, safe for automation
 ```
 
+**What `--safe` actually narrows (#4890)**: `--safe` is documented as
+"merged-PR-only mode", but that promise only has meaning for artifacts that
+*are* an artifact of a merged PR — worktrees (gated on issue-closed +
+PR-merged + grace period) and branches. A tmux session has no PR association
+at all, so `loom-clean --safe` skips tmux cleanup **entirely** rather than
+silently killing a live session (a Manual-Orchestration-Mode terminal on
+Loom's isolated `-L loom` tmux socket does not show up in a plain `tmux ls`,
+so an operator has no other way to notice). Use `loom-clean --tmux-only`
+(optionally with `--force`) outside `--safe` to clean tmux sessions
+explicitly. Even then, a session with an attached client (someone is actively
+looking at it) is preserved unless `--force` is passed.
+
 **Backlog of pre-existing `[gone]` local branches (#4100)**: `merge-pr.sh` deletes
 the local feature branch for every PR it merges as of #4100, but repos that ran
 Loom before that fix accumulated one orphaned local branch per merged issue —
@@ -380,11 +392,90 @@ fails with `No module named loom_tools.orphan_recovery` or a "stale build"
 error, see [`loom-clean` / `loom-cleanup` / `loom-recover-orphans` fail on a
 stale binary](#loom-clean--loom-cleanup--loom-recover-orphans-fail-on-a-stale-binary-4384).
 
+**Run it from inside the checkout** (or pass `--workspace <path>`): repo-root
+resolution requires an ancestor holding **both** `.git` and `.loom/`, so a
+machine-level `~/.loom` (the token pool) is never mistaken for a repository. Run
+from anywhere else it exits `1` naming the directory it searched — it does not
+guess (#5140).
+
+**Exit codes**: `0` = assessed, nothing orphaned · `2` = orphans found in
+dry-run mode · `3` = **could not assess** (e.g. the `gh issue list --label
+loom:building` query failed). A `3` is never reported as "No orphaned tasks
+found" — a failed query is not evidence that nothing is stranded, and `--json`
+carries `assessment_failed` / `assessment_errors` for automation.
+
 **What it does**:
 - Finds issues with `loom:building` label that have been stuck
 - Checks if there's an associated PR (by branch name or body reference)
 - Issues without PRs older than threshold are flagged/recovered
 - Issues with stale PRs are flagged but not auto-recovered (need manual review)
+
+### Uncommitted work in the primary clone can be quarantined at any time — branching does not protect it (#5194)
+
+**Symptom**: uncommitted edits made directly in a Loom-managed repo's **primary
+clone** (the main checkout, not a `.loom/worktrees/issue-N` linked worktree)
+disappear. This happens even when the edits were made on a feature branch, not
+on `main` — checking out a branch first feels like it should be "safe," but it
+is not.
+
+**Root cause**: `check-main-clean.sh --quarantine` (see the Wave Lifecycle
+"Backstop" step in `defaults/.claude/commands/loom/sweep.md`) polices the
+**primary clone's working tree as a whole**, keyed on `git rev-parse
+--show-toplevel`/`--git-common-dir`, not on the currently checked-out branch.
+A concurrent `/loom:sweep` (interactively, via the daemon, or via cron) that
+snapshots the primary clone and later finds it dirty will stash-quarantine
+**every** offending path in one `git stash push --include-untracked`, whichever
+branch happens to be checked out at that moment. It has no way to know "this
+dirt is on a branch I don't own" — from its point of view, any uncommitted
+change in the primary clone that was not there at snapshot time is
+contamination, full stop.
+
+**Branching is NOT sufficient protection.** This is the first (and wrong)
+inference people make: "I'm not on `main`, so a sweep can't touch my WIP."
+Twice in one session, uncommitted work in the primary clone was lost this way
+even though it lived on a dedicated branch — see #5185 and
+[rjwalters/repo#89](https://github.com/rjwalters/repo/issues/89) for the
+incidents that prompted this note. The quarantine backstop exists precisely
+because *something* wrote to the primary clone's working tree outside of a
+worktree — it does not, and should not, special-case "but it's on a branch."
+
+**The only patterns that actually protect uncommitted work**:
+
+1. **Create a worktree outside the policed clone** and do the work there:
+   ```bash
+   git worktree add /path/outside/the/clone some-branch
+   ```
+   A sibling directory (or anywhere off the main checkout's `git
+   rev-parse --show-toplevel`) is never touched by `check-main-clean.sh`,
+   because it only ever inspects the primary clone's own working tree. This is
+   exactly what `./.loom/scripts/worktree.sh <issue-number>` gives you under
+   `.loom/worktrees/issue-N` — use it (or a hand-rolled `git worktree add`
+   pointed elsewhere) for any WIP you want to survive a sweep, rather than
+   editing directly in the primary clone.
+2. **Commit before a sweep can fire.** A commit is not "dirt" — the backstop
+   only quarantines the working tree's uncommitted delta against its snapshot
+   baseline, so committed history on any branch is unaffected regardless of
+   which branch is checked out when a sweep runs.
+
+Checking out a branch and leaving changes **uncommitted** in the primary clone
+protects against neither: the working tree is still what gets swept into a
+stash rescue ref, and recovering it means digging through `git stash list`
+in the primary clone (`stash_ref`/`stash_commit` are logged to
+`.loom/logs/main-quarantine.log`) rather than simply finding your branch
+intact.
+
+**A note on the quarantine's stash message**: `check-main-clean.sh` passes an
+explicit `-m "loom-quarantine: $QUARANTINE_LABEL"` message to `git stash
+push`, but `git stash list` always prefixes stash entries with `On
+<branch>:` regardless of the `-m` message supplied — so a quarantined stash
+reads as e.g. `On some-branch: loom-quarantine: run=... issue=...`, which can
+itself read as "this was scoped to `some-branch`" even though the quarantine
+is whole-working-tree, not branch-scoped. Changing that format is out of
+scope here — `stash_message` is also emitted as a structured field in the
+`main-clean.quarantine` JSON log line, and other tooling may parse either
+form — but if you are debugging a quarantine, read the `On <branch>:` prefix
+as "which branch happened to be checked out at quarantine time," not as
+"which branch's changes were protected."
 
 ## Several unrelated things hang at once (macOS Gatekeeper / `syspolicyd`)
 
@@ -496,6 +587,83 @@ loom-daemon status --json  # machine-readable
 
 The pre-v0.10.0 indicators `missing_milestone:worktree_created` and `extended_work` were retired when the Python daemon brain (`daemon_v2/`) was removed — see [the migration guide § Per-CLI breaking changes](https://github.com/rjwalters/loom/blob/main/docs/migration/v0.10.0-shepherd-deprecation.md#per-cli-breaking-changes) (upstream Loom repo — not shipped to consumer installs) for the field-level diff. The shell-level daemon surface (`./.loom/scripts/daemon.sh`) is preserved but does not write progress files, so milestone-based heuristics no longer apply.
 
+### A killed Task/Agent-tool subagent leaves no teardown signal for external resources it held
+
+**Symptom**: a Task/Agent-tool subagent dispatched mid-conversation (e.g. a
+Builder or Judge subagent under `/loom:sweep`) is killed by a session cap or an
+API error while it holds an external, non-Loom resource — a browser profile
+lock, a hardware device claim, a DB advisory lock, a cloud lease, any arbitrary
+mutex a caller's own tooling manages. The resource stays held indefinitely:
+nothing in Claude Code notifies the parent session or Loom that the subagent
+died, and nothing runs the subagent's own cleanup code.
+
+**Root cause — no kill-time teardown hook exists for Task-tool subagents (as of
+2026-08-04, this repo's Claude Code)**. This repo's `.claude/settings.json`
+wires exactly four hook types: `PreToolUse`, `UserPromptSubmit`, `SessionStart`,
+and `Stop` (the top-level `Stop` hook fires on the **outer** session ending, not
+per-subagent). There is no `SubagentStop`-equivalent hook that fires when an
+individual Task/Agent-tool dispatch is killed — a session-cap or API-error kill
+of a subagent bypasses whatever teardown code that subagent would otherwise
+have run on a graceful exit. **This was evaluated and found infeasible against
+Claude Code's current hook taxonomy** (issue #5262) — if a future Claude Code
+release adds a subagent-lifecycle hook, re-evaluate then; until it does, do not
+re-propose a kill-time teardown hook or a daemon-side termination-signal
+channel for Task-tool subagents without first confirming the taxonomy actually
+changed upstream.
+
+**Guidance for callers building agent-driven scripts against Loom**: because no
+teardown signal is coming, any external lock a subagent might hold must be
+designed so it recovers **without** relying on the holder's liveness or on any
+kill notification:
+
+- **Make locks self-expiring by wall-clock heartbeat, not by holder liveness.**
+  A lock that is only released by its holder's own cleanup code stays held
+  forever once that holder is killed outside its control (a session cap or API
+  error gives it no chance to run cleanup at all). Instead, record a
+  last-heartbeat timestamp and treat the lock as free once that timestamp is
+  older than a bounded TTL — the same shape whether the lock lives in a file's
+  mtime, a directory, a DB row, or a remote lease API.
+- **Reap on a schedule, not only on the next acquire attempt.** A "stale-break
+  on acquire" check (comparing an existing lock's age against a threshold only
+  when something next tries to acquire it) never fires if nothing else ever
+  tries to acquire that resource again — the lock silently stays stale
+  forever. Pair it with a periodic reaper that proactively expires stale
+  entries on its own cadence, independent of acquisition attempts.
+
+**Loom's own internal precedent for this pattern** (worked examples, not a
+reusable shared primitive external callers can import — they solve Loom's own
+coordination problems, not a general-purpose external-mutex library):
+- `heartbeat_claim` (`loom-daemon/src/activity/claims.rs`, wired into the IPC
+  layer at `loom-daemon/src/ipc.rs:2712-2741`) keeps the `issue_claims` table's
+  `last_heartbeat` column current for a live claim holder; `claim_issue` in the
+  same file breaks a claim as stale only when `age_secs > stale_threshold` at
+  the moment of the **next acquire attempt** — the "on next acquire, not
+  scheduled" half of the pattern above, which is exactly why a resource nobody
+  else ever tries to (re-)claim can stay stale-held indefinitely under this
+  model alone.
+- `PeerClaimView` (`loom-daemon/src/peer_claims.rs`) is the scheduled-reaper
+  half: it expires a peer's soft claim once local receipt time exceeds a fixed
+  TTL since the *last* observed heartbeat ad (`is_claimed_at` /
+  `claimed_issues_at`), and a periodic re-advertisement
+  (`sweep_registry::readvertise_peer_claims`) refreshes that clock well inside
+  the TTL for a still-live holder — see the module doc comment's "TTL is
+  measured against LOCAL receipt, never the advertiser's clock" section for why
+  wall-clock skew across hosts rules out comparing timestamps directly.
+
+**Prior art establishing this as Loom's actual mitigation pattern** (both
+resolved without a kill-time hook, because none is available):
+- #3683 — a role subagent killed mid-phase by an account rate limit left
+  lifecycle steps dangling; the fix made the *lifecycle state* self-healing
+  (resumable from a checkpoint) rather than depending on the killed subagent's
+  own cleanup running.
+- #4348 — a detached sweep killed by an external `SIGKILL` was never recovered;
+  the fix was reaper-based detection of a dead PID against the sweep registry,
+  not a termination signal from the kill itself.
+
+**Out of scope**: implementing a `SubagentStop`-style hook, or any daemon-side
+termination-signal channel for Task-tool subagents, is explicitly out of scope
+for this section — see "Root cause" above for why.
+
 ## Sweep Dispatch Troubleshooting
 
 Multi-issue dispatch is driven by the Rust `loom-daemon` binary via `mcp__loom__dispatch_sweep`. The daemon holds the sweep registry, event bus, and reaper in memory — there is no on-disk orchestration state file to inspect. (The v0.9.x `spawn-loop.sh` and its `.loom/spawn-loop-state.json` state file were removed in v0.11.0.)
@@ -567,11 +735,30 @@ mcp__loom__tail_sweep_log --sweep_id <id>
 ### Cancel a sweep
 
 ```bash
-# Cancel a running sweep (SIGTERM → grace → SIGKILL)
+# From a Claude session with the MCP server attached:
 mcp__loom__cancel_sweep --sweep_id <id>
+
+# From a shell — including over ssh to a fleet worker (#4980). Same IPC
+# request, same daemon-side termination path:
+loom-daemon cancel <sweep-id>
+loom-daemon cancel --issue 123          # resolves the live sweep for that issue
+loom-daemon cancel --issue 123 --grace 5
 ```
 
-The daemon's reaper task detects dead PIDs (every 30s) and removes them from the registry, emitting `sweep.issue.*.exited` / `sweep.issue.*.crashed` events.
+Both send SIGTERM to the sweep's **process group**, wait the grace window, then
+SIGKILL — so the wrapper, the `claude` agent, and every descendant (build tools,
+simulations, watcher loops) die together.
+
+**Never hand-`kill` a sweep's pids instead.** The registry tracks the
+`claude-wrapper.sh` pid; killing it leaves the underlying agent alive. On
+2026-08-03 that surviving agent noticed its subprocesses had died and
+*relaunched* them, against an issue whose claim the crash path had already
+returned to `loom:issue` — a zombie agent the registry reported as
+`in_flight: 0`. If you have already done this, `loom-daemon status` will not show
+the survivors: find them with `pstree -p <pid>` / `ps -eo pid,pgid,args` and kill
+the whole group (`kill -TERM -<pgid>`).
+
+The daemon's reaper task detects dead PIDs (every 30s) and removes them from the registry, emitting `sweep.issue.*.exited` / `sweep.issue.*.crashed` events. Since #4980 it also reaps a dead leader's *surviving* process group on that same tick, so an orphaned agent no longer keeps running unclaimed work.
 
 ### Stuck sweep child
 
@@ -584,7 +771,8 @@ ls -la .loom/sweep-checkpoint/issue-123.json
 # Look at the child's log for errors
 tail -200 .loom/logs/sweep-issue-123.log
 
-# Cancel it through the daemon:
+# Cancel it through the daemon (MCP tool, or `loom-daemon cancel <id>` from a
+# shell / over ssh):
 mcp__loom__cancel_sweep --sweep_id <id>
 
 # The checkpoint survives cancellation, so re-dispatching the issue resumes
@@ -630,7 +818,9 @@ claude -p "/loom:hermit"    --dangerously-skip-permissions
 > summary is a skill: `/loom:watch [--until 07:00] [--interval 25m]`
 > (`--dry-run` for a single read-only tick). It assumes — and does not restate —
 > the host-sleep and `.loom/` resync procedures in this section. See
-> `.claude/commands/loom/watch.md`.
+> `.claude/commands/loom/watch.md`. Note the host-sleep check above does **not**
+> cover *session* suspension stalling a mode-A `ScheduleWakeup` loop — see
+> `watch.md` → Loop mechanics → A for that hazard and its preflight (#4930).
 
 ### Keeping the host awake (#3350)
 

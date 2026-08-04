@@ -27,6 +27,13 @@
 #   LOOM_AUTH_CACHE_TTL    - Auth cache TTL in seconds (default: 120)
 #   LOOM_AUTH_CACHE_STALE_LOCK_THRESHOLD - Stale lock cleanup threshold in seconds (default: 90)
 #   LOOM_AUTH_CACHE_LOCK_WAIT - Max time to wait for lock holder in seconds (default: 60)
+#   LOOM_NODE_BIN          - Absolute path to `node` for the MCP pre-flight
+#                            (issue #5032). Optional: the pre-flight resolves
+#                            node/npm from an ordered explicit candidate list
+#                            (PATH, then /opt/homebrew/bin, /usr/local/bin, …)
+#                            because launchd jobs and `ssh host 'cmd'` shells
+#                            never source the login profile.
+#   LOOM_NPM_BIN           - Absolute path to `npm`, same resolution rules.
 #   LOOM_MODEL             - Model to pass as `claude --model <value>` (issue
 #                            #3477). An explicit `--model` in the wrapper args
 #                            always wins. The flag is appended once before the
@@ -453,10 +460,19 @@ for name, srv in servers.items():
     # is startable but lacks recent fixes (a smoke test passes on it silently).
     # Rebuild before the smoke test. This mirrors the predicate in
     # scripts/setup-mcp.sh (the one-shot .mcp.json generator) exactly so the two
-    # gates cannot drift (issue #4043). Rebuild failure on an otherwise-startable
-    # bundle is non-fatal — fall through to the smoke test below.
-    local mcp_src
-    mcp_src="$(dirname "$(dirname "${mcp_entry}")")/src"
+    # gates cannot drift (issue #4043).
+    #
+    # Rebuild failure here is FATAL for this candidate (#5032). The original
+    # design treated it as non-fatal ("an otherwise-startable bundle") and fell
+    # through to the smoke test below — but that assumption does not survive an
+    # actual rebuild failure: a bundle that cannot be rebuilt from its own
+    # sources is not otherwise-startable, and the smoke test then runs against
+    # the same known-broken dist and is guaranteed to fail. Aborting instead
+    # matches the missing-entry-point path above and lets check_mcp_server fall
+    # back to the next candidate immediately with an actionable message.
+    local mcp_src mcp_pkg_dir
+    mcp_pkg_dir="$(dirname "$(dirname "${mcp_entry}")")"
+    mcp_src="${mcp_pkg_dir}/src"
     if [[ -d "${mcp_src}" ]] && \
        [[ -n "$(find "${mcp_src}" -type f -newer "${mcp_entry}" -print -quit 2>/dev/null)" ]]; then
         log_warn "MCP bundle is stale (src newer than dist) - rebuilding: ${mcp_entry}"
@@ -464,14 +480,21 @@ for name, srv in servers.items():
             # Rebuild succeeded and already re-verified the smoke test.
             return 0
         fi
-        log_warn "MCP rebuild for stale bundle failed - continuing with existing bundle"
+        log_error "MCP rebuild for stale bundle failed - aborting this candidate (${mcp_config})"
+        log_error "Repair manually: cd ${mcp_pkg_dir} && npm ci && npm run build"
+        return 1
     fi
 
     # Smoke test: start MCP server and verify it emits the startup message
     # The MCP server writes "Loom MCP server running on stdio" to stderr on success.
     # Use a short timeout - we just need to see the startup message.
-    local mcp_stderr
-    mcp_stderr=$(timeout 5 node "${mcp_entry}" </dev/null 2>&1 || true)
+    # `node` is resolved via explicit candidate paths, not a bare PATH lookup:
+    # a non-login ssh session / launchd job never sources the login profile, so
+    # /opt/homebrew/bin is not on PATH (#5032, same reasoning as #4875).
+    local mcp_stderr node_bin
+    node_bin="$(_locate_node_tool node)" || node_bin="node"
+    [[ -n "${node_bin}" ]] || node_bin="node"
+    mcp_stderr=$(timeout 5 "${node_bin}" "${mcp_entry}" </dev/null 2>&1 || true)
 
     if echo "${mcp_stderr}" | grep -qi "running on stdio"; then
         log_info "MCP server health check passed (${mcp_config})"
@@ -559,15 +582,22 @@ check_global_mcp_configs() {
     fi
 
     # Parse mcpServers from ~/.claude.json.
-    # Output one line per server: "name|command|args0"
-    # Falls through silently on malformed JSON or missing python3.
+    # First line is a presence sentinel: "__HAS_LOOM__=1" or "__HAS_LOOM__=0"
+    # (emitted whenever the file parses as JSON, regardless of whether any
+    # servers are configured), so we can detect a missing `loom` entry even
+    # when mcpServers is absent or empty — not just validate entries that
+    # already exist. Every subsequent line is one server: "name|command|args0"
+    # Falls through silently (no sentinel, no server lines) on malformed JSON
+    # or missing python3, preserving the prior warn-only, never-abort contract.
     local server_info
     server_info=$(python3 - "${global_config}" 2>/dev/null <<'PYEOF'
 import json, sys
 try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
-    for name, srv in cfg.get('mcpServers', {}).items():
+    servers = cfg.get('mcpServers', {})
+    print(f"__HAS_LOOM__={1 if 'loom' in servers else 0}")
+    for name, srv in servers.items():
         command = srv.get('command', '')
         args = srv.get('args', [])
         args0 = args[0] if args else ''
@@ -578,6 +608,24 @@ PYEOF
 )
 
     if [[ -z "${server_info}" ]]; then
+        return 0
+    fi
+
+    # Presence check (acceptance criterion #1): warn — but never abort — when
+    # the machine-level `loom` MCP registration (#4230) is absent, instead of
+    # silently relying on a possibly-stale repo-local .mcp.json.
+    if [[ "${server_info}" == *$'\n'* ]]; then
+        local first_line="${server_info%%$'\n'*}"
+    else
+        local first_line="${server_info}"
+    fi
+    if [[ "${first_line}" == "__HAS_LOOM__=0" ]]; then
+        log_warn "⚠ No 'loom' entry in ~/.claude.json mcpServers — user-scope MCP registration (#4230) is missing"
+        log_warn "Fix: re-run scripts/install-loom.sh (or 'loom update') to register the machine-level 'loom' MCP server; see CLAUDE.md § MCP hooks"
+    fi
+    server_info="${server_info#*$'\n'}"
+
+    if [[ -z "${server_info}" || "${server_info}" == "__HAS_LOOM__="* ]]; then
         return 0
     fi
 
@@ -614,7 +662,143 @@ PYEOF
     return 0  # Always succeed — this is a warning-only check
 }
 
-# Attempt to rebuild the MCP server and re-verify
+# Ordered explicit candidate directories for the node toolchain (#5032).
+# claude-wrapper.sh runs from launchd jobs and `ssh host 'cmd'` non-login
+# shells that never source the login profile, so /opt/homebrew/bin (Apple
+# Silicon Homebrew) et al are NOT on PATH and a bare `command -v npm` lookup
+# fails even on a host where npm is perfectly well installed. Mirrors the
+# explicit-candidate-list pattern lib/locate-daemon-bin.sh established for the
+# same class of bug (#4875) rather than inventing a second approach.
+_LOOM_NODE_TOOL_DIRS=(
+    /opt/homebrew/bin
+    /usr/local/bin
+    /usr/bin
+    /opt/local/bin
+    /snap/bin
+)
+
+# _locate_node_tool <node|npm> -> echoes an absolute path, or nothing (rc 1).
+# Precedence: $LOOM_NODE_BIN / $LOOM_NPM_BIN override -> PATH -> the explicit
+# candidate list above -> nvm-style versioned installs (newest first).
+_locate_node_tool() {
+    local tool="$1"
+    local override=""
+    case "${tool}" in
+        node) override="${LOOM_NODE_BIN:-}" ;;
+        npm)  override="${LOOM_NPM_BIN:-}" ;;
+    esac
+
+    if [[ -n "${override}" && -x "${override}" ]]; then
+        echo "${override}"
+        return 0
+    fi
+
+    if command -v "${tool}" >/dev/null 2>&1; then
+        command -v "${tool}"
+        return 0
+    fi
+
+    local dir candidate
+    for dir in "${_LOOM_NODE_TOOL_DIRS[@]}" "${HOME}/.local/bin" "${HOME}/.volta/bin"; do
+        candidate="${dir}/${tool}"
+        if [[ -x "${candidate}" ]]; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+
+    local nvm_root="${NVM_DIR:-${HOME}/.nvm}"
+    if [[ -d "${nvm_root}/versions/node" ]]; then
+        while IFS= read -r candidate; do
+            [[ -z "${candidate}" ]] && continue
+            if [[ -x "${candidate}" ]]; then
+                echo "${candidate}"
+                return 0
+            fi
+        done < <(ls -1d "${nvm_root}"/versions/node/*/bin/"${tool}" 2>/dev/null | sort -r)
+    fi
+
+    return 1
+}
+
+# Render the search list for a "tool not found" error message. Mirrors
+# _locate_node_tool's precedence exactly, kept side by side so the two cannot
+# drift (same discipline as loom_daemon_bin_search_paths).
+_node_tool_search_paths() {
+    local tool="$1"
+    case "${tool}" in
+        node) echo "\$LOOM_NODE_BIN" ;;
+        npm)  echo "\$LOOM_NPM_BIN" ;;
+    esac
+    echo "${tool} on \$PATH"
+    local dir
+    for dir in "${_LOOM_NODE_TOOL_DIRS[@]}" "${HOME}/.local/bin" "${HOME}/.volta/bin"; do
+        echo "${dir}/${tool}"
+    done
+    echo "${NVM_DIR:-${HOME}/.nvm}/versions/node/*/bin/${tool}"
+}
+
+# True (rc 0) when <pkg_dir>/node_modules is missing, empty, or a broken
+# half-install — i.e. mechanically repairable by `npm ci` rather than a genuine
+# build-source error (#5032).
+#
+# "Broken half-install" is the robb-pro root cause: node_modules existed and
+# was non-empty, but node_modules/@modelcontextprotocol/sdk was an EMPTY
+# directory, so `npm run build` died with MODULE_NOT_FOUND exactly like a real
+# source error. Checking that every declared dependency resolves to a directory
+# containing its own package.json catches that case; a `require` failure for a
+# dependency the package never declared is correctly NOT treated as repairable.
+_mcp_node_modules_unusable() {
+    local pkg_dir="$1"
+    local node_modules="${pkg_dir}/node_modules"
+
+    if [[ ! -d "${node_modules}" ]]; then
+        return 0
+    fi
+    if [[ -z "$(ls -A "${node_modules}" 2>/dev/null)" ]]; then
+        return 0
+    fi
+
+    # `timeout` is not present on a bare macOS install; degrade to a direct
+    # call rather than losing the half-install detection entirely.
+    local -a _py=()
+    if command -v timeout >/dev/null 2>&1; then
+        _py=(timeout 10 "${LOOM_PYTHON}")
+    else
+        _py=("${LOOM_PYTHON}")
+    fi
+
+    local deps
+    deps=$("${_py[@]}" -c "
+import json, sys
+try:
+    with open('${pkg_dir}/package.json') as f:
+        cfg = json.load(f)
+except Exception:
+    sys.exit(0)
+for section in ('dependencies', 'devDependencies'):
+    for name in (cfg.get(section) or {}):
+        print(name)
+" 2>/dev/null || echo "")
+
+    local dep
+    while IFS= read -r dep; do
+        [[ -z "${dep}" ]] && continue
+        if [[ ! -f "${node_modules}/${dep}/package.json" ]]; then
+            return 0
+        fi
+    done <<< "${deps}"
+
+    return 1
+}
+
+# Attempt to rebuild the MCP server and re-verify.
+#
+# Before `npm run build`, self-repair a missing/empty/half-installed
+# node_modules with `npm ci` when a package-lock.json is present (#5032) —
+# without it the two very different failures (unusable dependency tree vs.
+# genuine build-source error) are indistinguishable at the call site and both
+# needed an operator to run `npm ci` by hand.
 _try_mcp_rebuild() {
     local mcp_entry="$1"
 
@@ -628,13 +812,54 @@ _try_mcp_rebuild() {
         return 1
     fi
 
+    local npm_bin node_bin node_dir
+    npm_bin="$(_locate_node_tool npm)" || npm_bin=""
+    if [[ -z "${npm_bin}" ]]; then
+        log_error "npm not found - cannot rebuild the MCP bundle at ${mcp_dir}"
+        log_error "Searched: $(_node_tool_search_paths npm | tr '\n' ' ')"
+        log_error "Set \$LOOM_NPM_BIN to an absolute npm path, or install node."
+        return 1
+    fi
+    # npm's own shim execs `node`; a minimal PATH breaks it even once npm
+    # itself is resolved, so put the resolved node's directory on PATH for the
+    # build subshells.
+    node_bin="$(_locate_node_tool node)" || node_bin=""
+    node_dir=""
+    [[ -n "${node_bin}" ]] && node_dir="$(dirname "${node_bin}")"
+
     log_info "Attempting MCP server rebuild in ${mcp_dir}..."
 
+    # Self-repair: an unusable dependency tree plus a lockfile is mechanically
+    # fixable — run `npm ci` first. Without a lockfile `npm ci` cannot run at
+    # all, so fall straight through to the build and let it report the error.
+    if _mcp_node_modules_unusable "${mcp_dir}"; then
+        if [[ -f "${mcp_dir}/package-lock.json" ]]; then
+            log_warn "MCP node_modules missing/incomplete in ${mcp_dir} - running 'npm ci' (self-repair)"
+            if ( set -o pipefail
+                 cd "${mcp_dir}" && PATH="${node_dir:+${node_dir}:}${PATH}" \
+                     "${npm_bin}" ci 2>&1 | tail -5 ) >&2; then
+                log_info "npm ci completed - dependency tree repaired"
+            else
+                # No network / corrupted lockfile / registry auth failure.
+                # Abort loudly: `npm run build` on the same broken tree would
+                # only produce a confusing MODULE_NOT_FOUND.
+                log_error "npm ci failed in ${mcp_dir} - cannot repair the MCP dependency tree"
+                log_error "Repair manually: cd ${mcp_dir} && npm ci && npm run build"
+                return 1
+            fi
+        else
+            log_warn "MCP node_modules missing/incomplete in ${mcp_dir} but no package-lock.json - cannot self-repair with 'npm ci'"
+        fi
+    fi
+
     # Run npm build (suppressing verbose output)
-    if (cd "${mcp_dir}" && npm run build 2>&1 | tail -5) >&2; then
+    if ( set -o pipefail
+         cd "${mcp_dir}" && PATH="${node_dir:+${node_dir}:}${PATH}" \
+             "${npm_bin}" run build 2>&1 | tail -5 ) >&2; then
         log_info "MCP rebuild completed"
     else
         log_error "MCP rebuild failed"
+        log_error "Repair manually: cd ${mcp_dir} && npm ci && npm run build"
         return 1
     fi
 
@@ -645,7 +870,8 @@ _try_mcp_rebuild() {
     fi
 
     local mcp_stderr
-    mcp_stderr=$(timeout 5 node "${mcp_entry}" </dev/null 2>&1 || true)
+    [[ -n "${node_bin}" ]] || node_bin="node"
+    mcp_stderr=$(timeout 5 "${node_bin}" "${mcp_entry}" </dev/null 2>&1 || true)
 
     if echo "${mcp_stderr}" | grep -qi "running on stdio"; then
         log_info "MCP server health check passed after rebuild"

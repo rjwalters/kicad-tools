@@ -60,14 +60,23 @@ Classify the changed files to determine which scoped test strategies to apply:
 
 **CRITICAL: Use `./.loom/scripts/run-tests.sh` instead of bare `python3 -m pytest` in worktrees**
 
-Loom installs `loom-tools` as an editable package from the main repo root. When you `cd` into an
-issue worktree (`.loom/worktrees/issue-N`) and run `python3 -m pytest`, Python imports from the
-*main branch's* source — not the worktree's code. This produces false test failures for any PR
-that modifies `loom-tools`. (Observed in PR #2818 review.)
+When a repo's package is installed in editable mode (`pip install -e .`) from the main checkout,
+the `.pth` entry points at the *main* checkout's source tree. So when you `cd` into an issue
+worktree (`.loom/worktrees/issue-N`) and run `python3 -m pytest`, Python imports the *main
+branch's* code — not the code the PR actually changed — producing test results that describe the
+wrong tree. (Observed in PR #2818 review.)
 
-`./.loom/scripts/run-tests.sh` detects the worktree automatically and sets
-`PYTHONPATH=<worktree>/loom-tools/src` before invoking pytest, ensuring tests import the
-worktree's version. Use it everywhere you would otherwise call `python3 -m pytest`.
+`./.loom/scripts/run-tests.sh` detects the worktree automatically and prepends that worktree's
+source root(s) to `PYTHONPATH` before invoking pytest, ensuring tests import the worktree's
+version. Use it everywhere you would otherwise call `python3 -m pytest`.
+
+> **Loom's own repo is not a Python repo — and has no Python at all.** Epic #4081 Phase 4 (#4557)
+> retired the `loom-tools` package's core, and #4970 finished the job by retiring its last
+> residue, the opt-in `loom-search` carve-out (per the operator's RETIRE decision on #4608).
+> Loom's orchestration layer is the native `loom-daemon` binary plus bash. When reviewing a Loom
+> PR, the relevant suites are `cargo test --workspace` and the bash suites under
+> `defaults/scripts/tests/` + `scripts/test-installer.sh`. This "Python Repositories" section
+> applies to the other repos Loom orchestrates, not to Loom's own repo.
 
 **Preferred: Use `pytest-testmon` when available**
 

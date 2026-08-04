@@ -111,10 +111,25 @@ info()    { echo "INFO: $*"; }
 success() { echo "OK: $*"; }
 warning() { echo "WARN: $*" >&2; }
 
+# --- Real forge-helpers.sh (for the #4856 rate-limit-safe mutation wrappers) ---
+# merge-pr.sh's mutating call sites no longer invoke `gh issue edit` / `gh issue
+# reopen` / `gh issue comment` directly — they route through
+# forge_gh_swap_label_rl_safe / forge_gh_reopen_issue_rl_safe /
+# forge_gh_comment_rl_safe, which live in lib/forge-helpers.sh and fall back to
+# REST when the GraphQL mutation is rate-limited (#4856). Source the REAL
+# helpers (rather than shimming them) so this suite keeps exercising the actual
+# `gh` invocation shape the wrappers produce on their happy path, which the stub
+# below records verbatim. Sourced BEFORE the shared globals are assigned:
+# forge-helpers.sh initializes FORGE_TYPE="" at load time, which would otherwise
+# clobber the FORGE_TYPE="github" the tests rely on.
+# shellcheck source=../lib/forge-helpers.sh
+source "$HELPERS_DIR/lib/forge-helpers.sh"
+
 # --- Extract the functions under test from merge-pr.sh and source them ---
 # Two spans, each bounded by an anchor line that is NOT part of the span:
-#   1. `_partial_increment_refs() {` .. `_check_partial_increment_close_conflict
-#      || true` — the #4569 pre-merge guard and its two pure-text ref extractors.
+#   1. `_strip_fenced_code_blocks() {` .. `_check_partial_increment_close_conflict
+#      || true` — the #4569 pre-merge guard, its pure-text ref extractors, and
+#      the #5234 code-span/fence-stripping helper the extractors depend on.
 #      Stopping at the INVOCATION line keeps the top-level call out of the
 #      sourced file (we drive the guard explicitly from the tests).
 #   2. `_reset_one_partial_issue() {` .. `# Handle auto-merge mode` — the
@@ -124,17 +139,17 @@ warning() { echo "WARN: $*" >&2; }
 FUNCS_FILE="$(mktemp)"
 trap 'rm -rf "$FUNCS_FILE" "$STUB_DIR" 2>/dev/null || true' EXIT
 awk '
-  /^_partial_increment_refs\(\) \{/                     { capture=1 }
+  /^_strip_fenced_code_blocks\(\) \{/                    { capture=1 }
   /^_check_partial_increment_close_conflict \|\| true/   { capture=0 }
   /^_reset_one_partial_issue\(\) \{/                    { capture=1 }
   /^# Handle auto-merge mode/                           { capture=0 }
   capture { print }
 ' "$MERGE_PR_SRC" > "$FUNCS_FILE"
 
-for _fn in _partial_increment_refs _closing_refs_stdin _body_closing_refs \
-           _closing_ref_snippets _pr_commit_messages \
-           _check_partial_increment_close_conflict _reset_one_partial_issue \
-           _reset_partial_increment_labels; do
+for _fn in _strip_fenced_code_blocks _partial_increment_refs _closing_refs_stdin \
+           _body_closing_refs _closing_ref_snippets _partial_increment_ref_snippets \
+           _pr_commit_messages _check_partial_increment_close_conflict \
+           _reset_one_partial_issue _reset_partial_increment_labels; do
     if ! grep -q "^${_fn}() {" "$FUNCS_FILE"; then
         echo -e "${RED}FATAL${NC}: could not extract $_fn from $MERGE_PR_SRC" >&2
         exit 2
@@ -236,6 +251,17 @@ cat > "$STUB_DIR/issue-888.json" <<'EOF'
 EOF
 cat > "$STUB_DIR/issue-321.json" <<'EOF'
 {"state":"open","pull_request":{"url":"x"},"labels":[{"name":"loom:building"}]}
+EOF
+cat > "$STUB_DIR/issue-4574.json" <<'EOF'
+{"state":"open","labels":[{"name":"loom:building"}]}
+EOF
+# PA6 fixtures: a numbered-list declaration `3. Part of #789` whose marker
+# ordinal (3) collides with a genuine `Closes #3` elsewhere in the same body.
+cat > "$STUB_DIR/issue-3.json" <<'EOF'
+{"state":"open","labels":[{"name":"loom:building"}]}
+EOF
+cat > "$STUB_DIR/issue-789.json" <<'EOF'
+{"state":"open","labels":[{"name":"loom:building"}]}
 EOF
 
 # Canned `pulls/<N>/commits` payload: one JSON commit object per message given.
@@ -380,6 +406,114 @@ assert_eq "" "$(_body_closing_refs 'close issue #123')" \
   "'close issue #123' is NOT a closing reference (keyword not adjacent to #N)"
 assert_eq "1234" "$(_body_closing_refs 'Closes #1234')" \
   "Full number is extracted (no #123 prefix confusion)"
+
+echo ""
+echo "Testing _partial_increment_refs prose/code-span guarding (#5234)..."
+
+# PA1: the exact #5234 incident shape — a mid-sentence, backticked, conditional
+# mention of `Part of #4574` inside a paragraph addressed to the Judge, plus
+# the real, declared `Closes #4574` elsewhere in the body. The backticked
+# mention is prose describing a hypothetical ("if you would rather... I will
+# switch the reference to"), not a declaration, and must NOT be read as one.
+incident_body='Summary of the fix.
+
+Judge: if you would rather this stay open until #4580 lands, say so and I will switch the reference to `Part of #4574`.
+
+More detail about the change.
+
+Closes #4574'
+assert_eq "" "$(_partial_increment_refs "$incident_body")" \
+  "#5234 incident: backticked, mid-sentence 'Part of #4574' is NOT read as a declaration"
+
+reset_log
+PR_JSON="$(jq -n --arg body "$incident_body" '{body: $body}')"
+_check_partial_increment_close_conflict 2>/dev/null
+assert_eq "" "$PARTIAL_CONFLICT_ISSUES" \
+  "#5234 incident: no conflict recorded — the real 'Closes #4574' stands unopposed"
+assert_eq "" "$PARTIAL_OPEN_BEFORE_MERGE" \
+  "#5234 incident: #4574 is not tracked as a partial-increment ref at all (no declaration found)"
+
+# PA2: companion — a genuine, line-leading `Part of #4574` trailer (its own
+# line, no backticks) still triggers the existing partial-increment path, and
+# a conflicting closing reference elsewhere in the body is still detected. Also
+# verifies AC #4: the warning quotes the matched declaration text.
+genuine_body='Summary of the fix.
+
+Part of #4574
+
+Closes #4574'
+assert_eq "4574" "$(_partial_increment_refs "$genuine_body")" \
+  "Companion: genuine line-leading 'Part of #4574' IS read as a declaration"
+
+reset_log
+PR_JSON="$(jq -n --arg body "$genuine_body" '{body: $body}')"
+run_capturing_stderr _check_partial_increment_close_conflict
+genuine_err="$(read_stderr)"
+assert_eq "4574" "$PARTIAL_CONFLICT_ISSUES" \
+  "Companion: genuine 'Part of #4574' + 'Closes #4574' -> conflict recorded (existing path still fires)"
+assert_contains "$genuine_err" '("Part of #4574")' \
+  "Companion: warning quotes the matched declaration text with context (AC #4)"
+assert_contains "$genuine_err" 'Closes #4574' \
+  "Companion: warning also quotes the offending closing-keyword text"
+
+# PA3: `Part of #123` shown inside a FENCED code block (not just inline
+# backticks) is also excluded — a documentation example, not a live
+# declaration.
+fenced_body='Example usage of the convention:
+
+```
+Part of #123
+```
+
+Closes #123'
+assert_eq "" "$(_partial_increment_refs "$fenced_body")" \
+  "Fenced code block: 'Part of #123' inside a triple-backtick fence is NOT a declaration"
+
+# PA4: mid-sentence prose (no backticks at all) referencing the pattern is
+# still excluded by the line-leading anchor alone.
+prose_body='This work is part of #123, a larger initiative that will continue after this PR.'
+assert_eq "" "$(_partial_increment_refs "$prose_body")" \
+  "Mid-sentence prose 'part of #123' (no backticks) is NOT a declaration (line-leading anchor)"
+
+# PA5: a list-marker-prefixed declaration still counts (AC: "optionally after
+# list-marker/whitespace").
+list_body='Changes in this increment:
+
+- Part of #123'
+assert_eq "123" "$(_partial_increment_refs "$list_body")" \
+  "List-marker prefix: '- Part of #123' still counts as a declaration"
+
+# PA6: a NUMBERED list marker carries its own digits, which the second-stage
+# extraction must not mistake for an issue number. PA5 only covers a dash
+# marker (no digits to leak), so this case is what caught the regression: with
+# a naive `grep -oE '[0-9]+'` over the whole matched span, `3. Part of #789`
+# yielded BOTH `3` and `789`. Paired with a genuine `Closes #3` elsewhere in
+# the body, that spuriously registers #3 as a declared partial increment AND a
+# closing reference — the exact false-positive-reopen shape #5234 exists to
+# eliminate, reintroduced through the list-marker support itself.
+numbered_body='Changes in this increment:
+
+3. Part of #789
+
+Closes #3'
+assert_eq "789" "$(_partial_increment_refs "$numbered_body")" \
+  "Numbered list marker: '3. Part of #789' yields ONLY 789 — the marker ordinal 3 does not leak"
+
+reset_log
+PR_JSON="$(jq -n --arg body "$numbered_body" '{body: $body}')"
+_check_partial_increment_close_conflict 2>/dev/null
+assert_eq "" "$PARTIAL_CONFLICT_ISSUES" \
+  "Numbered list marker: no conflict — 'Closes #3' stands, #3 is not a partial-increment ref"
+assert_eq "789" "$PARTIAL_OPEN_BEFORE_MERGE" \
+  "Numbered list marker: only the real declaration target (#789) is tracked as open before the merge"
+
+# PA7: blockquote marker (`>`), the other marker branch the regex claims to
+# support and that no test previously exercised.
+quoted_body='Context from the epic:
+
+> Part of #456'
+assert_eq "456" "$(_partial_increment_refs "$quoted_body")" \
+  "Blockquote marker: '> Part of #456' still counts as a declaration"
 
 echo ""
 echo "Testing _check_partial_increment_close_conflict (pre-merge guard)..."
@@ -645,22 +779,39 @@ assert_contains "$src" "_reset_partial_increment_labels" \
   "merge-pr.sh defines and calls _reset_partial_increment_labels"
 assert_contains "$src" "(Part of|Contributes to)" \
   "merge-pr.sh matches the non-closing partial-increment keywords"
-assert_contains "$src" "--remove-label \"loom:building\"" \
-  "merge-pr.sh swaps loom:building"
-assert_contains "$src" "--add-label \"loom:issue\"" \
-  "merge-pr.sh restores loom:issue"
+# The label swap / reopen / comment mutations route through the #4856
+# rate-limit-safe wrappers in lib/forge-helpers.sh, so the source guards assert
+# on the WRAPPER call sites (with their label/issue arguments) rather than the
+# pre-#4856 raw `gh issue edit --remove-label ... --add-label ...` / `gh issue
+# reopen ...` literals, which no longer appear in merge-pr.sh. The intent is
+# unchanged: fail loudly if a refactor drops the loom:building -> loom:issue
+# swap, the premature-auto-close revert, or the REPO_NWO scoping.
+assert_contains "$src" 'forge_gh_swap_label_rl_safe "$REPO_NWO" "$issue_num" "loom:building" "loom:issue"' \
+  "merge-pr.sh swaps loom:building -> loom:issue via the rate-limit-safe wrapper (#4856)"
+assert_contains "$src" '"loom:building" "loom:issue"' \
+  "merge-pr.sh restores loom:issue as the swap's add-label argument"
 assert_contains "$src" "--repo \"\$REPO_NWO\"" \
   "merge-pr.sh scopes the partial-increment mutations to REPO_NWO"
+assert_contains "$src" 'forge_gh_swap_label_rl_safe "$REPO_NWO"' \
+  "merge-pr.sh passes REPO_NWO to the label-swap wrapper (repo-scoped mutation)"
 assert_contains "$src" "_check_partial_increment_close_conflict || true" \
   "merge-pr.sh invokes the #4569 conflict guard BEFORE either merge path"
-assert_contains "$src" 'gh issue reopen "$issue_num"' \
-  "merge-pr.sh reverts a premature auto-close with gh issue reopen"
+assert_contains "$src" 'forge_gh_reopen_issue_rl_safe "$REPO_NWO" "$issue_num"' \
+  "merge-pr.sh reverts a premature auto-close via the rate-limit-safe reopen wrapper (#4856)"
+assert_contains "$src" 'forge_gh_comment_rl_safe "$REPO_NWO" "$issue_num" "$comment"' \
+  "merge-pr.sh posts the partial-increment / premature-close comments via the rate-limit-safe wrapper (#4856)"
 assert_contains "$src" 'close[sd]?|fix(e[sd])?|resolve[sd]?' \
   "merge-pr.sh matches the canonical GitHub closing-keyword set"
 assert_contains "$src" 'repos/$REPO_NWO/pulls/$PR_NUMBER/commits' \
   "merge-pr.sh reads the PR's commit messages for closing keywords (#4595)"
 assert_contains "$src" '--paginate' \
   "merge-pr.sh paginates the commits fetch (>30-commit PRs are not truncated)"
+assert_contains "$src" '_strip_fenced_code_blocks' \
+  "merge-pr.sh strips fenced code blocks before matching a partial-increment declaration (#5234)"
+assert_contains "$src" "sed -E 's/\`[^\`]*\`//g'" \
+  "merge-pr.sh blanks inline code spans before matching a partial-increment declaration (#5234)"
+assert_contains "$src" '_partial_increment_ref_snippets' \
+  "merge-pr.sh quotes the matched partial-increment declaration text in the pre-merge warning (#5234 AC #4)"
 
 # --- Summary ---
 echo ""

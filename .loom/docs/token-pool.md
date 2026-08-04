@@ -203,6 +203,21 @@ loom-daemon tokens check --json    # Native Rust equivalent (issue #4108)
 ./.loom/scripts/probe-tokens.sh    # Cron-friendly wrapper for periodic invocation
 ```
 
+`--source` (flag or `$LOOM_RANKING_SOURCE`) selects where the ranking comes
+from: `auto` (default) prefers a fresh claude-monitor `ranking.json` and only
+falls back to this CLI's own native probe when one isn't present; `monitor`
+never falls back (an empty report when claude-monitor has nothing fresh);
+`probe` always uses the native probe, ignoring claude-monitor entirely.
+
+**After adding a new account** (via `bootstrap` or `import-from-monitor`), run
+`loom-daemon tokens check --ranking --source probe` once. Under the `auto`
+default, a fresh claude-monitor `ranking.json` short-circuits the whole probe
+— including for an account claude-monitor itself has not ranked yet — so a
+just-added account can be silently absent from `.ranking` (and therefore
+never selected) until claude-monitor's own next probe cycle catches up.
+`--source probe` reads every `*.token` file on disk directly, so the new
+account is ranked immediately.
+
 **`probe-tokens.sh` delegates to `loom-daemon tokens check`, not Python (#4080).**
 It resolves a `loom-daemon` binary (`$LOOM_DAEMON_BIN` → `loom-daemon` on PATH →
 build-output-relative candidates under the repo), capability-probes it with
@@ -290,6 +305,14 @@ token hits its weekly limit.
    `claude` (or pass `--use-wrapper` to layer on top of `claude-wrapper.sh` for
    retry behavior).
 
+This whole rotation scheme rests on one assumption: the installed Claude Code
+CLI honors `CLAUDE_CODE_OAUTH_TOKEN` over a locally logged-in Keychain
+account. `defaults/scripts/verify-token-precedence.sh` (#3236, operator-manual
+-- run by hand once per Claude Code version, not wired into any automated
+check) confirms that assumption still holds by comparing `claude auth status`
+with a real Keychain login against the same command run with a deliberately
+bogus env token.
+
 ## Selection algorithm (`loom-daemon tokens select`)
 
 Three tiers, falling through to the next when the current tier yields nothing.
@@ -299,8 +322,9 @@ byte-compatible with the historical `loom_tools.tokens.select` implementation,
 which stays in-tree as reference/conformance material (`loom-tools/tests/tokens/`)
 but is no longer on the runtime path:
 
-1. **Ranking** — `.loom/tokens/.ranking` (pipe-delimited `name|status|5h_util`,
-   refreshed every <10 min). A persistent rotation cursor spreads consecutive
+1. **Ranking** — `.loom/tokens/.ranking` (pipe-delimited
+   `name|status|5h_util|limit_reset`, refreshed every <10 min). A persistent
+   rotation cursor spreads consecutive
    dispatches one-per-account across the eligible accounts (#3909;
    `LOOM_TOKEN_SPREAD_TOP_N` / `tokens.spreadTopN` optionally caps the window).
 2. **Allowlist** — `.loom/tokens/.allowlist` (one name per line). Random pick from
@@ -316,8 +340,8 @@ pinned-account auto-recovery pre-flight (see below) before selecting.
 
 ### Ranking format: 5h-load field + soft gate (issue #4195)
 
-The `.ranking` line format is `name|status|5h_util`, where the **third field**
-is the account's 5h-window utilization (a fraction `0.0`–`1.0`, fixed at 2
+The `.ranking` line format is `name|status|5h_util|limit_reset`, where the **third
+field** is the account's 5h-window utilization (a fraction `0.0`–`1.0`, fixed at 2
 decimals). It is **optional**: a legacy 2-field `name|status` line still parses,
 and an account with no measured 5h utilization is written in the 2-field form
 (the value is left off, never faked as `0.0`). All four ranking writers emit it
@@ -336,6 +360,58 @@ the Rust port (`tokens_pool::select`). This is the Option-A reconciliation of
 the gpeyton-fork load-aware selection proposal (fork commits `283de8e3`,
 `20961dd9`) with upstream's existing rotation-cursor spread — a load-aware gate
 *layered on* #3909, not the fork's waterfall-fill replacement.
+
+### Ranking format: limit-reset field (issue #4874)
+
+The **fourth field** is the instant the account's **binding** limit window
+resets — the answer to "when can I dispatch to this account again?" — written as
+`%Y-%m-%dT%H:%M:%SZ`. Like `5h_util` it is **optional and additive**: a legacy
+2- or 3-field line still parses, with the reset read back as *unknown*
+(`None`) — never a fabricated date.
+
+**Which window is binding depends on the status** (`check::limit_reset` is the
+single place this is decided, and both writers call it):
+
+| Status | Reset written | Why |
+|---|---|---|
+| `exhausted` | 7d | `exhausted` *is* 7d utilization ≥ `EXHAUSTED_THRESHOLD`; the 5h window rolling over releases nothing. |
+| `rate_limited` | 5h | A 429 with 7d utilization below the threshold — the 5h window is what tripped. |
+| anything else | 5h | Not gated at all; the 5h rollover is what the reported `5h_util` is racing. |
+
+Reporting the 7d reset unconditionally would be *worse than an empty column*:
+on a live host a `rate_limited` account had a 5h reset ~1.6h out and a 7d reset
+**six days** out, so a 7d countdown would have told the operator the fleet was
+stalled until Saturday. When the binding window's instant is unknown it is left
+absent — never substituted with the other window's, because an absent countdown
+reads as "unknown" and a wrong one reads as a fact.
+
+Both ranking backends populate it:
+
+- The **claude-monitor backend** (`tokens_pool::monitor`) reads
+  `accounts[].resets["5h"]` and `["7d"]` from `~/.claude-monitor/ranking.json`
+  and normalizes them to the instant format. It previously reported no reset at
+  all, which is why the CLI's reset column was empty on every monitor-sourced
+  run even though the data was on disk the whole time.
+- The **native probe** (`tokens_pool::check`) parses the
+  `anthropic-ratelimit-…-7d-reset` header (it already did, only to discard the
+  value at the writer) plus `-5h-reset` opportunistically — the API does not
+  always send the latter, in which case a `rate_limited` row carries no
+  countdown rather than a misleading one.
+
+`loom-daemon tokens check --ranking`'s table shows this same value in a
+`Resets at` column that names its window, e.g. `2026-08-02T03:00:00Z (7d)`.
+
+**Field-position rule**: a row that knows its reset but *not* its utilization
+writes an empty third field (`name|status||limit_reset`) so the reset stays in
+position 4. The reader parses that empty utilization back to `None`, never to
+`0.0`. A reset containing a `|` or `#` (either would make the line unparseable)
+is dropped rather than written — an absent reset beats a mangled row.
+
+Selection **ignores** this field: it is telemetry, not an input to the tiered
+pick, so adding it cannot perturb which account is chosen. Its consumer is
+`tokens.snapshot`'s `limit_window_reset_at` (see `telemetry-schema.md`), which
+feeds the dashboard's per-account reset countdown, its burn-curve segmentation
+and forecasts, and the pool-level "capacity returns at" aggregate.
 
 ## Bad-token tracking (`loom-daemon tokens mark-bad`)
 
@@ -456,11 +532,57 @@ first-class in *generated* systemd units; this section is for bare/unmanaged
 daemon startups and ad hoc CLI invocations from arbitrary cwds — the generated
 units already cover the managed case).
 
-Implementation: [`resolve_tokens_dir_anchored()`](../../loom-daemon/src/tokens_pool/paths.rs)
+Implementation: [`resolve_tokens_dir_anchored()`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/tokens_pool/paths.rs)
 delegates step 2/3's "is this candidate a recognized Loom workspace" question
 to the same registry-membership check `#4299` established for CLI
 `--workspace` defaulting (`workspace_registry::resolve_client_workspace_default`)
 rather than a second, parallel detection path.
+
+### `loom-daemon health`'s daemon-CWD-vs-operator-repo distinction (#5269)
+
+The precedence above governs **two separate mechanisms** that do not share a
+scope, and conflating them was the root cause of a "5h-stale ranking" incident
+where the documented remediation refreshed the wrong pool:
+
+1. **The self-refresh loop is per-repo-correct.** The daemon's own
+   `token_ranking_refresh.rs` background task re-runs `tokens check --ranking`
+   for **every registered repo independently**, resolving each repo's own pool
+   via the *unanchored* `resolve_tokens_dir(&repo.root)` (step 1/2 of the
+   precedence above, evaluated separately per repo). On a multi-repo daemon
+   this keeps every registered repo's OWN `.ranking` fresh on its own cadence,
+   regardless of which repo the daemon process happens to be running in.
+2. **`loom-daemon health`'s (and `status`'s) single machine-level tokens
+   section is anchored to the daemon's OWN `fallback_root`** — its launch CWD
+   or `LOOM_WORKSPACE`, resolved via `resolve_tokens_dir_anchored` (the full
+   precedence above). On a daemon managing several repos from a launch CWD
+   that is only one of them (e.g. a daemon started under `~/GitHub/anvil`
+   managing `~/GitHub/loom` too), this reports staleness for whichever pool
+   *that* anchoring resolves to — which is not necessarily any particular
+   other registered repo's own pool, and was never designed to answer "is
+   *my* repo's pool fresh" for an operator running the command from a
+   different registered repo.
+
+**The fix (#5269)**: `loom-daemon status`'s `per_repo` breakdown (see
+[daemon-reference.md](daemon-reference.md)) now carries each registered repo's
+own `token_pool_dir`/`ranking_present`/`ranking_age_secs`, populated with the
+exact same unanchored `resolve_tokens_dir(&repo.root)` the self-refresh loop
+already uses — so an operator asking about a specific repo gets that repo's
+own answer, independent of the daemon's launch CWD. `loom-daemon health`'s
+`tokens` section detail JSON (`--json`) surfaces this as `per_repo: [...]`
+alongside the existing single-pool `pool_path`/`ranking_present`/
+`ranking_age_secs` fields (which keep their original, narrower
+`fallback_root`-anchored meaning — the top-level fields are NOT replaced,
+only supplemented), and folds a bounded "`N of M` registered repos have their
+own pool's `.ranking` stale/missing" note into the human summary line when any
+repo is affected.
+
+**The workaround this incident's remediation used** — refreshing from `$HOME`
+happened to "fix" the daemon's top-level reading only because
+`per_repo_tokens_dir($HOME)` collapses to the same path as the default shared
+pool (`~/.loom/tokens`) — is now unnecessary for diagnosing (not necessarily
+for actually refreshing) a specific repo's own staleness: read that repo's
+line in `loom-daemon status --json`'s `per_repo` array, or
+`loom-daemon health --json`'s `tokens.detail.per_repo`, instead.
 
 ## Hard-fail on missing pool
 
@@ -473,7 +595,7 @@ rotation has not been configured at all.
 
 The `loom-daemon` role runner (`autonomous.roleRunner`, see
 [daemon-reference.md](daemon-reference.md)) pre-checks
-[`tokens::token_pool_size`](../../loom-daemon/src/tokens.rs) for exactly this
+[`tokens::token_pool_size`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/tokens.rs) for exactly this
 condition **before** it ever spawns `spawn-claude.sh` (issue #4642): a repo
 with neither pool provisioned skips the doomed spawn entirely instead of
 hitting this hard-fail on every single tick forever. The skip is logged once
@@ -636,7 +758,6 @@ refuses to silently auto-clear `.bad_tokens` — that masks real auth problems.
 ## Tests
 
 ```bash
-PYTHONPATH=loom-tools/src python3 -m pytest loom-tools/tests/tokens/ -v
 bash .loom/scripts/tests/test-spawn-claude.sh
 ```
 

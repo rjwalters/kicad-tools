@@ -33,9 +33,11 @@
 # same "all tiers absent" result callers already treat as fine) rather than
 # erroring the caller.
 #
-# Mirrors loom-daemon/src/config_resolver.rs and
-# loom_tools/common/config_resolver.py key-for-key so a shared fixture tree
-# resolves identically from all three languages (conformance test).
+# Mirrors loom-daemon/src/config_resolver.rs key-for-key so a shared fixture
+# tree resolves identically from both languages (conformance test, fixture at
+# defaults/scripts/tests/fixtures/config_resolver/). A third implementation,
+# loom_tools/common/config_resolver.py, was part of this contract until #4970
+# retired the Python `loom-tools` package.
 
 LOOM_CONFIG_LEGACY_REL=".loom/config.json"
 LOOM_CONFIG_PROJECT_REL=".loom-project/project.json"

@@ -1,7 +1,7 @@
 # Blame-Issue Attribution
 
 Reference detail for `.loom/scripts/blame-issue.sh` (#4338, codecast evaluation
-borrow item 1 — [`docs/research/codecast-evaluation.md`](../../docs/research/codecast-evaluation.md)).
+borrow item 1 — [`docs/research/codecast-evaluation.md`](https://github.com/rjwalters/loom/blob/main/docs/research/codecast-evaluation.md)).
 
 ## Why
 

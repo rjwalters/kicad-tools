@@ -22,6 +22,25 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 START_SCRIPT="$(cd "$SCRIPT_DIR/../cli" && pwd)/loom-daemon-start.sh"
 
+# Background-PID bookkeeping (#4773): the `sleep 30 &` decoys below stand in
+# for a real daemon MainPID and are tracked here so the EXIT/INT/TERM trap can
+# reap them even if this suite is interrupted before its own inline `kill`.
+# shellcheck source=lib/bg-proc-trap.sh
+source "$SCRIPT_DIR/lib/bg-proc-trap.sh"
+
+# Shared live-state sandbox (#5179, adopted here per #5191 — this suite had
+# ZERO suite-wide LOOM_PID_FILE-class pins, only per-invocation ones, so any
+# call site below that forgot one inherited whatever LOOM_SOCKET_PATH /
+# LOOM_AUTONOMY_MARKER / LOOM_MACHINE_CHECKOUT / LOOM_WORKSPACE / LOOM_DAEMON_BIN
+# the calling session happened to export). The snapshot MUST run here — before
+# live_state_sandbox_init below rewrites the LOOM_* state vars, and before any
+# sub-invocation can write anything — because it discovers WHICH paths are the
+# live ones by reading the ambient environment. The matching
+# live_state_sandbox_assert_untouched runs as the suite's final guard.
+# shellcheck source=lib/live-state-sandbox.sh
+source "$SCRIPT_DIR/lib/live-state-sandbox.sh"
+live_state_sandbox_snapshot
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
@@ -46,8 +65,32 @@ assert_eq() {
 
 # ---------- fixture ----------
 WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
+# bg_proc_reap kills the `sleep 30 &` decoys tracked via bg_proc_track below
+# (their argv never references $WORKDIR, so a path-pattern pkill would miss
+# them); the pkill backstop catches any real nohup'd fake-daemon process this
+# suite starts (BG_FAKE_BIN / SH_BG_FAKE_BIN both live under $WORKDIR, so
+# their argv always matches). EXIT/INT/TERM (not just EXIT, #4773) so a hard
+# interruption of this suite still reaps every tracked/backstopped process.
+# NOTE: a bare `trap CMD EXIT INT TERM` runs CMD on INT/TERM but does NOT stop
+# the script (only an EXIT-trap firing auto-exits) -- the explicit `exit`
+# below is required, else a SIGTERM'd suite would clean up once and then keep
+# running every remaining test case (re-populating $WORKDIR as it goes).
+trap 'bg_proc_reap; [ -n "$WORKDIR" ] && pkill -f "$WORKDIR" >/dev/null 2>&1; rm -rf "$WORKDIR"' EXIT
+trap 'bg_proc_reap; [ -n "$WORKDIR" ] && pkill -f "$WORKDIR" >/dev/null 2>&1; rm -rf "$WORKDIR"; exit 1' INT TERM
 mkdir -p "$WORKDIR/.loom/logs"
+
+# ---------- live daemon state sandbox (#5179, adopted here per #5191) ----------
+# ONE helper owns every live-state path this suite could otherwise reach (see
+# lib/live-state-sandbox.sh for the full per-variable rationale). This is the
+# suite-wide FLOOR, not a replacement for every case: tests below that need a
+# specific fixture's OWN scratch HOME still pin LOOM_SOCKET_PATH /
+# LOOM_AUTONOMY_MARKER inline on their own invocation (a per-command assignment
+# always wins over this exported default, same precedence as before). This
+# only closes the call sites that do NOT pin them — e.g. tests 1-7 below run
+# with no override at all, so pre-fix they resolved LOOM_SOCKET_PATH's default
+# fallback (`${LOOM_SOCKET_PATH:-$HOME/.loom/loom-daemon.sock}` in
+# loom-daemon-start.sh) straight onto the REAL $HOME/.loom.
+live_state_sandbox_init "$WORKDIR/live-state"
 
 FAKE_BIN="$WORKDIR/fake-loom-daemon"
 cat > "$FAKE_BIN" <<'EOF'
@@ -277,18 +320,21 @@ rm -rf "$MACHINE_HOME" "$MACHINE_CHECKOUT" "$NON_REPO_DIR"
 SD_UNIT="loom-daemon-test-$$.service"
 
 # S1. --print-unit renders the unit with NO side effects (no systemctl, no file
-#     write). Assert the four load-bearing fields from the issue's test plan:
-#     Restart=on-success, WantedBy=default.target, the baked
-#     Environment=LOOM_DAEMON_SUPERVISOR=systemd, and WorkingDirectory=<repo>.
+#     write). Assert the six load-bearing fields from the issue's test plan:
+#     Restart=on-success, KillMode=mixed (#4862), TimeoutStopSec=20 (#4950),
+#     WantedBy=default.target, the baked Environment=LOOM_DAEMON_SUPERVISOR=systemd,
+#     and WorkingDirectory=<repo>.
 unit_out=$( ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     LOOM_DAEMON_BIN="$FAKE_BIN" bash "$START_SCRIPT" --print-unit 2>/dev/null ) )
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$unit_out" | grep -qx 'Restart=on-success' \
+    && echo "$unit_out" | grep -qx 'KillMode=mixed' \
+    && echo "$unit_out" | grep -qx 'TimeoutStopSec=20' \
     && echo "$unit_out" | grep -qx 'WantedBy=default.target' \
     && echo "$unit_out" | grep -qx 'Environment=LOOM_DAEMON_SUPERVISOR=systemd' \
     && echo "$unit_out" | grep -qx "WorkingDirectory=$WORKDIR"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} --print-unit renders Restart=on-success, WantedBy=default.target, LOOM_DAEMON_SUPERVISOR=systemd, WorkingDirectory=<repo>"
+    echo -e "${GREEN}✓${NC} --print-unit renders Restart=on-success, KillMode=mixed, TimeoutStopSec=20, WantedBy=default.target, LOOM_DAEMON_SUPERVISOR=systemd, WorkingDirectory=<repo>"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "${RED}✗${NC} --print-unit renders the expected unit fields"
@@ -318,6 +364,7 @@ EOF
 #     from `systemctl --user show -p MainPID`. A real sleeper stands in for the
 #     daemon MainPID so the liveness check (kill -0) passes.
 sleep 30 & SD_MAIN_SLEEP_PID=$!
+bg_proc_track "$SD_MAIN_SLEEP_PID"
 SD_LOG="$WORKDIR/sd-enable.log"; : > "$SD_LOG"
 make_sd_stub "$SD_LOG" "$SD_MAIN_SLEEP_PID"
 SD_HOME="$(mktemp -d)"; mkdir -p "$SD_HOME/.loom/logs"
@@ -353,12 +400,14 @@ fi
 rm -f "$WORKDIR/.loom/.daemon.pid"
 TESTS_RUN=$((TESTS_RUN + 1))
 if [[ -f "$SD_HOME/.config/systemd/user/$SD_UNIT" ]] \
-    && grep -qx 'Restart=on-success' "$SD_HOME/.config/systemd/user/$SD_UNIT"; then
+    && grep -qx 'Restart=on-success' "$SD_HOME/.config/systemd/user/$SD_UNIT" \
+    && grep -qx 'KillMode=mixed' "$SD_HOME/.config/systemd/user/$SD_UNIT" \
+    && grep -qx 'TimeoutStopSec=20' "$SD_HOME/.config/systemd/user/$SD_UNIT"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} systemd path: renders the unit file under ~/.config/systemd/user with Restart=on-success"
+    echo -e "${GREEN}✓${NC} systemd path: renders the unit file under ~/.config/systemd/user with Restart=on-success + KillMode=mixed (#4862) + TimeoutStopSec=20 (#4950)"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} systemd path: renders the unit file under ~/.config/systemd/user with Restart=on-success"
+    echo -e "${RED}✗${NC} systemd path: renders the unit file under ~/.config/systemd/user with Restart=on-success + KillMode=mixed + TimeoutStopSec=20"
 fi
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$sd_out" | grep -qi 'enable-linger'; then
@@ -413,6 +462,7 @@ EOF
 #      (not the service) is enable --now'd, and LOOM_WATCHDOG_INTERVAL_SECS
 #      drives BOTH OnUnitActiveSec and OnBootSec.
 sleep 30 & WD_MAIN_SLEEP_PID=$!
+bg_proc_track "$WD_MAIN_SLEEP_PID"
 WD_LOG="$WORKDIR/sd-watchdog.log"; : > "$WD_LOG"
 make_sd_stub_wd "$WD_LOG" "$WD_MAIN_SLEEP_PID" "0"
 WD_HOME="$(mktemp -d)"; mkdir -p "$WD_HOME/.loom/logs"
@@ -471,6 +521,7 @@ rm -rf "$WD_HOME"
 # WD2. Provisioning failure (stub enable --now on the timer exits 1) is a
 #      WARNING, never a failed daemon start.
 sleep 30 & WD2_MAIN_SLEEP_PID=$!
+bg_proc_track "$WD2_MAIN_SLEEP_PID"
 WD2_LOG="$WORKDIR/sd-watchdog-fail.log"; : > "$WD2_LOG"
 make_sd_stub_wd "$WD2_LOG" "$WD2_MAIN_SLEEP_PID" "1"
 WD2_HOME="$(mktemp -d)"; mkdir -p "$WD2_HOME/.loom/logs"
@@ -784,7 +835,7 @@ DEK_LIVE_PLIST="$DEK_HOME/Library/LaunchAgents/${DEK_LABEL}.plist"
 
 # DEK1. First-ever install (no existing plist) must NOT warn.
 dek1_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_SAFEHOUSE_ENABLED \
-    HOME="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    HOME="$DEK_HOME" LOOM_MACHINE_CHECKOUT="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
 TESTS_RUN=$((TESTS_RUN + 1))
 if ! echo "$dek1_out" | grep -qi 'drops.*env key'; then
@@ -797,14 +848,14 @@ else
 fi
 
 # Install the "rich" plist (LOOM_SAFEHOUSE_ENABLED + LOOM_WORK_FINDER present).
-env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE HOME="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" \
+env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE HOME="$DEK_HOME" LOOM_MACHINE_CHECKOUT="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" \
     LOOM_SAFEHOUSE_ENABLED=1 LOOM_WORK_FINDER=1 LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist > "$DEK_LIVE_PLIST" 2>/dev/null
 
 # DEK2. Re-rendering with LOOM_SAFEHOUSE_ENABLED no longer exported warns and
 #       names the dropped key, with the LOOM_SAFEHOUSE_* migration hint.
 dek2_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_SAFEHOUSE_ENABLED \
-    HOME="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    HOME="$DEK_HOME" LOOM_MACHINE_CHECKOUT="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$dek2_out" | grep -qi 'drops 1 env key' && echo "$dek2_out" | grep -q 'LOOM_SAFEHOUSE_ENABLED'; then
@@ -826,7 +877,7 @@ else
 fi
 
 # DEK3. Re-rendering with the SAME (or a superset of) keys does not warn.
-dek3_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE HOME="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" \
+dek3_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE HOME="$DEK_HOME" LOOM_MACHINE_CHECKOUT="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" \
     LOOM_SAFEHOUSE_ENABLED=1 LOOM_WORK_FINDER=1 LOOM_DAEMON_PATH_EXTRA=/extra/bin LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
 TESTS_RUN=$((TESTS_RUN + 1))
@@ -841,7 +892,7 @@ fi
 
 # DEK4. --force-env suppresses the warning for an intentional narrowing.
 dek4_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_SAFEHOUSE_ENABLED \
-    HOME="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    HOME="$DEK_HOME" LOOM_MACHINE_CHECKOUT="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist --force-env 2>&1 >/dev/null )
 TESTS_RUN=$((TESTS_RUN + 1))
 if ! echo "$dek4_out" | grep -qi 'drops.*env key'; then
@@ -910,6 +961,7 @@ fi
 #       actually carries the key.
 : > "$DEK_SD_LOG"
 sleep 30 & DEK_SD_PID1=$!
+bg_proc_track "$DEK_SD_PID1"
 ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     PATH="$DEK_SD_BIN:$PATH" HOME="$DEK_SD_HOME" \
     LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$DEK_SD_UNIT" \
@@ -934,6 +986,7 @@ else
 fi
 
 sleep 30 & DEK_SD_PID2=$!
+bg_proc_track "$DEK_SD_PID2"
 dek6_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_SAFEHOUSE_ENABLED \
     PATH="$DEK_SD_BIN:$PATH" HOME="$DEK_SD_HOME" \
     LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$DEK_SD_UNIT" \
@@ -967,6 +1020,7 @@ fi
 
 # DEK7. --force-env suppresses the warning on the real install path too.
 sleep 30 & DEK_SD_PID3=$!
+bg_proc_track "$DEK_SD_PID3"
 ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     PATH="$DEK_SD_BIN:$PATH" HOME="$DEK_SD_HOME" \
     LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$DEK_SD_UNIT" \
@@ -981,6 +1035,7 @@ if [[ -f "$DEK_SD_HOME/.loom/.daemon.pid" ]]; then
     rm -f "$DEK_SD_HOME/.loom/.daemon.pid"
 fi
 sleep 30 & DEK_SD_PID4=$!
+bg_proc_track "$DEK_SD_PID4"
 dek7_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_SAFEHOUSE_ENABLED \
     PATH="$DEK_SD_BIN:$PATH" HOME="$DEK_SD_HOME" \
     LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$DEK_SD_UNIT" \
@@ -1075,12 +1130,12 @@ AD_LIVE_PLIST="$AD_HOME/Library/LaunchAgents/${AD_LABEL}.plist"
 # AD1. Prior plist had LOOM_WORK_FINDER=1; a plain re-render (no flags) warns
 #      and names the exact transition. This is the issue's required test case:
 #      "prior-plist-had-work-finder + plain restart -> warning emitted".
-env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE HOME="$AD_HOME" LOOM_LAUNCHD_LABEL="$AD_LABEL" \
+env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE HOME="$AD_HOME" LOOM_MACHINE_CHECKOUT="$AD_HOME" LOOM_LAUNCHD_LABEL="$AD_LABEL" \
     LOOM_WORK_FINDER=1 LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist > "$AD_LIVE_PLIST" 2>/dev/null
 
 ad1_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
-    HOME="$AD_HOME" LOOM_LAUNCHD_LABEL="$AD_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    HOME="$AD_HOME" LOOM_MACHINE_CHECKOUT="$AD_HOME" LOOM_LAUNCHD_LABEL="$AD_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$ad1_out" | grep -qi 'autonomy downgrade' && echo "$ad1_out" | grep -q 'LOOM_WORK_FINDER: 1 -> 0'; then
@@ -1111,7 +1166,7 @@ fi
 #       resolution was gated on USE_LAUNCHD, the whole warning was silently
 #       unreachable there -- the exact silence this feature exists to eliminate.
 ad1b_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
-    HOME="$AD_HOME" LOOM_LAUNCHD_LABEL="$AD_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    HOME="$AD_HOME" LOOM_MACHINE_CHECKOUT="$AD_HOME" LOOM_LAUNCHD_LABEL="$AD_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
     LOOM_DAEMON_LAUNCHD=0 \
     bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
 TESTS_RUN=$((TESTS_RUN + 1))
@@ -1128,7 +1183,7 @@ fi
 #      .loom/config.json, so re-rendering FLAGS-OFF-equivalent (both vars left
 #      unset) after a WORK_FINDER=1 prior install must NOT warn.
 ad2_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
-    HOME="$AD_HOME" LOOM_LAUNCHD_LABEL="$AD_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    HOME="$AD_HOME" LOOM_MACHINE_CHECKOUT="$AD_HOME" LOOM_LAUNCHD_LABEL="$AD_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist --from-config 2>&1 >/dev/null )
 TESTS_RUN=$((TESTS_RUN + 1))
 if ! echo "$ad2_out" | grep -qi 'autonomy downgrade'; then
@@ -1142,7 +1197,7 @@ fi
 
 # AD3. An explicit --no-work-finder THIS invocation is not silent -- no warning.
 ad3_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
-    HOME="$AD_HOME" LOOM_LAUNCHD_LABEL="$AD_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    HOME="$AD_HOME" LOOM_MACHINE_CHECKOUT="$AD_HOME" LOOM_LAUNCHD_LABEL="$AD_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist --no-work-finder 2>&1 >/dev/null )
 TESTS_RUN=$((TESTS_RUN + 1))
 if ! echo "$ad3_out" | grep -qi 'autonomy downgrade'; then
@@ -1157,7 +1212,7 @@ fi
 # AD4. An operator-exported LOOM_WORK_FINDER=0 in the calling shell is also an
 #      explicit, non-default signal -- no warning.
 ad4_out=$( env -u LOOM_MAIN_HEALTH_GATE LOOM_WORK_FINDER=0 \
-    HOME="$AD_HOME" LOOM_LAUNCHD_LABEL="$AD_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    HOME="$AD_HOME" LOOM_MACHINE_CHECKOUT="$AD_HOME" LOOM_LAUNCHD_LABEL="$AD_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
 TESTS_RUN=$((TESTS_RUN + 1))
 if ! echo "$ad4_out" | grep -qi 'autonomy downgrade'; then
@@ -1177,11 +1232,11 @@ AD5_HOME="$(mktemp -d)"
 mkdir -p "$AD5_HOME/Library/LaunchAgents"
 AD5_LABEL="com.rjwalters.loom-daemon-ad5-test"
 AD5_LIVE_PLIST="$AD5_HOME/Library/LaunchAgents/${AD5_LABEL}.plist"
-env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE HOME="$AD5_HOME" LOOM_LAUNCHD_LABEL="$AD5_LABEL" \
+env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE HOME="$AD5_HOME" LOOM_MACHINE_CHECKOUT="$AD5_HOME" LOOM_LAUNCHD_LABEL="$AD5_LABEL" \
     LOOM_WORK_FINDER=0 LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist > "$AD5_LIVE_PLIST" 2>/dev/null
 ad5_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
-    HOME="$AD5_HOME" LOOM_LAUNCHD_LABEL="$AD5_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    HOME="$AD5_HOME" LOOM_MACHINE_CHECKOUT="$AD5_HOME" LOOM_LAUNCHD_LABEL="$AD5_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
 TESTS_RUN=$((TESTS_RUN + 1))
 if ! echo "$ad5_out" | grep -qi 'autonomy downgrade'; then
@@ -1198,7 +1253,7 @@ rm -rf "$AD5_HOME"
 AD6_HOME="$(mktemp -d)"
 mkdir -p "$AD6_HOME/Library/LaunchAgents"
 ad6_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
-    HOME="$AD6_HOME" LOOM_LAUNCHD_LABEL="com.rjwalters.loom-daemon-ad6-test" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    HOME="$AD6_HOME" LOOM_MACHINE_CHECKOUT="$AD6_HOME" LOOM_LAUNCHD_LABEL="com.rjwalters.loom-daemon-ad6-test" LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
 TESTS_RUN=$((TESTS_RUN + 1))
 if ! echo "$ad6_out" | grep -qi 'autonomy downgrade'; then
@@ -1219,7 +1274,7 @@ AD7_HOME="$(mktemp -d)"
 mkdir -p "$AD7_HOME/Library/LaunchAgents" "$AD7_HOME/.loom"
 : > "$AD7_HOME/.loom/autonomy-desired"
 ad7_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
-    HOME="$AD7_HOME" LOOM_LAUNCHD_LABEL="com.rjwalters.loom-daemon-ad7-test" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    HOME="$AD7_HOME" LOOM_MACHINE_CHECKOUT="$AD7_HOME" LOOM_LAUNCHD_LABEL="com.rjwalters.loom-daemon-ad7-test" LOOM_DAEMON_BIN="$FAKE_BIN" \
     LOOM_AUTONOMY_MARKER="$AD7_HOME/.loom/autonomy-desired" \
     bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
 TESTS_RUN=$((TESTS_RUN + 1))
@@ -1243,13 +1298,14 @@ AD8_LOG="$WORKDIR/ad8-install.log"; : > "$AD8_LOG"
 
 # Install the "prior" unit with LOOM_WORK_FINDER=1.
 sleep 30 & AD8_SLEEP_PID1=$!
+bg_proc_track "$AD8_SLEEP_PID1"
 make_sd_stub "$AD8_LOG" "$AD8_SLEEP_PID1"
-env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     PATH="$SD_BIN:$PATH" HOME="$AD8_HOME" LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$AD_SD_UNIT" \
     LOOM_WORK_FINDER=1 LOOM_DAEMON_BIN="$FAKE_BIN" \
     LOOM_SOCKET_PATH="$AD8_HOME/.loom/loom-daemon.sock" \
     LOOM_AUTONOMY_MARKER="$AD8_HOME/.loom/autonomy-desired" \
-    bash "$START_SCRIPT" --no-launchd >/dev/null 2>&1
+    bash "$START_SCRIPT" --no-launchd >/dev/null 2>&1 )
 kill "$AD8_SLEEP_PID1" 2>/dev/null || true
 rm -f "$AD8_HOME/.loom/.daemon.pid"
 
@@ -1259,6 +1315,7 @@ rm -f "$AD8_HOME/.loom/.daemon.pid"
 #      "prior-plist-had-work-finder + plain restart -> warning emitted",
 #      systemd sibling.
 sleep 30 & AD8_SLEEP_PID2=$!
+bg_proc_track "$AD8_SLEEP_PID2"
 make_sd_stub "$AD8_LOG" "$AD8_SLEEP_PID2"
 ad8_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     PATH="$SD_BIN:$PATH" HOME="$AD8_HOME" LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$AD_SD_UNIT" \
@@ -1280,6 +1337,363 @@ fi
 kill "$AD8_SLEEP_PID2" 2>/dev/null || true
 rm -f "$AD8_HOME/.loom/.daemon.pid"
 rm -rf "$AD8_HOME"
+
+# ---------- KillMode=mixed real-systemd regression (#4862) ----------
+# The stub-based systemd tests above assert the RENDERED TEXT of the unit
+# (Restart=on-success, KillMode=mixed present) but never exercise a real
+# `systemd --user` manager, so they cannot catch a regression in what those
+# fields actually DO. This block drives the ACTUAL production-rendered unit
+# (via --print-unit, only ExecStart/WorkingDirectory substituted) against a
+# real `systemctl --user` when one is reachable, proving BOTH halves of the
+# issue's acceptance criteria in one shot:
+#   MX1. a clean exit(0) with a SIGTERM-ignoring lingering child (standing in
+#        for an in-flight claude/tee/sleep sweep worker) still causes
+#        Restart=on-success to fire — the #4862 fix.
+#   MX2. a crash exit(1) does NOT get restarted — the #4054 no-crash-loop
+#        property must survive the #4862 change (KillMode=mixed touches only
+#        HOW leftover cgroup members are reaped, never the crash/on-success
+#        exit-code contract).
+# Skips cleanly (not a failure) when no reachable `systemd --user` manager
+# exists — e.g. a Darwin CI runner, or a sandboxed host with no user
+# session/bus. Real unit files land under the ACTUAL $HOME (systemd --user
+# cannot be redirected via an env HOME override the way the stub-based tests
+# above redirect it), uniquely named with $$ so a leftover from an
+# interrupted run cannot collide with a later one.
+MX_HAVE_SYSTEMD=false
+if command -v systemctl >/dev/null 2>&1 && [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+    mx_state="$(systemctl --user is-system-running 2>/dev/null)"
+    [[ "$mx_state" != "offline" && -n "$mx_state" ]] && MX_HAVE_SYSTEMD=true
+fi
+if [[ "$MX_HAVE_SYSTEMD" == "true" ]]; then
+    MX_UNIT_MIXED="loom-daemon-test-mx-mixed-$$.service"
+    MX_UNIT_CRASH="loom-daemon-test-mx-crash-$$.service"
+    MX_UNIT_DIR="$HOME/.config/systemd/user"
+    MX_SCRIPT_DIR="$WORKDIR/mx-scripts"
+    mkdir -p "$MX_UNIT_DIR" "$MX_SCRIPT_DIR"
+
+    mx_cleanup() {
+        systemctl --user stop "$MX_UNIT_MIXED" "$MX_UNIT_CRASH" >/dev/null 2>&1 || true
+        rm -f "$MX_UNIT_DIR/$MX_UNIT_MIXED" "$MX_UNIT_DIR/$MX_UNIT_CRASH"
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+        systemctl --user reset-failed "$MX_UNIT_MIXED" "$MX_UNIT_CRASH" >/dev/null 2>&1 || true
+    }
+    # Extend the suite-wide traps (not replace) so an interruption mid-MX-block
+    # still tears down these REAL systemd units, not just $WORKDIR.
+    trap 'mx_cleanup; bg_proc_reap; [ -n "$WORKDIR" ] && pkill -f "$WORKDIR" >/dev/null 2>&1; rm -rf "$WORKDIR"' EXIT
+    trap 'mx_cleanup; bg_proc_reap; [ -n "$WORKDIR" ] && pkill -f "$WORKDIR" >/dev/null 2>&1; rm -rf "$WORKDIR"; exit 1' INT TERM
+    mx_cleanup
+
+    # mx-main.sh: forks a SIGTERM-ignoring child (stand-in for a lingering
+    # claude/tee/sleep sweep worker in the SAME cgroup), then exits 0 quickly
+    # — mirrors the incident's "clean main-process exit, children still
+    # running" shape.
+    cat > "$MX_SCRIPT_DIR/mx-main.sh" <<'MXEOF'
+#!/bin/bash
+trap '' TERM
+(trap '' TERM; sleep 30) &
+sleep 1
+exit 0
+MXEOF
+    chmod +x "$MX_SCRIPT_DIR/mx-main.sh"
+    cat > "$MX_SCRIPT_DIR/mx-crash.sh" <<'MXEOF'
+#!/bin/bash
+sleep 1
+exit 1
+MXEOF
+    chmod +x "$MX_SCRIPT_DIR/mx-crash.sh"
+
+    # Render via the ACTUAL production code path, then retarget ExecStart/
+    # WorkingDirectory at the tiny fixture script above -- proves the SHIPPED
+    # unit shape (not a hand-rolled duplicate) reproduces the fix.
+    mx_render() {
+        local exec_script="$1"
+        ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+            LOOM_DAEMON_BIN="$exec_script" bash "$START_SCRIPT" --print-unit 2>/dev/null ) \
+            | sed -e "s|^ExecStart=.*|ExecStart=/bin/bash $exec_script|" \
+                  -e "s|^WorkingDirectory=.*|WorkingDirectory=$MX_SCRIPT_DIR|"
+    }
+    mx_render "$MX_SCRIPT_DIR/mx-main.sh" > "$MX_UNIT_DIR/$MX_UNIT_MIXED"
+    mx_render "$MX_SCRIPT_DIR/mx-crash.sh" > "$MX_UNIT_DIR/$MX_UNIT_CRASH"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+
+    # MX1. Clean exit + lingering child -> Restart=on-success fires (NRestarts
+    # climbs above 0 within a few restart cycles). Poll up to ~8s.
+    systemctl --user start "$MX_UNIT_MIXED" >/dev/null 2>&1
+    mx1_restarts=0
+    for _ in 1 2 3 4 5 6 7 8; do
+        mx1_restarts="$(systemctl --user show -p NRestarts --value "$MX_UNIT_MIXED" 2>/dev/null)"
+        [[ "$mx1_restarts" =~ ^[0-9]+$ ]] && (( mx1_restarts > 0 )) && break
+        sleep 1
+    done
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [[ "$mx1_restarts" =~ ^[0-9]+$ ]] && (( mx1_restarts > 0 )); then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "${GREEN}✓${NC} real systemd (#4862): clean exit + lingering child -> Restart=on-success fires (NRestarts=$mx1_restarts)"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "${RED}✗${NC} real systemd (#4862): clean exit + lingering child -> Restart=on-success fires"
+        echo "  systemctl --user status ${MX_UNIT_MIXED}:"
+        systemctl --user status "$MX_UNIT_MIXED" --no-pager -l 2>&1 | sed 's/^/    /'
+    fi
+    systemctl --user stop "$MX_UNIT_MIXED" >/dev/null 2>&1 || true
+
+    # MX2. Crash exit(1) -> stays down (the #4054 no-crash-loop property).
+    # Wait past the fixture's own 1s sleep + a restart-cycle margin, then
+    # assert BOTH that it never restarted and that it is in a failed/inactive
+    # (not activating/running) state.
+    systemctl --user start "$MX_UNIT_CRASH" >/dev/null 2>&1
+    sleep 3
+    mx2_restarts="$(systemctl --user show -p NRestarts --value "$MX_UNIT_CRASH" 2>/dev/null)"
+    mx2_active="$(systemctl --user show -p ActiveState --value "$MX_UNIT_CRASH" 2>/dev/null)"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [[ "$mx2_restarts" == "0" ]] && [[ "$mx2_active" != "active" && "$mx2_active" != "activating" ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "${GREEN}✓${NC} real systemd (#4862): crash exit(1) does NOT restart (#4054 no-crash-loop preserved; ActiveState=$mx2_active)"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "${RED}✗${NC} real systemd (#4862): crash exit(1) does NOT restart"
+        echo "  NRestarts=$mx2_restarts ActiveState=$mx2_active"
+        systemctl --user status "$MX_UNIT_CRASH" --no-pager -l 2>&1 | sed 's/^/    /'
+    fi
+
+    mx_cleanup
+    # Restore the plain (non-MX) suite-wide traps for the remainder of the run.
+    trap 'bg_proc_reap; [ -n "$WORKDIR" ] && pkill -f "$WORKDIR" >/dev/null 2>&1; rm -rf "$WORKDIR"' EXIT
+    trap 'bg_proc_reap; [ -n "$WORKDIR" ] && pkill -f "$WORKDIR" >/dev/null 2>&1; rm -rf "$WORKDIR"; exit 1' INT TERM
+else
+    echo "  (skipping real-systemd #4862 regression: no reachable 'systemctl --user' manager on this host)"
+fi
+
+# ===================================================================
+# Real launchd bootout+bootstrap path (#5081): settle/retry on the async
+# EIO race ("Bootstrap failed: 5: Input/output error"), and a post-bootstrap
+# check that the running job's REPORTED env actually matches the
+# freshly-rendered plist. Only meaningful on Darwin (the launchd path is
+# Darwin-gated). `LOOM_LAUNCHD_DOMAIN` is pinned so resolve_launchd_domain()
+# never probes `launchctl print gui/<uid>` itself, and HOME is sandboxed so
+# the rendered plist never lands in the operator's real
+# ~/Library/LaunchAgents -- this suite must never touch real launchd state.
+# ===================================================================
+if [[ "$(uname -s)" == "Darwin" ]]; then
+
+LD5081_LABEL="com.example.loom-sandbox-5081-$$"
+LD5081_DOMAIN="user/$(id -u)"
+LD5081_SERVICE="${LD5081_DOMAIN}/${LD5081_LABEL}"
+
+# write_smart_launchd_bin <bin_dir> <bootstrap_log> <state_dir> <eio_failures> <mismatch:0|1>
+#
+# A launchctl stub that reflects a REAL bootstrap outcome instead of a
+# hardcoded fake: `bootstrap` records the plist path it was handed (and, for
+# the first <eio_failures> calls, fails with the EXACT text real launchd
+# reports for the #5081 async race); `print` — for OUR service only — reports
+# a REAL backgrounded process's pid (read from <state_dir>/real.pid, so the
+# script's own `kill -0` liveness check succeeds) plus an
+# "environment = { KEY => value ... }" block built from the LAST bootstrapped
+# plist via plutil+jq, mirroring real `launchctl print` output byte-for-byte
+# closely enough for extract_launchd_print_env to parse. <mismatch>=1
+# corrupts the reported LOOM_SOCKET_PATH value so a verification-FAILURE path
+# can be exercised. Any OTHER service (e.g. the watchdog's own label) reports
+# "not loaded" (print exits 1); bootout/kickstart are unconditional no-ops
+# for every service.
+write_smart_launchd_bin() {
+    local bin_dir="$1" bootstrap_log="$2" state_dir="$3" eio_failures="$4" mismatch="${5:-0}"
+    mkdir -p "$bin_dir" "$state_dir"
+    : > "$bootstrap_log"
+    echo 0 > "$state_dir/bootstrap-attempts"
+    rm -f "$state_dir/bootstrapped-plist-path"
+    cat > "$bin_dir/launchctl" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "${bootstrap_log}"
+service_arg="\${2:-}"
+case "\${1:-}" in
+  print)
+    if [[ "\$service_arg" == "${LD5081_SERVICE}" && -f "${state_dir}/bootstrapped-plist-path" ]]; then
+      plist_path="\$(cat "${state_dir}/bootstrapped-plist-path")"
+      real_pid="\$(cat "${state_dir}/real.pid" 2>/dev/null)"
+      echo "	pid = \${real_pid}"
+      echo "	environment = {"
+      if [[ "${mismatch}" == "1" ]]; then
+        plutil -convert json -o - "\$plist_path" 2>/dev/null | jq -r '.EnvironmentVariables // {} | to_entries[] | "\t\t" + .key + " => " + (.value|tostring)' | awk -F' => ' -v OFS=' => ' '{ if (\$1 ~ /LOOM_SOCKET_PATH\$/) { \$2 = "WRONG-VALUE-INJECTED-BY-TEST" }; print }'
+      else
+        plutil -convert json -o - "\$plist_path" 2>/dev/null | jq -r '.EnvironmentVariables // {} | to_entries[] | "\t\t" + .key + " => " + (.value|tostring)'
+      fi
+      echo "	}"
+      exit 0
+    fi
+    exit 1
+    ;;
+  bootout)
+    rm -f "${state_dir}/bootstrapped-plist-path"
+    exit 0
+    ;;
+  bootstrap)
+    plist_path="\$3"
+    attempts="\$(cat "${state_dir}/bootstrap-attempts" 2>/dev/null || echo 0)"
+    attempts=\$((attempts + 1))
+    echo "\$attempts" > "${state_dir}/bootstrap-attempts"
+    if [[ "\$attempts" -le "${eio_failures}" ]]; then
+      echo "Bootstrap failed: 5: Input/output error" >&2
+      exit 5
+    fi
+    echo "\$plist_path" > "${state_dir}/bootstrapped-plist-path"
+    exit 0
+    ;;
+  kickstart) exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+    chmod +x "$bin_dir/launchctl"
+}
+
+LD5081_FAKE_BIN="$WORKDIR/fake-loom-daemon-5081"
+cat > "$LD5081_FAKE_BIN" <<'EOF'
+#!/usr/bin/env bash
+sleep 60
+EOF
+chmod +x "$LD5081_FAKE_BIN"
+
+# T1. Clean bootstrap (no EIO race) -> exits 0, env verification passes
+#     against the real, freshly-rendered plist.
+LD1_HOME="$WORKDIR/ld1-home"
+LD1_BIN="$WORKDIR/ld1-launchctl-bin"
+LD1_STATE="$WORKDIR/ld1-state"
+mkdir -p "$LD1_HOME"
+write_smart_launchd_bin "$LD1_BIN" "$WORKDIR/ld1.log" "$LD1_STATE" 0 0
+sleep 60 >/dev/null 2>&1 &
+LD1_REAL_PID=$!
+bg_proc_track "$LD1_REAL_PID"
+echo "$LD1_REAL_PID" > "$LD1_STATE/real.pid"
+out1=$( PATH="$LD1_BIN:$PATH" HOME="$LD1_HOME" LOOM_MACHINE_CHECKOUT="$LD1_HOME" LOOM_DAEMON_BIN="$LD5081_FAKE_BIN" \
+    LOOM_LAUNCHD_LABEL="$LD5081_LABEL" LOOM_LAUNCHD_DOMAIN="$LD5081_DOMAIN" \
+    LOOM_SOCKET_PATH="$LD1_HOME/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$LD1_HOME/.loom/autonomy-desired" \
+    LOOM_WATCHDOG_LABEL="com.example.loom-sandbox-5081-wd-$$" \
+    bash "$START_SCRIPT" 2>&1 )
+rc1=$?
+kill "$LD1_REAL_PID" 2>/dev/null || true
+assert_eq "0" "$rc1" "launchd path (#5081): clean bootstrap + matching env -> exit 0"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$rc1" -eq 0 ]] && ! echo "$out1" | grep -qi 'does NOT match'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} launchd path (#5081): env verification passes against the real rendered plist"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} launchd path (#5081): env verification passes against the real rendered plist"
+    echo "  output: $out1"
+fi
+
+# T2. Bootstrap fails with the EIO race exactly once, then succeeds on retry
+#     -> exit 0, and the output names the retry.
+LD2_HOME="$WORKDIR/ld2-home"
+LD2_BIN="$WORKDIR/ld2-launchctl-bin"
+LD2_STATE="$WORKDIR/ld2-state"
+mkdir -p "$LD2_HOME"
+write_smart_launchd_bin "$LD2_BIN" "$WORKDIR/ld2.log" "$LD2_STATE" 1 0
+sleep 60 >/dev/null 2>&1 &
+LD2_REAL_PID=$!
+bg_proc_track "$LD2_REAL_PID"
+echo "$LD2_REAL_PID" > "$LD2_STATE/real.pid"
+out2=$( PATH="$LD2_BIN:$PATH" HOME="$LD2_HOME" LOOM_MACHINE_CHECKOUT="$LD2_HOME" LOOM_DAEMON_BIN="$LD5081_FAKE_BIN" \
+    LOOM_LAUNCHD_LABEL="$LD5081_LABEL" LOOM_LAUNCHD_DOMAIN="$LD5081_DOMAIN" \
+    LOOM_SOCKET_PATH="$LD2_HOME/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$LD2_HOME/.loom/autonomy-desired" \
+    LOOM_WATCHDOG_LABEL="com.example.loom-sandbox-5081-wd-$$" \
+    LOOM_DAEMON_BOOTSTRAP_RETRY_SECS=0 \
+    bash "$START_SCRIPT" 2>&1 )
+rc2=$?
+kill "$LD2_REAL_PID" 2>/dev/null || true
+assert_eq "0" "$rc2" "launchd path (#5081): one EIO bootstrap failure, retry succeeds -> exit 0"
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out2" | grep -qi 'async-bootout race' && echo "$out2" | grep -q 'attempt 1/'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} launchd path (#5081): EIO retry is logged"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} launchd path (#5081): EIO retry is logged"
+    echo "  output: $out2"
+fi
+
+# T3. Bootstrap keeps failing with the EIO race past the retry ceiling ->
+#     exit 1, loudly, and NEVER a false "started" success.
+LD3_HOME="$WORKDIR/ld3-home"
+LD3_BIN="$WORKDIR/ld3-launchctl-bin"
+LD3_STATE="$WORKDIR/ld3-state"
+mkdir -p "$LD3_HOME"
+write_smart_launchd_bin "$LD3_BIN" "$WORKDIR/ld3.log" "$LD3_STATE" 99 0
+out3=$( PATH="$LD3_BIN:$PATH" HOME="$LD3_HOME" LOOM_MACHINE_CHECKOUT="$LD3_HOME" LOOM_DAEMON_BIN="$LD5081_FAKE_BIN" \
+    LOOM_LAUNCHD_LABEL="$LD5081_LABEL" LOOM_LAUNCHD_DOMAIN="$LD5081_DOMAIN" \
+    LOOM_SOCKET_PATH="$LD3_HOME/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$LD3_HOME/.loom/autonomy-desired" \
+    LOOM_WATCHDOG_LABEL="com.example.loom-sandbox-5081-wd-$$" \
+    LOOM_DAEMON_BOOTSTRAP_RETRY_ATTEMPTS=2 LOOM_DAEMON_BOOTSTRAP_RETRY_SECS=0 \
+    bash "$START_SCRIPT" 2>&1 )
+rc3=$?
+assert_eq "1" "$rc3" "launchd path (#5081): EIO race persists past the retry ceiling -> exit 1"
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out3" | grep -qi 'bootstrap failed' && ! echo "$out3" | grep -qi 'started under launchd'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} launchd path (#5081): exhausted EIO retries never report a false success"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} launchd path (#5081): exhausted EIO retries never report a false success"
+    echo "  output: $out3"
+fi
+
+# T4. Bootstrap + kickstart succeed, pid is alive, but the running job's
+#     REPORTED env does not match the freshly-rendered plist -> exit 1, named
+#     as an env mismatch (#5081's "never silently return a wrong env" AC),
+#     never a false "started" success either.
+LD4_HOME="$WORKDIR/ld4-home"
+LD4_BIN="$WORKDIR/ld4-launchctl-bin"
+LD4_STATE="$WORKDIR/ld4-state"
+mkdir -p "$LD4_HOME"
+write_smart_launchd_bin "$LD4_BIN" "$WORKDIR/ld4.log" "$LD4_STATE" 0 1
+sleep 60 >/dev/null 2>&1 &
+LD4_REAL_PID=$!
+bg_proc_track "$LD4_REAL_PID"
+echo "$LD4_REAL_PID" > "$LD4_STATE/real.pid"
+out4=$( PATH="$LD4_BIN:$PATH" HOME="$LD4_HOME" LOOM_MACHINE_CHECKOUT="$LD4_HOME" LOOM_DAEMON_BIN="$LD5081_FAKE_BIN" \
+    LOOM_LAUNCHD_LABEL="$LD5081_LABEL" LOOM_LAUNCHD_DOMAIN="$LD5081_DOMAIN" \
+    LOOM_SOCKET_PATH="$LD4_HOME/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$LD4_HOME/.loom/autonomy-desired" \
+    LOOM_WATCHDOG_LABEL="com.example.loom-sandbox-5081-wd-$$" \
+    bash "$START_SCRIPT" 2>&1 )
+rc4=$?
+kill "$LD4_REAL_PID" 2>/dev/null || true
+assert_eq "1" "$rc4" "launchd path (#5081): env mismatch after a successful bootstrap -> exit 1"
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out4" | grep -qi 'does NOT match' && echo "$out4" | grep -qi 'LOOM_SOCKET_PATH' && ! echo "$out4" | grep -qi 'started under launchd'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} launchd path (#5081): env mismatch is named and never reported as a false success"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} launchd path (#5081): env mismatch is named and never reported as a false success"
+    echo "  output: $out4"
+fi
+
+else
+    echo "  (skipping real launchd bootout/bootstrap #5081 regression: not running on Darwin)"
+fi
+
+# ============================================================
+# Live daemon state guard (#5179, adopted here per #5191): every live `.loom`
+# state path reachable from the ambient environment (the real $HOME/.loom, the
+# live checkout's .loom, an ambient LOOM_PID_FILE / LOOM_WORKSPACE /
+# LOOM_MACHINE_CHECKOUT) must be byte-and-mtime identical to its pre-suite
+# snapshot -- and a path that was ABSENT must still be absent. This converts
+# "state file leaked into production" from "discovered by an operator on a
+# degraded host" into "caught by the suite".
+# ============================================================
+TESTS_RUN=$((TESTS_RUN + 1))
+if live_state_sandbox_assert_untouched; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} no live .loom daemon state path was written during the suite ($(live_state_sandbox_snapshot_size) paths guarded, #5191)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} a LIVE .loom daemon state path was written during this test run (#5191 regression!)"
+    echo "  sandbox in effect during the run:"
+    live_state_sandbox_describe | sed 's/^/    /'
+fi
 
 # ---------- summary ----------
 echo

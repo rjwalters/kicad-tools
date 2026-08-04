@@ -5,6 +5,20 @@
 # This script checks that all configured roles have their dependencies
 # properly configured, preventing silent failures where work gets stuck.
 #
+# OPERATOR-MANUAL TOOL (no in-repo caller besides its own test, #5277). The
+# canonical, actively-wired validator is the Rust `loom-daemon validate`
+# command (`loom-daemon/src/role_validation.rs` /
+# `loom-daemon/src/cli/misc_cmds.rs::handle_validate_command`) -- it runs the
+# identical role-dependency checks, is invoked proactively at daemon startup
+# and documented in `defaults/docs/runtime-adapters.md`. This Bash script is
+# kept as a dependency-light fallback: it needs only `jq` + the shared
+# `lib/config-resolver.sh`, so it works before `loom-daemon` has ever been
+# built (e.g. a fresh source checkout, or a shell-only CI step) or when an
+# operator wants a quick check without invoking the daemon binary. Its
+# config-tier-resolution behavior is covered by
+# `defaults/scripts/tests/test-config-tiers-cli-migration.sh` (Tests 2-4);
+# if this script changes, keep that test passing.
+#
 # Usage:
 #   ./validate-roles.sh [OPTIONS]
 #
@@ -50,7 +64,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help)
-            head -27 "$0" | tail -23
+            head -35 "$0" | tail -14
             exit 0
             ;;
         *)

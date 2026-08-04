@@ -232,6 +232,121 @@ class TestBuildManifest:
         assert manifest["files"]["test.csv"]["sha256"] == expected_sha
         assert manifest["files"]["test.csv"]["size"] == f.stat().st_size
 
+    def _bundle_with_subdirs(self, tmp_path):
+        """Build a result mirroring a real bundle: gerbers/ and images/."""
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        bom = tmp_path / "bom.csv"
+        bom.write_text("Comment,Designator\n")
+
+        gerber_dir = tmp_path / "gerbers"
+        gerber_dir.mkdir()
+        gerbers = gerber_dir / "gerbers.zip"
+        gerbers.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+
+        image_dir = tmp_path / "images"
+        image_dir.mkdir()
+        images = []
+        for name in ("assembly.png", "pcb_front.png"):
+            p = image_dir / name
+            p.write_bytes(b"\x89PNG\r\n\x1a\n")
+            images.append(p)
+
+        return ManufacturingResult(
+            output_dir=tmp_path,
+            assembly_result=AssemblyPackageResult(
+                output_dir=tmp_path,
+                bom_path=bom,
+                gerber_path=gerbers,
+            ),
+            image_paths=images,
+        )
+
+    def test_subdirectory_artifacts_keyed_by_relative_path(self, tmp_path):
+        """Artifacts in subdirectories are keyed by bundle-relative path (#4590)."""
+        result = self._bundle_with_subdirs(tmp_path)
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        assert set(manifest["files"]) == {
+            "bom.csv",
+            "gerbers/gerbers.zip",
+            "images/assembly.png",
+            "images/pcb_front.png",
+        }
+        # The old basename keys must be gone.
+        assert "gerbers.zip" not in manifest["files"]
+        assert "assembly.png" not in manifest["files"]
+
+    def test_every_manifest_key_resolves_at_bundle_root(self, tmp_path):
+        """`bundle_dir / key` resolves every entry -- no rglob needed (#4590)."""
+        result = self._bundle_with_subdirs(tmp_path)
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        unresolvable = [k for k in manifest["files"] if not (tmp_path / k).exists()]
+        assert unresolvable == []
+
+    def test_manifest_keys_use_posix_separators(self, tmp_path):
+        """Keys are POSIX-separated so the manifest is platform-stable (#3529)."""
+        result = self._bundle_with_subdirs(tmp_path)
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        assert all("\\" not in key for key in manifest["files"])
+        assert "gerbers/gerbers.zip" in manifest["files"]
+
+    def test_relative_output_dir_still_resolves(self, tmp_path, monkeypatch):
+        """A relative output_dir (e.g. `-o ./out`) still yields relative keys."""
+        monkeypatch.chdir(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        result = self._bundle_with_subdirs(out)
+        result.output_dir = Path("./out")
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        assert "gerbers/gerbers.zip" in manifest["files"]
+        assert [k for k in manifest["files"] if not (out / k).exists()] == []
+
+    def test_artifact_outside_bundle_falls_back_to_basename(self, tmp_path):
+        """A path outside output_dir degrades to the basename, never raises."""
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        inside = bundle / "bom.csv"
+        inside.write_text("Comment,Designator\n")
+
+        outside = tmp_path / "stray.zip"
+        outside.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+
+        result = ManufacturingResult(
+            output_dir=bundle,
+            assembly_result=AssemblyPackageResult(
+                output_dir=bundle,
+                bom_path=inside,
+                gerber_path=outside,
+            ),
+        )
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        assert set(manifest["files"]) == {"bom.csv", "stray.zip"}
+        assert manifest["files"]["stray.zip"]["size"] == outside.stat().st_size
+
 
 class TestManufacturingPackageDryRun:
     """Tests for ManufacturingPackage dry run mode."""

@@ -179,15 +179,32 @@ LOOMREPO=$(mktemp -d); git -C "$LOOMREPO" init -q; mkdir -p "$LOOMREPO/.loom"; e
 run_wrapper "$LOOMREPO"
 assert_contains "$WOUT" "MACHINE-RAN:$LOOMREPO" "AC1: Loom workspace with no copy -> execs the machine hook, LOOM_PROJECT_ROOT set"
 
-# 8c: Loom workspace WITH a per-repo .loom/hooks/ copy -> defers (transition dedup)
+# 8c: Loom workspace WITH a per-repo .loom/hooks/ copy but NO project-level
+# entry referencing it -> the deferral is now CONDITIONAL (#4806): with
+# nothing to defer TO, the wrapper falls through and execs the machine hook
+# rather than silently no-op'ing (the zero-guard-hooks bug this issue closes).
 mkdir -p "$LOOMREPO/.loom/hooks"
 printf '#!/usr/bin/env bash\necho SHOULD-NOT-RUN\n' > "$LOOMREPO/.loom/hooks/guard-destructive.sh"
 chmod +x "$LOOMREPO/.loom/hooks/guard-destructive.sh"
 run_wrapper "$LOOMREPO"
-[[ -z "$WOUT" && "$WRC" == "0" ]] && pass "transition: defers to a present per-repo copy (machine hook does not run)" || fail "transition: expected silent defer, got out='$WOUT' rc=$WRC"
+assert_contains "$WOUT" "MACHINE-RAN:$LOOMREPO" "#4806 AC(a): copies present + no project entry -> machine hook runs (was a zero-guard silent no-op)"
 
-# 8d: Loom workspace but machine checkout absent -> no-op (fail-open)
-out=$(cd "$LOOMREPO" && rm -rf "$LOOMREPO/.loom/hooks" && LOOM_HOME="/nonexistent/checkout" bash -c "$CMD" </dev/null 2>/dev/null); wrc=$?
+# 8c2: same repo, but NOW the project .claude/settings.json actually
+# references the per-repo copy -> the wrapper defers (exactly one fire, no
+# double-fire; #4806 AC(b)).
+mkdir -p "$LOOMREPO/.claude"
+printf '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"${CLAUDE_PROJECT_DIR}/.loom/hooks/guard-destructive.sh"}]}]}}\n' > "$LOOMREPO/.claude/settings.json"
+run_wrapper "$LOOMREPO"
+[[ -z "$WOUT" && "$WRC" == "0" ]] && pass "#4806 AC(b): copies present + project entry -> defers to it (machine hook does not double-fire)" || fail "#4806 AC(b): expected silent defer, got out='$WOUT' rc=$WRC"
+
+# 8d: Loom workspace, copies ABSENT -> machine exec runs (#4806 AC(c); also
+# covered by 8b above, restated explicitly per the issue's AC wording).
+rm -rf "$LOOMREPO/.loom/hooks" "$LOOMREPO/.claude/settings.json"
+run_wrapper "$LOOMREPO"
+assert_contains "$WOUT" "MACHINE-RAN:$LOOMREPO" "#4806 AC(c): copies absent -> machine hook runs"
+
+# 8e: Loom workspace but machine checkout absent -> no-op (fail-open)
+out=$(cd "$LOOMREPO" && LOOM_HOME="/nonexistent/checkout" bash -c "$CMD" </dev/null 2>/dev/null); wrc=$?
 [[ -z "$out" && "$wrc" == "0" ]] && pass "machine checkout absent -> silent no-op (exit 0)" || fail "expected silent exit 0 when checkout absent, got out='$out' rc=$wrc"
 
 # ── Test 9: deprovision removes only Loom-owned entries ──────────────────────
@@ -368,6 +385,53 @@ OUT18=$(cd "$R18" && LOOM_HOME="$CHK18" bash -c "$CMD18" </dev/null 2>/dev/null)
 rm -rf "$R18/.loom/hooks"
 OUT18b=$(cd "$R18" && LOOM_HOME="$CHK18" bash -c "$CMD18" </dev/null 2>/dev/null)
 assert_contains "$OUT18b" "MACHINE-RAN" "once the copies are gone, the machine-checkout hook runs (coverage never zero)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stale-Loom-wrapper UPGRADE path (#4806) — re-provisioning an install that
+# carries an OLDER Loom-authored wrapper (predating a `_phook_cmd()` edit)
+# must REWRITE it in place, since the dedup marker (`defaults/hooks/<name>`)
+# matches regardless of wrapper version and would otherwise cause a naive
+# re-provision to skip it forever.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# An "older" wrapper: same overall shape (the recognizable
+# `ROOT=$(cd "$(git rev-parse --git-common-dir` prefix + the
+# `defaults/hooks/<name>` marker) but with the UNCONDITIONAL transition-dedup
+# step this issue replaces (no `.claude/settings.json` check before deferring).
+OLD_WRAPPER_CMD='bash -c '"'"'ROOT=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd); [ -n "$ROOT" ] || exit 0; { [ -f "$ROOT/.loom-project/project.json" ] || [ -f "$ROOT/.loom/config.json" ]; } || exit 0; [ -x "$ROOT/.loom/hooks/guard-destructive.sh" ] && exit 0; H="${LOOM_HOME:-$HOME/.local/share/loom}/defaults/hooks/guard-destructive.sh"; [ -x "$H" ] && LOOM_PROJECT_ROOT="$ROOT" exec "$H" || exit 0'"'"''
+
+# ── Test 19: re-provisioning REPLACES a stale Loom-authored wrapper ──────────
+echo "Test 19: re-provisioning an install with an OLDER Loom wrapper replaces it in place (#4806)"
+HOME19=$(mktemp -d); mkdir -p "$HOME19/.claude"
+jq -n --arg cmd "$OLD_WRAPPER_CMD" \
+    '{hooks:{PreToolUse:[{matcher:"Bash",hooks:[{type:"command",command:$cmd}]}]}}' \
+    > "$HOME19/.claude/settings.json"
+BEFORE_CMD19=$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$HOME19/.claude/settings.json")
+assert_eq "$BEFORE_CMD19" "$OLD_WRAPPER_CMD" "precondition: the stale wrapper is seeded verbatim"
+provision_loom_hooks "$HOME19/.claude" >/dev/null 2>&1
+assert_eq "$(count_marker "$HOME19/.claude/settings.json" guard-destructive.sh)" "1" "still exactly one guard-destructive.sh entry after upgrade (no duplicate)"
+AFTER_CMD19=$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$HOME19/.claude/settings.json")
+CURRENT_CMD19="$(_phook_cmd guard-destructive.sh)"
+assert_eq "$AFTER_CMD19" "$CURRENT_CMD19" "the stale entry was rewritten to the CURRENT _phook_cmd() output"
+[[ "$AFTER_CMD19" != "$OLD_WRAPPER_CMD" ]] && pass "the old unconditional-defer text is gone" || fail "the old wrapper text is still present — upgrade did not fire"
+# Idempotent: a second re-provision must not touch it again (it now matches).
+provision_loom_hooks "$HOME19/.claude" >/dev/null 2>&1
+assert_eq "$(count_marker "$HOME19/.claude/settings.json" guard-destructive.sh)" "1" "still exactly one entry after a second re-provision"
+assert_eq "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$HOME19/.claude/settings.json")" "$CURRENT_CMD19" "already-current entry left unchanged by a second re-provision"
+
+# ── Test 20: a hand-written entry sharing the marker is NEVER rewritten ──────
+echo "Test 20: a non-Loom / hand-written entry is never rewritten or removed by the upgrade path (#4806)"
+HOME20=$(mktemp -d); mkdir -p "$HOME20/.claude"
+HANDWRITTEN_CMD='.claude/hooks/my-custom-wrapper.sh --marker defaults/hooks/guard-destructive.sh'
+jq -n --arg cmd "$HANDWRITTEN_CMD" \
+    '{hooks:{PreToolUse:[{matcher:"Bash",hooks:[{type:"command",command:$cmd}]}]}}' \
+    > "$HOME20/.claude/settings.json"
+provision_loom_hooks "$HOME20/.claude" >/dev/null 2>&1
+assert_eq "$(jq -r '[.hooks.PreToolUse[0].hooks[] | select(.command == $h)] | length' --arg h "$HANDWRITTEN_CMD" "$HOME20/.claude/settings.json")" "1" "hand-written entry is byte-identical after provisioning (never rewritten)"
+# Its shape does not match the known Loom wrapper prefix, so the dedup test
+# treats the marker match as satisfied and does NOT append a second (Loom)
+# entry either — same no-duplicate contract as before this issue.
+assert_eq "$(count_marker "$HOME20/.claude/settings.json" guard-destructive.sh)" "1" "no second (Loom) entry appended alongside the hand-written one"
 
 echo ""
 echo "======================================"

@@ -33,33 +33,46 @@
 # prompt) or waived with `--dangerously-bypass-hook-trust`.
 #
 # On 0.146.0 there is NO documented non-interactive command to establish it:
-# `codex` exposes no `hooks` subcommand, and `codex doctor` reports no hook
-# check (verified 2026-07-31 against the shipped 0.146.0 binary). Loom will not
-# guess the identity string or the hash algorithm, and #4495's scope guards
-# forbid `--dangerously-bypass-hook-trust`. So this script takes the second
-# option #4495's acceptance criteria explicitly allow: **fail closed before
-# mutable-role dispatch when trust cannot be verified.**
+# `codex` exposes no `hooks` subcommand, `codex doctor --json` reports no hook
+# check among its 18 checks, and the `codex app-server` JSON-RPC surface (the
+# same binary's strings table) exposes only a read-only `hooks/list` — no
+# `hooks/trust` or equivalent (independently re-verified issue #5005,
+# 2026-08-03, against the real `@openai/codex@0.146.0` npm package: `--help`
+# output, `doctor --json`, `features list`, and a `strings` pass over the
+# shipped binary, which shows hook-trust as a TUI-only internal action
+# (`TrustHook`/`HookTrustUpdate`) with no CLI flag or RPC method reaching it).
+# Loom will not guess the identity string or the hash algorithm, and #4495's
+# scope guards forbid `--dangerously-bypass-hook-trust`. So this script takes
+# the second option #4495's (and #5005's) acceptance criteria explicitly
+# allow: an **operator-attested one-time trust step per profile**, with **fail
+# closed before mutable-role dispatch when trust cannot be verified.**
 #
 # `verify` therefore checks three things:
 #
 #   1. STRUCTURE — hooks.json contains Loom's managed entry at the expected
 #      version, and the bridge it names is readable and points at the current
 #      workspace's provisioned guard.
-#   2. CODEX TRUST — `config.toml` carries at least one `hooks.state` entry
-#      with a non-empty `trusted_hash`. This is the only Codex-owned trust
-#      signal observable from outside the CLI; it proves the operator has been
-#      through the trust prompt for this profile.
+#   2. CODEX TRUST — a NEW `hooks.state` entry with a non-empty `trusted_hash`
+#      appeared since Loom's currently-installed entry was (re)provisioned
+#      (issue #5005's trust-baseline diff; see `read_trusted_hashes` and the
+#      `trustBaselineHashes` receipt field below). This still cannot prove
+#      Codex trusted LOOM'S SPECIFIC entry — Codex exposes no identity string
+#      Loom can observe — but it is materially stronger than "some hook, at
+#      some point, was trusted": it requires a trust decision to have happened
+#      AFTER Loom's entry landed, not merely to exist. Profiles from before
+#      this baseline tracking shipped fall back to the old coarse signal (any
+#      `trusted_hash` present) rather than losing readiness on a Loom upgrade.
 #   3. STALENESS — Loom's own receipt (`<CODEX_HOME>/loom-codex-hooks.json`,
 #      non-secret, Loom-owned) pins the SHA-256 of the managed entry as it was
 #      when it was last installed. If the entry has since changed, trust
 #      established for the OLD entry cannot be assumed to cover the new one, so
 #      readiness is STALE and mutable-role dispatch fails closed.
 #
-# Check 2 is deliberately labelled as a coarse signal in
-# defaults/docs/guardrail-parity-codex.md: it proves "this profile has trusted
-# some hook", not "this profile has trusted LOOM's hook". That imprecision is
-# one of the reasons `defaults/runtimes/codex.json` stays at
-# `hooks: partial` / `worktreeIsolation: partial`.
+# Check 2's baseline-diff form is still an imprecise signal — it correlates
+# timing, it does not identify which hook was trusted — and that imprecision
+# is one of the reasons `defaults/runtimes/codex.json` stays at
+# `hooks: partial` / `worktreeIsolation: partial` (see
+# defaults/docs/guardrail-parity-codex.md gap 11).
 #
 # ============================================================================
 # USAGE
@@ -269,6 +282,34 @@ sha256_of() {
     fi
 }
 
+# read_trusted_hashes <config.toml path>
+#
+# Prints the sorted, de-duplicated set of every non-empty `hooks.state`
+# trusted_hash VALUE the file carries, one per line. Matches both spellings
+# Codex may write: the table form (`[hooks.state."<id>"]` with `trusted_hash =
+# "..."` on its own line) and the dotted form
+# (`hooks.state."<id>".trusted_hash = "..."`) — the same two forms the coarse
+# existence check already tolerated. A `#`-commented line is excluded so a
+# documentation comment cannot fake an entry. Unreadable/absent input prints
+# nothing (not an error): callers treat "no file yet" and "no trust yet" the
+# same way, which is the correct baseline for a brand-new profile.
+#
+# This is the building block for the trust-baseline diff in do_install/
+# do_verify below (issue #5005): it lets readiness distinguish "a NEW trust
+# decision was recorded after Loom's hook was (re)installed" from the old
+# coarse "some trusted_hash exists somewhere in this file" signal, without
+# guessing Codex's internal identity string or hash algorithm — it only ever
+# compares the OBSERVABLE set of values, never interprets them.
+read_trusted_hashes() {
+    local file="$1"
+    [[ -n "$file" && -r "$file" ]] || return 0
+    grep -vE '^[[:space:]]*#' "$file" 2>/dev/null \
+        | grep -oE 'trusted_hash[[:space:]]*=[[:space:]]*"[^"]+"' \
+        | sed -E 's/^trusted_hash[[:space:]]*=[[:space:]]*"//; s/"$//' \
+        | sort -u
+    return 0
+}
+
 # Read the existing hooks.json, or `{}` when absent. A malformed file is a hard
 # error: silently replacing an operator's unparseable config would destroy it.
 read_hooks_json() {
@@ -369,6 +410,56 @@ do_install() {
     # Receipt: Loom-owned, non-secret staleness detector (see the header).
     local entry_hash receipt
     entry_hash="$(sha256_of "$cmd")"
+
+    # Trust baseline (issue #5005): the set of hooks.state trusted_hash values
+    # this profile already carried BEFORE this install, so verify can later
+    # tell "a NEW trust decision landed since this content was installed"
+    # apart from "some trust exists, possibly for something else entirely,
+    # possibly from years ago". Read the OLD receipt (still on disk — it is
+    # not overwritten until the atomic_write call below) to decide whether
+    # this is a genuinely fresh/changed install or a no-op reinstall of
+    # identical content:
+    #
+    #   - identical content (old receipt's commandSha256 == this entry_hash)
+    #     AND that old receipt already recorded a baseline: PRESERVE it
+    #     unchanged. An idempotent reinstall (e.g. after `loom update` reruns
+    #     provisioning defensively) must never erase an operator's earlier
+    #     trust decision by quietly resetting the floor to "whatever is
+    #     trusted right now".
+    #   - identical content, but the old receipt predates this field (an
+    #     older Loom version provisioned this profile before trust-baseline
+    #     tracking shipped): grandfather in whatever is ALREADY trusted by
+    #     starting the baseline at empty, rather than snapshotting "now" —
+    #     snapshotting now would wrongly absorb an existing trust decision
+    #     into the floor and make an already-ready profile read as untrusted
+    #     purely because Loom upgraded.
+    #   - anything else (no receipt at all, or content genuinely changed):
+    #     snapshot whatever is trusted RIGHT NOW, before the operator has had
+    #     any chance to trust the (possibly new) content.
+    local -a baseline_hashes=()
+    local prior_cmd_hash="" prior_has_baseline="false" content_unchanged="false"
+    if [[ -r "$RECEIPT_FILE" ]]; then
+        prior_cmd_hash="$(jq -r '.loomManagedHook.commandSha256 // empty' "$RECEIPT_FILE" 2>/dev/null)" || prior_cmd_hash=""
+        if jq -e '.loomManagedHook | has("trustBaselineHashes")' "$RECEIPT_FILE" >/dev/null 2>&1; then
+            prior_has_baseline="true"
+        fi
+        [[ -n "$prior_cmd_hash" && "$prior_cmd_hash" == "$entry_hash" ]] && content_unchanged="true"
+    fi
+    if [[ "$content_unchanged" == "true" && "$prior_has_baseline" == "true" ]]; then
+        while IFS= read -r _h; do
+            [[ -n "$_h" ]] && baseline_hashes+=("$_h")
+        done < <(jq -r '.loomManagedHook.trustBaselineHashes[]? // empty' "$RECEIPT_FILE" 2>/dev/null)
+    elif [[ "$content_unchanged" == "true" ]]; then
+        baseline_hashes=()  # grandfather: legacy receipt, unchanged content
+    else
+        while IFS= read -r _h; do
+            [[ -n "$_h" ]] && baseline_hashes+=("$_h")
+        done < <(read_trusted_hashes "$CONFIG_FILE")
+    fi
+    local baseline_json
+    baseline_json="$(printf '%s\n' ${baseline_hashes[@]+"${baseline_hashes[@]}"} | jq -R -s 'split("\n") | map(select(length > 0))' 2>/dev/null)"
+    [[ -n "$baseline_json" ]] || baseline_json="[]"
+
     receipt="$(jq -nc \
         --arg version "$LOOM_HOOK_VERSION" \
         --arg command "$cmd" \
@@ -376,9 +467,11 @@ do_install() {
         --arg matcher "$matcher" \
         --arg schema "$CODEX_SCHEMA_PIN" \
         --arg workspace "${WORKSPACE_ARG%/}" \
+        --argjson trustBaseline "$baseline_json" \
         '{loomManagedHook: {version: ($version|tonumber), command: $command,
                             commandSha256: $hash, matcher: $matcher,
-                            codexSchemaPin: $schema, workspace: $workspace}}' 2>/dev/null)" || receipt=""
+                            codexSchemaPin: $schema, workspace: $workspace,
+                            trustBaselineHashes: $trustBaseline}}' 2>/dev/null)" || receipt=""
     if [[ -n "$receipt" ]]; then
         atomic_write "$RECEIPT_FILE" "$receipt" || log_warn "Could not write the managed-hook receipt; verify will report the entry as unpinned."
     fi
@@ -443,12 +536,17 @@ do_remove() {
 #
 # Prints a machine-readable object under --json:
 #   {"profile","ready":bool,"installed":bool,"version":N,"trusted":bool,
+#    "trustSignal":"none"|"baseline-diff"|"baseline-diff-no-new-trust"|"legacy-coarse",
 #    "stale":bool,"bridgeReadable":bool,"reason":"..."}
-# The profile DIRECTORY NAME is the only identity ever emitted; no path
-# contents, no credential material.
+# `trustSignal` records WHICH trust check produced `trusted` (issue #5005):
+# `baseline-diff` is the strengthened signal (a NEW trusted_hash appeared
+# after Loom's entry was installed); `legacy-coarse` is the old "any
+# trusted_hash exists" fallback, used only when no install-time baseline was
+# recorded for this profile. The profile DIRECTORY NAME is the only identity
+# ever emitted; no path contents, no credential material.
 do_verify() {
     local installed=false trusted=false stale=false bridge_readable=false
-    local installed_cmd="" reason="" ready=false
+    local installed_cmd="" reason="" ready=false trust_signal="none"
 
     if [[ -r "$BRIDGE" ]]; then
         bridge_readable=true
@@ -467,15 +565,62 @@ do_verify() {
         [[ -n "$installed_cmd" ]] && installed=true
     fi
 
-    # Codex-owned trust signal: any hooks.state entry with a trusted_hash. Codex
-    # writes it either as a `[hooks.state."<id>"]` table with `trusted_hash =
-    # "..."` on its own line, or as a dotted key
-    # (`hooks.state."<id>".trusted_hash = "..."`); both spellings are matched.
-    # A `#`-commented line is excluded so a documentation comment in an
-    # operator's config.toml cannot fake trust.
-    if [[ -r "$CONFIG_FILE" ]] \
-        && grep -qE '^[^#]*trusted_hash[[:space:]]*=[[:space:]]*"[^"]+"' "$CONFIG_FILE" 2>/dev/null; then
-        trusted=true
+    # Codex-owned trust signal (issue #5005 strengthens this beyond the
+    # coarse "any trusted_hash exists" check): compare the CURRENT set of
+    # hooks.state trusted_hash values against the trust-baseline snapshot
+    # do_install recorded in the receipt (the set of hashes that were already
+    # present when Loom's currently-installed entry was provisioned).
+    #
+    #   trustSignal=baseline-diff       a receipt with a baseline is present,
+    #                                   and readiness is decided by whether a
+    #                                   NEW trusted_hash appeared since — i.e.
+    #                                   Codex hook trust was (re)established
+    #                                   AFTER Loom's entry landed, not merely
+    #                                   "some hook, at some point, was trusted"
+    #   trustSignal=legacy-coarse       no receipt (or a receipt from before
+    #                                   this field existed) — falls back to
+    #                                   the old "any trusted_hash present"
+    #                                   signal so an already-trusted profile
+    #                                   is never punished for a Loom upgrade
+    #
+    # Neither signal can prove Codex trusted LOOM'S SPECIFIC entry (Codex
+    # exposes no identity string Loom can observe or compute — see the header
+    # and defaults/docs/guardrail-parity-codex.md gap 11); baseline-diff only
+    # strengthens the CORRELATION in time between "Loom installed this
+    # content" and "a trust decision happened", which is the concrete gap the
+    # coarse existence check left open.
+    local -a current_hashes=() baseline_hashes=()
+    while IFS= read -r _h; do
+        [[ -n "$_h" ]] && current_hashes+=("$_h")
+    done < <(read_trusted_hashes "$CONFIG_FILE")
+
+    local baseline_present=false
+    if [[ -r "$RECEIPT_FILE" ]] && jq -e '.loomManagedHook | has("trustBaselineHashes")' "$RECEIPT_FILE" >/dev/null 2>&1; then
+        baseline_present=true
+        while IFS= read -r _h; do
+            [[ -n "$_h" ]] && baseline_hashes+=("$_h")
+        done < <(jq -r '.loomManagedHook.trustBaselineHashes[]? // empty' "$RECEIPT_FILE" 2>/dev/null)
+    fi
+
+    if [[ ${#current_hashes[@]} -gt 0 ]]; then
+        local new_hashes
+        new_hashes="$(comm -13 \
+            <(printf '%s\n' ${baseline_hashes[@]+"${baseline_hashes[@]}"} | sort -u) \
+            <(printf '%s\n' "${current_hashes[@]}" | sort -u) 2>/dev/null)"
+        if [[ "$baseline_present" == true ]]; then
+            if [[ -n "$new_hashes" ]]; then
+                trusted=true
+                trust_signal="baseline-diff"
+            else
+                trust_signal="baseline-diff-no-new-trust"
+            fi
+        else
+            # No baseline recorded for this profile at all (receipt missing,
+            # or from before this field existed): fall back to the coarse
+            # signal rather than treat unexplainable state as untrusted.
+            trusted=true
+            trust_signal="legacy-coarse"
+        fi
     fi
 
     # Staleness: the installed command must match the receipt's pinned hash.
@@ -508,12 +653,20 @@ do_verify() {
     if [[ "$bridge_readable" != true ]]; then
         reason="the managed hook bridge is missing or unreadable"
     elif [[ "$trusted" != true && -z "$reason" ]]; then
-        reason="Codex hook trust is not established for this profile (no hooks.state trusted_hash in config.toml)"
+        if [[ "$trust_signal" == "baseline-diff-no-new-trust" ]]; then
+            reason="Codex hook trust has not been (re-)established for this profile since Loom's managed hook was last (re)installed — hooks.state carries no trusted_hash beyond the pre-install baseline"
+        else
+            reason="Codex hook trust is not established for this profile (no hooks.state trusted_hash in config.toml)"
+        fi
     fi
 
     if [[ "$installed" == true && "$trusted" == true && "$stale" == false && "$bridge_readable" == true ]]; then
         ready=true
-        reason="managed hook v$LOOM_HOOK_VERSION installed, pinned, and the profile has established Codex hook trust"
+        if [[ "$trust_signal" == "baseline-diff" ]]; then
+            reason="managed hook v$LOOM_HOOK_VERSION installed, pinned, and a NEW Codex hook trust decision was recorded for this profile since the managed hook was (re)installed"
+        else
+            reason="managed hook v$LOOM_HOOK_VERSION installed, pinned, and the profile has established Codex hook trust (legacy signal: no install-time baseline recorded for this profile, falling back to any trusted_hash present)"
+        fi
     fi
     [[ -n "$reason" ]] || reason="not ready"
 
@@ -523,13 +676,14 @@ do_verify() {
             --argjson ready "$ready" \
             --argjson installed "$installed" \
             --argjson trusted "$trusted" \
+            --arg trustSignal "$trust_signal" \
             --argjson stale "$stale" \
             --argjson bridgeReadable "$bridge_readable" \
             --argjson version "$LOOM_HOOK_VERSION" \
             --arg reason "$reason" \
             '{profile: $profile, ready: $ready, installed: $installed,
-              trusted: $trusted, stale: $stale, bridgeReadable: $bridgeReadable,
-              version: $version, reason: $reason}'
+              trusted: $trusted, trustSignal: $trustSignal, stale: $stale,
+              bridgeReadable: $bridgeReadable, version: $version, reason: $reason}'
     fi
 
     if [[ "$ready" == true ]]; then

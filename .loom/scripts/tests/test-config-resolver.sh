@@ -169,14 +169,15 @@ assert_eq "$result" "safe-default" "indexing through a scalar soft-fails to defa
 rm -rf "$repo"
 
 # --- Test 11: cross-language conformance fixture (#4039 AC) ---
-# The same fixture tree must resolve identically from Rust, Python, and
-# Bash -- see loom-tools/tests/fixtures/config_resolver/README.md. Rust:
+# The same fixture tree must resolve identically from Rust and Bash -- see
+# defaults/scripts/tests/fixtures/config_resolver/README.md. Rust:
 # loom-daemon/src/config_resolver.rs
-# (test_conformance_fixture_matches_expected_json). Python:
-# loom-tools/tests/test_config_resolver.py (TestConformanceFixture).
+# (test_conformance_fixture_matches_expected_json). (A Python resolver was a
+# third consumer until #4970 retired loom-tools/, which is also when this
+# fixture relocated from loom-tools/tests/fixtures/config_resolver/ to its
+# current path below.)
 echo "Test 11: cross-language conformance fixture resolves to the shared expected.json"
-REPO_ROOT_FOR_FIXTURE="$(cd "$SCRIPTS_DIR/../.." && pwd)"
-FIXTURE_DIR="$REPO_ROOT_FOR_FIXTURE/loom-tools/tests/fixtures/config_resolver"
+FIXTURE_DIR="$SCRIPTS_DIR/tests/fixtures/config_resolver"
 
 if [[ -d "$FIXTURE_DIR" ]]; then
     actual=$(loom_resolve_config "$FIXTURE_DIR" | jq -S -c .)

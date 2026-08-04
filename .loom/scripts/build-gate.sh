@@ -20,14 +20,20 @@
 #   - The gate is ZERO-PYTHON as of epic #4081 Phase 4 (#4557). It used to run
 #     `cd loom-tools && uv run pytest tests/` (full tier) and
 #     `uv run python -c "import loom_tools"` (fast tier); the Python package was
-#     retired, so both stages would now fail against a deleted path. The only
-#     surviving Python is the opt-in `loom-search` carve-out
-#     (loom-tools/src/loom_tools/semantic_search.py), which is off the core
-#     daemon path and is covered by the best-effort, NEVER-INSTALLING stage at
-#     the end of the full tier below — skipped entirely on a host with no
-#     pytest, because requiring a Python toolchain to gate a PR is exactly what
-#     #4081 removed.
+#     retired, so both stages would now fail against a deleted path. The
+#     package's last Python residue, the opt-in `loom-search` carve-out, was
+#     itself retired in #4970 (per the operator's RETIRE decision on #4608) —
+#     there is now no Python anywhere in the repo, load-bearing or otherwise,
+#     and no Python-conditional stage left to run.
 #   - bash scripts/test-installer.sh runs the 131-case installer suite.
+#   - bash scripts/test-changelog.sh runs scripts/changelog.sh's unit suite
+#     (#5196) against a disposable scratch repo (CHANGELOG_REPO_ROOT) -- no
+#     network, no dependency on this repo's own history, sub-second.
+#   - bash scripts/test-install-local-mode.sh (#5276) covers install-loom.sh
+#     --local/--gitignore mode -- no daemon build, no network, sub-second.
+#   - bash scripts/test-migrate-consumer.sh (#5276) covers scripts/install/
+#     migrate-consumer.sh (Epic #3835 Phase 6) against throwaway git fixtures
+#     -- no network, no real daemon, sub-second.
 #   - mcp-loom (TypeScript) is intentionally EXCLUDED: it needs npm install/ci
 #     in a fresh worktree (no guaranteed warm node_modules), which adds
 #     unpredictable latency to a gate that also runs once per PR. CI still
@@ -155,33 +161,13 @@ cargo test --workspace --lib --bins
 echo "[build-gate] bash installer suite"
 bash scripts/test-installer.sh
 
-# `loom-search` carve-out coverage (epic #4081 Phase 4, #4557) — BEST EFFORT.
-#
-# The Python stage here used to be `cd loom-tools && uv run pytest tests/`,
-# covering the whole loom_tools package. That package is retired; the only
-# Python left in the repo is the opt-in, off-by-default `loom-search` feature
-# (loom_tools/semantic_search.py + embedders.py + the three common/ helpers it
-# imports) and its tests.
-#
-# This stage is deliberately NON-BLOCKING ON TOOLCHAIN: it runs only when a
-# `python3` that can already `import pytest` happens to be on the host, and it
-# installs nothing (no `pip install`, no `uv run` venv materialization). The
-# whole point of #4081 was that gating a PR must never require a Python
-# toolchain, so a host without pytest SKIPS this stage and the gate still
-# reaches a determinate verdict. When it does run, a failure is a real gate
-# failure — set LOOM_BUILD_GATE_SKIP_SEARCH=1 to opt out explicitly.
-if [[ "${LOOM_BUILD_GATE_SKIP_SEARCH:-0}" == "1" ]]; then
-  echo "[build-gate] loom-search tests skipped (LOOM_BUILD_GATE_SKIP_SEARCH=1)"
-elif [[ -d loom-tools/tests ]] \
-     && command -v python3 >/dev/null 2>&1 \
-     && python3 -c "import pytest" >/dev/null 2>&1; then
-  echo "[build-gate] loom-search carve-out pytest (opt-in feature; PYTHONPATH-scoped, no install)"
-  (
-    cd loom-tools
-    PYTHONPATH="src${PYTHONPATH:+:${PYTHONPATH}}" python3 -m pytest tests/ -q
-  )
-else
-  echo "[build-gate] loom-search tests skipped (no python3 with pytest on this host — expected; #4081 removed the Python toolchain requirement)"
-fi
+echo "[build-gate] bash changelog generator suite"
+bash scripts/test-changelog.sh
+
+echo "[build-gate] bash install --local/--gitignore mode suite"
+bash scripts/test-install-local-mode.sh
+
+echo "[build-gate] bash migrate-consumer suite"
+bash scripts/test-migrate-consumer.sh
 
 echo "[build-gate] all stages passed"

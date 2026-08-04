@@ -90,6 +90,52 @@
 #       escalates to a maximally actionable DIVERGENCE report (exit 1) with the
 #       explicit recovery commands — never an automatic kill/restart.
 #
+# SOCKET-FIRST LIVENESS, PID FILE DEMOTED TO A HINT (#5118)
+#   Until #5118 the OUT-OF-BAND probe above was the ONLY thing that could
+#   establish liveness, and on a host with neither a launchd job nor a
+#   systemd-managed unit to ask, that reduced to a single artifact: the pid
+#   file. Three stacked defects made that unusable fleet-wide:
+#     1. PATH DISAGREEMENT. This script derived the pid file from the SOCKET's
+#        directory (`<dirname $LOOM_SOCKET_PATH>/.daemon.pid`) in the
+#        marker-absent path, while the daemon derives it from the START
+#        SCRIPT's `LOOM_PID_FILE` / the workspace (`daemon_pidfile.rs`). On a
+#        workspace-rooted install those are never the same directory.
+#     2. `LOOM_PID_FILE` WAS IGNORED HERE. It is exported by
+#        loom-daemon-start.sh and baked into every plist/unit it renders — and
+#        honored by the daemon as precedence tier 1 — but this script had no
+#        support for it at all, so the one variable that is supposed to
+#        single-source the path could not align the two ends.
+#     3. A STALE pid file reads as a CONFIRMED death. A pid file naming a
+#        long-dead pid (#4774, before the daemon self-wrote it at bind) is
+#        indistinguishable here from "no daemon".
+#   Observed 2026-08-03: BOTH fleet hosts ran healthy daemons while this
+#   watchdog reported `[DIVERGENCE] ... no live pid file at ~/.loom/.daemon.pid`
+#   every five minutes since 2026-08-01. An alarm that is always on carries no
+#   information — and two genuine outages that same session were
+#   indistinguishable from it.
+#
+#   The fix inverts the precedence to match what `loom-daemon health` already
+#   does: the IPC ROUND-TRIP IS AUTHORITATIVE, the pid file is a corroborating
+#   hint. Concretely, when the out-of-band probe does NOT find a live daemon
+#   this script now ASKS THE SOCKET before reporting anything:
+#     * socket ANSWERS + no supervisor was consulted (pid-file path) ⇒ HEALTHY.
+#       The pid file's absence/staleness is a note, never a page.
+#     * socket ANSWERS + the supervisor (launchd/systemd) says its job is down
+#       ⇒ a WARN state mismatch: a daemon is serving work but nothing is
+#       supervising it. Auto-remediation is SUPPRESSED — kickstarting a second
+#       daemon at a socket a live one already owns only produces a refusal.
+#     * socket is UNREACHABLE ⇒ the daemon really is down: the existing
+#       DIVERGENCE + bounded auto-remediation path, unchanged.
+#     * liveness CANNOT BE DETERMINED (no probe available — no resolvable
+#       binary, probe disabled, CLI wedged — AND no usable pid file) ⇒ a
+#       DISTINCT `UNKNOWN` report and exit 3. Defaulting to "the daemon is
+#       gone" is what manufactured the permanent false positive; an alerting
+#       component must say "I cannot tell" in its own words.
+#   The pid file's PATH is also now derived by the same precedence the daemon
+#   uses (`LOOM_PID_FILE` > the marker's `pid_file=` > machine/workspace >
+#   `<loom dir>`), so the two ends can no longer disagree about which file
+#   they mean.
+#
 # BOUNDED AUTO-REMEDIATION (#4232)
 #   The watchdog was deliberately report-only until #4232: on 2026-07-28 a
 #   `loom-daemon restart` was ack'd (the running daemon exited 0, honoring its
@@ -106,19 +152,36 @@
 #   report-only, exactly as before: no crash-loop revival, no reviving a
 #   deliberate stop.
 #
-# EXIT CODES (a StartInterval job's exit code does not affect relaunch — these
-# exist for testability and for a human running it by hand):
+#   #4862 adds the systemd --user mirror of this gate: a clean main-process
+#   exit (ExecMainCode=exited, ExecMainStatus=0) with the unit LOADED but not
+#   running auto-runs 'systemctl --user reset-failed <unit> && systemctl
+#   --user start <unit>' — the systemd analog of 'launchctl kickstart', for
+#   the exact "Restart=on-success didn't fire" incident #4862 reported (and
+#   the render_systemd_unit KillMode=mixed fix in loom-daemon-start.sh
+#   addresses at the source). Same narrow construction: an operator stop, a
+#   genuine crash, or a never-installed unit cannot produce this signature.
+#
+# EXIT CODES (a StartInterval/OnUnitActiveSec job's exit code does not affect
+# relaunch — these exist for testability and for a human running it by hand):
 #   0  no divergence — daemon healthy, OR no daemon expected AND none running
-#      (marker absent + nothing alive), OR the #4232 bounded auto-remediation
-#      (see above) successfully relaunched it via 'launchctl kickstart'
+#      (marker absent + nothing alive), OR the #4232/#4862 bounded
+#      auto-remediation (see above) successfully relaunched it via
+#      'launchctl kickstart' / 'systemctl --user start'
 #   1  DIVERGENCE / state mismatch reported — a daemon is expected but is not
 #      running (and either the #4232 remediation gate did not apply, or it fired
 #      but the daemon is still not confirmed running), or is running but its
 #      heartbeat is stale (possibly wedged), OR (#4398) it is running with a
 #      fresh heartbeat but its bounded IPC round-trip failed, OR (#4331) a daemon
 #      IS running while the marker is ABSENT (crash protection disarmed — a WARN
-#      state mismatch)
+#      state mismatch), OR (#5118) the socket answers while the supervisor says
+#      its job is down (an UNSUPERVISED daemon — serving work, but not crash
+#      protected)
 #   2  usage error
+#   3  (#5118) LIVENESS UNDETERMINED — deliberately NOT exit 1: no out-of-band
+#      signal found a live daemon AND the in-band socket probe could not run (no
+#      resolvable loom-daemon binary, the probe is disabled, or the CLI itself
+#      never returned), so this tick has NO EVIDENCE either way. Reported as
+#      UNKNOWN, never as "the daemon is down".
 #
 # Usage:
 #   ./.loom/scripts/cli/loom-daemon-watchdog.sh            Check once, report on divergence
@@ -132,12 +195,27 @@
 #   LOOM_DAEMON_HEARTBEAT_STALE_SECS  Staleness threshold in seconds (default:
 #                                  max(5 × heartbeat cadence, 300))
 #   LOOM_SOCKET_PATH              Override the daemon socket (its dir is the loom dir)
+#   LOOM_PID_FILE                 #5118: the pid file path, honored END-TO-END —
+#                                 the same precedence tier 1 the daemon itself
+#                                 uses (daemon_pidfile.rs) and the value
+#                                 loom-daemon-start.sh exports into every plist
+#                                 / systemd unit it renders. Wins over the
+#                                 marker's `pid_file=` field. The pid file is
+#                                 only ever a CORROBORATING hint here: the
+#                                 socket round-trip is authoritative.
 #   LOOM_LAUNCHD_LABEL            macOS: the DAEMON label to probe (default com.rjwalters.loom-daemon)
 #   LOOM_LAUNCHD_DOMAIN          macOS: pin the launchd domain (gui/<uid> or user/<uid>);
 #                                else auto-resolved gui→user (#4130), matching the start
 #   LOOM_DAEMON_LAUNCHD          0/false/no: treat as a non-launchd (nohup) daemon; check the pid file only
-#   LOOM_WATCHDOG_KICKSTART_RECHECK_ATTEMPTS  #4232: how many times to re-check
-#                                for a live pid after the auto-kickstart fallback
+#   LOOM_SYSTEMD_UNIT             #4862: the systemd --user unit to probe (default
+#                                loom-daemon.service, else the marker's systemd_unit)
+#   LOOM_WATCHDOG_SYSTEMD_PROBE   #4862: 1/true/yes: opt in to the systemd --user
+#                                probe (default: per the marker's use_systemd
+#                                field, else OFF -- `systemctl` merely being on
+#                                PATH is not proof of a systemd-managed daemon).
+#                                0/false/no forces it off regardless of the marker.
+#   LOOM_WATCHDOG_KICKSTART_RECHECK_ATTEMPTS  #4232/#4862: how many times to re-check
+#                                for a live pid after the auto-kickstart / systemctl-start fallback
 #                                (default 3).
 #   LOOM_WATCHDOG_KICKSTART_RECHECK_INTERVAL  #4232: seconds between re-checks
 #                                (default 1; may be fractional).
@@ -156,9 +234,12 @@
 #                                (default: LOOM_DAEMON_STARTUP_GRACE_SECS, else 90).
 #   LOOM_WATCHDOG_IPC_PROBE_STATE  #4398: path to the consecutive-failure counter
 #                                (default <loom dir>/.watchdog-probe-fail-count).
-#   LOOM_WATCHDOG_FORCE_PORTABLE_TIMEOUT  #4398: 1 forces the built-in bounded
-#                                runner instead of `timeout(1)` (test seam for
-#                                the default macOS no-`timeout` shape).
+#   LOOM_FORCE_PORTABLE_TIMEOUT    #4398, renamed from the watchdog-local
+#                                LOOM_WATCHDOG_FORCE_PORTABLE_TIMEOUT by #4832
+#                                when bounded_run() moved to the shared
+#                                lib/bounded-run.sh: 1 forces the built-in
+#                                bounded runner instead of `timeout(1)` (test
+#                                seam for the default macOS no-`timeout` shape).
 #   LOOM_DAEMON_BIN               Explicit loom-daemon binary for the IPC probe
 #                                (same resolution order as loom-daemon-start.sh).
 
@@ -181,6 +262,25 @@ _LOOM_LAUNCHD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null 
 if [[ -r "$_LOOM_LAUNCHD_LIB_DIR/launchd-domain.sh" ]]; then
     # shellcheck source=../lib/launchd-domain.sh
     source "$_LOOM_LAUNCHD_LIB_DIR/launchd-domain.sh"
+fi
+# bounded_run() (#4398, shared with loom-daemon-start.sh's print_calibrate_hint,
+# de-duplicated from this script's own former inline copy by #4832) — the IPC
+# probe's hard wall-clock budget. Unlike the start script's advisory hint, the
+# probe below is NOT optional, so run_ipc_probe() checks explicitly for a
+# missing `bounded_run` rather than letting an undefined-function call degrade
+# silently.
+if [[ -r "$_LOOM_LAUNCHD_LIB_DIR/bounded-run.sh" ]]; then
+    # shellcheck source=../lib/bounded-run.sh
+    source "$_LOOM_LAUNCHD_LIB_DIR/bounded-run.sh"
+fi
+# loom_locate_daemon_bin() (#4875, shared with loom-daemon-start.sh /
+# loom-daemon-update.sh / loom-status.sh / `.loom/bin/loom health`) — includes
+# the machine-level ~/.local/bin fallback so this watchdog (which runs from a
+# systemd/launchd timer with a minimal, non-login environment) still finds a
+# machine-level install even though $PATH never carries ~/.local/bin here.
+if [[ -r "$_LOOM_LAUNCHD_LIB_DIR/locate-daemon-bin.sh" ]]; then
+    # shellcheck source=../lib/locate-daemon-bin.sh
+    source "$_LOOM_LAUNCHD_LIB_DIR/locate-daemon-bin.sh"
 fi
 
 VERBOSE=false
@@ -235,14 +335,72 @@ report() {
     esac
 }
 
+# ---------- marker reader ----------
+# Defined UP HERE (moved by #5118) rather than beside the marker-present path
+# below: locate_daemon_bin() consults `marker_get repo_root`, and #5118's
+# socket probe now runs on the marker-ABSENT path too, which executes before
+# that path's own code. A function must exist at CALL time, so this has to be
+# defined before section 1 runs.
+marker_get() {
+    local key="$1"
+    # First matching `key=value` line; strip the key= prefix. Comments start '#'.
+    [[ -f "$MARKER" ]] || return 0
+    grep -E "^${key}=" "$MARKER" 2>/dev/null | head -n1 | cut -d= -f2-
+}
+
+# ---------- pid-file path resolution (#5118) ----------
+# Mirrors the daemon's own `daemon_pidfile::resolve_pid_file_path_from`
+# precedence EXACTLY so the two ends can never mean different files — the #5118
+# path disagreement (this script read `<socket dir>/.daemon.pid`; the daemon
+# wrote `<workspace>/.loom/.daemon.pid`) was possible only because each side
+# derived its own path:
+#   1. LOOM_PID_FILE            — explicit, exported by loom-daemon-start.sh and
+#                                 baked into the rendered plist / systemd unit,
+#                                 so every supervisor relaunch resolves it too.
+#   2. the marker's `pid_file=` — the path the start script chose on THIS host
+#                                 (i.e. what it exported as LOOM_PID_FILE).
+#   3. LOOM_MACHINE_CHECKOUT    — machine mode keeps runtime state in the
+#                                 machine-level loom dir.
+#   4. LOOM_WORKSPACE / the marker's repo_root — repo mode: `<repo>/.loom`.
+#   5. `<loom dir>/.daemon.pid` — the daemon's own final fallback.
+# Whatever this returns is only ever a CORROBORATING hint; an absent or stale
+# file must not by itself produce a divergence (that is the whole bug).
+resolve_pid_file() { # [marker pid_file value]
+    local from_marker="${1:-}"
+    if [[ -n "${LOOM_PID_FILE:-}" ]]; then
+        echo "$LOOM_PID_FILE"; return 0
+    fi
+    if [[ -n "$from_marker" ]]; then
+        echo "$from_marker"; return 0
+    fi
+    if [[ -n "${LOOM_MACHINE_CHECKOUT:-}" ]]; then
+        echo "$LOOM_DIR/.daemon.pid"; return 0
+    fi
+    local workspace="${LOOM_WORKSPACE:-$(marker_get repo_root)}"
+    if [[ -n "$workspace" ]]; then
+        echo "$workspace/.loom/.daemon.pid"; return 0
+    fi
+    echo "$LOOM_DIR/.daemon.pid"
+}
+
 # ---------- reality probe (shared) ----------
 # Determine whether the expected daemon is actually alive. Reads the resolved
-# USE_LAUNCHD / LABEL / PID_FILE and sets four globals the callers branch on:
+# USE_LAUNCHD / USE_SYSTEMD / LABEL / SYSTEMD_UNIT / PID_FILE and sets globals
+# the callers branch on:
 #   daemon_alive     true|false
 #   liveness_detail  human-readable string (mirrored into status/log messages)
-#   job_loaded       true|false — launchd job in the table but with no live pid
-#                    (feeds the #4232 bounded auto-remediation gate)
+#   job_loaded       true|false — launchd job / systemd unit known but with no
+#                    live pid (feeds the #4232 / #4862 bounded auto-remediation
+#                    gates)
 #   launchd_service  <domain>/<label> for the launchd path (else empty)
+#   systemd_service  <unit> for the systemd path (else empty)
+#   liveness_source  launchd|systemd|pidfile — WHICH out-of-band signal was
+#                    consulted (#5118: a supervisor's "job is down" is real
+#                    evidence; a missing pid file is not, so the two must be
+#                    told apart by the callers)
+#   pidfile_evidence alive|dead|absent — only meaningful on the pidfile path
+#                    (#5118: `dead` — a file naming a non-live pid — is positive
+#                    evidence; `absent` is no evidence at all)
 # Factored out (#4331) so the no-marker state-mismatch check below and the
 # marker-present path below run the IDENTICAL liveness logic — they can never
 # diverge on what "alive" means.
@@ -251,10 +409,14 @@ detect_daemon_liveness() {
     liveness_detail=""
     job_loaded=false
     launchd_service=""
+    systemd_service=""
     live_pid=""
+    liveness_source=pidfile
+    pidfile_evidence=absent
     if [[ "$USE_LAUNCHD" == "true" ]] && command -v launchctl >/dev/null 2>&1; then
         # Resolve the domain (gui/<uid> ↦ user/<uid>, #4130) the same way the
         # start did, so a headless daemon in user/<uid> is probed correctly.
+        liveness_source=launchd
         launchd_service="$(resolve_launchd_domain)/${LABEL}"
         launchd_print_output="$(launchctl print "$launchd_service" 2>/dev/null)"
         launchd_print_rc=$?
@@ -269,18 +431,48 @@ detect_daemon_liveness() {
         else
             liveness_detail="launchd job $launchd_service is not loaded/alive"
         fi
+    elif [[ "$USE_SYSTEMD" == "true" ]] && command -v systemctl >/dev/null 2>&1; then
+        # systemd --user path (#4862): mirrors the launchd branch above so the
+        # #4232-style auto-remediation gate below has an equivalent signal on
+        # Linux. `show -p X --value` against an unknown unit answers cleanly
+        # (LoadState=not-found) rather than erroring, so no separate rc check
+        # is needed the way launchd's print exit code is used above.
+        liveness_source=systemd
+        systemd_service="$SYSTEMD_UNIT"
+        systemd_main_pid="$(systemctl --user show -p MainPID --value "$systemd_service" 2>/dev/null)"
+        if [[ -n "$systemd_main_pid" && "$systemd_main_pid" != "0" ]] && kill -0 "$systemd_main_pid" 2>/dev/null; then
+            daemon_alive=true
+            liveness_detail="systemd unit $systemd_service alive (pid $systemd_main_pid)"
+            live_pid="$systemd_main_pid"
+        else
+            systemd_load_state="$(systemctl --user show -p LoadState --value "$systemd_service" 2>/dev/null)"
+            if [[ "$systemd_load_state" == "loaded" ]]; then
+                job_loaded=true
+                liveness_detail="systemd unit $systemd_service is LOADED but NOT running (no live MainPID)"
+            else
+                liveness_detail="systemd unit $systemd_service is not loaded/alive"
+            fi
+        fi
     else
-        # Non-launchd (nohup / Linux) path: the pid file is the only signal.
+        # Non-launchd, non-systemd (nohup) path: the pid file is the only
+        # OUT-OF-BAND signal — and, since #5118, explicitly the WEAKEST one.
+        # A live pid here is still accepted as liveness (cheap, and correct
+        # whenever the file is fresh), but neither of the negative outcomes
+        # below may end the check: the caller asks the socket before reporting.
+        liveness_source=pidfile
         if [[ -n "$PID_FILE" && -f "$PID_FILE" ]]; then
             pid="$(cat "$PID_FILE" 2>/dev/null || true)"
             if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
                 daemon_alive=true
+                pidfile_evidence=alive
                 liveness_detail="pid $pid (from $PID_FILE) alive"
                 live_pid="$pid"
             else
+                pidfile_evidence=dead
                 liveness_detail="pid file $PID_FILE present but pid not alive"
             fi
         else
+            pidfile_evidence=absent
             liveness_detail="no live pid file at ${PID_FILE:-<none>}"
         fi
     fi
@@ -326,78 +518,34 @@ process_age_secs() {
 
 # ---------- bounded in-band IPC probe (#4398) ----------
 
-# Resolve the loom-daemon binary the probe should invoke, in the SAME order
-# loom-daemon-start.sh's `locate_daemon_bin` uses (LOOM_DAEMON_BIN override ->
-# PATH -> in-repo cargo targets) so the watchdog and the start path can never
-# disagree about which binary is "the" daemon CLI. Echoes nothing and returns 1
-# when nothing is resolvable — the caller must then SKIP the probe, never
-# report a divergence: a watchdog that pages because its own optional helper
-# is missing is worse than one that quietly keeps doing the other two checks.
+# Resolve the loom-daemon binary the probe should invoke, via the shared
+# loom_locate_daemon_bin() (lib/locate-daemon-bin.sh, sourced above) so this
+# watchdog, loom-daemon-start.sh, loom-daemon-update.sh, loom-status.sh and
+# `.loom/bin/loom health` can never disagree about which binary is "the"
+# daemon CLI. Preserves this function's original contract (thin wrapper):
+# echoes nothing and returns 1 when nothing is resolvable — the caller must
+# then SKIP the probe, never report a divergence: a watchdog that pages
+# because its own optional helper is missing is worse than one that quietly
+# keeps doing the other two checks.
 locate_daemon_bin() {
-    if [[ -n "${LOOM_DAEMON_BIN:-}" && -x "${LOOM_DAEMON_BIN}" ]]; then
-        echo "${LOOM_DAEMON_BIN}"; return 0
-    fi
-    if command -v loom-daemon >/dev/null 2>&1; then
-        command -v loom-daemon; return 0
-    fi
-    local root candidate
+    local root bin
     root="$(marker_get repo_root 2>/dev/null)"
-    if [[ -n "$root" ]]; then
-        for candidate in \
-            "$root/loom-daemon/target/release/loom-daemon" \
-            "$root/loom-daemon/target/debug/loom-daemon" \
-            "$root/target/release/loom-daemon" \
-            "$root/target/debug/loom-daemon"; do
-            if [[ -x "$candidate" ]]; then echo "$candidate"; return 0; fi
-        done
-    fi
-    return 1
+    bin="$(loom_locate_daemon_bin "$root")"
+    [[ -n "$bin" ]] || return 1
+    echo "$bin"
 }
 
-# Run a command under a HARD wall-clock budget, returning 124 on timeout exactly
-# like GNU `timeout` does. macOS ships no `timeout(1)`, and for this probe an
-# unbounded fallback is not acceptable — "the CLI never returns" is precisely the
-# failure mode being detected (#4381's hung stub) — so the no-`timeout` path is a
-# real bounded implementation, not a degrade-to-unbounded.
-#
-# `-k 2` is load-bearing on the `timeout(1)` path: a non-interactive bash that is
-# blocked in a foreground command defers SIGTERM, so without the KILL escalation
-# `timeout` itself would wait indefinitely for a child that ignores the TERM —
-# reintroducing the very unbounded wait this helper exists to prevent.
-# LOOM_WATCHDOG_FORCE_PORTABLE_TIMEOUT=1 forces the fallback path, so the
-# no-`timeout(1)` behavior (the default macOS shape) is testable on any host.
-bounded_run() { # <timeout_secs> <cmd> [args...]
-    local secs="$1"; shift
-    if [[ ! "${LOOM_WATCHDOG_FORCE_PORTABLE_TIMEOUT:-}" =~ ^(1|true|yes)$ ]]; then
-        if command -v timeout >/dev/null 2>&1; then
-            timeout -k 2 "$secs" "$@"
-            return $?
-        fi
-        if command -v gtimeout >/dev/null 2>&1; then
-            gtimeout -k 2 "$secs" "$@"
-            return $?
-        fi
-    fi
-    # Portable fallback: run the command in the background and pair it with a
-    # killer subshell that TERM/KILLs it once the budget elapses.
-    "$@" &
-    local cmd_pid=$!
-    (
-        sleep "$secs"
-        kill -TERM "$cmd_pid" 2>/dev/null
-        sleep 2
-        kill -KILL "$cmd_pid" 2>/dev/null
-    ) >/dev/null 2>&1 &
-    local killer_pid=$! rc=0
-    wait "$cmd_pid" 2>/dev/null || rc=$?
-    kill "$killer_pid" 2>/dev/null
-    wait "$killer_pid" 2>/dev/null
-    # Normalize a killed-by-the-budget exit (128+TERM / 128+KILL) to `timeout`'s
-    # own 124 so the caller has ONE code to branch on regardless of which
-    # implementation ran.
-    case "$rc" in 143|137) rc=124 ;; esac
-    return "$rc"
-}
+# bounded_run() — a HARD wall-clock budget around a command, returning 124 on
+# timeout exactly like GNU `timeout` does. Sourced from the shared
+# lib/bounded-run.sh (#4807 extracted this watchdog's own inline copy so
+# loom-daemon-start.sh's print_calibrate_hint() could reuse it, #4799); see
+# that file for the full implementation notes (the `-k 2` KILL escalation,
+# the portable no-`timeout(1)` fallback for macOS, the 143/137 -> 124
+# normalization). The lib is sourced just below (near launchd-domain.sh); if
+# sourcing failed for any reason, `bounded_run` is simply undefined and
+# run_ipc_probe() below detects that explicitly and skips the probe with a
+# clear diagnostic — never a raw `command not found` on a scheduled tick
+# (#4832).
 
 # Read the consecutive-failure tally for <pid> from the state file. The tally is
 # KEYED TO THE PID: a relaunched daemon is a different process and must start
@@ -420,6 +568,130 @@ probe_fail_count_clear() {
     rm -f "$PROBE_STATE_FILE" 2>/dev/null || true
 }
 
+# Run the bounded probe command ONCE. Extracted from run_ipc_probe() by #5118 so
+# the post-liveness hang probe and the new pre-report socket-liveness probe
+# invoke the daemon CLI through the IDENTICAL code path (same binary
+# resolution, same argv, same hard budget) and can never disagree about what
+# "the daemon answered" means.
+#
+# Sets PROBE_RUN_RC / PROBE_RUN_OUTPUT / PROBE_RUN_BIN and returns 0 when the
+# command actually ran; returns 1 with PROBE_RUN_SKIP_REASON set when it could
+# NOT be run at all (disabled, no bounded_run, no binary, empty argv). The
+# distinction matters: "ran and failed" is evidence, "could not run" is not.
+invoke_probe_command() {
+    PROBE_RUN_RC=0
+    PROBE_RUN_OUTPUT=""
+    PROBE_RUN_BIN=""
+    PROBE_RUN_SKIP_REASON=""
+
+    if [[ "${LOOM_WATCHDOG_IPC_PROBE:-}" =~ ^(0|false|no)$ ]]; then
+        PROBE_RUN_SKIP_REASON="IPC probe disabled via LOOM_WATCHDOG_IPC_PROBE"
+        return 1
+    fi
+
+    # #4832: bounded_run is defined by sourcing lib/bounded-run.sh above. A
+    # missing/unreadable lib file leaves it undefined -- without this explicit
+    # check, the invocation below would fail as a raw shell "command not
+    # found" (rc 127) on every scheduled tick instead of a diagnosed skip.
+    if ! command -v bounded_run >/dev/null 2>&1; then
+        PROBE_RUN_SKIP_REASON="bounded_run is undefined -- lib/bounded-run.sh failed to source (missing or unreadable)"
+        return 1
+    fi
+
+    local bin
+    bin="$(locate_daemon_bin)" || bin=""
+    if [[ -z "$bin" ]]; then
+        PROBE_RUN_SKIP_REASON="no loom-daemon binary resolvable (LOOM_DAEMON_BIN unset, not on PATH, no in-repo build)"
+        return 1
+    fi
+    PROBE_RUN_BIN="$bin"
+
+    local -a probe_argv
+    # shellcheck disable=SC2206  # deliberate word-splitting of the argv override
+    read -r -a probe_argv <<< "$PROBE_ARGS"
+    if (( ${#probe_argv[@]} == 0 )); then
+        PROBE_RUN_SKIP_REASON="LOOM_WATCHDOG_IPC_PROBE_ARGS is empty — nothing to probe with"
+        return 1
+    fi
+
+    local out rc=0
+    out="$(mktemp "${TMPDIR:-/tmp}/loom-watchdog-probe.XXXXXX" 2>/dev/null)" || out=""
+    if [[ -n "$out" ]]; then
+        LOOM_SOCKET_PATH="$SOCKET_PATH" bounded_run "$PROBE_TIMEOUT_SECS" \
+            "$bin" "${probe_argv[@]}" > "$out" 2>&1
+        rc=$?
+        PROBE_RUN_OUTPUT="$(cat "$out" 2>/dev/null)"
+        rm -f "$out" 2>/dev/null
+    else
+        LOOM_SOCKET_PATH="$SOCKET_PATH" bounded_run "$PROBE_TIMEOUT_SECS" \
+            "$bin" "${probe_argv[@]}" >/dev/null 2>&1
+        rc=$?
+    fi
+    PROBE_RUN_RC=$rc
+    return 0
+}
+
+# ---------- authoritative socket-liveness probe (#5118) ----------
+# Ask the daemon's own socket whether ANYTHING is serving there, and classify
+# the answer for the liveness decision (NOT the hang decision — that is
+# run_ipc_probe's job, and it only runs once liveness is established).
+#
+# Sets:
+#   socket_verdict  answered | unreachable | indeterminate
+#   socket_detail   human-readable reason, mirrored into every report
+#
+# The three verdicts are deliberately asymmetric about what counts as evidence:
+#   answered      a round-trip completed, OR the daemon replied with an
+#                 application-level error (which PROVES the socket is served),
+#                 OR the CLI itself says the daemon is alive-but-starting.
+#   unreachable   positive evidence of absence: the CLI could not reach the
+#                 socket (no listener / connect refused / connect timed out).
+#   indeterminate everything else — the probe could not be run, the CLI itself
+#                 never returned, or the daemon looks alive-but-wedged. The
+#                 caller must report UNKNOWN, never "the daemon is down".
+probe_socket_liveness() {
+    socket_verdict=indeterminate
+    socket_detail=""
+
+    if ! invoke_probe_command; then
+        socket_detail="could not ask the socket: ${PROBE_RUN_SKIP_REASON}"
+        return 0
+    fi
+
+    local label
+    label="$(basename "$PROBE_RUN_BIN") ${PROBE_ARGS}"
+    case "$PROBE_RUN_RC" in
+        0)
+            socket_verdict=answered
+            socket_detail="'${label}' round-tripped over ${SOCKET_PATH} within ${PROBE_TIMEOUT_SECS}s"
+            return 0
+            ;;
+        124)
+            socket_detail="'${label}' did NOT return within the ${PROBE_TIMEOUT_SECS}s probe budget — the CLI itself is wedged, so this tick proves nothing about the daemon either way"
+            return 0
+            ;;
+        2|126|127)
+            socket_detail="probe command '${label}' is unsupported by this binary (exit ${PROBE_RUN_RC}) — no in-band liveness signal available"
+            return 0
+            ;;
+    esac
+
+    if printf '%s' "$PROBE_RUN_OUTPUT" | grep -qiE 'alive-starting|socket has not bound'; then
+        socket_verdict=answered
+        socket_detail="the daemon is alive and STARTING (its socket is not bound yet) — alive, not gone"
+    elif printf '%s' "$PROBE_RUN_OUTPUT" | grep -qiE 'alive-but-unresponsive'; then
+        socket_detail="the CLI reports the daemon process as alive-but-unresponsive — alive-vs-gone is UNDETERMINED from this tick"
+    elif printf '%s' "$PROBE_RUN_OUTPUT" | grep -qiE 'could not reach loom-daemon|connect timed out|connect failed|connection refused|no such file'; then
+        socket_verdict=unreachable
+        socket_detail="'${label}' could not reach anything at ${SOCKET_PATH} (exit ${PROBE_RUN_RC}): $(printf '%s' "$PROBE_RUN_OUTPUT" | head -n1)"
+    elif printf '%s' "$PROBE_RUN_OUTPUT" | grep -qiE 'round-trip timed out|closed the connection without responding'; then
+        socket_detail="'${label}' connected but the round-trip did not complete (exit ${PROBE_RUN_RC}) — a wedge, not a proven absence: $(printf '%s' "$PROBE_RUN_OUTPUT" | head -n1)"
+    else
+        socket_verdict=answered
+        socket_detail="'${label}' exited ${PROBE_RUN_RC} with an application-level error (the daemon ANSWERED, so the socket is served): $(printf '%s' "$PROBE_RUN_OUTPUT" | head -n1)"
+    fi
+}
+
 # Perform the bounded IPC round-trip and classify the outcome. Sets:
 #   probe_verdict  healthy | unresponsive | skipped
 #   probe_detail   human-readable reason (mirrored into the report)
@@ -430,53 +702,29 @@ run_ipc_probe() { # <live_pid> <proc_age_or_empty>
     probe_detail=""
     local pid="$1" age="$2"
 
-    if [[ "${LOOM_WATCHDOG_IPC_PROBE:-}" =~ ^(0|false|no)$ ]]; then
-        probe_detail="IPC probe disabled via LOOM_WATCHDOG_IPC_PROBE"
-        return 0
-    fi
-
     # Post-relaunch socket-bind window (#4213/#4331): a live pid whose socket is
     # not bound yet is STARTING, not wedged. Skip outright so it cannot count
     # toward a confirmed hang. An UNPARSEABLE age does not skip — `ps` failing
     # for a live pid is not a real deployment state, and silently disabling the
     # probe on it would reintroduce the blind spot; the N-consecutive debounce
-    # still spans far more than any bind window.
+    # still spans far more than any bind window. Checked BEFORE the invocation
+    # so a young daemon is never even asked.
     if [[ "$age" =~ ^[0-9]+$ ]] && (( age < PROBE_GRACE_SECS )); then
         probe_detail="process is only ${age}s old (< ${PROBE_GRACE_SECS}s startup grace) — socket may not be bound yet"
         return 0
     fi
 
-    local bin
-    bin="$(locate_daemon_bin)" || bin=""
-    if [[ -z "$bin" ]]; then
-        probe_detail="no loom-daemon binary resolvable (LOOM_DAEMON_BIN unset, not on PATH, no in-repo build)"
+    # #5118: the invocation itself (probe-disabled / missing bounded_run /
+    # unresolvable binary / empty argv checks included) now lives in the shared
+    # invoke_probe_command(). Its skip reasons are the SAME "could not run at
+    # all" set this function has always degraded on, so they still map to
+    # `skipped`, never to a divergence.
+    if ! invoke_probe_command; then
+        probe_detail="$PROBE_RUN_SKIP_REASON"
         return 0
     fi
 
-    local -a probe_argv
-    # shellcheck disable=SC2206  # deliberate word-splitting of the argv override
-    read -r -a probe_argv <<< "$PROBE_ARGS"
-    if (( ${#probe_argv[@]} == 0 )); then
-        probe_detail="LOOM_WATCHDOG_IPC_PROBE_ARGS is empty — nothing to probe with"
-        return 0
-    fi
-
-    local out rc=0
-    out="$(mktemp "${TMPDIR:-/tmp}/loom-watchdog-probe.XXXXXX" 2>/dev/null)" || out=""
-    if [[ -n "$out" ]]; then
-        LOOM_SOCKET_PATH="$SOCKET_PATH" bounded_run "$PROBE_TIMEOUT_SECS" \
-            "$bin" "${probe_argv[@]}" > "$out" 2>&1
-        rc=$?
-    else
-        LOOM_SOCKET_PATH="$SOCKET_PATH" bounded_run "$PROBE_TIMEOUT_SECS" \
-            "$bin" "${probe_argv[@]}" >/dev/null 2>&1
-        rc=$?
-    fi
-    local probe_output=""
-    if [[ -n "$out" ]]; then
-        probe_output="$(cat "$out" 2>/dev/null)"
-        rm -f "$out" 2>/dev/null
-    fi
+    local bin="$PROBE_RUN_BIN" rc="$PROBE_RUN_RC" probe_output="$PROBE_RUN_OUTPUT"
 
     case "$rc" in
         0)
@@ -532,8 +780,37 @@ if [[ ! -f "$MARKER" ]]; then
     fi
     [[ "$(uname -s)" == "Darwin" ]] || USE_LAUNCHD=false
     LABEL="${LOOM_LAUNCHD_LABEL:-com.rjwalters.loom-daemon}"
-    PID_FILE="$LOOM_DIR/.daemon.pid"
+    # #4862: with no marker to read use_systemd/systemd_unit from, there is no
+    # reliable signal that THIS host's daemon is systemd-managed rather than a
+    # bystander user session with `systemctl` merely on PATH (every dev/test
+    # host in this suite has that) -- so, unlike USE_LAUNCHD above (which is
+    # genuinely platform-derived), the systemd probe stays OFF here unless
+    # explicitly requested via LOOM_WATCHDOG_SYSTEMD_PROBE=1. The marker-present path
+    # below (the common case — a daemon just started) gets it from the
+    # use_systemd field loom-daemon-start.sh's systemd branch now writes.
+    USE_SYSTEMD=false
+    if [[ "$USE_LAUNCHD" != "true" ]] && [[ "$(uname -s)" != "Darwin" ]] \
+        && [[ "${LOOM_WATCHDOG_SYSTEMD_PROBE:-}" =~ ^(1|true|yes)$ ]] && command -v systemctl >/dev/null 2>&1; then
+        USE_SYSTEMD=true
+    fi
+    SYSTEMD_UNIT="${LOOM_SYSTEMD_UNIT:-loom-daemon.service}"
+    # #5118: derived by the SAME precedence the daemon uses, not blindly from
+    # the socket's directory (which is what made this file unfindable on a
+    # workspace-rooted install).
+    PID_FILE="$(resolve_pid_file "")"
     detect_daemon_liveness
+    if [[ "$daemon_alive" != "true" ]]; then
+        # #5118: the out-of-band signals found nothing — which, before this fix,
+        # was accepted as "nothing is running" on the strength of a pid file
+        # alone. Ask the socket before concluding: an unmarked-but-LIVE daemon
+        # is exactly the #4331 state this section exists to surface, and it must
+        # not be missed just because its pid file is absent or stale.
+        probe_socket_liveness
+        if [[ "$socket_verdict" == "answered" ]]; then
+            daemon_alive=true
+            liveness_detail="a daemon ANSWERS on ${SOCKET_PATH} (${socket_detail}); the out-of-band signal disagreed: ${liveness_detail}"
+        fi
+    fi
     if [[ "$daemon_alive" == "true" ]]; then
         report WARN \
             "STATE MISMATCH: no autonomy-desired marker at $MARKER, but a daemon IS running (${liveness_detail}). Crash protection is DISARMED — if this daemon dies the watchdog will NOT revive it. Heal it by restarting the daemon (it self-heals the marker at startup, #4331) or re-running ./.loom/scripts/cli/loom-daemon-start.sh; if the daemon should NOT be running, stop it with ./.loom/scripts/cli/loom-daemon-stop.sh."
@@ -547,22 +824,24 @@ if [[ ! -f "$MARKER" ]]; then
 fi
 
 # ---------- parse the marker (key=value; ignore comments/blanks) ----------
-marker_get() {
-    local key="$1"
-    # First matching `key=value` line; strip the key= prefix. Comments start '#'.
-    grep -E "^${key}=" "$MARKER" 2>/dev/null | head -n1 | cut -d= -f2-
-}
-
+# marker_get() itself is defined near the top (#5118) so the marker-ABSENT path
+# above can use the same reader.
 HEARTBEAT_FILE="$(marker_get heartbeat_file)"
 HEARTBEAT_INTERVAL_SECS="$(marker_get heartbeat_interval_secs)"
 MARKER_USE_LAUNCHD="$(marker_get use_launchd)"
 MARKER_LABEL="$(marker_get launchd_label)"
-PID_FILE="$(marker_get pid_file)"
+MARKER_USE_SYSTEMD="$(marker_get use_systemd)"
+MARKER_SYSTEMD_UNIT="$(marker_get systemd_unit)"
+# #5118: LOOM_PID_FILE (the value loom-daemon-start.sh exports and the daemon
+# honors as its own tier 1) now wins over the marker's recorded path, and an
+# absent field falls through the daemon's remaining tiers instead of resolving
+# to the empty string. Before this the two ends could — and on both fleet hosts
+# did — mean different files.
+PID_FILE="$(resolve_pid_file "$(marker_get pid_file)")"
 
 # Fallbacks when the marker predates a field or the value is empty.
 [[ -z "$HEARTBEAT_FILE" ]] && HEARTBEAT_FILE="$LOOM_DIR/daemon.heartbeat"
 [[ "$HEARTBEAT_INTERVAL_SECS" =~ ^[0-9]+$ ]] || HEARTBEAT_INTERVAL_SECS=60
-[[ -z "$PID_FILE" ]] && PID_FILE=""
 
 # Env overrides win over the marker (a stop/start under a different label should
 # be probed with the current env, not a stale marker value).
@@ -573,6 +852,34 @@ fi
 [[ "$(uname -s)" == "Darwin" ]] || USE_LAUNCHD=false
 LABEL="${LOOM_LAUNCHD_LABEL:-${MARKER_LABEL:-com.rjwalters.loom-daemon}}"
 
+# #4862: use_systemd/systemd_unit are new marker fields, written by
+# loom-daemon-start.sh's systemd branch (a marker from before this fix, or
+# from the launchd/nohup branches, has no use_systemd=true line). A blank
+# MARKER_USE_SYSTEMD stays OFF by default here -- same rationale as section 1
+# above: `systemctl` merely being on PATH is not proof THIS daemon is
+# systemd-managed, so no platform auto-detect. LOOM_WATCHDOG_SYSTEMD_PROBE=1 opts in
+# explicitly for a pre-#4862 marker that has not been rewritten yet.
+#
+# Deliberately NO platform clobber here. An earlier revision ended this block
+# with `[[ "$(uname -s)" == "Darwin" ]] && USE_SYSTEMD=false`, which ran after
+# the opt-in and silently overrode both the marker and the documented
+# LOOM_WATCHDOG_SYSTEMD_PROBE=1 escape hatch -- contradicting the comment above
+# and making the whole #4862 systemd remediation path unreachable (and
+# untestable) on a Darwin host.
+#
+# It was also redundant for the case it appeared to protect: the marker is the
+# authority, and only loom-daemon-start.sh's systemd branch writes
+# `use_systemd=true`. The launchd branch calls `write_intent_marker "true"
+# "$LAUNCHD_LABEL"` with no third argument, so a real Darwin host's marker
+# carries `use_systemd=false` and this resolves to false on its own.
+USE_SYSTEMD="${MARKER_USE_SYSTEMD:-false}"
+if [[ "${LOOM_WATCHDOG_SYSTEMD_PROBE:-}" =~ ^(1|true|yes)$ ]]; then
+    USE_SYSTEMD=true
+elif [[ "${LOOM_WATCHDOG_SYSTEMD_PROBE:-}" =~ ^(0|false|no)$ ]]; then
+    USE_SYSTEMD=false
+fi
+SYSTEMD_UNIT="${LOOM_SYSTEMD_UNIT:-${MARKER_SYSTEMD_UNIT:-loom-daemon.service}}"
+
 # ---------- 2. reality: is the expected daemon actually alive? ----------
 # Shared probe (#4331): sets daemon_alive / liveness_detail / job_loaded /
 # launchd_service from the resolved USE_LAUNCHD / LABEL / PID_FILE. job_loaded /
@@ -582,6 +889,66 @@ LABEL="${LOOM_LAUNCHD_LABEL:-${MARKER_LABEL:-com.rjwalters.loom-daemon}}"
 # (a booted-out job, or a non-launchd host), which stays report-only no matter
 # what.
 detect_daemon_liveness
+
+# ---------- 2b. authoritative in-band cross-check (#5118) ----------
+# The probe above is entirely OUT-OF-BAND. When it does not find a live daemon,
+# that is NOT yet a finding: on both fleet hosts the pid-file branch reported
+# "no live pid file" every five minutes for two days while a healthy daemon was
+# serving work on the socket the whole time. So before ANY report, ask the
+# socket — the same signal `loom-daemon health` already treats as authoritative,
+# with the pid file demoted to a corroborating hint.
+#
+# SOCKET_ONLY_LIVENESS records that liveness came from the socket alone (no live
+# pid to age-check or key a hang streak to), which the sections below honor.
+SOCKET_ONLY_LIVENESS=false
+socket_verdict=""
+socket_detail=""
+if [[ "$daemon_alive" != "true" ]]; then
+    probe_socket_liveness
+    case "$socket_verdict" in
+        answered)
+            if [[ "$liveness_source" == "pidfile" ]]; then
+                # No supervisor was consulted, so nothing contradicts the
+                # socket: the daemon is HEALTHY and the pid file was simply not
+                # a usable signal. This is the false-alarm case #5118 fixes —
+                # it must be an OK, never a page.
+                daemon_alive=true
+                SOCKET_ONLY_LIVENESS=true
+                liveness_detail="daemon ANSWERS on ${SOCKET_PATH} (${socket_detail}) — authoritative; the pid-file hint was unusable (${liveness_detail}), which is NOT evidence of an outage (#5118)"
+                report OK "daemon healthy via the in-band socket round-trip: ${liveness_detail}."
+            else
+                # A supervisor DOES claim its job is down while something is
+                # serving the socket. That is a real anomaly (an unsupervised
+                # daemon: still dispatching, but with no crash protection) — but
+                # it is NOT "autonomous dispatch has stopped", and auto-
+                # remediation must NOT fire: kickstarting a second daemon at a
+                # socket a live one already owns can only produce a refusal.
+                report WARN \
+                    "STATE MISMATCH: ${liveness_detail}, yet a daemon ANSWERS on ${SOCKET_PATH} (${socket_detail}). Dispatch is still running, so this is NOT an autonomy outage — but the daemon is UNSUPERVISED: nothing will relaunch it if it dies, and no auto-remediation is attempted here (relaunching into a served socket would only be refused by the singleton guard). Heal it by rolling the daemon through ./.loom/scripts/cli/loom-daemon-stop.sh && ./.loom/scripts/cli/loom-daemon-start.sh [flags] so the supervisor owns it again."
+                exit 1
+            fi
+            ;;
+        unreachable)
+            # Positive evidence of absence — fall through to the existing
+            # divergence + bounded auto-remediation path, now carrying BOTH
+            # signals in its message.
+            liveness_detail="${liveness_detail}; and the in-band probe confirms it: ${socket_detail}"
+            ;;
+        *)
+            # Indeterminate. Report "the daemon is down" ONLY when some signal
+            # actually says so: a supervisor that reports its job down, or a pid
+            # file naming a pid that is not alive. With neither — the exact
+            # shape that produced the permanent false positive — say UNKNOWN in
+            # its own words and exit 3, distinct from a real outage (#5118).
+            if [[ "$liveness_source" == "pidfile" && "$pidfile_evidence" == "absent" ]]; then
+                report UNKNOWN \
+                    "LIVENESS UNDETERMINED: a daemon is EXPECTED (autonomy-desired marker present, started $(marker_get started_at)) but this tick found NO evidence either way — ${liveness_detail}, and the in-band socket probe could not answer: ${socket_detail}. This is deliberately NOT reported as an outage (#5118): the pid file alone is too weak a signal to declare one. Restore the in-band probe (make a loom-daemon binary resolvable — LOOM_DAEMON_BIN / PATH / ~/.local/bin — and leave LOOM_WATCHDOG_IPC_PROBE enabled), then re-check with 'loom-daemon health'."
+                exit 3
+            fi
+            liveness_detail="${liveness_detail}; the in-band probe could not corroborate: ${socket_detail}"
+            ;;
+    esac
+fi
 
 if [[ "$daemon_alive" != "true" ]]; then
     # ---------- bounded auto-remediation (#4232) ----------
@@ -634,6 +1001,48 @@ if [[ "$daemon_alive" != "true" ]]; then
         fi
     fi
 
+    # ---------- bounded auto-remediation, systemd (#4862) ----------
+    # The Linux mirror of the #4232 launchd gate above, closing the exact gap
+    # #4862 reported: on a systemd host the watchdog previously only LOGGED a
+    # clean-exit-turned-timeout divergence, never acted on it. Narrow by the
+    # SAME construction as the launchd gate: fires ONLY for "unit LOADED
+    # (systemd still knows about it) + NOT running + main process's own last
+    # exit was a clean status 0" (ExecMainCode=exited, ExecMainStatus=0). An
+    # operator stop (loom-daemon-stop.sh) disables the unit outright; a genuine
+    # crash leaves a non-zero/signal ExecMainStatus; a never-installed unit
+    # fails LoadState=loaded (job_loaded=false). None of those can produce
+    # "loaded, down, ExecMainStatus=0" — only a restart-primitive exit that
+    # Restart=on-success failed to honor can (e.g. a pre-#4862 unit still
+    # missing KillMode=mixed). Every other divergence falls through unchanged.
+    if [[ "$job_loaded" == "true" && -n "$systemd_service" ]] && command -v systemctl >/dev/null 2>&1; then
+        exec_main_code="$(systemctl --user show -p ExecMainCode --value "$systemd_service" 2>/dev/null)"
+        exec_main_status="$(systemctl --user show -p ExecMainStatus --value "$systemd_service" 2>/dev/null)"
+        if [[ "$exec_main_code" == "exited" && "$exec_main_status" == "0" ]]; then
+            report DIVERGENCE \
+                "A daemon is EXPECTED (autonomy-desired marker present, started $(marker_get started_at)) but is NOT running: ${liveness_detail}. Main process's last exit was clean (status 0) — the restart-primitive's own exit-0 contract (#4054/#4077) — which Restart=on-success failed to honor (likely a unit-result reclassification, #4862). Auto-remediating with 'systemctl --user reset-failed ${systemd_service} && systemctl --user start ${systemd_service}'."
+            systemctl --user reset-failed "$systemd_service" >/dev/null 2>&1 || true
+            systemctl --user start "$systemd_service" >/dev/null 2>&1
+            RECHECK_ATTEMPTS="${LOOM_WATCHDOG_KICKSTART_RECHECK_ATTEMPTS:-3}"
+            RECHECK_INTERVAL="${LOOM_WATCHDOG_KICKSTART_RECHECK_INTERVAL:-1}"
+            recheck_pid=""
+            for _ in $(seq 1 "$RECHECK_ATTEMPTS"); do
+                recheck_pid="$(systemctl --user show -p MainPID --value "$systemd_service" 2>/dev/null)"
+                if [[ -n "$recheck_pid" && "$recheck_pid" != "0" ]] && kill -0 "$recheck_pid" 2>/dev/null; then
+                    break
+                fi
+                recheck_pid=""
+                sleep "$RECHECK_INTERVAL"
+            done
+            if [[ -n "$recheck_pid" ]]; then
+                report OK "auto-remediation succeeded: 'systemctl --user start' relaunched ${systemd_service} (new pid ${recheck_pid})."
+                exit 0
+            fi
+            report DIVERGENCE \
+                "Auto-remediation attempted ('systemctl --user start ${systemd_service}') but the daemon is STILL not confirmed running. Escalate manually: systemctl --user status ${systemd_service}  (or ./.loom/scripts/cli/loom-daemon-start.sh [flags])."
+            exit 1
+        fi
+    fi
+
     report DIVERGENCE \
         "A daemon is EXPECTED (autonomy-desired marker present, started $(marker_get started_at)) but is NOT running: ${liveness_detail}. Autonomous dispatch has stopped. Recover with: ./.loom/scripts/cli/loom-daemon-start.sh [flags]  (or 'loom-daemon status' to inspect)."
     exit 1
@@ -650,7 +1059,16 @@ fi
 # heartbeat check below, so both consumers see the same number.
 proc_age="$(process_age_secs "$live_pid" 2>/dev/null)" || proc_age=""
 
-run_ipc_probe "$live_pid" "$proc_age"
+if [[ "$SOCKET_ONLY_LIVENESS" == "true" ]]; then
+    # #5118: liveness was ESTABLISHED by a socket round-trip a moment ago, so
+    # re-running the same probe would only spend a second budget to learn the
+    # same thing. Adopt that result directly (and clear any stale streak: a
+    # successful round-trip is exactly what ends one).
+    probe_verdict=healthy
+    probe_detail="$socket_detail"
+else
+    run_ipc_probe "$live_pid" "$proc_age"
+fi
 
 case "$probe_verdict" in
     healthy)

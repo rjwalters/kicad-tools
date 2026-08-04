@@ -1,0 +1,19 @@
+{
+  "autonomous": {
+    "workFinder": {
+      "maxConcurrent": 5
+    },
+    "mainHealthGate": {
+      "enabled": true
+    }
+  },
+  "guards": {
+    "cloudCli": false
+  },
+  "buildGate": {
+    "enabled": true,
+    "command": "make test"
+  },
+  "projectOnly": "project-value",
+  "overriddenByLocal": "project-value"
+}

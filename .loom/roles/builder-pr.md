@@ -252,6 +252,7 @@ Root cause verification (for process/behavior issues):
 
 Local verification:
 - [ ] The project's check command passes (see `buildGate.command` in `.loom/config.json`, or the repo's documented CI command, e.g. `pnpm check:ci`)
+- [ ] Formatter + linter run on changed files (see "Format and Lint Changed Files" below) — a format-only CI failure is a guaranteed Judge rejection
 - [ ] Commits are signed off if required (`commit.signoff: true` in `.loom/config.json`, or a DCO/`sign-off` requirement — `git commit --signoff`; see "DCO sign-off" above)
 - [ ] Relevant tests pass
 - [ ] Each criterion has explicit verification (not "I think it works")
@@ -290,6 +291,52 @@ Closes #123
 | Test passes | `pnpm test -- <pattern>` |
 | File exists/content | `cat <file>` or `grep <pattern> <file>` |
 | Config changes | Read file and verify expected content |
+
+### Format and Lint Changed Files: MANDATORY Before Committing
+
+**Run the project's formatter and linter on your changed files before every
+commit, not just before opening the PR.** A format-only CI failure (e.g. `cargo
+fmt --check` / `ruff format --check` / `biome format --check` catching an
+unformatted file with otherwise-correct code) is a **guaranteed Judge
+rejection** — Judge never approves with a failing required check (see "PR
+Creation Checklist" below), so a one-command mechanical fix costs a full
+Doctor -> Judge cycle (an extra dispatch, re-review, and CI wait). This
+happened repeatedly in production (kicad-tools PRs #4532/#4533/#4535, #4882):
+otherwise approve-ready PRs rejected solely on `ruff format --check`.
+
+**Discover the commands from repo convention** — don't skip this because the
+language or toolchain is unfamiliar:
+
+1. Check `buildGate.command` in `.loom/config.json` (may already run
+   format+lint as part of the project check command).
+2. Check `CONTRIBUTING.md`, `package.json` scripts, a `Makefile`, or the CI
+   workflow (`.github/workflows/*.yml`) for the documented format/lint
+   commands.
+3. Fall back to the language's standard tool:
+
+| Language | Format | Lint |
+|----------|--------|------|
+| Rust | `cargo fmt` | `cargo clippy` |
+| Python | `ruff format <files>` (or `black <files>`) | `ruff check <files>` |
+| TypeScript/JavaScript | `biome format --write <files>` / `prettier --write <files>` | `biome check <files>` / `eslint <files>` |
+| Go | `gofmt -w <files>` | `go vet ./...` |
+| Shell | — | `shellcheck <file>` |
+
+**Scope to your changed files** (same pattern as "Handling Pre-existing
+Lint/Build Failures" below) so you don't pull unrelated files into your PR:
+
+```bash
+# Example: Python project
+git diff --name-only origin/main -- '*.py' | xargs -r uv run ruff format
+git diff --name-only origin/main -- '*.py' | xargs -r uv run ruff check
+```
+
+Add to your pre-PR checklist:
+```markdown
+Local verification:
+- [ ] Formatter run on changed files (no remaining diff / `--check` passes)
+- [ ] Linter run on changed files (0 errors)
+```
 
 ### Language-Specific Verification
 
@@ -578,7 +625,7 @@ Closes #123
 
 ### Why This Matters
 
-GitHub's auto-close feature only works with specific keywords at the start of a line:
+GitHub's auto-close feature only works with specific keywords **immediately followed** by the issue reference:
 - `Closes #X`
 - `Fixes #X`
 - `Resolves #X`
@@ -587,6 +634,14 @@ GitHub's auto-close feature only works with specific keywords at the start of a 
 - `Resolved #X`
 
 **Any other phrasing will NOT trigger auto-close.**
+
+> **The keyword does NOT have to start a line — GitHub scans the ENTIRE body.**
+> `close`/`closes`/`closed`/`fix`/`fixes`/`fixed`/`resolve`/`resolves`/`resolved` creates a
+> real closing reference **wherever** it appears — mid-sentence, inside a numbered list, in a
+> "follow-up" checklist. What breaks the link is a word between the keyword and the reference
+> (`close issue #X`, `Fixes issue #X`), not its position in the body. This cuts both ways: it
+> is why `Fixes issue #123` silently fails to close, and why a stray `then close #123` buried
+> in prose silently *does* close — see "Partial increments" below (#4569).
 
 ### Partial increments (family/epic issues)
 
@@ -601,6 +656,56 @@ Contributes to #123
 
 **Both the PR body and the commit message must carry the same reference.** This repo squash-merges, and GitHub harvests closing keywords from the squash commit message as well as the PR body — a stray `Closes #N` in the commit body will auto-close the family issue even when the PR body says `Part of #N`. When in doubt on a `loom:epic` issue, prefer `Part of #N`.
 
+#### A stray closing keyword ANYWHERE in the body defeats `Part of #N` (#4569)
+
+`Part of #N` / `Contributes to #N` is not a shield. GitHub does not weigh the two references
+against each other — **one** closing keyword adjacent to `#N` anywhere in the body is enough
+to close the issue on merge, no matter how explicitly the rest of the body says otherwise.
+
+This is a real, observed failure, not a hypothetical. A partial-increment PR ended with the
+deliberate trailer `Contributes to #2` and an operator-handoff section that read:
+
+```markdown
+## Operator follow-up (after merge)
+
+3. Verify `npm view censusapi` resolves to `0.0.1`, then close #2.   ← closes #2 on merge!
+```
+
+GitHub honored that `close #2`. The issue was closed on squash-merge and had to be reopened
+by hand. (For the record: the head branch was `feature/issue-2`, but branch naming was *not*
+the cause — Loom's `feature/issue-N` convention does not create a Development-sidebar link.)
+
+**Rules for a partial-increment PR body:**
+
+- **Never** write a closing keyword immediately before the tracked issue's number. Write
+  `then close the issue`, or `then close issue #2` (the intervening word breaks the link).
+- The tracked issue number should appear exactly once with a keyword: the `Part of #N` /
+  `Contributes to #N` reference. Scan the whole body — including checklists, test plans, and
+  operator-handoff sections — before creating the PR:
+
+  ```bash
+  # Must print nothing for the tracked issue N:
+  grep -inE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#N\b' <<<"$PR_BODY"
+  ```
+
+- **The same rule applies to every commit message on the branch** (#4595). The squash message
+  GitHub composes from your commits is parsed for closing keywords too, so a stray
+  `close #N` in a commit body closes the issue even when the PR body is spotless. Scan them
+  before pushing — and amend/reword (`git commit --amend`, `git rebase -i`) if one is there:
+
+  ```bash
+  # Must print nothing for the tracked issue N:
+  git log --format=%B origin/main..HEAD \
+    | grep -inE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#N\b'
+  ```
+
+**Backstop (not a substitute for the above)**: `merge-pr.sh` detects this contradiction
+before merging — in the PR body, in any commit message of the PR, and in GitHub's
+`closingIssuesReferences` — and warns naming which source is at fault, then reopens the issue
+immediately after the merge if GitHub closed it anyway. That leaves a close/reopen flicker
+plus notification churn on the issue — fix the body or the commit message instead of relying
+on it.
+
 ### PR Creation Checklist
 
 When creating a PR, verify:
@@ -610,7 +715,7 @@ When creating a PR, verify:
 3. PR description references the issue: `Closes #X` for a full implementation, or `Part of #X` for a declared partial increment (not "Issue #X" or "Addresses #X") — same reference in the commit message
 4. Issue number is correct
 5. PR has `loom:review-requested` label
-6. All CI checks pass locally (the project's check command — `buildGate.command` in `.loom/config.json`, e.g. `pnpm check:ci`)
+6. All CI checks pass locally (the project's check command — `buildGate.command` in `.loom/config.json`, e.g. `pnpm check:ci`) — **including the formatter/linter on changed files** (see "Format and Lint Changed Files" above); a format-only failure is a guaranteed Judge rejection, not a warning
 7. PR description includes verification table for each criterion
 8. Tests added/updated as needed
 9. Commits carry a `Signed-off-by:` trailer if required (`commit.signoff: true` in `.loom/config.json`, or a DCO/`sign-off` check — see "DCO sign-off")
@@ -723,8 +828,17 @@ Is the failure in YOUR changed files?
 
 If you want to track pre-existing issues for future cleanup:
 
+> **File issues with `./.loom/scripts/create-issue.sh`, never a bare `gh issue create` (#5047).**
+> `gh issue create` fails outright when GraphQL quota is exhausted, while the independent REST
+> pool sits ~99% unused. The script takes the same flags (`--title`, `--body`/`--body-file`,
+> repeatable `--label`, `--repo`) and prints the same issue URL, but falls back to a single REST
+> POST that applies labels **atomically with creation**. Recipe and rationale:
+> `.loom/docs/gh-issue-create-rest-fallback.md` (or `forge_gh_create_issue_rl_safe` in
+> `lib/forge-helpers.sh` if scripting). `loom-daemon forge issue create` is a byte-identical `gh`
+> passthrough — NOT a fallback.
+
 ```bash
-gh issue create --title "Tech debt: Migrate biome.json to v2 schema" --body "$(cat <<'EOF'
+./.loom/scripts/create-issue.sh --title "Tech debt: Migrate biome.json to v2 schema" --body "$(cat <<'EOF'
 ## Problem
 
 `biome.json` uses deprecated v1 schema which causes warnings on every lint run.
@@ -782,7 +896,7 @@ After completing your assigned work, you can suggest improvements by creating un
 
 **Example of post-work suggestion:**
 ```bash
-gh issue create --title "Refactor terminal state management to use reducer pattern" --body "$(cat <<'EOF'
+./.loom/scripts/create-issue.sh --title "Refactor terminal state management to use reducer pattern" --body "$(cat <<'EOF'
 ## Problem
 
 While implementing #42, I noticed that terminal state updates are scattered across multiple files with inconsistent patterns.

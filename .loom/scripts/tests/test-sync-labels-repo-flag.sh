@@ -129,6 +129,11 @@ mkdir -p "$STUB_DIR"
 #                         (simulating "no resolvable remote here")
 #   gh label list ...  -> echoes nothing (script takes the `create` branch)
 #   gh label create|edit|delete ... -> exit 0
+#   gh api repos/.../issues -f labels=<L> ... -> the #5066 in-use lookup made
+#                         by github_label_usage/github_maybe_delete_label.
+#                         Echoes $LOOM_TEST_GH_USAGE_NUMBERS (one number per
+#                         line) when <L> matches $LOOM_TEST_GH_USAGE_LABEL,
+#                         otherwise empty (label not in use).
 cat > "$STUB_DIR/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${LOOM_TEST_GH_LOG:?stub gh: LOOM_TEST_GH_LOG not set}"
@@ -159,6 +164,23 @@ case "$1" in
     esac
     echo "stub gh: unhandled label args: $*" >&2
     exit 3
+    ;;
+  api)
+    # Find the -f labels=<value> argument by argv POSITION, not by splitting
+    # the space-joined log — a label value with spaces ("good first issue")
+    # must survive intact.
+    label=""
+    prev=""
+    for arg in "$@"; do
+      if [[ "$prev" == "-f" && "$arg" == labels=* ]]; then
+        label="${arg#labels=}"
+      fi
+      prev="$arg"
+    done
+    if [[ -n "$label" && "$label" == "${LOOM_TEST_GH_USAGE_LABEL:-}" ]]; then
+      printf '%s\n' "${LOOM_TEST_GH_USAGE_NUMBERS:-}" | sed '/^$/d'
+    fi
+    exit 0
     ;;
 esac
 echo "stub gh: unhandled args: $*" >&2
@@ -248,6 +270,8 @@ run_sls() {
         LOOM_CONFIG_DEFAULTS_FILE="" \
         REPO_ROOT="$repo_root" \
         LOOM_FORGE_TYPE="${LOOM_FORGE_TYPE_OVERRIDE:-}" \
+        LOOM_TEST_GH_USAGE_LABEL="${LOOM_TEST_GH_USAGE_LABEL:-}" \
+        LOOM_TEST_GH_USAGE_NUMBERS="${LOOM_TEST_GH_USAGE_NUMBERS:-}" \
         bash "$SLS" "$@" 2>&1
     )"
     RC=$?
@@ -269,8 +293,12 @@ assert_contains "$OUT" "Target repository: octocat/hello-world (github)" \
 # the preflight below is a different call (it NAMES the target).
 assert_not_contains "$LOG" "repo view --json nameWithOwner --jq" \
     "--repo never resolves the NWO from the forge (forge_get_repo_nwo short-circuited)"
-assert_contains "$LOG" "label delete bug -R octocat/hello-world" \
-    "default-label deletion targets the override NWO"
+# Additive by default (#5066): no --prune-defaults, so no default-label
+# deletion happens even when --repo names an explicit target.
+assert_not_contains "$LOG" "label delete" \
+    "bare --repo run performs no default-label deletion (additive by default)"
+assert_contains "$OUT" "Leaving default labels untouched" \
+    "bare --repo run explains why nothing was deleted"
 assert_contains "$LOG" "label create loom:issue -R octocat/hello-world" \
     "label create targets the override NWO"
 assert_contains "$OUT" "Synced 2 labels" \
@@ -305,8 +333,10 @@ echo "=== --dry-run is forge-free ==="
 run_sls -- --repo octocat/hello-world --dry-run
 assert_eq "0" "$RC" "--repo --dry-run exits 0"
 assert_eq "" "$LOG" "--dry-run makes ZERO gh calls"
-assert_contains "$OUT" "[dry-run] would delete default label: bug" \
-    "--dry-run reports the default-label deletions it would make"
+assert_contains "$OUT" "[dry-run] would leave default labels untouched" \
+    "--dry-run (no --prune-defaults) reports that default labels are left alone"
+assert_not_contains "$OUT" "[dry-run] would delete default label" \
+    "--dry-run without --prune-defaults never previews a deletion"
 assert_contains "$OUT" "[dry-run] would create or update label: loom:issue" \
     "--dry-run reports the labels it would sync"
 assert_contains "$OUT" "Dry run complete: 2 labels would be synced to octocat/hello-world" \
@@ -519,7 +549,7 @@ run_sls --repo-view " " -- --repo octocat/hello-world
 assert_eq "0" "$RC" "an indeterminate permission does not block the sync"
 assert_contains "$OUT" "Could not determine your permission" \
     "an indeterminate permission is warned about"
-assert_contains "$LOG" "label delete bug -R octocat/hello-world" \
+assert_contains "$LOG" "label create loom:issue -R octocat/hello-world" \
     "the sync proceeds once existence is proven"
 
 # The preflight is real-run only: --dry-run must stay forge-free.
@@ -535,6 +565,94 @@ assert_eq "0" "$RC" "--help exits 0"
 assert_contains "$OUT" "--repo OWNER/NAME" "--help documents --repo"
 assert_contains "$OUT" "--dry-run" "--help documents --dry-run"
 assert_contains "$OUT" "End of options" "--help documents the -- terminator (#4524)"
+assert_contains "$OUT" "--prune-defaults" "--help documents --prune-defaults (#5066)"
+assert_contains "$OUT" "--force" "--help documents --force (#5066)"
+
+echo ""
+echo "=== Additive by default: no deletion without --prune-defaults (#5066) ==="
+
+# A bare run (no --repo, no --prune-defaults) against the locally-resolved
+# repo must create/update Loom labels and touch none of GitHub's defaults —
+# the core regression this issue exists to prevent.
+run_sls --nwo owner/from-remote --
+assert_not_contains "$LOG" "label delete" \
+    "a bare run performs no default-label deletion"
+assert_contains "$OUT" "Leaving default labels untouched" \
+    "a bare run explains that default labels were left alone"
+assert_contains "$LOG" "label create loom:issue -R owner/from-remote" \
+    "a bare run still creates/updates the Loom labels"
+
+# Same, but --repo (a real forge round-trip location, not just the resolved
+# path) confirms the additive default holds there too.
+run_sls -- --repo octocat/hello-world
+assert_not_contains "$LOG" "label delete" \
+    "a bare --repo run performs no default-label deletion"
+
+echo ""
+echo "=== --prune-defaults restores the old (pre-#5066) deletion behavior ==="
+
+run_sls -- --repo octocat/hello-world --prune-defaults
+assert_eq "0" "$RC" "--prune-defaults run exits 0"
+assert_contains "$OUT" "Pruning default labels (--prune-defaults)..." \
+    "--prune-defaults announces that it is pruning"
+assert_contains "$LOG" "label delete bug -R octocat/hello-world" \
+    "--prune-defaults deletes GitHub's default labels (unused label, no in-use guard triggered)"
+assert_contains "$LOG" "label delete wontfix -R octocat/hello-world" \
+    "--prune-defaults deletes every default label, not just the first"
+assert_contains "$LOG" "label create loom:issue -R octocat/hello-world" \
+    "--prune-defaults still creates/updates the Loom labels"
+
+echo ""
+echo "=== --prune-defaults skips an in-use default label unless --force ==="
+
+# 'bug' is reported in use on issues #1 and #2; every other default label is
+# reported unused (LOOM_TEST_GH_USAGE_LABEL only matches one label per run).
+LOOM_TEST_GH_USAGE_LABEL="bug" LOOM_TEST_GH_USAGE_NUMBERS=$'1\n2' \
+    run_sls -- --repo octocat/hello-world --prune-defaults
+assert_eq "0" "$RC" "an in-use default label does not fail the whole run"
+assert_contains "$OUT" "Refusing to delete in-use default label 'bug'" \
+    "the in-use label is refused, not silently deleted"
+assert_contains "$OUT" "#1 #2" \
+    "the refusal names the affected issue/PR numbers"
+assert_contains "$OUT" "pass --force to delete anyway" \
+    "the refusal names the escape hatch"
+assert_not_contains "$LOG" "label delete bug " \
+    "the in-use label is NOT deleted without --force"
+assert_contains "$LOG" "label delete wontfix -R octocat/hello-world" \
+    "an unrelated, unused default label is still deleted normally"
+
+# --force overrides the refusal, but still warns first.
+LOOM_TEST_GH_USAGE_LABEL="bug" LOOM_TEST_GH_USAGE_NUMBERS=$'1\n2' \
+    run_sls -- --repo octocat/hello-world --prune-defaults --force
+assert_eq "0" "$RC" "--force run exits 0"
+assert_contains "$OUT" "Deleting in-use default label 'bug' (--force)" \
+    "--force warns before deleting an in-use label"
+assert_contains "$OUT" "#1 #2" \
+    "the --force warning still names the affected issue/PR numbers"
+assert_contains "$LOG" "label delete bug -R octocat/hello-world" \
+    "--force actually deletes the in-use label"
+
+echo ""
+echo "=== --prune-defaults --dry-run flags in-use deletions (#5066) ==="
+
+# Unlike a bare --dry-run (forge-free), --dry-run combined with
+# --prune-defaults performs a READ-ONLY in-use lookup so the preview can flag
+# which deletions would be skipped without --force.
+LOOM_TEST_GH_USAGE_LABEL="bug" LOOM_TEST_GH_USAGE_NUMBERS=$'1\n2' \
+    run_sls -- --repo octocat/hello-world --prune-defaults --dry-run
+assert_eq "0" "$RC" "--prune-defaults --dry-run exits 0"
+assert_contains "$OUT" "[dry-run] would delete default label: bug (IN USE: #1 #2" \
+    "the dry-run preview flags the in-use default label"
+assert_contains "$OUT" "[dry-run] would delete default label: wontfix" \
+    "the dry-run preview lists an unused default label plainly"
+assert_not_contains "$OUT" "would delete default label: wontfix (IN USE" \
+    "the dry-run preview does not flag an unused label as in-use"
+assert_not_contains "$LOG" "label delete" \
+    "--prune-defaults --dry-run never actually deletes anything"
+assert_not_contains "$LOG" "label create" \
+    "--prune-defaults --dry-run never actually creates/updates anything"
+assert_contains "$LOG" "api repos/octocat/hello-world/issues" \
+    "--prune-defaults --dry-run DOES make a read-only in-use lookup (unlike a bare --dry-run)"
 
 echo ""
 echo "=== Installed-tree parity (.loom/scripts is a symlinked dir) ==="

@@ -1,0 +1,9 @@
+{
+  "worktree": {
+    "root": "/mnt/scratch"
+  },
+  "overriddenByLocal": "local-value",
+  "autonomous": {
+    "perTokenConcurrency": 4
+  }
+}

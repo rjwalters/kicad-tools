@@ -2,13 +2,14 @@
 # test-resolve-tier-model.sh - Tests for resolve-tier-model.sh's complexity-tier
 # parsing (#4448).
 #
-# resolve-tier-model.sh's `grep -o 'loom:complexity=[a-z]*' | case` layer had no
+# resolve-tier-model.sh's `grep -oE '<!-- ... -->' | case` layer had no
 # shell-level test coverage — only the Python `--tier` lookup behind it
 # (loom-tools/tests/test_model_tiers.py) was exercised. This harness targets
 # that layer: valid marker, absent marker, out-of-vocabulary marker (the drift
 # bug #4448 was filed for — curators emitting `trivial`/`large`/`moderate`
-# instead of the closed `mechanical|routine|complex` enum), and first-marker-
-# wins when a body carries more than one marker.
+# instead of the closed `mechanical|routine|complex` enum), last-marker-wins
+# when a body carries more than one canonical marker, and prose that merely
+# discusses the marker syntax before the real marker appears (#4840).
 #
 # Style matches test-blame-issue.sh: a fake `gh` stub on PATH answers the
 # `gh issue view <issue> -R <repo> --json body -q .body` invocation the script
@@ -86,13 +87,19 @@ More text." ;;
 
 <!-- loom:complexity=trivial -->
 " ;;
-        9004) echo "Body with two markers -- first one wins.
+        9004) echo "Body with two markers -- last one wins.
 
 <!-- loom:complexity=complex -->
 <!-- loom:complexity=mechanical -->
 " ;;
         9005) exit 1 ;;   # GraphQL quota exhausted -> forces REST fallback (#4472)
         9006) exit 1 ;;   # GraphQL fails ...
+        9007) echo "Meta issue about the complexity-marker feature itself, which
+legitimately quotes the marker syntax as literal example text before the real
+marker appears (#4840): \`<!-- loom:complexity=<tier> -->\`.
+
+<!-- loom:complexity=mechanical -->
+" ;;
         *) echo "" ;;
     esac
     exit 0
@@ -158,11 +165,11 @@ err="$(run_resolve 9003 2>&1 1>/dev/null)"
 assert_contains "invalid complexity tier 'trivial' -> routine" "$err" "invalid marker warning names the offending value"
 assert_not_contains "no complexity marker" "$err" "invalid marker is not conflated with the absent-marker message"
 
-# -------- Test 5: first-marker-wins when multiple markers are present --------
-echo "Test 5: first marker wins when a body carries two"
+# -------- Test 5: last-marker-wins when multiple markers are present --------
+echo "Test 5: last marker wins when a body carries two"
 err="$(run_resolve 9004 2>&1 1>/dev/null)"
-assert_contains "tier=complex" "$err" "first marker (complex) wins over the second (mechanical)"
-assert_not_contains "tier=mechanical" "$err" "second marker is not the one resolved"
+assert_contains "tier=mechanical" "$err" "last marker (mechanical) wins over the first (complex)"
+assert_not_contains "tier=complex" "$err" "first marker is not the one resolved"
 
 # -------- Test 6: all four cases still exit 3 (unconfigured tierModels) --------
 # Confirms the resolution layer itself is unchanged -- only the diagnostics
@@ -195,6 +202,20 @@ echo "Test 8: total fetch failure degrades to routine with a diagnostic"
 err="$(run_resolve 9006 2>&1 1>/dev/null)"
 assert_contains "could not fetch body" "$err" "total fetch failure logs a fetch-error diagnostic"
 assert_contains "-> routine" "$err" "total fetch failure still degrades to routine"
+
+# -------- Test 9: prose mentioning the marker syntax before the real marker
+# -------- is ignored (#4840) --------
+# The bug this issue reports: a body that *discusses* the marker syntax in
+# prose before the real marker (e.g. a meta issue about the complexity-marker
+# feature itself, quoting `<!-- loom:complexity=<tier> -->` as literal example
+# text) used to produce an empty first match that `head -1` picked over the
+# real marker later in the body, silently resolving to `routine` instead of
+# the issue's actual `mechanical` tier.
+echo "Test 9: prose that mentions the marker syntax before the real marker is ignored"
+err="$(run_resolve 9007 2>&1 1>/dev/null)"
+assert_contains "tier=mechanical" "$err" "real marker (mechanical) is resolved despite preceding prose mentions"
+assert_not_contains "invalid complexity tier" "$err" "prose mention never triggers the invalid-tier warning"
+assert_not_contains "no complexity marker" "$err" "prose mention never triggers the absent-marker message"
 
 # -------- Summary --------
 echo ""

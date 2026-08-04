@@ -112,17 +112,74 @@ def _write_bundle(tmp_path: Path) -> Path:
     return manifest_path
 
 
+def _write_fresh_bundle(tmp_path: Path) -> Path:
+    """Create a bundle whose manifest is written by the real generator.
+
+    Mirrors the shipping layout: BOM/CPL at the package root, the gerber
+    archive under ``gerbers/`` and report images under ``images/``.
+    """
+    from kicad_tools.export.assembly import AssemblyPackageResult
+    from kicad_tools.export.manufacturing import ManufacturingResult, _build_manifest
+
+    bom = tmp_path / "bom_jlcpcb.csv"
+    bom.write_text("Comment,Designator,Footprint,LCSC Part #\n10k,R1,R_0603,C25804\n")
+    cpl = tmp_path / "cpl_jlcpcb.csv"
+    cpl.write_text("Designator,Mid X,Mid Y,Layer,Rotation\nR1,10,20,top,90\n")
+
+    gerber_dir = tmp_path / "gerbers"
+    gerber_dir.mkdir()
+    zip_file = gerber_dir / "gerbers.zip"
+    zip_file.write_bytes(b"PK\x05\x06" + b"\x00" * 18)  # empty zip
+
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    images = []
+    for name in ("assembly.png", "pcb_front.png", "layer_F_Cu.png"):
+        p = image_dir / name
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + name.encode())
+        images.append(p)
+
+    readme = tmp_path / "README.txt"
+    readme.write_text("Manufacturing package\n")
+
+    pcb_path = tmp_path / "board.kicad_pcb"
+    pcb_path.write_text("(kicad_pcb)")
+
+    result = ManufacturingResult(
+        output_dir=tmp_path,
+        assembly_result=AssemblyPackageResult(
+            output_dir=tmp_path,
+            bom_path=bom,
+            pnp_path=cpl,
+            gerber_path=zip_file,
+        ),
+        image_paths=images,
+        readme_path=readme,
+    )
+    manifest = _build_manifest(result, pcb_path, "jlcpcb")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    return manifest_path
+
+
 class TestVerifyManifest:
     def test_clean_bundle_passes(self, tmp_path):
         manifest_path = _write_bundle(tmp_path)
         assert verify_manifest(manifest_path) == []
 
     def test_resolves_files_in_subdirectories(self, tmp_path):
-        # gerbers.zip lives in gerbers/ but the manifest stores the bare
-        # name; verification must still find and check it.
+        # LEGACY bundles (pre-#4590) store the bare name for artifacts in
+        # subdirectories -- gerbers.zip lives in gerbers/.  Verification
+        # must still find and check it, so already-shipped bundles keep
+        # verifying without regeneration.
         manifest_path = _write_bundle(tmp_path)
         problems = verify_manifest(manifest_path)
         assert not any("gerbers.zip" in p for p in problems)
+
+    def test_fresh_bundle_verifies(self, tmp_path):
+        """Relative-keyed manifests written today verify cleanly (#4590)."""
+        manifest_path = _write_fresh_bundle(tmp_path)
+        assert verify_manifest(manifest_path) == []
 
     def test_detects_modified_content(self, tmp_path):
         manifest_path = _write_bundle(tmp_path)
@@ -139,6 +196,56 @@ class TestVerifyManifest:
         (tmp_path / "bom_jlcpcb.csv").unlink()
         problems = verify_manifest(manifest_path)
         assert any("bom_jlcpcb.csv" in p and "not found" in p for p in problems)
+
+
+# ---------------------------------------------------------------------------
+# Layer 2a': manifest keys must resolve by plain path join (issue #4590)
+#
+# The #3572 guard covers content drift only.  A manifest key that does not
+# resolve at `bundle_dir / key` makes a correct bundle look corrupt to any
+# external consumer, which is what shipped as #4590.
+# ---------------------------------------------------------------------------
+
+
+class TestManifestKeyPathResolution:
+    def test_fresh_manifest_keys_resolve_without_rglob(self, tmp_path):
+        manifest_path = _write_fresh_bundle(tmp_path)
+        bundle_dir = manifest_path.parent
+        keys = list(json.loads(manifest_path.read_text())["files"])
+
+        unresolvable = [k for k in keys if not (bundle_dir / k).exists()]
+        assert unresolvable == [], (
+            "every manifest key must resolve at bundle_dir / key with no "
+            f"recursive search (issue #4590); unresolvable: {unresolvable}"
+        )
+
+    def test_fresh_manifest_records_subdirectory_artifacts(self, tmp_path):
+        manifest_path = _write_fresh_bundle(tmp_path)
+        keys = set(json.loads(manifest_path.read_text())["files"])
+
+        assert "gerbers/gerbers.zip" in keys
+        assert "gerbers.zip" not in keys
+        assert "images/assembly.png" in keys
+        assert "assembly.png" not in keys
+
+    def test_fresh_manifest_keys_are_posix(self, tmp_path):
+        manifest_path = _write_fresh_bundle(tmp_path)
+        keys = list(json.loads(manifest_path.read_text())["files"])
+
+        assert all("\\" not in k for k in keys), f"non-POSIX separator in keys: {keys}"
+
+    def test_verifier_accepts_both_manifest_vintages(self, tmp_path):
+        """Mixed-vintage: legacy basename keys and new relative keys both pass."""
+        legacy_dir = tmp_path / "legacy"
+        legacy_dir.mkdir()
+        fresh_dir = tmp_path / "fresh"
+        fresh_dir.mkdir()
+
+        legacy = _write_bundle(legacy_dir)
+        fresh = _write_fresh_bundle(fresh_dir)
+
+        assert verify_manifest(legacy) == []
+        assert verify_manifest(fresh) == []
 
 
 # ---------------------------------------------------------------------------

@@ -94,6 +94,19 @@ info()    { echo "INFO: $*"; }
 success() { echo "OK: $*"; }
 warning() { echo "WARN: $*" >&2; }
 
+# --- Real forge-helpers.sh (for the #4856 rate-limit-safe mutation wrappers) ---
+# The deferred-reconciliation comment is no longer posted with a bare
+# `gh pr comment` — it routes through forge_gh_comment_rl_safe (lib/forge-helpers.sh),
+# which posts via `gh issue comment` and falls back to the REST comments endpoint
+# (shared by issues and PRs) when the GraphQL mutation is rate-limited (#4856).
+# Source the REAL helper (rather than shimming it) so this suite keeps exercising
+# the actual `gh` invocation shape the wrapper produces, which the stub below
+# records verbatim. Sourced BEFORE the shared globals are assigned:
+# forge-helpers.sh initializes FORGE_TYPE="" at load time, which would otherwise
+# clobber the FORGE_TYPE="github" the tests rely on.
+# shellcheck source=../lib/forge-helpers.sh
+source "$HELPERS_DIR/lib/forge-helpers.sh"
+
 # --- Extract the functions under test from merge-pr.sh and source them ---
 # From `_reset_one_partial_issue() {` up to (not including) the
 # `# Handle auto-merge mode` line — this span contains the partial-increment
@@ -134,7 +147,16 @@ export LOOM_TEST_RECON_LOG="$RECON_DIR/recon-calls.log"
 # --- Stub gh on PATH ---
 #   gh api repos/OWNER/REPO/issues/N   -> cat $STUB_DIR/issue-N.json (or {})
 #   gh pr list --base B ...            -> cat $STUB_DIR/prlist-<sanitized B>.json (or [])
+#   gh issue comment|edit|reopen N ... -> record to $STUB_DIR/gh-calls.log
 #   gh pr comment N ...                -> record to $STUB_DIR/gh-calls.log
+# The deferred-reconciliation comment reaches the stub as `gh issue comment <pr>`
+# (not `gh pr comment <pr>`) since #4856 routed it through
+# forge_gh_comment_rl_safe — the REST comments endpoint is shared by issues and
+# PRs, so the wrapper uses the issue-side CLI verb for both. The legacy
+# `gh pr comment` arm is retained so an accidental regression back to the raw
+# call still lands in the log (where the assertions, which now expect the
+# `issue comment` shape, will flag it) instead of hitting the unhandled-args
+# fallback with a confusing exit 3.
 # The --base value contains a '/' (feature/issue-N), so the stub sanitizes it to
 # '_' before building the fixture filename; the test writes fixtures the same way.
 cat > "$STUB_DIR/gh" <<'STUB'
@@ -165,6 +187,13 @@ if [[ "$1" == "pr" && "$2" == "list" ]]; then
 fi
 
 if [[ "$1" == "pr" && "$2" == "comment" ]]; then
+  echo "$*" >> "$LOG"
+  exit 0
+fi
+
+# `gh issue comment|edit|reopen N ...` — the shapes the #4856 rate-limit-safe
+# wrappers in lib/forge-helpers.sh emit on their happy path.
+if [[ "$1" == "issue" ]]; then
   echo "$*" >> "$LOG"
   exit 0
 fi
@@ -227,7 +256,12 @@ PR_BRANCH="feature/issue-100"
 write_prlist "feature/issue-100" '[{"number":502,"headRefName":"feature/issue-202"}]'
 _auto_reconcile_stacked_children
 assert_eq "" "$(read_recon)" "Unsafe child #502 (issue #202 building) -> reconcile-stack.sh NOT invoked"
-assert_contains "$(read_gh_log)" "pr comment 502 --repo owner/repo" \
+# Since #4856 the comment is posted through forge_gh_comment_rl_safe, whose
+# happy path is `gh issue comment <pr> --repo <nwo> --body ...` (the REST
+# comments endpoint it falls back to is shared by issues and PRs, so the wrapper
+# uses one CLI verb for both) — assert on that shape, not the pre-#4856
+# `gh pr comment` literal.
+assert_contains "$(read_gh_log)" "issue comment 502 --repo owner/repo" \
   "Unsafe child -> deferred-reconciliation comment posted on PR #502"
 
 # T4: non-feature/issue-N parent branch -> step skipped entirely (no discovery).
@@ -271,7 +305,7 @@ assert_contains "$(read_recon)" "reconcile-stack.sh 501 feature/issue-100" \
   "Mixed set: safe child #501 reconciled"
 assert_not_contains "$(read_recon)" "502" \
   "Mixed set: unsafe child #502 NOT reconciled"
-assert_contains "$(read_gh_log)" "pr comment 502 --repo owner/repo" \
+assert_contains "$(read_gh_log)" "issue comment 502 --repo owner/repo" \
   "Mixed set: unsafe child #502 got a deferred comment"
 
 # --- Source-contains guards (fail if a refactor drops the key behavior) ---
@@ -288,6 +322,8 @@ assert_contains "$src" "grep -qx 'loom:building'" \
   "merge-pr.sh gates safe/unsafe on the child issue's loom:building label"
 assert_contains "$src" '"$SCRIPT_DIR/reconcile-stack.sh" "$child_pr" "$parent_branch"' \
   "merge-pr.sh reuses reconcile-stack.sh unmodified (no inline rebase logic)"
+assert_contains "$src" 'forge_gh_comment_rl_safe "$REPO_NWO" "$child_pr" "$comment"' \
+  "merge-pr.sh posts the deferral comment via the rate-limit-safe wrapper (#4856)"
 
 # --- Summary ---
 echo ""

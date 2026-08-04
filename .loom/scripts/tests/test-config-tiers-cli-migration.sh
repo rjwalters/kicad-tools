@@ -76,7 +76,11 @@ mkdir -p "$ws/.loom-project"
 cat > "$ws/.loom-project/project.json" <<'JSON'
 {"terminals": [{"id": "cfgtier-t1", "name": "Builder", "roleConfig": {"roleFile": "builder.md"}}]}
 JSON
-out=$(cd "$ws" && "$LOOM_STATUS_SH" --json 2>&1) || true
+# stdout only: loom_locate_daemon_bin's resolution diagnostic (#4997) lands on
+# stderr and, on a host where it fires, would land ahead of the JSON payload
+# under a merged 2>&1 capture and break the jq -e parse below even though the
+# JSON on stdout is correct (#5183).
+out=$(cd "$ws" && "$LOOM_STATUS_SH" --json 2>/dev/null) || true
 if echo "$out" | jq -e '(.stopped + .running) | map(select(.id == "cfgtier-t1")) | length == 1' >/dev/null 2>&1; then
     pass "loom-status.sh --json lists a terminal sourced only from the project tier"
 else

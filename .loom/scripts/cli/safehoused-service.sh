@@ -125,6 +125,13 @@ if [[ -r "$_LOOM_LIB_DIR/mcp-config.sh" ]]; then
     # shellcheck source=../lib/mcp-config.sh
     source "$_LOOM_LIB_DIR/mcp-config.sh"
 fi
+# canonical_daemon_path() (#4831) — the same shared canonical PATH superset
+# loom-daemon-start.sh's resolve_plist_path() renders, sourced here instead of
+# a fourth hand-maintained copy (see lib/canonical-daemon-path.sh).
+if [[ -r "$_LOOM_LIB_DIR/canonical-daemon-path.sh" ]]; then
+    # shellcheck source=../lib/canonical-daemon-path.sh
+    source "$_LOOM_LIB_DIR/canonical-daemon-path.sh"
+fi
 
 # ---------- XML escaping (launchd plist) ----------
 xml_escape() {
@@ -137,15 +144,22 @@ xml_escape() {
 
 # ---------- deterministic service PATH ----------
 # The same canonical minimal PATH loom-daemon-start.sh bakes into its plist
-# (#4172): hermetic, reproducible across hosts/sessions, never the invoking
-# shell's interactive PATH. Override with SAFEHOUSED_PATH (verbatim).
+# (#4172), sourced from lib/canonical-daemon-path.sh (#4831) so this is no
+# longer a separately-maintained copy of that set: hermetic, reproducible
+# across hosts/sessions, never the invoking shell's interactive PATH.
+# Override with SAFEHOUSED_PATH (verbatim).
 resolve_service_path() {
-    local canonical="${HOME}/.local/bin:${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     if [[ -n "${SAFEHOUSED_PATH:-}" ]]; then
         printf '%s' "${SAFEHOUSED_PATH}"
         return 0
     fi
-    printf '%s' "$canonical"
+    if declare -F canonical_daemon_path >/dev/null 2>&1; then
+        canonical_daemon_path
+        return 0
+    fi
+    # Degraded fallback if lib/canonical-daemon-path.sh could not be sourced
+    # -- keep byte-for-byte identical to the lib's definition.
+    printf '%s' "${HOME}/.local/bin:${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
 # ---------- label / unit resolvers ----------

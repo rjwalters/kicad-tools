@@ -6,6 +6,15 @@ cache under `/tmp/gh-cache/`. Because the cache is on disk, it is shared
 **across processes on one host** — the N sweep / Judge / Champion sessions
 running concurrently against the same repo hit the same entries.
 
+The cache directory is further scoped **per repo** (#5224): the wrapper
+resolves `git rev-parse --show-toplevel` once per invocation (cheap, local, no
+network) and hashes it into a subdirectory of `GH_CACHE_DIR`, so two different
+repos on the same host issuing the textually identical `gh` invocation never
+read (or invalidate) each other's cached entries — the sessions sharing
+entries above are always sessions against the *same* repo. `GH_CACHE_REPO_ID`
+overrides the resolved identity directly when needed (tests, or a working
+directory that isn't a git repo).
+
 This document is the policy reference for **which** reads in the
 `/loom:sweep`, `/loom:judge`, and Champion-PR-merge skills go through the
 wrapper and which are deliberately left uncached (#4667). The motivating
@@ -42,8 +51,9 @@ resolution.
 
 | Command shape | Behavior | TTL |
 |---|---|---|
-| `gh issue view` / `issue list` | cached | 30s |
-| `gh pr view` / `pr list` | cached | 30s |
+| `gh issue view` | cached | 30s |
+| `gh pr view` | cached | 30s |
+| `gh issue list` / `pr list` (cacheable shape) | **ETag/REST (#5056)** — free 304, never stale; TTL fallback | 0s (revalidated) |
 | `gh label list`, `gh <x> search/status` | cached | 30s (default) |
 | `gh api` **without** `-X <non-GET>` / `-f` | cached | 30s |
 | `gh … edit/create/delete/close/reopen/merge/review/comment/label` | **bypassed**, and invalidates (but issue writes as literal `gh` — see below) | — |
@@ -53,6 +63,52 @@ Only **successful** (`rc == 0`) responses are cached, so a transient forge
 error is never memoized. TTL knobs: `GH_CACHE_TTL` (default 30s),
 `GH_CACHE_MAX_SIZE` (256 entries, LRU), `GH_CACHE_DIR`, `GH_CACHE_DISABLE=1`
 (hard off), `GH_CACHE_DEBUG=1` (per-call HIT/MISS/INVALIDATE lines on stderr).
+
+### ETag/REST cached listings — free, never-stale `issue list` / `pr list` (#5056)
+
+`gh issue list` / `gh pr list` are **GraphQL**, which has no conditional-request
+mechanism, so every call burns the shared GraphQL rate-limit pool even when the
+queue is unchanged. (Measured 2026-08-03: `graphql` at 1378/5000 in ~16 minutes
+while REST `core` sat at 19/5000 — `gh issue create` was already failing while
+the REST pool was 99.6% idle.) The daemon's own polling loops avoided this via
+`forge_listing::list_issues_cached` — a REST `GET` with `If-None-Match` that a
+matching ETag answers with a **304 at zero rate-limit cost** — but agents had no
+access to it.
+
+The wrapper now closes that gap. For an `issue list` / `pr list` whose shape the
+REST issues endpoint can serve, it first tries loom-daemon's **disk-persistent**
+ETag cache (`loom-daemon forge <issue|pr> list --cached …`, backed by
+`forge_listing::list_issues_cached_persistent`):
+
+- **Free on repeat.** A validated `304` costs zero rate-limit units, so the
+  second and later readers on a host pay nothing when the queue is unchanged.
+  The ETag + last-good body persist on disk (`${TMPDIR:-/tmp}/loom-forge-listing-cache`,
+  override `LOOM_LISTING_CACHE_DIR`), so this holds across the *separate*
+  short-lived agent processes — not just within one long-running daemon.
+- **Separate pool.** It draws on REST `core`, not the exhausted GraphQL pool.
+- **Never stale.** Unlike the 30s TTL cache below, a `304` is positive proof
+  nothing changed — so this path is safe even for claim-arbitration reads, and
+  is tried *before* the TTL cache.
+- **Degrades gracefully.** When loom-daemon is unreachable (binary absent) or
+  the shape is not cacheable, the daemon exits non-zero and the wrapper falls
+  through to its normal path (TTL cache / plain `gh`) — the same fallback
+  contract as the rest of this wrapper. `LOOM_ETAG_LIST_DISABLE=1` turns the
+  whole layer off.
+
+**Which shapes route here** (everything else declines to `gh`, so a repoint is
+always safe): a `list` with `--json` limited to
+`{number,title,state,body,labels,createdAt,updatedAt,closedAt,author}`; `--label`
+(AND) and `--search` restricted to `label:` / `-label:` include/exclude terms;
+`--state open|closed|all` for issues, `--state open` for PRs; not a
+possibly-truncated full page (>= 100 rows). A bare `list` (human table, no
+`--json`), a freeform `--search` (`head:…`, `in:body`, text), a PR-only field
+(`mergedAt`, `files`), or a merged/closed PR listing all fall back to `gh`.
+
+> **`loom-daemon forge issue` / `forge pr` WITHOUT `--cached` is NOT this path.**
+> The bare passthrough is a byte-identical GraphQL exec of `gh` and inherits its
+> full GraphQL cost. Only the explicit `--cached` flag (reached for you by this
+> wrapper) uses the ETag/REST cache. Never reach for the bare passthrough
+> expecting caching.
 
 ### Mutation-triggered invalidation — and why writes still use plain `gh`
 
@@ -161,7 +217,11 @@ stub `gh` on `PATH` and a temp `GH_CACHE_DIR`, asserting: repeated `pr list` /
 `issue list` / `pr view` reads hit the cache; `--no-cache` bypasses; `gh pr
 checks` and `gh repo view` are never cached; a wrapped `gh pr edit` /
 `gh pr comment` invalidates the cached reads of that PR (including the cached
-listing that contains it); and a state change is observed once the TTL expires.
+listing that contains it); a state change is observed once the TTL expires;
+and (#5224) two different repo identities — both via `GH_CACHE_REPO_ID` and
+via two real, distinct git toplevels — never share a cache read or an
+invalidation for the textually identical `gh` args, even when both repos have
+a numerically-identical resource id.
 
 ### Manual (inherently runtime — cannot be unit-tested)
 

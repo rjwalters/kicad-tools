@@ -481,7 +481,7 @@ assert_contains "$migrate_run" "machine_checkout=[$CHK]" "'loom migrate' hands o
 echo "Test 19: 'loom sweep' default path (no env, no config) routes to spawn-claude.sh unchanged"
 SWEEPREPO="$(make_sweep_repo)"
 set +e
-out=$(cd "$SWEEPREPO" && LOOM_CONFIG_DEFAULTS_FILE="" LOOM_HOME="$CHK" bash "$DISPATCHER" sweep 4467 2>&1)
+out=$(cd "$SWEEPREPO" && env -u LOOM_RUNTIME -u LOOM_WORKSPACE LOOM_CONFIG_DEFAULTS_FILE="" LOOM_HOME="$CHK" bash "$DISPATCHER" sweep 4467 2>&1)
 rc=$?
 set -e 2>/dev/null || true
 assert_eq "$rc" "0" "'loom sweep' default path exits 0"
@@ -504,7 +504,7 @@ if command -v jq >/dev/null 2>&1; then
     SWEEPCFG="$(make_sweep_repo)"
     echo '{"runtimes":{"default":"codex"}}' > "$SWEEPCFG/.loom/config.json"
     set +e
-    out=$(cd "$SWEEPCFG" && LOOM_CONFIG_DEFAULTS_FILE="" LOOM_HOME="$CHK" bash "$DISPATCHER" sweep 4467 2>&1)
+    out=$(cd "$SWEEPCFG" && env -u LOOM_RUNTIME -u LOOM_WORKSPACE LOOM_CONFIG_DEFAULTS_FILE="" LOOM_HOME="$CHK" bash "$DISPATCHER" sweep 4467 2>&1)
     rc=$?
     set -e 2>/dev/null || true
     assert_eq "$rc" "0" "'loom sweep' with runtimes.default=codex exits 0"

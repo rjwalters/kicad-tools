@@ -86,6 +86,111 @@ machine-local, ungitted override):
 }
 ```
 
+## Provisioning additional Macs
+
+The certificate lives in **one** Mac's login keychain — nothing about it is
+committed, so a second fleet Mac invoked with the *same*
+`LOOM_CODESIGN_IDENTITY` finds no matching identity and falls back to ad-hoc
+signing. `provision-daemon.sh` says so explicitly on stderr before the
+ad-hoc line:
+
+```
+  [loom-daemon] WARNING: LOOM_CODESIGN_IDENTITY 'Loom Local Signing' not found via 'security find-identity -v -p codesigning'; falling back to ad-hoc signing (see defaults/docs/macos-tcc-codesign.md)
+  [loom-daemon] ad-hoc signed /Users/you/.local/bin/loom-daemon (identifier=com.rjwalters.loom-daemon)
+```
+
+That host still runs fine — the only consequence is the deferred one this
+doc exists for: its TCC grants reset on every rebuild. To fix it, give the
+new Mac its own stable identity, either by copying the existing certificate
+(Option 1) or by minting a fresh one there (Option 2).
+
+**Prefer Option 2, and reuse the same Common Name on every host.** A TCC
+grant is per-host, so nothing requires the *certificate* to be shared —
+only that the identity *name* matches what `codesign.identity` /
+`LOOM_CODESIGN_IDENTITY` asks for. Minting a same-named cert per host gets
+you one committed config value with no private key ever leaving the first
+machine. Option 1 exists for when you specifically want one certificate
+across the fleet (e.g. so `codesign -dvv` reports an identical
+`Authority=` leaf everywhere).
+
+### Option 1 — export the cert + key and import it on the second Mac
+
+On the Mac that already has the identity, export both halves. Keychain
+Access is the reliable single-identity path: select the **certificate and
+its private key** together → **File → Export Items…** → `Personal
+Information Exchange (.p12)`. The CLI equivalent exports *every* identity
+in the keychain, so only reach for it on a keychain you know is clean:
+
+```bash
+# Exports ALL codesigning identities in the keychain, not just this one.
+security export -k ~/Library/Keychains/login.keychain-db \
+  -t identities -f pkcs12 -P changeit -o loom-signing.p12
+
+# The public certificate alone, needed for add-trusted-cert on the far side.
+security find-certificate -c "Loom Local Signing" -p \
+  ~/Library/Keychains/login.keychain-db > loom-signing.crt
+```
+
+The `.p12` contains the **private key** — move it over a channel you trust
+(`scp`, AirDrop), use a real passphrase rather than `changeit`, and delete
+it from both hosts once imported.
+
+On the new Mac, import with the same flags the one-time setup above uses
+(`-T /usr/bin/codesign` so later signing is non-interactive; the trust step
+is what keeps the self-signed root from prompting on first use):
+
+```bash
+security import loom-signing.p12 -k ~/Library/Keychains/login.keychain-db \
+  -P changeit -T /usr/bin/codesign
+
+security add-trusted-cert -p codeSign -k ~/Library/Keychains/login.keychain-db \
+  loom-signing.crt
+
+rm -f loom-signing.p12          # the private key does not need to persist on disk
+security find-identity -v -p codesigning   # should now list "Loom Local Signing"
+```
+
+If the import fails with "MAC verification failed", the `.p12` was written
+in OpenSSL 3's default format — re-export it with `-legacy` (same quirk as
+step 2 of Option B above).
+
+### Option 2 — mint an independent cert per host
+
+Just run the one-time setup (Option A or B) again on the new Mac. No key
+material is transferred, and each host's certificate is independent.
+
+- **Same CN on every host** (recommended): use `/CN=Loom Local Signing`
+  again, and the committed `codesign.identity` keeps working unchanged.
+  The certificates differ per host, but each host only ever validates its
+  own signature, so the shared name is all the config needs.
+- **Different CN per host** (e.g. `Loom Local Signing (studio)`): then a
+  single committed value can't cover the fleet. Set the identity per host
+  in `.loom-local/local.json` — the highest-precedence config tier, meant to
+  stay untracked (`install-loom.sh --local` gitignores `/.loom-local/` for
+  you):
+
+  ```json
+  {
+    "codesign": { "identity": "Loom Local Signing (studio)" }
+  }
+  ```
+
+  Exporting `LOOM_CODESIGN_IDENTITY` from the host's shell profile works
+  too and takes precedence over both config tiers.
+
+### Verifying the new host
+
+```bash
+security find-identity -v -p codesigning        # the identity is listed
+./.loom/scripts/cli/loom-daemon-update.sh       # re-provision + re-sign
+codesign -dvv ~/.local/bin/loom-daemon 2>&1 | grep -E 'Authority|adhoc'
+# want: Authority=Loom Local Signing   (and NO 'adhoc' in the flags line)
+```
+
+If `adhoc` is still reported, re-read the provisioning output: the
+`WARNING:` line above pinpoints whether the identity was requested but
+missing from *this* keychain, versus `codesign` itself failing.
+
 ## Grant the daemon identity, not Terminal
 
 Work spawned from an interactive terminal shell — in-session

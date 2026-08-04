@@ -40,10 +40,23 @@
 #          warning.
 #      (f) no expected_head_sha supplied (the pre-#4100 --worktree-path
 #          caller shape) -> falls back to plain `-d` behaviour unchanged.
+#      (g)-(j) primary-checkout auto-cleanup (#5015): when the branch is
+#          checked out in the PRIMARY repo checkout (not a linked worktree)
+#          and the tip-match safety check passed, merge-pr.sh no longer just
+#          prints manual instructions — it completes the cleanup itself:
+#          (g) clean tree -> auto `checkout <default> && branch -D`.
+#          (h) dirty tree (control) -> unchanged manual-instructions
+#              behavior, HEAD untouched.
+#          (i) tree clean but a stash entry exists -> treated as unsafe, not
+#              auto-cleaned.
+#          (j) CLEANUP_PRIMARY_CHECKOUT=false (--no-cleanup-primary) opts out
+#              even when otherwise fully safe.
 #
 # This is the companion to test-merge-pr-worktree-path.sh (wiring/discovery)
 # and test-merge-pr-primary-worktree-guard.sh (the extract-and-eval pattern
-# this test reuses for _maybe_delete_local_branch).
+# this test reuses for _maybe_delete_local_branch). See also
+# test-merge-pr-primary-checkout-advice.sh (the #4171 companion, also
+# extended for #5015 with the tip-match auto-cleanup case).
 
 set -euo pipefail
 
@@ -116,6 +129,15 @@ warning() { echo "WARN: $*"; }
 success() { echo "OK: $*"; }
 error()   { echo "ERROR: $*" >&2; return 1; }
 
+# _maybe_delete_local_branch's primary-checkout auto-cleanup path (#5015)
+# calls _find_worktree_by_branch / _is_primary_worktree_path, which in turn
+# calls _primary_worktree_path — extract all three alongside it so the real
+# auto-cleanup branch actually runs in this harness (an undefined helper
+# silently no-ops instead of erroring, which would otherwise mask the new
+# behavior rather than exercise it).
+eval "$(extract_fn _primary_worktree_path "$MERGE_PR")"
+eval "$(extract_fn _is_primary_worktree_path "$MERGE_PR")"
+eval "$(extract_fn _find_worktree_by_branch "$MERGE_PR")"
 eval "$(extract_fn _maybe_delete_local_branch "$MERGE_PR")"
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/loom-merge-local-branch.XXXXXX")"
@@ -138,6 +160,8 @@ BASE_SHA="$(git -C "$REPO" rev-parse HEAD)"
 REPO_ROOT="$REPO"
 # shellcheck disable=SC2034
 DEFAULT_BRANCH_NAME="main"
+# shellcheck disable=SC2034
+CLEANUP_PRIMARY_CHECKOUT=true
 
 echo ""
 echo "Test 2: behavioral tests of the real _maybe_delete_local_branch body"
@@ -193,10 +217,16 @@ fi
 git -C "$REPO" worktree remove "$WT2" --force >/dev/null 2>&1 || true
 git -C "$REPO" branch -D feature/issue-300 >/dev/null 2>&1 || true
 
-# --- (c2) branch IS the current HEAD (primary checkout) -> also refused ---
+# --- (c2) branch IS the current HEAD (primary checkout) -> also refused.
+# REPO here IS the primary checkout, so with _is_primary_worktree_path /
+# _find_worktree_by_branch now extracted (needed by the #5015 auto-cleanup
+# tests below), this correctly gets the primary-checkout-specific message
+# rather than the generic one — no expected_head_sha means delete_flag stays
+# "-d", so the #5015 auto-cleanup gate (which requires "-D") never fires and
+# the branch is preserved either way. ---
 git -C "$REPO" checkout -q -b feature/issue-301
 out_c2="$(_maybe_delete_local_branch "feature/issue-301" "" 2>&1)"
-if [[ "$out_c2" == *"checked out (current HEAD or another worktree)"* ]] \
+if [[ "$out_c2" == *"checked out in the primary repository checkout"* ]] \
    && git -C "$REPO" show-ref --verify --quiet refs/heads/feature/issue-301; then
     pass "(c2) branch that is the current HEAD is never deleted"
 else
@@ -240,6 +270,94 @@ if [[ "$out_f" == *"OK: Local branch 'feature/issue-400' deleted"* ]] \
 else
     fail "(f) expected plain -d delete with no safety-note; got: $out_f"
 fi
+
+# --- (g) checked out in the PRIMARY checkout, clean tree, tip matches head SHA
+#     -> auto-cleanup: checkout the default branch, then force-delete (#5015) ---
+echo ""
+echo "Test 3: primary-checkout auto-cleanup (#5015)"
+
+git -C "$REPO" checkout -q -b feature/issue-500
+echo "change" >> "$REPO/README.md"
+git -C "$REPO" commit -q -am "issue 500 work"
+MATCH_SHA_G="$(git -C "$REPO" rev-parse feature/issue-500)"
+# feature/issue-500 remains checked out (current HEAD) — REPO IS the primary
+# checkout (the sole worktree in this repo), and the tree is clean.
+
+out_g="$(_maybe_delete_local_branch "feature/issue-500" "$MATCH_SHA_G" 2>&1)"
+if [[ "$out_g" == *"OK: Local branch 'feature/issue-500' deleted"* ]] \
+   && [[ "$out_g" == *"safe force-delete"* ]] \
+   && [[ "$out_g" == *"automatically switched to 'main'"* ]] \
+   && [[ "$(git -C "$REPO" branch --show-current)" == "main" ]] \
+   && ! git -C "$REPO" show-ref --verify --quiet refs/heads/feature/issue-500; then
+    pass "(g) clean tree + tip match in the primary checkout auto-checks-out default and force-deletes"
+else
+    fail "(g) expected auto-checkout + force-delete; got: $out_g (branch now: $(git -C "$REPO" branch --show-current))"
+fi
+
+# --- (h) control: same setup but a DIRTY tree -> unchanged manual-instructions
+#     behavior, HEAD untouched, branch preserved ---
+git -C "$REPO" checkout -q -b feature/issue-600
+echo "change" >> "$REPO/README.md"
+git -C "$REPO" commit -q -am "issue 600 work"
+MATCH_SHA_H="$(git -C "$REPO" rev-parse feature/issue-600)"
+echo "uncommitted work" >> "$REPO/README.md"   # dirty the tree, do NOT commit
+
+out_h="$(_maybe_delete_local_branch "feature/issue-600" "$MATCH_SHA_H" 2>&1)"
+if [[ "$out_h" == *"checked out in the primary repository checkout"* ]] \
+   && [[ "$out_h" == *"checkout main"* ]] \
+   && [[ "$out_h" == *"branch -D feature/issue-600"* ]] \
+   && [[ "$(git -C "$REPO" branch --show-current)" == "feature/issue-600" ]] \
+   && git -C "$REPO" show-ref --verify --quiet refs/heads/feature/issue-600; then
+    pass "(h) dirty tree in the primary checkout keeps current behavior — manual instructions, HEAD untouched"
+else
+    fail "(h) expected unchanged manual-instructions behavior on a dirty tree; got: $out_h"
+fi
+git -C "$REPO" checkout -q -- README.md
+git -C "$REPO" checkout -q main
+git -C "$REPO" branch -D feature/issue-600 >/dev/null 2>&1 || true
+
+# --- (i) edge case: tree is clean but a stash entry exists -> treated as
+#     unsafe, not auto-cleaned (AC: "no stash entries created by the script") ---
+git -C "$REPO" checkout -q -b feature/issue-700
+echo "change" >> "$REPO/README.md"
+git -C "$REPO" commit -q -am "issue 700 work"
+MATCH_SHA_I="$(git -C "$REPO" rev-parse feature/issue-700)"
+echo "stash me" >> "$REPO/README.md"
+git -C "$REPO" stash push -q -m "unrelated wip"   # tree is clean again, but a stash entry now exists
+
+out_i="$(_maybe_delete_local_branch "feature/issue-700" "$MATCH_SHA_I" 2>&1)"
+if [[ "$out_i" == *"checked out in the primary repository checkout"* ]] \
+   && [[ "$(git -C "$REPO" branch --show-current)" == "feature/issue-700" ]] \
+   && git -C "$REPO" show-ref --verify --quiet refs/heads/feature/issue-700; then
+    pass "(i) a present stash entry blocks auto-cleanup even with an otherwise-clean tree"
+else
+    fail "(i) expected stash presence to block auto-cleanup; got: $out_i"
+fi
+git -C "$REPO" stash drop -q >/dev/null 2>&1 || true
+git -C "$REPO" checkout -q main
+git -C "$REPO" branch -D feature/issue-700 >/dev/null 2>&1 || true
+
+# --- (j) opt-out: CLEANUP_PRIMARY_CHECKOUT=false disables auto-cleanup even
+#     when otherwise fully safe (--no-cleanup-primary sets this at the CLI) ---
+git -C "$REPO" checkout -q -b feature/issue-800
+echo "change" >> "$REPO/README.md"
+git -C "$REPO" commit -q -am "issue 800 work"
+MATCH_SHA_J="$(git -C "$REPO" rev-parse feature/issue-800)"
+
+CLEANUP_PRIMARY_CHECKOUT=false
+out_j="$(_maybe_delete_local_branch "feature/issue-800" "$MATCH_SHA_J" 2>&1)"
+# shellcheck disable=SC2034
+CLEANUP_PRIMARY_CHECKOUT=true
+
+if [[ "$out_j" == *"checked out in the primary repository checkout"* ]] \
+   && [[ "$(git -C "$REPO" branch --show-current)" == "feature/issue-800" ]] \
+   && git -C "$REPO" show-ref --verify --quiet refs/heads/feature/issue-800; then
+    pass "(j) CLEANUP_PRIMARY_CHECKOUT=false (--no-cleanup-primary) opts out even when otherwise safe"
+else
+    fail "(j) expected opt-out to fall back to manual instructions; got: $out_j"
+fi
+git -C "$REPO" checkout -q main
+git -C "$REPO" branch -D feature/issue-800 >/dev/null 2>&1 || true
 
 # --- Summary ---
 echo ""

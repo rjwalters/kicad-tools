@@ -8,6 +8,7 @@ handling -- not on actually invoking cmake.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from unittest import mock
 
@@ -336,6 +337,265 @@ class TestRouteCmdCallsHelper:
         assert "WARNING: C++ router backend not installed" not in text, (
             "Old inline Python-fallback warning still present in route_cmd.py"
         )
+
+
+class TestProbeBackendInfo:
+    """Issue #4589: the shared fresh-interpreter availability probe.
+
+    ``kct build-native`` used to verify its own work in the process that just
+    did the build.  For an already-``dlopen``'d C extension that is impossible:
+    ``sys.modules.pop`` + ``importlib.invalidate_caches`` + ``reload`` return
+    the *identical* module object, so the probe describes the PRE-build
+    extension.  ``probe_backend_info`` answers the only question that matters
+    -- "what will the next process see?" -- by asking a fresh interpreter.
+    """
+
+    def test_in_process_fast_path_when_nothing_was_replaced(self, monkeypatch):
+        """``--check`` must stay sub-second: no subprocess when it is safe."""
+        monkeypatch.setattr(cpp_backend, "_EXTENSION_REPLACED", False)
+        spawned = mock.MagicMock(side_effect=AssertionError("must not spawn"))
+        monkeypatch.setattr(subprocess, "run", spawned)
+
+        info = cpp_backend.probe_backend_info()
+
+        assert info["probe"]["mode"] == "in-process"
+        assert info["probe"]["failed"] is False
+        assert info["available"] is cpp_backend.is_cpp_available()
+        assert spawned.call_count == 0
+
+    def test_forced_subprocess_reports_child_answer(self, monkeypatch):
+        monkeypatch.setattr(cpp_backend, "_EXTENSION_REPLACED", False)
+        payload = {"available": True, "version": "1.0.0", "build_version": 18}
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *_a, **_k: mock.MagicMock(returncode=0, stdout=json.dumps(payload), stderr=""),
+        )
+
+        info = cpp_backend.probe_backend_info(allow_in_process=False)
+
+        assert info["available"] is True
+        assert info["build_version"] == 18
+        assert info["probe"]["mode"] == "subprocess"
+        assert info["probe"]["failed"] is False
+
+    def test_subprocess_used_automatically_after_extension_replaced(self, monkeypatch):
+        """Once this process overwrote the .so, memory is stale by construction."""
+        monkeypatch.setattr(cpp_backend, "_EXTENSION_REPLACED", False)
+        cpp_backend.note_extension_replaced()
+        assert cpp_backend.extension_replaced_in_process() is True
+
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *_a, **_k: mock.MagicMock(
+                returncode=0, stdout=json.dumps({"available": True}), stderr=""
+            ),
+        )
+
+        # Note: allow_in_process defaults to True and is still overridden.
+        info = cpp_backend.probe_backend_info()
+        assert info["probe"]["mode"] == "subprocess"
+
+    def test_unavailable_child_carries_the_reason_through(self, monkeypatch):
+        monkeypatch.setattr(cpp_backend, "_EXTENSION_REPLACED", False)
+        payload = {
+            "available": False,
+            "unavailable_reason": "router_cpp build version 20 does not match required 19",
+        }
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *_a, **_k: mock.MagicMock(returncode=0, stdout=json.dumps(payload), stderr=""),
+        )
+
+        info = cpp_backend.probe_backend_info(allow_in_process=False)
+
+        assert info["available"] is False
+        assert "build version 20 does not match required 19" in info["unavailable_reason"]
+        assert info["probe"]["failed"] is False
+
+    def test_probe_crash_is_reported_as_probe_failure_not_broken_extension(self, monkeypatch):
+        monkeypatch.setattr(cpp_backend, "_EXTENSION_REPLACED", False)
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *_a, **_k: mock.MagicMock(returncode=1, stdout="", stderr="Traceback: boom"),
+        )
+
+        info = cpp_backend.probe_backend_info(allow_in_process=False)
+
+        assert info["available"] is False
+        assert info["probe"]["failed"] is True
+        assert "exited 1" in info["probe"]["error"]
+        assert "boom" in info["probe"]["error"]
+        assert "probe did not run" in info["unavailable_reason"]
+
+    def test_probe_timeout_never_raises(self, monkeypatch):
+        monkeypatch.setattr(cpp_backend, "_EXTENSION_REPLACED", False)
+
+        def _timeout(*_a, **_k):
+            raise subprocess.TimeoutExpired(cmd="python", timeout=60)
+
+        monkeypatch.setattr(subprocess, "run", _timeout)
+
+        info = cpp_backend.probe_backend_info(allow_in_process=False, timeout=60)
+
+        assert info["available"] is False
+        assert info["probe"]["failed"] is True
+        assert "TimeoutExpired" in info["probe"]["error"]
+
+    def test_unparseable_output_is_a_probe_failure(self, monkeypatch):
+        monkeypatch.setattr(cpp_backend, "_EXTENSION_REPLACED", False)
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *_a, **_k: mock.MagicMock(returncode=0, stdout="not json", stderr=""),
+        )
+
+        info = cpp_backend.probe_backend_info(allow_in_process=False)
+
+        assert info["probe"]["failed"] is True
+        assert "could not parse probe output" in info["probe"]["error"]
+
+    def test_probe_reports_the_interpreter_it_used(self, monkeypatch):
+        monkeypatch.setattr(cpp_backend, "_EXTENSION_REPLACED", False)
+        seen: dict = {}
+
+        def _run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            return mock.MagicMock(returncode=0, stdout=json.dumps({"available": True}), stderr="")
+
+        monkeypatch.setattr(subprocess, "run", _run)
+
+        info = cpp_backend.probe_backend_info(
+            executable="/opt/py/bin/python", allow_in_process=False
+        )
+
+        assert info["probe"]["interpreter"] == "/opt/py/bin/python"
+        assert seen["cmd"][0] == "/opt/py/bin/python"
+
+    def test_probe_really_runs_a_fresh_interpreter(self):
+        """End-to-end: no mocks, a genuine subprocess must agree with us."""
+        info = cpp_backend.probe_backend_info(allow_in_process=False, timeout=120)
+
+        assert info["probe"]["mode"] == "subprocess"
+        assert info["probe"]["failed"] is False, info["probe"]["error"]
+        assert info["available"] is cpp_backend.is_cpp_available()
+
+
+class TestGetBackendInfoBuildVersion:
+    """Issue #4589: ``version()`` ("1.0.0") is not the staleness number."""
+
+    def test_reports_build_version_and_requirement(self):
+        info = cpp_backend.get_backend_info()
+
+        assert "build_version" in info
+        assert "required_build_version" in info
+        assert "extension_path" in info
+        assert info["required_build_version"] == cpp_backend._REQUIRED_CPP_BUILD_VERSION
+
+    def test_build_version_matches_requirement_when_available(self):
+        if not cpp_backend.is_cpp_available():
+            pytest.skip("C++ backend not available on this environment")
+        info = cpp_backend.get_backend_info()
+        assert info["build_version"] == info["required_build_version"]
+        assert info["extension_path"] is not None
+
+
+class TestAutoBuildUsesSharedProbe:
+    """Issue #4589: ``kct route``'s silent auto-build shared the same flaw.
+
+    ``_attempt_auto_build`` used to collapse "this process cannot hot-swap the
+    rebuilt extension" into "the build failed", printing a Python-fallback
+    announcement that ``kct build-native --check`` would contradict a second
+    later.
+    """
+
+    def _patch_reload_to_fail(self, monkeypatch):
+        monkeypatch.setattr(cpp_backend, "_reload_cpp_backend", lambda: False)
+
+    def test_successful_build_that_cannot_hot_swap_is_not_reported_as_failure(
+        self, force_cpp_unavailable, toolchain_present, no_env_optout, monkeypatch, capsys
+    ):
+        self._patch_reload_to_fail(monkeypatch)
+        _patch_build_native(monkeypatch, lambda **_: _FakeBuildResult(success=True))
+        probe_calls: list[dict] = []
+
+        def _probe(**kwargs):
+            probe_calls.append(kwargs)
+            return {"available": True}
+
+        monkeypatch.setattr(cpp_backend, "probe_backend_info", _probe)
+
+        outcome = cpp_backend._attempt_auto_build(quiet=False)
+
+        assert outcome.available_in_process is False
+        assert outcome.available_on_disk is True
+        # The shared probe must be forced into a fresh interpreter.
+        assert probe_calls == [{"allow_in_process": False}]
+
+        out = capsys.readouterr().out
+        assert "built successfully" in out
+        assert "re-run the command" in out.lower()
+
+    def test_no_not_installed_warning_when_the_build_actually_succeeded(
+        self, force_cpp_unavailable, toolchain_present, no_env_optout, monkeypatch, capsys
+    ):
+        self._patch_reload_to_fail(monkeypatch)
+        _patch_build_native(monkeypatch, lambda **_: _FakeBuildResult(success=True))
+        monkeypatch.setattr(cpp_backend, "probe_backend_info", lambda **_: {"available": True})
+
+        ok, force_python, exit_code = cpp_backend.ensure_cpp_backend_available(
+            backend="auto", quiet=False
+        )
+
+        assert ok is True
+        assert exit_code is None
+        out = capsys.readouterr().out
+        # This is the line that used to contradict `kct build-native --check`.
+        assert "C++ router backend not installed" not in out
+
+    def test_genuine_failure_still_warns_with_the_probe_reason(
+        self, force_cpp_unavailable, toolchain_present, no_env_optout, monkeypatch, capsys
+    ):
+        self._patch_reload_to_fail(monkeypatch)
+        _patch_build_native(monkeypatch, lambda **_: _FakeBuildResult(success=True))
+        monkeypatch.setattr(
+            cpp_backend,
+            "probe_backend_info",
+            lambda **_: {"available": False, "unavailable_reason": "ABI mismatch: cpython-313"},
+        )
+
+        ok, force_python, exit_code = cpp_backend.ensure_cpp_backend_available(
+            backend="auto", quiet=False
+        )
+
+        assert ok is True
+        outcome_out = capsys.readouterr().out
+        assert "ABI mismatch: cpython-313" in outcome_out
+        assert "C++ router backend not installed" in outcome_out
+
+    def test_backend_cpp_error_distinguishes_built_but_not_hot_swappable(
+        self, force_cpp_unavailable, toolchain_present, no_env_optout, monkeypatch, capsys
+    ):
+        self._patch_reload_to_fail(monkeypatch)
+        _patch_build_native(monkeypatch, lambda **_: _FakeBuildResult(success=True))
+        monkeypatch.setattr(cpp_backend, "probe_backend_info", lambda **_: {"available": True})
+
+        ok, force_python, exit_code = cpp_backend.ensure_cpp_backend_available(
+            backend="cpp", quiet=False
+        )
+
+        assert ok is False
+        assert exit_code == 1
+        err = capsys.readouterr().err
+        assert "Re-run this command" in err
+        assert "not available" not in err
+
+    def test_outcome_is_truthy_only_when_usable_in_process(self):
+        assert bool(cpp_backend.AutoBuildOutcome(True, True)) is True
+        assert bool(cpp_backend.AutoBuildOutcome(False, True)) is False
 
 
 class TestReloadCppBackend:

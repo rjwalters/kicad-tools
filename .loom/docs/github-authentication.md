@@ -372,6 +372,15 @@ outlives a ~1h App-token lifetime starts 401ing with no automatic fallback. See
 "Long-running sweep children and credential snapshots (#4458)" above for the
 mechanics and the workaround (a long-lived PAT for consistently long workloads).
 
+## Filing issues under GraphQL exhaustion
+
+GitHub's GraphQL quota and REST quota are independent buckets, and `gh issue
+create` is GraphQL-backed with no REST fallback of its own (#5047) — file new
+issues with `./.loom/scripts/create-issue.sh`, never a bare `gh issue create`.
+Full recipe, the atomic create+label requirement, the scripted
+`forge_gh_create_issue_rl_safe` equivalent, and why `loom-daemon forge issue
+create` is NOT a fallback: [`gh-issue-create-rest-fallback.md`](gh-issue-create-rest-fallback.md).
+
 ## Troubleshooting
 
 ### Token not being picked up

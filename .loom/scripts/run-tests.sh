@@ -13,13 +13,14 @@
 # worktree's source root(s) to PYTHONPATH so imports resolve to the worktree's
 # version, then execs pytest.
 #
-# NOTE for the Loom repo itself: Loom no longer ships a Python package on any
-# load-bearing path — epic #4081 Phase 4 (#4557) retired `loom-tools`, and the
-# orchestration layer is the native `loom-daemon` binary plus bash scripts (see
-# docs/adr/0013-loom-tools-python-retirement.md). The only Python left is the
-# opt-in `loom-search` carve-out under `loom-tools/src/`, which is why that
-# layout is still probed below. This script exists primarily for OTHER repos
-# under Loom orchestration that are genuinely Python-first.
+# NOTE for the Loom repo itself: Loom ships no Python package at all — epic
+# #4081 Phase 4 (#4557) retired `loom-tools`'s core, and #4970 finished the
+# job by retiring its last residue, the opt-in `loom-search` carve-out (per
+# the operator's RETIRE decision on #4608). The orchestration layer is the
+# native `loom-daemon` binary plus bash scripts (see
+# docs/adr/0013-loom-tools-python-retirement.md). This script now exists
+# purely for OTHER repos under Loom orchestration that are genuinely
+# Python-first — nothing in the Loom repo itself uses it.
 #
 # Usage:
 #   ./.loom/scripts/run-tests.sh [pytest args...]
@@ -28,7 +29,6 @@
 # Examples:
 #   ./.loom/scripts/run-tests.sh -x -q
 #   ./.loom/scripts/run-tests.sh --testmon -x -q
-#   ./.loom/scripts/run-tests.sh loom-tools/tests/
 
 set -euo pipefail
 
@@ -58,18 +58,15 @@ if [[ -z "$WORKTREE_PATH" ]]; then
     fi
 fi
 
-# Prepend the worktree's source root(s) to PYTHONPATH.
+# Prepend the worktree's source root to PYTHONPATH, if present.
 #
-# Probed layouts, in order:
-#   1. <worktree>/src        — the conventional src-layout package root.
-#   2. <worktree>/loom-tools/src — this repo's `loom-search` carve-out (#4557).
+# Probed layout: <worktree>/src — the conventional src-layout package root.
 if [[ -n "$WORKTREE_PATH" ]]; then
-    for candidate in "$WORKTREE_PATH/src" "$WORKTREE_PATH/loom-tools/src"; do
-        if [[ -d "$candidate" ]]; then
-            echo "[run-tests] Prepending PYTHONPATH=$candidate (worktree source override)" >&2
-            export PYTHONPATH="${candidate}${PYTHONPATH:+:${PYTHONPATH}}"
-        fi
-    done
+    candidate="$WORKTREE_PATH/src"
+    if [[ -d "$candidate" ]]; then
+        echo "[run-tests] Prepending PYTHONPATH=$candidate (worktree source override)" >&2
+        export PYTHONPATH="${candidate}${PYTHONPATH:+:${PYTHONPATH}}"
+    fi
 fi
 
 exec python3 -m pytest "${PYTEST_ARGS[@]}"

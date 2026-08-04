@@ -1,0 +1,13 @@
+{
+  "runtime": "aider",
+  "tier": 3,
+  "tierLabel": "generic passthrough (unverified)",
+  "capabilities": {
+    "mcp": "no",
+    "subagents": "no",
+    "hooks": "no",
+    "skills": "no",
+    "worktreeIsolation": "no"
+  },
+  "note": "Tier-3 generic passthrough adapter (issue #4780). worktreeIsolation is declared 'no' EXPLICITLY, not 'partial' -- it is flatly unverified, not 'close but gapped'. This refuses Builder and Doctor (both require worktreeIsolation) by the same mechanism that already keeps Codex's 'partial' out of Builder; check-runtime-capabilities.sh needed no code change to enforce this. No guardrail-parity document exists or is required for tier-3 -- see defaults/docs/runtime-adapters.md's tier-3 section for why that is safe."
+}

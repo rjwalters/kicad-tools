@@ -5,7 +5,9 @@ Drop-in replacement for `gh` that caches read-only command responses
 to reduce API calls. Mutations bypass the cache and invalidate
 related entries.
 
-Cache is file-backed in /tmp/gh-cache/ for cross-process sharing.
+Cache is file-backed in /tmp/gh-cache/ for cross-process sharing, scoped into
+a per-repo subdirectory (#5224) so two different repos on the same host never
+share cache entries even when they issue textually identical `gh` commands.
 
 Usage:
     gh-cached issue view 42 --json labels
@@ -15,11 +17,17 @@ Usage:
     gh-cached --cache-stats                            # show hit/miss statistics
 
 Environment:
-    GH_CACHE_DIR       Cache directory (default: /tmp/gh-cache)
+    GH_CACHE_DIR       Cache directory base (default: /tmp/gh-cache); the
+                        actual cache lives under a per-repo subdirectory of
+                        this path — see resolve_repo_id() below.
     GH_CACHE_TTL       Default TTL in seconds (default: 30)
     GH_CACHE_MAX_SIZE  Max cached entries (default: 256)
     GH_CACHE_DISABLE   Set to "1" to disable caching entirely
     GH_CACHE_DEBUG     Set to "1" for debug logging to stderr
+    GH_CACHE_REPO_ID   Override the resolved repo identity used to scope
+                        GH_CACHE_DIR (default: `git rev-parse
+                        --show-toplevel`). Mainly for tests and non-git
+                        working directories that still want isolation.
 """
 
 from __future__ import annotations
@@ -33,7 +41,49 @@ import time
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 
-CACHE_DIR = os.environ.get("GH_CACHE_DIR", "/tmp/gh-cache")
+
+def resolve_repo_id() -> str:
+    """Resolve a stable per-host-repo identity used to scope CACHE_DIR (#5224).
+
+    Two different repos on the same host issuing the textually identical `gh`
+    command must never share a cache entry — `cache_key()` alone only hashes
+    the `gh` argv, which says nothing about which repo it targets (most reads
+    routed through this wrapper have no explicit `--repo` and resolve via the
+    cwd's git remote). Scoping CACHE_DIR itself (rather than only extending
+    cache_key()'s hash input) also naturally repo-isolates enforce_max_size(),
+    invalidate_for_resource(), invalidate_all_for_type(), and clear_cache(),
+    since every one of them already operates on CACHE_DIR as-is.
+
+    Uses `git rev-parse --show-toplevel` — cheap, local, no network call —
+    mirroring the existing pattern of resolving $GH_READ once per session via
+    a local probe (defaults/docs/gh-cached.md). GH_CACHE_REPO_ID overrides the
+    resolved identity directly (used by tests, and as an escape hatch for
+    non-git working directories that still want isolation).
+    """
+    override = os.environ.get("GH_CACHE_REPO_ID", "")
+    if override:
+        return override
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode == 0:
+            top = proc.stdout.strip()
+            if top:
+                return top
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    # Not inside a git repo (or git unavailable): fall back to a fixed
+    # sentinel so behavior is deterministic rather than silently unscoped.
+    return "_no-repo"
+
+
+CACHE_DIR_BASE = os.environ.get("GH_CACHE_DIR", "/tmp/gh-cache")
+REPO_ID = resolve_repo_id()
+CACHE_DIR = os.path.join(CACHE_DIR_BASE, hashlib.sha256(REPO_ID.encode()).hexdigest()[:16])
 DEFAULT_TTL = int(os.environ.get("GH_CACHE_TTL", "30"))
 MAX_CACHE_SIZE = int(os.environ.get("GH_CACHE_MAX_SIZE", "256"))
 CACHE_DISABLED = os.environ.get("GH_CACHE_DISABLE", "") == "1"
@@ -102,7 +152,7 @@ def read_stats() -> dict:
         with open(path) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"hits": 0, "misses": 0, "bypasses": 0, "invalidations": 0}
+        return {"hits": 0, "misses": 0, "bypasses": 0, "invalidations": 0, "etag": 0}
 
 
 def write_stats(stats: dict) -> None:
@@ -345,8 +395,61 @@ def run_gh(args: list[str]) -> tuple[str, str, int]:
     return proc.stdout, proc.stderr, proc.returncode
 
 
+# ─── ETag/REST cached listing (#5056) ────────────────────────────────────────
+
+def locate_loom_daemon() -> str | None:
+    """Resolve a loom-daemon binary for the ETag-cached `forge … list --cached`
+    path. Mirrors lib/locate-daemon-bin.sh's common cases: $LOOM_DAEMON_BIN, then
+    PATH, then the machine-level install. Returns None when none is executable —
+    the caller then degrades to plain `gh` (the "daemon unreachable" fallback)."""
+    bin_env = os.environ.get("LOOM_DAEMON_BIN", "")
+    if bin_env and os.access(bin_env, os.X_OK):
+        return bin_env
+    from shutil import which
+    found = which("loom-daemon")
+    if found:
+        return found
+    machine = os.path.join(
+        os.environ.get("LOOM_DAEMON_BIN_DIR", os.path.expanduser("~/.local/bin")),
+        "loom-daemon",
+    )
+    if os.access(machine, os.X_OK):
+        return machine
+    return None
+
+
+def try_etag_list(resource_type: str, args: list[str]) -> tuple[str, int] | None:
+    """Route a cacheable `issue list` / `pr list` through loom-daemon's
+    disk-persistent ETag REST cache (#5056).
+
+    A validated 304 costs **zero** rate-limit units — and, unlike the local TTL
+    cache below, is never stale (a 304 is positive proof nothing changed). So
+    this is tried *before* the TTL cache for the label/state listing shape.
+
+    Returns (stdout, 0) when the daemon served the query, or None to fall back
+    to the normal path (binary absent → daemon unreachable; or the daemon
+    declined an uncacheable shape — e.g. `--search head:…`, a table `list` with
+    no `--json`, a PR-only field — with a non-zero exit)."""
+    if os.environ.get("LOOM_ETAG_LIST_DISABLE", "") == "1":
+        return None
+    daemon = locate_loom_daemon()
+    if not daemon:
+        return None
+    # args == [resource_type, "list", <rest…>]; forward everything after "list".
+    rest = args[2:]
+    cmd = [daemon, "forge", resource_type, "list", "--cached", *rest]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError:
+        return None
+    if proc.returncode == 0:
+        return proc.stdout, 0
+    return None
+
+
 def main() -> int:
     args = sys.argv[1:]
+    debug(f"REPO_ID={REPO_ID!r} CACHE_DIR={CACHE_DIR}")
 
     # Handle meta-commands
     if "--clear-cache" in args:
@@ -362,6 +465,7 @@ def main() -> int:
         print(f"Misses: {stats['misses']}", file=sys.stderr)
         print(f"Bypasses: {stats['bypasses']}", file=sys.stderr)
         print(f"Invalidations: {stats['invalidations']}", file=sys.stderr)
+        print(f"ETag (free 304 listings): {stats.get('etag', 0)}", file=sys.stderr)
         print(f"Hit rate: {rate:.1f}%", file=sys.stderr)
         return 0
 
@@ -400,6 +504,19 @@ def main() -> int:
 
         increment_stat("bypasses")
         return rc
+
+    # ETag/REST cached listing (#5056): `issue list` / `pr list` can be served
+    # for free on a validated 304 through loom-daemon's disk-persistent cache —
+    # a separate rate-limit pool (REST, not GraphQL) AND zero cost when nothing
+    # changed. Tried before the local TTL cache because a 304 is both free and
+    # never stale. On decline / absent binary it falls through to the TTL path.
+    if parsed["subcommand"] == "list" and parsed["resource_type"] in ("issue", "pr"):
+        etag_result = try_etag_list(parsed["resource_type"], args)
+        if etag_result is not None:
+            etag_stdout, etag_rc = etag_result
+            sys.stdout.write(etag_stdout)
+            increment_stat("etag")
+            return etag_rc
 
     # Read-only: check cache
     key = cache_key(args)

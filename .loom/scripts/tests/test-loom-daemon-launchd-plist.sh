@@ -77,7 +77,19 @@ assert_eq() {
 
 # ---------- fixture ----------
 WORKDIR="$(mktemp -d)"
+# No bg_proc_track/bg_proc_reap here (#4773, unlike the other daemon-suite
+# traps touched in that issue): every invocation below passes --print-plist
+# (or --help), which per the file header above is pure string generation with
+# NO side effects — $FAKE_BIN is only referenced via LOOM_DAEMON_BIN, never
+# actually executed/backgrounded, so there is no PID this suite could leak.
+# Still widened to INT/TERM (not just EXIT) so $WORKDIR itself is reclaimed on
+# a hard interruption, matching the other suites' trap signal set. NOTE: a
+# bare `trap CMD EXIT INT TERM` runs CMD on INT/TERM but does NOT stop the
+# script (only an EXIT-trap firing auto-exits) -- the explicit `exit` below is
+# required, else a SIGTERM'd suite would clean up once and then keep running
+# every remaining test case.
 trap 'rm -rf "$WORKDIR"' EXIT
+trap 'rm -rf "$WORKDIR"; exit 1' INT TERM
 mkdir -p "$WORKDIR/.loom/logs"
 
 FAKE_BIN="$WORKDIR/fake-loom-daemon"

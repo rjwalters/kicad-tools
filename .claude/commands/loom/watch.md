@@ -77,6 +77,9 @@ end-of-window summary diffs against.
    A host that can sleep will silently pause the whole fleet mid-window. Warn
    loudly, once; never block on it. (Details:
    [`.loom/docs/troubleshooting.md` → Overnight / long-running orchestration](../../../.loom/docs/troubleshooting.md).)
+   This check covers **host** sleep only — it says nothing about whether the
+   *session* driving a mode-A `ScheduleWakeup` loop will stay alive for the
+   window; see the mode-A hazard note under "Loop mechanics" (#4930).
 5. **Print the plan**: window, interval, tick budget, health-probe mode
    (`native` / `fallback`), managed roots, and — in `--dry-run` — the words
    `DRY RUN: no remediation will be attempted`.
@@ -341,6 +344,41 @@ re-arm. Context cost per tick is one probe plus one line.
 > this is a **false positive by construction** — the armed wakeup *is* the loop.
 > The guard blocks at most once, so simply stopping again is correct and safe.
 > Do not `TaskStop` the wakeup to satisfy the guard; that cancels the watch.
+
+> **Hazard — an armed wakeup only fires into a live session (#4930).** A
+> `ScheduleWakeup` needs the *Claude session*, not just the host, to be running
+> when it fires. If the session suspends — laptop lid closed, terminal app
+> quiesced, host UI session goes idle — the wakeup does not error and does not
+> get dropped; it simply fires late, whenever the session next resumes, with no
+> warning anywhere. `check-host-sleep.sh` (tick-0 preflight, above) does **not**
+> cover this: the host itself can stay fully awake — running the daemon, merging
+> PRs, ticking every other role — while the one session holding the watch's
+> armed wakeup is suspended. A tick that was supposed to fire at 00:57 firing at
+> 09:29 with a perfectly healthy fleet in between is this failure mode, not a
+> host-sleep miss.
+>
+> **Tick-0 preflight addition.** Before choosing mode A, confirm the session
+> will stay live for the *entire* window — an always-on host with a detached/
+> backgrounded session that will not suspend. If that is not true (an
+> interactive laptop session that may sleep, lock, or be closed), prefer mode C
+> instead: a scheduler-driven headless single tick (`cron` →
+> `claude -p "/loom:watch --max-ticks 1"`), so each tick is dispatched fresh by
+> something that does not depend on a session staying alive. Say which mode was
+> chosen, and why, in the tick-0 plan.
+>
+> **Diagnostic signature.** If a wakeup fires hours late *and* the health
+> probe's own UTC `at` timestamp disagrees with the tick boundary you expected,
+> that combination is session suspension, not a timezone bug in the probe or a
+> drifting interval — do not spend time chasing a TZ conversion; check whether
+> the session was actually live across the gap.
+>
+> **The gap is bounded, not dangerous.** A suspended session is not an outage:
+> the daemon and `loom-daemon-watchdog.sh` (#4011) carry the fleet on their own
+> independent of this skill — they do not depend on the watch ticking. The
+> watch resumes with its tick-0 baseline intact once the session wakes; there is
+> no state to reconstruct. The end-of-window summary should still **disclose
+> the gap** (how long the session was suspended, and what the fleet did
+> unsupervised during it) rather than silently reporting a clean interval.
 
 ### B. A `/goal`-style duration stop hook is active (the deadlock)
 

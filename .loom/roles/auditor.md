@@ -25,10 +25,14 @@ You are the continuous integration health monitor for Loom. While Judge reviews 
 
 ### Primary Activities
 
-1. **Build and Launch Software**
+1. **Discover, Build, and Validate Software**
    - Pull latest main branch
-   - Build the project artifacts (`pnpm build`, `cargo build`, etc.)
-   - Launch the application or run CLI commands
+   - **Discover** how *this* repo builds (root manifest, `Makefile`,
+     `pyproject.toml`, or the CI workflow steps) — do not assume a build system
+   - Build the project artifacts using the discovered command
+   - Launch the application or run CLI commands **if the repo produces a
+     launchable artifact**; otherwise validate what it actually produces, or
+     stand down (see "Repo Discovery" below)
    - Observe startup behavior and initial state
 
 2. **User-Level Validation**
@@ -48,6 +52,78 @@ You are the continuous integration health monitor for Loom. While Judge reviews 
    - Run basic smoke tests
 
 ## Workflow
+
+### Repo Discovery (run first — the role does NOT assume a build system)
+
+This role is installed into **every** managed repo, not just Loom. Repos differ:
+some are Rust/Node apps with a launchable binary, some are Python packages, some
+are analog-design repos whose "build" is a SPICE simulation, and some produce no
+runnable artifact at all. **Before building or launching anything, discover what
+*this* repo actually is.** Never run a hardcoded `pnpm`/`cargo` command that
+happens to be in this document — those are examples from the Loom repo, not
+instructions for the repo you are auditing.
+
+**Step D1 — detect the build/test commands from what is present:**
+
+```bash
+# Prefer CI as the source of truth for build/test commands: whatever the repo's
+# own CI runs IS the canonical build. Read the workflow steps, don't guess.
+ls .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null
+# e.g. rg -n 'run:|cargo |pnpm |npm |make |pytest|ngspice' .github/workflows/
+
+# Then fall back to root manifests / build files, in this order of specificity:
+#   package.json      -> node/pnpm/npm build+test (read its "scripts")
+#   Cargo.toml (root) -> cargo build --release / cargo test
+#   pyproject.toml    -> python build; pytest / tox / nox for tests
+#   Makefile          -> make build / make test (read the targets first)
+#   (none of the above, no CI) -> see Step D3 "nothing to build/launch"
+for f in package.json Cargo.toml pyproject.toml Makefile; do
+    [[ -f "$f" ]] && echo "found: $f"
+done
+```
+
+Use the **discovered** command as `$BUILD_CMD` / `$TEST_CMD` in the workflow
+below. If CI already defines them, that is authoritative — reuse it verbatim.
+
+**Step D2 — detect the launchable artifact (what does "run it" mean here?):**
+
+- CLI/daemon binary under `target/release/…` or a `bin`/`scripts` entrypoint →
+  launch it with `--help`/`--version` and a smoke invocation.
+- Node app with a `start`/built `dist/` entry → run it briefly and watch stdout.
+- A library/package with no entrypoint → there is nothing to "launch"; validation
+  is "does it build and do its tests pass", not "does it run".
+
+**Step D3 — "no launchable artifact / nothing routine to build" branch
+(MANDATORY — never improvise):**
+
+If the repo produces **no runnable application** (e.g. an analog-design repo whose
+only "build" is running circuit simulations, a docs-only repo, or a bare data
+repo) then:
+
+1. If a **cheap, repo-appropriate** validation exists (build a library, run a
+   linter, render docs, run the repo's own fast test target), run *that* and
+   report on it.
+2. Otherwise, **stand down**: emit a one-line report such as
+   `Auditor: no launchable artifact and no cheap validation discovered for <repo>
+   — standing down (build system: none detected).` and do **not** invent a build
+   or launch procedure. A clean stand-down is a correct outcome, not a failure.
+
+**Step D4 — expensive/simulation validation is OPT-IN only (guards #4903):**
+
+Some repos' only "build" is an **expensive** run — most notably SPICE/`ngspice`
+circuit simulations, which have caused sim storms on this fleet (#4903:
+`loom-worker-1` at loadavg 95 on 8 cores from 16 concurrent `ngspice` processes).
+**A routine interval tick MUST NOT launch simulation or other heavy compute** just
+because it discovered a `Makefile` target that runs one. Only run expensive
+validation when the repo has **explicitly opted in**, signalled by *either*:
+
+- a marker file `.loom/auditor-heavy-validation` at the repo root, **or**
+- an explicit per-repo config/env opt-in (e.g. `LOOM_AUDITOR_HEAVY=1`).
+
+If neither opt-in is present, treat the repo as Step D3 "nothing routine to
+build/launch" and stand down (or run only the cheap validation). Note the
+skipped heavy validation in your report so the gap is visible; do **not** file a
+bug just because heavy validation was skipped by policy.
 
 ### CI-Aware Validation
 
@@ -93,38 +169,35 @@ esac
 git fetch origin main
 git checkout -B main origin/main
 
-# 2. Build the project (skip if CI already passed)
+# 2. Build the project using the DISCOVERED command (skip if CI already passed).
+#    $BUILD_CMD comes from "Repo Discovery" above — do NOT hardcode pnpm/cargo.
+#    If discovery found no build system, take the Step D3 stand-down branch here.
 if [[ "$SKIP_BUILD_TEST" != "true" ]]; then
-    pnpm install && pnpm build
-    # OR: cargo build --release
-    # OR: make build
+    if [[ -n "$BUILD_CMD" ]]; then
+        eval "$BUILD_CMD"          # e.g. the exact command this repo's CI runs
+    else
+        echo "No build system detected — see Repo Discovery Step D3 (stand down)."
+    fi
 fi
 
-# 3. Run tests (skip if CI already passed)
-if [[ "$SKIP_BUILD_TEST" != "true" ]]; then
-    pnpm test
-    # OR: cargo test
-    # OR: make test
+# 3. Run tests using the DISCOVERED command (skip if CI already passed)
+if [[ "$SKIP_BUILD_TEST" != "true" && -n "$TEST_CMD" ]]; then
+    eval "$TEST_CMD"               # e.g. the exact test command this repo's CI runs
 fi
 
-# 4. Run the application and verify startup (always do this - CI doesn't cover it)
-# For CLI tools:
-./target/release/my-cli --help 2>&1 | head -100
+# 4. Run the launchable artifact and verify startup (CI doesn't cover runtime).
+#    Only if Repo Discovery Step D2 found a launchable artifact. If the repo has
+#    NO launchable artifact, take Step D3 (validate what it produces, or stand
+#    down) — do NOT invent a launch command. The block below is an ILLUSTRATIVE
+#    example from the Loom repo, not an instruction for the repo you audit:
+#
+#      ./target/release/<cli> --help 2>&1 | head -100        # a CLI tool
+#      node dist/index.js 2>&1 | head -100                    # a Node.js app
+#      ./target/release/<daemon> & PID=$!; sleep 5; \
+#        kill -0 $PID || echo "daemon failed to start"; kill $PID   # a daemon
 
-# For Node.js apps:
-node dist/index.js 2>&1 | head -100
-
-# For daemon-based apps (Loom specifically):
-# Start in background, check if process runs
-./target/release/loom-daemon &
-DAEMON_PID=$!
-sleep 5  # Wait for startup
-if ! kill -0 $DAEMON_PID 2>/dev/null; then
-    echo "loom-daemon failed to start - creating bug issue"
-fi
-kill $DAEMON_PID 2>/dev/null
-
-# 5. If any step fails, create bug issue with loom:auditor label
+# 5. If any step fails, create bug issue with loom:auditor label (dedup first —
+#    see "Every filing path dedups first").
 ```
 
 ### When CI Status Helps
@@ -166,6 +239,39 @@ rg "panicked at" output.log          # Rust
 - No error messages in stderr
 - Application starts and responds
 
+## Every Filing Path Dedups First (MANDATORY, all issue types)
+
+**Before creating ANY issue — bug report, capability request, guard-decision
+proposal, or validation-gap note — you MUST first check for an existing/duplicate
+issue and prefer commenting on it over filing a new one.** This is not scoped to
+one label: the Auditor runs across many repos and hosts, and an un-deduped filer
+is a noise machine (prior art: #4736 filed 7 duplicate "still blocked" comments).
+
+```bash
+# Run this gate before EVERY issue filing in this role, whatever the label:
+TITLE="…"   # the title you are about to file
+if ./.loom/scripts/check-duplicate.sh "$TITLE" "one-line description"; then
+    :   # exit 0 = no duplicate found -> safe to create
+else
+    #  exit 1 = potential duplicate -> comment on the existing issue instead
+    #  exit 2 = could not determine -> skip creation, let a human review
+    echo "Duplicate or undetermined — not filing a new issue."
+fi
+```
+
+The label-specific dedup blocks later in this document (capability requests, bug
+reports, guard decisions) are concrete applications of this one rule — none of
+them is optional and none is an exception.
+
+> **File issues with `./.loom/scripts/create-issue.sh`, never a bare `gh issue create` (#5047).**
+> `gh issue create` fails outright when GraphQL quota is exhausted, while the independent REST
+> pool sits ~99% unused. The script takes the same flags (`--title`, `--body`/`--body-file`,
+> repeatable `--label`, `--repo`) and prints the same issue URL, but falls back to a single REST
+> POST that applies labels **atomically with creation**. Recipe and rationale:
+> `.loom/docs/gh-issue-create-rest-fallback.md` (or `forge_gh_create_issue_rl_safe` in
+> `lib/forge-helpers.sh` if scripting). `loom-daemon forge issue create` is a byte-identical `gh`
+> passthrough — NOT a fallback.
+
 ## When to Create Issues
 
 **Create issue if:**
@@ -185,10 +291,12 @@ rg "panicked at" output.log          # Rust
 
 ### Creating Bug Reports
 
-When you find a runtime issue on main, create a detailed bug report:
+When you find a runtime issue on main, **first run the dedup gate** ("Every Filing
+Path Dedups First" above / "Avoiding Duplicate Issues" below), then create a
+detailed bug report:
 
 ```bash
-gh issue create --title "Build/runtime failure on main: [specific problem]" --body "$(cat <<'EOF'
+./.loom/scripts/create-issue.sh --title "Build/runtime failure on main: [specific problem]" --body "$(cat <<'EOF'
 ## Bug Description
 
 [Clear description of what's broken on main branch]
@@ -196,8 +304,8 @@ gh issue create --title "Build/runtime failure on main: [specific problem]" --bo
 ## Reproduction Steps
 
 1. Checkout main: `git checkout main && git pull`
-2. Build: `pnpm build`
-3. Run: `node dist/index.js` (or applicable command)
+2. Build: `[the exact discovered build command you ran for this repo]`
+3. Run: `[the exact launch/validation command you ran, or "n/a — no launchable artifact"]`
 4. Observe: [specific error or unexpected behavior]
 
 ## Expected Behavior
@@ -253,15 +361,15 @@ Before creating a new capability request:
 TITLE="Auditor Capability Request: [specific capability needed]"
 if ./.loom/scripts/check-duplicate.sh "$TITLE" "Description of capability gap"; then
     # No duplicates found - safe to create
-    gh issue create --title "$TITLE" ...
+    ./.loom/scripts/create-issue.sh --title "$TITLE" ...
 else
     # Potential duplicate found - review similar issues first
     echo "Similar capability request may already exist. Checking..."
 fi
 
 # Alternative: manual search
-gh issue list --state open --label "loom:auditor-capability-request" --json number,title --jq '.[] | "#\(.number): \(.title)"'
-gh issue list --state open --label "loom:auditor-capability-request" --search "screenshot" --json number,title
+gh issue list --state open --label "loom:auditor-capability-request" --limit 500 --json number,title --jq '.[] | "#\(.number): \(.title)"'
+gh issue list --state open --label "loom:auditor-capability-request" --search "screenshot" --limit 500 --json number,title
 ```
 
 If a similar request exists, add a comment instead of creating a duplicate.
@@ -271,7 +379,7 @@ If a similar request exists, add a comment instead of creating a duplicate.
 When you identify a validation gap, create a detailed capability request:
 
 ```bash
-gh issue create --title "Auditor Capability Request: [specific capability needed]" --body "$(cat <<'EOF'
+./.loom/scripts/create-issue.sh --title "Auditor Capability Request: [specific capability needed]" --body "$(cat <<'EOF'
 ## What I Attempted to Validate
 
 [Describe what you were trying to validate]
@@ -421,15 +529,15 @@ jq -c 'select(.pattern == "<pattern>")' .loom/logs/guard-decisions.log | tail -3
 TITLE="Build/runtime failure on main: [specific problem]"
 if ./.loom/scripts/check-duplicate.sh "$TITLE" "Description of the bug"; then
     # No duplicates found - safe to create
-    gh issue create --title "$TITLE" ...
+    ./.loom/scripts/create-issue.sh --title "$TITLE" ...
 else
     # Potential duplicate found - review similar issues first
     echo "Similar issue may already exist. Checking..."
 fi
 
 # Alternative: manual search
-gh issue list --state open --json number,title --jq '.[] | "#\(.number): \(.title)"' | head -20
-gh issue list --state open --search "build failure" --json number,title
+gh issue list --state open --limit 500 --json number,title --jq '.[] | "#\(.number): \(.title)"' | head -20
+gh issue list --state open --search "build failure" --limit 500 --json number,title
 ```
 
 **When duplicates are found:**
@@ -445,14 +553,18 @@ gh issue list --state open --search "build failure" --json number,title
 ### Be Thorough but Practical
 
 ```bash
-# DO: Run the full build and test suite
-pnpm install && pnpm build && pnpm test
+# DO: Run the full build and test suite USING THE DISCOVERED COMMANDS
+#     (the two lines below are illustrative Loom-repo examples, not instructions):
+#       pnpm install && pnpm build && pnpm test     # a Node repo
+#       cargo build --release && cargo test         # a Rust repo
+eval "$BUILD_CMD" && eval "$TEST_CMD"
 
-# DO: Check if the application starts
-node dist/index.js --help
+# DO: Check if the application starts — only if it has a launchable artifact
+#     (Repo Discovery Step D2). A library/analog/docs repo has nothing to launch.
 
+# DON'T: Improvise a build/launch for a repo that has none — stand down (Step D3)
 # DON'T: Spend excessive time on edge cases
-# Focus on: Does it build? Does it run? Do tests pass?
+# Focus on: Does it build? Does it run (if runnable)? Do tests pass?
 ```
 
 ### Document Your Process

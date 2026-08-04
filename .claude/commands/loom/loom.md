@@ -109,7 +109,7 @@ The `loom-daemon` binary talks to the same running daemon over the same Unix-soc
 |---|---|---|
 | `mcp__loom__list_sweeps` | `loom-daemon status` [`--json`] [`--pipeline`] | Richer than `list_sweeps`: also reports the three dynamic-cap inputs (token-pool size, disk headroom, configured ceiling) + their `min`, the main-health-gate halt state, and per-token usage. `--pipeline` adds the forge-side `gh` snapshot (opt-in — extra API calls). |
 | `mcp__loom__dispatch_sweep` | `loom-daemon dispatch <N>` [`--model`] [`--effort`] [`--depends-on`] [`--workspace`] | First-class non-MCP entry point (#3952) over the same IPC `DispatchSweep` request. Bounded client-side ack timeout — exits nonzero fast instead of hanging (built explicitly to avoid the #4043 MCP wedge). |
-| `mcp__loom__cancel_sweep` | *(none)* | No CLI subcommand cancels an in-flight sweep by ID. Fallback: get the PID from `loom-daemon status` and `kill -TERM <pid>` directly — the `.loom/sweep-checkpoint/` file still survives, so redispatch still resumes. `loom-daemon quarantine clear <issue>` is the adjacent lever for a crash-looping issue (releases the daemon's insta-crash pause), not a manual-cancel substitute. |
+| `mcp__loom__cancel_sweep` | `loom-daemon cancel <sweep-id>` \| `--issue <N>` [`--grace`] [`--workspace`] | First-class non-MCP entry point (#4980) over the same IPC `CancelSweep` request — the `dispatch` sibling, usable over ssh. **Do NOT `kill -TERM <pid>` from `loom-daemon status` instead** (the pre-#4980 fallback): the daemon tracks the *wrapper* pid, so killing it leaves the underlying `claude` agent alive — on 2026-08-03 that survivor relaunched its workload against an issue whose claim had already been returned to the queue. The CLI signals the whole process group. `.loom/sweep-checkpoint/` still survives a cancel, so redispatch still resumes. |
 | `mcp__loom__get_sweep_status` | *(none, partial)* | `loom-daemon status` gives fleet-wide state, not one sweep's phase/blockers. `loom-daemon watch add <N>` (add `--pr` to watch a PR instead of an issue) registers a durable watch on that issue/PR's terminal state instead (persists to `~/.loom/watches.json`, survives a daemon restart, resolves to `~/.loom/logs/watch-results.log`). |
 | `mcp__loom__tail_sweep_log` | *(none)* | `tail -f .loom/logs/sweep-issue-<N>.log` directly. |
 | `mcp__loom__tail_event_bus`, `subscribe_to_events`, `publish_event` | *(none)* | Live pub/sub is MCP-only; there is no CLI event stream. Poll `loom-daemon status` + `gh issue/pr list` on your loop cadence instead. |
@@ -134,7 +134,7 @@ When the daemon is running, you coordinate work via MCP tools where available, a
 |---|---|
 | `mcp__loom__list_sweeps` | `loom-daemon status` |
 | `mcp__loom__dispatch_sweep` | `loom-daemon dispatch <N>` |
-| `mcp__loom__cancel_sweep` | none — see "CLI Fallback" |
+| `mcp__loom__cancel_sweep` | `loom-daemon cancel <sweep-id>` / `--issue <N>` |
 | `mcp__loom__get_sweep_status`, `tail_sweep_log`, `tail_event_bus`, `subscribe_to_events`, `publish_event` | none — MCP-only |
 
 **Each iteration:**
@@ -197,13 +197,18 @@ When the daemon is running, you coordinate work via MCP tools where available, a
    ```
    This sends SIGTERM, waits the configured grace window, then SIGKILL. The `.loom/sweep-checkpoint/issue-<N>.json` checkpoint survives the cancellation; the next `dispatch_sweep` for that issue resumes from the last completed phase.
 
-   **No CLI subcommand cancels a sweep by ID.** If MCP is unavailable: get the
-   PID from `loom-daemon status`, `kill -TERM <pid>` it directly (the checkpoint
-   still survives — cancellation semantics are the same, just invoked manually),
-   and if it keeps crash-looping on redispatch, `loom-daemon quarantine clear
-   <issue>` clears the daemon's insta-crash pause once you're ready to
-   redispatch (quarantine is about crash-loop protection, not manual
-   cancellation, but it's the adjacent CLI lever).
+   **CLI equivalent** (#4980), for when MCP is unavailable or you are on ssh:
+   ```
+   loom-daemon cancel <sweep-id>        # or: loom-daemon cancel --issue <N>
+   ```
+   Same IPC request, same daemon-side termination. **Do not `kill -TERM <pid>`
+   the PID from `loom-daemon status` instead** — that was the pre-#4980 fallback
+   and it is how the 2026-08-03 incident happened: the tracked PID is the
+   *wrapper*, so killing it leaves the `claude` agent alive to relaunch its
+   workload against an issue whose claim has already been returned to the queue.
+   If a sweep keeps crash-looping on redispatch, `loom-daemon quarantine clear
+   <issue>` clears the daemon's insta-crash pause (crash-loop protection, not a
+   cancellation substitute).
 
 6. **Tail per-sweep logs** if you need to inspect output:
    ```
@@ -250,7 +255,7 @@ In-session subagent dispatch (`/loom:sweep` with Stage -1 falling through to sub
 | `/loom:loom` | Check daemon (MCP `list_sweeps`, fallback `loom-daemon status`), start observing/dispatching |
 | `/loom:loom status` | `mcp__loom__list_sweeps`, or `loom-daemon status` if MCP is unavailable |
 | `/loom:loom health` | Display daemon health summary (registry + recent events, or `loom-daemon status` which folds in the health-gate state) |
-| `/loom:loom stop` | Cancel all in-flight sweeps via `mcp__loom__cancel_sweep` (no CLI equivalent — see below); daemon process itself stays alive |
+| `/loom:loom stop` | Cancel all in-flight sweeps via `mcp__loom__cancel_sweep` (CLI: `loom-daemon cancel <sweep-id>`, #4980); daemon process itself stays alive |
 | `/loom:loom help` | Show comprehensive help guide |
 | `/loom:loom help <topic>` | Show help for a specific topic |
 
@@ -267,10 +272,16 @@ For each sweep returned by mcp__loom__list_sweeps:
   mcp__loom__cancel_sweep --sweep_id <sweep_id>
 ```
 
-**No CLI equivalent for cancellation.** If MCP tools are unavailable, get PIDs
-from `loom-daemon status` and `kill -TERM <pid>` each one directly — the
-`.loom/sweep-checkpoint/` files still survive, so a later `dispatch_sweep` /
-`loom-daemon dispatch` for that issue resumes from the last completed phase.
+**CLI equivalent** (#4980), for a shell / ssh session with no MCP server:
+```
+loom-daemon cancel <sweep-id>        # or: loom-daemon cancel --issue <N>
+```
+Same IPC request and same daemon-side termination as the MCP tool, and it signals
+the whole process group. Never hand-`kill` the PIDs from `loom-daemon status`
+instead: those are *wrapper* PIDs, and killing one leaves the underlying agent
+alive (the 2026-08-03 zombie-agent incident). `.loom/sweep-checkpoint/` files
+still survive a cancel, so a later `dispatch_sweep` / `loom-daemon dispatch` for
+that issue resumes from the last completed phase.
 
 **Stop the daemon process itself** is out of scope for this skill — the daemon is a long-lived service that the operator manages outside Claude Code (via their init system, foreman, or shell-level process management).
 
@@ -524,7 +535,7 @@ until stopped.
 | `mcp__loom__dispatch_sweep` | Dispatch a sweep for an issue (returns sweep ID) | `loom-daemon dispatch <N>` (#3952, bounded ack timeout) |
 | `mcp__loom__list_sweeps` | Enumerate registry entries | `loom-daemon status` (also reports dynamic-cap inputs, health-gate state, per-token usage) |
 | `mcp__loom__get_sweep_status` | Inspect a single sweep's state | *(none — closest is `loom-daemon watch add` for durable terminal-state tracking)* |
-| `mcp__loom__cancel_sweep` | SIGTERM -> grace -> SIGKILL | *(none — `kill -TERM <pid>` the PID from `loom-daemon status` directly)* |
+| `mcp__loom__cancel_sweep` | SIGTERM -> grace -> SIGKILL (whole process GROUP) | `loom-daemon cancel <sweep-id>` / `--issue <N>` (#4980) — never hand-`kill` the PID from `loom-daemon status`: that leaves the agent alive |
 | `mcp__loom__tail_sweep_log` | Tail per-issue log file | *(none — `tail -f .loom/logs/sweep-issue-<N>.log`)* |
 | `mcp__loom__publish_event` | Publish a lifecycle event | *(none — daemon-internal)* |
 | `mcp__loom__subscribe_to_events` | Topic-filtered event stream | *(none — poll `loom-daemon status` instead)* |
