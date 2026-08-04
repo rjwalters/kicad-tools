@@ -18,7 +18,13 @@ committed (``router.routes``), so it is engine-agnostic.  These tests pin:
 2. the identical board **without** ``--voltage-map`` -> gate is a strict no-op
    (exit 0, ``SUCCESS``, byte-identical copper);
 3. grid + ``--voltage-map`` on a board with no HV/LV proximity -> still exit 0
-   (the gate is not a false-positive source on the production default).
+   (the gate is not a false-positive source on the production default);
+4. a board whose only HV/LV proximity is inside a **rated domain-bridging
+   footprint** (#4506) -> exit 0 at *any* board origin.  ``PCB.load`` reports
+   footprint positions board-relative while ``router.routes`` are
+   sheet-absolute, so an unshifted attach zone silently misses on every board
+   that does not sit at sheet origin -- i.e. on every real board -- turning
+   this gate into a hard false fail.
 
 Boards are fully synthetic S-expression strings (same approach as
 ``test_route_offboard_gate.py``) -- the softstart rev-C board from the original
@@ -96,6 +102,55 @@ def _two_domain_board(lv_offset_mm: float) -> str:
   (net 1 "/HV_LINE")
   (net 2 "/LV_SENSE")
   (gr_rect (start 100 100) (end 130 116)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+{"".join(parts)})
+"""
+
+
+def _bridging_board(origin_x: float, origin_y: float) -> str:
+    """Board whose only HV/LV proximity lives inside a rated bridging footprint.
+
+    ``R5`` is the canonical #4506 domain-bridging part: pad 1 on ``/HV_LINE``,
+    pad 2 on ``/LV_SENSE``, 2 mm apart.  Each net's other terminal sits 9 mm
+    away, so the two nets come within the creepage requirement *only* across
+    R5's own body -- exactly what the attach-zone exemption exists to waive.
+    The board rectangle starts at ``(origin_x, origin_y)``, which is what
+    ``PCB._detect_board_origin`` picks up as the board origin.
+    """
+    ox, oy = origin_x, origin_y
+    bridge_pads = "\n    ".join(
+        [
+            _pad("1", -1.0, 0, 1, "/HV_LINE"),
+            _pad("2", 1.0, 0, 2, "/LV_SENSE"),
+        ]
+    )
+    parts = [
+        _fp("R1", 10, ox + 5.0, oy + 5.0, _pad("1", 0, 0, 1, "/HV_LINE")),
+        _fp("R5", 11, ox + 15.0, oy + 5.0, bridge_pads),
+        _fp("R3", 12, ox + 25.0, oy + 5.0, _pad("1", 0, 0, 2, "/LV_SENSE")),
+    ]
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "/HV_LINE")
+  (net 2 "/LV_SENSE")
+  (gr_rect (start {ox} {oy}) (end {ox + 30.0} {oy + 16.0})
     (stroke (width 0.1) (type default))
     (fill none)
     (layer "Edge.Cuts")
@@ -294,6 +349,101 @@ class TestGridUnaffected:
         assert rc == 0, captured
         assert "SUCCESS:" in captured
         assert "pairwise HV clearance violations" not in captured
+
+
+class TestAttachZoneExemptionCoordinateSpace:
+    """The #4506 exemption must survive a non-zero board origin (PR #4603).
+
+    Every pre-existing attach-zone test builds ``AttachZone`` literals in the
+    same space as its synthetic ``Route``s, so none of them *can* observe a
+    coordinate-space mismatch.  These tests vary only where the board sits on
+    the sheet: ``(0, 0)`` used to pass and every real origin used to fail with
+    a hard ``ROUTING FAILED``, because ``PCB.load`` hands back board-relative
+    footprint positions while ``router.routes`` are sheet-absolute.
+    """
+
+    # (0, 0) is the only origin the pre-fix code handled; 100/100 is the
+    # Judge's reproduction; 136/77.5 is boards/00-simple-led's real origin.
+    ORIGINS = [(0.0, 0.0), (100.0, 100.0), (136.0, 77.5)]
+
+    @pytest.mark.parametrize("origin", ORIGINS)
+    def test_rated_bridging_footprint_is_exempt_at_any_board_origin(
+        self, origin: tuple[float, float], tmp_path: Path, capsys
+    ) -> None:
+        ox, oy = origin
+        pcb = tmp_path / f"bridge_{ox}_{oy}.kicad_pcb"
+        pcb.write_text(_bridging_board(ox, oy))
+        vmap = _write_voltage_map(tmp_path)
+        out = tmp_path / f"bridge_{ox}_{oy}_routed.kicad_pcb"
+
+        rc = route_main(_route_args(pcb, out, "lattice", vmap))
+        captured = capsys.readouterr().out
+
+        assert rc == 0, f"origin {origin} exited {rc}\n{captured}"
+        assert "SUCCESS:" in captured
+        assert "ROUTING FAILED" not in captured
+        assert "pairwise HV clearance violations" not in captured
+
+    @pytest.mark.parametrize("origin", ORIGINS)
+    def test_grid_engine_shares_the_corrected_zones(
+        self, origin: tuple[float, float], tmp_path: Path, capsys
+    ) -> None:
+        """``_apply_pairwise_clearance`` feeds the pathfinder the same resolver.
+
+        The mis-spaced zones also blinded the grid engine's *route-time*
+        rejection, which walled the bridging footprint off and dropped the
+        board to 1/2 nets.  One shared helper repairs both paths.
+        """
+        ox, oy = origin
+        pcb = tmp_path / f"bridge_grid_{ox}_{oy}.kicad_pcb"
+        pcb.write_text(_bridging_board(ox, oy))
+        vmap = _write_voltage_map(tmp_path)
+        out = tmp_path / f"bridge_grid_{ox}_{oy}_routed.kicad_pcb"
+
+        rc = route_main(_route_args(pcb, out, "grid", vmap))
+        captured = capsys.readouterr().out
+
+        assert rc == 0, f"origin {origin} exited {rc}\n{captured}"
+        assert "Routed: 2/2 nets" in captured
+
+    def test_zones_are_returned_in_sheet_absolute_millimetres(self, tmp_path: Path) -> None:
+        """Pin the space directly: zones must be offset by ``pcb.board_origin``."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _pairwise_attach_zones
+
+        origin = (100.0, 100.0)
+        pcb = tmp_path / "space.kicad_pcb"
+        pcb.write_text(_bridging_board(*origin))
+
+        zones = _pairwise_attach_zones(SimpleNamespace(_pairwise_attach_zone_pcb_path=str(pcb)))
+
+        assert len(zones) == 1, f"expected only the 2-net bridging footprint, got {zones}"
+        zone = zones[0]
+        assert zone.net_names == frozenset({"HV_LINE", "LV_SENSE"})
+        # R5 sits 15 mm / 5 mm into a board whose origin is (100, 100), so the
+        # zone must straddle the sheet-absolute point (115, 105).
+        assert zone.min_x < 115.0 < zone.max_x, zone
+        assert zone.min_y < 105.0 < zone.max_y, zone
+        assert zone.exempts(115.0, 105.0, "/HV_LINE", "/LV_SENSE")
+
+    def test_unreadable_board_warns_on_stderr_instead_of_failing_silently(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """An empty tuple must never be mistaken for "no exemptions apply"."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _pairwise_attach_zones
+
+        broken = tmp_path / "broken.kicad_pcb"
+        broken.write_text("(kicad_pcb (this is not a board")
+
+        zones = _pairwise_attach_zones(SimpleNamespace(_pairwise_attach_zone_pcb_path=str(broken)))
+
+        assert zones == ()
+        err = capsys.readouterr().err
+        assert "rated attach zones" in err
+        assert "broken.kicad_pcb" in err
 
 
 class TestAuditHelper:

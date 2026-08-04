@@ -66,6 +66,7 @@ import sys
 import textwrap
 import time
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -3828,11 +3829,7 @@ def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -
     if required is None or voltages is None:
         return
 
-    from kicad_tools.router.pairwise_clearance import (
-        PairwiseClearanceTable,
-        build_attach_zones,
-    )
-    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.router.pairwise_clearance import PairwiseClearanceTable
 
     rules = getattr(router, "rules", None)
     if rules is None:
@@ -3845,7 +3842,11 @@ def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -
     pcb_path = getattr(router, "_pairwise_attach_zone_pcb_path", None)
     pathfinder = getattr(router, "router", None)
     if pathfinder is not None and pcb_path is not None and hasattr(pathfinder, "set_attach_zones"):
-        pathfinder.set_attach_zones(build_attach_zones(PCB.load(pcb_path).footprints))
+        # Issue #4588: route through the shared resolver so the grid search sees
+        # the same sheet-absolute zones the post-route audit does.  Building them
+        # inline here (pre-#4588) leaked board-relative footprint coordinates
+        # into a sheet-absolute pathfinder.
+        pathfinder.set_attach_zones(_pairwise_attach_zones(router))
 
     if not quiet:
         from kicad_tools.cli.progress import flush_print
@@ -3872,11 +3873,19 @@ def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -
 def _pairwise_attach_zones(router: "Autorouter") -> "tuple[AttachZone, ...]":
     """Resolve (and memoise) the #4506 rated-footprint attach zones for *router*.
 
-    ``_apply_pairwise_clearance`` builds these only when the active pathfinder
-    exposes ``set_attach_zones`` (the grid engines).  The post-route audit gate
-    (#4588) needs them on **every** engine, so this helper resolves them
-    independently from ``router._pairwise_attach_zone_pcb_path`` and caches the
-    result on the router -- loading the PCB twice per run would be pure waste.
+    This is the single resolver for both consumers: ``_apply_pairwise_clearance``
+    hands the result to the grid pathfinder's ``set_attach_zones``, and the
+    post-route audit gate (#4588) uses it on **every** engine.  The result is
+    cached on the router -- loading the PCB twice per run would be pure waste.
+
+    **Coordinate space.**  ``PCB.load`` detects the Edge.Cuts origin and exposes
+    footprint positions *board-relative* (``schema/pcb.py::_detect_board_origin``),
+    while both the routed segments (``router/io.py``) and the grid pathfinder work
+    in *sheet-absolute* millimetres.  The zones are therefore shifted by
+    ``pcb.board_origin`` -- the same board-relative -> sheet-absolute offset
+    ``Segment.to_sexp``/``Via.to_sexp`` apply when writing copper (#4416).
+    Without the shift the #4506 exemption silently misses on every board that
+    does not sit at sheet origin (0, 0) -- i.e. on every real board.
 
     Returns an empty tuple when no source board path was recorded (attach-zone
     exemption then simply does not apply, which is the pre-#4506 behaviour).
@@ -3892,8 +3901,27 @@ def _pairwise_attach_zones(router: "Autorouter") -> "tuple[AttachZone, ...]":
         from kicad_tools.schema.pcb import PCB
 
         try:
-            zones = tuple(build_attach_zones(PCB.load(pcb_path).footprints))
-        except Exception:  # pragma: no cover - defensive: never fail the audit
+            pcb = PCB.load(pcb_path)
+            ox, oy = pcb.board_origin
+            zones = tuple(
+                dataclass_replace(
+                    zone,
+                    min_x=zone.min_x + ox,
+                    min_y=zone.min_y + oy,
+                    max_x=zone.max_x + ox,
+                    max_y=zone.max_y + oy,
+                )
+                for zone in build_attach_zones(pcb.footprints)
+            )
+        except Exception as exc:  # defensive: never fail the audit on a bad board
+            # Issue #4588: an empty tuple is indistinguishable from "no rated
+            # footprints on this board", so a silent swallow degrades straight
+            # into a false HARD fail.  Say so on stderr.
+            print(
+                f"Warning: could not build #4506 rated attach zones from {pcb_path} "
+                f"({type(exc).__name__}: {exc}); HV pairwise exemptions will not apply.",
+                file=sys.stderr,
+            )
             zones = ()
     with contextlib.suppress(AttributeError):  # exotic router stand-ins
         router._pairwise_attach_zones_cache = zones  # type: ignore[attr-defined]
@@ -9978,8 +10006,11 @@ def main(argv: list[str] | None = None) -> int:
               0  all nets routed (or meets --min-completion), DRC clean
               1  fatal failure -- no nets routed
               2  partial routing -- below --min-completion threshold
-              3  routing meets threshold but DRC violations remain
-              4  partial routing AND segment-segment clearance violations
+              3  routing meets threshold but the copper is clearance-dirty:
+                 DRC violations remain, --auto-fix rolled back (issue #2852),
+                 or the --voltage-map HV pairwise audit failed (issue #4588)
+              4  partial routing AND segment-segment or HV pairwise
+                 clearance violations (issues #1666, #4588)
               5  interrupted by SIGINT with partial results saved
               8  --complete: one or more unroutable links remain (issue #4477)
         """),
@@ -14167,6 +14198,10 @@ def main(argv: list[str] | None = None) -> int:
     #     pairwise-clearance audit (--voltage-map) finds violations the
     #     engine's search let through — semantically a clearance failure, so
     #     it shares the "routing succeeded but the copper is dirty" contract.
+    #     KNOWN GAP (issue #4607): build_cmd.py / pipeline_cmd.py treat exit 3
+    #     as a non-fatal warning (and label it a DRC failure).  Neither
+    #     forwards --voltage-map today, so the HV meaning cannot reach them;
+    #     #4607 threads the flag through and makes it fatal there.
     # 4 = Seg-seg or HV pairwise clearance violations remain AND routing is
     #     below threshold (Issue #1666, extended by #4588)
     # 5 = Interrupted by SIGINT with partial results saved (handled in _handle_interrupt)

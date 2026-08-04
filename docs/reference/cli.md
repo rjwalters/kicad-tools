@@ -1171,17 +1171,24 @@ kct symbols project.kicad_sch --format json
 ### `kct route` ladder
 
 The router exposes a finer-grained ladder so CI can tell partial routing
-apart from clean routing with DRC issues. Source of truth: the epilog at
-[`src/kicad_tools/cli/route_cmd.py:4051-4059`](../../src/kicad_tools/cli/route_cmd.py).
+apart from clean routing with DRC issues. Source of truth: the `exit codes:`
+epilog in [`src/kicad_tools/cli/route_cmd.py`](../../src/kicad_tools/cli/route_cmd.py)
+(`build_parser`), expanded by the `# Exit codes:` comment block in `main()`.
 
 | Code | Meaning |
 |------|---------|
 | 0 | All nets routed (or meets `--min-completion`), DRC clean |
 | 1 | Fatal failure — no nets routed |
 | 2 | Partial routing — below `--min-completion` threshold |
-| 3 | Routing meets threshold **but** DRC violations remain — **also** returned when `--auto-fix` rollback fires (issue #2852). Both meanings share this code by design (see `route_cmd.py:2576-2580`). |
-| 4 | Partial routing **and** segment-segment clearance violations |
+| 3 | Routing meets threshold **but** the copper is clearance-dirty. Three meanings share this code by design: DRC violations remain; `--auto-fix` rolled back on a connectivity regression (issue #2852); or the post-route board-level HV pairwise-clearance audit under `--voltage-map` found violations the engine's search let through (issue #4588). In every case "routing succeeded, but the resulting copper cannot be trusted". |
+| 4 | Partial routing **and** clearance violations remain — segment-segment (issue #1666) or HV pairwise (issue #4588) |
 | 5 | Interrupted by SIGINT with partial results saved (file on disk is valid) |
+| 8 | `--complete`: one or more previously-unconnected links remain unroutable (issue #4477) |
+
+> **Consumer note (issue #4588).** `kct build` and `kct pipeline` treat exit 3
+> as a non-fatal warning. Neither forwards `--voltage-map` today, so the HV
+> meaning of 3 cannot reach them; threading the flag through and making the
+> pairwise-dirty result fatal there is tracked as issue #4607.
 
 ### `kct optimize-placement`
 
