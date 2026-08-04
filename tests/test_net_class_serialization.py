@@ -24,13 +24,16 @@ from dataclasses import fields
 
 import pytest
 
+from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.rules import (
     NET_CLASS_HIGH_SPEED,
+    LayerResolutionError,
     LengthConstraint,
     NetClassRouting,
     create_net_class_map,
     net_class_map_from_dict,
     net_class_map_to_dict,
+    resolve_layer_index,
 )
 
 
@@ -372,3 +375,211 @@ class TestNetClassMapHelpers:
         for reserved_value in ("a string", ["a", "list"], None, {"nested": 1}):
             result = net_class_map_from_dict({"_reserved": reserved_value})
             assert result == {}
+
+
+# =============================================================================
+# Issue #4587: KiCad layer NAMES in preferred_layers / avoid_layers
+# =============================================================================
+
+
+class TestLayerNameNormalization:
+    """Layer names normalize to grid indices at deserialization (#4587).
+
+    Before this, a sidecar spelling layers the way KiCad does
+    (``"avoid_layers": ["In1.Cu"]``) crashed the grid engine deep inside
+    detailed routing (``int('In1.Cu')`` in
+    :meth:`NetClassRouting.hard_avoided_layer_indices`) and was *silently
+    inert* on the soft cost-bias path (``int in ["In1.Cu"]`` never matches).
+    """
+
+    def test_stack_independent_names_resolve_without_a_stack(self):
+        """``F.Cu`` -> 0 and ``In<k>.Cu`` -> k need no layer stack."""
+        assert resolve_layer_index("F.Cu") == 0
+        assert resolve_layer_index("In1.Cu") == 1
+        assert resolve_layer_index("In2.Cu") == 2
+        assert resolve_layer_index("In4.Cu") == 4
+
+    @pytest.mark.parametrize(
+        ("stack_factory", "expected_b_cu"),
+        [
+            (LayerStack.two_layer, 1),
+            (LayerStack.four_layer_sig_gnd_pwr_sig, 3),
+            (LayerStack.four_layer_all_signal, 3),
+            (LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig, 5),
+        ],
+    )
+    def test_b_cu_resolves_to_the_stacks_last_index(self, stack_factory, expected_b_cu):
+        """``B.Cu`` is the board's LAST copper index, not ``CopperLayer.B_CU``.
+
+        The fixed 6-slot :class:`CopperLayer` enum has ``B_CU == 5``; on a
+        4-layer board the grid index is ``3``.  Resolving through the enum
+        would hard-block a non-existent layer -- a silent wrong answer
+        strictly worse than the original crash.
+        """
+        stack = stack_factory()
+        assert resolve_layer_index("B.Cu", stack) == expected_b_cu
+        assert expected_b_cu == stack.num_layers - 1
+
+    def test_b_cu_is_not_the_copper_layer_enum_value_on_four_layers(self):
+        """Explicit anti-regression against the ``CopperLayer.B_CU == 5`` trap."""
+        from kicad_tools.core.types import CopperLayer
+
+        assert CopperLayer.B_CU.value == 5
+        assert resolve_layer_index("B.Cu", LayerStack.four_layer_sig_gnd_pwr_sig()) == 3
+
+    def test_b_cu_without_a_stack_fails_loud(self):
+        """No stack => ``B.Cu`` is unresolvable; it must raise, never guess."""
+        with pytest.raises(LayerResolutionError, match="B.Cu"):
+            resolve_layer_index("B.Cu")
+
+    def test_int_and_numeric_string_forms(self):
+        """Ints pass through unchanged; numeric strings coerce."""
+        assert resolve_layer_index(0) == 0
+        assert resolve_layer_index(3) == 3
+        assert resolve_layer_index("3") == 3
+
+    def test_unrecognized_token_raises_with_token_named(self):
+        """A non-copper / bogus token names itself and the accepted forms."""
+        for bad in ("Top", "F.Silkscreen", "", "F.Cu.Cu"):
+            with pytest.raises(LayerResolutionError) as exc:
+                resolve_layer_index(bad)
+            assert repr(bad) in str(exc.value)
+
+    def test_name_absent_from_stack_raises(self):
+        """``In3.Cu`` on a 4-layer board must surface loudly, not resolve to 3."""
+        stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+        with pytest.raises(LayerResolutionError, match="not present in this board"):
+            resolve_layer_index("In3.Cu", stack)
+
+    def test_bool_is_not_a_layer_index(self):
+        """A JSON ``true`` must not silently become layer 1."""
+        with pytest.raises(LayerResolutionError):
+            resolve_layer_index(True)
+
+    def test_from_dict_normalizes_both_layer_lists(self):
+        """Both fields are normalized, mixing ints and names in one file."""
+        nc = NetClassRouting.from_dict(
+            {
+                "name": "HV",
+                "preferred_layers": [3],
+                "avoid_layers": ["In1.Cu", "In2.Cu"],
+                "target_ampacity": 15.0,
+            }
+        )
+        assert nc.preferred_layers == [3]
+        assert nc.avoid_layers == [1, 2]
+
+    def test_from_dict_resolves_b_cu_with_a_stack(self):
+        """``B.Cu`` in a sidecar resolves against the supplied stack."""
+        nc = NetClassRouting.from_dict(
+            {"name": "HV", "preferred_layers": ["F.Cu", "B.Cu"]},
+            layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+        )
+        assert nc.preferred_layers == [0, 3]
+
+    def test_hard_avoid_no_longer_crashes_on_names(self):
+        """The #4587 crash site: ampacity-bearing class + layer names."""
+        nc = NetClassRouting.from_dict(
+            {"name": "HV", "avoid_layers": ["In1.Cu", "In2.Cu"], "target_ampacity": 15.0}
+        )
+        assert nc.hard_avoided_layer_indices() == frozenset({1, 2})
+
+    def test_hard_avoid_raises_actionable_error_for_residual_string(self):
+        """A class built in-process with an unresolvable name must not go quiet."""
+        nc = NetClassRouting(name="HV", avoid_layers=["B.Cu"], target_ampacity=15.0)  # type: ignore[list-item]
+        with pytest.raises(LayerResolutionError) as exc:
+            nc.hard_avoided_layer_indices()
+        message = str(exc.value)
+        assert "B.Cu" in message
+        assert "'HV'" in message  # names the owning class
+        # And it must NOT have silently dropped the entry.
+        assert "invalid literal for int()" not in message
+
+    def test_soft_preference_cost_matches_the_integer_form(self):
+        """AC: ``preferred_layers: ["F.Cu"]`` now discounts like ``[0]``.
+
+        Previously names were silently inert on this path (``0 in ["F.Cu"]``
+        is always False), so a name-bearing map got the neutral 1.0 cost.
+        """
+        from kicad_tools.router.pathfinder import Router
+
+        by_name = NetClassRouting.from_dict(
+            {"name": "P", "preferred_layers": ["F.Cu"], "avoid_layers": ["In1.Cu"]}
+        )
+        by_index = NetClassRouting.from_dict(
+            {"name": "P", "preferred_layers": [0], "avoid_layers": [1]}
+        )
+        cost = Router._get_layer_preference_cost
+        for layer in (0, 1, 2):
+            assert cost(None, layer, by_name) == cost(None, layer, by_index)
+        assert cost(None, 0, by_name) == 0.5
+        assert cost(None, 1, by_name) == by_name.layer_cost_multiplier
+
+    def test_none_and_empty_lists_pass_through(self):
+        """``None`` stays ``None``; an empty list stays empty."""
+        nc = NetClassRouting.from_dict({"name": "X", "preferred_layers": None, "avoid_layers": []})
+        assert nc.preferred_layers is None
+        assert nc.avoid_layers == []
+
+    def test_non_list_layer_value_raises(self):
+        """A bare string (not a list) is a malformed sidecar, not a layer."""
+        with pytest.raises(LayerResolutionError, match="invalid layer list"):
+            NetClassRouting.from_dict({"name": "X", "avoid_layers": "In1.Cu"})
+
+    def test_roundtrip_is_idempotent_for_name_form(self):
+        """Names normalize on the way in; ``to_dict`` emits ints thereafter."""
+        nc = NetClassRouting.from_dict(
+            {"name": "HV", "preferred_layers": ["F.Cu"], "avoid_layers": ["In1.Cu"]}
+        )
+        wire = nc.to_dict()
+        assert wire["preferred_layers"] == [0]
+        assert wire["avoid_layers"] == [1]
+        assert NetClassRouting.from_dict(wire) == nc
+
+    def test_integer_form_is_unchanged(self):
+        """No-op regression guard: integer maps deserialize exactly as before."""
+        nc = NetClassRouting.from_dict(
+            {"name": "HV", "preferred_layers": [0, 1], "avoid_layers": [2, 3]}
+        )
+        assert nc.preferred_layers == [0, 1]
+        assert nc.avoid_layers == [2, 3]
+
+
+class TestNetClassMapLayerNameResolution:
+    """Map-level plumbing of the optional ``layer_stack`` kwarg (#4587)."""
+
+    def test_map_resolves_names_with_stack(self):
+        m = net_class_map_from_dict(
+            {
+                "/AC_LINE": {
+                    "name": "HV",
+                    "preferred_layers": ["F.Cu", "B.Cu"],
+                    "avoid_layers": ["In1.Cu", "In2.Cu"],
+                    "target_ampacity": 15.0,
+                }
+            },
+            layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+        )
+        assert m["/AC_LINE"].preferred_layers == [0, 3]
+        assert m["/AC_LINE"].avoid_layers == [1, 2]
+        assert m["/AC_LINE"].hard_avoided_layer_indices() == frozenset({1, 2})
+
+    def test_map_default_kwarg_keeps_existing_callers_working(self):
+        """The five non-route callers pass no stack; integer maps still load."""
+        m = create_net_class_map(power_nets=["GND"])
+        assert net_class_map_from_dict(net_class_map_to_dict(m)) == m
+
+    def test_error_names_both_the_token_and_the_owning_key(self):
+        """AC: the preload message identifies the net-class key AND the value."""
+        with pytest.raises(LayerResolutionError) as exc:
+            net_class_map_from_dict(
+                {"/AC_LINE": {"name": "HV", "avoid_layers": ["Top"]}},
+                layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+            )
+        message = str(exc.value)
+        assert "/AC_LINE" in message
+        assert "Top" in message
+
+    def test_layer_resolution_error_is_a_value_error(self):
+        """Existing ``except (TypeError, ValueError)`` guards keep catching it."""
+        assert issubclass(LayerResolutionError, ValueError)

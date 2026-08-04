@@ -11517,8 +11517,41 @@ def main(argv: list[str] | None = None) -> int:
         except _ncm_json.JSONDecodeError as e:
             print(f"Error parsing net-class-map JSON: {e}", file=sys.stderr)
             return 1
+        # Issue #4587: resolve the board's layer stack HERE so a sidecar that
+        # spells ``preferred_layers`` / ``avoid_layers`` as KiCad layer names
+        # ("In1.Cu") is normalized to grid indices at preload -- before any
+        # engine touches the map.  Without this, an ampacity-bearing class
+        # crashed detailed routing with int('In1.Cu') after the escape/global
+        # phases had already burned minutes, and the soft layer-preference
+        # bias silently never matched.  Stack selection mirrors the
+        # ``--layers`` handling used by the routing sub-flows; ``B.Cu`` is only
+        # resolvable against the actual copper layer count (index 3 on a
+        # 4-layer board, NOT CopperLayer.B_CU == 5).
+        from kicad_tools.router import LayerStack as _NcmLayerStack
+        from kicad_tools.router.io import detect_layer_stack as _ncm_detect_layer_stack
+
+        _ncm_layers_arg = getattr(args, "layers", "auto")
+        _ncm_layer_stack = None
         try:
-            args._loaded_net_class_map = net_class_map_from_dict(_ncm_data)
+            if _ncm_layers_arg == "auto":
+                _ncm_layer_stack = _ncm_detect_layer_stack(pcb_path.read_text())
+            else:
+                _ncm_layer_stack = {
+                    "2": _NcmLayerStack.two_layer,
+                    "4": _NcmLayerStack.four_layer_sig_gnd_pwr_sig,
+                    "4-sig": _NcmLayerStack.four_layer_sig_sig_gnd_pwr,
+                    "4-all": _NcmLayerStack.four_layer_all_signal,
+                    "6": _NcmLayerStack.six_layer_sig_gnd_sig_sig_pwr_sig,
+                }[_ncm_layers_arg]()
+        except (KeyError, OSError, ValueError):
+            # Stack detection is best-effort: without it the stack-independent
+            # names ("F.Cu", "In<k>.Cu") still resolve and "B.Cu" fails loud
+            # below with an actionable message rather than a silent wrong index.
+            _ncm_layer_stack = None
+        try:
+            args._loaded_net_class_map = net_class_map_from_dict(
+                _ncm_data, layer_stack=_ncm_layer_stack
+            )
         except (TypeError, ValueError) as e:
             print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
             return 1

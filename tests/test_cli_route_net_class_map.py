@@ -518,3 +518,212 @@ class TestHierarchicalPrefixNormalization:
 
         assert router.net_class_map["/FUSED_LINE"].priority == 5
         assert "WARNING" not in capsys.readouterr().err
+
+
+# =============================================================================
+# Issue #4587: KiCad layer NAMES in the sidecar resolve at preload
+# =============================================================================
+
+# 4-layer variant of MINIMAL_PCB.  ``--layers auto`` must detect four copper
+# layers so that "B.Cu" resolves to grid index 3 (NOT CopperLayer.B_CU == 5).
+MINIMAL_PCB_4LAYER = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+    (49 "F.Fab" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "PGND")
+  (gr_rect (start 100 100) (end 150 150)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+)
+"""
+
+
+@pytest.fixture
+def minimal_pcb_4layer(tmp_path: Path) -> Path:
+    p = tmp_path / "minimal4.kicad_pcb"
+    p.write_text(MINIMAL_PCB_4LAYER)
+    return p
+
+
+def _run_route_preload(pcb: Path, sidecar: Path, tmp_path: Path, *extra_args: str) -> int:
+    """Drive ``route_cmd.main`` far enough to exercise the sidecar preload."""
+    from kicad_tools.cli.route_cmd import main as route_main
+
+    return route_main(
+        [
+            str(pcb),
+            "--dry-run",
+            "--quiet",
+            "--net-class-map",
+            str(sidecar),
+            "--output",
+            str(tmp_path / "out.kicad_pcb"),
+            *extra_args,
+        ]
+    )
+
+
+class TestLayerNamePreloadResolution:
+    """A layer-name sidecar is normalized at preload, before any routing.
+
+    Regression for #4587: ``kct route --route-engine grid`` died on the first
+    net with ``invalid literal for int() with base 10: 'In1.Cu'`` -- AFTER the
+    escape and global phases had already burned minutes -- whenever an
+    ampacity-bearing class declared its ``avoid_layers`` as KiCad layer names.
+    """
+
+    def _capture_preload(self, pcb: Path, sidecar: Path, tmp_path: Path, *extra_args: str):
+        """Run the preload with a spy that records the resolved map + stack.
+
+        The spy delegates to the real ``net_class_map_from_dict``, so this is a
+        genuine end-to-end check of the CLI plumbing (stack selection + kwarg
+        forwarding), not a mock of the code under test.
+        """
+        from kicad_tools.router import rules as _rules
+
+        real = _rules.net_class_map_from_dict
+        captured: dict = {}
+
+        def spy(data, layer_stack=None):
+            result = real(data, layer_stack=layer_stack)
+            captured["layer_stack"] = layer_stack
+            captured["map"] = result
+            return result
+
+        with patch.object(_rules, "net_class_map_from_dict", spy):
+            rc = _run_route_preload(pcb, sidecar, tmp_path, *extra_args)
+        return rc, captured
+
+    def test_ampacity_class_with_layer_names_does_not_crash(
+        self, minimal_pcb_4layer: Path, tmp_path: Path, capsys
+    ):
+        """The exact repro shape: names + ``target_ampacity`` on a 4-layer board."""
+        sidecar = tmp_path / "ncm.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "PGND": {
+                        "name": "HV",
+                        "preferred_layers": ["F.Cu", "B.Cu"],
+                        "avoid_layers": ["In1.Cu", "In2.Cu"],
+                        "target_ampacity": 15.0,
+                    }
+                }
+            )
+        )
+        rc, captured = self._capture_preload(minimal_pcb_4layer, sidecar, tmp_path)
+
+        assert rc != 1 or "invalid literal for int()" not in capsys.readouterr().err
+        nc = captured["map"]["PGND"]
+        # Names are gone before any engine touches the map.
+        assert nc.avoid_layers == [1, 2]
+        # B.Cu is the board's LAST copper index on this 4-layer stack.
+        assert nc.preferred_layers == [0, 3]
+        # And the #4587 crash site is now clean.
+        assert nc.hard_avoided_layer_indices() == frozenset({1, 2})
+
+    def test_auto_detected_stack_resolves_b_cu_to_three(
+        self, minimal_pcb_4layer: Path, tmp_path: Path
+    ):
+        """``--layers auto`` detects the board's four copper layers."""
+        sidecar = tmp_path / "ncm.json"
+        sidecar.write_text(json.dumps({"PGND": {"name": "HV", "avoid_layers": ["B.Cu"]}}))
+        _rc, captured = self._capture_preload(
+            minimal_pcb_4layer, sidecar, tmp_path, "--layers", "auto"
+        )
+        assert captured["layer_stack"] is not None
+        assert captured["layer_stack"].num_layers == 4
+        assert captured["map"]["PGND"].avoid_layers == [3]
+
+    def test_explicit_layers_flag_selects_the_stack(self, minimal_pcb_4layer: Path, tmp_path: Path):
+        """``--layers 2`` resolves B.Cu to 1; ``--layers 6`` resolves it to 5."""
+        sidecar = tmp_path / "ncm.json"
+        sidecar.write_text(json.dumps({"PGND": {"name": "HV", "avoid_layers": ["B.Cu"]}}))
+
+        _rc, two = self._capture_preload(minimal_pcb_4layer, sidecar, tmp_path, "--layers", "2")
+        assert two["map"]["PGND"].avoid_layers == [1]
+
+        _rc, six = self._capture_preload(minimal_pcb_4layer, sidecar, tmp_path, "--layers", "6")
+        assert six["map"]["PGND"].avoid_layers == [5]
+
+    def test_mixed_int_and_name_forms_in_one_file(self, minimal_pcb_4layer: Path, tmp_path: Path):
+        """A file mixing ``[3]`` and ``["In1.Cu", "In2.Cu"]`` loads."""
+        sidecar = tmp_path / "ncm.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "PGND": {
+                        "name": "HV",
+                        "preferred_layers": [3],
+                        "avoid_layers": ["In1.Cu", "In2.Cu"],
+                        "target_ampacity": 15.0,
+                    }
+                }
+            )
+        )
+        _rc, captured = self._capture_preload(minimal_pcb_4layer, sidecar, tmp_path)
+        assert captured["map"]["PGND"].preferred_layers == [3]
+        assert captured["map"]["PGND"].avoid_layers == [1, 2]
+
+    def test_unrecognized_token_exits_1_at_preload(
+        self, minimal_pcb_4layer: Path, tmp_path: Path, capsys
+    ):
+        """A bogus layer token fails at preload with the structured message."""
+        sidecar = tmp_path / "ncm.json"
+        sidecar.write_text(json.dumps({"PGND": {"name": "HV", "avoid_layers": ["Top"]}}))
+
+        rc = _run_route_preload(minimal_pcb_4layer, sidecar, tmp_path)
+
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "invalid net-class-map structure" in err
+        assert "Top" in err  # names the offending value
+        assert "PGND" in err  # names the owning net-class key
+
+    def test_layer_absent_from_stack_exits_1(
+        self, minimal_pcb_4layer: Path, tmp_path: Path, capsys
+    ):
+        """``In3.Cu`` on a 4-layer board is a misconfiguration, not layer 3."""
+        sidecar = tmp_path / "ncm.json"
+        sidecar.write_text(json.dumps({"PGND": {"name": "HV", "avoid_layers": ["In3.Cu"]}}))
+
+        rc = _run_route_preload(minimal_pcb_4layer, sidecar, tmp_path)
+
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "invalid net-class-map structure" in err
+        assert "In3.Cu" in err
+
+    def test_integer_sidecar_is_unchanged(self, minimal_pcb_4layer: Path, tmp_path: Path):
+        """No-op guard: an integer-valued sidecar preloads exactly as before."""
+        sidecar = tmp_path / "ncm.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "PGND": {
+                        "name": "HV",
+                        "preferred_layers": [0, 3],
+                        "avoid_layers": [1, 2],
+                        "target_ampacity": 15.0,
+                    }
+                }
+            )
+        )
+        _rc, captured = self._capture_preload(minimal_pcb_4layer, sidecar, tmp_path)
+        assert captured["map"]["PGND"].preferred_layers == [0, 3]
+        assert captured["map"]["PGND"].avoid_layers == [1, 2]

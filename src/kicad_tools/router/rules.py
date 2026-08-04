@@ -7,12 +7,13 @@ This module provides:
 - Predefined net classes for common use cases
 """
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
-from .layers import Layer
+from .layers import Layer, LayerStack
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .pairwise_clearance import PairwiseClearanceTable
@@ -711,6 +712,142 @@ class DesignRules:
         return self.min_trace_width + t * (corridor_width - self.min_trace_width)
 
 
+# =============================================================================
+# LAYER-INDEX RESOLUTION (Issue #4587)
+# =============================================================================
+
+# KiCad inner-copper layer names: "In1.Cu" ... "In32.Cu".  The ordinal is the
+# grid index on every KiCad stackup (In1.Cu is always grid layer 1), so this
+# form is resolvable without knowing the board's copper layer count.
+_INNER_COPPER_NAME_RE = re.compile(r"^In(\d+)\.Cu$")
+
+_ACCEPTED_LAYER_FORMS = (
+    'an int grid index (e.g. 0), a numeric string (e.g. "3"), or a KiCad '
+    'copper layer name (e.g. "F.Cu", "In1.Cu", "B.Cu")'
+)
+
+
+class LayerResolutionError(ValueError):
+    """A net-class layer entry could not be resolved to a grid-layer index.
+
+    Issue #4587.  Subclasses :class:`ValueError` so every existing
+    ``except (TypeError, ValueError)`` guard around net-class-map
+    deserialization (notably the ``kct route --net-class-map`` preload)
+    keeps catching it and exiting 1 with a structured message.
+    """
+
+
+def resolve_layer_index(
+    value: object,
+    layer_stack: LayerStack | None = None,
+    *,
+    context: str = "",
+) -> int:
+    """Resolve one ``preferred_layers`` / ``avoid_layers`` entry to a grid index.
+
+    Issue #4587.  ``NetClassRouting.preferred_layers`` / ``avoid_layers`` are
+    declared as ``list[int]`` (grid-layer indices), but hand-authored sidecars
+    routinely spell layers the way KiCad does (``"In1.Cu"``).  Before this
+    resolver, a layer NAME crashed the grid engine deep inside detailed routing
+    (``int('In1.Cu')`` in :meth:`NetClassRouting.hard_avoided_layer_indices`)
+    and was *silently inert* on the soft cost-bias path.  Normalizing once at
+    deserialization fixes both.
+
+    Accepted forms:
+
+    - ``int`` -- already a grid index; returned unchanged (existing integer
+      maps stay byte-for-byte identical).
+    - numeric ``str`` (``"3"``) -- coerced with :func:`int`.
+    - KiCad copper layer name -- resolved against ``layer_stack`` when one is
+      supplied (the canonical, stack-aware path via
+      :meth:`LayerStack.get_layer_by_name`).  Without a stack only the
+      stack-independent names resolve: ``"F.Cu"`` -> ``0`` and ``"In<k>.Cu"``
+      -> ``k``.
+
+    ``"B.Cu"`` is deliberately NOT resolvable without a stack: its grid index
+    is the board's *last* copper index (``3`` on a 4-layer board), not
+    :class:`~kicad_tools.core.types.CopperLayer.B_CU` (``5``).  Guessing would
+    hard-block a non-existent layer -- a silent wrong answer strictly worse
+    than the crash this function replaces.
+
+    Args:
+        value: The raw sidecar entry (int, numeric string, or layer name).
+        layer_stack: The board's stackup, when known.  Required to resolve
+            ``"B.Cu"`` and to reject names absent from the actual stack.
+        context: Human-readable provenance (e.g. ``"net class 'HV' avoid_layers"``)
+            embedded in error messages so a failure names the offending token
+            AND its owner.
+
+    Returns:
+        The grid-layer index.
+
+    Raises:
+        LayerResolutionError: The value is not one of the accepted forms, names
+            a layer absent from ``layer_stack``, or is ``"B.Cu"`` with no stack
+            available.  Never silently dropped: a dropped hard-avoid entry puts
+            an ampacity-bearing net back on a thin inner plane, which is exactly
+            what #4433 exists to prevent.
+    """
+    where = f" ({context})" if context else ""
+
+    # bool is an int subclass -- a JSON ``true`` is not a layer index.
+    if isinstance(value, bool):
+        raise LayerResolutionError(
+            f"invalid layer value {value!r}{where}: expected {_ACCEPTED_LAYER_FORMS}"
+        )
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        token = value.strip()
+        if token.lstrip("-").isdigit():
+            return int(token)
+        if layer_stack is not None:
+            layer_def = layer_stack.get_layer_by_name(token)
+            if layer_def is not None:
+                return layer_def.index
+            available = [lyr.name for lyr in layer_stack.layers]
+            raise LayerResolutionError(
+                f"layer {value!r}{where} is not present in this board's "
+                f"{layer_stack.num_layers}-layer stack (available: {available})"
+            )
+        if token == "F.Cu":
+            return 0
+        inner = _INNER_COPPER_NAME_RE.match(token)
+        if inner is not None:
+            return int(inner.group(1))
+        if token == "B.Cu":
+            raise LayerResolutionError(
+                f"layer 'B.Cu'{where} cannot be resolved without a layer stack: its "
+                "grid index is the board's last copper index (3 on a 4-layer board), "
+                "which depends on the copper layer count. Load the net-class map with "
+                "a layer_stack, or use the numeric grid index."
+            )
+    raise LayerResolutionError(
+        f"invalid layer value {value!r}{where}: expected {_ACCEPTED_LAYER_FORMS}"
+    )
+
+
+def _resolve_layer_index_list(
+    values: object,
+    layer_stack: LayerStack | None,
+    context: str,
+) -> list[int] | None:
+    """Normalize a whole ``preferred_layers`` / ``avoid_layers`` list (#4587).
+
+    ``None`` passes through unchanged (the "unset" sentinel both the soft-cost
+    and hard-avoid paths test for).  Every element is resolved via
+    :func:`resolve_layer_index`, so a mixed ``[3, "In1.Cu"]`` list is accepted
+    and stored as ``[3, 1]`` -- satisfying the ``list[int]`` field annotation.
+    """
+    if values is None:
+        return None
+    if not isinstance(values, (list, tuple)):
+        raise LayerResolutionError(
+            f"invalid layer list {values!r} ({context}): expected a list of {_ACCEPTED_LAYER_FORMS}"
+        )
+    return [resolve_layer_index(v, layer_stack, context=context) for v in values]
+
+
 @dataclass
 class LengthConstraint:
     """Length constraint for timing-critical nets.
@@ -1160,7 +1297,21 @@ class NetClassRouting:
         if not self.avoid_layers:
             return frozenset()
         if self.target_ampacity is not None or strict_layers:
-            return frozenset(int(layer) for layer in self.avoid_layers)
+            # Issue #4587: entries are normally already ints (normalized in
+            # ``from_dict``).  A residual string can only reach here when a
+            # class was constructed in-process with layer NAMES; resolve what
+            # is unambiguous and raise an actionable LayerResolutionError
+            # (naming the class and the token) otherwise -- never silently
+            # drop the entry, which would put an ampacity-bearing net back on
+            # the very layer it declared off-limits.
+            return frozenset(
+                resolve_layer_index(
+                    layer,
+                    None,
+                    context=f"net class {self.name!r} avoid_layers",
+                )
+                for layer in self.avoid_layers
+            )
         return frozenset()
 
     def effective_coupled_continuity_threshold(self, default: float = 0.7) -> float:
@@ -1324,14 +1475,31 @@ class NetClassRouting:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "NetClassRouting":
+    def from_dict(cls, data: dict, layer_stack: LayerStack | None = None) -> "NetClassRouting":
         """Deserialize from a dict produced by :meth:`to_dict`.
 
         Tolerates missing optional keys (falls back to dataclass defaults)
         and ignores unknown keys (forward compatibility).  The only
         required field is ``name``.
 
-        Round-trip property: see :meth:`to_dict`.
+        Issue #4587: ``preferred_layers`` / ``avoid_layers`` may be spelled as
+        KiCad layer names (``"In1.Cu"``) as well as grid indices; both are
+        normalized to ``list[int]`` here via :func:`resolve_layer_index`, so
+        every downstream consumer (the soft cost bias in the pathfinder AND
+        the hard-avoid set in both grid backends) sees indices only.  Pass
+        ``layer_stack`` to resolve names against the board's actual stackup --
+        required for ``"B.Cu"``, whose index depends on the layer count.
+
+        Round-trip property: see :meth:`to_dict`.  Names normalize to ints on
+        the way in and ``to_dict`` emits ints, so the round trip is idempotent.
+
+        Args:
+            data: The serialized mapping.
+            layer_stack: Optional board stackup used to resolve layer names.
+
+        Raises:
+            ValueError: ``name`` is missing.
+            LayerResolutionError: A layer entry cannot be resolved.
         """
         if "name" not in data:
             raise ValueError(
@@ -1358,8 +1526,16 @@ class NetClassRouting:
             zone_connection=data.get("zone_connection", "thermal"),
             is_pour_net=data.get("is_pour_net", False),
             route_via=data.get("route_via", "pathfinder"),
-            preferred_layers=data.get("preferred_layers"),
-            avoid_layers=data.get("avoid_layers"),
+            preferred_layers=_resolve_layer_index_list(
+                data.get("preferred_layers"),
+                layer_stack,
+                f"net class {data['name']!r} preferred_layers",
+            ),
+            avoid_layers=_resolve_layer_index_list(
+                data.get("avoid_layers"),
+                layer_stack,
+                f"net class {data['name']!r} avoid_layers",
+            ),
             layer_cost_multiplier=data.get("layer_cost_multiplier", 2.0),
             length_constraint=length_constraint,
             escape_clearance=data.get("escape_clearance"),
@@ -1558,6 +1734,7 @@ def net_class_map_to_dict(
 
 def net_class_map_from_dict(
     data: dict[str, dict],
+    layer_stack: LayerStack | None = None,
 ) -> dict[str, NetClassRouting]:
     """Deserialize a ``{net_name: NetClassRouting}`` map from a JSON-shaped dict.
 
@@ -1575,10 +1752,19 @@ def net_class_map_from_dict(
         data: Mapping of ``net_name -> NetClassRouting-dict``.  Must be a
             dict; non-``_``-prefixed values must each be a dict.  Any
             ``_``-prefixed key is ignored regardless of its value type.
+        layer_stack: Optional board stackup (issue #4587) forwarded to
+            :meth:`NetClassRouting.from_dict` so ``preferred_layers`` /
+            ``avoid_layers`` spelled as KiCad layer names resolve against the
+            board's ACTUAL copper indices (``"B.Cu"`` -> ``3`` on a 4-layer
+            board).  Defaults to ``None``, which keeps every existing caller
+            working unchanged for integer-valued maps.
 
     Raises:
         ValueError: If any (non-``_``-prefixed) entry is malformed
-            (missing 'name' field).
+            (missing 'name' field), or -- as
+            :class:`LayerResolutionError` -- if a layer entry cannot be
+            resolved; the message names the offending token AND the owning
+            net-class key.
         TypeError: If ``data`` is not a dict, or if a non-``_``-prefixed
             entry is not a dict.
     """
@@ -1592,7 +1778,12 @@ def net_class_map_from_dict(
             raise TypeError(
                 f"net_class_map entry for {net_name!r} must be a dict, got {type(entry).__name__}"
             )
-        result[net_name] = NetClassRouting.from_dict(entry)
+        try:
+            result[net_name] = NetClassRouting.from_dict(entry, layer_stack=layer_stack)
+        except LayerResolutionError as e:
+            # Re-raise with the owning sidecar key so the CLI preload message
+            # names both the bad token and the net it belongs to (#4587).
+            raise LayerResolutionError(f"net-class entry {net_name!r}: {e}") from e
     return result
 
 
