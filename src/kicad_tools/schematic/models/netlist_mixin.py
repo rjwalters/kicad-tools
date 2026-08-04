@@ -6,6 +6,7 @@ Provides netlist extraction and connectivity query functionality.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,49 @@ class PinRef:
 
     def __str__(self) -> str:
         return f"{self.symbol_ref}.{self.pin}"
+
+
+def auto_net_name(pins: Iterable[PinRef]) -> str:
+    """Return the canonical auto-generated net name for an unnamed net.
+
+    KiCad gives an unlabelled connected component a synthetic name derived
+    from one of the pins on it (``Net-(R1-2)``).  Which pin is chosen is a
+    *property of the component*, never of the pin doing the asking — so
+    every pin on one node must answer the same string.
+
+    This picks the **lexicographically smallest** ``(symbol_ref, pin)``
+    among all pins in the component, which makes the name:
+
+    * **identity-shaped** — one node, one name, regardless of which pin was
+      queried.  ``get_net_for_pin()`` previously derived the name from the
+      *queried* pin, so a single unnamed node answered ``Net-(C11-2)`` to
+      ``C11.2`` and ``Net-(C37-2)`` to ``C37.2``.  Downstream, LVS uses that
+      string as the schematic net **identity**, so k pads on one unnamed net
+      splintered into k identities and
+      :func:`kicad_tools.lvs.copper_lvs.compare_partitions` correctly (given
+      its input) reported C(k, 2) shorts inside the one copper component
+      that legitimately joined them — 50 false "shorts" on the board in
+      issue #4615.
+    * **deterministic** — independent of ``dict`` iteration order.
+      ``extract_netlist()`` previously used ``pins_in_net[0]``, i.e. whatever
+      point happened to come first out of the connectivity graph's dicts, so
+      the same schematic could name the same node differently between runs.
+
+    Note this is *not* a claim to reproduce KiCad's own choice of
+    representative pin byte-for-byte; kicad-tools only guarantees that its
+    own answer is stable and per-component.  Cross-tool naming differences
+    are handled by the placeholder-aware comparison in
+    :func:`kicad_tools.lvs.board_lvs.compare_netlists`.
+
+    Args:
+        pins: Non-empty iterable of :class:`PinRef` in one connected
+            component.
+
+    Returns:
+        ``"Net-(<ref>-<pin>)"`` for the canonical representative pin.
+    """
+    rep = min(pins, key=lambda p: (p.symbol_ref, p.pin))
+    return f"Net-({rep.symbol_ref}-{rep.pin})"
 
 
 def _instance_owns_pin(sym, pin) -> bool:
@@ -346,9 +390,14 @@ class SchematicNetlistMixin:
                 # Prefer power symbol names if present (they're more canonical)
                 net_name = net_names[0]
             else:
-                # Auto-generate net name from first pin
-                first_pin = pins_in_net[0]
-                net_name = f"Net-({first_pin.symbol_ref}-{first_pin.pin})"
+                # Auto-generate a name for this unnamed component.  The
+                # representative is the lexicographically smallest pin in
+                # the component (see :func:`auto_net_name`), NOT
+                # ``pins_in_net[0]`` — that followed dict iteration order,
+                # so the same schematic could name the same node
+                # differently between runs and disagree with
+                # ``get_net_for_pin()`` about the same node (issue #4615).
+                net_name = auto_net_name(pins_in_net)
 
             # Add pins to netlist
             if net_name not in netlist:
@@ -393,7 +442,12 @@ class SchematicNetlistMixin:
 
         Returns:
             Net name if the pin is connected to a named net, None if floating.
-            For unnamed nets, returns auto-generated name like "Net-(R1-1)".
+            For unnamed nets, returns an auto-generated name like
+            ``"Net-(R1-1)"`` derived from the **whole connected component**
+            (see :func:`auto_net_name`), so every pin on one unnamed node
+            gets the *same* string.  The return value is therefore a net
+            *identity*, safe to use as a comparison key — not a per-pin
+            display label (issue #4615).
 
         Example:
             >>> net = sch.get_net_for_pin("U1", "VDD")
@@ -442,11 +496,31 @@ class SchematicNetlistMixin:
             if find(point) == pin_root and net_names:
                 return net_names[0]
 
-        # No named net - check if connected to anything
-        # If connected to other pins, return auto-generated name
+        # No named net — this component carries no label or power symbol.
+        #
+        # Collect EVERY pin in the component and derive one canonical
+        # auto-name from the whole component (issue #4615).  Deriving it
+        # from ``symbol_ref``/``pin`` — the pin being *queried* — made a
+        # single unnamed node answer a different name to every pad that
+        # asked, which splintered the schematic net identity that LVS
+        # builds on and manufactured C(k, 2) false "shorts" for a k-pad
+        # unnamed net.  See :func:`auto_net_name`.
+        #
+        # The floating predicate is deliberately unchanged: a pin is
+        # floating iff no OTHER point in its component carries a pin.
+        # ``board_lvs``, the copper-LVS vacuity guard, and
+        # ``bound_pad_count`` all depend on ``None`` for a floating pin.
+        component_pins: list[PinRef] = []
+        connected_elsewhere = False
         for point, pins in point_to_pins.items():
-            if find(point) == pin_root and point != pin_pos:
-                return f"Net-({symbol_ref}-{pin})"
+            if find(point) != pin_root:
+                continue
+            component_pins.extend(pins)
+            if point != pin_pos:
+                connected_elsewhere = True
+
+        if connected_elsewhere:
+            return auto_net_name(component_pins)
 
         # Pin is floating (not connected to anything)
         return None

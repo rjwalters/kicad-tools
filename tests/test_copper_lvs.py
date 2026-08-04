@@ -1806,3 +1806,158 @@ def test_via_barrel_clear_of_foreign_track_does_not_fuse(tmp_path: Path) -> None
         f"net-1 track ends 1.6 mm clear of the via barrel and must not bond; "
         f"partition={sorted(sorted(c) for c in partition)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Unnamed multi-pad nets (issue #4615)
+#
+# These pin BOTH halves of the #4615 contract:
+#
+#   * the false shorts are gone because the schematic side now supplies ONE
+#     identity per unnamed net (fixed in ``netlist_mixin.auto_net_name``);
+#   * the shorts predicate itself was NOT weakened — two *distinct* unnamed
+#     nets fused in one copper island must still report a short.
+#
+# The second is the anti-suppression proof.  The tempting shortcut for #4615
+# was to filter ``Net-(...)`` names out of ``compare_partitions``; that makes
+# the symptom vanish while silently disabling short detection for every
+# unnamed net on every board.  If anyone ever lands that patch,
+# ``test_two_distinct_unnamed_nets_fused_in_copper_is_still_a_short`` fails.
+# ---------------------------------------------------------------------------
+
+UNNAMED_NET_FIXTURES = Path(__file__).parent / "fixtures" / "unnamed_net_lvs"
+
+
+def test_unnamed_multi_pad_net_reports_no_false_shorts() -> None:
+    """One unnamed net across 3 pads, joined by copper -> zero shorts.
+
+    Before #4615 the schematic side answered ``Net-(R1-1)``/``Net-(R2-1)``/
+    ``Net-(R3-1)`` for the same node, so this exact input produced
+    C(3, 2) = 3 "shorts" against copper that was perfectly correct.
+    """
+    sch = {
+        ("R1", "1"): "Net-(R1-1)",
+        ("R2", "1"): "Net-(R1-1)",
+        ("R3", "1"): "Net-(R1-1)",
+    }
+    partition = [frozenset({"R1.1", "R2.1", "R3.1"})]
+    result = compare_partitions(sch, partition)
+    assert result.clean, f"unnamed net must not self-short: {result.mismatches}"
+    assert result.shorts == ()
+
+
+def test_two_distinct_unnamed_nets_fused_in_copper_is_still_a_short() -> None:
+    """ANTI-SUPPRESSION PROOF (issue #4615): auto-named nets are not exempt.
+
+    Two genuinely different unnamed nodes (two RC mid-nodes, say) whose pads
+    land in the SAME copper component is a real, hard defect — a router
+    error that fuses them.  Any "fix" for #4615 that skips, buckets, or
+    normalizes ``Net-(...)`` names inside :func:`compare_partitions` makes
+    this test fail.
+    """
+    sch = {
+        # Node A
+        ("R1", "2"): "Net-(R1-2)",
+        ("C1", "1"): "Net-(R1-2)",
+        # Node B — a *different* unnamed node
+        ("R2", "2"): "Net-(R2-2)",
+        ("C2", "1"): "Net-(R2-2)",
+    }
+    # Copper wrongly fuses both nodes into one island.
+    partition = [frozenset({"R1.2", "C1.1", "R2.2", "C2.1"})]
+    result = compare_partitions(sch, partition)
+    assert not result.clean
+    assert len(result.shorts) == 1, f"expected exactly one net-pair short: {result.shorts}"
+    short = result.shorts[0]
+    assert {short.net_a, short.net_b} == {"Net-(R1-2)", "Net-(R2-2)"}
+
+
+def test_unnamed_net_short_against_a_named_net_is_still_reported() -> None:
+    """An unnamed node fused to GND is still a short (issue #4615)."""
+    sch = {
+        ("R1", "2"): "Net-(R1-2)",
+        ("C1", "1"): "Net-(R1-2)",
+        ("U1", "5"): "GND",
+    }
+    partition = [frozenset({"R1.2", "C1.1", "U1.5"})]
+    result = compare_partitions(sch, partition)
+    assert len(result.shorts) == 1
+    assert {result.shorts[0].net_a, result.shorts[0].net_b} == {"Net-(R1-2)", "GND"}
+
+
+def test_unnamed_net_split_across_copper_islands_is_now_an_open() -> None:
+    """UNMASKED OPENS (issue #4615): an unnamed net can finally be open.
+
+    ``compare_partitions`` skips nets carrying fewer than 2 pads, and the
+    per-pad naming bug made EVERY unnamed net a collection of singletons —
+    so no unnamed net could be reported open however badly it was routed.
+    With one identity per node the pads group and the open surfaces.
+    """
+    sch = {
+        ("R1", "1"): "Net-(R1-1)",
+        ("R2", "1"): "Net-(R1-1)",
+        ("R3", "1"): "Net-(R1-1)",
+    }
+    # Copper reaches R1.1<->R2.1 but strands R3.1.
+    partition = [frozenset({"R1.1", "R2.1"}), frozenset({"R3.1"})]
+    result = compare_partitions(sch, partition)
+    assert not result.clean
+    assert len(result.opens) == 1
+    assert result.opens[0].net_a == result.opens[0].net_b == "Net-(R1-1)"
+    assert {result.opens[0].pad_a, result.opens[0].pad_b} == {"R1.1", "R3.1"}
+
+
+def test_unnamed_net_with_exactly_two_pads_is_clean_when_joined() -> None:
+    """Edge case: the smallest unnamed net that can short or open at all."""
+    sch = {("R1", "2"): "Net-(R1-2)", ("C1", "1"): "Net-(R1-2)"}
+    assert compare_partitions(sch, [frozenset({"R1.2", "C1.1"})]).clean
+    # ...and still reports an open when copper does not reach across.
+    split = compare_partitions(sch, [frozenset({"R1.2"}), frozenset({"C1.1"})])
+    assert len(split.opens) == 1
+
+
+def test_unnamed_net_fixture_copper_lvs_is_clean() -> None:
+    """End-to-end on disk: unnamed 3-pad net + correct copper -> clean.
+
+    The fixture's PCB deliberately labels the node ``Net-(R3-Pad1)`` — a
+    different representative pin AND the other spelling convention from the
+    schematic side's ``Net-(R1-1)`` — because the copper comparator must not
+    care about either.
+    """
+    result = compare_copper_netlist(
+        UNNAMED_NET_FIXTURES / "unnamed_net.kicad_sch",
+        UNNAMED_NET_FIXTURES / "unnamed_net.kicad_pcb",
+    )
+    assert result.clean, f"expected clean, got {result.mismatches}"
+    assert result.bound_pad_count == 6
+
+
+def test_unnamed_net_fixture_open_copper_is_reported() -> None:
+    """Same fixture schematic, copper missing one hop -> a real open."""
+    result = compare_copper_netlist(
+        UNNAMED_NET_FIXTURES / "unnamed_net.kicad_sch",
+        UNNAMED_NET_FIXTURES / "unnamed_net_open.kicad_pcb",
+    )
+    assert not result.clean
+    assert len(result.opens) == 1
+    assert result.opens[0].net_a == "Net-(R1-1)"
+    assert result.shorts == ()
+
+
+def test_unnamed_net_fixture_kct_check_lvs_line_passes() -> None:
+    """``kct check``'s LVS line reads PASSED on the fixture (issue #4615).
+
+    Proves the failure did not merely migrate from the copper line to the
+    label line: ``_lvs_subcheck`` returns on a dirty copper result *before*
+    it inspects the label result, so a copper-only fix would have handed the
+    ``LVS: FAILED`` verdict straight to the label comparator's
+    ``Net-(R1-1)`` vs ``Net-(R3-Pad1)`` string mismatch.
+    """
+    from kicad_tools.cli.check_cmd import _lvs_subcheck
+
+    sub = _lvs_subcheck(
+        UNNAMED_NET_FIXTURES / "unnamed_net.kicad_sch",
+        UNNAMED_NET_FIXTURES / "unnamed_net.kicad_pcb",
+    )
+    assert sub.status == "PASSED", f"LVS line: {sub.status} ({sub.detail})"
+    assert sub.detail == "label + copper: 0 mismatch(es)"

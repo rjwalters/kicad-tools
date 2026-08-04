@@ -2,9 +2,15 @@
 
 For each ``(ref, pad)`` pair present on either side, build a
 ``dict[(ref, pad), net_name | None]`` from the schematic and another from
-the routed PCB, then diff them.  v1 compares as plain strings -- no
+the routed PCB, then diff them.  Named nets compare as plain strings -- no
 rename heuristics, no power-net normalization.  Those belong in the
 fleet-wide rollout (issue #3742).
+
+The single exception is **auto-generated placeholder names** for unnamed
+nets (``Net-(C11-2)`` / ``Net-(C11-Pad2)``): when both sides carry a
+placeholder, the induced *pad partitions* are compared instead of the
+strings, because the text is invented by whichever tool wrote the file and
+carries no design intent (issue #4615).  See :func:`compare_netlists`.
 
 Inputs:
 
@@ -26,10 +32,43 @@ result should fail the build (it raises
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeGuard
 
 from kicad_tools.sexp import SExp, parse_file
+
+# An auto-generated ("placeholder") net name: the synthetic name a netlister
+# invents for a connected component that carries no label or power symbol.
+# Deliberately permissive about what sits inside the parentheses, because the
+# spelling is tool- and version-dependent and is NOT something this comparator
+# should adjudicate:
+#
+#   ``Net-(C11-2)``            one convention
+#   ``Net-(C11-Pad2)``         the other convention
+#   ``Net-(/pwr/C11-Pad2)``    sheet-qualified variants
+#
+# ``kicad_tools.audit.net_audit`` labels these two spellings "new style" and
+# "old style" respectively; issue #4615's filed body asserted the opposite
+# mapping.  That question is left unsettled *on purpose* — the comparison
+# below never has to pick a winner, because it stops comparing the strings at
+# all once both sides are recognized as placeholders.
+_PLACEHOLDER_NET_RE = re.compile(r"^Net-\(.*\)$")
+
+
+def _is_placeholder_net(name: str | None) -> TypeGuard[str]:
+    """True when ``name`` is an auto-generated (unnamed-net) placeholder.
+
+    A placeholder carries no design intent: it names a node the designer
+    never labelled, and its exact text is chosen by whichever tool wrote the
+    file.  Explicitly named nets (``VCC``, ``DAC_CLK``, ...) are never
+    placeholders and keep strict string equality.
+
+    Typed as a :class:`~typing.TypeGuard` so a positive answer also narrows
+    ``str | None`` to ``str`` for callers.
+    """
+    return name is not None and bool(_PLACEHOLDER_NET_RE.match(name))
 
 
 @dataclass(frozen=True)
@@ -163,6 +202,16 @@ def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
     resolution is byte-identical to the previous behaviour — the loop is
     simply applied to each recursed sheet in turn.
 
+    The returned value is a net **identity**, not a per-pin display label:
+    every pin on one connected component maps to the same string, including
+    unnamed components (whose auto-generated ``Net-(...)`` name is derived
+    from the component's canonical representative pin — see
+    :func:`kicad_tools.schematic.models.netlist_mixin.auto_net_name`).  That
+    property is load-bearing for :func:`copper_lvs.compare_partitions`,
+    which treats two distinct strings inside one copper component as a
+    short; before issue #4615 an unnamed node answered a different name to
+    every pad and manufactured C(k, 2) false shorts.
+
     ``None`` indicates a floating pin (declared on the symbol but not
     connected to anything on its sheet), matching the convention used for
     unconnected PCB pads.
@@ -234,6 +283,18 @@ def compare_netlists(sch_path: str | Path, pcb_path: str | Path) -> LVSResult:
     The PCB's net-0 default ("no net") is treated as ``None`` on the PCB
     side -- it's the "no connection" sentinel, not a real net name.
 
+    **Auto-generated placeholder names are compared by partition, not by
+    string** (issue #4615).  An unnamed net's name (``Net-(C11-2)``,
+    ``Net-(C11-Pad2)``) is invented by the netlister — the spelling
+    convention and the representative pin both vary by tool and version —
+    so when *both* sides carry a placeholder, the pads the schematic puts
+    on that node must equal the pads the PCB puts on its node, and the
+    strings themselves are not compared.  Nothing else is relaxed: a
+    placeholder facing a real named net (or a floating/unconnected side)
+    still mismatches, a pad bound to a *different* unnamed node still
+    mismatches because the pad sets differ, and explicitly named nets keep
+    exact string equality.
+
     Args:
         sch_path: Path to a root ``.kicad_sch``.  The full sheet
             hierarchy is walked — every ``(sheet ...)`` sub-sheet is
@@ -274,22 +335,72 @@ def compare_netlists(sch_path: str | Path, pcb_path: str | Path) -> LVSResult:
             return None
         return name
 
-    mismatches: list[LVSMismatch] = []
     # Stable iteration order: union of keys, sorted by (ref, pad) so the
     # output is deterministic for golden-file tests.
     all_keys = sorted(set(sch_map) | set(pcb_map))
+    norm_pcb_map = {key: _norm_pcb(pcb_map.get(key), key[0], key[1]) for key in all_keys}
+
+    # --- Placeholder-vs-placeholder: compare partitions, not strings ---
+    #
+    # An unnamed net's name is invented, not designed: kct derives it from
+    # the lexicographically smallest pin on the node, KiCad derives it from
+    # its own representative, and the two spellings differ by convention
+    # (``Net-(C11-2)`` vs ``Net-(C11-Pad2)``) as well as by representative.
+    # Comparing those strings makes every pad on every unnamed net mismatch
+    # even when both sides describe *exactly the same* connectivity — the
+    # failure that would simply have taken over the ``LVS: FAILED`` line
+    # once the copper-side splintering of issue #4615 was fixed.
+    #
+    # So when BOTH sides carry a placeholder, compare the induced pad
+    # partitions instead: the set of pads the schematic puts on that node
+    # must equal the set of pads the PCB puts on its node.  This is strictly
+    # a *renaming* tolerance, not a relaxation:
+    #
+    #   * placeholder vs real named net (either direction) -> still compared
+    #     as strings, still mismatches;
+    #   * placeholder vs ``None`` (floating / unconnected) -> still mismatches;
+    #   * a pad bound to a DIFFERENT unnamed node than the schematic says ->
+    #     the two pad sets differ, so it still mismatches (as do the other
+    #     pads on both affected nodes);
+    #   * explicitly named nets are untouched — exact string equality.
+    #
+    # Groups are built only over keys where BOTH sides carry a placeholder.
+    # A pad that is one-sided, floating, or bound to a real named net on
+    # either side is already judged on its own key by the rules above, and
+    # excluding it keeps its verdict from smearing across every other pad
+    # that shares its net.  Detection is unaffected: any pad whose two sides
+    # disagree about *which* unnamed node it belongs to is a both-placeholder
+    # key by construction, so it is still inside the partitions being diffed.
+    sch_groups: dict[str, set[tuple[str, str]]] = {}
+    pcb_groups: dict[str, set[tuple[str, str]]] = {}
+    for key in sorted(set(sch_map) & set(pcb_map)):
+        sch_name = sch_map.get(key)
+        pcb_name = norm_pcb_map.get(key)
+        if _is_placeholder_net(sch_name) and _is_placeholder_net(pcb_name):
+            sch_groups.setdefault(sch_name, set()).add(key)
+            pcb_groups.setdefault(pcb_name, set()).add(key)
+
+    mismatches: list[LVSMismatch] = []
     for key in all_keys:
         ref, pad = key
         sch_net = sch_map.get(key)
-        pcb_net = _norm_pcb(pcb_map.get(key), ref, pad)
-        if sch_net != pcb_net:
-            mismatches.append(
-                LVSMismatch(
-                    ref=ref,
-                    pad=pad,
-                    schematic_net=sch_net,
-                    pcb_net=pcb_net,
-                )
+        pcb_net = norm_pcb_map[key]
+        if sch_net == pcb_net:
+            continue
+        if (
+            _is_placeholder_net(sch_net)
+            and _is_placeholder_net(pcb_net)
+            and sch_groups.get(sch_net) == pcb_groups.get(pcb_net)
+        ):
+            # Same physical node, different invented spelling — not a defect.
+            continue
+        mismatches.append(
+            LVSMismatch(
+                ref=ref,
+                pad=pad,
+                schematic_net=sch_net,
+                pcb_net=pcb_net,
             )
+        )
 
     return LVSResult(clean=not mismatches, mismatches=tuple(mismatches))

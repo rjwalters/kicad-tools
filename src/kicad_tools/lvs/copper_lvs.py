@@ -25,6 +25,27 @@ for the partition diff — that asymmetry is the label-based comparator's
 job (:func:`board_lvs.compare_netlists`), and the two checks are meant
 to run side by side.
 
+**Input contract: one identity per schematic net.** The shorts predicate
+is "two distinct schematic net *names* inside one copper component", so it
+is only as sound as the identity the schematic side supplies.  Every pad on
+one schematic net must map to the *same* string, and pads on different nets
+to *different* strings.  Issue #4615 was a violation of the first half:
+``get_net_for_pin()`` derived an unnamed net's auto-generated name from the
+pin being queried, so a k-pad unnamed node presented k distinct identities
+and this comparator dutifully reported C(k, 2) shorts for copper that was
+perfectly correct.  The fix was to make the identity canonical per
+connected component (see
+:func:`kicad_tools.schematic.models.netlist_mixin.auto_net_name`); the
+predicate below was **not** touched, and must not be.
+
+Concretely: do **not** "fix" a false-short report by teaching
+:func:`compare_partitions` to skip, bucket, or normalize auto-generated
+``Net-(...)`` names.  That would make the symptom vanish while silently
+disabling short detection for every unnamed net on every board — two
+adjacent unnamed RC mid-nodes fused by a router error would become
+invisible.  If a short looks false, the identity mapping is wrong; fix it
+upstream.
+
 Vacuity guard (#4005 review): when the schematic binds **zero** pads —
 every pin floats (a PCB-first fixture schematic with no ``(wire ...)``
 elements) or no schematic pin matches a board pad — the partition diff
@@ -138,6 +159,13 @@ def compare_partitions(
         schematic_net_of_pad: ``{(ref, pad) -> net_name | None}`` as built
             by :func:`board_lvs._schematic_pin_to_net`.  ``None`` means the
             pin is floating in the schematic and is excluded from the diff.
+            **These strings are net identities**: the caller must supply the
+            same string for every pad on one schematic net (including
+            unnamed nets, whose auto-generated names are canonical per
+            connected component).  Splintered identities manufacture false
+            shorts and mask real opens — the identity is the caller's
+            contract to keep, not something this function may paper over
+            (issue #4615).
         copper_partition: list of ``frozenset`` pad-id groups (``"REF.PAD"``
             form) from :meth:`ConnectivityValidator.extract_pad_partition`.
         advisory_net_names: nets whose completeness is satisfied by copper
@@ -239,6 +267,13 @@ def compare_partitions(
         net_to_pads.setdefault(net, []).append(pad_id)
 
     for net, pads in sorted(net_to_pads.items()):
+        # A single-pad net cannot be open — there is nothing to connect it
+        # to.  NOTE (#4615): this skip is also why the per-pad auto-naming
+        # bug MASKED opens.  Every unnamed net presented one pad per
+        # identity, so no unnamed net could ever be reported open however
+        # badly it was routed.  With canonical per-component identities they
+        # are visible again; expect genuine new opens on boards that carry
+        # unnamed nets — those are true positives, not a regression.
         if len(pads) < 2:
             continue
         # Pour-routed nets (own a copper zone) are stitched incrementally;

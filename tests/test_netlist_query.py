@@ -1061,3 +1061,136 @@ class TestWireToWireCollinearUnion:
         sch.labels.append(Label(text="NET_A", x=100, y=100))
         sch.labels.append(Label(text="NET_B", x=106, y=90))
         assert sch.are_connected("R1", "2", "R3", "1") is False
+
+
+class TestCanonicalAutoNetName:
+    """Auto-generated names for unnamed nets are per-COMPONENT identities.
+
+    Regression tests for issue #4615: ``get_net_for_pin()`` used to derive
+    an unnamed net's auto-generated name from the *pin being queried*, so a
+    single unlabelled node answered ``Net-(R1-2)`` to ``R1.2`` and
+    ``Net-(R2-1)`` to ``R2.1``.  Board LVS uses that string as the schematic
+    net **identity**, so a k-pad unnamed net splintered into k identities
+    and manufactured C(k, 2) false "shorts" inside the one copper component
+    that legitimately joined them.
+    """
+
+    @staticmethod
+    def _star(n: int, prefix: str = "R"):
+        """Build ``n`` resistors whose pin 2 all meet at one unlabelled hub."""
+        sch = Schematic("Test")
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        hub = (300.0, 300.0)
+        for i in range(n):
+            x = 100.0 + 10.0 * i
+            sch.symbols.append(
+                SymbolInstance(
+                    symbol_def=r_def,
+                    x=x,
+                    y=50,
+                    rotation=0,
+                    reference=f"{prefix}{i + 1}",
+                    value="10k",
+                )
+            )
+            sch.wires.append(Wire(x1=x + 2.54, y1=50, x2=hub[0], y2=hub[1]))
+        return sch
+
+    def test_every_pin_on_one_unnamed_node_gets_the_same_name(self):
+        """One unnamed node -> one string, whichever pin asks (issue #4615)."""
+        sch = self._star(4)
+        names = {sch.get_net_for_pin(f"R{i}", "2") for i in range(1, 5)}
+        assert len(names) == 1, f"unnamed node splintered into {sorted(names)}"
+        assert names.pop() == "Net-(R1-2)"
+
+    def test_name_is_the_lexicographically_smallest_pin_not_the_queried_one(self):
+        """The representative is a property of the node, not of the query."""
+        sch = self._star(3)
+        # Ask via the LAST pin on the node: the answer must still name R1.
+        assert sch.get_net_for_pin("R3", "2") == "Net-(R1-2)"
+
+    def test_name_is_deterministic_across_repeated_queries(self):
+        """No dict-iteration-order dependence: same answer every time."""
+        sch = self._star(6)
+        answers = [sch.get_net_for_pin("R4", "2") for _ in range(20)]
+        assert len(set(answers)) == 1
+        assert answers[0] == "Net-(R1-2)"
+
+    def test_extract_netlist_agrees_with_get_net_for_pin(self):
+        """The two APIs must name the same node identically (issue #4615).
+
+        ``extract_netlist()`` previously used ``pins_in_net[0]`` — whatever
+        point came first out of the connectivity graph's dicts — so it could
+        disagree with ``get_net_for_pin()`` about the very same node.
+        """
+        sch = self._star(5)
+        queried = sch.get_net_for_pin("R2", "2")
+        netlist = sch.extract_netlist()
+        assert queried in netlist
+        assert {str(p) for p in netlist[queried]} == {f"R{i}.2" for i in range(1, 6)}
+
+    def test_extract_netlist_auto_name_is_deterministic(self):
+        """Repeated extraction of the same schematic yields the same name."""
+        sch = self._star(5)
+        names = {
+            next(n for n, pins in sch.extract_netlist().items() if len(pins) == 5)
+            for _ in range(10)
+        }
+        assert names == {"Net-(R1-2)"}
+
+    def test_pins_on_net_round_trips_the_auto_name(self):
+        """``pins_on_net(get_net_for_pin(...))`` now resolves (issue #4615)."""
+        sch = self._star(3)
+        name = sch.get_net_for_pin("R2", "2")
+        assert {str(p) for p in sch.pins_on_net(name)} == {"R1.2", "R2.2", "R3.2"}
+
+    def test_floating_pin_still_returns_none(self):
+        """The floating contract is unchanged — ``None``, not an auto-name.
+
+        ``board_lvs``, the copper-LVS vacuity guard and ``bound_pad_count``
+        all depend on ``None`` for a pin connected to nothing.
+        """
+        sch = self._star(3)
+        # Pin 1 of every resistor is wired to nothing.
+        for i in range(1, 4):
+            assert sch.get_net_for_pin(f"R{i}", "1") is None
+
+    def test_two_distinct_unnamed_nodes_keep_distinct_names(self):
+        """Canonicalization must not collapse separate nodes together."""
+        sch = Schematic("Test")
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        # Node A: R1.2 -- R2.1.  Node B: R3.2 -- R4.1.  No label on either.
+        for ref, x in (("R1", 100), ("R2", 110), ("R3", 200), ("R4", 210)):
+            sch.symbols.append(
+                SymbolInstance(symbol_def=r_def, x=x, y=50, rotation=0, reference=ref, value="10k")
+            )
+        sch.wires.append(Wire(x1=102.54, y1=50, x2=107.46, y2=50))
+        sch.wires.append(Wire(x1=202.54, y1=50, x2=207.46, y2=50))
+        a = sch.get_net_for_pin("R1", "2")
+        b = sch.get_net_for_pin("R3", "2")
+        assert a == sch.get_net_for_pin("R2", "1") == "Net-(R1-2)"
+        assert b == sch.get_net_for_pin("R4", "1") == "Net-(R3-2)"
+        assert a != b
+
+    def test_labelled_node_still_wins_over_the_auto_name(self):
+        """A label/power name always takes precedence over the auto-name."""
+        sch = self._star(3)
+        sch.labels.append(Label(text="SIG_HUB", x=300, y=300))
+        for i in range(1, 4):
+            assert sch.get_net_for_pin(f"R{i}", "2") == "SIG_HUB"
+
+    def test_reference_ordering_is_lexicographic_not_numeric(self):
+        """Pin the documented tie-break so it cannot drift silently.
+
+        ``R10`` sorts before ``R2`` lexicographically.  The contract is
+        determinism, not numeric-natural order — assert the actual rule so a
+        future change to the key is a deliberate, visible decision.
+        """
+        sch = self._star(10)
+        assert sorted(s.reference for s in sch.symbols)[0] == "R1"
+        # R1 is smallest under both orderings; make the point with R10/R2 by
+        # dropping R1 from the node.
+        sch2 = self._star(10)
+        sch2.symbols = [s for s in sch2.symbols if s.reference != "R1"]
+        sch2.wires = sch2.wires[1:]
+        assert sch2.get_net_for_pin("R2", "2") == "Net-(R10-2)"
