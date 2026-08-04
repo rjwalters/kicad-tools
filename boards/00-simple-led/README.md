@@ -95,7 +95,7 @@ mixed THT/SMD board — see the `decisions:` block in `project.kct`.
 | `generate_design.py` | The recipe: builds project, schematic, PCB, routes, runs ERC/DRC/LVS, exports the manufacturing bundle. Accepts an optional output directory as `argv[1]`. |
 | `project.kct` | Project specification — intent, requirements, component list, BOM/LCSC mapping, and the `decisions:` log. |
 | `output/simple_led.kicad_sch` | Generated schematic |
-| `output/simple_led.kicad_pcb` | Generated unrouted PCB (+ `.kicad_pro`, `.kicad_prl`, `.kicad_pcb.kct.json` sidecar) |
+| `output/simple_led.kicad_pcb` | Generated unrouted PCB (+ `.kicad_pro`, `.kicad_prl`) |
 | `output/simple_led_routed.kicad_pcb` | Routed PCB (+ `.kicad_pro`, `.kicad_prl`, `.kicad_dru` design rules) |
 | `output/lvs.json` | Copper + label LVS report; `clean: true` on the committed board |
 | `output/drc_report.json` | DRC snapshot from the run that produced these artifacts |

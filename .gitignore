@@ -30,6 +30,17 @@ boards/*/*/output/renders/
 boards/*/output/board.json
 boards/*/*/output/board.json
 
+# Silkscreen marking sidecars (written by `kct build`'s silkscreen step)
+# NOTE: this is marking-identity state, not a cache -- the uuid->tag map
+# cannot be recomputed from the PCB, because a gr_text node carries no tag
+# of its own. If a board recipe ever commits a PCB carrying kct: markings,
+# that board's sidecar MUST be force-added (`git add -f`) alongside it, or
+# re-running `kct build` will append duplicate gr_text markings. No board
+# does this today -- no boards/*/generate_design.py runs the silkscreen
+# step (#4565).
+boards/*/output/*.kct.json
+boards/*/*/output/*.kct.json
+
 # Local credentials (BYO API keys -- issue #4118). NEVER commit real keys.
 .env
 .env.*
