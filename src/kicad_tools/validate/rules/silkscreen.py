@@ -5,7 +5,17 @@ This module implements DRC checks for silkscreen elements:
 - Minimum text height
 - Silkscreen-over-pad detection (legacy centroid heuristic)
 - Silkscreen-over-copper detection (geometric, vs pad mask apertures)
+- Silkscreen-over-silkscreen detection (geometric, silk vs silk)
 - Silkscreen-to-edge clearance (geometric, vs Edge.Cuts outline)
+
+**Cross-gate counting model.**  The three geometric checks are designed to be
+count-comparable with ``kicad-cli pcb drc``, which is used as kct's referee at
+manufacturing sign-off.  Each emits **one violation per colliding pair**:
+``silk_over_copper`` per (silk item, mask aperture), ``silk_overlap`` per
+unordered (silk item, silk item), ``silk_edge_clearance`` per (silk item,
+outline) -- the outline being a single object, so that one is per silk item.
+A count mismatch against kicad-cli is therefore a bug to investigate, not a
+convention difference to explain away.  See #4612 for the measured parity table.
 """
 
 from __future__ import annotations
@@ -69,6 +79,18 @@ _CLEARANCE_EPSILON_MM = 1e-4
 # overlaps by exactly 0.01 mm^2; a 0.05 mm^2 gate separates them with wide
 # margin and drops no real finding.
 _MIN_OVERLAP_AREA_MM2 = 0.05
+
+# Minimum silk/silk overlap area (mm^2) before ``silk_overlap`` fires.
+# A SIBLING of ``_MIN_OVERLAP_AREA_MM2`` rather than a reuse of it, because the
+# calibration genuinely differs: silk-over-copper always pairs a silk element
+# with a comparatively large pad aperture, whereas silk-over-silk routinely
+# pairs two thin strokes.  Two minimum-width (0.15 mm) silk lines crossing at
+# right angles overlap by only 0.0225 mm^2 -- well under the 0.05 mm^2 copper
+# gate -- so reusing that constant would silently drop the single most obvious
+# silk_overlap case.  0.005 mm^2 keeps right-angle stroke crossings (4.5x
+# margin) while still rejecting numerically-degenerate hairline touches between
+# two axis-aligned text bounding boxes.
+_MIN_SILK_OVERLAP_AREA_MM2 = 0.005
 
 
 def is_silkscreen_layer(layer: str) -> bool:
@@ -527,6 +549,28 @@ def _iter_pad_apertures(
     SMD pads expose copper on their own side; thru_hole pads expose copper on
     BOTH sides (so they are yielded for both ``"F"`` and ``"B"``).  ``side`` is
     the silk side the aperture must be checked against.
+
+    **Aperture-set scope: pads only (known, deliberate gap -- see #4612).**
+    The aperture index is built from ``footprint.pads`` exclusively;
+    ``pcb.vias`` is never consulted, so an *untented* via's mask opening is not
+    an aperture as far as this module is concerned.  KiCad's silk-clearance
+    provider indexes mask-layer items generally, and this divergence is
+    **measured, not assumed**: on a synthetic probe board carrying
+    ``(tenting (front no) (back no))`` plus one silk segment across a via,
+    ``kicad-cli pcb drc --severity-all`` (KiCad 10.0.5, 2026-08-04) reports::
+
+        silk_over_copper | warning | Segment on F.Silkscreen <-> Via [GND] on F.Cu - B.Cu
+
+    while this rule reports 0.  That is the only known residue after #4612
+    brought pad-pair counting into exact parity with kicad-cli.
+
+    The gap is unexercised by the in-repo fleet: every committed board sets
+    ``(tenting (front yes) (back yes))`` in its ``setup`` block, so no fleet via
+    has a mask opening at all, and kicad-cli names a *pad* in every one of its
+    ``silk_over_copper`` findings on boards 03/05/06/07.  Modelling via
+    apertures needs per-via tenting resolution (board default + per-via
+    override) that this module does not currently parse, so it is deferred to a
+    follow-up rather than guessed at.
     """
     for footprint in pcb.footprints:
         transform = _fp_transform(footprint)
@@ -556,13 +600,30 @@ def check_silk_over_copper(
     Builds a shapely geometry per silk element (text bbox or buffered graphic
     stroke) and tests it against the solder-mask apertures of all pads on the
     matching silk side.  Emits a ``silk_over_copper`` **warning** (matching
-    kicad-cli severity) for any silk element that intersects an aperture.
+    kicad-cli severity) for any silk/aperture intersection.
+
+    **Counting model: one violation per (silk item, mask aperture) pair,
+    matching ``kicad-cli pcb drc``.**  A refdes straddling four pads yields four
+    violations, not one -- so a kct count and a kicad-cli count are directly
+    comparable, and every colliding pad is named rather than an arbitrary
+    representative.  Before #4612 this de-duplicated to one violation per silk
+    element, which under-reported by ~2x and named an R-tree-ordered arbitrary
+    member of the collision set; a count mismatch against kicad-cli is now a
+    bug, not a convention difference.  Violations are sorted by
+    ``(silk label, pad label)`` because ``STRtree.query`` order is unspecified.
+
+    The ``_MIN_OVERLAP_AREA_MM2`` gate is applied **per pair** (each silk/pad
+    intersection must clear it independently), which is the reading the per-pair
+    counting model implies.
 
     This supersedes the crude centroid heuristic in
     :func:`check_silkscreen_over_pads` (which is retained for backward
     compatibility with the ``silkscreen_over_pad`` rule_id), and unlike that
     heuristic it accounts for real text bounding boxes, graphic strokes,
     board-level silk, thru-hole apertures, and silk-over-other-footprint pads.
+
+    The aperture set is **pad-only**; see :func:`_iter_pad_apertures` for the
+    untented-via scope note.
 
     Args:
         pcb: The PCB to check.
@@ -588,6 +649,7 @@ def check_silk_over_copper(
         if entries:
             trees[side] = STRtree([g for g, _ in entries])
 
+    found: list[DRCViolation] = []
     for side, geom, silk_label, location, layer in _iter_silk_geometries(pcb):
         side_entries = apertures.get(side)
         if not side_entries:
@@ -599,10 +661,14 @@ def check_silk_over_copper(
             if not geom.intersects(ap_geom):
                 continue
             # Require a non-trivial overlap area to reject hairline corner
-            # touches that the AABB text approximation can manufacture.
+            # touches that the AABB text approximation can manufacture.  Applied
+            # per (silk, aperture) pair -- see the counting model above.
             if geom.intersection(ap_geom).area < _MIN_OVERLAP_AREA_MM2:
                 continue
-            results.add(
+            # One violation per (silk item, mask aperture) PAIR, matching
+            # kicad-cli.  Do NOT re-introduce a break here: it collapses a
+            # multi-pad collision to a single arbitrary representative (#4612).
+            found.append(
                 DRCViolation(
                     rule_id="silk_over_copper",
                     severity="warning",
@@ -612,7 +678,106 @@ def check_silk_over_copper(
                     items=(silk_label, pad_label),
                 )
             )
-            break  # one violation per silk element
+
+    # STRtree.query order is unspecified; sort for deterministic reporting.
+    for violation in sorted(found, key=lambda v: (v.items[0], v.items[1])):
+        results.add(violation)
+
+    return results
+
+
+def check_silk_overlap(
+    pcb: PCB,
+    design_rules: DesignRules,
+) -> DRCResults:
+    """Geometric check: silkscreen printed on top of other silkscreen.
+
+    Silk-over-silk renders both elements illegible (the refdes you need at
+    assembly and rework time is the usual casualty).  kicad-cli reports this as
+    ``silk_overlap``; before #4612 kct had no producer for it at all, so an
+    entire kicad-cli rule class was invisible to a kct-only workflow even though
+    :data:`~kicad_tools.drc.violation.ViolationType.SILK_OVERLAP` and its fix
+    suggestions were already wired up downstream.
+
+    **Counting model: one violation per unordered (silk item, silk item) pair,
+    matching ``kicad-cli pcb drc``.**  A silk element never pairs with itself,
+    and each colliding pair is emitted exactly once (never as both ``(A, B)``
+    and ``(B, A)``).  Front and back silk are indexed separately, so F-side silk
+    can never pair with B-side silk.
+
+    **Same-footprint pairs DO count.**  A reference designator overlapping its
+    own footprint's courtyard/outline art is a real, reportable finding, not a
+    self-collision to filter out.  kicad-cli is the tiebreaker here and it was
+    measured directly (2026-08-04, KiCad 10.0.5) on the synthetic probe fixture
+    that mirrors ``tests/test_validate_silkscreen.py``'s
+    ``test_same_footprint_refdes_over_own_graphic_flags``::
+
+        silk_overlap | warning | Reference field of A1 <-> Segment of A1 on F.Silkscreen
+        silk_overlap | warning | Reference field of B1 <-> Reference field of C1
+
+    Both the same-footprint pair and the cross-footprint pair fire, so this
+    function excludes neither.
+
+    **Detection is bare intersection, not clearance.**  KiCad's silk-to-silk
+    test enforces a configurable *clearance* (silk must be some distance apart);
+    this check requires the geometries to actually overlap.  That is the
+    deliberately conservative choice for an advisory rule -- it under-reports
+    rather than over-reports relative to kicad-cli on boards that configure a
+    non-zero silk clearance, and it needs no new profile field.
+
+    Args:
+        pcb: The PCB to check.
+        design_rules: Design rules (unused; detection is bare geometric
+            intersection, gated by :data:`_MIN_SILK_OVERLAP_AREA_MM2`).
+
+    Returns:
+        DRCResults containing any ``silk_overlap`` warnings.
+    """
+    del design_rules  # bare intersection; no profile field participates
+    require_shapely("silk-overlap geometry")
+    from shapely import STRtree
+
+    results = DRCResults(rules_checked=1)
+
+    # Reuse the single silk traversal shared with silk_over_copper /
+    # silk_edge_clearance; partition by side so F silk never pairs with B silk.
+    by_side: dict[str, list[tuple[_Geometry, str, tuple[float, float], str]]] = {"F": [], "B": []}
+    for side, geom, label, location, layer in _iter_silk_geometries(pcb):
+        by_side[side].append((geom, label, location, layer))
+
+    found: list[DRCViolation] = []
+    for entries in by_side.values():
+        if len(entries) < 2:
+            continue
+        tree = STRtree([g for g, _, _, _ in entries])
+        for i, (geom, label_a, location, layer) in enumerate(entries):
+            for raw_idx in tree.query(geom):
+                j = int(raw_idx)
+                # Skip self-pairing, and emit each unordered pair once by
+                # keeping only j > i.  Compared by INDEX, not geometry: two
+                # identical refdes boxes on different parts are distinct
+                # elements and must still pair with each other.
+                if j <= i:
+                    continue
+                other_geom, label_b, _, _ = entries[j]
+                if not geom.intersects(other_geom):
+                    continue
+                if geom.intersection(other_geom).area < _MIN_SILK_OVERLAP_AREA_MM2:
+                    continue
+                found.append(
+                    DRCViolation(
+                        rule_id="silk_overlap",
+                        severity="warning",
+                        message=(f"Silkscreen {label_a} overlaps silkscreen {label_b}"),
+                        location=location,
+                        layer=layer,
+                        items=(label_a, label_b),
+                    )
+                )
+
+    # STRtree.query order is unspecified; sort for deterministic reporting.
+    for violation in sorted(found, key=lambda v: (v.items[0], v.items[1])):
+        results.add(violation)
 
     return results
 
@@ -628,6 +793,11 @@ def check_silk_edge_clearance(
     the silk crosses the outline or sits within :data:`SILK_EDGE_CLEARANCE_MM`
     of it.  No-op when the board has no outline (mirrors
     ``EdgeClearanceRule.check``).
+
+    **Counting model: one violation per (silk item, outline) pair, matching
+    ``kicad-cli pcb drc``.**  The outline is treated as a single object, so this
+    is one violation per offending silk item -- unlike ``silk_over_copper``,
+    where each colliding aperture counts separately.
 
     Args:
         pcb: The PCB to check.
@@ -695,6 +865,7 @@ def check_all_silkscreen(
     )
     results.merge(check_silkscreen_over_pads(pcb, design_rules))
     results.merge(check_silk_over_copper(pcb, design_rules))
+    results.merge(check_silk_overlap(pcb, design_rules))
     results.merge(check_silk_edge_clearance(pcb, design_rules))
 
     return results

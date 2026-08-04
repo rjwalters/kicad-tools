@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`silk_overlap` DRC rule** — `kct check --only silkscreen` now detects
+  silkscreen printed on top of other silkscreen, closing a gap where an entire
+  `kicad-cli pcb drc` rule class was invisible to a kct-only workflow. Emitted
+  at `warning` severity (advisory, non-blocking), one violation per unordered
+  (silk item, silk item) pair. Same-footprint pairs count — a reference
+  designator over its own courtyard art is a real finding, confirmed against
+  `kicad-cli` on a synthetic fixture. Detection is bare geometric intersection
+  rather than KiCad's configurable silk clearance, so it under-reports rather
+  than over-reports (#4612).
+
+### Changed
+
+- **`silk_over_copper` now counts one violation per (silk item, mask aperture)
+  pair**, matching `kicad-cli pcb drc`. Previously it de-duplicated to one
+  violation per silk element. **User-visible: reported `silk_over_copper`
+  counts roughly double** (measured on the in-repo fleet: 2→4, 6→12, 4→7, 3→5),
+  with no change to which silk elements are detected. This makes kct and
+  kicad-cli counts directly comparable — the cross-gate convention that has the
+  two engines referee each other at manufacturing sign-off previously compared
+  numbers that could not agree by construction. It also fixes a second defect:
+  the rule stopped at the first R-tree hit, so a refdes straddling four pads
+  named one *arbitrary* member of the collision set (board 05 reported `U10
+  pad 28`; the real set is pads 27, 28, 29, 30) (#4612).
+
+### Known limitations
+
+- `silk_over_copper`'s aperture set is **pad-only**: untented via mask openings
+  are not indexed, so a silk stroke crossing an untented via is reported by
+  `kicad-cli` but not by kct. Measured on a synthetic probe board; the in-repo
+  fleet tents all vias, so the gap is invisible there (#4612).
+
 ## [0.19.0] - 2026-07-20
 
 ### Summary

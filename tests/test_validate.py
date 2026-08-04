@@ -1842,11 +1842,13 @@ class TestSilkscreenRules:
 
         # Should have 2 violations (text + line); this fixture has no pads or
         # board outline so the geometric silk_over_copper / silk_edge_clearance
-        # checks contribute no violations.
+        # checks contribute no violations, and its refdes sits clear of its
+        # silk line so silk_overlap contributes none either.
         assert len(results) == 2
-        # 5 rule types checked: line width, text height, legacy over-pad,
-        # geometric silk_over_copper, silk_edge_clearance.
-        assert results.rules_checked == 5
+        # 6 rule types checked: line width, text height, legacy over-pad,
+        # geometric silk_over_copper, silk_overlap (added by #4612),
+        # silk_edge_clearance.
+        assert results.rules_checked == 6
 
         # Check that both rule types are represented
         rule_ids = {v.rule_id for v in results.violations}

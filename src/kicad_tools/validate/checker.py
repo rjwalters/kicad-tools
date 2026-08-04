@@ -987,8 +987,14 @@ class DRCChecker:
           (``silkscreen_over_pad``)
         - Silkscreen text/graphics over pad mask apertures -- geometric shapely
           check (``silk_over_copper``)
+        - Silkscreen text/graphics over other silkscreen -- geometric shapely
+          check (``silk_overlap``)
         - Silkscreen text/graphics too close to the board edge -- geometric
           shapely check (``silk_edge_clearance``)
+
+        The three geometric checks count **one violation per colliding pair**,
+        matching ``kicad-cli pcb drc`` so the two engines can referee each other
+        (#4612).
 
         Returns:
             DRCResults containing silkscreen violations
