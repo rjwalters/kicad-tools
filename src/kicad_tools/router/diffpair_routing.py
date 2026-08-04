@@ -56,6 +56,7 @@ from .quantize import (
     dogleg_points,
     verify_segment_45,
 )
+from .via_clearance import segment_via_deficit
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +296,36 @@ _SHADOW_PAD_DEFICIT_EPS: float = 1e-4
 # declining the whole side.
 _SHADOW_PAD_PROBE_STEP_MM: float = 0.2
 
+# Issue #4575: the segment-vs-VIA quadrant of the same validation gap.  The
+# constructor's only via-aware self-check is ``_pair_has_physical_overlap``,
+# which is an OVERLAP detector (``via_r + seg_w/2``, no clearance term), and the
+# partner universe handed to every tail screen is ``list(guide.segments)`` -- it
+# contains no vias at all.  So a constructed leg passing 0.090 mm from the
+# partner leg's barrel is accepted by every construction-time gate and then
+# reported by ``clearance_segment_via`` at 0.102 mm (measured on board-06
+# shadow-ON seed 42: USB3_TX1+ copper vs a USB3_TX1- barrel).  A diff-pair net
+# is excluded from ``drc_verify_and_nudge`` (#3508), so nothing downstream
+# repairs it.
+#
+# THRESHOLD (load-bearing): ``ClearanceRule`` exempts a declared diff pair from
+# the generic clearance check ONLY when both elements are SEGMENTS
+# (``validate/rules/clearance.py`` -- the #2560 scoping).  A segment-vs-via or
+# via-vs-via pair between P and N is therefore checked at the full board
+# minimum.  This gate must use ``rules.trace_clearance`` /
+# ``rules.via_clearance``, NOT ``_pair_seg_clearance``'s intra-pair relaxation:
+# the relaxed bound is deliberately tighter than the manufacturer clearance, so
+# a gate built on it could never fire on the very finding it exists to close.
+#
+# Same noise floor as the pad quadrant (one serialization quantum, and the same
+# value as ``DRC_TOLERANCE``) so the gate and the checker agree at the boundary.
+_SHADOW_VIA_DEFICIT_EPS: float = _SHADOW_PAD_DEFICIT_EPS
+# Mirrors ``validate.rules.clearance._COLOCATION_EPSILON_MM`` (#2706): the
+# in-pad-escape router places segment endpoints EXACTLY at via centres, and the
+# DRC skips such pairs.  A gate without the same carve-out would be stricter
+# than the checker and decline sides over geometry that is never reported --
+# pure reach loss for zero DRC gain.
+_SHADOW_VIA_COLOCATION_EPS: float = 1e-4
+
 # Issue #4574: the constructed crossover's via sites are chosen FIRST-LEGAL out
 # of a fixed 3x5 lattice, so the winning site carries no information about what
 # the rest of the board still has to route.  An all-layer F.Cu<->B.Cu barrel is
@@ -360,6 +391,30 @@ def _channel_seal_penalty(
             continue  # the direct escape still fits past this barrel
         penalty += keepout - lateral
     return penalty
+
+
+class _ShadowForeignCopper(NamedTuple):
+    """Copper the constructed leg must keep VIA clearance from (issue #4575).
+
+    ``vias`` and ``segments`` are flat snapshots unioning the board's
+    committed routes with the pair's own SIBLING legs -- the guide, and
+    (during the late one-leg-at-a-time mutations of #4553's length matcher
+    and #4570's via mirror) the other constructed leg.  The sibling legs are
+    never in the routing grid during shadow construction, which is exactly
+    why no raster check can see them.
+
+    Elements carry their own ``net``, so same-net filtering is a per-element
+    comparison at query time -- ``exclude_net`` semantics with no
+    ``exclude_refs`` anywhere (the #3545 same-component carve-out would
+    exempt the partner's barrel whenever P and N share a fine-pitch
+    connector ref, which is exactly the board-06 case this gate exists for).
+
+    See :meth:`DiffPairRouter._shadow_foreign_copper` for how the snapshot is
+    built and why ``autorouter.routes`` (not ``grid.routes``) is the source.
+    """
+
+    vias: tuple[Via, ...]
+    segments: tuple[Segment, ...]
 
 
 # Issue #4572: the constructor's landing tails are the pair's uncoupled copper.
@@ -3624,7 +3679,8 @@ class DiffPairRouter:
         # ("overlap" -- self-check / physical P/N overlap, "blockage" --
         # no legal via site / mid-route obstacle / unreachable pad tail, or
         # "pad-clearance" -- constructed copper inside a foreign pad's
-        # clearance halo, #4571);
+        # clearance halo, #4571, or "via-clearance" -- constructed copper
+        # inside a foreign VIA BARREL's clearance halo, #4575);
         # reset per spec, set inside ``_shadow_route_pair``.
         # ``_last_coupled_pair_report`` holds the most-recent per-pair
         # taxonomy classification (a :class:`CoupledPairReport`).  Both are
@@ -3636,6 +3692,21 @@ class DiffPairRouter:
         # boosts the guide A*'s cost at these sites to steer the re-route away.
         self._last_shadow_overlap_locations: list[tuple[float, float]] = []
         self._last_coupled_pair_report: CoupledPairReport | None = None
+        # Issue #4575: foreign-copper universe for the exact segment-vs-via /
+        # via-vs-via clearance gate, armed for the duration of ONE
+        # ``_shadow_route_pair`` call by ``_shadow_foreign_copper``.  ``None``
+        # means the gate is DISARMED and every one of its screens is a no-op --
+        # which is precisely the state on the shadow-construction-OFF path and
+        # for the ordinary (non-shadow) ``_tail_route`` calls, so this change
+        # cannot alter either.
+        self._shadow_foreign_universe: _ShadowForeignCopper | None = None
+        # Issue #4575 (observability, in the spirit of #4459): how many
+        # CANDIDATES the foreign-via gate rejected during the most recent
+        # ``_shadow_route_pair`` call.  A gate that only ever declines whole
+        # sides trades DRC errors for coupling; this counter is the evidence
+        # that the per-candidate screens are doing the repair instead.
+        # Diagnostic only -- never read by a routing decision.
+        self._shadow_via_gate_rejections: int = 0
         # Issue #3089: True iff the most-recent call to
         # ``route_differential_pair_coupled`` returned because the
         # inner ``CoupledPathfinder.route_coupled`` exceeded its
@@ -4445,6 +4516,282 @@ class DiffPairRouter:
                 worst, worst_loc = deficit, loc
         return worst, worst_loc
 
+    # ------------------------------------------------------------------
+    # Issue #4575: exact foreign-VIA clearance gate for constructed copper
+    # ------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _shadow_foreign_copper(self, *partners: Route) -> Iterator[None]:
+        """Arm the segment-vs-via clearance gate for one pair attempt (#4575).
+
+        The gate is deliberately AMBIENT rather than threaded through the
+        eight-deep tail-synthesis call chain (``_tail_route`` ->
+        ``_synthesize_following_tail`` -> ``_bridge_to`` /
+        ``_follow_partner_runs`` -> ``_synthesize_tail`` /
+        ``_synthesize_crossing_tail`` -> ``_fallback_tail_route`` ->
+        ``_planar_tail_probe``).  Two properties follow from that and both
+        are load-bearing:
+
+        * **No screen can be missed.**  Every candidate produced anywhere in
+          that chain is measured, including the last-resort A* tail whose
+          partner screen (``_tail_partner_clear`` with ``clearance=0.0``)
+          checks barrels for physical OVERLAP only.
+        * **It is inert everywhere else.**  Outside this context manager
+          ``_shadow_foreign_universe`` is ``None`` and every screen below
+          returns ``0.0``, so the ordinary (non-shadow) ``_tail_route``
+          calls and the whole shadow-construction-OFF path are unchanged.
+
+        The universe unions two sources:
+
+        * every route already committed to ``autorouter.routes`` -- the
+          AUTHORITATIVE list, deliberately NOT ``grid.routes``, which can
+          hold a stale best-iteration geometry after a restore (see the #3486
+          warning on ``RoutingGrid.worst_via_segment_deficit``); and
+        * ``partners`` -- the pair's own sibling legs, which are never in the
+          grid during shadow construction and are therefore invisible to
+          every raster check.  The guide is registered here for the whole
+          construction, and the post-assembly gate re-registers the FINAL
+          guide geometry (the #4553 length matcher and the #4570 via mirror
+          both mutate a leg after the first snapshot was taken).
+
+        NOTHING is filtered out by net at snapshot time.  The
+        ``exclude_net`` discipline is applied per ELEMENT at query time
+        (``via.net == seg.net`` -> skip), which is the same
+        ``exclude_net``-only rule #4571 uses and which
+        :meth:`_collect_existing_drills` already applies to the drill
+        registry -- and never ``exclude_refs``, whose #3545 same-component
+        carve-out would exempt the partner's barrel on exactly the fine-pitch
+        connectors this gate exists for.
+
+        Measured scope note (board-06 shadow-ON seed 42): every candidate
+        rejection this gate makes traces to the PARTNER leg -- a run with the
+        committed half of the universe removed produces the identical
+        per-pair rejection counts.  That is consistent with the board having
+        no constructed-copper-vs-third-party-barrel finding at baseline, so
+        the committed half is defence-in-depth for other boards rather than
+        the thing that closes #4575.
+
+        Nesting is supported (``_shadow_route_pair`` re-enters itself for the
+        uncompressed-guide retry, and the post-assembly gate re-arms with the
+        FINAL guide geometry) by save/restore.
+        """
+        prev = self._shadow_foreign_universe
+        vias: list[Via] = []
+        segments: list[Segment] = []
+        for route in list(getattr(self.autorouter, "routes", None) or []):
+            vias.extend(route.vias)
+            segments.extend(route.segments)
+        for partner in partners:
+            vias.extend(partner.vias)
+            segments.extend(partner.segments)
+        self._shadow_foreign_universe = _ShadowForeignCopper(tuple(vias), tuple(segments))
+        try:
+            yield
+        finally:
+            self._shadow_foreign_universe = prev
+
+    @contextlib.contextmanager
+    def _shadow_foreign_copper_extended(self, *extra: Route) -> Iterator[None]:
+        """Temporarily widen the armed universe with more copper (#4575).
+
+        Used where the constructor mutates ONE leg while the OTHER leg has
+        already been built -- the length matcher's meander teeth and the
+        #4570 via-signature mirror.  At that point the sibling leg is
+        constructed copper that exists nowhere in the ambient universe (it is
+        neither committed nor the pre-assembly guide), so without this the
+        tooth screens would be blind to the very barrels the pair just gained
+        (measured on board-06 seed 42: a guide-leg meander tooth dipped to
+        0.090 mm from the shadow leg's own landing via).
+
+        A no-op when the gate is disarmed, so the shadow-OFF path is unchanged.
+        """
+        prev = self._shadow_foreign_universe
+        if prev is None:
+            yield
+            return
+        vias = list(prev.vias)
+        segments = list(prev.segments)
+        for route in extra:
+            vias.extend(route.vias)
+            segments.extend(route.segments)
+        self._shadow_foreign_universe = _ShadowForeignCopper(tuple(vias), tuple(segments))
+        try:
+            yield
+        finally:
+            self._shadow_foreign_universe = prev
+
+    @staticmethod
+    def _seg_via_colocated(seg: Segment, via: Via) -> bool:
+        """#2706 co-location carve-out, matching ``ClearanceRule`` (#4575).
+
+        The in-pad-escape router places segment endpoints EXACTLY at via
+        centres, and the DRC skips any segment/via pair whose segment
+        endpoint is within ``_COLOCATION_EPSILON_MM`` of the via centre.
+        Without the same carve-out this gate would be STRICTER than the
+        checker and decline sides over geometry the checker never reports.
+        """
+        return (
+            math.hypot(seg.x1 - via.x, seg.y1 - via.y) < _SHADOW_VIA_COLOCATION_EPS
+            or math.hypot(seg.x2 - via.x, seg.y2 - via.y) < _SHADOW_VIA_COLOCATION_EPS
+        )
+
+    def _segment_via_deficit(self, seg: Segment) -> tuple[float, tuple[float, float] | None]:
+        """Worst exact clearance deficit of a segment vs FOREIGN vias (#4575).
+
+        ``> _SHADOW_VIA_DEFICIT_EPS`` means the segment would violate the
+        ``clearance_segment_via`` predicate against some via that is not on
+        ``seg.net`` -- INCLUDING the diff-pair partner's barrels, which the
+        DRC checks at the full board minimum because its diff-pair exemption
+        covers segment-to-SEGMENT edges only.
+
+        Returns ``(0.0, None)`` when the gate is disarmed.
+        """
+        universe = self._shadow_foreign_universe
+        if universe is None:
+            return 0.0, None
+        clearance = self.autorouter.rules.trace_clearance
+        worst = 0.0
+        worst_loc: tuple[float, float] | None = None
+        for via in universe.vias:
+            if via.net == seg.net:
+                continue  # own-net copper may touch (a tail lands on it)
+            if self._seg_via_colocated(seg, via):
+                continue
+            deficit = segment_via_deficit(seg, via, clearance)
+            if deficit > worst:
+                worst, worst_loc = deficit, (via.x, via.y)
+        return worst, worst_loc
+
+    def _span_via_deficit(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer_idx: int,
+        net: int,
+        width: float,
+    ) -> float:
+        """Worst foreign-via clearance deficit of a candidate span (#4575)."""
+        if self._shadow_foreign_universe is None:
+            return 0.0
+        grid = self.autorouter.grid
+        probe = Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=width,
+            layer=Layer(grid.index_to_layer(layer_idx)),
+            net=net,
+            net_name="",
+        )
+        return self._segment_via_deficit(probe)[0]
+
+    def _span_via_clear(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer_idx: int,
+        net: int,
+        width: float,
+    ) -> bool:
+        """True when a candidate span keeps foreign-via clearance (#4575)."""
+        ok = (
+            self._span_via_deficit(x1, y1, x2, y2, layer_idx, net, width) <= _SHADOW_VIA_DEFICIT_EPS
+        )
+        if not ok:
+            self._shadow_via_gate_rejections += 1
+        return ok
+
+    def _via_copper_deficit(self, via: Via) -> tuple[float, tuple[float, float] | None]:
+        """Worst deficit of a via vs FOREIGN segments and vias (#4575).
+
+        The mirror direction of :meth:`_segment_via_deficit`: a constructed
+        barrel is copper on every layer it spans, so it must keep
+        ``rules.via_clearance`` from foreign trace centrelines (the exact
+        threshold ``RoutingGrid.worst_via_segment_deficit`` and
+        ``via_clears_foreign_segment`` use) and from foreign barrels.
+        """
+        universe = self._shadow_foreign_universe
+        if universe is None:
+            return 0.0, None
+        clearance = self.autorouter.rules.via_clearance
+        worst = 0.0
+        worst_loc: tuple[float, float] | None = None
+        for seg in universe.segments:
+            if seg.net == via.net:
+                continue
+            if self._seg_via_colocated(seg, via):
+                continue
+            deficit = segment_via_deficit(seg, via, clearance)
+            if deficit > worst:
+                worst, worst_loc = deficit, (via.x, via.y)
+        v_lo = min(via.layers[0].value, via.layers[1].value)
+        v_hi = max(via.layers[0].value, via.layers[1].value)
+        for other in universe.vias:
+            if other.net == via.net:
+                continue
+            o_lo = min(other.layers[0].value, other.layers[1].value)
+            o_hi = max(other.layers[0].value, other.layers[1].value)
+            if o_hi < v_lo or o_lo > v_hi:
+                continue  # barrels never share a layer
+            dist = math.hypot(via.x - other.x, via.y - other.y)
+            deficit = via.diameter / 2 + other.diameter / 2 + clearance - dist
+            if deficit > worst:
+                worst, worst_loc = deficit, (other.x, other.y)
+        return worst, worst_loc
+
+    def _route_via_violation(
+        self,
+        route: Route,
+    ) -> tuple[float, tuple[float, float] | None]:
+        """Worst foreign-via clearance deficit over an assembled route (#4575).
+
+        Sibling of :meth:`_route_pad_violation` for the via quadrant.  Both
+        directions of the P/N interaction are covered by measuring the
+        CONSTRUCTED leg only, because the partner is registered as foreign
+        copper: the leg's segments are checked against the partner's barrels
+        AND the leg's barrels against the partner's segments and barrels.
+
+        Only the CONSTRUCTED leg is ever passed in.  The guide leg is not
+        measured against third-party copper: it is ordinary single-ended
+        router output that keeps the single-ended finalization backstops, so
+        declining a side over a pre-existing guide graze would cost coupling
+        without fixing anything the constructor introduced (the #4571
+        rationale, one quadrant over).  Guide copper the CONSTRUCTOR added --
+        the length matcher's meander teeth, the via mirror's z-jog -- is
+        still covered, because it is screened as it is built (against a
+        universe widened with the sibling leg) and because the post-assembly
+        call re-registers the final guide as foreign copper.
+
+        Returns ``(worst_deficit, worst_location)``; ``worst_deficit <=
+        _SHADOW_VIA_DEFICIT_EPS`` means the route is clean.  Always
+        ``(0.0, None)`` when the gate is disarmed.
+        """
+        if self._shadow_foreign_universe is None:
+            return 0.0, None
+        worst = 0.0
+        worst_loc: tuple[float, float] | None = None
+        for seg in route.segments:
+            deficit, loc = self._segment_via_deficit(seg)
+            if deficit > worst:
+                worst, worst_loc = deficit, loc
+        for via in route.vias:
+            deficit, loc = self._via_copper_deficit(via)
+            if deficit > worst:
+                worst, worst_loc = deficit, loc
+        return worst, worst_loc
+
+    def _route_via_clear(self, route: Route | None) -> bool:
+        """True when an assembled candidate keeps foreign-via clearance (#4575)."""
+        ok = route is not None and self._route_via_violation(route)[0] <= _SHADOW_VIA_DEFICIT_EPS
+        if not ok and route is not None:
+            self._shadow_via_gate_rejections += 1
+        return ok
+
     def _pad_deficit_arcs(
         self,
         x1: float,
@@ -4636,6 +4983,17 @@ class DiffPairRouter:
                 # shipping a short.
                 if any(
                     not self._span_pad_clear(x1, y1, x2, y2, layer_idx, head.net, width)
+                    for x1, y1, x2, y2 in segs
+                ):
+                    continue
+                # Issue #4575: the partner universe this method screens against
+                # is ``partner_segments`` -- SEGMENTS.  A landing tail drawn
+                # 0.090 mm from the partner leg's via BARREL therefore passes
+                # every check above and ships (board-06 seed 42, USB3_TX1).
+                # Screen it here, inside the loop, so a grazing candidate loses
+                # to a later detour instead of declining the side.
+                if any(
+                    not self._span_via_clear(x1, y1, x2, y2, layer_idx, head.net, width)
                     for x1, y1, x2, y2 in segs
                 ):
                     continue
@@ -5159,11 +5517,12 @@ class DiffPairRouter:
         partner_segments: list[Segment],
         partner_clearance: float,
     ) -> bool:
-        """The three gates every synthesized tail span must pass (#4572).
+        """The four gates every synthesized tail span must pass (#4572).
 
-        Deliberately the SAME three, in the same order, as
+        Deliberately the SAME four, in the same order, as
         :meth:`_synthesize_tail`'s candidate loop: grid raster, partner
-        clearance floor (#4460), exact foreign-pad clearance (#4571/PR #4573).
+        clearance floor (#4460), exact foreign-pad clearance (#4571/PR #4573)
+        and exact foreign-via clearance (#4575).
         """
         for x1, y1, x2, y2 in spans:
             if not self._segment_cells_clear(pathfinder, x1, y1, x2, y2, layer_idx, net):
@@ -5176,6 +5535,9 @@ class DiffPairRouter:
                 return False
         for x1, y1, x2, y2 in spans:
             if not self._span_pad_clear(x1, y1, x2, y2, layer_idx, net, width):
+                return False
+        for x1, y1, x2, y2 in spans:
+            if not self._span_via_clear(x1, y1, x2, y2, layer_idx, net, width):
                 return False
         return True
 
@@ -5552,6 +5914,14 @@ class DiffPairRouter:
                 # loses to a later via-site candidate instead of shipping.
                 if self._route_pad_violation(route)[0] > _SHADOW_PAD_DEFICIT_EPS:
                     continue
+                # Issue #4575: the barrel screens above measure this crossover
+                # against the partner's SEGMENTS only, and the raster cannot
+                # see the partner at all.  Hold the assembled crossover to the
+                # exact ``clearance_segment_via`` / via-vs-via predicates too,
+                # so a via site that grazes the partner's barrel loses to the
+                # next candidate pair rather than shipping.
+                if not self._route_via_clear(route):
+                    continue
                 return route
         return None
 
@@ -5725,6 +6095,8 @@ class DiffPairRouter:
             why = "lock-leaked-a-via"
         elif self._route_pad_violation(cand)[0] > _SHADOW_PAD_DEFICIT_EPS:
             why = "pad-deficit"
+        elif not self._route_via_clear(cand):
+            why = "via-deficit"  # issue #4575
         elif partner_segments and not self._tail_partner_clear(cand, partner_segments, seg_clear):
             why = "partner-clearance"
         if _SHADOW_DEBUG:
@@ -5858,6 +6230,14 @@ class DiffPairRouter:
             ]
             if any(self._via_pad_deficit(v) > _SHADOW_PAD_DEFICIT_EPS for v in vias):
                 continue
+            # Issue #4575: the mirrored jog drills TWO new barrels into copper
+            # the raster does not fully model (the partner is not in the grid
+            # at all).  Hold them to the exact via-vs-foreign-segment /
+            # via-vs-via predicates before anything is mutated, exactly as the
+            # pad predicate above -- otherwise the symmetry repair itself
+            # becomes a new source of ``clearance_segment_via`` findings.
+            if any(self._via_copper_deficit(v)[0] > _SHADOW_VIA_DEFICIT_EPS for v in vias):
+                continue
             if not self._segment_cells_clear(pathfinder, ax, ay, bx, by, jog_idx, net):
                 continue
             jog_seg = Segment(
@@ -5872,6 +6252,8 @@ class DiffPairRouter:
             )
             if not self._segment_pad_clear(jog_seg):
                 continue
+            if self._segment_via_deficit(jog_seg)[0] > _SHADOW_VIA_DEFICIT_EPS:
+                continue  # issue #4575: relocated copper vs foreign barrels
             if partner_segments and any(
                 self._min_distance_to_partner(v.x, v.y, v.x, v.y, partner_segments, None)
                 < via_clear
@@ -5947,14 +6329,21 @@ class DiffPairRouter:
                 if count % 2:
                     return False
                 for _ in range(count // 2):
-                    if not self._mirror_z_jog(
-                        deficient,
-                        layer_pair,
-                        pathfinder,
-                        list(partner.segments),
-                        deficient.net,
-                        deficient.net_name,
-                    ):
+                    # Issue #4575: the mirror drills into the pair's OTHER
+                    # constructed leg's neighbourhood, and that leg is in
+                    # neither the committed routes nor the pre-assembly guide.
+                    # Widen the armed universe so ``_mirror_z_jog``'s barrel
+                    # screens can see the partner's own barrels and traces.
+                    with self._shadow_foreign_copper_extended(partner):
+                        mirrored = self._mirror_z_jog(
+                            deficient,
+                            layer_pair,
+                            pathfinder,
+                            list(partner.segments),
+                            deficient.net,
+                            deficient.net_name,
+                        )
+                    if not mirrored:
                         return False
         return self._via_layer_multiset(guide_route, num_copper_layers) == (
             self._via_layer_multiset(shadow_route, num_copper_layers)
@@ -5986,7 +6375,7 @@ class DiffPairRouter:
         PCIE_RX / USB3_TX1).  When ``prefer_planar_layer`` names the layer the
         partner's corresponding copper occupies, ONE extra probe is spent with
         the router locked to that layer, and its result is preferred whenever
-        it passes the same ``_pad_ok`` / ``_tail_partner_clear`` gates as the
+        it passes the same ``_copper_ok`` / ``_tail_partner_clear`` gates as the
         unbiased probe.  ``None`` (the default, and the only value reachable
         with shadow construction off) skips the extra probe entirely, so the
         legacy chain below is untouched.
@@ -6008,13 +6397,25 @@ class DiffPairRouter:
         # tail is the constructor's most direct route to a pad short.  Discard
         # any probe result whose copper violates the exact pad predicate; the
         # caller's anchor-stepping retry then gets the attempt instead.
-        def _pad_ok(cand: Route | None) -> bool:
-            return cand is not None and self._route_pad_violation(cand)[0] <= (
-                _SHADOW_PAD_DEFICIT_EPS
+        # Issue #4575: the same argument one quadrant over, and it is the
+        # sharper one HERE.  The last-resort acceptance below settles for
+        # ``_tail_partner_clear(..., 0.0)``, whose barrel bound drops the
+        # clearance term entirely -- copper is only required not to physically
+        # intersect the partner.  Rejecting a via-violating probe up front (so
+        # both ``plain`` and ``biased`` are already ``None`` by the time that
+        # loop runs) keeps the last-resort path consistent with the
+        # post-assembly gate: the caller's anchor-stepping retry gets the
+        # attempt instead of the constructor emitting copper the gate is
+        # guaranteed to reject.
+        def _copper_ok(cand: Route | None) -> bool:
+            return (
+                cand is not None
+                and self._route_pad_violation(cand)[0] <= _SHADOW_PAD_DEFICIT_EPS
+                and self._route_via_clear(cand)
             )
 
         plain = _probe(None, 1)
-        if not _pad_ok(plain):
+        if not _copper_ok(plain):
             plain = None
 
         # Issue #4570: the unbiased probe stays FIRST CHOICE whenever it is
@@ -6050,7 +6451,7 @@ class DiffPairRouter:
                     biased = None
             else:
                 biased = _probe(sites, radius_cells)
-            if not _pad_ok(biased):
+            if not _copper_ok(biased):
                 biased = None
             if biased is not None and self._tail_partner_clear(biased, partner_segments, seg_clear):
                 return biased
@@ -6418,13 +6819,23 @@ class DiffPairRouter:
         )
         if need <= 1e-6:
             return 0.0
-        added = self._meander_route_to_length(
-            shorter,
-            list(partner.segments),
-            pathfinder,
-            need,
-            min_partner_center,
-        )
+        # Issue #4575: ``partner`` here is the pair's OTHER constructed leg --
+        # copper that exists in neither the committed route list nor the
+        # pre-assembly guide, so the foreign-via gate armed for this
+        # construction cannot see its barrels.  A tooth is displaced AWAY from
+        # the partner's traces, which says nothing about the partner's VIAS
+        # (board-06 seed 42: a guide-leg tooth landed 0.090 mm from the shadow
+        # leg's own landing via).  Widen the universe for the duration so each
+        # candidate tooth is screened against them and a violating tooth simply
+        # loses to the next window.
+        with self._shadow_foreign_copper_extended(partner):
+            added = self._meander_route_to_length(
+                shorter,
+                list(partner.segments),
+                pathfinder,
+                need,
+                min_partner_center,
+            )
         if _SHADOW_DEBUG:
             print(
                 f"    [coupled-shadow-match] {pair.name} delta={delta:+.3f} "
@@ -6518,6 +6929,11 @@ class DiffPairRouter:
                     # against the exact foreign-pad predicate, not only the
                     # (fine-pitch-shrunk) raster halo.
                     if not self._span_pad_clear(s.x1, s.y1, s.x2, s.y2, _li, _net, _w):
+                        return False
+                    # Issue #4575: and against the exact foreign-VIA predicate.
+                    # A tooth is pushed AWAY from the partner, straight into
+                    # whatever barrels sit on the far side.
+                    if not self._span_via_clear(s.x1, s.y1, s.x2, s.y2, _li, _net, _w):
                         return False
                     if (
                         self._min_distance_to_partner(
@@ -6671,12 +7087,19 @@ class DiffPairRouter:
                 continue
             if cur.layer == prev.layer and gap <= res:
                 li = self.autorouter.grid.layer_to_index(cur.layer.value)
-                # Issue #4571: the inserted connector is real copper -- hold it
-                # to the exact foreign-pad predicate too, not just the raster.
-                if self._segment_cells_clear(
-                    pathfinder, prev.x2, prev.y2, cur.x1, cur.y1, li, cur.net
-                ) and self._span_pad_clear(
-                    prev.x2, prev.y2, cur.x1, cur.y1, li, cur.net, cur.width
+                # Issue #4571 / #4575: the inserted connector is real copper --
+                # hold it to the exact foreign-pad AND foreign-via predicates
+                # too, not just the raster.
+                if (
+                    self._segment_cells_clear(
+                        pathfinder, prev.x2, prev.y2, cur.x1, cur.y1, li, cur.net
+                    )
+                    and self._span_pad_clear(
+                        prev.x2, prev.y2, cur.x1, cur.y1, li, cur.net, cur.width
+                    )
+                    and self._span_via_clear(
+                        prev.x2, prev.y2, cur.x1, cur.y1, li, cur.net, cur.width
+                    )
                 ):
                     out.append(
                         Segment(
@@ -6787,6 +7210,11 @@ class DiffPairRouter:
                     # into a foreign pad's clearance halo loses to the other
                     # variant (or the segment is kept as-is, unchanged).
                     if not self._span_pad_clear(x1, y1, x2, y2, _li, _seg.net, _seg.width):
+                        return False
+                    # Issue #4575: same argument for a foreign VIA barrel --
+                    # the bulge is new copper the raster's via halo does not
+                    # measure at the exact ``clearance_segment_via`` threshold.
+                    if not self._span_via_clear(x1, y1, x2, y2, _li, _seg.net, _seg.width):
                         return False
                 return True
 
@@ -7366,8 +7794,6 @@ class DiffPairRouter:
         self._last_shadow_overlap_locations = []
         if not guide.segments:
             return None
-        grid = self.autorouter.grid
-        rules = self.autorouter.rules
         # Issue #4553: compress the guide's per-cell staircase FIRST, so the
         # parallel offset is taken from a polyline with long straight runs.
         # The caller's ``guide`` object is left untouched (it is reused by the
@@ -7382,6 +7808,59 @@ class DiffPairRouter:
         guide_was_simplified = guide is not raw_guide
         if not guide.segments:
             return None
+        # Issue #4575: register the guide (the PARTNER leg) plus every
+        # committed route as foreign copper for the whole construction, so the
+        # exact segment-vs-via / via-vs-via predicates are reachable from every
+        # tail-synthesis screen below and from the post-assembly gate.  Armed
+        # here -- after simplification -- so the registered partner segments are
+        # exactly the ones the tail screens receive as ``partner_segs``.  The
+        # gate is a no-op outside this block, which is what keeps the
+        # shadow-construction-OFF path unchanged.
+        outermost = self._shadow_foreign_universe is None
+        if outermost:
+            self._shadow_via_gate_rejections = 0
+        with self._shadow_foreign_copper(guide):
+            result = self._shadow_route_pair_body(
+                pair,
+                spec,
+                pathfinder,
+                guide,
+                raw_guide,
+                guide_was_simplified,
+                spacing_cells,
+                swap_roles,
+            )
+        if outermost and self._shadow_via_gate_rejections:
+            # One line, only when the gate actually did something: N candidates
+            # were rejected for grazing a foreign barrel and lost to a LATER
+            # candidate (a repair), which is the outcome that does not cost
+            # reach.  A side that could not be repaired says so separately, via
+            # the ``via-clearance`` decline line inside the body.
+            print(
+                f"    [coupled-shadow] {pair.name} foreign-via gate rejected "
+                f"{self._shadow_via_gate_rejections} candidate(s) (issue #4575)"
+            )
+        return result
+
+    def _shadow_route_pair_body(
+        self,
+        pair: DifferentialPair,
+        spec: CoupledSegmentSpec,
+        pathfinder: CoupledPathfinder,
+        guide: Route,
+        raw_guide: Route,
+        guide_was_simplified: bool,
+        spacing_cells: int,
+        swap_roles: bool,
+    ) -> tuple[Route, Route] | None:
+        """Body of :meth:`_shadow_route_pair` (split out for issue #4575).
+
+        Separated ONLY so the caller can arm ``_shadow_foreign_copper``
+        around the whole construction without re-indenting it; the guide has
+        already been simplified (or not) by the caller.
+        """
+        grid = self.autorouter.grid
+        rules = self.autorouter.rules
         if swap_roles:
             shadow_start, shadow_end = spec.p_start, spec.p_end
         else:
@@ -8106,6 +8585,38 @@ class DiffPairRouter:
                     f"{pair.name}; trying other side"
                 )
                 self._last_shadow_decline_reason = "pad-clearance"  # #4571
+                continue
+            # Issue #4575 (fourth pass): FOREIGN-VIA clearance self-check, the
+            # quadrant adjacent to #4571's.  ``_pair_has_physical_overlap``
+            # above does look at barrels, but only at the bodies-intersect
+            # threshold (``via_r + seg_w/2``, no clearance term) -- so a
+            # constructed leg passing 0.090 mm from the partner's barrel is
+            # "clean" to it and is then reported by ``clearance_segment_via``
+            # at 0.102 mm (board-06 seed 42, USB3_TX1+ vs USB3_TX1-).  The
+            # exact predicates close it here, at the same failover point.
+            #
+            # Both directions of the P/N interaction are covered by measuring
+            # the CONSTRUCTED leg alone, because the guide is registered as
+            # foreign copper: shadow segments vs guide barrels, and shadow
+            # barrels vs guide segments/barrels.  The guide leg is never gated
+            # against THIRD-PARTY copper (the #4571 rationale above).
+            #
+            # The universe is re-armed on ``guide_route_obj`` -- the FINAL
+            # guide geometry -- rather than reusing the ambient snapshot: the
+            # #4570 via mirror and the #4553 length matcher both mutate the
+            # guide leg after that snapshot was taken, and it was exactly one
+            # of those late guide-leg meander teeth that grazed the shadow's
+            # landing barrel at 0.090 mm on board-06 seed 42.
+            with self._shadow_foreign_copper(guide_route_obj):
+                via_deficit, via_loc = self._route_via_violation(shadow_route)
+            if via_deficit > _SHADOW_VIA_DEFICIT_EPS:
+                loc_str = f" near ({via_loc[0]:.3f}, {via_loc[1]:.3f})" if via_loc else ""
+                print(
+                    f"    [coupled-shadow] side={side:+.0f} foreign-via "
+                    f"clearance deficit {via_deficit:.3f}mm{loc_str} for "
+                    f"{pair.name}; trying other side"
+                )
+                self._last_shadow_decline_reason = "via-clearance"  # #4575
                 continue
             if not via_symmetric:
                 # Issue #4570: this side is otherwise legal but its two legs

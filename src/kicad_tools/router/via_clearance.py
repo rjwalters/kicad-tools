@@ -451,6 +451,61 @@ class _ViaLike(Protocol):
     # ``layers`` is a 2-tuple whose elements expose ``.value``.
 
 
+def segment_via_deficit(
+    seg: _SegmentLike,
+    via: _ViaLike,
+    trace_clearance: float,
+    hard_intersection_only: bool = False,
+) -> float:
+    """Signed clearance deficit of a segment against a foreign-net via.
+
+    Issue #4575.  The DEFICIT form of :func:`segment_clears_foreign_via`:
+    returns ``required - actual`` in mm, so ``> 0`` is a violation whose
+    magnitude is exactly how much clearance is missing and ``<= 0`` is
+    clean.  This is the same sign convention
+    :meth:`kicad_tools.router.grid.RoutingGrid.worst_via_segment_deficit`
+    and :meth:`~kicad_tools.router.grid.RoutingGrid.worst_segment_pad_deficit`
+    use, so a gate built on it can report "0.012 mm short" the way the DRC
+    finding does rather than only "bad".
+
+    Split out of the boolean predicate (which now delegates here) so a
+    caller that needs the magnitude -- the diff-pair shadow constructor's
+    segment-vs-via gate -- cannot drift from the predicate's threshold
+    arithmetic.  This is the #4571 ``_span_pad_deficit`` /
+    ``worst_segment_pad_deficit`` split applied to the via quadrant.
+
+    Layer-awareness is inherited: a via that does not span the segment's
+    layer returns ``-inf`` (infinitely clear), never a small negative that
+    a ``max()`` accumulation could mistake for a near-miss.
+
+    Same-net filtering remains the CALLER's responsibility, as it is for
+    :func:`segment_clears_foreign_via`.
+
+    Args:
+        seg: The candidate segment.  Reads ``x1/y1/x2/y2/width/layer``.
+        via: A foreign-net via to measure against.  Reads
+            ``x/y/diameter/layers``.
+        trace_clearance: Manufacturer minimum copper-to-copper clearance
+            in mm (use ``via_clearance`` for the via-vs-via-barrel
+            direction, matching ``worst_via_segment_deficit``).
+        hard_intersection_only: When True, drop ``trace_clearance`` from
+            the threshold -- the physical-overlap-only bound.
+
+    Returns:
+        ``required - dist`` where ``required = via.diameter/2 +
+        seg.width/2 (+ trace_clearance)``.
+    """
+    v_lo = min(via.layers[0].value, via.layers[1].value)
+    v_hi = max(via.layers[0].value, via.layers[1].value)
+    if not (v_lo <= seg.layer.value <= v_hi):
+        return -math.inf  # Via doesn't reach the segment's layer.
+    dist = point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
+    required = via.diameter / 2 + seg.width / 2
+    if not hard_intersection_only:
+        required += trace_clearance
+    return required - dist
+
+
 def segment_clears_foreign_via(
     seg: _SegmentLike,
     via: _ViaLike,
@@ -517,19 +572,20 @@ def segment_clears_foreign_via(
     Returns:
         True if the segment clears the via, False on violation.
     """
-    # Layer overlap check: vias span layers[0]..layers[1] inclusive.
-    v_lo = min(via.layers[0].value, via.layers[1].value)
-    v_hi = max(via.layers[0].value, via.layers[1].value)
-    if not (v_lo <= seg.layer.value <= v_hi):
-        return True  # Via doesn't reach the segment's layer.
-
-    dist = point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
-    required = via.diameter / 2 + seg.width / 2
-    if not hard_intersection_only:
-        required += trace_clearance
+    # Layer overlap, distance and threshold all live in
+    # ``segment_via_deficit`` (issue #4575) so the boolean predicate and
+    # the magnitude-reporting gate can never disagree.  A via that does
+    # not span the segment's layer yields ``-inf`` there, which satisfies
+    # the comparison below exactly as the old early ``return True`` did.
+    #
     # 1e-9 epsilon mirrors ``point_clear_of_copper``'s convention so a
     # segment exactly at the clearance threshold is admitted.
-    return dist >= required - 1e-9
+    return (
+        segment_via_deficit(
+            seg, via, trace_clearance, hard_intersection_only=hard_intersection_only
+        )
+        <= 1e-9
+    )
 
 
 def via_clears_foreign_segment(

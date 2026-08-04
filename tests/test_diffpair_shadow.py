@@ -1446,6 +1446,30 @@ def _shadow_setup(spacing_cells: int, bend_end: tuple[float, float]):
     return dpr, pair, spec, pathfinder, guide
 
 
+def _defeat_pair_self_check_gates(mp) -> None:
+    """Stub off BOTH constructed-pair copper self-checks (issue #4575).
+
+    The fixtures below deliberately drive the constructor with DEGENERATE
+    geometry -- a 0.4 mm coupled gap alongside a 0.7 mm-diameter guide via,
+    or a stub tail that drops a 0.6 mm via straight onto the body anchor --
+    so that the single property under test is observable in what the
+    constructor COMMITS rather than being masked by a blanket decline.  That
+    geometry PHYSICALLY overlaps the partner (0.40 mm centre-to-centre
+    against a 0.45 mm overlap threshold), which is why
+    ``_pair_has_physical_overlap`` has always been stubbed off here.
+
+    ``_route_via_violation`` is the CLEARANCE sibling of that same overlap
+    check -- it fires on exactly the same geometry, one quadrant over -- so
+    it is stubbed off alongside it.  Leaving it armed would turn every one of
+    these fixtures into a test of the #4575 gate instead of the property it
+    was written for.
+    """
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    mp.setattr(DiffPairRouter, "_pair_has_physical_overlap", lambda self, p, n: False, raising=True)
+    mp.setattr(DiffPairRouter, "_route_via_violation", lambda self, r: (0.0, None), raising=True)
+
+
 def _stub_tail_route(
     self, _pf, head, goal, _layer, _label, _name, partner_segments=None, prefer_planar=False
 ):
@@ -1508,12 +1532,10 @@ def test_shadow_via_clears_partner_at_tight_gap(monkeypatch):
     )
 
     monkeypatch.setattr(DiffPairRouter, "_tail_route", _stub_tail_route, raising=True)
-    # Defeat the belt-and-braces overlap gate so we observe the via the
+    # Defeat the belt-and-braces copper self-checks so we observe the via the
     # constructor PRODUCES (the fix must clear the guide by construction,
     # not merely fail the side over to a reject-everything None).
-    monkeypatch.setattr(
-        DiffPairRouter, "_pair_has_physical_overlap", lambda self, p, n: False, raising=True
-    )
+    _defeat_pair_self_check_gates(monkeypatch)
 
     result = dpr._shadow_route_pair(pair, spec, pathfinder, guide, spacing_cells)
     assert result is not None, "shadow constructor should place a clearing via, not give up"
@@ -1567,13 +1589,11 @@ def test_shadow_via_guard_is_load_bearing(monkeypatch):
                 spacing_cells, bend_end=_SHADOW_VIA_GUARD_BEND_END
             )
             mp.setattr(DiffPairRouter, "_tail_route", _stub_tail_route, raising=True)
-            # Stub OFF the belt-and-braces overlap gate in both runs: it is the
-            # production backstop, but here we are isolating the GUARD's effect,
-            # so what the constructor COMMITS (clean vs short) must be the
-            # guard's doing, not the gate's.
-            mp.setattr(
-                DiffPairRouter, "_pair_has_physical_overlap", lambda self, p, n: False, raising=True
-            )
+            # Stub OFF the belt-and-braces copper self-checks in both runs:
+            # they are the production backstop, but here we are isolating the
+            # GUARD's effect, so what the constructor COMMITS (clean vs short)
+            # must be the guard's doing, not the gates'.
+            _defeat_pair_self_check_gates(mp)
             if disable_guard:
                 # ``_min_distance_to_partner`` is called in exactly one place
                 # inside ``_shadow_route_pair`` -- the #3541 via-vs-guide guard.
@@ -2676,6 +2696,386 @@ def test_close_shadow_chain_refuses_a_connector_through_a_pad_halo():
 
 
 # ---------------------------------------------------------------------------
+# 14. exact foreign-VIA clearance gate for constructed copper (issue #4575)
+# ---------------------------------------------------------------------------
+#
+# The quadrant adjacent to #4571's.  The constructor's only via-aware copper
+# self-check is ``_pair_has_physical_overlap``, and it is an OVERLAP detector:
+# ``via.diameter/2 + seg.width/2``, no clearance term.  Worse, the partner
+# universe every tail screen receives is ``list(guide.segments)`` -- the
+# guide's VIAS are not in it at all.  So a constructed leg passing 0.090 mm
+# from the partner leg's barrel is accepted by every construction-time gate and
+# then reported by ``clearance_segment_via`` at the 0.102 mm board minimum
+# (measured on board-06 shadow-ON seed 42: USB3_TX1+ copper vs a USB3_TX1-
+# barrel).  A diff-pair net is excluded from ``drc_verify_and_nudge`` (#3508),
+# so nothing downstream repairs it.
+#
+# THE VACUITY TRAP these tests pin: ``ClearanceRule`` exempts a declared diff
+# pair from the generic clearance check ONLY when both elements are SEGMENTS,
+# so a segment-vs-via pair between P and N is checked at the FULL board
+# minimum.  A gate built on the intra-pair relaxation would be strictly looser
+# than the checker and could never fire on the finding it exists to close.
+
+
+def _via_gate_via(x, y, net, name, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU)):
+    from kicad_tools.router.primitives import Via
+
+    return Via(
+        x=x,
+        y=y,
+        drill=0.35,
+        diameter=diameter,
+        layers=layers,
+        net=net,
+        net_name=name,
+    )
+
+
+def _via_gate_seg(x1, y1, x2, y2, net=7, name="USB3_TX1+", width=0.2, layer=Layer.F_CU):
+    return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=width, layer=layer, net=net, net_name=name)
+
+
+# Geometry used throughout this section.  A 0.7 mm via reads as a 0.35 mm
+# barrel radius, a 0.2 mm trace contributes 0.1 mm of half-width, and the
+# default manufacturer clearance is 0.2 mm.  So:
+#   * copper physically INTERSECTS below 0.45 mm centre-to-centre, and
+#   * the DRC requires 0.65 mm.
+# A centreline 0.55 mm away is therefore NON-overlapping (the overlap gate
+# accepts it) yet 0.10 mm short of clearance -- the exact regime the board-06
+# 0.090 mm finding lives in.
+_BARREL_GAP = 0.55
+_BARREL_DEFICIT = 0.10
+_BARREL_OVERLAP_BOUND = 0.45
+
+
+def test_segment_via_gate_rejects_a_subclearance_nonoverlapping_barrel_gap():
+    """AC-5: the gate fires exactly where the overlap detector cannot.
+
+    The two legs are a declared diff pair, the barrel belongs to the PARTNER,
+    and the copper does not intersect -- so ``_pair_has_physical_overlap``
+    (the only pre-#4575 via-aware self-check) accepts it.  The exact
+    ``clearance_segment_via`` predicate does not.
+    """
+    from kicad_tools.router.via_clearance import segment_clears_foreign_via
+
+    dpr = _pad_gate_router()
+    rules = dpr.autorouter.rules
+
+    partner = Route(net=8, net_name="USB3_TX1-")
+    partner.vias.append(_via_gate_via(5.0, 5.0, net=8, name="USB3_TX1-"))
+    shadow = Route(net=7, net_name="USB3_TX1+")
+    seg = _via_gate_seg(3.0, 5.0 + _BARREL_GAP, 7.0, 5.0 + _BARREL_GAP)
+    shadow.segments.append(seg)
+
+    # Sanity: this is the non-overlapping-but-sub-clearance regime.
+    assert _BARREL_OVERLAP_BOUND < _BARREL_GAP < _BARREL_OVERLAP_BOUND + rules.trace_clearance
+    assert dpr._pair_has_physical_overlap(partner, shadow) is False
+    assert segment_clears_foreign_via(seg, partner.vias[0], rules.trace_clearance) is False
+
+    with dpr._shadow_foreign_copper(partner):
+        deficit, loc = dpr._route_via_violation(shadow)
+    assert deficit == pytest.approx(_BARREL_DEFICIT, abs=1e-9)
+    assert loc == (5.0, 5.0)
+
+
+def test_via_gate_threshold_is_the_inter_net_clearance_not_the_intra_pair_one():
+    """AC-5 (the vacuity trap), stated as arithmetic.
+
+    ``DiffPairClearanceIntraRule``'s per-class threshold is deliberately
+    TIGHTER than the manufacturer clearance, and ``ClearanceRule``'s diff-pair
+    exemption covers segment-to-SEGMENT edges only.  Measuring this quadrant
+    against the intra-pair bound would therefore produce a gate that passes
+    the very geometry the DRC reports.
+    """
+    from kicad_tools.router.via_clearance import segment_via_deficit
+
+    dpr = _pad_gate_router()
+    rules = dpr.autorouter.rules
+    via = _via_gate_via(5.0, 5.0, net=8, name="USB3_TX1-")
+    seg = _via_gate_seg(3.0, 5.0 + _BARREL_GAP, 7.0, 5.0 + _BARREL_GAP)
+
+    intra_pair = 0.08  # a representative per-class intra-pair clearance
+    assert intra_pair < rules.trace_clearance
+    # The trap: at the relaxed bound this geometry reads CLEAN ...
+    assert segment_via_deficit(seg, via, intra_pair) < 0.0
+    # ... while the threshold the checker actually applies reports the deficit.
+    assert segment_via_deficit(seg, via, rules.trace_clearance) == pytest.approx(
+        _BARREL_DEFICIT, abs=1e-9
+    )
+
+
+def test_segment_via_deficit_agrees_with_the_boolean_predicate():
+    """Drift guard: the gate and ``segment_clears_foreign_via`` are one formula."""
+    from kicad_tools.router.via_clearance import segment_clears_foreign_via, segment_via_deficit
+
+    via = _via_gate_via(5.0, 5.0, net=8, name="USB3_TX1-")
+    for dy in (0.30, 0.44, 0.45, 0.55, 0.6499, 0.65, 0.80):
+        seg = _via_gate_seg(3.0, 5.0 + dy, 7.0, 5.0 + dy)
+        clear = segment_clears_foreign_via(seg, via, 0.2)
+        assert clear == (segment_via_deficit(seg, via, 0.2) <= 1e-9), dy
+
+
+def test_via_gate_ignores_the_segments_own_net_via():
+    """A tail MUST still be able to land on (and run into) its own net's via."""
+    dpr = _pad_gate_router()
+
+    own = Route(net=7, net_name="USB3_TX1+")
+    own.vias.append(_via_gate_via(5.0, 5.0, net=7, name="USB3_TX1+"))
+    shadow = Route(net=7, net_name="USB3_TX1+")
+    shadow.segments.append(_via_gate_seg(3.0, 5.0, 7.0, 5.0))  # straight through it
+
+    with dpr._shadow_foreign_copper(own):
+        assert dpr._route_via_violation(shadow)[0] == 0.0
+
+
+def test_partner_via_on_a_shared_connector_ref_is_still_measured():
+    """AC-6: ``exclude_net`` only -- no ``exclude_refs`` carve-out (#3545).
+
+    Diff-pair P and N legs routinely land on the same fine-pitch connector
+    ``ref`` (board-06's FFC carries both MIPI_CLK+ and MIPI_CLK-).  The #3545
+    same-component carve-out that the single-ended backstop applies would
+    exempt the partner's copper on exactly the connectors this gate exists
+    for, so the gate must never consult a ref at all.
+    """
+    dpr = _pad_gate_router()
+    grid = dpr.autorouter.grid
+    grid.add_pad(_pad_at(5.0, 5.0, net=8, name="MIPI_CLK+", ref="J1", pin="1"))
+    grid.add_pad(_pad_at(5.4, 5.0, net=7, name="MIPI_CLK-", ref="J1", pin="2"))
+    assert grid._component_is_fine_pitch("J1") is True
+
+    partner = Route(net=8, net_name="MIPI_CLK+")
+    partner.vias.append(_via_gate_via(5.0, 5.0, net=8, name="MIPI_CLK+"))
+    shadow = Route(net=7, net_name="MIPI_CLK-")
+    shadow.segments.append(
+        _via_gate_seg(3.0, 5.0 + _BARREL_GAP, 7.0, 5.0 + _BARREL_GAP, net=7, name="MIPI_CLK-")
+    )
+
+    with dpr._shadow_foreign_copper(partner):
+        assert dpr._route_via_violation(shadow)[0] == pytest.approx(_BARREL_DEFICIT, abs=1e-9)
+
+
+def test_segment_endpoint_colocated_with_a_foreign_via_is_not_flagged():
+    """AC-7: mirror ``ClearanceRule``'s #2706 in-pad-escape carve-out.
+
+    The router's in-pad escape places segment endpoints EXACTLY at via
+    centres, and the DRC skips such pairs.  A gate without the carve-out
+    would be STRICTER than the checker and decline sides over geometry that
+    is never reported -- pure reach loss for zero DRC gain.
+    """
+    dpr = _pad_gate_router()
+
+    foreign = Route(net=99, net_name="OTHER")
+    foreign.vias.append(_via_gate_via(5.0, 5.0, net=99, name="OTHER"))
+    shadow = Route(net=7, net_name="USB3_TX1+")
+    shadow.segments.append(_via_gate_seg(5.0, 5.0, 8.0, 5.0))  # endpoint ON the via centre
+
+    with dpr._shadow_foreign_copper(foreign):
+        assert dpr._route_via_violation(shadow)[0] == 0.0
+
+    # One quantum away from the carve-out epsilon the copper IS measured.
+    moved = Route(net=7, net_name="USB3_TX1+")
+    moved.segments.append(_via_gate_seg(5.01, 5.0, 8.0, 5.0))
+    with dpr._shadow_foreign_copper(foreign):
+        assert dpr._route_via_violation(moved)[0] > 0.0
+
+
+def test_blind_via_that_does_not_span_the_segments_layer_is_not_flagged():
+    """Layer-span awareness: a barrel is only copper where it actually runs."""
+    dpr = _pad_gate_router()
+
+    shadow = Route(net=7, net_name="USB3_TX1+")
+    shadow.segments.append(
+        _via_gate_seg(3.0, 5.0 + _BARREL_GAP, 7.0, 5.0 + _BARREL_GAP, layer=Layer.F_CU)
+    )
+
+    blind = Route(net=99, net_name="OTHER")
+    blind.vias.append(
+        _via_gate_via(5.0, 5.0, net=99, name="OTHER", layers=(Layer.B_CU, Layer.B_CU))
+    )
+    with dpr._shadow_foreign_copper(blind):
+        assert dpr._route_via_violation(shadow)[0] == 0.0
+
+    # Positive control: the SAME site as a through via does span F.Cu.
+    through = Route(net=99, net_name="OTHER")
+    through.vias.append(_via_gate_via(5.0, 5.0, net=99, name="OTHER"))
+    with dpr._shadow_foreign_copper(through):
+        assert dpr._route_via_violation(shadow)[0] == pytest.approx(_BARREL_DEFICIT, abs=1e-9)
+
+
+def test_via_gate_measures_the_via_vs_via_quadrant_too():
+    """A constructed BARREL must clear a foreign barrel at ``via_clearance``."""
+    dpr = _pad_gate_router()
+    rules = dpr.autorouter.rules
+    bound = rules.via_diameter + rules.via_clearance  # centre-to-centre
+
+    foreign = Route(net=99, net_name="OTHER")
+    foreign.vias.append(_via_gate_via(5.0, 5.0, net=99, name="OTHER"))
+
+    clean = Route(net=7, net_name="USB3_TX1+")
+    clean.vias.append(_via_gate_via(5.0 + bound, 5.0, net=7, name="USB3_TX1+"))
+    grazing = Route(net=7, net_name="USB3_TX1+")
+    grazing.vias.append(_via_gate_via(5.0 + bound - 0.05, 5.0, net=7, name="USB3_TX1+"))
+
+    with dpr._shadow_foreign_copper(foreign):
+        assert dpr._route_via_violation(clean)[0] == pytest.approx(0.0, abs=1e-9)
+        deficit, loc = dpr._route_via_violation(grazing)
+    assert deficit == pytest.approx(0.05, abs=1e-9)
+    assert loc == (5.0, 5.0)
+
+
+def test_via_gate_measures_a_constructed_barrel_against_foreign_segments():
+    """The mirror direction: shadow BARREL vs the partner's trace."""
+    dpr = _pad_gate_router()
+    rules = dpr.autorouter.rules
+    bound = rules.via_diameter / 2 + 0.1 + rules.via_clearance
+
+    partner = Route(net=8, net_name="USB3_TX1-")
+    partner.segments.append(_via_gate_seg(0.0, 5.0, 10.0, 5.0, net=8, name="USB3_TX1-"))
+    shadow = Route(net=7, net_name="USB3_TX1+")
+    shadow.vias.append(_via_gate_via(5.0, 5.0 + bound - 0.05, net=7, name="USB3_TX1+"))
+
+    with dpr._shadow_foreign_copper(partner):
+        assert dpr._route_via_violation(shadow)[0] == pytest.approx(0.05, abs=1e-9)
+
+
+def test_via_gate_is_a_no_op_when_disarmed():
+    """AC-8: outside a ``_shadow_route_pair`` call the gate does not exist.
+
+    This is what keeps the shadow-construction-OFF path (and every ordinary,
+    non-shadow ``_tail_route`` call) byte-identical.
+    """
+    dpr = _pad_gate_router()
+    shadow = Route(net=7, net_name="USB3_TX1+")
+    shadow.segments.append(_via_gate_seg(3.0, 5.0, 7.0, 5.0))
+    shadow.vias.append(_via_gate_via(5.0, 5.0, net=7, name="USB3_TX1+"))
+
+    partner = Route(net=8, net_name="USB3_TX1-")
+    partner.vias.append(_via_gate_via(5.0, 5.0 + _BARREL_GAP, net=8, name="USB3_TX1-"))
+
+    assert dpr._shadow_foreign_universe is None
+    assert dpr._route_via_violation(shadow) == (0.0, None)
+    assert dpr._span_via_clear(3.0, 5.0, 7.0, 5.0, 0, 7, 0.2) is True
+    # ... and it is restored to inert after an armed block, including nesting.
+    with dpr._shadow_foreign_copper(partner):
+        assert dpr._route_via_violation(shadow)[0] > 0.0
+        with dpr._shadow_foreign_copper(Route(net=8, net_name="P")):
+            assert dpr._route_via_violation(shadow) == (0.0, None)
+        assert dpr._route_via_violation(shadow)[0] > 0.0
+    assert dpr._shadow_foreign_universe is None
+    assert dpr._route_via_violation(shadow) == (0.0, None)
+
+
+def test_sibling_leg_copper_is_only_visible_inside_the_extended_universe():
+    """The board-06 residual's actual shape: LATE guide-leg copper.
+
+    The #4553 length matcher and the #4570 via mirror both mutate ONE leg
+    after the other leg is already built, and that sibling leg is in neither
+    the committed route list nor the pre-assembly guide.  So the ambient
+    universe cannot see its barrels; ``_shadow_foreign_copper_extended`` is
+    what makes the meander-tooth / z-jog screens see them.
+    """
+    dpr = _pad_gate_router()
+
+    guide = Route(net=8, net_name="USB3_TX1-")
+    guide.segments.append(_via_gate_seg(0.0, 5.0, 10.0, 5.0, net=8, name="USB3_TX1-"))
+    sibling = Route(net=8, net_name="USB3_TX1-")
+    sibling.vias.append(_via_gate_via(5.0, 5.0 + _BARREL_GAP, net=8, name="USB3_TX1-"))
+    tooth = Route(net=7, net_name="USB3_TX1+")
+    tooth.segments.append(_via_gate_seg(3.0, 5.0 + 2 * _BARREL_GAP, 7.0, 5.0 + 2 * _BARREL_GAP))
+
+    with dpr._shadow_foreign_copper(guide):
+        # Blind: the sibling leg's barrel is nowhere in the universe.
+        assert dpr._route_via_violation(tooth)[0] == 0.0
+        with dpr._shadow_foreign_copper_extended(sibling):
+            assert dpr._route_via_violation(tooth)[0] == pytest.approx(_BARREL_DEFICIT, abs=1e-9)
+        # ... and the widening is scoped.
+        assert dpr._route_via_violation(tooth)[0] == 0.0
+    # Disarmed, the extension is a no-op rather than an implicit arming.
+    with dpr._shadow_foreign_copper_extended(sibling):
+        assert dpr._shadow_foreign_universe is None
+        assert dpr._route_via_violation(tooth)[0] == 0.0
+
+
+def test_pair_with_no_vias_anywhere_is_completely_unaffected():
+    """The gate is a no-op for a via-free pair -- no cost, no behaviour change."""
+    dpr = _pad_gate_router()
+    partner = Route(net=8, net_name="USB3_TX1-")
+    partner.segments.append(_via_gate_seg(0.0, 5.0, 10.0, 5.0, net=8, name="USB3_TX1-"))
+    shadow = Route(net=7, net_name="USB3_TX1+")
+    shadow.segments.append(_via_gate_seg(0.0, 5.2, 10.0, 5.2))
+
+    with dpr._shadow_foreign_copper(partner):
+        assert dpr._route_via_violation(shadow) == (0.0, None)
+
+
+def test_synthesize_tail_detours_around_a_partner_via_the_raster_cannot_see():
+    """The REPAIR half of the fix: a grazing candidate loses to a later one.
+
+    The partner guide is never in the routing grid, so ``_AllClearPathfinder``
+    (which blocks nothing) is a faithful stand-in.  With the gate disarmed the
+    direct candidate wins and ships copper straight through the partner's
+    barrel; with it armed the synthesizer detours instead of declining.
+    """
+    dpr = _pad_gate_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = Route(net=99, net_name="OTHER")
+    partner.vias.append(_via_gate_via(6.5, 5.0, net=99, name="OTHER"))
+
+    # Disarmed: unchanged pre-#4575 behaviour -- the direct candidate wins.
+    plain = dpr._synthesize_tail(_AllClearPathfinder(), head, goal, 0)
+    assert plain is not None and len(plain.segments) == 1
+
+    with dpr._shadow_foreign_copper(partner):
+        tail = dpr._synthesize_tail(_AllClearPathfinder(), head, goal, 0)
+        assert tail is not None, "a legal detour exists; the synthesizer must find it"
+        assert len(tail.segments) > 1, "the direct candidate runs through the barrel"
+        assert dpr._route_via_violation(tail)[0] == 0.0
+    # Still lands exactly on the pads it was asked to connect.
+    assert (tail.segments[0].x1, tail.segments[0].y1) == (5.0, 5.0)
+    assert (tail.segments[-1].x2, tail.segments[-1].y2) == (8.0, 5.0)
+
+
+def test_shadow_pair_declines_a_side_on_foreign_via_clearance(monkeypatch):
+    """The FAILOVER half: a violating side loses to the other offset side.
+
+    The guide (partner) carries a barrel 0.55 mm off the ``side=+1`` offset
+    line.  It is not in the routing grid (the guide never is, so the
+    constructor's raster cannot see it), it is not a pad (#4571's gate cannot
+    see it), and at 0.55 mm the copper does not intersect
+    (``_pair_has_physical_overlap``'s bound is 0.45 mm, so it cannot see it
+    either) -- only the exact ``clearance_segment_via`` predicate can.  The
+    side is declined with a distinct reason and ``side=-1`` ships instead.
+
+    The #4570 via-signature gate is switched off for the duration: a
+    single-via guide is deliberately asymmetric, and its ``via-skew`` decline
+    reason would otherwise mask the one under test.
+    """
+    import kicad_tools.router.diffpair_routing as dpr_mod
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    monkeypatch.setattr(dpr_mod, "_SHADOW_VIA_SYMMETRY", False, raising=True)
+
+    spacing_cells = 4
+    dpr, pair, spec, pathfinder, _ = _shadow_setup(spacing_cells, bend_end=(11.0, 7.7))
+    guide = _planar_guide(spec.p_start)  # straight F.Cu run at y = 4.8
+    # side=+1 offsets the shadow to y = 5.2; put the partner's barrel in the
+    # sub-clearance-but-non-overlapping band above it.
+    guide.vias.append(
+        _via_gate_via(15.0, 5.2 + _BARREL_GAP, net=spec.p_start.net, name=spec.p_start.net_name)
+    )
+    monkeypatch.setattr(DiffPairRouter, "_tail_route", _stub_tail_route_planar, raising=True)
+
+    result = dpr._shadow_route_pair(pair, spec, pathfinder, guide, spacing_cells)
+
+    assert result is not None, "the other offset side is legal; the pair must still ship"
+    assert dpr._last_shadow_decline_reason == "via-clearance"
+    _p_route, n_route = result
+    assert n_route.segments, "the shadow leg must carry copper"
+    for seg in n_route.segments:
+        assert seg.y1 < 4.8 and seg.y2 < 4.8, "the surviving side is the one away from the barrel"
+
+
+# ---------------------------------------------------------------------------
 # Issue #4572: coupling-aware landing-tail synthesis
 # ---------------------------------------------------------------------------
 # The shadow constructor trims the coupled body at both ends and reconnects to
@@ -3418,9 +3818,7 @@ def _run_shadow_with_tails(monkeypatch, tail_stub):
     dpr, pair, spec, pathfinder, _ = _shadow_setup(spacing_cells, bend_end=(11.0, 7.7))
     guide = _planar_guide(spec.p_start)
     monkeypatch.setattr(DiffPairRouter, "_tail_route", tail_stub, raising=True)
-    monkeypatch.setattr(
-        DiffPairRouter, "_pair_has_physical_overlap", lambda self, p, n: False, raising=True
-    )
+    _defeat_pair_self_check_gates(monkeypatch)
     result = dpr._shadow_route_pair(pair, spec, pathfinder, guide, spacing_cells)
     return dpr, result
 
@@ -3489,9 +3887,7 @@ def test_symmetric_side_beats_an_asymmetric_one(monkeypatch):
         return stub(self, _pf, head, goal, _layer, _label, _name, partner_segments)
 
     monkeypatch.setattr(DiffPairRouter, "_tail_route", _tail, raising=True)
-    monkeypatch.setattr(
-        DiffPairRouter, "_pair_has_physical_overlap", lambda self, p, n: False, raising=True
-    )
+    _defeat_pair_self_check_gates(monkeypatch)
     spacing_cells = 4
     dpr, pair, spec, pathfinder, _ = _shadow_setup(spacing_cells, bend_end=(11.0, 7.7))
     guide = _planar_guide(spec.p_start)
