@@ -15,16 +15,28 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from kicad_tools.footprints.library_path import LibraryPaths
+from kicad_tools.pcb import lcsc_model_transforms
+from kicad_tools.pcb.lcsc_model_transforms import (
+    LCSC_MODEL_TRANSFORMS,
+    LcscModelTransform,
+    TransformProvenance,
+    entry_problems,
+    lookup_transform,
+    table_problems,
+)
 from kicad_tools.pcb.lcsc_models import (
     DEFAULT_CACHE_ENV_VAR,
     LCSC_MODEL_PATH_VAR,
+    LcscModelEntry,
     _fetch_lcsc_step,
+    _fmt_num,
     _parse_3d_uuid,
     fetch_enabled,
     lcsc_cache_dir,
@@ -306,7 +318,16 @@ class TestSidecar:
     def test_loads_lib_id_to_cnumber(self, tmp_path):
         sidecar = tmp_path / "lcsc_models.json"
         sidecar.write_text(json.dumps({"Module:Joystick_Analog": "C50950"}))
-        assert load_lcsc_mapping(sidecar) == {"Module:Joystick_Analog": "C50950"}
+        assert load_lcsc_mapping(sidecar) == {
+            "Module:Joystick_Analog": LcscModelEntry(lcsc="C50950")
+        }
+
+    def test_bare_string_form_carries_no_transform(self, tmp_path):
+        sidecar = tmp_path / "lcsc_models.json"
+        sidecar.write_text(json.dumps({"Module:Joystick_Analog": "C50950"}))
+        entry = load_lcsc_mapping(sidecar)["Module:Joystick_Analog"]
+        assert entry.rotate is None
+        assert entry.offset is None
 
     def test_malformed_json_raises_value_error(self, tmp_path):
         sidecar = tmp_path / "bad.json"
@@ -346,8 +367,133 @@ class TestSidecar:
 
 
 # --------------------------------------------------------------------------
+# Sidecar object form: per-part rotate/offset overrides (#4584)
+# --------------------------------------------------------------------------
+
+
+class TestSidecarObjectForm:
+    def test_object_form_with_rotate_and_offset(self, tmp_path):
+        sidecar = tmp_path / "lcsc_models.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "Connector_PCIE:PCIE_Mini_Edge": {
+                        "lcsc": "C444929",
+                        "rotate": [0, 0, -90],
+                        "offset": [1.5, -2, 0.25],
+                    }
+                }
+            )
+        )
+        assert load_lcsc_mapping(sidecar) == {
+            "Connector_PCIE:PCIE_Mini_Edge": LcscModelEntry(
+                lcsc="C444929", rotate=(0.0, 0.0, -90.0), offset=(1.5, -2.0, 0.25)
+            )
+        }
+
+    def test_object_form_fields_are_independently_optional(self, tmp_path):
+        sidecar = tmp_path / "lcsc_models.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "A:RotateOnly": {"lcsc": "C1", "rotate": [0, 0, 90]},
+                    "B:OffsetOnly": {"lcsc": "C2", "offset": [0, 0, 1]},
+                    "C:Neither": {"lcsc": "C3"},
+                }
+            )
+        )
+        mapping = load_lcsc_mapping(sidecar)
+        assert mapping["A:RotateOnly"] == LcscModelEntry("C1", rotate=(0.0, 0.0, 90.0))
+        assert mapping["B:OffsetOnly"] == LcscModelEntry("C2", offset=(0.0, 0.0, 1.0))
+        assert mapping["C:Neither"] == LcscModelEntry("C3")
+
+    def test_mixed_bare_and_object_forms_in_one_sidecar(self, tmp_path):
+        sidecar = tmp_path / "lcsc_models.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "Module:Joystick_Analog": "C50950",
+                    "Connector_PCIE:PCIE_Mini_Edge": {"lcsc": "C444929", "rotate": [0, 0, -90]},
+                }
+            )
+        )
+        mapping = load_lcsc_mapping(sidecar)
+        assert mapping["Module:Joystick_Analog"] == LcscModelEntry("C50950")
+        assert mapping["Connector_PCIE:PCIE_Mini_Edge"].rotate == (0.0, 0.0, -90.0)
+
+    def test_object_form_validates_cnumber_like_bare_form(self, tmp_path):
+        sidecar = tmp_path / "lcsc_models.json"
+        sidecar.write_text(json.dumps({"Lib:Name": {"lcsc": "../outside/pwned"}}))
+        with pytest.raises(ValueError, match="invalid C-number"):
+            load_lcsc_mapping(sidecar)
+
+    def test_object_form_requires_lcsc_key(self, tmp_path):
+        sidecar = tmp_path / "lcsc_models.json"
+        sidecar.write_text(json.dumps({"Lib:Name": {"rotate": [0, 0, 90]}}))
+        with pytest.raises(ValueError, match="must contain a string 'lcsc'"):
+            load_lcsc_mapping(sidecar)
+
+    def test_unknown_key_is_rejected_not_ignored(self, tmp_path):
+        # A typo'd "rotation" must fail loudly.  Silently ignoring it would
+        # produce a green no-op -- exactly the failure this mechanism exists
+        # to prevent.
+        sidecar = tmp_path / "lcsc_models.json"
+        sidecar.write_text(json.dumps({"Lib:Name": {"lcsc": "C1", "rotation": [0, 0, 90]}}))
+        with pytest.raises(ValueError, match="unknown key"):
+            load_lcsc_mapping(sidecar)
+
+    @pytest.mark.parametrize(
+        ("bad", "pattern"),
+        [
+            ([0, 0], "exactly 3 numbers"),
+            ([0, 0, 0, 0], "exactly 3 numbers"),
+            ("0,0,90", "exactly 3 numbers"),
+            ({"z": 90}, "exactly 3 numbers"),
+            ([0, 0, "90"], "only numbers"),
+            ([0, 0, True], "only numbers"),
+            ([0, 0, float("nan")], "only finite numbers"),
+            ([0, float("inf"), 0], "only finite numbers"),
+        ],
+    )
+    def test_malformed_triples_are_build_errors(self, tmp_path, bad, pattern):
+        sidecar = tmp_path / "lcsc_models.json"
+        # NaN/inf are not valid JSON but json.dumps emits them by default and
+        # json.loads accepts them back -- exercise the loader's own guard.
+        sidecar.write_text(json.dumps({"Lib:Name": {"lcsc": "C1", "rotate": bad}}))
+        with pytest.raises(ValueError, match=pattern):
+            load_lcsc_mapping(sidecar)
+
+    def test_error_message_names_sidecar_path_and_key(self, tmp_path):
+        sidecar = tmp_path / "board_sidecar.json"
+        sidecar.write_text(json.dumps({"Lib:Name": {"lcsc": "C1", "offset": [0, 0]}}))
+        with pytest.raises(ValueError) as exc:
+            load_lcsc_mapping(sidecar)
+        message = str(exc.value)
+        assert str(sidecar) in message
+        assert "offset" in message
+        assert "Lib:Name" in message
+
+
+# --------------------------------------------------------------------------
 # Synthesized model block
 # --------------------------------------------------------------------------
+
+# The exact bytes the LCSC tier emitted before per-part overrides existed
+# (#4584).  Pinned verbatim: with no override the output must not drift by a
+# single byte, because every committed board artifact carries these.
+IDENTITY_BLOCK = (
+    '(model "${KCT_LCSC_3D_DIR}/C50950.step"\n'
+    "\t(offset\n"
+    "\t\t(xyz 0 0 0)\n"
+    "\t)\n"
+    "\t(scale\n"
+    "\t\t(xyz 1 1 1)\n"
+    "\t)\n"
+    "\t(rotate\n"
+    "\t\t(xyz 0 0 0)\n"
+    "\t)\n"
+    ")"
+)
 
 
 class TestSynthesize:
@@ -357,6 +503,174 @@ class TestSynthesize:
         assert "${KCT_LCSC_3D_DIR}" in block
         assert "(offset" in block and "(xyz 0 0 0)" in block
         assert block.endswith(")")
+
+    def test_no_override_is_byte_identical_to_the_historical_output(self):
+        assert synthesize_model_block("C50950") == IDENTITY_BLOCK
+
+    def test_explicit_zero_triples_are_indistinguishable_from_identity(self):
+        # An author writing rotate=[0,0,0] must not produce different bytes
+        # from omitting it -- otherwise a no-op entry would churn artifacts.
+        assert (
+            synthesize_model_block("C50950", rotate=(0.0, 0.0, 0.0), offset=(0.0, 0.0, 0.0))
+            == IDENTITY_BLOCK
+        )
+
+    def test_rotate_only_golden(self):
+        assert synthesize_model_block("C444929", rotate=(0.0, 0.0, -90.0)) == (
+            '(model "${KCT_LCSC_3D_DIR}/C444929.step"\n'
+            "\t(offset\n"
+            "\t\t(xyz 0 0 0)\n"
+            "\t)\n"
+            "\t(scale\n"
+            "\t\t(xyz 1 1 1)\n"
+            "\t)\n"
+            "\t(rotate\n"
+            "\t\t(xyz 0 0 -90)\n"
+            "\t)\n"
+            ")"
+        )
+
+    def test_offset_only_golden(self):
+        assert synthesize_model_block("C444929", offset=(1.5, -2.0, 0.25)) == (
+            '(model "${KCT_LCSC_3D_DIR}/C444929.step"\n'
+            "\t(offset\n"
+            "\t\t(xyz 1.5 -2 0.25)\n"
+            "\t)\n"
+            "\t(scale\n"
+            "\t\t(xyz 1 1 1)\n"
+            "\t)\n"
+            "\t(rotate\n"
+            "\t\t(xyz 0 0 0)\n"
+            "\t)\n"
+            ")"
+        )
+
+    def test_rotate_and_offset_golden(self):
+        assert synthesize_model_block(
+            "C444929", rotate=(0.0, 0.0, -90.0), offset=(1.5, -2.0, 0.25)
+        ) == (
+            '(model "${KCT_LCSC_3D_DIR}/C444929.step"\n'
+            "\t(offset\n"
+            "\t\t(xyz 1.5 -2 0.25)\n"
+            "\t)\n"
+            "\t(scale\n"
+            "\t\t(xyz 1 1 1)\n"
+            "\t)\n"
+            "\t(rotate\n"
+            "\t\t(xyz 0 0 -90)\n"
+            "\t)\n"
+            ")"
+        )
+
+    def test_scale_is_never_touched_by_an_override(self):
+        block = synthesize_model_block("C1", rotate=(1.0, 2.0, 3.0), offset=(4.0, 5.0, 6.0))
+        assert "\t(scale\n\t\t(xyz 1 1 1)\n\t)\n" in block
+
+    @pytest.mark.parametrize(
+        "value", [0.0, -0.0, 1.0, -90.0, 1.5, -2.0, 0.25, 1.2699999999, 1e-9, 123456.789]
+    )
+    def test_number_formatting_matches_the_offset_machinery(self, value):
+        # The synthesized block and a block ``_apply_offset_delta`` has
+        # rewritten must format numbers identically, or an override would
+        # change bytes purely by being re-run through the other formatter.
+        from kicad_tools.pcb.models3d import _fmt_num as models3d_fmt_num
+
+        assert _fmt_num(value) == models3d_fmt_num(value)
+
+
+# --------------------------------------------------------------------------
+# Packaged per-part transform table (#4584)
+# --------------------------------------------------------------------------
+
+
+GOOD_PROVENANCE = TransformProvenance(
+    board="boards/06-diffpair-test",
+    refdes="J3",
+    verified="2026-08-04",
+    command="kct render boards/06-diffpair-test",
+)
+
+
+class TestPackagedTransformTable:
+    def test_every_entry_carries_render_provenance(self):
+        """CI cannot render, so an entry may only enter the table if a human
+        did -- and recorded it.  This is the structural gate that keeps an
+        uncalibrated guess from landing green (the #4457 failure mode)."""
+        problems = table_problems()
+        assert problems == {}, f"unfit packaged transform entries: {problems}"
+
+    def test_table_is_c_number_keyed(self):
+        for key in LCSC_MODEL_TRANSFORMS:
+            assert re.match(r"^C\d+$", key), f"table key {key!r} is not a C-number"
+
+    def test_lookup_returns_none_for_unlisted_part(self):
+        assert lookup_transform("C999999999") is None
+
+    def test_calibrated_pcie_mini_edge_entry(self):
+        # The part that motivated the mechanism (#4584): mini-PCIe edge socket
+        # whose EasyEDA body is authored a quarter turn off its pad column.
+        entry = lookup_transform("C444929")
+        assert entry is not None
+        assert entry.rotate == (0.0, 0.0, -90.0)
+        assert entry.provenance is not None
+        assert entry.provenance.refdes == "J3"
+
+    # ---- the enforcing test must actually reject bad entries -------------
+
+    def test_entry_without_provenance_is_rejected(self):
+        problems = entry_problems("C1", LcscModelTransform(rotate=(0.0, 0.0, 90.0)))
+        assert any("missing provenance" in p for p in problems)
+
+    @pytest.mark.parametrize(
+        ("prov", "pattern"),
+        [
+            (TransformProvenance("", "J3", "2026-08-04", "kct render x"), "provenance.board"),
+            (TransformProvenance("b", "  ", "2026-08-04", "kct render x"), "provenance.refdes"),
+            (TransformProvenance("b", "J3", "2026-08-04", ""), "provenance.command"),
+            (TransformProvenance("b", "J3", "yesterday", "kct render x"), "provenance.verified"),
+            (TransformProvenance("b", "J3", "2026-13-04", "kct render x"), "provenance.verified"),
+            (TransformProvenance("b", "J3", "04/08/2026", "kct render x"), "provenance.verified"),
+        ],
+    )
+    def test_incomplete_provenance_is_rejected(self, prov, pattern):
+        problems = entry_problems(
+            "C1", LcscModelTransform(rotate=(0.0, 0.0, 90.0), provenance=prov)
+        )
+        assert any(pattern in p for p in problems), problems
+
+    def test_no_op_entry_is_rejected(self):
+        problems = entry_problems("C1", LcscModelTransform(provenance=GOOD_PROVENANCE))
+        assert any("neither rotate nor offset" in p for p in problems)
+
+    def test_non_c_number_key_is_rejected(self):
+        problems = entry_problems(
+            "Connector_PCIE:PCIE_Mini_Edge",
+            LcscModelTransform(rotate=(0.0, 0.0, 90.0), provenance=GOOD_PROVENANCE),
+        )
+        assert any("is not a C-number" in p for p in problems)
+
+    @pytest.mark.parametrize(
+        "bad_rotate",
+        [(0.0, 0.0), (0.0, 0.0, 0.0, 0.0), [0.0, 0.0, 90.0], (0.0, 0.0, float("nan")), "0,0,90"],
+    )
+    def test_malformed_triple_is_rejected(self, bad_rotate):
+        problems = entry_problems(
+            "C1", LcscModelTransform(rotate=bad_rotate, provenance=GOOD_PROVENANCE)
+        )
+        assert problems
+
+    def test_table_walk_fails_when_an_uncalibrated_entry_is_added(self, monkeypatch):
+        """The end-to-end proof that the gate bites: inject a guessed entry
+        with no provenance and the same check that guards the real table
+        reports it."""
+        monkeypatch.setitem(
+            lcsc_model_transforms.LCSC_MODEL_TRANSFORMS,
+            "C7654321",
+            LcscModelTransform(rotate=(0.0, 0.0, 90.0)),
+        )
+        problems = table_problems()
+        assert "C7654321" in problems
+        assert any("missing provenance" in p for p in problems["C7654321"])
 
 
 # --------------------------------------------------------------------------
@@ -498,6 +812,197 @@ class TestLcscOffset:
         assert report.patched == ["Module:Joystick_Analog"]
         # The inserted model's own offset carries the target pad-centroid delta.
         assert "(xyz 2 1.27 0)" in new_text
+
+
+# --------------------------------------------------------------------------
+# Per-part transform precedence: sidecar > packaged table > identity (#4584)
+# --------------------------------------------------------------------------
+
+
+def _lcsc_resolver(tmp_path, mapping, c_number="C50950"):
+    """A tier-4-only resolver whose cache already holds *c_number*."""
+    cache = tmp_path / "cache"
+    cache.mkdir(exist_ok=True)
+    (cache / f"{c_number}.step").write_bytes(FAKE_STEP)
+    return make_library_resolver(
+        _empty_library(tmp_path),
+        lcsc_mapping=mapping,
+        lcsc_cache_dir=cache,
+    )
+
+
+class TestTransformPrecedence:
+    LIB_ID = "Module:Joystick_Analog"
+
+    def test_no_entry_anywhere_stays_identity(self, tmp_path):
+        resolver = _lcsc_resolver(tmp_path, {self.LIB_ID: "C50950"})
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert "(rotate\n\t\t(xyz 0 0 0)\n" in resolved.models[0]
+
+    def test_packaged_table_applies_to_a_bare_string_sidecar(self, tmp_path, monkeypatch):
+        monkeypatch.setitem(
+            lcsc_model_transforms.LCSC_MODEL_TRANSFORMS,
+            "C50950",
+            LcscModelTransform(rotate=(0.0, 0.0, -90.0), provenance=GOOD_PROVENANCE),
+        )
+        resolver = _lcsc_resolver(tmp_path, {self.LIB_ID: "C50950"})
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert "(rotate\n\t\t(xyz 0 0 -90)\n" in resolved.models[0]
+
+    def test_sidecar_object_form_wins_over_the_packaged_table(self, tmp_path, monkeypatch):
+        monkeypatch.setitem(
+            lcsc_model_transforms.LCSC_MODEL_TRANSFORMS,
+            "C50950",
+            LcscModelTransform(rotate=(0.0, 0.0, -90.0), provenance=GOOD_PROVENANCE),
+        )
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, 180.0))}
+        )
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert "(rotate\n\t\t(xyz 0 0 180)\n" in resolved.models[0]
+
+    def test_sidecar_object_form_applies_when_the_table_is_silent(self, tmp_path):
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, 45.0))}
+        )
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert "(rotate\n\t\t(xyz 0 0 45)\n" in resolved.models[0]
+
+    def test_merge_is_per_field_not_all_or_nothing(self, tmp_path, monkeypatch):
+        # A sidecar overriding only rotate must NOT suppress a packaged offset.
+        monkeypatch.setitem(
+            lcsc_model_transforms.LCSC_MODEL_TRANSFORMS,
+            "C50950",
+            LcscModelTransform(
+                rotate=(0.0, 0.0, -90.0), offset=(0.0, 0.0, 1.25), provenance=GOOD_PROVENANCE
+            ),
+        )
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, 180.0))}
+        )
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert "(rotate\n\t\t(xyz 0 0 180)\n" in resolved.models[0]
+        assert "(offset\n\t\t(xyz 0 0 1.25)\n" in resolved.models[0]
+
+    def test_merge_is_per_field_in_the_other_direction(self, tmp_path, monkeypatch):
+        monkeypatch.setitem(
+            lcsc_model_transforms.LCSC_MODEL_TRANSFORMS,
+            "C50950",
+            LcscModelTransform(
+                rotate=(0.0, 0.0, -90.0), offset=(0.0, 0.0, 1.25), provenance=GOOD_PROVENANCE
+            ),
+        )
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", offset=(0.0, 0.0, 3.0))}
+        )
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert "(rotate\n\t\t(xyz 0 0 -90)\n" in resolved.models[0]
+        assert "(offset\n\t\t(xyz 0 0 3)\n" in resolved.models[0]
+
+    def test_transform_log_names_each_field_source(self, tmp_path, monkeypatch):
+        monkeypatch.setitem(
+            lcsc_model_transforms.LCSC_MODEL_TRANSFORMS,
+            "C50950",
+            LcscModelTransform(
+                rotate=(0.0, 0.0, -90.0), offset=(0.0, 0.0, 1.25), provenance=GOOD_PROVENANCE
+            ),
+        )
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        (cache / "C50950.step").write_bytes(FAKE_STEP)
+        log: dict[str, str] = {}
+        resolver = make_library_resolver(
+            _empty_library(tmp_path),
+            lcsc_mapping={self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, 180.0))},
+            lcsc_cache_dir=cache,
+            lcsc_transform_log=log,
+        )
+        resolver(self.LIB_ID)
+        assert log == {
+            self.LIB_ID: "rotate=(0, 0, 180) [sidecar] offset=(0, 0, 1.25) [packaged table]"
+        }
+
+    def test_identity_leaves_the_transform_log_empty(self, tmp_path):
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        (cache / "C50950.step").write_bytes(FAKE_STEP)
+        log: dict[str, str] = {}
+        resolver = make_library_resolver(
+            _empty_library(tmp_path),
+            lcsc_mapping={self.LIB_ID: "C50950"},
+            lcsc_cache_dir=cache,
+            lcsc_transform_log=log,
+        )
+        resolver(self.LIB_ID)
+        assert log == {}
+
+
+class TestTransformComposition:
+    """The override must compose with -- never replace -- the centroid delta."""
+
+    LIB_ID = "Module:Joystick_Analog"
+
+    def test_lcsc_tier_never_derives_an_orientation(self, tmp_path):
+        # theta stays 0 for this tier by construction, which is what makes it
+        # safe to write the override rotation verbatim: _apply_rotate_delta
+        # can never compose with (and so double-apply) it.
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, -90.0))}
+        )
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert resolved.source_orientation is None
+        assert resolved.source_anchor == (0.0, 0.0)
+
+    def test_rotate_is_verbatim_even_with_a_nonzero_pad_centroid(self, tmp_path):
+        # PCB_LCSC's single pad sits at (2.0, -1.27), so the centroid delta is
+        # nonzero.  The rotation must still be exactly what was authored.
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, -90.0))}
+        )
+        new_text, report = add_model_refs_to_text(PCB_LCSC, resolver)
+        assert report.patched == [self.LIB_ID]
+        assert "(xyz 0 0 -90)" in new_text
+
+    def test_offset_override_adds_to_the_pad_centroid_delta(self, tmp_path):
+        # centroid delta is (dx, -dy) = (2.0, +1.27); override adds (0.5, 0.25).
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", offset=(0.5, 0.25, 0.0))}
+        )
+        new_text, _ = add_model_refs_to_text(PCB_LCSC, resolver)
+        assert "(xyz 2.5 1.52 0)" in new_text
+
+    def test_offset_override_z_passes_through_untouched(self, tmp_path):
+        # _apply_offset_delta never rewrites Z, so the authored Z survives the
+        # centroid composition verbatim -- the knob for a STEP whose origin is
+        # off the board plane.
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", offset=(0.0, 0.0, -3.5))}
+        )
+        new_text, _ = add_model_refs_to_text(PCB_LCSC, resolver)
+        assert "(xyz 2 1.27 -3.5)" in new_text
+
+    def test_rotate_and_offset_compose_independently(self, tmp_path):
+        resolver = _lcsc_resolver(
+            tmp_path,
+            {
+                self.LIB_ID: LcscModelEntry(
+                    "C50950", rotate=(0.0, 0.0, -90.0), offset=(0.5, 0.25, 1.0)
+                )
+            },
+        )
+        new_text, _ = add_model_refs_to_text(PCB_LCSC, resolver)
+        # The rotation does NOT rotate the centroid delta: source_anchor is
+        # (0, 0) for this tier, so R_theta * source_anchor == (0, 0) for any
+        # theta and the two are fully independent.
+        assert "(xyz 2.5 1.52 1)" in new_text
+        assert "(xyz 0 0 -90)" in new_text
 
 
 # --------------------------------------------------------------------------

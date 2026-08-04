@@ -2125,7 +2125,9 @@ def _add_pcb_parser(subparsers) -> None:
         "C-number, enabling the LCSC/EasyEDA fetch-on-demand tier. Bodies are "
         "resolved from a cache dir (${KCT_LCSC_3D_DIR}, default "
         "~/.cache/kicad-tools/lcsc-3d/) and emitted as portable "
-        "${KCT_LCSC_3D_DIR}/C#####.step refs",
+        "${KCT_LCSC_3D_DIR}/C#####.step refs. An entry may also use the object "
+        'form {"lcsc": "C#####", "rotate": [0,0,90], "offset": [0,0,0]} to '
+        "override the packaged per-part transform table for that board",
     )
     pcb_add_models.add_argument(
         "--fetch-lcsc",

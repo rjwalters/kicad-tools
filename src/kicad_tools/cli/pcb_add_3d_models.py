@@ -48,7 +48,9 @@ def run_add_3d_models(
             the ``..._EP2.6x2.6mm`` variant — the model body is identical).
         lcsc_models: Optional path to an ``lcsc_models.json`` sidecar mapping
             ``lib_id -> C-number``, enabling the LCSC/EasyEDA fetch-on-demand
-            tier.
+            tier.  Entries may also use the object form
+            (``{"lcsc": "C…", "rotate": [...], "offset": [...]}``) to override
+            the packaged per-part transform table.
         fetch_lcsc: When True, fetch a missing LCSC STEP from EasyEDA on a
             cache miss (default: cache-only; also enabled by
             ``KCT_LCSC_FETCH``).
@@ -59,10 +61,10 @@ def run_add_3d_models(
         Exit code (0 success, 1 error).
     """
     from kicad_tools.footprints.library_path import detect_kicad_library_path
-    from kicad_tools.pcb.lcsc_models import fetch_enabled, load_lcsc_mapping
+    from kicad_tools.pcb.lcsc_models import LcscModelEntry, fetch_enabled, load_lcsc_mapping
     from kicad_tools.pcb.models3d import add_model_refs
 
-    lcsc_mapping: dict[str, str] | None = None
+    lcsc_mapping: dict[str, LcscModelEntry] | None = None
     if lcsc_models is not None:
         try:
             lcsc_mapping = load_lcsc_mapping(lcsc_models)
@@ -120,6 +122,7 @@ def run_add_3d_models(
         "variant_matches": report.variant_matches,
         "substitution_matches": report.substitution_matches,
         "lcsc_matches": report.lcsc_matches,
+        "lcsc_transforms": report.lcsc_transforms,
     }
 
     if output_format == "json":
@@ -149,6 +152,10 @@ def run_add_3d_models(
             print("  LCSC/EasyEDA fetched models used (cached STEP):")
             for lib_id, cnum in sorted(report.lcsc_matches.items()):
                 print(f"    {lib_id} -> {cnum}")
+        if report.lcsc_transforms:
+            print("  Per-part LCSC transforms applied:")
+            for lib_id, desc in sorted(report.lcsc_transforms.items()):
+                print(f"    {lib_id}: {desc}")
         if report.already_present:
             print(f"  Already had models: {len(report.already_present)}")
         if report.no_model_in_library:

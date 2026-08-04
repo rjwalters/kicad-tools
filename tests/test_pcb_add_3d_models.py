@@ -1174,3 +1174,141 @@ class TestOrientationConventionRotation:
         rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", pcb.read_text())
         assert rotate_xyz is not None
         assert rotate_xyz.group(1).strip() == "0 0 0"
+
+
+# --------------------------------------------------------------------------
+# LCSC tier: authored per-part transforms compose with the centroid delta
+# --------------------------------------------------------------------------
+# The three installed-library tiers derive their transforms geometrically; the
+# LCSC tier cannot (there is no source .kicad_mod), so its correction is
+# authored -- in the packaged lcsc_model_transforms table or a per-board
+# sidecar (#4584).  These cases pin the *composition* end to end, through
+# add_model_refs_to_text: rotate verbatim, offset added to the pad-centroid
+# delta, model-frame Y negation, Z passthrough.
+
+
+# A multi-pad footprint whose pad centroid is deliberately NOT the origin:
+# pads at (10, 4) and (10, -4) -> centroid (10, 0)... plus a third at (10, 6)
+# so the centroid is (10, 2), nonzero in both axes.
+PCB_LCSC_OFFCENTRE = """(kicad_pcb
+\t(version 20240108)
+\t(generator "kicad_tools")
+\t(footprint "Connector_PCIE:PCIE_Mini_Edge"
+\t\t(layer "F.Cu")
+\t\t(at 193.5 92.5)
+\t\t(pad "1" smd rect
+\t\t\t(at 10 4)
+\t\t\t(size 0.5 0.6)
+\t\t\t(layers "F.Cu" "F.Mask" "F.Paste")
+\t\t)
+\t\t(pad "2" smd rect
+\t\t\t(at 10 -4)
+\t\t\t(size 0.5 0.6)
+\t\t\t(layers "F.Cu" "F.Mask" "F.Paste")
+\t\t)
+\t\t(pad "3" smd rect
+\t\t\t(at 10 6)
+\t\t\t(size 0.5 0.6)
+\t\t\t(layers "F.Cu" "F.Mask" "F.Paste")
+\t\t)
+\t)
+)
+"""
+
+_FAKE_STEP = b"ISO-10303-21;\r\nHEADER;\r\nEND-ISO-10303-21;\r\n"
+
+
+def _lcsc_only_resolver(tmp_path: Path, mapping, *, cached=("C444929", "C50950")):
+    """A resolver where only the LCSC tier can hit (empty footprint library)."""
+    from kicad_tools.pcb.models3d import make_library_resolver as _mk
+
+    footprints = tmp_path / "footprints"
+    footprints.mkdir(exist_ok=True)
+    cache = tmp_path / "lcsc-cache"
+    cache.mkdir(exist_ok=True)
+    for c_number in cached:
+        (cache / f"{c_number}.step").write_bytes(_FAKE_STEP)
+    return _mk(
+        LibraryPaths(footprints_path=footprints, source="config"),
+        lcsc_mapping=mapping,
+        lcsc_cache_dir=cache,
+    )
+
+
+class TestLcscPerPartTransform:
+    LIB_ID = "Connector_PCIE:PCIE_Mini_Edge"
+
+    def test_centroid_is_off_origin_in_both_axes(self, tmp_path):
+        """Guard the fixture itself: a zero centroid would make the
+        composition assertions below vacuous."""
+        block = iter_footprint_blocks(PCB_LCSC_OFFCENTRE)[0]
+        body = PCB_LCSC_OFFCENTRE[block.start : block.end + 1]
+        assert _pad_anchor(body) == (10.0, 2.0)
+
+    def test_override_composes_with_a_nonzero_pad_centroid(self, tmp_path):
+        from kicad_tools.pcb.lcsc_models import LcscModelEntry
+
+        resolver = _lcsc_only_resolver(
+            tmp_path,
+            {
+                self.LIB_ID: LcscModelEntry(
+                    "C444929", rotate=(0.0, 0.0, -90.0), offset=(0.5, 0.25, 1.75)
+                )
+            },
+        )
+        new_text, report = add_model_refs_to_text(PCB_LCSC_OFFCENTRE, resolver)
+        assert report.patched == [self.LIB_ID]
+        # rotate: written verbatim (the LCSC tier's derived theta is always 0).
+        assert "(xyz 0 0 -90)" in new_text
+        # offset: authored (0.5, 0.25, 1.75) + centroid delta (10, -2) in the
+        # model frame (Y negated vs the footprint 2D centroid (10, 2)); Z is
+        # never rewritten by the offset machinery.
+        assert "(xyz 10.5 -1.75 1.75)" in new_text
+
+    def test_bare_mapping_for_an_unlisted_part_is_unchanged_from_identity(self, tmp_path):
+        # C50950 carries no packaged transform, so this is the pre-#4584 path.
+        resolver = _lcsc_only_resolver(tmp_path, {self.LIB_ID: "C50950"})
+        new_text, report = add_model_refs_to_text(PCB_LCSC_OFFCENTRE, resolver)
+        assert report.patched == [self.LIB_ID]
+        assert "(xyz 0 0 0)" in new_text  # rotate untouched
+        assert "(xyz 10 -2 0)" in new_text  # pure centroid delta
+
+    def test_bare_mapping_picks_up_the_packaged_table(self, tmp_path):
+        # The committed board-06 sidecar uses the bare-string form; the
+        # calibrated C444929 correction must still reach the emitted node.
+        resolver = _lcsc_only_resolver(tmp_path, {self.LIB_ID: "C444929"})
+        new_text, report = add_model_refs_to_text(PCB_LCSC_OFFCENTRE, resolver)
+        assert report.patched == [self.LIB_ID]
+        assert "(xyz 0 0 -90)" in new_text
+
+    def test_theta_stays_zero_so_the_rotate_delta_cannot_double_apply(self, tmp_path):
+        """The invariant that licenses writing the override verbatim."""
+        from kicad_tools.pcb.lcsc_models import LcscModelEntry
+
+        resolver = _lcsc_only_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C444929", rotate=(0.0, 0.0, -90.0))}
+        )
+        resolved = resolver(self.LIB_ID)
+        assert isinstance(resolved, ResolvedModels)
+        assert resolved.source_orientation is None
+        # ...and the target footprint DOES have a derivable orientation, so
+        # this is a real guard, not a vacuous one.
+        block = iter_footprint_blocks(PCB_LCSC_OFFCENTRE)[0]
+        body = PCB_LCSC_OFFCENTRE[block.start : block.end + 1]
+        assert _pad_field_orientation(body) is not None
+        # The rotate delta is therefore a no-op on the authored value.
+        assert _apply_rotate_delta(resolved.models[0], 0.0) == resolved.models[0]
+
+    def test_source_anchor_stays_origin_so_rotation_and_offset_are_independent(self, tmp_path):
+        """R_theta * (0, 0) == (0, 0) for every theta, so an override rotation
+        can never perturb the centroid offset."""
+        from kicad_tools.pcb.lcsc_models import LcscModelEntry
+
+        rotated = _lcsc_only_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, -90.0))}
+        )
+        plain = _lcsc_only_resolver(tmp_path, {self.LIB_ID: "C50950"})
+        rotated_text, _ = add_model_refs_to_text(PCB_LCSC_OFFCENTRE, rotated)
+        plain_text, _ = add_model_refs_to_text(PCB_LCSC_OFFCENTRE, plain)
+        for text in (rotated_text, plain_text):
+            assert "(xyz 10 -2 0)" in text

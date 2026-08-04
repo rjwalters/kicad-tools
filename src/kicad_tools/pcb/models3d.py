@@ -60,9 +60,10 @@ Used by ``kct pcb add-3d-models``.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kicad_tools.footprints.library_path import (
     LibraryPaths,
@@ -71,8 +72,20 @@ from kicad_tools.footprints.library_path import (
 )
 from kicad_tools.pcb.model_substitutions import substitute_lib_id
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.pcb.lcsc_models import LcscModelEntry
+
+# The LCSC sidecar mapping accepted by the tier-4 resolver.  A bare ``str``
+# value (a plain ``lib_id -> C-number`` dict) stays valid for callers written
+# before the per-part override mechanism (#4584); an ``LcscModelEntry`` value
+# additionally carries the sidecar's object-form ``rotate``/``offset``.  Typed
+# as a ``Mapping`` (covariant in its value type) so a caller may pass either a
+# ``dict[str, str]`` or a ``dict[str, LcscModelEntry]`` without a cast.
+LcscMapping = Mapping[str, "str | LcscModelEntry"]
+
 __all__ = [
     "FootprintBlock",
+    "LcscMapping",
     "ModelPatchReport",
     "ResolvedModels",
     "add_model_refs",
@@ -565,6 +578,29 @@ def _find_variant_mod(paths: LibraryPaths, library: str, name: str) -> Path | No
     return candidates[0]
 
 
+def _describe_lcsc_transform(
+    rotate: tuple[float, float, float] | None,
+    offset: tuple[float, float, float] | None,
+    *,
+    rotate_from_sidecar: bool,
+    offset_from_sidecar: bool,
+) -> str:
+    """Render a one-line ``rotate=... offset=...`` summary naming each source."""
+    parts: list[str] = []
+    if rotate is not None:
+        source = "sidecar" if rotate_from_sidecar else "packaged table"
+        parts.append(f"rotate={_fmt_triple(rotate)} [{source}]")
+    if offset is not None:
+        source = "sidecar" if offset_from_sidecar else "packaged table"
+        parts.append(f"offset={_fmt_triple(offset)} [{source}]")
+    return " ".join(parts)
+
+
+def _fmt_triple(triple: tuple[float, float, float]) -> str:
+    """Render a transform triple for human-readable reporting."""
+    return "(" + ", ".join(_fmt_num(v) for v in triple) + ")"
+
+
 def make_library_resolver(
     library_paths: LibraryPaths | None = None,
     *,
@@ -572,10 +608,11 @@ def make_library_resolver(
     allow_substitutions: bool = True,
     variant_log: dict[str, str] | None = None,
     substitution_log: dict[str, str] | None = None,
-    lcsc_mapping: dict[str, str] | None = None,
+    lcsc_mapping: LcscMapping | None = None,
     lcsc_fetch: bool = False,
     lcsc_cache_dir: Path | None = None,
     lcsc_log: dict[str, str] | None = None,
+    lcsc_transform_log: dict[str, str] | None = None,
     lcsc_warn: Callable[[str], None] | None = None,
 ) -> Resolver:
     """Build a resolver that reads model refs from installed KiCad libraries.
@@ -602,6 +639,11 @@ def make_library_resolver(
        synthesized ``(model ...)`` ref points at ``${KCT_LCSC_3D_DIR}`` and is
        authored as **origin-centered** (``source_anchor=(0.0, 0.0)``) so the
        shared offset machinery lands the body on the target pad centroid.
+       Because there is no source footprint, no rotation is *derivable*; any
+       per-part ``rotate``/``offset`` correction comes from the sidecar's
+       object form or the packaged
+       :mod:`kicad_tools.pcb.lcsc_model_transforms` table (in that order,
+       merged per field, falling back to identity).
 
     Args:
         library_paths: Explicit library location (default: auto-detect).
@@ -616,12 +658,18 @@ def make_library_resolver(
             substitution, so callers can report them.
         lcsc_mapping: Optional ``lib_id -> C-number`` sidecar mapping enabling
             the LCSC tier (tier 4).  Only lib ids present here are eligible.
+            Values may be a bare C-number ``str`` or an
+            :class:`~kicad_tools.pcb.lcsc_models.LcscModelEntry` carrying
+            per-part ``rotate``/``offset`` overrides.
         lcsc_fetch: When True, fetch a missing STEP from EasyEDA on a cache
             miss; default cache-only (no network).
         lcsc_cache_dir: Optional LCSC STEP cache directory (default:
             :func:`kicad_tools.pcb.lcsc_models.lcsc_cache_dir`).
         lcsc_log: Optional dict populated with ``lib_id -> C-number`` for every
             resolved LCSC match, so callers can report them.
+        lcsc_transform_log: Optional dict populated with ``lib_id ->
+            description`` for every LCSC body that received a non-identity
+            per-part transform, naming the source of each field.
         lcsc_warn: Optional ``callable(str)`` invoked on a fetch failure.
     """
     paths = library_paths if library_paths is not None else detect_kicad_library_path()
@@ -660,12 +708,28 @@ def make_library_resolver(
         has no mapping, or the STEP is neither cached nor fetchable."""
         if not lcsc_mapping:
             return None
-        lcsc_id = lcsc_mapping.get(lib_id)
-        if not lcsc_id:
+        entry = lcsc_mapping.get(lib_id)
+        if not entry:
             return None
         # Imported lazily so the module (and the three installed-library tiers)
         # never depend on the LCSC client unless the LCSC tier is actually used.
-        from kicad_tools.pcb.lcsc_models import resolve_lcsc_step, synthesize_model_block
+        from kicad_tools.pcb.lcsc_model_transforms import lookup_transform
+        from kicad_tools.pcb.lcsc_models import (
+            LcscModelEntry,
+            resolve_lcsc_step,
+            synthesize_model_block,
+        )
+
+        # Accept a bare ``str`` C-number (legacy callers passing a plain
+        # ``dict[str, str]``) or the richer sidecar entry.
+        if isinstance(entry, LcscModelEntry):
+            lcsc_id = entry.lcsc
+            sidecar_rotate = entry.rotate
+            sidecar_offset = entry.offset
+        else:
+            lcsc_id = entry
+            sidecar_rotate = None
+            sidecar_offset = None
 
         step_path = resolve_lcsc_step(
             lcsc_id,
@@ -679,9 +743,32 @@ def make_library_resolver(
             return None
         if lcsc_log is not None:
             lcsc_log[lib_id] = lcsc_id
+        # Per-part transform precedence, merged per field so a sidecar that
+        # overrides only ``rotate`` still inherits a packaged ``offset``:
+        #   per-board sidecar object form > packaged table > identity.
+        packaged = lookup_transform(lcsc_id)
+        packaged_rotate = packaged.rotate if packaged is not None else None
+        packaged_offset = packaged.offset if packaged is not None else None
+        rotate = sidecar_rotate if sidecar_rotate is not None else packaged_rotate
+        offset = sidecar_offset if sidecar_offset is not None else packaged_offset
+        if lcsc_transform_log is not None and (rotate is not None or offset is not None):
+            lcsc_transform_log[lib_id] = _describe_lcsc_transform(
+                rotate,
+                offset,
+                rotate_from_sidecar=sidecar_rotate is not None,
+                offset_from_sidecar=sidecar_offset is not None,
+            )
         # Origin-authored body: explicit (0, 0) source anchor so the shared
-        # offset math shifts by the full target pad centroid.
-        return ResolvedModels(models=[synthesize_model_block(lcsc_id)], source_anchor=(0.0, 0.0))
+        # offset math shifts by the full target pad centroid.  ``source_orientation``
+        # is deliberately left ``None`` -- there is no source footprint to
+        # derive a pad-field orientation from, so ``theta`` stays 0 and
+        # ``_apply_rotate_delta`` is a no-op.  That is what makes it safe to
+        # write the override rotation verbatim here: the two can never
+        # double-apply.
+        return ResolvedModels(
+            models=[synthesize_model_block(lcsc_id, rotate=rotate, offset=offset)],
+            source_anchor=(0.0, 0.0),
+        )
 
     def resolve(lib_id: str) -> ResolvedModels | None:
         if lib_id in cache:
@@ -736,6 +823,9 @@ class ModelPatchReport:
     lcsc_matches: dict[str, str] = field(default_factory=dict)
     """Lib ids whose model came from the LCSC/EasyEDA fetch tier
     (``lib_id -> C-number``)."""
+    lcsc_transforms: dict[str, str] = field(default_factory=dict)
+    """Lib ids whose LCSC body received a non-identity per-part transform
+    (``lib_id -> human-readable summary naming each field's source``)."""
 
     @property
     def changed(self) -> bool:
@@ -780,7 +870,13 @@ def add_model_refs_to_text(pcb_text: str, resolver: Resolver) -> tuple[str, Mode
         # 2D frame; the model frame's Y negation and KiCad's render-time
         # negation of the written (rotate ...) cancel, so _apply_rotate_delta
         # bakes a model-frame Z of +theta.  When either orientation is underivable
-        # (single-pad parts, LCSC-synthesized bodies) theta stays 0.
+        # (single-pad parts, LCSC-synthesized bodies) theta stays 0.  For the
+        # LCSC tier that is permanent by construction -- there is no source
+        # footprint -- so its orientation correction is *authored* instead, and
+        # is already baked into the synthesized block by
+        # ``make_library_resolver._resolve_lcsc`` (sidecar object form >
+        # packaged lcsc_model_transforms table > identity).  theta == 0 there
+        # is what guarantees the two can never double-apply.
         target_orientation = _pad_field_orientation(body)
         theta = 0.0
         if source_orientation is not None and target_orientation is not None:
@@ -827,7 +923,7 @@ def add_model_refs(
     resolver: Resolver | None = None,
     allow_variants: bool = True,
     allow_substitutions: bool = True,
-    lcsc_mapping: dict[str, str] | None = None,
+    lcsc_mapping: LcscMapping | None = None,
     lcsc_fetch: bool = False,
     lcsc_cache_dir: Path | None = None,
     lcsc_warn: Callable[[str], None] | None = None,
@@ -848,8 +944,11 @@ def add_model_refs(
             exact + variant matching both miss (reported in
             ``substitution_matches``). Ignored when *resolver* is supplied.
         lcsc_mapping: Optional ``lib_id -> C-number`` sidecar enabling the LCSC
-            fetch tier (reported in ``lcsc_matches``). Ignored when *resolver*
-            is supplied.
+            fetch tier (reported in ``lcsc_matches``). Values may be a bare
+            C-number ``str`` or an
+            :class:`~kicad_tools.pcb.lcsc_models.LcscModelEntry` carrying
+            per-part ``rotate``/``offset`` overrides (reported in
+            ``lcsc_transforms``). Ignored when *resolver* is supplied.
         lcsc_fetch: When True, fetch a missing LCSC STEP on a cache miss;
             default cache-only (no network). Ignored when *resolver* is
             supplied.
@@ -867,6 +966,7 @@ def add_model_refs(
     variant_log: dict[str, str] = {}
     substitution_log: dict[str, str] = {}
     lcsc_log: dict[str, str] = {}
+    lcsc_transform_log: dict[str, str] = {}
     if resolver is None:
         resolver = make_library_resolver(
             library_paths,
@@ -878,6 +978,7 @@ def add_model_refs(
             lcsc_fetch=lcsc_fetch,
             lcsc_cache_dir=lcsc_cache_dir,
             lcsc_log=lcsc_log,
+            lcsc_transform_log=lcsc_transform_log,
             lcsc_warn=lcsc_warn,
         )
     new_text, report = add_model_refs_to_text(text, resolver)
@@ -890,6 +991,9 @@ def add_model_refs(
     }
     report.lcsc_matches = {
         lib_id: cnum for lib_id, cnum in lcsc_log.items() if lib_id in report.patched
+    }
+    report.lcsc_transforms = {
+        lib_id: desc for lib_id, desc in lcsc_transform_log.items() if lib_id in report.patched
     }
     if report.changed and not dry_run:
         dest = Path(output_path) if output_path is not None else pcb_path

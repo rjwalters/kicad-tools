@@ -20,10 +20,18 @@ are treated as **origin-authored**: the resolver returns
 shared ``add_model_refs_to_text`` offset math computes ``dx, dy =
 target_anchor`` -- the body's origin lands on the target footprint's pad
 centroid.  This is an approximation (origin-centered placement, not
-pin-1-registered) and scale/rotation are left at KiCad defaults (``1 1 1`` /
-``0 0 0``); a fetched body whose native orientation differs from the
-footprint's silkscreen may sit rotated.  These limitations are acceptable for
-cosmetic render bodies and noted for future per-mapping overrides.
+pin-1-registered).
+
+**Orientation policy.**  There is likewise no source footprint to *derive* a
+rotation from, and EasyEDA bodies are authored in whatever orientation the
+part vendor chose, so the tier's default identity rotation is a guess that is
+wrong for many parts.  Authored per-part corrections therefore come from two
+places, resolved in ``models3d._resolve_lcsc`` (first non-``None`` wins,
+merged per field): a per-board sidecar entry in **object form**
+(:class:`LcscModelEntry`), then the packaged, C-number-keyed table in
+:mod:`kicad_tools.pcb.lcsc_model_transforms`, then identity.  See
+``docs/guides/lcsc-3d-models.md`` for the frame semantics and the calibration
+recipe.
 
 **Offline / CI safety.**  The fetch is opt-in.  A model resolves only when the
 cache already holds the STEP, or when fetching is explicitly enabled (via the
@@ -35,21 +43,28 @@ never fails for want of a body, and CI never needs network.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 __all__ = [
     "DEFAULT_CACHE_ENV_VAR",
     "LCSC_MODEL_PATH_VAR",
+    "LcscModelEntry",
     "fetch_enabled",
     "load_lcsc_mapping",
     "lcsc_cache_dir",
     "resolve_lcsc_step",
     "synthesize_model_block",
 ]
+
+# A model-frame (x, y, z) triple, as written into ``(offset ...)`` /
+# ``(rotate ...)``.
+Triple = tuple[float, float, float]
 
 # Env var naming the on-disk LCSC STEP cache directory.  It doubles as the
 # ``(model ...)`` path variable emitted into committed ``.kicad_pcb`` files
@@ -123,13 +138,114 @@ def fetch_enabled(flag: bool = False) -> bool:
     return val in {"1", "true", "yes", "on"}
 
 
-def load_lcsc_mapping(sidecar_path: Path | str) -> dict[str, str]:
+@dataclass(frozen=True)
+class LcscModelEntry:
+    """One resolved sidecar entry: a C-number plus optional per-part transforms.
+
+    *rotate* and *offset* are model-frame triples (X as the footprint 2D X, Y
+    negated versus footprint 2D Y, Z up from the board).  ``None`` means "this
+    sidecar says nothing about that field", which lets the packaged
+    :mod:`kicad_tools.pcb.lcsc_model_transforms` table supply it — the merge is
+    per field, so a sidecar that overrides only ``rotate`` does not suppress a
+    packaged ``offset``.
+    """
+
+    lcsc: str
+    rotate: Triple | None = None
+    offset: Triple | None = None
+
+
+# Keys accepted in the sidecar's object form.  Anything else is a build error:
+# a typo'd ``"rotation"`` must not degrade to a silent, green no-op -- that is
+# precisely the failure mode the override mechanism exists to prevent.
+_ENTRY_KEYS = frozenset({"lcsc", "rotate", "offset"})
+
+
+def _parse_triple(path: Path, lib_id: str, field_name: str, value: object) -> Triple:
+    """Validate an object-form ``rotate``/``offset`` array, or raise ``ValueError``."""
+    if not isinstance(value, list) or len(value) != 3:
+        raise ValueError(
+            f"LCSC sidecar {path}: {field_name!r} for {lib_id!r} must be an array of "
+            f"exactly 3 numbers, got {value!r}"
+        )
+    out: list[float] = []
+    for component in value:
+        # ``bool`` is an ``int`` subclass; a JSON ``true`` is not a coordinate.
+        if isinstance(component, bool) or not isinstance(component, (int, float)):
+            raise ValueError(
+                f"LCSC sidecar {path}: {field_name!r} for {lib_id!r} must contain only "
+                f"numbers, got {component!r}"
+            )
+        as_float = float(component)
+        if not math.isfinite(as_float):
+            raise ValueError(
+                f"LCSC sidecar {path}: {field_name!r} for {lib_id!r} must contain only "
+                f"finite numbers, got {component!r}"
+            )
+        out.append(as_float)
+    return (out[0], out[1], out[2])
+
+
+def _parse_entry(path: Path, lib_id: str, value: object) -> LcscModelEntry:
+    """Parse one sidecar value (bare C-number string, or the object form)."""
+    if isinstance(value, str):
+        c_number = value
+        rotate: Triple | None = None
+        offset: Triple | None = None
+    elif isinstance(value, dict):
+        unknown = sorted(set(value) - _ENTRY_KEYS)
+        if unknown:
+            raise ValueError(
+                f"LCSC sidecar {path}: unknown key(s) {unknown} for {lib_id!r} "
+                f"(expected any of {sorted(_ENTRY_KEYS)})"
+            )
+        raw_lcsc = value.get("lcsc")
+        if not isinstance(raw_lcsc, str):
+            raise ValueError(
+                f"LCSC sidecar {path}: object form for {lib_id!r} must contain a "
+                "string 'lcsc' C-number"
+            )
+        c_number = raw_lcsc
+        rotate = (
+            _parse_triple(path, lib_id, "rotate", value["rotate"]) if "rotate" in value else None
+        )
+        offset = (
+            _parse_triple(path, lib_id, "offset", value["offset"]) if "offset" in value else None
+        )
+    else:
+        raise ValueError(
+            f"LCSC sidecar {path}: entry for {lib_id!r} must be a string C-number or an "
+            "object with an 'lcsc' key"
+        )
+    # The C-number is untrusted and flows into a cache filename, a request
+    # URL, and a committed board ref; a malformed value (path traversal,
+    # URL injection, non-C string) is a build error, matching the
+    # malformed-sidecar posture above.  Validated identically on both forms.
+    if not _is_valid_lcsc_id(c_number):
+        raise ValueError(
+            f"LCSC sidecar {path}: invalid C-number {c_number!r} for {lib_id!r} "
+            "(expected 'C' followed by digits, e.g. 'C50950')"
+        )
+    return LcscModelEntry(lcsc=c_number, rotate=rotate, offset=offset)
+
+
+def load_lcsc_mapping(sidecar_path: Path | str) -> dict[str, LcscModelEntry]:
     """Load a ``lib_id -> C-number`` sidecar (``lcsc_models.json``).
 
-    The sidecar is a flat JSON object, e.g.
-    ``{"Module:Joystick_Analog": "C50950"}``.  Raises ``ValueError`` on a
-    malformed file (not silently ignored -- a broken committed sidecar is a
-    build error, distinct from a runtime network failure).
+    Two per-entry forms are accepted:
+
+    * **bare string** -- ``{"Module:Joystick_Analog": "C50950"}``, meaning "use
+      this C-number with whatever transform the packaged table supplies (or
+      identity)";
+    * **object** -- ``{"Connector:Part": {"lcsc": "C444929", "rotate": [0, 0,
+      90], "offset": [0, 0, 0]}}``, a board-local override of the packaged
+      :mod:`kicad_tools.pcb.lcsc_model_transforms` table.  ``rotate`` and
+      ``offset`` are independently optional.
+
+    Raises ``ValueError`` on a malformed file (not silently ignored -- a broken
+    committed sidecar is a build error, distinct from a runtime network
+    failure).  Unknown object keys are rejected rather than ignored, so a
+    typo'd ``"rotation"`` fails loudly instead of silently doing nothing.
     """
     path = Path(sidecar_path)
     try:
@@ -140,22 +256,11 @@ def load_lcsc_mapping(sidecar_path: Path | str) -> dict[str, str]:
         raise ValueError(f"malformed LCSC sidecar {path}: {e}") from e
     if not isinstance(raw, dict):
         raise ValueError(f"LCSC sidecar {path} must be a JSON object of lib_id -> C-number")
-    mapping: dict[str, str] = {}
+    mapping: dict[str, LcscModelEntry] = {}
     for key, value in raw.items():
-        if not isinstance(key, str) or not isinstance(value, str):
-            raise ValueError(
-                f"LCSC sidecar {path}: entries must be string lib_id -> string C-number"
-            )
-        # The C-number is untrusted and flows into a cache filename, a request
-        # URL, and a committed board ref; a malformed value (path traversal,
-        # URL injection, non-C string) is a build error, matching the
-        # malformed-sidecar posture above.
-        if not _is_valid_lcsc_id(value):
-            raise ValueError(
-                f"LCSC sidecar {path}: invalid C-number {value!r} for {key!r} "
-                "(expected 'C' followed by digits, e.g. 'C50950')"
-            )
-        mapping[key] = value
+        if not isinstance(key, str):
+            raise ValueError(f"LCSC sidecar {path}: entry keys must be string lib_ids")
+        mapping[key] = _parse_entry(path, key, value)
     return mapping
 
 
@@ -307,23 +412,63 @@ def resolve_lcsc_step(
     return step_path
 
 
-def synthesize_model_block(lcsc_id: str) -> str:
+def _fmt_num(value: float) -> str:
+    """Format a float the way KiCad writes model offsets (no trailing zeros).
+
+    Deliberately identical to ``models3d._fmt_num`` so a synthesized block and
+    a block the shared offset machinery has rewritten are byte-comparable.
+    ``tests/test_lcsc_models.py`` asserts the two stay in agreement.
+    """
+    if value == 0.0:
+        value = 0.0  # normalize -0.0 -> 0.0
+    rounded = round(value, 6)
+    if rounded == int(rounded):
+        return str(int(rounded))
+    return f"{rounded:g}"
+
+
+def _fmt_xyz(triple: Triple | None, default: Triple) -> str:
+    """Render ``(xyz x y z)`` for *triple*, falling back to *default*."""
+    x, y, z = default if triple is None else triple
+    return f"(xyz {_fmt_num(x)} {_fmt_num(y)} {_fmt_num(z)})"
+
+
+def synthesize_model_block(
+    lcsc_id: str,
+    *,
+    rotate: Triple | None = None,
+    offset: Triple | None = None,
+) -> str:
     """Build a dedented ``(model ...)`` block referencing the LCSC cache.
 
-    The path uses the portable ``${KCT_LCSC_3D_DIR}`` variable and a baseline
-    ``(offset (xyz 0 0 0))`` so the shared offset machinery injects the full
-    target pad-centroid delta as the model's final offset.
+    The path uses the portable ``${KCT_LCSC_3D_DIR}`` variable.  With no
+    override the block is the historical identity node -- ``(offset (xyz 0 0
+    0))`` (so the shared offset machinery injects the full target pad-centroid
+    delta as the model's final offset), ``(scale (xyz 1 1 1))``, ``(rotate
+    (xyz 0 0 0))``.
+
+    Args:
+        lcsc_id: LCSC part number (e.g. ``"C444929"``).
+        rotate: Optional model-frame rotation triple, written **verbatim**.
+            The LCSC tier's derived ``theta`` is always ``0`` (there is no
+            source footprint to derive one from), so nothing composes with
+            this value.
+        offset: Optional model-frame offset triple.  It seeds the node's
+            ``(offset ...)``, and the shared pad-centroid delta ``(dx, -dy)``
+            is then *added* into its X/Y by ``models3d._apply_offset_delta``;
+            Z passes through untouched.  Because KiCad applies scale ->
+            rotate -> offset, this is a post-rotation translation.
     """
     return (
         f'(model "{LCSC_MODEL_PATH_VAR}/{lcsc_id}.step"\n'
         "\t(offset\n"
-        "\t\t(xyz 0 0 0)\n"
+        f"\t\t{_fmt_xyz(offset, (0.0, 0.0, 0.0))}\n"
         "\t)\n"
         "\t(scale\n"
         "\t\t(xyz 1 1 1)\n"
         "\t)\n"
         "\t(rotate\n"
-        "\t\t(xyz 0 0 0)\n"
+        f"\t\t{_fmt_xyz(rotate, (0.0, 0.0, 0.0))}\n"
         "\t)\n"
         ")"
     )
