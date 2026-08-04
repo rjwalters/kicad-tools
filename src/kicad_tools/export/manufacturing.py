@@ -167,10 +167,12 @@ def verify_manifest(manifest_path: str | Path) -> list[str]:
 
     Recomputes the SHA256 checksum and size of every file listed in the
     manifest and compares them to the recorded values.  Files are looked
-    up first in the manifest's own directory; entries that aren't found
-    there are searched recursively, because the manifest records bare
-    filenames even for artifacts that live in subdirectories (e.g.
-    ``gerbers.zip`` under ``gerbers/``).
+    up as ``bundle_dir / key``, which resolves every entry of a manifest
+    written by a current kicad-tools (keys are bundle-relative POSIX
+    paths, e.g. ``gerbers/gerbers.zip``).  Entries that aren't found
+    there fall back to a recursive search, purely for backward
+    compatibility with **legacy** manifests that recorded bare filenames
+    even for artifacts living in subdirectories (issue #4590).
 
     The manifest itself is excluded from verification (its hash can't
     contain itself).
@@ -198,8 +200,13 @@ def verify_manifest(manifest_path: str | Path) -> list[str]:
             continue
         fpath = bundle_dir / name
         if not fpath.exists():
-            # Manifest stores bare filenames; some artifacts live in
-            # subdirectories of the bundle (e.g. gerbers/gerbers.zip).
+            # LEGACY-ONLY fallback (issue #4590): manifests written
+            # before the bundle-relative key fix stored bare filenames
+            # for artifacts that live in subdirectories of the bundle
+            # (e.g. "gerbers.zip" for gerbers/gerbers.zip).  Current
+            # manifests always resolve via bundle_dir / name above; keep
+            # this path so already-shipped bundles still verify without
+            # being regenerated.
             candidates = sorted(bundle_dir.rglob(name))
             if not candidates:
                 problems.append(f"{name}: listed in manifest but not found on disk")
@@ -262,11 +269,27 @@ def _build_manifest(
     pcb_path: Path,
     manufacturer: str,
 ) -> dict:
-    """Build the manifest dictionary with SHA256 checksums."""
+    """Build the manifest dictionary with SHA256 checksums.
+
+    Files are keyed by their **bundle-relative POSIX path** (relative to
+    ``result.output_dir``), so a consumer can resolve every entry with a
+    plain ``bundle_dir / key`` -- including artifacts that live in
+    subdirectories such as ``gerbers/gerbers.zip`` and ``images/*.png``
+    (issue #4590).  ``as_posix()`` keeps the key platform-independent so
+    the manifest is byte-identical across hosts (cf. #3529).
+    """
     files_info: dict[str, dict] = {}
+    bundle_root = result.output_dir.resolve()
     for fpath in result.all_files:
         if fpath.exists():
-            files_info[fpath.name] = {
+            try:
+                key = fpath.resolve().relative_to(bundle_root).as_posix()
+            except ValueError:
+                # Artifact outside the bundle (shouldn't happen for
+                # all_files) -- degrade to the basename rather than
+                # dropping the entry.
+                key = fpath.name
+            files_info[key] = {
                 "sha256": _sha256_file(fpath),
                 "size": fpath.stat().st_size,
             }

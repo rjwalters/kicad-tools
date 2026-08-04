@@ -460,6 +460,10 @@ class TestImagePromotion:
         manifest = _build_manifest(result, pcb, "jlcpcb-tier1")
 
         assert manifest["manufacturer"] == "jlcpcb-tier1"
+        # Images are keyed by their bundle-relative POSIX path so a
+        # consumer can resolve them with `bundle_dir / key` (issue #4590).
         for name in ("layer_F_Cu.png", "layer_B_Cu.png", "assembly.png"):
-            assert name in manifest["files"]
-            assert manifest["files"][name]["sha256"] == _sha256_file(out_dir / "images" / name)
+            key = f"images/{name}"
+            assert key in manifest["files"]
+            assert name not in manifest["files"]
+            assert manifest["files"][key]["sha256"] == _sha256_file(out_dir / "images" / name)
