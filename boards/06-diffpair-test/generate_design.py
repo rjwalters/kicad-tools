@@ -41,6 +41,7 @@ from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
+from kicad_tools.recipes.precondition import require_spec
 from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED, NET_CLASS_POWER, NetClassRouting
 
 # Re-export net definitions and footprint generators from generate_pcb.
@@ -3392,6 +3393,15 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+
+    # Precondition (#4539): refuse to mutate a board that carries no captured
+    # intent.  Anchored on ``__file__`` -- NOT ``Path.cwd()`` and NOT the
+    # output dir -- because CI invokes this recipe from the repo root with an
+    # out-of-tree output dir, so a cwd-anchored search would find nothing and
+    # fire spuriously.  Advisory by default (L1: project.kct exists, is
+    # non-empty, and parses); ``KCT_REQUIRE_SPEC=1`` upgrades it to a hard L2
+    # gate that exits non-zero BEFORE any file is written.
+    require_spec(__file__)
 
     if args.output_dir is not None:
         output_dir = Path(args.output_dir)

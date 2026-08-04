@@ -267,6 +267,68 @@ intent:
     kicad-tools pipeline.
 ```
 
+### Spec precondition: recipes refuse to mutate a board with no captured intent
+
+Every board recipe entry point calls
+`kicad_tools.recipes.precondition.require_spec(__file__)` as its **first**
+statement, before any file is written. It is the pre-condition half of the
+recipe contract (`kicad_tools.recipes.gate.evaluate_pipeline_gate` is the
+post-condition half). The check is strictly **read-only** — it never writes,
+repairs or rewrites a `.kct` file.
+
+Discovery walks **up from the recipe script's own directory**
+(`Path(__file__).parent`, bounded to 6 ancestors) looking for `project.kct`.
+It deliberately does **not** anchor on the current working directory or on the
+output directory, because CI invokes recipes from the repo root with an
+out-of-tree output dir:
+
+```bash
+uv run python boards/00-simple-led/generate_design.py /tmp/board00-ci
+```
+
+**Gate strength:**
+
+| Level | Check | Default | Strict |
+|-------|-------|---------|--------|
+| L0 | `project.kct` exists and is non-empty | required | required |
+| L1 | + `load_spec()` parses it | **required** | required |
+| L2 | + `validate_spec()` reports no errors | not checked | **required** |
+
+- **Default is L1 and advisory.** A missing / empty / unparseable spec prints a
+  labelled `⚠️ spec precondition` warning to stderr and returns a falsy
+  `SpecPreconditionResult`. It does **not** raise and does **not** change the
+  recipe's exit code. An unexpected error inside the helper itself is swallowed
+  and reported as "could not check" — the gate never crashes a recipe.
+- **Strict mode is opt-in** via the `KCT_REQUIRE_SPEC` environment variable
+  (`KCT_REQUIRE_SPEC=1`) or `require_spec(__file__, strict=True)`. It raises the
+  bar to L2 and exits non-zero **before** the recipe's first write.
+
+```bash
+# advisory (default)
+uv run python boards/00-simple-led/generate_design.py /tmp/out
+
+# hard gate: abort unless the spec also validates semantically
+KCT_REQUIRE_SPEC=1 uv run python boards/00-simple-led/generate_design.py /tmp/out
+```
+
+L2 is not the default because it is not currently clean across the fleet:
+`boards/01-voltage-divider/project.kct` fails semantic validation with
+`Progress: current phase 'complete' not found in phases` — a bookkeeping defect
+in the spec's `progress` block, tracked separately. All 8 boards pass L1.
+
+**Non-goal — this is not a schema-completeness check.** The precondition asks
+only *"does this board carry captured intent that parses?"*. It deliberately
+does **not** check whether the spec *models* the board's requirements (i.e. it
+does not reject unrecognized / unmodelled `.kct` keys). What `.kct` should model
+is a separate, open schema-design question.
+
+**Consumer-repo escape hatch:** a project whose intent artifact lives elsewhere
+or is named something else passes it explicitly:
+
+```python
+require_spec(__file__, spec_path=Path("docs/ENGINEERING_PLAN.kct"))
+```
+
 ## Board Details
 
 ### 00 - Simple LED (Hello World)
