@@ -186,8 +186,11 @@ def committed_seg_clear_grown(
         gap = committed.trace_half + hw + max(committed.clearance, iclr) + extra
         if cnet not in nets and seg_seg_dist(a, b, c, d) < gap - _EPS:
             return False
-    vgap = committed.via_radius + committed.clearance + committed.trace_half + extra
-    for point, vnet in committed.vias:
+    # Issue #4597: honor the stored via's class clearance, mirroring the
+    # ``max(clearance, iclr)`` the copper loop above already applies.
+    base_vgap = committed.via_radius + committed.trace_half + committed.clearance + extra
+    for point, vnet, vclr in committed.vias:
+        vgap = base_vgap if vclr <= committed.clearance else base_vgap - committed.clearance + vclr
         if vnet not in nets and seg_pt_dist(a, b, point) < vgap - _EPS:
             return False
     return True
@@ -206,8 +209,11 @@ def committed_point_clear_grown(
         gap = committed.trace_half + hw + max(committed.clearance, iclr) + extra
         if cnet not in nets and seg_pt_dist(c, d, point) < gap - _EPS:
             return False
-    vgap = committed.via_radius + committed.clearance + committed.trace_half + extra
-    for vpt, vnet in committed.vias:
+    # Issue #4597: honor the stored via's class clearance (see
+    # ``committed_seg_clear_grown``).
+    base_vgap = committed.via_radius + committed.trace_half + committed.clearance + extra
+    for vpt, vnet, vclr in committed.vias:
+        vgap = base_vgap if vclr <= committed.clearance else base_vgap - committed.clearance + vclr
         if vnet not in nets and dist(point, vpt) < vgap - _EPS:
             return False
     return True

@@ -777,6 +777,46 @@ so it does, then re-run the tile.
 > the board, plants the cross-region boundary stubs, and routes the tiles in
 > sequence automatically, making this recipe a single command.
 
+### Preserved copper keeps its `--net-class-map` clearance (lattice engine)
+
+Any multi-step composition (`--region`, `--nets`, or an explicit
+`--preserve-existing`) routes one group of nets per step and treats the copper
+from earlier steps as a fixed obstacle. On the **lattice** engine
+(`--engine lattice`) that preserved copper is spaced at the
+`--net-class-map` clearance **of the preserved net**, not merely at the
+board-global DRU clearance
+([#4597](https://github.com/rjwalters/kicad-tools/issues/4597)). The required
+edge-to-edge gap between new copper and preserved copper is
+
+```
+max(new_net_class_clearance, preserved_net_class_clearance)
+```
+
+floored at `DesignRules.trace_clearance` — the same rule that applies to two
+nets routed in a single pass, so a step boundary no longer changes the answer.
+This is what makes the HV-outer recipe (route the mains group first, then the
+low-voltage group with a map that puts 2.0–3.2 mm on the HV nets) actually
+enforce those isolation gaps; before this the cross-step pairs collapsed to
+the DRU floor (~0.2 mm) and passed DRC silently.
+
+Practical consequence: **carry the HV entries in every step's map**, not just
+the step that routes them. A preserved net with no entry in the current step's
+map resolves to the global clearance exactly as before.
+
+Not covered — document, do not assume:
+
+- **`--engine grid`** blocks preserved routes at
+  `segment_width / 2 + DesignRules.trace_clearance` for all routes, preserved
+  or fresh; per-net class clearance is not applied to preserved copper there.
+- **`--engine mesh`** inflates its preserved-copper obstacles at the global
+  `trace_width + trace_clearance` and its committed model is net-agnostic, so
+  it cannot express a per-net clearance at all.
+- **Class-pair (pairwise) clearance** — the voltage-matrix mechanism is a
+  separate feature and is not applied to preserved copper by this rule.
+- **Via-to-via**: a *new* via applies its own class clearance to preserved
+  copper traces, and honors a preserved via's class clearance, but a new via
+  does not yet apply *its own* class clearance against other vias.
+
 ---
 
 ## See Also

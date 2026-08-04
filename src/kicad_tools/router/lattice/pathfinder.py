@@ -266,14 +266,22 @@ class LatticePathfinder:
         self.pair_outcomes: dict[object, str] = {}
         # Issue #4355: immovable copper from NON-listed nets (the preserved
         # ``router.existing_routes``), pre-processed into per-segment seed
-        # tuples ``(layer_idx, a, b, net, half_width)`` plus via sites
-        # ``(point, net)``.  Every fresh CommittedCopper model is pre-seeded
-        # with these so a negotiated net spaces against the fixed copper as a
-        # HARD geometric block -- routes around it or is honestly reported
-        # unroutable, never shipped as a short.  Empty (the default) preserves
-        # the pre-#4355 behavior byte-for-byte.
-        self._fixed_runs: list[tuple[int, Pt, Pt, int, float]] = []
-        self._fixed_vias: list[tuple[Pt, int]] = []
+        # tuples ``(layer_idx, a, b, net, half_width, clearance)`` plus via
+        # sites ``(point, net, clearance)``.  Every fresh CommittedCopper model
+        # is pre-seeded with these so a negotiated net spaces against the fixed
+        # copper as a HARD geometric block -- routes around it or is honestly
+        # reported unroutable, never shipped as a short.  Empty (the default)
+        # preserves the pre-#4355 behavior byte-for-byte.
+        #
+        # Issue #4597: the per-seed CLEARANCE is the preserved net's own
+        # net-class clearance (resolved by the caller and handed to
+        # :meth:`route_netset` as ``fixed_clearance``), floored at
+        # ``rules.trace_clearance``.  Before this the seed hardcoded the
+        # board-global floor, so a multi-step ``--preserve-existing``
+        # composition silently spaced new copper at the DRU floor from an HV
+        # net the net-class map put at 2.0-3.2 mm.
+        self._fixed_runs: list[tuple[int, Pt, Pt, int, float, float]] = []
+        self._fixed_vias: list[tuple[Pt, int, float]] = []
 
     # -- construction from a board ----------------------------------------
 
@@ -400,29 +408,52 @@ class LatticePathfinder:
         """Commit the preserved non-listed copper into ``committed`` (#4355).
 
         Each preserved segment is committed under its OWN net id at its emitted
-        half-width and the board-global clearance floor -- a hard geometric
-        block that ``route_netset`` declines to cross (never shipped as a
-        short).  Same-net exemption in :meth:`CommittedCopper.seg_clear` means
-        seeding a listed net's own stale copper (if any slipped into the fixed
-        set) cannot block that net's fresh route.  Each preserved via seeds
-        ``committed.vias`` (a through-via blocks every layer).
-        """
-        clr = self.rules.trace_clearance
-        for layer_idx, a, b, net, half in self._fixed_runs:
-            committed.add_run(layer_idx, [a, b], net, half, clr)
-        for point, net in self._fixed_vias:
-            committed.add_via(point, net)
+        half-width and its OWN net-class clearance (issue #4597) -- a hard
+        geometric block that ``route_netset`` declines to cross (never shipped
+        as a short).  Same-net exemption in :meth:`CommittedCopper.seg_clear`
+        means seeding a listed net's own stale copper (if any slipped into the
+        fixed set) cannot block that net's fresh route.  Each preserved via
+        seeds ``committed.vias`` at that same clearance (a through-via blocks
+        every layer).
 
-    def _set_fixed_copper(self, routes: list[Route] | None) -> None:
+        Nets with no resolved class clearance seed at ``rules.trace_clearance``
+        exactly as before #4597.
+        """
+        for layer_idx, a, b, net, half, clr in self._fixed_runs:
+            committed.add_run(layer_idx, [a, b], net, half, clr)
+        for point, net, clr in self._fixed_vias:
+            committed.add_via(point, net, clr)
+
+    def _fixed_clearance_for(self, net: int, clearances: dict[int, float] | None) -> float:
+        """Seed clearance for preserved net ``net`` (issue #4597).
+
+        Same floor semantics as :meth:`_conn_geometry`: a class may only GROW
+        the gap, never shrink it below ``rules.trace_clearance``.  An unmapped
+        net (or ``clearances is None``) resolves to the board-global floor --
+        the pre-#4597 behavior, byte-for-byte.
+        """
+        if not clearances:
+            return self.rules.trace_clearance
+        return max(clearances.get(net) or 0.0, self.rules.trace_clearance)
+
+    def _set_fixed_copper(
+        self,
+        routes: list[Route] | None,
+        clearances: dict[int, float] | None = None,
+    ) -> None:
         """Pre-process preserved ``Route``s into flat seed tuples (#4355).
 
         Called once by :meth:`route_netset`; maps each segment's layer enum to
         a lattice layer index (dropping copper on non-routing layers) and each
         via to a site.  ``None``/empty resets the seed set so a reused
         pathfinder does not carry stale fixed copper.
+
+        ``clearances`` (issue #4597) is a plain ``{net_id: clearance}`` map the
+        CALLER resolved from its net-class map -- the pathfinder stays
+        geometry-only and never sees net names or net classes.
         """
-        runs: list[tuple[int, Pt, Pt, int, float]] = []
-        vias: list[tuple[Pt, int]] = []
+        runs: list[tuple[int, Pt, Pt, int, float, float]] = []
+        vias: list[tuple[Pt, int, float]] = []
         for route in routes or []:
             for seg in getattr(route, "segments", []):
                 try:
@@ -438,9 +469,13 @@ class LatticePathfinder:
                 if dist(a, b) <= 1e-9:
                     continue
                 half = (getattr(seg, "width", None) or self.rules.trace_width) / 2.0
-                runs.append((layer_idx, a, b, seg.net, half))
+                runs.append(
+                    (layer_idx, a, b, seg.net, half, self._fixed_clearance_for(seg.net, clearances))
+                )
             for via in getattr(route, "vias", []):
-                vias.append(((via.x, via.y), via.net))
+                vias.append(
+                    ((via.x, via.y), via.net, self._fixed_clearance_for(via.net, clearances))
+                )
         self._fixed_runs = runs
         self._fixed_vias = vias
 
@@ -1680,6 +1715,7 @@ class LatticePathfinder:
         *,
         coupled: list[CoupledConnection] | None = None,
         fixed_copper: list[Route] | None = None,
+        fixed_clearance: dict[int, float] | None = None,
         max_iterations: int = 8,
         present_cost_initial: float = 1.0,
         present_cost_growth: float = 1.6,
@@ -1722,6 +1758,16 @@ class LatticePathfinder:
         immovable hard obstacle, so a negotiated net routes AROUND it or is
         honestly declined -- it is never emitted overlapping foreign copper.
 
+        Issue #4597: ``fixed_clearance`` is a plain ``{net_id: clearance}`` map
+        giving each preserved net its net-class clearance, floored at
+        ``rules.trace_clearance`` (a class may only GROW the gap).  Without it
+        every preserved segment/via seeds at the board-global floor, so a
+        multi-step ``--preserve-existing`` composition spaced new copper at the
+        DRU floor from an HV net the map put at 2.0-3.2 mm -- the
+        ``max(own_clr, stored_clr)`` term in :class:`CommittedCopper` collapsed
+        to the routing net's own clearance.  ``None`` / ``{}`` / unmapped nets
+        preserve the pre-#4597 behavior byte-for-byte.
+
         Issue #4472: ``deadline`` is an optional absolute
         :func:`time.monotonic` timestamp.  When set, the negotiation aborts as
         soon as it is reached -- checked before each iteration and before each
@@ -1734,7 +1780,7 @@ class LatticePathfinder:
         # deadline check) so a report can honestly say "elapsed Xs of a Ys
         # budget" even on a run that never hits the deadline.
         start_time = time.monotonic()
-        self._set_fixed_copper(fixed_copper)
+        self._set_fixed_copper(fixed_copper, fixed_clearance)
         self.build()
         pairs = list(coupled or [])
 

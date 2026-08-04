@@ -2897,6 +2897,28 @@ class Autorouter:
         # this the lattice sees the non-listed pads but not the traces between
         # them and legally crosses foreign copper -> segment-segment shorts.
         fixed_copper = [r for r in self.existing_routes if r.net not in self.nets]
+        # Issue #4597: preserved copper keeps its NET-CLASS clearance across the
+        # pass boundary.  ``--preserve-existing`` composition (the documented
+        # 2-step HV-outer recipe, generalized to voltage-binned groups) routes
+        # one group per step with a per-step --net-class-map whose entries carry
+        # large HV clearances; without this resolution every preserved segment
+        # seeded at the board-global DRU floor, so ``max(own_clr, stored_clr)``
+        # in ``CommittedCopper`` collapsed to the ROUTING net's own clearance
+        # and cross-step pairs landed at 0.166-0.2 mm instead of the mapped
+        # 2.0-3.2 mm.  Resolve exactly as the listed-net branch above does
+        # (``self.net_class_map[net_name]``, floor at ``rules.trace_clearance``)
+        # so a preserved net is spaced identically to the same net routed
+        # in-pass.  The pathfinder stays geometry-only: it receives a plain
+        # ``{net_id: clearance}`` map, never the name-keyed class table.
+        fixed_clearance: dict[int, float] = {}
+        for route in fixed_copper:
+            if route.net in fixed_clearance:
+                continue
+            name = self.net_names.get(route.net) or getattr(route, "net_name", None)
+            nc = self.net_class_map.get(name) if name else None
+            clr = getattr(nc, "clearance", None) or 0.0
+            if clr > self.rules.trace_clearance:
+                fixed_clearance[route.net] = clr
         # Issue #4472: per-link wall-clock deadline.  ``--complete`` stamps a
         # per-link budget so each completion search aborts within a bounded
         # budget instead of grinding (issue #4434's >10-minute non-termination)
@@ -2911,6 +2933,7 @@ class Autorouter:
             connections,
             coupled=coupled,
             fixed_copper=fixed_copper,
+            fixed_clearance=fixed_clearance,
             max_iterations=max_iterations,
             deadline=deadline,
         )

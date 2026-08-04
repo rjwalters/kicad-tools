@@ -4247,6 +4247,13 @@ class RoutingGrid:
         positions inward.  The extra cell ensures the blocked envelope is
         always at least as large as the geometric clearance requirement.
 
+        Issue #4597 (scope note): the blocking radius uses the board-global
+        ``rules.trace_clearance`` for EVERY route, preserved or fresh -- this
+        engine does not apply a preserved net's ``--net-class-map`` clearance,
+        so multi-step ``--preserve-existing`` composition still spaces
+        cross-step pairs at the DRU floor here.  Only ``--engine lattice``
+        carries the per-net clearance across the pass boundary.
+
         Args:
             route: The route to mark on the grid.
             max_trace_width: Maximum trace width across all net classes.

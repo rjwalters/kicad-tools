@@ -901,6 +901,14 @@ class MeshPathfinder:
         Called at the top of every negotiation pass (the dict is reset each
         pass), so the seed is re-applied per pass.  A ``None`` / empty seed adds
         nothing and is a byte-identical no-op.
+
+        Issue #4597 (scope note): unlike the lattice engine, this seed does NOT
+        carry the preserved net's ``--net-class-map`` clearance -- the capsules
+        are inflated at the board-global ``trace_width + trace_clearance`` and
+        the mesh committed model is net-AGNOSTIC (plain polygons with no per-net
+        field), so it cannot express a per-net clearance without a model change.
+        Multi-step ``--preserve-existing`` composition therefore still spaces
+        cross-step pairs at the DRU floor on ``--engine mesh``.
         """
         for route in fixed_copper or []:
             for lidx, polys in self._route_obstacles_by_layer(route).items():
