@@ -91,7 +91,12 @@ class PreflightChecker:
             print("Cannot proceed with export")
     """
 
-    # Manufacturers whose standard assembly service is SMT-only
+    # Fab *families* whose standard assembly service is SMT-only.
+    #
+    # Compared against ``self._fab_family`` (NOT the raw ``--mfr`` value):
+    # capability tiers such as ``jlcpcb-tier1`` share the parent fab's
+    # assembly service and CPL format, so they must inherit the parent's
+    # THT policy.  See ``get_fab_family()`` and issue #3497.
     _SMT_ONLY_MANUFACTURERS = {"jlcpcb"}
 
     def __init__(
@@ -115,11 +120,25 @@ class PreflightChecker:
         # (default: lazily constructed in _check_bom_lcsc_values).
         self._parts_cache = parts_cache
 
-        # Determine THT exclusion: explicit override, or default per manufacturer
+        # Resolve the fab *family* once.  Export-format concerns (BOM/CPL
+        # formatters, THT policy) are properties of the physical fab, not of
+        # a capability tier: ``jlcpcb-tier1`` -> ``jlcpcb``.  The CPL writer
+        # already resolves the family (``assembly.py`` -> ``get_fab_family``),
+        # so preflight must use the same key or its THT predictions desync
+        # from the file that actually ships (issue #4591).  DRC limits keep
+        # using the *full* manufacturer ID -- see ``_get_manufacturer_limits``.
+        try:
+            from ..manufacturers import get_fab_family
+
+            self._fab_family = get_fab_family(self.manufacturer)
+        except Exception:  # pragma: no cover - defensive; resolver is pure
+            self._fab_family = self.manufacturer
+
+        # Determine THT exclusion: explicit override, or default per fab family
         if exclude_tht is not None:
             self._exclude_tht = exclude_tht
         else:
-            self._exclude_tht = self.manufacturer in self._SMT_ONLY_MANUFACTURERS
+            self._exclude_tht = self._fab_family in self._SMT_ONLY_MANUFACTURERS
 
         # Lazy-loaded objects
         self._pcb = None
@@ -620,7 +639,7 @@ class PreflightChecker:
                 details=f"THT references: {refs}{suffix}",
             )
 
-        if self.manufacturer in self._SMT_ONLY_MANUFACTURERS:
+        if self._fab_family in self._SMT_ONLY_MANUFACTURERS:
             return PreflightResult(
                 name="tht_in_cpl",
                 status="WARN",

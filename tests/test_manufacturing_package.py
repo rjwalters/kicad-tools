@@ -1611,3 +1611,201 @@ class TestManufacturingPreflightSpecOverlay:
 
         assert result.status == "WARN"
         assert "2/2 active item(s) missing LCSC part number" in result.details
+
+
+class TestPreflightLCSCReconciliation:
+    """``bom_fields`` must reflect post-``--auto-lcsc`` state (issue #4591).
+
+    Preflight (Step 0) runs before any file is written -- deliberately, so
+    ``--strict-preflight`` can abort with nothing on disk.  It therefore
+    cannot know what ``enrich_bom_lcsc`` (Step 1) will resolve, since that
+    needs parts-API / cache I/O.  ``_reconcile_preflight_lcsc`` updates the
+    recorded result after enrichment and before the manifest is serialized.
+    """
+
+    def _write_project(self, tmp_path):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        return pcb
+
+    def _enrichment(self, *, auto=0, unmatched_refs=()):
+        from kicad_tools.export.bom_enrich import EnrichmentEntry, EnrichmentReport
+
+        entries = [
+            EnrichmentEntry(
+                value="100nF",
+                footprint="C_0402",
+                references=[f"C{i}"],
+                lcsc_part=f"C{1000 + i}",
+                source="auto",
+            )
+            for i in range(auto)
+        ]
+        entries += [
+            EnrichmentEntry(
+                value="X",
+                footprint="F",
+                references=[ref],
+                lcsc_part="",
+                source="unmatched",
+            )
+            for ref in unmatched_refs
+        ]
+        return EnrichmentReport(entries=entries)
+
+    def _run_export(self, tmp_path, monkeypatch, preflight_results, enrichment):
+        """Run a full export with assembly mocked to report ``enrichment``."""
+        pcb = self._write_project(tmp_path)
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            res = assembly.AssemblyPackageResult(output_dir=od)
+            res.lcsc_enrichment = enrichment
+            return res
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+        monkeypatch.setattr(PreflightChecker, "run_all", lambda self: preflight_results)
+
+        config = ManufacturingConfig(include_report=False, include_project_zip=False)
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        out_dir = tmp_path / "out"
+        result = pkg.export(out_dir)
+        manifest = json.loads((out_dir / "manifest.json").read_text())
+        entry = next(e for e in manifest["preflight"] if e["name"] == "bom_fields")
+        return result, entry
+
+    def test_fully_enriched_warn_becomes_ok(self, tmp_path, monkeypatch):
+        """Enrichment resolved everything => manifest records OK, not the WARN."""
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="WARN",
+                message="BOM field issues: 1 problem(s)",
+                details="88/88 active item(s) missing LCSC part number",
+            )
+        ]
+        _, entry = self._run_export(tmp_path, monkeypatch, preflight, self._enrichment(auto=88))
+        assert entry["status"] == "OK"
+        assert "missing LCSC part number" not in entry["message"]
+        assert "missing LCSC part number" not in entry.get("details", "")
+        assert "88 group(s) received LCSC from enrichment" in entry["details"]
+
+    def test_partial_enrichment_names_only_unmatched(self, tmp_path, monkeypatch):
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="WARN",
+                message="BOM field issues: 1 problem(s)",
+                details="10/10 active item(s) missing LCSC part number",
+            )
+        ]
+        _, entry = self._run_export(
+            tmp_path,
+            monkeypatch,
+            preflight,
+            self._enrichment(auto=8, unmatched_refs=("U7", "U9")),
+        )
+        assert entry["status"] == "WARN"
+        assert "2 component group(s) still missing LCSC" in entry["details"]
+        assert "U7" in entry["details"]
+        assert "U9" in entry["details"]
+        assert "10/10" not in entry["details"]
+
+    def test_fail_is_never_downgraded(self, tmp_path, monkeypatch):
+        """A FAIL (missing footprint) survives reconciliation verbatim."""
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="FAIL",
+                message="BOM field issues: 2 problem(s)",
+                details=(
+                    "1 item(s) missing footprint: U1; 5/5 active item(s) missing LCSC part number"
+                ),
+            )
+        ]
+        _, entry = self._run_export(tmp_path, monkeypatch, preflight, self._enrichment(auto=5))
+        assert entry["status"] == "FAIL"
+        assert entry["details"] == (
+            "1 item(s) missing footprint: U1; 5/5 active item(s) missing LCSC part number"
+        )
+
+    def test_non_lcsc_warn_clause_is_preserved(self, tmp_path, monkeypatch):
+        """A missing-value WARN keeps the entry at WARN after LCSC resolves."""
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="WARN",
+                message="BOM field issues: 2 problem(s)",
+                details=(
+                    "1 item(s) missing value: R9; 4/4 active item(s) missing LCSC part number"
+                ),
+            )
+        ]
+        _, entry = self._run_export(tmp_path, monkeypatch, preflight, self._enrichment(auto=4))
+        assert entry["status"] == "WARN"
+        assert "1 item(s) missing value: R9" in entry["details"]
+        assert "missing LCSC part number" not in entry["details"]
+
+    def test_no_enrichment_report_is_noop(self, tmp_path, monkeypatch):
+        """``--no-auto-lcsc`` (no report) must leave the entry untouched."""
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="WARN",
+                message="BOM field issues: 1 problem(s)",
+                details="3/3 active item(s) missing LCSC part number",
+            )
+        ]
+        _, entry = self._run_export(tmp_path, monkeypatch, preflight, None)
+        assert entry["status"] == "WARN"
+        assert entry["details"] == "3/3 active item(s) missing LCSC part number"
+
+    def test_ok_entry_without_lcsc_clause_untouched(self, tmp_path, monkeypatch):
+        """The #3926 spec-overlay note must not be rewritten."""
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="OK",
+                message="All 4 BOM items have required fields",
+                details="4 active item(s) will receive LCSC from spec overlay",
+            )
+        ]
+        _, entry = self._run_export(tmp_path, monkeypatch, preflight, self._enrichment(auto=0))
+        assert entry["status"] == "OK"
+        assert entry["message"] == "All 4 BOM items have required fields"
+        assert entry["details"] == "4 active item(s) will receive LCSC from spec overlay"
+
+    def test_skip_preflight_reconciliation_noop(self, tmp_path, monkeypatch):
+        """No preflight results => reconciliation is a no-op, not a crash."""
+        pcb = self._write_project(tmp_path)
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            res = assembly.AssemblyPackageResult(output_dir=od)
+            res.lcsc_enrichment = self_enrichment
+            return res
+
+        self_enrichment = self._enrichment(auto=2)
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        out_dir = tmp_path / "out"
+        result = pkg.export(out_dir)
+
+        assert result.preflight_results == []
+        manifest = json.loads((out_dir / "manifest.json").read_text())
+        assert "preflight" not in manifest

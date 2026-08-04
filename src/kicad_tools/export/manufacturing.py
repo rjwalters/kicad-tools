@@ -434,6 +434,13 @@ class ManufacturingPackage:
         if not assembly_ok:
             return result
 
+        # Step 1.5: Reconcile the recorded ``bom_fields`` preflight result
+        # against the LCSC enrichment that only just ran (Step 1).  Preflight
+        # inspects a raw BOM before any network/cache lookup, so its
+        # "missing LCSC part number" clause is a prediction that
+        # ``--auto-lcsc`` may have already invalidated (issue #4591).
+        self._reconcile_preflight_lcsc(result)
+
         # Step 2: Report (optional)
         if self.config.include_report:
             self._generate_report(out_dir, result)
@@ -459,6 +466,91 @@ class ManufacturingPackage:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    # Substring that identifies the LCSC clause emitted by
+    # ``PreflightChecker._check_bom_fields``.
+    _LCSC_CLAUSE_MARKER = "missing LCSC part number"
+
+    # Substrings that identify the non-LCSC problem clauses.  Anything in
+    # ``details`` that matches neither these nor the LCSC marker is an
+    # informational note and is preserved verbatim.
+    _BOM_FIELD_ISSUE_MARKERS = ("missing footprint", "missing value")
+
+    def _reconcile_preflight_lcsc(self, result: ManufacturingResult) -> None:
+        """Update the recorded ``bom_fields`` result with post-enrichment LCSC state.
+
+        ``PreflightChecker`` runs before any file is written (Step 0), which
+        is deliberate: ``strict_preflight`` and ``block_on_unbuildable_bom``
+        must be able to abort with nothing on disk.  The consequence is that
+        ``_check_bom_fields`` sees a *raw* BOM: for the ``--auto-lcsc`` path
+        it cannot know which items :func:`enrich_bom_lcsc` will resolve,
+        because that requires parts-API / cache I/O which preflight must not
+        perform.  (The spec-overlay path is predicted statically by
+        ``PreflightChecker._spec_lcsc_refs`` -- issues #3926 / #3932.)
+
+        So the LCSC clause is reconciled here, after Step 1 has actually run
+        the enrichment, and before the manifest is serialized.  Both the
+        manifest (``_build_manifest`` reads ``result.preflight_results``) and
+        the CLI summary render the updated entry with no changes at either
+        consumer.
+
+        Safety rules:
+
+        * A ``FAIL`` is **never** downgraded -- a ``bom_fields`` FAIL comes
+          from missing footprints, which enrichment cannot fix.
+        * Non-LCSC clauses (missing footprint / missing value) and
+          informational notes are preserved verbatim.
+        * No enrichment report (``--no-auto-lcsc``, non-JLCPCB family,
+          enrichment error) or no preflight results (``--skip-preflight``)
+          makes this a no-op.
+        """
+        if not result.preflight_results:
+            return
+        if result.assembly_result is None:
+            return
+
+        report = result.assembly_result.lcsc_enrichment
+        if report is None:
+            return
+
+        entry = next((pr for pr in result.preflight_results if pr.name == "bom_fields"), None)
+        if entry is None or entry.status == "FAIL":
+            return
+
+        clauses = [c.strip() for c in entry.details.split(";")] if entry.details else []
+        lcsc_clauses = [c for c in clauses if self._LCSC_CLAUSE_MARKER in c]
+        if not lcsc_clauses:
+            # Nothing predicted about LCSC -- leave the entry untouched.
+            return
+
+        other_clauses = [c for c in clauses if self._LCSC_CLAUSE_MARKER not in c]
+        remaining_issues = [
+            c for c in other_clauses if any(marker in c for marker in self._BOM_FIELD_ISSUE_MARKERS)
+        ]
+        notes = [c for c in other_clauses if c not in remaining_issues]
+
+        unmatched_entries = report.unmatched_entries
+        if unmatched_entries:
+            refs = [ref for e in unmatched_entries for ref in e.references]
+            shown = ", ".join(sorted(refs)[:10])
+            suffix = f" (and {len(refs) - 10} more)" if len(refs) > 10 else ""
+            remaining_issues.append(
+                f"{len(unmatched_entries)} component group(s) still missing LCSC "
+                f"part number after enrichment: {shown}{suffix}"
+            )
+        else:
+            resolved = report.auto_matched + report.cache_matched
+            if resolved:
+                notes.append(f"{resolved} group(s) received LCSC from enrichment")
+
+        if remaining_issues:
+            entry.status = "WARN"
+            entry.message = f"BOM field issues: {len(remaining_issues)} problem(s)"
+        else:
+            entry.status = "OK"
+            entry.message = "All BOM items have required fields (LCSC resolved by enrichment)"
+
+        entry.details = "; ".join(remaining_issues + notes)
 
     def _check_drc_safety_floor(self, result: ManufacturingResult) -> None:
         """Hard-abort export on net shorts / connectivity errors.

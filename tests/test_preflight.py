@@ -1692,3 +1692,134 @@ class TestPreflightBomCplMatchTHT:
         result = checker._check_bom_cpl_match()
         assert result.status == "OK"
         assert "DNP excluded" in result.message
+
+
+# ---------------------------------------------------------------------------
+# Capability-tier manufacturers resolve THT policy via the fab family (#4591)
+# ---------------------------------------------------------------------------
+
+
+class TestPreflightFabFamilyTHT:
+    """``jlcpcb-tier1`` must inherit the ``jlcpcb`` SMT-only THT policy.
+
+    The CPL writer resolves the fab *family* (``get_fab_family()``) before
+    picking a formatter, so a preflight that keyed off the raw ``--mfr``
+    string predicted "THT included" for a CPL that in fact excluded THT --
+    producing a false ``tht_in_cpl`` OK and a spurious ``bom_cpl_match``
+    FAIL (issue #4591).
+    """
+
+    def test_tier_id_resolves_exclude_tht(self, tmp_path):
+        pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1"], ["J1"])
+        base = PreflightChecker(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        tier = PreflightChecker(
+            pcb_path=pcb,
+            manufacturer="jlcpcb-tier1",
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        assert base._exclude_tht is True
+        assert tier._exclude_tht is True
+        assert tier._fab_family == "jlcpcb"
+
+    def test_tier_id_tht_in_cpl_reports_excluded(self, tmp_path):
+        pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1"], ["J1", "J2"])
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            manufacturer="jlcpcb-tier1",
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+        result = checker._check_tht_in_cpl()
+        assert result.status == "OK"
+        assert "excluded from CPL" in result.message
+        assert "included in CPL" not in result.message
+        # Details still enumerate the THT references.
+        assert "J1" in result.details
+        assert "J2" in result.details
+
+    def test_tier_id_bom_cpl_match_no_false_fail(self, tmp_path, monkeypatch):
+        """A BOM/CPL delta that is purely THT exclusion must report OK."""
+        pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1", "C1"], ["J1"])
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text('(kicad_sch (version 20231120) (generator "eeschema"))')
+
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            manufacturer="jlcpcb-tier1",
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        # J1 is on the PCB but absent from the BOM -- exactly the shape that
+        # produced "1 in CPL but not in BOM" FAIL before the fix.
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
+            ]
+        )
+        monkeypatch.setattr(checker, "_load_bom", lambda: bom)
+
+        result = checker._check_bom_cpl_match()
+        assert result.status == "OK"
+        assert "THT excluded" in result.message
+
+    def test_include_tht_override_wins_for_both_ids(self, tmp_path):
+        """Explicit ``exclude_tht=False`` (--include-tht) keeps precedence."""
+        pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1"], ["J1"])
+        for mfr in ("jlcpcb", "jlcpcb-tier1"):
+            checker = PreflightChecker(
+                pcb_path=pcb,
+                manufacturer=mfr,
+                exclude_tht=False,
+                config=PreflightConfig(skip_drc=True, skip_erc=True),
+            )
+            assert checker._exclude_tht is False, mfr
+            checker.run_all()
+            result = checker._check_tht_in_cpl()
+            assert result.status == "WARN", mfr
+            assert "SMT-only" in result.message
+            # The user-facing message names the ID the user actually passed.
+            assert mfr in result.message
+
+    def test_non_jlc_family_still_includes_tht(self, tmp_path):
+        pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1"], ["J1"])
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            manufacturer="generic",
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        assert checker._exclude_tht is False
+        checker.run_all()
+        result = checker._check_tht_in_cpl()
+        assert result.status == "OK"
+        assert "included in CPL" in result.message
+
+    def test_drc_limits_still_use_full_manufacturer_id(self, tmp_path, monkeypatch):
+        """Tier DRC limits must NOT be resolved through the fab family."""
+        import kicad_tools.manufacturers as mfr_mod
+
+        seen: list[str] = []
+        real_get_profile = mfr_mod.get_profile
+
+        def _spy(manufacturer_id: str):
+            seen.append(manufacturer_id)
+            return real_get_profile(manufacturer_id)
+
+        monkeypatch.setattr(mfr_mod, "get_profile", _spy)
+
+        pcb = _create_pcb_with_footprints(tmp_path, ["R1"])
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            manufacturer="jlcpcb-tier1",
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker._get_manufacturer_limits()
+        assert seen == ["jlcpcb-tier1"]
