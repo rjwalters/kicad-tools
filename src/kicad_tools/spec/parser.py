@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -111,12 +112,40 @@ def _spec_header(kct_version: str) -> str:
 """
 
 
+def _apply_target_mode(tmp_path: Path, path: Path) -> None:
+    """Give ``tmp_path`` the permissions ``path`` should end up with.
+
+    ``tempfile.mkstemp`` deliberately creates its file ``0600``, and
+    ``os.replace`` carries that mode onto the target -- so a naive atomic write
+    silently narrows an existing ``0644`` ``.kct`` to ``0600`` on every save.
+    That is exactly the class of unrequested side-effect this module exists to
+    avoid, so the mode is set explicitly before the rename:
+
+    * **existing target** -- copy its current permission bits verbatim, so a
+      save changes the file's *content* and nothing else;
+    * **new target** -- apply the process umask to ``0666``, matching what an
+      ordinary ``open(path, "w")`` / :meth:`Path.write_text` would have
+      produced (the behaviour of the repo's other atomic-write site).
+    """
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        # No existing target (or it is unreadable): fall back to umask, which
+        # can only be read by temporarily setting it.
+        umask = os.umask(0o022)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    os.chmod(tmp_path, mode)
+
+
 def _atomic_write_text(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` atomically.
 
     A failure part-way through serialization must never leave a truncated
     ``.kct`` on disk: the file is written to a sibling temp file first and
-    renamed into place only once it is complete.
+    renamed into place only once it is complete. The target's existing
+    permission bits are preserved across the rename -- see
+    :func:`_apply_target_mode`.
     """
     path = Path(path)
     directory = path.parent if str(path.parent) else Path(".")
@@ -127,6 +156,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
+        _apply_target_mode(tmp_path, path)
         os.replace(tmp_path, path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)

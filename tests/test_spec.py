@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 import tempfile
 from collections import Counter
 from datetime import date
@@ -1198,6 +1200,81 @@ class TestAppendDecision:
             "Multi-line rationale.\n\nWith a blank line.\n"
         )
 
+    # Shapes where the textual splice *succeeds* and still re-parses as valid
+    # YAML, but produces the wrong data -- so only the ``reparsed != expected``
+    # comparison in ``append_decision`` can catch them. Each entry is
+    # (source text, topics the splice alone would have written).
+    _UNSPLICEABLE_SHAPES = {
+        # A column-0 comment terminates the block scan early, so the entry is
+        # inserted *between* the two existing decisions instead of after them.
+        "comment_inside_block": (
+            'kct_version: "1.0"\n'
+            "project:\n"
+            '  name: "T"\n'
+            "decisions:\n"
+            "  - topic: First\n"
+            "    choice: A\n"
+            "    rationale: R1\n"
+            "# column-0 comment inside the decisions block\n"
+            "  - topic: Second\n"
+            "    choice: B\n"
+            "    rationale: R2\n"
+            "progress:\n"
+            "  phase: concept\n",
+            ["First", "PROBE", "Second"],
+            ["First", "Second", "PROBE"],
+        ),
+        # A quoted key misses the top-level-key regex, so the splice starts a
+        # *second* ``decisions:`` block; pyyaml resolves the duplicate
+        # last-wins and the pre-existing entry disappears silently.
+        "quoted_key": (
+            'kct_version: "1.0"\n'
+            "project:\n"
+            '  name: "T"\n'
+            '"decisions":\n'
+            "  - topic: First\n"
+            "    choice: A\n"
+            "    rationale: R1\n"
+            "progress:\n"
+            "  phase: concept\n",
+            ["PROBE"],
+            ["First", "PROBE"],
+        ),
+    }
+
+    @pytest.mark.parametrize("shape", sorted(_UNSPLICEABLE_SHAPES))
+    def test_unfaithful_splice_falls_back_to_a_structural_rewrite(self, shape, tmp_path):
+        """A splice that parses but says the wrong thing must never be written.
+
+        ``_splice_decision`` returns text for both of these shapes and that text
+        is valid YAML, so nothing but the ``reparsed != expected`` comparison in
+        :func:`append_decision` detects that it is wrong. Deleting that guard
+        makes this test fail.
+        """
+        from kicad_tools.spec import append_decision
+        from kicad_tools.spec.parser import _splice_decision
+
+        source, spliced_topics, expected_topics = self._UNSPLICEABLE_SHAPES[shape]
+
+        # The raw splice really does produce wrong data for this shape -- that
+        # is what makes the guard load-bearing rather than decorative.
+        entry = self._decision().model_dump(exclude_none=True, mode="json")
+        raw = _splice_decision(source, entry)
+        assert raw is not None, f"{shape}: splice declined, so it never reaches the guard"
+        assert [d["topic"] for d in yaml.safe_load(raw)["decisions"]] == spliced_topics
+
+        # append_decision must reject it and take the structural-rewrite path.
+        path = tmp_path / "p.kct"
+        path.write_text(source, encoding="utf-8")
+        append_decision(path, self._decision())
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert [d["topic"] for d in data["decisions"]] == expected_topics
+        # The rest of the file survives the fallback rewrite intact.
+        assert data["project"]["name"] == "T"
+        assert data["progress"]["phase"] == "concept"
+        assert data["kct_version"] == "1.0"
+
     def test_malformed_spec_fails_loudly_without_truncating(self, tmp_path):
         from kicad_tools.spec import append_decision
 
@@ -1209,6 +1286,66 @@ class TestAppendDecision:
             append_decision(path, self._decision())
 
         assert path.read_text(encoding="utf-8") == original
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    @pytest.mark.parametrize("original_mode", [0o644, 0o664, 0o600])
+    def test_writing_preserves_the_files_permission_bits(self, original_mode, tmp_path):
+        """Neither write path may silently re-permission an existing ``.kct``.
+
+        The atomic write goes through ``tempfile.mkstemp`` (which creates its
+        file 0600) plus ``os.replace`` (which carries that mode onto the
+        target), so without an explicit chmod every save would narrow a normal
+        0644 spec to 0600 -- cumulatively and invisibly, since git tracks only
+        the exec bit.
+        """
+        from kicad_tools.spec import append_decision, load_spec, save_spec
+
+        path = tmp_path / "p.kct"
+        path.write_text(
+            'kct_version: "1.0"\n'
+            "project:\n"
+            '  name: "T"\n'
+            "decisions: []\n"
+            "progress:\n"
+            "  phase: concept\n",
+            encoding="utf-8",
+        )
+        os.chmod(path, original_mode)
+        assert stat.S_IMODE(path.stat().st_mode) == original_mode
+
+        append_decision(path, self._decision())
+        assert stat.S_IMODE(path.stat().st_mode) == original_mode, (
+            "append_decision changed the file's permission bits"
+        )
+
+        save_spec(load_spec(path), path)
+        assert stat.S_IMODE(path.stat().st_mode) == original_mode, (
+            "save_spec changed the file's permission bits"
+        )
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_new_file_permissions_follow_the_umask(self, tmp_path):
+        """A *created* spec gets ordinary umask permissions, not mkstemp's 0600.
+
+        The exact bits depend on the ambient umask, so this asserts equivalence
+        with what a plain ``Path.write_text`` produces in the same process
+        rather than pinning a literal mode.
+        """
+        from kicad_tools.spec import load_spec, save_spec
+
+        seed = tmp_path / "seed.kct"
+        seed.write_text(
+            'kct_version: "1.0"\nproject:\n  name: "T"\nprogress:\n  phase: concept\n',
+            encoding="utf-8",
+        )
+
+        reference = tmp_path / "reference.kct"
+        reference.write_text("x\n", encoding="utf-8")
+
+        created = tmp_path / "created.kct"
+        save_spec(load_spec(seed), created)
+
+        assert stat.S_IMODE(created.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
 
     def test_cli_decide_on_a_board_copy_is_append_only(self, tmp_path):
         """End-to-end through the CLI handler, not just the library."""
