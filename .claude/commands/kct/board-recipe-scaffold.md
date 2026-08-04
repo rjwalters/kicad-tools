@@ -86,6 +86,48 @@ return 0 if erc_success and drc_success and lvs_success else 1
 - A **partial route is a fast-fail** (step 5.5): while LVS is a `require_clean=True` hard gate, `not route_success` `raise`s a distinct "partial route" error *before* LVS runs, so the recipe never emits a misleading `BoardNetlistMismatch`/LVS traceback for what is really route truncation (issue #4047). Only a recipe that intentionally downgrades LVS below `require_clean=True` may instead tolerate a partial route as an explicit `Routing: PARTIAL` summary line (documented option, never a silent swallow).
 - LVS specifically is never downgraded to advisory — it is the divergence catcher.
 
+## Design memory (step 0 — emit alongside the recipe)
+
+A recipe records *how* the board was produced. It does not record **why** the
+material choices were made, and six months later that is the expensive half to
+reconstruct. Scaffold the design-memory log at the same time as the recipe.
+
+Emit `<board-path>/project.kct` next to `generate_design.py`:
+
+```bash
+uv run kct spec init "‹board name›" --template minimal -o <board-path>/project.kct
+```
+
+Every template ships an empty, commented `decisions: []` block, so the log
+exists from the first commit rather than being retrofitted.
+
+Record a decision whenever a **material** choice is made — a topology, a part
+family, a fab tier, a stackup, a placement or routing constraint that a future
+reader could reasonably second-guess:
+
+```bash
+uv run kct spec decide <board-path>/project.kct \
+    --topic "Gate driver" \
+    --choice "DRV8301" \
+    --rationale "Integrated buck + 3 half-bridge drivers; avoids a separate rail" \
+    --alternatives "IR2136,FD6288"
+```
+
+`kct spec decide` is **append-only**: it splices the new entry into the existing
+`decisions:` list and leaves every other byte of the file — including comments
+and keys the `.kct` schema does not define — untouched. Existing entries are
+never reordered or rewritten, so the log is safe to keep under version control
+and safe for an agent to write to unattended.
+
+**This adds no gate.** Nothing in the nine-step pipeline reads `project.kct`,
+and a missing or empty decision log never changes the recipe's exit code. It is
+documentation that happens to be structured and machine-readable.
+
+Do **not** invent a fifth artifact for this. `project.kct` `decisions:` is the
+durable design-decision surface; see the disambiguation table in
+`/kct:layout-journal` for how it relates to `LAYOUT_NOTES.md` and to the
+`kct decisions` machine store.
+
 ## What to leave as fill-in points (do NOT invent a circuit)
 
 The scaffold ships the pipeline shape and the gating contract. The author fills in, per their actual board:
@@ -93,7 +135,9 @@ The scaffold ships the pipeline shape and the gating contract. The author fills 
 - schematic topology (components, values, net names, wiring) — step 2;
 - footprint selection + placement coordinates (multiples of 45° only) — step 4;
 - the `NETS` dict and pour-net names (power/ground) — steps 4-5;
-- the fab `‹tier›` — step 8, resolved via the registry, never a hardcoded list.
+- the fab `‹tier›` — step 8, resolved via the registry, never a hardcoded list;
+- the `project.kct` requirements + the rationale behind each of the above, via
+  `kct spec decide` — step 0.
 
 Mark each of these `# TODO(author): ...` in the emitted template so they cannot be mistaken for done.
 

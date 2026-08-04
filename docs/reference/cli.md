@@ -57,7 +57,7 @@ kct [--help] [--version] <command> [options]
 | | `build` | Build from spec to manufacturable design |
 | | `create-pcb` | Create a PCB from a KiCad schematic |
 | | `init` | Initialize a project with manufacturer design rules |
-| | `spec` | Project specification (`.kct`) management |
+| | `spec` | Project specification (`.kct`) management — incl. `spec decide`, the append-only **human** design-decision log |
 | | `clean` | Clean up old/orphaned files from KiCad projects |
 | **Libraries** | `lib` | Symbol and footprint library tools |
 | | `footprint` | Footprint generation and tools |
@@ -72,7 +72,7 @@ kct [--help] [--version] <command> [options]
 | | `optim` | Placement / routing figure-of-merit tools |
 | **AI Integration** | `reason` | LLM-driven PCB layout reasoning |
 | | `mcp` | MCP server for AI agent integration |
-| | `decisions` | Query design decisions (placement/routing rationale) |
+| | `decisions` | Query **machine**-recorded placement/routing rationale (read-only; distinct from `spec decide`) |
 | | `explain` | Explain design rules and DRC violations |
 | | `suggest` | Part suggestions and recommendations |
 | **Advanced Analysis** | `analyze` | PCB analysis (congestion, thermal, signal integrity) |
@@ -491,6 +491,68 @@ kct build boards/05-bldc-motor-controller/project.kct --allow-incomplete
 kct build boards/05-bldc-motor-controller/project.kct \
     --step preflight-routing
 ```
+
+---
+
+### `spec`
+
+Project specification (`.kct`) management — design intent, requirements,
+progress, and the per-board **design-decision log**. Implemented in
+[`src/kicad_tools/cli/commands/spec.py`](../../src/kicad_tools/cli/commands/spec.py).
+
+```bash
+kct spec <subcommand> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `init NAME [--template T] [-o FILE] [--force]` | Scaffold a new `.kct` (`minimal`, `power_supply`, `sensor_board`, `mcu_breakout`) |
+| `validate FILE` | Validate a `.kct`; reports unrecognized keys as **warnings** |
+| `status FILE` | Show phase, checklist completion, and progress |
+| `decide FILE --topic T --choice C --rationale R [--alternatives A,B]` | **Append** a design decision to the log |
+| `check FILE ITEM` | Mark a checklist item complete |
+
+#### `kct spec decide` — the design-decision log
+
+Records a durable design decision in the `decisions:` list of a `.kct` file:
+the topic, the option chosen, the reasoning, and optionally the alternatives
+considered. The current design phase and today's date are filled in
+automatically.
+
+```bash
+kct spec decide boards/00-simple-led/project.kct \
+    --topic "Resistor value" \
+    --choice "330 ohm" \
+    --rationale "Standard E24 value closest to (5V - 2V) / 10mA" \
+    --alternatives "300 ohm,360 ohm"
+```
+
+**The write is append-only.** The new entry is spliced into the existing
+`decisions:` sequence; every other byte of the file — comments, quoting style,
+blank-line structure, and any key the `.kct` schema does not define — is left
+exactly as it was, and decisions already recorded are never reordered or
+rewritten. `.kct` files are therefore safe to hand-edit and safe for an agent to
+write to unattended.
+
+`kct spec validate` reports keys it does not recognize as warnings (exit code
+still `0` when the spec is otherwise valid). Those keys are **preserved** on
+every write — the warning exists so schema drift and typos stay visible, not
+because anything is at risk:
+
+```console
+$ kct spec validate boards/00-simple-led/project.kct
+Valid: boards/00-simple-led/project.kct
+Warnings: 8 unrecognized key(s)
+  - Unrecognized key (preserved on write): progress.checklist
+  - Unrecognized key (preserved on write): requirements.components
+  ...
+```
+
+> **Not the same as [`kct decisions`](#decisions).** `kct spec decide` **writes**
+> the *human* design-decision log inside `project.kct`. `kct decisions` **reads**
+> the *machine* placement/routing rationale the optimizer and autorouter record
+> next to the board. Different authors, different storage, different lifetimes —
+> there is deliberately no `kct decisions add`.
 
 ---
 
@@ -942,6 +1004,41 @@ kct mcp serve --http --port 8080
 ```
 
 See [MCP Documentation](../mcp/README.md) for configuration details.
+
+---
+
+### `decisions`
+
+Query the **machine-recorded** placement/routing rationale that the placement
+optimizer and autorouter write next to a board (`<board>.kicad_pcb.decisions.json`,
+emitted when they run with `record_decisions=True`). Implemented in
+[`src/kicad_tools/cli/decisions_cmd.py`](../../src/kicad_tools/cli/decisions_cmd.py).
+
+```bash
+kct decisions <subcommand> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `show` | Show decisions matching filters |
+| `list` | List a summary of all recorded decisions |
+| `explain-placement` | Explain why a component is placed where it is |
+| `explain-route` | Explain why a net was routed the way it was |
+
+**Examples:**
+```bash
+kct decisions list board.kicad_pcb
+kct decisions explain-placement board.kicad_pcb U1
+kct decisions explain-route board.kicad_pcb VBUS
+```
+
+> **Not the same as [`kct spec decide`](#spec).** This store is written by the
+> *tools*, is regenerated whenever the board is re-placed or re-routed, and is
+> read-only from the CLI. Durable *human* design decisions ("why this
+> topology?", "why this fab tier?") belong in the `decisions:` list of
+> `project.kct` and are written with `kct spec decide`. There is deliberately no
+> `kct decisions add` — adding one would collide with this differently-scoped
+> command.
 
 ---
 

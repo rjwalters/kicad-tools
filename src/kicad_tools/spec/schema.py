@@ -18,7 +18,7 @@ from enum import Enum
 from typing import Any, Literal
 
 try:
-    from pydantic import BaseModel, Field, field_validator, model_validator
+    from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 except ImportError as e:
     raise ImportError(
         "pydantic is required for the spec module. "
@@ -27,6 +27,7 @@ except ImportError as e:
 
 
 __all__ = [
+    "SpecModel",
     "ProjectSpec",
     "ProjectMetadata",
     "ProjectArtifacts",
@@ -58,6 +59,30 @@ __all__ = [
 ]
 
 
+class SpecModel(BaseModel):
+    """Base model for every ``.kct`` schema node.
+
+    ``extra="allow"`` is a deliberate, load-bearing choice, not a convenience.
+
+    A ``.kct`` file is a *human-authored configuration file that kicad-tools
+    rewrites in place* (``kct spec decide``, ``kct spec check``, and any caller
+    of :func:`kicad_tools.spec.parser.save_spec`). Pydantic's default
+    ``extra="ignore"`` is the right policy for parsing a throwaway API payload
+    and exactly the wrong policy for a round-tripped config file: every key the
+    schema does not define would be dropped from the model at load time and
+    therefore **silently deleted from the user's file on the next write**.
+
+    Keeping unknown keys on the model means ``model_dump()`` round-trips them,
+    so a writer can never destroy content it does not understand. The obvious
+    cost of ``extra="allow"`` -- that it also swallows genuine typos -- is paid
+    down by :func:`kicad_tools.spec.parser.collect_unknown_keys`, which
+    ``kct spec validate`` reports as warnings so schema drift stays *visible*
+    instead of becoming *destructive*.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+
 class DesignPhase(str, Enum):
     """Design phase enumeration."""
 
@@ -78,7 +103,7 @@ class PhaseStatus(str, Enum):
     BLOCKED = "blocked"
 
 
-class ProjectArtifacts(BaseModel):
+class ProjectArtifacts(SpecModel):
     """Project file artifacts."""
 
     schematic: str | None = Field(default=None, description="Path to schematic file")
@@ -93,7 +118,7 @@ class ProjectArtifacts(BaseModel):
     project: str | None = Field(default=None, description="Path to KiCad project file")
 
 
-class BuildConfig(BaseModel):
+class BuildConfig(SpecModel):
     """Build-pipeline configuration (`kct build`).
 
     Currently carries the route-step discovery contract. Boards whose
@@ -120,7 +145,7 @@ class BuildConfig(BaseModel):
     )
 
 
-class ProjectMetadata(BaseModel):
+class ProjectMetadata(SpecModel):
     """Project metadata and identification."""
 
     name: str = Field(..., description="Project name")
@@ -131,7 +156,7 @@ class ProjectMetadata(BaseModel):
     artifacts: ProjectArtifacts | None = Field(default=None, description="Project file paths")
 
 
-class Interface(BaseModel):
+class Interface(SpecModel):
     """Interface definition for the design."""
 
     name: str = Field(..., description="Interface name")
@@ -174,7 +199,7 @@ class Interface(BaseModel):
     )
 
 
-class DesignIntent(BaseModel):
+class DesignIntent(SpecModel):
     """High-level design intent - the 'why' before the 'what'."""
 
     summary: str = Field(..., description="Brief summary of what the board does")
@@ -185,7 +210,7 @@ class DesignIntent(BaseModel):
     )
 
 
-class InputRequirements(BaseModel):
+class InputRequirements(SpecModel):
     """Input power/signal requirements."""
 
     voltage: dict[str, str] | None = Field(
@@ -199,7 +224,7 @@ class InputRequirements(BaseModel):
     )
 
 
-class OutputRail(BaseModel):
+class OutputRail(SpecModel):
     """Output power rail specification."""
 
     rail: str = Field(..., description="Rail name or voltage")
@@ -210,7 +235,7 @@ class OutputRail(BaseModel):
     load_regulation: str | None = Field(default=None, description="Load regulation spec")
 
 
-class ElectricalRequirements(BaseModel):
+class ElectricalRequirements(SpecModel):
     """Electrical requirements and specifications."""
 
     input: InputRequirements | None = Field(default=None, description="Input requirements")
@@ -222,7 +247,7 @@ class ElectricalRequirements(BaseModel):
     isolation: str | None = Field(default=None, description="Isolation requirements")
 
 
-class MountingHole(BaseModel):
+class MountingHole(SpecModel):
     """Mounting hole specification."""
 
     x: str = Field(..., description="X position")
@@ -231,7 +256,7 @@ class MountingHole(BaseModel):
     plated: bool = Field(default=False, description="Whether hole is plated")
 
 
-class KeepOut(BaseModel):
+class KeepOut(SpecModel):
     """Keep-out region specification."""
 
     region: dict[str, str] = Field(..., description="Region bounds (x, y, width, height)")
@@ -239,7 +264,7 @@ class KeepOut(BaseModel):
     layers: list[str] | None = Field(default=None, description="Affected layers")
 
 
-class MountingHoleGroupSpec(BaseModel):
+class MountingHoleGroupSpec(SpecModel):
     """Placeable group of mounting holes with fixed relative geometry.
 
     Issue #3352 (Q3 reframe): mounting holes form a rigid pattern that can be
@@ -317,7 +342,7 @@ class MountingHoleGroupSpec(BaseModel):
         return v
 
 
-class MechanicalRequirements(BaseModel):
+class MechanicalRequirements(SpecModel):
     """Mechanical requirements and form factor."""
 
     dimensions: dict[str, str] | None = Field(
@@ -357,14 +382,14 @@ class MechanicalRequirements(BaseModel):
     )
 
 
-class TemperatureRange(BaseModel):
+class TemperatureRange(SpecModel):
     """Temperature range specification."""
 
     operating: list[str] | None = Field(default=None, description="Operating range [min, max]")
     storage: list[str] | None = Field(default=None, description="Storage range [min, max]")
 
 
-class EnvironmentalRequirements(BaseModel):
+class EnvironmentalRequirements(SpecModel):
     """Environmental requirements."""
 
     temperature: TemperatureRange | None = Field(default=None, description="Temperature ranges")
@@ -401,7 +426,7 @@ def _parse_copper_weight_oz(value: int | float | str) -> float:
     return float(m.group(1))
 
 
-class EscalationPolicy(BaseModel):
+class EscalationPolicy(SpecModel):
     """Issue #3352: Routing escalation policy for the auto-* ladder.
 
     Declares the order in which the routing system will attempt to overcome
@@ -576,7 +601,7 @@ class EscalationPolicy(BaseModel):
         return self
 
 
-class ManufacturingRequirements(BaseModel):
+class ManufacturingRequirements(SpecModel):
     """Manufacturing requirements and constraints."""
 
     layers: dict[str, int] | None = Field(
@@ -665,7 +690,7 @@ class ManufacturingRequirements(BaseModel):
         return data
 
 
-class Compliance(BaseModel):
+class Compliance(SpecModel):
     """Compliance and certification requirements."""
 
     standards: list[str] | None = Field(
@@ -676,7 +701,7 @@ class Compliance(BaseModel):
     ul: str | None = Field(default=None, description="UL certification requirements")
 
 
-class Requirements(BaseModel):
+class Requirements(SpecModel):
     """All project requirements."""
 
     electrical: ElectricalRequirements | None = Field(
@@ -694,7 +719,7 @@ class Requirements(BaseModel):
     compliance: Compliance | None = Field(default=None, description="Compliance requirements")
 
 
-class ComponentSuggestion(BaseModel):
+class ComponentSuggestion(SpecModel):
     """Component suggestion with preferences and rationale.
 
     Accepts two equivalent YAML shapes for ergonomic authoring:
@@ -732,7 +757,7 @@ class ComponentSuggestion(BaseModel):
         return data
 
 
-class BOMSuggestions(BaseModel):
+class BOMSuggestions(SpecModel):
     """BOM-related suggestions."""
 
     preferred_vendors: list[str] | None = Field(
@@ -744,7 +769,7 @@ class BOMSuggestions(BaseModel):
     cost_target: str | None = Field(default=None, description="Target BOM cost")
 
 
-class BOMEntry(BaseModel):
+class BOMEntry(SpecModel):
     """Per-reference BOM mapping for explicit part assignment.
 
     Allows the project spec to declare exact MPN and LCSC part numbers
@@ -761,7 +786,7 @@ class BOMEntry(BaseModel):
     lcsc: str | None = Field(default=None, description="Explicit LCSC part number if known")
 
 
-class Suggestions(BaseModel):
+class Suggestions(SpecModel):
     """Design suggestions and preferences (SHOULD, not MUST)."""
 
     components: dict[str, ComponentSuggestion] | None = Field(
@@ -772,7 +797,7 @@ class Suggestions(BaseModel):
     notes: list[str] | None = Field(default=None, description="General design notes")
 
 
-class Decision(BaseModel):
+class Decision(SpecModel):
     """Design decision with rationale."""
 
     topic: str = Field(..., description="Decision topic")
@@ -788,7 +813,7 @@ class Decision(BaseModel):
     author: str | None = Field(default=None, description="Who made the decision")
 
 
-class PhaseProgress(BaseModel):
+class PhaseProgress(SpecModel):
     """Progress tracking for a single phase."""
 
     status: PhaseStatus = Field(default=PhaseStatus.PENDING, description="Phase status")
@@ -800,7 +825,7 @@ class PhaseProgress(BaseModel):
     notes: str | None = Field(default=None, description="Phase notes")
 
 
-class Progress(BaseModel):
+class Progress(SpecModel):
     """Overall project progress tracking."""
 
     phase: DesignPhase | str = Field(
@@ -810,7 +835,7 @@ class Progress(BaseModel):
     blockers: list[str] | None = Field(default=None, description="Current blockers")
 
 
-class ValidationResult(BaseModel):
+class ValidationResult(SpecModel):
     """Single validation result."""
 
     status: str = Field(..., description="pass, fail, warning, pending")
@@ -819,7 +844,7 @@ class ValidationResult(BaseModel):
     details: list[str] | None = Field(default=None, description="Detailed messages")
 
 
-class Validation(BaseModel):
+class Validation(SpecModel):
     """Validation results from design tools."""
 
     last_run: datetime.datetime | None = Field(
@@ -836,7 +861,7 @@ class Validation(BaseModel):
     )
 
 
-class ProjectSpec(BaseModel):
+class ProjectSpec(SpecModel):
     """Complete project specification (.kct file)."""
 
     kct_version: str = Field(default="1.0", description="KCT format version")

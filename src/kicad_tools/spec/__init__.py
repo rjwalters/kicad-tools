@@ -26,11 +26,14 @@ Usage:
 """
 
 from .parser import (
+    append_decision,
+    collect_unknown_keys,
     create_minimal_spec,
     get_template,
     load_spec,
     save_spec,
     validate_spec,
+    validate_spec_detailed,
 )
 from .schema import (
     BuildConfig,
@@ -80,7 +83,10 @@ __all__ = [
     # Load/save/validate
     "load_spec",
     "save_spec",
+    "append_decision",
+    "collect_unknown_keys",
     "validate_spec",
+    "validate_spec_detailed",
     "create_minimal_spec",
     "get_template",
 ]

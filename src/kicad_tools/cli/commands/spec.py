@@ -90,21 +90,32 @@ def _run_spec_validate(args) -> int:
     """Validate a .kct specification file."""
     from rich.console import Console
 
-    from kicad_tools.spec import validate_spec
+    from kicad_tools.spec import validate_spec_detailed
 
     console = Console()
     spec_file = Path(args.spec_file)
 
-    is_valid, errors = validate_spec(spec_file)
+    is_valid, errors, warnings = validate_spec_detailed(spec_file)
 
     if is_valid:
         console.print(f"[green]Valid:[/green] {spec_file}")
-        return 0
     else:
         console.print(f"[red]Invalid:[/red] {spec_file}")
         for error in errors:
             console.print(f"  - {error}")
-        return 1
+
+    # Unrecognized keys are preserved on write, but they are almost always a
+    # typo or schema drift -- report them so drift is visible, never silent.
+    if warnings:
+        console.print(f"[yellow]Warnings:[/yellow] {len(warnings)} unrecognized key(s)")
+        for warning in warnings:
+            console.print(f"  - {warning}")
+        console.print(
+            "  These keys are not part of the .kct schema. They are preserved "
+            "when kicad-tools rewrites the file, but check them for typos."
+        )
+
+    return 0 if is_valid else 1
 
 
 def _run_spec_status(args) -> int:
@@ -229,7 +240,7 @@ def _run_spec_decide(args) -> int:
 
     from rich.console import Console
 
-    from kicad_tools.spec import load_spec, save_spec
+    from kicad_tools.spec import append_decision, load_spec
     from kicad_tools.spec.schema import Decision, DesignPhase
 
     console = Console()
@@ -257,14 +268,12 @@ def _run_spec_decide(args) -> int:
         alternatives=args.decide_alternatives.split(",") if args.decide_alternatives else None,
     )
 
-    # Add to spec
-    if spec.decisions is None:
-        spec.decisions = []
-    spec.decisions.append(decision)
-
-    # Save
+    # Append-only: splice the new entry into the existing file rather than
+    # rewriting it from the model. Everything else in the file -- including
+    # keys the schema does not define, and the decisions already recorded --
+    # is left untouched.
     try:
-        save_spec(spec, spec_file)
+        append_decision(spec_file, decision)
         console.print(f"[green]Decision recorded:[/green] {decision.topic}")
         console.print(f"  Choice: {decision.choice}")
         console.print(f"  Rationale: {decision.rationale}")

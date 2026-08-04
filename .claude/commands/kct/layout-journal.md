@@ -78,6 +78,35 @@ Referee for every entry: `kicad-cli pcb drc --refill-zones <board.kicad_pcb>` �
 4. **Surface blockers explicitly.** If a net is stuck on an owner/EE decision, say so in "Open" and in the net-status table — do not bury it. (For an analog/placement-blocked net, `/kct:ee-review <board-path>` produces the decision document the hand-route then executes.)
 5. **Tie every claim to the committed artifact.** Measured facts ("nearest blocker 0.05mm") come from `kct net-status <pcb> --why` on the committed board, not memory.
 
+## Which decision surface? (do not add a fifth)
+
+kicad-tools already ships four places a "decision" can live, and they are **not**
+interchangeable. Pick by *durability* and *author*, and never invent a new
+per-board decision file — a fifth surface adds no capability and guarantees the
+four existing ones drift.
+
+| Surface | Write it with | Author | Lifetime | Use it for |
+|---------|---------------|--------|----------|------------|
+| `LAYOUT_NOTES.md` (this skill) | `/kct:layout-journal` | Human/agent, free-form Markdown | **Per session** — a dated journal that accumulates | What you did in *this* hand-routing pass: nets ripped, corridor chosen, referee result, what is still open |
+| `project.kct` → `decisions:` | `kct spec decide` (append-only) | Human/agent, structured YAML | **Durable** — outlives every session | Material design decisions: topology, part family, stackup, fab tier, a constraint a future reader would second-guess |
+| `<board>.kicad_pcb.decisions.json` | Written by the placement optimizer / autorouter (`record_decisions=True`); queried with `kct decisions show/list/explain-placement/explain-route` | **Machine** | Regenerated with the board | Why the *tools* placed or routed something a particular way |
+| `/kct:ee-review` decision document | `/kct:ee-review <board-path>` | EE reviewer (advisory sign-off) | Per review | An analog/placement blocker needing an EE call before the hand-route can proceed |
+
+**Rule of thumb.** If a resumed session next week needs it → `LAYOUT_NOTES.md`.
+If a reviewer *next year* would ask "why is it like this?" → `kct spec decide`.
+If you are asking what the router was thinking → `kct decisions`.
+
+**Naming hazard.** `kct decisions` and `kct spec decide` are different surfaces
+with confusingly similar names. `kct decisions` **reads** the machine
+place/route store; `kct spec decide` **writes** the human design log. There is
+deliberately no `kct decisions add` — the write verb for design memory is
+`kct spec decide`.
+
+Promote freely in one direction: when a session-journal entry turns out to
+encode a durable choice rather than a passing tactic, restate it with
+`kct spec decide` and leave the journal entry where it is. The append-only
+writer never rewrites what is already recorded, so promotion is always safe.
+
 ## Referee gate (mandatory before you call a session done)
 
 ```bash
