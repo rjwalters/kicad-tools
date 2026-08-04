@@ -43,7 +43,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
 from kicad_tools.schema.pcb import canonicalize_power_nets
@@ -448,6 +448,13 @@ def _detect_manufacturing(board_dir: Path) -> ManufacturingStatus:
     Prefer ``manifest.json``'s ``files`` keys when present; fall back to
     directory globs (so we tolerate manufacturer-name variations such as
     ``bom_jlcpcb.csv`` vs ``bom_pcbway.csv``).
+
+    Manifest keys come in two vintages and BOTH must be recognised
+    (issue #4590): legacy manifests recorded bare filenames
+    (``gerbers.zip``) while current ones record bundle-relative POSIX
+    paths (``gerbers/gerbers.zip``).  Matching on the key's basename
+    accepts either, so already-shipped bundles and freshly exported ones
+    both report their artifacts.
     """
     mfg = ManufacturingStatus()
     mfg_dir = board_dir / "output" / "manufacturing"
@@ -469,7 +476,9 @@ def _detect_manufacturing(board_dir: Path) -> ManufacturingStatus:
             files = manifest.get("files") if isinstance(manifest, dict) else None
             if isinstance(files, dict):
                 for name in files.keys():
-                    lower = name.lower()
+                    # Basename match: tolerates both legacy bare-filename
+                    # keys and current bundle-relative keys (#4590).
+                    lower = PurePosixPath(name).name.lower()
                     if lower.startswith("bom_") and lower.endswith(".csv"):
                         mfg.has_bom = True
                     elif lower.startswith("cpl_") and lower.endswith(".csv"):
@@ -482,7 +491,12 @@ def _detect_manufacturing(board_dir: Path) -> ManufacturingStatus:
 
     # Directory-scan fallback (also fills gaps if manifest's files list is
     # incomplete).
-    if not mfg.has_gerbers and (mfg_dir / "gerbers.zip").is_file():
+    # ``gerbers.zip`` normally lives under ``gerbers/`` in a real bundle;
+    # the bundle-root location is only seen in older/hand-made layouts
+    # (and in fixtures), so check both (#4590).
+    if not mfg.has_gerbers and (
+        (mfg_dir / "gerbers" / "gerbers.zip").is_file() or (mfg_dir / "gerbers.zip").is_file()
+    ):
         mfg.has_gerbers = True
     if not mfg.has_bom and any(mfg_dir.glob("bom_*.csv")):
         mfg.has_bom = True

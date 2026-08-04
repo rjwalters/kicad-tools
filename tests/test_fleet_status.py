@@ -687,6 +687,154 @@ class TestFleetStatusManufacturerVariation:
         assert b["manufacturing"]["has_cpl"] is True
 
 
+class TestFleetStatusRealBundleLayout:
+    """Issue #4590 -- detect artifacts in the REAL shipping bundle layout.
+
+    A bundle written by ``export_manufacturing_package`` puts
+    ``gerbers.zip`` under ``gerbers/`` and the renders under ``images/``.
+    The pre-existing fixtures in this module write ``gerbers.zip`` at the
+    bundle ROOT, so they never exercised that layout -- which is how a
+    manifest-key change (bare filename -> bundle-relative POSIX path)
+    could silently flip ``has_gerbers`` to False for every freshly
+    exported board without any test noticing.
+
+    Both manifest vintages must be recognised:
+      * legacy keys: ``gerbers.zip``
+      * current keys: ``gerbers/gerbers.zip``
+    """
+
+    @staticmethod
+    def _make_shipping_board(
+        boards_dir: Path,
+        name: str,
+        *,
+        manifest_keys: str,
+    ) -> Path:
+        """Build a board whose manufacturing bundle uses the real layout.
+
+        ``manifest_keys`` selects the manifest vintage: ``"relative"``
+        (bundle-relative POSIX paths), ``"legacy"`` (bare filenames), or
+        ``"none"`` (no manifest at all -- exercises the directory-scan
+        rescue).
+        """
+        board_dir = boards_dir / name
+        output_dir = board_dir / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        routed_pcb = output_dir / f"{name.replace('-', '_')}_routed.kicad_pcb"
+        routed_pcb.write_text(CONNECTED_PCB)
+
+        mfg_dir = output_dir / "manufacturing"
+        (mfg_dir / "gerbers").mkdir(parents=True, exist_ok=True)
+        (mfg_dir / "images").mkdir(parents=True, exist_ok=True)
+
+        (mfg_dir / "gerbers" / "gerbers.zip").write_bytes(b"PK\x03\x04fake")
+        (mfg_dir / "bom_jlcpcb.csv").write_text("ref,value\nR1,10k\n")
+        (mfg_dir / "cpl_jlcpcb.csv").write_text("ref,x,y\nR1,0,0\n")
+        (mfg_dir / "images" / "pcb_front.png").write_bytes(b"\x89PNG\r\n")
+        (mfg_dir / "report.md").write_text("# report\n")
+
+        if manifest_keys != "none":
+            gerber_key = "gerbers/gerbers.zip" if manifest_keys == "relative" else "gerbers.zip"
+            image_key = "images/pcb_front.png" if manifest_keys == "relative" else "pcb_front.png"
+            manifest = {
+                "version": "1.0",
+                "manufacturer": "jlcpcb",
+                "files": {
+                    "bom_jlcpcb.csv": {"sha256": "0" * 64, "size": 12},
+                    "cpl_jlcpcb.csv": {"sha256": "0" * 64, "size": 13},
+                    gerber_key: {"sha256": "0" * 64, "size": 14},
+                    image_key: {"sha256": "0" * 64, "size": 15},
+                    "report.md": {"sha256": "0" * 64, "size": 9},
+                },
+            }
+            (mfg_dir / "manifest.json").write_text(json.dumps(manifest))
+
+        return routed_pcb
+
+    @pytest.mark.parametrize("manifest_keys", ["relative", "legacy", "none"])
+    def test_gerbers_detected_in_real_layout(self, tmp_path: Path, capsys, manifest_keys: str):
+        """``has_gerbers`` must be True for BOTH manifest vintages."""
+        boards = tmp_path / "boards"
+        self._make_shipping_board(boards, "ship-board", manifest_keys=manifest_keys)
+
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        mfg = data["boards"][0]["manufacturing"]
+
+        assert mfg["has_gerbers"] is True, (
+            f"gerbers/gerbers.zip missed with {manifest_keys!r} manifest keys"
+        )
+        assert mfg["has_bom"] is True
+        assert mfg["has_cpl"] is True
+        if manifest_keys != "none":
+            # ``has_all`` (gerbers AND bom AND cpl AND manifest) drives the
+            # summary's missing-artifacts count.
+            assert mfg["has_manifest"] is True
+            assert data["summary"]["missing_artifacts"] == 0
+
+    @pytest.mark.parametrize("manifest_keys", ["relative", "legacy"])
+    def test_no_missing_gerbers_blocker_in_real_layout(
+        self, tmp_path: Path, capsys, manifest_keys: str
+    ):
+        """``ship-ready`` must not report "missing gerbers" for a real bundle."""
+        boards = tmp_path / "boards"
+        self._make_shipping_board(boards, "ship-board", manifest_keys=manifest_keys)
+
+        main(["ship-ready", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        board = data["boards"][0]
+
+        assert "missing gerbers" not in board["blockers"], board["blockers"]
+
+    def test_manifest_written_by_exporter_is_understood(self, tmp_path: Path, capsys):
+        """End-to-end key contract: the exporter's own ``_build_manifest``
+        output must be readable by the fleet surveyor.
+
+        This binds the producer (``export/manufacturing.py``) and the
+        consumer (``cli/fleet_cmd.py``) together so a future key-scheme
+        change cannot regress ship-readiness detection unnoticed.
+        """
+        from kicad_tools.export.assembly import AssemblyPackageResult
+        from kicad_tools.export.manufacturing import (
+            ManufacturingResult,
+            _build_manifest,
+        )
+
+        boards = tmp_path / "boards"
+        self._make_shipping_board(boards, "ship-board", manifest_keys="none")
+        mfg_dir = boards / "ship-board" / "output" / "manufacturing"
+
+        result = ManufacturingResult(
+            output_dir=mfg_dir,
+            assembly_result=AssemblyPackageResult(
+                output_dir=mfg_dir,
+                bom_path=mfg_dir / "bom_jlcpcb.csv",
+                pnp_path=mfg_dir / "cpl_jlcpcb.csv",
+                gerber_path=mfg_dir / "gerbers" / "gerbers.zip",
+            ),
+            report_md_path=mfg_dir / "report.md",
+            image_paths=[mfg_dir / "images" / "pcb_front.png"],
+        )
+        manifest = _build_manifest(
+            result,
+            pcb_path=mfg_dir / "unused.kicad_pcb",
+            manufacturer="jlcpcb",
+        )
+        (mfg_dir / "manifest.json").write_text(json.dumps(manifest))
+
+        # The producer really does emit subdirectory-qualified keys...
+        assert "gerbers/gerbers.zip" in manifest["files"]
+        assert "images/pcb_front.png" in manifest["files"]
+
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        mfg = data["boards"][0]["manufacturing"]
+        assert mfg["has_gerbers"] is True
+        assert mfg["has_bom"] is True
+        assert mfg["has_cpl"] is True
+        assert data["summary"]["missing_artifacts"] == 0
+
+
 class TestFleetStatusIntegration:
     """Integration smoke test against the actual repo boards/ dir."""
 
