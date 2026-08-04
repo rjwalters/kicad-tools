@@ -42,14 +42,17 @@ the body 90° off from the copper.  This is the rotation analog of the origin
 offset above: we derive the pad-field orientation of both the target block
 and the source library footprint from two anchor pads (the pad-1→pad-2
 vector), and bake ``theta = target - source`` into the inserted model's
-``(rotate (xyz 0 0 ...))``.  Because the model frame's Y is negated versus the
-footprint 2D frame, a footprint-2D rotation of ``theta`` maps to a model-frame
-Z rotation of ``-theta``.  The centroid offset is composed **in the rotated
-frame** (``offset_2d = target_centroid - R_theta * source_centroid``) so the
-body still lands on the target pads.  Co-oriented footprints (all SMD parts,
-headers already authored on the library convention, the origin-offset case
-above) compute ``theta ~= 0`` and keep ``(rotate (xyz 0 0 0))`` plus the
-existing offset verbatim.
+``(rotate (xyz 0 0 ...))``.  **Two negations cancel here**: the model frame
+negates Y versus the footprint 2D frame, *and* KiCad negates the written
+``(rotate ...)`` components when it applies them at render time.  Their
+composition is the identity, so a written ``rz`` **is** the footprint-2D
+rotation it produces -- to realize ``theta`` we write ``rz + theta``, never
+``rz - theta`` (that inverted sign was the #4583 defect).  The centroid offset
+is composed **in the rotated frame** (``offset_2d = target_centroid - R_theta *
+source_centroid``) so the body still lands on the target pads.  Co-oriented
+footprints (all SMD parts, headers already authored on the library convention,
+the origin-offset case above) compute ``theta ~= 0`` and keep ``(rotate (xyz 0 0
+0))`` plus the existing offset verbatim.
 
 Used by ``kct pcb add-3d-models``.
 """
@@ -461,14 +464,22 @@ def _fmt_num(value: float) -> str:
 
 
 def _apply_rotate_delta(model_block: str, theta_deg: float) -> str:
-    """Return *model_block* with a model-frame Z rotation of ``-theta_deg`` baked in.
+    """Return *model_block* with a model-frame Z rotation of ``+theta_deg`` baked in.
 
     *theta_deg* is the pad-field rotation of the target footprint relative to
-    its library source, measured in the footprint 2D frame.  The KiCad 3D-model
-    frame negates Y versus the footprint 2D frame, so a footprint-2D rotation of
-    ``theta`` maps to a model-frame Z rotation of ``-theta`` (pinned by the
-    regression tests).  The delta is added into the block's own ``(rotate (xyz
-    X Y Z))`` Z field; X and Y are preserved.
+    its library source, measured in the footprint 2D frame.  Two negations
+    cancel in the model rotation path: the KiCad 3D-model frame negates Y
+    versus the footprint 2D frame, **and** KiCad negates the written ``(rotate
+    ...)`` components when it applies them at render time (the renderer rotates
+    by ``-m_Rotation.z`` in a right-handed Y-up model frame).  Conjugating the
+    applied rotation ``-rz`` by the Y flip yields ``+rz``, so a written ``rz``
+    **is** the footprint-2D rotation it produces.  Realizing ``theta`` therefore
+    means writing ``rz + theta``; the pre-#4583 ``rz - theta`` rotated bodies the
+    wrong way and (once composed with the rotated-frame centroid offset) threw
+    them ``2 * |R_theta * source_centroid|`` off their pads.  The delta is added
+    into the block's own ``(rotate (xyz X Y Z))`` Z field; X and Y are preserved.
+    A library model that already carries a nonzero ``rz`` composes by plain
+    addition, because ``rz`` and ``theta`` are then in the same sense.
 
     When *theta_deg* is (near) zero -- the co-oriented case (all SMD parts, the
     origin-convention offset fixtures) -- the block is returned unchanged so
@@ -492,7 +503,10 @@ def _apply_rotate_delta(model_block: str, theta_deg: float) -> str:
         rx, ry, rz = float(fields[0]), float(fields[1]), float(fields[2])
     except ValueError:
         return model_block
-    nz = _fmt_num(_normalize_angle(rz - theta_deg))  # footprint 2D theta -> model Z -theta
+    # A written rz IS the footprint-2D rotation it produces: KiCad negates the
+    # written (rotate ...) at render time and the model frame negates Y, and the
+    # two negations cancel.  So realize theta by writing rz + theta (#4583).
+    nz = _fmt_num(_normalize_angle(rz + theta_deg))
     new_xyz = f"(xyz {_fmt_num(rx)} {_fmt_num(ry)} {nz})"
     return model_block[:xyz_idx] + new_xyz + model_block[xyz_end + 1 :]
 
@@ -763,8 +777,9 @@ def add_model_refs_to_text(pcb_text: str, resolver: Resolver) -> tuple[str, Mode
         # is rotated relative to its library source (rotation baked into pad
         # coordinates rather than the placement angle) needs the delta baked
         # into the model's (rotate ...).  theta is measured in the footprint
-        # 2D frame; the model frame negates Y, so _apply_rotate_delta bakes a
-        # model-frame Z of -theta.  When either orientation is underivable
+        # 2D frame; the model frame's Y negation and KiCad's render-time
+        # negation of the written (rotate ...) cancel, so _apply_rotate_delta
+        # bakes a model-frame Z of +theta.  When either orientation is underivable
         # (single-pad parts, LCSC-synthesized bodies) theta stays 0.
         target_orientation = _pad_field_orientation(body)
         theta = 0.0

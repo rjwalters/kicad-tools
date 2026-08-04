@@ -11,6 +11,8 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.footprints.library_path import LibraryPaths
 from kicad_tools.pcb.models3d import (
     ResolvedModels,
@@ -762,9 +764,17 @@ class TestResolvedModels:
 # Y.  Placement angle and model rotate are both 0 as written, so kicad-cli
 # renders the body 90° off from the copper.  The patcher must derive the
 # pad-field orientation from two anchor pads and bake theta = target - source
-# into the model (rotate (xyz 0 0 -theta)) -- model-frame Y is negated vs the
-# footprint 2D frame, so a footprint-2D rotation of theta maps to model-frame
-# Z of -theta -- while composing the centroid offset in the rotated frame.
+# into the model (rotate (xyz 0 0 +theta)) -- TWO negations cancel here: the
+# model frame negates Y vs the footprint 2D frame, AND KiCad negates the
+# written (rotate ...) when it applies it at render time, so a written rz IS
+# the footprint-2D rotation it produces -- while composing the centroid offset
+# in the rotated frame.
+#
+# Issue #4583: the original #4448/#4457 implementation baked -theta.  The four
+# assertions below pinning +90-for-theta=-90 were themselves wrong and have been
+# flipped; test_one_eighty_rotation passed under BOTH signs (180 == -180 after
+# normalization), which is exactly how the defect shipped green.  See
+# `_assert_model_lands_on_target_pads` for the non-sign-invariant guard.
 
 # Library footprint: 1x09 pins running along +Y (pad 1 at origin), matching
 # the canonical KiCad PinHeader_1x09_P2.54mm_Vertical .step authoring.
@@ -888,17 +898,20 @@ class TestApplyRotateDelta:
         "\t(rotate\n\t\t(xyz 0 0 0)\n\t)\n)"
     )
 
-    def test_footprint_theta_maps_to_model_z_negated(self):
-        # theta = -90 (target rotated -90 from source) -> model-frame Z = +90.
+    def test_footprint_theta_maps_to_model_z_directly(self):
+        # #4583 sign pin: theta = -90 -> model-frame Z = -90 (NOT +90).  A
+        # written rz is the footprint-2D rotation it produces, because KiCad's
+        # render-time negation of (rotate ...) cancels the model frame's Y flip.
         out = _apply_rotate_delta(self.MODEL, -90.0)
-        assert "(rotate\n\t\t(xyz 0 0 90)" in out
+        assert "(rotate\n\t\t(xyz 0 0 -90)" in out
         # Only the rotate xyz changed; offset/scale untouched.
         assert "(offset\n\t\t(xyz 0 0 0)" in out
         assert "(scale\n\t\t(xyz 1 1 1)" in out
 
-    def test_positive_theta_maps_to_negative_model_z(self):
+    def test_positive_theta_maps_to_positive_model_z(self):
+        # #4583 sign pin, the other direction: theta = +90 -> model Z = +90.
         out = _apply_rotate_delta(self.MODEL, 90.0)
-        assert "(rotate\n\t\t(xyz 0 0 -90)" in out
+        assert "(rotate\n\t\t(xyz 0 0 90)" in out
 
     def test_zero_theta_is_verbatim(self):
         assert _apply_rotate_delta(self.MODEL, 0.0) == self.MODEL
@@ -910,15 +923,68 @@ class TestApplyRotateDelta:
     def test_existing_nonzero_rotate_is_added_to(self):
         model = '(model "a.step"\n\t(rotate\n\t\t(xyz 0 0 45)\n\t)\n)'
         out = _apply_rotate_delta(model, -90.0)
-        # 45 - (-90) = 135
-        assert "(xyz 0 0 135)" in out
+        # #4583: plain addition -- rz and theta are in the same sense, so
+        # 45 + (-90) = -45 (NOT 45 - (-90) = 135).
+        assert "(xyz 0 0 -45)" in out
+
+
+def _assert_model_lands_on_target_pads(
+    patched_text: str,
+    source_centroid: tuple[float, float],
+    target_centroid: tuple[float, float],
+) -> None:
+    """Geometric end-to-end guard for the #4583 rotation sign.
+
+    Parses the inserted ``(offset ...)`` / ``(rotate ...)`` back out of the
+    patched board text, reconstructs the transform KiCad will actually apply to
+    the STEP body, and asserts it maps the *source* (library) pad centroid onto
+    the *target* (board) pad centroid to within 1 nm.
+
+    Reconstruction, in footprint-2D coordinates:
+
+    * the model frame negates Y, so a model offset ``(ox, oy, oz)`` is a
+      footprint-2D translation of ``(ox, -oy)``;
+    * a written ``rz`` **is** the footprint-2D rotation it produces (KiCad's
+      render-time negation of ``(rotate ...)`` cancels the model frame's Y
+      flip), so the applied rotation is ``R_{+rz}``.
+
+    So the body's source centroid lands at ``(ox, -oy) + R_{rz}(source)``.
+
+    This is deliberately **not** sign-invariant at +/-90 degrees: flipping the
+    sign in ``_apply_rotate_delta`` moves the reconstructed point by
+    ``2 * |R_theta * source_centroid|`` and the assertion fails.  A
+    literal-string assertion alone would not have caught #4457, and
+    ``test_one_eighty_rotation`` cannot (180 == -180 after normalization).
+    """
+    import math
+    import re
+
+    offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", patched_text)
+    rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", patched_text)
+    assert offset_xyz is not None, "no (offset (xyz ...)) in patched text"
+    assert rotate_xyz is not None, "no (rotate (xyz ...)) in patched text"
+    ox, oy, _oz = (float(v) for v in offset_xyz.group(1).split())
+    _rx, _ry, rz = (float(v) for v in rotate_xyz.group(1).split())
+
+    rad = math.radians(rz)
+    sx, sy = source_centroid
+    landed = (
+        ox + (sx * math.cos(rad) - sy * math.sin(rad)),
+        -oy + (sx * math.sin(rad) + sy * math.cos(rad)),
+    )
+    assert landed == pytest.approx(target_centroid, abs=1e-6), (
+        f"model body lands at {landed}, expected the target pad centroid "
+        f"{target_centroid} (offset={ox},{oy} rotate_z={rz})"
+    )
 
 
 class TestOrientationConventionRotation:
     def test_pad_rotated_header_gets_ninety_degree_model_rotate(self, tmp_path):
         """The board-07 case: library pads along Y, board pads along X.
 
-        theta = target(0°) - source(90°) = -90°; model-frame Z = -theta = +90°.
+        theta = target(0°) - source(90°) = -90°; model-frame Z = +theta = -90°
+        (#4583 -- KiCad's render-time negation of (rotate ...) cancels the model
+        frame's Y flip, so a written rz *is* the footprint-2D rotation).
         Offset is composed in the rotated frame:
           R_{-90} * source_centroid(0, 10.16) = (10.16, 0)
           offset_2d = target_centroid(0,0) - (10.16, 0) = (-10.16, 0)
@@ -932,14 +998,67 @@ class TestOrientationConventionRotation:
         text = pcb.read_text()
         import re
 
-        # Sign convention pinned: +90 model-frame Z for a -90 footprint rotation.
+        # Sign convention pinned (#4583): -90 model-frame Z for a -90 footprint
+        # rotation.  Pre-#4583 this asserted "0 0 90" and rendered off-board.
         rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", text)
         assert rotate_xyz is not None
-        assert rotate_xyz.group(1).strip() == "0 0 90"
-        # Centroid offset composed in the rotated frame.
+        assert rotate_xyz.group(1).strip() == "0 0 -90"
+        # Centroid offset composed in the rotated frame (unchanged by #4583).
         offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", text)
         assert offset_xyz is not None
         assert offset_xyz.group(1).strip() == "-10.16 0 0"
+        # ...and the reconstructed transform actually seats the body on the pads.
+        _assert_model_lands_on_target_pads(text, (0.0, 10.16), (0.0, 0.0))
+
+    def test_minus_ninety_body_lands_on_target_pads(self, tmp_path):
+        """#4583 geometric regression, theta = -90 (== 270).
+
+        Not sign-invariant: under the pre-#4583 ``rz - theta`` the body lands at
+        (-20.32, 0) instead of the target centroid (0, 0) -- exactly the 20.32 mm
+        = 2 x 10.16 mm displacement observed on board-07's J3.
+        """
+        lib = _make_rot_header_library(tmp_path)
+        new_text, report = add_model_refs_to_text(ROT_HEADER_PCB_TEXT, make_library_resolver(lib))
+        assert report.patched
+        _assert_model_lands_on_target_pads(new_text, (0.0, 10.16), (0.0, 0.0))
+
+    def test_plus_ninety_body_lands_on_target_pads(self, tmp_path):
+        """#4583 geometric regression, theta = +90 (the mirror of the above).
+
+        Board pads run along -X (pad 1 at (10.16, 0) down to pad 9 at
+        (-10.16, 0)), so target orientation = 180°, source = 90°, theta = +90°.
+        Expect (rotate (xyz 0 0 90)) and (offset (xyz 10.16 0 0)).  Asserting
+        both directions blocks a future ``abs()``-style regression that would
+        satisfy only one of them.
+        """
+        import re
+
+        lib = _make_rot_header_library(tmp_path)
+        pcb_text = (
+            "(kicad_pcb\n"
+            '\t(footprint "Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"\n'
+            '\t\t(layer "F.Cu")\n'
+            + "".join(
+                f'\t\t(pad "{i + 1}" thru_hole {"rect" if i == 0 else "oval"}\n'
+                f"\t\t\t(at {10.16 - i * 2.54:g} 0)\n"
+                "\t\t\t(size 1.7 1.7)\n"
+                "\t\t\t(drill 1)\n"
+                '\t\t\t(layers "*.Cu" "*.Mask")\n'
+                "\t\t)\n"
+                for i in range(9)
+            )
+            + "\t)\n"
+            ")\n"
+        )
+        new_text, report = add_model_refs_to_text(pcb_text, make_library_resolver(lib))
+        assert report.patched
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", new_text)
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 90"
+        offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", new_text)
+        assert offset_xyz is not None
+        assert offset_xyz.group(1).strip() == "10.16 0 0"
+        _assert_model_lands_on_target_pads(new_text, (0.0, 10.16), (0.0, 0.0))
 
     def test_rotate_and_offset_are_pure_metadata(self, tmp_path):
         """Only inserted model lines differ; no original copper line moves."""
