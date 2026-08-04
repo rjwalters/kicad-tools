@@ -371,6 +371,67 @@ def test_find_pairwise_violations_board_scan() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Issue #4588: the board scan must honour #4506 attach zones
+# ---------------------------------------------------------------------------
+
+
+def _hv_lv_board_routes() -> list[Route]:
+    """Two parallel HV/LV segments 0.3 mm apart -- above DRU, below creepage."""
+    return [
+        Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")]),
+        Route(net=2, net_name="/GND", segments=[_seg(0, 0.5, 5, 0.5, 2, "/GND")]),
+    ]
+
+
+def test_find_pairwise_violations_without_attach_zone_reports() -> None:
+    """Baseline for the exemption test: the pair IS a violation unexempted."""
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    violations = find_pairwise_violations(_hv_lv_board_routes(), table)
+    assert len(violations) == 1
+    # Edge-to-edge gap is 0.3 mm (0.5 centre - two 0.1 half-widths), which is
+    # comfortably above the 0.2 mm DRU floor -- so an attach zone can waive it.
+    assert violations[0].actual_mm == pytest.approx(0.3)
+
+
+def test_find_pairwise_violations_honours_attach_zone_exemption() -> None:
+    """A rated-footprint attach zone covering the span suppresses the finding.
+
+    Without this (issue #4588), the post-route gate would fire on every
+    deliberately-exempted domain-bridging footprint and make HV boards
+    unroutable by construction -- a false fail as bad as the false pass.
+    """
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    zone = AttachZone(-1.0, -1.0, 6.0, 1.5, frozenset({"AC_LINE", "GND"}))
+    assert find_pairwise_violations(_hv_lv_board_routes(), table, attach_zones=(zone,)) == []
+
+
+def test_find_pairwise_violations_attach_zone_outside_span_still_reports() -> None:
+    """An attach zone that does not cover the gap point exempts nothing."""
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    far = AttachZone(50.0, 50.0, 60.0, 60.0, frozenset({"AC_LINE", "GND"}))
+    assert len(find_pairwise_violations(_hv_lv_board_routes(), table, attach_zones=(far,))) == 1
+
+
+def test_find_pairwise_violations_attach_zone_needs_both_nets() -> None:
+    """A zone listing only one of the two nets cannot waive the pair."""
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    partial = AttachZone(-1.0, -1.0, 6.0, 1.5, frozenset({"AC_LINE"}))
+    assert len(find_pairwise_violations(_hv_lv_board_routes(), table, attach_zones=(partial,))) == 1
+
+
+def test_find_pairwise_violations_attach_zone_never_waives_below_dru() -> None:
+    """Attach zones waive the HV *widening* only, never the scalar DRU floor."""
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    routes = [
+        Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")]),
+        # 0.25 mm centre-to-centre -> 0.05 mm edge gap, below the 0.2 mm DRU.
+        Route(net=2, net_name="/GND", segments=[_seg(0, 0.25, 5, 0.25, 2, "/GND")]),
+    ]
+    zone = AttachZone(-1.0, -1.0, 6.0, 1.5, frozenset({"AC_LINE", "GND"}))
+    assert len(find_pairwise_violations(routes, table, attach_zones=(zone,))) == 1
+
+
+# ---------------------------------------------------------------------------
 # Backward compatibility
 # ---------------------------------------------------------------------------
 

@@ -591,6 +591,7 @@ def find_pairwise_violations(
     *,
     id_to_name: Mapping[int, str] | None = None,
     dru: float | None = None,
+    attach_zones: Sequence[AttachZone] = (),
     tolerance: float = _PASS_TOLERANCE,
 ) -> list[PairwiseViolation]:
     """Scan a whole routed board for pairwise-clearance shortfalls (board-level).
@@ -600,6 +601,13 @@ def find_pairwise_violations(
     found (empty when the board satisfies all pairwise requirements).  Intended
     for a post-route board audit / tests; the in-loop validators use
     :func:`route_pairwise_violation` for early-exit.
+
+    ``attach_zones`` (issue #4588) carries the #4506 rated-footprint necking
+    regions through to :func:`segment_pair_violation`, exactly as
+    :func:`route_pairwise_violation` already does.  Omitting them would make
+    this scan report every deliberately-exempted domain-bridging footprint
+    (tap resistors, TO-220 packages, optocouplers) as a violation -- a false
+    *fail* that renders every HV board unroutable by construction.
     """
     materialised = list(routes)
     floor = table.dru if dru is None else dru
@@ -624,6 +632,7 @@ def find_pairwise_violations(
                         net_a_name=a_name,
                         net_b_name=b_name,
                         dru=floor,
+                        attach_zones=attach_zones,
                         tolerance=tolerance,
                     )
                     if violation is not None:

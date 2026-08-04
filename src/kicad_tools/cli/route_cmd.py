@@ -66,13 +66,15 @@ import sys
 import textwrap
 import time
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from kicad_tools.router import Autorouter, LayerStack
+    from kicad_tools.router.pairwise_clearance import AttachZone, PairwiseViolation
     from kicad_tools.router.primitives import Route
 
 # Issue #3035: ``_auto_skip_pour_nets`` was promoted to a public helper at
@@ -3827,11 +3829,7 @@ def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -
     if required is None or voltages is None:
         return
 
-    from kicad_tools.router.pairwise_clearance import (
-        PairwiseClearanceTable,
-        build_attach_zones,
-    )
-    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.router.pairwise_clearance import PairwiseClearanceTable
 
     rules = getattr(router, "rules", None)
     if rules is None:
@@ -3844,15 +3842,260 @@ def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -
     pcb_path = getattr(router, "_pairwise_attach_zone_pcb_path", None)
     pathfinder = getattr(router, "router", None)
     if pathfinder is not None and pcb_path is not None and hasattr(pathfinder, "set_attach_zones"):
-        pathfinder.set_attach_zones(build_attach_zones(PCB.load(pcb_path).footprints))
+        # Issue #4588: route through the shared resolver so the grid search sees
+        # the same sheet-absolute zones the post-route audit does.  Building them
+        # inline here (pre-#4588) leaked board-relative footprint coordinates
+        # into a sheet-absolute pathfinder.
+        pathfinder.set_attach_zones(_pairwise_attach_zones(router))
 
     if not quiet:
         from kicad_tools.cli.progress import flush_print
 
+        # Issue #4588: name the enforcement that will ACTUALLY run.  Only the
+        # grid engines consult ``rules.pairwise_clearance`` during search
+        # (``router/pathfinder.py``, ``router/cpp_backend.py``, the C++ halo);
+        # lattice/mesh resolve clearance as a pure scalar, so claiming
+        # "route-time creepage rejection active" there was the reassuring line
+        # that made the false pass silent.  Both engines are now covered by the
+        # post-route board audit (``_audit_pairwise_clearance``).
+        engine = getattr(args, "route_engine", "grid") or "grid"
+        enforcement = (
+            "route-time rejection + post-route audit"
+            if engine == "grid"
+            else f"post-route audit only -- the {engine} search is pairwise-blind"
+        )
         flush_print(
             f"  HV pairwise clearance: {len(voltages)} mapped nets, "
-            f"{len(required)} cross-pairs (route-time creepage rejection active)"
+            f"{len(required)} cross-pairs ({enforcement})"
         )
+
+
+def _pairwise_attach_zones(router: "Autorouter") -> "tuple[AttachZone, ...]":
+    """Resolve (and memoise) the #4506 rated-footprint attach zones for *router*.
+
+    This is the single resolver for both consumers: ``_apply_pairwise_clearance``
+    hands the result to the grid pathfinder's ``set_attach_zones``, and the
+    post-route audit gate (#4588) uses it on **every** engine.  The result is
+    cached on the router -- loading the PCB twice per run would be pure waste.
+
+    **Coordinate space.**  ``PCB.load`` detects the Edge.Cuts origin and exposes
+    footprint positions *board-relative* (``schema/pcb.py::_detect_board_origin``),
+    while both the routed segments (``router/io.py``) and the grid pathfinder work
+    in *sheet-absolute* millimetres.  The zones are therefore shifted by
+    ``pcb.board_origin`` -- the same board-relative -> sheet-absolute offset
+    ``Segment.to_sexp``/``Via.to_sexp`` apply when writing copper (#4416).
+    Without the shift the #4506 exemption silently misses on every board that
+    does not sit at sheet origin (0, 0) -- i.e. on every real board.
+
+    Returns an empty tuple when no source board path was recorded (attach-zone
+    exemption then simply does not apply, which is the pre-#4506 behaviour).
+    """
+    cached: tuple[AttachZone, ...] | None = getattr(router, "_pairwise_attach_zones_cache", None)
+    if cached is not None:
+        return cached
+
+    pcb_path = getattr(router, "_pairwise_attach_zone_pcb_path", None)
+    zones: tuple[AttachZone, ...] = ()
+    if pcb_path is not None:
+        from kicad_tools.router.pairwise_clearance import build_attach_zones
+        from kicad_tools.schema.pcb import PCB
+
+        try:
+            pcb = PCB.load(pcb_path)
+            ox, oy = pcb.board_origin
+            zones = tuple(
+                dataclass_replace(
+                    zone,
+                    min_x=zone.min_x + ox,
+                    min_y=zone.min_y + oy,
+                    max_x=zone.max_x + ox,
+                    max_y=zone.max_y + oy,
+                )
+                for zone in build_attach_zones(pcb.footprints)
+            )
+        except Exception as exc:  # defensive: never fail the audit on a bad board
+            # Issue #4588: an empty tuple is indistinguishable from "no rated
+            # footprints on this board", so a silent swallow degrades straight
+            # into a false HARD fail.  Say so on stderr.
+            print(
+                f"Warning: could not build #4506 rated attach zones from {pcb_path} "
+                f"({type(exc).__name__}: {exc}); HV pairwise exemptions will not apply.",
+                file=sys.stderr,
+            )
+            zones = ()
+    with contextlib.suppress(AttributeError):  # exotic router stand-ins
+        router._pairwise_attach_zones_cache = zones  # type: ignore[attr-defined]
+    return zones
+
+
+def _audit_pairwise_clearance(
+    router: "Autorouter", args, *, id_to_name=None
+) -> "list[PairwiseViolation]":
+    """Board-level post-route pairwise (HV creepage) audit -- issue #4588.
+
+    ``rules.pairwise_clearance`` is consumed **only** by the grid engines'
+    route-acceptance predicates (``router/pathfinder.py``, ``router/cpp_backend.py``
+    and the C++ ``Grid3D`` halo).  The lattice and mesh engines resolve clearance
+    as a pure scalar, so a ``--voltage-map`` run on those engines committed HV
+    copper at DRU spacing while still printing the reassuring ``HV pairwise
+    clearance: N mapped nets`` line -- a silent false pass of a safety feature.
+
+    This audit closes that hole engine-agnostically: every engine commits copper
+    by appending to ``router.routes``, so a whole-board scan of that list catches
+    what the search let through, regardless of which search produced it.
+
+    Returns a list of :class:`~kicad_tools.router.pairwise_clearance.PairwiseViolation`
+    sorted worst-shortfall-first.  A strict no-op (empty list, no board load, no
+    scan) when ``--voltage-map`` was not supplied, so every pre-existing run is
+    byte-identical.
+
+    Scope: **trace-to-trace, same layer only** (the limit of
+    ``find_pairwise_violations``).  Pad/via geometry is the ``kct creepage``
+    census' remit; the failure banner says so.
+    """
+    if getattr(args, "_pairwise_required", None) is None:
+        return []
+    rules = getattr(router, "rules", None)
+    table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
+    if table is None:
+        return []
+    routes = list(getattr(router, "routes", None) or [])
+    if not routes:
+        return []
+
+    from kicad_tools.router.pairwise_clearance import find_pairwise_violations
+
+    violations = find_pairwise_violations(
+        routes,
+        table,
+        id_to_name=id_to_name,
+        dru=table.dru,
+        attach_zones=_pairwise_attach_zones(router),
+    )
+    # A single conflicting corridor is decomposed into many collinear segment
+    # pairs that all report the SAME net pair, gap and location.  Collapse the
+    # exact duplicates so the count reflects distinct defects rather than
+    # segment granularity (this can only shrink the list, never empty a
+    # non-empty one, so the gate's fire/no-fire decision is unaffected).
+    unique: dict[tuple, PairwiseViolation] = {}
+    for v in violations:
+        key = (
+            v.net_a,
+            v.net_b,
+            round(v.x, 3),
+            round(v.y, 3),
+            round(v.actual_mm, 4),
+            round(v.required_mm, 4),
+        )
+        unique.setdefault(key, v)
+    deduped = list(unique.values())
+    # Worst shortfall first; net names/coords break ties so the ordering is
+    # fully deterministic (CI diffs the banner text).
+    deduped.sort(key=lambda v: (-(v.required_mm - v.actual_mm), v.net_a, v.net_b, v.x, v.y))
+    return deduped
+
+
+def _format_pairwise_violations(violations: "Sequence[PairwiseViolation]", limit: int = 10) -> str:
+    """Render pairwise violations in the ``router/io.py`` clearance-report shape.
+
+    ``[trace] /NET_A vs /NET_B: X.XXXmm (required Y.YYYmm) at (x, y)`` with an
+    ``... and K more`` tail, so the output is diffable against ``kct creepage``.
+    """
+    lines = [
+        f"  [trace] {v.net_a} vs {v.net_b}: {v.actual_mm:.3f}mm "
+        f"(required {v.required_mm:.3f}mm) at ({v.x:.3f}, {v.y:.3f})"
+        for v in violations[:limit]
+    ]
+    remaining = len(violations) - limit
+    if remaining > 0:
+        lines.append(f"  ... and {remaining} more")
+    return "\n".join(lines)
+
+
+def _print_pairwise_addendum(violations: "Sequence[PairwiseViolation]") -> None:
+    """Fold pairwise findings into an already-failing summary (issue #4588).
+
+    Used by the ``PARTIAL`` / ``ROUTING FAILED: DRC`` branches so a run that is
+    dirty for several reasons still prints exactly one coherent report.
+    """
+    print(f"  Additionally, {len(violations)} HV pairwise clearance violation(s) detected:")
+    print(_format_pairwise_violations(violations, limit=5))
+    print("  (trace-to-trace only; run 'kct creepage' for the full census)")
+
+
+def _pairwise_escalation_exit(rc: int, violations: "Sequence[PairwiseViolation]") -> int:
+    """Map an escalation wrapper's exit code through the #4588 gate.
+
+    ``0`` (met the completion threshold) becomes ``3`` -- the established
+    "routing succeeded but the copper is clearance-dirty" contract -- and ``2``
+    (below threshold) becomes ``4``, mirroring ``main()``'s seg-seg handling.
+    Any other code (fatal, deadline, rollback) already carries a more specific
+    diagnosis and is passed through untouched.
+    """
+    if not violations:
+        return rc
+    if rc == 0:
+        return 3
+    if rc == 2:
+        return 4
+    return rc
+
+
+def _audit_pairwise_for_escalation(final_result, args) -> "list[PairwiseViolation]":
+    """Run the #4588 HV pairwise gate for the escalation wrapper flows.
+
+    ``route_with_layer_escalation`` / ``route_with_rule_relaxation`` /
+    ``route_with_combined_escalation`` are *terminal* paths: each owns its own
+    summary banner and exit-code block, and ``main()``'s post-DRC gate never
+    runs for them.  Because ``--auto-layers`` defaults to **True**, the
+    layer-escalation wrapper is the DEFAULT ``kct route`` path -- and the one
+    the issue-#4588 report actually exercised -- so gating only ``main()``'s
+    inline block would have left the audit dead where it matters most.
+
+    Safe to call after ``_release_routing_engine_state``: that helper
+    explicitly preserves ``router.routes``, which is all this audit reads.
+    """
+    return _audit_pairwise_clearance(
+        final_result.router,
+        args,
+        id_to_name={v: k for k, v in (getattr(final_result, "net_map", None) or {}).items()},
+    )
+
+
+def _print_pairwise_failure_banner(
+    violations: "Sequence[PairwiseViolation]", args, output_path
+) -> None:
+    """Print the #4588 ``ROUTING FAILED`` banner for board-level HV violations."""
+    print("ROUTING FAILED: pairwise HV clearance violations")
+    print("=" * 60)
+    print()
+    print(f"HV Pairwise Clearance ({len(violations)} violation(s)):")
+    print(_format_pairwise_violations(violations))
+    print()
+    print("Routed copper is closer than the --voltage-map derived creepage")
+    print("requirement for these net pairs. This board is NOT safe to manufacture.")
+    print()
+    print("Scope of this gate: trace-to-trace, same layer only. Pad and via")
+    print("geometry are not scanned here -- 'kct creepage' is the authoritative")
+    print("full census:")
+    vm = getattr(args, "voltage_map", None)
+    print(
+        f"  kct creepage {output_path} --voltage-map {vm} --standard "
+        f"{getattr(args, 'creepage_standard', 'iec60664')} --pollution-degree "
+        f"{getattr(args, 'pollution_degree', 2)} --material-group "
+        f"{getattr(args, 'material_group', 'IIIa')}"
+    )
+    engine = getattr(args, "route_engine", "grid") or "grid"
+    if engine != "grid":
+        # Issue #4588 gates; issue #4602 will teach the non-grid searches to
+        # AVOID the proximity instead of only reporting it.  Until then the
+        # only in-tool remedy is the engine that already enforces pairwise
+        # clearance during search (#4454 / #4511).
+        print()
+        print(f"  The {engine} search resolves clearance as a per-net scalar and cannot")
+        print("  avoid HV<->LV proximity (issue #4602). Remedies: re-route with")
+        print("  --route-engine grid (route-time creepage rejection), widen the HV")
+        print("  corridor in placement, or add rated attach zones (#4506).")
 
 
 def _warn_unresolved_net_class_map(resolution, board_net_names, nearest_fn) -> None:
@@ -5397,10 +5640,18 @@ def route_with_layer_escalation(
                 args=args,  # Issue #2802: honor total wall-clock deadline
             )
 
+    # Issue #4588: board-level HV pairwise clearance gate.  A no-op without
+    # --voltage-map; otherwise it audits the copper this engine committed.
+    _pairwise = _audit_pairwise_for_escalation(final_result, args)
+
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
-        if final_result.success:
+        if final_result.success and _pairwise:
+            # Issue #4588: this run would have printed a SUCCESS banner while
+            # its own copper violates the --voltage-map creepage requirement.
+            _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif final_result.success:
             print(f"SUCCESS: Design requires minimum {final_result.layer_count} layers")
         else:
             print(
@@ -5423,6 +5674,8 @@ def route_with_layer_escalation(
                 # path; suppress the redundant "Try --auto-layers" recommendation.
                 auto_layers_attempted=True,
             )
+            if _pairwise:
+                _print_pairwise_addendum(_pairwise)
 
     # Issue #2881: Stash the final router on args so an outer
     # ``route_with_mfr_tier_escalation`` wrapper can inspect
@@ -5448,10 +5701,10 @@ def route_with_layer_escalation(
         # detected") already covers this case semantically.
         if fix_result == 3:
             return 3
-        return 0
+        return _pairwise_escalation_exit(0, _pairwise)
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
-        return 2
+        return _pairwise_escalation_exit(2, _pairwise)
     # Nothing was routed — treat as fatal failure
     return 1
 
@@ -6115,10 +6368,16 @@ def route_with_rule_relaxation(
                 args=args,  # Issue #2802: honor total wall-clock deadline
             )
 
+    # Issue #4588: board-level HV pairwise clearance gate (see the
+    # layer-escalation wrapper above for why each terminal path needs it).
+    _pairwise = _audit_pairwise_for_escalation(final_result, args)
+
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
-        if final_result.success:
+        if final_result.success and _pairwise:
+            _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif final_result.success:
             print("SUCCESS: Routing complete with adaptive rules")
             if final_result.tier > 0:
                 print(
@@ -6143,6 +6402,8 @@ def route_with_rule_relaxation(
                 nets_to_route_ids=_multi_pad_ids,
                 single_pad_count=getattr(final_result, "single_pad_count", 0),
             )
+            if _pairwise:
+                _print_pairwise_addendum(_pairwise)
 
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline.
@@ -6152,10 +6413,10 @@ def route_with_rule_relaxation(
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
             return 3
-        return 0
+        return _pairwise_escalation_exit(0, _pairwise)
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
-        return 2
+        return _pairwise_escalation_exit(2, _pairwise)
     # Nothing was routed — treat as fatal failure
     return 1
 
@@ -8350,10 +8611,16 @@ def route_with_combined_escalation(
                 args=args,  # Issue #2802: honor total wall-clock deadline
             )
 
+    # Issue #4588: board-level HV pairwise clearance gate (see the
+    # layer-escalation wrapper above for why each terminal path needs it).
+    _pairwise = _audit_pairwise_for_escalation(final_result, args)
+
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
-        if final_result.success:
+        if final_result.success and _pairwise:
+            _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif final_result.success:
             print(
                 f"SUCCESS: Minimum viable config = {final_result.layer_count} layers + "
                 f"tier {final_result.tier} rules"
@@ -8380,6 +8647,8 @@ def route_with_combined_escalation(
                 # recommendation.
                 auto_layers_attempted=True,
             )
+            if _pairwise:
+                _print_pairwise_addendum(_pairwise)
 
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline.
@@ -8389,10 +8658,10 @@ def route_with_combined_escalation(
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
             return 3
-        return 0
+        return _pairwise_escalation_exit(0, _pairwise)
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
-        return 2
+        return _pairwise_escalation_exit(2, _pairwise)
     # Nothing was routed — treat as fatal failure
     return 1
 
@@ -9737,8 +10006,11 @@ def main(argv: list[str] | None = None) -> int:
               0  all nets routed (or meets --min-completion), DRC clean
               1  fatal failure -- no nets routed
               2  partial routing -- below --min-completion threshold
-              3  routing meets threshold but DRC violations remain
-              4  partial routing AND segment-segment clearance violations
+              3  routing meets threshold but the copper is clearance-dirty:
+                 DRC violations remain, --auto-fix rolled back (issue #2852),
+                 or the --voltage-map HV pairwise audit failed (issue #4588)
+              4  partial routing AND segment-segment or HV pairwise
+                 clearance violations (issues #1666, #4588)
               5  interrupted by SIGINT with partial results saved
               8  --complete: one or more unroutable links remain (issue #4477)
         """),
@@ -13772,6 +14044,23 @@ def main(argv: list[str] | None = None) -> int:
 
     _rss.mark("post-drc")
 
+    # Issue #4588: board-level pairwise (HV creepage) gate.
+    #
+    # ``rules.pairwise_clearance`` is only consulted by the *grid* engines'
+    # route-acceptance predicates, so a ``--voltage-map`` run on ``--route-engine
+    # lattice``/``mesh`` previously committed HV copper at scalar-DRU spacing and
+    # still exited 0 with a SUCCESS banner.  Auditing the committed copper
+    # (``router.routes``) here catches that on every engine.  Runs *after* DRC
+    # and *before* the summary predicate; a strict no-op without ``--voltage-map``
+    # (and never on ``--dry-run``, where nothing was committed to disk).
+    # Deliberately NOT gated on ``--skip-drc``: this is not a DRC sub-step.
+    pairwise_violations: list = []
+    if not args.dry_run:
+        pairwise_violations = _audit_pairwise_clearance(
+            router, args, id_to_name={v: k for k, v in net_map.items()}
+        )
+    pairwise_violation_count = len(pairwise_violations)
+
     # Summary
     all_nets_routed = stats["nets_routed"] == nets_to_route
     drc_passed = drc_errors <= 0  # -1 means DRC failed to run, treat as passed
@@ -13788,7 +14077,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not quiet:
         print("\n" + "=" * 60)
-        if all_nets_routed and drc_passed:
+        if pairwise_violation_count > 0 and drc_passed and (all_nets_routed or meets_threshold):
+            # Issue #4588: this run would otherwise have printed a SUCCESS
+            # banner.  Board-level HV creepage violations make that a false
+            # pass, so the pairwise failure banner replaces it outright --
+            # SUCCESS must be unreachable while non-exempt violations exist.
+            _print_pairwise_failure_banner(pairwise_violations, args, output_path)
+        elif all_nets_routed and drc_passed:
             if drc_ran and drc_errors == 0:
                 print(f"SUCCESS: All signal nets routed, DRC passed!{summary_suffix}")
             else:
@@ -13831,12 +14126,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - Or re-route with auto-fix: kct route {args.pcb} --auto-fix")
             print()
             print(f"  Run 'kct check {output_path} --mfr {args.manufacturer}' for full details")
+            if pairwise_violation_count > 0:
+                # Issue #4588: one coherent failure report -- HV creepage is
+                # folded into the DRC banner rather than printing a second one.
+                print()
+                print(f"HV Pairwise Clearance ({pairwise_violation_count} violation(s)):")
+                print(_format_pairwise_violations(pairwise_violations))
+                print("  (trace-to-trace only; run 'kct creepage' for the full census)")
         else:
             print(
                 f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} signal nets{summary_suffix}"
             )
             if drc_ran and drc_errors > 0:
                 print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
+            if pairwise_violation_count > 0:
+                # Issue #4588: see the DRC branch above.
+                _print_pairwise_addendum(pairwise_violations)
 
             # Issue #2388: When the negotiated loop bailed out due to a
             # power-net stall, surface actionable suggestions naming the
@@ -13922,7 +14227,16 @@ def main(argv: list[str] | None = None) -> int:
     #     connectivity regression (fix-drc exit 3) — semantically the same
     #     contract ("routing succeeded but DRC is dirty"); callers cannot
     #     trust the post-route DRC state.
-    # 4 = Seg-seg clearance violations remain AND routing is below threshold (Issue #1666)
+    #     Issue #4588: also returned when the post-route board-level HV
+    #     pairwise-clearance audit (--voltage-map) finds violations the
+    #     engine's search let through — semantically a clearance failure, so
+    #     it shares the "routing succeeded but the copper is dirty" contract.
+    #     KNOWN GAP (issue #4607): build_cmd.py / pipeline_cmd.py treat exit 3
+    #     as a non-fatal warning (and label it a DRC failure).  Neither
+    #     forwards --voltage-map today, so the HV meaning cannot reach them;
+    #     #4607 threads the flag through and makes it fatal there.
+    # 4 = Seg-seg or HV pairwise clearance violations remain AND routing is
+    #     below threshold (Issue #1666, extended by #4588)
     # 5 = Interrupted by SIGINT with partial results saved (handled in _handle_interrupt)
     # 6 = Connectivity regression detected (--strict mode only): either
     #     the optimize / DRC nudge phases reduced the number of fully-
@@ -13984,13 +14298,21 @@ def main(argv: list[str] | None = None) -> int:
     # but before every generic threshold-based code below.
     if getattr(args, "complete", False) and not all_nets_routed:
         return 8
-    elif meets_threshold and drc_passed and seg_seg_violation_count == 0:
+    elif (
+        meets_threshold
+        and drc_passed
+        and seg_seg_violation_count == 0
+        and pairwise_violation_count == 0
+    ):
         return 0
-    elif meets_threshold and (not drc_passed or seg_seg_violation_count > 0):
+    elif meets_threshold and (
+        not drc_passed or seg_seg_violation_count > 0 or pairwise_violation_count > 0
+    ):
         # Meets completion threshold but has DRC or clearance violations
+        # (including issue #4588 board-level HV pairwise creepage violations)
         return 3
-    elif not meets_threshold and seg_seg_violation_count > 0:
-        # Below threshold AND has seg-seg clearance violations
+    elif not meets_threshold and (seg_seg_violation_count > 0 or pairwise_violation_count > 0):
+        # Below threshold AND has seg-seg or HV pairwise clearance violations
         return 4
     else:
         # Partial routing: some nets routed but below threshold

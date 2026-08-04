@@ -2141,14 +2141,28 @@ def test_fallback_tail_route_without_partner_is_the_plain_probe():
 
 
 def test_fallback_tail_route_keeps_a_partner_clean_probe_unchanged():
-    """A tail that already holds the coupled clearance is returned as-is."""
+    """A tail that already holds the coupled clearance is returned as-is.
+
+    Issue #4577 split the method into a wrapper plus
+    ``_fallback_tail_route_body``.  The #4460 invariant this test was written
+    for is a statement about that BODY -- "a probe that already keeps the
+    intra-pair clearance must not trigger the guide-biased re-route" -- and it
+    is asserted on the body here, unchanged.  The wrapper's own extra probe is
+    a different condition (a winner carrying ZERO coupled millimetres) and is
+    covered by ``test_channel_retry_*`` below; what must still hold publicly is
+    that a clean probe comes back untouched, which is asserted first.
+    """
     dpr = _diffpair_router()
     probe_route = Route(net=2, net_name="USB3_TX1-")
     probe_route.segments.append(_gseg(5.0, 5.0, 8.0, 5.0))
-    calls = _stub_probe(dpr, probe_route)
+    _stub_probe(dpr, probe_route)
     head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
     partner = [_gseg(4.0, 6.0, 9.0, 6.0)]
     assert dpr._fallback_tail_route(head, goal, partner, 0.4) is probe_route
+
+    dpr = _diffpair_router()
+    calls = _stub_probe(dpr, probe_route)
+    assert dpr._fallback_tail_route_body(head, goal, partner, 0.4) is probe_route
     assert len(calls) == 1, "a clean probe must not trigger the biased re-route"
 
 
@@ -3485,6 +3499,290 @@ def test_route_is_chained_rejects_a_subcell_hole():
     # Closing the 5 um hole makes it a chain again.
     route.segments[1].x1 = 1.0
     assert dpr._route_is_chained(route, head, goal) is True
+
+
+# --- Issue #4577: reaching the follow run, and attributing the declines ------
+#
+# Measured on board-06 shadow-ON seed 42 with the decline attribution added
+# below: `lead` -- ``_bridge_to`` could not reach the run's START from the tail
+# head -- is the SOLE reason in 22 of the 38 numeric declines and participates
+# in 27.  Two structural facts cause it: ``_follow_partner_runs`` breaks the run
+# AT the blockage (so the survivor begins past it, routinely on the far side of
+# the guide from the head), and ``_truncate_spans`` is a head-anchored prefix
+# (so ``run[0]`` is identical at every keep fraction).  Nothing before this
+# issue could move that one coordinate.
+
+
+def test_suffix_spans_is_the_mirror_of_truncate_spans():
+    """``_truncate_spans`` gives up the END; ``_suffix_spans`` the START."""
+    dpr = _diffpair_router()
+    spans = [(0.0, 0.0, 1.0, 0.0), (1.0, 0.0, 2.0, 0.0), (2.0, 0.0, 3.0, 0.0)]
+
+    kept = dpr._suffix_spans(spans, 1.5)
+    assert kept, "a 1.5mm suffix of a 3mm chain is not empty"
+    # The chain's END is preserved and its START has moved forward.
+    assert (kept[-1][2], kept[-1][3]) == (3.0, 0.0)
+    assert kept[0][0] == pytest.approx(1.5)
+    assert sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in kept) == pytest.approx(1.5)
+    # Degenerate rungs behave like the prefix helper's.
+    assert dpr._suffix_spans(spans, 0.0) == []
+    assert dpr._suffix_spans([], 1.0) == []
+
+
+def test_head_partner_side_matches_the_offset_side_convention():
+    """The head's side must be expressed in ``_follow_partner_runs``' units.
+
+    That method offsets by ``n = (-uy, ux) / |u| * side``, so a head sitting at
+    ``slice[0] + n`` for ``side=+1`` must report ``+1.0``.  Getting the sign
+    backwards would aim the expensive lead-in probe at the run that is
+    guaranteed to be across the guide -- the exact defect this is for.
+    """
+    dpr = _diffpair_router()
+    # Partner heading +x: n(+1) = (0, +1).
+    slice_ = [(4.0, 4.0, 6.0, 4.0, 0.2)]
+    assert dpr._head_partner_side(_tail_pads((4.0, 4.5), (9.0, 9.0))[0], slice_) == 1.0
+    assert dpr._head_partner_side(_tail_pads((4.0, 3.5), (9.0, 9.0))[0], slice_) == -1.0
+    # On the centreline, and with no slice at all, neither side is preferred.
+    assert dpr._head_partner_side(_tail_pads((5.0, 4.0), (9.0, 9.0))[0], slice_) == 0.0
+    assert dpr._head_partner_side(_tail_pads((4.0, 4.5), (9.0, 9.0))[0], []) == 0.0
+
+
+def _split_partner(x0=4.0, x1=9.0, y=4.0, step=0.25) -> list[Segment]:
+    """A horizontal guide as many short spans, so a blockage can BREAK a run.
+
+    ``_follow_partner_runs`` selects a spacing rung PER partner segment, so a
+    guide expressed as one long span is all-or-nothing.  Board-06's guides near
+    a landing are per-cell staircases (measured: a 2.634 mm slice over 40
+    spans), which is what makes partial runs possible at all.
+    """
+    n = int(round((x1 - x0) / step))
+    return [_gseg(x0 + step * i, y, x0 + step * (i + 1), y) for i in range(n)]
+
+
+def _follow_bridge_targets(dpr, head, goal, partner, clearance=0.4):
+    """Every ``(tx, ty, allow_expensive)`` the follow synthesizer asks for.
+
+    ``_bridge_to`` is stubbed to REFUSE, so the whole candidate ladder is
+    walked and recorded instead of short-circuiting on the first success.
+    """
+    seen: list[tuple[float, float, bool]] = []
+
+    def refuse(pathfinder, h, tx, ty, layer_idx, ps, pc, allow_expensive=False):
+        seen.append((round(tx, 3), round(ty, 3), allow_expensive))
+        return None
+
+    dpr._bridge_to = refuse  # type: ignore[method-assign]
+    assert (
+        dpr._synthesize_following_tail(
+            _AllClearPathfinder(),
+            head,
+            goal,
+            0,
+            partner,
+            clearance,
+            allow_expensive_landing=True,
+        )
+        is None
+    )
+    return seen
+
+
+def test_follow_entry_point_walks_forward_when_the_run_start_is_unreachable():
+    """The bridge point is NEGOTIABLE (issue #4577).
+
+    On ``main`` each candidate run gets exactly ONE ``_bridge_to`` attempt, at
+    ``run[0]`` -- and no keep fraction can move that coordinate, because
+    ``_truncate_spans`` is a head-anchored prefix.  A run whose start is
+    unreachable is therefore dead on arrival, which is the sole decline reason
+    in 22 of board-06's 38 numeric declines.  Each run must now be offered at
+    several entry points, walking FORWARD along it.
+    """
+    dpr = _pad_gate_router()
+    partner = _split_partner()
+    head, goal = _tail_pads((4.0, 4.45), (9.0, 4.45))
+
+    seen = _follow_bridge_targets(dpr, head, goal, partner)
+
+    by_run: dict[float, list[float]] = {}
+    for tx, ty, _exp in seen:
+        by_run.setdefault(ty, []).append(tx)
+    assert by_run, "the fixture must produce at least one offset run"
+    for ty, xs in by_run.items():
+        assert len(xs) > 1, f"run at y={ty} was offered only its own start (pre-#4577)"
+        assert xs == sorted(xs), "entry points must walk FORWARD along the run"
+        assert len(set(xs)) == len(xs), "each entry point must be a distinct target"
+
+
+def test_expensive_lead_probe_also_reaches_the_head_side_run():
+    """The far-side run is unreachable by construction (issue #4577).
+
+    ``_follow_partner_runs`` offsets the slice on both sides blindly and the
+    candidates are ordered by LENGTH, so the expensive lead-in probe is
+    routinely spent on a run that sits across the guide from the head -- where
+    any lead-in would have to cross the partner's own copper, which every gate
+    forbids.  Here foreign pads shorten the head-side run so the far-side one
+    ranks first; both must get the expensive probe.
+    """
+    dpr = _pad_gate_router()
+    partner = _split_partner()
+    head, goal = _tail_pads((4.0, 4.45), (9.0, 4.45))
+    # Wall off the first ~1.5mm of the +1 (head-side) offset run only.
+    for x in (4.3, 4.7, 5.1):
+        dpr.autorouter.grid.add_pad(_pad_at(x, 4.6, net=99, name="OTHER"))
+
+    seen = _follow_bridge_targets(dpr, head, goal, partner)
+
+    far = [(tx, exp) for tx, ty, exp in seen if ty < 4.0]
+    near = [(tx, exp) for tx, ty, exp in seen if ty > 4.0]
+    assert far and near, "the fixture must produce a run on each side"
+    assert min(tx for tx, _ in near) > 4.0, "the head-side run must start past the pads"
+    assert any(exp for _tx, exp in far), "the longest run keeps its expensive probe"
+    assert any(exp for _tx, exp in near), (
+        "the head-side run must also get one -- on main only rank 0 does, and "
+        "rank 0 here is the run across the guide"
+    )
+
+
+def test_follow_decline_names_the_stage_that_rejected_the_candidate(capsys, monkeypatch):
+    """Gate 1: the decline line must attribute, not just report arithmetic."""
+    import kicad_tools.router.diffpair_routing as dpr_mod
+
+    monkeypatch.setattr(dpr_mod, "_SHADOW_DEBUG", True)
+    dpr = _diffpair_router()
+    # The #4572 "detour far longer than the direct hop" fixture: a partner that
+    # loops away between the anchors, so every bracket blows the budget.
+    partner = [
+        _gseg(4.0, 4.0, 4.0, 1.0),
+        _gseg(4.0, 1.0, 9.0, 1.0),
+        _gseg(9.0, 1.0, 9.0, 4.0),
+    ]
+    head, goal = _tail_pads((4.4, 4.0), (9.4, 4.0))
+
+    assert (
+        dpr._synthesize_following_tail(_AllClearPathfinder(), head, goal, 0, partner, 0.4) is None
+    )
+
+    line = [ln for ln in capsys.readouterr().out.splitlines() if "[coupled-follow] declined:" in ln]
+    assert line, "a numeric decline must print its attribution"
+    assert "why=" in line[-1] and "runs=" in line[-1]
+    # The reason vocabulary is closed: no-surviving-run / lead / truncate /
+    # landing / budget / chain.
+    reasons = line[-1].split("why=")[-1].split()[0]
+    for token in reasons.split(","):
+        assert token.split("=")[0] in {
+            "no-surviving-run",
+            "lead",
+            "truncate",
+            "landing",
+            "budget",
+            "chain",
+        }
+
+
+def test_channel_wall_sites_sit_outside_the_coupling_window():
+    """The fence must never penalise a cell the continuity rule scores coupled.
+
+    Issue #4577's direction (b): ``_partner_boost_sites`` only REPELS, so the
+    fallback A* has no reason to stay in the band the rule measures.  The wall
+    sites are the missing outer edge -- and they are only useful if they are
+    strictly outside the window, or they would push the probe out of the very
+    band they exist to hold it in.
+    """
+    from kicad_tools.router.diffpair_routing import _COUPLING_WINDOW_MM
+
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = [_gseg(4.0, 5.0, 9.0, 5.0)]
+
+    sites = dpr._partner_channel_wall_sites(head, goal, partner, 0.4)
+
+    assert sites, "a partner in the corridor must produce a fence"
+    for _sx, sy in sites:
+        centre = abs(sy - 5.0)
+        # 0.2mm-wide guide: edge-to-edge = centre - 0.1 - 0.1 for a 0.2mm tail.
+        assert centre - 0.2 > _COUPLING_WINDOW_MM, "the fence is inside the coupled band"
+    # Both sides are fenced, so the result is a channel and not a gradient.
+    assert any(sy > 5.0 for _sx, sy in sites) and any(sy < 5.0 for _sx, sy in sites)
+    # No partner / no clearance floor => nothing to fence.
+    assert dpr._partner_channel_wall_sites(head, goal, [], 0.4) == []
+    assert dpr._partner_channel_wall_sites(head, goal, partner, 0.0) == []
+
+
+def test_channel_retry_is_not_vacuous_and_only_fires_on_a_zero_coupled_tail():
+    """Non-vacuity spy, mirroring ``test_shadow_entry_point_spy_is_not_vacuous``.
+
+    A refactor that silently stopped calling the retry would leave every other
+    assertion in this file green, so the call itself is asserted here -- both
+    that it HAPPENS for a 0%-coupled winner and that it does NOT for a winner
+    that already runs alongside its partner.
+    """
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    seen: list[Route] = []
+
+    def spy(h, g, partner, clear, planar_layer, incumbent):
+        seen.append(incumbent)
+        return incumbent
+
+    dpr._channel_biased_tail = spy  # type: ignore[method-assign]
+
+    # (a) an uncoupled winner (partner 1.0mm away, outside the window).
+    uncoupled = Route(net=2, net_name="USB3_TX1-")
+    uncoupled.segments.append(_gseg(5.0, 5.0, 8.0, 5.0))
+    _stub_probe(dpr, uncoupled)
+    assert dpr._fallback_tail_route(head, goal, [_gseg(4.0, 6.0, 9.0, 6.0)], 0.4) is uncoupled
+    assert len(seen) == 1, "a 0.000-coupled winner MUST reach the channel retry"
+
+    # (b) a winner already inside the coupling window: no retry, no extra probe.
+    coupled = Route(net=2, net_name="USB3_TX1-")
+    coupled.segments.append(_gseg(5.0, 5.0, 8.0, 5.0))
+    _stub_probe(dpr, coupled)
+    assert dpr._fallback_tail_route(head, goal, [_gseg(4.0, 5.45, 9.0, 5.45)], 0.4) is coupled
+    assert len(seen) == 1, "an already-coupled winner must not pay for the retry"
+
+
+def test_channel_retry_is_inert_with_shadow_construction_off():
+    """Flag-OFF inertness, mirroring the #4574 crossing-tail guard.
+
+    ``partner_segments`` is supplied ONLY by the shadow constructor, so with
+    ``enable_shadow_construction`` off the wrapper must be a pass-through: one
+    probe, its result returned untouched, and the retry never entered.
+    """
+    dpr = _diffpair_router()
+    assert dpr.enable_shadow_construction is False
+    probe_route = Route(net=2, net_name="USB3_TX1-")
+    probe_route.segments.append(_gseg(5.0, 5.0, 8.0, 5.0))
+    calls = _stub_probe(dpr, probe_route)
+    entered: list[int] = []
+    dpr._channel_biased_tail = lambda *a, **k: entered.append(1)  # type: ignore[method-assign]
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+
+    assert dpr._fallback_tail_route(head, goal, None, 0.0) is probe_route
+    assert calls == [(10.0, None, 1)]
+    assert entered == [], "the retry must not run without a partner"
+
+
+def test_channel_retry_declines_a_candidate_that_is_not_better_coupled():
+    """The retry can only displace a tail it beats on coupled millimetres.
+
+    Same predicate (``_tail_is_better_coupled``) the follow tail is judged by,
+    so a probe that merely wanders differently loses -- which is what keeps the
+    retry from trading DRC-clean copper for a cosmetic change.
+    """
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = [_gseg(4.0, 6.0, 9.0, 6.0)]
+    incumbent = Route(net=2, net_name="USB3_TX1-")
+    incumbent.segments.append(_gseg(5.0, 5.0, 8.0, 5.0))
+    # The stubbed probe returns another equally-uncoupled route.
+    other = Route(net=2, net_name="USB3_TX1-")
+    other.segments.append(_gseg(5.0, 5.0, 6.5, 4.5))
+    other.segments.append(_gseg(6.5, 4.5, 8.0, 5.0))
+    _stub_probe(dpr, other)
+
+    assert dpr._channel_biased_tail(head, goal, partner, 0.4, None, incumbent) is incumbent, (
+        "an equally-uncoupled candidate must not displace the incumbent"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -478,6 +478,20 @@ _TAIL_FOLLOW_MIN_FRACTION: float = 0.30
 # How much of the partner's landing run a following tail may give up (the last
 # stretch is the part most likely to be walled in by neighbour-pad halos).
 _TAIL_FOLLOW_KEEP_FRACTIONS: tuple[float, ...] = (1.0, 0.85, 0.7, 0.55, 0.4, 0.25)
+# ...and how much of its HEAD end (issue #4577).  ``_TAIL_FOLLOW_KEEP_FRACTIONS``
+# is applied by ``_truncate_spans``, a head-ANCHORED prefix, so ``run[0]`` is
+# identical at every rung -- and ``run[0]`` is the coordinate the lead-in fails
+# on in 22 of the 38 numeric board-06 declines.  These are that ladder's mirror
+# image: walk the entry point forward along the run, giving up a prefix of the
+# coupled copper to buy a bridge the axis-aligned synthesizer can actually draw.
+# The first rung is 0.0, so the pre-#4577 attempt is always tried first and a
+# tail that already bracketed is produced unchanged.
+_TAIL_FOLLOW_ENTRY_FRACTIONS: tuple[float, ...] = (0.0, 0.2, 0.4, 0.6)
+# How far OUTSIDE the coupling window the fallback A*'s soft cost fence sits
+# (issue #4577).  Big enough that the fence never penalises a cell the
+# continuity rule would score as coupled, small enough that the channel it
+# forms is still narrow enough to steer a shortest-path search.
+_TAIL_CHANNEL_WALL_MARGIN_MM: float = 0.15
 # Guardrails on the slice itself: too short to be worth following, or so many
 # partner segments that offsetting them would dominate construction time.
 _TAIL_FOLLOW_MIN_SLICE_MM: float = 0.3
@@ -5228,11 +5242,29 @@ class DiffPairRouter:
         So the coupled middle is new, while both hops keep every gate and
         detour the existing synthesizer has.
 
+        Issue #4577: that lead-in is the measured blocker, not the budget.
+        Instrumenting the candidate loop on board-06 shadow-ON seed 42 puts
+        ``lead`` -- ``_bridge_to`` found no route to ``run[0]`` at all -- as the
+        SOLE reason in 22 of the 38 numeric declines, and a participant in 27;
+        "the slice was mostly unoffsettable" accounts for 4.  Two changes
+        address it, both of which only ADD candidates:
+
+        * the expensive lead-in probe now also reaches the longest run on the
+          head's OWN side of the partner, because ordering purely by length
+          routinely aims it at a run across the guide, where no legal lead-in
+          can exist (a lead-in must keep ``partner_clearance``, so it cannot
+          cross the partner's copper); and
+        * the bridge point is negotiable -- :data:`_TAIL_FOLLOW_ENTRY_FRACTIONS`
+          walks the entry forward along the run, giving up a prefix.  This is
+          the mirror of the keep-fraction ladder, which is head-anchored and so
+          can never move ``run[0]``.
+
         Every span is held to exactly the gates ``_synthesize_tail`` applies
         (raster cells, ``partner_clearance`` centre-to-centre, and #4573's
         exact foreign-pad predicate).  Returns ``None`` when no side / run /
-        truncation produces a legal tail, and the caller's existing fallback
-        chain then runs unchanged.
+        entry / truncation produces a legal tail, and the caller's existing
+        fallback chain then runs unchanged; under ``KCT_SHADOW_DEBUG`` the
+        decline line names WHICH bracketing stage rejected each candidate.
         """
         grid = self.autorouter.grid
         if grid.layer_to_index(goal.layer.value) != layer_idx:
@@ -5253,6 +5285,7 @@ class DiffPairRouter:
         followed_best = 0.0
 
         candidates: list[list[tuple[float, float, float, float]]] = []
+        sides: list[float] = []
         for side in (1.0, -1.0):
             runs = self._follow_partner_runs(
                 pathfinder,
@@ -5271,95 +5304,162 @@ class DiffPairRouter:
                     followed_best,
                     sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in run),
                 )
-            candidates.extend(runs[:_TAIL_FOLLOW_MAX_RUNS_PER_SIDE])
-        candidates.sort(key=lambda r: -sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in r))
-
-        for rank, run in enumerate(candidates[: 2 * _TAIL_FOLLOW_MAX_RUNS_PER_SIDE]):
-            lead = self._bridge_to(
-                pathfinder,
-                head,
-                run[0][0],
-                run[0][1],
-                layer_idx,
-                partner_segments,
-                partner_clearance,
-                # The slice a landing tail gets is the stretch the body
-                # trimmed for being BLOCKED, so the usable offset run often
-                # starts past that blockage -- which the axis-aligned lead-in
-                # then cannot reach either.  Spend the expensive probes on the
-                # single longest run only, and only when the caller was
-                # already going to pay for them.
-                allow_expensive=allow_expensive_landing and rank == 0,
-            )
-            if lead is None:
-                continue
-            run_len = sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in run)
-            for keep_frac in _TAIL_FOLLOW_KEEP_FRACTIONS:
-                kept = self._truncate_spans(run, run_len * keep_frac)
-                if not kept:
-                    continue
-                kept_len = sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in kept)
-                anchor = self._virtual_pad_at(goal, kept[-1][2], kept[-1][3], layer_idx)
-                landing = self._synthesize_tail(
-                    pathfinder,
-                    anchor,
-                    goal,
-                    layer_idx,
-                    partner_segments=partner_segments,
-                    partner_clearance=partner_clearance,
+            for run in runs[:_TAIL_FOLLOW_MAX_RUNS_PER_SIDE]:
+                candidates.append(run)
+                sides.append(side)
+        order = sorted(
+            range(len(candidates)),
+            key=lambda i: -sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in candidates[i]),
+        )
+        candidates = [candidates[i] for i in order]
+        sides = [sides[i] for i in order]
+        # Issue #4577: which SIDE of the partner the tail's head already sits
+        # on.  ``_follow_partner_runs`` offsets the slice on both sides
+        # blindly, and the longest surviving run is routinely the one on the
+        # FAR side -- measured on board-06 seed 42, USB3_TX1: head
+        # (149.055, 63.490), partner (148.772, 63.772), winning run start
+        # (148.472, 64.073), i.e. the partner's own copper lies between the two.
+        # A lead-in to that run must cross the guide, which every gate in
+        # ``_synthesize_tail`` / ``_bridge_to`` forbids by construction, so the
+        # expensive probe is spent on a bridge that cannot exist (32 of the 50
+        # instrumented lead attempts returned no route at all, none of them a
+        # chain break).  Knowing the head's side lets the expensive probe also
+        # reach the best NEAR-side run.
+        head_side = self._head_partner_side(head, slice_)
+        near_rank = next(
+            (i for i, s in enumerate(sides) if head_side != 0.0 and s == head_side),
+            None,
+        )
+        # Issue #4577 (Gate 1): WHICH bracketing stage rejected each candidate.
+        # The pre-#4577 decline line reported only the slice/followed/budget
+        # arithmetic, which invited the wrong attribution -- the filed root
+        # cause blamed the budget, while the measured blocker on 22 of 38
+        # numeric board-06 declines is the LEAD-IN alone.  Counting the stages
+        # makes the next lever choice evidence-driven instead of narrative.
+        why: dict[str, int] = {}
+        for rank, full_run in enumerate(candidates[: 2 * _TAIL_FOLLOW_MAX_RUNS_PER_SIDE]):
+            full_len = sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in full_run)
+            # The slice a landing tail gets is the stretch the body trimmed for
+            # being BLOCKED, so the usable offset run often starts past that
+            # blockage -- which the axis-aligned lead-in then cannot reach
+            # either.  Spend the expensive probes on the single longest run
+            # only, and only when the caller was already going to pay for them
+            # -- plus (issue #4577) on the longest run that at least sits on
+            # the head's own side of the partner, since the longest run overall
+            # is frequently across the guide and so unreachable by any legal
+            # lead-in at all.
+            expensive = allow_expensive_landing and rank in (0, near_rank)
+            lead_found = False
+            for entry_frac in _TAIL_FOLLOW_ENTRY_FRACTIONS:
+                # Issue #4577: the bridge point is NEGOTIABLE.  ``_truncate_spans``
+                # is a head-anchored prefix, so every rung of
+                # ``_TAIL_FOLLOW_KEEP_FRACTIONS`` leaves ``run[0]`` exactly where
+                # it was -- and ``run[0]`` is the one coordinate the lead-in is
+                # failing on.  Walking the entry point forward along the run is
+                # that ladder's mirror image: it gives up a PREFIX of the coupled
+                # copper to buy a bridge the synthesizer can actually draw.
+                run = (
+                    full_run
+                    if entry_frac <= 0.0
+                    else self._suffix_spans(full_run, full_len * (1.0 - entry_frac))
                 )
-                if landing is None and allow_expensive_landing:
-                    landing = self._synthesize_crossing_tail(
-                        pathfinder, anchor, goal, layer_idx, partner_segments
-                    ) or self._fallback_tail_route(
+                run_len = sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in run)
+                if not run or run_len < _TAIL_FOLLOW_MIN_SLICE_MM:
+                    break  # every later entry point is shorter still
+                lead = self._bridge_to(
+                    pathfinder,
+                    head,
+                    run[0][0],
+                    run[0][1],
+                    layer_idx,
+                    partner_segments,
+                    partner_clearance,
+                    # Only the run's own start is worth an expensive probe: the
+                    # stepped-in entries exist to find a bridge the CHEAP
+                    # synthesizer can draw, so the worst-case probe count per
+                    # candidate is unchanged.
+                    allow_expensive=expensive and entry_frac <= 0.0,
+                )
+                if lead is None:
+                    continue
+                lead_found = True
+                for keep_frac in _TAIL_FOLLOW_KEEP_FRACTIONS:
+                    kept = self._truncate_spans(run, run_len * keep_frac)
+                    if not kept:
+                        why["truncate"] = why.get("truncate", 0) + 1
+                        continue
+                    kept_len = sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in kept)
+                    anchor = self._virtual_pad_at(goal, kept[-1][2], kept[-1][3], layer_idx)
+                    landing = self._synthesize_tail(
+                        pathfinder,
                         anchor,
                         goal,
-                        partner_segments,
-                        partner_clearance,
-                        # Issue #4570: the follow tail's own last-resort A*
-                        # lander is a second via-inventing source; bias it the
-                        # same way as the caller's.
-                        prefer_planar_layer=layer_idx if prefer_planar else None,
+                        layer_idx,
+                        partner_segments=partner_segments,
+                        partner_clearance=partner_clearance,
                     )
-                if landing is None:
-                    continue
-                total = _route_copper_length(lead) + kept_len + _route_copper_length(landing)
-                if total > budget:
-                    continue
-                route = Route(net=head.net, net_name=head.net_name)
-                route.segments.extend(lead.segments)
-                route.vias.extend(lead.vias)
-                for x1, y1, x2, y2 in kept:
-                    route.segments.append(
-                        Segment(
-                            x1=x1,
-                            y1=y1,
-                            x2=x2,
-                            y2=y2,
-                            width=width,
-                            layer=layer,
-                            net=head.net,
-                            net_name=head.net_name,
+                    if landing is None and allow_expensive_landing:
+                        landing = self._synthesize_crossing_tail(
+                            pathfinder, anchor, goal, layer_idx, partner_segments
+                        ) or self._fallback_tail_route(
+                            anchor,
+                            goal,
+                            partner_segments,
+                            partner_clearance,
+                            # Issue #4570: the follow tail's own last-resort A*
+                            # lander is a second via-inventing source; bias it
+                            # the same way as the caller's.
+                            prefer_planar_layer=layer_idx if prefer_planar else None,
                         )
-                    )
-                route.segments.extend(landing.segments)
-                route.vias.extend(landing.vias)
-                # Issue #4572 (and the #4462 lesson): a three-piece tail is
-                # only copper if the three pieces MEET.  ``_synthesize_tail``
-                # silently drops a sub-0.01 mm span, which is harmless at a
-                # pad landing but leaves a real break when the piece is spliced
-                # between a lead-in and a follow run -- and the #3540
-                # transactional strand guard then rips the whole pair
-                # (measured: PCIE_RX stranded at U3.32).  Verify the chain
-                # end-to-end and drop the candidate rather than emit a break.
-                if not route.segments or not self._route_is_chained(route, head, goal):
-                    continue
-                return route
+                    if landing is None:
+                        why["landing"] = why.get("landing", 0) + 1
+                        continue
+                    total = _route_copper_length(lead) + kept_len + _route_copper_length(landing)
+                    if total > budget:
+                        why["budget"] = why.get("budget", 0) + 1
+                        continue
+                    route = Route(net=head.net, net_name=head.net_name)
+                    route.segments.extend(lead.segments)
+                    route.vias.extend(lead.vias)
+                    for x1, y1, x2, y2 in kept:
+                        route.segments.append(
+                            Segment(
+                                x1=x1,
+                                y1=y1,
+                                x2=x2,
+                                y2=y2,
+                                width=width,
+                                layer=layer,
+                                net=head.net,
+                                net_name=head.net_name,
+                            )
+                        )
+                    route.segments.extend(landing.segments)
+                    route.vias.extend(landing.vias)
+                    # Issue #4572 (and the #4462 lesson): a three-piece tail is
+                    # only copper if the three pieces MEET.  ``_synthesize_tail``
+                    # silently drops a sub-0.01 mm span, which is harmless at a
+                    # pad landing but leaves a real break when the piece is
+                    # spliced between a lead-in and a follow run -- and the
+                    # #3540 transactional strand guard then rips the whole pair
+                    # (measured: PCIE_RX stranded at U3.32).  Verify the chain
+                    # end-to-end and drop the candidate rather than emit a break.
+                    if not route.segments or not self._route_is_chained(route, head, goal):
+                        why["chain"] = why.get("chain", 0) + 1
+                        continue
+                    return route
+            if not lead_found:
+                # Issue #4577: count the lead-in blocker ONCE per candidate run,
+                # not once per entry point, so the decline histogram stays
+                # comparable across the entry ladder's introduction.
+                why["lead"] = why.get("lead", 0) + 1
         if _SHADOW_DEBUG:
             slice_len = sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2, _w in slice_)
+            reasons = ",".join(f"{k}={why[k]}" for k in sorted(why)) or "no-surviving-run"
             print(
                 f"    [coupled-follow] declined: slice={slice_len:.3f} "
-                f"followed={followed_best:.3f} direct={direct:.3f} budget={budget:.3f}"
+                f"followed={followed_best:.3f} direct={direct:.3f} budget={budget:.3f} "
+                f"runs={len(candidates)} why={reasons}"
             )
         return None
 
@@ -5568,6 +5668,67 @@ class DiffPairRouter:
                 out.append((x1, y1, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t))
             break
         return out
+
+    @staticmethod
+    def _suffix_spans(
+        spans: list[tuple[float, float, float, float]],
+        keep_len: float,
+    ) -> list[tuple[float, float, float, float]]:
+        """Tail-anchored suffix of a span chain, at most ``keep_len`` long.
+
+        Issue #4577.  The mirror of :meth:`_truncate_spans`: that one gives up
+        the run's LAST stretch (walled-in by neighbour-pad halos), this one
+        gives up its FIRST -- which is what a lead-in that cannot reach
+        ``run[0]`` needs, since the run a landing tail gets typically starts on
+        the far side of the very blockage that broke it.  The run's END is
+        preserved, so the landing hop the caller then synthesizes is
+        unaffected.
+        """
+        if keep_len <= 1e-9:
+            return []
+        out: list[tuple[float, float, float, float]] = []
+        used = 0.0
+        for x1, y1, x2, y2 in reversed(spans):
+            seg_len = math.hypot(x2 - x1, y2 - y1)
+            if seg_len < 1e-9:
+                continue
+            if used + seg_len <= keep_len + 1e-9:
+                out.append((x1, y1, x2, y2))
+                used += seg_len
+                continue
+            t = (keep_len - used) / seg_len
+            if t > 1e-6:
+                out.append((x2 - (x2 - x1) * t, y2 - (y2 - y1) * t, x2, y2))
+            break
+        out.reverse()
+        return out
+
+    @staticmethod
+    def _head_partner_side(
+        head: Pad,
+        slice_: list[tuple[float, float, float, float, float]],
+    ) -> float:
+        """Which offset side of the partner slice the tail's head sits on (#4577).
+
+        ``_guide_follow_slice`` cuts the slice AT the partner point closest to
+        ``head``, so ``slice_[0]``'s start is that point and the head->point
+        vector is (up to the cut's own error) the local normal.  Returns
+        ``+1.0`` / ``-1.0`` in ``_follow_partner_runs``' own side convention
+        (``n = (-uy, ux) / |u| * side``), or ``0.0`` when the head is on the
+        partner's centreline and neither side is nearer -- in which case the
+        caller must not express a preference.
+        """
+        if not slice_:
+            return 0.0
+        x1, y1, x2, y2, _w = slice_[0]
+        ux, uy = x2 - x1, y2 - y1
+        norm = math.hypot(ux, uy)
+        if norm < 1e-9:
+            return 0.0
+        proj = (head.x - x1) * (-uy / norm) + (head.y - y1) * (ux / norm)
+        if abs(proj) < 1e-9:
+            return 0.0
+        return 1.0 if proj > 0.0 else -1.0
 
     def _pair_seg_clearance(self, pathfinder: CoupledPathfinder, net_name: str) -> float:
         """Centerline distance bound between pair partners (issue #3508).
@@ -6017,6 +6178,68 @@ class DiffPairRouter:
                     return sites
         return sites
 
+    def _partner_channel_wall_sites(
+        self,
+        head: Pad,
+        goal: Pad,
+        partner_segments: list[Segment],
+        seg_clear: float,
+        max_sites: int = 40,
+    ) -> list[tuple[float, float]]:
+        """Cost walls just OUTSIDE the coupling window (issue #4577).
+
+        :meth:`_partner_boost_sites` samples the partner itself, so it only
+        ever pushes the fallback A* AWAY from the guide.  Nothing rewards the
+        band the continuity rule actually measures, and the probe -- which is a
+        shortest-path search over free cells -- has no reason to stay in it:
+        measured on board-06 seed 42, USB3_TX1's shipped landing tail is
+        4.865 mm over 84 grid steps at **0.000** coupled.
+
+        These sites are the missing other wall.  Offsetting each partner
+        segment by ``_COUPLING_WINDOW_MM + partner width + margin``
+        centre-to-centre on BOTH sides puts a soft cost fence at the far edge
+        of the coupled band, so the two cheapest lanes through the corridor are
+        the ones between the guide's own halo and that fence -- i.e. exactly
+        the offsets a coupled tail wants.  Combined with the repelling sites
+        the caller already has, the pair forms a channel rather than a
+        gradient.
+
+        ``avoid_locations`` only ADDS cost (``GridCell.avoidance_cost``), so
+        the fence is a preference, never a barrier: a tail whose only path
+        leaves the channel still routes, it just pays.  Nothing is written to
+        the grid's corridor reservations, which are global and shared with the
+        escape router (``grid.py`` ``clear_corridor_reservations`` / #4071).
+        """
+        if not partner_segments or seg_clear <= 0.0:
+            return []
+        reach = _COUPLING_WINDOW_MM + _TAIL_CHANNEL_WALL_MARGIN_MM
+        pad = 2.0 * seg_clear + reach + 0.5
+        lo_x, hi_x = min(head.x, goal.x) - pad, max(head.x, goal.x) + pad
+        lo_y, hi_y = min(head.y, goal.y) - pad, max(head.y, goal.y) + pad
+        step = max(self.autorouter.grid.resolution, seg_clear)
+        sites: list[tuple[float, float]] = []
+        for ps in partner_segments:
+            seg_len = math.hypot(ps.x2 - ps.x1, ps.y2 - ps.y1)
+            if seg_len < 1e-9:
+                continue
+            wall = reach + ps.width
+            nx, ny = -(ps.y2 - ps.y1) / seg_len, (ps.x2 - ps.x1) / seg_len
+            n_steps = max(1, int(math.ceil(seg_len / step)))
+            for i in range(n_steps + 1):
+                t = i / n_steps
+                px = ps.x1 + (ps.x2 - ps.x1) * t
+                py = ps.y1 + (ps.y2 - ps.y1) * t
+                for sign in (1.0, -1.0):
+                    wx, wy = px + wall * nx * sign, py + wall * ny * sign
+                    if not (lo_x <= wx <= hi_x and lo_y <= wy <= hi_y):
+                        continue
+                    if any(math.hypot(wx - sx, wy - sy) < step for sx, sy in sites):
+                        continue
+                    sites.append((wx, wy))
+                    if len(sites) >= max_sites:
+                        return sites
+        return sites
+
     @contextlib.contextmanager
     def _layer_locked_router(self, layer_idx: int) -> Iterator[bool]:
         """Narrow the shared pathfinder to one copper layer (issue #4570).
@@ -6361,6 +6584,138 @@ class DiffPairRouter:
         seg_clear: float,
         prefer_planar_layer: int | None = None,
     ) -> Route | None:
+        """Last-resort A* tail, with a coupling-aware retry (issues #4460/#4577).
+
+        The whole legacy chain is :meth:`_fallback_tail_route_body`, unchanged.
+        This wrapper adds ONE thing: when that chain's winner carries **zero**
+        coupled millimetres -- the 100%-uncoupled grid staircase issue #4577 is
+        about -- a single extra probe is spent with the guide's coupling band
+        fenced in on both sides (:meth:`_partner_channel_wall_sites`), and it is
+        preferred only when :meth:`_tail_is_better_coupled` says it beats the
+        incumbent on the same coupled-millimetres doctrine the follow tail is
+        judged by, at the same partner-clearance floor the incumbent met.
+
+        Restricting the retry to a zero-coupled incumbent is what keeps the
+        probe count bounded: every tail that already runs alongside its partner
+        (and every tail reached with no partner supplied) returns from the body
+        without the extra search.
+
+        **Measured outcome on board-06 shadow-ON seed 42: it fires 10 times and
+        upgrades 0 tails.**  It is kept because it is the only path that can
+        exploit a cheap coupled corridor, and because its instrumentation is
+        what PRICES the alternative: on USB3_TX1's landing it found a genuinely
+        coupled route (2.058 coupled mm against the incumbent's 0.000) that is
+        10.764 mm long against the incumbent's 4.865 -- 5.9 mm of extra copper
+        for 2.1 mm of coupling.  Swapping it in would have LOWERED that leg's
+        ``diffpair_routing_continuity`` (0.867 -> 0.815), which is exactly what
+        :meth:`_tail_is_better_coupled` exists to prevent.  The lever the issue
+        named is therefore not blocked by a missing attractor; it is blocked by
+        the price of the detour.
+        """
+        winner = self._fallback_tail_route_body(
+            head, goal, partner_segments, seg_clear, prefer_planar_layer
+        )
+        if winner is None or not partner_segments or seg_clear <= 0.0:
+            return winner
+        if self._tail_coupled_mm(winner, partner_segments)[0] > 0.0:
+            return winner
+        return self._channel_biased_tail(
+            head, goal, partner_segments, seg_clear, prefer_planar_layer, winner
+        )
+
+    def _channel_biased_tail(
+        self,
+        head: Pad,
+        goal: Pad,
+        partner_segments: list[Segment],
+        seg_clear: float,
+        prefer_planar_layer: int | None,
+        incumbent: Route,
+    ) -> Route:
+        """One channel-fenced A* retry for a 0%-coupled tail (issue #4577).
+
+        Returns ``incumbent`` unchanged unless the retry produces copper that
+
+        * passes the same exact foreign-pad / foreign-via gates
+          (:meth:`_route_pad_violation`, :meth:`_route_via_clear`),
+        * meets the SAME partner-clearance floor the incumbent met (the strict
+          intra-pair bound when the incumbent met it, the physical-overlap
+          floor otherwise -- so the retry can never smuggle copper past a check
+          the incumbent passed),
+        * does not invent a via when ``prefer_planar_layer`` says the partner
+          leg has none to match (#4570), and
+        * beats the incumbent under :meth:`_tail_is_better_coupled`: at least
+          ``_TAIL_FOLLOW_MIN_COUPLED_MM`` more coupled copper, and no more
+          extra length than the coupling it bought.
+        """
+        strict_ok = self._tail_partner_clear(incumbent, partner_segments, seg_clear)
+        floor = seg_clear if strict_ok else 0.0
+        sites = self._partner_boost_sites(head, goal, partner_segments, seg_clear)
+        sites = sites + self._partner_channel_wall_sites(head, goal, partner_segments, seg_clear)
+        if not sites:
+            return incumbent
+        radius_cells = max(
+            1, int(round(seg_clear / max(self.autorouter.grid.resolution, 1e-9) / 3.0))
+        )
+        if prefer_planar_layer is not None:
+            with self._layer_locked_router(prefer_planar_layer) as locked:
+                cand = (
+                    self._single_ended_guide_route(
+                        head,
+                        goal,
+                        per_net_timeout=10.0,
+                        avoid_locations=sites,
+                        avoid_radius_cells=radius_cells,
+                    )
+                    if locked
+                    else None
+                )
+            if cand is not None and cand.vias:
+                cand = None
+        else:
+            cand = self._single_ended_guide_route(
+                head,
+                goal,
+                per_net_timeout=10.0,
+                avoid_locations=sites,
+                avoid_radius_cells=radius_cells,
+            )
+        # Issue #4577 (Gate 1): report WHICH gate the channel-fenced retry lost
+        # to, on the same principle as the ``[coupled-follow] declined:``
+        # attribution -- a retry that silently does nothing is indistinguishable
+        # from one that is not wired up.
+        why: str | None = None
+        got = tot = 0.0
+        if cand is None or not cand.segments:
+            why = "no-path" if prefer_planar_layer is None else "no-planar-path"
+        elif self._route_pad_violation(cand)[0] > _SHADOW_PAD_DEFICIT_EPS:
+            why = "pad-deficit"
+        elif not self._route_via_clear(cand):
+            why = "via-deficit"
+        elif not self._tail_partner_clear(cand, partner_segments, floor):
+            why = "partner-clearance"
+        else:
+            got, tot = self._tail_coupled_mm(cand, partner_segments)
+            if not self._tail_is_better_coupled(cand, incumbent, partner_segments):
+                why = "not-better-coupled"
+        if _SHADOW_DEBUG:
+            print(
+                f"    [coupled-channel] {why or 'upgraded'}: sites={len(sites)} "
+                f"len={tot:.3f} coupled={got:.3f} "
+                f"segs={len(cand.segments) if cand is not None else 0} "
+                f"(was len={_route_copper_length(incumbent):.3f} "
+                f"segs={len(incumbent.segments)})"
+            )
+        return incumbent if (why is not None or cand is None) else cand
+
+    def _fallback_tail_route_body(
+        self,
+        head: Pad,
+        goal: Pad,
+        partner_segments: list[Segment] | None,
+        seg_clear: float,
+        prefer_planar_layer: int | None = None,
+    ) -> Route | None:
         """Partner-aware last-resort A* tail (issue #4460).
 
         Order is deliberately conservative: the UNBIASED probe runs first and
@@ -6526,6 +6881,10 @@ class DiffPairRouter:
         # winning wherever it was already good enough.
         source = "synth" if tail is not None else "none"
         following: Route | None = None
+        # Issue #4577: a follow candidate that lost only to the "no incumbent"
+        # stand-in bound, kept for a second, fair comparison once the tail that
+        # actually ships exists.
+        deferred_follow: Route | None = None
         if partner_segments:
             following = self._synthesize_following_tail(
                 pathfinder,
@@ -6541,15 +6900,29 @@ class DiffPairRouter:
                 allow_expensive_landing=tail is None,
                 prefer_planar=prefer_planar,
             )
-            if (
-                following is not None
+            if following is not None and not (
                 # Issue #4570: never let a via-carrying follow displace a
                 # PLANAR incumbent when the partner leg has no via to match.
-                and not (prefer_planar and following.vias and tail is not None and not tail.vias)
-                and self._tail_is_better_coupled(following, tail, partner_segments)
+                prefer_planar and following.vias and tail is not None and not tail.vias
             ):
-                tail = following
-                source = "follow"
+                if self._tail_is_better_coupled(following, tail, partner_segments):
+                    tail = following
+                    source = "follow"
+                elif tail is None:
+                    # Issue #4577: with no incumbent to measure the trade
+                    # against, ``_tail_is_better_coupled`` falls back to
+                    # ``_TAIL_FOLLOW_MIN_FRACTION`` -- but "no incumbent" is not
+                    # true here, it is merely not KNOWN YET.  When the cheap
+                    # synthesizer declined, what actually ships is the
+                    # partner-BLIND probe further down, and on board-06 seed 42
+                    # that is USB3_TX1's 4.865 mm / 84-segment / 0.000-coupled
+                    # A* staircase.  Judged against THAT, a 3.6 mm tail carrying
+                    # 0.85 coupled mm is both shorter and better coupled -- it
+                    # wins on exactly the coupled-millimetres doctrine this
+                    # method documents, and loses the fraction test only because
+                    # the comparison ran too early.  Hold the candidate and
+                    # re-judge it below, against the tail that will really ship.
+                    deferred_follow = following
         # Issue #4570: the LAYER-LOCKED A* runs before the crossing tail when
         # the partner leg has no via to match.  ``_synthesize_crossing_tail``
         # is a deliberate TWO-via construction (the polarity-swap crossover),
@@ -6585,6 +6958,36 @@ class DiffPairRouter:
             # Nothing else reached the pad: a weakly-coupled following tail is
             # still legal copper and still better than declining the side.
             tail, source = following, "follow-lastresort"
+        elif (
+            deferred_follow is not None
+            and tail is not None
+            and partner_segments
+            and source != "follow"
+        ):
+            # Issue #4577: the deferred re-judgement.  Exactly the same
+            # coupled-millimetres predicate, and the same #4570 via guard, now
+            # applied against the tail this call really produced instead of
+            # against ``None``.  It can only displace a tail the candidate beats
+            # on BOTH counts -- at least ``_TAIL_FOLLOW_MIN_COUPLED_MM`` more
+            # coupled copper, and no more extra length than the coupling bought
+            # -- so a follow that merely detours still loses.
+            if not (
+                prefer_planar and deferred_follow.vias and not tail.vias
+            ) and self._tail_is_better_coupled(deferred_follow, tail, partner_segments):
+                tail, source = deferred_follow, "follow-deferred"
+            elif _SHADOW_DEBUG:
+                # Gate 1 again: a deferred candidate that keeps losing is the
+                # single most useful number for the NEXT lever choice -- it says
+                # how much coupled copper the follow machinery could actually
+                # find, independent of why it declined.
+                got, tot = self._tail_coupled_mm(deferred_follow, partner_segments)
+                inc_got, inc_tot = self._tail_coupled_mm(tail, partner_segments)
+                print(
+                    f"    [coupled-follow] deferred candidate lost: "
+                    f"cand len={tot:.3f} coupled={got:.3f} vs "
+                    f"incumbent len={inc_tot:.3f} coupled={inc_got:.3f} "
+                    f"(floor={_TAIL_FOLLOW_MIN_COUPLED_MM:.3f})"
+                )
         if tail is None:
             print(
                 f"    [coupled-rescue] {label} tail unroutable for {pair_name} "
