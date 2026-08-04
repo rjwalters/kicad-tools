@@ -121,9 +121,27 @@ BOARD_07_EXPECTED_FAMILY_DELTA: dict[str, int] = {
     # the via-inclusive 1.069mm residual (route-side tuner converges the
     # via-BLIND skew to 0.000 -- see the #3928/#3931 note in
     # scripts/ci/check_matchgroup_coverage.py).
+    #
+    # Re-baselined 2026-08-04 (Issue #4592): match_group_length_skew 1 -> 0.
+    # PR #4030 (commit de0d91ec, closes #4007, "measure standard vias as
+    # through-vias in match-group skew") made the route-side tuner and the
+    # file-based checker measure via length the same way, collapsing the
+    # spurious via-inclusive ADDR_BUS 1.069mm residual described above to
+    # ~0.0015mm -- well inside the 0.500mm tolerance.  The rule still RUNS on
+    # the committed artifact (summary.rules_checked_by_rule.match_group_length_skew
+    # = 1); it simply finds nothing, i.e. gated-but-clean.  #4030 updated
+    # .github/routed-drc-tolerance.yml, tests/test_board_07_matchgroup_test.py
+    # and tests/test_match_group_length.py; PR #4211 (commit 2985cd4e, Issue
+    # #4207) then re-baselined the sibling `blocking == 8` assertion in THIS
+    # file (see TestCiGateCountsGatedFamilies below) -- but both missed this
+    # dict, leaving the file self-contradictory (9 here vs 8 there) until
+    # #4592.  KEEP THE TWO IN SYNC: the sum of the values in this dict MUST
+    # equal the `blocking ==` pin in
+    # TestCiGateCountsGatedFamilies.test_board_07_gate_counts_diffpair_and_matchgroup
+    # (currently 4 + 4 + 0 = 8).
     "diffpair_length_skew": 4,
     "diffpair_routing_continuity": 4,
-    "match_group_length_skew": 1,
+    "match_group_length_skew": 0,
 }
 
 
@@ -472,6 +490,11 @@ class TestCiGateCountsGatedFamilies:
         # before/after #4030, so no clearance/short violation vanished.
         # Advisory connectivity is unchanged at 5 (the DQ3/DQ4/MIPI_DAT0_N/
         # TMDS_D0_N/TMDS_D1_N #3438 negotiated-reach residual).
+        #
+        # KEEP IN SYNC with BOARD_07_EXPECTED_FAMILY_DELTA at the top of this
+        # file: this pin must equal sum(BOARD_07_EXPECTED_FAMILY_DELTA.values()).
+        # #4211 updated only this assertion and left that dict stale, which is
+        # what Issue #4592 had to clean up -- re-baseline BOTH together.
         assert blocking == 8, (
             f"expected 8 blocking errors (4 diffpair_length_skew + "
             f"4 diffpair_routing_continuity + 0 match_group_length_skew) on "
