@@ -3813,7 +3813,11 @@ class DiffPairRouter:
         routed_nets = {route.net for route in getattr(autorouter, "routes", None) or ()}
         channels: list[_EscapeChannel] = []
         # ``sorted`` keeps the registry -- and therefore every penalty sum --
-        # independent of dict iteration order (AC-6 / #4536).
+        # independent of dict iteration order (AC-6 / #4536). This fixed one
+        # source of board-06 full-regen nondeterminism, not all of it -- see
+        # boards/06-diffpair-test/README.md "Measuring Changes" for the
+        # deterministic shadow-phase measurement surface and the two
+        # remaining stable downstream modes.
         for net_id in sorted(nets):
             if net_id in exclude_nets or net_id in routed_nets:
                 continue

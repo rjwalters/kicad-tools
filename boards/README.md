@@ -162,6 +162,15 @@ Two caveats:
   round-trip, drowning real changes in reformat noise. If you regenerate a
   board and see a large diff with no geometric change, confirm you are
   comparing same-version fresh-vs-fresh before assuming a router bug.
+- **Board 06 is a known exception downstream of its coupled diff-pair
+  pre-phase**: full-regen output is run-to-run nondeterministic even at a
+  fixed version and seed (issue #4536, open). The pre-phase itself
+  (shadow construction) *is* deterministic and is the correct surface to
+  measure a change against --- see [`boards/06-diffpair-test/README.md`
+  "Measuring Changes"](06-diffpair-test/README.md#measuring-changes-the-shadow-phase-is-deterministic-full-regen-is-not-4536)
+  for the two stable downstream modes and the paired-comparison
+  convention. Do not assume the smoke test above proves full-board
+  byte-identity on this one board.
 
 ### Subprocess (`kct route`) vs. in-process (`router.route_all_*`)
 
