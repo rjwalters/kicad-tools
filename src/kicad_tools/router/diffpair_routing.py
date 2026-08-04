@@ -219,6 +219,19 @@ _GUIDE_BIAS_BOOST_REPEATS: int = int(os.environ.get("KCT_GUIDE_BIAS_BOOST_REPEAT
 # it sits relative to the guide.  Diagnostic-only; off by default.
 _SHADOW_DEBUG: bool = os.environ.get("KCT_SHADOW_DEBUG", "0") == "1"
 
+# A bare (x, y) via site in the crossover candidate lattice (issue #4580).
+_XY = tuple[float, float]
+
+# Issue #4580: opt-in crossover LEGALITY census.  See
+# ``DiffPairRouter._synthesize_crossing_tail`` for what it measures and why the
+# first-legal loop cannot answer the question on its own.  Diagnostic-only, off
+# by default, and observation-only when on -- it never changes which route
+# ships.  Costs a full 225-candidate sweep per crossover.
+_CROSSTAIL_CENSUS: bool = os.environ.get("KCT_CROSSTAIL_CENSUS", "0") == "1"
+# How many legal candidates the census lists per crossover before truncating.
+# The count in the header line is always the true total, never the listed one.
+_CROSSTAIL_CENSUS_LIST: int = 12
+
 # Issue #4553: guide pre-simplification.  The C++ per-net A* emits one segment
 # per grid cell, so a board-06 guide is a ~400-segment staircase whose longest
 # contiguous collinear run is ~0.3 mm.  Every micro-corner costs the parallel
@@ -5911,6 +5924,27 @@ class DiffPairRouter:
             for v1 in _via_candidates(head.x, head.y, 1.0)
             for v2 in _via_candidates(goal.x, goal.y, -1.0)
         ]
+        # Issue #4580: the crossover LEGALITY census.  ``_synthesize_crossing_tail``
+        # returns the first legal candidate and says nothing about the rest, so
+        # "the site that ships seals a neighbour" is indistinguishable from two
+        # very different worlds: an ORDERING problem (many sites are legal, a
+        # better key would pick a kinder one) or a SATURATION one (almost
+        # nothing is legal, and no key can help).  #4574 and #4580 were both
+        # filed as the former; measuring board-06 showed the latter.  Telling
+        # them apart needs the size and membership of the legal set, which no
+        # amount of ``KCT_SHADOW_DEBUG`` output can supply.
+        #
+        # ``KCT_CROSSTAIL_CENSUS=1`` scans the WHOLE lattice instead of
+        # stopping at the first legal candidate and reports what it found.  It
+        # is observation only -- the route returned is still the first legal
+        # one in sorted order, i.e. exactly what the un-instrumented loop
+        # returns -- and it costs a full 225-candidate sweep per crossover, so
+        # it is opt-in and off in every normal run.
+        census_on = _CROSSTAIL_CENSUS
+        census_enum = {id(pair): i for i, pair in enumerate(candidate_pairs)}
+        census_legal: list[tuple[int, int, float, _XY, _XY]] = []
+        census_key: Callable[[tuple[_XY, _XY]], float] | None = None
+        census_first: Route | None = None
         if self.enable_shadow_construction:
             exclude = {head.net}
             exclude.update(ps.net for ps in partner_segments)
@@ -5926,11 +5960,13 @@ class DiffPairRouter:
                         seal_cache[site] = cached
                     return cached
 
-                candidate_pairs.sort(
-                    key=lambda pair: _site_penalty(pair[0]) + _site_penalty(pair[1])
-                )
+                def _pair_penalty(pair: tuple[_XY, _XY]) -> float:
+                    return _site_penalty(pair[0]) + _site_penalty(pair[1])
 
-        for v1, v2 in candidate_pairs:
+                candidate_pairs.sort(key=_pair_penalty)
+                census_key = _pair_penalty
+
+        for rank, (v1, v2) in enumerate(candidate_pairs):
             # Issue #3855: replace the hardcoded 0.6mm center-to-center
             # via-to-via check with an edge-to-edge ``min_hole_to_hole``
             # check.  This single crossover's two vias must clear each
@@ -6087,8 +6123,62 @@ class DiffPairRouter:
                 # next candidate pair rather than shipping.
                 if not self._route_via_clear(route):
                     continue
+                if census_on:
+                    census_legal.append(
+                        (
+                            census_enum.get(id(candidate_pairs[rank]), -1),
+                            rank,
+                            census_key((v1, v2)) if census_key is not None else 0.0,
+                            v1,
+                            v2,
+                        )
+                    )
+                    if census_first is None:
+                        census_first = route  # what the un-instrumented loop returns
+                    break  # legal -- record it and keep scanning the lattice
                 return route
+        if census_on:
+            self._report_crossing_tail_census(head, goal, census_legal, len(candidate_pairs))
+            return census_first  # observation only: the first legal candidate
         return None
+
+    @staticmethod
+    def _report_crossing_tail_census(
+        head: Pad,
+        goal: Pad,
+        legal: list[tuple[int, int, float, _XY, _XY]],
+        total: int,
+    ) -> None:
+        """Print one crossover's legality census (issue #4580).
+
+        The header's ``legal=`` count is the true size of the legal set; only
+        the per-candidate listing truncates, and it says so when it does.  The
+        distinction that matters when reading this is whether the legal
+        candidates share a via SITE: distinct sites mean the ordering has a
+        real choice to make, while a legal set that is a singleton in ``v1``
+        (board-06's MIPI_CLK- landing) means no ordering key can move the
+        result and the constraint lives upstream in placement / escape
+        planning.
+        """
+        print(
+            f"    [crosstail-census] net={head.net_name} "
+            f"head=({head.x:.5f},{head.y:.5f}) goal=({goal.x:.5f},{goal.y:.5f}) "
+            f"legal={len(legal)}/{total} "
+            f"distinct_v1={len({site[3] for site in legal})}",
+            flush=True,
+        )
+        for enum_i, rank, penalty, v1, v2 in legal[:_CROSSTAIL_CENSUS_LIST]:
+            print(
+                f"    [crosstail-census]   rank={rank} enum={enum_i} pen={penalty:.4f} "
+                f"v1=({v1[0]:.5f},{v1[1]:.5f}) v2=({v2[0]:.5f},{v2[1]:.5f})",
+                flush=True,
+            )
+        if len(legal) > _CROSSTAIL_CENSUS_LIST:
+            print(
+                f"    [crosstail-census]   ... {len(legal) - _CROSSTAIL_CENSUS_LIST} "
+                f"further legal candidate(s) not listed",
+                flush=True,
+            )
 
     def _tail_partner_clear(
         self,

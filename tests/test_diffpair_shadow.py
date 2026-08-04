@@ -4651,3 +4651,144 @@ def test_channel_seal_penalty_sums_over_every_channel_it_reaches():
     both = _channel_seal_penalty(0.75, 0.2, 0.65, channels)
     assert one == pytest.approx(0.25)
     assert both == pytest.approx(0.9)
+
+
+# --- Issue #4580: crossover legality census ---------------------------------
+# ``_synthesize_crossing_tail`` ships the FIRST legal candidate and reports
+# nothing about the rest, which makes an ORDERING problem (many legal sites, a
+# better key would pick a kinder one) look exactly like a SATURATION one
+# (almost nothing is legal, so no key can help).  #4574 and #4580 were both
+# filed as the former; the census showed board-06's MIPI_CLK- landing is the
+# latter -- 2 legal candidates out of 225, both on the SAME sealing ``v1``.
+# The census is opt-in, and when on it must remain observation-only.
+
+
+def _census_on(monkeypatch) -> None:
+    import kicad_tools.router.diffpair_routing as dpr_mod
+
+    monkeypatch.setattr(dpr_mod, "_CROSSTAIL_CENSUS", True)
+
+
+def _census_lines(capsys) -> list[str]:
+    return [
+        line.strip()
+        for line in capsys.readouterr().out.splitlines()
+        if "[crosstail-census]" in line
+    ]
+
+
+def test_crossing_tail_census_is_off_by_default(capsys):
+    """The sweep is expensive: a normal run must not pay for it or print it."""
+    tail = _crossing_tail(_crossing_router())
+
+    assert tail is not None
+    assert _census_lines(capsys) == []
+
+
+def test_crossing_tail_census_ships_the_route_it_would_have_shipped(monkeypatch, capsys):
+    """The load-bearing safety property: the census OBSERVES, it never steers.
+
+    Scanning the whole lattice must not change which candidate wins, so the
+    censused route has to be bit-for-bit the un-instrumented one.  The
+    ``capsys`` assertion keeps this non-vacuous -- without it the test would
+    still pass if the census silently never ran.
+    """
+    dpr = _crossing_router()
+    _register_unrouted_neighbour(dpr)
+    baseline = _crossing_tail(dpr)
+    capsys.readouterr()
+
+    _census_on(monkeypatch)
+    censused_router = _crossing_router()
+    _register_unrouted_neighbour(censused_router)
+    censused = _crossing_tail(censused_router)
+
+    assert _census_lines(capsys), "the census must actually have run"
+    assert baseline is not None and censused is not None
+    assert _via_sites(censused) == _via_sites(baseline)
+    assert [(s.x1, s.y1, s.x2, s.y2, s.layer) for s in censused.segments] == [
+        (s.x1, s.y1, s.x2, s.y2, s.layer) for s in baseline.segments
+    ]
+
+
+def test_crossing_tail_census_counts_the_whole_legal_set(monkeypatch, capsys):
+    """First-legal stops at one; the census has to keep going.
+
+    An open lattice has many legal candidates, so a census that reported only
+    the shipped one -- the number the old loop could produce -- would be the
+    exact failure this instrumentation exists to rule out.
+    """
+    _census_on(monkeypatch)
+
+    assert _crossing_tail(_crossing_router()) is not None
+
+    header = [line for line in _census_lines(capsys) if "legal=" in line]
+    assert len(header) == 1
+    legal, total = header[0].split("legal=")[1].split()[0].split("/")
+    assert int(total) == 225
+    assert int(legal) > 1, "an unobstructed lattice has many legal candidates"
+
+
+def test_crossing_tail_census_never_lists_a_candidate_a_gate_rejected(monkeypatch, capsys):
+    """The census reports legality, so it must apply every gate, not skip them.
+
+    The site at ``(8.0, 4.4)`` is covered by a foreign pad ON THE GRID, so the
+    #4571 pad screen vetoes it; a census that enumerated candidates instead of
+    validating them would happily list it.
+    """
+    _census_on(monkeypatch)
+    dpr = _crossing_router()
+    _register_unrouted_neighbour(dpr)
+    dpr.autorouter.grid.add_pad(_pad_at(8.0, 4.4, net=99, name="OTHER"))
+
+    assert _crossing_tail(dpr) is not None
+
+    listed = [line for line in _census_lines(capsys) if "v2=" in line]
+    assert listed, "the census must list the legal candidates it found"
+    assert not any("v2=(8.00000,4.40000)" in line for line in listed)
+
+
+def test_crossing_tail_census_reports_a_singleton_via_site_lattice(capsys):
+    """``distinct_v1`` is what separates 'reorder it' from 'placement's problem'.
+
+    Board-06's MIPI_CLK- landing has two legal candidates that share one
+    ``v1`` -- the sealing barrel -- so every legal route carries the same wall
+    and no ordering key can help.  A census that reported only ``legal=2``
+    would leave that indistinguishable from two genuinely different choices.
+    """
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    head, goal = _tail_pads((108.10213, 117.02400), (106.10000, 117.50000))
+    shared_v1 = (108.24091, 117.60773)
+    DiffPairRouter._report_crossing_tail_census(
+        head,
+        goal,
+        [
+            (32, 204, 0.7429, shared_v1, (106.23878, 118.08373)),
+            (34, 206, 0.7429, shared_v1, (106.37756, 118.66746)),
+        ],
+        225,
+    )
+
+    header = _census_lines(capsys)[0]
+    assert "legal=2/225" in header
+    assert "distinct_v1=1" in header
+
+
+def test_crossing_tail_census_announces_truncation_instead_of_hiding_it(capsys):
+    """A silent cap reads as 'that was all of them' -- it must say what it dropped."""
+    from kicad_tools.router.diffpair_routing import (
+        _CROSSTAIL_CENSUS_LIST,
+        DiffPairRouter,
+    )
+
+    head, goal = _tail_pads((0.0, 0.0), (3.0, 0.0))
+    many = [
+        (i, i, 0.0, (float(i), 1.0), (float(i), 2.0)) for i in range(_CROSSTAIL_CENSUS_LIST + 5)
+    ]
+    DiffPairRouter._report_crossing_tail_census(head, goal, many, 225)
+
+    lines = _census_lines(capsys)
+    assert f"legal={_CROSSTAIL_CENSUS_LIST + 5}/225" in lines[0]
+    assert sum(1 for line in lines if "rank=" in line) == _CROSSTAIL_CENSUS_LIST
+    assert any("5 further legal candidate(s) not listed" in line for line in lines)
