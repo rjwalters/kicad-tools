@@ -259,6 +259,9 @@ def run_check_command(args) -> int:
         sub_argv.extend(["--schematic", args.schematic])
     if getattr(args, "net_class_map", None):
         sub_argv.extend(["--net-class-map", args.net_class_map])
+    # Issue #4601: forward the sidecar auto-discovery opt-out.
+    if getattr(args, "no_net_class_map", False):
+        sub_argv.append("--no-net-class-map")
     # Issue #3061: forward pad_grid tolerance flags.
     if getattr(args, "pad_grid_strict", False):
         sub_argv.append("--pad-grid-strict")

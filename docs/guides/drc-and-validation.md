@@ -124,6 +124,44 @@ a bare CLI run). The sidecar is produced from the board's
 `build_net_class_map()` via `net_class_map_to_dict` and consumed via
 `net_class_map_from_dict`.
 
+**Auto-discovery.** When `--net-class-map` is omitted, `kct check` probes for a
+sidecar next to the board. Two filename conventions are accepted — the
+stem-keyed `<board-stem>.net_class_map.json` (hand-maintained trees that keep
+several board revisions side by side) and the bare `net_class_map.json` written
+by `kct route` — searched in this order:
+
+```
+<board-dir>/<board-stem>.net_class_map.json
+<board-dir>/net_class_map.json
+<board-dir>/output/<board-stem>.net_class_map.json
+<board-dir>/output/net_class_map.json
+<board-dir>/../output/<board-stem>.net_class_map.json
+<board-dir>/../output/net_class_map.json
+```
+
+The first existing file wins: within a directory the stem-keyed name beats the
+bare one, and nearer directories beat farther ones. When a sidecar is picked up
+this way, `kct check` says so on stderr:
+
+```
+[INFO] auto-loaded net-class-map sidecar: /path/to/board_v24.net_class_map.json
+```
+
+The stem must match **exactly** — no globbing, no un-suffixing. A directory
+holding both `board_v23.net_class_map.json` and `board_v24.net_class_map.json`
+never applies v23's constraints to `board_v24.kicad_pcb`, and a board routed to
+`board_routed.kicad_pcb` looks for `board_routed.net_class_map.json`, *not*
+`board.net_class_map.json`. An explicit `--net-class-map` always wins and
+short-circuits the probe entirely. An auto-discovered sidecar that fails to
+parse degrades gracefully (`WARNING: ignoring malformed net-class-map sidecar
+…`, then continue with no map); an explicit one that fails is a hard error.
+
+Pass `--no-net-class-map` to suppress auto-discovery and restore the
+historical no-sidecar behaviour — useful when a stale sidecar sits beside the
+board. Combining it with `--net-class-map` is a usage error. When no sidecar is
+found (or discovery is disabled), the "rules are INACTIVE" warning names the
+exact paths that were probed, or says that discovery was turned off.
+
 **CI resolves the map automatically.** The strict routed-PCB DRC gate
 (`scripts/ci/check_routed_drc.py`) is net-class-map-aware: it prefers a
 committed `net_class_map.json` next to the routed PCB and, for boards that

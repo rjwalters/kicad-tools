@@ -300,8 +300,57 @@ def _parse_copper_weight_arg(raw: str) -> tuple[float | None, float | None]:
     return (outer, inner)
 
 
+def _net_class_map_sidecar_candidates(pcb_path: Path) -> list[Path]:
+    """Enumerate the net-class-map sidecar paths the auto-probe checks.
+
+    Split out from :func:`_discover_net_class_map_sidecar` (Issue #4601)
+    so the "rules are INACTIVE" warning can name the paths that were
+    *actually* searched instead of an invented ``output/…`` example.
+
+    Two filename conventions are probed in each directory:
+
+    - ``<pcb_stem>.net_class_map.json`` -- the stem-keyed sidecar
+      convention used by hand-maintained board trees that keep several
+      revisions side by side (``board_v24.kicad_pcb`` next to
+      ``board_v24.net_class_map.json``).
+    - ``net_class_map.json`` -- the bare name written by ``kct route``
+      (Issue #3917 Defect 1 / #4428).
+
+    Ordering is deliberate: within a directory the **stem-keyed** name
+    wins (it is evidence about *this* board, not a generic file), and
+    nearer directories win over farther ones (the pre-#4601
+    ``pcb_dir`` -> ``pcb_dir/output`` -> ``pcb_dir.parent/output``
+    order is preserved).
+
+    The stem must match **exactly**: no globbing and no un-suffixing
+    heuristics.  A directory holding ``board_v23.net_class_map.json``
+    and ``board_v24.net_class_map.json`` must never apply v23's
+    constraints to a v24 board, and ``board_routed.kicad_pcb`` looks
+    only for ``board_routed.net_class_map.json``.
+
+    Returns:
+        Candidate paths in probe order, de-duplicated (the
+        ``<board>/output/<pcb>`` layout makes ``pcb_dir`` and
+        ``pcb_dir.parent/output`` the same directory).
+    """
+    pcb_dir = pcb_path.parent
+    names = [f"{pcb_path.stem}.net_class_map.json", "net_class_map.json"]
+    directories = [pcb_dir, pcb_dir / "output", pcb_dir.parent / "output"]
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for directory in directories:
+        for name in names:
+            candidate = directory / name
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            candidates.append(candidate)
+    return candidates
+
+
 def _discover_net_class_map_sidecar(pcb_path: Path) -> Path | None:
-    """Probe conventional locations for a ``net_class_map.json`` sidecar.
+    """Probe conventional locations for a net-class-map sidecar.
 
     Issue #3917 Defect 2: ``kct route`` writes a ``net_class_map.json``
     sidecar next to the routed PCB (in the output directory).  ``kct
@@ -309,28 +358,15 @@ def _discover_net_class_map_sidecar(pcb_path: Path) -> Path | None:
     rules fire without the user having to pass ``--net-class-map`` by
     hand -- mirroring the existing schematic auto-discovery.
 
-    Candidate locations, in priority order, relative to the resolved
-    PCB path:
-
-    - ``<pcb_dir>/net_class_map.json`` (sidecar written alongside a
-      routed board that lives in its own output directory)
-    - ``<pcb_dir>/output/net_class_map.json`` (board dir with an
-      ``output/`` subtree)
-    - ``<pcb_dir>/../output/net_class_map.json`` (routed PCB inside
-      ``output/`` with the sidecar as a sibling -- redundant with the
-      first candidate but kept for the ``<board>/output/<pcb>`` layout)
+    Issue #4601 widened the probe to also accept the stem-keyed
+    ``<pcb_stem>.net_class_map.json`` convention.  See
+    :func:`_net_class_map_sidecar_candidates` for the full probe order.
 
     Returns:
         The first existing candidate path, or ``None`` when no sidecar
         is found.
     """
-    pcb_dir = pcb_path.parent
-    candidates = [
-        pcb_dir / "net_class_map.json",
-        pcb_dir / "output" / "net_class_map.json",
-        pcb_dir.parent / "output" / "net_class_map.json",
-    ]
-    for candidate in candidates:
+    for candidate in _net_class_map_sidecar_candidates(pcb_path):
         if candidate.is_file():
             return candidate
     return None
@@ -1266,7 +1302,22 @@ def main(argv: list[str] | None = None) -> int:
             "fields (see kicad_tools.router.rules.NetClassRouting.to_dict). "
             "When supplied, enables the diff-pair routing_continuity and "
             "length_skew rules to fire on routed boards; without it those "
-            "rules degrade to no-ops (Issue #2684)."
+            "rules degrade to no-ops (Issue #2684). Auto-discovered next to "
+            "the board when this flag is omitted -- as "
+            "<board-stem>.net_class_map.json or net_class_map.json, in the "
+            "board dir then output/ then ../output/ (Issue #4601). Use "
+            "--no-net-class-map to suppress that auto-discovery."
+        ),
+    )
+    parser.add_argument(
+        "--no-net-class-map",
+        dest="no_net_class_map",
+        action="store_true",
+        help=(
+            "Suppress net-class-map sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (the diff-pair / match-group skew rules "
+            "stay inactive). Cannot be combined with --net-class-map "
+            "(Issue #4601)."
         ),
     )
     parser.add_argument(
@@ -1323,6 +1374,19 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    # Issue #4601: --no-net-class-map suppresses sidecar auto-discovery.
+    # Pairing it with an explicit --net-class-map is a usage error rather
+    # than a silent precedence puzzle.
+    if getattr(args, "no_net_class_map", False) and args.net_class_map is not None:
+        print(
+            "Error: --no-net-class-map cannot be combined with "
+            f"--net-class-map {args.net_class_map!r}: one disables sidecar "
+            "auto-discovery, the other names a sidecar to load. Pass exactly "
+            "one of them.",
+            file=sys.stderr,
+        )
+        return 1
 
     # Parse and validate filter options
     only_set: set[str] | None = None
@@ -1431,9 +1495,16 @@ def main(argv: list[str] | None = None) -> int:
     # to the routed PCB.  An explicit flag always wins and short-circuits
     # the probe (AC3: no double-load).
     ncm_explicit = args.net_class_map is not None
+    # Issue #4601: --no-net-class-map suppresses the probe only (the
+    # explicit-flag combination was already rejected above).
+    ncm_suppressed = bool(getattr(args, "no_net_class_map", False))
+    ncm_candidates: list[Path] = []
     if ncm_explicit:
         ncm_path: Path | None = Path(args.net_class_map).resolve()
+    elif ncm_suppressed:
+        ncm_path = None
     else:
+        ncm_candidates = _net_class_map_sidecar_candidates(pcb_path)
         ncm_path = _discover_net_class_map_sidecar(pcb_path)
 
     if ncm_path is not None:
@@ -1495,14 +1566,35 @@ def main(argv: list[str] | None = None) -> int:
             if (only_set is None or rule in only_set) and rule not in skip_set
         ]
         if _inactive_rules:
-            print(
+            # Issue #4601: name what was actually probed instead of an
+            # invented example path that may not correspond to the layout
+            # in use.
+            _head = (
                 "WARNING: the following rules are INACTIVE without "
                 "--net-class-map and will silently pass: "
-                f"{', '.join(_inactive_rules)}.  Pass the routed board's "
-                "sidecar (e.g. output/net_class_map.json) to validate "
-                "length-match skew.",
-                file=sys.stderr,
+                f"{', '.join(_inactive_rules)}."
             )
+            if ncm_suppressed:
+                _tail = (
+                    "  Sidecar auto-discovery was disabled with "
+                    "--no-net-class-map; drop that flag or pass a sidecar "
+                    "explicitly with --net-class-map to validate "
+                    "length-match skew."
+                )
+            elif ncm_path is not None:
+                _tail = (
+                    f"  The sidecar at {ncm_path} could not be loaded (see "
+                    "the warning above); fix it or pass a different one with "
+                    "--net-class-map to validate length-match skew."
+                )
+            else:
+                _probed = "".join(f"\n  {candidate}" for candidate in ncm_candidates)
+                _tail = (
+                    f"  No sidecar was found at any of:{_probed}\n"
+                    "Pass one explicitly with --net-class-map, or place it at "
+                    "one of the paths above, to validate length-match skew."
+                )
+            print(_head + _tail, file=sys.stderr)
 
     # Load optional courtyard-waivers sidecar (Issue #4137).  An explicit
     # --courtyard-waivers path always wins and a malformed explicit file is a

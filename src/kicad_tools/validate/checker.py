@@ -669,8 +669,8 @@ class DRCChecker:
         self._inactive_skew_warned.add(rule_name)
         print(
             f"WARNING: rule {rule_name!r} is INACTIVE without a net-class-map "
-            "sidecar and will silently pass; pass the routed board's sidecar "
-            "(e.g. output/net_class_map.json) to validate length-match skew.",
+            "sidecar and will silently pass; supply a net-class-map sidecar "
+            "to validate length-match skew.",
             file=sys.stderr,
         )
 

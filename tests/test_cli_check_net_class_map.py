@@ -488,6 +488,227 @@ class TestSidecarAutoLoad:
         # Fell back to no-sidecar -> rule is a no-op.
         assert _mg_error_count(captured.out) == 0
 
+    # ---------------------------------------------------------------
+    # Issue #4601: the probe also accepts the stem-keyed
+    # ``<pcb_stem>.net_class_map.json`` convention, the INACTIVE warning
+    # names the paths it actually probed, and ``--no-net-class-map``
+    # suppresses discovery.
+    # ---------------------------------------------------------------
+
+    @staticmethod
+    def _mg_argv(pcb: Path, *extra: str) -> list[str]:
+        return [
+            str(pcb),
+            "--only",
+            "match_group_length_skew",
+            "--format",
+            "json",
+            "--allow-incomplete",
+            *extra,
+        ]
+
+    def test_auto_load_stem_keyed_sidecar(self, tmp_path: Path, capsys):
+        """AC1/AC2: ``<pcb_stem>.net_class_map.json`` beside the board is
+        auto-loaded, reported, and engages the gated rule."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path)  # ddr.kicad_pcb
+        scar = tmp_path / "ddr.net_class_map.json"
+        scar.write_text(json.dumps(MATCHGROUP_SIDECAR, indent=2))
+
+        rc = main(self._mg_argv(pcb))
+        captured = capsys.readouterr()
+        assert f"auto-loaded net-class-map sidecar: {scar}" in captured.err
+        assert _mg_error_count(captured.out) >= 1
+        assert rc == 2
+
+    def test_stem_keyed_beats_bare_in_same_directory(self, tmp_path: Path, capsys):
+        """AC3: within a directory the stem-keyed name wins over the bare one."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path)
+        stem_scar = tmp_path / "ddr.net_class_map.json"
+        stem_scar.write_text(json.dumps(MATCHGROUP_SIDECAR, indent=2))
+        _write_matchgroup_sidecar(tmp_path)  # bare net_class_map.json
+
+        main(self._mg_argv(pcb))
+        captured = capsys.readouterr()
+        assert f"auto-loaded net-class-map sidecar: {stem_scar}" in captured.err
+        assert f"sidecar: {tmp_path / 'net_class_map.json'}" not in captured.err
+
+    def test_nearer_directory_beats_farther(self, tmp_path: Path, capsys):
+        """AC3: the pcb_dir -> output/ -> ../output/ order is preserved."""
+        from kicad_tools.cli.check_cmd import main
+
+        board_dir = tmp_path / "board"
+        board_dir.mkdir()
+        pcb = _write_matchgroup_board(board_dir)
+
+        near = board_dir / "output"
+        near.mkdir()
+        near_scar = near / "ddr.net_class_map.json"
+        near_scar.write_text(json.dumps(MATCHGROUP_SIDECAR, indent=2))
+
+        far = tmp_path / "output"
+        far.mkdir()
+        (far / "ddr.net_class_map.json").write_text(json.dumps(MATCHGROUP_SIDECAR, indent=2))
+
+        main(self._mg_argv(pcb))
+        captured = capsys.readouterr()
+        assert f"auto-loaded net-class-map sidecar: {near_scar}" in captured.err
+
+    def test_stem_keyed_sidecar_in_parent_output(self, tmp_path: Path, capsys):
+        """The ``<board>/output/<pcb>`` layout finds a stem-keyed sibling."""
+        from kicad_tools.cli.check_cmd import main
+
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+        pcb = _write_matchgroup_board(out_dir)
+        scar = out_dir / "ddr.net_class_map.json"
+        scar.write_text(json.dumps(MATCHGROUP_SIDECAR, indent=2))
+
+        main(self._mg_argv(pcb))
+        captured = capsys.readouterr()
+        assert f"auto-loaded net-class-map sidecar: {scar}" in captured.err
+
+    def test_foreign_stem_sidecar_is_ignored(self, tmp_path: Path, capsys):
+        """AC4: a stem-keyed sidecar for a *different* board revision is not
+        loaded -- exact-stem matching, never a glob."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path)  # ddr.kicad_pcb
+        (tmp_path / "ddr_v23_mfg.net_class_map.json").write_text(
+            json.dumps(MATCHGROUP_SIDECAR, indent=2)
+        )
+
+        main(self._mg_argv(pcb))
+        captured = capsys.readouterr()
+        assert "auto-loaded net-class-map sidecar" not in captured.err
+        assert _mg_error_count(captured.out) == 0
+
+    def test_routed_stem_is_not_unsuffixed(self, tmp_path: Path, capsys):
+        """Hazard 2: ``<name>_routed.kicad_pcb`` does not fall back to
+        ``<name>.net_class_map.json``."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = tmp_path / "ddr_routed.kicad_pcb"
+        pcb.write_text(MATCHGROUP_PCB)
+        (tmp_path / "ddr.net_class_map.json").write_text(json.dumps(MATCHGROUP_SIDECAR, indent=2))
+
+        main(self._mg_argv(pcb))
+        captured = capsys.readouterr()
+        assert "auto-loaded net-class-map sidecar" not in captured.err
+
+    def test_sidecar_directory_is_rejected(self, tmp_path: Path, capsys):
+        """A stem-keyed *directory* is not a sidecar (``is_file()`` guard)."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path)
+        (tmp_path / "ddr.net_class_map.json").mkdir()
+
+        main(self._mg_argv(pcb))
+        captured = capsys.readouterr()
+        assert "auto-loaded net-class-map sidecar" not in captured.err
+
+    def test_inactive_warning_lists_probed_paths(self, tmp_path: Path, capsys):
+        """AC8: with no sidecar anywhere the warning enumerates the actual
+        candidates instead of an invented ``output/`` example."""
+        from kicad_tools.cli.check_cmd import (
+            _net_class_map_sidecar_candidates,
+            main,
+        )
+
+        pcb = _write_matchgroup_board(tmp_path)
+
+        main(self._mg_argv(pcb))
+        captured = capsys.readouterr()
+        assert "INACTIVE" in captured.err
+        for candidate in _net_class_map_sidecar_candidates(pcb):
+            assert str(candidate) in captured.err
+        # The invented example path is gone.
+        assert "(e.g. output/net_class_map.json)" not in captured.err
+
+    def test_no_net_class_map_suppresses_discovery(self, tmp_path: Path, capsys):
+        """AC6/AC9: ``--no-net-class-map`` behaves exactly like "no sidecar",
+        and the warning says discovery was disabled rather than listing paths."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path)
+        (tmp_path / "ddr.net_class_map.json").write_text(json.dumps(MATCHGROUP_SIDECAR, indent=2))
+
+        rc = main(self._mg_argv(pcb, "--no-net-class-map"))
+        captured = capsys.readouterr()
+        assert "auto-loaded net-class-map sidecar" not in captured.err
+        assert _mg_error_count(captured.out) == 0
+        assert rc != 2
+        assert "--no-net-class-map" in captured.err
+        assert str(tmp_path / "ddr.net_class_map.json") not in captured.err
+
+    def test_no_net_class_map_conflicts_with_explicit(self, tmp_path: Path, capsys):
+        """AC7: the two flags together are a usage error, not a precedence
+        puzzle."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path)
+        scar = _write_matchgroup_sidecar(tmp_path)
+
+        rc = main(self._mg_argv(pcb, "--no-net-class-map", "--net-class-map", str(scar)))
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "--no-net-class-map" in captured.err
+        assert "--net-class-map" in captured.err
+
+    def test_malformed_stem_keyed_auto_sidecar_falls_back(self, tmp_path: Path, capsys):
+        """AC10: a malformed stem-keyed auto-sidecar warns audibly and keeps
+        going (mirrors the bare-name contract)."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path)
+        scar = tmp_path / "ddr.net_class_map.json"
+        scar.write_text("not { valid json")
+
+        rc = main(self._mg_argv(pcb))
+        captured = capsys.readouterr()
+        assert rc != 1
+        assert f"ignoring malformed net-class-map sidecar {scar}" in captured.err
+        assert _mg_error_count(captured.out) == 0
+
+    def test_auto_sidecar_with_back_copper_avoid_layer_warns(self, tmp_path: Path, capsys):
+        """AC10: ``avoid_layers: ["B.Cu"]`` is rejected by
+        ``net_class_map_from_dict`` (no LayerStack is threaded at this
+        callsite) -- that must warn audibly and continue, never crash."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path)
+        scar = tmp_path / "ddr.net_class_map.json"
+        payload = {
+            name: {**entry, "avoid_layers": ["B.Cu"]} for name, entry in MATCHGROUP_SIDECAR.items()
+        }
+        scar.write_text(json.dumps(payload, indent=2))
+
+        rc = main(self._mg_argv(pcb))
+        captured = capsys.readouterr()
+        assert rc != 1
+        assert f"ignoring malformed net-class-map sidecar {scar}" in captured.err
+        assert "B.Cu" in captured.err
+        # Still degrades to no-sidecar behaviour rather than crashing.
+        assert _mg_error_count(captured.out) == 0
+
+    def test_explicit_flag_still_wins_over_stem_keyed_sidecar(self, tmp_path: Path, capsys):
+        """AC5: an explicit path short-circuits the widened probe too."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path)
+        (tmp_path / "ddr.net_class_map.json").write_text("not { valid json")
+        explicit = tmp_path / "explicit.json"
+        explicit.write_text(json.dumps(MATCHGROUP_SIDECAR, indent=2))
+
+        main(self._mg_argv(pcb, "--net-class-map", str(explicit)))
+        captured = capsys.readouterr()
+        assert "auto-loaded net-class-map sidecar" not in captured.err
+        assert "malformed net-class-map sidecar" not in captured.err
+        assert _mg_error_count(captured.out) >= 1
+
 
 class TestSidecarWrittenByRoute:
     """Issue #3917 Defect 1: the route step persists the net-class map as a

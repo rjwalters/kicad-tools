@@ -790,7 +790,22 @@ def _add_check_parser(subparsers) -> None:
             "Path to a JSON sidecar mapping net names to NetClassRouting "
             "fields.  When supplied, enables the diff-pair DRC rules "
             "(routing_continuity, length_skew) to fire on routed boards "
-            "(Issue #2684)."
+            "(Issue #2684).  Auto-discovered next to the board when this "
+            "flag is omitted -- as <board-stem>.net_class_map.json or "
+            "net_class_map.json, in the board dir then output/ then "
+            "../output/ (Issue #4601).  Use --no-net-class-map to suppress "
+            "that auto-discovery."
+        ),
+    )
+    check_parser.add_argument(
+        "--no-net-class-map",
+        dest="no_net_class_map",
+        action="store_true",
+        help=(
+            "Suppress net-class-map sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (the diff-pair / match-group skew rules "
+            "stay inactive).  Cannot be combined with --net-class-map "
+            "(Issue #4601)."
         ),
     )
     # Issue #3061: per-board auto-derive of the pad_grid tolerance is the
