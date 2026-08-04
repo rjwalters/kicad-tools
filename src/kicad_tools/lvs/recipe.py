@@ -285,7 +285,7 @@ def write_lvs_report(
     lvs_path = output_dir / "lvs.json"
     lvs_path.write_text(
         json.dumps(
-            _build_payload(copper_result, label_result, clean=gated_clean),
+            build_lvs_payload(copper_result, label_result, clean=gated_clean),
             indent=2,
         )
         + "\n"
@@ -303,13 +303,14 @@ def write_lvs_report(
     return copper_clean, label_clean
 
 
-def _build_payload(
+def build_lvs_payload(
     copper_result: CopperLVSResult | None,
     label_result: LVSResult | None,
     *,
-    clean: bool,
+    clean: bool | None = None,
+    include_schema: bool = True,
 ) -> dict:
-    """Assemble the v1 ``lvs.json`` payload.
+    """Assemble the v1 ``lvs.json`` payload (shared producer, issue #4616).
 
     ``mismatches`` carries the label-based mismatches (unchanged from the
     historical board-00 schema so ``_parse_lvs`` and the e2e asserter keep
@@ -318,30 +319,59 @@ def _build_payload(
     ``copper_vacuous`` / ``copper_bound_pad_count`` (additive, #4005
     review) record whether the copper verdict carried any schematic
     evidence; a vacuous copper leg forces ``clean=false``.
+
+    This is the **single** producer of the v1 record shapes.  Besides
+    :func:`write_lvs_report` (which writes ``output/lvs.json`` with the
+    full envelope), ``kct check`` embeds the same records under
+    ``meta_checks.lvs`` so a consumer can parse both surfaces with one
+    code path (issue #4616).  ``kct check`` passes
+    ``include_schema=False`` and leaves ``clean`` as ``None`` because the
+    sub-check's own ``status`` already carries the verdict and the
+    envelope is not a standalone v1 document.
+
+    Args:
+        copper_result: Copper-extracted comparator result, or ``None``
+            when that leg did not run.
+        label_result: Label-based comparator result, or ``None`` when
+            that leg did not run.
+        clean: The gated verdict.  Emitted as the ``clean`` key when not
+            ``None``; omitted entirely when ``None``.
+        include_schema: When ``True`` (default) the payload leads with
+            the ``$schema`` key, making it a standalone v1 document.
+
+    Returns:
+        A JSON-safe dict in the stable v1 key order: ``$schema``,
+        ``clean``, ``mismatches``, ``copper_mismatches``,
+        ``copper_vacuous``, ``copper_bound_pad_count``.
     """
-    payload: dict = {
-        "$schema": _LVS_SCHEMA_URL,
-        "clean": clean,
-        "mismatches": [
-            {
-                "ref": lm.ref,
-                "pad": lm.pad,
-                "schematic_net": lm.schematic_net,
-                "pcb_net": lm.pcb_net,
-            }
-            for lm in (label_result.mismatches if label_result is not None else ())
-        ],
-        "copper_mismatches": [
-            {
-                "kind": cm.kind,
-                "net_a": cm.net_a,
-                "net_b": cm.net_b,
-                "pad_a": cm.pad_a,
-                "pad_b": cm.pad_b,
-            }
-            for cm in (copper_result.mismatches if copper_result is not None else ())
-        ],
-    }
+    payload: dict = {}
+    if include_schema:
+        payload["$schema"] = _LVS_SCHEMA_URL
+    if clean is not None:
+        payload["clean"] = clean
+    payload.update(
+        {
+            "mismatches": [
+                {
+                    "ref": lm.ref,
+                    "pad": lm.pad,
+                    "schematic_net": lm.schematic_net,
+                    "pcb_net": lm.pcb_net,
+                }
+                for lm in (label_result.mismatches if label_result is not None else ())
+            ],
+            "copper_mismatches": [
+                {
+                    "kind": cm.kind,
+                    "net_a": cm.net_a,
+                    "net_b": cm.net_b,
+                    "pad_a": cm.pad_a,
+                    "pad_b": cm.pad_b,
+                }
+                for cm in (copper_result.mismatches if copper_result is not None else ())
+            ],
+        }
+    )
     if copper_result is not None:
         payload["copper_vacuous"] = copper_result.vacuous
         payload["copper_bound_pad_count"] = copper_result.bound_pad_count

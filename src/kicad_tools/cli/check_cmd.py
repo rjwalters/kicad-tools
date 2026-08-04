@@ -26,7 +26,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -133,13 +133,28 @@ class SubCheckResult:
     ``status`` is one of ``PASSED`` / ``FAILED`` / ``NOT RUN``.  ``detail``
     is the one-line human-readable summary that appears in parentheses on
     the human stanza and as the ``detail`` field in the JSON envelope.
+
+    ``data`` (issue #4616) is an optional **structured** payload merged
+    flat into ``to_dict()`` so a machine consumer gets the full findings
+    rather than the truncated prose ``detail``.  It follows the
+    OMIT-when-absent convention already used for ``meta_checks`` itself:
+    sub-checks that carry no structured payload (DRC / ERC / Manifest)
+    leave it ``None`` and serialize byte-identically to before.  LVS
+    populates it with the v1 ``lvs.json`` record shapes produced by
+    :func:`kicad_tools.lvs.build_lvs_payload`, so ``meta_checks.lvs`` is
+    parsable field-for-field by the same code that reads
+    ``boards/*/output/lvs.json``.
     """
 
     status: SubCheckStatus
     detail: str
+    data: dict | None = None
 
-    def to_dict(self) -> dict[str, str]:
-        return {"status": self.status, "detail": self.detail}
+    def to_dict(self) -> dict:
+        out: dict = {"status": self.status, "detail": self.detail}
+        if self.data is not None:
+            out.update(self.data)
+        return out
 
 
 @dataclass
@@ -695,6 +710,17 @@ def _lvs_subcheck(sch_path: Path | None, pcb_path: Path) -> SubCheckResult:
     Always recomputes -- never reads ``output/lvs.json`` -- so a fresh
     PCB edit that breaks LVS is surfaced immediately.  Returns
     ``NOT RUN`` when no schematic is found.
+
+    Issue #4616: whenever both comparators ran, the **complete** record
+    set from *both* legs is attached to :attr:`SubCheckResult.data` using
+    the v1 ``lvs.json`` shapes (:func:`kicad_tools.lvs.build_lvs_payload`),
+    so ``meta_checks.lvs`` carries full fidelity in JSON even though
+    ``detail`` stays the bounded 3-record human summary.  This also
+    closes a data-loss bug: the old copper-dirty early return discarded
+    the already-computed label-leg mismatches entirely, so on a
+    copper-dirty board the label findings appeared in *no* output.  The
+    copper-dirty branch is now a ``detail``-selection branch, not a
+    return, and both legs are always carried.
     """
     if sch_path is None:
         return SubCheckResult(
@@ -722,35 +748,49 @@ def _lvs_subcheck(sch_path: Path | None, pcb_path: Path) -> SubCheckResult:
             detail=f"copper LVS comparator raised {type(e).__name__}: {e}",
         )
 
+    from kicad_tools.lvs.recipe import build_lvs_payload
+
+    # Stable sort orders shared by the JSON payload, the bounded ``detail``
+    # preview and the ``--verbose`` terminal expansion, so all three agree.
+    copper_records = sorted(copper.mismatches, key=lambda m: (m.kind, m.pad_a, m.pad_b))
+    label_records = sorted(result.mismatches, key=lambda m: (m.ref, m.pad))
+
+    data = build_lvs_payload(
+        replace(copper, mismatches=tuple(copper_records)),
+        replace(result, mismatches=tuple(label_records)),
+        include_schema=False,
+    )
+
     if not copper.clean:
         # The copper-extracted gate is the soundness-critical one: surface
         # it first.  Show up to the first 3 records in a stable order.
-        records = sorted(copper.mismatches, key=lambda m: (m.kind, m.pad_a, m.pad_b))
         preview = ", ".join(
-            f"{m.kind} {m.pad_a}({m.net_a})/{m.pad_b}({m.net_b})" for m in records[:3]
+            f"{m.kind} {m.pad_a}({m.net_a})/{m.pad_b}({m.net_b})" for m in copper_records[:3]
         )
-        suffix = "" if len(records) <= 3 else f" (+{len(records) - 3} more)"
+        suffix = "" if len(copper_records) <= 3 else f" (+{len(copper_records) - 3} more)"
         return SubCheckResult(
             status="FAILED",
-            detail=f"copper: {len(records)} mismatch(es): {preview}{suffix}",
+            detail=f"copper: {len(copper_records)} mismatch(es): {preview}{suffix}",
+            data=data,
         )
 
     if result.clean:
         return SubCheckResult(
             status="PASSED",
             detail="label + copper: 0 mismatch(es)",
+            data=data,
         )
 
     # Show up to the first 3 mismatches in stable (ref, pad) order so
     # the detail line is bounded but informative.
-    mismatches = sorted(result.mismatches, key=lambda m: (m.ref, m.pad))
     preview = ", ".join(
-        f"{m.ref}.{m.pad} sch={m.schematic_net!r} pcb={m.pcb_net!r}" for m in mismatches[:3]
+        f"{m.ref}.{m.pad} sch={m.schematic_net!r} pcb={m.pcb_net!r}" for m in label_records[:3]
     )
-    suffix = "" if len(mismatches) <= 3 else f" (+{len(mismatches) - 3} more)"
+    suffix = "" if len(label_records) <= 3 else f" (+{len(label_records) - 3} more)"
     return SubCheckResult(
         status="FAILED",
-        detail=f"label: {len(mismatches)} mismatch(es): {preview}{suffix}",
+        detail=f"label: {len(label_records)} mismatch(es): {preview}{suffix}",
+        data=data,
     )
 
 
@@ -971,17 +1011,52 @@ def _format_meta_status_line(name: str, sub: SubCheckResult) -> str:
     return f"{name + ':':10} {display_status:8} ({detail})"
 
 
-def print_meta_check_stanza(result: MetaCheckResult) -> None:
+def _print_lvs_verbose_expansion(sub: SubCheckResult) -> None:
+    """Print every LVS mismatch beneath the ``LVS:`` line (issue #4616).
+
+    Reads the records back out of :attr:`SubCheckResult.data` -- the same
+    structured payload the JSON envelope serializes -- so the terminal
+    expansion and ``meta_checks.lvs`` are provably the same list, in the
+    same stable order, with **no** cap.  A no-op when LVS produced no
+    structured payload (``NOT RUN`` / comparator raised) or when both
+    legs are empty.
+    """
+    data = sub.data
+    if not data:
+        return
+    copper_records = data.get("copper_mismatches") or []
+    label_records = data.get("mismatches") or []
+    if not copper_records and not label_records:
+        return
+    if copper_records:
+        print(f"  copper: {len(copper_records)} mismatch(es)")
+        for m in copper_records:
+            print(f"    {m['kind']} {m['pad_a']}({m['net_a']})/{m['pad_b']}({m['net_b']})")
+    if label_records:
+        print(f"  label: {len(label_records)} mismatch(es)")
+        for m in label_records:
+            print(f"    {m['ref']}.{m['pad']} sch={m['schematic_net']!r} pcb={m['pcb_net']!r}")
+
+
+def print_meta_check_stanza(result: MetaCheckResult, verbose: bool = False) -> None:
     """Print the per-sub-check status block + overall rollup (issue #3750).
 
     Output goes to stdout in a stable column layout so humans can
     diff it across runs.  The ``Overall:`` line is the rollup that
     matches the exit-code decision.
+
+    ``verbose`` (issue #4616) expands the ``LVS:`` row into the complete,
+    uncapped mismatch list from both comparator legs.  The status lines
+    themselves -- including the bounded 3-record ``(+N more)`` LVS
+    summary -- are byte-identical either way; ``--verbose`` only adds
+    lines beneath the ``LVS:`` row.
     """
     print()
     print(_format_meta_status_line("DRC", result.drc))
     print(_format_meta_status_line("ERC", result.erc))
     print(_format_meta_status_line("LVS", result.lvs))
+    if verbose:
+        _print_lvs_verbose_expansion(result.lvs)
     print(_format_meta_status_line("Manifest", result.manifest))
     print(f"{'Overall:':10} {result.overall}")
 
@@ -1925,11 +2000,11 @@ def main(argv: list[str] | None = None) -> int:
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
         if meta is not None:
-            print_meta_check_stanza(meta)
+            print_meta_check_stanza(meta, args.verbose)
     else:
         output_table(violations, results, pcb_path, effective_mfr, layers, args.verbose)
         if meta is not None:
-            print_meta_check_stanza(meta)
+            print_meta_check_stanza(meta, args.verbose)
 
     # Write JSON report to file if --output specified
     if args.output:

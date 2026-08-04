@@ -30,6 +30,10 @@ Public API:
 * :class:`BoardNetlistMismatch` — exception carrying the LVSResult;
                                   raised by board recipes, never by the
                                   comparator itself.
+* :func:`build_lvs_payload` — the single producer of the v1 ``lvs.json``
+                              record shapes, shared by
+                              :func:`write_lvs_report` and ``kct check``'s
+                              ``meta_checks.lvs`` payload (issue #4616).
 * :func:`_ref_of`           — helper that resolves a footprint's
                               reference designator across both KiCad
                               serializer dialects (kept underscored
@@ -56,6 +60,7 @@ from kicad_tools.lvs.copper_lvs import (
 from kicad_tools.lvs.recipe import (
     ADVISORY_LVS_BOARDS,
     FreshCopperCheckError,
+    build_lvs_payload,
     write_lvs_report,
 )
 
@@ -70,6 +75,7 @@ __all__ = [
     "VACUOUS_KIND",
     "VACUOUS_NET",
     "_ref_of",
+    "build_lvs_payload",
     "compare_copper_netlist",
     "compare_netlists",
     "compare_partitions",

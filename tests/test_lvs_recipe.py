@@ -282,6 +282,84 @@ def test_no_comparator_selected_raises_value_error(
 
 
 # ---------------------------------------------------------------------------
+# Issue #4616: build_lvs_payload is the single shared producer of the v1
+# record shapes, used by both write_lvs_report and kct check.
+# ---------------------------------------------------------------------------
+
+
+_DIRTY_COPPER_PAIR = CopperLVSResult(
+    clean=False,
+    mismatches=(
+        CopperLVSMismatch(kind="short", net_a="GND", net_b="VCC", pad_a="R1.1", pad_b="R2.2"),
+        CopperLVSMismatch(kind="open", net_a="SIG", net_b="SIG", pad_a="U1.3", pad_b="U2.4"),
+    ),
+    bound_pad_count=9,
+)
+_DIRTY_LABEL_PAIR = LVSResult(
+    clean=False,
+    mismatches=(LVSMismatch(ref="D1", pad="1", schematic_net="GND", pcb_net="VCC"),),
+)
+
+
+def test_build_lvs_payload_preserves_v1_key_order() -> None:
+    """The on-disk lvs.json key order is load-bearing (#4616 scope guard)."""
+    payload = recipe.build_lvs_payload(
+        _DIRTY_COPPER_PAIR, _DIRTY_LABEL_PAIR, clean=False, include_schema=True
+    )
+    assert list(payload) == [
+        "$schema",
+        "clean",
+        "mismatches",
+        "copper_mismatches",
+        "copper_vacuous",
+        "copper_bound_pad_count",
+    ]
+
+
+def test_build_lvs_payload_embedded_form_drops_schema_and_clean() -> None:
+    """``kct check`` embeds the records without the standalone-document keys."""
+    payload = recipe.build_lvs_payload(_DIRTY_COPPER_PAIR, _DIRTY_LABEL_PAIR, include_schema=False)
+    assert list(payload) == [
+        "mismatches",
+        "copper_mismatches",
+        "copper_vacuous",
+        "copper_bound_pad_count",
+    ]
+
+
+def test_check_meta_lvs_payload_shares_lvs_json_record_shapes() -> None:
+    """Drift guard: ``meta_checks.lvs`` records == ``lvs.json`` records (#4616).
+
+    ``kct check`` must not invent a second record shape.  Both surfaces
+    are produced by :func:`build_lvs_payload`, so a consumer that parses
+    ``boards/*/output/lvs.json`` parses the check envelope unchanged.
+    """
+    from kicad_tools.cli.check_cmd import SubCheckResult
+
+    on_disk = recipe.build_lvs_payload(_DIRTY_COPPER_PAIR, _DIRTY_LABEL_PAIR, clean=False)
+    embedded = SubCheckResult(
+        status="FAILED",
+        detail="copper: 2 mismatch(es): ...",
+        data=recipe.build_lvs_payload(_DIRTY_COPPER_PAIR, _DIRTY_LABEL_PAIR, include_schema=False),
+    ).to_dict()
+
+    for field in ("mismatches", "copper_mismatches"):
+        assert embedded[field] == on_disk[field]
+        assert [set(r) for r in embedded[field]] == [set(r) for r in on_disk[field]]
+    assert embedded["copper_vacuous"] == on_disk["copper_vacuous"]
+    assert embedded["copper_bound_pad_count"] == on_disk["copper_bound_pad_count"]
+    # The check envelope adds only its own two keys on top of the v1 fields.
+    assert set(embedded) - set(on_disk) == {"status", "detail"}
+
+
+def test_build_lvs_payload_is_exported_from_package() -> None:
+    import kicad_tools.lvs as lvs_pkg
+
+    assert "build_lvs_payload" in lvs_pkg.__all__
+    assert lvs_pkg.build_lvs_payload is recipe.build_lvs_payload
+
+
+# ---------------------------------------------------------------------------
 # Advisory allowlist constant
 # ---------------------------------------------------------------------------
 

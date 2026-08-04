@@ -740,6 +740,262 @@ class TestCheckMetaCheck:
 
 
 # ---------------------------------------------------------------------------
+# Issue #4616: full-fidelity LVS records under meta_checks.lvs
+# ---------------------------------------------------------------------------
+
+BOARD_02_DIR = REPO_ROOT / "boards" / "02-charlieplex-led" / "output"
+BOARD_02_SCH = BOARD_02_DIR / "charlieplex_3x3.kicad_sch"
+BOARD_02_PCB = BOARD_02_DIR / "charlieplex_3x3_routed.kicad_pcb"
+
+_LVS_RECORD_KEYS = {
+    "mismatches": {"ref", "pad", "schematic_net", "pcb_net"},
+    "copper_mismatches": {"kind", "net_a", "net_b", "pad_a", "pad_b"},
+}
+
+
+def _strip_all_segments(src_pcb: Path, dest_pcb: Path) -> Path:
+    """Copy ``src_pcb`` to ``dest_pcb`` with every routed ``segment`` removed.
+
+    Un-routing the board leaves each multi-pad net split across separate
+    copper islands, which the copper-extracted comparator reports as
+    ``open`` mismatches — a cheap way to synthesize a copper-dirty board
+    with a controllable number of findings, without touching any
+    committed artifact.
+    """
+    from kicad_tools.sexp import SExp, parse_file
+
+    doc = parse_file(src_pcb)
+    doc.children = [c for c in doc.children if not (isinstance(c, SExp) and c.name == "segment")]
+    dest_pcb.write_text(doc.to_string() + "\n")
+    return dest_pcb
+
+
+def _stage_board02_unrouted(dest_dir: Path) -> Path:
+    """Stage board 02 (charlieplex) with all segments stripped.
+
+    Yields >= 4 copper mismatches (22 at the time of writing), which is
+    what makes the ``(+N more)`` truncation observable end-to-end.
+    """
+    if not BOARD_02_SCH.exists() or not BOARD_02_PCB.exists():
+        pytest.skip("board 02 artifacts missing; run generate_design.py")
+
+    shutil.copy(BOARD_02_SCH, dest_dir / BOARD_02_SCH.name)
+    return _strip_all_segments(BOARD_02_PCB, dest_dir / BOARD_02_PCB.name)
+
+
+def _stage_board00_both_legs_dirty(dest_dir: Path) -> Path:
+    """Stage a board 00 copy that is dirty on **both** LVS comparators.
+
+    ``_swap_d1_pad_nets_in_pcb`` dirties the label leg (D1's declared pad
+    nets no longer match the schematic); stripping the segments dirties
+    the copper leg (LED_ANODE splits into two islands).  Before issue
+    #4616 the copper-dirty early return in ``_lvs_subcheck`` discarded the
+    already-computed label findings entirely, so this board's D1
+    mismatches appeared in *no* output.
+    """
+    pcb, _manifest = _stage_board00_copy(dest_dir)
+    _swap_d1_pad_nets_in_pcb(pcb, pcb)
+    _strip_all_segments(pcb, pcb)
+    return pcb
+
+
+class TestCheckLVSFullFidelity:
+    """``meta_checks.lvs`` carries every mismatch as structured data (#4616).
+
+    The ``detail`` string stays the bounded 3-record human summary; the
+    machine payload reuses the v1 ``lvs.json`` record shapes verbatim so
+    one consumer parses both surfaces.
+    """
+
+    def test_copper_dirty_board_still_carries_label_leg(self, tmp_path: Path, capsys):
+        """Regression: a copper-dirty board must not drop the label findings.
+
+        This is the data-loss bug the issue's Curator found (#4616
+        "Correction 3").  ``_lvs_subcheck`` computed the label result,
+        then early-returned on the copper leg without ever formatting or
+        attaching it — so the D1 label mismatches below were *absent*,
+        not truncated.  Fails on ``origin/main``.
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_both_legs_dirty(tmp_path)
+
+        assert main([str(pcb), "--format", "json"]) == 2
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        assert lvs["status"] == "FAILED"
+        # The copper leg still wins the human ``detail`` line...
+        assert lvs["detail"].startswith("copper: ")
+        # ...but the label leg is no longer discarded.
+        assert [(m["ref"], m["pad"]) for m in lvs["mismatches"]] == [("D1", "1"), ("D1", "2")]
+        assert {m["schematic_net"] for m in lvs["mismatches"]} == {"GND", "LED_ANODE"}
+        assert len(lvs["copper_mismatches"]) >= 1
+
+    def test_payload_enumerates_every_copper_mismatch(self, tmp_path: Path, capsys):
+        """A board with >= 4 copper mismatches enumerates all of them."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board02_unrouted(tmp_path)
+
+        assert main([str(pcb), "--format", "json"]) == 2
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        # ``detail`` is still the truncated prose sentence...
+        count = int(lvs["detail"].split("copper: ")[1].split(" mismatch(es)")[0])
+        assert count >= 4
+        assert f"(+{count - 3} more)" in lvs["detail"]
+        # ...while the array is complete and carries no truncation marker.
+        assert len(lvs["copper_mismatches"]) == count
+        assert "more)" not in json.dumps(lvs["copper_mismatches"])
+        # Records use the v1 lvs.json field names verbatim.
+        for record in lvs["copper_mismatches"]:
+            assert set(record) == _LVS_RECORD_KEYS["copper_mismatches"]
+        # Stable sort order: (kind, pad_a, pad_b).
+        keys = [(m["kind"], m["pad_a"], m["pad_b"]) for m in lvs["copper_mismatches"]]
+        assert keys == sorted(keys)
+
+    def test_clean_board_emits_empty_payload(self, tmp_path: Path, capsys):
+        """A PASSED board still carries the payload, with empty lists."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+
+        assert main([str(pcb), "--format", "json"]) == 0
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        assert lvs["status"] == "PASSED"
+        # Consumers must never have to branch on key presence to tell
+        # "clean" from "old kct".
+        assert lvs["mismatches"] == []
+        assert lvs["copper_mismatches"] == []
+        assert lvs["copper_vacuous"] is False
+        assert lvs["copper_bound_pad_count"] is not None
+        assert lvs["copper_bound_pad_count"] > 0
+
+    def test_payload_omitted_when_lvs_not_run(self, drc_clean_pcb: Path, capsys):
+        """No schematic -> NOT RUN -> {status, detail} only."""
+        from kicad_tools.cli.check_cmd import main
+
+        assert main([str(drc_clean_pcb), "--format", "json"]) == 2
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        assert lvs["status"] == "NOT RUN"
+        assert set(lvs) == {"status", "detail"}
+
+    @pytest.mark.parametrize(
+        "module_path,symbol",
+        [
+            ("kicad_tools.lvs.board_lvs", "compare_netlists"),
+            ("kicad_tools.lvs.copper_lvs", "compare_copper_netlist"),
+        ],
+    )
+    def test_payload_omitted_when_comparator_raises(
+        self, tmp_path: Path, monkeypatch, module_path: str, symbol: str
+    ):
+        """A raised comparator keeps the legacy {status, detail} shape."""
+        import importlib
+
+        from kicad_tools.cli.check_cmd import _lvs_subcheck
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+        sch = tmp_path / "simple_led.kicad_sch"
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("synthetic comparator failure")
+
+        monkeypatch.setattr(importlib.import_module(module_path), symbol, _boom)
+
+        sub = _lvs_subcheck(sch, pcb)
+        assert sub.status == "FAILED"
+        assert sub.data is None
+        assert set(sub.to_dict()) == {"status", "detail"}
+        assert "RuntimeError" in sub.detail
+
+    def test_stdout_and_file_report_carry_identical_payload(self, tmp_path: Path, capsys):
+        """``--format json`` and ``-o report.json`` must agree exactly."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_both_legs_dirty(tmp_path)
+        report = tmp_path / "check.json"
+
+        assert main([str(pcb), "--format", "json", "-o", str(report)]) == 2
+
+        stdout_lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+        file_lvs = json.loads(report.read_text())["meta_checks"]["lvs"]
+        assert stdout_lvs == file_lvs
+        assert file_lvs["mismatches"], "file report must carry the label leg too"
+
+    def test_drc_only_still_omits_meta_checks(self, tmp_path: Path, capsys):
+        """The widened payload must not leak into the --drc-only envelope."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_both_legs_dirty(tmp_path)
+
+        main([str(pcb), "--format", "json", "--drc-only"])
+        assert "meta_checks" not in json.loads(capsys.readouterr().out)
+
+    def test_other_subchecks_serialize_unchanged(self, tmp_path: Path, capsys):
+        """DRC / ERC / Manifest keep the legacy two-key JSON shape."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+
+        main([str(pcb), "--format", "json"])
+        meta = json.loads(capsys.readouterr().out)["meta_checks"]
+
+        for name in ("drc", "erc", "manifest"):
+            assert set(meta[name]) == {"status", "detail"}, name
+
+    def test_verbose_expands_list_default_stays_truncated(self, tmp_path: Path, capsys):
+        """Default terminal line is unchanged; --verbose lists everything."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board02_unrouted(tmp_path)
+
+        main([str(pcb)])
+        plain = capsys.readouterr().out
+        plain_lvs = next(ln for ln in plain.splitlines() if ln.startswith("LVS:"))
+        count = int(plain_lvs.split("copper: ")[1].split(" mismatch(es)")[0])
+        assert f"(+{count - 3} more)" in plain_lvs
+        # Exactly the 3 preview records appear on the default path.
+        assert plain.count("    open ") == 0
+
+        main([str(pcb), "--verbose"])
+        verbose = capsys.readouterr().out
+        verbose_lvs = next(ln for ln in verbose.splitlines() if ln.startswith("LVS:"))
+        # The status line itself is byte-identical...
+        assert verbose_lvs == plain_lvs
+        # ...and every record is listed beneath it, uncapped.
+        assert f"  copper: {count} mismatch(es)" in verbose
+        assert verbose.count("    open ") == count
+
+    def test_verbose_matches_json_payload(self, tmp_path: Path, capsys):
+        """The --verbose expansion is rendered from the JSON payload itself."""
+        from kicad_tools.cli.check_cmd import (
+            MetaCheckResult,
+            SubCheckResult,
+            _lvs_subcheck,
+            print_meta_check_stanza,
+        )
+
+        pcb = _stage_board00_both_legs_dirty(tmp_path)
+        sub = _lvs_subcheck(tmp_path / "simple_led.kicad_sch", pcb)
+        stub = SubCheckResult(status="PASSED", detail="-")
+        meta = MetaCheckResult(drc=stub, erc=stub, lvs=sub, manifest=stub)
+
+        print_meta_check_stanza(meta, verbose=True)
+        out = capsys.readouterr().out
+
+        for record in sub.data["copper_mismatches"]:
+            assert (
+                f"{record['kind']} {record['pad_a']}({record['net_a']})"
+                f"/{record['pad_b']}({record['net_b']})" in out
+            )
+        for record in sub.data["mismatches"]:
+            assert f"{record['ref']}.{record['pad']} sch=" in out
+
+
+# ---------------------------------------------------------------------------
 # Issue #4096: stale-zone-fill advisory + opt-in --refill-zones flag
 # ---------------------------------------------------------------------------
 
