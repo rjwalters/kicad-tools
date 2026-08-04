@@ -151,18 +151,35 @@ KCT_BOARD06_SHADOW=1 PYTHONHASHSEED=42 uv run python \
 
 ### The two downstream modes
 
-Once shadow output feeds the negotiated `route_all_negotiated` pass, the
-board settles into one of two stable modes rather than a continuum:
+**All figures in this subsection are from the shadow-ON configuration
+(`KCT_BOARD06_SHADOW=1`, the repro block above).  The default recipe
+runs shadow-OFF** --- `ENABLE_COUPLED_SHADOW` reads `KCT_BOARD06_SHADOW`
+with default `"0"` (`generate_design.py`, the #3508 block), which is what
+the committed artifact and CI use.
 
-| | DRC errors | `diffpair_clearance_intra` | reach |
+Once shadow output feeds the negotiated `route_all_negotiated` pass, the
+shadow-ON board settles into one of two stable modes rather than a
+continuum:
+
+| (shadow-ON) | DRC errors | `diffpair_clearance_intra` | reach |
 |---|---|---|---|
 | Mode A | 32 | 7 | 19 of 21 |
 | Mode B | 35 | 19 | 18 of 21 |
 
-`coupled-ok` is 5/9 in both modes. A run's mode is identifiable from
-three mutually consistent signals --- total DRC error count, the
-`diffpair_clearance_intra` count, and reach --- which is what makes
-paired mode-for-mode comparison possible instead of guesswork.
+`coupled-ok` is 5/9 in both modes --- the shadow-ON convergence figure
+recorded in the recipe comments ("Convergence is 5/9 (post-#4576)").  A
+run's mode is identifiable from three mutually consistent signals ---
+total DRC error count, the `diffpair_clearance_intra` count, and reach
+--- which is what makes paired mode-for-mode comparison possible instead
+of guesswork.
+
+**If you ran with the default (shadow-OFF), you are not in either
+mode.** Expect the committed / CI floor instead: **18 DRC errors**
+(9 `diffpair_length_skew` + 9 `diffpair_routing_continuity`, the value
+pinned for this board in `.github/routed-drc-tolerance.yml`) at **21 of
+21** reach --- the shadow-OFF reach recorded in the same recipe
+comments.  A default-config run landing on those numbers is the expected
+result, not an unrecognized third mode.
 
 ### Measurement convention
 
@@ -190,7 +207,11 @@ Two traps this has already cost people:
 ### Standing invariants and the vacuity trap
 
 A change should not drop `coupled-ok` below 5/9, and should not drop
-reach when compared mode-for-mode.  Watch for the **vacuity trap**:
+reach when compared mode-for-mode.  **The 5/9 figure is the shadow-ON
+convergence number** recorded in the recipe comments next to
+`ENABLE_COUPLED_SHADOW`; like the mode table, it is an invariant for
+shadow-ON runs, so evaluate it against a shadow-ON baseline rather than
+a default (shadow-OFF) one.  Watch for the **vacuity trap**:
 `diffpair_length_skew` only fires on an *engaged* (coupled) pair, so a
 change that knocks a pair from coupled to declined removes it from
 skew-checking entirely --- the error count can drop while the change is
