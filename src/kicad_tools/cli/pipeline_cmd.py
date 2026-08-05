@@ -941,10 +941,37 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
     zone-fillable plane nets do not block the skip -- those are handled by
     other pipeline steps (or are inherently complete).  ``--force`` always
     re-runs the router.
+
+    HV guard (issue #4607): with ``--voltage-map`` set the skip path refuses
+    loudly instead of skipping, because the HV pairwise-clearance audit only
+    runs inside the routing subprocess -- a silent skip would report success
+    on possibly creepage-dirty copper.
     """
     assessment = _assess_routing_completeness(ctx.pcb_file, ctx.route_skip_threshold)
 
     if assessment.recommend_skip and not ctx.force:
+        # HV guard (issue #4607): the pipeline's primary input is an already
+        # routed board, and the HV pairwise-clearance audit only runs inside
+        # the `kct route` subprocess this skip avoids.  Silently skipping
+        # would report success on possibly creepage-dirty copper, so with a
+        # voltage map in play the skip path refuses loudly instead.  A forced
+        # re-route would be destructive to existing copper, so the user is
+        # pointed at `kct creepage` (non-destructive audit) or an explicit
+        # `--force`.
+        if ctx.voltage_map:
+            return PipelineResult(
+                step=PipelineStep.ROUTE,
+                success=False,
+                message=(
+                    "route: board is already routed so the route step would "
+                    "be skipped, but --voltage-map is set and the HV "
+                    "pairwise-clearance audit only runs during routing; "
+                    "refusing to skip silently. Audit the existing copper "
+                    f"with `kct creepage {ctx.pcb_file.name} --voltage-map "
+                    f"{ctx.voltage_map}`, or pass --force to re-route with "
+                    "the audit."
+                ),
+            )
         return PipelineResult(
             step=PipelineStep.ROUTE,
             success=True,

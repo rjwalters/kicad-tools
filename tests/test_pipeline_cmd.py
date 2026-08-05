@@ -986,6 +986,55 @@ class TestRouteVoltageMapFatalSplit:
 
         assert "--voltage-map vm.json" in result.message
 
+    def test_route_skip_with_voltage_map_refuses_loudly(self, routed_pcb: Path):
+        """A routed board must not silently skip the route step with a map.
+
+        Issue #4607 judge finding: recommend_skip on a >=95%-routed board
+        returned SKIP/success before the HV audit could run -- exit 0 and a
+        success banner on possibly creepage-dirty copper.  With a voltage
+        map the skip path must refuse loudly and abort the pipeline.
+        """
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, voltage_map="vm.json")
+        results = run_pipeline(ctx, [PipelineStep.ROUTE, PipelineStep.FIX_DRC, PipelineStep.AUDIT])
+
+        # Pipeline aborts at the route step; nothing downstream runs.
+        assert len(results) == 1
+        assert results[0].success is False
+        assert results[0].skipped is False
+        assert "--voltage-map" in results[0].message
+        assert "kct creepage" in results[0].message
+        assert "--force" in results[0].message
+
+    def test_main_exit_1_with_voltage_map_on_route_skip(self, routed_pcb: Path):
+        """End-to-end: `kct pipeline --voltage-map` on a routed board exits non-zero."""
+        from kicad_tools.cli import pipeline_cmd
+
+        rc = pipeline_cmd.main(
+            [str(routed_pcb), "--step", "route", "--voltage-map", "vm.json", "--quiet"]
+        )
+        assert rc == 1
+
+    def test_route_skip_without_voltage_map_unchanged(self, routed_pcb: Path):
+        """Without a voltage map, the historical skip semantics are untouched."""
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True)
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert results[0].success is True
+        assert results[0].skipped is True
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_force_with_voltage_map_reroutes_with_audit(self, mock_run, routed_pcb: Path):
+        """--force + --voltage-map re-routes (no refusal) with the HV flags."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, force=True, voltage_map="vm.json")
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert results[0].success is True
+        assert results[0].skipped is False
+        cmd_args = mock_run.call_args[0][0]
+        assert cmd_args[cmd_args.index("--voltage-map") + 1] == "vm.json"
+
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_main_exit_1_with_voltage_map_on_route_exit_3(self, mock_run, unrouted_pcb: Path):
         """End-to-end: `kct pipeline --voltage-map` exits non-zero on route exit 3."""

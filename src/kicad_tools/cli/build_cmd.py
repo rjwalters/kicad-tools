@@ -1430,6 +1430,32 @@ def _generate_design_supports_step_route(script: Path) -> bool:
         return False
 
 
+def _hv_recipe_route_refusal(ctx: BuildContext, tier_desc: str) -> BuildResult:
+    """Loud refusal: ``--voltage-map`` cannot ride through a route recipe/script.
+
+    Tier 1-3 route recipes and standalone route scripts build their own
+    router invocation, so the HV pairwise-clearance audit flags on the
+    build context never reach the router.  Silently dispatching to such a
+    tier would disable the HV safety gate the flag exists to enforce
+    (issue #4607) — so the route step fails fast instead, telling the user
+    how to run the audit.
+    """
+    return BuildResult(
+        step="route",
+        success=False,
+        message=(
+            f"--voltage-map is set but this board routes via {tier_desc}, "
+            "which cannot carry the HV pairwise-clearance audit flags; "
+            "refusing to route without the audit rather than silently "
+            "skipping it. Either add the HV flags "
+            "(--voltage-map/--creepage-standard/--pollution-degree/"
+            "--material-group/--hv-threshold) to the recipe's own `kct route` "
+            "invocation, or audit the routed copper directly with "
+            f"`kct creepage <board> --voltage-map {ctx.voltage_map}`."
+        ),
+    )
+
+
 def _run_route_recipe(
     ctx: BuildContext,
     console: Console,
@@ -1558,6 +1584,12 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     bake diff-pair / match-group / seed / layer flags into their recipe that
     the generic ``kct route`` fallback does not replicate; routing them through
     the fallback silently drops those flags and under-routes the board.
+
+    HV guard (issue #4607): only the generic ``kct route`` fallback can carry
+    the ``--voltage-map`` pairwise-clearance audit flags.  When
+    ``ctx.voltage_map`` is set and a Tier 1-3 recipe/script wins the probe,
+    the step refuses loudly (:func:`_hv_recipe_route_refusal`) instead of
+    silently routing with the HV audit disabled.
     """
     # If the PCB step (or a prior run) already left a routed artifact and
     # recorded it on the context, skip re-routing entirely. This protects
@@ -1654,6 +1686,11 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     # would silently drop those flags). See _resolve_route_recipe.
     recipe_argv = _resolve_route_recipe(ctx)
     if recipe_argv is not None:
+        # HV guard (issue #4607): a recipe builds its own router invocation,
+        # so ctx.voltage_map would be silently dropped — refuse loudly
+        # instead of routing with the HV audit disabled.
+        if ctx.voltage_map:
+            return _hv_recipe_route_refusal(ctx, f"route recipe {Path(recipe_argv[0]).name}")
         return _run_route_recipe(ctx, console, recipe_argv)
 
     # Tier 3: standalone route script.
@@ -1662,6 +1699,10 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
         route_script = ctx.project_dir / "route.py"
 
     if route_script.exists():
+        # HV guard (issue #4607): same reasoning as the recipe tiers above —
+        # a standalone route script cannot carry the audit flags.
+        if ctx.voltage_map:
+            return _hv_recipe_route_refusal(ctx, f"route script {route_script.name}")
         # Get routing parameters from project.kct to pass as environment variables
         # This allows custom route scripts to optionally use project.kct settings
         grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(

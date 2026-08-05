@@ -1071,6 +1071,100 @@ class TestRouteStepRecipeDiscovery:
         assert result.output_file == output_dir / "board_routed.kicad_pcb"
 
 
+class TestBuildRouteHvRecipeRefusal:
+    """--voltage-map refuses loudly when a recipe/script tier wins (issue #4607).
+
+    Tier 1-3 route recipes and standalone route scripts build their own
+    router invocation, so the HV pairwise-clearance audit flags never reach
+    the router through them.  Silently dispatching would disable the HV
+    safety gate the flag exists to enforce, so the route step must fail
+    fast with an actionable message instead.
+    """
+
+    def test_recipe_tier_with_voltage_map_refuses(self, tmp_path: Path) -> None:
+        """A Tier 2 sentinel recipe + --voltage-map fails fast without routing."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        (tmp_path / "generate_design.py").write_text("SUPPORTS_STEP_ROUTE = True\n")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        ctx.voltage_map = "vm.json"
+        console = Console()
+
+        with (
+            patch("kicad_tools.cli.build_cmd._run_python_script") as mock_script,
+            patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_generic,
+        ):
+            result = _run_step_route(ctx, console)
+
+        # Neither the recipe nor the generic router ran — refusal is loud
+        # and immediate.
+        mock_script.assert_not_called()
+        mock_generic.assert_not_called()
+        assert result.success is False
+        assert "--voltage-map" in result.message
+        assert "generate_design.py" in result.message
+        assert "kct creepage" in result.message
+
+    def test_route_script_tier_with_voltage_map_refuses(self, tmp_path: Path) -> None:
+        """A Tier 3 route_demo.py + --voltage-map fails fast without routing."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        (tmp_path / "route_demo.py").write_text("print('route demo')\n")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        ctx.voltage_map = "vm.json"
+        console = Console()
+
+        with (
+            patch("kicad_tools.cli.build_cmd._run_python_script") as mock_script,
+            patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_generic,
+        ):
+            result = _run_step_route(ctx, console)
+
+        mock_script.assert_not_called()
+        mock_generic.assert_not_called()
+        assert result.success is False
+        assert "--voltage-map" in result.message
+        assert "route_demo.py" in result.message
+        assert "kct creepage" in result.message
+
+    def test_recipe_tier_without_voltage_map_still_routes(self, tmp_path: Path) -> None:
+        """Without a voltage map, the recipe tier is untouched by the guard."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        (tmp_path / "generate_design.py").write_text("SUPPORTS_STEP_ROUTE = True\n")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        assert ctx.voltage_map is None  # BuildContext default
+        console = Console()
+
+        def fake_run_script(script, cwd, verbose, *, env_vars, script_args, quiet):
+            (tmp_path / "board_routed.kicad_pcb").write_text("(kicad_pcb)")
+            return True, "ok"
+
+        with patch(
+            "kicad_tools.cli.build_cmd._run_python_script",
+            side_effect=fake_run_script,
+        ) as mock_script:
+            result = _run_step_route(ctx, console)
+
+        mock_script.assert_called_once()
+        assert result.success is True
+
+
 class TestBuildRouteVoltageMapForwarding:
     """The generic `kct route` fallback must receive the HV flags (issue #4607).
 

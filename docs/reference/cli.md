@@ -1297,6 +1297,16 @@ epilog in [`src/kicad_tools/cli/route_cmd.py`](../../src/kicad_tools/cli/route_c
 >   copper may be an HV pairwise-clearance (creepage) failure, and such a
 >   board must not flow on to verification and manufacturing export as
 >   "completed with warnings". Exits 2 and 5 keep their soft handling.
+>
+> Because the audit only runs inside the `kct route` subprocess, both
+> consumers also **refuse loudly** (instead of silently dropping the audit)
+> when a voltage map is set but the route step would not reach `kct route`:
+> `kct build` fails fast when the board routes via a route recipe/script
+> (Tier 1–3 — those build their own router invocation and cannot carry the HV
+> flags), and `kct pipeline` fails fast instead of skipping the route step on
+> an already-routed board. In both cases the message points at
+> `kct creepage <board> --voltage-map …` for a non-destructive audit of the
+> existing copper.
 
 ### `kct optimize-placement`
 
