@@ -48,7 +48,7 @@ identity rotation the tier emits by default is therefore a *guess*, and for many
 parts it is wrong by a quarter turn.
 
 Authored corrections come from two places, in this order (first non-`None`
-wins, **merged per field**):
+wins, **merged per field** — with one guard, below):
 
 | Precedence | Source | Scope |
 |---|---|---|
@@ -56,8 +56,36 @@ wins, **merged per field**):
 | 2 | Packaged table `src/kicad_tools/pcb/lcsc_model_transforms.py` | The whole fleet + every downstream consumer of the wheel |
 | 3 | Identity (`rotate (xyz 0 0 0)`, `offset (xyz 0 0 0)`) | Every part with no entry anywhere |
 
-Merging is **per field**: a sidecar entry that overrides only `rotate` still
-inherits the packaged `offset`, and vice versa.
+Merging is **per field**: a sidecar entry that overrides only `offset` still
+inherits the packaged `rotate`, and vice versa.
+
+#### Guard: a packaged `offset` belongs to its sibling `rotate`
+
+`offset` is applied *after* `rotate` (see [Frame semantics](#frame-semantics)),
+so a packaged `offset` is only meaningful in the frame of the `rotate` it was
+measured under. The per-field merge therefore stops short of one case: a sidecar
+that overrides `rotate` to a **different** value while silently inheriting a
+packaged `offset` is a **build error** (`ValueError` naming the lib id, the
+C-number, both triples and the packaged entry's provenance) — not a
+plausible-but-wrong body.
+
+The invalidated components are `X`/`Y` when the two rotations differ only about
+Z (a Z-axis spin leaves height above the board untouched), and `X`/`Y`/`Z` when
+they differ about X or Y as well (an off-Z rotation tilts the body). The error
+only fires when at least one invalidated component is non-zero — a packaged
+`offset` of `[0, 0, 1.25]` (the "STEP origin is off the board plane" knob) is
+still inherited freely under a Z-only rotation change.
+
+Two ways to resolve it, both of which force a decision rather than inheriting
+one:
+
+- **Restate `offset` in the sidecar** — including an explicit `[0, 0, 0]`, which
+  suppresses the packaged value. Re-render first; that is the point.
+- **Drop the sidecar `rotate`**, keeping the calibrated `(rotate, offset)` pair.
+
+The symmetric case is *not* an error: a sidecar overriding only `offset` while
+inheriting the packaged `rotate` is fine, because its author necessarily
+measured with the packaged rotation active.
 
 ### Sidecar object form
 
@@ -105,7 +133,11 @@ the footprint 2D frame, and Z is up from the board.
   the knob for a STEP whose origin is not on the board plane.
 - Because `offset` is applied *after* `rotate`, it is a post-rotation
   translation. Practical consequence: **set `rotate` first, render, and only
-  then measure `offset`.**
+  then measure `offset`.** The corollary: an authored `offset` is calibrated
+  *for* the `rotate` beside it, and changing one without re-measuring the other
+  invalidates the pair — which is why overriding a packaged `rotate` from a
+  sidecar without restating its `offset` is rejected (see
+  [the guard above](#guard-a-packaged-offset-belongs-to-its-sibling-rotate)).
 - A footprint's own `(at x y angle)` rotates the whole footprint *including* its
   model, so an authored per-part transform is **placement-angle independent**.
   Calibrate once per part; never per instance. This is the property that makes a

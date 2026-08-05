@@ -29,9 +29,11 @@ wrong for many parts.  Authored per-part corrections therefore come from two
 places, resolved in ``models3d._resolve_lcsc`` (first non-``None`` wins,
 merged per field): a per-board sidecar entry in **object form**
 (:class:`LcscModelEntry`), then the packaged, C-number-keyed table in
-:mod:`kicad_tools.pcb.lcsc_model_transforms`, then identity.  See
-``docs/guides/lcsc-3d-models.md`` for the frame semantics and the calibration
-recipe.
+:mod:`kicad_tools.pcb.lcsc_model_transforms`, then identity.  The one
+exception to the per-field merge: a sidecar ``rotate`` may not silently
+inherit a packaged ``offset`` calibrated under a different rotation — that
+raises ``ValueError`` (#4636).  See ``docs/guides/lcsc-3d-models.md`` for the
+frame semantics and the calibration recipe.
 
 **Offline / CI safety.**  The fetch is opt-in.  A model resolves only when the
 cache already holds the STEP, or when fetching is explicitly enabled (via the
@@ -146,8 +148,16 @@ class LcscModelEntry:
     negated versus footprint 2D Y, Z up from the board).  ``None`` means "this
     sidecar says nothing about that field", which lets the packaged
     :mod:`kicad_tools.pcb.lcsc_model_transforms` table supply it — the merge is
-    per field, so a sidecar that overrides only ``rotate`` does not suppress a
-    packaged ``offset``.
+    per field, so a sidecar that overrides only ``offset`` does not suppress a
+    packaged ``rotate``.
+
+    The merge is per field in the other direction too, with one guard: because
+    ``offset`` is applied *after* ``rotate``, a packaged ``offset`` is only
+    meaningful in the frame of its sibling ``rotate``.  So a sidecar that
+    overrides ``rotate`` to a *different* value while inheriting a packaged
+    ``offset`` with non-zero invalidated components raises ``ValueError``
+    rather than emitting a plausible-but-wrong body (#4636).  Restating
+    ``offset`` here — ``[0, 0, 0]`` counts — always resolves it.
     """
 
     lcsc: str
