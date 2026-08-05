@@ -674,6 +674,20 @@ def _add_check_parser(subparsers) -> None:
         ),
     )
     check_parser.add_argument(
+        "--refill-zones",
+        dest="refill_zones",
+        action="store_true",
+        help=(
+            "Before checking, run `kicad-cli pcb drc --refill-zones "
+            "--save-board` to bring the on-disk zone fills back in sync with "
+            "the copper (issue #4096).  WARNING: this MUTATES the board file "
+            "in place (--save-board rewrites <pcb>).  Fixes phantom "
+            "clearance_*_zone findings caused by stale committed fills.  "
+            "Requires kicad-cli (KiCad 8+); degrades gracefully with a "
+            "warning if kicad-cli is not installed."
+        ),
+    )
+    check_parser.add_argument(
         "--mfr",
         "-m",
         choices=get_all_manufacturer_names(),
@@ -806,6 +820,29 @@ def _add_check_parser(subparsers) -> None:
             "no-sidecar behaviour (the diff-pair / match-group skew rules "
             "stay inactive).  Cannot be combined with --net-class-map "
             "(Issue #4601)."
+        ),
+    )
+    check_parser.add_argument(
+        "--courtyard-waivers",
+        dest="courtyard_waivers",
+        default=None,
+        help=(
+            "Path to a .courtyard_waivers.json sidecar waiving specific "
+            "courtyard-overlap pairs.  Matching overlapping pairs report as "
+            "WAIVED instead of failing the gate.  Auto-discovered next to the "
+            "board when this flag is omitted (Issue #4137)."
+        ),
+    )
+    check_parser.add_argument(
+        "--waivers",
+        dest="waivers",
+        default=None,
+        help=(
+            "Path to a general .kct_waivers.json sidecar (schema version 2) "
+            "waiving findings for ANY rule by matching the violation's items "
+            "(and optional nets) set.  Matched findings report as WAIVED "
+            "instead of failing the gate.  Auto-discovered next to the board "
+            "when this flag is omitted (Issue #4417)."
         ),
     )
     # Issue #3061: per-board auto-derive of the pad_grid tolerance is the

@@ -262,6 +262,18 @@ def run_check_command(args) -> int:
     # Issue #4601: forward the sidecar auto-discovery opt-out.
     if getattr(args, "no_net_class_map", False):
         sub_argv.append("--no-net-class-map")
+    # Issue #4633: forward the zone-refill opt-in (#4096/#4113) and the two
+    # waiver-sidecar path overrides (#4137 / #4417).  All three were declared
+    # on the inner check_cmd parser only, so `kct check --refill-zones` (and
+    # the explicit waiver paths) failed with "unrecognized arguments" until
+    # this shim + the outer subparser learned about them.  The parser-drift
+    # guard in tests/test_cli_parser_drift.py now pins all three.
+    if getattr(args, "refill_zones", False):
+        sub_argv.append("--refill-zones")
+    if getattr(args, "courtyard_waivers", None):
+        sub_argv.extend(["--courtyard-waivers", args.courtyard_waivers])
+    if getattr(args, "waivers", None):
+        sub_argv.extend(["--waivers", args.waivers])
     # Issue #3061: forward pad_grid tolerance flags.
     if getattr(args, "pad_grid_strict", False):
         sub_argv.append("--pad-grid-strict")
