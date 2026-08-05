@@ -245,6 +245,19 @@ constructor). No breaking changes.
 
 ### Fixed
 
+- **`/kct:tapeout` certified "upload as-is" on errors alone — assembly-affecting
+  warnings rode through.** The tapeout skill contract gains a warning-review
+  gate (Gate 4b): a per-rule warning table is derived from Gate 1's `kct check
+  --output` JSON report and printed (an aggregate total alone is
+  non-compliant), and any nonzero count in the assembly-affecting set
+  (`silk_over_copper`, `silkscreen_line_width`, `silk_edge_clearance`,
+  `silk_overlap`) forces TAPEOUT REFUSED unless explicitly acknowledged via
+  `--ack-warnings` or a per-rule accepted-risk line; Gate 7's README and Gate
+  8's manifest now carry the per-rule counts. `/kct:manufacturing-readiness`
+  sign-off quotes the per-rule `BY RULE:` warning breakdown, and the installer
+  vendors a 4th `.kct/CONVENTIONS.md` convention: manufacturing warning
+  baselines are recorded per rule, never as an aggregate (#4614).
+
 - **KiCad-10 name-based net references were invisible to four copper
   scanners.** On a board whose segments and vias name their net (`(net "GND")`)
   instead of numbering it, the `--preserve-existing` parser returned an empty

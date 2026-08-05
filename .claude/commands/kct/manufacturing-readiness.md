@@ -72,7 +72,8 @@ kct check <board.kicad_pcb> --mfr <tier>
   ```bash
   kct check <board.kicad_pcb> --mfr <tier> --net-class-map <path/to/net_class_map.json>
   ```
-- A clean exit here is necessary but **not sufficient**. Proceed to Gate 2 regardless — do not treat a green Gate 1 as sign-off.
+- **Quote the per-rule warning breakdown, not the aggregate.** `kct check`'s table output prints a per-rule `BY RULE:` breakdown of warnings; the sign-off verdict must quote that breakdown (rule → warning count) rather than a single aggregate total, even when the check exits clean. A warning **baseline is only meaningful per rule**: "N warnings, non-regressive vs. the baseline" can be satisfied by an aggregate while an entire defect class (e.g. silkscreen over exposed pads — a real assembly risk) hides inside it across repeated sign-offs. When recording or re-verifying a warning baseline, record and compare counts rule-by-rule. For a machine-readable form, pass `--output <report.json>` — the JSON envelope's `violations[]` carry a `rule_id` and severity per finding, so per-rule counts are a one-line derivation.
+- A clean exit here is necessary but **not sufficient**. Proceed to Gate 2 regardless — do not treat a green Gate 1 as sign-off. Warnings do not affect the exit code, so a "clean" Gate 1 says nothing about the warning population — that is exactly why the per-rule quote above is mandatory.
 
 ### Gate 2 — the mandatory independent cross-gate (NOT optional)
 
@@ -120,7 +121,7 @@ kct audit <board.kicad_pcb> --mfr <tier> \
 
 Sign off **only if all applicable gates** hold:
 
-1. Gate 1 `kct check --mfr <tier>` exits clean at the resolved tier.
+1. Gate 1 `kct check --mfr <tier>` exits clean at the resolved tier, **and** the verdict quotes the per-rule `BY RULE:` warning breakdown (not just an aggregate warning total) so a later re-verification can diff the warning population rule-by-rule.
 2. Gate 2 `kicad-cli pcb drc --refill-zones` reports **0 new errors** (and actually ran — a missing `kicad-cli` is a blocker, not a pass).
 3. Gate 3 `kct export --mfr <tier>` wrote a fresh `manifest.json`.
 4. **(HV/mains boards only)** Gate 4 `kct audit --hv-standard ...` exits 0 with a clean HV/isolation verdict — a `NOT_READY` (exit 2) isolation gate is a hard blocker; an un-gated HV path (`WARNING`, no requirement specified) is not sign-off either.
@@ -137,4 +138,5 @@ If any applicable gate fails or could not run, report **NOT signed off**, name t
 
 - `kct check --help` / `kct export --help` — authoritative `--mfr` tier choices (sourced from `kicad_tools.manufacturers.get_manufacturer_ids()`).
 - The `--refill-zones` cross-gate convention (Epic #4054 convention #2) was established after a 2026-07-04 defect where `kct check` alone missed a live short and read stale zone fills.
+- The per-rule warning-quote requirement was established after #4614: an aggregate "warnings match baseline" result concealed dozens of `silk_over_copper` warnings (silkscreen over exposed pads — an assembly risk) across two sign-offs; the fab order was aborted at the vendor site. A baseline compared per rule would have surfaced it immediately.
 - `/kct:ee-review` — sibling `kct` skill for analog/placement-blocked boards (advisory decisions, not copper).

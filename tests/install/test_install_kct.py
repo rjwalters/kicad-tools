@@ -216,11 +216,12 @@ def test_path_install_produces_all_artifacts(
     assert "refill-zones" not in claude
     assert "Existing content stays." in claude  # pre-existing content preserved
 
-    # The three conventions live verbatim in the vendored .kct/CONVENTIONS.md.
+    # The four conventions live verbatim in the vendored .kct/CONVENTIONS.md.
     conventions = (target_repo / ".kct" / "CONVENTIONS.md").read_text()
     assert "build-native" in conventions
     assert "refill-zones" in conventions
     assert "Artifact-first" in conventions
+    assert "per rule" in conventions
 
     # Metadata is valid JSON with the schema fields.
     meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
@@ -556,17 +557,25 @@ def test_vendored_gates_run_standalone_from_consumer(
 def test_conventions_vendored_with_verbatim_conventions(
     target_repo: Path, fake_uv_env: dict[str, str]
 ) -> None:
-    """The three load-bearing Epic #4054 conventions are vendored verbatim."""
+    """The four load-bearing conventions are vendored verbatim.
+
+    (1)-(3) are the Epic #4054 conventions; (4) is the per-rule warning-baseline
+    convention from #4614.
+    """
     result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
     assert result.returncode == 0, result.stderr
 
     conventions = target_repo / ".kct" / "CONVENTIONS.md"
     assert conventions.exists()
     text = conventions.read_text()
-    # (1) native backend build, (2) cross-gate DRC, (3) artifact-first.
+    # (1) native backend build, (2) cross-gate DRC, (3) artifact-first,
+    # (4) per-rule warning baselines.
     assert "build-native" in text
     assert "refill-zones" in text
     assert "Artifact-first" in text
+    assert "warning baselines are recorded per rule" in text
+    # The anti-pattern is named explicitly: an aggregate total is not a baseline.
+    assert "aggregate" in text
 
     # Recorded in the metadata manifest alongside the other vendored artifacts.
     meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
