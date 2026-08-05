@@ -267,10 +267,11 @@ kct check <pcb_file> [options]
 
 | Option | Description |
 |--------|-------------|
-| `--format {table,json}` | Output format |
+| `--format {table,json,summary}` | Output format |
 | `--mfr {jlcpcb,oshpark,pcbway}` | Manufacturer rules |
-| `--rules RULES` | Custom rules file |
 | `--refill-zones` | Refill zone fills in-place via `kicad-cli pcb drc --refill-zones --save-board` before checking (mutates the board file; kills stale-fill clearance false positives, #4113) |
+| `--waivers PATH` | Path to a general `.kct_waivers.json` sidecar (schema v2) waiving findings for any rule (#4417). Auto-discovered next to the board when omitted |
+| `--courtyard-waivers PATH` | Path to a `.courtyard_waivers.json` sidecar waiving specific courtyard-overlap pairs (#4137). Auto-discovered next to the board when omitted |
 
 **Examples:**
 ```bash

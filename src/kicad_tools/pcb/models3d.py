@@ -643,7 +643,9 @@ def make_library_resolver(
        per-part ``rotate``/``offset`` correction comes from the sidecar's
        object form or the packaged
        :mod:`kicad_tools.pcb.lcsc_model_transforms` table (in that order,
-       merged per field, falling back to identity).
+       merged per field, falling back to identity) — except that a sidecar
+       ``rotate`` may not silently inherit a packaged ``offset`` calibrated
+       under a different rotation, which raises ``ValueError`` (#4636).
 
     Args:
         library_paths: Explicit library location (default: auto-detect).
@@ -713,7 +715,7 @@ def make_library_resolver(
             return None
         # Imported lazily so the module (and the three installed-library tiers)
         # never depend on the LCSC client unless the LCSC tier is actually used.
-        from kicad_tools.pcb.lcsc_model_transforms import lookup_transform
+        from kicad_tools.pcb.lcsc_model_transforms import resolve_merged_transform
         from kicad_tools.pcb.lcsc_models import (
             LcscModelEntry,
             resolve_lcsc_step,
@@ -743,14 +745,12 @@ def make_library_resolver(
             return None
         if lcsc_log is not None:
             lcsc_log[lib_id] = lcsc_id
-        # Per-part transform precedence, merged per field so a sidecar that
-        # overrides only ``rotate`` still inherits a packaged ``offset``:
-        #   per-board sidecar object form > packaged table > identity.
-        packaged = lookup_transform(lcsc_id)
-        packaged_rotate = packaged.rotate if packaged is not None else None
-        packaged_offset = packaged.offset if packaged is not None else None
-        rotate = sidecar_rotate if sidecar_rotate is not None else packaged_rotate
-        offset = sidecar_offset if sidecar_offset is not None else packaged_offset
+        # Per-part transform precedence — per-board sidecar object form >
+        # packaged table > identity — merged per field, except that a sidecar
+        # ``rotate`` may not silently inherit a packaged ``offset`` calibrated
+        # under a different rotation (raises ValueError; see #4636 and the
+        # ``lcsc_model_transforms`` module docstring).
+        rotate, offset = resolve_merged_transform(lcsc_id, lib_id, sidecar_rotate, sidecar_offset)
         if lcsc_transform_log is not None and (rotate is not None or offset is not None):
             lcsc_transform_log[lib_id] = _describe_lcsc_transform(
                 rotate,

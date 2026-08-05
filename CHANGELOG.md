@@ -435,6 +435,28 @@ constructor). No breaking changes.
   copper-dirty branch is now a detail-selection branch rather than a return. Exit
   codes are unaffected — a copper-dirty board already failed (#4616).
 
+- **The crossover legality census spent the budget it was measuring.**
+  `KCT_CROSSTAIL_CENSUS=1` (#4580) is state-neutral but was not budget-neutral:
+  its lattice sweep runs inside the shadow phase's per-pair wall-clock window,
+  so census seconds were deducted from all four downstream deadlines and a
+  census-on run could differ from a census-off run through budget pressure
+  alone. The census now credits its **incremental** cost (the sweep after the
+  first legal candidate; zero when nothing is legal) back to that window and
+  reports it as a `census_s=` field appended to the `[crosstail-census]` header.
+  Default-off arithmetic is bit-identical — the credit is exactly `0.0` when the
+  census is unset (#4635).
+
+- **`kct check` and the CI merge gates could load different net-class-map
+  sidecars.** Stem-keyed sidecar discovery (#4601) reached `kct check` only, so
+  in a directory holding both `<board-stem>.net_class_map.json` and
+  `net_class_map.json` the routed-DRC gate, the match-group gate and the
+  `kct export` report surface all loaded the *other* file — a different rule set
+  for the three gated rules locally than in the gate that guards merge, with no
+  warning on either side. All four consumers now share one stdlib-only probe
+  (`kicad_tools.sidecars`); each keeps its own directory scope, so boards
+  carrying only the bare name (every board in this repo) resolve exactly what
+  they resolved before (#4634).
+
 ### Known limitations
 
 - `silk_over_copper`'s aperture set is **pad-only**: untented via mask openings

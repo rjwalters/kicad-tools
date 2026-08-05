@@ -1,4 +1,13 @@
-"""Argparse-drift regression test (Issues #2817, #2819).
+"""Argparse-drift regression test (Issues #2817, #2819, #4633).
+
+This module guards **two** three-hop parser pairs against the same bug
+class:
+
+* ``route`` -- ``parser.py :: _add_route_parser`` ->
+  ``commands/routing.py :: run_route_command`` -> ``route_cmd.main``.
+* ``check`` -- ``parser.py :: _add_check_parser`` ->
+  ``commands/validation.py :: run_check_command`` -> ``check_cmd.main``
+  (added by #4633; see the ``check``-pair section near the bottom).
 
 This test prevents a recurring class of bug where a flag is added to one
 of the two ``route`` parsers without being added to the other (and to
@@ -36,6 +45,22 @@ why the flag does not belong on the other parser.  In most cases the
 right answer is to add it to BOTH parsers and to the forwarding shim --
 see the ``--per-net-timeout`` block in ``commands/routing.py`` for the
 model pattern.
+
+The ``check`` pair went unguarded until #4633, and had accumulated
+**three** live instances of the bug class in the meantime -- all three
+declared on ``check_cmd.py`` only and rejected by the real ``kct check``
+with ``error: unrecognized arguments``:
+
+* ``--refill-zones`` (#4113, ``d42248ee``) -- entirely unreachable
+  through the ``kct`` entry point despite being advertised in
+  ``CHANGELOG.md`` and ``docs/reference/cli.md``.
+* ``--courtyard-waivers`` (#4137/#4150, ``07fd58f1``) and ``--waivers``
+  (#4417/#4445, ``59e36c47``) -- degraded partially rather than loudly,
+  because both sidecars are auto-discovered next to the board, so only
+  the explicit-path override was unreachable.
+
+#4633 added all three to the outer parser and the shim, so both
+``check`` allowlists below start out empty.
 """
 
 from __future__ import annotations
@@ -542,4 +567,325 @@ def test_fix_drc_threads_manufacturer_into_drc_checker():
     )
     assert kwargs.get("layers") == 4, (
         "_run_python_drc must thread --layers into DRCChecker(layers=...)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ``check`` parser pair (#4633)
+# ---------------------------------------------------------------------------
+#
+# ``kct check`` has the identical three-hop forwarding shape as ``route``:
+#
+#     parser.py :: _add_check_parser
+#         -> commands/validation.py :: run_check_command
+#             -> check_cmd.py :: main
+#
+# and went unguarded until #4633, by which point three flags had drifted
+# (``--refill-zones``, ``--courtyard-waivers``, ``--waivers`` -- see the
+# module docstring).  The allowlists below are DELIBERATELY EMPTY.
+
+# Flags that legitimately exist ONLY on the inner ``check_cmd.py`` parser.
+#
+# Empty by construction: as of #4633 every inner ``check`` flag is also
+# declared on the outer ``kct check`` subparser and forwarded by the shim.
+# A future entry belongs here only if the flag is genuinely internal-only
+# (a debug/profiling/experimental toggle that must NOT be advertised on the
+# ``kct`` surface), and must carry a one-line justification -- exactly like
+# the route ``INNER_ONLY_ALLOWLIST`` entries above.  A user-facing,
+# documented flag is a DRIFT BUG: add it to _add_check_parser and
+# run_check_command instead of allowlisting it.
+INNER_ONLY_CHECK_ALLOWLIST: frozenset[str] = frozenset(set())
+
+# Flags that legitimately exist ONLY on the outer ``kct check`` subparser.
+#
+# Empty by construction, mirroring the route ``OUTER_ONLY_ALLOWLIST``.  A
+# future entry belongs here only if the shim consumes the flag entirely
+# before building ``sub_argv`` (so it is never forwarded and the inner
+# parser has no equivalent), and must carry a one-line justification.
+# Otherwise an outer-only flag parses cleanly and is then silently dropped
+# -- the #2819 failure mode, applied to ``check``.
+OUTER_ONLY_CHECK_ALLOWLIST: frozenset[str] = frozenset(set())
+
+
+def _inner_check_parser_flags(prog: str = "kct check") -> set[str]:
+    """Capture the inner ``check_cmd.main`` parser without parsing argv.
+
+    ``prog`` is parameterised ONLY so the vacuity control below can prove
+    that a wrong prog string fails loudly rather than silently capturing
+    nothing.  Production callers must use the default.
+
+    .. warning::
+
+       The inner check parser's ``prog`` is ``"kct check"``, NOT
+       ``"kicad-tools check"`` (``check_cmd.py`` ``main()``), whereas the
+       inner *route* parser uses ``"kicad-tools route"``.  Copy-pasting
+       ``_inner_route_parser_flags`` and its prog filter here captures
+       nothing.  The hard ``assert`` below is what turns that mistake into
+       a loud failure instead of a permanently-green, vacuous test.
+    """
+    from kicad_tools.cli.check_cmd import main as check_main
+
+    captured: dict[str, argparse.ArgumentParser] = {}
+    real_parse_args = argparse.ArgumentParser.parse_args
+
+    def fake_parse_args(self, *args, **kwargs):
+        if getattr(self, "prog", "") == prog:
+            captured["parser"] = self
+            raise SystemExit(0)
+        return real_parse_args(self, *args, **kwargs)
+
+    with patch.object(argparse.ArgumentParser, "parse_args", fake_parse_args):
+        with pytest.raises(SystemExit):
+            check_main([])
+
+    assert "parser" in captured, (
+        f"failed to capture inner check parser with prog={prog!r} -- "
+        "check_cmd.main's prog string has changed; update "
+        "_inner_check_parser_flags rather than letting this test go vacuous"
+    )
+    return _flags_from_parser(captured["parser"])
+
+
+def test_check_inner_only_flags_are_in_allowlist():
+    """Every flag on the inner check parser must be on the outer one.
+
+    Guards the direction that actually shipped three times (#4113,
+    #4137, #4417): a flag declared on ``check_cmd.py`` only, so
+    ``kct check --flag`` dies with ``error: unrecognized arguments``.
+    """
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    unexpected_inner_only = (inner - outer) - INNER_ONLY_CHECK_ALLOWLIST
+
+    if unexpected_inner_only:
+        flag_list = "\n  ".join(sorted(unexpected_inner_only))
+        pytest.fail(
+            "Argparse drift detected: the following flags are accepted by "
+            "the inner 'check_cmd.py' parser but rejected by the outer "
+            "'kct check' parser:\n  "
+            f"{flag_list}\n\n"
+            "Fix by adding each flag to BOTH:\n"
+            "  1. src/kicad_tools/cli/parser.py :: _add_check_parser\n"
+            "  2. src/kicad_tools/cli/commands/validation.py :: "
+            "run_check_command (forward to sub_argv)\n\n"
+            "Model after the --refill-zones / --waivers blocks added by "
+            "#4633.  If the flag is genuinely internal-only "
+            "(debug/profiling), add it to INNER_ONLY_CHECK_ALLOWLIST in "
+            "tests/test_cli_parser_drift.py with justification."
+        )
+
+
+def test_check_outer_only_flags_are_in_allowlist():
+    """Every flag on the outer check parser must be on the inner one.
+
+    Guards the #2819 direction applied to ``check``: a flag the outer
+    parser accepts but the shim never forwards, so the user-supplied
+    value is silently discarded.
+    """
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    unexpected_outer_only = (outer - inner) - OUTER_ONLY_CHECK_ALLOWLIST
+
+    if unexpected_outer_only:
+        flag_list = "\n  ".join(sorted(unexpected_outer_only))
+        pytest.fail(
+            "Argparse drift detected: the following flags are accepted by "
+            "the outer 'kct check' parser but rejected by the inner "
+            "'check_cmd.py' parser:\n  "
+            f"{flag_list}\n\n"
+            "These flags will be silently dropped by the forwarding shim, "
+            "so any user-supplied value is ignored.  Fix by:\n"
+            "  1. src/kicad_tools/cli/check_cmd.py :: main "
+            "(add matching add_argument)\n"
+            "  2. src/kicad_tools/cli/commands/validation.py :: "
+            "run_check_command (forward to sub_argv)\n\n"
+            "If the flag is genuinely consumed by the shim and "
+            "intentionally never forwarded, add it to "
+            "OUTER_ONLY_CHECK_ALLOWLIST with justification."
+        )
+
+
+def test_check_allowlist_entries_are_actually_inner_only():
+    """Sanity: ``INNER_ONLY_CHECK_ALLOWLIST`` must not go stale.
+
+    Mirrors ``test_allowlist_entries_are_actually_inner_only`` for the
+    check pair, so an allowlisted flag that later gains an outer
+    declaration stops masking future drift for that flag.
+    """
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    stale: set[str] = set()
+    for flag in INNER_ONLY_CHECK_ALLOWLIST:
+        if flag not in inner:
+            stale.add(f"{flag} (not on inner parser at all)")
+        elif flag in outer:
+            stale.add(f"{flag} (now on outer parser -- remove from allowlist)")
+
+    if stale:
+        entries = "\n  ".join(sorted(stale))
+        pytest.fail(
+            "Stale entries in INNER_ONLY_CHECK_ALLOWLIST:\n  "
+            f"{entries}\n\n"
+            "Remove these entries from tests/test_cli_parser_drift.py."
+        )
+
+
+def test_check_allowlist_entries_are_actually_outer_only():
+    """Sanity: ``OUTER_ONLY_CHECK_ALLOWLIST`` must not go stale."""
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    stale: set[str] = set()
+    for flag in OUTER_ONLY_CHECK_ALLOWLIST:
+        if flag not in outer:
+            stale.add(f"{flag} (not on outer parser at all)")
+        elif flag in inner:
+            stale.add(f"{flag} (now on inner parser -- remove from allowlist)")
+
+    if stale:
+        entries = "\n  ".join(sorted(stale))
+        pytest.fail(
+            "Stale entries in OUTER_ONLY_CHECK_ALLOWLIST:\n  "
+            f"{entries}\n\n"
+            "Remove these entries from tests/test_cli_parser_drift.py."
+        )
+
+
+def test_inner_check_parser_capture_is_not_vacuous():
+    """Negative control for the ``prog``-string trap (#4633).
+
+    The inner check parser uses ``prog="kct check"`` while the outer
+    subparser inherits ``"kicad-tools check"``.  A filter on the wrong
+    prog would capture nothing; depending on how the helper is written
+    that either fails loudly or degrades into comparing a set against
+    itself (a permanently-green test).  This pins the loud behaviour:
+
+    1. the default capture returns a non-empty flag set, and
+    2. a wrong prog string raises ``AssertionError``, it does not
+       silently return an empty set.
+    """
+    inner = _inner_check_parser_flags()
+    assert inner, "inner check parser capture returned an empty flag set"
+    # A few flags that have been on the inner parser since long before
+    # #4633 -- if these vanish, the capture is looking at the wrong parser.
+    assert {"--errors-only", "--strict", "--layers"} <= inner, (
+        f"inner check capture looks wrong; got {sorted(inner)}"
+    )
+
+    with pytest.raises(AssertionError, match="failed to capture inner check parser"):
+        _inner_check_parser_flags(prog="kicad-tools check")
+
+
+def test_no_net_class_map_is_on_both_check_parsers():
+    """Direct regression pin for #4601 / PR #4629.
+
+    ``--no-net-class-map`` is the flag whose Judge review surfaced the
+    missing ``check`` guard (#4633).  It is correct on both parsers
+    today; pin it so it cannot drift.
+    """
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    assert "--no-net-class-map" in inner, (
+        "--no-net-class-map is missing from the inner check_cmd.py parser "
+        "(this would regress #4601)"
+    )
+    assert "--no-net-class-map" in outer, (
+        "--no-net-class-map is missing from the outer parser.py check "
+        "subparser (this would regress #4601)"
+    )
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--refill-zones", "--courtyard-waivers", "--waivers"],
+)
+def test_drifted_check_flags_are_on_both_parsers(flag):
+    """Direct regression pins for the three drift instances fixed by #4633.
+
+    Each was declared on ``check_cmd.py`` only and rejected by the real
+    ``kct check`` CLI:  ``--refill-zones`` (#4113) was entirely
+    unreachable; ``--courtyard-waivers`` (#4137) and ``--waivers``
+    (#4417) lost only their explicit-path override because both sidecars
+    are auto-discovered next to the board.
+    """
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    assert flag in inner, f"{flag} is missing from the inner check_cmd.py parser"
+    assert flag in outer, (
+        f"{flag} is missing from the outer parser.py check subparser "
+        "(this would regress #4633 -- `kct check` would reject it with "
+        "'unrecognized arguments')"
+    )
+
+
+def test_check_shim_forwards_drifted_flags_to_inner_main():
+    """The shim must actually forward the #4633 flags, not just parse them.
+
+    Declaring the flags on the outer parser alone would fix the
+    ``unrecognized arguments`` error while still discarding the value --
+    the #2819 failure mode.  This drives the real
+    ``create_parser() -> run_check_command`` path and asserts the flags
+    and their values land in the argv handed to ``check_cmd.main``.
+    """
+    from kicad_tools.cli.commands.validation import run_check_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(
+        [
+            "check",
+            "board.kicad_pcb",
+            "--refill-zones",
+            "--courtyard-waivers",
+            "/tmp/cw.json",
+            "--waivers",
+            "/tmp/w.json",
+        ]
+    )
+
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        assert run_check_command(args) == 0
+
+    assert inner_main.call_count == 1
+    sub_argv = inner_main.call_args[0][0]
+
+    assert "--refill-zones" in sub_argv, f"run_check_command dropped --refill-zones; got {sub_argv}"
+    for opt, value in (
+        ("--courtyard-waivers", "/tmp/cw.json"),
+        ("--waivers", "/tmp/w.json"),
+    ):
+        assert opt in sub_argv, f"run_check_command dropped {opt}; got {sub_argv}"
+        assert sub_argv[sub_argv.index(opt) + 1] == value, (
+            f"run_check_command forwarded {opt} without its value; got {sub_argv}"
+        )
+
+
+def test_check_shim_omits_drifted_flags_when_unset():
+    """Absent flags must not be forwarded (default behaviour preserved).
+
+    Note the value-bearing flags use a truthiness guard, matching the
+    existing ``--net-class-map`` block: an empty-string path is treated
+    as "not supplied" rather than forwarded as ``--waivers ''``.
+    """
+    from kicad_tools.cli.commands.validation import run_check_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["check", "board.kicad_pcb"])
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        run_check_command(args)
+    sub_argv = inner_main.call_args[0][0]
+    for opt in ("--refill-zones", "--courtyard-waivers", "--waivers"):
+        assert opt not in sub_argv, f"{opt} forwarded even though it was not supplied"
+
+    args = create_parser().parse_args(["check", "board.kicad_pcb", "--waivers", ""])
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        run_check_command(args)
+    sub_argv = inner_main.call_args[0][0]
+    assert "--waivers" not in sub_argv, (
+        "an empty --waivers path should be treated as absent (matching the "
+        f"--net-class-map truthiness guard); got {sub_argv}"
     )
