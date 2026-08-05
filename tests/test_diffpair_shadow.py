@@ -4729,23 +4729,68 @@ def test_crossing_tail_census_counts_the_whole_legal_set(monkeypatch, capsys):
     assert int(legal) > 1, "an unobstructed lattice has many legal candidates"
 
 
+def _complete_census_listing(monkeypatch, capsys, *, foreign_pad: bool) -> list[str]:
+    """Census the crossing-tail fixture with NOTHING truncated (issue #4637).
+
+    The per-candidate listing is capped at ``_CROSSTAIL_CENSUS_LIST`` = 12 and
+    the fixture's open lattice yields 135 legal candidates, so a membership
+    assertion over the printed listing is otherwise a statement about a
+    penalty-ranked PREFIX -- it holds only while the candidate of interest
+    happens to rank in the top 12, and goes vacuous with no failure signal the
+    moment the sort key, the lattice or the fixture geometry shifts.  Raising
+    the cap past the whole 225-pair lattice makes the listing the complete
+    legal set, and asserting the truncation notice is ABSENT keeps
+    "the listing is complete" a checked fact rather than an assumption a
+    larger lattice could silently invalidate.
+    """
+    import kicad_tools.router.diffpair_routing as dpr_mod
+
+    _census_on(monkeypatch)
+    monkeypatch.setattr(dpr_mod, "_CROSSTAIL_CENSUS_LIST", 10_000)
+    dpr = _crossing_router()
+    _register_unrouted_neighbour(dpr)
+    if foreign_pad:
+        dpr.autorouter.grid.add_pad(_pad_at(8.0, 4.4, net=99, name="OTHER"))
+
+    assert _crossing_tail(dpr) is not None
+
+    lines = _census_lines(capsys)
+    assert not any("not listed" in line for line in lines), (
+        "the listing must not truncate here -- a truncated listing makes the "
+        "membership assertions rank-dependent again"
+    )
+    listed = [line for line in lines if "v2=" in line]
+    assert listed, "the census must list the legal candidates it found"
+    return listed
+
+
 def test_crossing_tail_census_never_lists_a_candidate_a_gate_rejected(monkeypatch, capsys):
     """The census reports legality, so it must apply every gate, not skip them.
 
     The site at ``(8.0, 4.4)`` is covered by a foreign pad ON THE GRID, so the
     #4571 pad screen vetoes it; a census that enumerated candidates instead of
     validating them would happily list it.
+
+    Issue #4637: stated DIFFERENTIALLY and over the COMPLETE legal set.  An
+    absence-only assertion cannot tell "the gate rejected it" from "the fixture
+    never produced it", and an absence over the truncated 12-of-135 listing is
+    additionally hostage to where the site ranks.  The positive control -- the
+    same site IS censused once the vetoing pad is gone -- pins the fixture, and
+    the uncapped listing makes the negative rank-independent.
     """
-    _census_on(monkeypatch)
-    dpr = _crossing_router()
-    _register_unrouted_neighbour(dpr)
-    dpr.autorouter.grid.add_pad(_pad_at(8.0, 4.4, net=99, name="OTHER"))
+    site = "v2=(8.00000,4.40000)"
 
-    assert _crossing_tail(dpr) is not None
+    rejected = _complete_census_listing(monkeypatch, capsys, foreign_pad=True)
+    assert not any(site in line for line in rejected), (
+        "the #4571 pad screen vetoed this site, so the census must not list it"
+    )
 
-    listed = [line for line in _census_lines(capsys) if "v2=" in line]
-    assert listed, "the census must list the legal candidates it found"
-    assert not any("v2=(8.00000,4.40000)" in line for line in listed)
+    admitted = _complete_census_listing(monkeypatch, capsys, foreign_pad=False)
+    assert any(site in line for line in admitted), (
+        "positive control: without the vetoing pad the fixture DOES produce "
+        "this site -- its absence above is the gate, not a missing candidate"
+    )
+    assert len(rejected) < len(admitted), "the pad must shrink the legal set"
 
 
 def test_crossing_tail_census_reports_a_singleton_via_site_lattice(capsys):
