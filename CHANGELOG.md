@@ -297,6 +297,15 @@ constructor). No breaking changes.
   additionally threw board 07's 9-pin header 20.32 mm off the board edge.
   Co-oriented footprints compute θ ≈ 0 and are byte-identical (#4448, #4583).
 
+- **A sidecar `rotate` could silently inherit a frame-mismatched packaged
+  `offset`.** A packaged LCSC transform's `offset` is a post-rotation
+  translation, meaningful only under the `rotate` it was calibrated with — but
+  the per-field sidecar/table merge let a board sidecar override `rotate` alone
+  and keep that offset, producing a plausibly-placed, quietly-wrong body. The
+  merge now rejects the split with an error naming the stale components and
+  both remedies; restating `offset` in the sidecar (including an explicit
+  `[0, 0, 0]`) wins the merge and clears it (#4636).
+
 - **Routing was nondeterministic from a dangling C++ grid reference.** The
   nanobind pathfinder constructors stored the incoming `Grid3D` as a bare C++
   reference with no keep-alive policy, so in the common
@@ -366,6 +375,14 @@ constructor). No breaking changes.
   depended on glob order; references are now merged per rule id and
   `explain(context={"manufacturer": ...})` resolves deterministically
   (#4491, #4502).
+
+- **Three `kct check` flags were declared but unreachable.** `--refill-zones`,
+  `--waivers`, and `--courtyard-waivers` existed on the inner check command but
+  were never declared on the outer `kct check` subparser, so the documented
+  `--refill-zones` was rejected outright and the two waiver-path overrides
+  silently fell back to sidecar auto-discovery. All three now reach the inner
+  command, and the route-parser drift guard is extended to the check parser
+  pair (both allowlists empty) so the class cannot recur (#4633).
 
 - **`kct build-native` could contradict `--check` seconds later.** Post-build
   verification ran in the process that had just done the build, which cannot
