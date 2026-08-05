@@ -30,6 +30,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
+from kicad_tools.analysis.routing_quality import (
+    FRAGMENT_LENGTH_MM,
+    STAIRCASE_STEP_MM,
+    RoutingQualityMetrics,
+    compute_routing_quality,
+)
 from kicad_tools.manufacturers import get_manufacturer_ids, get_profile
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
@@ -1036,6 +1042,44 @@ def print_meta_check_stanza(result: MetaCheckResult, verbose: bool = False) -> N
     print(f"{'Overall:':10} {result.overall}")
 
 
+def print_routing_quality_stanza(metrics: RoutingQualityMetrics) -> None:
+    """Print the advisory routing-quality stanza (issue #4623).
+
+    Purely descriptive: these numbers never contribute to the verdict,
+    exit code, or meta rollup -- including under ``--strict``.  Printed
+    after the meta-check stanza in the default (meta) mode only; skipped
+    under ``--drc-only`` to preserve the legacy stdout contract (#3750),
+    mirroring how ``meta_checks`` is omitted.
+    """
+    pct_base = metrics.total_segments - metrics.zero_length_count
+
+    def pct(count: int) -> str:
+        return f"{100.0 * count / pct_base:.1f}%" if pct_base else "0.0%"
+
+    print()
+    print("Routing quality (advisory):")
+    print(
+        f"  Segments:     {metrics.total_segments} across "
+        f"{metrics.nets_with_copper} net(s) ({metrics.segments_per_net:.1f}/net)"
+    )
+    print(f"  Median length: {metrics.median_length_mm:.3f} mm")
+    print(
+        f"  Fragments (<{FRAGMENT_LENGTH_MM} mm): "
+        f"{metrics.fragment_count} ({pct(metrics.fragment_count)})"
+    )
+    print(
+        f"  Direction:    orthogonal {metrics.orthogonal_count} "
+        f"({pct(metrics.orthogonal_count)}) / 45-deg {metrics.diagonal_45_count} "
+        f"({pct(metrics.diagonal_45_count)}) / off-axis {metrics.off_axis_count} "
+        f"({pct(metrics.off_axis_count)})"
+    )
+    print(
+        f"  Staircase steps (<{STAIRCASE_STEP_MM} mm legs): "
+        f"{metrics.staircase_step_count} ({pct(metrics.staircase_step_count)})"
+    )
+    print(f"  Zero-length:  {metrics.zero_length_count}")
+
+
 CHECK_CATEGORIES = [
     "ampacity",
     "clearance",
@@ -1969,24 +2013,61 @@ def main(argv: list[str] | None = None) -> int:
             strict=args.strict,
         )
 
+    # Issue #4623: advisory routing-quality metrics.  Computed only in meta
+    # mode -- skipped entirely under --drc-only to keep the legacy stdout
+    # and on-disk JSON contracts byte-identical (#3750), mirroring how
+    # ``meta_checks`` is omitted.  Advisory ONLY: the metrics never change
+    # the verdict, exit code, or meta rollup (including under --strict);
+    # a metrics crash degrades to a stderr warning, never a failed check.
+    routing_quality: RoutingQualityMetrics | None = None
+    if not drc_only:
+        try:
+            routing_quality = compute_routing_quality(pcb)
+        except Exception as exc:
+            print(
+                f"Warning: routing-quality metrics unavailable ({exc}); "
+                "continuing without the advisory stanza",
+                file=sys.stderr,
+            )
+    routing_quality_dict = routing_quality.to_dict() if routing_quality is not None else None
+
     # Output results
     if args.format == "json":
-        output_json(violations, results, pcb_path, effective_mfr, layers, meta=meta)
+        output_json(
+            violations,
+            results,
+            pcb_path,
+            effective_mfr,
+            layers,
+            meta=meta,
+            routing_quality=routing_quality_dict,
+        )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
         if meta is not None:
             print_meta_check_stanza(meta, args.verbose)
+        if routing_quality is not None:
+            print_routing_quality_stanza(routing_quality)
     else:
         output_table(violations, results, pcb_path, effective_mfr, layers, args.verbose)
         if meta is not None:
             print_meta_check_stanza(meta, args.verbose)
+        if routing_quality is not None:
+            print_routing_quality_stanza(routing_quality)
 
     # Write JSON report to file if --output specified
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         write_json_report(
-            violations, results, pcb_path, effective_mfr, layers, output_path, meta=meta
+            violations,
+            results,
+            pcb_path,
+            effective_mfr,
+            layers,
+            output_path,
+            meta=meta,
+            routing_quality=routing_quality_dict,
         )
 
     # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
@@ -2581,6 +2662,7 @@ def output_json(
     mfr: str,
     layers: int,
     meta: MetaCheckResult | None = None,
+    routing_quality: dict | None = None,
 ) -> None:
     """Output violations as JSON.
 
@@ -2589,6 +2671,10 @@ def output_json(
     ``summary.passed`` / ``summary.errors`` / ``violations`` are
     unaffected.  Under ``--drc-only`` the ``meta`` parameter is ``None``
     and the field is omitted (``OMIT-when-absent`` convention).
+
+    Issue #4623: ``routing_quality`` (a ``RoutingQualityMetrics.to_dict()``
+    payload) follows the same convention -- emitted as a top-level key in
+    meta mode, omitted under ``--drc-only``.
     """
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = sum(1 for v in violations if v.is_warning)
@@ -2627,6 +2713,8 @@ def output_json(
     }
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
+    if routing_quality is not None:
+        data["routing_quality"] = routing_quality
     print(json.dumps(data, indent=2))
 
 
@@ -2638,12 +2726,16 @@ def write_json_report(
     layers: int,
     output_path: Path,
     meta: MetaCheckResult | None = None,
+    routing_quality: dict | None = None,
 ) -> None:
     """Write DRC results as a JSON report file.
 
     Issue #3750: ``meta_checks`` is added to the envelope when meta-mode
     is active.  Omitted under ``--drc-only`` to preserve the legacy
     on-disk schema.
+
+    Issue #4623: ``routing_quality`` follows the same OMIT-when-absent
+    convention (present in meta mode, omitted under ``--drc-only``).
     """
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = sum(1 for v in violations if v.is_warning)
@@ -2676,6 +2768,8 @@ def write_json_report(
     }
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
+    if routing_quality is not None:
+        data["routing_quality"] = routing_quality
     output_path.write_text(json.dumps(data, indent=2) + "\n")
 
 

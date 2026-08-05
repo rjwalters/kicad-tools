@@ -17,6 +17,17 @@ constructor). No breaking changes.
 
 ### Added
 
+- **Advisory routing-quality metrics in `kct check`** — a new pure
+  `kicad_tools.analysis.routing_quality` module measures segment-length
+  distribution (median, sub-0.25 mm fragments), direction classes
+  (orthogonal / true-45° / off-axis), H/V staircase steps (< 0.6 mm legs),
+  zero-length segments, and per-net segment counts over the board's copper.
+  Default `kct check` prints a "Routing quality (advisory)" stanza after the
+  meta-check rollup and the JSON/`--output` envelopes gain a top-level
+  `routing_quality` object; strictly advisory — never affects the verdict or
+  exit code (even under `--strict`), no new flags, and `--drc-only` output is
+  unchanged (#4623).
+
 - **`kct route --complete`** — a targeted completion pass: auto-detect the
   still-unconnected signal nets and route only those links, with all other
   copper fixed, on the octilinear lattice engine. Implies `--preserve-existing`
