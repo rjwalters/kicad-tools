@@ -27,10 +27,13 @@ WITHOUT changing the standalone-CLI no-op contract:
   implementation.
 * :func:`resolve_net_class_map_sidecar` -- a context manager that yields a
   filesystem path suitable for ``--net-class-map``.  It prefers a committed
-  ``net_class_map.json`` sidecar next to the routed PCB (board 07 has one);
-  when none exists (board 06 does NOT commit one) it falls back to
-  in-process derivation, serialising the derived map to a temporary file
-  that is cleaned up on exit.
+  sidecar next to the routed PCB (board 07 has one) -- either the
+  stem-keyed ``<pcb_stem>.net_class_map.json`` or the bare
+  ``net_class_map.json``, resolved by the shared
+  :mod:`kicad_tools.sidecars` helper so this gate and ``kct check`` can
+  never load different files (Issue #4634); when none exists (board 06
+  does NOT commit one) it falls back to in-process derivation, serialising
+  the derived map to a temporary file that is cleaned up on exit.
 
 The standalone ``kct check`` behaviour is unchanged: the no-op contract
 lives in the DRC rules, and this module only affects what the CI gates
@@ -49,9 +52,23 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-# Canonical name of the committed sidecar a board's generate_design.py may
-# emit next to its routed PCB (Phase 3M pattern; board 07 emits one).
-SIDECAR_FILENAME = "net_class_map.json"
+# Issue #4634: the sidecar *filename* rules are shared with ``kct check``
+# and the ``kct export`` report surface via the stdlib-only leaf module
+# ``kicad_tools.sidecars``.  Unlike ``count_blocking_errors``' deliberately
+# lazy ``DRCChecker`` import below, this one is module level because
+# ``SIDECAR_FILENAME`` is a module-level constant other modules and tests
+# import.  ``scripts/ci`` -> ``kicad_tools`` is the established direction
+# (never the reverse: ``scripts/ci`` has no ``__init__.py`` and is excluded
+# from the wheel), and these gates always run under ``uv run``.
+from kicad_tools.sidecars import (
+    NET_CLASS_MAP_SIDECAR_BASENAME,
+    first_existing_net_class_map_sidecar,
+)
+
+# Canonical *bare* name of the committed sidecar a board's generate_design.py
+# may emit next to its routed PCB (Phase 3M pattern; board 07 emits one).
+# Re-exported under the historical name so importers keep working.
+SIDECAR_FILENAME = NET_CLASS_MAP_SIDECAR_BASENAME
 
 
 def count_blocking_errors(data: dict[str, Any]) -> tuple[int, dict[str, int]]:
@@ -219,10 +236,17 @@ def resolve_net_class_map_sidecar(pcb_path: Path) -> Iterator[Path | None]:
 
     Resolution order (Issue #3151, Option B):
 
-    1. **Committed sidecar** -- if ``<pcb_dir>/net_class_map.json`` exists
-       (board 07's ``generate_design.py`` emits one), yield it directly.
-       This is the same sidecar the board's in-pipeline ``run_drc`` uses,
-       so the CI gate counts exactly what ``generate_design.py`` counts.
+    1. **Committed sidecar** -- if a committed sidecar exists in
+       ``<pcb_dir>`` (board 07's ``generate_design.py`` emits one), yield
+       it directly.  This is the same sidecar the board's in-pipeline
+       ``run_drc`` uses, so the CI gate counts exactly what
+       ``generate_design.py`` counts.  Both accepted filenames are probed
+       in the shared order -- stem-keyed
+       ``<pcb_stem>.net_class_map.json`` first, then the bare
+       ``net_class_map.json`` -- so this gate can never load a different
+       file than ``kct check`` does (Issue #4634).  The **directory**
+       scope is unchanged and deliberately narrower than ``kct check``'s:
+       the PCB's own directory only.
     2. **In-process derivation** -- otherwise import the board's
        ``generate_design.build_net_class_map()`` and serialise the result
        to a temporary JSON file (board 06 has no committed sidecar).  The
@@ -241,8 +265,8 @@ def resolve_net_class_map_sidecar(pcb_path: Path) -> Iterator[Path | None]:
     pcb_path = Path(pcb_path)
 
     # (1) Prefer a committed sidecar adjacent to the routed PCB.
-    committed = pcb_path.resolve().parent / SIDECAR_FILENAME
-    if committed.is_file():
+    committed = first_existing_net_class_map_sidecar([pcb_path.resolve().parent], pcb_path.stem)
+    if committed is not None:
         yield committed
         return
 

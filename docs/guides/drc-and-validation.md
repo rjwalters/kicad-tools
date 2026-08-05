@@ -156,6 +156,23 @@ short-circuits the probe entirely. An auto-discovered sidecar that fails to
 parse degrades gracefully (`WARNING: ignoring malformed net-class-map sidecar
 …`, then continue with no map); an explicit one that fails is a hard error.
 
+**The probe order is shared, not a `kct check` feature.** The accepted
+filenames and their in-directory precedence live in one place —
+`kicad_tools/sidecars.py` — and all four sidecar consumers use it: `kct check`,
+the routed-DRC CI gate (`scripts/ci/check_routed_drc.py` via
+`net_class_map_resolver.py`), the match-group CI gate
+(`scripts/ci/check_matchgroup_coverage.py`) and the `kct export` report surface
+(`kicad_tools/report/net_class_map.py`). A directory holding both filename
+forms therefore resolves to the *same* file everywhere, so a board cannot be
+checked against one rule set locally and a different one by the gate that
+guards merge.
+
+What is **not** shared is how many directories each consumer searches, and that
+is deliberate. `kct check` walks the three directories listed above; the two CI
+gates and the report surface each search exactly one (`<pcb-dir>` for the
+routed-DRC gate and the report, `<board-dir>/output` for the match-group gate).
+Widening any of them would change which sidecar a board resolves.
+
 Pass `--no-net-class-map` to suppress auto-discovery and restore the
 historical no-sidecar behaviour — useful when a stale sidecar sits beside the
 board. Combining it with `--net-class-map` is a usage error. When no sidecar is
@@ -164,10 +181,14 @@ exact paths that were probed, or says that discovery was turned off.
 
 **CI resolves the map automatically.** The strict routed-PCB DRC gate
 (`scripts/ci/check_routed_drc.py`) is net-class-map-aware: it prefers a
-committed `net_class_map.json` next to the routed PCB and, for boards that
-don't commit one (e.g. board 06), derives it in-process from the board's
-`build_net_class_map()`. This keeps the CI gate's error count in parity with
-the in-pipeline DRC while leaving the standalone `kct check` no-op contract
+committed sidecar next to the routed PCB — accepting **both** filename forms in
+the same order `kct check` uses, stem-keyed
+`<board-stem>.net_class_map.json` first and bare `net_class_map.json` second —
+and, for boards that don't commit one (e.g. board 06), derives it in-process
+from the board's `build_net_class_map()`. The match-group gate
+(`scripts/ci/check_matchgroup_coverage.py`) accepts the same two names in
+`<board-dir>/output`. This keeps the CI gates' error counts in parity with the
+in-pipeline DRC while leaving the standalone `kct check` no-op contract
 unchanged.
 
 ## CLI: Compare Manufacturer Rules

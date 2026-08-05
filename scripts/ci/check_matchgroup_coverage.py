@@ -85,6 +85,16 @@ this gate and ``check_routed_drc.py`` compare the *same* count against the
 read the raw ``summary.errors`` integer (advisory ``connectivity`` errors
 included), which diverged from ``check_routed_drc.py``'s blocking-only
 count and forced the shared floor up to absorb the difference.
+
+Exception (Issue #4634): the net-class-map sidecar *filename* probe is
+likewise no longer duplicated -- ``find_net_class_map_sidecar`` delegates
+the name set and their in-directory precedence to
+``kicad_tools.sidecars``.  Four copies of that probe had drifted apart
+after #4601/PR #4629 taught ``kct check`` about the stem-keyed
+``<pcb_stem>.net_class_map.json`` name, so this gate could have passed a
+different sidecar to ``kct check`` than a developer's local ``kct check``
+would have auto-discovered.  The directory this gate searches
+(``board_dir/output``) is unchanged.
 """
 
 from __future__ import annotations
@@ -97,6 +107,15 @@ import sys
 from pathlib import Path
 
 import yaml
+
+# Issue #4634: the sidecar filename rules are shared with ``kct check``, the
+# routed-DRC gate and the ``kct export`` report surface via the stdlib-only
+# leaf module ``kicad_tools.sidecars``, so no two of them can resolve
+# different files for the same board.
+from kicad_tools.sidecars import (
+    first_existing_net_class_map_sidecar,
+    net_class_map_sidecar_names,
+)
 
 # Issue #4008: import the single shared blocking-error counter so this gate
 # and ``check_routed_drc.py`` agree on the count they gate against.
@@ -324,8 +343,8 @@ def find_routed_pcb(board_dir: Path) -> Path | None:
     return candidates[0]
 
 
-def find_net_class_map_sidecar(board_dir: Path) -> Path | None:
-    """Locate the board's ``net_class_map.json`` sidecar.
+def find_net_class_map_sidecar(board_dir: Path, routed_pcb: Path) -> Path | None:
+    """Locate the board's net-class-map sidecar.
 
     The Phase 3L scaffolding (Issue #2724) emits the sidecar from
     ``generate_design.write_sidecar()`` during the route step, so the
@@ -333,10 +352,21 @@ def find_net_class_map_sidecar(board_dir: Path) -> Path | None:
     is mandatory for the ``match_group_length_skew`` rule to fire under
     standalone ``kct check`` -- without it the rule degrades to a no-op
     (see ``MatchGroupLengthSkewRule`` docstring).
+
+    Issue #4634: both accepted filenames are probed in the shared order
+    (stem-keyed ``<pcb_stem>.net_class_map.json`` first, then the bare
+    ``net_class_map.json``) via :mod:`kicad_tools.sidecars`, so this gate
+    can never resolve a different file than the ``kct check`` invocation
+    it goes on to gate.  The **directory** scope is unchanged:
+    ``board_dir/output`` only.
+
+    Args:
+        board_dir: The board directory (``boards/NN-name``).
+        routed_pcb: The routed PCB the sidecar must describe -- supplies
+            the exact stem for the stem-keyed candidate.  The caller
+            already holds it from :func:`find_routed_pcb`.
     """
-    out = board_dir / "output"
-    sidecar = out / "net_class_map.json"
-    return sidecar if sidecar.is_file() else None
+    return first_existing_net_class_map_sidecar([board_dir / "output"], routed_pcb.stem)
 
 
 def _import_module_from_path(module_name: str, path: Path):
@@ -662,15 +692,17 @@ def check_board(
         )
         return 1
 
-    sidecar = find_net_class_map_sidecar(board_dir)
+    sidecar = find_net_class_map_sidecar(board_dir, routed_pcb)
     if sidecar is None:
+        expected = " or ".join(
+            f"{board_dir}/output/{name}" for name in net_class_map_sidecar_names(routed_pcb.stem)
+        )
         annotate_error(
             str(board_dir),
             (
-                "No net_class_map.json sidecar found in board output dir; "
+                "No net-class-map sidecar found in board output dir; "
                 "the match_group_length_skew rule will degrade to a no-op "
-                "without it.  Expected at "
-                f"{board_dir}/output/net_class_map.json (emitted by "
+                f"without it.  Expected at {expected} (emitted by "
                 "generate_design.write_sidecar)."
             ),
         )

@@ -32,6 +32,7 @@ from typing import Literal
 
 from kicad_tools.manufacturers import get_manufacturer_ids, get_profile
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.sidecars import net_class_map_sidecar_candidates
 from kicad_tools.sync.discover import resolve_target_fab_for_pcb
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
 
@@ -322,46 +323,20 @@ def _net_class_map_sidecar_candidates(pcb_path: Path) -> list[Path]:
     so the "rules are INACTIVE" warning can name the paths that were
     *actually* searched instead of an invented ``output/…`` example.
 
-    Two filename conventions are probed in each directory:
-
-    - ``<pcb_stem>.net_class_map.json`` -- the stem-keyed sidecar
-      convention used by hand-maintained board trees that keep several
-      revisions side by side (``board_v24.kicad_pcb`` next to
-      ``board_v24.net_class_map.json``).
-    - ``net_class_map.json`` -- the bare name written by ``kct route``
-      (Issue #3917 Defect 1 / #4428).
-
-    Ordering is deliberate: within a directory the **stem-keyed** name
-    wins (it is evidence about *this* board, not a generic file), and
-    nearer directories win over farther ones (the pre-#4601
-    ``pcb_dir`` -> ``pcb_dir/output`` -> ``pcb_dir.parent/output``
-    order is preserved).
-
-    The stem must match **exactly**: no globbing and no un-suffixing
-    heuristics.  A directory holding ``board_v23.net_class_map.json``
-    and ``board_v24.net_class_map.json`` must never apply v23's
-    constraints to a v24 board, and ``board_routed.kicad_pcb`` looks
-    only for ``board_routed.net_class_map.json``.
+    Issue #4634 hoisted the probe itself into
+    :mod:`kicad_tools.sidecars` so the three sibling consumers (the two
+    CI merge gates and the ``kct export`` report surface) resolve the
+    same filenames in the same order; this remains a thin alias so both
+    call sites and the warning surface are unchanged.  See
+    :func:`kicad_tools.sidecars.net_class_map_sidecar_candidates` for
+    the probe order and the exact-stem contract.
 
     Returns:
         Candidate paths in probe order, de-duplicated (the
         ``<board>/output/<pcb>`` layout makes ``pcb_dir`` and
         ``pcb_dir.parent/output`` the same directory).
     """
-    pcb_dir = pcb_path.parent
-    names = [f"{pcb_path.stem}.net_class_map.json", "net_class_map.json"]
-    directories = [pcb_dir, pcb_dir / "output", pcb_dir.parent / "output"]
-
-    candidates: list[Path] = []
-    seen: set[Path] = set()
-    for directory in directories:
-        for name in names:
-            candidate = directory / name
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            candidates.append(candidate)
-    return candidates
+    return net_class_map_sidecar_candidates(pcb_path)
 
 
 def _discover_net_class_map_sidecar(pcb_path: Path) -> Path | None:

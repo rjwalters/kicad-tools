@@ -85,6 +85,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copper-dirty branch is now a detail-selection branch rather than a return. Exit
   codes are unaffected — a copper-dirty board already failed (#4616).
 
+- **`kct check` and the CI merge gates could load different net-class-map
+  sidecars.** Stem-keyed sidecar discovery (#4601) reached `kct check` only, so
+  in a directory holding both `<board-stem>.net_class_map.json` and
+  `net_class_map.json` the routed-DRC gate, the match-group gate and the
+  `kct export` report surface all loaded the *other* file — a different rule set
+  for the three gated rules locally than in the gate that guards merge, with no
+  warning on either side. All four consumers now share one stdlib-only probe
+  (`kicad_tools.sidecars`); each keeps its own directory scope, so boards
+  carrying only the bare name (every board in this repo) resolve exactly what
+  they resolved before (#4634).
+
 ### Known limitations
 
 - `silk_over_copper`'s aperture set is **pad-only**: untented via mask openings
