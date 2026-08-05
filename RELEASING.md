@@ -5,10 +5,11 @@ for every release. It exists to keep releases consistent with `main` branch
 protection: every commit reaches `main` through a pull request, including the
 version-bump commit.
 
-> **TL;DR** — Branch → bump commit + CHANGELOG → PR → auto-merge → `git fetch`
-> → annotated tag on the **merged `main` SHA** → push the tag. The tag is
-> created **only after** the bump commit is on `main`. Never push the
-> version-bump commit directly to `main`.
+> **TL;DR** — Reconcile the CHANGELOG (`scripts/changelog_gap_report.py`) →
+> branch → bump commit + CHANGELOG → PR → auto-merge → `git fetch` → annotated
+> tag on the **merged `main` SHA** → push the tag. The tag is created **only
+> after** the bump commit is on `main`. Never push the version-bump commit
+> directly to `main`.
 
 ## Why PR-based (not a direct push)
 
@@ -46,6 +47,35 @@ uniform rule.
 ## The release sequence
 
 Let `X.Y.Z` be the new version.
+
+### (0) Reconcile `CHANGELOG.md` against `git log <last-tag>..main`
+
+**Do this before the bump commit, not during it.** Nothing forces a CHANGELOG
+entry at PR time, so `[Unreleased]` drifts silently: between `v0.19.0` and
+2026-08-05 it documented 6 of 87 user-visible commits (#4638). Reconstructing
+two weeks of history *while* cutting a release is how a permanently wrong
+changelog ships — the tag is irrevocable once `publish.yml` uploads to PyPI.
+
+Run the gap report; it exits non-zero and names every undocumented issue:
+
+```bash
+uv run python scripts/changelog_gap_report.py            # since the latest v* tag
+uv run python scripts/changelog_gap_report.py --since v0.19.0 --json
+```
+
+The script walks `git log <tag>..HEAD`, resolves each commit to the **issue**
+number it addresses (closing keyword → `feature/issue-<N>` branch name →
+`Part of #N`), classifies user-visible vs. internal from the conventional-commit
+subject prefix, and prints the user-visible issues that `[Unreleased]` does not
+cite. Close every gap it reports — by writing a thematic `[Unreleased]` bullet,
+or, for a commit that changes nothing a package consumer observes, by adding an
+entry with its rationale to `INTERNAL_ISSUES` / `INTERNAL_COMMITS` in the
+script. **Do not** rename `[Unreleased]` to `[X.Y.Z]` yet; that happens in (a).
+
+> Note the trailing `(#NNNN)` in a squash-merge subject is the **PR** number.
+> CHANGELOG entries cite **issue** numbers — do not read them off subjects.
+
+A clean run ends with `RESULT: gap set is empty` and exit 0. Only then proceed.
 
 ### (a) Create a release branch with the bump commit
 
@@ -150,6 +180,8 @@ the merge — load-bearing.
 
 ## Quick checklist
 
+- [ ] `uv run python scripts/changelog_gap_report.py` exits 0 with an empty gap
+      set (step (0)) — run this *before* the bump commit.
 - [ ] Version bumped in `pyproject.toml`; `uv.lock` regenerated to match.
 - [ ] CHANGELOG entry added for `X.Y.Z`.
 - [ ] Confirmed `pyproject.toml` is authoritative (ignore the `package.json`

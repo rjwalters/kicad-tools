@@ -7,7 +7,158 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Summary
+
+Development since `v0.19.0`: a targeted `kct route --complete` completion pass,
+route-time enforcement of high-voltage isolation across every engine, a general
+`.kct_waivers.json` waiver mechanism for `kct check`, and a broad correctness
+sweep (KiCad-10 net dialect, export manifests, LVS identity, diff-pair shadow
+constructor). No breaking changes.
+
 ### Added
+
+- **`kct route --complete`** — a targeted completion pass: auto-detect the
+  still-unconnected signal nets and route only those links, with all other
+  copper fixed, on the octilinear lattice engine. Implies `--preserve-existing`
+  and is a byte-identical no-op on a connected board. The lattice build is
+  localized to the stranded nets' pad bounding boxes and every link carries a
+  wall-clock deadline, so a walled SMD pocket that used to grind for over ten
+  minutes now terminates and reports. `--complete-report PATH` writes per-link
+  records (endpoints, elapsed vs. budget, blocking copper) and the pass exits 8
+  when links remain unroutable; batch rescue now shells it instead of the
+  coarse grid A*. The companion `--via-in-pad-last-resort` (default off) lets
+  the lattice engine stage a same-net via-in-pad attach for a walled SMD pad
+  only after an in-layer route and an off-pad via have failed, gated on the
+  manufacturer tier floor so an unsupporting tier declines with an explicit
+  `via-in-pad-tier-unsupported` reason (#4471, #4472, #4475, #4477, #4478).
+
+- **Route-time high-voltage isolation** — `kct route` gains `--voltage-map`
+  (plus `--creepage-standard` / `--pollution-degree` / `--material-group` /
+  `--hv-threshold`) and resolves each net pair at `max(DRU, creepage(|ΔV|))`,
+  sharing the derivation with `kct creepage` and `kct optimize-placement` so
+  the three agree by construction. Enforcement spans the stack: a per-net
+  domain matrix in the C++ validator, search-time A* hard-blocking, and
+  rated-footprint attach zones that waive the widening but never the DRU floor.
+  A post-route board-level audit now gates *every* engine's exit code — the
+  lattice engine previously committed HV copper at DRU spacing and exited 0
+  (#4431, #4506, #4510, #4511, #4588).
+
+- **`kct creepage-export-rules`** — turns a `--voltage-map` into artifacts
+  `kicad-cli pcb drc` enforces: voltage-domain netclasses and net patterns
+  merged into `<project>.kicad_pro`, and pairwise clearance `(rule ...)`
+  clauses in a sentinel-delimited block in `<project>.kicad_dru`. Both are
+  idempotent and preserve user-authored content; domain-bridging footprints
+  become refdes-scoped `insideCourtyard` exclusions (#4508).
+
+- **Richer creepage model** — a `--voltage-map` entry now accepts
+  `{"min": v0, "max": v1}` as well as a scalar and the census derives the
+  worst-case endpoint stress, closing a same-potential false PASS where two
+  nets sharing a dominant state derived ΔV = 0 despite mains-class transient
+  stress (an all-scalar map still serializes byte-identically). Pairs also
+  carry a `relationship` (`board` / `same_footprint`), so component-internal
+  gaps — functional insulation governed by the part's own rating — are
+  distinguishable; `--waive-same-footprint` (default off) drops them from the
+  exit gate but still lists them `WAIVED`, and `kct audit` still blocks
+  (#4403, #4411).
+
+- **`.kct_waivers.json` — a general waiver mechanism for `kct check`** — a
+  version-2 sidecar waives findings for **any** `rule_id` by matching a
+  violation's items (and optional nets) as an exact set, via `--waivers PATH` or
+  auto-discovery; stale entries raise a `waiver_unused` advisory. Waived findings
+  leave `kct check`'s exit gate but keep `severity: "error"` in the JSON, so
+  `kct audit` stays blocking (#4417).
+
+- **Fab-profile auto-discovery for `kct check`** — `kct route` writes a
+  `fab_profile.json` sidecar recording the resolved `--manufacturer`, and
+  `kct check` resolves the effective `--mfr` by precedence (explicit `--mfr` >
+  sidecar > `project.kct` `target_fab` > `jlcpcb`), so a board routed with
+  tier-gated geometry such as via-in-pad no longer reports a false FAILED
+  against the base tier. With neither source, a non-blocking advisory names a
+  permitting tier (#3920).
+
+- **Placement refinement and edge connectors** — `--seed current` warm-starts
+  CMA-ES from the board's on-disk footprint positions (with a much tighter
+  sigma), so the optimizer refines a ratified hand floorplan instead of
+  re-imagining it from the bounds center. `kct placement check` flags an
+  off-board connector standing more than `edge_connector_max_inset` (2 mm)
+  inside the outline — one no cable can mate with — and the solver gains a
+  torque that rotates such connectors to face off-board (#4405, #4450).
+
+- **`kct pcb move-footprint --drag-endpoints`** — a translation nudge carries
+  coincident trace endpoints along with the pads instead of stranding the routed
+  copper, with `--drag-tolerance`, per-pad drag counts, `--map` batch
+  composition, and UUID-preserving dry-run reporting (#4418).
+
+- **Grid-independent different-net short verifier and repair** — a post-route
+  pass geometrically verifies emitted copper for via-via, via-segment, and
+  segment-segment different-net overlaps independently of the router's grid
+  model, then relocates each offending via onto a clearance-validated site
+  (escape-node slide, then an 8-direction ladder, with connectivity stubs).
+  This matters under `--allow-unsafe-grid`, where a coarse grid lets two nets
+  quantize into a real short that passes grid occupancy (#4470).
+
+- **Manufacturer-driven hole-to-hole via relocation** — a `--mfr`-driven
+  post-pass relocates in-pad and plane-stitch vias that violate the drill
+  hole-to-hole floor onto a clearance-validated location, re-bonds them, and
+  reports boxed-in vias rather than moving them. It never introduces a new
+  violation (#4408).
+
+- **Zone-fill island reporting** — KiCad's `unconnected_items` now land in a
+  dedicated `DRCReport.unconnected_items` collection, so orphaned zone-fill
+  islands surface without redefining `violations`, which keeps its
+  geometry-only meaning for every existing consumer (#4498).
+
+- **Kelvin / current-sense star topology** — the router recognizes
+  current-sense nets and roots their topology at the shunt pad instead of an
+  arbitrary hub, so a sense tap connects *at* the Kelvin point rather than
+  merging into the high-current segment and reading the load-current IR drop.
+  Applied by the RSMT builder and by the lattice and mesh netset drivers, which
+  previously anchored every star at `pads[0]`. Detection needs a net-name
+  pattern *and* a resolvable shunt root; other nets are untouched (#4473, #4476).
+
+- **Congestion-aware escape-corridor reservation** —
+  `--escape-corridor-reservation` (default off) clusters a dense part's pins by
+  face and destination, sizes a corridor per cluster from the congestion
+  estimator, assigns clusters to distinct inner layers, and soft-reserves those
+  cells before the general negotiation. Reservation is selective and
+  length-bounded, so it is a local escape channel rather than a board-spanning
+  attractor field — board 05 goes 25 875 cells over four layers → 2 886 over
+  two (#4474, #4519).
+
+- **Classifier-driven placement feedback for stuck nets** — a stuck-net
+  diagnosis now translates into a concrete placement delta (translate,
+  `rotate_180`, `reorder_pins`), and `kct route --placement-delta-feedback`
+  applies it, re-routes, and keeps it only on a strict routed-net improvement —
+  otherwise placement, router pads, and routes revert atomically. A kept delta
+  persists the mutated placement, since the new copper is valid only against
+  the moved footprints (#4466, #4467, #4468).
+
+- **Per-net `avoid_layers` as a hard constraint** — `--strict-layers` promotes
+  a net class's `avoid_layers` from a soft cost bias (Python-only, and absent
+  from the C++ backend) to a hard routable-layer restriction honored by both
+  backends, so an ampacity-bearing net can no longer land copper on a thin
+  inner plane when escalation reaches the all-signal rung. It also applies
+  automatically to any class declaring `target_ampacity` (#4433).
+
+- **Router failure diagnostics** — the coupled diff-pair router emits a
+  per-reason rejection histogram from the C++ joint search plus a structured
+  per-pair failure taxonomy, and the rescue path replaces the opaque `FAILED
+  (no output produced)` line with a concrete reason (blocked-by-non-rippable-
+  copper, no-legal-escape, budget-exhausted, clearance-infidelity, CLI-refused)
+  plus a grid-fidelity report naming too-narrow lanes (#4459, #4469).
+
+- **Shared pipeline gate for board recipes** —
+  `recipes.gate.evaluate_pipeline_gate()` returns one verdict from which every
+  board recipe derives **both** its printed SUMMARY and its exit code, so the
+  two can no longer disagree. The authoritative DRC leg is `kicad-cli pcb drc
+  --refill-zones` (`kct check --drc-only` trusts stale zone fills), unioned
+  with a supplemental verdict for the kct-internal rule families (#3912).
+
+- **`project.kct` precondition for mutating recipes** —
+  `recipes.precondition.require_spec()` asserts a board carries captured intent
+  (a `project.kct` that exists, is non-empty, and parses) before a recipe
+  mutates anything. Advisory and fail-soft by default, read-only w.r.t. the
+  `.kct`; `KCT_REQUIRE_SPEC=1` escalates to full semantic validation (#4539).
 
 - **`silk_overlap` DRC rule** — `kct check --only silkscreen` now detects
   silkscreen printed on top of other silkscreen, closing a gap where an entire
@@ -56,6 +207,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`kct check` splits its report into manufacturing and advisory buckets** —
+  a rule-to-category taxonomy renders a CATEGORY SUMMARY with "Manufacturing
+  DRC: N blocking" and "Advisory/quality: M advisory", so routing-intent
+  findings (connectivity, diff-pair skew and continuity, `copper_sliver`,
+  ampacity, silkscreen) no longer inflate an undifferentiated "N DRC
+  violations" count that reads as N fab-blocking defects even when `kicad-cli`
+  reports 0. Presentation only: counts, verdict, exit code, and the gating
+  advisory-rule set are unchanged (#3803).
+
+- **`copper_sliver` detection now matches KiCad's algorithm** — the native
+  component-wise tiny-vertex traversal and sliver thresholds are ported, so a
+  sub-0.0008 mm numerical kink beside an acute tip no longer hides a sliver
+  `kicad-cli` reports. Two shapely-union artifacts KiCad's integer-nm poly-set
+  union never creates are also suppressed (a low-height union seam, and a
+  keyhole pinch at a shared ring coordinate). **User-visible: board 06 goes 2
+  markers → 0**, matching `kicad-cli`; 00–05 and 07 stay clean (#4497, #4521).
+
+- **Negotiated routing bails out of terminal stalls** — when a rip-up round
+  makes zero progress and every remaining stuck net is confidently *not*
+  budget-starved, the loop breaks to PARTIAL instead of escalating the rip-up
+  radius through the full iteration budget; more iterations cannot help such a
+  set by construction (board 07 previously spent ~13 of ~14 minutes on this
+  plateau). Default on, with the old behavior bisectable (#4406).
+
 - **`silk_over_copper` now counts one violation per (silk item, mask aperture)
   pair**, matching `kicad-cli pcb drc`. Previously it de-duplicated to one
   violation per silk element. **User-visible: reported `silk_over_copper`
@@ -69,6 +244,181 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pad 28`; the real set is pads 27, 28, 29, 30) (#4612).
 
 ### Fixed
+
+- **KiCad-10 name-based net references were invisible to four copper
+  scanners.** On a board whose segments and vias name their net (`(net "GND")`)
+  instead of numbering it, the `--preserve-existing` parser returned an empty
+  set and the dialect-blind strip pass then deleted *all* existing copper — so
+  `--preserve-existing` / `--nets` / `--region` silently destroyed a fully
+  routed board. The `strip_traces` net filter, the stranded-stub strip, the
+  conflicting-via scan, and the 45° quantizer were likewise no-ops. All now
+  resolve both dialects through one shared helper, copper kct adds re-emits the
+  board's own dialect, and a guard aborts a write retaining under 10% of a
+  board's copper (#4413, #4414, #4416, #4529).
+
+- **`kct spec decide` destroyed the rest of the `.kct` file.** It was a
+  load → model → dump → overwrite cycle over models with pydantic's default
+  `extra="ignore"`, so every key the schema does not define was dropped at load
+  and deleted on write. One invocation on a copy of
+  `boards/00-simple-led/project.kct` exited 0, printed "Decision recorded", and
+  took the file from 88 lines to 74. Unknown keys now survive `model_dump` for
+  every `save_spec` caller, and `decide` splices the new entry into the
+  existing `decisions:` sequence textually, re-parsing and comparing the result
+  before committing it (#4538).
+
+- **LVS reported false shorts from per-pad unnamed-net naming.** An unnamed
+  net's auto-generated name was derived from the *queried pin*, so a k-pad
+  unnamed net splintered into k identities and was reported as C(k, 2) shorts
+  inside the one copper component that legitimately joined them. A single
+  10-pad net accounted for 45 of 50 false shorts on copper `kicad-cli pcb drc`
+  found clean. Auto-names now pick a deterministic canonical representative per
+  connected component (also making them stable across runs), and board LVS
+  compares pad partitions, not strings, when both sides carry one (#4615).
+
+- **Export manifests were keyed by bare filename.** Every artifact in a
+  subdirectory (`gerbers/`, `images/`, `vN/`) was recorded under a key that
+  does not resolve from the manifest's own directory: **70 of 118 keys across
+  the eight committed bundles failed the obvious `bundle_dir / key` walk**, and
+  same-named artifacts in different subdirectories overwrote each other. Keys
+  are now bundle-relative POSIX paths, with the legacy fallback retained so
+  committed manifests keep verifying. Separately, `kct export --mfr
+  jlcpcb-tier1` recorded a false `bom_cpl_match` FAIL because preflight
+  compared the raw tier id against an exact-match `{"jlcpcb"}` set while the
+  CPL writer resolved the fab *family*; preflight now resolves the family once,
+  and `bom_fields` is reconciled against `--auto-lcsc` (#4590, #4591).
+
+- **3D bodies rendered rotated away from their copper.** The model inserter
+  compensated translation only and always wrote an identity rotation, so a
+  footprint whose rotation is baked into its pad coordinates rather than its
+  placement angle rendered a quarter turn off. Orientation is now derived from
+  an anchor-pad vector on both footprints and baked into the model node, with
+  the centroid offset composed in the rotated frame. A sign error in that bake
+  (`rz - θ`, where KiCad's render-time negation makes `rz + θ` correct)
+  additionally threw board 07's 9-pin header 20.32 mm off the board edge.
+  Co-oriented footprints compute θ ≈ 0 and are byte-identical (#4448, #4583).
+
+- **Routing was nondeterministic from a dangling C++ grid reference.** The
+  nanobind pathfinder constructors stored the incoming `Grid3D` as a bare C++
+  reference with no keep-alive policy, so in the common
+  `Pathfinder(Grid3D(...), rules).route(...)` idiom the grid was freed as soon
+  as the factory returned and the A* then read freed heap (AddressSanitizer
+  pins it at `grid_.at()`). The symptom was run-to-run variation in segment
+  counts on identical input (#4485).
+
+- **Net-class clearances were dropped on three independent paths.** The
+  post-route sidecar writer hard-coded `<output_dir>/net_class_map.json` and
+  wrote unconditionally, so routing into the directory holding the user's
+  hand-authored map silently clobbered it — the derived map now diverts to
+  `net_class_map.effective.json` on a collision, and the user's map is merged
+  over the classifier output. Hand-authored KiCad layer names (`"In1.Cu"`) in
+  `preferred_layers` / `avoid_layers` either killed detailed routing with
+  `invalid literal for int()` or silently never matched; they now normalize to
+  grid indices against the board's own layer stack. And the lattice pathfinder
+  seeded every `--preserve-existing` obstacle at the DRU floor, spacing new
+  copper 0.166 mm from an HV net the map put at 2.0–3.2 mm (#4428, #4587, #4597).
+
+- **Creepage safety and table correctness.** A high-|V| net whose routing class
+  was not HV (a 150 V gate-drive net classed Digital) never entered the HV
+  census — a safety-gate false pass — now closed by unioning voltage-mapped
+  nets into census membership behind a new `--census-threshold` (default 30 V).
+  The IEC 60664-1 Table F.4 transcription started at the 50 V row, so every
+  working voltage ≤ 50 V mapped to 1.2 mm at PD2/IIIa — a floor no dense-board
+  adjacent-pad gap can meet, making the gate unpassable; the seven missing
+  sub-50 V rows from EN 60664-1:2007 are transcribed, dropping the floor to
+  0.40 mm (IEC 62368-1 Table 17 shares the table and is fixed too). And
+  `kct optimize-placement --voltage-map` rejected the `_`-prefixed reserved
+  keys the creepage loader skips; it now delegates to that one parser
+  (#4401, #4402, #4404).
+
+- **Connectivity analysis reported false opens and dangling vias.**
+  `kct net-status` split a cross-layer path (`pad → F.Cu → through-via →
+  In2.Cu → through-via → F.Cu → pad`) into per-layer components and reported a
+  false `incomplete`; pads are now fused across every via that spans the
+  relevant layers, with a blind/buried via declining to fuse a layer it cannot
+  reach. `kct stitch` decided via placement against the zone *outline* rather
+  than the refilled copper, so a via dropped where the pour had retreated had
+  nothing to bond to and KiCad reported it dangling; all three modes now gate on
+  same-net fill containment (#4429, #4432).
+
+- **Writer and mutation fidelity.** `kct zones hv-keepout` emitted its
+  disposition tokens as quoted strings, which KiCad 10 rejects as a hard parse
+  error, making the written board unloadable; they now serialize as bare
+  symbols. And rotating a footprint through the recovery applicator bumped only
+  the footprint angle, leaving every pad's absolute angle stale on
+  serialization — the phantom-short / wrong-gerber-aperture defect class for
+  chamfered-roundrect, trapezoid, and custom pads. Schema `Pad` objects are now
+  linked to their S-exp nodes, so `pad.rotation` round-trips (#4430, #4518).
+
+- **`kct sch fix-annotation` left cross-sheet duplicate power references in
+  place.** Canonicality was judged one symbol at a time, so two symbols on
+  different sheets both holding a canonical `#PWR40` were each skipped and the
+  error survived the repair. Uniqueness is now enforced project-wide across the
+  flattened hierarchy, first-occurrence-wins. Power nodes are also excluded from
+  the net-neutrality gate's snapshot — their designators are electrically
+  meaningless, and including them aborted an otherwise neutral repair (#4415).
+
+- **CLI plumbing defects.** The outer `kct route` parser declared
+  `--auto-layers` with `default=True`, collapsing "the user typed it" and "the
+  user typed nothing", so an explicit `--auto-layers` never reached the inner
+  command — `--complete` disabled auto-layers while printing "pass
+  `--auto-layers` to override". The flag is now tri-state. `kct explain` picked
+  `spec_references[0]`, so which manufacturer's YAML won a shared `rule_id`
+  depended on glob order; references are now merged per rule id and
+  `explain(context={"manufacturer": ...})` resolves deterministically
+  (#4491, #4502).
+
+- **`kct build-native` could contradict `--check` seconds later.** Post-build
+  verification ran in the process that had just done the build, which cannot
+  observe a replaced C extension: once `router_cpp.*.so` is dlopen'd, CPython's
+  runtime extension cache survives `sys.modules.pop` and `importlib.reload`, so
+  the probe described the *pre*-build extension — both a false "not loading
+  correctly" and a false "installed successfully!" were reproduced.
+  Verification now runs in a fresh interpreter. Separately, nanobind and the
+  scikit-build-core/cmake/ninja chain moved into the default `dev` group and
+  the `all` extra, so an unrelated `uv sync` cannot prune them (#4412, #4589).
+
+- **Misleading diagnostics.** An LCSC no-match search leaked
+  `(J1) ('NoneType' object is not iterable)` into the BOM-enrichment summary,
+  because the live JLCPCB API returns `"list": null` and `dict.get(key,
+  default)` substitutes only when the key is *absent*; it now reports a clean
+  "no matching parts found". And the auto-grid "may produce clearance violations
+  at fine-pitch pads" warning fired on a predicate omitting the fine-pitch term
+  its own text claims, so DRC-clean boards without fine-pitch pads were told
+  they were at risk (#3942, #4407).
+
+- **Rescue and mid-session C++ router state.** A per-net rescue subprocess had
+  been exiting 1 before routing anything since the auto-grid safety gate
+  landed, because the rescue command never forwarded an `--allow-unsafe-grid`
+  equivalent — bogus `no_output` failures for 8 of 8 nets; the refusal is now
+  classified `CLI_REFUSED` rather than a fabricated "crash / OOM" diagnosis.
+  And the C++ pairwise domain matrix was never re-pushed after a mid-session
+  net-map or attach-zone change, because the install was gated on a flag that
+  latches true on first install: remapped net ids reported 0.0 required
+  clearance while stale ids kept phantom widening (#4528, #4530).
+
+- **Diff-pair shadow constructor — copper legality** (opt-in, default off).
+  Constructed copper was validated against the routing grid raster only, whose
+  pad halo is deliberately shrunk in fine-pitch corridors on the promise that
+  full clearance is checked in post-routing DRC — a promise never kept for
+  diff-pair nets, which the nudge backstop skips. Exact, DRC-equivalent pad-
+  and via-clearance predicates now apply everywhere the constructor accepts
+  copper, tail candidates are ordered by how much of their length runs *coupled*
+  to the partner, and crossing-tail via sites are scored by how deeply they
+  intrude on other nets' escape channels (#4571, #4572, #4574, #4575).
+
+- **Diff-pair shadow constructor — geometry and length symmetry** (opt-in,
+  default off). Inside-bend corners folded the parallel offset across the guide
+  centerline, and sub-grid-cell steps between impedance-band rungs left
+  polyline breaks invisible to every per-segment gate but fatal to the pair —
+  a finished, length-matched pair read "1/2 pads reached" and was ripped
+  wholesale. Corner joins now mitre concave bends and bevel sub-cell steps, and
+  the assembled chain enforces the no-gap invariant. The guide is compressed
+  with a deviation-bounded 45°-legal simplifier before offsetting, the pair is
+  meander-matched at construction time, and the legs are gated on a
+  thickness-free via signature so a 0.012 mm planar match cannot ship a 3.19 mm
+  electrical skew. Rescue tails are partner-aware, and the negotiated loop stops
+  at a stranded fixed point instead of re-deriving the same failure to its
+  ceiling (#4460, #4462, #4463, #4553, #4570, #4577).
 
 - **`--net-class-map` was silently inert on every composition step.** On a
   filtered routing pass (`--nets` / `--skip-nets`, and the `--region` /

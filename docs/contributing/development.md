@@ -416,11 +416,19 @@ def main(argv: list[str] | None = None) -> int:
 
 ## Release Process
 
-1. Update version in `src/kicad_tools/__init__.py`
-2. Update `CHANGELOG.md`
-3. Create a git tag: `git tag v0.X.0`
-4. Push tag: `git push origin v0.X.0`
-5. GitHub Actions builds and publishes to PyPI
+**[`RELEASING.md`](../../RELEASING.md) is the canonical process — follow it, not
+this summary.** Releases are PR-based: the version-bump commit reaches `main`
+through a pull request, and the `vX.Y.Z` tag is created only afterwards, on the
+merged `main` SHA.
+
+1. Reconcile `CHANGELOG.md` against `git log <last-tag>..main` —
+   `uv run python scripts/changelog_gap_report.py` must exit 0 with an empty gap
+   set (`RELEASING.md` step (0))
+2. Bump the version in `pyproject.toml` (the source of truth) and regenerate
+   `uv.lock`, on a `release/vX.Y.Z` branch
+3. Open a PR and merge it via `./.loom/scripts/merge-pr.sh <PR>`
+4. Tag the **merged `main` SHA**: `git tag -a vX.Y.Z -m "Release X.Y.Z"`
+5. Push the tag — GitHub Actions builds the tagged commit and publishes to PyPI
 
 ---
 
