@@ -222,6 +222,7 @@ class DRCChecker:
         "check_ampacity",
         "check_clearances",
         "check_connectivity",
+        "check_connector_access",
         "check_segment_zone_clearances",
         "check_via_zone_clearances",
         "check_copper_slivers",
@@ -310,6 +311,12 @@ class DRCChecker:
         # ---- Advisory / quality: routing-intent & non-fab-blocking. ----
         "connectivity": CATEGORY_ADVISORY,
         "ampacity": CATEGORY_ADVISORY,
+        # Connector mating / edge-access (Issue #4613): mechanical
+        # accessibility advisories, not fab-blocking copper defects.
+        # Explicit entries are REQUIRED -- category_for_rule defaults
+        # unknown ids to the fab-blocking Manufacturing bucket.
+        "connector_edge_access": CATEGORY_ADVISORY,
+        "connector_edge_distance": CATEGORY_ADVISORY,
         "copper_sliver": CATEGORY_ADVISORY,
         "impedance": CATEGORY_ADVISORY,
         "diffpair_clearance_intra": CATEGORY_ADVISORY,
@@ -1031,6 +1038,27 @@ class DRCChecker:
             DRCResults containing placement violations
         """
         rule = FootprintOutsideBoardRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_connector_access(self) -> DRCResults:
+        """Check that panel-entry connectors can reach a board edge.
+
+        Issue #4613.  Flags rigid-plug, horizontal-mating connector
+        families (audio jacks, USB receptacles, barrel jacks, RJ jacks,
+        card edges -- per KiCad library naming) whose courtyard is too
+        far from every ``Edge.Cuts`` segment for a mating plug to reach
+        (``connector_edge_access``, warning severity).  Additionally
+        emits an info-severity per-connector distance inventory
+        (``connector_edge_distance``) under the same measurement/verbose
+        gate the skew rules use, so ``--format json`` / ``--verbose``
+        consumers get the full connector-to-edge table.
+
+        Returns:
+            DRCResults containing connector edge-access findings.
+        """
+        from .rules.connector_access import ConnectorEdgeAccessRule
+
+        rule = ConnectorEdgeAccessRule(emit_inventory=self.verbose or self.emit_measurements)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_netlist(self) -> DRCResults:

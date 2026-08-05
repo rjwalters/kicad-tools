@@ -17,6 +17,20 @@ constructor). No breaking changes.
 
 ### Added
 
+- **Connector mating / edge-access rule in `kct check`** — new default-on
+  `connector_access` category (selectable via `--only`/`--skip`, no new flags)
+  with a warning-severity `connector_edge_access` rule that flags rigid-plug
+  panel-entry connectors (audio / USB / barrel-jack / RJ / card-edge families,
+  using KiCad's own `_Horizontal`/`_Vertical` library naming) whose courtyard
+  is more than 3.0 mm from every `Edge.Cuts` segment — catching the
+  shipped-incident class of a certified board whose audio jack sat 10.66 mm
+  inside the outline, unpluggable. Pin headers and JST/Molex/FFC wire-to-board
+  connectors are deliberately excluded (precision-first). An info-severity
+  `connector_edge_distance` inventory row reports every `Connector_*`
+  footprint's distance-to-edge in JSON/verbose output, and findings are
+  suppressible per-reference via `.kct_waivers.json`; both rule ids are
+  classified advisory, so plain exit codes are unchanged (#4613).
+
 - **Advisory routing-quality metrics in `kct check`** — a new pure
   `kicad_tools.analysis.routing_quality` module measures segment-length
   distribution (median, sub-0.25 mm fragments), direction classes

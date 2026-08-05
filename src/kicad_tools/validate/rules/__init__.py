@@ -6,6 +6,7 @@ implementations for the pure Python DRC checker.
 
 from .base import DRC_TOLERANCE, DRCRule
 from .clearance import ClearanceRule, SegmentZoneClearanceRule, ViaZoneClearanceRule
+from .connector_access import ConnectorEdgeAccessRule
 from .diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .diffpair_length_skew import DiffPairLengthSkewRule
 from .diffpair_routing_continuity import DiffPairRoutingContinuityRule
@@ -32,6 +33,7 @@ __all__ = [
     "ClearanceRule",
     "SegmentZoneClearanceRule",
     "ViaZoneClearanceRule",
+    "ConnectorEdgeAccessRule",
     "DiffPairClearanceIntraRule",
     "DiffPairLengthSkewRule",
     "DiffPairRoutingContinuityRule",
