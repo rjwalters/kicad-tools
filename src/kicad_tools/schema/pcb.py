@@ -1140,6 +1140,17 @@ class Via:
     # ``True`` when the via's net reference was read in name-only
     # ``(net "SDA")`` form so serialization re-emits the same dialect.
     net_name_only: bool = field(default=False, compare=False)
+    # Issue #4624: per-via tenting override.  KiCad 10 writes
+    # ``(tenting (front yes|no|none) (back yes|no|none))`` after the
+    # ``layers`` node when either side is overridden in the via
+    # properties dialog; the node is absent entirely when both sides
+    # follow the board default.  Raw tokens are preserved verbatim
+    # (``"yes"`` = tented, ``"no"`` = not tented, ``"none"`` = inherit
+    # the board default) so a load -> save round-trip re-emits the
+    # override byte-for-byte -- same round-trip discipline as
+    # :attr:`via_type` (#3124).  ``None`` = side not present in the node.
+    tenting_front: str | None = None
+    tenting_back: str | None = None
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Via:
@@ -1177,6 +1188,13 @@ class Via:
                 for i in range(len(layers.values))
                 if isinstance(layers.values[i], str)
             ]
+        # Issue #4624: per-via tenting override
+        # ``(tenting (front yes|no|none) (back yes|no|none))``.
+        if tenting := sexp.find("tenting"):
+            if front := tenting.find("front"):
+                via.tenting_front = front.get_string(0)
+            if back := tenting.find("back"):
+                via.tenting_back = back.get_string(0)
         # Net — handles both (net N "name") and (net "name") formats.
         # KiCad 10 may emit (net "name") without a numeric net number.
         if net := sexp.find("net"):
@@ -1230,6 +1248,17 @@ class Via:
         # Build layers list
         layers_sexp = SExp.list("layers", *self.layers)
         via_sexp.append(layers_sexp)
+        # Issue #4624: re-emit a parsed per-via tenting override after
+        # ``layers``, matching KiCad 10's writer position, so the
+        # override survives a load + save round-trip.  Only sides that
+        # were present in the parsed node are emitted.
+        if self.tenting_front is not None or self.tenting_back is not None:
+            tenting_sexp = SExp.list("tenting")
+            if self.tenting_front is not None:
+                tenting_sexp.append(SExp.list("front", self.tenting_front))
+            if self.tenting_back is not None:
+                tenting_sexp.append(SExp.list("back", self.tenting_back))
+            via_sexp.append(tenting_sexp)
         if not self.uuid:
             self.uuid = str(uuid.uuid4())
         via_sexp.append(SExp.list("uuid", self.uuid))
@@ -1532,6 +1561,15 @@ class Setup:
     pad_to_mask_clearance: float = 0.0
     copper_finish: str = ""
     aux_axis_origin: tuple[float, float] = (0.0, 0.0)
+    # Issue #4624: board-default via tenting from the setup-level
+    # ``(tenting (front yes|no) (back yes|no))`` node.  ``True`` = tented
+    # (mask covers vias on that side), ``False`` = not tented (vias have
+    # mask openings).  ``None`` = the token is absent from the file, which
+    # lets consumers distinguish "explicitly untented" from "unspecified"
+    # (KiCad's absent-token default is tented -- measured against
+    # kicad-cli 10.0.5, see ``validate/rules/silkscreen.py``).
+    tenting_front: bool | None = None
+    tenting_back: bool | None = None
 
 
 # Paper sizes in mm (width, height) - KiCad uses landscape orientation
@@ -2231,6 +2269,19 @@ class PCB:
             x = aux_origin.get_float(0) or 0.0
             y = aux_origin.get_float(1) or 0.0
             setup.aux_axis_origin = (x, y)
+
+        # Issue #4624: board-default via tenting.  KiCad 10 writes
+        # ``(tenting (front yes|no) (back yes|no))`` directly under setup;
+        # tokens other than yes/no are left as None (unspecified).
+        if tenting := sexp.find("tenting"):
+            if front := tenting.find("front"):
+                value = front.get_string(0)
+                if value in ("yes", "no"):
+                    setup.tenting_front = value == "yes"
+            if back := tenting.find("back"):
+                value = back.get_string(0)
+                if value in ("yes", "no"):
+                    setup.tenting_back = value == "yes"
 
         self._setup = setup
 

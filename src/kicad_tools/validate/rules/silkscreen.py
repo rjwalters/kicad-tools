@@ -35,6 +35,8 @@ if TYPE_CHECKING:
         Footprint,
         FootprintGraphic,
         Pad,
+        Setup,
+        Via,
     )
 
     from ...manufacturers import DesignRules
@@ -482,6 +484,91 @@ def _pad_aperture_geometry(
     return box(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
 
 
+def _via_aperture_geometry(via: Via, min_mask_clearance: float) -> _Geometry:
+    """Build a shapely polygon for an untented via's solder-mask opening.
+
+    Aperture = via annular copper (diameter ``via.size``) expanded by the
+    profile's mask margin.  Approximated as an axis-aligned box to
+    first-order-match :func:`_pad_aperture_geometry`'s convention (a circle
+    inscribes the box, so this slightly over-approximates the corners --
+    consistent with the pad/text AABB model used throughout this module).
+    """
+    from shapely.geometry import box
+
+    d = via.size + 2.0 * min_mask_clearance
+    cx, cy = via.position
+    return box(cx - d / 2.0, cy - d / 2.0, cx + d / 2.0, cy + d / 2.0)
+
+
+def _via_is_tented(via: Via, setup: Setup | None, side: str) -> bool:
+    """Resolve whether ``via`` is tented (mask-covered) on ``side`` (``F``/``B``).
+
+    Resolution order per side, matching KiCad's model (each step measured
+    behaviorally against ``kicad-cli pcb drc --severity-all``, KiCad 10.0.5,
+    2026-08-05, on synthetic probe boards -- see #4624):
+
+    1. **Per-via override**: a ``(tenting (front yes|no|none) (back ...))``
+       node on the via.  ``yes`` = tented, ``no`` = not tented, ``none`` (or
+       the side absent from the node) = fall through to the board default.
+       Measured: a ``(front no)`` via on a board-tented default IS reported
+       by kicad-cli, and a ``(front yes)`` via on a board-untented default is
+       NOT -- the override beats the setup default in both directions, and
+       sides resolve independently.
+    2. **Board default**: the setup-level ``(tenting (front yes|no) (back
+       yes|no))`` node.
+    3. **Absent-token default: tented.**  Measured: a board whose setup block
+       has no ``(tenting ...)`` node at all produces ZERO
+       ``silk_over_copper`` findings for silk crossing a via (KiCad 10.0.5),
+       and a fresh pcbnew board writes ``(front yes) (back yes)`` -- so an
+       unspecified board tents its vias.
+    """
+    override = via.tenting_front if side == "F" else via.tenting_back
+    if override == "yes":
+        return True
+    if override == "no":
+        return False
+    # "none" or absent: inherit the board default.
+    if setup is not None:
+        default = setup.tenting_front if side == "F" else setup.tenting_back
+        if default is not None:
+            return default
+    # Measured absent-token default (KiCad 10.0.5): tented.
+    return True
+
+
+def _iter_via_apertures(
+    pcb: PCB, min_mask_clearance: float
+) -> Iterator[tuple[str, _Geometry, str]]:
+    """Yield ``(side, geom, label)`` for every *untented* via mask opening.
+
+    Sibling of :func:`_iter_pad_apertures` (#4624): a via whose resolved
+    tenting on a side is "not tented" exposes copper there exactly like a pad
+    aperture, and kicad-cli reports silk crossing it as ``silk_over_copper``
+    (measured -- see the deliberate-gap note that used to live on
+    :func:`_iter_pad_apertures`, now closed by this function).  Tented sides
+    yield nothing, so fully-tented fleets (every committed board sets
+    ``(tenting (front yes) (back yes))``) produce zero via apertures and the
+    #4612 pad-parity result is preserved.
+
+    Tenting is resolved per side via :func:`_via_is_tented` (per-via override
+    -> board setup default -> measured absent-token default).
+    """
+    setup = pcb.setup
+    for via in pcb.vias:
+        if via.size <= 0:
+            continue
+        geom: _Geometry | None = None
+        for side in ("F", "B"):
+            if _via_is_tented(via, setup, side):
+                continue
+            if geom is None:
+                geom = _via_aperture_geometry(via, min_mask_clearance)
+            x, y = via.position
+            net = f" [{via.net_name}]" if via.net_name else ""
+            label = f"via{net} at ({x:.3f}, {y:.3f})"
+            yield side, geom, label
+
+
 def _iter_silk_geometries(
     pcb: PCB,
 ) -> Iterator[tuple[str, _Geometry, str, tuple[float, float], str]]:
@@ -550,27 +637,12 @@ def _iter_pad_apertures(
     BOTH sides (so they are yielded for both ``"F"`` and ``"B"``).  ``side`` is
     the silk side the aperture must be checked against.
 
-    **Aperture-set scope: pads only (known, deliberate gap -- see #4612).**
-    The aperture index is built from ``footprint.pads`` exclusively;
-    ``pcb.vias`` is never consulted, so an *untented* via's mask opening is not
-    an aperture as far as this module is concerned.  KiCad's silk-clearance
-    provider indexes mask-layer items generally, and this divergence is
-    **measured, not assumed**: on a synthetic probe board carrying
-    ``(tenting (front no) (back no))`` plus one silk segment across a via,
-    ``kicad-cli pcb drc --severity-all`` (KiCad 10.0.5, 2026-08-04) reports::
-
-        silk_over_copper | warning | Segment on F.Silkscreen <-> Via [GND] on F.Cu - B.Cu
-
-    while this rule reports 0.  That is the only known residue after #4612
-    brought pad-pair counting into exact parity with kicad-cli.
-
-    The gap is unexercised by the in-repo fleet: every committed board sets
-    ``(tenting (front yes) (back yes))`` in its ``setup`` block, so no fleet via
-    has a mask opening at all, and kicad-cli names a *pad* in every one of its
-    ``silk_over_copper`` findings on boards 03/05/06/07.  Modelling via
-    apertures needs per-via tenting resolution (board default + per-via
-    override) that this module does not currently parse, so it is deferred to a
-    follow-up rather than guessed at.
+    This function covers **pads only**; *untented via* mask openings -- the
+    one residue #4612 measured and deferred -- are yielded by the sibling
+    :func:`_iter_via_apertures` (#4624), which resolves per-via tenting
+    (per-via override -> board setup default -> measured absent-token
+    default).  ``check_silk_over_copper`` chains both iterators into a single
+    aperture index.
     """
     for footprint in pcb.footprints:
         transform = _fp_transform(footprint)
@@ -595,12 +667,13 @@ def check_silk_over_copper(
     pcb: PCB,
     design_rules: DesignRules,
 ) -> DRCResults:
-    """Geometric check: silk text/graphics over exposed pad copper.
+    """Geometric check: silk text/graphics over exposed copper.
 
     Builds a shapely geometry per silk element (text bbox or buffered graphic
-    stroke) and tests it against the solder-mask apertures of all pads on the
-    matching silk side.  Emits a ``silk_over_copper`` **warning** (matching
-    kicad-cli severity) for any silk/aperture intersection.
+    stroke) and tests it against the solder-mask apertures of all pads and
+    untented vias on the matching silk side.  Emits a ``silk_over_copper``
+    **warning** (matching kicad-cli severity) for any silk/aperture
+    intersection.
 
     **Counting model: one violation per (silk item, mask aperture) pair,
     matching ``kicad-cli pcb drc``.**  A refdes straddling four pads yields four
@@ -622,8 +695,11 @@ def check_silk_over_copper(
     heuristic it accounts for real text bounding boxes, graphic strokes,
     board-level silk, thru-hole apertures, and silk-over-other-footprint pads.
 
-    The aperture set is **pad-only**; see :func:`_iter_pad_apertures` for the
-    untented-via scope note.
+    The aperture set covers **pads and untented vias**: pads via
+    :func:`_iter_pad_apertures`, untented-via mask openings via
+    :func:`_iter_via_apertures` (#4624 closed the deliberate pads-only gap
+    left by #4612).  Tented vias contribute no aperture, so fully-tented
+    boards -- the entire committed fleet -- behave exactly as before.
 
     Args:
         pcb: The PCB to check.
@@ -640,8 +716,11 @@ def check_silk_over_copper(
     min_mask = design_rules.min_solder_mask_clearance_mm
 
     # Group apertures by side and index with an STRtree for fast lookup.
+    # Pads and untented vias contribute to the same index (#4624).
     apertures: dict[str, list[tuple[_Geometry, str]]] = {"F": [], "B": []}
     for side, geom, label in _iter_pad_apertures(pcb, min_mask):
+        apertures[side].append((geom, label))
+    for side, geom, label in _iter_via_apertures(pcb, min_mask):
         apertures[side].append((geom, label))
 
     trees: dict[str, Any] = {}
@@ -657,7 +736,7 @@ def check_silk_over_copper(
         tree = trees[side]
         # STRtree.query returns candidate indices whose envelopes overlap.
         for idx in tree.query(geom):
-            ap_geom, pad_label = side_entries[int(idx)]
+            ap_geom, aperture_label = side_entries[int(idx)]
             if not geom.intersects(ap_geom):
                 continue
             # Require a non-trivial overlap area to reject hairline corner
@@ -672,10 +751,12 @@ def check_silk_over_copper(
                 DRCViolation(
                     rule_id="silk_over_copper",
                     severity="warning",
-                    message=(f"Silkscreen {silk_label} overlaps exposed copper of {pad_label}"),
+                    message=(
+                        f"Silkscreen {silk_label} overlaps exposed copper of {aperture_label}"
+                    ),
                     location=location,
                     layer=layer,
-                    items=(silk_label, pad_label),
+                    items=(silk_label, aperture_label),
                 )
             )
 

@@ -245,6 +245,18 @@ constructor). No breaking changes.
 
 ### Fixed
 
+- **`kct check` `silk_over_copper` now sees untented-via mask openings.** The
+  aperture set was pads-only, so silk over an exposed via was invisible
+  (kicad-cli 1, kct 0 — the residue #4612 measured and deferred). The rule now
+  resolves per-via tenting per side (per-via `(tenting ...)` override → board
+  `setup` default → the measured absent-token default, tented) and yields an
+  aperture for each untented side; `Setup` and `Via` parse the setup-level and
+  per-via `(tenting (front …) (back …))` nodes, with the per-via override
+  round-tripped through `Via.to_sexp` like `via_type`. Tented vias — the
+  entire committed fleet — contribute nothing, preserving #4612's exact
+  kicad-cli parity; all seven synthetic tenting probes match kicad-cli 10.0.5
+  counts exactly (#4624).
+
 - **KiCad-10 name-based net references were invisible to four copper
   scanners.** On a board whose segments and vias name their net (`(net "GND")`)
   instead of numbering it, the `--preserve-existing` parser returned an empty

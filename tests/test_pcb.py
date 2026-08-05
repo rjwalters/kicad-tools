@@ -4518,3 +4518,135 @@ class TestCopperDedup:
         }
         # The set of distinct segment geometries is unchanged: no net edge lost.
         assert before == after
+
+
+class TestViaTentingRoundTrip:
+    """Per-via and setup-level ``(tenting ...)`` parsing + round-trip (#4624).
+
+    KiCad 10.0.5 (measured 2026-08-05 by authoring overrides through pcbnew
+    and reading the saved file) writes a per-via override as
+    ``(tenting (front yes|no|none) (back yes|no|none))`` after the ``layers``
+    node -- ``none`` meaning "inherit the board default" -- and omits the node
+    entirely when both sides follow the board default.  Same round-trip
+    discipline as ``via_type`` (#3124): a rebuilt via node must not strip the
+    override.
+    """
+
+    def _parse_via(self, text: str):
+        from kicad_tools.schema.pcb import Via
+        from kicad_tools.sexp import parse_string
+
+        return Via.from_sexp(parse_string(text))
+
+    def _via_text(self, tenting: str = "") -> str:
+        return f"""(via
+    (at 10 10)
+    (size 0.6)
+    (drill 0.3)
+    (layers "F.Cu" "B.Cu")
+    {tenting}
+    (net 1)
+    (uuid "abc")
+)"""
+
+    def test_parses_per_via_tenting_tokens(self):
+        via = self._parse_via(self._via_text("(tenting (front no) (back yes))"))
+        assert via.tenting_front == "no"
+        assert via.tenting_back == "yes"
+
+    def test_parses_none_token(self):
+        via = self._parse_via(self._via_text("(tenting (front none) (back no))"))
+        assert via.tenting_front == "none"
+        assert via.tenting_back == "no"
+
+    def test_no_tenting_node_leaves_fields_none(self):
+        via = self._parse_via(self._via_text())
+        assert via.tenting_front is None
+        assert via.tenting_back is None
+
+    def test_to_sexp_round_trips_override(self):
+        """parse -> to_sexp -> re-parse preserves the override tokens."""
+        from kicad_tools.schema.pcb import Via
+
+        via = self._parse_via(self._via_text("(tenting (front no) (back none))"))
+        reparsed = Via.from_sexp(via.to_sexp())
+        assert reparsed.tenting_front == "no"
+        assert reparsed.tenting_back == "none"
+
+    def test_to_sexp_emits_tenting_after_layers(self):
+        """The rebuilt node carries tenting right after layers (KiCad order)."""
+        via = self._parse_via(self._via_text("(tenting (front no) (back yes))"))
+        names = [child.name for child in via.to_sexp().children if not child.is_atom]
+        assert names.index("tenting") == names.index("layers") + 1
+
+    def test_to_sexp_omits_node_when_no_override(self):
+        via = self._parse_via(self._via_text())
+        names = [child.name for child in via.to_sexp().children if not child.is_atom]
+        assert "tenting" not in names
+
+    def test_pcb_load_save_preserves_via_tenting(self, tmp_path: Path):
+        """Whole-file load -> save keeps a per-via override intact."""
+        board = """(kicad_pcb
+    (version 20260206)
+    (generator "pcbnew")
+    (net 0 "")
+    (net 1 "GND")
+    (via (at 10 10) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")
+        (tenting (front no) (back yes))
+        (net 1) (uuid "abc"))
+)"""
+        src = tmp_path / "tenting.kicad_pcb"
+        src.write_text(board)
+        pcb = PCB.load(src)
+        assert pcb.vias[0].tenting_front == "no"
+        assert pcb.vias[0].tenting_back == "yes"
+        out = tmp_path / "tenting_out.kicad_pcb"
+        pcb.save(out)
+        reloaded = PCB.load(out)
+        assert reloaded.vias[0].tenting_front == "no"
+        assert reloaded.vias[0].tenting_back == "yes"
+
+
+class TestSetupTenting:
+    """Board-default ``(tenting (front ...) (back ...))`` in setup (#4624)."""
+
+    def _pcb_with_setup(self, setup_body: str) -> PCB:
+        from kicad_tools.sexp import parse_string
+
+        return PCB(
+            parse_string(
+                f"""(kicad_pcb
+    (version 20260206)
+    (generator "pcbnew")
+    (setup
+        (pad_to_mask_clearance 0)
+        {setup_body}
+    )
+)"""
+            )
+        )
+
+    def test_parses_board_default_tenting(self):
+        pcb = self._pcb_with_setup("(tenting (front yes) (back no))")
+        assert pcb.setup is not None
+        assert pcb.setup.tenting_front is True
+        assert pcb.setup.tenting_back is False
+
+    def test_absent_token_is_none(self):
+        """No ``(tenting ...)`` node -> fields stay None (unspecified).
+
+        ``None`` lets the silkscreen rule distinguish "explicitly untented"
+        from "unspecified" -- KiCad's absent-token behavior (tented, measured
+        against kicad-cli 10.0.5) is applied by the consumer, not baked into
+        the parse.
+        """
+        pcb = self._pcb_with_setup("")
+        assert pcb.setup is not None
+        assert pcb.setup.tenting_front is None
+        assert pcb.setup.tenting_back is None
+
+    def test_fleet_style_both_tented(self):
+        pcb = self._pcb_with_setup("(tenting (front yes) (back yes))")
+        assert pcb.setup is not None
+        assert pcb.setup.tenting_front is True
+        assert pcb.setup.tenting_back is True

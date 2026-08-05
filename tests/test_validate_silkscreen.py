@@ -380,6 +380,152 @@ class TestSilkOverCopper:
 
 
 # ---------------------------------------------------------------------------
+# silk_over_copper: untented-via mask openings (#4624)
+# ---------------------------------------------------------------------------
+#
+# No committed board can serve as a fixture here: every board under ``boards/``
+# sets ``(tenting (front yes) (back yes))``, so no fleet via has a mask opening
+# at all.  These synthetic fixtures mirror hand-authored probe boards fed to
+# ``kicad-cli pcb drc --severity-all --format json`` (KiCad 10.0.5, 2026-08-05),
+# which measured (silk segments on BOTH F.SilkS and B.SilkS over one via):
+#
+#   no (tenting ...) anywhere (absent token)          -> 0   (default = tented)
+#   setup (front yes) (back yes)                      -> 0
+#   setup (front no) (back no)                        -> 2   (F and B)
+#   board tented  + via (tenting (front no) (back no))  -> 2
+#   board untented + via (tenting (front yes)(back yes))-> 0
+#   board tented  + via (front no) (back yes)         -> 1   (F only)
+#   board untented + via (front none) (back yes)      -> 1   (F only; none=inherit)
+#
+# i.e. the per-via override beats the board default in both directions, sides
+# resolve independently, ``none`` inherits, and KiCad's absent-token default is
+# TENTED.  The assertions below encode exactly those counts.
+
+
+def _via_probe_pcb(
+    *,
+    setup_tenting: tuple[str, str] | None,
+    via_tenting: tuple[str, str] | None,
+    silk_layers: tuple[str, ...] = ("F.SilkS",),
+) -> PCB:
+    """Build a PCB with one GND via at (10, 10) and silk segment(s) across it.
+
+    ``setup_tenting`` / ``via_tenting`` are ``(front, back)`` token pairs
+    (``"yes"`` / ``"no"`` / ``"none"``) or ``None`` to omit the node entirely,
+    exercising the real ``(tenting ...)`` parse path in both places.
+    """
+    setup_block = ""
+    if setup_tenting is not None:
+        setup_block = f"(tenting (front {setup_tenting[0]}) (back {setup_tenting[1]}))"
+    via_block = ""
+    if via_tenting is not None:
+        via_block = f"(tenting (front {via_tenting[0]}) (back {via_tenting[1]}))"
+    silk_lines = "".join(
+        f"""
+    (gr_line (start 8 10) (end 12 10)
+        (stroke (width 0.2) (type solid))
+        (layer "{layer}") (uuid "2222-{i}"))"""
+        for i, layer in enumerate(silk_layers)
+    )
+    text = f"""(kicad_pcb
+    (version 20260206)
+    (generator "pcbnew")
+    (setup
+        (pad_to_mask_clearance 0)
+        {setup_block}
+    )
+    (net 0 "")
+    (net 1 "GND")
+    (via (at 10 10) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")
+        {via_block}
+        (net 1) (uuid "1111"))
+    {silk_lines}
+)"""
+    from kicad_tools.sexp import parse_string
+
+    return PCB(parse_string(text))
+
+
+class TestSilkOverUntentedVia:
+    def test_untented_via_under_silk_flags(self):
+        """Board-untented via with silk across it yields one pair naming the via."""
+        pcb = _via_probe_pcb(setup_tenting=("no", "no"), via_tenting=None)
+        violations = check_silk_over_copper(pcb, _rules()).violations
+        assert len(violations) == 1
+        assert violations[0].items[1] == "via [GND] at (10.000, 10.000)"
+
+    def test_tented_via_same_geometry_clean(self):
+        """Same geometry with board-tented vias yields nothing (no regression)."""
+        pcb = _via_probe_pcb(setup_tenting=("yes", "yes"), via_tenting=None)
+        assert len(check_silk_over_copper(pcb, _rules())) == 0
+
+    def test_absent_tenting_token_defaults_to_tented(self):
+        """No ``(tenting ...)`` node anywhere -> tented -> no aperture.
+
+        The absent-token default is MEASURED, not assumed: kicad-cli 10.0.5
+        reports zero ``silk_over_copper`` findings on this exact probe board,
+        and a fresh pcbnew board writes ``(front yes) (back yes)``.
+        """
+        pcb = _via_probe_pcb(
+            setup_tenting=None, via_tenting=None, silk_layers=("F.SilkS", "B.SilkS")
+        )
+        assert len(check_silk_over_copper(pcb, _rules())) == 0
+
+    def test_via_override_beats_board_tented_default(self):
+        """Per-via untented override on a board-tented default IS reported."""
+        pcb = _via_probe_pcb(setup_tenting=("yes", "yes"), via_tenting=("no", "no"))
+        violations = check_silk_over_copper(pcb, _rules()).violations
+        assert len(violations) == 1
+        assert violations[0].items[1] == "via [GND] at (10.000, 10.000)"
+
+    def test_via_override_beats_board_untented_default(self):
+        """Per-via tented override on a board-untented default is NOT reported."""
+        pcb = _via_probe_pcb(setup_tenting=("no", "no"), via_tenting=("yes", "yes"))
+        assert len(check_silk_over_copper(pcb, _rules())) == 0
+
+    def test_front_back_sides_resolve_independently(self):
+        """A front-untented/back-tented via is an aperture only against F silk."""
+        pcb = _via_probe_pcb(
+            setup_tenting=("yes", "yes"),
+            via_tenting=("no", "yes"),
+            silk_layers=("F.SilkS", "B.SilkS"),
+        )
+        violations = check_silk_over_copper(pcb, _rules()).violations
+        assert len(violations) == 1
+        assert violations[0].layer == "F.SilkS"
+
+    def test_none_token_inherits_board_default(self):
+        """``none`` on a side falls through to the board default for that side."""
+        pcb = _via_probe_pcb(
+            setup_tenting=("no", "no"),
+            via_tenting=("none", "yes"),
+            silk_layers=("F.SilkS", "B.SilkS"),
+        )
+        violations = check_silk_over_copper(pcb, _rules()).violations
+        assert len(violations) == 1
+        assert violations[0].layer == "F.SilkS"
+
+    def test_both_sides_untented_pairs_with_both_silk_sides(self):
+        """F and B silk over a both-sides-untented via yield one pair each."""
+        pcb = _via_probe_pcb(
+            setup_tenting=("no", "no"),
+            via_tenting=None,
+            silk_layers=("F.SilkS", "B.SilkS"),
+        )
+        violations = check_silk_over_copper(pcb, _rules()).violations
+        assert len(violations) == 2
+        assert sorted(v.layer for v in violations) == ["B.SilkS", "F.SilkS"]
+
+    def test_silk_clear_of_untented_via_not_flagged(self):
+        """An untented via with silk elsewhere on the board yields nothing."""
+        pcb = _via_probe_pcb(setup_tenting=("no", "no"), via_tenting=None)
+        # Move the silk line well away from the via.
+        pcb.graphics[0].start = (30.0, 30.0)
+        pcb.graphics[0].end = (34.0, 30.0)
+        assert len(check_silk_over_copper(pcb, _rules())) == 0
+
+
+# ---------------------------------------------------------------------------
 # silk_overlap (#4612)
 # ---------------------------------------------------------------------------
 #
