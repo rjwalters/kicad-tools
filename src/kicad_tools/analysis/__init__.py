@@ -39,6 +39,12 @@ from .net_status import (
     PadInfo,
     build_zone_net_map,
 )
+from .routing_quality import (
+    FRAGMENT_LENGTH_MM,
+    STAIRCASE_STEP_MM,
+    RoutingQualityMetrics,
+    compute_routing_quality,
+)
 from .signal_integrity import (
     CrosstalkRisk,
     ImpedanceDiscontinuity,
@@ -61,6 +67,8 @@ from .trace_length import (
 )
 
 __all__ = [
+    "FRAGMENT_LENGTH_MM",
+    "STAIRCASE_STEP_MM",
     "AnalogComponent",
     "Bottleneck",
     "ComplexityAnalyzer",
@@ -82,6 +90,7 @@ __all__ = [
     "PowerEstimator",
     "RiskLevel",
     "RoutingComplexity",
+    "RoutingQualityMetrics",
     "Severity",
     "SignalIntegrityAnalyzer",
     "TraceCrosstalkRisk",
@@ -93,6 +102,7 @@ __all__ = [
     "TraceLengthAnalyzer",
     "TraceLengthReport",
     "build_zone_net_map",
+    "compute_routing_quality",
     "detect_analog_components",
     "infer_rail_voltage",
 ]
