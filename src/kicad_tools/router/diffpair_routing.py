@@ -227,6 +227,24 @@ _XY = tuple[float, float]
 # first-legal loop cannot answer the question on its own.  Diagnostic-only, off
 # by default, and observation-only when on -- it never changes which route
 # ships.  Costs a full 225-candidate sweep per crossover.
+#
+# Issue #4635 -- STATE-neutral is not BUDGET-neutral.  PR #4611's prose claimed
+# the census "cannot" cause a routing difference because it is "observation-only
+# by construction".  That is true of router STATE: every gate the scan calls
+# past the accept point is mutation-free, so continuing the sweep cannot perturb
+# anything.  It was NOT true of the wall-clock BUDGET: the census runs inside the
+# window ``spec_t0`` opens in ``route_differential_pair_coupled``, and every
+# downstream deadline there is computed as ``<budget> - (now - spec_t0)``, so
+# census seconds were silently deducted from the probes that follow.  A census-on
+# run could therefore differ from a census-off run through budget pressure alone
+# -- with no state mutation anywhere.  It now credits its own INCREMENTAL cost
+# (the sweep after the first legal candidate) back via
+# ``DiffPairRouter._census_elapsed_s``, so census-on and census-off runs get the
+# same effective downstream budget and are genuinely comparable.  The credit
+# means a census-on pair's TRUE wall clock may exceed
+# ``_SHADOW_PER_PAIR_BUDGET_S`` by the census's own cost -- a deliberate trade
+# for a default-off diagnostic; the true elapsed time stays visible in the
+# per-pair timing log and in the ``census_s=`` field of each census header.
 _CROSSTAIL_CENSUS: bool = os.environ.get("KCT_CROSSTAIL_CENSUS", "0") == "1"
 # How many legal candidates the census lists per crossover before truncating.
 # The count in the header line is always the true total, never the listed one.
@@ -3734,6 +3752,17 @@ class DiffPairRouter:
         # that the per-candidate screens are doing the repair instead.
         # Diagnostic only -- never read by a routing decision.
         self._shadow_via_gate_rejections: int = 0
+        # Issue #4635: wall-clock seconds the #4580 crossover census spent
+        # INSIDE the current spec's budgeted window, beyond what the
+        # un-instrumented first-legal loop would have spent.  The census is
+        # state-neutral (proven in #4580) but it is NOT budget-neutral: it runs
+        # inside the window ``spec_t0`` opens, so without this credit every
+        # census second is silently deducted from the downstream probe
+        # deadlines.  Accumulated in ``_synthesize_crossing_tail``, reset per
+        # spec beside ``spec_t0``, and subtracted from the elapsed term at each
+        # deadline computation.  Exactly ``0.0`` whenever the census is off, so
+        # the default path's timing arithmetic is bit-identical.
+        self._census_elapsed_s: float = 0.0
         # Issue #3089: True iff the most-recent call to
         # ``route_differential_pair_coupled`` returned because the
         # inner ``CoupledPathfinder.route_coupled`` exceeded its
@@ -5945,6 +5974,17 @@ class DiffPairRouter:
         census_legal: list[tuple[int, int, float, _XY, _XY]] = []
         census_key: Callable[[tuple[_XY, _XY]], float] | None = None
         census_first: Route | None = None
+        # Issue #4635: the census's sweep is spent inside the shadow spec's
+        # WALL-CLOCK budget, so it is state-neutral but not budget-neutral.
+        # Stamp the moment the un-instrumented loop would have RETURNED (set
+        # with ``census_first`` below) and charge only the sweep AFTER it to
+        # ``self._census_elapsed_s``, which the deadline arithmetic in
+        # ``route_differential_pair_coupled`` credits back.  Charging the whole
+        # loop would over-credit: on a saturated lattice the un-instrumented
+        # loop already scans most of the 225 candidates before it finds
+        # anything, and a crossover with NO legal candidate scanned the entire
+        # lattice in both modes -- so it correctly credits zero.
+        census_extra_t0: float | None = None
         if self.enable_shadow_construction:
             exclude = {head.net}
             exclude.update(ps.net for ps in partner_segments)
@@ -6135,10 +6175,24 @@ class DiffPairRouter:
                     )
                     if census_first is None:
                         census_first = route  # what the un-instrumented loop returns
+                        # Issue #4635: everything past this point is the
+                        # census's own cost, not the router's.
+                        census_extra_t0 = time.monotonic()
                     break  # legal -- record it and keep scanning the lattice
                 return route
         if census_on:
-            self._report_crossing_tail_census(head, goal, census_legal, len(candidate_pairs))
+            # Issue #4635: credit the INCREMENTAL sweep (post-first-legal) back
+            # to the spec's wall-clock budget.  ``census_extra_t0 is None``
+            # means no candidate was ever legal, i.e. both modes scanned the
+            # whole lattice -- nothing to credit.  The report's own stdout cost
+            # is deliberately not credited: it is bounded (at most
+            # ``_CROSSTAIL_CENSUS_LIST`` + 2 lines) and crediting it would make
+            # the ``census_s=`` field it prints self-referential.
+            census_extra_s = 0.0 if census_extra_t0 is None else time.monotonic() - census_extra_t0
+            self._census_elapsed_s += census_extra_s
+            self._report_crossing_tail_census(
+                head, goal, census_legal, len(candidate_pairs), census_extra_s
+            )
             return census_first  # observation only: the first legal candidate
         return None
 
@@ -6148,6 +6202,7 @@ class DiffPairRouter:
         goal: Pad,
         legal: list[tuple[int, int, float, _XY, _XY]],
         total: int,
+        census_s: float = 0.0,
     ) -> None:
         """Print one crossover's legality census (issue #4580).
 
@@ -6159,12 +6214,21 @@ class DiffPairRouter:
         (board-06's MIPI_CLK- landing) means no ordering key can move the
         result and the constraint lives upstream in placement / escape
         planning.
+
+        Issue #4635: ``census_s`` is this crossover's INCREMENTAL wall-clock
+        cost -- the sweep after the first legal candidate, i.e. exactly what
+        the un-instrumented loop would not have paid, and exactly what is
+        credited back to the shadow spec's budget.  Zero when no candidate was
+        legal (both modes scanned the whole lattice).  It is appended LAST so
+        the pre-existing fields keep their names and positions for anything
+        parsing this header.
         """
         print(
             f"    [crosstail-census] net={head.net_name} "
             f"head=({head.x:.5f},{head.y:.5f}) goal=({goal.x:.5f},{goal.y:.5f}) "
             f"legal={len(legal)}/{total} "
-            f"distinct_v1={len({site[3] for site in legal})}",
+            f"distinct_v1={len({site[3] for site in legal})} "
+            f"census_s={census_s:.4f}",
             flush=True,
         )
         for enum_i, rank, penalty, v1, v2 in legal[:_CROSSTAIL_CENSUS_LIST]:
@@ -9615,6 +9679,12 @@ class DiffPairRouter:
             # prior pair's decline cannot leak into this pair's per-pair
             # classification.  ``_shadow_route_pair`` sets it at each decline.
             self._last_shadow_decline_reason = None
+            # Issue #4635: reset the #4580 census's budget credit for this spec.
+            # Census time recorded OUTSIDE a spec (the escape-stub call site)
+            # pressured no spec budget, so discarding it here is correct.  With
+            # ``KCT_CROSSTAIL_CENSUS`` unset this stays exactly ``0.0`` for the
+            # whole spec and every deadline below is bit-identical to pre-#4635.
+            self._census_elapsed_s = 0.0
             # Issue #3473: iterations the corridor attempt consumed,
             # charged against the shared per-pair iteration budget so
             # the open fallback gets the REMAINDER (not a fresh full
@@ -9719,13 +9789,17 @@ class DiffPairRouter:
                 # of the hard per-pair shadow budget so the two probes
                 # together cannot exceed ``_SHADOW_PER_PAIR_BUDGET_S`` --
                 # the fail-fast contract is per PAIR, not per probe.
+                # Issue #4635: minus the #4580 census's incremental cost, so a
+                # census-on run hands this probe the same deadline a census-off
+                # run would (``0.0`` and therefore bit-identical when off).
                 n_probe_timeout = probe_timeout
                 if per_pair_timeout is not None and probe_timeout is not None:
                     n_probe_timeout = max(
                         0.5,
                         min(
                             probe_timeout,
-                            _SHADOW_PER_PAIR_BUDGET_S - (time.monotonic() - spec_t0),
+                            _SHADOW_PER_PAIR_BUDGET_S
+                            - (time.monotonic() - spec_t0 - self._census_elapsed_s),
                         ),
                     )
                 n_guide = self._single_ended_guide_route(
@@ -9762,12 +9836,15 @@ class DiffPairRouter:
                 # shadow budget so this last-resort pass cannot extend the
                 # per-pair wall-clock past ``_SHADOW_PER_PAIR_BUDGET_S`` (the
                 # normal attempts may already have spent most of it).
+                # Issue #4635: less the census's incremental cost (see above).
                 bias_timeout = probe_timeout
                 if per_pair_timeout is not None and probe_timeout is not None:
                     bias_timeout = max(
                         0.5,
                         min(
-                            probe_timeout, _SHADOW_PER_PAIR_BUDGET_S - (time.monotonic() - spec_t0)
+                            probe_timeout,
+                            _SHADOW_PER_PAIR_BUDGET_S
+                            - (time.monotonic() - spec_t0 - self._census_elapsed_s),
                         ),
                     )
                 biased = self._shadow_with_guide_bias(
@@ -9866,11 +9943,18 @@ class DiffPairRouter:
                 # corridor half (it already counts against the pair
                 # via ``spec_t0``), keeping probe+corridor <= ~50% of
                 # the per-pair budget instead of 62.5%.
+                # Issue #4635: the #4580 census's incremental cost is NOT the
+                # probe's, so it is credited back here too.  This site is
+                # reachable with the census ON and shadow construction OFF
+                # (``_CROSSTAIL_CENSUS`` is independent of
+                # ``enable_shadow_construction``), so leaving it uncorrected
+                # would make the fix partial.
                 corridor_budget: float | None = None
                 if per_pair_timeout is not None:
                     corridor_budget = max(
                         0.5,
-                        per_pair_timeout * 0.5 - (time.monotonic() - spec_t0),
+                        per_pair_timeout * 0.5
+                        - (time.monotonic() - spec_t0 - self._census_elapsed_s),
                     )
                 # Issue #3473: split the ITERATION budget the same way
                 # as the wall-clock budget -- the corridor attempt gets
@@ -9895,7 +9979,12 @@ class DiffPairRouter:
             if result is None and not shadow_fail_fast:
                 remaining_budget = per_pair_timeout
                 if per_pair_timeout is not None:
-                    remaining_budget = max(1.0, per_pair_timeout - (time.monotonic() - spec_t0))
+                    # Issue #4635: same census credit as the corridor budget
+                    # above -- this open fallback shares the ``spec_t0`` window.
+                    remaining_budget = max(
+                        1.0,
+                        per_pair_timeout - (time.monotonic() - spec_t0 - self._census_elapsed_s),
+                    )
                 # Issue #3473: the open fallback gets the REMAINDER of
                 # the shared iteration budget.  Because the corridor
                 # attempt was capped at half, the fallback always
@@ -9915,6 +10004,11 @@ class DiffPairRouter:
                     max_iterations_budget=remaining_iterations,
                 )
 
+            # Issue #4635: deliberately NOT census-adjusted.  The deadlines
+            # above credit the census's cost back so census-on and census-off
+            # runs are comparable; this is the pair's TRUE wall clock, and
+            # subtracting the census here would hide exactly the cost the credit
+            # makes the pair spend beyond ``_SHADOW_PER_PAIR_BUDGET_S``.
             spec_elapsed = time.monotonic() - spec_t0
             logger.info(
                 "diffpair coupled timing: pair=%r phase=%s elapsed=%.2fs success=%s",

@@ -85,6 +85,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copper-dirty branch is now a detail-selection branch rather than a return. Exit
   codes are unaffected — a copper-dirty board already failed (#4616).
 
+- **The crossover legality census spent the budget it was measuring.**
+  `KCT_CROSSTAIL_CENSUS=1` (#4580) is state-neutral but was not budget-neutral:
+  its lattice sweep runs inside the shadow phase's per-pair wall-clock window,
+  so census seconds were deducted from all four downstream deadlines and a
+  census-on run could differ from a census-off run through budget pressure
+  alone. The census now credits its **incremental** cost (the sweep after the
+  first legal candidate; zero when nothing is legal) back to that window and
+  reports it as a `census_s=` field appended to the `[crosstail-census]` header.
+  Default-off arithmetic is bit-identical — the credit is exactly `0.0` when the
+  census is unset (#4635).
+
 ### Known limitations
 
 - `silk_over_copper`'s aperture set is **pad-only**: untented via mask openings
