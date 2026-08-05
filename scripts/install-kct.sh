@@ -483,7 +483,8 @@ VENDORED_FILES+=(".kct/ci/README.md")
 ok "vendored ${#CI_GATE_FILES[@]} CI gate script(s) + README into .kct/ci/"
 
 # ----- Stage 6c: vendor load-bearing conventions into .kct/CONVENTIONS.md ----
-# The three load-bearing Epic #4054 conventions live here verbatim. This file
+# The four load-bearing conventions (Epic #4054 #1-#3, plus the per-rule
+# warning-baseline convention from #4614) live here verbatim. This file
 # is the "guaranteed-present, survives CLAUDE.md divergence" artifact: the
 # installer owns it outright and overwrites it on every run (same refresh
 # semantics as .kct/ci/README.md and .kct/install-metadata.json). Moving the
@@ -513,6 +514,12 @@ sign-off.
 3. **Artifact-first.** The committed board artifact is shipping truth. A
    `generate_design.py`/regeneration may diverge by design and is NOT
    authoritative over a committed board.
+4. **Manufacturing warning baselines are recorded per rule.** "Non-regressive
+   vs an aggregate warning total" is NOT a valid baseline check — an aggregate
+   can conceal an entire defect class (e.g. silkscreen over exposed pads, an
+   assembly risk) indefinitely. Record and compare warning counts rule-by-rule
+   (`kct check`'s BY RULE breakdown, or per-rule counts derived from the
+   `--output` JSON report's violations).
 CONVENTIONS_EOF
 }
 do_action "write .kct/CONVENTIONS.md" write_conventions

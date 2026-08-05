@@ -88,9 +88,10 @@ the files actually present:
    convention files rather than restating them here (they are owned by the
    installer and must not be duplicated a third time):
 
-   - **`.kct/CONVENTIONS.md`** — the three load-bearing Epic #4054 conventions
-     verbatim (build the native router backend, cross-gate DRC with
-     `kicad-cli pcb drc --refill-zones`, artifact-first). Read this before
+   - **`.kct/CONVENTIONS.md`** — the four load-bearing conventions verbatim
+     (build the native router backend, cross-gate DRC with
+     `kicad-cli pcb drc --refill-zones`, artifact-first, and per-rule
+     manufacturing warning baselines). Read this before
      routing or manufacturing sign-off. If `.kct/CONVENTIONS.md` is absent
      (an install predating it), fall back to the guarded kicad-tools block in
      the repo's `CLAUDE.md`, which carries the same pointer.

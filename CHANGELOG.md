@@ -17,6 +17,17 @@ constructor). No breaking changes.
 
 ### Added
 
+- **Advisory routing-quality metrics in `kct check`** — a new pure
+  `kicad_tools.analysis.routing_quality` module measures segment-length
+  distribution (median, sub-0.25 mm fragments), direction classes
+  (orthogonal / true-45° / off-axis), H/V staircase steps (< 0.6 mm legs),
+  zero-length segments, and per-net segment counts over the board's copper.
+  Default `kct check` prints a "Routing quality (advisory)" stanza after the
+  meta-check rollup and the JSON/`--output` envelopes gain a top-level
+  `routing_quality` object; strictly advisory — never affects the verdict or
+  exit code (even under `--strict`), no new flags, and `--drc-only` output is
+  unchanged (#4623).
+
 - **`kct route --complete`** — a targeted completion pass: auto-detect the
   still-unconnected signal nets and route only those links, with all other
   copper fixed, on the octilinear lattice engine. Implies `--preserve-existing`
@@ -255,6 +266,31 @@ constructor). No breaking changes.
   fatal — the board no longer continues to verification and manufacturing
   export. Without a voltage map, exit 2-5 handling is byte-identical to
   before, and the exit-3 message now names all three shared meanings (#4607).
+
+- **`kct check` `silk_over_copper` now sees untented-via mask openings.** The
+  aperture set was pads-only, so silk over an exposed via was invisible
+  (kicad-cli 1, kct 0 — the residue #4612 measured and deferred). The rule now
+  resolves per-via tenting per side (per-via `(tenting ...)` override → board
+  `setup` default → the measured absent-token default, tented) and yields an
+  aperture for each untented side; `Setup` and `Via` parse the setup-level and
+  per-via `(tenting (front …) (back …))` nodes, with the per-via override
+  round-tripped through `Via.to_sexp` like `via_type`. Tented vias — the
+  entire committed fleet — contribute nothing, preserving #4612's exact
+  kicad-cli parity; all seven synthetic tenting probes match kicad-cli 10.0.5
+  counts exactly (#4624).
+
+- **`/kct:tapeout` certified "upload as-is" on errors alone — assembly-affecting
+  warnings rode through.** The tapeout skill contract gains a warning-review
+  gate (Gate 4b): a per-rule warning table is derived from Gate 1's `kct check
+  --output` JSON report and printed (an aggregate total alone is
+  non-compliant), and any nonzero count in the assembly-affecting set
+  (`silk_over_copper`, `silkscreen_line_width`, `silk_edge_clearance`,
+  `silk_overlap`) forces TAPEOUT REFUSED unless explicitly acknowledged via
+  `--ack-warnings` or a per-rule accepted-risk line; Gate 7's README and Gate
+  8's manifest now carry the per-rule counts. `/kct:manufacturing-readiness`
+  sign-off quotes the per-rule `BY RULE:` warning breakdown, and the installer
+  vendors a 4th `.kct/CONVENTIONS.md` convention: manufacturing warning
+  baselines are recorded per rule, never as an aggregate (#4614).
 
 - **KiCad-10 name-based net references were invisible to four copper
   scanners.** On a board whose segments and vias name their net (`(net "GND")`)
