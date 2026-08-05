@@ -91,6 +91,10 @@ if TYPE_CHECKING:
 # not remove this alias without also updating those patch targets.
 from kicad_tools.router.auto_pour import auto_skip_pour_nets as _auto_skip_pour_nets  # noqa: E402
 
+# Issue #4634: the sidecar filename this writer emits is the same constant the
+# four sidecar *probes* share, so writer and readers cannot drift apart.
+from kicad_tools.sidecars import NET_CLASS_MAP_SIDECAR_BASENAME  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 
@@ -2079,7 +2083,7 @@ def _write_net_class_map_sidecar(
     if not effective_map:
         return
 
-    sidecar_path = output_path.parent / "net_class_map.json"
+    sidecar_path = output_path.parent / NET_CLASS_MAP_SIDECAR_BASENAME
 
     # Never clobber the user's --net-class-map input file (Issue #4428).
     diverted = False

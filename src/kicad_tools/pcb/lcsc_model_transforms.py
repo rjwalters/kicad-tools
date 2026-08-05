@@ -36,14 +36,34 @@ board.  Because ``offset`` is applied *after* ``rotate``, the ``offset`` here
 is a post-rotation translation — so when calibrating a part, set ``rotate``
 first, render, and only then measure ``offset``.
 
-**Precedence** (resolved in ``models3d._resolve_lcsc``, first non-``None``
-wins, merged per field):
+**Precedence** (resolved by :func:`resolve_merged_transform`, called from
+``models3d._resolve_lcsc``; first non-``None`` wins, merged per field except
+where the split-calibration guard below applies):
 
 1. A per-board ``lcsc_models.json`` sidecar entry in object form
    (``{"lib_id": {"lcsc": "C...", "rotate": [...], "offset": [...]}}``).
 2. This packaged table.
 3. Identity (``rotate (xyz 0 0 0)`` / ``offset (xyz 0 0 0)``) — unchanged
    behavior for every part with no entry anywhere.
+
+**A packaged ``offset`` is calibrated for its sibling ``rotate``, and the
+merge will not split the pair silently** (issue #4636).  Because ``offset``
+is a *post-rotation* translation, an offset measured in one frame points
+somewhere else in another.  So a sidecar that changes ``rotate`` while
+inheriting a packaged ``offset`` whose invalidated components are non-zero is
+a hard :class:`ValueError`, not a quiet almost-right body.  The invalidated
+components are ``X``/``Y`` when the two rotations differ only about Z (a
+Z-axis rotation leaves Z invariant), and ``X``/``Y``/``Z`` when they differ
+about X or Y as well (an off-Z rotation tilts the body, so Z is no longer
+invariant either).  Three merges stay legal and silent:
+
+* a sidecar that **restates** ``offset`` (including an explicit ``[0, 0, 0]``,
+  which suppresses the packaged value) — the calibrator acknowledged it;
+* a sidecar ``rotate`` **equal** to the packaged ``rotate`` — the frame did
+  not change;
+* the symmetric case, a sidecar overriding only ``offset`` and inheriting the
+  packaged ``rotate`` — that offset was necessarily measured *with* the
+  packaged rotation active, so it is already in the right frame.
 
 **Provenance is mandatory, and enforced.**  Every entry MUST carry a
 :class:`TransformProvenance` recording the board, refdes, ISO date, and the
@@ -67,6 +87,7 @@ __all__ = [
     "TransformProvenance",
     "entry_problems",
     "lookup_transform",
+    "resolve_merged_transform",
     "table_problems",
 ]
 
@@ -181,6 +202,141 @@ def lookup_transform(c_number: str) -> LcscModelTransform | None:
     before falling back to identity.
     """
     return LCSC_MODEL_TRANSFORMS.get(c_number)
+
+
+# --------------------------------------------------------------------------
+# The sidecar/table merge, and the split-calibration guard (#4636)
+# --------------------------------------------------------------------------
+
+_IDENTITY_ROTATE: Triple = (0.0, 0.0, 0.0)
+
+
+def _fmt_triple(triple: Triple) -> str:
+    """Render a triple the way a sidecar/table author writes one."""
+    return "(" + ", ".join(f"{component:g}" for component in triple) + ")"
+
+
+def _invalidated_offset_axes(sidecar_rotate: Triple, packaged_rotate: Triple) -> tuple[str, ...]:
+    """Return the offset axes a rotation change from *packaged* to *sidecar* invalidates.
+
+    A pure Z-axis rotation delta spins the body about the board normal: the
+    in-plane X/Y components of a post-rotation offset now point elsewhere, but
+    the Z component (height above the board) is unchanged.  Any X or Y
+    component in the delta *tilts* the body, which moves it vertically too, so
+    every axis of the offset is then suspect.
+    """
+    if sidecar_rotate[0] == packaged_rotate[0] and sidecar_rotate[1] == packaged_rotate[1]:
+        return ("x", "y")
+    return ("x", "y", "z")
+
+
+def _provenance_clause(provenance: TransformProvenance | None) -> str:
+    """Name where and when the packaged offset was rendered, if recorded."""
+    if provenance is None:
+        return " (no provenance recorded)"
+    return f" (verified on {provenance.board} {provenance.refdes}, {provenance.verified})"
+
+
+def _split_calibration_message(
+    c_number: str,
+    lib_id: str,
+    sidecar_rotate: Triple,
+    packaged: LcscModelTransform,
+    packaged_rotate: Triple,
+    packaged_offset: Triple,
+    stale: list[str],
+) -> str:
+    """The error text for an inherited offset measured in a different frame."""
+    return (
+        f"per-part 3D transform conflict for {lib_id!r} (LCSC {c_number}): the "
+        f"sidecar overrides rotate={_fmt_triple(sidecar_rotate)} but inherits the "
+        f"packaged offset={_fmt_triple(packaged_offset)}, which was calibrated "
+        f"under rotate={_fmt_triple(packaged_rotate)}"
+        f"{_provenance_clause(packaged.provenance)}. "
+        f"offset is applied *after* rotate, so {', '.join(stale)} "
+        f"{'points' if len(stale) == 1 else 'point'} somewhere else in the new "
+        f"frame. Fix: restate offset in the sidecar entry for {lib_id!r} — use "
+        f"[0, 0, 0] if a re-render shows none is needed — or drop the sidecar "
+        f"rotate to keep the calibrated (rotate, offset) pair intact."
+    )
+
+
+def resolve_merged_transform(
+    c_number: str,
+    lib_id: str,
+    sidecar_rotate: Triple | None,
+    sidecar_offset: Triple | None,
+) -> tuple[Triple | None, Triple | None]:
+    """Merge a sidecar entry over the packaged table, rejecting a split calibration.
+
+    Implements the precedence documented in the module docstring: each field is
+    taken from the sidecar when it says something, else from the packaged
+    table, else left ``None`` (identity).
+
+    Args:
+        c_number: The LCSC C-number the sidecar entry resolved to.
+        lib_id: The footprint lib id being resolved — named in the error
+            message, because ``LcscModelEntry`` does not retain the sidecar
+            file path.
+        sidecar_rotate: The sidecar's ``rotate``, or ``None`` when it says
+            nothing about rotation.
+        sidecar_offset: The sidecar's ``offset``, or ``None`` when it says
+            nothing about translation.
+
+    Returns:
+        The merged ``(rotate, offset)``; either element may be ``None``,
+        meaning "identity for this field".
+
+    Raises:
+        ValueError: When the sidecar changes ``rotate`` while silently
+            inheriting a packaged ``offset`` whose invalidated components are
+            non-zero — the offset was measured in a frame that no longer
+            applies.  Restating ``offset`` in the sidecar (``[0, 0, 0]``
+            counts) always escapes this.
+
+    Rotation equality is compared exactly.  Both sides are authored literals,
+    never the result of arithmetic, so an exact comparison is the right test —
+    and a sidecar that writes ``360`` where the table writes ``0`` has
+    *stated* a rotation it never rendered, which is exactly the class of
+    unverified number this guard exists to catch.
+    """
+    packaged = lookup_transform(c_number)
+    packaged_rotate = packaged.rotate if packaged is not None else None
+    packaged_offset = packaged.offset if packaged is not None else None
+
+    if (
+        packaged is not None
+        and packaged_offset is not None
+        and sidecar_rotate is not None
+        and sidecar_offset is None
+    ):
+        # A packaged entry may carry an offset with no rotate; that offset was
+        # then calibrated in the identity frame.
+        effective_rotate = packaged_rotate if packaged_rotate is not None else _IDENTITY_ROTATE
+        if tuple(sidecar_rotate) != tuple(effective_rotate):
+            invalidated = _invalidated_offset_axes(sidecar_rotate, effective_rotate)
+            # ``-0.0 != 0.0`` is False, so a signed zero is correctly benign.
+            stale = [
+                f"its {axis.upper()} component ({packaged_offset[index]:g})"
+                for index, axis in enumerate("xyz")
+                if axis in invalidated and packaged_offset[index] != 0.0
+            ]
+            if stale:
+                raise ValueError(
+                    _split_calibration_message(
+                        c_number,
+                        lib_id,
+                        sidecar_rotate,
+                        packaged,
+                        effective_rotate,
+                        packaged_offset,
+                        stale,
+                    )
+                )
+
+    rotate = sidecar_rotate if sidecar_rotate is not None else packaged_rotate
+    offset = sidecar_offset if sidecar_offset is not None else packaged_offset
+    return rotate, offset
 
 
 def _triple_problems(label: str, value: object) -> list[str]:
