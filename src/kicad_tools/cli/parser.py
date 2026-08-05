@@ -7398,6 +7398,68 @@ def _add_pipeline_parser(subparsers) -> None:
             " high-confidence value/footprint corrections in place."
         ),
     )
+    # Issue #4607: HV pairwise-clearance passthrough.  Mirrors the `kct route`
+    # flags (see _add_route_parser) so the pipeline's route step can forward
+    # them to the route subprocess.  Must stay in lockstep with the inner
+    # parser in pipeline_cmd.main and be forwarded by
+    # commands/pipeline.py::run_pipeline_command (pinned by
+    # tests/test_pipeline_cli_args.py).
+    pipeline_parser.add_argument(
+        "--voltage-map",
+        dest="pipeline_voltage_map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON per-net voltage map {net_name: volts}, forwarded "
+            "to the route step to enable the HV pairwise-clearance audit "
+            "(see `kct route --voltage-map`). With a voltage map in play, a "
+            "clearance-dirty route result (exit 3/4) FAILS the pipeline's "
+            "route step instead of continuing as a warning (issue #4607)."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--creepage-standard",
+        dest="pipeline_creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help=(
+            "Creepage standard for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: iec60664)."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--pollution-degree",
+        dest="pipeline_pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help=(
+            "IEC pollution degree for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: 2)."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--material-group",
+        dest="pipeline_material_group",
+        default="IIIa",
+        help=(
+            "Insulation material group I/II/IIIa/IIIb for the --voltage-map "
+            "pairwise-clearance lookup, forwarded to the route step "
+            "(default: IIIa)."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--hv-threshold",
+        dest="pipeline_hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help=(
+            "Minimum net-pair |ΔV| (volts) that triggers a creepage widening "
+            "for --voltage-map pairwise clearance, forwarded to the route "
+            "step (default: 30.0)."
+        ),
+    )
 
 
 def _add_create_pcb_parser(subparsers) -> None:
@@ -7598,6 +7660,67 @@ def _add_build_parser(subparsers) -> None:
         help=(
             "Skip the routing-completeness preflight "
             "(advertised in failure messages; CI greppable)."
+        ),
+    )
+    # Issue #4607: HV pairwise-clearance passthrough.  Mirrors the `kct route`
+    # flags (see _add_route_parser) so the build's route step can forward them
+    # to the route subprocess.  Must stay in lockstep with
+    # build_cmd._build_inner_parser (enforced by tests/test_build_parser_parity.py)
+    # and be forwarded by commands/build.py::run_build_command.
+    build_parser.add_argument(
+        "--voltage-map",
+        dest="build_voltage_map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON per-net voltage map {net_name: volts}, forwarded "
+            "to the route step to enable the HV pairwise-clearance audit "
+            "(see `kct route --voltage-map`). With a voltage map in play, a "
+            "clearance-dirty route result (exit 3/4) FAILS the build instead "
+            "of continuing to verification and export (issue #4607)."
+        ),
+    )
+    build_parser.add_argument(
+        "--creepage-standard",
+        dest="build_creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help=(
+            "Creepage standard for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: iec60664)."
+        ),
+    )
+    build_parser.add_argument(
+        "--pollution-degree",
+        dest="build_pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help=(
+            "IEC pollution degree for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: 2)."
+        ),
+    )
+    build_parser.add_argument(
+        "--material-group",
+        dest="build_material_group",
+        default="IIIa",
+        help=(
+            "Insulation material group I/II/IIIa/IIIb for the --voltage-map "
+            "pairwise-clearance lookup, forwarded to the route step "
+            "(default: IIIa)."
+        ),
+    )
+    build_parser.add_argument(
+        "--hv-threshold",
+        dest="build_hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help=(
+            "Minimum net-pair |ΔV| (volts) that triggers a creepage widening "
+            "for --voltage-map pairwise clearance, forwarded to the route "
+            "step (default: 30.0)."
         ),
     )
 

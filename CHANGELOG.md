@@ -245,6 +245,17 @@ constructor). No breaking changes.
 
 ### Fixed
 
+- **An HV pairwise-clearance failure could flow through `kct build` /
+  `kct pipeline` as a soft warning.** Neither consumer forwarded
+  `--voltage-map`, and both treated route exit 3 as non-fatal with a message
+  that misnamed it as "DRC violations remain". Both now thread `--voltage-map`
+  (plus `--creepage-standard` / `--pollution-degree` / `--material-group` /
+  `--hv-threshold`) through to the route subprocess across every parser hop,
+  and with a voltage map in play a clearance-dirty route result (exit 3/4) is
+  fatal — the board no longer continues to verification and manufacturing
+  export. Without a voltage map, exit 2-5 handling is byte-identical to
+  before, and the exit-3 message now names all three shared meanings (#4607).
+
 - **KiCad-10 name-based net references were invisible to four copper
   scanners.** On a board whose segments and vias name their net (`(net "GND")`)
   instead of numbering it, the `--preserve-existing` parser returned an empty
