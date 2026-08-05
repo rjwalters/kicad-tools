@@ -218,14 +218,67 @@ skew-checking entirely --- the error count can drop while the change is
 a regression, not a win.  Always read `coupled-ok` and reach alongside
 the raw error count, never the error count alone.
 
+### The crossover legality census (`KCT_CROSSTAIL_CENSUS=1`)
+
+The shadow constructor's crossover tails ship the **first** legal via-site
+candidate out of a 225-entry lattice and report nothing about the rest, so an
+*ordering* problem (many sites legal, a better key would pick a kinder one)
+looks exactly like a *saturation* one (almost nothing is legal, so no key can
+help).  `KCT_CROSSTAIL_CENSUS=1` ([#4580]) scans the whole lattice instead and
+prints one header per crossover:
+
+```bash
+KCT_CROSSTAIL_CENSUS=1 KCT_BOARD06_SHADOW=1 PYTHONHASHSEED=42 uv run python \
+  boards/06-diffpair-test/generate_design.py --step route --seed 42
+# [crosstail-census] net=… head=(…) goal=(…) legal=2/225 distinct_v1=1 census_s=0.0164
+```
+
+`distinct_v1` is the field that separates the two worlds: a legal set that is a
+singleton in `v1` carries the same barrel on every legal route, so no ordering
+key can move the result and the constraint lives upstream in placement / escape
+planning.
+
+**State-neutral is not the same as budget-neutral ([#4635]).** PR [#4611]'s
+prose claimed the census "cannot" change the route because it is
+"observation-only by construction".  That is true of router **state** — every
+gate the scan calls past the accept point is mutation-free, so continuing the
+sweep cannot perturb anything.  It was **not** true of the wall-clock
+**budget**: the census runs inside the shadow phase's per-pair window, and every
+downstream deadline there is computed as `<budget> - <elapsed since the window
+opened>`, so census seconds were silently deducted from the probes that follow.
+A census-on run could therefore differ from a census-off run through budget
+pressure alone.  Since #4635 the census credits its own **incremental** cost
+(the sweep after the first legal candidate — zero when nothing is legal, since
+both modes then scan the whole lattice) back to that window, so census-on and
+census-off runs get the same effective downstream budget.  The trade is
+deliberate: a census-on pair's *true* wall clock may now exceed the 30 s
+`_SHADOW_PER_PAIR_BUDGET_S` by the census's own cost, which stays visible in
+`census_s=` and in the unadjusted per-pair `[coupled-timing] elapsed=` line.
+
+**Measured on this board** (shadow-ON, seed 42, 2026-08-04 — re-measure before
+quoting): 166 crossovers, of which **150 (90.4%) have `legal=0/225`** and so
+credit exactly zero.  Total credited census time across the whole shadow phase
+is **1.28 s**; the worst single pair (USB3_TX1) accrues **0.86 s**, i.e. under
+3% of its 30 s budget.  That is a **refutation** of the budget-pressure
+hypothesis for the Mode A / Mode B flip: board-06's lattice is saturated, the
+un-instrumented loop already scans most of the 225 candidates before finding
+anything, and the incremental cost is therefore small.  [#4536] bimodality
+remains the leading explanation for a 35-vs-32 difference.  (On an *open*
+lattice the picture reverses — a synthetic fixture whose first legal candidate
+is at rank 0 pays ~3.9 ms of a ~4.0 ms census, ~39x the un-instrumented
+0.10 ms.)
+
 [#4536]: https://github.com/rjwalters/kicad-tools/issues/4536
 [#4570]: https://github.com/rjwalters/kicad-tools/issues/4570
 [#4574]: https://github.com/rjwalters/kicad-tools/issues/4574
 [#4575]: https://github.com/rjwalters/kicad-tools/issues/4575
 [#4577]: https://github.com/rjwalters/kicad-tools/issues/4577
 [#4579]: https://github.com/rjwalters/kicad-tools/issues/4579
+[#4580]: https://github.com/rjwalters/kicad-tools/issues/4580
 [#4581]: https://github.com/rjwalters/kicad-tools/issues/4581
 [#4582]: https://github.com/rjwalters/kicad-tools/issues/4582
+[#4611]: https://github.com/rjwalters/kicad-tools/pull/4611
+[#4635]: https://github.com/rjwalters/kicad-tools/issues/4635
 
 ## CI Gate (Phase 4N, #2660)
 

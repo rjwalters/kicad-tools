@@ -1312,3 +1312,95 @@ class TestLcscPerPartTransform:
         plain_text, _ = add_model_refs_to_text(PCB_LCSC_OFFCENTRE, plain)
         for text in (rotated_text, plain_text):
             assert "(xyz 10 -2 0)" in text
+
+
+# --------------------------------------------------------------------------
+# CLI surface for the split-calibration guard (issue #4636)
+# --------------------------------------------------------------------------
+
+
+class TestSplitCalibrationCliSurface:
+    """A sidecar ``rotate`` inheriting a frame-mismatched packaged ``offset``
+    must reach the operator as a nonzero exit plus the message, on both output
+    formats.  ``run_add_3d_models`` already wraps ``add_model_refs`` in a
+    catch-all, so no CLI plumbing is involved -- this pins that it stays true.
+    """
+
+    LIB_ID = "Connector_PCIE:PCIE_Mini_Edge"
+
+    def _setup(self, tmp_path, monkeypatch):
+        import json
+
+        from kicad_tools.pcb import lcsc_model_transforms
+        from kicad_tools.pcb.lcsc_model_transforms import (
+            LcscModelTransform,
+            TransformProvenance,
+        )
+        from kicad_tools.pcb.lcsc_models import DEFAULT_CACHE_ENV_VAR
+
+        monkeypatch.setitem(
+            lcsc_model_transforms.LCSC_MODEL_TRANSFORMS,
+            "C444929",
+            LcscModelTransform(
+                rotate=(0.0, 0.0, -90.0),
+                offset=(1.5, -0.25, 0.0),
+                provenance=TransformProvenance(
+                    board="boards/06-diffpair-test",
+                    refdes="J3",
+                    verified="2026-08-04",
+                    command="kct render boards/06-diffpair-test",
+                ),
+            ),
+        )
+        cache = tmp_path / "lcsc-cache"
+        cache.mkdir(exist_ok=True)
+        (cache / "C444929.step").write_bytes(_FAKE_STEP)
+        monkeypatch.setenv(DEFAULT_CACHE_ENV_VAR, str(cache))
+        footprints = tmp_path / "footprints"
+        footprints.mkdir(exist_ok=True)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(PCB_LCSC_OFFCENTRE)
+        sidecar = tmp_path / "lcsc_models.json"
+        sidecar.write_text(json.dumps({self.LIB_ID: {"lcsc": "C444929", "rotate": [0, 0, 90]}}))
+        return pcb, sidecar, footprints
+
+    def test_text_format_exits_1_and_prints_to_stderr(self, tmp_path, monkeypatch, capsys):
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        pcb, sidecar, footprints = self._setup(tmp_path, monkeypatch)
+        rc = run_add_3d_models(pcb, lib_path=footprints, lcsc_models=sidecar, output_format="text")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "per-part 3D transform conflict" in err
+        assert self.LIB_ID in err
+        assert "C444929" in err
+        # The board is left untouched by a rejected merge.
+        assert pcb.read_text() == PCB_LCSC_OFFCENTRE
+
+    def test_json_format_exits_1_and_reports_the_error_key(self, tmp_path, monkeypatch, capsys):
+        import json
+
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        pcb, sidecar, footprints = self._setup(tmp_path, monkeypatch)
+        rc = run_add_3d_models(pcb, lib_path=footprints, lcsc_models=sidecar, output_format="json")
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert "per-part 3D transform conflict" in payload["error"]
+        assert "[0, 0, 0]" in payload["error"]  # the remedy
+
+    def test_the_documented_escape_hatch_unblocks_the_run(self, tmp_path, monkeypatch, capsys):
+        import json
+
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        pcb, sidecar, footprints = self._setup(tmp_path, monkeypatch)
+        sidecar.write_text(
+            json.dumps(
+                {self.LIB_ID: {"lcsc": "C444929", "rotate": [0, 0, 90], "offset": [0, 0, 0]}}
+            )
+        )
+        rc = run_add_3d_models(pcb, lib_path=footprints, lcsc_models=sidecar, output_format="json")
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["patched"] == [self.LIB_ID]

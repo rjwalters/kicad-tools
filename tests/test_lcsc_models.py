@@ -29,6 +29,7 @@ from kicad_tools.pcb.lcsc_model_transforms import (
     TransformProvenance,
     entry_problems,
     lookup_transform,
+    resolve_merged_transform,
     table_problems,
 )
 from kicad_tools.pcb.lcsc_models import (
@@ -941,6 +942,209 @@ class TestTransformPrecedence:
         )
         resolver(self.LIB_ID)
         assert log == {}
+
+
+class TestSplitCalibrationGuard:
+    """A packaged ``offset`` is calibrated for its sibling ``rotate`` (#4636).
+
+    ``offset`` is applied *after* ``rotate``, so an offset measured in one
+    frame points somewhere else in another.  A sidecar that changes ``rotate``
+    while silently inheriting such an offset must fail loudly instead of
+    emitting an almost-right body -- the worst failure mode for a transform
+    whose only real validation is a human looking at a render.
+    """
+
+    LIB_ID = "Module:Joystick_Analog"
+
+    @staticmethod
+    def _packaged(monkeypatch, **kwargs):
+        monkeypatch.setitem(
+            lcsc_model_transforms.LCSC_MODEL_TRANSFORMS,
+            "C50950",
+            LcscModelTransform(provenance=GOOD_PROVENANCE, **kwargs),
+        )
+
+    # -- the defect ---------------------------------------------------------
+
+    def test_sidecar_rotate_inheriting_an_xy_offset_raises(self, tmp_path, monkeypatch):
+        self._packaged(monkeypatch, rotate=(0.0, 0.0, -90.0), offset=(1.5, -0.25, 0.0))
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, 90.0))}
+        )
+        with pytest.raises(ValueError) as excinfo:
+            resolver(self.LIB_ID)
+        message = str(excinfo.value)
+        # Both sources named, plus the render that measured the offset.
+        assert self.LIB_ID in message
+        assert "C50950" in message
+        assert "(1.5, -0.25, 0)" in message  # the packaged offset
+        assert "(0, 0, -90)" in message  # the rotation it was calibrated under
+        assert "(0, 0, 90)" in message  # the sidecar rotation
+        assert "boards/06-diffpair-test" in message
+        assert "J3" in message
+        assert "2026-08-04" in message
+        # And the remedy.
+        assert "[0, 0, 0]" in message
+
+    def test_message_names_only_the_invalidated_nonzero_components(self, tmp_path, monkeypatch):
+        # Z is invariant under a Z-only rotation delta, so a nonzero Z must not
+        # be cited as evidence even when X/Y are what trip the guard.
+        self._packaged(monkeypatch, rotate=(0.0, 0.0, -90.0), offset=(1.5, 0.0, 1.25))
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, 90.0))}
+        )
+        with pytest.raises(ValueError) as excinfo:
+            resolver(self.LIB_ID)
+        message = str(excinfo.value)
+        assert "its X component (1.5)" in message
+        assert "Y component" not in message  # zero -- nothing to invalidate
+        assert "Z component" not in message  # rotation-invariant here
+
+    def test_off_z_rotation_invalidates_a_z_only_offset_too(self, tmp_path, monkeypatch):
+        # Tilting the body about X/Y moves it vertically, so "Z is
+        # rotation-invariant" no longer holds.
+        self._packaged(monkeypatch, offset=(0.0, 0.0, 1.25))
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 15.0, 0.0))}
+        )
+        with pytest.raises(ValueError) as excinfo:
+            resolver(self.LIB_ID)
+        assert "its Z component (1.25)" in str(excinfo.value)
+
+    def test_packaged_offset_without_a_rotate_is_calibrated_in_the_identity_frame(
+        self, tmp_path, monkeypatch
+    ):
+        # No packaged ``rotate`` means the offset was measured at identity, so
+        # any sidecar rotation still changes the frame.
+        self._packaged(monkeypatch, offset=(1.5, -0.25, 0.0))
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, 90.0))}
+        )
+        with pytest.raises(ValueError) as excinfo:
+            resolver(self.LIB_ID)
+        assert "(0, 0, 0)" in str(excinfo.value)
+
+    def test_missing_provenance_still_produces_a_message(self, tmp_path, monkeypatch):
+        # provenance is typed optional (a forgetful author gets a test failure,
+        # not a TypeError) -- building the error must not AttributeError.
+        monkeypatch.setitem(
+            lcsc_model_transforms.LCSC_MODEL_TRANSFORMS,
+            "C50950",
+            LcscModelTransform(rotate=(0.0, 0.0, -90.0), offset=(1.5, -0.25, 0.0)),
+        )
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, 90.0))}
+        )
+        with pytest.raises(ValueError, match="no provenance recorded"):
+            resolver(self.LIB_ID)
+
+    # -- what must stay legal ----------------------------------------------
+
+    def test_z_only_offset_survives_a_z_only_rotation_change(self, tmp_path, monkeypatch):
+        # The "STEP origin is off the board plane" knob is rotation-invariant
+        # under a Z spin.  Over-rejecting here would break the documented use.
+        self._packaged(monkeypatch, rotate=(0.0, 0.0, -90.0), offset=(0.0, 0.0, 1.25))
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, 180.0))}
+        )
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert "(rotate\n\t\t(xyz 0 0 180)\n" in resolved.models[0]
+        assert "(offset\n\t\t(xyz 0 0 1.25)\n" in resolved.models[0]
+
+    def test_signed_zero_offset_components_count_as_zero(self, tmp_path, monkeypatch):
+        self._packaged(monkeypatch, rotate=(0.0, 0.0, -90.0), offset=(-0.0, -0.0, 1.25))
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, 180.0))}
+        )
+        assert resolver(self.LIB_ID) is not None
+
+    def test_a_redundant_identical_rotate_does_not_change_the_frame(self, tmp_path, monkeypatch):
+        self._packaged(monkeypatch, rotate=(0.0, 0.0, -90.0), offset=(1.5, -0.25, 0.0))
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, -90.0))}
+        )
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert "(rotate\n\t\t(xyz 0 0 -90)\n" in resolved.models[0]
+
+    def test_restating_the_offset_acknowledges_it(self, tmp_path, monkeypatch):
+        self._packaged(monkeypatch, rotate=(0.0, 0.0, -90.0), offset=(1.5, -0.25, 0.0))
+        resolver = _lcsc_resolver(
+            tmp_path,
+            {
+                self.LIB_ID: LcscModelEntry(
+                    "C50950", rotate=(0.0, 0.0, 90.0), offset=(-0.25, 1.5, 0.0)
+                )
+            },
+        )
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert "(rotate\n\t\t(xyz 0 0 90)\n" in resolved.models[0]
+
+    def test_an_explicit_zero_offset_is_a_valid_acknowledgement(self, tmp_path, monkeypatch):
+        # The documented escape hatch: sidecar (0, 0, 0) wins the merge and
+        # suppresses the packaged value.
+        self._packaged(monkeypatch, rotate=(0.0, 0.0, -90.0), offset=(1.5, -0.25, 0.0))
+        resolver = _lcsc_resolver(
+            tmp_path,
+            {
+                self.LIB_ID: LcscModelEntry(
+                    "C50950", rotate=(0.0, 0.0, 90.0), offset=(0.0, 0.0, 0.0)
+                )
+            },
+        )
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert "(rotate\n\t\t(xyz 0 0 90)\n" in resolved.models[0]
+
+    def test_a_bare_string_sidecar_inherits_a_calibrated_pair(self, tmp_path, monkeypatch):
+        # The normal path: nothing was overridden, so nothing is out of frame.
+        self._packaged(monkeypatch, rotate=(0.0, 0.0, -90.0), offset=(1.5, -0.25, 0.0))
+        resolver = _lcsc_resolver(tmp_path, {self.LIB_ID: "C50950"})
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert "(rotate\n\t\t(xyz 0 0 -90)\n" in resolved.models[0]
+
+    def test_the_symmetric_case_is_not_a_defect(self, tmp_path, monkeypatch):
+        # A sidecar offset inheriting a packaged rotate is fine: its author
+        # necessarily measured with the packaged rotation active.
+        self._packaged(monkeypatch, rotate=(0.0, 0.0, -90.0), offset=(1.5, -0.25, 0.0))
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", offset=(0.0, 0.0, 3.0))}
+        )
+        resolved = resolver(self.LIB_ID)
+        assert resolved is not None
+        assert "(rotate\n\t\t(xyz 0 0 -90)\n" in resolved.models[0]
+        assert "(offset\n\t\t(xyz 0 0 3)\n" in resolved.models[0]
+
+    def test_no_packaged_entry_means_nothing_to_inherit(self, tmp_path):
+        resolver = _lcsc_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, 45.0))}
+        )
+        assert resolver(self.LIB_ID) is not None
+
+    # -- the committed sidecars (AC 4) --------------------------------------
+
+    @pytest.mark.parametrize(
+        "sidecar",
+        [
+            "boards/03-usb-joystick/lcsc_models.json",
+            "boards/06-diffpair-test/lcsc_models.json",
+        ],
+    )
+    def test_committed_sidecars_never_trip_the_guard(self, sidecar):
+        """Both committed sidecars are bare-string form, so no packaged offset
+        can ever be split by one -- assert it, so a future table addition
+        cannot quietly break a board."""
+        path = Path(__file__).resolve().parents[1] / sidecar
+        mapping = load_lcsc_mapping(path)
+        assert mapping
+        for lib_id, entry in mapping.items():
+            c_number = entry.lcsc if isinstance(entry, LcscModelEntry) else entry
+            sidecar_rotate = entry.rotate if isinstance(entry, LcscModelEntry) else None
+            sidecar_offset = entry.offset if isinstance(entry, LcscModelEntry) else None
+            resolve_merged_transform(c_number, lib_id, sidecar_rotate, sidecar_offset)
 
 
 class TestTransformComposition:
