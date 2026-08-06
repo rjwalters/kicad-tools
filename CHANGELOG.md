@@ -303,6 +303,17 @@ constructor). No breaking changes.
   named one *arbitrary* member of the collision set (board 05 reported `U10
   pad 28`; the real set is pads 27, 28, 29, 30) (#4612).
 
+### Removed
+
+- **One-off diagnostic scripts for closed issues** —
+  `scripts/calibrate_area_estimate.py` (packing-overhead calibration helper
+  for #3403) and `scripts/diagnose_b03_diffpair.py` (board-03 diff-pair
+  pre-pass diagnostic for #2490) are deleted along with their
+  `scripts/README.md` catalogue rows. Both parent issues shipped long ago,
+  nothing in the repo invokes either script, and the estimator's coverage
+  lives in dedicated tests; recoverable from git history if ever needed
+  (#4566).
+
 ### Fixed
 
 - **The `.kicad_dru` sidecar write clobbered pre-existing user content.** The
