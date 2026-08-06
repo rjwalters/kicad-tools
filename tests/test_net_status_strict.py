@@ -1,11 +1,15 @@
 """Tests for ``NetStatusAnalyzer(strict=True)`` real-geometry connectivity.
 
-Issue #4176: the default net-status connectivity model unions copper on a
+Issue #4176: the legacy net-status connectivity model unions copper on a
 0.01mm endpoint-proximity radius (``_points_close``) without testing whether
 the real copper shapes (segment width, pad size) actually touch, so it can
 report a net "complete" that ``kicad-cli pcb drc`` reports as unconnected
 (over-connecting relative to KiCad).  ``strict=True`` decides connectivity by
-real shapely copper-shape intersection instead, matching KiCad.
+real shapely copper-shape intersection instead, matching KiCad.  Since issue
+#4557 strict is the DEFAULT (the legacy model also under-connects: a trace
+endpoint inside pad copper but >0.01mm from the pad center was false-flagged
+open -- 16 false opens on board 06); ``strict=False`` is the explicit legacy
+opt-out.
 
 These fixtures are minimal synthetic PCBs built from S-expression strings (no
 external board files), following the convention in ``test_net_status.py``.
@@ -124,13 +128,13 @@ def test_strict_reports_complete_when_segment_reaches_into_pad():
 # --------------------------------------------------------------------------
 # AC #4: segment endpoints within the old 0.01mm tolerance but with
 # non-overlapping copper.  Proves the mode flag changes behavior AND that the
-# default is preserved.
+# legacy opt-out (``strict=False``) is preserved.
 # --------------------------------------------------------------------------
 
 
-def test_default_over_connects_endpoints_within_tolerance():
+def test_legacy_over_connects_endpoints_within_tolerance():
     # gap 0.009mm (< 0.01 tolerance), width 0.001mm (buffered copper 0.0005mm
-    # each side, so the copper is ~0.008mm short of touching).  The default
+    # each side, so the copper is ~0.008mm short of touching).  The legacy
     # endpoint-proximity model unions the two chains -> complete.
     board = _two_segment_board(gap=0.009, width=0.001)
     assert _status(board, "SIG", strict=False) == "complete"
@@ -156,14 +160,65 @@ def test_strict_and_default_agree_when_copper_actually_overlaps():
 # --------------------------------------------------------------------------
 
 
-def test_analyzer_defaults_to_non_strict(tmp_path: Path):
-    analyzer = _analyzer(_pad_seg_board(seg_end_x=109.9), tmp_path)
-    assert analyzer.strict is False
+def test_analyzer_defaults_to_strict(tmp_path: Path):
+    # Issue #4557: strict (real copper geometry) is the default.  Construct
+    # WITHOUT any ``strict`` argument so this pins the real constructor
+    # default, not a helper's.
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(_pad_seg_board(seg_end_x=109.9))
+    analyzer = NetStatusAnalyzer(path)
+    assert analyzer.strict is True
+
+
+def test_default_path_reports_complete_when_segment_reaches_into_pad(tmp_path: Path):
+    # Issue #4557 regression: the trace ends at 109.9 -- inside R2.1's copper
+    # (edge at 109.7) but 0.1mm from the pad CENTER at 110.0, i.e. 10x outside
+    # the legacy 0.01mm proximity radius.  The legacy model false-flags this
+    # open; the strict default must report complete.  No ``strict`` argument
+    # anywhere -- this exercises the default code path consumers hit.
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(_pad_seg_board(seg_end_x=109.9))
+    result = NetStatusAnalyzer(path).analyze()
+    net_status = result.get_net("SIG")
+    assert net_status is not None
+    assert net_status.status == "complete"
+
+
+def test_default_path_keeps_truly_disconnected_net_open(tmp_path: Path):
+    # Genuine-open guard (issue #4557): a multi-pad net with NO copper at all
+    # must stay unrouted/incomplete under the new strict default -- the flip
+    # must not mask real opens.  No ``strict`` argument anywhere.
+    board = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "")
+  (net 1 "SIG")
+  (footprint "R" (layer "F.Cu") (uuid "fp1") (at 100 100)
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (uuid "r1"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG")))
+  (footprint "R" (layer "F.Cu") (uuid "fp2") (at 110 100)
+    (property "Reference" "R2" (at 0 0 0) (layer "F.SilkS") (uuid "r2"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG")))
+)
+"""
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(board)
+    result = NetStatusAnalyzer(path).analyze()
+    net_status = result.get_net("SIG")
+    assert net_status is not None
+    assert net_status.status in ("incomplete", "unrouted")
+    assert net_status.unconnected_count >= 1
 
 
 def test_strict_flag_is_recorded(tmp_path: Path):
     analyzer = _analyzer(_pad_seg_board(seg_end_x=109.9), tmp_path, strict=True)
     assert analyzer.strict is True
+
+
+def test_legacy_opt_out_flag_is_recorded(tmp_path: Path):
+    analyzer = _analyzer(_pad_seg_board(seg_end_x=109.9), tmp_path, strict=False)
+    assert analyzer.strict is False
 
 
 def test_zero_width_segment_does_not_crash_strict():
@@ -200,6 +255,11 @@ def test_strict_requires_shapely(monkeypatch, tmp_path: Path):
     path.write_text(_pad_seg_board(seg_end_x=109.9))
     with pytest.raises(ModuleNotFoundError):
         NetStatusAnalyzer(path, strict=True)
+    # Since #4557 the DEFAULT construction is strict, so it fails loud too.
+    with pytest.raises(ModuleNotFoundError):
+        NetStatusAnalyzer(path)
+    # The explicit legacy opt-out still works without shapely.
+    NetStatusAnalyzer(path, strict=False)
 
 
 # ---------------------------------------------------------------------------

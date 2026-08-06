@@ -428,6 +428,8 @@ def _dispatch_command(args) -> int:
             sub_argv.append("--why")
         if hasattr(args, "net_status_strict") and args.net_status_strict:
             sub_argv.append("--strict")
+        if hasattr(args, "net_status_legacy_proximity") and args.net_status_legacy_proximity:
+            sub_argv.append("--legacy-proximity")
         return net_status_cmd(sub_argv)
 
     elif args.command == "clean":

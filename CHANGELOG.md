@@ -267,6 +267,22 @@ constructor). No breaking changes.
 
 ### Changed
 
+- **`kct net-status` / `NetStatusAnalyzer` default to strict real-geometry
+  connectivity** — the default connectivity model is now shapely copper-shape
+  intersection (`strict=True`), matching `kicad-cli pcb drc` semantics. The
+  legacy 0.01mm endpoint-proximity model diverged from KiCad in both
+  directions: it over-connected copper whose reference points were merely near
+  (#4176) and false-flagged pads open when a trace endpoint landed inside pad
+  copper but away from the pad *center* — 16 false opens on board 06's poured
+  nets (`GND`/`+1V2`/`VBUS_USB`), now 0 by default. Board 07's 5 genuine
+  #3438 opens are unchanged. `--legacy-proximity` (CLI) / `strict=False`
+  (API) opt back into the old model; `--strict` remains accepted as a no-op.
+  Output now names the model in use, `--why` respects the selection
+  (previously `--strict --why` silently ignored `--strict`), and strict-mode
+  segment/pad bonds are now layer-gated so a 2D copper overlap on a different
+  layer can no longer fuse copper a via does not electrically span.
+  `kct check` connectivity defaults are unchanged (#4557).
+
 - **`kct check` splits its report into manufacturing and advisory buckets** —
   a rule-to-category taxonomy renders a CATEGORY SUMMARY with "Manufacturing
   DRC: N blocking" and "Advisory/quality: M advisory", so routing-intent
