@@ -12239,21 +12239,23 @@ def main(argv: list[str] | None = None) -> int:
 
     # Auto-apply edge clearance from manufacturer when not explicitly set.
     # This ensures --manufacturer jlcpcb automatically enforces the 0.3mm
-    # copper-to-edge clearance without requiring a separate --edge-clearance flag.
+    # copper-to-edge clearance without requiring a separate --edge-clearance
+    # flag.  Issue #4568: the resolution logic lives in the shared
+    # ``resolve_edge_clearance`` helper (also used by
+    # ``load_pcb_for_routing``'s library-level auto-resolution); the CLI
+    # keeps the explicit args.edge_clearance so this user-facing message
+    # prints exactly once and the keepout is applied exactly once.
     if args.edge_clearance is None:
-        from kicad_tools.router.mfr_limits import get_mfr_limits
+        from kicad_tools.router.mfr_limits import resolve_edge_clearance
 
-        try:
-            _mfr = get_mfr_limits(args.manufacturer)
-            if _mfr.min_edge_clearance > 0:
-                args.edge_clearance = _mfr.min_edge_clearance
-                if not args.quiet:
-                    print(
-                        f"Edge clearance: {args.edge_clearance}mm "
-                        f"(from {args.manufacturer} manufacturer limits)"
-                    )
-        except ValueError:
-            pass  # Unknown manufacturer -- edge_clearance stays None
+        _resolved_edge = resolve_edge_clearance(args.manufacturer)
+        if _resolved_edge is not None:
+            args.edge_clearance = _resolved_edge
+            if not args.quiet:
+                print(
+                    f"Edge clearance: {args.edge_clearance}mm "
+                    f"(from {args.manufacturer} manufacturer limits)"
+                )
 
     # Issue #3400: resolve the effective ``starting_layers`` value with the
     # precedence CLI flag > project.kct EscalationPolicy field > default 2.

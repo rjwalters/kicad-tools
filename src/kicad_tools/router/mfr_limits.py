@@ -501,6 +501,37 @@ def get_mfr_limits(manufacturer: str) -> MfrLimits:
     raise ValueError(msg)
 
 
+def resolve_edge_clearance(manufacturer: str | None) -> float | None:
+    """Resolve the copper-to-board-edge clearance floor for a manufacturer.
+
+    Shared resolution helper (Issue #4568) used by both the ``kct route``
+    CLI ``--edge-clearance`` auto-fill and
+    :func:`~kicad_tools.router.io.load_pcb_for_routing`, so the route-time
+    board-edge keepout always matches the per-tier
+    :attr:`MfrLimits.min_edge_clearance` floor that ``kct check --mfr``
+    enforces (jlcpcb 0.3, oshpark 0.381, seeed 0.25, ...).
+
+    Args:
+        manufacturer: Manufacturer name (case-insensitive, aliases OK),
+            or ``None``/empty when no manufacturer is configured.
+
+    Returns:
+        The manufacturer's ``min_edge_clearance`` in mm, or ``None`` when
+        ``manufacturer`` is falsy, unknown (no raise -- manufacturer
+        validation belongs to the CLI layer), or its edge-clearance floor
+        is not positive.
+    """
+    if not manufacturer:
+        return None
+    try:
+        limits = get_mfr_limits(manufacturer)
+    except ValueError:
+        return None
+    if limits.min_edge_clearance > 0:
+        return limits.min_edge_clearance
+    return None
+
+
 @dataclass
 class RelaxationTier:
     """A single design rule relaxation tier.

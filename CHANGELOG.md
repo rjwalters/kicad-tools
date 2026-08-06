@@ -17,6 +17,22 @@ constructor). No breaking changes.
 
 ### Added
 
+- **Board-edge keepout auto-resolved from manufacturer limits** (#4568) —
+  `load_pcb_for_routing(edge_clearance=None)` now resolves the copper-to-edge
+  clearance from the effective rules' `manufacturer` via the same per-tier
+  `MfrLimits.min_edge_clearance` floor that `kct check --mfr` enforces
+  (jlcpcb 0.3, oshpark 0.381, ...), and applies the preventive board-edge
+  keepout in the routing grid (both backends). Previously only the `kct
+  route` CLI auto-filled `--edge-clearance`, so in-process API callers
+  (board pipelines, `optim/router_factory`) silently routed with no edge
+  constraint and could emit copper hugging the outline
+  (`edge_clearance_trace` at 0.187mm on the board-06 shadow re-route).
+  Pass `edge_clearance=0` to explicitly opt out; explicit positive values
+  and manufacturer-less rules are unchanged. The shared resolver lives in
+  `router/mfr_limits.py::resolve_edge_clearance` (CLI now delegates to it),
+  and `build_pcb_router_factory` gained a `rules=` passthrough so
+  placement-fitness routing can opt into the same keepout.
+
 - **Search-time HV pairwise clearance in the lattice engine** — `--voltage-map`
   + `--route-engine lattice` now *avoids* HV↔LV proximity during the A\* search
   instead of only failing the #4588 post-route gate after committing the

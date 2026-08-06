@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.rules import DesignRules
 
 __all__ = [
     "PlacementRouterFactory",
@@ -223,6 +224,7 @@ def build_pcb_router_factory(
     *,
     component_positions: dict[str, tuple[float, float, float]] | None = None,
     skip_nets: list[str] | None = None,
+    rules: DesignRules | None = None,
     use_pcb_rules: bool = True,
     validate_drc: bool = False,
     auto_adjust_grid: bool = True,
@@ -245,6 +247,15 @@ def build_pcb_router_factory(
         skip_nets: Net names to skip when building the base router (typically
             plane nets like ``"GND"``, ``"+3.3V"``).  Forwarded to
             :func:`~kicad_tools.router.io.load_pcb_for_routing`.
+        rules: Optional explicit :class:`DesignRules` for the base router,
+            forwarded to :func:`load_pcb_for_routing`.  Issue #4568: when
+            the rules carry a ``manufacturer``, the loader now auto-applies
+            that manufacturer's board-edge keepout
+            (``MfrLimits.min_edge_clearance``), so placement candidates are
+            scored against edge-legal routing.  When ``None`` (the default),
+            rules are extracted from the PCB file, which carries no
+            manufacturer -- that path intentionally stays keepout-free
+            because a bare PCB file names no fab profile to resolve from.
         use_pcb_rules: Whether to extract design rules from the PCB.
             Forwarded to :func:`load_pcb_for_routing`.
         validate_drc: Forwarded to :func:`load_pcb_for_routing`.  Default
@@ -265,6 +276,7 @@ def build_pcb_router_factory(
     base_router, _ = load_pcb_for_routing(
         str(pcb_path),
         skip_nets=skip_nets,
+        rules=rules,
         use_pcb_rules=use_pcb_rules,
         validate_drc=validate_drc,
         auto_adjust_grid=auto_adjust_grid,

@@ -3415,10 +3415,21 @@ def load_pcb_for_routing(
                          DRC-compliant value (clearance / 2) instead of failing.
                          When enabled, logs an INFO message about the adjustment.
                          Default is False for backward compatibility.
-        edge_clearance: Copper-to-edge clearance in mm. If specified, blocks
-                        routing within this distance of the board edge. Common
-                        values are 0.25-0.5mm. If None, no edge clearance is
-                        applied (default for backward compatibility).
+        edge_clearance: Copper-to-edge clearance in mm. If a positive value
+                        is given, blocks routing within this distance of the
+                        board edge. Common values are 0.25-0.5mm.
+                        If None (the default), the clearance is auto-resolved
+                        from the effective rules' ``manufacturer`` via
+                        ``MfrLimits.min_edge_clearance`` (Issue #4568) so the
+                        route-time keepout matches the per-tier floor that
+                        ``kct check --mfr <m>`` enforces (e.g.
+                        ``manufacturer="jlcpcb"`` applies 0.3mm). When no
+                        manufacturer is configured, or it is unknown, or its
+                        edge-clearance floor is 0, no edge clearance is
+                        applied (pre-#4568 behavior).
+                        Pass ``0`` (or a negative value) to explicitly
+                        disable the board-edge keepout regardless of
+                        manufacturer.
         layer_stack: Layer stack configuration for routing. Controls how many
                      layers are available for routing and which layers are
                      planes vs signal layers. If None, auto-detects from the
@@ -3847,6 +3858,22 @@ def load_pcb_for_routing(
                 router._board_geometry = BoardGeometry.from_pcb(_schema_pcb)
     except ImportError:
         pass
+
+    # Auto-resolve edge clearance from the effective rules' manufacturer
+    # (Issue #4568).  The ``kct route`` CLI already auto-fills
+    # ``--edge-clearance`` from the manufacturer profile, but in-process API
+    # callers (board pipelines, optim/router_factory) previously routed with
+    # NO board-edge keepout even when their DesignRules named a manufacturer
+    # whose ``kct check --mfr`` would then fail the result with
+    # ``edge_clearance_trace`` errors.  Resolve the same per-tier
+    # ``MfrLimits.min_edge_clearance`` floor here so route-time keepout ==
+    # check-time floor.  An explicit ``edge_clearance`` (including ``0`` as
+    # the documented opt-out) always wins; unknown/absent manufacturers
+    # resolve to None (no keepout, pre-#4568 behavior).
+    if edge_clearance is None:
+        from .mfr_limits import resolve_edge_clearance
+
+        edge_clearance = resolve_edge_clearance(getattr(rules, "manufacturer", None))
 
     # Apply edge clearance if specified
     if edge_clearance is not None and edge_clearance > 0:

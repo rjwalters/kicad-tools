@@ -3242,6 +3242,267 @@ class TestLoadPcbEdgeClearance:
         assert router.grid.grid[layer_idx][gy][gx].blocked is False
 
 
+def _write_edge_pcb(tmp_path, name="edge_auto.kicad_pcb", extra="", size=20):
+    """Write a minimal square PCB with an Edge.Cuts outline at (0,0)-(size,size)."""
+    pcb_file = tmp_path / name
+    pcb_file.write_text(f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "SIG")
+  (gr_rect (start 0 0) (end {size} {size}) (layer "Edge.Cuts"))
+{extra})
+""")
+    return pcb_file
+
+
+# Two footprints on net SIG near the bottom edge (y=10 on the 10x10 board),
+# 1.5mm inboard -- outside any manufacturer edge keepout, but positioned so a
+# corridor obstacle can force the shortest path toward the outline.
+_EDGE_PCB_TWO_PADS = """  (footprint "Resistor_SMD:R_0805"
+    (layer "F.Cu")
+    (at 2 8.5)
+    (fp_text reference "R1" (at 0 -2) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "SIG"))
+  )
+  (footprint "Resistor_SMD:R_0805"
+    (layer "F.Cu")
+    (at 8 8.5)
+    (fp_text reference "R2" (at 0 -2) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "SIG"))
+  )
+"""
+
+
+class TestEdgeClearanceAutoResolution:
+    """Issue #4568: auto-resolve the board-edge keepout from rules.manufacturer.
+
+    ``load_pcb_for_routing(edge_clearance=None)`` must apply the same per-tier
+    ``MfrLimits.min_edge_clearance`` floor that ``kct check --mfr`` enforces
+    whenever the effective DesignRules carry a manufacturer, so in-process API
+    callers (board pipelines, optim/router_factory) can no longer silently
+    route copper that the checker will reject with ``edge_clearance_trace``.
+    """
+
+    def test_resolve_edge_clearance_per_tier(self):
+        """The shared helper returns each tier's floor, not a hardcoded 0.3."""
+        from kicad_tools.router.mfr_limits import get_mfr_limits, resolve_edge_clearance
+
+        # Two tiers with DIFFERENT floors (AC requirement).
+        assert resolve_edge_clearance("jlcpcb") == pytest.approx(0.3)
+        assert resolve_edge_clearance("oshpark") == pytest.approx(0.381)
+        # Values must track MfrLimits, the same source `kct check` reads.
+        for mfr in ("jlcpcb", "jlcpcb-tier1", "oshpark"):
+            assert resolve_edge_clearance(mfr) == get_mfr_limits(mfr).min_edge_clearance
+
+    def test_resolve_edge_clearance_fallbacks(self):
+        """Falsy or unknown manufacturers resolve to None without raising."""
+        from kicad_tools.router.mfr_limits import resolve_edge_clearance
+
+        assert resolve_edge_clearance(None) is None
+        assert resolve_edge_clearance("") is None
+        assert resolve_edge_clearance("not-a-real-fab") is None
+
+    def test_auto_keepout_from_manufacturer(self, tmp_path):
+        """rules.manufacturer alone (no edge_clearance arg) blocks edge cells."""
+        pcb_file = _write_edge_pcb(tmp_path)
+
+        rules = DesignRules(manufacturer="jlcpcb", grid_resolution=0.1)
+        router, _ = load_pcb_for_routing(str(pcb_file), rules=rules, validate_drc=False)
+
+        # Resolved floor matches the jlcpcb profile and is stamped on the
+        # router so EscapeRouter clamping / validate_routes activate too.
+        assert router._edge_clearance == pytest.approx(0.3)
+
+        layer_idx = router.grid.get_routable_indices()[0]
+        # Cell 0.15mm from the left edge: inside the 0.3mm keepout.
+        gx, gy = router.grid.world_to_grid(0.15, 10)
+        assert router.grid.grid[layer_idx][gy][gx].blocked is True
+        # Board center: untouched.
+        gx, gy = router.grid.world_to_grid(10, 10)
+        assert router.grid.grid[layer_idx][gy][gx].blocked is False
+
+    def test_auto_keepout_uses_per_tier_floor(self, tmp_path):
+        """Different manufacturers resolve to their own floors (0.3 vs 0.381)."""
+        pcb_file = _write_edge_pcb(tmp_path)
+
+        router_jlc, _ = load_pcb_for_routing(
+            str(pcb_file),
+            rules=DesignRules(manufacturer="jlcpcb", grid_resolution=0.1),
+            validate_drc=False,
+        )
+        router_osh, _ = load_pcb_for_routing(
+            str(pcb_file),
+            rules=DesignRules(manufacturer="oshpark", grid_resolution=0.1),
+            validate_drc=False,
+        )
+
+        assert router_jlc._edge_clearance == pytest.approx(0.3)
+        assert router_osh._edge_clearance == pytest.approx(0.381)
+
+    def test_explicit_zero_disables_auto_keepout(self, tmp_path):
+        """edge_clearance=0 is the documented opt-out, even with a manufacturer."""
+        pcb_file = _write_edge_pcb(tmp_path)
+
+        rules = DesignRules(manufacturer="jlcpcb", grid_resolution=0.1)
+        router, _ = load_pcb_for_routing(
+            str(pcb_file), rules=rules, edge_clearance=0, validate_drc=False
+        )
+
+        assert not getattr(router, "_edge_clearance", None)
+        layer_idx = router.grid.get_routable_indices()[0]
+        gx, gy = router.grid.world_to_grid(0.15, 10)
+        assert router.grid.grid[layer_idx][gy][gx].blocked is False
+
+    def test_explicit_value_overrides_manufacturer(self, tmp_path):
+        """An explicit edge_clearance wins over the manufacturer floor."""
+        pcb_file = _write_edge_pcb(tmp_path)
+
+        rules = DesignRules(manufacturer="jlcpcb", grid_resolution=0.1)
+        router, _ = load_pcb_for_routing(
+            str(pcb_file), rules=rules, edge_clearance=1.0, validate_drc=False
+        )
+
+        assert router._edge_clearance == pytest.approx(1.0)
+        layer_idx = router.grid.get_routable_indices()[0]
+        # 0.8mm from the edge: outside jlcpcb's 0.3mm floor but inside the
+        # explicit 1.0mm keepout -- proves the explicit value was used.
+        gx, gy = router.grid.world_to_grid(0.8, 10)
+        assert router.grid.grid[layer_idx][gy][gx].blocked is True
+
+    def test_unknown_manufacturer_no_keepout(self, tmp_path):
+        """Unknown manufacturer resolves to None: no keepout, no raise."""
+        pcb_file = _write_edge_pcb(tmp_path)
+
+        rules = DesignRules(manufacturer="not-a-real-fab", grid_resolution=0.1)
+        router, _ = load_pcb_for_routing(str(pcb_file), rules=rules, validate_drc=False)
+
+        assert not getattr(router, "_edge_clearance", None)
+        layer_idx = router.grid.get_routable_indices()[0]
+        gx, gy = router.grid.world_to_grid(0.15, 10)
+        assert router.grid.grid[layer_idx][gy][gx].blocked is False
+
+    def test_no_manufacturer_no_keepout(self, tmp_path):
+        """Explicit rules without a manufacturer keep the pre-#4568 behavior."""
+        pcb_file = _write_edge_pcb(tmp_path)
+
+        router, _ = load_pcb_for_routing(
+            str(pcb_file), rules=DesignRules(grid_resolution=0.1), validate_drc=False
+        )
+
+        assert not getattr(router, "_edge_clearance", None)
+        layer_idx = router.grid.get_routable_indices()[0]
+        gx, gy = router.grid.world_to_grid(0.15, 10)
+        assert router.grid.grid[layer_idx][gy][gx].blocked is False
+
+    def test_router_factory_rules_passthrough_gets_keepout(self, tmp_path):
+        """optim/router_factory-built routers get the keepout via rules=..."""
+        from kicad_tools.optim.router_factory import build_pcb_router_factory
+
+        pcb_file = _write_edge_pcb(tmp_path, extra=_EDGE_PCB_TWO_PADS)
+
+        factory = build_pcb_router_factory(
+            str(pcb_file),
+            rules=DesignRules(manufacturer="jlcpcb", grid_resolution=0.1),
+        )
+
+        base = factory.base_router
+        assert base._edge_clearance == pytest.approx(0.3)
+        layer_idx = base.grid.get_routable_indices()[0]
+        gx, gy = base.grid.world_to_grid(0.15, 10)
+        assert base.grid.grid[layer_idx][gy][gx].blocked is True
+
+    @staticmethod
+    def _block_wall(router, x_lo, x_hi, y_lo, y_hi):
+        """Block all routable-layer cells inside a world-coordinate rectangle."""
+        grid = router.grid
+        gx1, gy1 = grid.world_to_grid(x_lo, y_lo)
+        gx2, gy2 = grid.world_to_grid(x_hi, y_hi)
+        for layer_idx in grid.get_routable_indices():
+            for gy in range(min(gy1, gy2), max(gy1, gy2) + 1):
+                for gx in range(min(gx1, gx2), max(gx1, gx2) + 1):
+                    if 0 <= gx < grid.cols and 0 <= gy < grid.rows:
+                        cell = grid.grid[layer_idx][gy][gx]
+                        cell.blocked = True
+                        cell.is_obstacle = True
+
+    @staticmethod
+    def _min_outline_distance(routes, size=10.0):
+        """Min (centerline distance to the square outline - half trace width)."""
+        min_dist = float("inf")
+        for route in routes:
+            for seg in route.segments:
+                for t in range(11):
+                    x = seg.x1 + (seg.x2 - seg.x1) * t / 10
+                    y = seg.y1 + (seg.y2 - seg.y1) * t / 10
+                    d = min(x, size - x, y, size - y) - seg.width / 2
+                    min_dist = min(min_dist, d)
+        return min_dist
+
+    def test_routed_net_stays_clear_of_edge(self, tmp_path):
+        """Regression fixture: the auto keepout prevents edge-hugging routes.
+
+        A wall of obstacle cells between the two SIG pads leaves only a thin
+        gap along the bottom outline (plus a wide interior corridor at the
+        top).  Without the keepout the shortest path squeezes through the
+        bottom gap and hugs the outline (the board-06 MIPI_D0- failure mode);
+        with rules.manufacturer="jlcpcb" the gap is blocked and the route
+        must take the interior corridor, staying >= 0.3mm from the outline.
+        """
+        rules = DesignRules(
+            manufacturer="jlcpcb",
+            grid_resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.15,
+        )
+        # Wall from y=2.0 down to y=9.3 on the 10x10 board: leaves a 0.7mm
+        # gap at the bottom outline (y=10) -- wide enough for the A* plus
+        # its obstacle-clearance halo, whose shortest path then runs at
+        # y=9.7 (0.2mm copper-to-edge after the 0.1mm half-width) -- and a
+        # ~1.6mm interior corridor at the top (the top-edge keepout blocks
+        # y < ~0.4).  With the 0.3mm keepout the bottom gap shrinks below
+        # the halo minimum and becomes untraversable.
+        wall = (4.8, 5.2, 2.0, 9.3)
+
+        # --- Hazard demonstration: keepout explicitly disabled -> the
+        # shortest path hugs the outline closer than the 0.3mm floor.
+        # force_python: the wall below is injected by mutating Python-side
+        # grid cells AFTER load, which the C++ grid snapshot (taken at
+        # construction) would not see.  The keepout itself is applied at
+        # load time and propagates to both backends via
+        # CppGrid.from_routing_grid; only the synthetic wall needs this.
+        pcb_file = _write_edge_pcb(tmp_path, extra=_EDGE_PCB_TWO_PADS, size=10)
+        router_off, net_map = load_pcb_for_routing(
+            str(pcb_file),
+            rules=rules,
+            edge_clearance=0,
+            validate_drc=False,
+            force_python=True,
+        )
+        self._block_wall(router_off, *wall)
+        routes_off = router_off.route_net(net_map["SIG"])
+        assert routes_off, "no-keepout baseline failed to route SIG"
+        assert self._min_outline_distance(routes_off) < 0.3, (
+            "fixture no longer exercises edge-hugging: without the keepout "
+            "the route was expected to pass through the bottom-edge gap"
+        )
+
+        # --- With auto-resolved keepout (no edge_clearance arg): the route
+        # completes AND keeps >= 0.3mm copper-to-edge everywhere.
+        router_on, net_map_on = load_pcb_for_routing(
+            str(pcb_file), rules=rules, validate_drc=False, force_python=True
+        )
+        assert router_on._edge_clearance == pytest.approx(0.3)
+        self._block_wall(router_on, *wall)
+        routes_on = router_on.route_net(net_map_on["SIG"])
+        assert routes_on, "SIG became unroutable with the edge keepout applied"
+        assert self._min_outline_distance(routes_on) >= 0.3
+
+
 class TestLoadPcbLayerStackAutoDetection:
     """Tests for layer stack auto-detection in load_pcb_for_routing (Issue #949)."""
 
