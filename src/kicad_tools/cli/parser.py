@@ -2230,6 +2230,15 @@ def _add_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Report what would be inserted without modifying the PCB file",
     )
+    pcb_add_models.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Re-resolve footprints that already carry (model ...) refs and "
+        "replace them with freshly computed ones (picks up current offset/"
+        "rotation/LCSC-transform logic). Footprints that cannot be re-resolved "
+        "keep their existing refs untouched. Default: insert-only — existing "
+        "refs are never modified",
+    )
 
     # pcb remove-footprint
     pcb_remove_fp = pcb_subparsers.add_parser(

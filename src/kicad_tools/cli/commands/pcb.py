@@ -965,6 +965,7 @@ def _run_add_3d_models_command(args, pcb_path: Path) -> int:
         lcsc_models=Path(lcsc_models) if lcsc_models else None,
         fetch_lcsc=getattr(args, "fetch_lcsc", False),
         dry_run=getattr(args, "dry_run", False),
+        refresh=getattr(args, "refresh", False),
         output_format=getattr(args, "format", "text"),
     )
 

@@ -17,6 +17,21 @@ constructor). No breaking changes.
 
 ### Added
 
+- **`kct pcb add-3d-models --refresh` — rewrite existing `(model ...)` refs
+  in place** (#4586) — the command was insert-only, so refs generated before
+  a resolution fix (#4045 offsets, #4457/#4583 rotation baking, #4584 LCSC
+  per-part transforms) were stranded stale with no migration path short of
+  hand-stripping the nodes. `--refresh` re-resolves every footprint through
+  the current tier chain (exact → same-library variant → cross-library
+  substitution → LCSC sidecar) and replaces existing model nodes with the
+  freshly computed ones; output is byte-identical to stripping the old nodes
+  and re-running the insert path. Footprints the tiers cannot re-resolve keep
+  their existing nodes byte-for-byte (reported as `refresh_kept` alongside
+  the new `refreshed` field in text/JSON output). Without the flag the
+  command is unchanged (insert-only, existing refs never touched); combines
+  with `--dry-run`. All edits stay scoped to `(model ...)` metadata — copper,
+  placement, zones and nets are untouched.
+
 - **Search-time HV pairwise clearance in the lattice engine** — `--voltage-map`
   + `--route-engine lattice` now *avoids* HV↔LV proximity during the A\* search
   instead of only failing the #4588 post-route gate after committing the

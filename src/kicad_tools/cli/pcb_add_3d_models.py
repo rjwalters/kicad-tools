@@ -34,6 +34,7 @@ def run_add_3d_models(
     lcsc_models: Path | None = None,
     fetch_lcsc: bool = False,
     dry_run: bool = False,
+    refresh: bool = False,
     output_format: str = "text",
 ) -> int:
     """Patch missing 3D model refs into *pcb_path*.
@@ -55,6 +56,10 @@ def run_add_3d_models(
             cache miss (default: cache-only; also enabled by
             ``KCT_LCSC_FETCH``).
         dry_run: Report what would be inserted without writing.
+        refresh: Re-resolve footprints that already carry ``(model ...)``
+            nodes and replace them with freshly computed refs; footprints
+            the tiers cannot re-resolve keep their existing nodes untouched
+            (default: insert-only, existing refs are never modified).
         output_format: ``"text"`` or ``"json"``.
 
     Returns:
@@ -101,6 +106,7 @@ def run_add_3d_models(
             lcsc_fetch=fetch_enabled(fetch_lcsc),
             lcsc_warn=_warn,
             dry_run=dry_run,
+            refresh=refresh,
         )
     except Exception as e:
         if output_format == "json":
@@ -114,8 +120,11 @@ def run_add_3d_models(
         "input": str(pcb_path),
         "output": str(dest) if (report.changed and not dry_run) else None,
         "dry_run": dry_run,
+        "refresh": refresh,
         "libraries": str(library_paths.footprints_path),
         "patched": report.patched,
+        "refreshed": report.refreshed,
+        "refresh_kept": report.refresh_kept,
         "already_present": report.already_present,
         "unresolved": report.unresolved,
         "no_model_in_library": report.no_model_in_library,
@@ -138,7 +147,12 @@ def run_add_3d_models(
             print(f"  {verb} model refs to {len(report.patched)} footprint(s):")
             for lib_id in report.patched:
                 print(f"    {lib_id}")
-        else:
+        if report.refreshed:
+            verb = "Would replace" if dry_run else "Replaced"
+            print(f"  {verb} existing model refs on {len(report.refreshed)} footprint(s):")
+            for lib_id in report.refreshed:
+                print(f"    {lib_id}")
+        if not report.patched and not report.refreshed:
             print("  No footprints needed patching.")
         if report.variant_matches:
             print("  Same-library variant models used (visual match):")
@@ -158,6 +172,11 @@ def run_add_3d_models(
                 print(f"    {lib_id}: {desc}")
         if report.already_present:
             print(f"  Already had models: {len(report.already_present)}")
+        if report.refresh_kept:
+            print(
+                f"  Kept existing refs (could not re-resolve): "
+                f"{', '.join(sorted(set(report.refresh_kept)))}"
+            )
         if report.no_model_in_library:
             print(
                 f"  Library footprint has no model: "
