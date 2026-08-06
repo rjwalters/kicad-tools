@@ -18,6 +18,7 @@ from kicad_tools.pcb.models3d import (
     ResolvedModels,
     _apply_offset_delta,
     _apply_rotate_delta,
+    _model_node_spans,
     _pad_anchor,
     _pad_field_orientation,
     add_model_refs,
@@ -1404,3 +1405,423 @@ class TestSplitCalibrationCliSurface:
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["patched"] == [self.LIB_ID]
+
+
+# --------------------------------------------------------------------------
+# --refresh: rewrite existing (model ...) refs in place (issue #4586)
+# --------------------------------------------------------------------------
+#
+# The default path is insert-only: footprints already carrying a (model ...)
+# node are skipped, so refs generated before a resolution fix (#4045 offsets,
+# #4457/#4583 rotations, #4584 LCSC transforms) are stranded stale.  refresh
+# deletes the existing model-node spans and reuses the untouched insert path,
+# so it picks up every current fix for free.  Footprints the tiers cannot
+# re-resolve keep their node byte-for-byte (never delete what you can't
+# replace).
+
+# The pre-#4586 workaround fixture: PCB_TEXT's R1 with a stale ref (wrong
+# path + wrong offset) that only a refresh can correct.
+STALE_MODEL_NODE = (
+    '\t\t(model "stale/old_R_0805.step"\n\t\t\t(offset\n\t\t\t\t(xyz 9 9 9)\n\t\t\t)\n\t\t)\n'
+)
+
+STALE_PCB_TEXT = PCB_TEXT.replace(
+    "\t\t(embedded_fonts no)\n",
+    STALE_MODEL_NODE + "\t\t(embedded_fonts no)\n",
+)
+
+
+class TestModelNodeSpans:
+    def test_whole_line_spans_for_writer_layout(self):
+        block = iter_footprint_blocks(STALE_PCB_TEXT)[0]
+        body = STALE_PCB_TEXT[block.start : block.end + 1]
+        spans = _model_node_spans(body)
+        assert len(spans) == 1
+        start, end = spans[0]
+        # The span is exactly the stale node's whole lines: deleting it
+        # reconstructs the model-less original footprint block.
+        assert body[start:end] == STALE_MODEL_NODE
+        orig = iter_footprint_blocks(PCB_TEXT)[0]
+        assert body[:start] + body[end:] == PCB_TEXT[orig.start : orig.end + 1]
+
+    def test_tight_span_when_node_shares_a_line(self):
+        body = '(footprint "x"\n\t(attr smd) (model "a.step" (offset (xyz 0 0 0)))\n)'
+        spans = _model_node_spans(body)
+        assert len(spans) == 1
+        start, end = spans[0]
+        assert body[start:end] == '(model "a.step" (offset (xyz 0 0 0)))'
+
+    def test_model_token_inside_string_ignored(self):
+        body = '(footprint "x"\n\t(property "n" "(model fake)")\n)'
+        assert _model_node_spans(body) == []
+
+    def test_multiple_nodes(self):
+        body = (
+            '(footprint "x"\n'
+            '\t(model "a.step"\n\t\t(offset (xyz 0 0 0))\n\t)\n'
+            '\t(model "b.step"\n\t\t(offset (xyz 0 0 0))\n\t)\n'
+            ")"
+        )
+        spans = _model_node_spans(body)
+        assert len(spans) == 2
+        assert body[spans[0][0] : spans[0][1]].lstrip("\t").startswith('(model "a.step"')
+        assert body[spans[1][0] : spans[1][1]].lstrip("\t").startswith('(model "b.step"')
+
+
+class TestRefresh:
+    LIB_ID = "Resistor_SMD:R_0805_2012Metric"
+
+    def test_default_path_still_byte_identical(self, tmp_path):
+        """Without refresh, a board with existing refs is untouched (the
+        pre-#4586 contract; refresh must not perturb the default path)."""
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        new_text, report = add_model_refs_to_text(STALE_PCB_TEXT, resolver)
+        assert new_text == STALE_PCB_TEXT
+        assert report.already_present == [self.LIB_ID]
+        assert report.refreshed == []
+        assert report.refresh_kept == []
+        # The stale ref survives the default path verbatim.
+        assert "stale/old_R_0805.step" in new_text
+
+    def test_refresh_replaces_stale_ref(self, tmp_path):
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        new_text, report = add_model_refs_to_text(STALE_PCB_TEXT, resolver, refresh=True)
+        assert report.refreshed == [self.LIB_ID]
+        assert report.patched == []
+        # Under refresh, footprints with refs are never filed already_present.
+        assert report.already_present == []
+        # Model-less footprints keep their default-path classification.
+        assert report.no_model_in_library == ["MountingHole:MountingHole_3.2mm_M3"]
+        assert report.unresolved == ["Custom_Lib:Not_A_Standard_Part"]
+        assert report.changed
+        assert "stale/old_R_0805.step" not in new_text
+        assert new_text.count("R_0805_2012Metric.step") == 1
+
+    def test_refresh_equals_strip_then_insert(self, tmp_path):
+        """The property #4585's regen needs: refresh output is byte-identical
+        to stripping every model node and re-running the insert-only path."""
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        refreshed, _ = add_model_refs_to_text(STALE_PCB_TEXT, resolver, refresh=True)
+        # STALE_PCB_TEXT stripped of its only model node IS PCB_TEXT.
+        stripped_then_inserted, _ = add_model_refs_to_text(PCB_TEXT, resolver)
+        assert refreshed == stripped_then_inserted
+
+    def test_refresh_is_idempotent(self, tmp_path):
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        once, report1 = add_model_refs_to_text(STALE_PCB_TEXT, resolver, refresh=True)
+        twice, report2 = add_model_refs_to_text(once, resolver, refresh=True)
+        assert twice == once
+        # Deterministic reporting: the second pass re-resolves and re-replaces
+        # (byte-identically), so the classification is stable run to run.
+        assert report2.refreshed == report1.refreshed == [self.LIB_ID]
+
+    def test_refresh_keeps_unresolvable_ref(self, tmp_path):
+        """A footprint whose lib id resolves to nothing keeps its existing
+        node byte-for-byte and is reported in refresh_kept."""
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        node = '\t\t(model "hand_authored.step"\n\t\t\t(offset (xyz 1 2 3))\n\t\t)\n'
+        text = PCB_TEXT.replace(
+            '\t(footprint "Custom_Lib:Not_A_Standard_Part"\n\t\t(layer "F.Cu")\n\t\t(at 90 90)\n\t)\n',
+            '\t(footprint "Custom_Lib:Not_A_Standard_Part"\n\t\t(layer "F.Cu")\n\t\t(at 90 90)\n'
+            + node
+            + "\t)\n",
+        )
+        assert "hand_authored.step" in text  # fixture guard: replace() hit
+        new_text, report = add_model_refs_to_text(text, resolver, refresh=True)
+        assert report.refresh_kept == ["Custom_Lib:Not_A_Standard_Part"]
+        assert "Custom_Lib:Not_A_Standard_Part" not in report.unresolved
+        assert node in new_text
+        assert new_text.count("hand_authored.step") == 1
+
+    def test_refresh_keeps_ref_when_library_footprint_has_no_model(self, tmp_path):
+        """Resolving to a model-less library footprint also keeps + reports."""
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        node = '\t\t(model "hand_authored_hole.step"\n\t\t\t(offset (xyz 0 0 0))\n\t\t)\n'
+        text = PCB_TEXT.replace(
+            '\t(footprint "MountingHole:MountingHole_3.2mm_M3"\n\t\t(layer "F.Cu")\n\t\t(at 100 100)\n\t)\n',
+            '\t(footprint "MountingHole:MountingHole_3.2mm_M3"\n\t\t(layer "F.Cu")\n\t\t(at 100 100)\n'
+            + node
+            + "\t)\n",
+        )
+        assert "hand_authored_hole.step" in text
+        new_text, report = add_model_refs_to_text(text, resolver, refresh=True)
+        assert report.refresh_kept == ["MountingHole:MountingHole_3.2mm_M3"]
+        assert "MountingHole:MountingHole_3.2mm_M3" not in report.no_model_in_library
+        assert node in new_text
+
+    @staticmethod
+    def _strip_model_nodes(text: str) -> str:
+        """Delete every (model ...) node span from every footprint block."""
+        out = text
+        for block in reversed(iter_footprint_blocks(text)):
+            body = text[block.start : block.end + 1]
+            for s, e in reversed(_model_node_spans(body)):
+                out = out[: block.start + s] + out[block.start + e :]
+        return out
+
+    def test_refresh_is_metadata_only(self, tmp_path):
+        """Only (model ...) node bytes change: with model nodes deleted from
+        both sides, before and after are byte-identical — copper, placement
+        (at ...), nets and the segment are untouched."""
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        new_text, _ = add_model_refs_to_text(STALE_PCB_TEXT, resolver, refresh=True)
+        assert new_text != STALE_PCB_TEXT  # the refresh did rewrite the node
+        assert self._strip_model_nodes(new_text) == self._strip_model_nodes(STALE_PCB_TEXT)
+        # And the non-model content is exactly the model-less original.
+        assert self._strip_model_nodes(new_text) == PCB_TEXT
+        # Every non-model original line survives verbatim, in order.
+        model_lines = set(STALE_MODEL_NODE.splitlines())
+        kept = [l for l in STALE_PCB_TEXT.splitlines() if l not in model_lines]
+        it = iter(new_text.splitlines())
+        assert all(line in it for line in kept), "a non-model line moved/was dropped"
+
+    def test_refresh_replaces_multiple_nodes_with_resolver_list(self, tmp_path):
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        text = PCB_TEXT.replace(
+            "\t\t(embedded_fonts no)\n",
+            STALE_MODEL_NODE
+            + '\t\t(model "stale/second.step"\n\t\t\t(offset (xyz 0 0 0))\n\t\t)\n'
+            + "\t\t(embedded_fonts no)\n",
+        )
+        new_text, report = add_model_refs_to_text(text, resolver, refresh=True)
+        assert report.refreshed == [self.LIB_ID]
+        assert "stale/" not in new_text
+        assert new_text.count("(model ") == 1
+
+    def test_refresh_recomputes_stale_rotation(self, tmp_path):
+        """The gallery-misorientation case (#4583 pickup): a ref generated
+        before rotation baking carries (rotate (xyz 0 0 0)); refresh rewrites
+        it with the current -90 baking and the rotated-frame offset."""
+        import re
+
+        stale_node = (
+            '\t\t(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/'
+            'PinHeader_1x09_P2.54mm_Vertical.step"\n'
+            "\t\t\t(offset\n\t\t\t\t(xyz 0 0 0)\n\t\t\t)\n"
+            "\t\t\t(scale\n\t\t\t\t(xyz 1 1 1)\n\t\t\t)\n"
+            "\t\t\t(rotate\n\t\t\t\t(xyz 0 0 0)\n\t\t\t)\n"
+            "\t\t)\n"
+        )
+        stale_text = ROT_HEADER_PCB_TEXT.replace("\t)\n)\n", stale_node + "\t)\n)\n")
+        assert stale_text != ROT_HEADER_PCB_TEXT  # fixture guard
+        lib = _make_rot_header_library(tmp_path)
+        new_text, report = add_model_refs_to_text(
+            stale_text, make_library_resolver(lib), refresh=True
+        )
+        assert report.refreshed == ["Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"]
+        assert new_text.count("(model ") == 1
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", new_text)
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 -90"
+        offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", new_text)
+        assert offset_xyz is not None
+        assert offset_xyz.group(1).strip() == "-10.16 0 0"
+        _assert_model_lands_on_target_pads(new_text, (0.0, 10.16), (0.0, 0.0))
+
+    def test_refresh_picks_up_lcsc_packaged_transform(self, tmp_path):
+        """#4584 pickup: refresh re-runs the LCSC tier, so a stale ref gains
+        the packaged per-part transform (C444929 -> rotate Z -90)."""
+        stale_node = '\t\t(model "stale/C444929.step"\n\t\t\t(offset (xyz 0 0 0))\n\t\t)\n'
+        stale_text = PCB_LCSC_OFFCENTRE.replace("\t)\n)\n", stale_node + "\t)\n)\n")
+        assert stale_text != PCB_LCSC_OFFCENTRE
+        resolver = _lcsc_only_resolver(tmp_path, {"Connector_PCIE:PCIE_Mini_Edge": "C444929"})
+        new_text, report = add_model_refs_to_text(stale_text, resolver, refresh=True)
+        assert report.refreshed == ["Connector_PCIE:PCIE_Mini_Edge"]
+        assert "stale/C444929.step" not in new_text
+        assert "(xyz 0 0 -90)" in new_text
+
+    def test_refresh_surfaces_lcsc_match_logs(self, tmp_path):
+        """add_model_refs filters the tier logs by applied lib ids; refreshed
+        footprints must surface there too (previously patched-only)."""
+        footprints = tmp_path / "footprints"
+        footprints.mkdir(exist_ok=True)
+        cache = tmp_path / "lcsc-cache"
+        cache.mkdir(exist_ok=True)
+        (cache / "C444929.step").write_bytes(_FAKE_STEP)
+        stale_node = '\t\t(model "stale/C444929.step"\n\t\t\t(offset (xyz 0 0 0))\n\t\t)\n'
+        stale_text = PCB_LCSC_OFFCENTRE.replace("\t)\n)\n", stale_node + "\t)\n)\n")
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(stale_text)
+        report = add_model_refs(
+            pcb,
+            library_paths=LibraryPaths(footprints_path=footprints, source="config"),
+            lcsc_mapping={"Connector_PCIE:PCIE_Mini_Edge": "C444929"},
+            lcsc_cache_dir=cache,
+            refresh=True,
+        )
+        assert report.refreshed == ["Connector_PCIE:PCIE_Mini_Edge"]
+        assert report.lcsc_matches == {"Connector_PCIE:PCIE_Mini_Edge": "C444929"}
+
+
+class TestRefreshFileAPI:
+    def test_refresh_writes_in_place(self, tmp_path):
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(STALE_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib, refresh=True)
+        assert report.changed
+        text = pcb.read_text()
+        assert "stale/old_R_0805.step" not in text
+        assert "R_0805_2012Metric.step" in text
+
+    def test_refresh_dry_run_reports_without_writing(self, tmp_path):
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(STALE_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib, refresh=True, dry_run=True)
+        assert report.changed
+        assert report.refreshed == ["Resistor_SMD:R_0805_2012Metric"]
+        assert pcb.read_text() == STALE_PCB_TEXT
+
+    def test_refresh_file_run_is_idempotent(self, tmp_path):
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(STALE_PCB_TEXT)
+        add_model_refs(pcb, library_paths=lib, refresh=True)
+        first = pcb.read_text()
+        add_model_refs(pcb, library_paths=lib, refresh=True)
+        assert pcb.read_text() == first
+
+    def test_refreshed_pcb_still_parses_and_roundtrips_models(self, tmp_path):
+        """Round-trip safety (extends the insert-path guard at
+        test_patched_pcb_still_parses_and_roundtrips_models)."""
+        from kicad_tools.schema.pcb import PCB
+
+        lib = _make_library(tmp_path)
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(STALE_PCB_TEXT)
+        add_model_refs(pcb_path, library_paths=lib, refresh=True)
+
+        pcb = PCB.load(pcb_path)
+        assert len(pcb.footprints) == 3
+        out = tmp_path / "resaved.kicad_pcb"
+        pcb.save(out)
+        assert out.read_text().count("(model ") == 1
+
+
+class TestRefreshCLI:
+    def test_json_includes_refresh_fields(self, tmp_path, capsys):
+        import json
+
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(STALE_PCB_TEXT)
+        rc = run_add_3d_models(
+            pcb, lib_path=tmp_path / "footprints", refresh=True, output_format="json"
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["refresh"] is True
+        assert payload["refreshed"] == ["Resistor_SMD:R_0805_2012Metric"]
+        assert payload["refresh_kept"] == []
+        assert payload["already_present"] == []
+
+    def test_json_default_path_reports_refresh_false(self, tmp_path, capsys):
+        import json
+
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(STALE_PCB_TEXT)
+        rc = run_add_3d_models(pcb, lib_path=tmp_path / "footprints", output_format="json")
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["refresh"] is False
+        assert payload["refreshed"] == []
+        assert payload["already_present"] == ["Resistor_SMD:R_0805_2012Metric"]
+        assert pcb.read_text() == STALE_PCB_TEXT
+
+    def test_text_output_reports_replaced_and_kept(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        _make_library(tmp_path)
+        kept_node = '\t\t(model "hand_authored.step"\n\t\t\t(offset (xyz 1 2 3))\n\t\t)\n'
+        text = STALE_PCB_TEXT.replace(
+            '\t(footprint "Custom_Lib:Not_A_Standard_Part"\n\t\t(layer "F.Cu")\n\t\t(at 90 90)\n\t)\n',
+            '\t(footprint "Custom_Lib:Not_A_Standard_Part"\n\t\t(layer "F.Cu")\n\t\t(at 90 90)\n'
+            + kept_node
+            + "\t)\n",
+        )
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(text)
+        rc = run_add_3d_models(
+            pcb, lib_path=tmp_path / "footprints", refresh=True, output_format="text"
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Replaced existing model refs on 1 footprint(s):" in out
+        assert "Resistor_SMD:R_0805_2012Metric" in out
+        assert "Kept existing refs (could not re-resolve): Custom_Lib:Not_A_Standard_Part" in out
+        # The kept node is untouched on disk.
+        assert kept_node in pcb.read_text()
+
+    def test_dry_run_refresh_text_output_writes_nothing(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(STALE_PCB_TEXT)
+        rc = run_add_3d_models(
+            pcb,
+            lib_path=tmp_path / "footprints",
+            refresh=True,
+            dry_run=True,
+            output_format="text",
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Would replace existing model refs on 1 footprint(s):" in out
+        assert pcb.read_text() == STALE_PCB_TEXT
+
+
+class TestRefreshFlagThreading:
+    """Pin the parser -> commands/pcb.py -> run_add_3d_models threading.
+
+    The forwarding uses ``getattr(args, "refresh", False)``, which silently
+    defaults if the parser argument is dropped — so the flag needs its own
+    end-to-end guard (test_cli_parser_drift.py does not cover this parser).
+    """
+
+    def _run(self, monkeypatch, argv, pcb):
+        from kicad_tools.cli import pcb_add_3d_models as runner_mod
+        from kicad_tools.cli.commands.pcb import _run_add_3d_models_command
+        from kicad_tools.cli.parser import create_parser
+
+        captured: dict = {}
+
+        def fake_run(**kwargs):
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(runner_mod, "run_add_3d_models", fake_run)
+        args = create_parser().parse_args(argv)
+        rc = _run_add_3d_models_command(args, pcb)
+        assert rc == 0
+        return args, captured
+
+    def test_refresh_flag_reaches_runner(self, tmp_path, monkeypatch):
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        args, captured = self._run(
+            monkeypatch, ["pcb", "add-3d-models", str(pcb), "--refresh"], pcb
+        )
+        assert args.refresh is True
+        assert captured["refresh"] is True
+
+    def test_refresh_defaults_to_false(self, tmp_path, monkeypatch):
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        args, captured = self._run(monkeypatch, ["pcb", "add-3d-models", str(pcb)], pcb)
+        assert args.refresh is False
+        assert captured["refresh"] is False

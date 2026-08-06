@@ -704,6 +704,7 @@ def keepout_node(
     no_vias: bool = True,
     no_pour: bool = True,
     uuid_str: str = "",
+    name: str = "",
 ) -> SExp:
     """Build a PCB keepout zone S-expression.
 
@@ -716,6 +717,8 @@ def keepout_node(
         no_vias: Prevent vias in this area
         no_pour: Prevent copper pour in this area
         uuid_str: Unique identifier
+        name: Optional rule-area name (issue #4605) -- the key the
+            ``spatial_keepouts`` net-class-map sidecar block filters by
 
     Example output:
         (zone
@@ -745,6 +748,8 @@ def keepout_node(
         uuid_node(uuid_str),
         SExp.list("hatch", "edge", 0.5),
     )
+    if name:
+        zone.append(SExp.list("name", name))
 
     # Add keepout settings
     keepout = SExp.list(

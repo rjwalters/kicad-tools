@@ -1022,6 +1022,16 @@ class Autorouter:
         # board-origin shift per PR #4603).  ``None`` = not yet resolved.
         # Consumed here by the lattice pairwise projection (#4602).
         self._pairwise_attach_zones_cache: tuple[Any, ...] | None = None
+        # Issue #4605: optional ``spatial_keepouts`` sidecar filter block
+        # (``{rule_area_name: {"except_classes": [...] | "only_classes":
+        # [...]}}``), stashed by the CLI's ``_apply_net_class_map_sidecar``.
+        # ``None`` = no filter -> every rule area applies to all nets
+        # (KiCad-default semantics).
+        self._spatial_keepout_filters: dict[str, Any] | None = None
+        # Memoised lattice keepout-mask projection (built at most once per
+        # router by ``_lattice_keepout_projection``).
+        self._lattice_keepouts_cache: Any = None
+        self._lattice_keepouts_resolved: bool = False
         # Issue #2610: stored so _create_grid_and_routers can pass it to
         # create_hybrid_router on the initial construction.
         self._max_search_iterations = int(max_search_iterations) if max_search_iterations else 0
@@ -2663,17 +2673,164 @@ class Autorouter:
 
         from .lattice.pairwise import build_lattice_pairwise
 
+        zones = self._pairwise_attach_zones_cache or ()
+        return build_lattice_pairwise(table, zones, self._net_name_to_id())
+
+    def _net_name_to_id(self) -> dict[str, int]:
+        """Net name -> id map (``net_names`` + a pad-derived fallback).
+
+        Shared by the lattice pairwise (#4602) and keepout (#4605)
+        projections: a router assembled without ``add_component`` (tests,
+        deserialization) may have an empty ``net_names`` map while its pads
+        still carry names.
+        """
         name_to_id: dict[str, int] = {
             name: int(net_id) for net_id, name in self.net_names.items() if name
         }
-        # Defensive union with the pad-derived names: a router assembled
-        # without ``add_component`` (tests, deserialization) may have an
-        # empty ``net_names`` map while its pads still carry names.
         for pad in self.all_pads or list(self.pads.values()):
             if pad.net_name and pad.net_name not in name_to_id and pad.net is not None:
                 name_to_id[pad.net_name] = int(pad.net)
-        zones = self._pairwise_attach_zones_cache or ()
-        return build_lattice_pairwise(table, zones, name_to_id)
+        return name_to_id
+
+    def _lattice_keepout_projection(self) -> Any:
+        """Keepout rule-area mask for the lattice engine (issue #4605).
+
+        Reads the board's ``(zone ... (keepout ...))`` rule areas from the
+        source PCB (the same recorded path the #4506 attach-zone resolver
+        uses), keeps only areas that block tracks and/or vias (a
+        ``copperpour not_allowed``-only area -- the ``kct zones hv-keepout``
+        output -- is the zone filler's business and must never affect
+        routing), shifts their polygons board-relative -> sheet-absolute
+        (``PCB.load`` exposes zone polygons board-relative, the lattice works
+        sheet-absolute -- the #4416/#4603 offset), resolves their layer specs
+        against the real copper stack, and joins the optional
+        ``spatial_keepouts`` sidecar filter (class names -> net-id sets).
+
+        The pathfinder stays geometry-only: it receives resolved polygons,
+        lattice layer indices, and net-id applicability sets -- never names
+        (#4597 discipline).  Returns ``None`` when the board declares no
+        track/via-blocking rule areas, the dormant signal that keeps the
+        lattice search byte-identical to the pre-#4605 path.
+
+        Raises:
+            ValueError: a ``spatial_keepouts`` filter names a net class that
+                exists nowhere in the router's net-class map (fail loud: a
+                typo here would silently widen or narrow a safety constraint).
+        """
+        if self._lattice_keepouts_resolved:
+            return self._lattice_keepouts_cache
+        self._lattice_keepouts_resolved = True
+        self._lattice_keepouts_cache = None
+
+        pcb_path = self._pairwise_attach_zone_pcb_path
+        if pcb_path is None:
+            return None
+
+        from .lattice.obstacles import KeepoutArea, LatticeKeepoutMask
+
+        try:
+            from kicad_tools.schema.pcb import PCB as _SchemaPCB
+
+            pcb = _SchemaPCB.load(pcb_path)
+        except Exception as exc:  # defensive: never crash routing on a bad board
+            import sys as _sys
+
+            print(
+                f"Warning: could not read keepout rule areas from {pcb_path} "
+                f"({type(exc).__name__}: {exc}); rule areas will not constrain routing.",
+                file=_sys.stderr,
+            )
+            return None
+
+        raw_areas = [
+            zone
+            for zone in pcb.rule_areas
+            if zone.keepout is not None
+            and (not zone.keepout.tracks_allowed or not zone.keepout.vias_allowed)
+            and len(zone.polygon) >= 3
+        ]
+        if not raw_areas:
+            return None
+
+        from .layers import LayerStack as _LayerStack
+
+        stack = self.layer_stack or _LayerStack.two_layer()
+        all_indices = frozenset(layer.index for layer in stack.layers)
+
+        def _resolve_layers(names: list[str]) -> frozenset[int]:
+            indices: set[int] = set()
+            for name in names:
+                if name == "*.Cu":
+                    indices.update(all_indices)
+                elif name == "F&B.Cu":
+                    indices.update({0, stack.num_layers - 1})
+                else:
+                    layer_def = stack.get_layer_by_name(name)
+                    if layer_def is not None:
+                        indices.add(layer_def.index)
+            return frozenset(indices)
+
+        # Class-name -> net-id resolution for the sidecar filter.
+        filters = self._spatial_keepout_filters or {}
+        class_ids: dict[str, frozenset[int]] = {}
+        if filters:
+            name_to_id = self._net_name_to_id()
+            by_class: dict[str, set[int]] = {}
+            known_classes: set[str] = set()
+            for net_name, nc in self.net_class_map.items():
+                cls_name = getattr(nc, "name", None)
+                if not cls_name:
+                    continue
+                known_classes.add(cls_name)
+                net_id = name_to_id.get(net_name)
+                if net_id is not None:
+                    by_class.setdefault(cls_name, set()).add(net_id)
+            for entry in filters.values():
+                for key in ("except_classes", "only_classes"):
+                    for cls_name in entry.get(key) or ():
+                        if cls_name not in known_classes:
+                            raise ValueError(
+                                f"spatial_keepouts: unknown net class {cls_name!r} "
+                                f"(known classes: {', '.join(sorted(known_classes)) or 'none'})"
+                            )
+                        class_ids[cls_name] = frozenset(by_class.get(cls_name, set()))
+
+        ox, oy = pcb.board_origin
+        areas: list[KeepoutArea] = []
+        for zone in raw_areas:
+            layer_names = zone.layers or ([zone.layer] if zone.layer else [])
+            layer_indices = _resolve_layers(layer_names)
+            if not layer_indices:
+                continue  # rule area on no routable copper layer
+            entry = filters.get(zone.name) if zone.name else None
+            only: frozenset[int] | None = None
+            exempt: frozenset[int] = frozenset()
+            if entry:
+                if entry.get("only_classes"):
+                    ids: set[int] = set()
+                    for cls_name in entry["only_classes"]:
+                        ids.update(class_ids.get(cls_name, frozenset()))
+                    only = frozenset(ids)
+                if entry.get("except_classes"):
+                    ids = set()
+                    for cls_name in entry["except_classes"]:
+                        ids.update(class_ids.get(cls_name, frozenset()))
+                    exempt = frozenset(ids)
+            assert zone.keepout is not None  # filtered above
+            areas.append(
+                KeepoutArea(
+                    polygon=tuple((x + ox, y + oy) for x, y in zone.polygon),
+                    layers=layer_indices,
+                    blocks_tracks=not zone.keepout.tracks_allowed,
+                    blocks_vias=not zone.keepout.vias_allowed,
+                    only=only,
+                    exempt=exempt,
+                    name=zone.name,
+                )
+            )
+        mask = LatticeKeepoutMask(areas)
+        self._lattice_keepouts_cache = mask if mask else None
+        return self._lattice_keepouts_cache
 
     @staticmethod
     def _snap_lattice_region(
@@ -2870,6 +3027,16 @@ class Autorouter:
         # ``route_cmd.py`` (``LatticePathfinder`` itself always has it).
         if hasattr(pf, "set_pairwise"):
             pf.set_pairwise(self._lattice_pairwise_projection())
+
+        # Issue #4605: resolve the board's keepout rule areas (+ the optional
+        # ``spatial_keepouts`` sidecar filter) into a geometry-only mask and
+        # install it, so a ``(tracks not_allowed)`` / ``(vias not_allowed)``
+        # rule area is honored DURING search.  Always called -- ``None``
+        # resets a reused pathfinder (no stale rule areas), and is the
+        # guaranteed result on boards with no track/via-blocking rule areas
+        # (byte-identical no-constraint path).
+        if hasattr(pf, "set_keepouts"):
+            pf.set_keepouts(self._lattice_keepout_projection())
 
         coupled, reserved = self._lattice_coupled_connections()
 

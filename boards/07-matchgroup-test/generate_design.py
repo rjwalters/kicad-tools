@@ -1656,12 +1656,17 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     #
     # MEASURED VERDICT (solo, seed 42, C++ backend, PYTHONHASHSEED=42) --
     # reach stays 26/31, by decision rather than for lack of a candidate.
-    # The loop emits a delta for all 5 open nets and probes the top two:
+    # The loop emits a delta for all 5 open nets and probes the top two.
+    # Probe-level routed counts are HOST-SPECIFIC even at fixed seed (the
+    # decisions and final state are identical everywhere -- see the README
+    # section "Host-vs-CI divergence"):
     #
     #   probe 0  U2 rotate_180 (DQ3's DE_REVERSE_BUNDLE verdict)
-    #            routed 25 -> 16, clearance violations 0 -> 1489   REVERTED
+    #            host (macOS arm64): routed 25 -> 16, clearance 0 -> 1489
+    #            CI (both runs):     routed 25 -> 14           REVERTED
     #   probe 1  U3 translate (-0.77, -1.85) mm (MIPI_DAT0_N's MOVE_PART)
-    #            routed 25 -> 26, clearance violations 0 -> 2      REVERTED
+    #            host (macOS arm64): routed 25 -> 26, clearance 0 -> 2
+    #            CI (both runs):     routed 25 -> 25 (no gain) REVERTED
     #
     # Probe 0: the classifier is RIGHT that the DDR byte is reversed at U2
     # (28/28 facing pad pairs invert), but a 180-degree rotation de-reverses
@@ -1669,14 +1674,17 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # package -- the byte then has to wrap a 7x7 mm QFN.  The correct move is
     # a mirror, which KiCad expresses only as a layer flip.
     #
-    # Probe 1: a genuine +1 net (26/31 -> 27/31, MIPI_DAT0_N closes) that
-    # costs manufacturability -- two U1-escape clearances drop to 0.076 /
-    # 0.094 mm against the 0.102 mm jlcpcb floor (blocking DRC 10 -> 13) and
-    # the ADDR_BUS length-match tuner is left at 11.03 mm skew instead of
-    # 0.000 mm.  Taking it would have meant widening the board-07 floor in
-    # .github/routed-drc-tolerance.yml from 8 to 13 -- a bad trade on a
-    # match-group/DRC testbench -- so the loop refuses it and records the
-    # refusal (with both measurements) in the delta artifact.
+    # Probe 1, ON THE LOCAL HOST ONLY: a +1 net (26/31 -> 27/31,
+    # MIPI_DAT0_N closes) that costs manufacturability -- two U1-escape
+    # clearances drop to 0.076 / 0.094 mm against the 0.102 mm jlcpcb floor
+    # (blocking DRC 10 -> 13) and the ADDR_BUS length-match tuner is left at
+    # 11.03 mm skew instead of 0.000 mm.  Taking it would have meant widening
+    # the board-07 floor in .github/routed-drc-tolerance.yml from 8 to 13 --
+    # a bad trade on a match-group/DRC testbench -- so the loop refuses it
+    # and records the refusal (with both measurements) in the delta artifact.
+    # On CI the same probe measures 25 -> 25 (both independent runs, PR
+    # #4556), so it is refused for no strict routed-net increase and the
+    # clearance-regression guard never fires there.
     #
     # Budget 2 is deliberate: probe 0 is the classifier's top rung and probe
     # 1 is the one that is only marginally short of acceptable, so a future

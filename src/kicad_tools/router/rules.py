@@ -1747,6 +1747,9 @@ def net_class_map_from_dict(
     self-document without a sibling README, e.g. a ``_comment`` string or
     a ``_meta`` dict block (issue #4248).  Because KiCad net names do not
     start with ``_`` in practice, this cannot shadow a real net entry.
+    The ``spatial_keepouts`` key is likewise reserved (issue #4605): it
+    carries per-rule-area net-class filters for KiCad keepout rule areas
+    and is parsed by the route CLI, not by this deserializer.
 
     Args:
         data: Mapping of ``net_name -> NetClassRouting-dict``.  Must be a
@@ -1774,6 +1777,12 @@ def net_class_map_from_dict(
     for net_name, entry in data.items():
         if isinstance(net_name, str) and net_name.startswith("_"):
             continue  # reserved for in-band documentation (_comment, _meta, ...)
+        if net_name == "spatial_keepouts":
+            # Issue #4605: reserved block -- per-rule-area net-class filters
+            # for KiCad keepout rule areas, parsed by the route CLI (never a
+            # net entry).  Skipped here so every sidecar consumer that only
+            # wants net classes keeps working.
+            continue
         if not isinstance(entry, dict):
             raise TypeError(
                 f"net_class_map entry for {net_name!r} must be a dict, got {type(entry).__name__}"

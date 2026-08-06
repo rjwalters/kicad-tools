@@ -40,6 +40,71 @@ DRU_FLOORS_BLOCK_END = "# END kct fab floors"
 # KiCad ``.kicad_dru`` files start with a version header.
 DRU_VERSION_HEADER = "(version 1)"
 
+# ---------------------------------------------------------------------------
+# Legacy (pre-#4600) generated-sidecar detection (Issue #4667)
+# ---------------------------------------------------------------------------
+#
+# Before #4600 the ``.kicad_dru`` sidecar was clobber-written with raw
+# :func:`generate_dru` output -- no sentinel markers.  Those files are OUR
+# generated content, not user-authored, so on merge they must be REPLACED by
+# the managed block rather than appended to (appending duplicates every tier
+# floor and dirties committed board artifacts; see Issue #4667).
+#
+# Detection is deliberately strict: the file must start with a version
+# header, contain nothing but blank lines and rule s-expressions matching the
+# exact line grammar :func:`generate_dru` emits, and every rule name must be
+# one of the generated rule families (with an optional ``- <manufacturer>``
+# label suffix).  Any comment line, foreign rule name, or off-grammar line
+# (hand-edited values keep the generated grammar, so those still count as
+# legacy -- but structural edits do not) classifies the file as user-owned
+# and keeps the never-clobber append semantics from #4600.
+
+#: Rule-name families emitted by :func:`generate_dru`, sans label suffix.
+_LEGACY_RULE_NAME_RE = re.compile(
+    r"^(?:Trace Width|Clearance|Via Drill|Via Diameter|Annular Ring|"
+    r"Copper to Edge|Hole to Edge|Silkscreen Width|Silkscreen Height|"
+    r"Solder Mask Clearance|Solder Mask Dam|"
+    r"Ampacity Min Width \(.+, (?:external|internal)\))"
+    r"(?: - .+)?$"
+)
+
+_LEGACY_VERSION_LINE_RE = re.compile(r"\(version \d+\)")
+_LEGACY_RULE_OPEN_RE = re.compile(r'\(rule "([^"]+)"')
+_LEGACY_CONDITION_LINE_RE = re.compile(r'  \(condition "[^"]*"\)')
+_LEGACY_CONSTRAINT_LINE_RE = re.compile(r"  \(constraint \w+ \(min [0-9.]+mm\)\)\)")
+
+
+def _is_legacy_generated_dru(existing: str) -> bool:
+    """True when ``existing`` is a pre-#4600 clobber-written generated sidecar.
+
+    Such files carry no sentinel markers but are recognizably raw
+    :func:`generate_dru` output: a leading ``(version N)`` header followed
+    exclusively by tier-floor rules using the generated line grammar and
+    rule names.  Genuinely user-authored content (custom rule names,
+    comments, creepage markers, multi-constraint rules, ...) never matches.
+    """
+    if not re.match(r"^\s*\(version\b", existing):
+        return False
+
+    saw_rule = False
+    for line in existing.splitlines():
+        if not line.strip():
+            continue
+        if _LEGACY_VERSION_LINE_RE.fullmatch(line):
+            continue
+        rule_open = _LEGACY_RULE_OPEN_RE.fullmatch(line)
+        if rule_open:
+            if not _LEGACY_RULE_NAME_RE.match(rule_open.group(1)):
+                return False
+            saw_rule = True
+            continue
+        if _LEGACY_CONDITION_LINE_RE.fullmatch(line):
+            continue
+        if _LEGACY_CONSTRAINT_LINE_RE.fullmatch(line):
+            continue
+        return False
+    return saw_rule
+
 
 def _strip_version_header(content: str) -> str:
     """Drop a leading ``(version N)`` line so a merged file keeps exactly one."""
@@ -57,12 +122,18 @@ def merge_dru_floors(existing: str | None, dru_content: str) -> str:
     * No existing content -> ``(version 1)`` + the managed block.
     * Existing fab-floors block present -> replace only the text between the
       sentinels.
-    * Existing content without a fab-floors block (a fully user-owned file,
-      or one holding the creepage managed block) -> **append** the block,
-      preserving every existing byte, and prepend a version header only if
-      the file lacks one.  A pre-existing file is therefore never clobbered
-      or deleted -- the previous blanket ``write_text`` silently destroyed
-      HV creepage rules and hand-written custom rules.
+    * Existing content that is a **legacy pre-#4600 generated sidecar**
+      (no markers, but recognizably raw :func:`generate_dru` output; see
+      :func:`_is_legacy_generated_dru`) -> treat it as ours and REPLACE it
+      with the managed block.  Appending would duplicate every tier floor
+      on each re-emit and permanently dirty committed board artifacts
+      (Issue #4667).
+    * Other existing content without a fab-floors block (a fully user-owned
+      file, or one holding the creepage managed block) -> **append** the
+      block, preserving every existing byte, and prepend a version header
+      only if the file lacks one.  A pre-existing user file is therefore
+      never clobbered or deleted -- the previous blanket ``write_text``
+      silently destroyed HV creepage rules and hand-written custom rules.
 
     The merged result contains exactly one leading ``(version 1)`` header
     (the header inside ``dru_content`` is stripped before wrapping).
@@ -91,6 +162,12 @@ def merge_dru_floors(existing: str | None, dru_content: str) -> str:
     if pattern.search(existing):
         merged = pattern.sub(lambda _m: block, existing)
         return merged if merged.endswith("\n") else merged + "\n"
+
+    if _is_legacy_generated_dru(existing):
+        # Pre-#4600 clobber-written sidecar: the whole file is our own
+        # generated output, so replace it with the marked block instead of
+        # appending a duplicate copy of every floor (#4667).
+        return f"{DRU_VERSION_HEADER}\n\n{block}\n"
 
     # Append; ensure a version header exists (mirrors ``merge_dru_block``).
     prefix = existing if existing.endswith("\n") else existing + "\n"
