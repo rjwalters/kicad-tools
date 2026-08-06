@@ -305,6 +305,20 @@ constructor). No breaking changes.
 
 ### Fixed
 
+- **Legacy pre-#4600 generated `.kicad_dru` sidecars duplicated on merge.**
+  The marker-guarded fab-floors merge (#4600) treated kct's own
+  clobber-written, unmarked sidecars as user-authored and APPENDED a second
+  copy of every tier floor instead of replacing the legacy content — rewriting
+  committed board artifacts in place (board-05's sidecar tripped the #3580
+  committed-artifacts guard, failing the Test job on main). `merge_dru_floors`
+  now recognizes the legacy generated shape (a `(version N)` header followed
+  exclusively by `generate_dru`-grammar rules with generated rule names) and
+  replaces it with the managed block; genuinely user-authored no-marker
+  content keeps the never-clobber append semantics. All eight committed
+  `boards/*/output/*.kicad_dru` sidecars were migrated to the marked format
+  (byte-identical rule floors, now sentinel-delimited), so re-export is
+  idempotent on them. (#4667)
+
 - **The `.kicad_dru` sidecar write clobbered pre-existing user content.** The
   tier-floor `.kicad_dru` written beside the board by `kct route`, `kct build`,
   `kct mfr apply-rules`, and `kct check --emit-dru`/`--emit-drc-constraints`
