@@ -293,6 +293,13 @@ EXPECTED_COMMITTED_DRC_RULES = {
     # it does NOT raise the 0-error ceiling (MAX_COMMITTED_DRC_ERRORS) above;
     # it only appears in the BY-RULE breakdown.  Tracked behavior, not errors.
     "copper_sliver",
+    # Issue #4613: the new Tier-B connector edge-access inventory rule reports
+    # the board-03 USB-C receptacle (J1) sitting 0.50mm from the board edge.
+    # It is INFO severity (advisory inventory, not a violation), so it does
+    # NOT raise the 0-error ceiling (MAX_COMMITTED_DRC_ERRORS) above; it only
+    # appears in the BY-RULE breakdown.  Tool-side rule addition, not a board
+    # regression.
+    "connector_edge_distance",
 }
 
 
