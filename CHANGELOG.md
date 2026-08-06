@@ -35,6 +35,25 @@ constructor). No breaking changes.
   envelopes are deliberately excluded (same-domain by construction; emitted
   legs remain audited). The mesh engine stays post-route-gated only (#4602).
 
+- **Keepout rule areas honored by the lattice engine, with a per-net-class
+  filter** — KiCad `(zone … (keepout …))` rule areas now parse into a
+  first-class model (`schema/pcb.py`: `Zone.keepout` flags + multi-layer
+  `Zone.layers` + `PCB.rule_areas`; previously the `keepout` child was
+  silently dropped) and `--route-engine lattice` enforces them at search
+  time: `tracks not_allowed` keeps every segment's copper edge out of the
+  area on its declared layers, `vias not_allowed` rejects through-vias whose
+  barrel would enter it, and `copperpour not_allowed`-only areas (the
+  `kct zones hv-keepout` pour voids) never constrain routing. A new
+  `spatial_keepouts` block in the `--net-class-map` sidecar scopes an area
+  per net class by zone name (`only_classes` / `except_classes`; no entry =
+  KiCad-default all-nets), which makes disjoint HV bank corridors expressible
+  as complementary keepouts — declarable spatial segregation by construction,
+  composing with (not replacing) the #4602 pairwise search-time avoidance.
+  Nets rendered unroutable by an area report keepout-attributed declines
+  (`pad-escape-*-keepout`, `no-path-keepout-constrained`); boards with no
+  track/via-blocking rule areas route byte-identically; grid/mesh warn once
+  that they do not honor rule areas (#4605).
+
 - **`kct sch tidy` — headless Reference/Value field autoplace** — new
   schematic subcommand that resets visible `Reference`/`Value` field
   positions to deterministic bbox-relative defaults (Reference centered
