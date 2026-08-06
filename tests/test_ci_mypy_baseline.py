@@ -269,3 +269,126 @@ def test_main_missing_baseline_is_strict(mod, tmp_path: Path) -> None:
     out = _write(tmp_path, "mypy.txt", "src/a.py:10: error: bad thing  [misc]\n")
     missing = tmp_path / "does-not-exist.txt"
     assert mod.main(["--baseline", str(missing), "--mypy-output", str(out)]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Mypy version-drift guard (issue #4558)
+# ---------------------------------------------------------------------------
+
+_FAKE_LOCK = """\
+[[package]]
+name = "librt"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "mypy"
+version = "1.19.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mypy-extensions" },
+]
+
+[[package]]
+name = "mypy-extensions"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+"""
+
+
+def test_locked_mypy_version_parses_pin(mod, tmp_path: Path) -> None:
+    lock = _write(tmp_path, "uv.lock", _FAKE_LOCK)
+    assert mod.locked_mypy_version(lock) == "1.19.1"
+
+
+def test_locked_mypy_version_ignores_similar_names(mod, tmp_path: Path) -> None:
+    """``mypy-extensions`` must not satisfy the ``mypy`` block lookup."""
+    lock_text = _FAKE_LOCK.replace('name = "mypy"\nversion = "1.19.1"\n', "")
+    lock = _write(tmp_path, "uv.lock", lock_text)
+    assert mod.locked_mypy_version(lock) is None
+
+
+def test_locked_mypy_version_missing_lock_is_none(mod, tmp_path: Path) -> None:
+    assert mod.locked_mypy_version(tmp_path / "no-such-uv.lock") is None
+
+
+def test_locked_mypy_version_unparseable_lock_is_none(mod, tmp_path: Path) -> None:
+    lock = _write(tmp_path, "uv.lock", "this is not a lockfile at all\n")
+    assert mod.locked_mypy_version(lock) is None
+
+
+def test_repo_uv_lock_pin_is_parseable(mod) -> None:
+    """The real uv.lock must yield a version -- otherwise the guard is dead code."""
+    version = mod.locked_mypy_version(REPO_ROOT / "uv.lock")
+    assert version is not None and version[0].isdigit()
+
+
+def test_parse_installed_mypy_version(mod) -> None:
+    assert mod.parse_installed_mypy_version("mypy 1.19.1 (compiled: yes)") == "1.19.1"
+    assert mod.parse_installed_mypy_version("mypy 1.20.2") == "1.20.2"
+    assert mod.parse_installed_mypy_version("garbage output") is None
+
+
+def test_mypy_version_drift_mismatch(mod, tmp_path: Path, monkeypatch) -> None:
+    lock = _write(tmp_path, "uv.lock", _FAKE_LOCK)
+    monkeypatch.setattr(mod, "installed_mypy_version", lambda: "1.20.2")
+    assert mod.mypy_version_drift(lock) == ("1.19.1", "1.20.2")
+
+
+def test_mypy_version_drift_match_is_silent(mod, tmp_path: Path, monkeypatch) -> None:
+    lock = _write(tmp_path, "uv.lock", _FAKE_LOCK)
+    monkeypatch.setattr(mod, "installed_mypy_version", lambda: "1.19.1")
+    assert mod.mypy_version_drift(lock) is None
+
+
+def test_mypy_version_drift_skips_on_unparseable_lock(mod, tmp_path: Path, monkeypatch) -> None:
+    """Guard must degrade gracefully -- never a tool failure, never a query."""
+    lock = _write(tmp_path, "uv.lock", "not a lockfile\n")
+
+    def _boom() -> str:
+        raise AssertionError("installed version must not be queried without a parsed pin")
+
+    monkeypatch.setattr(mod, "installed_mypy_version", _boom)
+    assert mod.mypy_version_drift(lock) is None
+
+
+def test_mypy_version_drift_skips_when_mypy_unqueryable(mod, tmp_path: Path, monkeypatch) -> None:
+    lock = _write(tmp_path, "uv.lock", _FAKE_LOCK)
+    monkeypatch.setattr(mod, "installed_mypy_version", lambda: None)
+    assert mod.mypy_version_drift(lock) is None
+
+
+def test_emit_drift_warning_names_versions_and_remedy(mod, capsys) -> None:
+    mod.emit_drift_warning("1.19.1", "1.20.2", has_new_errors=False)
+    out = capsys.readouterr().out
+    assert "MYPY VERSION DRIFT" in out
+    assert "1.19.1" in out and "1.20.2" in out
+    assert "uv sync --frozen --extra dev" in out
+    assert "::warning::" in out
+    # No banner when the gate is otherwise clean.
+    assert "TOOLCHAIN NOISE" not in out
+
+
+def test_emit_drift_warning_banner_when_new_errors(mod, capsys) -> None:
+    mod.emit_drift_warning("1.19.1", "1.20.2", has_new_errors=True)
+    out = capsys.readouterr().out
+    assert "TOOLCHAIN NOISE" in out
+    assert "uv sync --frozen --extra dev" in out
+    # The banner must not steer agents toward --update as a drift "fix".
+    assert "Do NOT run --update" in out
+
+
+def test_main_synthetic_output_skips_drift_guard(mod, tmp_path: Path, monkeypatch, capsys) -> None:
+    """--mypy-output runs never invoked the PATH mypy, so no drift check."""
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("drift guard must not run for --mypy-output runs")
+
+    monkeypatch.setattr(mod, "mypy_version_drift", _boom)
+    raw = "src/a.py:10: error: bad thing  [misc]\nFound 1 error in 1 file\n"
+    mypy_out = _write(tmp_path, "mypy.txt", raw)
+    baseline = tmp_path / "baseline.txt"
+    assert mod.main(["--baseline", str(baseline), "--update", "--mypy-output", str(mypy_out)]) == 0
+    assert mod.main(["--baseline", str(baseline), "--mypy-output", str(mypy_out)]) == 0
+    out = capsys.readouterr().out
+    assert "MYPY VERSION DRIFT" not in out

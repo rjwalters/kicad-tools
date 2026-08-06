@@ -749,10 +749,24 @@ uv run ruff format .
 
 #### Fresh worktree checklist
 
-When creating a new git worktree (e.g. via `./.loom/scripts/worktree.sh`),
-the worktree's `.venv/` does not inherit the C++ extension built in the
-main checkout. After `cd` into the worktree, run `uv run kct build-native`
-once before any routing benchmarks.
+1. **Sync the lock-pinned dev environment first**:
+
+   ```bash
+   uv sync --frozen --extra dev
+   ```
+
+   A fresh worktree performs no Python env setup, and a stale or drifted
+   `.venv/` (e.g. a mypy newer than the `uv.lock` pin) produces spurious
+   mypy-baseline noise that looks like real type regressions (issue #4558).
+   `--frozen` guarantees the resolved set matches `uv.lock` exactly — the
+   same environment CI uses. Loom-created worktrees run this automatically
+   via the `.loom/hooks/post-worktree.sh` hook; run it manually for
+   hand-made worktrees or if the hook reported a failure.
+
+2. **Build the native extension.** The worktree's `.venv/` does not inherit
+   the C++ extension built in the main checkout, and `uv sync` does not
+   build it. After `cd` into the worktree, run `uv run kct build-native`
+   once before any routing benchmarks.
 
 The build's `nanobind` dependency is composed into the default dev
 dependency-group, so a plain `uv sync` keeps it resolved and a later

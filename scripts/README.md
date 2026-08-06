@@ -13,10 +13,8 @@ Python helpers with `uv run python scripts/<name>.py`, from the repository root.
 | `build-cpp.sh` | Build/install the nanobind C++ router extension (`clean`, `check` subcommands). Wrapped by `kct build-native`. Requires the `native` extra (`uv sync --extra native` / `pip install "kicad-tools[native]"`) so nanobind stays lockfile-tracked; the default dev group already composes it in. |
 | `deploy-site.sh` | Manual one-command deploy of the kicad-tools.org demo gallery to Cloudflare Pages (via a locally authenticated `wrangler`). |
 | `install-kct.sh` | Install kicad-tools into a consumer PCB-design repo (uv dependency + vendored `.claude/commands/kct/` skills and `ci/` gate scripts). |
-| `calibrate_area_estimate.py` | Calibration helper for the sum-of-clearances board-area estimator (#3403). |
 | `changelog_gap_report.py` | Release gate: list user-visible commits since a `v*` tag whose issue number is not cited in the CHANGELOG's `[Unreleased]` section; exits non-zero when the gap set is non-empty. Invoked by `RELEASING.md` step (0) (#4638). |
 | `check_trace_vs_zone_fills.py` | Verify track segments against foreign-net zone fill copper (clearance/short check DRC cannot yet do; #3527). |
-| `diagnose_b03_diffpair.py` | Diagnostic for why the differential-pair pre-pass fails on board 03 (#2490). |
 | `route_chorus.py` | Canonical chorus-test-revA routing recipe runner with partial-net rescue (#3474). |
 
 ## Subdirectories

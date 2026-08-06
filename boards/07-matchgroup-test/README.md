@@ -174,12 +174,18 @@ atomically.
 **Measured verdict: the reach stays at 26/31, and that is a decision, not
 a failure to find anything.**  Solo, seed 42, C++ backend built,
 `PYTHONHASHSEED=42`, the loop emits a delta for every one of the 5 open
-nets and probes the top two:
+nets and probes the top two.  The probe-level routed counts are
+**host-specific** (see "Host-vs-CI divergence" below); both are recorded:
 
-| # | Probe | Routed | Clearance violations | Verdict |
-|---|-------|--------|----------------------|---------|
-| 0 | `U2` `rotate_180` --- from `DQ3`'s `DE_REVERSE_BUNDLE` verdict | 25 -> **16** | 0 -> **1489** | reverted |
-| 1 | `U3` translate `(-0.77, -1.85)` mm --- from `MIPI_DAT0_N`'s `MOVE_PART` | 25 -> **26** | 0 -> **2** | reverted (clearance) |
+| # | Probe | Routed (host) | Routed (CI, both runs) | Clearance violations (host) | Verdict |
+|---|-------|---------------|------------------------|-----------------------------|---------|
+| 0 | `U2` `rotate_180` --- from `DQ3`'s `DE_REVERSE_BUNDLE` verdict | 25 -> **16** | 25 -> **14** | 0 -> **1489** | reverted (reach collapse) |
+| 1 | `U3` translate `(-0.77, -1.85)` mm --- from `MIPI_DAT0_N`'s `MOVE_PART` | 25 -> **26** | 25 -> **25** | 0 -> **2** | reverted (host: clearance; CI: no reach gain) |
+
+The `Routed` columns are the loop's internal routed-net counter, whose
+baseline at probe time is 25/31; the `26/31 -> 27/31` figures in the
+prose below are the same host-measured +1 net expressed as final-artifact
+reach (the probe-1 artifact measured 27/31 on that host).
 
 Probe 0 is the informative negative result.  The classifier is **right**
 that the DDR byte is reversed at `U2` --- it measures 28/28 facing pad
@@ -191,10 +197,15 @@ geometrically correct move is a **mirror** of the pad column, which KiCad
 expresses only as a layer flip and which the Phase-1 translator therefore
 never emits.
 
-Probe 1 is the real finding.  A single bounded 2 mm translate of `U3`
-**does** close `MIPI_DAT0_N` --- 26/31 -> 27/31 --- but the extra copper it
-lets into the DDR channel costs manufacturability.  Measured on that
-27/31 artifact:
+Probe 1 is the real finding --- **on the local macOS arm64 host**.  There,
+a single bounded 2 mm translate of `U3` **does** close `MIPI_DAT0_N` ---
+26/31 -> 27/31 --- but the extra copper it lets into the DDR channel costs
+manufacturability.  This is a host-specific measurement, not a universal
+one: both independent CI runs (ubuntu-latest, same seed and
+`PYTHONHASHSEED`) measured the same probe as routed **25 -> 25** --- no
+reach gain --- so on CI the delta is refused for lack of a strict
+routed-net increase and the clearance-regression guard never fires.  The
+manufacturability cost below was measured on the host's 27/31 artifact:
 
 * two segment-to-pad clearances drop under the jlcpcb floor
   (0.076 mm and 0.094 mm against a 0.102 mm minimum, at the `U1` DDR
@@ -228,9 +239,36 @@ host:
 The shipping budget is **2**: probe 0 is the classifier's top-ranked rung
 and probe 1 is the one that is only marginally short of acceptable, so if a
 future router change removes those two clearances the loop will take the
-net automatically.  Each budget unit costs one complete board-07 re-route;
-the whole route step measures **27m05s** locally against ~16 min for the
-loop-off recipe.
+net automatically.  A direct consequence: `DQ4`, `TMDS_D0_N` and
+`TMDS_D1_N` are **unprobed-by-budget, not unroutable** --- the loop
+proposes a delta for each of them (all proposals are recorded in the
+delta artifact; CI logs `Deltas proposed: 10`), but the budget of 2 is
+consumed by `DQ3`'s and `MIPI_DAT0_N`'s probes before those three are
+ever tried.  Their `CONGESTION_SATURATED` / `PLACEMENT_BOUND` verdicts in
+the table below describe why the *router* leaves them open at the current
+placement; no placement delta for them has been probed and refused.  Each
+budget unit costs one complete board-07 re-route; the whole route step
+measures **27m05s** locally against ~16 min for the loop-off recipe.
+
+#### Host-vs-CI divergence (probe-level only)
+
+The probe-level routed counts above are host-dependent even at a fixed
+seed.  Same code, `--seed 42`, `PYTHONHASHSEED=42`:
+
+* local macOS arm64 host: probe 0 routed `25 -> 16`, probe 1 routed
+  `25 -> 26` (reverted for clearance);
+* CI ubuntu-latest: probe 0 routed `25 -> 14`, probe 1 routed `25 -> 25`
+  (reverted for no reach gain) --- reproduced **bit-for-bit across two
+  independent CI runs** on different head SHAs (PR #4556; run
+  `30680605924` and its predecessor).
+
+The *decisions* and the final state agree everywhere: 10 deltas proposed,
+0 kept, exit `pd_reverted`, 26/31 reach, the identical 5-net open set,
+and blocking DRC 8 at the committed floor.  Only the probe-level
+narrative diverges.  This is the same honesty hazard as board-06's
+run-to-run nondeterminism (#4536), on a cross-host axis: future
+threshold or known-open decisions for this board should be made against
+the CI numbers.
 
 ### Fresh per-net verdict (`kct net-status --incomplete --why`)
 

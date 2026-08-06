@@ -164,11 +164,26 @@ class TestCategoryListMatchesDispatcher:
     the dispatcher dict are two declarations of the same set; drift
     between them produces silently-ignored CLI flags."""
 
+    # Categories dispatched as CLI-level closures that do NOT invoke any
+    # ``DRCChecker.check_*`` method, so the behavioural extractor above
+    # (which records stubbed checker methods) cannot observe them:
+    #
+    # * ``sch_fields`` (Issue #4595): schematic field-geometry lint.  It
+    #   runs on the resolved sibling ``.kicad_sch``, not the PCB, and the
+    #   bare ``run_selected_checks(checker, only_set, skip_set)`` call
+    #   used here leaves ``sch_path=None``, making the closure a silent
+    #   no-op.  It is deliberately NOT a checker method / NOT in
+    #   ``CHECK_ALL_METHODS`` -- the checker is PCB-scoped.
+    NON_CHECKER_CATEGORIES = frozenset({"sch_fields"})
+
     def test_categories_list_equals_dispatcher_keys(self) -> None:
         checker = _build_minimal_checker()
         category_to_method = _extract_dispatcher_methods(checker)
-        assert set(check_cmd.CHECK_CATEGORIES) == set(category_to_method.keys()), (
-            "CHECK_CATEGORIES must equal the keys of run_selected_checks's "
+        assert set(check_cmd.CHECK_CATEGORIES) - self.NON_CHECKER_CATEGORIES == set(
+            category_to_method.keys()
+        ), (
+            "CHECK_CATEGORIES (minus the documented non-checker closure "
+            "categories) must equal the keys of run_selected_checks's "
             "check_methods dict.  Drift means --only/--skip silently "
             "accepts/rejects unknown categories."
         )

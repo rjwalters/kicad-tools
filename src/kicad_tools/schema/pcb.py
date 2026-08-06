@@ -1267,11 +1267,49 @@ class Via:
 
 
 @dataclass
+class ZoneKeepout:
+    """Keepout settings of a KiCad rule area (``(zone ... (keepout ...))``).
+
+    Issue #4605: rule areas were previously dropped on parse (the ``keepout``
+    child was silently ignored), so no engine could honor a
+    ``(tracks not_allowed)`` area declared in the board.  Each flag mirrors
+    one ``(<object> allowed|not_allowed)`` child; a missing child defaults to
+    ``allowed`` (KiCad's own default for an unspecified object type).
+    """
+
+    tracks_allowed: bool = True
+    vias_allowed: bool = True
+    pads_allowed: bool = True
+    copperpour_allowed: bool = True
+    footprints_allowed: bool = True
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> ZoneKeepout:
+        """Parse a ``(keepout ...)`` node's per-object-type flags."""
+        keepout = cls()
+        for tag, attr in (
+            ("tracks", "tracks_allowed"),
+            ("vias", "vias_allowed"),
+            ("pads", "pads_allowed"),
+            ("copperpour", "copperpour_allowed"),
+            ("footprints", "footprints_allowed"),
+        ):
+            if child := sexp.find(tag):
+                setattr(keepout, attr, child.get_string(0) != "not_allowed")
+        return keepout
+
+
+@dataclass
 class Zone:
     """PCB copper pour zone.
 
     Represents a copper fill zone with boundary polygon and thermal relief settings.
     Zones are used for ground planes, power planes, and copper pours.
+
+    A zone carrying a ``(keepout ...)`` child is a KiCad **rule area** rather
+    than a pour: :attr:`keepout` holds its per-object-type flags (issue
+    #4605) and :meth:`is_rule_area` is True.  Rule areas are commonly
+    multi-layer (``(layers "F.Cu" "B.Cu")``), captured in :attr:`layers`.
     """
 
     net_number: int
@@ -1279,6 +1317,11 @@ class Zone:
     layer: str
     uuid: str = ""
     name: str = ""
+    # Multi-layer spec from a ``(layers ...)`` node (rule areas; may contain
+    # wildcards such as ``*.Cu`` / ``F&B.Cu``).  Empty for single-layer zones.
+    layers: list[str] = field(default_factory=list)
+    # Keepout flags when this zone is a rule area; None for pour zones.
+    keepout: ZoneKeepout | None = None
     # Boundary polygon points (x, y) in mm
     polygon: list[tuple[float, float]] = field(default_factory=list)
     # Filled polygon regions after DRC (may differ from boundary due to clearances)
@@ -1341,10 +1384,23 @@ class Zone:
             zone.net_name = net_name.get_string(0) or ""
         if layer := sexp.find("layer"):
             zone.layer = layer.get_string(0) or ""
+        # Multi-layer form (rule areas): (layers "F.Cu" "B.Cu") / (layers "*.Cu")
+        if layers := sexp.find("layers"):
+            zone.layers = [
+                layer_name
+                for i in range(len(layers.values))
+                if (layer_name := layers.get_string(i))
+            ]
+            if not zone.layer and zone.layers:
+                zone.layer = zone.layers[0]
         if uuid := sexp.find("uuid"):
             zone.uuid = uuid.get_string(0) or ""
         if name := sexp.find("name"):
             zone.name = name.get_string(0) or ""
+
+        # Rule-area keepout flags (issue #4605): (keepout (tracks not_allowed) ...)
+        if keepout := sexp.find("keepout"):
+            zone.keepout = ZoneKeepout.from_sexp(keepout)
 
         # Priority
         if priority := sexp.find("priority"):
@@ -3253,6 +3309,17 @@ class PCB:
     def zones(self) -> list[Zone]:
         """All zones (copper pours)."""
         return self._zones
+
+    @property
+    def rule_areas(self) -> list[Zone]:
+        """All keepout rule areas (zones carrying a ``(keepout ...)`` child).
+
+        Issue #4605: the first-class read path for KiCad rule areas.  Each
+        entry's :attr:`Zone.keepout` holds the per-object-type flags and
+        :attr:`Zone.layers` the (possibly multi-layer / wildcard) layer spec.
+        Polygon vertices are board-relative, like every other zone polygon.
+        """
+        return [zone for zone in self._zones if zone.keepout is not None]
 
     @property
     def graphic_lines(self) -> list[GraphicLine]:

@@ -845,6 +845,60 @@ Not covered — document, do not assume:
   copper traces, and honors a preserved via's class clearance, but a new via
   does not yet apply *its own* class clearance against other vias.
 
+### Keepout rule areas (lattice engine)
+
+The **lattice** engine (`--route-engine lattice`) honors KiCad **keepout rule
+areas** — `(zone … (keepout …))` — at search time
+([#4605](https://github.com/rjwalters/kicad-tools/issues/4605)):
+
+- `(tracks not_allowed)` keeps every routed segment's **copper edge** (not
+  just the centerline) out of the area, on the area's declared layers;
+- `(vias not_allowed)` rejects any through-via whose barrel would enter the
+  area on any of its layers;
+- `(copperpour not_allowed)` is the zone filler's business and never
+  constrains routing — the pour voids `kct zones hv-keepout` emits route
+  identically with or without this feature;
+- `pads` / `footprints` flags are ignored by the router (placement's remit).
+
+Rule areas apply to **all nets by default** (standard KiCad semantics). To
+scope an area per net class — the spatial HV-segregation primitive: disjoint
+bank corridors are just complementary keepouts — add a `spatial_keepouts`
+block to the `--net-class-map` sidecar, keyed by the rule area's **zone name**
+(the `(name "…")` node, editable in the KiCad zone properties dialog):
+
+```json
+{
+  "/HV_A": { "name": "HV_A" },
+  "/HV_B": { "name": "HV_B" },
+  "spatial_keepouts": {
+    "hv-a-corridor-guard": { "only_classes": ["HV_A"] },
+    "hv-b-corridor-guard": { "only_classes": ["HV_B"] },
+    "antenna-zone":        { "except_classes": ["RF"] }
+  }
+}
+```
+
+Per entry, exactly one of:
+
+- `only_classes` — the area constrains **only** nets in the listed classes
+  (every other net routes through freely). "Class `HV_A` stays inside region
+  A" is expressed as an area covering the **complement** of region A with
+  `only_classes: ["HV_A"]`.
+- `except_classes` — the area constrains every net **except** the listed
+  classes (e.g. an exclusion zone that the zone's own bank may still enter).
+
+A rule area with no `spatial_keepouts` entry (or no zone name) applies to all
+nets. Naming a class that exists nowhere in the effective net-class map is a
+hard error (exit 1) — a typo would otherwise silently widen or narrow a
+spatial safety constraint. A net rendered unroutable by a keepout reports a
+keepout-attributed decline (`pad-escape-*-keepout`,
+`no-path-keepout-constrained`) rather than a generic failure.
+
+**Engine support**: lattice only. `--route-engine grid` / `mesh` print a
+one-line warning when the board declares track/via-blocking rule areas and
+will route through them (KiCad's own DRC still flags the violations
+downstream).
+
 ---
 
 ## See Also

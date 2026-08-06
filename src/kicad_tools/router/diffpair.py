@@ -664,19 +664,27 @@ class DifferentialPairConfig:
     #          bodies gone.
     #
     # Issue #3921 (2026-07-08) re-measured shadow-ON end-to-end and found
-    # TWO NEW blockers that keep the flag OFF on the current geometry:
+    # TWO NEW blockers on the then-current geometry.  Both are since
+    # RESOLVED:
     #
-    #   A. Convergence collapsed to 3/9.  The tightened coupled widths
-    #      (0.225-0.275 mm from #3413 phase 6) make the geometric parallel
-    #      offset infeasible for 6/9 pairs: the offset lands copper on the
-    #      partner (10 "self-check overlap" events, worst -0.165..-0.275 mm)
-    #      or cannot clear an obstacle the guide threaded (12 "mid-route
-    #      blockage" events).  Only MIPI_CLK/MIPI_D0/PCIE_RX construct.
-    #   B. Off-angle geometry.  The surviving shadow segments serialize
-    #      off the 0/45/90/135 set (``OffAngleSegmentWarning`` from the
-    #      #3975 emission guard); the recipe's post-route quantization
-    #      pass repairs them, but a by-construction dogleg (#3907) is the
-    #      real fix.
+    #   A. Convergence had collapsed to 3/9 (dated 2026-07-08): the
+    #      tightened coupled widths (0.225-0.275 mm from #3413 phase 6)
+    #      made the geometric parallel offset infeasible for 6/9 pairs --
+    #      the offset landed copper on the partner ("self-check overlap")
+    #      or could not clear an obstacle the guide threaded ("mid-route
+    #      blockage").  FIXED (#4460, closed 2026-07-31): the shadow-aware
+    #      guide-biased re-route (#4512) plus partner-aware rescue tails
+    #      (#4526) bring board-06 construction to 6/9.
+    #   B. Off-angle geometry.  Shadow segments used to serialize off the
+    #      0/45/90/135 set (``OffAngleSegmentWarning`` from the #3975
+    #      emission guard), leaving repair to the recipe's post-route
+    #      quantization pass.  FIXED (#3988, closing #3987):
+    #      ``_quantize_shadow_segments`` (``diffpair_routing.py``) doglegs
+    #      any off-angle shadow segment 45-legal and obstacle-aware at
+    #      emission time, before the self-check/overlap gates -- by
+    #      construction, not post-route repair.  Verified 2026-07-31 on
+    #      board 06: zero ``OffAngleSegmentWarning`` across all 9 pairs
+    #      (#4461, closed already-satisfied).
     #
     # WALL-CLOCK (re-measured 2026-08-02 under #4463; the old "~150 s
     # shadow-OFF vs >1200 s shadow-ON" figures in this comment were stale
@@ -707,9 +715,11 @@ class DifferentialPairConfig:
     #
     # Enabling this by default is therefore still blocked on: the
     # remaining corridor contention (USB_CC1 is not recoverable by
-    # yielding), the total shadow-ON wall-clock above, the open
-    # skew/continuity residuals (#4570, #4574, #4575, #4577), and a
-    # shadow-aware by-construction dogleg (#3907/#3975).
+    # yielding, measured 2026-08-02 under #4463) and the total shadow-ON
+    # wall-clock above.  The other blockers this list once carried are
+    # resolved: the skew/continuity residuals #4570/#4574/#4575/#4577 all
+    # CLOSED by 2026-08-04, and the shadow-aware by-construction dogleg
+    # exists since #3988 (item B above; #3907/#3975 likewise closed).
     # Set ``KCT_BOARD06_SHADOW=1`` on the board-06 recipe to reproduce the
     # shadow-ON run.  Default False keeps recipes on their pre-#3508
     # budget-exit behaviour (0/9 coupled, 21/21 single-ended reach).

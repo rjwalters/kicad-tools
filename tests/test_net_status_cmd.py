@@ -414,3 +414,68 @@ class TestEdgeCases:
         result = main([str(only_unconnected)])
         # Should handle gracefully (net 0 is typically excluded)
         assert result in (0, 1, 2)
+
+
+class TestConnectivityModelSelection:
+    """Issue #4557: strict is the default; --legacy-proximity is the opt-out."""
+
+    def test_strict_flag_is_accepted_noop(self, connected_pcb: Path, capsys):
+        """--strict stays accepted for script compat and matches the default."""
+        assert main([str(connected_pcb), "--strict"]) == 0
+        strict_out = capsys.readouterr().out
+        assert main([str(connected_pcb)]) == 0
+        default_out = capsys.readouterr().out
+        assert strict_out == default_out
+
+    def test_legacy_proximity_flag_accepted(self, connected_pcb: Path, capsys):
+        assert main([str(connected_pcb), "--legacy-proximity"]) == 0
+        out = capsys.readouterr().out
+        assert "legacy endpoint-proximity" in out
+
+    def test_strict_and_legacy_mutually_exclusive(self, connected_pcb: Path, capsys):
+        with pytest.raises(SystemExit) as excinfo:
+            main([str(connected_pcb), "--strict", "--legacy-proximity"])
+        assert excinfo.value.code == 2
+
+    def test_text_output_names_model_default(self, connected_pcb: Path, capsys):
+        main([str(connected_pcb)])
+        out = capsys.readouterr().out
+        assert "Connectivity model: strict (real copper geometry" in out
+
+    def test_json_output_names_model_default(self, connected_pcb: Path, capsys):
+        main([str(connected_pcb), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["connectivity_model"] == "strict"
+
+    def test_json_output_names_model_legacy(self, connected_pcb: Path, capsys):
+        main([str(connected_pcb), "--format", "json", "--legacy-proximity"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["connectivity_model"] == "legacy_proximity"
+
+    def test_why_output_names_model(self, connected_pcb: Path, capsys):
+        """--why states which connectivity model produced the verdict."""
+        main([str(connected_pcb), "--why"])
+        out = capsys.readouterr().out
+        assert "Connectivity model: strict (real copper geometry" in out
+
+    def test_why_respects_legacy_selection(self, connected_pcb: Path, capsys):
+        """--legacy-proximity --why threads the model into the classifier.
+
+        Before #4557, ``--strict --why`` silently ignored the model flag
+        because ``classify_stuck_nets_from_pcb`` hardcoded default-mode
+        analyzers.
+        """
+        main([str(connected_pcb), "--why", "--legacy-proximity"])
+        out = capsys.readouterr().out
+        assert "Connectivity model: legacy endpoint-proximity" in out
+
+    def test_why_json_names_model(self, connected_pcb: Path, capsys):
+        main([str(connected_pcb), "--why", "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["connectivity_model"] == "strict"
+
+    def test_exit_codes_unchanged_by_model_on_genuine_open(self, unrouted_pcb: Path, capsys):
+        """A truly disconnected board exits 2 under BOTH models (no masking)."""
+        assert main([str(unrouted_pcb)]) == 2
+        capsys.readouterr()
+        assert main([str(unrouted_pcb), "--legacy-proximity"]) == 2
