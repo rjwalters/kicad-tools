@@ -245,6 +245,44 @@ def extract_model_blocks(mod_text: str) -> list[str]:
     return blocks
 
 
+def _model_node_spans(body: str) -> list[tuple[int, int]]:
+    """Locate every ``(model ...)`` node in a footprint block body.
+
+    Sibling of :func:`extract_model_blocks` that returns half-open ``(start,
+    end)`` spans into *body* instead of node texts.  When a node has its
+    lines to itself (the KiCad writer layout) the span is expanded to whole
+    lines — leading indentation through the trailing newline — so deleting
+    the span removes the node without leaving blank lines.  A node sharing a
+    line with other content keeps the span tight to the node itself.
+
+    Used by the ``refresh`` path of :func:`add_model_refs_to_text` to replace
+    existing model refs in place.
+    """
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(body)
+    while i < n:
+        c = body[i]
+        if c == '"':
+            i = _skip_string(body, i)
+            continue
+        if c == "(" and body.startswith("(model", i):
+            after = i + len("(model")
+            if after < n and body[after] in ' \t\n"':
+                end = _find_matching_paren(body, i)
+                line_start = body.rfind("\n", 0, i) + 1
+                nl = body.find("\n", end + 1)
+                line_end = nl + 1 if nl != -1 else n
+                if body[line_start:i].strip() == "" and body[end + 1 : line_end].strip() == "":
+                    spans.append((line_start, line_end))
+                else:
+                    spans.append((i, end + 1))
+                i = end + 1
+                continue
+        i += 1
+    return spans
+
+
 def _dedent_block(raw: str, base_indent: str) -> str:
     """Strip *base_indent* from the continuation lines of a raw node text."""
     if not base_indent:
@@ -809,7 +847,18 @@ class ModelPatchReport:
     patched: list[str] = field(default_factory=list)
     """Lib ids that had model refs inserted (one entry per footprint)."""
     already_present: list[str] = field(default_factory=list)
-    """Lib ids skipped because the footprint already has a model ref."""
+    """Lib ids skipped because the footprint already has a model ref.
+
+    Only populated on the default (insert-only) path; under ``refresh`` a
+    footprint with an existing ref lands in ``refreshed`` or ``refresh_kept``
+    instead."""
+    refreshed: list[str] = field(default_factory=list)
+    """Lib ids whose existing model refs were replaced with freshly resolved
+    ones (``refresh=True`` only)."""
+    refresh_kept: list[str] = field(default_factory=list)
+    """Lib ids with an existing model ref that the tiers could not re-resolve
+    (unresolved, or a model-less library footprint); the existing node is
+    preserved byte-for-byte (``refresh=True`` only)."""
     unresolved: list[str] = field(default_factory=list)
     """Lib ids skipped: not found in the installed KiCad libraries."""
     no_model_in_library: list[str] = field(default_factory=list)
@@ -829,27 +878,45 @@ class ModelPatchReport:
 
     @property
     def changed(self) -> bool:
-        return bool(self.patched)
+        return bool(self.patched or self.refreshed)
 
 
-def add_model_refs_to_text(pcb_text: str, resolver: Resolver) -> tuple[str, ModelPatchReport]:
+def add_model_refs_to_text(
+    pcb_text: str, resolver: Resolver, *, refresh: bool = False
+) -> tuple[str, ModelPatchReport]:
     """Insert missing ``(model ...)`` refs into raw ``.kicad_pcb`` text.
 
-    Pure text insertion: the returned text differs from *pcb_text* only by
-    inserted model lines (never removed or reordered bytes), keeping the
-    change strictly render-metadata-scoped.
+    Pure text insertion by default: the returned text differs from *pcb_text*
+    only by inserted model lines (never removed or reordered bytes), keeping
+    the change strictly render-metadata-scoped.
+
+    With ``refresh=True``, footprints that already carry ``(model ...)`` nodes
+    are re-resolved through the same tier chain and their existing nodes are
+    *replaced* by the freshly computed ones (equivalent to stripping the old
+    nodes and re-running the insert path).  Footprints the tiers cannot
+    re-resolve keep their existing nodes byte-for-byte (reported in
+    ``refresh_kept`` — a ref the tool cannot replace is never deleted).  All
+    edits remain scoped to ``(model ...)`` node bytes; copper, placement,
+    zones and nets are untouched either way.
     """
     report = ModelPatchReport()
-    insertions: list[tuple[int, str]] = []  # (index, text) sorted ascending
+    # (start, end, replacement) half-open spans, ascending and non-overlapping.
+    # A pure insertion is the zero-width case (idx, idx, text); the default
+    # (non-refresh) path only ever emits zero-width edits.
+    edits: list[tuple[int, int, str]] = []
 
     for block in iter_footprint_blocks(pcb_text):
         body = pcb_text[block.start : block.end + 1]
-        if _contains_token(body, "model"):
+        has_model = _contains_token(body, "model")
+        if has_model and not refresh:
             report.already_present.append(block.lib_id)
             continue
         resolved = resolver(block.lib_id)
         if resolved is None:
-            report.unresolved.append(block.lib_id)
+            if has_model:
+                report.refresh_kept.append(block.lib_id)
+            else:
+                report.unresolved.append(block.lib_id)
             continue
         # Accept a bare list[str] (legacy resolvers) or a ResolvedModels.
         if isinstance(resolved, ResolvedModels):
@@ -861,7 +928,10 @@ def add_model_refs_to_text(pcb_text: str, resolver: Resolver) -> tuple[str, Mode
             source_anchor = None
             source_orientation = None
         if not models:
-            report.no_model_in_library.append(block.lib_id)
+            if has_model:
+                report.refresh_kept.append(block.lib_id)
+            else:
+                report.no_model_in_library.append(block.lib_id)
             continue
         # Orientation-convention rotation: a target footprint whose pad field
         # is rotated relative to its library source (rotation baked into pad
@@ -899,18 +969,30 @@ def add_model_refs_to_text(pcb_text: str, resolver: Resolver) -> tuple[str, Mode
             + "\n"
             for m in models
         )
-        insertions.append((close_line_start, text))
-        report.patched.append(block.lib_id)
+        insert_at = close_line_start
+        if has_model:
+            # Refresh: delete every existing model-node span, then reuse the
+            # untouched insert-before-closing-paren path for the fresh nodes.
+            for span_start, span_end in _model_node_spans(body):
+                edits.append((block.start + span_start, block.start + span_end, ""))
+                # Degenerate hand-written layouts can put a model node on the
+                # closing-paren line; never insert inside a deleted span.
+                insert_at = max(insert_at, block.start + span_end)
+            report.refreshed.append(block.lib_id)
+        else:
+            report.patched.append(block.lib_id)
+        edits.append((insert_at, insert_at, text))
 
-    if not insertions:
+    if not edits:
         return pcb_text, report
 
+    edits.sort(key=lambda e: (e[0], e[1]))
     out: list[str] = []
     prev = 0
-    for idx, text in insertions:
-        out.append(pcb_text[prev:idx])
+    for start, end, text in edits:
+        out.append(pcb_text[prev:start])
         out.append(text)
-        prev = idx
+        prev = end
     out.append(pcb_text[prev:])
     return "".join(out), report
 
@@ -928,6 +1010,7 @@ def add_model_refs(
     lcsc_cache_dir: Path | None = None,
     lcsc_warn: Callable[[str], None] | None = None,
     dry_run: bool = False,
+    refresh: bool = False,
 ) -> ModelPatchReport:
     """Patch missing 3D model refs into a ``.kicad_pcb`` file.
 
@@ -957,6 +1040,12 @@ def add_model_refs(
         lcsc_warn: Optional ``callable(str)`` invoked on an LCSC fetch failure.
             Ignored when *resolver* is supplied.
         dry_run: When True, nothing is written.
+        refresh: When True, footprints that already carry ``(model ...)``
+            nodes are re-resolved and their nodes replaced by freshly
+            computed ones (reported in ``refreshed``); footprints the tiers
+            cannot re-resolve keep their existing nodes byte-for-byte
+            (reported in ``refresh_kept``).  Default: insert-only (existing
+            nodes are never touched).
 
     Returns:
         ModelPatchReport describing what was (or would be) inserted.
@@ -981,19 +1070,19 @@ def add_model_refs(
             lcsc_transform_log=lcsc_transform_log,
             lcsc_warn=lcsc_warn,
         )
-    new_text, report = add_model_refs_to_text(text, resolver)
-    # Only surface variants/substitutions that actually got patched in.
+    new_text, report = add_model_refs_to_text(text, resolver, refresh=refresh)
+    # Only surface variants/substitutions that actually got patched in
+    # (inserted or, under refresh, replaced).
+    applied = set(report.patched) | set(report.refreshed)
     report.variant_matches = {
-        lib_id: stem for lib_id, stem in variant_log.items() if lib_id in report.patched
+        lib_id: stem for lib_id, stem in variant_log.items() if lib_id in applied
     }
     report.substitution_matches = {
-        lib_id: sub for lib_id, sub in substitution_log.items() if lib_id in report.patched
+        lib_id: sub for lib_id, sub in substitution_log.items() if lib_id in applied
     }
-    report.lcsc_matches = {
-        lib_id: cnum for lib_id, cnum in lcsc_log.items() if lib_id in report.patched
-    }
+    report.lcsc_matches = {lib_id: cnum for lib_id, cnum in lcsc_log.items() if lib_id in applied}
     report.lcsc_transforms = {
-        lib_id: desc for lib_id, desc in lcsc_transform_log.items() if lib_id in report.patched
+        lib_id: desc for lib_id, desc in lcsc_transform_log.items() if lib_id in applied
     }
     if report.changed and not dry_run:
         dest = Path(output_path) if output_path is not None else pcb_path

@@ -869,6 +869,22 @@ def _add_check_parser(subparsers) -> None:
             "auto-derivation."
         ),
     )
+    # Issue #4595: sch_fields schematic field-geometry lint threshold.
+    # Declared on BOTH parsers + forwarded by the shim (see the parser-drift
+    # guard in tests/test_cli_parser_drift.py, issue #4633).
+    check_parser.add_argument(
+        "--sch-field-threshold",
+        dest="sch_field_threshold",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Distance in mm beyond which the sch_fields lint flags a "
+            "visible Reference/Value field as adrift from its symbol body "
+            "(default 15.0, warning severity only; issue #4595).  Fixed "
+            "threshold -- an adaptive per-sheet-median variant is deferred."
+        ),
+    )
 
 
 def _add_sch_parser(subparsers) -> None:
@@ -2229,6 +2245,15 @@ def _add_pcb_parser(subparsers) -> None:
         "--dry-run",
         action="store_true",
         help="Report what would be inserted without modifying the PCB file",
+    )
+    pcb_add_models.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Re-resolve footprints that already carry (model ...) refs and "
+        "replace them with freshly computed ones (picks up current offset/"
+        "rotation/LCSC-transform logic). Footprints that cannot be re-resolved "
+        "keep their existing refs untouched. Default: insert-only — existing "
+        "refs are never modified",
     )
 
     # pcb remove-footprint
@@ -6497,19 +6522,29 @@ def _add_net_status_parser(subparsers) -> None:
             "(issue #3863)."
         ),
     )
-    net_status_parser.add_argument(
+    model_group = net_status_parser.add_mutually_exclusive_group()
+    model_group.add_argument(
         "--strict",
         dest="net_status_strict",
         action="store_true",
         help=(
             "Decide connectivity by REAL geometric copper contact (shapely "
-            "polygon intersection) instead of the default 0.01mm endpoint "
-            "proximity tolerance. The default model unions a segment endpoint "
-            "with a pad/via/segment whenever their reference points land "
-            "within 0.01mm even if the actual copper (segment width, pad "
-            "shape) does not touch -- so it can report a net 'complete' that "
-            "'kicad-cli pcb drc' reports as unconnected. --strict matches "
-            "KiCad's connectivity semantics (issue #4176). Requires shapely."
+            "polygon intersection), matching KiCad's connectivity semantics "
+            "(issue #4176). This has been the DEFAULT since issue #4557; the "
+            "flag is kept as an explicit no-op for script compatibility."
+        ),
+    )
+    model_group.add_argument(
+        "--legacy-proximity",
+        dest="net_status_legacy_proximity",
+        action="store_true",
+        help=(
+            "Opt into the legacy 0.01mm endpoint-proximity connectivity "
+            "model: a segment endpoint is unioned with a pad/via/segment "
+            "whenever their reference points land within 0.01mm, even if the "
+            "actual copper (segment width, pad shape) does not touch. "
+            "Faster (~1.5-2x) but diverges from KiCad in both directions "
+            "(issues #4176, #4557). Mutually exclusive with --strict."
         ),
     )
 
