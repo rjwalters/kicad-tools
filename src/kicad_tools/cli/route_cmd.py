@@ -71,7 +71,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from kicad_tools.router import Autorouter, LayerStack
     from kicad_tools.router.net_names import NetClassMapResolution
@@ -1611,6 +1611,76 @@ def _handle_interrupt(signum, frame):
     # This is distinct from code 2 (partial routing below threshold) so scripts can
     # distinguish user-interrupted from router-decided-partial.
     sys.exit(5 if saved else 130)  # 130 = 128 + SIGINT (2)
+
+
+# Issue #4559: per-invocation record of whether ``_main_impl`` seeded the
+# global ``random`` module (``--seed``).  ``_process_state_guard`` resets it
+# on entry and restores the caller's RNG state on exit ONLY when it was set,
+# so an unseeded run never touches the caller-observable global RNG state
+# (existing behavior, preserved bit-for-bit).
+_process_run_state = {"rng_seeded": False}
+
+
+@contextlib.contextmanager
+def _process_state_guard() -> "Iterator[None]":
+    """Snapshot/restore the process-global state that ``_main_impl`` stamps.
+
+    ``route_cmd.main()`` is invoked **in-process** by ``kct route``
+    (``commands/routing.py``) and by dozens of test files, but the
+    implementation mutates process-global state and (before issue #4559)
+    restored none of it, silently poisoning every subsequent in-process
+    invocation.  This guard wraps the outermost ``main()`` boundary and
+    restores, in a ``finally``:
+
+    * ``os.environ`` -- the ``KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE`` /
+      ``KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK`` (+ ``_SIZE``/``_DRILL``)
+      escalation stamps, read lazily far below the CLI in
+      ``EscapeRouter.__init__``.  The env var IS the channel: it must stay
+      stamped for the *entire* invocation (the escalation ladder re-stamps
+      per rung, and ``EscapeRouter`` is constructed lazily mid-run), so the
+      restore happens here -- at the outermost boundary, strictly after all
+      copper has been written -- never per-rung.  The whole environ is
+      snapshotted and restored exactly (``clear()`` + ``update()``), so vars
+      *created* during the run are removed rather than merely reverted.
+    * the global ``random`` state -- restored only when ``--seed`` was
+      actually applied (see ``_process_run_state``); an unseeded run leaves
+      the global RNG untouched, exactly as before.
+    * the ``SIGINT`` handler installed for the Ctrl+C partial-save path --
+      restored only if it is still ``_handle_interrupt`` on exit, so a
+      handler installed by someone else mid-run is never clobbered.
+    * ``_interrupt_state`` -- the router/output references are dropped so a
+      completed run does not pin an ``Autorouter`` (and its grid) alive for
+      the rest of the process.
+
+    ``kct route`` as a **subprocess** is unaffected: the guard is inert
+    there (the process exits anyway), so child-process env propagation of
+    the stamps during the run is preserved.
+    """
+    saved_environ = dict(os.environ)
+    saved_rng_state = random.getstate()
+    try:
+        saved_sigint = signal.getsignal(signal.SIGINT)
+    except ValueError:  # pragma: no cover -- not on the main thread
+        saved_sigint = None
+    _process_run_state["rng_seeded"] = False
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_environ)
+        if _process_run_state["rng_seeded"]:
+            random.setstate(saved_rng_state)
+        if saved_sigint is not None:
+            try:
+                if signal.getsignal(signal.SIGINT) is _handle_interrupt:
+                    signal.signal(signal.SIGINT, saved_sigint)
+            except ValueError:  # pragma: no cover -- not on the main thread
+                pass
+        # Release the router/grid pinned for the SIGINT partial-save path.
+        _interrupt_state["router"] = None
+        _interrupt_state["output_path"] = None
+        _interrupt_state["pcb_path"] = None
+        _interrupt_state["interrupted"] = False
 
 
 def _save_partial_results() -> bool:
@@ -10106,6 +10176,21 @@ def format_dry_run_grid_plan(plan: DryRunGridPlan) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Entry point for the route command.
+
+    Thin wrapper (issue #4559): ``_process_state_guard`` restores the
+    process-global state ``_main_impl`` stamps -- the ``KICAD_TOOLS_*``
+    escalation env vars, the ``--seed`` global-RNG seeding, the SIGINT
+    handler, and the ``_interrupt_state`` router pin -- so in-process
+    callers (``kct route`` via ``commands/routing.py`` and the test
+    suite) are not poisoned.  The state stays stamped for the entire
+    invocation; only the outermost exit (return *or* raise) restores it.
+    """
+    with _process_state_guard():
+        return _main_impl(argv)
+
+
+def _main_impl(argv: list[str] | None = None) -> int:
     """Main entry point for route command."""
     parser = argparse.ArgumentParser(
         prog="kicad-tools route",
@@ -11729,6 +11814,13 @@ def main(argv: list[str] | None = None) -> int:
     # CLI) reads the same opt-in state.  See escape.py's __init__ for the
     # env-var read site.  Defaults to "0" so absence preserves the legacy
     # "proceed anyway" behaviour bit-for-bit.
+    #
+    # Issue #4559: these stamps (and every other env mutation below) are
+    # scoped to this invocation by ``_process_state_guard`` in ``main()`` --
+    # they stay set for the whole run (EscapeRouter reads them lazily,
+    # possibly per escalation rung) and are restored at the outermost exit
+    # so in-process callers are not poisoned.  Do NOT add a mid-run restore
+    # here, and do NOT add new unguarded stamps outside ``main()``.
     import os as _os
 
     if getattr(args, "strict_in_pad_clearance", False):
@@ -11752,6 +11844,9 @@ def main(argv: list[str] | None = None) -> int:
     # variance.  When ``--seed`` is omitted, the global RNG is left at its
     # default os.urandom-derived state -- existing behaviour is preserved.
     if args.seed is not None:
+        # Issue #4559: record the seeding so ``_process_state_guard`` restores
+        # the caller's global-RNG state when this invocation exits.
+        _process_run_state["rng_seeded"] = True
         random.seed(args.seed)
         if not getattr(args, "quiet", False):
             print(f"[seed] Seeded global random with --seed {args.seed}")
@@ -12671,7 +12766,10 @@ def main(argv: list[str] | None = None) -> int:
     # Issue #1841: Tell the autorouter which pour nets lack zones
     router._pour_nets_without_zones = set(_no_zone)
 
-    # Set up Ctrl+C handling to save partial results
+    # Set up Ctrl+C handling to save partial results.  Issue #4559: the
+    # handler (and the router pinned here) is restored/released by
+    # ``_process_state_guard`` when ``main()`` exits -- mirroring the
+    # save/restore the two escalation paths already do locally.
     _interrupt_state["router"] = router
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path

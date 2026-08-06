@@ -305,6 +305,26 @@ constructor). No breaking changes.
 
 ### Fixed
 
+- **`route_cmd.main()` no longer leaks process-global state to in-process
+  callers** (#4559). The route CLI stamps the `KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE`
+  / `KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK` (+ `_SIZE`/`_DRILL`) escalation
+  env vars, seeds the global `random` module for `--seed`, installs a SIGINT
+  partial-save handler, and pins the live `Autorouter` in a module-level
+  interrupt dict — and previously restored none of them. Any in-process
+  invocation (`kct route` via `commands/routing.py`, or a test calling
+  `route_cmd.main()`) permanently poisoned the process: a leaked fallback
+  `=1` silently re-enabled micro-via-in-pad rescue for every subsequent
+  `EscapeRouter`, producing the selection-dependent pytest-xdist worker
+  failures first seen in PR #4556. `main()` is now a thin wrapper whose
+  `_process_state_guard` context manager snapshot-restores `os.environ`
+  (exact, including removing vars created mid-run), the global RNG state
+  (only when `--seed` was applied; unseeded runs still leave the RNG
+  untouched), the SIGINT handler (only if still ours on exit), and releases
+  the pinned router/grid. Stickiness *within* one invocation — including the
+  escalation ladder's per-rung stamp/pop and subprocess env propagation — is
+  unchanged: the restore runs strictly at the outermost exit, after all
+  copper is written.
+
 - **The `.kicad_dru` sidecar write clobbered pre-existing user content.** The
   tier-floor `.kicad_dru` written beside the board by `kct route`, `kct build`,
   `kct mfr apply-rules`, and `kct check --emit-dru`/`--emit-drc-constraints`
