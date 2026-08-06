@@ -318,6 +318,13 @@ class DRCChecker:
         "connector_edge_access": CATEGORY_ADVISORY,
         "connector_edge_distance": CATEGORY_ADVISORY,
         "copper_sliver": CATEGORY_ADVISORY,
+        # Schematic field-geometry legibility lint (Issue #4595):
+        # warning-severity readability advisories on the resolved sibling
+        # schematic -- never fab-blocking.  Explicit entries are REQUIRED:
+        # category_for_rule defaults unknown ids to the fab-blocking
+        # Manufacturing bucket and there is no "sch" prefix fallback.
+        "sch_field_offset": CATEGORY_ADVISORY,
+        "sch_field_overlap": CATEGORY_ADVISORY,
         "impedance": CATEGORY_ADVISORY,
         "diffpair_clearance_intra": CATEGORY_ADVISORY,
         "diffpair_length_skew": CATEGORY_ADVISORY,

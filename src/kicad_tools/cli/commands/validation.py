@@ -279,6 +279,11 @@ def run_check_command(args) -> int:
         sub_argv.append("--pad-grid-strict")
     if getattr(args, "pad_grid_tolerance", None) is not None:
         sub_argv.extend(["--pad-grid-tolerance", str(args.pad_grid_tolerance)])
+    # Issue #4595: forward the sch_fields lint threshold.  The outer parser
+    # defaults it to None so the inner check_cmd parser's default (15.0mm)
+    # stays the single source of truth.
+    if getattr(args, "sch_field_threshold", None) is not None:
+        sub_argv.extend(["--sch-field-threshold", str(args.sch_field_threshold)])
     return check_main(sub_argv)
 
 

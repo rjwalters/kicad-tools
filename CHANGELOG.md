@@ -17,6 +17,22 @@ constructor). No breaking changes.
 
 ### Added
 
+- **`kct check` schematic field-geometry lint (`sch_fields`)** — new
+  warning-severity check category with two rules: `sch_field_offset` flags a
+  visible `Reference`/`Value` field farther than a threshold (default 15 mm,
+  `--sch-field-threshold`) from its symbol's placed body bbox, and
+  `sch_field_overlap` flags a field's estimated text bbox colliding with
+  another symbol's body or another symbol's visible field (the superimposed
+  `+3.3VA9`-style composites). Runs on the same resolved schematic ERC/LVS
+  use (explicit `--schematic` or sibling discovery), recurses into
+  hierarchical sub-sheets, and shares the exact `field_geometry` metric that
+  `kct sch tidy` fixes — lint reports it, tidy repairs it. Both rules are
+  advisory (`advisory-quality` bucket), never raise the error count, and
+  never block `kct build`/`kct pipeline` fab gates; under `--strict` they
+  become fatal by the pre-existing global warnings contract. Findings are
+  deterministically sorted for CI. Skipped entirely under `--drc-only`.
+  (#4595)
+
 - **Search-time HV pairwise clearance in the lattice engine** — `--voltage-map`
   + `--route-engine lattice` now *avoids* HV↔LV proximity during the A\* search
   instead of only failing the #4588 post-route gate after committing the

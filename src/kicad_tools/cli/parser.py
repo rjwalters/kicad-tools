@@ -869,6 +869,22 @@ def _add_check_parser(subparsers) -> None:
             "auto-derivation."
         ),
     )
+    # Issue #4595: sch_fields schematic field-geometry lint threshold.
+    # Declared on BOTH parsers + forwarded by the shim (see the parser-drift
+    # guard in tests/test_cli_parser_drift.py, issue #4633).
+    check_parser.add_argument(
+        "--sch-field-threshold",
+        dest="sch_field_threshold",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Distance in mm beyond which the sch_fields lint flags a "
+            "visible Reference/Value field as adrift from its symbol body "
+            "(default 15.0, warning severity only; issue #4595).  Fixed "
+            "threshold -- an adaptive per-sheet-median variant is deferred."
+        ),
+    )
 
 
 def _add_sch_parser(subparsers) -> None:
