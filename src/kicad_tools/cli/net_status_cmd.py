@@ -10,16 +10,21 @@ Usage:
     kicad-net-status board.kicad_pcb --by-class
     kicad-net-status board.kicad_pcb --format json
     kicad-net-status board.kicad_pcb --strict
+    kicad-net-status board.kicad_pcb --legacy-proximity
 
 Connectivity model:
-    By default, connectivity is decided by a 0.01mm endpoint-proximity
-    tolerance: a segment endpoint is unioned with a pad / via / other segment
-    whenever their reference points land within 0.01mm, without testing
-    whether the real copper (segment width, pad shape) actually touches. This
-    can over-connect relative to KiCad, reporting a net "complete" that
-    ``kicad-cli pcb drc`` reports as having unconnected items (issue #4176).
-    Pass ``--strict`` to decide connectivity by real geometric copper contact
-    (shapely polygon intersection), which matches KiCad's semantics.
+    By default (since issue #4557), connectivity is decided by real geometric
+    copper contact (shapely polygon intersection), matching the semantics of
+    ``kicad-cli pcb drc`` (issue #4176). ``--strict`` selects the same model
+    explicitly (kept as a no-op for script compatibility).
+    Pass ``--legacy-proximity`` to opt into the legacy 0.01mm
+    endpoint-proximity tolerance: a segment endpoint is unioned with a pad /
+    via / other segment whenever their reference points land within 0.01mm,
+    without testing whether the real copper (segment width, pad shape)
+    actually touches. That model diverges from KiCad in both directions -- it
+    can report proximity-unioned copper "complete" that KiCad reports open
+    (issue #4176), and it reports false opens when a trace endpoint lands
+    inside pad copper but away from the pad center (issue #4557).
 
 Exit Codes:
     0 - No incomplete nets
@@ -33,7 +38,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.analysis.net_status import NetStatus, NetStatusAnalyzer, NetStatusResult
 
@@ -77,18 +82,28 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Show all pads with coordinates",
     )
-    parser.add_argument(
+    model_group = parser.add_mutually_exclusive_group()
+    model_group.add_argument(
         "--strict",
         action="store_true",
         help=(
             "Decide connectivity by REAL geometric copper contact (shapely "
-            "polygon intersection) instead of the default 0.01mm endpoint "
-            "proximity tolerance. The default model unions a segment endpoint "
-            "with a pad/via/segment whenever their reference points land "
-            "within 0.01mm, even if the actual copper (segment width, pad "
-            "shape) does not touch -- so it can report a net 'complete' that "
-            "'kicad-cli pcb drc' reports as unconnected. --strict matches "
-            "KiCad's connectivity semantics (issue #4176). Requires shapely."
+            "polygon intersection), matching KiCad's connectivity semantics "
+            "(issue #4176). This has been the DEFAULT since issue #4557; the "
+            "flag is kept as an explicit no-op for script compatibility."
+        ),
+    )
+    model_group.add_argument(
+        "--legacy-proximity",
+        action="store_true",
+        dest="legacy_proximity",
+        help=(
+            "Opt into the legacy 0.01mm endpoint-proximity connectivity "
+            "model: a segment endpoint is unioned with a pad/via/segment "
+            "whenever their reference points land within 0.01mm, even if the "
+            "actual copper (segment width, pad shape) does not touch. "
+            "Faster (~1.5-2x) but diverges from KiCad in both directions "
+            "(issues #4176, #4557). Mutually exclusive with --strict."
         ),
     )
     parser.add_argument(
@@ -110,9 +125,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: PCB not found: {pcb_path}", file=sys.stderr)
         return 1
 
+    # Connectivity model selection (issue #4557): strict (real copper
+    # geometry) is the default; --strict is an explicit no-op kept for script
+    # compatibility; --legacy-proximity opts back into the endpoint-proximity
+    # model. The two flags are mutually exclusive (argparse-enforced).
+    strict = not args.legacy_proximity
+
     # Run analysis
     try:
-        analyzer = NetStatusAnalyzer(pcb_path, strict=args.strict)
+        analyzer = NetStatusAnalyzer(pcb_path, strict=strict)
         result = analyzer.analyze()
     except Exception as e:
         print(f"Error during analysis: {e}", file=sys.stderr)
@@ -120,9 +141,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # --why: stuck-net classifier (issue #3863). Read-only diagnostic that
     # labels each incomplete signal net by WHY it is stuck. Handled before the
-    # normal filter/output path because it has its own output shape.
+    # normal filter/output path because it has its own output shape. Respects
+    # the strict/legacy selection (issue #4557).
     if args.why:
-        return output_why(pcb_path, args.format)
+        return output_why(pcb_path, args.format, strict=strict)
 
     # Filter results if needed
     if args.net:
@@ -147,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Output
     if args.format == "json":
-        output_json(filtered, pcb_path, args.by_class)
+        output_json(filtered, pcb_path, args.by_class, strict=strict)
     else:
         # The summary header must always describe the unfiltered board so its
         # counts stay internally consistent (Complete + Incomplete + Unrouted ==
@@ -159,12 +181,20 @@ def main(argv: list[str] | None = None) -> int:
             args.by_class,
             args.incomplete,
             summary_result=result,
+            strict=strict,
         )
 
     # Exit code
     if result.incomplete_count > 0 or result.unrouted_count > 0:
         return 2
     return 0
+
+
+def _model_label(strict: bool) -> str:
+    """Human-readable name of the connectivity model in use (issue #4557)."""
+    if strict:
+        return "strict (real copper geometry, matches kicad-cli)"
+    return "legacy endpoint-proximity (0.01mm tolerance)"
 
 
 def output_text(
@@ -174,6 +204,7 @@ def output_text(
     by_class: bool = False,
     incomplete_only: bool = False,
     summary_result: NetStatusResult | None = None,
+    strict: bool = True,
 ) -> None:
     """Output results as formatted text.
 
@@ -183,10 +214,13 @@ def output_text(
             ``--incomplete`` filters complete nets out of ``result``, the header
             must still describe the full board so its counts stay consistent
             (Complete + Incomplete + Unrouted == total). Defaults to ``result``.
+        strict: Which connectivity model produced ``result`` (drives the
+            model line in the header, issue #4557).
     """
     summary = summary_result if summary_result is not None else result
     print(f"Net Status: {pcb_path.name}")
     print("=" * 60)
+    print(f"Connectivity model: {_model_label(strict)}")
     print()
     print(f"Summary: {summary.total_nets} nets total")
     print(f"  Complete:   {summary.complete_count} (100% connected)")
@@ -289,10 +323,12 @@ def output_json(
     result: NetStatusResult,
     pcb_path: Path,
     by_class: bool = False,
+    strict: bool = True,
 ) -> None:
     """Output results as JSON."""
-    data = {
+    data: dict[str, Any] = {
         "pcb": str(pcb_path),
+        "connectivity_model": "strict" if strict else "legacy_proximity",
         "summary": {
             "total_nets": result.total_nets,
             "complete": result.complete_count,
@@ -345,23 +381,32 @@ def _print_recommendation(diag: StuckNetDiagnosis) -> None:
         print(f"                    {i}. {label} ({ranked.rationale}){preferred}")
 
 
-def output_why(pcb_path: Path, fmt: str) -> int:
+def output_why(pcb_path: Path, fmt: str, strict: bool = True) -> int:
     """Classify incomplete signal nets by why they are stuck and print them.
+
+    ``strict`` selects the connectivity model the classifier's internal
+    ``NetStatusAnalyzer`` runs use (issue #4557) -- before this parameter,
+    ``--strict --why`` silently ignored ``--strict``.
 
     Returns 2 if any stuck nets were found (matching the rest of net-status'
     exit-code convention), 0 if the board has no stuck signal nets.
     """
     from kicad_tools.router.stuck_classifier import classify_stuck_nets
 
-    result = classify_stuck_nets(pcb_path)
+    result = classify_stuck_nets(pcb_path, strict=strict)
 
     if fmt == "json":
-        data = {"pcb": str(pcb_path), **result.to_dict()}
+        data = {
+            "pcb": str(pcb_path),
+            "connectivity_model": "strict" if strict else "legacy_proximity",
+            **result.to_dict(),
+        }
         print(json.dumps(data, indent=2))
         return 2 if result.diagnoses else 0
 
     print(f"Stuck-net classification: {pcb_path.name}")
     print("=" * 70)
+    print(f"Connectivity model: {_model_label(strict)}")
     print()
     counts = result.counts
     print(f"Stuck signal nets: {len(result.diagnoses)}")

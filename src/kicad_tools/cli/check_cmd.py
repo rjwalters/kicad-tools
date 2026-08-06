@@ -41,6 +41,7 @@ from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
 from kicad_tools.sync.discover import resolve_target_fab_for_pcb
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
+from kicad_tools.validate.rules.schematic_fields import DEFAULT_SCH_FIELD_THRESHOLD_MM
 
 # Issue #3750: meta-check status set.  ``NOT RUN`` is rendered with a space
 # in human output and ``"NOT RUN"`` in JSON; we treat it as a single token
@@ -905,6 +906,25 @@ def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
     )
 
 
+def _resolve_check_schematic(schematic: str | None, pcb_path: Path) -> Path | None:
+    """Resolve the schematic used by schematic-aware checks.
+
+    Shared by the meta sub-checks (ERC/LVS, issue #3750) and the
+    ``sch_fields`` lint category (issue #4595) so both consume the exact
+    same resolution: an explicit ``--schematic`` override wins (a missing
+    override path resolves to ``None``), otherwise sibling discovery via
+    :func:`kicad_tools.sync.discover.resolve_schematic_for_pcb` (which
+    handles ``project.kct artifacts.schematic`` and the ``_routed``-style
+    stage-suffix strip).
+    """
+    from kicad_tools.sync.discover import resolve_schematic_for_pcb
+
+    if schematic is not None:
+        candidate = Path(schematic).resolve()
+        return candidate if candidate.exists() else None
+    return resolve_schematic_for_pcb(pcb_path)
+
+
 def run_meta_checks(
     pcb_path: Path,
     drc_status: SubCheckResult,
@@ -933,14 +953,7 @@ def run_meta_checks(
             ``INCOMPLETE`` exits non-zero (the new default) or 0 (with
             ``--allow-incomplete``).
     """
-    from kicad_tools.sync.discover import resolve_schematic_for_pcb
-
-    resolved_sch: Path | None
-    if schematic is not None:
-        candidate = Path(schematic).resolve()
-        resolved_sch = candidate if candidate.exists() else None
-    else:
-        resolved_sch = resolve_schematic_for_pcb(pcb_path)
+    resolved_sch = _resolve_check_schematic(schematic, pcb_path)
 
     erc = _erc_subcheck(resolved_sch, strict)
     lvs = _lvs_subcheck(resolved_sch, pcb_path)
@@ -1099,6 +1112,7 @@ CHECK_CATEGORIES = [
     "netlist",
     "pad_grid",
     "placement",
+    "sch_fields",
     "silkscreen",
     "single_pad_net",
     "solder_mask",
@@ -1465,6 +1479,21 @@ def main(argv: list[str] | None = None) -> int:
             "Override the pad_grid L2 tolerance with an explicit value "
             "in mm (e.g. ``--pad-grid-tolerance 0.02``).  Disables "
             "auto-derivation."
+        ),
+    )
+    # Issue #4595: sch_fields schematic field-geometry lint threshold.
+    parser.add_argument(
+        "--sch-field-threshold",
+        dest="sch_field_threshold",
+        type=float,
+        default=DEFAULT_SCH_FIELD_THRESHOLD_MM,
+        metavar="MM",
+        help=(
+            "Distance in mm beyond which the sch_fields lint flags a "
+            "visible Reference/Value field as adrift from its symbol body "
+            f"(default {DEFAULT_SCH_FIELD_THRESHOLD_MM}, warning severity "
+            "only; issue #4595).  Fixed threshold -- an adaptive "
+            "per-sheet-median variant is deferred."
         ),
     )
 
@@ -1923,6 +1952,23 @@ def main(argv: list[str] | None = None) -> int:
         pad_grid_threshold = None
         pad_grid_auto_derive = True
 
+    # Issue #4595: resolve the schematic for the sch_fields lint category,
+    # via the exact resolution ERC/LVS use (explicit --schematic override,
+    # else sibling discovery).  Resolution is skipped -- and the category is
+    # therefore a silent no-op -- when the category is deselected, or under
+    # --drc-only (which pins the legacy PCB-only stdout/exit contract, so
+    # schematic-sourced findings must not appear there; documented decision).
+    # No schematic resolved => the closure emits nothing and never fails
+    # (the #4350 loud missing-schematic stderr warning covers visibility).
+    sch_fields_active = (
+        (only_set is None or "sch_fields" in only_set)
+        and "sch_fields" not in skip_set
+        and not getattr(args, "drc_only", False)
+    )
+    sch_path: Path | None = None
+    if sch_fields_active:
+        sch_path = _resolve_check_schematic(getattr(args, "schematic", None), pcb_path)
+
     # Run selected checks
     results = run_selected_checks(
         checker,
@@ -1930,6 +1976,8 @@ def main(argv: list[str] | None = None) -> int:
         skip_set,
         pad_grid_threshold=pad_grid_threshold,
         pad_grid_auto_derive=pad_grid_auto_derive,
+        sch_path=sch_path,
+        sch_field_threshold=args.sch_field_threshold,
     )
 
     # Issue #4417: apply general waivers centrally, once, AFTER all checks run.
@@ -2223,6 +2271,8 @@ def run_selected_checks(
     skip_set: set[str],
     pad_grid_threshold: float | None = None,
     pad_grid_auto_derive: bool = True,
+    sch_path: Path | None = None,
+    sch_field_threshold: float = DEFAULT_SCH_FIELD_THRESHOLD_MM,
 ) -> DRCResults:
     """Run the selected DRC checks based on filters.
 
@@ -2238,6 +2288,14 @@ def run_selected_checks(
             the board's pad-offset histogram (issue #3061).  Defaults
             to ``True`` for the CLI; ``False`` preserves the PR #3057
             fixed-0.05mm behaviour.
+        sch_path: Resolved schematic path for the ``sch_fields``
+            field-geometry lint (issue #4595), or ``None`` when no
+            schematic is available -- the category then emits nothing
+            (the #4350 missing-schematic stderr warning already covers
+            visibility).  Must default to ``None`` so library callers
+            that only exercise PCB-scoped checks are unaffected.
+        sch_field_threshold: ``sch_field_offset`` distance threshold in
+            mm (issue #4595; strictly-greater-than comparison).
     """
     results = DRCResults()
 
@@ -2253,6 +2311,18 @@ def run_selected_checks(
             auto_derive_threshold=pad_grid_auto_derive,
             aggregate=not checker.verbose,
         )
+
+    # Issue #4595: schematic field-geometry lint.  Dispatched as a
+    # CLI-level closure (like ``pad_grid``) because it runs on the
+    # resolved sibling schematic, not the PCB -- it is intentionally NOT
+    # a ``DRCChecker`` method and NOT part of ``CHECK_ALL_METHODS``.
+    # With no schematic resolved it is a silent no-op.
+    def _sch_fields_check() -> DRCResults:
+        if sch_path is None:
+            return DRCResults()
+        from kicad_tools.validate.rules.schematic_fields import check_schematic_fields
+
+        return check_schematic_fields(sch_path, threshold_mm=sch_field_threshold)
 
     # Map of category to check method.  This dict MUST stay a superset
     # of the methods invoked by ``DRCChecker.check_all`` (i.e., every
@@ -2279,6 +2349,7 @@ def run_selected_checks(
         "netlist": checker.check_netlist,
         "pad_grid": _pad_grid_check,
         "placement": checker.check_footprint_placement,
+        "sch_fields": _sch_fields_check,
         "silkscreen": checker.check_silkscreen,
         "single_pad_net": checker.check_single_pad_nets,
         "solder_mask": checker.check_solder_mask_pads,

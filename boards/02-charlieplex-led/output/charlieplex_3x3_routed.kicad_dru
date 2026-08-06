@@ -1,4 +1,6 @@
 (version 1)
+
+# BEGIN kct fab floors (Issue #4600) -- managed, do not edit
 (rule "Trace Width - jlcpcb-tier1"
   (condition "A.Type == 'track'")
   (constraint track_width (min 0.127mm)))
@@ -28,3 +30,4 @@
   (constraint solder_mask_margin (min 0.05mm)))
 (rule "Solder Mask Dam - jlcpcb-tier1"
   (constraint physical_hole_clearance (min 0.1mm)))
+# END kct fab floors

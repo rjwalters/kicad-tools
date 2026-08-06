@@ -22,6 +22,7 @@ per copper layer:
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..primitives import Pad
@@ -30,7 +31,9 @@ from .geometry import (
     Rect,
     SegHash,
     dist,
+    polygon_bbox,
     pt_in_rect,
+    seg_near_polygon,
     seg_pt_dist,
     seg_rect_intersect,
     seg_seg_dist,
@@ -225,6 +228,113 @@ class LatticeObstacleModel:
             if seg_rect_intersect(a, b, grown) and not pairwise.exempt_seg_pt(
                 a, b, (pad.x, pad.y), net, pad.net
             ):
+                return True
+        return False
+
+
+@dataclass(frozen=True)
+class KeepoutArea:
+    """One resolved keepout rule area in lattice space (issue #4605).
+
+    The CALLER (``Autorouter._lattice_keepout_projection``) resolves the
+    KiCad ``(zone ... (keepout ...))`` rule areas into this flat carrier --
+    sheet-absolute polygon, lattice layer indices, per-object-type blocking
+    flags, and a net-id applicability filter -- so the pathfinder stays
+    geometry-only and never sees net names or net classes (#4597 discipline).
+
+    Applicability (the ``spatial_keepouts`` sidecar filter): the area applies
+    to net ``n`` iff ``(only is None or n in only) and n not in exempt``.
+    ``only=None, exempt=frozenset()`` is the KiCad-default all-nets rule.
+    """
+
+    polygon: tuple[Pt, ...]
+    layers: frozenset[int]  # lattice layer indices the area covers
+    blocks_tracks: bool
+    blocks_vias: bool
+    only: frozenset[int] | None = None
+    exempt: frozenset[int] = frozenset()
+    name: str = ""
+    bbox: Rect = field(default=(0.0, 0.0, 0.0, 0.0))
+
+    def __post_init__(self) -> None:
+        if len(self.polygon) >= 3 and self.bbox == (0.0, 0.0, 0.0, 0.0):
+            object.__setattr__(self, "bbox", polygon_bbox(self.polygon))
+
+    def applies_to(self, net: int) -> bool:
+        """True when the area's rule governs net id ``net``."""
+        if self.only is not None and net not in self.only:
+            return False
+        return net not in self.exempt
+
+
+class LatticeKeepoutMask:
+    """Static per-board keepout rule-area mask for the lattice engine (#4605).
+
+    A parallel legality source to the pad masks: built once from the resolved
+    :class:`KeepoutArea` list and consulted by the same predicates the
+    pathfinder already routes every expansion through.  All queries are
+    geometric with an AABB pre-filter -- boards carry a handful of rule
+    areas, so per-query polygon checks (cached per lattice resource by the
+    search's ``edge_ok`` / ``node_ok`` memos) beat a full node/edge
+    precompute.
+
+    Semantics (KiCad rule-area flags, finding 6 of the #4605 curation):
+
+    * ``tracks not_allowed`` blocks SEGMENTS on the area's layers -- the
+      copper edge must stay out, so every query inflates by the querying
+      copper's half-width;
+    * ``vias not_allowed`` blocks a through-via whose barrel would enter the
+      area on ANY of the area's layers (a through-via exists on all layers);
+    * ``copperpour`` / ``pads`` / ``footprints`` flags are the zone filler's
+      and placement's business and are deliberately ignored here -- a
+      pour-void-only rule area (the ``kct zones hv-keepout`` output) must
+      never affect routing.
+    """
+
+    def __init__(self, areas: list[KeepoutArea] | tuple[KeepoutArea, ...]) -> None:
+        self.areas: tuple[KeepoutArea, ...] = tuple(
+            a for a in areas if len(a.polygon) >= 3 and (a.blocks_tracks or a.blocks_vias)
+        )
+
+    def __bool__(self) -> bool:
+        return bool(self.areas)
+
+    def segment_blocked(self, a: Pt, b: Pt, layer: int, net: int, half: float) -> bool:
+        """True if copper of half-width ``half`` along ``a-b`` on ``layer``
+        would enter a track-blocking rule area governing ``net``.
+
+        The degenerate ``a == b`` form doubles as a point (lattice-node)
+        probe, mirroring :meth:`LatticeObstacleModel.segment_blocked`.
+        """
+        x0, x1 = min(a[0], b[0]) - half, max(a[0], b[0]) + half
+        y0, y1 = min(a[1], b[1]) - half, max(a[1], b[1]) + half
+        for area in self.areas:
+            if not area.blocks_tracks or layer not in area.layers:
+                continue
+            if not area.applies_to(net):
+                continue
+            bx0, by0, bx1, by1 = area.bbox
+            if x1 < bx0 or bx1 < x0 or y1 < by0 or by1 < y0:
+                continue
+            if seg_near_polygon(a, b, area.polygon, half):
+                return True
+        return False
+
+    def via_blocked(self, point: Pt, net: int, via_radius: float) -> bool:
+        """True if a through-via at ``point`` would enter a via-blocking rule
+        area governing ``net`` (layer-agnostic: the barrel spans the stack,
+        so an area on any copper layer subset still intersects it)."""
+        x0, x1 = point[0] - via_radius, point[0] + via_radius
+        y0, y1 = point[1] - via_radius, point[1] + via_radius
+        for area in self.areas:
+            if not area.blocks_vias or not area.layers:
+                continue
+            if not area.applies_to(net):
+                continue
+            bx0, by0, bx1, by1 = area.bbox
+            if x1 < bx0 or bx1 < x0 or y1 < by0 or by1 < y0:
+                continue
+            if seg_near_polygon(point, point, area.polygon, via_radius):
                 return True
         return False
 

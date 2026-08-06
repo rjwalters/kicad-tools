@@ -17,6 +17,22 @@ constructor). No breaking changes.
 
 ### Added
 
+- **`kct check` schematic field-geometry lint (`sch_fields`)** — new
+  warning-severity check category with two rules: `sch_field_offset` flags a
+  visible `Reference`/`Value` field farther than a threshold (default 15 mm,
+  `--sch-field-threshold`) from its symbol's placed body bbox, and
+  `sch_field_overlap` flags a field's estimated text bbox colliding with
+  another symbol's body or another symbol's visible field (the superimposed
+  `+3.3VA9`-style composites). Runs on the same resolved schematic ERC/LVS
+  use (explicit `--schematic` or sibling discovery), recurses into
+  hierarchical sub-sheets, and shares the exact `field_geometry` metric that
+  `kct sch tidy` fixes — lint reports it, tidy repairs it. Both rules are
+  advisory (`advisory-quality` bucket), never raise the error count, and
+  never block `kct build`/`kct pipeline` fab gates; under `--strict` they
+  become fatal by the pre-existing global warnings contract. Findings are
+  deterministically sorted for CI. Skipped entirely under `--drc-only`.
+  (#4595)
+
 - **Search-time HV pairwise clearance in the lattice engine** — `--voltage-map`
   + `--route-engine lattice` now *avoids* HV↔LV proximity during the A\* search
   instead of only failing the #4588 post-route gate after committing the
@@ -34,6 +50,25 @@ constructor). No breaking changes.
   `--voltage-map` the lattice path is byte-identical; coupled diff-pair fat
   envelopes are deliberately excluded (same-domain by construction; emitted
   legs remain audited). The mesh engine stays post-route-gated only (#4602).
+
+- **Keepout rule areas honored by the lattice engine, with a per-net-class
+  filter** — KiCad `(zone … (keepout …))` rule areas now parse into a
+  first-class model (`schema/pcb.py`: `Zone.keepout` flags + multi-layer
+  `Zone.layers` + `PCB.rule_areas`; previously the `keepout` child was
+  silently dropped) and `--route-engine lattice` enforces them at search
+  time: `tracks not_allowed` keeps every segment's copper edge out of the
+  area on its declared layers, `vias not_allowed` rejects through-vias whose
+  barrel would enter it, and `copperpour not_allowed`-only areas (the
+  `kct zones hv-keepout` pour voids) never constrain routing. A new
+  `spatial_keepouts` block in the `--net-class-map` sidecar scopes an area
+  per net class by zone name (`only_classes` / `except_classes`; no entry =
+  KiCad-default all-nets), which makes disjoint HV bank corridors expressible
+  as complementary keepouts — declarable spatial segregation by construction,
+  composing with (not replacing) the #4602 pairwise search-time avoidance.
+  Nets rendered unroutable by an area report keepout-attributed declines
+  (`pad-escape-*-keepout`, `no-path-keepout-constrained`); boards with no
+  track/via-blocking rule areas route byte-identically; grid/mesh warn once
+  that they do not honor rule areas (#4605).
 
 - **`kct sch tidy` — headless Reference/Value field autoplace** — new
   schematic subcommand that resets visible `Reference`/`Value` field
@@ -267,6 +302,22 @@ constructor). No breaking changes.
 
 ### Changed
 
+- **`kct net-status` / `NetStatusAnalyzer` default to strict real-geometry
+  connectivity** — the default connectivity model is now shapely copper-shape
+  intersection (`strict=True`), matching `kicad-cli pcb drc` semantics. The
+  legacy 0.01mm endpoint-proximity model diverged from KiCad in both
+  directions: it over-connected copper whose reference points were merely near
+  (#4176) and false-flagged pads open when a trace endpoint landed inside pad
+  copper but away from the pad *center* — 16 false opens on board 06's poured
+  nets (`GND`/`+1V2`/`VBUS_USB`), now 0 by default. Board 07's 5 genuine
+  #3438 opens are unchanged. `--legacy-proximity` (CLI) / `strict=False`
+  (API) opt back into the old model; `--strict` remains accepted as a no-op.
+  Output now names the model in use, `--why` respects the selection
+  (previously `--strict --why` silently ignored `--strict`), and strict-mode
+  segment/pad bonds are now layer-gated so a 2D copper overlap on a different
+  layer can no longer fuse copper a via does not electrically span.
+  `kct check` connectivity defaults are unchanged (#4557).
+
 - **`kct check` splits its report into manufacturing and advisory buckets** —
   a rule-to-category taxonomy renders a CATEGORY SUMMARY with "Manufacturing
   DRC: N blocking" and "Advisory/quality: M advisory", so routing-intent
@@ -303,6 +354,17 @@ constructor). No breaking changes.
   named one *arbitrary* member of the collision set (board 05 reported `U10
   pad 28`; the real set is pads 27, 28, 29, 30) (#4612).
 
+### Removed
+
+- **One-off diagnostic scripts for closed issues** —
+  `scripts/calibrate_area_estimate.py` (packing-overhead calibration helper
+  for #3403) and `scripts/diagnose_b03_diffpair.py` (board-03 diff-pair
+  pre-pass diagnostic for #2490) are deleted along with their
+  `scripts/README.md` catalogue rows. Both parent issues shipped long ago,
+  nothing in the repo invokes either script, and the estimator's coverage
+  lives in dedicated tests; recoverable from git history if ever needed
+  (#4566).
+
 ### Fixed
 
 - **Docs: board-07 placement-delta probe results corrected to CI ground
@@ -318,6 +380,19 @@ constructor). No breaking changes.
   `TMDS_D0_N` / `TMDS_D1_N` are now explicitly named unprobed-by-budget
   rather than reading as unroutable. Text-only; no code, thresholds, or
   routed artifacts changed (#4561).
+- **Legacy pre-#4600 generated `.kicad_dru` sidecars duplicated on merge.**
+  The marker-guarded fab-floors merge (#4600) treated kct's own
+  clobber-written, unmarked sidecars as user-authored and APPENDED a second
+  copy of every tier floor instead of replacing the legacy content — rewriting
+  committed board artifacts in place (board-05's sidecar tripped the #3580
+  committed-artifacts guard, failing the Test job on main). `merge_dru_floors`
+  now recognizes the legacy generated shape (a `(version N)` header followed
+  exclusively by `generate_dru`-grammar rules with generated rule names) and
+  replaces it with the managed block; genuinely user-authored no-marker
+  content keeps the never-clobber append semantics. All eight committed
+  `boards/*/output/*.kicad_dru` sidecars were migrated to the marked format
+  (byte-identical rule floors, now sentinel-delimited), so re-export is
+  idempotent on them. (#4667)
 
 - **The `.kicad_dru` sidecar write clobbered pre-existing user content.** The
   tier-floor `.kicad_dru` written beside the board by `kct route`, `kct build`,
