@@ -12,9 +12,10 @@ is no separately-resolved profile that could drift.
 
 The load-bearing contracts pinned here:
 
-1. **Parity by construction** -- the emitted ``.kicad_dru`` is byte-identical
-   to ``generate_dru(checker.design_rules, ...)`` for the resolved tier /
-   layer / copper, so the two engines cannot silently diverge.
+1. **Parity by construction** -- the emitted ``.kicad_dru`` managed block is
+   byte-identical to ``generate_dru(checker.design_rules, ...)`` (wrapped via
+   ``merge_dru_floors``, #4600) for the resolved tier / layer / copper, so
+   the two engines cannot silently diverge.
 2. **DRU-only vs both** -- ``--emit-dru`` writes only the ``.kicad_dru``;
    ``--emit-drc-constraints`` also writes the ``.kicad_pro`` whose applied
    Default netclass clearance is required for kicad-cli clearance parity
@@ -31,7 +32,7 @@ import pytest
 
 from kicad_tools.cli.check_cmd import _emit_drc_sidecars, main
 from kicad_tools.manufacturers import get_profile
-from kicad_tools.manufacturers.dru_generator import generate_dru
+from kicad_tools.manufacturers.dru_generator import generate_dru, merge_dru_floors
 from kicad_tools.router.rules import NetClassRouting
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate import DRCChecker
@@ -105,7 +106,9 @@ def test_emit_dru_matches_checker_resolved_rules(
         copper_oz=copper,
         copper_oz_outer=copper,
     )
-    expected = generate_dru(checker.design_rules, manufacturer_name=mfr)
+    # The rules land inside the managed fab-floors block (#4600); a fresh
+    # file is byte-identical to the merged generate_dru output.
+    expected = merge_dru_floors(None, generate_dru(checker.design_rules, manufacturer_name=mfr))
     assert dru_path.read_text(encoding="utf-8") == expected
 
     # And the emitted floors track the profile minimums for that tier.
@@ -172,10 +175,13 @@ def test_emit_dedups_shared_ampacity_class_to_one_rule_pair(board_copy: Path) ->
     assert dru.count("Ampacity Min Width (POWER, internal)") == 1
     # Byte-identical to a SINGLE deduplicated class -- the DRU carries no
     # per-net redundancy.
-    expected = generate_dru(
-        checker.design_rules,
-        manufacturer_name="jlcpcb",
-        net_classes=[NetClassRouting(name="POWER", target_ampacity=15.0)],
+    expected = merge_dru_floors(
+        None,
+        generate_dru(
+            checker.design_rules,
+            manufacturer_name="jlcpcb",
+            net_classes=[NetClassRouting(name="POWER", target_ampacity=15.0)],
+        ),
     )
     assert dru == expected
 
@@ -294,3 +300,61 @@ def test_emit_degrades_on_unwritable_dir(board_copy: Path, capsys, monkeypatch) 
     # Verdict unchanged despite the failed sidecar write, and a warning fired.
     assert rc == plain_rc
     assert "could not emit" in captured.err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Bare check writes NOTHING beside the board (#4600 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_bare_check_leaves_board_directory_clean(board_copy: Path) -> None:
+    """``kct check --mfr <tier>`` without ``--emit-*`` writes no sidecars.
+
+    Issue #4600 locks in the current clean behavior: check-path sidecar
+    emission is opt-in (#4386), so a bare check must leave the board's
+    directory byte-for-byte unchanged -- no untracked ``.kicad_dru`` /
+    ``.kicad_pro`` for a later ``kicad-cli pcb drc`` to silently consume.
+    """
+    before = sorted(p.name for p in board_copy.parent.iterdir())
+    rc = main([str(board_copy), "--mfr", "jlcpcb-tier1", "--allow-incomplete"])
+    assert rc in (0, 2)  # a verdict, not a tool error
+
+    after = sorted(p.name for p in board_copy.parent.iterdir())
+    assert after == before
+    assert not board_copy.with_suffix(".kicad_dru").exists()
+    assert not board_copy.with_suffix(".kicad_pro").exists()
+
+
+# ---------------------------------------------------------------------------
+# Emit merges the managed block -- pre-existing DRU content survives (#4600)
+# ---------------------------------------------------------------------------
+
+
+def test_emit_dru_preserves_existing_creepage_and_user_rules(board_copy: Path) -> None:
+    """``--emit-dru`` merges into the managed block instead of clobbering.
+
+    A pre-existing ``.kicad_dru`` holding the ``kct creepage export-rules``
+    managed block (#4508) plus a hand-written rule must survive the emit
+    with both intact -- the old blanket ``write_text`` silently deleted
+    them.
+    """
+    from kicad_tools.creepage.export_rules import DRU_BLOCK_BEGIN, merge_dru_block
+    from kicad_tools.manufacturers.dru_generator import DRU_FLOORS_BLOCK_BEGIN
+
+    creepage_body = '(rule "kct creepage"\n  (constraint clearance (min 1.5mm)))'
+    hand_rule = '(rule "Hand Rule"\n  (constraint clearance (min 2mm)))'
+    dru_path = board_copy.with_suffix(".kicad_dru")
+    dru_path.write_text(
+        merge_dru_block(f"(version 1)\n{hand_rule}\n", creepage_body),
+        encoding="utf-8",
+    )
+
+    main([str(board_copy), "--mfr", "jlcpcb", "--emit-dru", "--allow-incomplete"])
+
+    merged = dru_path.read_text(encoding="utf-8")
+    assert creepage_body in merged
+    assert hand_rule in merged
+    assert DRU_BLOCK_BEGIN in merged
+    assert DRU_FLOORS_BLOCK_BEGIN in merged
+    assert '(rule "Trace Width - jlcpcb"' in merged
+    assert merged.count("(version 1)") == 1

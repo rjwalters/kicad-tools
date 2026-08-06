@@ -16,12 +16,87 @@ Usage:
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Sequence
 
 from .base import DesignRules
 
 if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
+
+# ---------------------------------------------------------------------------
+# Managed fab-floors block (Issue #4600)
+# ---------------------------------------------------------------------------
+
+# Sentinel markers delimiting the kct-owned fab-floor rules inside a
+# ``.kicad_dru`` sidecar.  On re-emit only the text BETWEEN these markers is
+# replaced; everything else in the file -- hand-written custom rules, the
+# ``kct creepage export-rules`` managed block (which uses its own, distinct
+# markers; see ``kicad_tools.creepage.export_rules.DRU_BLOCK_BEGIN``) -- is
+# preserved verbatim, so the two managed blocks coexist in one file.
+DRU_FLOORS_BLOCK_BEGIN = "# BEGIN kct fab floors (Issue #4600) -- managed, do not edit"
+DRU_FLOORS_BLOCK_END = "# END kct fab floors"
+
+# KiCad ``.kicad_dru`` files start with a version header.
+DRU_VERSION_HEADER = "(version 1)"
+
+
+def _strip_version_header(content: str) -> str:
+    """Drop a leading ``(version N)`` line so a merged file keeps exactly one."""
+    return re.sub(r"^\s*\(version[^)]*\)\s*\n?", "", content, count=1)
+
+
+def merge_dru_floors(existing: str | None, dru_content: str) -> str:
+    """Merge :func:`generate_dru` output into ``.kicad_dru`` content (#4600).
+
+    The tier-floor rules are wrapped in a sentinel-delimited managed block and
+    merged into ``existing`` with the same semantics as the creepage
+    exporter's ``merge_dru_block`` (Issue #4508) -- one merge dialect, two
+    distinct marker pairs:
+
+    * No existing content -> ``(version 1)`` + the managed block.
+    * Existing fab-floors block present -> replace only the text between the
+      sentinels.
+    * Existing content without a fab-floors block (a fully user-owned file,
+      or one holding the creepage managed block) -> **append** the block,
+      preserving every existing byte, and prepend a version header only if
+      the file lacks one.  A pre-existing file is therefore never clobbered
+      or deleted -- the previous blanket ``write_text`` silently destroyed
+      HV creepage rules and hand-written custom rules.
+
+    The merged result contains exactly one leading ``(version 1)`` header
+    (the header inside ``dru_content`` is stripped before wrapping).
+
+    Idempotent: re-merging identical inputs yields byte-identical output.
+
+    Args:
+        existing: Current ``.kicad_dru`` file content, or ``None`` when the
+            file does not exist yet.
+        dru_content: Fresh :func:`generate_dru` output (with its leading
+            version header) to install as the managed block.
+
+    Returns:
+        The full merged ``.kicad_dru`` file content.
+    """
+    body = _strip_version_header(dru_content).strip("\n")
+    block = f"{DRU_FLOORS_BLOCK_BEGIN}\n{body}\n{DRU_FLOORS_BLOCK_END}"
+
+    if existing is None or not existing.strip():
+        return f"{DRU_VERSION_HEADER}\n\n{block}\n"
+
+    pattern = re.compile(
+        re.escape(DRU_FLOORS_BLOCK_BEGIN) + r".*?" + re.escape(DRU_FLOORS_BLOCK_END),
+        re.DOTALL,
+    )
+    if pattern.search(existing):
+        merged = pattern.sub(lambda _m: block, existing)
+        return merged if merged.endswith("\n") else merged + "\n"
+
+    # Append; ensure a version header exists (mirrors ``merge_dru_block``).
+    prefix = existing if existing.endswith("\n") else existing + "\n"
+    if not re.search(r"^\s*\(version\b", existing, re.MULTILINE):
+        prefix = f"{DRU_VERSION_HEADER}\n" + prefix
+    return f"{prefix}\n{block}\n"
 
 
 def generate_dru(

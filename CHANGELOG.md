@@ -270,6 +270,23 @@ constructor). No breaking changes.
 
 ### Fixed
 
+- **The `.kicad_dru` sidecar write clobbered pre-existing user content.** The
+  tier-floor `.kicad_dru` written beside the board by `kct route`, `kct build`,
+  `kct mfr apply-rules`, and `kct check --emit-dru`/`--emit-drc-constraints`
+  was a blanket overwrite that silently deleted the marker-delimited HV
+  creepage rules merged by `kct creepage export-rules` (#4508) and any
+  hand-written custom rules. The fab-tier floors now live in their own
+  sentinel-delimited managed block (`# BEGIN kct fab floors ...` /
+  `# END kct fab floors`, mirroring the creepage exporter's merge dialect):
+  re-emitting replaces only that block, a pre-existing user-owned file is
+  preserved with the block merged in alongside its content, the merged file
+  keeps exactly one leading `(version 1)` header, and the creepage and
+  fab-floors managed blocks coexist in one file. Bare `kct check` (no
+  `--emit-*` flags) continues to write nothing beside the board — now locked
+  in by a regression test — and the `.kct/CONVENTIONS.md` cross-gate
+  convention vendored by `install-kct.sh` documents that `kicad-cli` auto-loads
+  these sidecars, sharing rule floors with `kct check` by design (#4600).
+
 - **An HV pairwise-clearance failure could flow through `kct build` /
   `kct pipeline` as a soft warning.** Neither consumer forwarded
   `--voltage-map`, and both treated route exit 3 as non-fatal with a message

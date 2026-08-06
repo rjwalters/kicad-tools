@@ -511,6 +511,18 @@ sign-off.
 2. **Cross-gate DRC for manufacturing sign-off.** `kct check` alone is
    insufficient — always also run `kicad-cli pcb drc --refill-zones`. `kct check`
    can miss marginals (e.g. 0.1000 vs 0.1016 mm) and read stale zone fills.
+   Know what the second referee reads: kct writes `<board>.kicad_pro` /
+   `<board>.kicad_dru` sidecars beside the board (`kct route` and `kct build`
+   always; `kct check` only under `--emit-dru` / `--emit-drc-constraints`),
+   and `kicad-cli` auto-loads both from the board's directory. The cross-gate
+   therefore judges against kct's fab-tier rule floors **by design** — the two
+   referees are independent at the geometry-engine level, not the rule-floor
+   level (without the sidecars, kicad-cli falls back to KiCad's stricter
+   factory defaults and reports false violations on tier-legal geometry). The
+   `.kicad_dru` floors live in a marker-guarded managed block; hand-written
+   custom rules and `kct creepage export-rules` content outside the markers
+   are preserved across re-emits. To audit the rule floors independently,
+   inspect — or temporarily remove — the sidecars before running `kicad-cli`.
 3. **Artifact-first.** The committed board artifact is shipping truth. A
    `generate_design.py`/regeneration may diverge by design and is NOT
    authoritative over a committed board.

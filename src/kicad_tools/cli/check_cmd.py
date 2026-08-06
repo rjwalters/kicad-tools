@@ -2149,6 +2149,11 @@ def _emit_drc_sidecars(
     not change the check verdict.  A write failure degrades to a stderr
     warning rather than raising (mirrors ``kct mfr apply-rules``).  Written
     paths are reported on stderr so JSON stdout stays uncorrupted.
+
+    The ``.kicad_dru`` rules are emitted inside a marker-guarded managed
+    block (Issue #4600): re-emitting replaces only the block, and content
+    outside it -- hand-written custom rules, the ``kct creepage
+    export-rules`` block (#4508) -- is preserved, never clobbered.
     """
     # ``net_class_map`` is keyed by board-net name with the SAME class object
     # shared across every net in that class (and a ``--net-class-map`` sidecar
@@ -2181,14 +2186,21 @@ def _emit_drc_sidecars(
                 net_classes=net_classes,
             )
         else:
-            from kicad_tools.manufacturers.dru_generator import generate_dru
+            from kicad_tools.manufacturers.dru_generator import generate_dru, merge_dru_floors
 
             dru_path = pcb_path.with_suffix(".kicad_dru")
+            # Issue #4600: merge into a marker-guarded managed block instead of
+            # a blanket overwrite, so hand-written rules and the creepage
+            # managed block (#4508) in a pre-existing file survive the emit.
+            existing_dru = dru_path.read_text(encoding="utf-8") if dru_path.exists() else None
             dru_path.write_text(
-                generate_dru(
-                    checker.design_rules,
-                    manufacturer_name=manufacturer_id,
-                    net_classes=net_classes,
+                merge_dru_floors(
+                    existing_dru,
+                    generate_dru(
+                        checker.design_rules,
+                        manufacturer_name=manufacturer_id,
+                        net_classes=net_classes,
+                    ),
                 ),
                 encoding="utf-8",
             )
