@@ -83,6 +83,9 @@ class _StubPathfinder:
         self.connections: list[tuple[object, Pad, Pad, object]] = []
         self.failure_reasons: dict[object, str] = {}
 
+    def set_pairwise(self, pairwise: Any) -> None:
+        """No-op stand-in for ``LatticePathfinder.set_pairwise`` (#4602)."""
+
     def route_netset(self, connections: list[Any], **_kwargs: Any) -> tuple[dict, Any]:
         self.connections = list(connections)
         return {}, SimpleNamespace(

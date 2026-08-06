@@ -2865,7 +2865,11 @@ class Autorouter:
         # lattice pathfinder, so HV<->LV proximity is AVOIDED during search
         # rather than merely reported by the #4588 post-route gate.  Always
         # called -- ``None`` resets a reused pathfinder (no stale projection).
-        pf.set_pairwise(self._lattice_pairwise_projection())
+        # ``hasattr``-guarded for duck-typed pathfinder stand-ins that predate
+        # the method, mirroring the ``set_attach_zones`` precedent in
+        # ``route_cmd.py`` (``LatticePathfinder`` itself always has it).
+        if hasattr(pf, "set_pairwise"):
+            pf.set_pairwise(self._lattice_pairwise_projection())
 
         coupled, reserved = self._lattice_coupled_connections()
 

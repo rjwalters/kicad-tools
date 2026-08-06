@@ -38,6 +38,9 @@ class _CapturingPathfinder:
         self.kwargs: dict[str, Any] = {}
         self.failure_reasons: dict[object, str] = {}
 
+    def set_pairwise(self, pairwise: Any) -> None:
+        """No-op stand-in for ``LatticePathfinder.set_pairwise`` (#4602)."""
+
     def route_netset(self, connections: list[Any], **kwargs: Any) -> tuple[dict, Any]:
         self.kwargs = kwargs
         return {}, SimpleNamespace(

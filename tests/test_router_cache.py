@@ -130,6 +130,101 @@ class TestCacheKey:
         assert key1.version != key2.version
         assert key1.full_key != key2.full_key
 
+    def test_dormant_pairwise_key_byte_identical(self):
+        """Dormant pairwise (``pairwise_clearance is None``) keys are unchanged.
+
+        Issue #4602 keys the cache on the HV pairwise matrix.  Scalar users
+        (no ``--voltage-map``) must keep their pre-existing cache entries, so
+        with ``rules.pairwise_clearance is None`` the serialized rules payload
+        must gain NO pairwise component -- the hash must match the pre-#4602
+        serialization byte-for-byte.  An empty table is equally dormant.
+        """
+        import hashlib
+        import json
+
+        from kicad_tools.router.pairwise_clearance import PairwiseClearanceTable
+
+        pcb_content = "(kicad_pcb (test))"
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.15)
+        assert rules.pairwise_clearance is None
+
+        key = CacheKey.compute(pcb_content, rules, 0.1)
+
+        # Reconstruct the pre-#4602 scalar-only serialization by hand.
+        legacy_rules_data = {
+            "trace_width": rules.trace_width,
+            "trace_clearance": rules.trace_clearance,
+            "via_drill": rules.via_drill,
+            "via_diameter": rules.via_diameter,
+            "via_clearance": rules.via_clearance,
+            "grid_resolution": 0.1,
+            "preferred_layer": rules.preferred_layer.value,
+            "alternate_layer": rules.alternate_layer.value,
+        }
+        legacy_hash = hashlib.sha256(
+            json.dumps(legacy_rules_data, sort_keys=True).encode()
+        ).hexdigest()
+        assert key.rules_hash == legacy_hash
+
+        # An empty pairwise table (no HV pairs) is dormant too.
+        rules.pairwise_clearance = PairwiseClearanceTable(
+            dru=0.15, net_voltages={}, required_by_pair={}
+        )
+        key_empty = CacheKey.compute(pcb_content, rules, 0.1)
+        assert key_empty.full_key == key.full_key
+
+    def test_pairwise_key_component_deterministic_and_distinct(self):
+        """The pairwise key component is deterministic and changes the key.
+
+        Issue #4602: (a) a populated pairwise table must produce a DIFFERENT
+        key from the scalar (None) case -- the original bug was a scalar
+        cache entry served to a ``--voltage-map`` run; (b) the component is
+        sorted, so tables built with different mapping insertion orders (and
+        repeated builds) hash identically.
+        """
+        from kicad_tools.router.pairwise_clearance import PairwiseClearanceTable
+
+        pcb_content = "(kicad_pcb (test))"
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.15)
+        key_scalar = CacheKey.compute(pcb_content, rules, 0.1)
+
+        pairs = {
+            ("HV_BUS", "SENSE"): 1.25,
+            ("GND", "HV_BUS"): 0.8,
+            ("HV_BUS", "LV_RAIL"): 0.6,
+        }
+        rules.pairwise_clearance = PairwiseClearanceTable(
+            dru=0.15, net_voltages={"HV_BUS": 400.0}, required_by_pair=dict(pairs)
+        )
+        key_pw = CacheKey.compute(pcb_content, rules, 0.1)
+
+        # (a) The pairwise matrix keys the cache.
+        assert key_pw.rules_hash != key_scalar.rules_hash
+        assert key_pw.full_key != key_scalar.full_key
+
+        # (b) Insertion order of the mapping must not matter, and repeated
+        # builds are byte-identical.
+        reversed_pairs = dict(reversed(list(pairs.items())))
+        rules.pairwise_clearance = PairwiseClearanceTable(
+            dru=0.15,
+            net_voltages={"HV_BUS": 400.0},
+            required_by_pair=reversed_pairs,
+        )
+        key_pw_reordered = CacheKey.compute(pcb_content, rules, 0.1)
+        assert key_pw_reordered.full_key == key_pw.full_key
+
+        key_pw_repeat = CacheKey.compute(pcb_content, rules, 0.1)
+        assert key_pw_repeat.full_key == key_pw_reordered.full_key
+
+        # A different requirement value is a different key.
+        rules.pairwise_clearance = PairwiseClearanceTable(
+            dru=0.15,
+            net_voltages={"HV_BUS": 400.0},
+            required_by_pair={**pairs, ("HV_BUS", "SENSE"): 1.5},
+        )
+        key_pw_changed = CacheKey.compute(pcb_content, rules, 0.1)
+        assert key_pw_changed.full_key != key_pw.full_key
+
 
 class TestRoutingCache:
     """Tests for RoutingCache class."""
