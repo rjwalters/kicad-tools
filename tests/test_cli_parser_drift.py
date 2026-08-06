@@ -394,6 +394,13 @@ def test_strict_in_pad_clearance_is_on_both_parsers_and_stamps_env(tmp_path):
     # We intercept just before any routing work happens by mocking out
     # the heavyweight downstream functions; the parse-args + env-stamp
     # block runs first so we can observe it.
+    #
+    # Issue #4559: ``main()`` now restores ``os.environ`` when it exits
+    # (any path, including this SystemExit interception), so the stamp
+    # must be observed MID-RUN -- inside the interception -- rather than
+    # after ``main()`` returns.  The mid-run view is the one that matters
+    # for #3033/#3062 anyway: it is what the lazily-constructed
+    # EscapeRouter sees.  The post-return view is now pinned to "no leak".
     import os
     from unittest.mock import patch
 
@@ -403,7 +410,13 @@ def test_strict_in_pad_clearance_is_on_both_parsers_and_stamps_env(tmp_path):
     dummy_pcb = tmp_path / "dummy.kicad_pcb"
     dummy_pcb.write_text("(kicad_pcb)")
 
-    # Stage 1: flag set -> env var becomes "1".
+    observed: dict[str, str | None] = {}
+
+    def _capture_and_exit(*args, **kwargs):
+        observed["mid_run"] = os.environ.get("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE")
+        raise SystemExit(0)
+
+    # Stage 1: flag set -> env var is "1" during the run.
     saved = os.environ.pop("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE", None)
     try:
         # We invoke the inner parser via the shim's sub_argv construction
@@ -417,32 +430,36 @@ def test_strict_in_pad_clearance_is_on_both_parsers_and_stamps_env(tmp_path):
         with patch.object(
             route_cmd,
             "_set_wall_clock_deadline",
-            side_effect=SystemExit(0),
+            side_effect=_capture_and_exit,
         ):
             with pytest.raises(SystemExit):
                 route_cmd.main([str(dummy_pcb), "--strict-in-pad-clearance"])
-        assert os.environ.get("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE") == "1", (
+        assert observed["mid_run"] == "1", (
             "Inner route_cmd.main must stamp "
-            "KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE=1 when "
-            "--strict-in-pad-clearance is passed; got "
-            f"{os.environ.get('KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE')!r}"
+            "KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE=1 (visible mid-run to the "
+            "lazily-constructed EscapeRouter) when --strict-in-pad-clearance "
+            f"is passed; got {observed['mid_run']!r}"
+        )
+        assert "KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE" not in os.environ, (
+            "route_cmd.main must restore os.environ on exit (issue #4559); "
+            "the strict-in-pad stamp leaked out of main()"
         )
 
-        # Stage 2: flag absent -> env var stays unset (we cleared it
-        # above; running without the flag should NOT set it).
-        del os.environ["KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE"]
+        # Stage 2: flag absent -> env var stays unset during the run too.
+        observed.clear()
         with patch.object(
             route_cmd,
             "_set_wall_clock_deadline",
-            side_effect=SystemExit(0),
+            side_effect=_capture_and_exit,
         ):
             with pytest.raises(SystemExit):
                 route_cmd.main([str(dummy_pcb)])
-        assert "KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE" not in os.environ, (
+        assert observed["mid_run"] is None, (
             "Inner route_cmd.main must NOT stamp the env var when the "
             "flag is absent; legacy bit-for-bit behaviour requires the "
-            "env var be cleared in this code path"
+            "env var be unset in this code path"
         )
+        assert "KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE" not in os.environ
     finally:
         # Restore env to original state.
         if saved is None:
