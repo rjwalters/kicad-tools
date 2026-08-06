@@ -67,6 +67,31 @@ def run_pipeline_command(args) -> int:
     if getattr(args, "pipeline_apply_sync", False):
         sub_argv.append("--apply-sync")
 
+    # HV pairwise-clearance passthrough (issue #4607).  Forward each flag
+    # only when it differs from its parser default so an invocation without
+    # the HV flags builds a byte-identical inner argv, while an explicitly
+    # supplied flag is never silently dropped at this hop (the historical
+    # unguarded-shim bug class -- see tests/test_pipeline_cli_args.py).
+    pipeline_voltage_map = getattr(args, "pipeline_voltage_map", None)
+    if pipeline_voltage_map is not None:
+        sub_argv.extend(["--voltage-map", pipeline_voltage_map])
+
+    pipeline_creepage_standard = getattr(args, "pipeline_creepage_standard", "iec60664")
+    if pipeline_creepage_standard != "iec60664":
+        sub_argv.extend(["--creepage-standard", pipeline_creepage_standard])
+
+    pipeline_pollution_degree = getattr(args, "pipeline_pollution_degree", 2)
+    if pipeline_pollution_degree != 2:
+        sub_argv.extend(["--pollution-degree", str(pipeline_pollution_degree)])
+
+    pipeline_material_group = getattr(args, "pipeline_material_group", "IIIa")
+    if pipeline_material_group != "IIIa":
+        sub_argv.extend(["--material-group", pipeline_material_group])
+
+    pipeline_hv_threshold = getattr(args, "pipeline_hv_threshold", 30.0)
+    if pipeline_hv_threshold is not None and pipeline_hv_threshold != 30.0:
+        sub_argv.extend(["--hv-threshold", str(pipeline_hv_threshold)])
+
     # Use global quiet or command-level quiet
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")

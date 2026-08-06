@@ -854,6 +854,210 @@ class TestRouteExitCode2Pipeline:
         assert "failed" in results[0].message
 
 
+class TestRouteVoltageMapFatalSplit:
+    """Exit-3/4 handling splits on --voltage-map presence (issue #4607).
+
+    With a voltage map in play, a clearance-dirty route result (exit 3/4)
+    may be an HV pairwise-clearance failure and must abort the pipeline
+    instead of continuing as "completed with warnings".  Without a voltage
+    map, the historical soft handling is byte-identical.
+    """
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_exit_3_without_voltage_map_stays_soft(self, mock_run, unrouted_pcb: Path):
+        """Exit 3 with no voltage map keeps its success-with-warning handling."""
+        mock_run.return_value = MagicMock(returncode=3, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True)
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert results[0].success is True
+        assert results[0].warning is True
+        assert "warnings" in results[0].message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_exit_3_with_voltage_map_is_fatal(self, mock_run, unrouted_pcb: Path):
+        """Exit 3 with a voltage map fails the route step and aborts the pipeline."""
+        mock_run.return_value = MagicMock(returncode=3, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, voltage_map="vm.json")
+        results = run_pipeline(ctx, [PipelineStep.ROUTE, PipelineStep.FIX_DRC, PipelineStep.AUDIT])
+
+        # Pipeline must stop at the route step -- HV-dirty copper does not
+        # flow on to downstream steps.
+        assert len(results) == 1
+        assert results[0].success is False
+        assert results[0].warning is False
+        assert "failed" in results[0].message
+        assert "--voltage-map" in results[0].message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_exit_4_with_voltage_map_is_fatal(self, mock_run, unrouted_pcb: Path):
+        """Exit 4 (partial + clearance violations) is also fatal with a map."""
+        mock_run.return_value = MagicMock(returncode=4, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, voltage_map="vm.json")
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert results[0].success is False
+        assert "--voltage-map" in results[0].message
+
+    @pytest.mark.parametrize("returncode", [2, 5])
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_exits_2_and_5_stay_soft_with_voltage_map(
+        self, mock_run, unrouted_pcb: Path, returncode: int
+    ):
+        """Exits 2 and 5 keep their soft handling even with a voltage map."""
+        mock_run.return_value = MagicMock(returncode=returncode, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, voltage_map="vm.json")
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert results[0].success is True
+        assert results[0].warning is True
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_fix_vias_exit_2_unaffected_by_fatal_split(self, mock_run, routed_pcb: Path):
+        """Other _run_subprocess_step consumers keep the shared soft semantics.
+
+        The fatal escalation is scoped to the route step's call site; the
+        fix-vias step (any non-route subprocess step) still treats exit 2
+        as success-with-warnings even though a voltage map is on the context.
+        """
+        mock_run.return_value = MagicMock(returncode=2, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, voltage_map="vm.json")
+        results = run_pipeline(ctx, [PipelineStep.FIX_VIAS])
+
+        assert results[0].success is True
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_cmd_includes_hv_flags(self, mock_run, unrouted_pcb: Path):
+        """The route subprocess argv carries all five HV flags when a map is set."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(
+            pcb_file=unrouted_pcb,
+            quiet=True,
+            voltage_map="vm.json",
+            creepage_standard="iec62368",
+            pollution_degree=3,
+            material_group="II",
+            hv_threshold=60.0,
+        )
+        run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert cmd_args[cmd_args.index("--voltage-map") + 1] == "vm.json"
+        assert cmd_args[cmd_args.index("--creepage-standard") + 1] == "iec62368"
+        assert cmd_args[cmd_args.index("--pollution-degree") + 1] == "3"
+        assert cmd_args[cmd_args.index("--material-group") + 1] == "II"
+        assert cmd_args[cmd_args.index("--hv-threshold") + 1] == "60.0"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_cmd_omits_hv_flags_without_map(self, mock_run, unrouted_pcb: Path):
+        """Without a voltage map, the route subprocess argv is unchanged."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True)
+        run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        cmd_args = mock_run.call_args[0][0]
+        for flag in (
+            "--voltage-map",
+            "--creepage-standard",
+            "--pollution-degree",
+            "--material-group",
+            "--hv-threshold",
+        ):
+            assert flag not in cmd_args
+
+    def test_dry_run_route_mentions_voltage_map(self, unrouted_pcb: Path):
+        """Dry-run message advertises the forwarded voltage map."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_route
+
+        ctx = PipelineContext(
+            pcb_file=unrouted_pcb, quiet=True, dry_run=True, voltage_map="vm.json"
+        )
+        console = Console(quiet=True)
+        result = _run_step_route(ctx, console)
+
+        assert "--voltage-map vm.json" in result.message
+
+    def test_route_skip_with_voltage_map_refuses_loudly(self, routed_pcb: Path):
+        """A routed board must not silently skip the route step with a map.
+
+        Issue #4607 judge finding: recommend_skip on a >=95%-routed board
+        returned SKIP/success before the HV audit could run -- exit 0 and a
+        success banner on possibly creepage-dirty copper.  With a voltage
+        map the skip path must refuse loudly and abort the pipeline.
+        """
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, voltage_map="vm.json")
+        results = run_pipeline(ctx, [PipelineStep.ROUTE, PipelineStep.FIX_DRC, PipelineStep.AUDIT])
+
+        # Pipeline aborts at the route step; nothing downstream runs.
+        assert len(results) == 1
+        assert results[0].success is False
+        assert results[0].skipped is False
+        assert "--voltage-map" in results[0].message
+        assert "kct creepage" in results[0].message
+        assert "--force" in results[0].message
+
+    def test_main_exit_1_with_voltage_map_on_route_skip(self, routed_pcb: Path):
+        """End-to-end: `kct pipeline --voltage-map` on a routed board exits non-zero."""
+        from kicad_tools.cli import pipeline_cmd
+
+        rc = pipeline_cmd.main(
+            [str(routed_pcb), "--step", "route", "--voltage-map", "vm.json", "--quiet"]
+        )
+        assert rc == 1
+
+    def test_route_skip_without_voltage_map_unchanged(self, routed_pcb: Path):
+        """Without a voltage map, the historical skip semantics are untouched."""
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True)
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert results[0].success is True
+        assert results[0].skipped is True
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_force_with_voltage_map_reroutes_with_audit(self, mock_run, routed_pcb: Path):
+        """--force + --voltage-map re-routes (no refusal) with the HV flags."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, force=True, voltage_map="vm.json")
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert results[0].success is True
+        assert results[0].skipped is False
+        cmd_args = mock_run.call_args[0][0]
+        assert cmd_args[cmd_args.index("--voltage-map") + 1] == "vm.json"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_main_exit_1_with_voltage_map_on_route_exit_3(self, mock_run, unrouted_pcb: Path):
+        """End-to-end: `kct pipeline --voltage-map` exits non-zero on route exit 3."""
+        from kicad_tools.cli import pipeline_cmd
+
+        mock_run.return_value = MagicMock(returncode=3, stderr="", stdout="")
+
+        rc = pipeline_cmd.main(
+            [str(unrouted_pcb), "--step", "route", "--voltage-map", "vm.json", "--quiet"]
+        )
+        assert rc == 1
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_main_exit_0_without_voltage_map_on_route_exit_3(self, mock_run, unrouted_pcb: Path):
+        """End-to-end: without a voltage map, route exit 3 stays a soft warning."""
+        from kicad_tools.cli import pipeline_cmd
+
+        mock_run.return_value = MagicMock(returncode=3, stderr="", stdout="")
+
+        rc = pipeline_cmd.main([str(unrouted_pcb), "--step", "route", "--quiet"])
+        assert rc == 0
+
+
 class TestProjectInput:
     """Tests for .kicad_pro input support."""
 

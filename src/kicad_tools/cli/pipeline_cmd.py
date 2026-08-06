@@ -39,6 +39,7 @@ import argparse
 import logging
 import subprocess
 import sys
+from collections.abc import Collection
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -133,6 +134,15 @@ class PipelineContext:
     max_displacement: float = 2.0
     apply_sync: bool = False
     route_skip_threshold: float = 95.0
+    # HV pairwise-clearance passthrough (issue #4607).  When voltage_map is
+    # set, the route step forwards these to the `kct route` subprocess and a
+    # clearance-dirty route result (exit 3/4) becomes fatal instead of a
+    # warning.  When None, routing behaviour is byte-identical to before.
+    voltage_map: str | None = None
+    creepage_standard: str = "iec60664"
+    pollution_degree: int = 2
+    material_group: str = "IIIa"
+    hv_threshold: float = 30.0
     erc_error_count: int = 0
     _check_data: dict | None = None  # cached kct check --format json result
 
@@ -868,6 +878,8 @@ def _run_subprocess_step(
     cmd: list[str],
     cwd: Path,
     verbose: bool = False,
+    fatal_returncodes: Collection[int] = (),
+    fatal_message: str | None = None,
 ) -> tuple[bool, str]:
     """Run a subprocess command and return (success, message).
 
@@ -875,6 +887,13 @@ def _run_subprocess_step(
         cmd: Command and arguments to execute
         cwd: Working directory
         verbose: Whether to show output
+        fatal_returncodes: Subset of the normally-soft exit codes (2-5) that
+            the *calling step* wants escalated to a hard failure.  Empty by
+            default, so the shared soft semantics are unchanged for every
+            other pipeline step; the route step passes ``(3, 4)`` when a
+            ``--voltage-map`` is in play (issue #4607).
+        fatal_message: Human-readable reason appended when an escalated
+            code fires.
 
     Returns:
         Tuple of (success, output/error message)
@@ -892,9 +911,15 @@ def _run_subprocess_step(
         elif result.returncode in (2, 3, 4, 5):
             # Exit codes 2-5 indicate usable output exists:
             #   2 = partial routing below threshold
-            #   3 = routing meets threshold but DRC violations remain
-            #   4 = partial routing with segment-segment clearance violations
+            #   3 = routing meets threshold but the copper is clearance-dirty
+            #       (DRC violations, --auto-fix rollback, or the HV
+            #       pairwise-clearance audit under --voltage-map -- #4588)
+            #   4 = partial routing with segment-segment or HV pairwise
+            #       clearance violations
             #   5 = interrupted by SIGINT with partial results saved
+            if result.returncode in fatal_returncodes:
+                reason = fatal_message or "exit code escalated to fatal by this step"
+                return False, f"failed: exit {result.returncode} -- {reason}"
             return True, "completed with warnings"
         else:
             error_msg = result.stderr.strip() if result.stderr else f"exit code {result.returncode}"
@@ -916,10 +941,37 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
     zone-fillable plane nets do not block the skip -- those are handled by
     other pipeline steps (or are inherently complete).  ``--force`` always
     re-runs the router.
+
+    HV guard (issue #4607): with ``--voltage-map`` set the skip path refuses
+    loudly instead of skipping, because the HV pairwise-clearance audit only
+    runs inside the routing subprocess -- a silent skip would report success
+    on possibly creepage-dirty copper.
     """
     assessment = _assess_routing_completeness(ctx.pcb_file, ctx.route_skip_threshold)
 
     if assessment.recommend_skip and not ctx.force:
+        # HV guard (issue #4607): the pipeline's primary input is an already
+        # routed board, and the HV pairwise-clearance audit only runs inside
+        # the `kct route` subprocess this skip avoids.  Silently skipping
+        # would report success on possibly creepage-dirty copper, so with a
+        # voltage map in play the skip path refuses loudly instead.  A forced
+        # re-route would be destructive to existing copper, so the user is
+        # pointed at `kct creepage` (non-destructive audit) or an explicit
+        # `--force`.
+        if ctx.voltage_map:
+            return PipelineResult(
+                step=PipelineStep.ROUTE,
+                success=False,
+                message=(
+                    "route: board is already routed so the route step would "
+                    "be skipped, but --voltage-map is set and the HV "
+                    "pairwise-clearance audit only runs during routing; "
+                    "refusing to skip silently. Audit the existing copper "
+                    f"with `kct creepage {ctx.pcb_file.name} --voltage-map "
+                    f"{ctx.voltage_map}`, or pass --force to re-route with "
+                    "the audit."
+                ),
+            )
         return PipelineResult(
             step=PipelineStep.ROUTE,
             success=True,
@@ -930,11 +982,13 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
     route_layers = ctx.layers or "auto"
 
     if ctx.dry_run:
-        cache_flags = ""
+        extra_flags = ""
         if ctx.no_cache:
-            cache_flags += " --no-cache"
+            extra_flags += " --no-cache"
         if ctx.clear_cache:
-            cache_flags += " --clear-cache"
+            extra_flags += " --clear-cache"
+        if ctx.voltage_map:
+            extra_flags += f" --voltage-map {ctx.voltage_map}"
         if assessment.recommend_skip:
             return PipelineResult(
                 step=PipelineStep.ROUTE,
@@ -942,7 +996,7 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
                 message=(
                     f"[dry-run] Would re-route (--force): {ctx.pcb_file.name} "
                     f"--grid auto --manufacturer {ctx.mfr} --layers {route_layers} --auto-fix"
-                    f"{cache_flags}"
+                    f"{extra_flags}"
                 ),
             )
         return PipelineResult(
@@ -951,7 +1005,7 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
             message=(
                 f"[dry-run] Would run: kct route {ctx.pcb_file.name} "
                 f"--grid auto --manufacturer {ctx.mfr} --layers {route_layers} --auto-fix"
-                f"{cache_flags}"
+                f"{extra_flags}"
             ),
         )
 
@@ -975,6 +1029,25 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
         "--auto-fix",
     ]
 
+    # HV pairwise-clearance passthrough (issue #4607): only forwarded when a
+    # voltage map is in play, so every existing no-voltage-map invocation
+    # builds an identical subprocess argv.
+    if ctx.voltage_map:
+        cmd.extend(
+            [
+                "--voltage-map",
+                str(ctx.voltage_map),
+                "--creepage-standard",
+                ctx.creepage_standard,
+                "--pollution-degree",
+                str(ctx.pollution_degree),
+                "--material-group",
+                ctx.material_group,
+                "--hv-threshold",
+                str(ctx.hv_threshold),
+            ]
+        )
+
     if ctx.quiet:
         cmd.append("--quiet")
     if ctx.no_cache:
@@ -982,7 +1055,28 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
     if ctx.clear_cache:
         cmd.append("--clear-cache")
 
-    success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
+    # With a voltage map in play, a clearance-dirty route result (exit 3/4)
+    # may mean the HV pairwise-clearance audit failed (issue #4588); that
+    # copper must not flow on to downstream steps as "completed with
+    # warnings", so those two codes are escalated to fatal here (issue
+    # #4607).  Exits 2 and 5 keep their soft handling, and every other
+    # pipeline step's use of _run_subprocess_step is unaffected.
+    fatal_returncodes: tuple[int, ...] = ()
+    fatal_message: str | None = None
+    if ctx.voltage_map:
+        fatal_returncodes = (3, 4)
+        fatal_message = (
+            "clearance-dirty copper (DRC violations or HV pairwise audit) "
+            "is fatal with --voltage-map"
+        )
+
+    success, message = _run_subprocess_step(
+        cmd,
+        ctx.pcb_file.parent,
+        ctx.verbose,
+        fatal_returncodes=fatal_returncodes,
+        fatal_message=fatal_message,
+    )
 
     # Detect partial routing (exit code 2 -> "completed with warnings")
     is_partial = success and "warnings" in message
@@ -2221,6 +2315,60 @@ Examples:
             " continue past drift without modification)."
         ),
     )
+    # Issue #4607: HV pairwise-clearance passthrough.  Mirrors the
+    # `kct route` flags; forwarded to the route subprocess when a voltage
+    # map is in play.  Must stay in lockstep with
+    # parser.py::_add_pipeline_parser (pinned by tests/test_pipeline_cli_args.py).
+    parser.add_argument(
+        "--voltage-map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON per-net voltage map {net_name: volts}, forwarded "
+            "to the route step to enable the HV pairwise-clearance audit "
+            "(see `kct route --voltage-map`). With a voltage map in play, a "
+            "clearance-dirty route result (exit 3/4) fails the route step."
+        ),
+    )
+    parser.add_argument(
+        "--creepage-standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help=(
+            "Creepage standard for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: iec60664)."
+        ),
+    )
+    parser.add_argument(
+        "--pollution-degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help=(
+            "IEC pollution degree for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: 2)."
+        ),
+    )
+    parser.add_argument(
+        "--material-group",
+        default="IIIa",
+        help=(
+            "Insulation material group I/II/IIIa/IIIb for the --voltage-map "
+            "pairwise-clearance lookup, forwarded to the route step "
+            "(default: IIIa)."
+        ),
+    )
+    parser.add_argument(
+        "--hv-threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help=(
+            "Minimum net-pair |ΔV| (volts) that triggers a creepage widening "
+            "for --voltage-map pairwise clearance, forwarded to the route "
+            "step (default: 30.0)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     input_path = Path(args.input).resolve()
@@ -2306,6 +2454,11 @@ Examples:
         max_displacement=args.max_displacement,
         apply_sync=args.apply_sync,
         route_skip_threshold=args.route_skip_threshold,
+        voltage_map=args.voltage_map,
+        creepage_standard=args.creepage_standard,
+        pollution_degree=args.pollution_degree,
+        material_group=args.material_group,
+        hv_threshold=args.hv_threshold,
     )
 
     # Determine steps to run

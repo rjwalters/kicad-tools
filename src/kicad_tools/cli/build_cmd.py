@@ -118,6 +118,15 @@ class BuildContext:
     optimize_placement: bool = False
     smoke_check: bool = True
     allow_incomplete: bool = False
+    # HV pairwise-clearance passthrough (issue #4607).  When voltage_map is
+    # set, the route step forwards these to the `kct route` subprocess and a
+    # clearance-dirty route result (exit 3/4) becomes fatal instead of a
+    # warning.  When None, routing behaviour is byte-identical to before.
+    voltage_map: str | None = None
+    creepage_standard: str = "iec60664"
+    pollution_degree: int = 2
+    material_group: str = "IIIa"
+    hv_threshold: float = 30.0
     _executed_scripts: set[Path] | None = None
     _kicad_cli_warning_emitted: bool = False
 
@@ -1421,6 +1430,32 @@ def _generate_design_supports_step_route(script: Path) -> bool:
         return False
 
 
+def _hv_recipe_route_refusal(ctx: BuildContext, tier_desc: str) -> BuildResult:
+    """Loud refusal: ``--voltage-map`` cannot ride through a route recipe/script.
+
+    Tier 1-3 route recipes and standalone route scripts build their own
+    router invocation, so the HV pairwise-clearance audit flags on the
+    build context never reach the router.  Silently dispatching to such a
+    tier would disable the HV safety gate the flag exists to enforce
+    (issue #4607) — so the route step fails fast instead, telling the user
+    how to run the audit.
+    """
+    return BuildResult(
+        step="route",
+        success=False,
+        message=(
+            f"--voltage-map is set but this board routes via {tier_desc}, "
+            "which cannot carry the HV pairwise-clearance audit flags; "
+            "refusing to route without the audit rather than silently "
+            "skipping it. Either add the HV flags "
+            "(--voltage-map/--creepage-standard/--pollution-degree/"
+            "--material-group/--hv-threshold) to the recipe's own `kct route` "
+            "invocation, or audit the routed copper directly with "
+            f"`kct creepage <board> --voltage-map {ctx.voltage_map}`."
+        ),
+    )
+
+
 def _run_route_recipe(
     ctx: BuildContext,
     console: Console,
@@ -1549,6 +1584,12 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     bake diff-pair / match-group / seed / layer flags into their recipe that
     the generic ``kct route`` fallback does not replicate; routing them through
     the fallback silently drops those flags and under-routes the board.
+
+    HV guard (issue #4607): only the generic ``kct route`` fallback can carry
+    the ``--voltage-map`` pairwise-clearance audit flags.  When
+    ``ctx.voltage_map`` is set and a Tier 1-3 recipe/script wins the probe,
+    the step refuses loudly (:func:`_hv_recipe_route_refusal`) instead of
+    silently routing with the HV audit disabled.
     """
     # If the PCB step (or a prior run) already left a routed artifact and
     # recorded it on the context, skip re-routing entirely. This protects
@@ -1645,6 +1686,11 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     # would silently drop those flags). See _resolve_route_recipe.
     recipe_argv = _resolve_route_recipe(ctx)
     if recipe_argv is not None:
+        # HV guard (issue #4607): a recipe builds its own router invocation,
+        # so ctx.voltage_map would be silently dropped — refuse loudly
+        # instead of routing with the HV audit disabled.
+        if ctx.voltage_map:
+            return _hv_recipe_route_refusal(ctx, f"route recipe {Path(recipe_argv[0]).name}")
         return _run_route_recipe(ctx, console, recipe_argv)
 
     # Tier 3: standalone route script.
@@ -1653,6 +1699,10 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
         route_script = ctx.project_dir / "route.py"
 
     if route_script.exists():
+        # HV guard (issue #4607): same reasoning as the recipe tiers above —
+        # a standalone route script cannot carry the audit flags.
+        if ctx.voltage_map:
+            return _hv_recipe_route_refusal(ctx, f"route script {route_script.name}")
         # Get routing parameters from project.kct to pass as environment variables
         # This allows custom route scripts to optionally use project.kct settings
         grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(
@@ -1723,13 +1773,16 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(ctx.mfr, ctx.spec)
 
     if ctx.dry_run:
+        dry_run_msg = (
+            f"[dry-run] Would run: kct route {ctx.pcb_file.name} "
+            f"--grid {grid} --clearance {clearance}"
+        )
+        if ctx.voltage_map:
+            dry_run_msg += f" --voltage-map {ctx.voltage_map}"
         return BuildResult(
             step="route",
             success=True,
-            message=(
-                f"[dry-run] Would run: kct route {ctx.pcb_file.name} "
-                f"--grid {grid} --clearance {clearance}"
-            ),
+            message=dry_run_msg,
         )
 
     if not ctx.quiet:
@@ -1757,6 +1810,25 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
             "--via-diameter",
             str(via_diameter),
         ]
+
+        # HV pairwise-clearance passthrough (issue #4607): only forwarded
+        # when a voltage map is in play, so every existing no-voltage-map
+        # invocation builds an identical subprocess argv.
+        if ctx.voltage_map:
+            cmd.extend(
+                [
+                    "--voltage-map",
+                    str(ctx.voltage_map),
+                    "--creepage-standard",
+                    ctx.creepage_standard,
+                    "--pollution-degree",
+                    str(ctx.pollution_degree),
+                    "--material-group",
+                    ctx.material_group,
+                    "--hv-threshold",
+                    str(ctx.hv_threshold),
+                ]
+            )
 
         if ctx.quiet:
             cmd.append("--quiet")
@@ -1792,13 +1864,39 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
         elif result.returncode in (2, 3, 4, 5):
             # Exit codes 2-5 all produce usable output files:
             #   2 = partial routing below --min-completion threshold
-            #   3 = routing meets threshold but DRC violations remain
-            #   4 = partial routing with segment-segment clearance violations
+            #   3 = routing meets threshold but the copper is clearance-dirty
+            #       (DRC violations, --auto-fix rollback, or the HV
+            #       pairwise-clearance audit under --voltage-map -- #4588)
+            #   4 = partial routing with clearance violations
+            #       (segment-segment or HV pairwise)
             #   5 = interrupted by SIGINT with partial results saved
-            # Treat as non-fatal so the build pipeline continues to verification.
+            # Without a voltage map these are non-fatal so the build pipeline
+            # continues to verification.  With a voltage map in play the
+            # clearance-dirty codes (3/4) may mean the HV pairwise-clearance
+            # audit failed; a board whose HV creepage may be short must NOT
+            # flow on to verification and manufacturing export, so those two
+            # become fatal (issue #4607).  The exit code alone cannot
+            # distinguish which of the shared meanings fired, so the split
+            # keys on --voltage-map presence.
+            if ctx.voltage_map and result.returncode in (3, 4):
+                return BuildResult(
+                    step="route",
+                    success=False,
+                    message=(
+                        f"Routing left clearance-dirty copper (exit "
+                        f"{result.returncode}: DRC violations, --auto-fix "
+                        "rollback, or HV pairwise audit) with --voltage-map "
+                        "in effect; failing the build instead of continuing "
+                        "to verification"
+                    ),
+                    output_file=output_file if output_file.exists() else None,
+                )
             _route_warning_messages = {
                 2: "Routing completed (some nets skipped for zone fill)",
-                3: "Routing complete but DRC violations remain",
+                3: (
+                    "Routing complete but copper is clearance-dirty "
+                    "(DRC violations, --auto-fix rollback, or HV pairwise audit)"
+                ),
                 4: "Partial routing with clearance violations",
                 5: "Routing interrupted by user, partial results saved",
             }
@@ -3197,6 +3295,60 @@ Examples:
             "(advertised in failure messages; CI greppable)."
         ),
     )
+    # Issue #4607: HV pairwise-clearance passthrough.  Mirrors the
+    # `kct route` flags; forwarded to the route subprocess when a voltage
+    # map is in play.  Must stay in lockstep with parser.py::_add_build_parser
+    # (enforced by tests/test_build_parser_parity.py).
+    parser.add_argument(
+        "--voltage-map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON per-net voltage map {net_name: volts}, forwarded "
+            "to the route step to enable the HV pairwise-clearance audit "
+            "(see `kct route --voltage-map`). With a voltage map in play, a "
+            "clearance-dirty route result (exit 3/4) fails the build."
+        ),
+    )
+    parser.add_argument(
+        "--creepage-standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help=(
+            "Creepage standard for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: iec60664)."
+        ),
+    )
+    parser.add_argument(
+        "--pollution-degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help=(
+            "IEC pollution degree for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: 2)."
+        ),
+    )
+    parser.add_argument(
+        "--material-group",
+        default="IIIa",
+        help=(
+            "Insulation material group I/II/IIIa/IIIb for the --voltage-map "
+            "pairwise-clearance lookup, forwarded to the route step "
+            "(default: IIIa)."
+        ),
+    )
+    parser.add_argument(
+        "--hv-threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help=(
+            "Minimum net-pair |ΔV| (volts) that triggers a creepage widening "
+            "for --voltage-map pairwise clearance, forwarded to the route "
+            "step (default: 30.0)."
+        ),
+    )
 
     return parser
 
@@ -3281,6 +3433,11 @@ def main(argv: list[str] | None = None) -> int:
         optimize_placement=args.optimize_placement,
         smoke_check=not args.no_smoke_check,
         allow_incomplete=args.allow_incomplete,
+        voltage_map=args.voltage_map,
+        creepage_standard=args.creepage_standard,
+        pollution_degree=args.pollution_degree,
+        material_group=args.material_group,
+        hv_threshold=args.hv_threshold,
     )
 
     # Print build header

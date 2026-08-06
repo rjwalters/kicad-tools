@@ -715,7 +715,7 @@ class TestBuildCmdExitCodeHandling:
     """Verify build_cmd.py handles route exit codes 3, 4, and 5 as non-fatal."""
 
     @staticmethod
-    def _run_route_step_with_exit_code(exit_code, tmp_path):
+    def _run_route_step_with_exit_code(exit_code, tmp_path, voltage_map=None):
         """Run _run_step_route with a mocked subprocess returning the given exit code."""
         from kicad_tools.cli.build_cmd import BuildContext, _run_step_route
 
@@ -735,6 +735,10 @@ class TestBuildCmdExitCodeHandling:
         ctx.verbose = False
         ctx.dry_run = False
         ctx.force = True
+        # MagicMock(spec=...) auto-vivifies truthy attribute mocks, which
+        # would spuriously trigger the --voltage-map fatal split for exit
+        # codes 3/4 (issue #4607) — pin the real default explicitly.
+        ctx.voltage_map = voltage_map
 
         console = MagicMock()
 
@@ -752,11 +756,33 @@ class TestBuildCmdExitCodeHandling:
         return result
 
     def test_build_cmd_treats_exit_codes_2_through_5_as_success(self, tmp_path):
-        """build_cmd treats exit codes 2, 3, 4, and 5 as non-fatal (success=True)."""
+        """build_cmd treats exit codes 2, 3, 4, and 5 as non-fatal (success=True).
+
+        This is the no-voltage-map half of the issue #4607 split; see
+        test_build_cmd_exit_3_and_4_fatal_with_voltage_map for the other half.
+        """
         for code in (2, 3, 4, 5):
             result = self._run_route_step_with_exit_code(code, tmp_path)
             assert result.success is True, (
                 f"Exit code {code} should be treated as success, got failure"
+            )
+
+    def test_build_cmd_exit_3_and_4_fatal_with_voltage_map(self, tmp_path):
+        """With --voltage-map, the clearance-dirty codes (3/4) become fatal.
+
+        Issue #4607: exit 3/4 may carry the HV pairwise-clearance audit
+        meaning, so a voltage-map build must not continue to verification.
+        Exits 2 and 5 keep their soft handling either way.
+        """
+        for code in (3, 4):
+            result = self._run_route_step_with_exit_code(code, tmp_path, voltage_map="vm.json")
+            assert result.success is False, (
+                f"Exit code {code} should be fatal with --voltage-map, got success"
+            )
+        for code in (2, 5):
+            result = self._run_route_step_with_exit_code(code, tmp_path, voltage_map="vm.json")
+            assert result.success is True, (
+                f"Exit code {code} should stay soft even with --voltage-map"
             )
 
     def test_build_cmd_treats_exit_1_as_failure(self, tmp_path):

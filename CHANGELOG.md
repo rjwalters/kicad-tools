@@ -270,6 +270,23 @@ constructor). No breaking changes.
 
 ### Fixed
 
+- **An HV pairwise-clearance failure could flow through `kct build` /
+  `kct pipeline` as a soft warning.** Neither consumer forwarded
+  `--voltage-map`, and both treated route exit 3 as non-fatal with a message
+  that misnamed it as "DRC violations remain". Both now thread `--voltage-map`
+  (plus `--creepage-standard` / `--pollution-degree` / `--material-group` /
+  `--hv-threshold`) through to the route subprocess across every parser hop,
+  and with a voltage map in play a clearance-dirty route result (exit 3/4) is
+  fatal — the board no longer continues to verification and manufacturing
+  export. Because the audit only runs inside the `kct route` subprocess, both
+  consumers also refuse loudly instead of silently dropping the audit when the
+  route step would not reach it: `kct build` fails fast when the board routes
+  via a Tier 1-3 route recipe/script, and `kct pipeline` fails fast instead of
+  skipping the route step on an already-routed board (both messages point at
+  `kct creepage` / `--force`). Without a voltage map, exit 2-5 handling and
+  the skip semantics are byte-identical to before, and the exit-3 message now
+  names all three shared meanings (#4607).
+
 - **`kct check` `silk_over_copper` now sees untented-via mask openings.** The
   aperture set was pads-only, so silk over an exposed via was invisible
   (kicad-cli 1, kct 0 — the residue #4612 measured and deferred). The rule now

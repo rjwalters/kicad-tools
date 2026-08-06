@@ -273,3 +273,154 @@ class TestRouteSkipThresholdForwarding:
         assert "--route-skip-threshold" in captured
         idx = captured.index("--route-skip-threshold")
         assert captured[idx + 1] == "75.0"
+
+
+# ---------------------------------------------------------------------------
+# --voltage-map + companion HV flags: parsing + forwarding (issue #4607)
+# ---------------------------------------------------------------------------
+
+HV_ARGV = [
+    "--voltage-map",
+    "vm.json",
+    "--creepage-standard",
+    "iec62368",
+    "--pollution-degree",
+    "3",
+    "--material-group",
+    "II",
+    "--hv-threshold",
+    "60",
+]
+
+
+class TestVoltageMapParsing:
+    """Verify the HV pairwise-clearance flags are accepted by the CLI parser.
+
+    The build/pipeline parser pairs are NOT covered by
+    tests/test_cli_parser_drift.py, so a flag declared on one hop but dropped
+    at another parses cleanly and silently disables the HV safety gate.
+    These tests (plus the forwarding class below) are the drift-guard
+    substitute for the pipeline chain.
+    """
+
+    def test_hv_flags_parsed(self):
+        ns = _parse_pipeline_args(["board.kicad_pcb", *HV_ARGV])
+        assert ns.pipeline_voltage_map == "vm.json"
+        assert ns.pipeline_creepage_standard == "iec62368"
+        assert ns.pipeline_pollution_degree == 3
+        assert ns.pipeline_material_group == "II"
+        assert ns.pipeline_hv_threshold == 60.0
+
+    def test_hv_flag_defaults(self):
+        ns = _parse_pipeline_args(["board.kicad_pcb"])
+        assert ns.pipeline_voltage_map is None
+        assert ns.pipeline_creepage_standard == "iec60664"
+        assert ns.pipeline_pollution_degree == 2
+        assert ns.pipeline_material_group == "IIIa"
+        assert ns.pipeline_hv_threshold == 30.0
+
+    def test_invalid_creepage_standard_rejected(self):
+        with pytest.raises(SystemExit):
+            _parse_pipeline_args(["board.kicad_pcb", "--creepage-standard", "nonsense"])
+
+    def test_invalid_pollution_degree_rejected(self):
+        with pytest.raises(SystemExit):
+            _parse_pipeline_args(["board.kicad_pcb", "--pollution-degree", "9"])
+
+
+class TestVoltageMapForwarding:
+    """Verify commands/pipeline.py forwards the HV flags into sub_argv."""
+
+    def _capture_argv(self, args_dict: dict) -> list[str]:
+        ns = SimpleNamespace(**args_dict)
+        captured: list[str] = []
+
+        def _fake_main(argv):
+            captured.extend(argv)
+            return 0
+
+        with patch("kicad_tools.cli.pipeline_cmd.main", _fake_main):
+            run_pipeline_command(ns)
+        return captured
+
+    def test_voltage_map_forwarded(self):
+        argv = self._capture_argv(
+            {
+                "pipeline_input": "b.kicad_pcb",
+                "pipeline_voltage_map": "vm.json",
+                "global_quiet": False,
+            }
+        )
+        assert argv[argv.index("--voltage-map") + 1] == "vm.json"
+
+    def test_companion_flags_forwarded_when_nondefault(self):
+        argv = self._capture_argv(
+            {
+                "pipeline_input": "b.kicad_pcb",
+                "pipeline_voltage_map": "vm.json",
+                "pipeline_creepage_standard": "iec62368",
+                "pipeline_pollution_degree": 3,
+                "pipeline_material_group": "II",
+                "pipeline_hv_threshold": 60.0,
+                "global_quiet": False,
+            }
+        )
+        assert argv[argv.index("--voltage-map") + 1] == "vm.json"
+        assert argv[argv.index("--creepage-standard") + 1] == "iec62368"
+        assert argv[argv.index("--pollution-degree") + 1] == "3"
+        assert argv[argv.index("--material-group") + 1] == "II"
+        assert argv[argv.index("--hv-threshold") + 1] == "60.0"
+
+    def test_hv_flags_omitted_at_defaults(self):
+        """A no-voltage-map invocation builds a byte-identical inner argv."""
+        argv = self._capture_argv(
+            {
+                "pipeline_input": "b.kicad_pcb",
+                "pipeline_voltage_map": None,
+                "pipeline_creepage_standard": "iec60664",
+                "pipeline_pollution_degree": 2,
+                "pipeline_material_group": "IIIa",
+                "pipeline_hv_threshold": 30.0,
+                "global_quiet": False,
+            }
+        )
+        for flag in (
+            "--voltage-map",
+            "--creepage-standard",
+            "--pollution-degree",
+            "--material-group",
+            "--hv-threshold",
+        ):
+            assert flag not in argv
+
+    def test_inner_parser_accepts_hv_flags(self, tmp_path):
+        """pipeline_cmd.main's own parser must understand the forwarded flags.
+
+        Uses a nonexistent input: argparse runs before the file-exists check,
+        so an unknown flag raises SystemExit(2) while an understood flag set
+        falls through to the file-not-found return of 1.
+        """
+        from kicad_tools.cli import pipeline_cmd
+
+        rc = pipeline_cmd.main([str(tmp_path / "missing.kicad_pcb"), *HV_ARGV])
+        assert rc == 1
+
+    def test_round_trip_parser_to_shim_argv(self):
+        """Full chain: top-level parser -> shim -> forwarded pipeline argv."""
+        ns = _parse_pipeline_args(["board.kicad_pcb", *HV_ARGV])
+        ns.global_quiet = False
+        captured: list[str] = []
+
+        def _fake_main(argv):
+            captured.extend(argv)
+            return 0
+
+        with patch("kicad_tools.cli.pipeline_cmd.main", _fake_main):
+            run_pipeline_command(ns)
+
+        assert captured[0] == "board.kicad_pcb"
+        assert captured[captured.index("--voltage-map") + 1] == "vm.json"
+        assert captured[captured.index("--creepage-standard") + 1] == "iec62368"
+        assert captured[captured.index("--pollution-degree") + 1] == "3"
+        assert captured[captured.index("--material-group") + 1] == "II"
+        assert captured[captured.index("--hv-threshold") + 1] == "60.0"

@@ -56,4 +56,29 @@ def run_build_command(args) -> int:
     if getattr(args, "build_allow_incomplete", False):
         sub_argv.append("--allow-incomplete")
 
+    # HV pairwise-clearance passthrough (issue #4607).  Forward each flag
+    # only when it differs from its parser default so an invocation without
+    # the HV flags builds a byte-identical inner argv, while an explicitly
+    # supplied flag is never silently dropped at this hop (the historical
+    # unguarded-shim bug class -- see tests/test_build_cmd_errors.py).
+    build_voltage_map = getattr(args, "build_voltage_map", None)
+    if build_voltage_map is not None:
+        sub_argv.extend(["--voltage-map", build_voltage_map])
+
+    build_creepage_standard = getattr(args, "build_creepage_standard", "iec60664")
+    if build_creepage_standard != "iec60664":
+        sub_argv.extend(["--creepage-standard", build_creepage_standard])
+
+    build_pollution_degree = getattr(args, "build_pollution_degree", 2)
+    if build_pollution_degree != 2:
+        sub_argv.extend(["--pollution-degree", str(build_pollution_degree)])
+
+    build_material_group = getattr(args, "build_material_group", "IIIa")
+    if build_material_group != "IIIa":
+        sub_argv.extend(["--material-group", build_material_group])
+
+    build_hv_threshold = getattr(args, "build_hv_threshold", 30.0)
+    if build_hv_threshold is not None and build_hv_threshold != 30.0:
+        sub_argv.extend(["--hv-threshold", str(build_hv_threshold)])
+
     return build_main(sub_argv)

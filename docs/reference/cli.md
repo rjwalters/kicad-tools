@@ -1283,10 +1283,30 @@ epilog in [`src/kicad_tools/cli/route_cmd.py`](../../src/kicad_tools/cli/route_c
 | 5 | Interrupted by SIGINT with partial results saved (file on disk is valid) |
 | 8 | `--complete`: one or more previously-unconnected links remain unroutable (issue #4477) |
 
-> **Consumer note (issue #4588).** `kct build` and `kct pipeline` treat exit 3
-> as a non-fatal warning. Neither forwards `--voltage-map` today, so the HV
-> meaning of 3 cannot reach them; threading the flag through and making the
-> pairwise-dirty result fatal there is tracked as issue #4607.
+> **Consumer note (issues #4588 / #4607).** `kct build` and `kct pipeline`
+> forward `--voltage-map` (plus `--creepage-standard`, `--pollution-degree`,
+> `--material-group`, `--hv-threshold`) to their underlying `kct route`
+> invocation. The exit-3/4 handling then splits on voltage-map presence,
+> because the exit code alone cannot distinguish which of the shared meanings
+> fired:
+>
+> - **Without a voltage map** (byte-identical to the historical behaviour):
+>   exits 2-5 are non-fatal warnings and the build/pipeline continues to
+>   verification, which surfaces any remaining DRC violations.
+> - **With a voltage map**: exits 3 and 4 are **fatal** — the clearance-dirty
+>   copper may be an HV pairwise-clearance (creepage) failure, and such a
+>   board must not flow on to verification and manufacturing export as
+>   "completed with warnings". Exits 2 and 5 keep their soft handling.
+>
+> Because the audit only runs inside the `kct route` subprocess, both
+> consumers also **refuse loudly** (instead of silently dropping the audit)
+> when a voltage map is set but the route step would not reach `kct route`:
+> `kct build` fails fast when the board routes via a route recipe/script
+> (Tier 1–3 — those build their own router invocation and cannot carry the HV
+> flags), and `kct pipeline` fails fast instead of skipping the route step on
+> an already-routed board. In both cases the message points at
+> `kct creepage <board> --voltage-map …` for a non-destructive audit of the
+> existing copper.
 
 ### `kct optimize-placement`
 

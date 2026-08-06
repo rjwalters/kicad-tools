@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.cli.build_cmd import (
     BuildContext,
     _capture_routed_artifact_mtime,
@@ -387,13 +389,16 @@ class TestBuildRouteExitCode2:
 
         assert result.success is False
 
-    def test_route_exit_code_3_is_nonfatal_warning(self, tmp_path: Path) -> None:
-        """Route exit code 3 (DRC violations remain) is non-fatal.
+    def test_route_exit_code_3_without_voltage_map_is_nonfatal_warning(
+        self, tmp_path: Path
+    ) -> None:
+        """Route exit code 3 stays non-fatal when no voltage map is in play.
 
         Exit codes 2-5 all produce usable output files; build_cmd treats
         them as success-with-warning so the pipeline continues to the
         verification step, which is responsible for surfacing remaining
-        DRC violations (stale-test update, issue #3436 burn-down).
+        DRC violations (stale-test update, issue #3436 burn-down; soft
+        semantics re-pinned for the no-voltage-map path in issue #4607).
         """
         from unittest.mock import MagicMock, patch
 
@@ -414,6 +419,7 @@ class TestBuildRouteExitCode2:
         ctx.force = True
         ctx.output_dir = None
         ctx.spec = None
+        assert ctx.voltage_map is None  # default: no voltage map
 
         console = Console()
 
@@ -422,7 +428,119 @@ class TestBuildRouteExitCode2:
             result = _run_step_route(ctx, console)
 
         assert result.success is True
-        assert "DRC violations remain" in result.message
+        # Issue #4607: exit 3 has three shared meanings (DRC violations,
+        # --auto-fix rollback, HV pairwise audit); the message must not
+        # claim "DRC violations remain" as the sole cause.
+        assert "DRC violations remain" not in result.message
+        assert "clearance-dirty" in result.message
+
+    def test_route_exit_code_3_with_voltage_map_is_fatal(self, tmp_path: Path) -> None:
+        """Route exit code 3 becomes fatal when a voltage map is in play.
+
+        With --voltage-map, the clearance-dirty result may be an HV
+        pairwise-clearance (creepage) failure; the build must stop instead
+        of flowing on to verification and export (issue #4607).
+        """
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+
+        ctx = BuildContext(
+            project_dir=tmp_path,
+            spec_file=None,
+        )
+        ctx.pcb_file = pcb_file
+        ctx.mfr = "jlcpcb"
+        ctx.quiet = True
+        ctx.verbose = False
+        ctx.dry_run = False
+        ctx.force = True
+        ctx.output_dir = None
+        ctx.spec = None
+        ctx.voltage_map = str(tmp_path / "voltage_map.json")
+
+        console = Console()
+
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
+            mock_run.return_value = MagicMock(returncode=3, stderr="", stdout="")
+            result = _run_step_route(ctx, console)
+
+        assert result.success is False
+        assert "--voltage-map" in result.message
+        assert "HV pairwise" in result.message
+
+    def test_route_exit_code_4_with_voltage_map_is_fatal(self, tmp_path: Path) -> None:
+        """Route exit code 4 (partial + clearance violations) is also fatal with a map."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+
+        ctx = BuildContext(
+            project_dir=tmp_path,
+            spec_file=None,
+        )
+        ctx.pcb_file = pcb_file
+        ctx.mfr = "jlcpcb"
+        ctx.quiet = True
+        ctx.verbose = False
+        ctx.dry_run = False
+        ctx.force = True
+        ctx.output_dir = None
+        ctx.spec = None
+        ctx.voltage_map = str(tmp_path / "voltage_map.json")
+
+        console = Console()
+
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
+            mock_run.return_value = MagicMock(returncode=4, stderr="", stdout="")
+            result = _run_step_route(ctx, console)
+
+        assert result.success is False
+        assert "--voltage-map" in result.message
+
+    @pytest.mark.parametrize("returncode", [2, 5])
+    def test_route_exit_codes_2_and_5_stay_soft_with_voltage_map(
+        self, tmp_path: Path, returncode: int
+    ) -> None:
+        """Exits 2 and 5 keep their soft handling even with a voltage map.
+
+        Only the clearance-dirty codes (3/4) can carry the HV pairwise
+        meaning; partial routing (2) and SIGINT (5) do not (issue #4607).
+        """
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+
+        ctx = BuildContext(
+            project_dir=tmp_path,
+            spec_file=None,
+        )
+        ctx.pcb_file = pcb_file
+        ctx.mfr = "jlcpcb"
+        ctx.quiet = True
+        ctx.verbose = False
+        ctx.dry_run = False
+        ctx.force = True
+        ctx.output_dir = None
+        ctx.spec = None
+        ctx.voltage_map = str(tmp_path / "voltage_map.json")
+
+        console = Console()
+
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
+            mock_run.return_value = MagicMock(returncode=returncode, stderr="", stdout="")
+            result = _run_step_route(ctx, console)
+
+        assert result.success is True
 
 
 class TestRouteStepRecipeArtifactGuard:
@@ -951,3 +1069,287 @@ class TestRouteStepRecipeDiscovery:
 
         assert result.success is True
         assert result.output_file == output_dir / "board_routed.kicad_pcb"
+
+
+class TestBuildRouteHvRecipeRefusal:
+    """--voltage-map refuses loudly when a recipe/script tier wins (issue #4607).
+
+    Tier 1-3 route recipes and standalone route scripts build their own
+    router invocation, so the HV pairwise-clearance audit flags never reach
+    the router through them.  Silently dispatching would disable the HV
+    safety gate the flag exists to enforce, so the route step must fail
+    fast with an actionable message instead.
+    """
+
+    def test_recipe_tier_with_voltage_map_refuses(self, tmp_path: Path) -> None:
+        """A Tier 2 sentinel recipe + --voltage-map fails fast without routing."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        (tmp_path / "generate_design.py").write_text("SUPPORTS_STEP_ROUTE = True\n")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        ctx.voltage_map = "vm.json"
+        console = Console()
+
+        with (
+            patch("kicad_tools.cli.build_cmd._run_python_script") as mock_script,
+            patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_generic,
+        ):
+            result = _run_step_route(ctx, console)
+
+        # Neither the recipe nor the generic router ran — refusal is loud
+        # and immediate.
+        mock_script.assert_not_called()
+        mock_generic.assert_not_called()
+        assert result.success is False
+        assert "--voltage-map" in result.message
+        assert "generate_design.py" in result.message
+        assert "kct creepage" in result.message
+
+    def test_route_script_tier_with_voltage_map_refuses(self, tmp_path: Path) -> None:
+        """A Tier 3 route_demo.py + --voltage-map fails fast without routing."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        (tmp_path / "route_demo.py").write_text("print('route demo')\n")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        ctx.voltage_map = "vm.json"
+        console = Console()
+
+        with (
+            patch("kicad_tools.cli.build_cmd._run_python_script") as mock_script,
+            patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_generic,
+        ):
+            result = _run_step_route(ctx, console)
+
+        mock_script.assert_not_called()
+        mock_generic.assert_not_called()
+        assert result.success is False
+        assert "--voltage-map" in result.message
+        assert "route_demo.py" in result.message
+        assert "kct creepage" in result.message
+
+    def test_recipe_tier_without_voltage_map_still_routes(self, tmp_path: Path) -> None:
+        """Without a voltage map, the recipe tier is untouched by the guard."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        (tmp_path / "generate_design.py").write_text("SUPPORTS_STEP_ROUTE = True\n")
+
+        ctx = _make_route_ctx(tmp_path, pcb_file, spec=None)
+        assert ctx.voltage_map is None  # BuildContext default
+        console = Console()
+
+        def fake_run_script(script, cwd, verbose, *, env_vars, script_args, quiet):
+            (tmp_path / "board_routed.kicad_pcb").write_text("(kicad_pcb)")
+            return True, "ok"
+
+        with patch(
+            "kicad_tools.cli.build_cmd._run_python_script",
+            side_effect=fake_run_script,
+        ) as mock_script:
+            result = _run_step_route(ctx, console)
+
+        mock_script.assert_called_once()
+        assert result.success is True
+
+
+class TestBuildRouteVoltageMapForwarding:
+    """The generic `kct route` fallback must receive the HV flags (issue #4607).
+
+    These assert against the actual subprocess argv so a flag silently
+    dropped between BuildContext and the cmd construction fails loudly.
+    """
+
+    def _route_cmd_argv(self, tmp_path: Path, **ctx_overrides) -> list[str]:
+        """Run the route step with a stubbed subprocess and return its argv."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+
+        ctx = BuildContext(project_dir=tmp_path, spec_file=None)
+        ctx.pcb_file = pcb_file
+        ctx.mfr = "jlcpcb"
+        ctx.quiet = True
+        ctx.verbose = False
+        ctx.dry_run = False
+        ctx.force = True
+        ctx.output_dir = None
+        ctx.spec = None
+        for key, value in ctx_overrides.items():
+            setattr(ctx, key, value)
+
+        console = Console()
+
+        with patch("kicad_tools.cli.build_cmd._run_subprocess_with_heartbeat") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            with patch("kicad_tools.cli.build_cmd._check_route_postcondition", return_value=None):
+                _run_step_route(ctx, console)
+            return list(mock_run.call_args[0][0])
+
+    def test_voltage_map_flags_forwarded_to_route_subprocess(self, tmp_path: Path) -> None:
+        argv = self._route_cmd_argv(
+            tmp_path,
+            voltage_map="vm.json",
+            creepage_standard="iec62368",
+            pollution_degree=3,
+            material_group="II",
+            hv_threshold=60.0,
+        )
+        assert argv[argv.index("--voltage-map") + 1] == "vm.json"
+        assert argv[argv.index("--creepage-standard") + 1] == "iec62368"
+        assert argv[argv.index("--pollution-degree") + 1] == "3"
+        assert argv[argv.index("--material-group") + 1] == "II"
+        assert argv[argv.index("--hv-threshold") + 1] == "60.0"
+
+    def test_no_voltage_map_builds_identical_argv(self, tmp_path: Path) -> None:
+        """Without a voltage map, none of the HV flags appear in the argv."""
+        argv = self._route_cmd_argv(tmp_path)
+        for flag in (
+            "--voltage-map",
+            "--creepage-standard",
+            "--pollution-degree",
+            "--material-group",
+            "--hv-threshold",
+        ):
+            assert flag not in argv
+
+
+class TestBuildVoltageMapPassthroughHops:
+    """Pin every hop of the build passthrough chain (issue #4607).
+
+    The historical failure mode is a flag declared on the outer parser but
+    dropped by the commands/build.py shim (or vice versa): everything parses
+    cleanly and the HV safety gate is silently disabled.  These tests pin
+    outer parse -> shim forwarding -> inner parse individually and end to end.
+    """
+
+    HV_ARGV = [
+        "--voltage-map",
+        "vm.json",
+        "--creepage-standard",
+        "iec62368",
+        "--pollution-degree",
+        "3",
+        "--material-group",
+        "II",
+        "--hv-threshold",
+        "60",
+    ]
+
+    def _run_shim(self, ns) -> list[str]:
+        """Invoke run_build_command with a stubbed inner main; return sub_argv."""
+        from unittest.mock import patch
+
+        from kicad_tools.cli.commands.build import run_build_command
+
+        captured: list[str] = []
+
+        def _fake_main(argv):
+            captured.extend(argv)
+            return 0
+
+        with patch("kicad_tools.cli.build_cmd.main", _fake_main):
+            run_build_command(ns)
+        return captured
+
+    def test_outer_parser_accepts_hv_flags(self) -> None:
+        from kicad_tools.cli.parser import create_parser
+
+        top = create_parser()
+        ns = top.parse_args(["build", "spec.kct", *self.HV_ARGV])
+        assert ns.build_voltage_map == "vm.json"
+        assert ns.build_creepage_standard == "iec62368"
+        assert ns.build_pollution_degree == 3
+        assert ns.build_material_group == "II"
+        assert ns.build_hv_threshold == 60.0
+
+    def test_outer_parser_hv_defaults(self) -> None:
+        from kicad_tools.cli.parser import create_parser
+
+        top = create_parser()
+        ns = top.parse_args(["build", "spec.kct"])
+        assert ns.build_voltage_map is None
+        assert ns.build_creepage_standard == "iec60664"
+        assert ns.build_pollution_degree == 2
+        assert ns.build_material_group == "IIIa"
+        assert ns.build_hv_threshold == 30.0
+
+    def test_shim_forwards_hv_flags(self) -> None:
+        from types import SimpleNamespace
+
+        ns = SimpleNamespace(
+            build_spec="spec.kct",
+            build_voltage_map="vm.json",
+            build_creepage_standard="iec62368",
+            build_pollution_degree=3,
+            build_material_group="II",
+            build_hv_threshold=60.0,
+        )
+        argv = self._run_shim(ns)
+        assert argv[argv.index("--voltage-map") + 1] == "vm.json"
+        assert argv[argv.index("--creepage-standard") + 1] == "iec62368"
+        assert argv[argv.index("--pollution-degree") + 1] == "3"
+        assert argv[argv.index("--material-group") + 1] == "II"
+        assert argv[argv.index("--hv-threshold") + 1] == "60.0"
+
+    def test_shim_omits_hv_flags_at_defaults(self) -> None:
+        """A no-voltage-map invocation builds a byte-identical inner argv."""
+        from types import SimpleNamespace
+
+        ns = SimpleNamespace(
+            build_spec="spec.kct",
+            build_voltage_map=None,
+            build_creepage_standard="iec60664",
+            build_pollution_degree=2,
+            build_material_group="IIIa",
+            build_hv_threshold=30.0,
+        )
+        argv = self._run_shim(ns)
+        for flag in (
+            "--voltage-map",
+            "--creepage-standard",
+            "--pollution-degree",
+            "--material-group",
+            "--hv-threshold",
+        ):
+            assert flag not in argv
+
+    def test_inner_parser_accepts_hv_flags(self) -> None:
+        from kicad_tools.cli.build_cmd import _build_inner_parser
+
+        ns = _build_inner_parser().parse_args(["spec.kct", *self.HV_ARGV])
+        assert ns.voltage_map == "vm.json"
+        assert ns.creepage_standard == "iec62368"
+        assert ns.pollution_degree == 3
+        assert ns.material_group == "II"
+        assert ns.hv_threshold == 60.0
+
+    def test_round_trip_outer_parse_to_inner_parse(self) -> None:
+        """Full chain: outer parser -> shim -> inner parser namespace."""
+        from kicad_tools.cli.build_cmd import _build_inner_parser
+        from kicad_tools.cli.parser import create_parser
+
+        top = create_parser()
+        outer_ns = top.parse_args(["build", "spec.kct", *self.HV_ARGV])
+        sub_argv = self._run_shim(outer_ns)
+        inner_ns = _build_inner_parser().parse_args(sub_argv)
+        assert inner_ns.voltage_map == "vm.json"
+        assert inner_ns.creepage_standard == "iec62368"
+        assert inner_ns.pollution_degree == 3
+        assert inner_ns.material_group == "II"
+        assert inner_ns.hv_threshold == 60.0
