@@ -1704,6 +1704,53 @@ def _add_sch_parser(subparsers) -> None:
         "--format", choices=["text", "json"], default="text", help="Output format"
     )
 
+    # sch tidy
+    sch_tidy = sch_subparsers.add_parser(
+        "tidy",
+        help=(
+            "Reset Reference/Value field positions to bbox-relative defaults "
+            "(headless field autoplace)"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Reset visible Reference/Value field positions to deterministic\n"
+            "offsets from each symbol's placed body bounding box: Reference\n"
+            "centered above the body, Value centered below, grid-aligned and\n"
+            "horizontal. Honors symbol rotation and mirroring. This is a\n"
+            "headless, diff-reviewable field autoplace -- parity with\n"
+            "Eeschema's autoplace algorithm is an explicit non-goal.\n"
+            "\n"
+            "Cosmetic only: nothing but the field (at x y angle) positions\n"
+            "changes, so netlist/ERC/BOM/CPL are unchanged.\n"
+            "\n"
+            "Power/virtual symbols ('#'-prefixed references) and hidden\n"
+            "fields are skipped unless explicitly named via --refs.\n"
+            "Multi-unit symbols: each placed unit's body bbox is estimated\n"
+            "from that unit's pin extents (per-unit body graphics are not\n"
+            "tracked), so placement can be coarser; use --refs to scope\n"
+            "around units needing hand placement."
+        ),
+    )
+    sch_tidy.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_tidy.add_argument(
+        "--threshold",
+        type=float,
+        default=0.0,
+        metavar="MM",
+        help=(
+            "Only touch fields farther than this many mm from the symbol body "
+            "bbox (default 0 = tidy all in-scope fields)"
+        ),
+    )
+    sch_tidy.add_argument(
+        "--refs", help="Comma-separated reference designators to tidy (e.g., C13,C15)"
+    )
+    sch_tidy.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
+    sch_tidy.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    sch_tidy.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+
     # sch remove-component
     sch_remove_component = sch_subparsers.add_parser(
         "remove-component", help="Remove a symbol from a schematic"

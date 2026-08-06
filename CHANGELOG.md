@@ -17,6 +17,23 @@ constructor). No breaking changes.
 
 ### Added
 
+- **`kct sch tidy` — headless Reference/Value field autoplace** — new
+  schematic subcommand that resets visible `Reference`/`Value` field
+  positions to deterministic bbox-relative defaults (Reference centered
+  above the placed symbol body, Value centered below, grid-aligned and
+  horizontal), honoring symbol rotation and mirroring — a diff-reviewable,
+  CI-runnable stand-in for Eeschema's GUI-only "Autoplace Fields"
+  (Eeschema-parity is an explicit non-goal). Supports `--threshold <mm>`
+  (only touch fields farther than this from the body), `--refs` scoping,
+  `--dry-run` before/after offset reports (`--format text|json`), and
+  `--backup`. Strictly cosmetic: only field `(at x y angle)` nodes change —
+  structural-diff, BOM, and kicad-cli netlist invariance are asserted in
+  tests. Power/virtual symbols and hidden fields are skipped by default;
+  unresolvable `lib_id`s warn instead of crashing. The underlying geometry
+  (placed body bbox, field-offset metric, default positions) lives in a new
+  shared `kicad_tools.schema.field_geometry` module so the companion
+  field-geometry lint (#4595) can reuse the exact same metric (#4596).
+
 - **Connector mating / edge-access rule in `kct check`** — new default-on
   `connector_access` category (selectable via `--only`/`--skip`, no new flags)
   with a warning-severity `connector_edge_access` rule that flags rigid-plug

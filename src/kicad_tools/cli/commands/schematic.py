@@ -29,7 +29,7 @@ def run_sch_command(args) -> int:
             " add-label, cleanup-wires, remove-wire, insert-inline,"
         )
         print("          disconnect, reconnect-pin, move-component, remove-component, re-annotate,")
-        print("          repair-instances, fix-annotation")
+        print("          repair-instances, fix-annotation, tidy")
         return 1
 
     schematic_path = Path(args.schematic)
@@ -584,6 +584,22 @@ def run_sch_command(args) -> int:
         if args.format != "text":
             sub_argv.extend(["--format", args.format])
         return move_component_main(sub_argv) or 0
+
+    elif args.sch_command == "tidy":
+        from ..sch_tidy import main as tidy_main
+
+        sub_argv = [str(schematic_path)]
+        if args.threshold:
+            sub_argv.extend(["--threshold", str(args.threshold)])
+        if args.refs:
+            sub_argv.extend(["--refs", args.refs])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        return tidy_main(sub_argv) or 0
 
     elif args.sch_command == "remove-component":
         from ..sch_remove_component import main as remove_component_main
