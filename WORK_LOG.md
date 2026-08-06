@@ -524,3 +524,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #1106** (closed): Bug: kicad-pcb-stitch doesn't connect vias to pads with traces
 - **Issue #1105** (closed): Bug: kicad-pcb-stitch places vias that short different nets
 - **Issue #1104** (closed): Bug: kicad-pcb-stitch adds invalid via format with rotation parameter
+
+## 2026-08-06 — v0.20.0 released
+
+- v0.20.0 tagged and published to PyPI: 16-issue sweep (waves 3-5) merged as a 12-PR train after the GitHub Actions outage; headliners: lattice search-time HV pairwise clearance (#4602) + keepout rule-areas (#4605), kct sch tidy (#4596) + schematic field lint (#4595), net-status strict default (#4557), .kicad_dru managed-block hardening (#4600/#4667).

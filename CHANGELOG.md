@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-06
+
 ### Summary
 
 Development since `v0.19.0`: a targeted `kct route --complete` completion pass,
@@ -2716,6 +2718,8 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.20.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.20.0
+[0.19.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.19.0
 [0.18.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.18.0
 [0.17.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.17.0
 [0.16.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.16.0
