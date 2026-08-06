@@ -2181,6 +2181,13 @@ def _write_drc_constraint_sidecars(
     unknown manufacturer degrades to a non-fatal warning, never a route
     failure.
 
+    Both sidecars have preserve-and-merge semantics: the ``.kicad_pro``
+    keeps existing project content and overwrites only the constraint /
+    severity entries, and the ``.kicad_dru`` tier floors land inside a
+    marker-guarded managed block (Issue #4600) so hand-written custom rules
+    and the ``kct creepage export-rules`` block (#4508) in a pre-existing
+    file survive every route.
+
     Args:
         output_path: Path to the routed PCB file.  The sidecars are written
             to the same directory (``<board>.kicad_pro`` / ``.kicad_dru``).

@@ -346,6 +346,49 @@ def test_merge_dru_block_appends_when_absent_and_is_idempotent():
 
 
 # ---------------------------------------------------------------------------
+# Interop with the fab-floors managed block (#4600)
+# ---------------------------------------------------------------------------
+
+
+def test_creepage_block_survives_write_drc_constraints(tmp_path):
+    """A sidecar re-emit (`kct route`/`build`/`check --emit-dru`) preserves us.
+
+    Issue #4600: `write_drc_constraints` used a blanket ``write_text`` that
+    deleted this module's managed block (plus hand-written rules).  It now
+    merges its own, distinctly-marked fab-floors block -- both managed
+    blocks and the hand-written rule must coexist in one valid file.
+    """
+    from kicad_tools.manufacturers import get_profile, write_drc_constraints
+    from kicad_tools.manufacturers.dru_generator import (
+        DRU_FLOORS_BLOCK_BEGIN,
+        DRU_FLOORS_BLOCK_END,
+    )
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    handwritten = '(version 1)\n\n(rule "hand_rule" (constraint track_width (min 0.15mm)))\n'
+    creepage_body = '(rule "kct_creepage_pair" (constraint clearance (min 1.5mm)))'
+    dru = board.with_suffix(".kicad_dru")
+    dru.write_text(merge_dru_block(handwritten, creepage_body))
+
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+    write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    merged = dru.read_text()
+    assert "hand_rule" in merged
+    assert creepage_body in merged
+    assert DRU_BLOCK_BEGIN in merged and DRU_BLOCK_END in merged
+    assert DRU_FLOORS_BLOCK_BEGIN in merged and DRU_FLOORS_BLOCK_END in merged
+    assert merged.count("(version 1)") == 1
+
+    # And the reverse: a creepage re-export preserves the fab-floors block.
+    re_exported = merge_dru_block(merged, creepage_body)
+    assert DRU_FLOORS_BLOCK_BEGIN in re_exported
+    assert re_exported.count(DRU_BLOCK_BEGIN) == 1
+    assert re_exported.count(DRU_FLOORS_BLOCK_BEGIN) == 1
+
+
+# ---------------------------------------------------------------------------
 # Round-trip: emitted rules parse back via the DRU importer
 # ---------------------------------------------------------------------------
 

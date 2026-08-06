@@ -34,7 +34,7 @@ from .base import (
     load_rotation_corrections,
     match_rotation_correction,
 )
-from .dru_generator import generate_dru
+from .dru_generator import generate_dru, merge_dru_floors
 from .flashpcb import FLASHPCB_PROFILE
 from .jlcpcb import JLCPCB_PROFILE
 from .jlcpcb_tier1 import JLCPCB_TIER1_PROFILE
@@ -65,6 +65,7 @@ __all__ = [
     "load_rotation_corrections",
     "match_rotation_correction",
     "generate_dru",
+    "merge_dru_floors",
     "build_default_netclass",
     "build_project_data",
     "build_project_rules",

@@ -35,6 +35,23 @@ constructor). No breaking changes.
   envelopes are deliberately excluded (same-domain by construction; emitted
   legs remain audited). The mesh engine stays post-route-gated only (#4602).
 
+- **`kct sch tidy` — headless Reference/Value field autoplace** — new
+  schematic subcommand that resets visible `Reference`/`Value` field
+  positions to deterministic bbox-relative defaults (Reference centered
+  above the placed symbol body, Value centered below, grid-aligned and
+  horizontal), honoring symbol rotation and mirroring — a diff-reviewable,
+  CI-runnable stand-in for Eeschema's GUI-only "Autoplace Fields"
+  (Eeschema-parity is an explicit non-goal). Supports `--threshold <mm>`
+  (only touch fields farther than this from the body), `--refs` scoping,
+  `--dry-run` before/after offset reports (`--format text|json`), and
+  `--backup`. Strictly cosmetic: only field `(at x y angle)` nodes change —
+  structural-diff, BOM, and kicad-cli netlist invariance are asserted in
+  tests. Power/virtual symbols and hidden fields are skipped by default;
+  unresolvable `lib_id`s warn instead of crashing. The underlying geometry
+  (placed body bbox, field-offset metric, default positions) lives in a new
+  shared `kicad_tools.schema.field_geometry` module so the companion
+  field-geometry lint (#4595) can reuse the exact same metric (#4596).
+
 - **Connector mating / edge-access rule in `kct check`** — new default-on
   `connector_access` category (selectable via `--only`/`--skip`, no new flags)
   with a warning-severity `connector_edge_access` rule that flags rigid-plug
@@ -287,6 +304,32 @@ constructor). No breaking changes.
   pad 28`; the real set is pads 27, 28, 29, 30) (#4612).
 
 ### Fixed
+
+- **The `.kicad_dru` sidecar write clobbered pre-existing user content.** The
+  tier-floor `.kicad_dru` written beside the board by `kct route`, `kct build`,
+  `kct mfr apply-rules`, and `kct check --emit-dru`/`--emit-drc-constraints`
+  was a blanket overwrite that silently deleted the marker-delimited HV
+  creepage rules merged by `kct creepage export-rules` (#4508) and any
+  hand-written custom rules. The fab-tier floors now live in their own
+  sentinel-delimited managed block (`# BEGIN kct fab floors ...` /
+  `# END kct fab floors`, mirroring the creepage exporter's merge dialect):
+  re-emitting replaces only that block, a pre-existing user-owned file is
+  preserved with the block merged in alongside its content, the merged file
+  keeps exactly one leading `(version 1)` header, and the creepage and
+  fab-floors managed blocks coexist in one file. Bare `kct check` (no
+  `--emit-*` flags) continues to write nothing beside the board — now locked
+  in by a regression test — and the `.kct/CONVENTIONS.md` cross-gate
+  convention vendored by `install-kct.sh` documents that `kicad-cli` auto-loads
+  these sidecars, sharing rule floors with `kct check` by design (#4600).
+
+- **Docs: `boards/06-diffpair-test/README.md` no longer cites the pre-ratchet
+  28-error allowlist.** The CI Gate section, "Interpreting a failure" table,
+  and "Tightening the allowlist" section now state the actual pin — 18 errors
+  (9x `diffpair_length_skew` + 9x `diffpair_routing_continuity`, #3540-#3544,
+  floor ratcheted 24 -> 18 by #4019) — matching
+  `.github/routed-drc-tolerance.yml` and `EXPECTED_STRICT_GATE_ERRORS`, and
+  stop presenting closed issues #2672/#2677/#2648 as pending prerequisites
+  (#4606).
 
 - **An HV pairwise-clearance failure could flow through `kct build` /
   `kct pipeline` as a soft warning.** Neither consumer forwarded

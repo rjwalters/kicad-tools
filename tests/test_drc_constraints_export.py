@@ -253,9 +253,12 @@ def test_write_drc_constraints_threads_net_classes_to_dru(tmp_path: Path):
     assert "Ampacity Min Width (POWER, external)" in dru_text
     assert "Ampacity Min Width (POWER, internal)" in dru_text
     # ...and the emitted text must be byte-identical to a direct
-    # generate_dru call with the same net_classes (no drift in the wiring).
-    assert dru_text == generate_dru(
-        rules, manufacturer_name="jlcpcb-tier1", net_classes=net_classes
+    # generate_dru call with the same net_classes wrapped in the managed
+    # fab-floors block (#4600) -- no drift in the wiring.
+    from kicad_tools.manufacturers.dru_generator import merge_dru_floors
+
+    assert dru_text == merge_dru_floors(
+        None, generate_dru(rules, manufacturer_name="jlcpcb-tier1", net_classes=net_classes)
     )
 
 
@@ -271,7 +274,155 @@ def test_write_drc_constraints_without_net_classes_omits_ampacity(tmp_path: Path
 
     dru_text = board.with_suffix(".kicad_dru").read_text()
     assert "Ampacity Min Width" not in dru_text
-    assert dru_text == generate_dru(rules, manufacturer_name="jlcpcb-tier1")
+    from kicad_tools.manufacturers.dru_generator import merge_dru_floors
+
+    assert dru_text == merge_dru_floors(None, generate_dru(rules, manufacturer_name="jlcpcb-tier1"))
+
+
+# ---------------------------------------------------------------------------
+# Managed fab-floors block: merge, never clobber (#4600)
+# ---------------------------------------------------------------------------
+
+
+class TestDruManagedBlockMerge:
+    """``write_drc_constraints`` merges the ``.kicad_dru``, never clobbers.
+
+    Issue #4600: the old blanket ``write_text`` silently destroyed the
+    marker-delimited HV creepage rules written by ``kct creepage
+    export-rules`` (#4508) and any hand-written custom rules.  The tier
+    floors now live in their own sentinel-delimited managed block (mirroring
+    the creepage exporter's ``merge_dru_block`` dialect) and re-emitting
+    replaces only that block.
+    """
+
+    def _emit(self, board: Path) -> str:
+        rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+        write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+        return board.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+
+    def test_fresh_write_wraps_rules_in_managed_block(self, tmp_path: Path):
+        from kicad_tools.manufacturers.dru_generator import (
+            DRU_FLOORS_BLOCK_BEGIN,
+            DRU_FLOORS_BLOCK_END,
+        )
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        dru_text = self._emit(board)
+
+        assert dru_text.startswith("(version 1)\n")
+        assert dru_text.count("(version 1)") == 1
+        assert DRU_FLOORS_BLOCK_BEGIN in dru_text
+        assert DRU_FLOORS_BLOCK_END in dru_text
+        # The floors are inside the block, after the BEGIN marker.
+        assert dru_text.index(DRU_FLOORS_BLOCK_BEGIN) < dru_text.index('(rule "Trace Width')
+
+    def test_reemit_is_idempotent(self, tmp_path: Path):
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        first = self._emit(board)
+        second = self._emit(board)
+        assert second == first
+
+    def test_reemit_replaces_only_the_managed_block(self, tmp_path: Path):
+        """A tier change swaps the block content; foreign rules survive."""
+        from kicad_tools.manufacturers.dru_generator import DRU_FLOORS_BLOCK_BEGIN
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        first = self._emit(board)
+        # A user appends a hand-written rule after the managed block.
+        hand_rule = '(rule "My HV Gap"\n  (constraint clearance (min 2.5mm)))\n'
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text(first + "\n" + hand_rule, encoding="utf-8")
+
+        # Re-emit at a different tier: the block floors change...
+        rules = get_profile("jlcpcb").get_design_rules(layers=2)
+        write_drc_constraints(board, rules, manufacturer_id="jlcpcb", layers=2)
+        merged = dru.read_text(encoding="utf-8")
+
+        assert '"Trace Width - jlcpcb"' in merged
+        assert '"Trace Width - jlcpcb-tier1"' not in merged
+        # ...exactly one block remains, and the hand-written rule survives.
+        assert merged.count(DRU_FLOORS_BLOCK_BEGIN) == 1
+        assert hand_rule.strip() in merged
+        assert merged.count("(version 1)") == 1
+
+    def test_creepage_block_survives_reemit(self, tmp_path: Path):
+        """The #4508 creepage managed block outlives a sidecar re-emit."""
+        from kicad_tools.creepage.export_rules import (
+            DRU_BLOCK_BEGIN,
+            DRU_BLOCK_END,
+            merge_dru_block,
+        )
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        creepage_body = (
+            '(rule "kct creepage 150V<->3p3V"\n'
+            "  (condition \"A.NetClass == 'kct_150V' && B.NetClass == 'kct_3p3V'\")\n"
+            "  (constraint clearance (min 1.5mm)))"
+        )
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text(merge_dru_block(None, creepage_body), encoding="utf-8")
+
+        merged = self._emit(board)
+        assert DRU_BLOCK_BEGIN in merged
+        assert DRU_BLOCK_END in merged
+        assert creepage_body in merged
+        assert '(rule "Trace Width - jlcpcb-tier1"' in merged
+        assert merged.count("(version 1)") == 1
+
+    def test_user_owned_file_is_never_clobbered(self, tmp_path: Path):
+        """A no-marker, fully user-owned file keeps every byte of content.
+
+        The managed block is merged in ALONGSIDE the user's rules (the
+        stronger option from #4600's acceptance criteria) rather than
+        skipping the write -- the sidecar must still deliver the tier
+        floors for kicad-cli floor parity (#3919).
+        """
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        user_content = '(version 1)\n(rule "Antenna Keepout"\n  (constraint clearance (min 3mm)))\n'
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text(user_content, encoding="utf-8")
+
+        merged = self._emit(board)
+        assert merged.startswith(user_content)
+        assert '(rule "Antenna Keepout"' in merged
+        assert '(rule "Trace Width - jlcpcb-tier1"' in merged
+        assert merged.count("(version 1)") == 1
+
+    def test_user_file_without_version_header_gains_exactly_one(self, tmp_path: Path):
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text('(rule "Bare"\n  (constraint clearance (min 1mm)))\n', encoding="utf-8")
+
+        merged = self._emit(board)
+        assert merged.startswith("(version 1)\n")
+        assert merged.count("(version 1)") == 1
+        assert '(rule "Bare"' in merged
+
+    def test_merged_file_still_parses_as_design_rules(self, tmp_path: Path):
+        """Creepage block + user rule + fab floors: still valid DRU syntax."""
+        from kicad_tools.core.sexp_file import load_design_rules
+        from kicad_tools.creepage.export_rules import merge_dru_block
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        seeded = merge_dru_block(
+            '(version 1)\n(rule "Hand Rule"\n  (constraint clearance (min 2mm)))\n',
+            '(rule "kct creepage"\n  (constraint clearance (min 1.5mm)))',
+        )
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text(seeded, encoding="utf-8")
+
+        self._emit(board)
+        sexp = load_design_rules(dru)
+        # version + 3 rule sources parsed (comments are skipped by the parser)
+        rule_tags = [v for v in sexp.values if getattr(v, "tag", None) == "rule"]
+        assert len(rule_tags) >= 3
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,12 @@ from .bom import (
     BOMItem,
     extract_bom,
 )
+from .field_geometry import (
+    DEFAULT_FIELD_CLEARANCE_MM,
+    default_field_positions,
+    field_offset_mm,
+    placed_body_bbox,
+)
 from .hierarchy import (
     HierarchyBuilder,
     HierarchyNode,
@@ -54,6 +60,10 @@ __all__ = [
     "BOMItem",
     "BOMGroup",
     "extract_bom",
+    "DEFAULT_FIELD_CLEARANCE_MM",
+    "default_field_positions",
+    "field_offset_mm",
+    "placed_body_bbox",
     "PCB",
     "Layer",
     "Net",

@@ -299,6 +299,15 @@ def write_drc_constraints(
     schema can't express.  An existing ``.kicad_pro`` is preserved and
     only the constraint/severity entries are overwritten.
 
+    The ``.kicad_dru`` half has matching preserve-and-merge semantics
+    (Issue #4600): the tier-floor rules land inside a sentinel-delimited
+    managed block (see
+    :func:`~kicad_tools.manufacturers.dru_generator.merge_dru_floors`) and
+    re-emitting replaces only that block.  Hand-written custom rules and
+    the ``kct creepage export-rules`` managed block (#4508) outside the
+    fab-floors markers survive verbatim; a pre-existing user-owned file
+    is never clobbered -- the block is merged in alongside its content.
+
     Args:
         pcb_path: Path to the routed board.
         rules: Manufacturer design rules to translate.
@@ -351,11 +360,22 @@ def write_drc_constraints(
     written.append(pro_path)
 
     if write_dru:
-        from .dru_generator import generate_dru
+        from .dru_generator import generate_dru, merge_dru_floors
 
         dru_path = pcb_path.with_suffix(".kicad_dru")
+        try:
+            existing_dru: str | None = (
+                dru_path.read_text(encoding="utf-8") if dru_path.exists() else None
+            )
+        except OSError:
+            # Unreadable existing file -- nothing recoverable to preserve;
+            # write cleanly (mirrors the corrupt-``.kicad_pro`` fallback).
+            existing_dru = None
         dru_path.write_text(
-            generate_dru(rules, manufacturer_name=manufacturer_id, net_classes=net_classes),
+            merge_dru_floors(
+                existing_dru,
+                generate_dru(rules, manufacturer_name=manufacturer_id, net_classes=net_classes),
+            ),
             encoding="utf-8",
         )
         written.append(dru_path)
