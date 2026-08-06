@@ -8,14 +8,17 @@ per-stage ``kct route`` command construction.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
 
 from kicad_tools.router.partial_rescue import (
+    COMPLETION_PASS_OVERRIDES,
     CompletionResult,
     RescueConfig,
     UnroutableLink,
+    _completion_pass_config,
     all_net_names,
     build_rescue_command,
     complete_unfinished_nets,
@@ -23,6 +26,39 @@ from kicad_tools.router.partial_rescue import (
     rescue_partial_nets,
     strip_net_copper,
 )
+
+
+def sentinel_rescue_config() -> RescueConfig:
+    """Build a :class:`RescueConfig` with a non-default sentinel in EVERY field.
+
+    Drift-guard scaffolding for #4550: iterates ``dataclasses.fields`` so a
+    future field is automatically covered, and picks a type-aware sentinel
+    guaranteed to differ from the field's default (``bool`` -> flipped,
+    ``int`` -> default+1, ``str`` -> ``"sentinel"``, ``frozenset`` ->
+    ``{"sentinel"}``, ``tuple`` -> ``("--sentinel",)``).  A field with an
+    unhandled type fails loudly so the sentinel table gets extended.
+    """
+    kwargs: dict[str, object] = {}
+    for f in dataclasses.fields(RescueConfig):
+        default = f.default if f.default is not dataclasses.MISSING else f.default_factory()  # type: ignore[misc]
+        # NOTE: bool before int (bool subclasses int).
+        if isinstance(default, bool):
+            kwargs[f.name] = not default
+        elif isinstance(default, int):
+            kwargs[f.name] = default + 1
+        elif isinstance(default, str):
+            kwargs[f.name] = "sentinel"
+        elif isinstance(default, frozenset):
+            kwargs[f.name] = frozenset({"sentinel"})
+        elif isinstance(default, tuple):
+            kwargs[f.name] = ("--sentinel",)
+        else:  # pragma: no cover - fails loudly on a new field type
+            raise AssertionError(
+                f"no sentinel rule for RescueConfig.{f.name} "
+                f"(default type {type(default).__name__}); extend sentinel_rescue_config()"
+            )
+    return RescueConfig(**kwargs)  # type: ignore[arg-type]
+
 
 # A minimal kicad_pcb skeleton: 3 nets, copper for nets 1 and 2.
 # Top-level copper blocks are tab-indented exactly as kicad emits them
@@ -810,6 +846,75 @@ def test_completion_report_propagates_unroutable_links(tmp_path: Path, monkeypat
     assert link.stuck_classification == "walled"
     # No report side-file left behind.
     assert not list(tmp_path.glob("*_complete_report*"))
+
+
+# ---------------------------------------------------------------------------
+# _completion_pass_config: RescueConfig field propagation drift guard (#4550)
+# ---------------------------------------------------------------------------
+
+
+def test_completion_pass_config_drift_guard() -> None:
+    """Every RescueConfig field must reach the completion pass config unchanged.
+
+    Issue #4550: the old field-by-field rebuild silently dropped any field
+    added after it was written (concretely ``allow_unsafe_grid``, #4532).
+    This guard iterates ``dataclasses.fields(RescueConfig)`` with non-default
+    sentinels: a future field that a re-introduced enumeration fails to
+    propagate makes this test fail WITHOUT any test edit.  The only allowed
+    difference is the documented explicit-override set.
+    """
+    assert frozenset({"stage_timeout_s"}) == COMPLETION_PASS_OVERRIDES
+
+    cfg = sentinel_rescue_config()
+    derived = _completion_pass_config(cfg, 1234)
+
+    assert derived.stage_timeout_s == 1234  # the one intentional override
+    for f in dataclasses.fields(RescueConfig):
+        if f.name in COMPLETION_PASS_OVERRIDES:
+            continue
+        assert getattr(derived, f.name) == getattr(cfg, f.name), (
+            f"RescueConfig.{f.name} was dropped by _completion_pass_config -- "
+            f"new fields must propagate to the batch completion pass (#4550)"
+        )
+
+
+def test_completion_pass_command_inherits_allow_unsafe_grid(tmp_path: Path, monkeypatch) -> None:
+    """#4550 regression: the batch completion subprocess argv must carry the
+    main pass's ``--allow-unsafe-grid`` (and ``--deterministic-budget``) --
+    previously ``complete_unfinished_nets`` rebuilt the pass config
+    field-by-field and reset ``allow_unsafe_grid`` to False, so an
+    unsafe-grid board's completion subprocess exited 1 at the CLI gate
+    before routing anything (bogus ``no_output`` failures)."""
+    pcb = _write_pcb(tmp_path)
+    captured: list[list[str]] = []
+
+    detections = iter([["SDA"], []])
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.partially_connected_signal_nets",
+        lambda *a, **k: next(detections),
+    )
+
+    def _fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        out = Path(cmd[cmd.index("--output") + 1])
+        out.write_text(Path(cmd[4]).read_text())
+        return _Result()
+
+    monkeypatch.setattr("kicad_tools.router.partial_rescue.subprocess.run", _fake_run)
+
+    config = RescueConfig(allow_unsafe_grid=True, deterministic_budget=True)
+    complete_unfinished_nets(pcb, config, max_passes=1, quiet=True)
+
+    assert captured, "a completion subprocess should have been launched"
+    for cmd in captured:
+        assert "--allow-unsafe-grid" in cmd
+        assert "--deterministic-budget" in cmd
 
 
 def test_completion_result_is_list_compatible() -> None:
