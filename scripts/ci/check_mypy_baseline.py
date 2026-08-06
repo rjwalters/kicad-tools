@@ -60,6 +60,7 @@ from pathlib import Path
 
 DEFAULT_BASELINE = Path(".github/mypy-baseline.txt")
 DEFAULT_TARGET = "src/"
+DEFAULT_UV_LOCK = Path("uv.lock")
 
 # Mypy error lines look like:
 #   src/pkg/mod.py:248: error: Function "builtins.any" is ...  [valid-type]
@@ -136,6 +137,113 @@ def run_mypy(target: str) -> str:
         check=False,
     )
     return proc.stdout + proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Mypy version-drift guard (issue #4558)
+#
+# Fresh/stale local worktrees can drift from the uv.lock pin (observed: mypy
+# 1.20.2 vs locked 1.19.1), surfacing new/changed mypy diagnostics as "NEW
+# errors beyond the baseline" with no hint that the toolchain -- not the diff
+# -- changed.  CI is immune (`uv sync --frozen --extra dev`), so this guard is
+# warn-only: it never changes exit-code semantics, and it skips silently when
+# uv.lock is missing/unparseable so it can never turn a working gate into a
+# tool failure.
+# ---------------------------------------------------------------------------
+
+# The uv.lock package block looks like:
+#   [[package]]
+#   name = "mypy"
+#   version = "1.19.1"
+_UV_LOCK_MYPY_RE = re.compile(
+    r'^\[\[package\]\]\s*\nname = "mypy"\s*\nversion = "(?P<version>[^"]+)"',
+    re.MULTILINE,
+)
+
+# `mypy --version` output looks like: ``mypy 1.19.1 (compiled: yes)``
+_MYPY_VERSION_OUTPUT_RE = re.compile(r"\bmypy\s+(?P<version>\d+\.\d+(?:\.\d+)?\S*)")
+
+
+def locked_mypy_version(lock_path: Path = DEFAULT_UV_LOCK) -> str | None:
+    """Parse the pinned mypy version out of ``uv.lock``.
+
+    Returns ``None`` (guard silently skipped) when the lockfile is missing,
+    unreadable, or has no recognizable mypy package block.
+    """
+    try:
+        text = lock_path.read_text()
+    except OSError:
+        return None
+    m = _UV_LOCK_MYPY_RE.search(text)
+    return m.group("version") if m else None
+
+
+def parse_installed_mypy_version(output: str) -> str | None:
+    """Extract the version number from ``mypy --version`` output."""
+    m = _MYPY_VERSION_OUTPUT_RE.search(output)
+    return m.group("version") if m else None
+
+
+def installed_mypy_version() -> str | None:
+    """Query the version of the same PATH ``mypy`` binary :func:`run_mypy` uses.
+
+    Deliberately NOT ``importlib.metadata``: ``run_mypy`` resolves ``mypy``
+    via PATH, and a PATH binary from another env is part of the drift failure
+    mode this guard exists to name.  Returns ``None`` on any failure.
+    """
+    try:
+        proc = subprocess.run(
+            ["mypy", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return parse_installed_mypy_version(proc.stdout + proc.stderr)
+
+
+def mypy_version_drift(lock_path: Path = DEFAULT_UV_LOCK) -> tuple[str, str] | None:
+    """Return ``(locked, installed)`` when the versions differ, else ``None``.
+
+    Any unreadable side (missing lock, no mypy block, mypy not runnable)
+    yields ``None`` -- the guard must never fail the gate on its own.
+    """
+    locked = locked_mypy_version(lock_path)
+    if locked is None:
+        return None
+    installed = installed_mypy_version()
+    if installed is None:
+        return None
+    return (locked, installed) if locked != installed else None
+
+
+def emit_drift_warning(locked: str, installed: str, has_new_errors: bool) -> None:
+    """Print the (warn-only) version-drift diagnostics.
+
+    When the run also reports new-vs-baseline errors, a banner states that
+    toolchain drift -- not the diff under review -- is the likely cause.
+    """
+    if has_new_errors:
+        print("=" * 72, flush=True)
+        print(
+            "MYPY VERSION DRIFT: the NEW errors reported below are likely\n"
+            "TOOLCHAIN NOISE, not regressions in this diff. The invoked mypy\n"
+            f"is {installed} but uv.lock pins {locked}. Re-sync the env and re-run\n"
+            "before chasing individual errors:\n"
+            "    uv sync --frozen --extra dev\n"
+            "Do NOT run --update to absorb drift-induced errors into the baseline.",
+            flush=True,
+        )
+        print("=" * 72, flush=True)
+    print(
+        f"::warning::MYPY VERSION DRIFT: installed mypy {installed} != uv.lock pin "
+        f"{locked}. Local env has drifted from the lockfile; fix with "
+        f"`uv sync --frozen --extra dev`.",
+        flush=True,
+    )
 
 
 def load_baseline(baseline_path: Path) -> Counter[str]:
@@ -249,10 +357,14 @@ def main(argv: list[str] | None = None) -> int:
 
     baseline_path = Path(args.baseline)
 
+    # Version-drift guard (issue #4558): only meaningful when we actually
+    # invoke the PATH mypy binary (synthetic --mypy-output runs did not).
+    drift: tuple[str, str] | None = None
     if args.mypy_output is not None:
         raw = Path(args.mypy_output).read_text()
     else:
         raw = run_mypy(args.target)
+        drift = mypy_version_drift()
 
     current = parse_mypy_output(raw)
 
@@ -266,6 +378,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     if args.update:
+        if drift is not None:
+            locked, installed = drift
+            print(
+                f"::warning::MYPY VERSION DRIFT during --update: regenerating the "
+                f"baseline with mypy {installed} while uv.lock pins {locked} bakes "
+                f"drift-induced errors into the ledger AND can drop env-agnostic "
+                f"entries (e.g. the nanobind import signatures). Run "
+                f"`uv sync --frozen --extra dev` and re-run --update instead.",
+                flush=True,
+            )
         write_baseline(baseline_path, current)
         print(
             f"Wrote baseline with {sum(current.values())} error(s) "
@@ -276,6 +398,9 @@ def main(argv: list[str] | None = None) -> int:
 
     baseline = load_baseline(baseline_path)
     new_errors, fixed_errors = diff_against_baseline(current, baseline)
+
+    if drift is not None:
+        emit_drift_warning(drift[0], drift[1], has_new_errors=bool(new_errors))
 
     if fixed_errors:
         n_fixed = sum(fixed_errors.values())
