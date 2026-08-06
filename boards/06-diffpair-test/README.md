@@ -113,13 +113,16 @@ kct check output/diffpair_test_routed.kicad_pcb --mfr jlcpcb --errors-only
   Once the router populates `skew_data`, the rule fires on PCIe / MIPI
   skew violations.
 - [#2648](https://github.com/rjwalters/kicad-tools/issues/2648)
-  (Phase 3I serpentine insertion) --- still in progress at scaffold-time.
-  Until it lands, PCIe / MIPI pairs may exceed their declared
-  `skew_tolerance_mm` because the router can't yet meander to fix skew.
+  (Phase 3I serpentine insertion) --- **landed** (closed).  At
+  scaffold-time it was still in progress, so PCIe / MIPI pairs could
+  exceed their declared `skew_tolerance_mm` because the router couldn't
+  yet meander to fix skew.
 
-Per the Epic #2556 Phase 4L mitigation strategy, this board is scaffolded
-now with PCIe / MIPI pairs declared but DRC tolerated at "non-strict" if
-#2648 hasn't landed yet.  Re-route and tighten when #2648 merges.
+*Historical scaffold-time context*: per the Epic #2556 Phase 4L
+mitigation strategy, this board was scaffolded with PCIe / MIPI pairs
+declared but DRC tolerated at "non-strict" while #2648 was pending.
+Both dependencies have since landed; the remaining tolerated residual is
+the 18-error diff-pair quality block documented under "CI Gate" below.
 
 ## Measuring Changes: the Shadow Phase Is Deterministic, Full Regen Is Not (#4536)
 
@@ -297,10 +300,14 @@ The job:
    `NetClassRouting` map from `build_net_class_map()`, and runs
    `DRCChecker` with `--mfr jlcpcb`.
 3. Asserts the DRC **error count** is within the per-board allowlist in
-   `.github/routed-drc-tolerance.yml` (currently 28: 25x `ImpedanceRule`
-   per [#2672](https://github.com/rjwalters/kicad-tools/issues/2672)
-   + 3x `diffpair_clearance_intra` per
-   [#2677](https://github.com/rjwalters/kicad-tools/issues/2677)).
+   `.github/routed-drc-tolerance.yml` (currently 18: 9x
+   `diffpair_length_skew` + 9x `diffpair_routing_continuity` per
+   [#3540](https://github.com/rjwalters/kicad-tools/issues/3540)-[#3544](https://github.com/rjwalters/kicad-tools/issues/3544),
+   floor ratcheted 24 -> 18 by
+   [#4019](https://github.com/rjwalters/kicad-tools/issues/4019) with all
+   three gated paths --- committed-artifact `routed-pcb-drc-check`,
+   seed-42 Diff-Pair Routing Regression, and the Board 06 E2E fresh
+   regen --- agreeing at 18).
 4. Asserts each of the three diff-pair DRC rule_ids was actually
    exercised by the check, i.e. the JSON summary's
    `rules_checked_by_rule[rule_id] >= 1` for each of:
@@ -319,16 +326,23 @@ The job:
 | Failure mode                                                | Likely cause                                                      |
 |-------------------------------------------------------------|-------------------------------------------------------------------|
 | `Diff-pair rule(s) NOT exercised`                           | Detection broken: `coupled_routing` flag flipped, suffix detection broken, or the routed PCB has no matching pair traces. |
-| `DRC regression: <N> error(s) exceeds allowlist value 28`   | The router introduced new DRC errors beyond the documented #2672/#2677 baseline.  Bisect against the routing algorithm. |
+| `DRC regression: <N> error(s) exceeds allowlist value 18`   | The router introduced new DRC errors beyond the documented #3540-#3544 baseline (9x skew + 9x continuity, #4019 ratchet).  Bisect against the routing algorithm. |
 | Re-route step fails with non-zero exit                      | Routing algorithm regression (board hangs or crashes during `route_all`).  Reproduce locally with `--seed 42`. |
 
 ### Tightening the allowlist
 
-When [#2672](https://github.com/rjwalters/kicad-tools/issues/2672)
+The original prerequisites ---
+[#2672](https://github.com/rjwalters/kicad-tools/issues/2672)
 (impedance-width selection) and
 [#2677](https://github.com/rjwalters/kicad-tools/issues/2677) (BGA
-partner-via escape) land, the board 06 entry in
-`.github/routed-drc-tolerance.yml` should be reduced.  Eventually the
+partner-via escape) --- are both **closed**, and their error classes are
+gone from the gate.  The floor was ratcheted 24 -> 18 by
+[#4019](https://github.com/rjwalters/kicad-tools/issues/4019); the
+current residual is exactly the diff-pair quality block (9x
+`diffpair_length_skew` + 9x `diffpair_routing_continuity`,
+[#3540](https://github.com/rjwalters/kicad-tools/issues/3540)-[#3544](https://github.com/rjwalters/kicad-tools/issues/3544)).
+That residual must clear before the board 06 entry in
+`.github/routed-drc-tolerance.yml` can shrink further.  Eventually the
 entry should be **removed** entirely (per the YAML's "absence == strict
 0 errors" convention) once the board routes cleanly under JLCPCB tier-1
 rules.

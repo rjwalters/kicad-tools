@@ -270,6 +270,15 @@ constructor). No breaking changes.
 
 ### Fixed
 
+- **Docs: `boards/06-diffpair-test/README.md` no longer cites the pre-ratchet
+  28-error allowlist.** The CI Gate section, "Interpreting a failure" table,
+  and "Tightening the allowlist" section now state the actual pin — 18 errors
+  (9x `diffpair_length_skew` + 9x `diffpair_routing_continuity`, #3540-#3544,
+  floor ratcheted 24 -> 18 by #4019) — matching
+  `.github/routed-drc-tolerance.yml` and `EXPECTED_STRICT_GATE_ERRORS`, and
+  stop presenting closed issues #2672/#2677/#2648 as pending prerequisites
+  (#4606).
+
 - **An HV pairwise-clearance failure could flow through `kct build` /
   `kct pipeline` as a soft warning.** Neither consumer forwarded
   `--voltage-map`, and both treated route exit 3 as non-fatal with a message
