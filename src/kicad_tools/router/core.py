@@ -1017,6 +1017,11 @@ class Autorouter:
         # Populated by the PCB loader and consumed only when pairwise voltage
         # rules are enabled, to derive rated-footprint attach zones.
         self._pairwise_attach_zone_pcb_path: str | None = None
+        # Memoised sheet-absolute #4506 attach zones (resolved + cached by the
+        # CLI's ``_pairwise_attach_zones`` helper, which owns the
+        # board-origin shift per PR #4603).  ``None`` = not yet resolved.
+        # Consumed here by the lattice pairwise projection (#4602).
+        self._pairwise_attach_zones_cache: tuple[Any, ...] | None = None
         # Issue #2610: stored so _create_grid_and_routers can pass it to
         # create_hybrid_router on the initial construction.
         self._max_search_iterations = int(max_search_iterations) if max_search_iterations else 0
@@ -2638,6 +2643,38 @@ class Autorouter:
             )
         return self._lattice_pathfinder
 
+    def _lattice_pairwise_projection(self) -> Any:
+        """Net-id-space HV pairwise projection for the lattice engine (#4602).
+
+        The router owns both halves the (deliberately geometry-only, #4597)
+        lattice pathfinder must never see: the name-keyed
+        ``rules.pairwise_clearance`` table and the ``net_names`` id map.  The
+        #4506 attach zones come from the CLI's ``_pairwise_attach_zones``
+        resolver output (memoised on ``_pairwise_attach_zones_cache``,
+        sheet-absolute per PR #4603) -- they are reused, never rebuilt here.
+
+        Returns ``None`` when no ``--voltage-map`` table is installed or no
+        pair resolves on this board -- the dormant signal that keeps the
+        lattice search byte-identical to the scalar path.
+        """
+        table = getattr(self.rules, "pairwise_clearance", None)
+        if table is None:
+            return None
+
+        from .lattice.pairwise import build_lattice_pairwise
+
+        name_to_id: dict[str, int] = {
+            name: int(net_id) for net_id, name in self.net_names.items() if name
+        }
+        # Defensive union with the pad-derived names: a router assembled
+        # without ``add_component`` (tests, deserialization) may have an
+        # empty ``net_names`` map while its pads still carry names.
+        for pad in self.all_pads or list(self.pads.values()):
+            if pad.net_name and pad.net_name not in name_to_id and pad.net is not None:
+                name_to_id[pad.net_name] = int(pad.net)
+        zones = self._pairwise_attach_zones_cache or ()
+        return build_lattice_pairwise(table, zones, name_to_id)
+
     @staticmethod
     def _snap_lattice_region(
         box: tuple[float, float, float, float],
@@ -2821,6 +2858,14 @@ class Autorouter:
         anchor selection untouched.
         """
         pf = self._ensure_lattice_pathfinder()
+
+        # Issue #4602: project the HV pairwise table (name-keyed, set on the
+        # shared rules by ``_apply_pairwise_clearance``) + the #4506 attach
+        # zones into net-id space and install them on the (geometry-only)
+        # lattice pathfinder, so HV<->LV proximity is AVOIDED during search
+        # rather than merely reported by the #4588 post-route gate.  Always
+        # called -- ``None`` resets a reused pathfinder (no stale projection).
+        pf.set_pairwise(self._lattice_pairwise_projection())
 
         coupled, reserved = self._lattice_coupled_connections()
 

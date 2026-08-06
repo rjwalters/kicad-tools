@@ -103,7 +103,7 @@ class CacheKey:
         pcb_hash = hashlib.sha256(pcb_content).hexdigest()
 
         # Hash design rules (serialize relevant fields)
-        rules_data = {
+        rules_data: dict[str, object] = {
             "trace_width": rules.trace_width,
             "trace_clearance": rules.trace_clearance,
             "via_drill": rules.via_drill,
@@ -113,6 +113,20 @@ class CacheKey:
             "preferred_layer": rules.preferred_layer.value,
             "alternate_layer": rules.alternate_layer.value,
         }
+        # Issue #4602: the derived HV pairwise matrix (--voltage-map, #4431)
+        # changes the ROUTES themselves -- grid (#4454/#4511) and lattice
+        # (#4602) avoid HV<->LV proximity during search -- so it must key the
+        # cache.  Without this a scalar run's entry was served to a
+        # --voltage-map run (silently bypassing route-time avoidance; only the
+        # #4588 post-route gate caught it) and vice versa.  Absent table ->
+        # ``rules_data`` is unchanged, so every pre-existing key is preserved
+        # byte-for-byte.
+        pairwise = getattr(rules, "pairwise_clearance", None)
+        if pairwise is not None and pairwise.required_by_pair:
+            rules_data["pairwise_required_by_pair"] = sorted(
+                [net_a, net_b, float(required)]
+                for (net_a, net_b), required in pairwise.required_by_pair.items()
+            )
         rules_json = json.dumps(rules_data, sort_keys=True)
         rules_hash = hashlib.sha256(rules_json.encode()).hexdigest()
 

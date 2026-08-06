@@ -413,9 +413,31 @@ def _segment_edge_gap(seg_a: Segment, seg_b: Segment) -> float:
 
 def _closest_gap_midpoint(seg_a: Segment, seg_b: Segment) -> tuple[float, float]:
     """Return the midpoint between the closest points on two line segments."""
-    ux, uy = seg_a.x2 - seg_a.x1, seg_a.y2 - seg_a.y1
-    vx, vy = seg_b.x2 - seg_b.x1, seg_b.y2 - seg_b.y1
-    wx, wy = seg_a.x1 - seg_b.x1, seg_a.y1 - seg_b.y1
+    return closest_gap_midpoint_xy(
+        seg_a.x1, seg_a.y1, seg_a.x2, seg_a.y2, seg_b.x1, seg_b.y1, seg_b.x2, seg_b.y2
+    )
+
+
+def closest_gap_midpoint_xy(
+    ax1: float,
+    ay1: float,
+    ax2: float,
+    ay2: float,
+    bx1: float,
+    by1: float,
+    bx2: float,
+    by2: float,
+) -> tuple[float, float]:
+    """Coordinate-level form of :func:`_closest_gap_midpoint` (issue #4602).
+
+    The lattice engine's search-time attach-zone exemption probes the SAME
+    closest-gap midpoint the post-route validator reports, so the in-search
+    verdict and the #4588 gate agree by construction.  The lattice works on
+    bare point tuples, hence this :class:`Segment`-free entry point.
+    """
+    ux, uy = ax2 - ax1, ay2 - ay1
+    vx, vy = bx2 - bx1, by2 - by1
+    wx, wy = ax1 - bx1, ay1 - by1
     a = ux * ux + uy * uy
     b = ux * vx + uy * vy
     c = vx * vx + vy * vy
@@ -423,15 +445,15 @@ def _closest_gap_midpoint(seg_a: Segment, seg_b: Segment) -> tuple[float, float]
     e = vx * wx + vy * wy
 
     if a <= 1e-15 and c <= 1e-15:
-        return ((seg_a.x1 + seg_b.x1) / 2.0, (seg_a.y1 + seg_b.y1) / 2.0)
+        return ((ax1 + bx1) / 2.0, (ay1 + by1) / 2.0)
     if a <= 1e-15:
         t = max(0.0, min(1.0, e / c))
-        closest_b = (seg_b.x1 + t * vx, seg_b.y1 + t * vy)
-        return ((seg_a.x1 + closest_b[0]) / 2.0, (seg_a.y1 + closest_b[1]) / 2.0)
+        closest_b = (bx1 + t * vx, by1 + t * vy)
+        return ((ax1 + closest_b[0]) / 2.0, (ay1 + closest_b[1]) / 2.0)
     if c <= 1e-15:
         s = max(0.0, min(1.0, -d / a))
-        closest_a = (seg_a.x1 + s * ux, seg_a.y1 + s * uy)
-        return ((closest_a[0] + seg_b.x1) / 2.0, (closest_a[1] + seg_b.y1) / 2.0)
+        closest_a = (ax1 + s * ux, ay1 + s * uy)
+        return ((closest_a[0] + bx1) / 2.0, (closest_a[1] + by1) / 2.0)
 
     denominator = a * c - b * b
     s_num, s_den = denominator, denominator
@@ -467,8 +489,8 @@ def _closest_gap_midpoint(seg_a: Segment, seg_b: Segment) -> tuple[float, float]
 
     s = 0.0 if abs(s_num) <= 1e-15 else s_num / s_den
     t = 0.0 if abs(t_num) <= 1e-15 else t_num / t_den
-    closest_a = (seg_a.x1 + s * ux, seg_a.y1 + s * uy)
-    closest_b = (seg_b.x1 + t * vx, seg_b.y1 + t * vy)
+    closest_a = (ax1 + s * ux, ay1 + s * uy)
+    closest_b = (bx1 + t * vx, by1 + t * vy)
     return ((closest_a[0] + closest_b[0]) / 2.0, (closest_a[1] + closest_b[1]) / 2.0)
 
 

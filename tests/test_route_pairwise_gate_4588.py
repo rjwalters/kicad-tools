@@ -13,10 +13,14 @@ feature on a mains board.
 The gate is a post-route, board-level audit of the copper the engine actually
 committed (``router.routes``), so it is engine-agnostic.  These tests pin:
 
-1. lattice + ``--voltage-map`` + planted HV/LV proximity -> non-zero exit,
-   ``ROUTING FAILED`` banner, no ``SUCCESS`` banner;
+1. lattice + ``--voltage-map`` + planted HV/LV proximity the search cannot
+   route around (pads pinned inside the requirement) -> non-zero exit, no
+   ``SUCCESS`` banner.  Since issue #4602 the lattice search *avoids* HV<->LV
+   proximity at route time, so the tight fixture now fails as an honest
+   in-search decline (``pad-escape``) rather than as committed-then-gated
+   copper -- either way, never a silent false pass;
 2. the identical board **without** ``--voltage-map`` -> gate is a strict no-op
-   (exit 0, ``SUCCESS``, byte-identical copper);
+   (exit 0, ``SUCCESS``);
 3. grid + ``--voltage-map`` on a board with no HV/LV proximity -> still exit 0
    (the gate is not a false-positive source on the production default);
 4. a board whose only HV/LV proximity is inside a **rated domain-bridging
@@ -24,7 +28,10 @@ committed (``router.routes``), so it is engine-agnostic.  These tests pin:
    footprint positions board-relative while ``router.routes`` are
    sheet-absolute, so an unshifted attach zone silently misses on every board
    that does not sit at sheet origin -- i.e. on every real board -- turning
-   this gate into a hard false fail.
+   this gate into a hard false fail;
+5. (issue #4602) a two-domain board where a compliant detour EXISTS -> the
+   lattice search takes it and the run passes the gate with exit 0, instead
+   of committing the naive proximate path and hard-failing.
 
 Boards are fully synthetic S-expression strings (same approach as
 ``test_route_offboard_gate.py``) -- the softstart rev-C board from the original
@@ -159,6 +166,56 @@ def _bridging_board(origin_x: float, origin_y: float) -> str:
 """
 
 
+def _detour_board() -> str:
+    """Two-domain board with a compliant detour available (issue #4602).
+
+    The HV link is a short horizontal run in the board centre; the LV link is
+    a vertical run whose NAIVE shortest path crosses straight through the HV
+    corridor.  Every pad-to-pad gap is 10 mm -- well beyond the 3.2 mm derived
+    requirement (300 V / IEC 60664-1 / PD2 / IIIa) -- so, unlike
+    ``_two_domain_board(0.6)``, avoidance CAN produce compliant copper: a
+    planar detour west/east of the HV corridor and a B.Cu under-crossing both
+    exist with margin.
+
+    Pre-#4602 behaviour (verified on ``main`` @ ``08776b3d``): the lattice
+    search jogged around the HV pad at scalar-DRU spacing and the #4588
+    post-route gate fired with 3 trace-to-trace findings (0.600 / 2.200 /
+    3.000 mm against the 3.200 mm requirement), exit 3.  This fixture is the
+    pass-oracle showing the search now avoids what the gate would report.
+    """
+    parts = [
+        _fp("R1", 10, 112.0, 112.0, _pad("1", 0, 0, 1, "/HV_LINE")),
+        _fp("R2", 11, 118.0, 112.0, _pad("1", 0, 0, 1, "/HV_LINE")),
+        _fp("R3", 12, 112.0, 102.0, _pad("1", 0, 0, 2, "/LV_SENSE")),
+        _fp("R4", 13, 112.0, 122.0, _pad("1", 0, 0, 2, "/LV_SENSE")),
+    ]
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "/HV_LINE")
+  (net 2 "/LV_SENSE")
+  (gr_rect (start 100 100) (end 130 124)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+{"".join(parts)})
+"""
+
+
 def _strip_uuids(text: str) -> str:
     """Drop the freshly-generated per-element ``uuid`` lines from a board."""
     return re.sub(r'\(uuid "[^"]*"\)', "(uuid)", text)
@@ -216,37 +273,45 @@ def wide_board(tmp_path: Path) -> Path:
 class TestLatticeGate:
     """The engine that had zero pairwise awareness must no longer false-pass."""
 
-    def test_lattice_with_voltage_map_fails_on_hv_proximity(
+    def test_lattice_with_voltage_map_declines_hv_proximity_in_search(
         self, tight_board: Path, tmp_path: Path, capsys
     ) -> None:
+        """The tight fixture stays an honest FAILURE -- now declined in-search.
+
+        ``_two_domain_board(0.6)`` pins the HV and LV *pads* 0.6 mm apart --
+        inside the 3.2 mm derived requirement -- so no routing outcome can
+        produce compliant copper here.  Pre-#4602 the search committed the
+        proximate copper and the post-route gate fired; with search-time
+        avoidance (#4602) the pairwise pad keep-outs block every escape stub
+        and the connections decline honestly instead.  Either way: non-zero
+        exit, no SUCCESS banner, never a silent false pass.
+        """
         vmap = _write_voltage_map(tmp_path)
         out = tmp_path / "tight_routed.kicad_pcb"
         rc = route_main(_route_args(tight_board, out, "lattice", vmap))
         captured = capsys.readouterr().out
 
         assert rc != 0, f"expected a non-zero exit, got {rc}\n{captured}"
-        assert "ROUTING FAILED" in captured
-        assert "pairwise HV clearance violations" in captured
         # The SUCCESS banner must be unreachable in this state.
         assert "SUCCESS:" not in captured
-        # Violation lines carry the census-diffable shape and name the census.
-        assert "/HV_LINE vs /LV_SENSE:" in captured or "/LV_SENSE vs /HV_LINE:" in captured
-        assert "(required " in captured
-        assert "kct creepage" in captured
-        # The failure must name the actual cause and an in-tool remedy rather
-        # than leaving the operator with a dead end (follow-up #4602).
-        assert "issue #4602" in captured
-        assert "--route-engine grid" in captured
+        # The search now declines the geometry instead of committing it: the
+        # lattice decline census names the pad-escape refusal (the pads sit
+        # inside each other's pairwise keep-out).
+        assert "decline[pad-escape" in captured
+        # And the copper that WAS committed (if any) still passed the gate --
+        # a gate hit here would mean avoidance leaked proximate copper.
+        assert "pairwise HV clearance violations" not in captured
 
-    def test_engagement_line_does_not_claim_route_time_enforcement_on_lattice(
+    def test_engagement_line_reports_route_time_enforcement_on_lattice(
         self, tight_board: Path, tmp_path: Path, capsys
     ) -> None:
         """The pre-route ``HV pairwise clearance:`` line must be engine-honest.
 
-        The original defect was *silence*: the run printed ``(route-time
-        creepage rejection active)`` on an engine whose search never reads
-        ``rules.pairwise_clearance``.  That reassurance is what made the false
-        pass invisible, so it must not survive on the non-grid engines.
+        The original #4588 defect was *reassurance*: the run printed
+        ``(route-time creepage rejection active)`` on an engine whose search
+        never read ``rules.pairwise_clearance``.  Since #4602 the lattice
+        search DOES consume the table (per-pair predicate widening + HV pad
+        keep-outs), so it now truthfully joins the grid branch.
         """
         vmap = _write_voltage_map(tmp_path)
         out = tmp_path / "engagement.kicad_pcb"
@@ -254,8 +319,35 @@ class TestLatticeGate:
         captured = capsys.readouterr().out
 
         assert "HV pairwise clearance:" in captured
-        assert "post-route audit only" in captured
-        assert "route-time creepage rejection active" not in captured
+        assert "route-time rejection + post-route audit" in captured
+        assert "post-route audit only" not in captured
+
+    def test_engagement_line_keeps_audit_only_wording_on_mesh(self, capsys) -> None:
+        """Mesh is still pairwise-blind (#4602 scoped lattice only) and must
+        keep the audit-only wording -- claiming route-time enforcement there
+        would recreate the reassuring line that made the false pass silent.
+
+        Exercised through ``_apply_pairwise_clearance`` directly (the helper
+        that prints the line) rather than a full mesh routing run.
+        """
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _apply_pairwise_clearance
+
+        router = SimpleNamespace(
+            rules=SimpleNamespace(trace_clearance=0.2, pairwise_clearance=None)
+        )
+        args = SimpleNamespace(
+            _pairwise_required={("HV_LINE", "LV_SENSE"): 3.2},
+            _pairwise_voltages={"HV_LINE": HV_VOLTS, "LV_SENSE": 0.0},
+            route_engine="mesh",
+        )
+        _apply_pairwise_clearance(router, args)
+        captured = capsys.readouterr().out
+
+        assert "HV pairwise clearance:" in captured
+        assert "post-route audit only -- the mesh search is pairwise-blind" in captured
+        assert "route-time rejection" not in captured
 
     def test_engagement_line_still_reports_route_time_rejection_on_grid(
         self, wide_board: Path, tmp_path: Path, capsys
@@ -281,22 +373,75 @@ class TestLatticeGate:
         assert "SUCCESS:" in captured
         assert "pairwise HV clearance violations" not in captured
 
-    def test_gate_is_copper_identical_to_the_ungated_run(
-        self, tight_board: Path, tmp_path: Path
+    def test_copper_identical_when_no_hv_proximity_is_at_stake(
+        self, wide_board: Path, tmp_path: Path
     ) -> None:
-        """The gate audits, it never edits: same copper with and without the flag.
+        """Same copper with and without the flag when nothing needs avoiding.
 
-        The exit code differs -- that is the whole point -- but the copper
-        written to disk must be identical, proving the gate is a pure read-only
-        audit rather than a router behaviour change.  Per-element ``uuid``
-        values are freshly generated on every write and are compared out.
+        Pre-#4602 this invariant held on the TIGHT board too (the gate was a
+        pure read-only audit); with search-time avoidance the flag now
+        legitimately CHANGES the copper wherever HV<->LV proximity must be
+        avoided -- that is the whole point.  The invariant that must survive
+        is dormancy: on a board whose corridors already clear the requirement
+        by a wide margin, the pairwise-aware search takes the identical routes,
+        so the ``--voltage-map`` run's copper is byte-identical to the plain
+        run's.  Per-element ``uuid`` values are freshly generated on every
+        write and are compared out.
         """
         vmap = _write_voltage_map(tmp_path)
         gated = tmp_path / "gated.kicad_pcb"
         ungated = tmp_path / "ungated.kicad_pcb"
-        route_main(_route_args(tight_board, gated, "lattice", vmap))
-        route_main(_route_args(tight_board, ungated, "lattice", None))
+        route_main(_route_args(wide_board, gated, "lattice", vmap))
+        route_main(_route_args(wide_board, ungated, "lattice", None))
         assert _strip_uuids(gated.read_text()) == _strip_uuids(ungated.read_text())
+
+
+class TestLatticeAvoidance:
+    """Issue #4602 pass-oracle: the lattice search avoids what the gate reports.
+
+    On ``_detour_board()`` every pad-to-pad gap (10 mm) exceeds the 3.2 mm
+    derived requirement, but the LV net's naive shortest path runs straight
+    through the HV corridor.  Pre-#4602 (verified on ``main`` @ ``08776b3d``)
+    the lattice committed that path and the #4588 gate hard-failed the run
+    (exit 3, findings at 0.600 / 2.200 / 3.000 mm vs required 3.200 mm).  With
+    search-time avoidance the LV route detours (or under-crosses on B.Cu) and
+    the run passes the very same gate.
+    """
+
+    def test_detour_board_routes_clean_with_voltage_map(self, tmp_path: Path, capsys) -> None:
+        pcb = tmp_path / "detour.kicad_pcb"
+        pcb.write_text(_detour_board())
+        vmap = _write_voltage_map(tmp_path)
+        out = tmp_path / "detour_routed.kicad_pcb"
+
+        rc = route_main(_route_args(pcb, out, "lattice", vmap))
+        captured = capsys.readouterr().out
+
+        assert rc == 0, f"expected exit 0, got {rc}\n{captured}"
+        assert "SUCCESS:" in captured
+        assert "Nets routed:     2/2" in captured
+        # Zero findings from the #4588 post-route gate -- the pass oracle.
+        assert "pairwise HV clearance violations" not in captured
+        assert "ROUTING FAILED" not in captured
+        # The run banner reports route-time enforcement (#4602).
+        assert "route-time rejection + post-route audit" in captured
+
+    def test_detour_board_without_voltage_map_takes_the_naive_path(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """Dormancy control: without the flag the board still routes (exit 0)
+        and no pairwise machinery engages -- the detour is a consequence of
+        the voltage map, not a general routing behaviour change."""
+        pcb = tmp_path / "detour_plain.kicad_pcb"
+        pcb.write_text(_detour_board())
+        out = tmp_path / "detour_plain_routed.kicad_pcb"
+
+        rc = route_main(_route_args(pcb, out, "lattice", None))
+        captured = capsys.readouterr().out
+
+        assert rc == 0, captured
+        assert "SUCCESS:" in captured
+        assert "HV pairwise clearance:" not in captured
 
 
 class TestNonEscalationPath:
@@ -307,9 +452,15 @@ class TestNonEscalationPath:
     with ``--no-auto-layers``.  Both terminal paths must gate.
     """
 
-    def test_inline_path_gates_on_hv_proximity(
+    def test_inline_path_fails_on_hv_proximity(
         self, tight_board: Path, tmp_path: Path, capsys
     ) -> None:
+        """Both terminal paths stay honest failures on the tight fixture.
+
+        Since #4602 the lattice search declines the geometry in-search (the
+        pads sit inside each other's pairwise keep-out), so the inline path
+        exits non-zero on incomplete routing rather than on the gate banner.
+        """
         vmap = _write_voltage_map(tmp_path)
         out = tmp_path / "inline_routed.kicad_pcb"
         rc = route_main(
@@ -318,7 +469,7 @@ class TestNonEscalationPath:
         captured = capsys.readouterr().out
 
         assert rc != 0, f"expected a non-zero exit, got {rc}\n{captured}"
-        assert "ROUTING FAILED: pairwise HV clearance violations" in captured
+        assert "decline[pad-escape" in captured
         assert "SUCCESS:" not in captured
 
     def test_inline_path_without_voltage_map_is_a_strict_noop(

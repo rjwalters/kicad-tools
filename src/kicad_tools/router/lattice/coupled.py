@@ -180,6 +180,16 @@ def committed_seg_clear_grown(
     and clearance, so the per-item gap is ``trace_half + stored_half +
     max(clearance, stored_clearance) + extra`` -- the fat envelope is
     spaced honestly even against oversize (e.g. 2.6 mm HV) copper.
+
+    Issue #4602 (deliberate exclusion): the fat-envelope predicates do NOT
+    apply the HV pairwise (``|delta V|``-derived) widening.  An engaged diff
+    pair is a same-domain signal pair by construction; giving the whole
+    grown envelope a multi-mm HV keep-out on top of ``pitch/2`` would make
+    every coupled run near mapped copper decline outright, and no fleet
+    board pairs an HV domain net into a diff pair.  The emitted legs remain
+    covered end-to-end: ``_pair_attach``/re-verification go through
+    ``CommittedCopper.seg_clear`` (pairwise-aware when a projection is
+    installed) and the #4588 post-route audit gates the committed copper.
     """
     pad = committed.trace_half + committed.clearance + extra + 0.5
     for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(a, b, pad=pad):

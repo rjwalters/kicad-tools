@@ -17,6 +17,24 @@ constructor). No breaking changes.
 
 ### Added
 
+- **Search-time HV pairwise clearance in the lattice engine** — `--voltage-map`
+  + `--route-engine lattice` now *avoids* HV↔LV proximity during the A\* search
+  instead of only failing the #4588 post-route gate after committing the
+  copper. The lattice consumes `rules.pairwise_clearance` through a new
+  net-id-space projection (`router/lattice/pairwise.py`, mirroring the #4510
+  C++ grid projection): every committed-copper predicate widens its gap to
+  `own_half + stored_half + max(own_clr, stored_clr, pairwise(pair))`, static
+  pad keep-outs grow per-pad/per-pair, spatial query windows inflate to the
+  widest requirement the querying net participates in (the #4511
+  search-radius trap), and #4506 rated attach zones exempt in-search at the
+  same closest-gap midpoint the post-route gate probes — so search and gate
+  agree by construction. The routing cache now keys the derived pairwise
+  matrix so a scalar run's entry is never served to a `--voltage-map` run
+  (previously it silently bypassed route-time avoidance on grid too). Without
+  `--voltage-map` the lattice path is byte-identical; coupled diff-pair fat
+  envelopes are deliberately excluded (same-domain by construction; emitted
+  legs remain audited). The mesh engine stays post-route-gated only (#4602).
+
 - **Connector mating / edge-access rule in `kct check`** — new default-on
   `connector_access` category (selectable via `--only`/`--skip`, no new flags)
   with a warning-severity `connector_edge_access` rule that flags rigid-plug

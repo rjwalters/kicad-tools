@@ -3928,27 +3928,36 @@ def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -
     )
     pcb_path = getattr(router, "_pairwise_attach_zone_pcb_path", None)
     pathfinder = getattr(router, "router", None)
-    if pathfinder is not None and pcb_path is not None and hasattr(pathfinder, "set_attach_zones"):
-        # Issue #4588: route through the shared resolver so the grid search sees
-        # the same sheet-absolute zones the post-route audit does.  Building them
-        # inline here (pre-#4588) leaked board-relative footprint coordinates
-        # into a sheet-absolute pathfinder.
-        pathfinder.set_attach_zones(_pairwise_attach_zones(router))
+    if pcb_path is not None:
+        # Issue #4588: route through the shared resolver so every search-time
+        # consumer sees the same sheet-absolute zones the post-route audit
+        # does.  Building them inline here (pre-#4588) leaked board-relative
+        # footprint coordinates into a sheet-absolute pathfinder.  The call is
+        # memoised on the router (``_pairwise_attach_zones_cache``), which is
+        # also how the LATTICE engine's id-space projection picks the zones up
+        # at negotiation time (#4602) -- its pathfinder does not exist yet at
+        # this point, so warming the cache here is the hand-off.
+        zones = _pairwise_attach_zones(router)
+        if pathfinder is not None and hasattr(pathfinder, "set_attach_zones"):
+            pathfinder.set_attach_zones(zones)
 
     if not quiet:
         from kicad_tools.cli.progress import flush_print
 
-        # Issue #4588: name the enforcement that will ACTUALLY run.  Only the
-        # grid engines consult ``rules.pairwise_clearance`` during search
-        # (``router/pathfinder.py``, ``router/cpp_backend.py``, the C++ halo);
-        # lattice/mesh resolve clearance as a pure scalar, so claiming
-        # "route-time creepage rejection active" there was the reassuring line
-        # that made the false pass silent.  Both engines are now covered by the
-        # post-route board audit (``_audit_pairwise_clearance``).
+        # Issue #4588: name the enforcement that will ACTUALLY run.  The grid
+        # engines consult ``rules.pairwise_clearance`` during search
+        # (``router/pathfinder.py``, ``router/cpp_backend.py``, the C++ halo),
+        # and the lattice search now does too (#4602: per-pair predicate
+        # widening + HV pad keep-outs).  The mesh engine still resolves
+        # clearance as a pure scalar, so it keeps the audit-only wording --
+        # claiming "route-time rejection" there would recreate the reassuring
+        # line that made the original false pass silent.  Every engine is
+        # additionally covered by the post-route board audit
+        # (``_audit_pairwise_clearance``).
         engine = getattr(args, "route_engine", "grid") or "grid"
         enforcement = (
             "route-time rejection + post-route audit"
-            if engine == "grid"
+            if engine in ("grid", "lattice")
             else f"post-route audit only -- the {engine} search is pairwise-blind"
         )
         flush_print(
@@ -4011,7 +4020,9 @@ def _pairwise_attach_zones(router: "Autorouter") -> "tuple[AttachZone, ...]":
             )
             zones = ()
     with contextlib.suppress(AttributeError):  # exotic router stand-ins
-        router._pairwise_attach_zones_cache = zones  # type: ignore[attr-defined]
+        # The attribute is declared on ``Autorouter.__init__`` (#4602), so no
+        # ignore is needed; the suppress still guards non-Autorouter stand-ins.
+        router._pairwise_attach_zones_cache = zones
     return zones
 
 
@@ -4020,12 +4031,14 @@ def _audit_pairwise_clearance(
 ) -> "list[PairwiseViolation]":
     """Board-level post-route pairwise (HV creepage) audit -- issue #4588.
 
-    ``rules.pairwise_clearance`` is consumed **only** by the grid engines'
+    ``rules.pairwise_clearance`` is consumed by the grid engines'
     route-acceptance predicates (``router/pathfinder.py``, ``router/cpp_backend.py``
-    and the C++ ``Grid3D`` halo).  The lattice and mesh engines resolve clearance
-    as a pure scalar, so a ``--voltage-map`` run on those engines committed HV
-    copper at DRU spacing while still printing the reassuring ``HV pairwise
-    clearance: N mapped nets`` line -- a silent false pass of a safety feature.
+    and the C++ ``Grid3D`` halo) and, since #4602, by the lattice search
+    (``router/lattice``: per-pair predicate widening + HV pad keep-outs).  The
+    MESH engine still resolves clearance as a pure scalar, so a ``--voltage-map``
+    run there committed HV copper at DRU spacing while still printing the
+    reassuring ``HV pairwise clearance: N mapped nets`` line -- a silent false
+    pass of a safety feature.
 
     This audit closes that hole engine-agnostically: every engine commits copper
     by appending to ``router.routes``, so a whole-board scan of that list catches
@@ -4173,16 +4186,18 @@ def _print_pairwise_failure_banner(
         f"{getattr(args, 'material_group', 'IIIa')}"
     )
     engine = getattr(args, "route_engine", "grid") or "grid"
-    if engine != "grid":
-        # Issue #4588 gates; issue #4602 will teach the non-grid searches to
-        # AVOID the proximity instead of only reporting it.  Until then the
-        # only in-tool remedy is the engine that already enforces pairwise
-        # clearance during search (#4454 / #4511).
+    if engine not in ("grid", "lattice"):
+        # Issue #4588 gates; grid (#4454/#4511) and lattice (#4602) avoid the
+        # proximity during search, so a gate hit there means the geometry
+        # itself is over-constrained.  The MESH search is still pairwise-blind
+        # -- the only in-tool remedy is an engine that enforces pairwise
+        # clearance during search.
         print()
         print(f"  The {engine} search resolves clearance as a per-net scalar and cannot")
-        print("  avoid HV<->LV proximity (issue #4602). Remedies: re-route with")
-        print("  --route-engine grid (route-time creepage rejection), widen the HV")
-        print("  corridor in placement, or add rated attach zones (#4506).")
+        print("  avoid HV<->LV proximity (issue #4602 covered lattice only). Remedies:")
+        print("  re-route with --route-engine grid or lattice (route-time creepage")
+        print("  rejection), widen the HV corridor in placement, or add rated attach")
+        print("  zones (#4506).")
 
 
 def _warn_unresolved_net_class_map(resolution, board_net_names, nearest_fn) -> None:
@@ -14133,10 +14148,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Issue #4588: board-level pairwise (HV creepage) gate.
     #
-    # ``rules.pairwise_clearance`` is only consulted by the *grid* engines'
-    # route-acceptance predicates, so a ``--voltage-map`` run on ``--route-engine
-    # lattice``/``mesh`` previously committed HV copper at scalar-DRU spacing and
-    # still exited 0 with a SUCCESS banner.  Auditing the committed copper
+    # ``rules.pairwise_clearance`` is consulted by the *grid* engines'
+    # route-acceptance predicates and (since #4602) by the lattice search, but
+    # NOT by mesh, so a ``--voltage-map`` run on ``--route-engine mesh``
+    # commits HV copper at scalar-DRU spacing.  Auditing the committed copper
     # (``router.routes``) here catches that on every engine.  Runs *after* DRC
     # and *before* the summary predicate; a strict no-op without ``--voltage-map``
     # (and never on ``--dry-run``, where nothing was committed to disk).

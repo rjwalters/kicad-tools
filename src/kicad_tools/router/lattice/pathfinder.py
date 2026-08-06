@@ -45,7 +45,7 @@ import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..layers import LayerStack
 from ..primitives import Pad, Route, Segment, Via
@@ -55,6 +55,9 @@ from .coupled import CoupledConnection
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
 from .obstacles import CommittedCopper, LatticeObstacleModel, seg_body_crosses_pt
 from .quadtree import EdgeKey, NodeKey, OctilinearLattice, RefineRegion
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .pairwise import LatticePairwise
 
 # A negotiation connection: (opaque hashable key, start pad, end pad, net_class)
 # -- the same shape as ``mesh.pathfinder.Connection``.
@@ -282,6 +285,23 @@ class LatticePathfinder:
         # net the net-class map put at 2.0-3.2 mm.
         self._fixed_runs: list[tuple[int, Pt, Pt, int, float, float]] = []
         self._fixed_vias: list[tuple[Pt, int, float]] = []
+        # Issue #4602: optional net-id-space HV pairwise projection
+        # (:class:`.pairwise.LatticePairwise`), resolved by the CALLER from
+        # ``rules.pairwise_clearance`` + the #4506 attach zones -- the
+        # pathfinder stays geometry-only and never sees net names (#4597
+        # discipline).  ``None`` (the default, and always the case without
+        # ``--voltage-map``) keeps every predicate on its scalar path
+        # byte-for-byte.
+        self._pairwise: LatticePairwise | None = None
+
+    def set_pairwise(self, pairwise: LatticePairwise | None) -> None:
+        """Install (or clear) the id-space HV pairwise projection (#4602).
+
+        Threaded into every fresh :class:`CommittedCopper` model and every
+        static pad keep-out probe.  Passing ``None`` resets a reused
+        pathfinder so it cannot carry a stale projection across runs.
+        """
+        self._pairwise = pairwise
 
     # -- construction from a board ----------------------------------------
 
@@ -395,6 +415,7 @@ class LatticePathfinder:
             via_radius=self.rules.via_diameter / 2.0,
             via_via_gap=self._via_via_gap,
             same_net_via_gap=self._same_net_via_gap,
+            pairwise=self._pairwise,
         )
         # Issue #4355: pre-seed immovable non-listed copper so EVERY fresh
         # model (per-pass negotiation, isolated stub/pair probes, and the
@@ -593,6 +614,10 @@ class LatticePathfinder:
                 pads_block_segment_grown,
             )
         extra = max(0.0, half + clr - self._agent_radius)
+        # Issue #4602: non-fat scans additionally honour the per-PAIR HV pad
+        # keep-outs (the fat coupled path is excluded from pairwise widening
+        # in this slice -- see ``coupled.committed_seg_clear_grown``).
+        pw = None if fat else self._pairwise
 
         candidates: list[tuple[float, NodeKey, Pt]] = []
         pad_pt = (pad.x, pad.y)
@@ -619,6 +644,10 @@ class LatticePathfinder:
                         continue
                     if extra > 0.0 and obstacles.segment_blocked(point, point, layer, net, extra):
                         continue
+                    if pw is not None and obstacles.pairwise_pad_blocked(
+                        point, point, layer, net, half, extra, pw
+                    ):
+                        continue
                     if not committed.node_clear(point, layer, net, half, clr):
                         continue
                 accepted: list[Pt] | None = None
@@ -639,6 +668,11 @@ class LatticePathfinder:
                                 break
                         else:
                             if obstacles.segment_blocked(a, b, layer, net, extra):
+                                ok = False
+                                break
+                            if pw is not None and obstacles.pairwise_pad_blocked(
+                                a, b, layer, net, half, extra, pw
+                            ):
                                 ok = False
                                 break
                             if not committed.seg_clear(a, b, layer, net, half, clr):
@@ -851,6 +885,19 @@ class LatticePathfinder:
             grown = (rect[0] - grow, rect[1] - grow, rect[2] + grow, rect[3] + grow)
             if pt_in_rect(point, grown):
                 return False
+        # Issue #4602: a through-via must additionally keep the PAIR (HV)
+        # requirement from foreign pads on every layer (``layer=None``) --
+        # the barrel exists on all of them.  Dormant when no projection.
+        if self._pairwise is not None and obstacles.pairwise_pad_blocked(
+            point,
+            point,
+            None,
+            net,
+            self.rules.via_diameter / 2.0,
+            max(self._via_pad_grow, 0.0),
+            self._pairwise,
+        ):
+            return False
         return committed.via_clear(point, net)
 
     # -- the route contract ------------------------------------------------------
@@ -1006,6 +1053,9 @@ class LatticePathfinder:
         extra = max(0.0, half + clr - self._agent_radius)
 
         fat = extra_clearance > 0.0 or partner_net is not None
+        # Issue #4602: per-PAIR HV pad keep-outs for the non-fat search (the
+        # fat coupled path is excluded from pairwise widening in this slice).
+        pw = None if fat else self._pairwise
         if fat:
             # v1 coupled runs are planar; there is no fat via legality.
             allow_vias = False
@@ -1118,6 +1168,12 @@ class LatticePathfinder:
                             and not (
                                 extra > 0.0 and obstacles.segment_blocked(ea, eb, layer, net, extra)
                             )
+                            and not (
+                                pw is not None
+                                and obstacles.pairwise_pad_blocked(
+                                    ea, eb, layer, net, half, extra, pw
+                                )
+                            )
                             and committed.seg_clear(ea, eb, layer, net, half, clr)
                         )
                     edge_ok[ek] = ok
@@ -1140,6 +1196,12 @@ class LatticePathfinder:
                             and not (
                                 extra > 0.0
                                 and obstacles.segment_blocked(npt, npt, layer, net, extra)
+                            )
+                            and not (
+                                pw is not None
+                                and obstacles.pairwise_pad_blocked(
+                                    npt, npt, layer, net, half, extra, pw
+                                )
                             )
                             and committed.node_clear(npt, layer, net, half, clr)
                         )
@@ -1174,6 +1236,12 @@ class LatticePathfinder:
                                 and not (
                                     extra > 0.0
                                     and obstacles.segment_blocked(kpt, kpt, nl, net, extra)
+                                )
+                                and not (
+                                    pw is not None
+                                    and obstacles.pairwise_pad_blocked(
+                                        kpt, kpt, nl, net, half, extra, pw
+                                    )
                                 )
                                 and committed.node_clear(kpt, nl, net, half, clr)
                             )

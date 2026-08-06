@@ -22,6 +22,7 @@ per copper layer:
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import TYPE_CHECKING
 
 from ..primitives import Pad
 from .geometry import (
@@ -35,6 +36,9 @@ from .geometry import (
     seg_seg_dist,
 )
 from .quadtree import EdgeKey, NodeKey, OctilinearLattice
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .pairwise import LatticePairwise
 
 _BUCKET = 4.0  # mm; pad-lookup acceleration grid
 
@@ -166,6 +170,64 @@ class LatticeObstacleModel:
                 return True
         return False
 
+    def pairwise_pad_blocked(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int | None,
+        net: int,
+        own_half: float,
+        base_extra: float,
+        pairwise: LatticePairwise,
+    ) -> bool:
+        """Pairwise-ONLY (HV) pad keep-out for free segment ``a-b`` (#4602).
+
+        Additive to the scalar checks (``node_blocked`` / ``edge_blocked`` /
+        ``segment_blocked``), which run unchanged: this predicate fires only
+        when the PAIR requirement between the querying net and a pad's net
+        exceeds what the scalar path already keeps out.  Each pad's keep-out
+        rect is grown per-pair to ``raw pad extent + own_half +
+        required(net, pad_net)`` (i.e. ``pad_rects[idx]`` inflated by
+        ``own_half + req - agent_radius``) -- a per-PAD, per-PAIR inflation,
+        never a uniform surcharge.  ``layer is None`` checks every layer the
+        pad occupies (the through-via probe).  A hit inside a #4506 attach
+        zone covering both nets is waived -- that is what keeps a rated
+        domain-bridging footprint routable in-search.
+
+        ``base_extra`` is the scalar inflation the ordinary checks already
+        apply (``max(0, own_half + own_clr - agent_radius)``): pads whose
+        pairwise inflation does not exceed it are the scalar path's business.
+        The degenerate ``a == b`` form doubles as a point probe.
+        """
+        reach = pairwise.max_required_for(net)
+        if reach <= 0.0:
+            return False
+        floor_extra = max(base_extra, 0.0)
+        max_extra = own_half + reach - self.agent_radius
+        if max_extra <= floor_extra:
+            return False
+        x0, x1 = min(a[0], b[0]), max(a[0], b[0])
+        y0, y1 = min(a[1], b[1]), max(a[1], b[1])
+        for idx in self.pads_near(x0 - max_extra, y0 - max_extra, x1 + max_extra, y1 + max_extra):
+            pad = self.pads[idx]
+            if pad.net == net:
+                continue
+            req = pairwise.required(net, pad.net)
+            if req <= 0.0:
+                continue
+            extra_pw = own_half + req - self.agent_radius
+            if extra_pw <= floor_extra:
+                continue
+            if layer is not None and layer not in self.pad_layer_indices[idx]:
+                continue
+            rect = self.pad_rects[idx]
+            grown = (rect[0] - extra_pw, rect[1] - extra_pw, rect[2] + extra_pw, rect[3] + extra_pw)
+            if seg_rect_intersect(a, b, grown) and not pairwise.exempt_seg_pt(
+                a, b, (pad.x, pad.y), net, pad.net
+            ):
+                return True
+        return False
+
 
 class CommittedCopper:
     """Copper committed by already-routed nets in one negotiation pass.
@@ -194,6 +256,21 @@ class CommittedCopper:
     That is what lets ``--preserve-existing`` copper seeded from an earlier
     routing step keep its net-class-map clearance across the pass boundary
     instead of collapsing to the board-global floor.
+
+    Issue #4602 (search-time HV pairwise clearance): ``pairwise`` is the
+    optional net-id-space projection of ``rules.pairwise_clearance``
+    (:class:`~kicad_tools.router.lattice.pairwise.LatticePairwise`).  When
+    set, every cross-net predicate widens its gap to
+    ``own_half + stored_half + max(own_clr, stored_clr, pairwise(query,
+    stored))`` -- the required clearance depends on the PAIR, never on a
+    widened per-net scalar (widening the scalar is exactly the inadequate
+    workaround #4431 documents: it would force LV<->LV spacing to HV<->LV
+    distances).  A hit that satisfies the scalar gap but falls inside the
+    pairwise requirement may be exempted by a #4506 attach zone probed at
+    the closest-gap midpoint, mirroring ``segment_pair_violation`` so the
+    search verdict and the #4588 post-route gate agree.  ``None`` (the
+    default, and always the case without ``--voltage-map``) runs the
+    pre-#4602 scalar path byte-for-byte.
     """
 
     def __init__(
@@ -205,6 +282,7 @@ class CommittedCopper:
         via_radius: float,
         via_via_gap: float,
         same_net_via_gap: float,
+        pairwise: LatticePairwise | None = None,
     ) -> None:
         self.num_layers = num_layers
         self.trace_half = trace_half  # global default copper half-width
@@ -212,6 +290,7 @@ class CommittedCopper:
         self.via_radius = via_radius  # via body radius
         self.via_via_gap = via_via_gap  # via centre to via centre (cross-net)
         self.same_net_via_gap = same_net_via_gap  # hole-to-hole floor
+        self.pairwise = pairwise  # id-space HV pairwise projection (#4602)
         self.copper: list[SegHash] = [SegHash() for _ in range(num_layers)]
         # ``(point, net, clearance)`` -- the stored clearance is the via's own
         # net-class clearance (issue #4597), defaulting to the board-global
@@ -287,11 +366,32 @@ class CommittedCopper:
     ) -> bool:
         """True if segment ``a-b`` on ``layer`` clears other-net copper + vias."""
         own_half, own_clr = self._own(half, clearance)
-        pad = own_half + own_clr + 0.5
+        # Issue #4602: an active pairwise projection inflates the spatial query
+        # window to the widest requirement THIS net participates in (the #4511
+        # search-radius trap: a ~3 mm creepage requirement vastly exceeds the
+        # DRU scalar, so an un-inflated window silently misses far-but-
+        # forbidden copper).  Dormant/unmapped nets keep the scalar window.
+        pw = self.pairwise
+        pw_reach = pw.max_required_for(net) if pw is not None else 0.0
+        pad = own_half + max(own_clr, pw_reach) + 0.5
         for c, d, cnet, hw, iclr in self.copper[layer].query_seg(a, b, pad=pad):
+            if cnet == net:
+                continue
             gap = own_half + hw + max(own_clr, iclr)
-            if cnet != net and seg_seg_dist(a, b, c, d) < gap - 1e-9:
+            d_cc = seg_seg_dist(a, b, c, d)
+            if d_cc < gap - 1e-9:
                 return False
+            # Issue #4602: pair term.  The gap widens to the PAIR requirement
+            # (never a per-net scalar); a scalar-passing hit inside the
+            # requirement may be waived by a #4506 attach zone, probed at the
+            # closest-gap midpoint exactly as the #4588 gate probes it.
+            if pw is not None:
+                req = pw.required(net, cnet)
+                if req > max(own_clr, iclr):
+                    if d_cc < own_half + hw + req - 1e-9 and not pw.exempt_seg_seg(
+                        a, b, c, d, net, cnet
+                    ):
+                        return False
         # Issue #4597: honor the STORED via's class clearance the same way the
         # copper loop above honors a stored segment's -- a preserved HV via must
         # be cleared at its own class gap, not merely at the querying net's.
@@ -301,8 +401,18 @@ class CommittedCopper:
         for point, vnet, vclr in self.vias:
             if vnet != net:
                 via_gap = own_via_gap if vclr <= own_clr else self.via_radius + own_half + vclr
-                if seg_pt_dist(a, b, point) < via_gap - 1e-9:
+                d_vp = seg_pt_dist(a, b, point)
+                if d_vp < via_gap - 1e-9:
                     return False
+                # Issue #4602: a committed via is copper too -- the pair
+                # requirement spaces the trace from its barrel edge.
+                if pw is not None:
+                    req = pw.required(net, vnet)
+                    if req > max(own_clr, vclr):
+                        if d_vp < self.via_radius + own_half + req - 1e-9 and not pw.exempt_seg_pt(
+                            a, b, point, net, vnet
+                        ):
+                            return False
             elif seg_body_crosses_pt(a, b, point):
                 # Same-net octilinear segment whose BODY runs across a same-net
                 # via center is malformed lattice copper (#4318).  The DRC
@@ -324,17 +434,41 @@ class CommittedCopper:
     ) -> bool:
         """True if a node site on ``layer`` clears other-net copper + vias."""
         own_half, own_clr = self._own(half, clearance)
-        pad = own_half + own_clr + 0.5
+        # Issue #4602: inflate the query window to the pairwise reach (see
+        # ``seg_clear``); dormant/unmapped nets keep the scalar window.
+        pw = self.pairwise
+        pw_reach = pw.max_required_for(net) if pw is not None else 0.0
+        pad = own_half + max(own_clr, pw_reach) + 0.5
         for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
+            if cnet == net:
+                continue
             gap = own_half + hw + max(own_clr, iclr)
-            if cnet != net and seg_pt_dist(c, d, point) < gap - 1e-9:
+            d_cc = seg_pt_dist(c, d, point)
+            if d_cc < gap - 1e-9:
                 return False
+            if pw is not None:
+                req = pw.required(net, cnet)
+                if req > max(own_clr, iclr):
+                    if d_cc < own_half + hw + req - 1e-9 and not pw.exempt_seg_pt(
+                        c, d, point, net, cnet
+                    ):
+                        return False
         # Issue #4597: ``max(own_clr, stored_via_clr)`` -- see ``seg_clear``.
         own_via_gap = self.via_radius + own_half + own_clr
         for vpt, vnet, vclr in self.vias:
+            if vnet == net:
+                continue
             via_gap = own_via_gap if vclr <= own_clr else self.via_radius + own_half + vclr
-            if vnet != net and dist(point, vpt) < via_gap - 1e-9:
+            d_vp = dist(point, vpt)
+            if d_vp < via_gap - 1e-9:
                 return False
+            if pw is not None:
+                req = pw.required(net, vnet)
+                if req > max(own_clr, vclr):
+                    if d_vp < self.via_radius + own_half + req - 1e-9 and not pw.exempt_pt_pt(
+                        point, vpt, net, vnet
+                    ):
+                        return False
         return True
 
     def via_clear(self, point: Pt, net: int) -> bool:
@@ -351,12 +485,27 @@ class CommittedCopper:
         still not applied to via-to-via pairs -- a pre-existing #4271 residual
         that is deliberately NOT widened here.
         """
-        pad = self.via_radius + self.clearance + self.trace_half + 2.0
+        # Issue #4602: a through-via is copper on EVERY layer, so its pair
+        # requirement against foreign copper applies on all of them.  The
+        # query window inflates by the net's pairwise reach (see ``seg_clear``).
+        pw = self.pairwise
+        pw_reach = pw.max_required_for(net) if pw is not None else 0.0
+        pad = self.via_radius + self.clearance + self.trace_half + 2.0 + pw_reach
         for layer in range(self.num_layers):
             for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
+                if cnet == net:
+                    continue
                 gap = self.via_radius + hw + max(self.clearance, iclr)
-                if cnet != net and seg_pt_dist(c, d, point) < gap - 1e-9:
+                d_cc = seg_pt_dist(c, d, point)
+                if d_cc < gap - 1e-9:
                     return False
+                if pw is not None:
+                    req = pw.required(net, cnet)
+                    if req > max(self.clearance, iclr):
+                        if d_cc < self.via_radius + hw + req - 1e-9 and not pw.exempt_seg_pt(
+                            c, d, point, net, cnet
+                        ):
+                            return False
         for vpt, vnet, vclr in self.vias:
             # Cross-net vias must honor BOTH the copper gap (via_via_gap =
             # via diameter + clearance, centre-to-centre) AND the drill
@@ -374,6 +523,15 @@ class CommittedCopper:
                 gap = max(self.via_via_gap, 2.0 * self.via_radius + vclr, self.same_net_via_gap)
             else:
                 gap = self.same_net_via_gap
-            if dist(point, vpt) < gap - 1e-9:
+            d_vv = dist(point, vpt)
+            if d_vv < gap - 1e-9:
                 return False
+            # Issue #4602: barrel-to-barrel pair requirement for cross-net vias.
+            if pw is not None and vnet != net:
+                req = pw.required(net, vnet)
+                if req > 0.0:
+                    if d_vv < 2.0 * self.via_radius + req - 1e-9 and not pw.exempt_pt_pt(
+                        point, vpt, net, vnet
+                    ):
+                        return False
         return True
