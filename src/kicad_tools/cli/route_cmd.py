@@ -3879,26 +3879,125 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
     Idempotent and a no-op when the flag was not supplied.
     """
     loaded = getattr(args, "_loaded_net_class_map", None)
-    if not loaded:
+    if loaded:
+        from kicad_tools.router.net_names import nearest_net_names
+
+        resolution, diagnostic_net_names = _resolve_net_class_map_domains(router, loaded.keys())
+
+        # Apply overrides rekeyed to the board's actual net names so
+        # ``self.net_class_map.get(net_name)`` finds them at routing time.
+        for board_net, user_key in resolution.resolved.items():
+            router.net_class_map[board_net] = loaded[user_key]
+
+        _warn_unresolved_net_class_map(resolution, diagnostic_net_names, nearest_net_names)
+
+        if not quiet:
+            from kicad_tools.cli.progress import flush_print
+
+            flush_print(
+                f"  Net-class map: merged {len(resolution.resolved)}/{resolution.total} "
+                "sidecar entries"
+            )
+
+    # Issue #4605: stash the ``spatial_keepouts`` rule-area filter block on
+    # the router for the lattice keepout projection.  Runs AFTER the merge
+    # above so class-name validation sees the sidecar-defined classes too;
+    # runs even when the sidecar declares no net-class entries at all.
+    _stash_spatial_keepout_filters(router, args, quiet=quiet)
+
+
+def _validate_spatial_keepouts_block(block: object) -> str | None:
+    """Structural validation of the ``spatial_keepouts`` sidecar block (#4605).
+
+    Shape: ``{rule_area_zone_name: {"except_classes": [str, ...]}}`` or
+    ``{... {"only_classes": [str, ...]}}`` -- one of the two per entry, never
+    both (their combination has no defined precedence).  Returns a human
+    message on the first defect, ``None`` when the block is valid (or absent).
+    Class-NAME existence is validated later against the router's merged
+    net-class map (:func:`_stash_spatial_keepout_filters`).
+    """
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        return f"expected an object, got {type(block).__name__}"
+    for zone_name, entry in block.items():
+        if not isinstance(entry, dict):
+            return f"entry {zone_name!r} must be an object, got {type(entry).__name__}"
+        unknown = set(entry) - {"except_classes", "only_classes"}
+        if unknown:
+            return f"entry {zone_name!r} has unknown key(s): {', '.join(sorted(unknown))}"
+        if "except_classes" in entry and "only_classes" in entry:
+            return f"entry {zone_name!r} sets both except_classes and only_classes"
+        if not entry:
+            return f"entry {zone_name!r} must set except_classes or only_classes"
+        for key, value in entry.items():
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                return f"entry {zone_name!r}: {key} must be a list of class-name strings"
+    return None
+
+
+def _stash_spatial_keepout_filters(router: "Autorouter", args, quiet: bool = False) -> None:
+    """Stash (and class-name-validate) the ``spatial_keepouts`` filters (#4605).
+
+    The block itself was structurally validated at preload
+    (:func:`_validate_spatial_keepouts_block`); here -- after the sidecar's
+    net-class entries have been merged into ``router.net_class_map`` -- every
+    referenced class name is checked against the classes that actually exist.
+    A typo would otherwise silently widen (``only_classes``) or narrow
+    (``except_classes``) a spatial safety constraint, so an unknown name is a
+    hard exit 1, mirroring the other sidecar preload failures.
+    """
+    filters = getattr(args, "_spatial_keepouts", None)
+    with contextlib.suppress(AttributeError):  # exotic router stand-ins
+        router._spatial_keepout_filters = filters
+    if not filters:
         return
-
-    from kicad_tools.router.net_names import nearest_net_names
-
-    resolution, diagnostic_net_names = _resolve_net_class_map_domains(router, loaded.keys())
-
-    # Apply overrides rekeyed to the board's actual net names so
-    # ``self.net_class_map.get(net_name)`` finds them at routing time.
-    for board_net, user_key in resolution.resolved.items():
-        router.net_class_map[board_net] = loaded[user_key]
-
-    _warn_unresolved_net_class_map(resolution, diagnostic_net_names, nearest_net_names)
-
+    known = {name for nc in router.net_class_map.values() if (name := getattr(nc, "name", None))}
+    for zone_name, entry in filters.items():
+        for key in ("except_classes", "only_classes"):
+            for cls_name in entry.get(key) or ():
+                if cls_name not in known:
+                    print(
+                        f"Error: spatial_keepouts[{zone_name!r}]: unknown net class "
+                        f"{cls_name!r} (known classes: {', '.join(sorted(known)) or 'none'})",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1)
     if not quiet:
         from kicad_tools.cli.progress import flush_print
 
-        flush_print(
-            f"  Net-class map: merged {len(resolution.resolved)}/{resolution.total} sidecar entries"
-        )
+        flush_print(f"  Spatial keepouts: {len(filters)} rule-area filter(s) loaded")
+
+
+def _warn_rule_areas_other_engine(pcb_path: Path, engine: str) -> None:
+    """One-line warning when rule areas exist but the engine ignores them.
+
+    Issue #4605: only the LATTICE engine honors ``(tracks not_allowed)`` /
+    ``(vias not_allowed)`` keepout rule areas at search time.  Routing such a
+    board with grid/mesh silently commits copper straight through the
+    declared areas, so say so once -- a warning, not a gate (KiCad's own DRC
+    still catches the violation downstream).  Pour-void-only rule areas (the
+    ``kct zones hv-keepout`` output) trigger nothing: they never constrain
+    routing on any engine.  A cheap text scan on purpose -- no board model is
+    built this early.
+    """
+    if engine == "lattice":
+        return
+    try:
+        text = pcb_path.read_text()
+    except OSError:
+        return
+    for match in re.finditer(r"\(keepout\b", text):
+        window = text[match.start() : match.start() + 400]
+        if "(tracks not_allowed" in window or "(vias not_allowed" in window:
+            print(
+                "Warning: board declares track/via-blocking keepout rule areas, "
+                f"but --route-engine {engine} does not honor them (only the "
+                "lattice engine does; see issue #4605). Routed copper may "
+                "cross the declared areas.",
+                file=sys.stderr,
+            )
+            return
 
 
 def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -> None:
@@ -11884,6 +11983,7 @@ def main(argv: list[str] | None = None) -> int:
     # ``args._loaded_net_class_map`` for downstream consumers (each
     # ``load_pcb_for_routing`` site merges it into ``router.net_class_map``).
     args._loaded_net_class_map = None
+    args._spatial_keepouts = None
     if getattr(args, "net_class_map", None) is not None:
         import json as _ncm_json
 
@@ -11936,6 +12036,21 @@ def main(argv: list[str] | None = None) -> int:
         except (TypeError, ValueError) as e:
             print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
             return 1
+        # Issue #4605: the optional ``spatial_keepouts`` block -- per-rule-area
+        # net-class filters for KiCad keepout rule areas (lattice engine).
+        # Structure is validated HERE so a malformed block short-circuits with
+        # exit 1 before any routing work; the class NAMES are validated later,
+        # once the router's merged net-class map exists
+        # (``_apply_net_class_map_sidecar``).
+        _sk_err = _validate_spatial_keepouts_block(_ncm_data.get("spatial_keepouts"))
+        if _sk_err is not None:
+            print(f"Error: invalid spatial_keepouts block: {_sk_err}", file=sys.stderr)
+            return 1
+        args._spatial_keepouts = _ncm_data.get("spatial_keepouts")
+
+    # Issue #4605: rule areas are honored by the lattice engine only -- warn
+    # once (never gate) when another engine is about to ignore them.
+    _warn_rule_areas_other_engine(pcb_path, getattr(args, "route_engine", "grid") or "grid")
 
     # Issue #4431 (Phase 1): validate and load the optional --voltage-map early
     # (mirrors the --net-class-map preload above) so a missing file / malformed

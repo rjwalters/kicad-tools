@@ -88,6 +88,55 @@ def seg_rect_intersect(a: Pt, b: Pt, rect: Rect) -> bool:
     return False
 
 
+def polygon_bbox(poly: list[Pt] | tuple[Pt, ...]) -> Rect:
+    """Axis-aligned bounding box of a polygon vertex list."""
+    xs = [p[0] for p in poly]
+    ys = [p[1] for p in poly]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def pt_in_polygon(p: Pt, poly: list[Pt] | tuple[Pt, ...]) -> bool:
+    """True if ``p`` lies inside simple polygon ``poly`` (ray casting).
+
+    Boundary points may report either side (float grazing); callers that
+    need edge-inclusive behavior combine this with an edge-distance check
+    (see :func:`seg_near_polygon`), which is what the keepout mask does.
+    """
+    inside = False
+    n = len(poly)
+    px, py = p
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        if (ay > py) != (by > py):
+            x_cross = ax + (py - ay) / (by - ay) * (bx - ax)
+            if px < x_cross:
+                inside = not inside
+    return inside
+
+
+def seg_near_polygon(a: Pt, b: Pt, poly: list[Pt] | tuple[Pt, ...], inflate: float) -> bool:
+    """True if segment ``a-b`` comes within ``inflate`` of polygon ``poly``.
+
+    Issue #4605 (keepout rule areas): the copper-edge test.  A trace of
+    half-width ``inflate`` whose centreline is ``a-b`` intersects the
+    polygon iff (a) an endpoint is inside, (b) the segment crosses the
+    boundary (edge distance 0), or (c) the segment passes within
+    ``inflate`` of a boundary edge.  A degenerate ``a == b`` form doubles
+    as a point probe.  Case (b) also covers a segment that pierces a
+    concave polygon without leaving an endpoint inside.
+    """
+    if pt_in_polygon(a, poly) or pt_in_polygon(b, poly):
+        return True
+    n = len(poly)
+    for i in range(n):
+        c = poly[i]
+        d = poly[(i + 1) % n]
+        if seg_seg_dist(a, b, c, d) < inflate - 1e-9:
+            return True
+    return False
+
+
 class SegHash:
     """Uniform-bucket spatial hash over committed copper segments.
 

@@ -373,6 +373,59 @@ class TestDruManagedBlockMerge:
         assert '(rule "Trace Width - jlcpcb-tier1"' in merged
         assert merged.count("(version 1)") == 1
 
+    def test_legacy_generated_sidecar_is_replaced_not_appended(self, tmp_path: Path):
+        """A pre-#4600 clobber-written sidecar is replaced, not duplicated.
+
+        Issue #4667: our own generated ``.kicad_dru`` files written before
+        the managed-block merge carry no markers.  They must be recognized
+        as kct-owned and REPLACED by the managed block -- appending doubles
+        every tier floor on each re-emit and permanently dirties committed
+        board artifacts (the #3580 guard fired on board-05's sidecar).
+        """
+        from kicad_tools.manufacturers.dru_generator import (
+            DRU_FLOORS_BLOCK_BEGIN,
+            generate_dru,
+        )
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        legacy = generate_dru(
+            get_profile("jlcpcb").get_design_rules(layers=2), manufacturer_name="jlcpcb"
+        )
+        assert DRU_FLOORS_BLOCK_BEGIN not in legacy
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text(legacy, encoding="utf-8")
+
+        merged = self._emit(board)  # emits at jlcpcb-tier1
+
+        assert merged.count(DRU_FLOORS_BLOCK_BEGIN) == 1
+        # The legacy floors were replaced -- no duplicated rule families.
+        assert merged.count('(rule "Trace Width') == 1
+        assert '"Trace Width - jlcpcb"' not in merged
+        assert '"Trace Width - jlcpcb-tier1"' in merged
+        assert merged.count("(version 1)") == 1
+        # Re-emitting is byte-stable.
+        assert self._emit(board) == merged
+
+    def test_committed_board_sidecars_are_marked(self):
+        """Every committed ``boards/*/output/*.kicad_dru`` uses the marked format.
+
+        Issue #4667 migrated the legacy sidecars; a legacy-shaped committed
+        artifact would be rewritten in place by export-path tests and trip
+        the #3580 committed-artifacts guard.
+        """
+        from kicad_tools.manufacturers.dru_generator import DRU_FLOORS_BLOCK_BEGIN
+
+        repo_root = Path(__file__).resolve().parent.parent
+        sidecars = sorted(repo_root.glob("boards/*/output/*.kicad_dru"))
+        assert sidecars, "expected committed board .kicad_dru sidecars"
+        unmarked = [
+            str(p.relative_to(repo_root))
+            for p in sidecars
+            if DRU_FLOORS_BLOCK_BEGIN not in p.read_text(encoding="utf-8")
+        ]
+        assert not unmarked, f"legacy-unmarked committed sidecars: {unmarked}"
+
     def test_user_owned_file_is_never_clobbered(self, tmp_path: Path):
         """A no-marker, fully user-owned file keeps every byte of content.
 

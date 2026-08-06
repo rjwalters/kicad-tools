@@ -1566,11 +1566,15 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             require_no_clearance_regression: Keep a delta only if it ALSO does
                 not increase the router's clearance-violation count (issue
                 #4468).  Reach alone is the wrong acceptance test for a
-                placement change: measured on board-07, a kept 2 mm translate
-                bought one net (26/31 -> 27/31) while pushing two DDR-channel
-                clearances under the jlcpcb floor and breaking the ADDR_BUS
+                placement change: on one board-07 host run (local macOS
+                arm64, seed 42), a kept 2 mm translate bought one net
+                (26/31 -> 27/31) while pushing two DDR-channel clearances
+                under the jlcpcb floor and breaking the ADDR_BUS
                 length-match the board exists to exercise -- a trade the
                 routed-DRC allowlist would have had to be WIDENED to absorb.
+                That motivating measurement is host-specific: both board-07
+                CI runs measured the same probe as routed 25 -> 25 (no
+                reach gain), so this guard never fired there (issue #4561).
                 Set False to restore the reach-only Phase-2 criterion.
 
         Returns:
