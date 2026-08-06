@@ -41,7 +41,7 @@ import json
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 __all__ = [
@@ -448,6 +448,28 @@ def _parse_complete_report(report_path: Path) -> list[UnroutableLink]:
     ]
 
 
+#: Fields of :class:`RescueConfig` that :func:`_completion_pass_config`
+#: intentionally overrides.  Everything else MUST propagate unchanged --
+#: the drift-guard test iterates ``dataclasses.fields(RescueConfig)``
+#: against this set, so a future field silently dropped by a re-introduced
+#: field-by-field rebuild fails the test without any test edit (#4550).
+COMPLETION_PASS_OVERRIDES: frozenset[str] = frozenset({"stage_timeout_s"})
+
+
+def _completion_pass_config(config: RescueConfig, pass_timeout_s: int) -> RescueConfig:
+    """Derive the per-pass config for a batch completion pass.
+
+    Issue #4550: the old field-by-field ``RescueConfig(...)`` rebuild here
+    silently dropped any field added after it was written -- concretely
+    ``allow_unsafe_grid`` (#4528/#4532), which made every completion
+    subprocess on an unsafe-grid board exit 1 at the CLI gate (bogus
+    ``no_output`` failures).  ``dataclasses.replace`` propagates every field
+    by construction; the ONLY intentional override is
+    ``stage_timeout_s=pass_timeout_s`` (see :data:`COMPLETION_PASS_OVERRIDES`).
+    """
+    return replace(config, stage_timeout_s=pass_timeout_s)
+
+
 def complete_unfinished_nets(
     routed_path: Path,
     config: RescueConfig,
@@ -544,19 +566,7 @@ def complete_unfinished_nets(
         tmp_out = routed_path.with_name(routed_path.stem + "_completion.kicad_pcb")
         report_path = routed_path.with_name(routed_path.stem + "_complete_report.json")
         report_path.unlink(missing_ok=True)
-        pass_config = RescueConfig(
-            manufacturer=config.manufacturer,
-            backend=config.backend,
-            seed=config.seed,
-            stage_timeout_s=pass_timeout_s,
-            per_net_timeout_s=config.per_net_timeout_s,
-            deterministic_budget=config.deterministic_budget,
-            starting_layers=config.starting_layers,
-            max_layers=config.max_layers,
-            excluded_nets=config.excluded_nets,
-            micro_via_in_pad_fallback=config.micro_via_in_pad_fallback,
-            extra_args=config.extra_args,
-        )
+        pass_config = _completion_pass_config(config, pass_timeout_s)
         # Issue #4478: shell ``kct route --complete`` (lattice engine) rather
         # than the grid-engine ``--skip-nets`` shape.  --complete self-selects
         # the stranded nets (same detector as ``targets`` above), so NO skip

@@ -21,15 +21,19 @@ without the router.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from pathlib import Path
 
 import pytest
 
 from kicad_tools.router import placement_nudge as pn
+from kicad_tools.router.partial_rescue import RescueConfig, build_rescue_command
 from kicad_tools.router.placement_nudge import (
+    REROUTE_PASS_OVERRIDES,
     NudgeConfig,
     PlacementNudge,
+    _reroute_pass_config,
     nudge_placement_bound_nets,
 )
 from kicad_tools.router.stuck_classifier import (
@@ -413,3 +417,58 @@ class TestNetPositiveGuard:
         assert result.nudges == []
         assert ran["reroute"] is False  # no re-route on a no-op
         assert p.read_bytes() == original_bytes
+
+
+# ---------------------------------------------------------------------------
+# _reroute_pass_config: RescueConfig field propagation drift guard (#4550)
+# ---------------------------------------------------------------------------
+
+
+class TestReroutePassConfig:
+    def test_drift_guard_all_fields_propagate(self) -> None:
+        """Every RescueConfig field must reach the post-nudge re-route config.
+
+        Issue #4550: the old field-by-field rebuild silently dropped
+        ``deterministic_budget`` (#3877) and ``allow_unsafe_grid`` (#4528).
+        Non-default sentinels over ``dataclasses.fields(RescueConfig)`` make a
+        future added-but-not-propagated field fail here WITHOUT a test edit;
+        the only allowed differences are the documented explicit overrides.
+        """
+        from tests.router.test_partial_rescue import sentinel_rescue_config
+
+        assert frozenset({"stage_timeout_s", "excluded_nets"}) == REROUTE_PASS_OVERRIDES
+
+        rescue = sentinel_rescue_config()
+        excluded = frozenset({"GND", "VCC"})
+        derived = _reroute_pass_config(rescue, 777, excluded)
+
+        # The two intentional overrides.
+        assert derived.stage_timeout_s == 777
+        assert derived.excluded_nets == excluded
+        for f in dataclasses.fields(RescueConfig):
+            if f.name in REROUTE_PASS_OVERRIDES:
+                continue
+            assert getattr(derived, f.name) == getattr(rescue, f.name), (
+                f"RescueConfig.{f.name} was dropped by _reroute_pass_config -- "
+                f"new fields must propagate to the nudge re-route (#4550)"
+            )
+
+    def test_deterministic_budget_and_allow_unsafe_grid_reach_command(self, tmp_path: Path) -> None:
+        """#4550 regression at the argv level: a nudge re-route on a board whose
+        recipe sets ``deterministic_budget``/``allow_unsafe_grid`` must emit
+        ``--deterministic-budget`` and ``--allow-unsafe-grid`` -- previously
+        both were silently reset to False by the field-by-field rebuild."""
+        rescue = RescueConfig(deterministic_budget=True, allow_unsafe_grid=True)
+        derived = _reroute_pass_config(rescue, 600, frozenset({"GND"}))
+        cmd = build_rescue_command(
+            tmp_path / "a.kicad_pcb",
+            tmp_path / "b.kicad_pcb",
+            skip_nets=["STRICT1"],
+            config=derived,
+        )
+        assert "--deterministic-budget" in cmd
+        assert "--allow-unsafe-grid" in cmd
+        # Wall-clock per-net cutoff replaced under deterministic budget (#3877).
+        assert "--per-net-timeout" not in cmd
+        # Intentional overrides survive to the argv.
+        assert cmd[cmd.index("--timeout") + 1] == "600"

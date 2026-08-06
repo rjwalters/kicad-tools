@@ -661,3 +661,46 @@ class TestNetCountBudget:
         for p_name, n_name in diffpairs.items():
             assert p_name in nets, f"Diff pair positive net {p_name!r} not in NETS"
             assert n_name in nets, f"Diff pair negative net {n_name!r} not in NETS"
+
+
+# =============================================================================
+# Issue #4557: genuine-open guard under the strict-by-default flip
+# =============================================================================
+
+
+class TestDefaultNetStatusGenuineOpens:
+    """The DEFAULT ``NetStatusAnalyzer`` path still reports board 07's real opens.
+
+    Issue #4557 flipped the analyzer default to strict (real copper
+    geometry).  The flip removes board 06's 16 FALSE opens but must not mask
+    board 07's 5 GENUINE opens (#3438) -- measured identical under both
+    connectivity models.  No ``strict`` argument may appear in these tests:
+    they pin the default code path consumers actually hit.
+    """
+
+    # The 5 known-unroutable nets on the committed artifact (#3438).
+    EXPECTED_OPEN_NETS = {"DQ3", "DQ4", "MIPI_DAT0_N", "TMDS_D0_N", "TMDS_D1_N"}
+
+    @pytest.fixture(scope="class")
+    def default_result(self):
+        pytest.importorskip("shapely")
+        routed = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+        if not routed.exists():
+            pytest.skip(f"Routed PCB artifact missing: {routed}")
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        # Default construction -- no strict kwarg (issue #4557).
+        return NetStatusAnalyzer(routed).analyze()
+
+    def test_genuine_opens_still_reported(self, default_result) -> None:
+        open_nets = {n.net_name for n in default_result.incomplete} | {
+            n.net_name for n in default_result.unrouted
+        }
+        assert open_nets == self.EXPECTED_OPEN_NETS, (
+            f"Default (strict) connectivity must keep reporting board 07's 5 "
+            f"genuine opens (#3438) -- the #4557 default flip must not mask "
+            f"real opens.  Expected {sorted(self.EXPECTED_OPEN_NETS)}, got "
+            f"{sorted(open_nets)}.  Fewer nets here WITHOUT a router "
+            f"improvement on the committed artifact means the connectivity "
+            f"model started over-connecting; more means a regression."
+        )

@@ -32,6 +32,46 @@ constructor). No breaking changes.
   `router/mfr_limits.py::resolve_edge_clearance` (CLI now delegates to it),
   and `build_pcb_router_factory` gained a `rules=` passthrough so
   placement-fitness routing can opt into the same keepout.
+- **Mypy version-drift guard + worktree env sync** — fresh worktrees perform
+  no Python env setup, so a drifted `.venv` (e.g. mypy 1.20.2 vs the locked
+  1.19.1) surfaced toolchain diagnostics as phantom "NEW mypy errors beyond
+  the baseline". `scripts/ci/check_mypy_baseline.py` now compares the invoked
+  PATH `mypy --version` against the `uv.lock` pin and prints a warn-only
+  `MYPY VERSION DRIFT` diagnostic (banner when new-vs-baseline errors are
+  also present) naming the `uv sync --frozen --extra dev` remedy; exit-code
+  semantics are unchanged and the guard skips silently on an unreadable
+  lock. A new repo-owned `.loom/hooks/post-worktree.sh` hook runs
+  `uv sync --frozen --extra dev` automatically in Loom-created worktrees, and
+  the README "Fresh worktree checklist" documents the manual step. (#4558)
+- **`kct pcb add-3d-models --refresh` — rewrite existing `(model ...)` refs
+  in place** (#4586) — the command was insert-only, so refs generated before
+  a resolution fix (#4045 offsets, #4457/#4583 rotation baking, #4584 LCSC
+  per-part transforms) were stranded stale with no migration path short of
+  hand-stripping the nodes. `--refresh` re-resolves every footprint through
+  the current tier chain (exact → same-library variant → cross-library
+  substitution → LCSC sidecar) and replaces existing model nodes with the
+  freshly computed ones; output is byte-identical to stripping the old nodes
+  and re-running the insert path. Footprints the tiers cannot re-resolve keep
+  their existing nodes byte-for-byte (reported as `refresh_kept` alongside
+  the new `refreshed` field in text/JSON output). Without the flag the
+  command is unchanged (insert-only, existing refs never touched); combines
+  with `--dry-run`. All edits stay scoped to `(model ...)` metadata — copper,
+  placement, zones and nets are untouched.
+- **`kct check` schematic field-geometry lint (`sch_fields`)** — new
+  warning-severity check category with two rules: `sch_field_offset` flags a
+  visible `Reference`/`Value` field farther than a threshold (default 15 mm,
+  `--sch-field-threshold`) from its symbol's placed body bbox, and
+  `sch_field_overlap` flags a field's estimated text bbox colliding with
+  another symbol's body or another symbol's visible field (the superimposed
+  `+3.3VA9`-style composites). Runs on the same resolved schematic ERC/LVS
+  use (explicit `--schematic` or sibling discovery), recurses into
+  hierarchical sub-sheets, and shares the exact `field_geometry` metric that
+  `kct sch tidy` fixes — lint reports it, tidy repairs it. Both rules are
+  advisory (`advisory-quality` bucket), never raise the error count, and
+  never block `kct build`/`kct pipeline` fab gates; under `--strict` they
+  become fatal by the pre-existing global warnings contract. Findings are
+  deterministically sorted for CI. Skipped entirely under `--drc-only`.
+  (#4595)
 
 - **Search-time HV pairwise clearance in the lattice engine** — `--voltage-map`
   + `--route-engine lattice` now *avoids* HV↔LV proximity during the A\* search
@@ -50,6 +90,25 @@ constructor). No breaking changes.
   `--voltage-map` the lattice path is byte-identical; coupled diff-pair fat
   envelopes are deliberately excluded (same-domain by construction; emitted
   legs remain audited). The mesh engine stays post-route-gated only (#4602).
+
+- **Keepout rule areas honored by the lattice engine, with a per-net-class
+  filter** — KiCad `(zone … (keepout …))` rule areas now parse into a
+  first-class model (`schema/pcb.py`: `Zone.keepout` flags + multi-layer
+  `Zone.layers` + `PCB.rule_areas`; previously the `keepout` child was
+  silently dropped) and `--route-engine lattice` enforces them at search
+  time: `tracks not_allowed` keeps every segment's copper edge out of the
+  area on its declared layers, `vias not_allowed` rejects through-vias whose
+  barrel would enter it, and `copperpour not_allowed`-only areas (the
+  `kct zones hv-keepout` pour voids) never constrain routing. A new
+  `spatial_keepouts` block in the `--net-class-map` sidecar scopes an area
+  per net class by zone name (`only_classes` / `except_classes`; no entry =
+  KiCad-default all-nets), which makes disjoint HV bank corridors expressible
+  as complementary keepouts — declarable spatial segregation by construction,
+  composing with (not replacing) the #4602 pairwise search-time avoidance.
+  Nets rendered unroutable by an area report keepout-attributed declines
+  (`pad-escape-*-keepout`, `no-path-keepout-constrained`); boards with no
+  track/via-blocking rule areas route byte-identically; grid/mesh warn once
+  that they do not honor rule areas (#4605).
 
 - **`kct sch tidy` — headless Reference/Value field autoplace** — new
   schematic subcommand that resets visible `Reference`/`Value` field
@@ -283,6 +342,22 @@ constructor). No breaking changes.
 
 ### Changed
 
+- **`kct net-status` / `NetStatusAnalyzer` default to strict real-geometry
+  connectivity** — the default connectivity model is now shapely copper-shape
+  intersection (`strict=True`), matching `kicad-cli pcb drc` semantics. The
+  legacy 0.01mm endpoint-proximity model diverged from KiCad in both
+  directions: it over-connected copper whose reference points were merely near
+  (#4176) and false-flagged pads open when a trace endpoint landed inside pad
+  copper but away from the pad *center* — 16 false opens on board 06's poured
+  nets (`GND`/`+1V2`/`VBUS_USB`), now 0 by default. Board 07's 5 genuine
+  #3438 opens are unchanged. `--legacy-proximity` (CLI) / `strict=False`
+  (API) opt back into the old model; `--strict` remains accepted as a no-op.
+  Output now names the model in use, `--why` respects the selection
+  (previously `--strict --why` silently ignored `--strict`), and strict-mode
+  segment/pad bonds are now layer-gated so a 2D copper overlap on a different
+  layer can no longer fuse copper a via does not electrically span.
+  `kct check` connectivity defaults are unchanged (#4557).
+
 - **`kct check` splits its report into manufacturing and advisory buckets** —
   a rule-to-category taxonomy renders a CATEGORY SUMMARY with "Manufacturing
   DRC: N blocking" and "Advisory/quality: M advisory", so routing-intent
@@ -319,7 +394,91 @@ constructor). No breaking changes.
   named one *arbitrary* member of the collision set (board 05 reported `U10
   pad 28`; the real set is pads 27, 28, 29, 30) (#4612).
 
+### Removed
+
+- **One-off diagnostic scripts for closed issues** —
+  `scripts/calibrate_area_estimate.py` (packing-overhead calibration helper
+  for #3403) and `scripts/diagnose_b03_diffpair.py` (board-03 diff-pair
+  pre-pass diagnostic for #2490) are deleted along with their
+  `scripts/README.md` catalogue rows. Both parent issues shipped long ago,
+  nothing in the repo invokes either script, and the estimator's coverage
+  lives in dedicated tests; recoverable from git history if ever needed
+  (#4566).
+
 ### Fixed
+
+- **Batch completion and nudge re-route no longer drop newer `RescueConfig`
+  fields.** `complete_unfinished_nets` (`router/partial_rescue.py`) and the
+  post-nudge re-route (`router/placement_nudge.py`) rebuilt their per-pass
+  `RescueConfig` field-by-field, silently resetting any field added after the
+  copy was written: `allow_unsafe_grid` (#4528/#4532) was dropped at both
+  sites — so an unsafe-grid board's completion subprocess exited 1 at the CLI
+  gate before routing anything (bogus `no_output` failures) — and the nudge
+  path also lost `deterministic_budget` (#3877 cross-machine
+  reproducibility). Both sites now derive the pass config via
+  `dataclasses.replace` (helpers `_completion_pass_config` /
+  `_reroute_pass_config`), so future fields propagate by construction, and a
+  sentinel-based drift-guard test over `dataclasses.fields(RescueConfig)`
+  fails if a field is ever enumerated-but-not-propagated again (#4550).
+- **Docs: the `enable_shadow_construction` comment block in
+  `router/diffpair.py` no longer cites pre-#3988 off-angle measurements.**
+  The 2026-07-08 #3921 snapshot (3/9 convergence; off-angle shadow segments
+  with a "pending" #3907 dogleg; open residuals #4570/#4574/#4575/#4577) is
+  re-framed as dated, resolved history: `_quantize_shadow_segments` (#3988)
+  doglegs shadow copper 45-legal at emission (verified 2026-07-31, zero
+  `OffAngleSegmentWarning` across all 9 board-06 pairs, #4461), construction
+  is 6/9 since #4460 (#4512/#4526), and the residuals are all closed. The
+  multiply-stale docstring of `test_shadow_construction_flag_defaults_off`
+  now states the current OFF rationale (USB_CC1 corridor contention + shadow-ON
+  wall-clock vs the 30-min CI ceiling, per the 2026-08-02 #4463 measurement).
+  The stale comment had already spawned near-duplicate work once (#4461 was
+  almost built as a new feature). Comment/docstring-only; zero executable-code
+  change (#4552).
+- **`route_cmd.main()` no longer leaks process-global state to in-process
+  callers** (#4559). The route CLI stamps the `KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE`
+  / `KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK` (+ `_SIZE`/`_DRILL`) escalation
+  env vars, seeds the global `random` module for `--seed`, installs a SIGINT
+  partial-save handler, and pins the live `Autorouter` in a module-level
+  interrupt dict — and previously restored none of them. Any in-process
+  invocation (`kct route` via `commands/routing.py`, or a test calling
+  `route_cmd.main()`) permanently poisoned the process: a leaked fallback
+  `=1` silently re-enabled micro-via-in-pad rescue for every subsequent
+  `EscapeRouter`, producing the selection-dependent pytest-xdist worker
+  failures first seen in PR #4556. `main()` is now a thin wrapper whose
+  `_process_state_guard` context manager snapshot-restores `os.environ`
+  (exact, including removing vars created mid-run), the global RNG state
+  (only when `--seed` was applied; unseeded runs still leave the RNG
+  untouched), the SIGINT handler (only if still ours on exit), and releases
+  the pinned router/grid. Stickiness *within* one invocation — including the
+  escalation ladder's per-rung stamp/pop and subprocess env propagation — is
+  unchanged: the restore runs strictly at the outermost exit, after all
+  copper is written.
+- **Docs: board-07 placement-delta probe results corrected to CI ground
+  truth.** The board-07 README, the `generate_design.py` "MEASURED VERDICT"
+  comment block, and the `run()` docstring in `router/placement_feedback.py`
+  presented the U3-translate probe as a universal "+1 net (26/31 -> 27/31)
+  reverted for clearance" — that was a host-specific (local macOS arm64)
+  measurement. Both independent board-07 CI runs measured the probe as routed
+  25 -> 25 (refused for no reach gain; the clearance guard never fires there)
+  and probe 0 as 25 -> 14 (host: 25 -> 16). All three sites now carry both
+  measurements with host-vs-CI provenance, the README records the divergence
+  alongside the board-06 nondeterminism tracked in #4536, and `DQ4` /
+  `TMDS_D0_N` / `TMDS_D1_N` are now explicitly named unprobed-by-budget
+  rather than reading as unroutable. Text-only; no code, thresholds, or
+  routed artifacts changed (#4561).
+- **Legacy pre-#4600 generated `.kicad_dru` sidecars duplicated on merge.**
+  The marker-guarded fab-floors merge (#4600) treated kct's own
+  clobber-written, unmarked sidecars as user-authored and APPENDED a second
+  copy of every tier floor instead of replacing the legacy content — rewriting
+  committed board artifacts in place (board-05's sidecar tripped the #3580
+  committed-artifacts guard, failing the Test job on main). `merge_dru_floors`
+  now recognizes the legacy generated shape (a `(version N)` header followed
+  exclusively by `generate_dru`-grammar rules with generated rule names) and
+  replaces it with the managed block; genuinely user-authored no-marker
+  content keeps the never-clobber append semantics. All eight committed
+  `boards/*/output/*.kicad_dru` sidecars were migrated to the marked format
+  (byte-identical rule floors, now sentinel-delimited), so re-export is
+  idempotent on them. (#4667)
 
 - **The `.kicad_dru` sidecar write clobbered pre-existing user content.** The
   tier-floor `.kicad_dru` written beside the board by `kct route`, `kct build`,

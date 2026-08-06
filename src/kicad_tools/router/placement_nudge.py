@@ -41,7 +41,7 @@ import math
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -413,6 +413,30 @@ class PlacementNudge:
                 fp.position = (n.new_xy[0], n.new_xy[1])
 
 
+#: Fields of :class:`RescueConfig` that :func:`_reroute_pass_config`
+#: intentionally overrides.  Everything else MUST propagate unchanged from
+#: ``cfg.rescue`` -- the drift-guard test iterates
+#: ``dataclasses.fields(RescueConfig)`` against this set (#4550).
+REROUTE_PASS_OVERRIDES: frozenset[str] = frozenset({"stage_timeout_s", "excluded_nets"})
+
+
+def _reroute_pass_config(
+    rescue: RescueConfig,
+    reroute_timeout_s: int,
+    excluded: frozenset[str],
+) -> RescueConfig:
+    """Derive the post-nudge re-route config from the board's rescue recipe.
+
+    Issue #4550: the old field-by-field ``RescueConfig(...)`` rebuild here
+    silently dropped ``deterministic_budget`` (#3877 cross-machine
+    reproducibility) and ``allow_unsafe_grid`` (#4528 unsafe-grid opt-in).
+    ``dataclasses.replace`` propagates every field by construction; the only
+    intentional overrides are ``stage_timeout_s=reroute_timeout_s`` and
+    ``excluded_nets=excluded`` (see :data:`REROUTE_PASS_OVERRIDES`).
+    """
+    return replace(rescue, stage_timeout_s=reroute_timeout_s, excluded_nets=excluded)
+
+
 def nudge_placement_bound_nets(
     routed_path: Path,
     config: NudgeConfig | None = None,
@@ -518,18 +542,7 @@ def nudge_placement_bound_nets(
             if n not in cohort_set
         ]
         strict_complete = sorted(set(skip_nets))
-        reroute_cfg = RescueConfig(
-            manufacturer=cfg.rescue.manufacturer,
-            backend=cfg.rescue.backend,
-            seed=cfg.rescue.seed,
-            stage_timeout_s=cfg.reroute_timeout_s,
-            per_net_timeout_s=cfg.rescue.per_net_timeout_s,
-            starting_layers=cfg.rescue.starting_layers,
-            max_layers=cfg.rescue.max_layers,
-            excluded_nets=excluded,
-            micro_via_in_pad_fallback=cfg.rescue.micro_via_in_pad_fallback,
-            extra_args=cfg.rescue.extra_args,
-        )
+        reroute_cfg = _reroute_pass_config(cfg.rescue, cfg.reroute_timeout_s, excluded)
         cmd = build_rescue_command(
             routed_path,
             routed_path,

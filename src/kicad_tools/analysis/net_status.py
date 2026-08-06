@@ -3,6 +3,11 @@
 This module provides detailed net connectivity status reporting, showing which nets
 are complete, incomplete, or unrouted, with details on what's missing.
 
+Connectivity is decided by real geometric copper contact (shapely polygon
+intersection, matching ``kicad-cli pcb drc`` semantics) by default; pass
+``strict=False`` to opt into the legacy 0.01mm endpoint-proximity model
+(see ``NetStatusAnalyzer.POSITION_TOLERANCE`` for the trade-offs).
+
 Example:
     >>> from kicad_tools.schema.pcb import PCB
     >>> from kicad_tools.analysis.net_status import NetStatusAnalyzer
@@ -372,32 +377,42 @@ class NetStatusAnalyzer:
     # Tolerance for matching point positions (in mm).
     #
     # This is an endpoint-proximity radius, NOT a geometric-contact test:
-    # in the default (non-strict) mode, two copper elements (segment
+    # in the legacy (``strict=False``) mode, two copper elements (segment
     # endpoints, pad centers, via centers) are unioned whenever their
     # reference points land within this radius, even if their actual copper
     # shapes (segment width, pad size) do not touch.  KiCad's connectivity
-    # engine instead requires real geometric overlap, so the default model
-    # can report a net "complete" that KiCad (``kicad-cli pcb drc``) reports
-    # as having unconnected items (Issue #4176).  Pass ``strict=True`` to use
-    # real shapely copper-shape intersection and match KiCad.
+    # engine instead requires real geometric overlap, so the legacy model
+    # both over-connects (reports a net "complete" that KiCad reports as
+    # having unconnected items, Issue #4176) and under-connects (reports a
+    # pad open when a trace endpoint lands inside the pad copper but more
+    # than this radius from the pad *center* -- 16 false opens on board 06,
+    # Issue #4557).  The default is therefore ``strict=True`` (real shapely
+    # copper-shape intersection, matching KiCad); pass ``strict=False`` to
+    # opt back into the legacy proximity model.
     POSITION_TOLERANCE = 0.01
 
-    def __init__(self, pcb: str | Path | PCB, *, strict: bool = False) -> None:
+    def __init__(self, pcb: str | Path | PCB, *, strict: bool = True) -> None:
         """Initialize the analyzer.
 
         Args:
             pcb: Path to PCB file or loaded PCB object.
-            strict: When ``True``, segment↔segment, segment↔pad, and
-                segment↔via connectivity is decided by real geometric copper
-                contact (shapely polygon intersection: a segment is its
-                centerline buffered by ``width / 2``; a pad/via is its copper
-                shape) instead of the ``POSITION_TOLERANCE`` endpoint-proximity
-                radius.  This matches KiCad's connectivity semantics
-                (Issue #4176).  The default (``False``) preserves the legacy
-                tolerance-based behavior so existing consumers are unaffected.
-                Requires ``shapely``; strict mode fails loud (rather than
+            strict: When ``True`` (the default since Issue #4557),
+                segment↔segment, segment↔pad, and segment↔via connectivity is
+                decided by real geometric copper contact (shapely polygon
+                intersection: a segment is its centerline buffered by
+                ``width / 2``; a pad/via is its copper shape).  This matches
+                KiCad's connectivity semantics (Issue #4176) and is what CI's
+                plane-net gate trusts.  Requires ``shapely`` (a core
+                dependency since #3824); strict mode fails loud (rather than
                 silently degrading to the tolerance model) if it is
-                unavailable.
+                unavailable.  Pass ``False`` to opt into the legacy
+                ``POSITION_TOLERANCE`` endpoint-proximity model, which is
+                cheaper (~1.5-2x) but diverges from KiCad in both directions:
+                it can report proximity-unioned copper "complete" that KiCad
+                reports open (#4176), and it reports false opens when a trace
+                endpoint lands inside pad copper but away from the pad center
+                (#4557).  Legitimate uses are perf-sensitive inner loops that
+                only consume before/after deltas.
         """
         from kicad_tools.schema.pcb import PCB as PCBClass
 
@@ -693,7 +708,12 @@ class NetStatusAnalyzer:
                 seg = segments[seg_idx]
                 if self.strict:
                     component_pads.update(
-                        self._find_pads_touching_geom(self._segment_poly(seg), pad_positions)
+                        self._find_pads_touching_geom(
+                            self._segment_poly(seg),
+                            pad_positions,
+                            layer=seg.layer,
+                            pad_layers=pad_layers,
+                        )
                     )
                 else:
                     component_pads.update(self._find_pads_at_point(seg.start, pad_positions))
@@ -758,7 +778,12 @@ class NetStatusAnalyzer:
                 seg = segments[seg_idx]
                 if self.strict:
                     chain_pads.update(
-                        self._find_pads_touching_geom(self._segment_poly(seg), pad_positions)
+                        self._find_pads_touching_geom(
+                            self._segment_poly(seg),
+                            pad_positions,
+                            layer=seg.layer,
+                            pad_layers=pad_layers,
+                        )
                     )
                 else:
                     chain_pads.update(self._find_pads_at_point(seg.start, pad_positions))
@@ -822,10 +847,17 @@ class NetStatusAnalyzer:
         # Strict (Issue #4176): two pads bond when both copper polygons
         # intersect the same segment / via copper geometry.
         if self.strict:
-            copper_geoms = [self._segment_poly(seg) for seg in segments]
-            copper_geoms.extend(self._via_geom(via) for via in vias)
-            for geom in copper_geoms:
-                touching = self._find_pads_touching_geom(geom, pad_positions)
+            # Segment geometry carries its layer (Issue #4557: a 2D copper
+            # polygon must not bond a pad that does not exist on that layer);
+            # via barrels span layers, so they stay layer-unfiltered here.
+            copper_geoms: list[tuple[Any, str | None]] = [
+                (self._segment_poly(seg), seg.layer) for seg in segments
+            ]
+            copper_geoms.extend((self._via_geom(via), None) for via in vias)
+            for geom, geom_layer in copper_geoms:
+                touching = self._find_pads_touching_geom(
+                    geom, pad_positions, layer=geom_layer, pad_layers=pad_layers
+                )
                 for i, pad_id in enumerate(touching):
                     for other_id in touching[i + 1 :]:
                         graph[pad_id].add(other_id)
@@ -1267,13 +1299,17 @@ class NetStatusAnalyzer:
         Returns:
             List of sets, each containing segment indices in a connected component
 
-        In the default mode two segments are chained when any of their
+        In the legacy mode two segments are chained when any of their
         endpoints land within ``POSITION_TOLERANCE`` of each other.  In
-        ``strict`` mode (Issue #4176) they are chained iff their real copper
-        polygons (each segment's centerline buffered by ``width / 2``)
-        intersect — matching KiCad, which does not bond two traces whose
-        copper does not physically touch even when their endpoints are within
-        the snap tolerance.
+        ``strict`` mode (Issue #4176) they are chained iff they are on the
+        SAME copper layer and their real copper polygons (each segment's
+        centerline buffered by ``width / 2``) intersect — matching KiCad,
+        which does not bond two traces whose copper does not physically touch
+        even when their endpoints are within the snap tolerance.  The
+        same-layer gate matters because copper polygons are 2D: without it a
+        trace crossing OVER another trace on a different layer would chain
+        (Issue #4557 — cross-layer joins are handled by
+        ``_merge_chains_via_vias`` with ``_via_spans_layer`` gating instead).
         """
         if not segments:
             return []
@@ -1287,7 +1323,9 @@ class NetStatusAnalyzer:
             for j, seg_b in enumerate(segments):
                 if i != j:
                     if self.strict:
-                        connected = self._geoms_touch(polys[i], polys[j])
+                        connected = seg_a.layer == seg_b.layer and self._geoms_touch(
+                            polys[i], polys[j]
+                        )
                     else:
                         connected = (
                             self._points_close(seg_a.start, seg_b.start)
@@ -1426,18 +1464,35 @@ class NetStatusAnalyzer:
         self,
         geom: Any,
         pad_positions: dict[str, tuple[float, float]],
+        *,
+        layer: str | None = None,
+        pad_layers: dict[str, list[str]] | None = None,
     ) -> list[str]:
         """Strict analogue of ``_find_pads_at_point``: pads whose copper touches ``geom``.
 
         Only pads present in ``pad_positions`` (i.e. on the net being analyzed)
         are considered, matching the point-based helper's contract.
+
+        When ``layer`` and ``pad_layers`` are both given (segment geometry,
+        Issue #4557), a pad only matches if it exists on that copper layer
+        (``*.Cu`` wildcard aware) — the copper polygons are 2D, so without the
+        gate an inner-layer trace passing UNDER a surface pad would falsely
+        bond it.
         """
         if geom is None:
             return []
         pad_polys = self._pad_polys()
-        return [
-            pad_id for pad_id in pad_positions if self._geoms_touch(geom, pad_polys.get(pad_id))
-        ]
+        matches: list[str] = []
+        for pad_id in pad_positions:
+            if (
+                layer is not None
+                and pad_layers is not None
+                and not self._pad_layer_matches_zone(pad_layers.get(pad_id, []), layer)
+            ):
+                continue
+            if self._geoms_touch(geom, pad_polys.get(pad_id)):
+                matches.append(pad_id)
+        return matches
 
     # Canonical copper layer ordering from top to bottom.
     # Promoted to ``kicad_tools.core.layers`` in Issue #3487 so the DRC

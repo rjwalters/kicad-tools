@@ -788,21 +788,22 @@ def test_proximity_guard_allows_exact_min_spacing():
 def test_shadow_construction_flag_defaults_off():
     """The geometric shadow constructor is opt-in (default False).
 
-    Two of the three original artifact-quality defects are fixed on main
-    (stranded shadow tails -> #3665 transactional rollback; shadow-via /
-    partner intersections -> #3667 full-polyline via validation), and the
-    corridor-competition defect did not reproduce on the current
-    tightened-width geometry (#3921 seed-42 re-run reached 15/15 singles).
+    The original artifact-quality defects are fixed on main: stranded
+    shadow tails -> #3665 transactional rollback; shadow-via / partner
+    intersections -> #3667 full-polyline via validation; off-angle shadow
+    segments -> #3988 by-construction quantization (verified 2026-07-31:
+    zero ``OffAngleSegmentWarning`` across all 9 board-06 pairs, #4461);
+    and parallel-offset feasibility -> #4460 (closed 2026-07-31 via
+    #4512/#4526), lifting board-06 construction to 6/9.
 
-    The flag stays OFF because the #3921 (2026-07-08) end-to-end
-    re-measurement found shadow-ON still un-shippable on board 06:
-    convergence collapsed to 3/9 (the 0.225-0.275 mm coupled widths make
-    the geometric parallel offset infeasible for 6/9 pairs), the surviving
-    shadow segments are off-angle (would fail the #3975 45-census if
-    committed), and the fallbacks blow the CI wall-clock (>1200 s vs
-    ~150 s / 21-21 shadow-OFF).  Flipping this default would regress CI;
-    it stays opt-in until a shadow-aware by-construction dogleg and a
-    parallel-offset feasibility fix land.  See #3921 for the full data.
+    The flag still stays OFF for the two reasons measured 2026-08-02
+    under #4463: corridor competition strands single-ended nets (3 nets
+    strand, 18/21 reach on seed 42; USB_CC1 is not recoverable even by
+    corridor yielding), and total shadow-ON wall-clock (~22.5 min local)
+    has no headroom against the diff-pair regression CI job's 30-minute
+    ceiling.  The comment block above
+    ``DifferentialPairConfig.enable_shadow_construction`` in
+    ``kicad_tools/router/diffpair.py`` is the canonical, dated history.
     """
     from kicad_tools.router.diffpair import DifferentialPairConfig
 

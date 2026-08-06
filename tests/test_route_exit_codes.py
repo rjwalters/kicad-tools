@@ -331,7 +331,13 @@ class TestRouteExitCodeIntegration:
 
 
 class TestRouteExitCodeDocumentation:
-    """Verify the exit code comment block in route_cmd.py is accurate."""
+    """Verify the exit code comment block in route_cmd.py is accurate.
+
+    Issue #4559: ``route_cmd.main`` became a thin process-state-guard
+    wrapper around ``route_cmd._main_impl``; the exit-code logic these
+    tests introspect lives in the implementation, so they inspect
+    ``_main_impl``.
+    """
 
     def test_source_documents_exit_code_2_for_partial(self):
         """The exit code comment in route_cmd.py documents exit code 2 for partial routing."""
@@ -339,10 +345,12 @@ class TestRouteExitCodeDocumentation:
 
         from kicad_tools.cli import route_cmd
 
-        source = inspect.getsource(route_cmd.main)
-        assert "return 2" in source, "route_cmd.main() must contain 'return 2' for partial routing"
+        source = inspect.getsource(route_cmd._main_impl)
+        assert "return 2" in source, (
+            "route_cmd._main_impl must contain 'return 2' for partial routing"
+        )
         assert "Partial routing" in source, (
-            "route_cmd.main() must document partial routing for exit code 2"
+            "route_cmd._main_impl must document partial routing for exit code 2"
         )
 
     def test_source_documents_exit_code_3(self):
@@ -351,12 +359,14 @@ class TestRouteExitCodeDocumentation:
 
         from kicad_tools.cli import route_cmd
 
-        source = inspect.getsource(route_cmd.main)
+        source = inspect.getsource(route_cmd._main_impl)
         assert "return 3" in source, (
-            "route_cmd.main() must contain 'return 3' for DRC-only failures"
+            "route_cmd._main_impl must contain 'return 3' for DRC-only failures"
         )
-        assert "return 0" in source, "route_cmd.main() must contain 'return 0' for success"
-        assert "return 1" in source, "route_cmd.main() must contain 'return 1' for fatal failure"
+        assert "return 0" in source, "route_cmd._main_impl must contain 'return 0' for success"
+        assert "return 1" in source, (
+            "route_cmd._main_impl must contain 'return 1' for fatal failure"
+        )
 
     def test_source_documents_threshold_semantics(self):
         """The exit code comments document --min-completion threshold behavior."""
@@ -364,11 +374,11 @@ class TestRouteExitCodeDocumentation:
 
         from kicad_tools.cli import route_cmd
 
-        source = inspect.getsource(route_cmd.main)
+        source = inspect.getsource(route_cmd._main_impl)
         assert "min_completion" in source, (
-            "route_cmd.main() must reference min_completion in exit code logic"
+            "route_cmd._main_impl must reference min_completion in exit code logic"
         )
-        assert "meets_threshold" in source, "route_cmd.main() must use meets_threshold variable"
+        assert "meets_threshold" in source, "route_cmd._main_impl must use meets_threshold variable"
 
 
 # ---------------------------------------------------------------------------

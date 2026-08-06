@@ -71,7 +71,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from kicad_tools.router import Autorouter, LayerStack
     from kicad_tools.router.net_names import NetClassMapResolution
@@ -1611,6 +1611,76 @@ def _handle_interrupt(signum, frame):
     # This is distinct from code 2 (partial routing below threshold) so scripts can
     # distinguish user-interrupted from router-decided-partial.
     sys.exit(5 if saved else 130)  # 130 = 128 + SIGINT (2)
+
+
+# Issue #4559: per-invocation record of whether ``_main_impl`` seeded the
+# global ``random`` module (``--seed``).  ``_process_state_guard`` resets it
+# on entry and restores the caller's RNG state on exit ONLY when it was set,
+# so an unseeded run never touches the caller-observable global RNG state
+# (existing behavior, preserved bit-for-bit).
+_process_run_state = {"rng_seeded": False}
+
+
+@contextlib.contextmanager
+def _process_state_guard() -> "Iterator[None]":
+    """Snapshot/restore the process-global state that ``_main_impl`` stamps.
+
+    ``route_cmd.main()`` is invoked **in-process** by ``kct route``
+    (``commands/routing.py``) and by dozens of test files, but the
+    implementation mutates process-global state and (before issue #4559)
+    restored none of it, silently poisoning every subsequent in-process
+    invocation.  This guard wraps the outermost ``main()`` boundary and
+    restores, in a ``finally``:
+
+    * ``os.environ`` -- the ``KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE`` /
+      ``KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK`` (+ ``_SIZE``/``_DRILL``)
+      escalation stamps, read lazily far below the CLI in
+      ``EscapeRouter.__init__``.  The env var IS the channel: it must stay
+      stamped for the *entire* invocation (the escalation ladder re-stamps
+      per rung, and ``EscapeRouter`` is constructed lazily mid-run), so the
+      restore happens here -- at the outermost boundary, strictly after all
+      copper has been written -- never per-rung.  The whole environ is
+      snapshotted and restored exactly (``clear()`` + ``update()``), so vars
+      *created* during the run are removed rather than merely reverted.
+    * the global ``random`` state -- restored only when ``--seed`` was
+      actually applied (see ``_process_run_state``); an unseeded run leaves
+      the global RNG untouched, exactly as before.
+    * the ``SIGINT`` handler installed for the Ctrl+C partial-save path --
+      restored only if it is still ``_handle_interrupt`` on exit, so a
+      handler installed by someone else mid-run is never clobbered.
+    * ``_interrupt_state`` -- the router/output references are dropped so a
+      completed run does not pin an ``Autorouter`` (and its grid) alive for
+      the rest of the process.
+
+    ``kct route`` as a **subprocess** is unaffected: the guard is inert
+    there (the process exits anyway), so child-process env propagation of
+    the stamps during the run is preserved.
+    """
+    saved_environ = dict(os.environ)
+    saved_rng_state = random.getstate()
+    try:
+        saved_sigint = signal.getsignal(signal.SIGINT)
+    except ValueError:  # pragma: no cover -- not on the main thread
+        saved_sigint = None
+    _process_run_state["rng_seeded"] = False
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_environ)
+        if _process_run_state["rng_seeded"]:
+            random.setstate(saved_rng_state)
+        if saved_sigint is not None:
+            try:
+                if signal.getsignal(signal.SIGINT) is _handle_interrupt:
+                    signal.signal(signal.SIGINT, saved_sigint)
+            except ValueError:  # pragma: no cover -- not on the main thread
+                pass
+        # Release the router/grid pinned for the SIGINT partial-save path.
+        _interrupt_state["router"] = None
+        _interrupt_state["output_path"] = None
+        _interrupt_state["pcb_path"] = None
+        _interrupt_state["interrupted"] = False
 
 
 def _save_partial_results() -> bool:
@@ -3879,26 +3949,125 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
     Idempotent and a no-op when the flag was not supplied.
     """
     loaded = getattr(args, "_loaded_net_class_map", None)
-    if not loaded:
+    if loaded:
+        from kicad_tools.router.net_names import nearest_net_names
+
+        resolution, diagnostic_net_names = _resolve_net_class_map_domains(router, loaded.keys())
+
+        # Apply overrides rekeyed to the board's actual net names so
+        # ``self.net_class_map.get(net_name)`` finds them at routing time.
+        for board_net, user_key in resolution.resolved.items():
+            router.net_class_map[board_net] = loaded[user_key]
+
+        _warn_unresolved_net_class_map(resolution, diagnostic_net_names, nearest_net_names)
+
+        if not quiet:
+            from kicad_tools.cli.progress import flush_print
+
+            flush_print(
+                f"  Net-class map: merged {len(resolution.resolved)}/{resolution.total} "
+                "sidecar entries"
+            )
+
+    # Issue #4605: stash the ``spatial_keepouts`` rule-area filter block on
+    # the router for the lattice keepout projection.  Runs AFTER the merge
+    # above so class-name validation sees the sidecar-defined classes too;
+    # runs even when the sidecar declares no net-class entries at all.
+    _stash_spatial_keepout_filters(router, args, quiet=quiet)
+
+
+def _validate_spatial_keepouts_block(block: object) -> str | None:
+    """Structural validation of the ``spatial_keepouts`` sidecar block (#4605).
+
+    Shape: ``{rule_area_zone_name: {"except_classes": [str, ...]}}`` or
+    ``{... {"only_classes": [str, ...]}}`` -- one of the two per entry, never
+    both (their combination has no defined precedence).  Returns a human
+    message on the first defect, ``None`` when the block is valid (or absent).
+    Class-NAME existence is validated later against the router's merged
+    net-class map (:func:`_stash_spatial_keepout_filters`).
+    """
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        return f"expected an object, got {type(block).__name__}"
+    for zone_name, entry in block.items():
+        if not isinstance(entry, dict):
+            return f"entry {zone_name!r} must be an object, got {type(entry).__name__}"
+        unknown = set(entry) - {"except_classes", "only_classes"}
+        if unknown:
+            return f"entry {zone_name!r} has unknown key(s): {', '.join(sorted(unknown))}"
+        if "except_classes" in entry and "only_classes" in entry:
+            return f"entry {zone_name!r} sets both except_classes and only_classes"
+        if not entry:
+            return f"entry {zone_name!r} must set except_classes or only_classes"
+        for key, value in entry.items():
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                return f"entry {zone_name!r}: {key} must be a list of class-name strings"
+    return None
+
+
+def _stash_spatial_keepout_filters(router: "Autorouter", args, quiet: bool = False) -> None:
+    """Stash (and class-name-validate) the ``spatial_keepouts`` filters (#4605).
+
+    The block itself was structurally validated at preload
+    (:func:`_validate_spatial_keepouts_block`); here -- after the sidecar's
+    net-class entries have been merged into ``router.net_class_map`` -- every
+    referenced class name is checked against the classes that actually exist.
+    A typo would otherwise silently widen (``only_classes``) or narrow
+    (``except_classes``) a spatial safety constraint, so an unknown name is a
+    hard exit 1, mirroring the other sidecar preload failures.
+    """
+    filters = getattr(args, "_spatial_keepouts", None)
+    with contextlib.suppress(AttributeError):  # exotic router stand-ins
+        router._spatial_keepout_filters = filters
+    if not filters:
         return
-
-    from kicad_tools.router.net_names import nearest_net_names
-
-    resolution, diagnostic_net_names = _resolve_net_class_map_domains(router, loaded.keys())
-
-    # Apply overrides rekeyed to the board's actual net names so
-    # ``self.net_class_map.get(net_name)`` finds them at routing time.
-    for board_net, user_key in resolution.resolved.items():
-        router.net_class_map[board_net] = loaded[user_key]
-
-    _warn_unresolved_net_class_map(resolution, diagnostic_net_names, nearest_net_names)
-
+    known = {name for nc in router.net_class_map.values() if (name := getattr(nc, "name", None))}
+    for zone_name, entry in filters.items():
+        for key in ("except_classes", "only_classes"):
+            for cls_name in entry.get(key) or ():
+                if cls_name not in known:
+                    print(
+                        f"Error: spatial_keepouts[{zone_name!r}]: unknown net class "
+                        f"{cls_name!r} (known classes: {', '.join(sorted(known)) or 'none'})",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1)
     if not quiet:
         from kicad_tools.cli.progress import flush_print
 
-        flush_print(
-            f"  Net-class map: merged {len(resolution.resolved)}/{resolution.total} sidecar entries"
-        )
+        flush_print(f"  Spatial keepouts: {len(filters)} rule-area filter(s) loaded")
+
+
+def _warn_rule_areas_other_engine(pcb_path: Path, engine: str) -> None:
+    """One-line warning when rule areas exist but the engine ignores them.
+
+    Issue #4605: only the LATTICE engine honors ``(tracks not_allowed)`` /
+    ``(vias not_allowed)`` keepout rule areas at search time.  Routing such a
+    board with grid/mesh silently commits copper straight through the
+    declared areas, so say so once -- a warning, not a gate (KiCad's own DRC
+    still catches the violation downstream).  Pour-void-only rule areas (the
+    ``kct zones hv-keepout`` output) trigger nothing: they never constrain
+    routing on any engine.  A cheap text scan on purpose -- no board model is
+    built this early.
+    """
+    if engine == "lattice":
+        return
+    try:
+        text = pcb_path.read_text()
+    except OSError:
+        return
+    for match in re.finditer(r"\(keepout\b", text):
+        window = text[match.start() : match.start() + 400]
+        if "(tracks not_allowed" in window or "(vias not_allowed" in window:
+            print(
+                "Warning: board declares track/via-blocking keepout rule areas, "
+                f"but --route-engine {engine} does not honor them (only the "
+                "lattice engine does; see issue #4605). Routed copper may "
+                "cross the declared areas.",
+                file=sys.stderr,
+            )
+            return
 
 
 def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -> None:
@@ -10106,6 +10275,21 @@ def format_dry_run_grid_plan(plan: DryRunGridPlan) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Entry point for the route command.
+
+    Thin wrapper (issue #4559): ``_process_state_guard`` restores the
+    process-global state ``_main_impl`` stamps -- the ``KICAD_TOOLS_*``
+    escalation env vars, the ``--seed`` global-RNG seeding, the SIGINT
+    handler, and the ``_interrupt_state`` router pin -- so in-process
+    callers (``kct route`` via ``commands/routing.py`` and the test
+    suite) are not poisoned.  The state stays stamped for the entire
+    invocation; only the outermost exit (return *or* raise) restores it.
+    """
+    with _process_state_guard():
+        return _main_impl(argv)
+
+
+def _main_impl(argv: list[str] | None = None) -> int:
     """Main entry point for route command."""
     parser = argparse.ArgumentParser(
         prog="kicad-tools route",
@@ -11729,6 +11913,13 @@ def main(argv: list[str] | None = None) -> int:
     # CLI) reads the same opt-in state.  See escape.py's __init__ for the
     # env-var read site.  Defaults to "0" so absence preserves the legacy
     # "proceed anyway" behaviour bit-for-bit.
+    #
+    # Issue #4559: these stamps (and every other env mutation below) are
+    # scoped to this invocation by ``_process_state_guard`` in ``main()`` --
+    # they stay set for the whole run (EscapeRouter reads them lazily,
+    # possibly per escalation rung) and are restored at the outermost exit
+    # so in-process callers are not poisoned.  Do NOT add a mid-run restore
+    # here, and do NOT add new unguarded stamps outside ``main()``.
     import os as _os
 
     if getattr(args, "strict_in_pad_clearance", False):
@@ -11752,6 +11943,9 @@ def main(argv: list[str] | None = None) -> int:
     # variance.  When ``--seed`` is omitted, the global RNG is left at its
     # default os.urandom-derived state -- existing behaviour is preserved.
     if args.seed is not None:
+        # Issue #4559: record the seeding so ``_process_state_guard`` restores
+        # the caller's global-RNG state when this invocation exits.
+        _process_run_state["rng_seeded"] = True
         random.seed(args.seed)
         if not getattr(args, "quiet", False):
             print(f"[seed] Seeded global random with --seed {args.seed}")
@@ -11884,6 +12078,7 @@ def main(argv: list[str] | None = None) -> int:
     # ``args._loaded_net_class_map`` for downstream consumers (each
     # ``load_pcb_for_routing`` site merges it into ``router.net_class_map``).
     args._loaded_net_class_map = None
+    args._spatial_keepouts = None
     if getattr(args, "net_class_map", None) is not None:
         import json as _ncm_json
 
@@ -11936,6 +12131,21 @@ def main(argv: list[str] | None = None) -> int:
         except (TypeError, ValueError) as e:
             print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
             return 1
+        # Issue #4605: the optional ``spatial_keepouts`` block -- per-rule-area
+        # net-class filters for KiCad keepout rule areas (lattice engine).
+        # Structure is validated HERE so a malformed block short-circuits with
+        # exit 1 before any routing work; the class NAMES are validated later,
+        # once the router's merged net-class map exists
+        # (``_apply_net_class_map_sidecar``).
+        _sk_err = _validate_spatial_keepouts_block(_ncm_data.get("spatial_keepouts"))
+        if _sk_err is not None:
+            print(f"Error: invalid spatial_keepouts block: {_sk_err}", file=sys.stderr)
+            return 1
+        args._spatial_keepouts = _ncm_data.get("spatial_keepouts")
+
+    # Issue #4605: rule areas are honored by the lattice engine only -- warn
+    # once (never gate) when another engine is about to ignore them.
+    _warn_rule_areas_other_engine(pcb_path, getattr(args, "route_engine", "grid") or "grid")
 
     # Issue #4431 (Phase 1): validate and load the optional --voltage-map early
     # (mirrors the --net-class-map preload above) so a missing file / malformed
@@ -12673,7 +12883,10 @@ def main(argv: list[str] | None = None) -> int:
     # Issue #1841: Tell the autorouter which pour nets lack zones
     router._pour_nets_without_zones = set(_no_zone)
 
-    # Set up Ctrl+C handling to save partial results
+    # Set up Ctrl+C handling to save partial results.  Issue #4559: the
+    # handler (and the router pinned here) is restored/released by
+    # ``_process_state_guard`` when ``main()`` exits -- mirroring the
+    # save/restore the two escalation paths already do locally.
     _interrupt_state["router"] = router
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path

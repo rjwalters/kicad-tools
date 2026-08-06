@@ -1190,3 +1190,101 @@ class TestPostQuantizeClearanceGate:
         assert generate_design_mod._clearance_signature(pcb_path) == set()
         ok = generate_design_mod._check_post_quantize_clearances(pcb_path, set())
         assert ok is True
+
+
+# =============================================================================
+# Issue #4557: default connectivity model = strict (real copper geometry)
+# =============================================================================
+
+
+class TestDefaultNetStatusOnCommittedArtifact:
+    """The DEFAULT ``NetStatusAnalyzer`` path reports 0 opens on board 06.
+
+    Issue #4557: the legacy endpoint-proximity model (0.01mm radius against
+    pad *centers*) false-flagged 16 open pads on the committed routed
+    artifact (``GND`` 14, ``+1V2`` 1, ``VBUS_USB`` 1) because the router
+    lands trace endpoints inside pad copper but away from pad centers
+    (e.g. ``+1V2`` pad U2.C3 entered 0.125mm off-center).  ``kicad-cli pcb
+    drc`` and strict mode both report 0.  The analyzer default is now
+    ``strict=True``; these tests pin the *default* code path -- no
+    ``strict`` argument may appear anywhere in them.
+    """
+
+    @pytest.fixture(scope="class")
+    def routed_pcb_path(self) -> Path:
+        routed = OUTPUT_DIR / "diffpair_test_routed.kicad_pcb"
+        if not routed.exists():
+            pytest.skip(f"Routed PCB artifact missing: {routed}")
+        return routed
+
+    @pytest.fixture(scope="class")
+    def default_result(self, routed_pcb_path: Path):
+        pytest.importorskip("shapely")
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        # Default construction -- the path every no-kwargs consumer hits.
+        return NetStatusAnalyzer(routed_pcb_path).analyze()
+
+    def test_default_path_reports_zero_open_pads(self, default_result) -> None:
+        incomplete = [n.net_name for n in default_result.incomplete]
+        unrouted = [n.net_name for n in default_result.unrouted]
+        assert incomplete == [] and unrouted == [], (
+            f"Default (strict) connectivity must report 0 incomplete / 0 "
+            f"unrouted nets on the committed board-06 artifact (kicad-cli "
+            f"agrees); got incomplete={incomplete}, unrouted={unrouted}. "
+            f"A regression here means the default connectivity model "
+            f"diverged from real copper geometry again (issue #4557)."
+        )
+        assert default_result.total_unconnected_pads == 0
+
+    @pytest.mark.parametrize("net_name", ["GND", "+1V2", "VBUS_USB"])
+    def test_previously_false_open_nets_complete(self, default_result, net_name: str) -> None:
+        """The three nets the legacy model false-flagged are complete."""
+        status = default_result.get_net(net_name)
+        assert status is not None, f"net {net_name!r} missing from analysis"
+        assert status.status == "complete", (
+            f"{net_name} must be complete under the default (strict) model "
+            f"(it is connected through zone pours; the legacy proximity model "
+            f"false-flagged it open, issue #4557); got {status.status} with "
+            f"{status.unconnected_count} unconnected pads."
+        )
+
+    def test_legacy_opt_out_reproduces_historical_false_opens(self, routed_pcb_path: Path) -> None:
+        """Characterization: ``strict=False`` still shows the legacy 16 opens.
+
+        Pins the explicit legacy opt-out's divergence so a silent behavior
+        change in either model is caught.  If the committed artifact is ever
+        regenerated with pad-center trace landings this count may change --
+        update the pin alongside the artifact refresh.
+        """
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        result = NetStatusAnalyzer(routed_pcb_path, strict=False).analyze()
+        opens_by_net = {n.net_name: n.unconnected_count for n in result.incomplete}
+        assert opens_by_net == {"GND": 14, "+1V2": 1, "VBUS_USB": 1}, (
+            f"Legacy proximity model characterization drifted: expected the "
+            f"historical 16 false opens (GND 14, +1V2 1, VBUS_USB 1); got "
+            f"{opens_by_net}."
+        )
+
+    def test_default_path_deterministic(self, routed_pcb_path: Path, default_result) -> None:
+        """Two default runs produce identical per-net verdicts and pad lists."""
+        pytest.importorskip("shapely")
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        second = NetStatusAnalyzer(routed_pcb_path).analyze()
+
+        def _snapshot(result):
+            return [
+                (
+                    n.net_name,
+                    n.status,
+                    tuple(p.full_name for p in n.unconnected_pads),
+                )
+                for n in result.nets
+            ]
+
+        assert _snapshot(default_result) == _snapshot(second), (
+            "Default (strict) net-status output must be deterministic across "
+            "runs on the same artifact (issue #4557 AC)."
+        )
