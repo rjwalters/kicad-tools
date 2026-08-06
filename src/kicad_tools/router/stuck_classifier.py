@@ -452,6 +452,7 @@ def _find_blocking_strict_nets_from_pcb(
     *,
     radius_mm: float = 2.0,
     max_blockers: int = 3,
+    strict: bool = True,
 ) -> list[str]:
     """Strict signal nets whose committed copper boxes in *target_net*'s pads.
 
@@ -467,10 +468,15 @@ def _find_blocking_strict_nets_from_pcb(
 
     Vendored from #3861 (``partial_rescue._find_blocking_strict_nets_from_pcb``)
     -- the frame-correct geometry is load-bearing; see module docstring.
+
+    ``strict`` is the *analyzer* connectivity-model selection (issue #4557:
+    real copper geometry when ``True``, legacy endpoint-proximity when
+    ``False``) -- unrelated to the "strict nets" routing-priority naming
+    used throughout this function.
     """
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
-    analysis = NetStatusAnalyzer(pcb).analyze()
+    analysis = NetStatusAnalyzer(pcb, strict=strict).analyze()
     status = analysis.get_net(target_net)
     if status is None or not status.unconnected_pads:
         return []
@@ -795,15 +801,21 @@ def classify_stuck_nets_from_pcb(
     dense_cluster_threshold: int = DEFAULT_DENSE_CLUSTER_THRESHOLD,
     max_blockers: int = 3,
     excluded_nets: frozenset[str] = frozenset(),
+    strict: bool = True,
 ) -> StuckClassifierResult:
     """Classify every unfinished signal net on *pcb* (already-loaded PCB).
 
     Split out from :func:`classify_stuck_nets` so it can be unit-tested with a
     small synthetic board without round-tripping through a file.
+
+    ``strict`` selects the ``NetStatusAnalyzer`` connectivity model (issue
+    #4557: real copper geometry when ``True``, legacy endpoint-proximity when
+    ``False``) -- NOT to be confused with the "strict nets" routing-priority
+    naming used for the rip-up pool below.
     """
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
-    analysis = NetStatusAnalyzer(pcb).analyze()
+    analysis = NetStatusAnalyzer(pcb, strict=strict).analyze()
 
     # Strict signal nets = fully-connected multi-pad signal nets.  This is the
     # rip-up pool the M2 stage would draw from, and the set #3861's blocker
@@ -874,6 +886,7 @@ def classify_stuck_nets_from_pcb(
             strict_nets,
             radius_mm=blocker_radius_mm,
             max_blockers=max_blockers,
+            strict=strict,
         )
 
         # 3) Local congestion = densest foreign-obstruction count over the
@@ -1411,11 +1424,15 @@ def classify_stuck_nets(
     dense_cluster_threshold: int = DEFAULT_DENSE_CLUSTER_THRESHOLD,
     max_blockers: int = 3,
     excluded_nets: frozenset[str] = frozenset(),
+    strict: bool = True,
 ) -> StuckClassifierResult:
     """Classify every unfinished signal net on the PCB at *pcb_path*.
 
     READ-ONLY: loads the board, analyses connectivity + geometry, and returns
     the per-net classification.  Never mutates the board.
+
+    ``strict`` selects the ``NetStatusAnalyzer`` connectivity model (issue
+    #4557); see :func:`classify_stuck_nets_from_pcb`.
     """
     from kicad_tools.schema.pcb import PCB
 
@@ -1430,4 +1447,5 @@ def classify_stuck_nets(
         dense_cluster_threshold=dense_cluster_threshold,
         max_blockers=max_blockers,
         excluded_nets=excluded_nets,
+        strict=strict,
     )

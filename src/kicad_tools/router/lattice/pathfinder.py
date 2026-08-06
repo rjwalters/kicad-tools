@@ -53,7 +53,12 @@ from ..quantize import dogleg_points
 from ..rules import DesignRules
 from .coupled import CoupledConnection
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
-from .obstacles import CommittedCopper, LatticeObstacleModel, seg_body_crosses_pt
+from .obstacles import (
+    CommittedCopper,
+    LatticeKeepoutMask,
+    LatticeObstacleModel,
+    seg_body_crosses_pt,
+)
 from .quadtree import EdgeKey, NodeKey, OctilinearLattice, RefineRegion
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -293,6 +298,15 @@ class LatticePathfinder:
         # ``--voltage-map``) keeps every predicate on its scalar path
         # byte-for-byte.
         self._pairwise: LatticePairwise | None = None
+        # Issue #4605: optional static keepout rule-area mask
+        # (:class:`.obstacles.LatticeKeepoutMask`), resolved by the CALLER
+        # from the board's ``(zone ... (keepout ...))`` rule areas + the
+        # ``spatial_keepouts`` sidecar filter -- the pathfinder stays
+        # geometry-only and never sees zone/net/class names.  ``None`` (the
+        # default, and always the case on a board with no track/via-blocking
+        # rule areas) keeps every predicate on its pre-#4605 path
+        # byte-for-byte.
+        self._keepouts: LatticeKeepoutMask | None = None
 
     def set_pairwise(self, pairwise: LatticePairwise | None) -> None:
         """Install (or clear) the id-space HV pairwise projection (#4602).
@@ -302,6 +316,17 @@ class LatticePathfinder:
         pathfinder so it cannot carry a stale projection across runs.
         """
         self._pairwise = pairwise
+
+    def set_keepouts(self, keepouts: LatticeKeepoutMask | None) -> None:
+        """Install (or clear) the keepout rule-area mask (#4605).
+
+        Consulted by the same three predicates every search expansion already
+        routes through (node / edge / free-segment legality) plus the via
+        gate -- no new call sites in the A* loop.  Passing ``None`` (or an
+        empty mask, normalised to ``None``) resets a reused pathfinder so it
+        cannot carry stale rule areas across runs.
+        """
+        self._keepouts = keepouts if keepouts else None
 
     # -- construction from a board ----------------------------------------
 
@@ -618,6 +643,12 @@ class LatticePathfinder:
         # keep-outs (the fat coupled path is excluded from pairwise widening
         # in this slice -- see ``coupled.committed_seg_clear_grown``).
         pw = None if fat else self._pairwise
+        # Issue #4605: keepout rule areas gate every stub candidate + dogleg
+        # leg at the leg's TRUE half-width (a tapered neck is probed as neck
+        # copper).  The fat coupled centerline skips the mask here -- the
+        # emitted offset legs are re-verified against it in
+        # ``_route_pair_impl``'s finish gate, so nothing under-masked ships.
+        ko = None if fat else self._keepouts
 
         candidates: list[tuple[float, NodeKey, Pt]] = []
         pad_pt = (pad.x, pad.y)
@@ -648,6 +679,8 @@ class LatticePathfinder:
                         point, point, layer, net, half, extra, pw
                     ):
                         continue
+                    if ko is not None and ko.segment_blocked(point, point, layer, net, half):
+                        continue
                     if not committed.node_clear(point, layer, net, half, clr):
                         continue
                 accepted: list[Pt] | None = None
@@ -673,6 +706,9 @@ class LatticePathfinder:
                             if pw is not None and obstacles.pairwise_pad_blocked(
                                 a, b, layer, net, half, extra, pw
                             ):
+                                ok = False
+                                break
+                            if ko is not None and ko.segment_blocked(a, b, layer, net, half):
                                 ok = False
                                 break
                             if not committed.seg_clear(a, b, layer, net, half, clr):
@@ -783,6 +819,34 @@ class LatticePathfinder:
             exempt_pads=exempt_pads,
         )
         return neck_stubs, neck_w
+
+    def _keepout_escape_reason(
+        self,
+        pad: Pad,
+        net: int,
+        stub_layers: tuple[int, ...] | None,
+        half: float,
+        base: str,
+    ) -> str:
+        """Refine an empty-stub decline with keepout attribution (#4605).
+
+        A pad whose OWN location sits inside an applicable track-keepout rule
+        area on every layer it could escape on can never produce a legal stub;
+        report that explicitly (``<base>-keepout``) instead of the generic
+        pad-escape decline the #3900 lesson warns against.  Any other empty
+        stub set keeps the honest base reason -- the mask is only blamed when
+        the pad point itself is provably covered.
+        """
+        keepouts = self._keepouts
+        if keepouts is None:
+            return base
+        layers = stub_layers if stub_layers is not None else self._pad_layer_indices(pad)
+        point = (pad.x, pad.y)
+        if layers and all(
+            keepouts.segment_blocked(point, point, layer, net, half) for layer in layers
+        ):
+            return base + "-keepout"
+        return base
 
     # -- via legality -----------------------------------------------------------
 
@@ -897,6 +961,11 @@ class LatticePathfinder:
             max(self._via_pad_grow, 0.0),
             self._pairwise,
         ):
+            return False
+        # Issue #4605: a ``(vias not_allowed)`` rule area governing this net
+        # rejects the through-via when its barrel would enter the area on ANY
+        # of the area's layers (the barrel spans the whole stack).
+        if self._keepouts is not None and self._keepouts.via_blocked(point, net, via_radius):
             return False
         return committed.via_clear(point, net)
 
@@ -1056,6 +1125,15 @@ class LatticePathfinder:
         # Issue #4602: per-PAIR HV pad keep-outs for the non-fat search (the
         # fat coupled path is excluded from pairwise widening in this slice).
         pw = None if fat else self._pairwise
+        # Issue #4605: keepout rule areas prune illegal resources in the same
+        # cached edge/node legality memos below.  ``ko_pruned`` records that
+        # the mask actually rejected at least one resource for THIS search, so
+        # a failing connection can report the keepout as a constraint instead
+        # of a bare "no-path" (the #3900 never-misattribute lesson).  The fat
+        # coupled centerline skips the mask in-search; its emitted legs are
+        # re-verified in ``_route_pair_impl``'s finish gate.
+        ko = None if fat else self._keepouts
+        ko_pruned = False
         if fat:
             # v1 coupled runs are planar; there is no fat via legality.
             allow_vias = False
@@ -1099,9 +1177,15 @@ class LatticePathfinder:
                 net_class=net_class,
             )
         if not stubs_a:
-            return None, "pad-escape-start"
+            reason = "pad-escape-start"
+            if not fat:
+                reason = self._keepout_escape_reason(start, net, stub_layers, half, reason)
+            return None, reason
         if not stubs_b:
-            return None, "pad-escape-end"
+            reason = "pad-escape-end"
+            if not fat:
+                reason = self._keepout_escape_reason(end, net, stub_layers, half, reason)
+            return None, reason
 
         goal: dict[_State, tuple[float, list[Pt]]] = {}
         for key, layer, poly, length in stubs_b:
@@ -1163,8 +1247,12 @@ class LatticePathfinder:
                     else:
                         ea = lattice.node_point(edge[0])
                         eb = lattice.node_point(edge[1])
+                        ko_hit = ko is not None and ko.segment_blocked(ea, eb, layer, net, half)
+                        if ko_hit:
+                            ko_pruned = True
                         ok = (
-                            not obstacles.edge_blocked(edge, layer, net)
+                            not ko_hit
+                            and not obstacles.edge_blocked(edge, layer, net)
                             and not (
                                 extra > 0.0 and obstacles.segment_blocked(ea, eb, layer, net, extra)
                             )
@@ -1191,8 +1279,12 @@ class LatticePathfinder:
                         )
                     else:
                         npt = lattice.node_point(nbr)
+                        ko_hit = ko is not None and ko.segment_blocked(npt, npt, layer, net, half)
+                        if ko_hit:
+                            ko_pruned = True
                         nok = (
-                            not obstacles.node_blocked(nbr, layer, net)
+                            not ko_hit
+                            and not obstacles.node_blocked(nbr, layer, net)
                             and not (
                                 extra > 0.0
                                 and obstacles.segment_blocked(npt, npt, layer, net, extra)
@@ -1231,8 +1323,12 @@ class LatticePathfinder:
                         nok = node_ok.get(nstate)
                         if nok is None:
                             kpt = lattice.node_point(key)
+                            ko_hit = ko is not None and ko.segment_blocked(kpt, kpt, nl, net, half)
+                            if ko_hit:
+                                ko_pruned = True
                             nok = (
-                                not obstacles.node_blocked(key, nl, net)
+                                not ko_hit
+                                and not obstacles.node_blocked(key, nl, net)
                                 and not (
                                     extra > 0.0
                                     and obstacles.segment_blocked(kpt, kpt, nl, net, extra)
@@ -1257,7 +1353,11 @@ class LatticePathfinder:
                             counter += 1
 
         if end_state is None:
-            return None, "no-path"
+            # Issue #4605: when the keepout mask actually rejected resources
+            # for this search, say so -- the area CONSTRAINED the search (it
+            # pruned candidates), which is honest without claiming it was the
+            # sole cause of the shortfall.
+            return None, "no-path-keepout-constrained" if ko_pruned else "no-path"
 
         # -- reconstruct ---------------------------------------------------
         chain: list[_State] = [end_state]
@@ -1662,6 +1762,14 @@ class LatticePathfinder:
                         return None, "pair-leg-blocked"
                     if not committed.seg_clear(a, b, layer, net):
                         return None, "pair-leg-blocked"
+                    # Issue #4605: the fat centerline search skips the keepout
+                    # mask, so the EMITTED legs (offset body + attach doglegs)
+                    # are verified against it here at their true half-width --
+                    # a coupled pair never ships copper through a rule area.
+                    if self._keepouts is not None and self._keepouts.segment_blocked(
+                        a, b, layer, net, trace_w / 2.0
+                    ):
+                        return None, "pair-leg-keepout"
                 legs.append((net, pad_a.net_name, full))
 
             # Intra-pair floor: leg-to-leg centreline separation must never

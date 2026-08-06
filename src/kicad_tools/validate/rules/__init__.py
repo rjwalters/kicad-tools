@@ -14,6 +14,7 @@ from .dimensions import DimensionRules
 from .edge import EdgeClearanceRule
 from .impedance import ImpedanceRule, NetImpedanceSpec
 from .match_group_length_skew import MatchGroupLengthSkewRule
+from .schematic_fields import check_schematic_fields
 from .silkscreen import (
     check_all_silkscreen,
     check_silk_edge_clearance,
@@ -46,6 +47,7 @@ __all__ = [
     "SolderMaskPadRules",
     "ViaInPadRule",
     "check_all_silkscreen",
+    "check_schematic_fields",
     "check_silk_edge_clearance",
     "check_silk_over_copper",
     "check_silkscreen_line_width",
