@@ -33,7 +33,7 @@ kct check boards/00-simple-led/output/simple_led_routed.kicad_pcb
 # Overall:   PASSED   (DRC + ERC + LVS + Manifest)
 
 kct net-status boards/00-simple-led/output/simple_led_routed.kicad_pcb
-# Summary: 3 nets total — Complete: 3 (100% connected)
+# Summary: 3 nets total — Complete: 3 (all pads connected)
 ```
 
 ## Circuit Overview

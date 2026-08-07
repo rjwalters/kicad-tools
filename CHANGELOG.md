@@ -43,6 +43,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   jobs keep their deliberate curl one-liner installs. No behavior change
   intended beyond the runtime bump.
 
+### Fixed
+
+- **`kct net-status --net X` output scoping** (#4682) — two `--net` defects
+  that made the filter untrustworthy. (1) `--net X --why` ignored the filter
+  entirely (`--why` short-circuited before net validation and
+  `output_why()` had no net parameter), so asking about one net printed
+  every OTHER stuck net's diagnosis; the whole-board classification is now
+  post-filtered to the selected net, with an explicit
+  `Net 'X' is not stuck (...)` statement (exit 0) when the selected net has
+  no diagnosis, and the same filtering in `--format json` (additive
+  `net_filter` key; unfiltered `--why` JSON unchanged). `--net NONEXISTENT
+  --why` now errors with the available-nets listing (exit 1) instead of
+  running unfiltered. (2) plain `--net X` rendered the board-wide summary
+  (e.g. `Incomplete: 1`) directly above an `All nets are fully connected!`
+  banner computed from the filtered set — a direct contradiction; the
+  summary and banner are now both scoped to the selection (`Summary: 1 net
+  selected (of N on board)` / `Selected net 'X' is fully connected.`). The
+  misleading `(100% connected)` literal on the Complete summary line is
+  reworded to `(all pads connected)`. Exit codes for the normal status path
+  are deliberately unchanged (board-wide even under `--net`, documented in
+  the `--net` help text); `--incomplete` keeps its board-wide header.
+
 ## [0.20.0] - 2026-08-06
 
 ### Summary

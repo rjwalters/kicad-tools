@@ -30,6 +30,12 @@ Exit Codes:
     0 - No incomplete nets
     1 - Error loading file or other error
     2 - Incomplete nets found
+
+    The exit code for the normal status path is board-wide even under
+    ``--net`` (exit 2 when ANY net on the board is incomplete, regardless of
+    the selected net's status) -- kept unchanged for script compatibility
+    (issue #4682). The ``--why`` path scopes its exit code to the selected
+    net when ``--net`` is given.
 """
 
 from __future__ import annotations
@@ -68,7 +74,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--net",
-        help="Show status for a specific net by name",
+        help=(
+            "Show status for a specific net by name. Scopes the text "
+            "summary/banner (and --why diagnoses) to the selected net. "
+            "Note: the exit code stays BOARD-WIDE for the normal status "
+            "path -- exit 2 when any net on the board is incomplete, even "
+            "if the selected net is complete (issue #4682)."
+        ),
     )
     parser.add_argument(
         "--by-class",
@@ -139,14 +151,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error during analysis: {e}", file=sys.stderr)
         return 1
 
-    # --why: stuck-net classifier (issue #3863). Read-only diagnostic that
-    # labels each incomplete signal net by WHY it is stuck. Handled before the
-    # normal filter/output path because it has its own output shape. Respects
-    # the strict/legacy selection (issue #4557).
-    if args.why:
-        return output_why(pcb_path, args.format, strict=strict)
-
-    # Filter results if needed
+    # --net: validate the selected net exists before dispatching to either
+    # output path. This must run ahead of the --why branch -- previously
+    # --why short-circuited first and silently ignored --net entirely
+    # (issue #4682).
+    net_status: NetStatus | None = None
     if args.net:
         net_status = result.get_net(args.net)
         if not net_status:
@@ -157,7 +166,18 @@ def main(argv: list[str] | None = None) -> int:
             if len(result.nets) > 20:
                 print(f"  ... and {len(result.nets) - 20} more", file=sys.stderr)
             return 1
-        # Create a result with just this net
+
+    # --why: stuck-net classifier (issue #3863). Read-only diagnostic that
+    # labels each incomplete signal net by WHY it is stuck. Handled before the
+    # normal filter/output path because it has its own output shape. Respects
+    # the strict/legacy selection (issue #4557) and the --net filter
+    # (issue #4682).
+    if args.why:
+        return output_why(pcb_path, args.format, strict=strict, net=args.net)
+
+    # Filter results if needed
+    if net_status is not None:
+        # Create a result with just this net (--net validated above)
         filtered = NetStatusResult(nets=[net_status], total_nets=1)
     elif args.incomplete:
         filtered = NetStatusResult(
@@ -171,9 +191,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.format == "json":
         output_json(filtered, pcb_path, args.by_class, strict=strict)
     else:
-        # The summary header must always describe the unfiltered board so its
-        # counts stay internally consistent (Complete + Incomplete + Unrouted ==
-        # total). The filtered set only drives the net *list* below the header.
+        # For --incomplete the summary header must describe the unfiltered
+        # board so its counts stay internally consistent (Complete +
+        # Incomplete + Unrouted == total). The filtered set only drives the
+        # net *list* below the header. For --net the summary is instead
+        # scoped to the selection (issue #4682) so the banner and summary
+        # cannot contradict each other; ``net_filter`` selects that path.
         output_text(
             filtered,
             pcb_path,
@@ -182,9 +205,12 @@ def main(argv: list[str] | None = None) -> int:
             args.incomplete,
             summary_result=result,
             strict=strict,
+            net_filter=args.net,
         )
 
-    # Exit code
+    # Exit code. Deliberately BOARD-WIDE even under --net (issue #4682 kept
+    # this unchanged to avoid breaking script consumers; documented in the
+    # --net help text).
     if result.incomplete_count > 0 or result.unrouted_count > 0:
         return 2
     return 0
@@ -205,6 +231,7 @@ def output_text(
     incomplete_only: bool = False,
     summary_result: NetStatusResult | None = None,
     strict: bool = True,
+    net_filter: str | None = None,
 ) -> None:
     """Output results as formatted text.
 
@@ -216,30 +243,50 @@ def output_text(
             (Complete + Incomplete + Unrouted == total). Defaults to ``result``.
         strict: Which connectivity model produced ``result`` (drives the
             model line in the header, issue #4557).
+        net_filter: Name of the net selected with ``--net``, if any. When set,
+            the Summary block and the connectivity banner are BOTH scoped to
+            the selection (with the board-wide total named for context) so no
+            rendered line contradicts another (issue #4682). Note the exit
+            code computed by ``main()`` stays board-wide regardless.
     """
     summary = summary_result if summary_result is not None else result
     print(f"Net Status: {pcb_path.name}")
     print("=" * 60)
     print(f"Connectivity model: {_model_label(strict)}")
     print()
-    print(f"Summary: {summary.total_nets} nets total")
-    print(f"  Complete:   {summary.complete_count} (100% connected)")
-    print(f"  Incomplete: {summary.incomplete_count} (partially connected)")
-    print(f"  Unrouted:   {summary.unrouted_count} (0% connected)")
+    if net_filter is not None:
+        # --net: scope the counts to the selection (issue #4682). Before
+        # this, a board-wide "Incomplete: 1" rendered directly above an
+        # "All nets are fully connected!" banner derived from the filtered
+        # set -- a direct contradiction.
+        print(f"Summary: 1 net selected (of {summary.total_nets} on board)")
+        counted = result
+    else:
+        print(f"Summary: {summary.total_nets} nets total")
+        counted = summary
+    print(f"  Complete:   {counted.complete_count} (all pads connected)")
+    print(f"  Incomplete: {counted.incomplete_count} (partially connected)")
+    print(f"  Unrouted:   {counted.unrouted_count} (no pads connected)")
     print()
 
     if by_class:
         _output_by_class(result, verbose)
     else:
-        _output_flat(result, verbose, incomplete_only)
+        _output_flat(result, verbose, incomplete_only, net_filter=net_filter)
 
 
 def _output_flat(
     result: NetStatusResult,
     verbose: bool,
     incomplete_only: bool,
+    net_filter: str | None = None,
 ) -> None:
-    """Output nets in flat list format."""
+    """Output nets in flat list format.
+
+    ``net_filter`` names the ``--net`` selection when set; the fully-connected
+    banner is then worded for that scope instead of claiming board-wide
+    completeness (issue #4682).
+    """
     # Show incomplete nets with details
     if result.incomplete or result.unrouted:
         print("Incomplete Nets:")
@@ -249,7 +296,10 @@ def _output_flat(
             _print_net_status(net, verbose)
 
     elif not incomplete_only:
-        print("All nets are fully connected!")
+        if net_filter is not None:
+            print(f"Selected net '{net_filter}' is fully connected.")
+        else:
+            print("All nets are fully connected!")
 
     # Show complete nets if not filtering
     if not incomplete_only and result.complete:
@@ -381,19 +431,32 @@ def _print_recommendation(diag: StuckNetDiagnosis) -> None:
         print(f"                    {i}. {label} ({ranked.rationale}){preferred}")
 
 
-def output_why(pcb_path: Path, fmt: str, strict: bool = True) -> int:
+def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = None) -> int:
     """Classify incomplete signal nets by why they are stuck and print them.
 
     ``strict`` selects the connectivity model the classifier's internal
     ``NetStatusAnalyzer`` runs use (issue #4557) -- before this parameter,
     ``--strict --why`` silently ignored ``--strict``.
 
-    Returns 2 if any stuck nets were found (matching the rest of net-status'
-    exit-code convention), 0 if the board has no stuck signal nets.
+    ``net`` scopes the output to a single net (the ``--net`` selection,
+    issue #4682): classification still runs whole-board (acceptable cost for
+    a read-only diagnostic), then the diagnoses are post-filtered to the
+    selected net. The caller (``main()``) has already validated that the net
+    exists on the board. Before this parameter, ``--net X --why`` silently
+    printed every stuck net EXCEPT the one asked about.
+
+    Returns 2 if any (selected) stuck nets were found (matching the rest of
+    net-status' exit-code convention), 0 if there are none -- so under
+    ``--net`` the exit code reflects the selected net only.
     """
-    from kicad_tools.router.stuck_classifier import classify_stuck_nets
+    from kicad_tools.router.stuck_classifier import StuckClassifierResult, classify_stuck_nets
 
     result = classify_stuck_nets(pcb_path, strict=strict)
+
+    # --net filter (issue #4682): restrict diagnoses (and every derived
+    # count) to the selected net.
+    if net is not None:
+        result = StuckClassifierResult(diagnoses=[d for d in result.diagnoses if d.net_name == net])
 
     if fmt == "json":
         data = {
@@ -401,12 +464,16 @@ def output_why(pcb_path: Path, fmt: str, strict: bool = True) -> int:
             "connectivity_model": "strict" if strict else "legacy_proximity",
             **result.to_dict(),
         }
+        if net is not None:
+            data["net_filter"] = net
         print(json.dumps(data, indent=2))
         return 2 if result.diagnoses else 0
 
     print(f"Stuck-net classification: {pcb_path.name}")
     print("=" * 70)
     print(f"Connectivity model: {_model_label(strict)}")
+    if net is not None:
+        print(f"Selected net: {net}")
     print()
     counts = result.counts
     print(f"Stuck signal nets: {len(result.diagnoses)}")
@@ -418,8 +485,11 @@ def output_why(pcb_path: Path, fmt: str, strict: bool = True) -> int:
     print()
 
     if not result.diagnoses:
-        print("No stuck signal nets -- board is fully routed (or only advisory")
-        print("plane/pour residuals remain).")
+        if net is not None:
+            print(f"Net '{net}' is not stuck (complete, or only advisory plane/pour residuals).")
+        else:
+            print("No stuck signal nets -- board is fully routed (or only advisory")
+            print("plane/pour residuals remain).")
         return 0
 
     # Group for readability, escape-blocked first (most upstream).

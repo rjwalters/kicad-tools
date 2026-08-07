@@ -1147,20 +1147,25 @@ kct net-status <pcb_file> [options]
 | Option | Description |
 |--------|-------------|
 | `--format {table,json}` | Output format |
-| `--net NET` | Check a specific net |
+| `--net NET` | Check a specific net (scopes the summary/banner and `--why` diagnoses to it; the normal-path exit code stays board-wide) |
 | `--incomplete` | Show only incomplete / unrouted nets |
 | `--by-class` | Group output by net class |
 | `--legacy-proximity` | Use the pre-v0.20 endpoint-proximity model (default is strict real-copper geometry; mutually exclusive with `--strict`) |
-| `--why` | Explain each incomplete net (composes with the strict model) |
+| `--why` | Explain each incomplete net (composes with the strict model and with `--net`) |
 | `-v`, `--verbose` | Per-segment / per-pad detail |
 
 Exit code semantics are reused by the `preflight-routing` step in
 `kct build` and by `kct fleet status` to decide "ship-ready vs. not".
+Note the normal status path exits 2 when **any** net on the board is
+incomplete, even under `--net` with a complete selected net (kept for
+script compatibility, #4682); `--net X --why` scopes its exit code to the
+selected net (0 when X is not stuck, 2 when it is).
 
 **Examples:**
 ```bash
 kct net-status board.kicad_pcb --incomplete --format json
 kct net-status board.kicad_pcb --by-class
+kct net-status board.kicad_pcb --net DAC_CLK --why   # only DAC_CLK's diagnosis
 ```
 
 ---

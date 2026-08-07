@@ -479,3 +479,100 @@ class TestConnectivityModelSelection:
         assert main([str(unrouted_pcb)]) == 2
         capsys.readouterr()
         assert main([str(unrouted_pcb), "--legacy-proximity"]) == 2
+
+
+class TestNetFilterScoping:
+    """Issue #4682: --net must scope the banner/summary AND the --why output.
+
+    Fixture facts (``incomplete_pcb``): VCC is complete (2 pads, traced);
+    GND is incomplete (R1.2 stranded); SIG is unrouted. So VCC is the
+    "complete net on a board with other incomplete nets" case from the issue.
+    """
+
+    def test_net_filter_banner_and_summary_agree_in_scope(self, incomplete_pcb: Path, capsys):
+        """--net <complete-net> must not claim board-wide completeness.
+
+        Previously the board-wide summary ("Incomplete: 2") rendered directly
+        above "All nets are fully connected!" (derived from the filtered set)
+        -- a direct contradiction.
+        """
+        result = main([str(incomplete_pcb), "--net", "VCC"])
+        out = capsys.readouterr().out
+
+        assert "All nets are fully connected!" not in out
+        assert "Selected net 'VCC' is fully connected." in out
+        # Summary is scoped to the selection, with board total for context.
+        assert "Summary: 1 net selected (of 3 on board)" in out
+        assert "Incomplete: 0" in out
+        # Exit code deliberately stays BOARD-WIDE (documented in --net help):
+        # the board has incomplete nets, so exit 2 even though VCC is complete.
+        assert result == 2
+
+    def test_complete_percentage_literal_reworded(self, incomplete_pcb: Path, capsys):
+        """The '(100% connected)' literal read as a board-level statistic."""
+        main([str(incomplete_pcb)])
+        out = capsys.readouterr().out
+        assert "100% connected" not in out
+        assert "(all pads connected)" in out
+
+    def test_why_net_filter_complete_net(self, incomplete_pcb: Path, capsys):
+        """--net <complete-net> --why names the net and says it is not stuck.
+
+        Previously --why ignored --net entirely and printed every OTHER stuck
+        net's diagnosis (asked about DAC_CLK, told about GNDA).
+        """
+        result = main([str(incomplete_pcb), "--net", "VCC", "--why"])
+        out = capsys.readouterr().out
+
+        assert result == 0
+        assert "Selected net: VCC" in out
+        assert "Net 'VCC' is not stuck" in out
+        # No other net's diagnosis leaks into the filtered output.
+        assert "GND" not in out
+        assert "SIG" not in out
+
+    def test_why_net_filter_stuck_net(self, incomplete_pcb: Path, capsys):
+        """--net <stuck-net> --why prints only that net's diagnosis, exit 2."""
+        result = main([str(incomplete_pcb), "--net", "SIG", "--why"])
+        out = capsys.readouterr().out
+
+        assert result == 2
+        assert "Selected net: SIG" in out
+        assert "Stuck signal nets: 1" in out
+        assert "SIG" in out
+        # GND is also stuck on this board but was not asked about.
+        assert "GND" not in out
+
+    def test_why_net_filter_not_found(self, incomplete_pcb: Path, capsys):
+        """--net NONEXISTENT --why errors with the available-nets listing."""
+        result = main([str(incomplete_pcb), "--net", "NONEXISTENT", "--why"])
+        captured = capsys.readouterr()
+
+        assert result == 1
+        assert "not found" in captured.err.lower()
+        assert "Available nets" in captured.err
+
+    def test_why_json_net_filter_complete_net(self, incomplete_pcb: Path, capsys):
+        """--net X --why --format json is filtered identically to text."""
+        result = main([str(incomplete_pcb), "--net", "VCC", "--why", "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+
+        assert result == 0
+        assert data["net_filter"] == "VCC"
+        assert data["summary"]["stuck_nets"] == 0
+        assert data["nets"] == []
+
+    def test_why_json_net_filter_stuck_net(self, incomplete_pcb: Path, capsys):
+        result = main([str(incomplete_pcb), "--net", "SIG", "--why", "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+
+        assert result == 2
+        assert data["net_filter"] == "SIG"
+        assert data["summary"]["stuck_nets"] == 1
+        assert [n["net_name"] for n in data["nets"]] == ["SIG"]
+
+    def test_why_json_without_net_has_no_filter_key(self, incomplete_pcb: Path, capsys):
+        """Plain --why JSON stays byte-compatible (net_filter key is additive)."""
+        main([str(incomplete_pcb), "--why", "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert "net_filter" not in data
