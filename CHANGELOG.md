@@ -68,6 +68,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`kct route --layers 2` no longer rejects a net-class-map whose
+  `avoid_layers` names an inner layer** (#4685) — a well-formed KiCad copper
+  layer name (`F.Cu`, `B.Cu`, `In<k>.Cu`) absent from the ACTIVE stack is now
+  tolerated instead of fatal: `avoid_layers` entries are dropped silently
+  (vacuously satisfied — the grid has no such layer to route on) and
+  `preferred_layers` entries are dropped with a one-line stderr warning naming
+  the net class and token (the preference cannot be honored). This restores
+  layer-subset composition (the HV-outer recipe: route the HV backbone at
+  `--layers 2`, then everything else at `--layers 4 --preserve-existing`) with
+  ONE shared sidecar describing the physical board. The semantics live in the
+  shared resolver (`_resolve_layer_index_list`, threaded per-field from
+  `NetClassRouting.from_dict`), so every consumer — `kct route`'s `--layers`
+  preload and the canonical `net_class_map_from_path` loader used by
+  `check`/`creepage`/`zones`/`audit` — behaves identically. Malformed tokens
+  (`"Bogus.Cu"`), integer indices, and the stack-less resolution path are
+  unchanged (the #4587 typo guard stays loud, integer maps stay
+  byte-identical, and absent names are judged only against a *supplied* stack,
+  never guessed).
+
 - **Board-04: C16 field overlap on the committed schematic** (#4675) — the
   fleet's only genuine `sch_field_overlap` advisory (`C16.Value` text
   overlapping U2's body in `stm32_devboard.kicad_sch`) is resolved by a

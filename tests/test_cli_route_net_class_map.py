@@ -828,6 +828,29 @@ def _run_route_preload(pcb: Path, sidecar: Path, tmp_path: Path, *extra_args: st
     )
 
 
+def _capture_preload(pcb: Path, sidecar: Path, tmp_path: Path, *extra_args: str):
+    """Run the preload with a spy that records the resolved map + stack.
+
+    The spy delegates to the real ``net_class_map_from_dict``, so this is a
+    genuine end-to-end check of the CLI plumbing (stack selection + kwarg
+    forwarding), not a mock of the code under test.
+    """
+    from kicad_tools.router import rules as _rules
+
+    real = _rules.net_class_map_from_dict
+    captured: dict = {}
+
+    def spy(data, layer_stack=None):
+        result = real(data, layer_stack=layer_stack)
+        captured["layer_stack"] = layer_stack
+        captured["map"] = result
+        return result
+
+    with patch.object(_rules, "net_class_map_from_dict", spy):
+        rc = _run_route_preload(pcb, sidecar, tmp_path, *extra_args)
+    return rc, captured
+
+
 class TestLayerNamePreloadResolution:
     """A layer-name sidecar is normalized at preload, before any routing.
 
@@ -838,26 +861,8 @@ class TestLayerNamePreloadResolution:
     """
 
     def _capture_preload(self, pcb: Path, sidecar: Path, tmp_path: Path, *extra_args: str):
-        """Run the preload with a spy that records the resolved map + stack.
-
-        The spy delegates to the real ``net_class_map_from_dict``, so this is a
-        genuine end-to-end check of the CLI plumbing (stack selection + kwarg
-        forwarding), not a mock of the code under test.
-        """
-        from kicad_tools.router import rules as _rules
-
-        real = _rules.net_class_map_from_dict
-        captured: dict = {}
-
-        def spy(data, layer_stack=None):
-            result = real(data, layer_stack=layer_stack)
-            captured["layer_stack"] = layer_stack
-            captured["map"] = result
-            return result
-
-        with patch.object(_rules, "net_class_map_from_dict", spy):
-            rc = _run_route_preload(pcb, sidecar, tmp_path, *extra_args)
-        return rc, captured
+        """See module-level :func:`_capture_preload` (hoisted for #4685 reuse)."""
+        return _capture_preload(pcb, sidecar, tmp_path, *extra_args)
 
     def test_ampacity_class_with_layer_names_does_not_crash(
         self, minimal_pcb_4layer: Path, tmp_path: Path, capsys
@@ -945,19 +950,22 @@ class TestLayerNamePreloadResolution:
         assert "Top" in err  # names the offending value
         assert "PGND" in err  # names the owning net-class key
 
-    def test_layer_absent_from_stack_exits_1(
-        self, minimal_pcb_4layer: Path, tmp_path: Path, capsys
+    def test_wellformed_layer_absent_from_stack_is_dropped(
+        self, minimal_pcb_4layer: Path, tmp_path: Path
     ):
-        """``In3.Cu`` on a 4-layer board is a misconfiguration, not layer 3."""
+        """``In3.Cu`` absent from a 4-layer board is vacuously satisfied (#4685).
+
+        Pre-#4685 this was fatal at preload; a well-formed KiCad copper name
+        that the active stack simply lacks is now dropped, never guessed
+        (``In3.Cu`` must NOT resolve to grid index 3 -- that is B.Cu here).
+        """
         sidecar = tmp_path / "ncm.json"
         sidecar.write_text(json.dumps({"PGND": {"name": "HV", "avoid_layers": ["In3.Cu"]}}))
 
-        rc = _run_route_preload(minimal_pcb_4layer, sidecar, tmp_path)
+        rc, captured = self._capture_preload(minimal_pcb_4layer, sidecar, tmp_path)
 
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "invalid net-class-map structure" in err
-        assert "In3.Cu" in err
+        assert rc != 1
+        assert captured["map"]["PGND"].avoid_layers == []
 
     def test_integer_sidecar_is_unchanged(self, minimal_pcb_4layer: Path, tmp_path: Path):
         """No-op guard: an integer-valued sidecar preloads exactly as before."""
@@ -977,6 +985,151 @@ class TestLayerNamePreloadResolution:
         _rc, captured = self._capture_preload(minimal_pcb_4layer, sidecar, tmp_path)
         assert captured["map"]["PGND"].preferred_layers == [0, 3]
         assert captured["map"]["PGND"].avoid_layers == [1, 2]
+
+
+# =============================================================================
+# Issue #4685: layer-subset composition -- one sidecar, every --layers subset
+# =============================================================================
+
+
+class TestLayerSubsetComposition:
+    """A sidecar describes the BOARD, not one invocation's layer subset (#4685).
+
+    The HV-outer composition recipe routes the HV backbone at ``--layers 2``
+    (inner layers physically absent, forcing outer copper) and everything else
+    at ``--layers 4 --preserve-existing`` -- both passes sharing ONE sidecar.
+    A well-formed KiCad copper name absent from the ACTIVE stack is therefore
+    tolerated: ``avoid_layers`` entries are vacuously satisfied (dropped
+    silently); ``preferred_layers`` entries cannot be honored (dropped with a
+    one-line warning).  Malformed tokens stay fatal (#4587 typo guard).
+    """
+
+    # The filer's exact sidecar entry shape (softstart rev-C, issue #4685).
+    FILER_ENTRY = {
+        "name": "HV",
+        "preferred_layers": ["F.Cu", "B.Cu"],
+        "avoid_layers": ["In1.Cu", "In2.Cu"],
+        "layer_cost_multiplier": 2.0,
+    }
+
+    def _sidecar(self, tmp_path: Path) -> Path:
+        p = tmp_path / "shared_ncm.json"
+        p.write_text(json.dumps({"PGND": dict(self.FILER_ENTRY)}))
+        return p
+
+    def test_shared_sidecar_loads_at_both_layer_subsets(
+        self, minimal_pcb_4layer: Path, tmp_path: Path
+    ):
+        """The SAME unmodified file preloads at ``--layers 2`` AND ``--layers 4``."""
+        sidecar = self._sidecar(tmp_path)
+
+        rc2, two = _capture_preload(minimal_pcb_4layer, sidecar, tmp_path, "--layers", "2")
+        assert rc2 != 1
+        # Inner layers do not exist in the 2-layer pass: the avoid-constraint
+        # is vacuously satisfied and dropped; F.Cu/B.Cu resolve to 0/1.
+        assert two["map"]["PGND"].avoid_layers == []
+        assert two["map"]["PGND"].preferred_layers == [0, 1]
+
+        rc4, four = _capture_preload(minimal_pcb_4layer, sidecar, tmp_path, "--layers", "4")
+        assert rc4 != 1
+        # On the full stack the identical file resolves completely.
+        assert four["map"]["PGND"].avoid_layers == [1, 2]
+        assert four["map"]["PGND"].preferred_layers == [0, 3]
+
+    def test_avoid_layers_absent_drops_silently(self, tmp_path: Path, caplog):
+        """No warning spam: 52 vacuous avoid entries must not print 52 lines."""
+        import logging
+
+        from kicad_tools.router import LayerStack
+        from kicad_tools.router.rules import net_class_map_from_dict
+
+        with caplog.at_level(logging.DEBUG, logger="kicad_tools.router.rules"):
+            ncm = net_class_map_from_dict(
+                {"PGND": {"name": "HV", "avoid_layers": ["In1.Cu", "In2.Cu"]}},
+                layer_stack=LayerStack.two_layer(),
+            )
+        assert ncm["PGND"].avoid_layers == []
+        assert caplog.records == []
+
+    def test_preferred_layers_absent_warns_and_drops(self, tmp_path: Path, caplog):
+        """The unhonorable preference warns ONCE, naming net class and token."""
+        import logging
+
+        from kicad_tools.router import LayerStack
+        from kicad_tools.router.rules import net_class_map_from_dict
+
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.router.rules"):
+            ncm = net_class_map_from_dict(
+                {"PGND": {"name": "HV", "preferred_layers": ["In1.Cu", "F.Cu"]}},
+                layer_stack=LayerStack.two_layer(),
+            )
+        assert ncm["PGND"].preferred_layers == [0]
+        warnings_ = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings_) == 1
+        message = warnings_[0].getMessage()
+        assert "'In1.Cu'" in message
+        assert "net class 'HV' preferred_layers" in message
+
+    def test_malformed_token_still_fatal_with_stack(
+        self, minimal_pcb_4layer: Path, tmp_path: Path, capsys
+    ):
+        """``Bogus.Cu`` is a typo, not a subset artifact: exit 1 is preserved."""
+        sidecar = tmp_path / "ncm.json"
+        sidecar.write_text(json.dumps({"PGND": {"name": "HV", "avoid_layers": ["Bogus.Cu"]}}))
+
+        rc = _run_route_preload(minimal_pcb_4layer, sidecar, tmp_path, "--layers", "2")
+
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "invalid net-class-map structure" in err
+        assert "Bogus.Cu" in err
+        assert "PGND" in err
+
+    def test_out_of_range_integers_pass_through_unchanged(self, tmp_path: Path):
+        """No new validation on ints: the #4587 byte-identical contract holds."""
+        from kicad_tools.router import LayerStack
+        from kicad_tools.router.rules import net_class_map_from_dict
+
+        ncm = net_class_map_from_dict(
+            {"PGND": {"name": "HV", "avoid_layers": [1, 2], "preferred_layers": [0, 7]}},
+            layer_stack=LayerStack.two_layer(),
+        )
+        assert ncm["PGND"].avoid_layers == [1, 2]
+        assert ncm["PGND"].preferred_layers == [0, 7]
+
+    def test_policy_default_is_still_fatal(self):
+        """Direct list resolution without a policy keeps the #4587 behavior."""
+        from kicad_tools.router import LayerStack
+        from kicad_tools.router.rules import LayerResolutionError, _resolve_layer_index_list
+
+        with pytest.raises(LayerResolutionError, match="In1.Cu"):
+            _resolve_layer_index_list(
+                ["In1.Cu"], LayerStack.two_layer(), "net class 'HV' avoid_layers"
+            )
+
+    def test_stackless_path_is_unchanged(self):
+        """Without a stack there is no ACTIVE subset to judge against: no drops."""
+        from kicad_tools.router.rules import net_class_map_from_dict
+
+        ncm = net_class_map_from_dict(
+            {"PGND": {"name": "HV", "avoid_layers": ["In1.Cu"]}},
+        )
+        # Stack-independent resolution, exactly as before #4685.
+        assert ncm["PGND"].avoid_layers == [1]
+
+    def test_canonical_loader_applies_the_same_semantics(self, tmp_path: Path):
+        """`net_class_map_from_path` + a detected 2-layer stack tolerates inners.
+
+        This is the cross-consumer half of the invariant: ``kct check`` /
+        ``creepage`` / ``zones`` on the 2-layer intermediate board must accept
+        the same sidecar the route passes consume (#4683 + #4685).
+        """
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        sidecar = self._sidecar(tmp_path)
+        ncm = net_class_map_from_path(sidecar, pcb_text=MINIMAL_PCB_2LAYER)
+        assert ncm["PGND"].avoid_layers == []
+        assert ncm["PGND"].preferred_layers == [0, 1]
 
 
 # =============================================================================

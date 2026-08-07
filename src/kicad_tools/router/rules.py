@@ -7,6 +7,7 @@ This module provides:
 - Predefined net classes for common use cases
 """
 
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -19,6 +20,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from pathlib import Path
 
     from .pairwise_clearance import PairwiseClearanceTable
+
+logger = logging.getLogger(__name__)
 
 # Allowed values for :attr:`NetClassRouting.route_via`.
 # - ``"pathfinder"`` (default) -- ordinary trace, standard pathfinder routing.
@@ -786,9 +789,13 @@ def resolve_layer_index(
     Raises:
         LayerResolutionError: The value is not one of the accepted forms, names
             a layer absent from ``layer_stack``, or is ``"B.Cu"`` with no stack
-            available.  Never silently dropped: a dropped hard-avoid entry puts
-            an ampacity-bearing net back on a thin inner plane, which is exactly
-            what #4433 exists to prevent.
+            available.  Never silently dropped HERE: a dropped hard-avoid entry
+            puts an ampacity-bearing net back on a thin inner plane, which is
+            exactly what #4433 exists to prevent.  The ONE sanctioned drop path
+            lives in :func:`_resolve_layer_index_list` (#4685): a well-formed
+            KiCad copper name absent from a *supplied* stack may be dropped
+            there (vacuously satisfied during a layer-subset pass) -- that
+            check runs against the active stack, never by guessing indices.
     """
     where = f" ({context})" if context else ""
 
@@ -829,10 +836,25 @@ def resolve_layer_index(
     )
 
 
+def _is_wellformed_copper_layer_name(token: str) -> bool:
+    """True when ``token`` has the shape of a KiCad copper layer name.
+
+    Issue #4685.  These are exactly the shapes :func:`resolve_layer_index`
+    recognizes on its stack-less path (``"F.Cu"``, ``"In<k>.Cu"``) plus
+    ``"B.Cu"``.  A well-formed name that happens to be absent from the ACTIVE
+    stack (``"In1.Cu"`` during a ``--layers 2`` pass) is a valid statement
+    about the physical board, not a typo -- unlike ``"Bogus.Cu"``, which
+    matches none of these shapes and stays a hard error.
+    """
+    return token in ("F.Cu", "B.Cu") or _INNER_COPPER_NAME_RE.match(token) is not None
+
+
 def _resolve_layer_index_list(
     values: object,
     layer_stack: LayerStack | None,
     context: str,
+    *,
+    on_absent: Literal["error", "drop", "drop_warn"] = "error",
 ) -> list[int] | None:
     """Normalize a whole ``preferred_layers`` / ``avoid_layers`` list (#4587).
 
@@ -840,6 +862,29 @@ def _resolve_layer_index_list(
     and hard-avoid paths test for).  Every element is resolved via
     :func:`resolve_layer_index`, so a mixed ``[3, "In1.Cu"]`` list is accepted
     and stored as ``[3, 1]`` -- satisfying the ``list[int]`` field annotation.
+
+    Issue #4685: ``on_absent`` selects the policy for a WELL-FORMED KiCad
+    copper layer name (see :func:`_is_wellformed_copper_layer_name`) that is
+    absent from a *supplied* ``layer_stack`` -- e.g. ``"In1.Cu"`` while
+    routing with ``--layers 2``.  A sidecar describes the physical board, not
+    one invocation's layer subset, so layer-subset composition passes (the
+    HV-outer recipe: route HV at ``--layers 2``, everything else at
+    ``--layers 4 --preserve-existing``) must be able to share one sidecar:
+
+    - ``"error"`` (default): raise :class:`LayerResolutionError`, the pre-#4685
+      behavior.  Kept for any future caller that resolves layers where absence
+      IS a misconfiguration.
+    - ``"drop"``: drop the entry silently -- used for ``avoid_layers``, where
+      an absent layer is vacuously satisfied (the grid cannot route there).
+    - ``"drop_warn"``: drop the entry with a one-line warning naming the
+      owning net class and token -- used for ``preferred_layers``, where the
+      preference genuinely cannot be honored.
+
+    The policy NEVER applies to malformed tokens (``"Bogus.Cu"``), integer
+    indices (in or out of range -- integer maps stay byte-identical per the
+    #4587 contract), or when ``layer_stack`` is ``None`` (guessing an index
+    stack-lessly and then dropping would be a silent wrong answer; the
+    stack-less path is unchanged).
     """
     if values is None:
         return None
@@ -847,7 +892,31 @@ def _resolve_layer_index_list(
         raise LayerResolutionError(
             f"invalid layer list {values!r} ({context}): expected a list of {_ACCEPTED_LAYER_FORMS}"
         )
-    return [resolve_layer_index(v, layer_stack, context=context) for v in values]
+    resolved: list[int] = []
+    for v in values:
+        if on_absent != "error" and layer_stack is not None and isinstance(v, str):
+            token = v.strip()
+            if (
+                not token.lstrip("-").isdigit()
+                and _is_wellformed_copper_layer_name(token)
+                and layer_stack.get_layer_by_name(token) is None
+            ):
+                # Well-formed KiCad copper name, absent from the ACTIVE stack:
+                # the layer is not routable in this pass, so an avoid-constraint
+                # on it is vacuously satisfied and a preference for it cannot
+                # be honored.  Never fatal (#4685).
+                if on_absent == "drop_warn":
+                    logger.warning(
+                        "layer %r (%s) is not present in this board's %d-layer "
+                        "stack; dropping the preference (it cannot be honored "
+                        "in this routing pass)",
+                        v,
+                        context,
+                        layer_stack.num_layers,
+                    )
+                continue
+        resolved.append(resolve_layer_index(v, layer_stack, context=context))
+    return resolved
 
 
 @dataclass
@@ -1492,6 +1561,14 @@ class NetClassRouting:
         ``layer_stack`` to resolve names against the board's actual stackup --
         required for ``"B.Cu"``, whose index depends on the layer count.
 
+        Issue #4685: a well-formed KiCad copper name absent from the supplied
+        stack (``"In1.Cu"`` while routing ``--layers 2``) is NOT fatal: it is
+        dropped -- silently for ``avoid_layers`` (vacuously satisfied: the
+        grid has no such layer to route on) and with a one-line warning for
+        ``preferred_layers`` (the preference cannot be honored).  This lets
+        the two passes of a layer-subset composition recipe share one sidecar.
+        Malformed tokens (``"Bogus.Cu"``) remain fatal.
+
         Round-trip property: see :meth:`to_dict`.  Names normalize to ints on
         the way in and ``to_dict`` emits ints, so the round trip is idempotent.
 
@@ -1532,11 +1609,13 @@ class NetClassRouting:
                 data.get("preferred_layers"),
                 layer_stack,
                 f"net class {data['name']!r} preferred_layers",
+                on_absent="drop_warn",
             ),
             avoid_layers=_resolve_layer_index_list(
                 data.get("avoid_layers"),
                 layer_stack,
                 f"net class {data['name']!r} avoid_layers",
+                on_absent="drop",
             ),
             layer_cost_multiplier=data.get("layer_cost_multiplier", 2.0),
             length_constraint=length_constraint,
