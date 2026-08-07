@@ -117,6 +117,7 @@ boards/*/*/output/*.kct.json
 .loom/*.sock
 .loom/*.tmp
 .loom/*.bak
+.loom/.install.lock
 .loom/logs/
 # <<< loom-managed <<<
 
