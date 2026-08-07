@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   island held only by pad-less copper is under-reported; on the synthetic
   fixture kicad-cli counts 2 where kct counts 1). Full pad-cluster
   semantics need transitive copper clustering with fills as conductors —
-  a follow-up on #4680. The shared per-layer copper indexing moved to a reusable
+  tracked as #4729. The shared per-layer copper indexing moved to a reusable
   `build_copper_layer_indexes()` in `dangling_copper.py` so both #4680
   detectors consult identical committed-copper geometry.
 

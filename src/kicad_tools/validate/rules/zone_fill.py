@@ -49,8 +49,8 @@ Known divergences from kicad-cli (``isolated_copper``)
   Implementing KiCad's semantics needs a transitive copper-connectivity
   clustering pass that treats fills as conductors and pads as the only
   connectivity seeds -- a scope step up that likely belongs with the
-  ``validate/connectivity.py`` tracer rather than this rule.  Tracked as a
-  follow-up on #4680; the divergence is pinned by
+  ``validate/connectivity.py`` tracer rather than this rule.  Tracked as
+  #4729; the divergence is pinned by
   ``TestKnownDivergencePadCluster`` so a future change to the predicate is
   a deliberate, test-visible decision.
 * KiCad's zone island-removal settings (``island_removal_mode``,

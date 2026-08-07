@@ -452,7 +452,7 @@ class TestKnownDivergencePadCluster:
     ``--refill-zones``); full evidence table in the *Known divergences*
     section of :mod:`kicad_tools.validate.rules.zone_fill`.  These tests
     assert the CURRENT behavior deliberately -- implementing full
-    pad-cluster semantics (a follow-up on #4680) should update them as a
+    pad-cluster semantics (tracked as #4729) should update them as a
     visible decision, not silently flip a passing suite.
     """
 
