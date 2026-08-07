@@ -244,6 +244,57 @@ def test_rule_area_round_trips_through_pcb_load_save(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 2b. Layer-spec resolution at the projection level (#4672).
+# ---------------------------------------------------------------------------
+
+
+def _projection_mask(tmp_path, zone_layers: str, stack: LayerStack):
+    """Project one track-blocking rule area with the given layer spec through
+    ``Autorouter._lattice_keepout_projection`` against ``stack``."""
+    from kicad_tools.router.core import Autorouter
+
+    zone_text = f"""(zone
+  (net 0)
+  (net_name "")
+  (name "inner-guard")
+  (layers {zone_layers})
+  (uuid "aaaaaaaa-0000-0000-0000-000000000009")
+  (hatch edge 0.5)
+  (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour allowed))
+  (polygon (pts (xy 10 10) (xy 20 10) (xy 20 20) (xy 10 20)))
+)"""
+    path = _board_with_rule_area(tmp_path, zone_text)
+    router = Autorouter(30, 30, strategy="lattice", layer_stack=stack)
+    router._pairwise_attach_zone_pcb_path = str(path)
+    return router._lattice_keepout_projection()
+
+
+def test_inner_wildcard_resolves_to_inner_layers_on_4_layer_stack(tmp_path) -> None:
+    mask = _projection_mask(tmp_path, '"*.In.Cu"', LayerStack.four_layer_all_signal())
+    assert mask is not None and len(mask.areas) == 1
+    assert mask.areas[0].layers == frozenset({1, 2})
+
+
+def test_inner_wildcard_resolves_to_inner_layers_on_6_layer_stack(tmp_path) -> None:
+    mask = _projection_mask(tmp_path, '"*.In.Cu"', LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig())
+    assert mask is not None and len(mask.areas) == 1
+    assert mask.areas[0].layers == frozenset({1, 2, 3, 4})
+
+
+def test_inner_wildcard_is_empty_on_2_layer_stack(tmp_path) -> None:
+    # No inner layers exist: the wildcard legitimately resolves to the empty
+    # set, so an area declared ONLY on ``*.In.Cu`` never constrains routing.
+    mask = _projection_mask(tmp_path, '"*.In.Cu"', LayerStack.two_layer())
+    assert mask is None
+
+
+def test_inner_wildcard_mixed_with_named_layer_keeps_the_named_layer(tmp_path) -> None:
+    mask = _projection_mask(tmp_path, '"F.Cu" "*.In.Cu"', LayerStack.two_layer())
+    assert mask is not None and len(mask.areas) == 1
+    assert mask.areas[0].layers == frozenset({0})
+
+
+# ---------------------------------------------------------------------------
 # 3. Mask semantics.
 # ---------------------------------------------------------------------------
 

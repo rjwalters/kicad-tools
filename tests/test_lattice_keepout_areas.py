@@ -283,6 +283,79 @@ def test_unknown_class_in_spatial_keepouts_fails_loud(tmp_path: Path, capsys) ->
     assert "HV_A" in err  # the known-classes hint
 
 
+def test_unknown_zone_name_in_spatial_keepouts_warns_but_routes(tmp_path: Path, capsys) -> None:
+    """#4672: a ``spatial_keepouts`` key matching no rule-area zone name is a
+    likely typo -- warn on stderr (naming the entry and the known rule areas)
+    but keep the conservative exit-0 semantics."""
+    pcb = tmp_path / "two_domain.kicad_pcb"
+    pcb.write_text(_board(_two_domain_guards()))
+    out = tmp_path / "routed.kicad_pcb"
+    sidecar = _write_sidecar(
+        tmp_path,
+        {
+            "hv-a-corridor-guard": {"only_classes": ["HV_A"]},
+            "hv-b-corridor-guard": {"only_classes": ["HV_B"]},
+            "hv-a-coridor-gaurd": {"only_classes": ["HV_A"]},  # typo'd zone name
+        },
+    )
+
+    rc = route_main(_route_args(pcb, out, sidecar=sidecar))
+    captured = capsys.readouterr()
+    assert rc == 0, captured.out
+    assert "spatial_keepouts entry 'hv-a-coridor-gaurd'" in captured.err
+    assert "matches no rule-area zone name" in captured.err
+    # The known-zone-names hint.
+    assert "hv-a-corridor-guard" in captured.err
+    assert "hv-b-corridor-guard" in captured.err
+    # The correctly spelled entry does NOT warn.
+    assert "entry 'hv-a-corridor-guard'" not in captured.err
+
+
+def test_spatial_keepouts_key_matching_pour_void_only_area_warns(tmp_path: Path, capsys) -> None:
+    """#4672: a key matching a real zone that was filtered out of the routing
+    mask (a ``copperpour not_allowed``-only area, the ``kct zones hv-keepout``
+    output) gets a distinct message -- the zone exists but never constrains
+    routing, the likely confusion source."""
+    pcb = tmp_path / "voided.kicad_pcb"
+    pcb.write_text(
+        _board(
+            _keepout_zone(
+                "hv-pour-void",
+                [(110, 106), (120, 106), (120, 110), (110, 110)],
+                tracks="allowed",
+                vias="allowed",
+                copperpour="not_allowed",
+            )
+        )
+    )
+    out = tmp_path / "routed.kicad_pcb"
+    sidecar = _write_sidecar(tmp_path, {"hv-pour-void": {"only_classes": ["HV_A"]}})
+
+    rc = route_main(_route_args(pcb, out, sidecar=sidecar))
+    captured = capsys.readouterr()
+    assert rc == 0, captured.out
+    assert "spatial_keepouts entry 'hv-pour-void'" in captured.err
+    assert "does not block tracks or vias" in captured.err
+
+
+def test_well_formed_spatial_keepouts_do_not_warn(tmp_path: Path, capsys) -> None:
+    pcb = tmp_path / "two_domain.kicad_pcb"
+    pcb.write_text(_board(_two_domain_guards()))
+    out = tmp_path / "routed.kicad_pcb"
+    sidecar = _write_sidecar(
+        tmp_path,
+        {
+            "hv-a-corridor-guard": {"only_classes": ["HV_A"]},
+            "hv-b-corridor-guard": {"only_classes": ["HV_B"]},
+        },
+    )
+
+    rc = route_main(_route_args(pcb, out, sidecar=sidecar))
+    captured = capsys.readouterr()
+    assert rc == 0, captured.out
+    assert "spatial_keepouts entry" not in captured.err
+
+
 def test_malformed_spatial_keepouts_block_fails_at_preload(tmp_path: Path, capsys) -> None:
     pcb = tmp_path / "two_domain.kicad_pcb"
     pcb.write_text(_board())

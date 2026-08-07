@@ -2749,6 +2749,40 @@ class Autorouter:
             and (not zone.keepout.tracks_allowed or not zone.keepout.vias_allowed)
             and len(zone.polygon) >= 3
         ]
+
+        # Issue #4672: a ``spatial_keepouts`` entry naming a nonexistent zone
+        # is conservative (the filter is simply never consulted) but a typo'd
+        # zone name would silently drop a per-class narrowing -- warn, naming
+        # the entry and the known rule-area zone names.  A key matching a rule
+        # area that was FILTERED OUT of ``raw_areas`` (a pour-void-only area,
+        # the ``kct zones hv-keepout`` output, or a <3-point polygon) gets a
+        # distinct message: that zone exists but never constrains routing.
+        filters = self._spatial_keepout_filters or {}
+        if filters:
+            import sys as _sys
+
+            kept_names = {zone.name for zone in raw_areas if zone.name}
+            all_names = {zone.name for zone in pcb.rule_areas if zone.name}
+            for key in sorted(filters):
+                if key in kept_names:
+                    continue
+                if key in all_names:
+                    print(
+                        f"Warning: spatial_keepouts entry {key!r} matches a rule "
+                        "area that does not block tracks or vias (e.g. a "
+                        "'kct zones hv-keepout' pour void); it will not "
+                        "constrain routing.",
+                        file=_sys.stderr,
+                    )
+                else:
+                    print(
+                        f"Warning: spatial_keepouts entry {key!r} matches no "
+                        "rule-area zone name on the board (known rule areas: "
+                        f"{', '.join(sorted(kept_names)) or 'none'}); it will "
+                        "be ignored.",
+                        file=_sys.stderr,
+                    )
+
         if not raw_areas:
             return None
 
@@ -2764,14 +2798,20 @@ class Autorouter:
                     indices.update(all_indices)
                 elif name == "F&B.Cu":
                     indices.update({0, stack.num_layers - 1})
+                elif name == "*.In.Cu":
+                    # KiCad's inner-copper wildcard: every layer that is
+                    # neither front nor back (#4672).  On a 2-layer stack it
+                    # legitimately resolves to the empty set -- there are no
+                    # inner layers -- which is correct, not an error.
+                    indices.update(i for i in all_indices if 0 < i < stack.num_layers - 1)
                 else:
                     layer_def = stack.get_layer_by_name(name)
                     if layer_def is not None:
                         indices.add(layer_def.index)
             return frozenset(indices)
 
-        # Class-name -> net-id resolution for the sidecar filter.
-        filters = self._spatial_keepout_filters or {}
+        # Class-name -> net-id resolution for the sidecar filter (``filters``
+        # bound above, before the unknown-zone-name warning pass).
         class_ids: dict[str, frozenset[int]] = {}
         if filters:
             name_to_id = self._net_name_to_id()

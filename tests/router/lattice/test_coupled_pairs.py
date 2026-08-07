@@ -264,6 +264,39 @@ def test_pair_declines_when_fat_envelope_is_blocked() -> None:
     assert stats2.routed == 2, pf2.failure_reasons
 
 
+def test_pair_declines_when_emitted_leg_violates_keepout() -> None:
+    # A track-keepout rule area spanning the pair corridor on both layers
+    # (#4605/#4672).  The fat centerline search deliberately skips the
+    # keepout mask, so the coarse search succeeds -- the finish gate's
+    # emitted-leg re-verification (probing every leg segment at trace_w/2)
+    # must catch the violation and decline with the ``pair-leg-keepout``
+    # attribution, emitting NOTHING (never split, #3906).
+    from kicad_tools.router.lattice.obstacles import KeepoutArea, LatticeKeepoutMask
+
+    wall = KeepoutArea(
+        polygon=((14.0, 0.0), (16.0, 0.0), (16.0, 12.0), (14.0, 12.0)),
+        layers=frozenset({0, 1}),
+        blocks_tracks=True,
+        blocks_vias=True,
+        only=None,
+        exempt=frozenset(),
+        name="pair-wall",
+    )
+    pf, pc = _pair_board()
+    pf.set_keepouts(LatticeKeepoutMask([wall]))
+    routes, stats = pf.route_netset([], coupled=[pc])
+    assert pf.pair_outcomes[pc.key] == "pair-leg-keepout", pf.pair_outcomes
+    assert pf.failure_reasons[pc.key] == "pair-leg-keepout"
+    assert routes == {}
+    assert stats.routed == 0 and stats.total == 1
+    # Control: the identical board with no keepout couples cleanly (proves
+    # the decline above is the keepout, not the corridor).
+    pf2, pc2 = _pair_board()
+    routes2, stats2 = pf2.route_netset([], coupled=[pc2])
+    assert pf2.pair_outcomes[pc2.key] == "coupled"
+    assert stats2.routed == 1 and routes2
+
+
 def test_pair_declines_on_polarity_twist_when_no_hook_room() -> None:
     # P/N swapped at the far end.  Full-height walls RIGHT behind both end
     # pad columns (grown keep-outs overlapping the pads' own) leave no hook

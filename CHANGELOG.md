@@ -27,6 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   voltage map, forced re-routes, and the actual-route exit-3/4 escalation
   are byte-identical to before.
 
+- **Lattice keepout rule areas: `*.In.Cu` wildcard + unknown-zone-name
+  warning + pair-leg decline coverage** (#4672, the #4605 review follow-ups)
+  — the `*.In.Cu` layer spec on a keepout rule area now resolves to every
+  inner copper layer of the routing stack (previously it was silently
+  dropped, leaving multilayer boards unprotected on inner layers; on a
+  2-layer stack it correctly resolves to the empty set). A
+  `spatial_keepouts` sidecar entry naming a nonexistent rule-area zone now
+  emits a stderr warning listing the known zone names (with a distinct
+  message when the name matches a pour-void-only area that never constrains
+  routing, e.g. `kct zones hv-keepout` output); exit code is unchanged. The
+  previously untested `pair-leg-keepout` finish-gate decline (a fat coupled
+  pair whose emitted leg would enter a rule area declines and emits
+  nothing) now has direct test coverage. No behavior change for well-formed
+  inputs.
+
 - **Local CI-equivalent gate script as an Actions-outage backstop** (#4671)
   — new `scripts/ci/local-gate.sh` mirrors the `.github/workflows/ci.yml`
   job set locally: `--cheap` (default) runs the six cheap gates,
