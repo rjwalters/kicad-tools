@@ -26,6 +26,8 @@ conflict, because ``--json`` only ever means ``--format json``.
 from __future__ import annotations
 
 import argparse
+import json
+from typing import Any
 
 FORMAT_TEXT = "text"
 FORMAT_JSON = "json"
@@ -78,6 +80,17 @@ def wants_json(
     if getattr(args, json_attr, False):
         return True
     return getattr(args, format_attr, None) == FORMAT_JSON
+
+
+def emit_json(payload: Any) -> None:
+    """Print *payload* as the single JSON document on stdout.
+
+    The machine-output contract (docs/reference/machine-output.md) is one
+    deterministic JSON document per invocation: keys are sorted, and any
+    non-serializable value (e.g. ``Path``) falls back to ``str``.  Human
+    chatter must go to stderr or be suppressed when JSON mode is active.
+    """
+    print(json.dumps(payload, indent=2, sort_keys=True, default=str))
 
 
 def normalize_format_alias(

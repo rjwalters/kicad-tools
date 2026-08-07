@@ -40,6 +40,8 @@ def run_zones_command(args) -> int:
         # Use global quiet flag
         if getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return zones_main(sub_argv) or 0
 
     elif args.zones_command == "list":
@@ -62,6 +64,8 @@ def run_zones_command(args) -> int:
         # Use global quiet flag
         if getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return zones_main(sub_argv) or 0
 
     elif args.zones_command == "hv-keepout":
@@ -82,6 +86,8 @@ def run_zones_command(args) -> int:
             sub_argv.append("--dry-run")
         if getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return zones_main(sub_argv) or 0
 
     elif args.zones_command == "fill":
@@ -97,6 +103,8 @@ def run_zones_command(args) -> int:
         # Use global quiet flag
         if getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return zones_main(sub_argv) or 0
 
     return 1

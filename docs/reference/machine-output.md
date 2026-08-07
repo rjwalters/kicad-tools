@@ -52,13 +52,20 @@ below is issue **#4674** and should build on these helpers.
 Measured by programmatic introspection of the real argparse tree
 (`create_parser()`, recursive walk of `_SubParsersAction` leaves) — not grep:
 
-| Idiom (outer `kct` parser) | Before #4543 | After #4543 |
-|---|---|---|
-| `--format` with a `json` choice | 124 | 124 |
-| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) |
-| `--json` boolean only | 2 | **0** |
-| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 |
-| Neither (prose-only) | 72 | 72 (backlog for #4674, below) |
+| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 batch 1 |
+|---|---|---|---|
+| `--format` with a `json` choice | 124 | 124 | 148 |
+| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 |
+| `--json` boolean only | 2 | **0** | 0 |
+| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** |
+| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 |
+
+The first #4674 batch swept the grouped-subcommand families -- `mfr` (7),
+`spec` (5), `placement fix/nudge/snap/align/distribute` (5), `zones
+add/batch/fill/hv-keepout` (4), `benchmark run/compare` (2) -- and added the
+`json` choice to `benchmark report`, closing the `format-nojson` bucket.
+The remaining 49 prose-only leaves (the 16 `sch` mutating commands, `stitch`,
+and the long tail of single commands) stay on the #4674 backlog below.
 
 Issue #4543 closed the `--json`-only bucket by adding `--format {text,json}`
 alongside the existing `--json` on both commands (outer parser, forwarding
@@ -83,10 +90,12 @@ reachable through `kct`:
 
 - `sch_symbol_info.py` `--json` — inner only; the user-facing `kct sch info`
   contract is `--format {text,json}`, translated by `commands/schematic.py`.
-- `mfr.py` `mfr rules --json` — **dead surface**: unreachable through `kct`
-  because the shim rebuilds `sub_argv` from outer args and the outer
-  `kct mfr rules` has no machine-output flag. The #4674 sweep should wire
-  the outer `--format` and retire this dead flag path.
+- `mfr.py` `mfr rules --json` — **retired** (first #4674 batch): the flag was
+  a dead surface, unreachable through `kct` because the shim rebuilds
+  `sub_argv` from outer args and the outer `kct mfr rules` had no
+  machine-output flag. `kct mfr rules --format json` is now wired end-to-end
+  (outer parser → shim → inner parser) and the inner `--json` boolean was
+  removed rather than aliased — it never shipped on any reachable surface.
 - `route_cmd.py` inner `--format` — deliberately allowlisted as inner-only
   (`tests/test_cli_parser_drift.py`, `INNER_ONLY_ALLOWLIST`), so `kct route`
   is prose-only at the user-facing surface today. See "Deferred" below.
@@ -111,27 +120,33 @@ is the separate mechanical sweep **#4674**.
 |---|---|
 | `route` | Inner `route_cmd.py` already has `--format`, but it is intentionally allowlisted as inner-only. Promoting it to the outer parser requires removing the `INNER_ONLY_ALLOWLIST` entry and adding shim forwarding under the route drift guard — owned by the route workstream, not the mechanical sweep. |
 
-### Sweep backlog for #4674 — should gain `--format {text,json}` (67)
+### Sweep backlog for #4674 — should gain `--format {text,json}`
 
 Read-only/reporting commands should emit their report as JSON; mutating
 commands should emit a JSON change-summary (precedent: `kct sch tidy`,
 `kct sch cleanup-wires`, `kct pcb sync-netlist` all do).
 
-- `benchmark compare`, `benchmark run`
+**Done (first #4674 batch, 24 surfaces):** `mfr list/info/rules/compare/`
+`export-dru/apply-rules/validate`, `spec init/validate/status/decide/check`,
+`placement fix/nudge/snap/align/distribute`, `zones add/batch/fill/`
+`hv-keepout`, `benchmark run/compare`, plus the `json` choice on
+`benchmark report` (the former `format-nojson` holdout).
+`tests/test_format_json_sweep.py` guards these surfaces.
+
+**Remaining actionable (44)** — the audit's `prose-only` bucket reads 49
+because it also counts the 4 exempt commands and the deferred `route`
+(sections above):
+
 - `board-metrics`, `build`, `config`, `create-pcb`, `creepage-export-rules`
 - `datasheet cache`, `datasheet convert`, `datasheet download`
 - `ipc connect`, `ipc push-routes`, `ipc status`
 - `lib create-footprint-lib`, `lib create-symbol-lib`, `lib generate-footprint`
 - `mcp setup`
-- `mfr apply-rules`, `mfr compare`, `mfr export-dru`, `mfr info`, `mfr list`,
-  `mfr rules`, `mfr validate`
 - `optimize-placement`, `optimize-traces`
 - `panel`
 - `parts cache`, `parts sync-catalog`
 - `pcb export-dsn`, `pcb import-ses`
 - `pipeline`
-- `placement align`, `placement distribute`, `placement fix`,
-  `placement nudge`, `placement snap`
 - `reason`, `report generate`, `route-auto`
 - `sch add-bypass-cap`, `sch add-component`, `sch add-junction`,
   `sch add-label`, `sch add-no-connect`, `sch add-pull-resistor`,
@@ -139,12 +154,9 @@ commands should emit a JSON change-summary (precedent: `kct sch tidy`,
   `sch replace`, `sch set-footprint`, `sch set-label-direction`,
   `sch set-reference`, `sch set-symbol-property`, `sch set-value`
 - `screenshot`
-- `spec check`, `spec decide`, `spec init`, `spec status`, `spec validate`
-- `stitch`
-- `zones add`, `zones batch`, `zones fill`, `zones hv-keepout`
+- `stitch` (single command, but its 6k-line inner module has a bespoke
+  multi-phase report — batch it alone)
 
-Additional sweep item outside the 72: `benchmark report` has
-`--format {text,markdown}` — add a `json` choice (no new flag needed).
 
 ## Interop note (survey idea 7)
 

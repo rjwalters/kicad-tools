@@ -6,6 +6,12 @@ from pathlib import Path
 __all__ = ["run_mfr_command"]
 
 
+def _forward_format(args, sub_argv: list) -> None:
+    """Forward the outer ``--format`` choice to the inner ``mfr`` parser."""
+    if getattr(args, "format", "text") != "text":
+        sub_argv.extend(["--format", args.format])
+
+
 def run_mfr_command(args) -> int:
     """Handle manufacturer subcommands."""
     if not args.mfr_command:
@@ -16,16 +22,21 @@ def run_mfr_command(args) -> int:
     from ..mfr import main as mfr_main
 
     if args.mfr_command == "list":
-        return mfr_main(["list"]) or 0
+        sub_argv = ["list"]
+        _forward_format(args, sub_argv)
+        return mfr_main(sub_argv) or 0
 
     elif args.mfr_command == "info":
-        return mfr_main(["info", args.manufacturer]) or 0
+        sub_argv = ["info", args.manufacturer]
+        _forward_format(args, sub_argv)
+        return mfr_main(sub_argv) or 0
 
     elif args.mfr_command == "rules":
         sub_argv = ["rules", args.manufacturer]
         # Always pass layers and copper to ensure inner command uses correct values
         sub_argv.extend(["--layers", str(args.layers)])
         sub_argv.extend(["--copper", str(args.copper)])
+        _forward_format(args, sub_argv)
         return mfr_main(sub_argv) or 0
 
     elif args.mfr_command == "compare":
@@ -33,6 +44,7 @@ def run_mfr_command(args) -> int:
         # Always pass layers and copper to ensure inner command uses correct values
         sub_argv.extend(["--layers", str(args.layers)])
         sub_argv.extend(["--copper", str(args.copper)])
+        _forward_format(args, sub_argv)
         return mfr_main(sub_argv) or 0
 
     elif args.mfr_command == "apply-rules":
@@ -45,6 +57,7 @@ def run_mfr_command(args) -> int:
             sub_argv.extend(["--output", args.output])
         if args.dry_run:
             sub_argv.append("--dry-run")
+        _forward_format(args, sub_argv)
         return mfr_main(sub_argv) or 0
 
     elif args.mfr_command == "validate":
@@ -53,6 +66,7 @@ def run_mfr_command(args) -> int:
             sub_argv.extend(["--layers", str(args.layers)])
         if args.copper != 1.0:
             sub_argv.extend(["--copper", str(args.copper)])
+        _forward_format(args, sub_argv)
         return mfr_main(sub_argv) or 0
 
     elif args.mfr_command == "export-dru":
@@ -63,6 +77,7 @@ def run_mfr_command(args) -> int:
             sub_argv.extend(["--copper", str(args.copper)])
         if args.output:
             sub_argv.extend(["--output", args.output])
+        _forward_format(args, sub_argv)
         return mfr_main(sub_argv) or 0
 
     elif args.mfr_command == "import-dru":

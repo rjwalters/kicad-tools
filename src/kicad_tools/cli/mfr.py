@@ -18,10 +18,10 @@ Usage:
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
+from kicad_tools.cli.format_options import add_format_flag, emit_json
 from kicad_tools.manufacturers import (
     compare_design_rules,
     find_compatible_manufacturers,
@@ -31,8 +31,67 @@ from kicad_tools.manufacturers import (
 from kicad_tools.units import get_current_formatter
 
 
+def _wants_json(args) -> bool:
+    """True when the canonical ``--format json`` spelling was requested."""
+    return getattr(args, "format", "text") == "json"
+
+
+def _fail(args, message: str, *, stderr: bool = False) -> None:
+    """Report an error and exit 1.
+
+    ``message`` is the full human-readable line (printed verbatim in text
+    mode, preserving historical output); in JSON mode it becomes the
+    ``error`` field of the single JSON document on stdout.
+    """
+    if _wants_json(args):
+        emit_json({"error": message})
+    else:
+        print(message, file=sys.stderr if stderr else sys.stdout)
+    sys.exit(1)
+
+
+def _profile_payload(profile) -> dict:
+    """Full machine rendering of a manufacturer profile (mirrors cmd_info)."""
+    payload: dict = profile.to_dict()
+    if profile.assembly:
+        payload["assembly"] = {
+            "min_component_pitch_mm": profile.assembly.min_component_pitch_mm,
+            "min_bga_pitch_mm": profile.assembly.min_bga_pitch_mm,
+            "supports_double_sided": profile.assembly.supports_double_sided,
+        }
+    else:
+        payload["assembly"] = None
+    if profile.parts_library:
+        lib = profile.parts_library
+        payload["parts_library"] = {
+            "name": lib.name,
+            "catalog_url": lib.catalog_url,
+            "tiers": lib.tiers,
+        }
+    else:
+        payload["parts_library"] = None
+    return payload
+
+
 def cmd_list(args):
     """List available manufacturers."""
+    if _wants_json(args):
+        emit_json(
+            {
+                "manufacturers": [
+                    {
+                        "id": profile.id,
+                        "name": profile.name,
+                        "supports_assembly": profile.supports_assembly(),
+                        "parts_library": (
+                            profile.parts_library.name if profile.parts_library else None
+                        ),
+                    }
+                    for profile in sorted(list_manufacturers(), key=lambda p: p.id)
+                ]
+            }
+        )
+        return
     print(f"\n{'=' * 60}")
     print("AVAILABLE MANUFACTURERS")
     print(f"{'=' * 60}\n")
@@ -55,8 +114,11 @@ def cmd_info(args):
     try:
         profile = get_profile(args.manufacturer)
     except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _fail(args, f"Error: {e}")
+
+    if _wants_json(args):
+        emit_json(_profile_payload(profile))
+        return
 
     print(f"\n{'=' * 60}")
     print(f"{profile.name.upper()}")
@@ -102,10 +164,21 @@ def cmd_rules(args):
     try:
         profile = get_profile(args.manufacturer)
     except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _fail(args, f"Error: {e}")
 
     rules = profile.get_design_rules(args.layers, args.copper)
+
+    if _wants_json(args):
+        emit_json(
+            {
+                "manufacturer": profile.id,
+                "layers": args.layers,
+                "copper_oz": args.copper,
+                "rules": rules.to_dict(),
+            }
+        )
+        return
+
     fmt = get_current_formatter()
 
     print(f"\n{'=' * 60}")
@@ -143,11 +216,6 @@ def cmd_rules(args):
     if rules.inner_copper_oz > 0:
         print(f"  Inner copper:       {rules.inner_copper_oz} oz")
 
-    if args.json:
-        print(f"\n{'─' * 60}")
-        print("JSON:")
-        print(json.dumps(rules.to_dict(), indent=2))
-
     print(f"\n{'=' * 60}")
 
 
@@ -157,6 +225,24 @@ def cmd_compare(args):
         layers=args.layers,
         copper_oz=args.copper,
     )
+
+    if _wants_json(args):
+        manufacturers = {}
+        for mfr in sorted(rules_by_mfr):
+            profile = get_profile(mfr)
+            manufacturers[mfr] = {
+                "rules": rules_by_mfr[mfr].to_dict(),
+                "supports_assembly": profile.supports_assembly(),
+                "parts_library": (profile.parts_library.name if profile.parts_library else None),
+            }
+        emit_json(
+            {
+                "layers": args.layers,
+                "copper_oz": args.copper,
+                "manufacturers": manufacturers,
+            }
+        )
+        return
 
     print(f"\n{'=' * 70}")
     print(f"MANUFACTURER COMPARISON - {args.layers}-LAYER {args.copper}oz")
@@ -265,8 +351,7 @@ def cmd_export_dru(args):
     try:
         profile = get_profile(args.manufacturer)
     except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _fail(args, f"Error: {e}")
 
     rules = profile.get_design_rules(args.layers, args.copper)
 
@@ -284,6 +369,16 @@ def cmd_export_dru(args):
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     output_path.write_text(dru_content)
+    if _wants_json(args):
+        emit_json(
+            {
+                "manufacturer": profile.id,
+                "layers": args.layers,
+                "copper_oz": args.copper,
+                "output": str(output_path),
+            }
+        )
+        return
     print(f"DRC rules exported to: {output_path}")
 
 
@@ -298,40 +393,55 @@ def cmd_apply_rules(args):
     )
     from kicad_tools.core.sexp_file import load_pcb, save_pcb
 
+    json_mode = _wants_json(args)
+
     try:
         profile = get_profile(args.manufacturer)
     except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _fail(args, f"Error: {e}")
 
     rules = profile.get_design_rules(args.layers, args.copper)
     file_path = Path(args.file)
 
     if not file_path.exists():
-        print(f"Error: File not found: {file_path}", file=sys.stderr)
-        sys.exit(1)
+        _fail(args, f"Error: File not found: {file_path}", stderr=True)
 
-    print(f"\n{'=' * 60}")
-    print(f"APPLYING {profile.name.upper()} DESIGN RULES")
-    print(f"{'=' * 60}")
-    print(f"\nFile: {file_path}")
-    print(f"Configuration: {args.layers}-layer, {args.copper}oz copper")
+    payload = {
+        "file": str(file_path),
+        "manufacturer": profile.id,
+        "layers": args.layers,
+        "copper_oz": args.copper,
+        "dry_run": bool(args.dry_run),
+        "rules": rules.to_dict(),
+    }
 
-    print("\nDesign Rules to Apply:")
-    print(
-        f"  Min clearance:     {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)"
-    )
-    print(
-        f"  Min trace width:   {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)"
-    )
-    print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
-    print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
-    print(f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm")
-    print(f"  Copper to edge:    {rules.min_copper_to_edge_mm:.3f} mm")
+    if not json_mode:
+        print(f"\n{'=' * 60}")
+        print(f"APPLYING {profile.name.upper()} DESIGN RULES")
+        print(f"{'=' * 60}")
+        print(f"\nFile: {file_path}")
+        print(f"Configuration: {args.layers}-layer, {args.copper}oz copper")
+
+        print("\nDesign Rules to Apply:")
+        print(
+            f"  Min clearance:     {rules.min_clearance_mm:.4f} mm "
+            f"({rules.min_clearance_mil:.1f} mil)"
+        )
+        print(
+            f"  Min trace width:   {rules.min_trace_width_mm:.4f} mm "
+            f"({rules.min_trace_width_mil:.1f} mil)"
+        )
+        print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
+        print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
+        print(f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm")
+        print(f"  Copper to edge:    {rules.min_copper_to_edge_mm:.3f} mm")
 
     if args.dry_run:
-        print("\n(dry run - no changes made)")
-        print(f"\n{'=' * 60}")
+        if json_mode:
+            emit_json(payload)
+        else:
+            print("\n(dry run - no changes made)")
+            print(f"\n{'=' * 60}")
         return
 
     # Handle project files (.kicad_pro)
@@ -339,8 +449,7 @@ def cmd_apply_rules(args):
         try:
             data = load_project(file_path)
         except Exception as e:
-            print(f"Error loading project: {e}", file=sys.stderr)
-            sys.exit(1)
+            _fail(args, f"Error loading project: {e}", stderr=True)
 
         # Apply manufacturer rules
         apply_manufacturer_rules(
@@ -379,36 +488,44 @@ def cmd_apply_rules(args):
         output_path = Path(args.output) if args.output else file_path
         try:
             save_project(data, output_path)
-            print(f"\nProject file updated: {output_path}")
+            if not json_mode:
+                print(f"\nProject file updated: {output_path}")
         except Exception as e:
-            print(f"Error saving project: {e}", file=sys.stderr)
-            sys.exit(1)
+            _fail(args, f"Error saving project: {e}", stderr=True)
+
+        payload["updated"] = "project"
+        payload["output"] = str(output_path)
 
     # Handle PCB files (.kicad_pcb) - update zone clearances
     elif file_path.suffix == ".kicad_pcb":
         try:
             sexp = load_pcb(file_path)
         except Exception as e:
-            print(f"Error loading PCB: {e}", file=sys.stderr)
-            sys.exit(1)
+            _fail(args, f"Error loading PCB: {e}", stderr=True)
 
         zones_updated = _update_zone_clearances(sexp, rules.min_clearance_mm)
 
-        if zones_updated > 0:
-            print(
-                f"\nUpdated {zones_updated} zone(s) with clearance: {rules.min_clearance_mm:.4f} mm"
-            )
-        else:
-            print("\nNo zones found to update.")
+        if not json_mode:
+            if zones_updated > 0:
+                print(
+                    f"\nUpdated {zones_updated} zone(s) with clearance: "
+                    f"{rules.min_clearance_mm:.4f} mm"
+                )
+            else:
+                print("\nNo zones found to update.")
 
         # Save
         output_path = Path(args.output) if args.output else file_path
         try:
             save_pcb(sexp, output_path)
-            print(f"PCB file updated: {output_path}")
+            if not json_mode:
+                print(f"PCB file updated: {output_path}")
         except Exception as e:
-            print(f"Error saving PCB: {e}", file=sys.stderr)
-            sys.exit(1)
+            _fail(args, f"Error saving PCB: {e}", stderr=True)
+
+        payload["updated"] = "pcb"
+        payload["output"] = str(output_path)
+        payload["zones_updated"] = zones_updated
 
         # A bare .kicad_pcb has no sibling .kicad_pro, so kicad-cli pcb drc
         # silently falls back to KiCad factory defaults (0.20 mm track/clearance,
@@ -419,6 +536,7 @@ def cmd_apply_rules(args):
         # already succeeded, so a sidecar failure only warns.
         from kicad_tools.manufacturers import write_drc_constraints
 
+        sidecars: list[str] = []
         try:
             written = write_drc_constraints(
                 output_path,
@@ -428,17 +546,27 @@ def cmd_apply_rules(args):
                 copper_oz=args.copper,
             )
             if written:
-                print("DRC-constraint sidecars updated: " + ", ".join(str(p) for p in written))
+                sidecars = [str(p) for p in written]
+                if not json_mode:
+                    print("DRC-constraint sidecars updated: " + ", ".join(sidecars))
         except (ValueError, OSError, KeyError) as e:
             print(
                 f"Warning: could not write DRC-constraint sidecars: {e}",
                 file=sys.stderr,
             )
+        payload["sidecars"] = sidecars
 
     else:
+        if json_mode:
+            emit_json({"error": f"Unsupported file type: {file_path.suffix}"})
+            sys.exit(1)
         print(f"Error: Unsupported file type: {file_path.suffix}", file=sys.stderr)
         print("Supported: .kicad_pro, .kicad_pcb")
         sys.exit(1)
+
+    if json_mode:
+        emit_json(payload)
+        return
 
     print(f"\n{'=' * 60}")
     print(f"Manufacturer set to: {profile.name} ({profile.id})")
@@ -481,47 +609,66 @@ def cmd_validate(args):
     """Validate a PCB design against manufacturer design rules."""
     from kicad_tools.core.sexp_file import load_pcb
 
+    json_mode = _wants_json(args)
+
     try:
         profile = get_profile(args.manufacturer)
     except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _fail(args, f"Error: {e}")
 
     rules = profile.get_design_rules(args.layers, args.copper)
     file_path = Path(args.file)
 
     if not file_path.exists():
-        print(f"Error: File not found: {file_path}", file=sys.stderr)
-        sys.exit(1)
+        _fail(args, f"Error: File not found: {file_path}", stderr=True)
 
     if file_path.suffix != ".kicad_pcb":
-        print(f"Error: Expected .kicad_pcb file, got: {file_path.suffix}", file=sys.stderr)
-        sys.exit(1)
+        _fail(args, f"Error: Expected .kicad_pcb file, got: {file_path.suffix}", stderr=True)
 
     try:
         sexp = load_pcb(file_path)
     except Exception as e:
-        print(f"Error loading PCB: {e}", file=sys.stderr)
-        sys.exit(1)
+        _fail(args, f"Error loading PCB: {e}", stderr=True)
 
-    print(f"\n{'=' * 60}")
-    print(f"VALIDATING AGAINST {profile.name.upper()} RULES")
-    print(f"{'=' * 60}")
-    print(f"\nFile: {file_path}")
-    print(f"Configuration: {args.layers}-layer, {args.copper}oz copper")
+    if not json_mode:
+        print(f"\n{'=' * 60}")
+        print(f"VALIDATING AGAINST {profile.name.upper()} RULES")
+        print(f"{'=' * 60}")
+        print(f"\nFile: {file_path}")
+        print(f"Configuration: {args.layers}-layer, {args.copper}oz copper")
 
-    print("\nDesign Rules:")
-    print(
-        f"  Min clearance:     {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)"
-    )
-    print(
-        f"  Min trace width:   {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)"
-    )
-    print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
-    print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
+        print("\nDesign Rules:")
+        print(
+            f"  Min clearance:     {rules.min_clearance_mm:.4f} mm "
+            f"({rules.min_clearance_mil:.1f} mil)"
+        )
+        print(
+            f"  Min trace width:   {rules.min_trace_width_mm:.4f} mm "
+            f"({rules.min_trace_width_mil:.1f} mil)"
+        )
+        print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
+        print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
 
     # Run validation checks
     violations = _validate_pcb_design(sexp, rules)
+
+    if json_mode:
+        emit_json(
+            {
+                "file": str(file_path),
+                "manufacturer": profile.id,
+                "layers": args.layers,
+                "copper_oz": args.copper,
+                "rules": rules.to_dict(),
+                "violations": [
+                    {"type": v_type, "detail": v_details} for v_type, v_details in violations
+                ],
+                "ok": not violations,
+            }
+        )
+        if violations:
+            sys.exit(1)
+        return
 
     print(f"\n{'-' * 60}")
 
@@ -655,11 +802,13 @@ Examples:
 
     # list
     p_list = subparsers.add_parser("list", help="List manufacturers")
+    add_format_flag(p_list)
     p_list.set_defaults(func=cmd_list)
 
     # info
     p_info = subparsers.add_parser("info", help="Show manufacturer info")
     p_info.add_argument("manufacturer", help="Manufacturer ID")
+    add_format_flag(p_info)
     p_info.set_defaults(func=cmd_info)
 
     # rules
@@ -667,13 +816,17 @@ Examples:
     p_rules.add_argument("manufacturer", help="Manufacturer ID")
     p_rules.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
     p_rules.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
-    p_rules.add_argument("--json", action="store_true", help="Include JSON output")
+    # The historical inner-only "--json" boolean (append-JSON-after-prose) was
+    # a dead surface -- unreachable through kct because the outer parser never
+    # declared it.  Retired in favour of the canonical --format json (#4674).
+    add_format_flag(p_rules)
     p_rules.set_defaults(func=cmd_rules)
 
     # compare
     p_compare = subparsers.add_parser("compare", help="Compare manufacturers")
     p_compare.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
     p_compare.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    add_format_flag(p_compare)
     p_compare.set_defaults(func=cmd_compare)
 
     # find
@@ -691,6 +844,7 @@ Examples:
     p_dru.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
     p_dru.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
     p_dru.add_argument("-o", "--output", type=Path, help="Output path")
+    add_format_flag(p_dru)
     p_dru.set_defaults(func=cmd_export_dru)
 
     # apply-rules
@@ -706,6 +860,7 @@ Examples:
     p_apply.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
     p_apply.add_argument("-o", "--output", help="Output file (default: modify in place)")
     p_apply.add_argument("--dry-run", action="store_true", help="Show changes without applying")
+    add_format_flag(p_apply)
     p_apply.set_defaults(func=cmd_apply_rules)
 
     # validate
@@ -719,6 +874,7 @@ Examples:
     p_validate.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
     p_validate.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
     p_validate.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    add_format_flag(p_validate)
     p_validate.set_defaults(func=cmd_validate)
 
     args = parser.parse_args(argv)

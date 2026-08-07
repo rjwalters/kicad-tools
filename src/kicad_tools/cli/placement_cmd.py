@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from kicad_tools.optim import OptimizationResult, OptimizationWorkflow
 
+from kicad_tools.cli.format_options import add_format_flag, emit_json
 from kicad_tools.placement import (
     Conflict,
     PlacementAnalyzer,
@@ -27,6 +28,20 @@ from kicad_tools.placement import (
 )
 from kicad_tools.placement.analyzer import DesignRules
 from kicad_tools.placement.fixer import FixStrategy
+
+
+def _wants_json(args) -> bool:
+    """True when the canonical ``--format json`` spelling was requested."""
+    return getattr(args, "format", "text") == "json"
+
+
+def _fail(args, message: str) -> int:
+    """Report an error and return 1 (single JSON document in JSON mode)."""
+    if _wants_json(args):
+        emit_json({"error": message})
+    else:
+        print(message, file=sys.stderr)
+    return 1
 
 
 def cmd_check(args) -> int:
@@ -100,12 +115,14 @@ def cmd_nudge(args) -> int:
     """
     from kicad_tools.cli.progress import spinner
 
-    quiet = getattr(args, "quiet", False)
+    json_mode = _wants_json(args)
+    # JSON mode suppresses prose/progress; the payload at the end is the
+    # single stdout document.
+    quiet = getattr(args, "quiet", False) or json_mode
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: File not found: {pcb_path}")
 
     # Build design rules
     rules = DesignRules(
@@ -139,6 +156,23 @@ def cmd_nudge(args) -> int:
             dry_run=args.dry_run,
         )
 
+    if json_mode:
+        emit_json(
+            {
+                "pcb": str(pcb_path),
+                "output": str(output_path),
+                "dry_run": bool(args.dry_run),
+                "anchored": sorted(anchored),
+                "success": bool(result.success),
+                "fixes_applied": result.fixes_applied,
+                "new_conflicts": result.new_conflicts,
+                "message": result.message,
+            }
+        )
+        if args.dry_run:
+            return 0
+        return 0 if result.success else 1
+
     if not quiet:
         print(f"\n{result.message}")
 
@@ -157,12 +191,14 @@ def cmd_fix(args) -> int:
     """Suggest and apply fixes for placement conflicts."""
     from kicad_tools.cli.progress import spinner
 
-    quiet = getattr(args, "quiet", False)
+    json_mode = _wants_json(args)
+    # JSON mode suppresses prose/progress; the payload at the end is the
+    # single stdout document.
+    quiet = getattr(args, "quiet", False) or json_mode
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: File not found: {pcb_path}")
 
     # Build design rules
     rules = DesignRules(
@@ -198,6 +234,25 @@ def cmd_fix(args) -> int:
                 output_path=fix_output_path,
                 dry_run=args.dry_run,
             )
+
+        if json_mode:
+            emit_json(
+                {
+                    "pcb": str(pcb_path),
+                    "output": str(fix_output_path),
+                    "strategy": args.strategy,
+                    "only": only_type,
+                    "dry_run": bool(args.dry_run),
+                    "anchored": sorted(fix_anchored),
+                    "success": bool(fix_result.success),
+                    "fixes_applied": fix_result.fixes_applied,
+                    "new_conflicts": fix_result.new_conflicts,
+                    "message": fix_result.message,
+                }
+            )
+            if args.dry_run:
+                return 0
+            return 0 if fix_result.success else 1
 
         if not quiet:
             print(f"\n{fix_result.message}")
@@ -243,6 +298,37 @@ def cmd_fix(args) -> int:
             timeout=timeout,
         )
 
+    if json_mode:
+        emit_json(
+            {
+                "pcb": str(pcb_path),
+                "output": str(output_path),
+                "strategy": args.strategy,
+                "only": only_type,
+                "dry_run": bool(args.dry_run),
+                "anchored": sorted(anchored),
+                "success": bool(result.success),
+                "total_passes": result.total_passes,
+                "initial_conflicts": result.initial_conflicts,
+                "remaining_conflicts": result.remaining_conflicts,
+                "fixes_applied": result.total_fixes_applied,
+                "passes": [
+                    {
+                        "pass": pr.pass_number,
+                        "conflicts_before": pr.conflicts_before,
+                        "conflicts_after": pr.conflicts_after,
+                        "fixes_applied": pr.fixes_applied,
+                        "escalation_factor": pr.escalation_factor,
+                    }
+                    for pr in result.pass_results
+                ],
+                "message": result.message,
+            }
+        )
+        if args.dry_run:
+            return 0
+        return 0 if result.success else 1
+
     if not quiet:
         # Per-pass progress when verbose
         if args.verbose and result.pass_results:
@@ -279,20 +365,21 @@ def cmd_snap(args) -> int:
     from kicad_tools.optim import PlacementConfig, PlacementOptimizer, snap_to_grid
     from kicad_tools.schema.pcb import PCB
 
-    quiet = getattr(args, "quiet", False)
+    json_mode = _wants_json(args)
+    # JSON mode suppresses prose/progress; the payload at the end is the
+    # single stdout document.
+    quiet = getattr(args, "quiet", False) or json_mode
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: File not found: {pcb_path}")
 
     # Load PCB
     try:
         with spinner("Loading PCB...", quiet=quiet):
             pcb = PCB.load(str(pcb_path))
     except Exception as e:
-        print(f"Error loading PCB: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error loading PCB: {e}")
 
     # Create optimizer from PCB
     config = PlacementConfig()
@@ -310,15 +397,27 @@ def cmd_snap(args) -> int:
     if not quiet:
         print(f"Snapped {count} components")
 
+    output_path = Path(args.output) if args.output else pcb_path
+    payload = {
+        "pcb": str(pcb_path),
+        "output": str(output_path),
+        "grid_mm": args.grid,
+        "rotation_snap_deg": rotation_snap,
+        "dry_run": bool(args.dry_run),
+        "components": len(optimizer.components),
+        "snapped": count,
+    }
+
     if args.dry_run:
-        if not quiet:
+        if json_mode:
+            payload["updated"] = 0
+            emit_json(payload)
+        elif not quiet:
             print("\n(Dry run - no changes made)")
             print(optimizer.report())
         return 0
 
     # Write results
-    output_path = Path(args.output) if args.output else pcb_path
-
     try:
         with spinner("Writing snapped placement...", quiet=quiet):
             updated = optimizer.write_to_pcb(pcb)
@@ -329,8 +428,11 @@ def cmd_snap(args) -> int:
             print(f"Saved to: {output_path}")
 
     except Exception as e:
-        print(f"Error saving PCB: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error saving PCB: {e}")
+
+    if json_mode:
+        payload["updated"] = updated
+        emit_json(payload)
 
     return 0
 
@@ -638,24 +740,24 @@ def cmd_align(args) -> int:
     from kicad_tools.optim import PlacementConfig, PlacementOptimizer, align_components
     from kicad_tools.schema.pcb import PCB
 
-    quiet = getattr(args, "quiet", False)
+    json_mode = _wants_json(args)
+    # JSON mode suppresses prose/progress; the payload at the end is the
+    # single stdout document.
+    quiet = getattr(args, "quiet", False) or json_mode
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: File not found: {pcb_path}")
 
     if not args.components:
-        print("Error: No components specified. Use --components R1,R2,R3", file=sys.stderr)
-        return 1
+        return _fail(args, "Error: No components specified. Use --components R1,R2,R3")
 
     # Load PCB
     try:
         with spinner("Loading PCB...", quiet=quiet):
             pcb = PCB.load(str(pcb_path))
     except Exception as e:
-        print(f"Error loading PCB: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error loading PCB: {e}")
 
     # Create optimizer from PCB
     config = PlacementConfig()
@@ -681,14 +783,27 @@ def cmd_align(args) -> int:
     if not quiet:
         print(f"Aligned {count} components")
 
+    output_path = Path(args.output) if args.output else pcb_path
+    payload = {
+        "pcb": str(pcb_path),
+        "output": str(output_path),
+        "axis": args.axis,
+        "reference": args.reference,
+        "tolerance_mm": args.tolerance,
+        "dry_run": bool(args.dry_run),
+        "components": refs,
+        "aligned": count,
+    }
+
     if args.dry_run:
-        if not quiet:
+        if json_mode:
+            payload["updated"] = 0
+            emit_json(payload)
+        elif not quiet:
             print("\n(Dry run - no changes made)")
         return 0
 
     # Write results
-    output_path = Path(args.output) if args.output else pcb_path
-
     try:
         with spinner("Writing aligned placement...", quiet=quiet):
             updated = optimizer.write_to_pcb(pcb)
@@ -699,8 +814,11 @@ def cmd_align(args) -> int:
             print(f"Saved to: {output_path}")
 
     except Exception as e:
-        print(f"Error saving PCB: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error saving PCB: {e}")
+
+    if json_mode:
+        payload["updated"] = updated
+        emit_json(payload)
 
     return 0
 
@@ -711,26 +829,24 @@ def cmd_distribute(args) -> int:
     from kicad_tools.optim import PlacementConfig, PlacementOptimizer, distribute_components
     from kicad_tools.schema.pcb import PCB
 
-    quiet = getattr(args, "quiet", False)
+    json_mode = _wants_json(args)
+    # JSON mode suppresses prose/progress; the payload at the end is the
+    # single stdout document.
+    quiet = getattr(args, "quiet", False) or json_mode
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: File not found: {pcb_path}")
 
     if not args.components:
-        print(
-            "Error: No components specified. Use --components LED1,LED2,LED3,LED4", file=sys.stderr
-        )
-        return 1
+        return _fail(args, "Error: No components specified. Use --components LED1,LED2,LED3,LED4")
 
     # Load PCB
     try:
         with spinner("Loading PCB...", quiet=quiet):
             pcb = PCB.load(str(pcb_path))
     except Exception as e:
-        print(f"Error loading PCB: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error loading PCB: {e}")
 
     # Create optimizer from PCB
     config = PlacementConfig()
@@ -758,14 +874,26 @@ def cmd_distribute(args) -> int:
         else:
             print(f"Distributed {count} components evenly")
 
+    output_path = Path(args.output) if args.output else pcb_path
+    payload = {
+        "pcb": str(pcb_path),
+        "output": str(output_path),
+        "axis": args.axis,
+        "spacing_mm": spacing,
+        "dry_run": bool(args.dry_run),
+        "components": refs,
+        "distributed": count,
+    }
+
     if args.dry_run:
-        if not quiet:
+        if json_mode:
+            payload["updated"] = 0
+            emit_json(payload)
+        elif not quiet:
             print("\n(Dry run - no changes made)")
         return 0
 
     # Write results
-    output_path = Path(args.output) if args.output else pcb_path
-
     try:
         with spinner("Writing distributed placement...", quiet=quiet):
             updated = optimizer.write_to_pcb(pcb)
@@ -776,8 +904,11 @@ def cmd_distribute(args) -> int:
             print(f"Saved to: {output_path}")
 
     except Exception as e:
-        print(f"Error saving PCB: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error saving PCB: {e}")
+
+    if json_mode:
+        payload["updated"] = updated
+        emit_json(payload)
 
     return 0
 
@@ -1707,6 +1838,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     fix_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     fix_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
+    add_format_flag(fix_parser)
 
     # Nudge subcommand (fast pad clearance repair)
     nudge_parser = subparsers.add_parser(
@@ -1736,6 +1868,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     nudge_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     nudge_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
+    add_format_flag(nudge_parser)
 
     # Snap subcommand
     snap_parser = subparsers.add_parser("snap", help="Snap components to grid")
@@ -1764,6 +1897,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     snap_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     snap_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
+    add_format_flag(snap_parser)
 
     # Align subcommand
     align_parser = subparsers.add_parser("align", help="Align components in row or column")
@@ -1804,6 +1938,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     align_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     align_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
+    add_format_flag(align_parser)
 
     # Distribute subcommand
     distribute_parser = subparsers.add_parser("distribute", help="Distribute components evenly")
@@ -1840,6 +1975,7 @@ def main(argv: list[str] | None = None) -> int:
     distribute_parser.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )
+    add_format_flag(distribute_parser)
 
     # Optimize subcommand
     optimize_parser = subparsers.add_parser(

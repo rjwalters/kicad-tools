@@ -12,6 +12,22 @@ import argparse
 import sys
 from pathlib import Path
 
+from kicad_tools.cli.format_options import add_format_flag, emit_json
+
+
+def _wants_json(args) -> bool:
+    """True when the canonical ``--format json`` spelling was requested."""
+    return getattr(args, "format", "text") == "json"
+
+
+def _fail(args, message: str) -> int:
+    """Report an error and return 1 (single JSON document in JSON mode)."""
+    if _wants_json(args):
+        emit_json({"error": message})
+    else:
+        print(message, file=sys.stderr)
+    return 1
+
 
 def parse_bbox(spec: str) -> list[tuple[float, float]]:
     """Parse a ``MINX,MINY,MAXX,MAXY`` bbox string into a polygon.
@@ -194,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Suppress progress output",
     )
+    add_format_flag(add_parser)
 
     # zones list
     list_parser = subparsers.add_parser("list", help="List existing zones in a PCB")
@@ -241,6 +258,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Suppress progress output",
     )
+    add_format_flag(batch_parser)
 
     # zones hv-keepout
     hv_parser = subparsers.add_parser(
@@ -296,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Suppress progress output",
     )
+    add_format_flag(hv_parser)
 
     # zones fill
     fill_parser = subparsers.add_parser("fill", help="Fill all zones in a PCB")
@@ -326,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Suppress progress output",
     )
+    add_format_flag(fill_parser)
 
     args = parser.parse_args(argv)
 
@@ -353,8 +373,7 @@ def _run_add(args) -> int:
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: File not found: {pcb_path}")
 
     # Determine output path. No -o means overwrite the input in place,
     # consistent with `zones fill` and `optimize-placement`. This makes a
@@ -362,7 +381,10 @@ def _run_add(args) -> int:
     # call reads its own prior output instead of the pristine input.
     output_path = Path(args.output) if args.output else pcb_path
 
-    quiet = args.quiet
+    json_mode = _wants_json(args)
+    # JSON mode suppresses the prose progress report; the payload at the end
+    # is the single stdout document (overlap warnings still go to stderr).
+    quiet = args.quiet or json_mode
 
     # Parse optional region/island boundary (mutually exclusive in argparse).
     boundary = None
@@ -372,8 +394,7 @@ def _run_add(args) -> int:
         elif args.region:
             boundary = parse_region(args.region)
     except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: {e}")
 
     if not quiet:
         print(f"Loading PCB: {pcb_path}")
@@ -381,8 +402,7 @@ def _run_add(args) -> int:
     try:
         gen = ZoneGenerator.from_pcb(str(pcb_path))
     except Exception as e:
-        print(f"Error loading PCB: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error loading PCB: {e}")
 
     # Add the zone
     try:
@@ -397,8 +417,7 @@ def _run_add(args) -> int:
             boundary=boundary,
         )
     except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: {e}")
 
     if not quiet:
         print("\nZone created:")
@@ -414,8 +433,25 @@ def _run_add(args) -> int:
         for w in gen.warnings:
             print(f"  WARNING: {w.message}", file=sys.stderr)
 
+    payload = {
+        "pcb": str(pcb_path),
+        "output": str(output_path),
+        "dry_run": bool(args.dry_run),
+        "zone": {
+            "net": zone.config.net,
+            "layer": zone.config.layer,
+            "priority": zone.config.priority,
+            "clearance_mm": zone.config.clearance,
+            "boundary_points": len(zone.boundary),
+        },
+        "warnings": [w.message for w in gen.warnings],
+    }
+
     if args.dry_run:
-        if not quiet:
+        if json_mode:
+            payload["saved"] = False
+            emit_json(payload)
+        elif not quiet:
             print("\n--- Dry run - not saving ---")
             print("\nGenerated S-expression:")
             print(gen.generate_sexp())
@@ -428,10 +464,12 @@ def _run_add(args) -> int:
     try:
         gen.save(output_path)
     except Exception as e:
-        print(f"Error: Write verification failed: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: Write verification failed: {e}")
 
-    if not quiet:
+    if json_mode:
+        payload["saved"] = True
+        emit_json(payload)
+    elif not quiet:
         print("Done!")
 
     return 0
@@ -525,25 +563,25 @@ def _run_batch(args) -> int:
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: File not found: {pcb_path}")
 
     # Parse power nets spec
     try:
         power_nets = parse_power_nets(args.power_nets)
     except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: {e}")
 
     if not power_nets:
-        print("Error: No power nets specified", file=sys.stderr)
-        return 1
+        return _fail(args, "Error: No power nets specified")
 
     # Determine output path. No -o means overwrite the input in place,
     # consistent with `zones fill` and `optimize-placement`.
     output_path = Path(args.output) if args.output else pcb_path
 
-    quiet = args.quiet
+    json_mode = _wants_json(args)
+    # JSON mode suppresses the prose progress report; the payload at the end
+    # is the single stdout document (errors/warnings still go to stderr).
+    quiet = args.quiet or json_mode
 
     if not quiet:
         print(f"Loading PCB: {pcb_path}")
@@ -551,8 +589,7 @@ def _run_batch(args) -> int:
     try:
         gen = ZoneGenerator.from_pcb(str(pcb_path))
     except Exception as e:
-        print(f"Error loading PCB: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error loading PCB: {e}")
 
     # Auto-assign priorities (by pad-cluster bbox area) and carve outlines
     # for same-layer groups so overlapping zones receive disjoint copper
@@ -567,13 +604,13 @@ def _run_batch(args) -> int:
         # Carving genuinely cannot produce disjoint copper for some net
         # (fully-coincident pad clusters).  Refuse rather than silently
         # writing zero-copper zones.
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: {e}")
 
     if not quiet:
         print(f"\nAdding {len(power_nets)} zone(s):")
 
     errors = []
+    created = []
     for net_name, layer in power_nets:
         # Keyed by (net, layer): a net on multiple layers must get the
         # correct per-layer outline (full board where it is sole, carved
@@ -588,13 +625,21 @@ def _run_batch(args) -> int:
                 clearance=args.clearance,
                 boundary=boundary,
             )
+            created.append(
+                {
+                    "net": net_name,
+                    "layer": layer,
+                    "priority": priority,
+                    "carved": boundary is not None,
+                }
+            )
             if not quiet:
                 carved = " (carved)" if boundary is not None else ""
                 print(f"  {net_name} on {layer} (priority {priority}){carved}")
         except ValueError as e:
             errors.append(f"  {net_name}: {e}")
 
-    if errors:
+    if errors and not json_mode:
         print("\nErrors:", file=sys.stderr)
         for err in errors:
             print(err, file=sys.stderr)
@@ -605,8 +650,22 @@ def _run_batch(args) -> int:
         for w in gen.warnings:
             print(f"  WARNING: {w.message}", file=sys.stderr)
 
+    payload = {
+        "pcb": str(pcb_path),
+        "output": str(output_path),
+        "dry_run": bool(args.dry_run),
+        "clearance_mm": args.clearance,
+        "zones": created,
+        "zone_count": len(created),
+        "errors": [e.strip() for e in errors],
+        "warnings": [w.message for w in gen.warnings],
+    }
+
     if args.dry_run:
-        if not quiet:
+        if json_mode:
+            payload["saved"] = False
+            emit_json(payload)
+        elif not quiet:
             print("\n--- Dry run - not saving ---")
             _print_batch_summary(gen, quiet)
             if args.verbose:
@@ -621,10 +680,12 @@ def _run_batch(args) -> int:
     try:
         gen.save(output_path)
     except Exception as e:
-        print(f"Error: Write verification failed: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: Write verification failed: {e}")
 
-    if not quiet:
+    if json_mode:
+        payload["saved"] = True
+        emit_json(payload)
+    elif not quiet:
         _print_batch_summary(gen, quiet)
 
     return 0 if not errors else 1
@@ -694,34 +755,30 @@ def _run_hv_keepout(args) -> int:
     from kicad_tools.sexp import parse_file
     from kicad_tools.zones.hv_keepout import build_hv_keepout_plan
 
-    quiet = getattr(args, "quiet", False)
+    json_mode = _wants_json(args)
+    # JSON mode suppresses the prose progress report; the payload at the end
+    # is the single stdout document (errors still go to stderr).
+    quiet = getattr(args, "quiet", False) or json_mode
 
     if not has_shapely():
-        print(
+        return _fail(
+            args,
             "Error: hv-keepout requires shapely (a core dependency); "
             "it is not importable in this environment.",
-            file=sys.stderr,
         )
-        return 1
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: File not found: {pcb_path}")
 
     if args.clearance <= 0:
-        print(
-            f"Error: --clearance must be positive (got {args.clearance}).",
-            file=sys.stderr,
-        )
-        return 1
+        return _fail(args, f"Error: --clearance must be positive (got {args.clearance}).")
 
     net_class_map, ncm_error = _load_net_class_map(
         getattr(args, "net_class_map", None), pcb_path=pcb_path
     )
     if ncm_error is not None:
-        print(f"Error: {ncm_error}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: {ncm_error}")
 
     # No -o means overwrite the input in place, consistent with 'zones fill'.
     output_path = Path(args.output) if args.output else pcb_path
@@ -736,13 +793,24 @@ def _run_hv_keepout(args) -> int:
     try:
         pcb = PCB.load(str(pcb_path))
     except Exception as e:
-        print(f"Error loading PCB: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error loading PCB: {e}")
 
     net_class = getattr(args, "net_class", "HV") or "HV"
     hv_nets = resolve_hv_nets(pcb, net_class, net_class_map)
 
+    payload = {
+        "pcb": str(pcb_path),
+        "output": str(output_path),
+        "net_class": net_class,
+        "clearance_mm": args.clearance,
+        "dry_run": bool(args.dry_run),
+    }
+
     if not hv_nets:
+        if json_mode:
+            payload.update({"hv_nets": [], "keepout_count": 0, "saved": False})
+            emit_json(payload)
+            return 0
         # Clean no-op mirroring `kct creepage`'s guidance (issue #4372 edge a).
         print(
             f"No '{net_class}' nets found "
@@ -758,7 +826,16 @@ def _run_hv_keepout(args) -> int:
         plane_layers=plane_layers,
     )
 
-    if not quiet or args.dry_run:
+    payload.update(
+        {
+            "hv_nets": sorted(plan.hv_nets.values()),
+            "plane_layers": list(plan.plane_layers),
+            "excluded_layers": list(plan.excluded_layers),
+            "keepout_count": plan.keepout_count,
+        }
+    )
+
+    if (not quiet or args.dry_run) and not json_mode:
         print(f"\nHV nets ({len(plan.hv_nets)}): {', '.join(sorted(plan.hv_nets.values()))}")
         print(f"Clearance: {plan.clearance_mm} mm")
         print(
@@ -773,7 +850,10 @@ def _run_hv_keepout(args) -> int:
                 print(f"  Void {i}: {len(void.points)} pts on {', '.join(void.layers)}")
 
     if plan.keepout_count == 0:
-        if not plan.plane_layers:
+        if json_mode:
+            payload["saved"] = False
+            emit_json(payload)
+        elif not plan.plane_layers:
             print(
                 "No target plane layers to void (supply --plane-layers, or add plane pours first)."
             )
@@ -782,7 +862,10 @@ def _run_hv_keepout(args) -> int:
         return 0
 
     if args.dry_run:
-        if not quiet:
+        if json_mode:
+            payload["saved"] = False
+            emit_json(payload)
+        elif not quiet:
             print("\n--- Dry run - not saving ---")
         return 0
 
@@ -790,8 +873,7 @@ def _run_hv_keepout(args) -> int:
     try:
         doc = parse_file(pcb_path)
     except Exception as e:
-        print(f"Error parsing PCB for write: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error parsing PCB for write: {e}")
 
     for node in plan.zone_nodes():
         doc.append(node)
@@ -804,18 +886,23 @@ def _run_hv_keepout(args) -> int:
 
         save_pcb(doc, output_path)
     except Exception as e:
-        print(f"Error: Write failed: {e}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: Write failed: {e}")
 
     if not quiet:
         print(f"Wrote {plan.keepout_count} keepout zone(s).")
 
+    refilled = False
     if args.refill:
         rc = _refill_after_keepout(output_path, quiet)
         if rc != 0:
             return rc
+        refilled = True
 
-    if not quiet:
+    if json_mode:
+        payload["saved"] = True
+        payload["refilled"] = refilled
+        emit_json(payload)
+    elif not quiet:
         print("Done!")
 
     return 0
@@ -851,24 +938,37 @@ def _run_fill(args) -> int:
     """Fill zones in a PCB using kicad-cli."""
     from .runner import find_kicad_cli, run_fill_zones
 
+    json_mode = _wants_json(args)
+
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: File not found: {pcb_path}")
 
     kicad_cli = find_kicad_cli()
     if not kicad_cli:
-        print(
+        return _fail(
+            args,
             "Error: kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
-            file=sys.stderr,
         )
-        return 1
 
     output_path = Path(args.output) if args.output else None
 
-    quiet = getattr(args, "quiet", False)
+    # JSON mode suppresses the prose progress report; the payload at the end
+    # is the single stdout document (errors still go to stderr).
+    quiet = getattr(args, "quiet", False) or json_mode
+
+    payload = {
+        "pcb": str(pcb_path),
+        "output": str(output_path if output_path else pcb_path),
+        "net": args.net,
+        "dry_run": bool(args.dry_run),
+    }
 
     if args.dry_run:
+        if json_mode:
+            payload["filled"] = False
+            emit_json(payload)
+            return 0
         print(f"Would fill zones in: {pcb_path}")
         if args.net:
             print(f"  Net filter: {args.net}")
@@ -893,10 +993,12 @@ def _run_fill(args) -> int:
     result = run_fill_zones(pcb_path, output_path, kicad_cli=kicad_cli)
 
     if not result.success:
-        print(f"Error: {result.stderr}", file=sys.stderr)
-        return 1
+        return _fail(args, f"Error: {result.stderr}")
 
-    if not quiet:
+    if json_mode:
+        payload["filled"] = True
+        emit_json(payload)
+    elif not quiet:
         target = output_path if output_path else pcb_path
         print(f"Zones filled: {target}")
 

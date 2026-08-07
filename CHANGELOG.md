@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--format json` on the grouped-family subcommands (first #4674 batch:
+  24 surfaces)** — the mechanical sweep executing #4543's canonical
+  machine-output idiom, batch 1. `kct mfr
+  list/info/rules/compare/export-dru/apply-rules/validate`, `kct spec
+  init/validate/status/decide/check`, `kct placement
+  fix/nudge/snap/align/distribute`, `kct zones add/batch/fill/hv-keepout`,
+  and `kct benchmark run/compare` all accept `--format {text,json}`
+  (threaded outer parser → shim → inner parser via the
+  `format_options.py` helpers), and `kct benchmark report` gains a `json`
+  choice — closing the `format-nojson` audit bucket. JSON mode emits one
+  deterministic document on stdout (sorted keys; progress/chatter
+  suppressed or on stderr; errors become `{"error": ...}` documents with
+  the same exit codes); text output is byte-identical to before. The dead
+  inner-only `mfr rules --json` surface (unreachable through `kct`;
+  documented in `docs/reference/machine-output.md`) is retired in favour
+  of the wired `--format json`. Audit: prose-only 72 → 49; `--format`
+  with `json` 124 → 148. New regression guards in
+  `tests/test_format_json_sweep.py`; remaining backlog (16 `sch` mutating
+  commands, `stitch`, long-tail singles) tracked on #4674.
+
 - **`kct check` now detects dangling copper natively: `track_dangling` +
   `via_dangling`** (part of #4680, the #4612 gap shape for the remaining
   rule classes) — a new `DanglingCopperRule`

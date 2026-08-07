@@ -53,6 +53,8 @@ def run_placement_command(args) -> int:
         # Use command-level quiet or global quiet
         if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return placement_main(sub_argv) or 0
 
     elif args.placement_command == "nudge":
@@ -69,6 +71,8 @@ def run_placement_command(args) -> int:
             sub_argv.append("--verbose")
         if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return placement_main(sub_argv) or 0
 
     elif args.placement_command == "optimize":
@@ -132,6 +136,8 @@ def run_placement_command(args) -> int:
             sub_argv.append("--verbose")
         if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return placement_main(sub_argv) or 0
 
     elif args.placement_command == "align":
@@ -151,6 +157,8 @@ def run_placement_command(args) -> int:
             sub_argv.append("--verbose")
         if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return placement_main(sub_argv) or 0
 
     elif args.placement_command == "distribute":
@@ -168,6 +176,8 @@ def run_placement_command(args) -> int:
             sub_argv.append("--verbose")
         if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return placement_main(sub_argv) or 0
 
     elif args.placement_command == "suggest":

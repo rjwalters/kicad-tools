@@ -5,7 +5,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from ..format_options import emit_json
+
 __all__ = ["run_spec_command"]
+
+
+def _wants_json(args) -> bool:
+    """True when the canonical ``--format json`` spelling was requested."""
+    return getattr(args, "spec_format", "text") == "json"
 
 
 def run_spec_command(args) -> int:
@@ -49,8 +56,13 @@ def _run_spec_init(args) -> int:
         # Default to project.kct in current directory
         output_path = Path("project.kct")
 
+    json_mode = _wants_json(args)
+
     # Check if file exists
     if output_path.exists() and not getattr(args, "spec_force", False):
+        if json_mode:
+            emit_json({"error": f"File already exists: {output_path} (use --force to overwrite)"})
+            return 1
         console.print(f"[red]Error:[/red] File already exists: {output_path}")
         console.print("Use --force to overwrite")
         return 1
@@ -69,6 +81,16 @@ def _run_spec_init(args) -> int:
         # Write file
         output_path.write_text(content, encoding="utf-8")
 
+        if json_mode:
+            emit_json(
+                {
+                    "created": str(output_path),
+                    "name": name,
+                    "template": template,
+                }
+            )
+            return 0
+
         console.print(f"[green]Created:[/green] {output_path}")
         console.print(f"Template: {template}")
         console.print("\nNext steps:")
@@ -79,9 +101,15 @@ def _run_spec_init(args) -> int:
         return 0
 
     except ValueError as e:
+        if json_mode:
+            emit_json({"error": str(e)})
+            return 1
         console.print(f"[red]Error:[/red] {e}")
         return 1
     except OSError as e:
+        if json_mode:
+            emit_json({"error": f"Error writing file: {e}"})
+            return 1
         console.print(f"[red]Error writing file:[/red] {e}")
         return 1
 
@@ -96,6 +124,17 @@ def _run_spec_validate(args) -> int:
     spec_file = Path(args.spec_file)
 
     is_valid, errors, warnings = validate_spec_detailed(spec_file)
+
+    if _wants_json(args):
+        emit_json(
+            {
+                "file": str(spec_file),
+                "valid": is_valid,
+                "errors": list(errors),
+                "warnings": list(warnings),
+            }
+        )
+        return 0 if is_valid else 1
 
     if is_valid:
         console.print(f"[green]Valid:[/green] {spec_file}")
@@ -134,8 +173,15 @@ def _run_spec_status(args) -> int:
     try:
         spec = load_spec(spec_file)
     except Exception as e:
+        if _wants_json(args):
+            emit_json({"error": f"Error loading spec: {e}"})
+            return 1
         console.print(f"[red]Error loading spec:[/red] {e}")
         return 1
+
+    if _wants_json(args):
+        emit_json(_status_payload(spec_file, spec))
+        return 0
 
     # Project info
     console.print(
@@ -234,6 +280,64 @@ def _run_spec_status(args) -> int:
     return 0
 
 
+def _status_payload(spec_file: Path, spec) -> dict:
+    """Machine rendering of ``kct spec status`` (mirrors the prose report)."""
+
+    def _enum_value(value):
+        return value.value if hasattr(value, "value") else value
+
+    payload: dict = {
+        "file": str(spec_file),
+        "project": {
+            "name": spec.project.name,
+            "revision": spec.project.revision,
+        },
+        "summary": spec.intent.summary if spec.intent else None,
+        "phase": None,
+        "completion_percent": None,
+        "phases": {},
+        "blockers": [],
+        "decisions": [],
+        "validation": None,
+    }
+
+    if spec.progress:
+        payload["phase"] = _enum_value(spec.progress.phase)
+        payload["completion_percent"] = spec.get_completion_percentage()
+        for phase_key, phase in (spec.progress.phases or {}).items():
+            checklist = phase.checklist or []
+            done = sum(1 for item in checklist if item.startswith(("[x]", "[X]")))
+            payload["phases"][phase_key] = {
+                "status": _enum_value(phase.status),
+                "checklist_done": done,
+                "checklist_total": len(checklist),
+            }
+        payload["blockers"] = list(spec.progress.blockers or [])
+
+    if spec.decisions:
+        payload["decisions"] = [
+            {
+                "date": str(decision.date),
+                "topic": decision.topic,
+                "choice": decision.choice,
+            }
+            for decision in spec.decisions
+        ]
+
+    if spec.validation and spec.validation.last_run:
+        validation: dict = {"last_run": str(spec.validation.last_run), "schematic": {}}
+        if spec.validation.schematic:
+            for check, result in spec.validation.schematic.items():
+                validation["schematic"][check] = {
+                    "status": result.status,
+                    "errors": result.errors,
+                    "warnings": result.warnings,
+                }
+        payload["validation"] = validation
+
+    return payload
+
+
 def _run_spec_decide(args) -> int:
     """Record a design decision in the .kct specification file."""
     from datetime import date
@@ -245,10 +349,14 @@ def _run_spec_decide(args) -> int:
 
     console = Console()
     spec_file = Path(args.spec_file)
+    json_mode = _wants_json(args)
 
     try:
         spec = load_spec(spec_file)
     except Exception as e:
+        if json_mode:
+            emit_json({"error": f"Error loading spec: {e}"})
+            return 1
         console.print(f"[red]Error loading spec:[/red] {e}")
         return 1
 
@@ -274,11 +382,28 @@ def _run_spec_decide(args) -> int:
     # is left untouched.
     try:
         append_decision(spec_file, decision)
+        if json_mode:
+            emit_json(
+                {
+                    "file": str(spec_file),
+                    "recorded": True,
+                    "date": str(decision.date),
+                    "phase": phase.value if hasattr(phase, "value") else phase,
+                    "topic": decision.topic,
+                    "choice": decision.choice,
+                    "rationale": decision.rationale,
+                    "alternatives": decision.alternatives,
+                }
+            )
+            return 0
         console.print(f"[green]Decision recorded:[/green] {decision.topic}")
         console.print(f"  Choice: {decision.choice}")
         console.print(f"  Rationale: {decision.rationale}")
         return 0
     except Exception as e:
+        if json_mode:
+            emit_json({"error": f"Error saving spec: {e}"})
+            return 1
         console.print(f"[red]Error saving spec:[/red] {e}")
         return 1
 
@@ -291,15 +416,22 @@ def _run_spec_check(args) -> int:
 
     console = Console()
     spec_file = Path(args.spec_file)
+    json_mode = _wants_json(args)
     item_path = args.check_item  # Format: "phase.item text" or "item text"
 
     try:
         spec = load_spec(spec_file)
     except Exception as e:
+        if json_mode:
+            emit_json({"error": f"Error loading spec: {e}"})
+            return 1
         console.print(f"[red]Error loading spec:[/red] {e}")
         return 1
 
     if not spec.progress or not spec.progress.phases:
+        if json_mode:
+            emit_json({"error": "No progress phases defined in spec"})
+            return 1
         console.print("[red]Error:[/red] No progress phases defined in spec")
         return 1
 
@@ -320,17 +452,29 @@ def _run_spec_check(args) -> int:
 
     # Find phase
     if phase_name not in spec.progress.phases:
+        if json_mode:
+            emit_json(
+                {
+                    "error": f"Phase not found: {phase_name}",
+                    "available_phases": list(spec.progress.phases.keys()),
+                }
+            )
+            return 1
         console.print(f"[red]Error:[/red] Phase not found: {phase_name}")
         console.print(f"Available phases: {', '.join(spec.progress.phases.keys())}")
         return 1
 
     phase = spec.progress.phases[phase_name]
     if not phase.checklist:
+        if json_mode:
+            emit_json({"error": f"No checklist in phase: {phase_name}"})
+            return 1
         console.print(f"[red]Error:[/red] No checklist in phase: {phase_name}")
         return 1
 
     # Find and update item
     found = False
+    checked_item = None
     for i, item in enumerate(phase.checklist):
         # Strip checkbox prefix for comparison
         item_content = item.lstrip("[ ]xX").strip()
@@ -338,10 +482,20 @@ def _run_spec_check(args) -> int:
             # Mark as complete
             phase.checklist[i] = f"[x] {item_content}"
             found = True
-            console.print(f"[green]Checked:[/green] {item_content}")
+            checked_item = item_content
+            if not json_mode:
+                console.print(f"[green]Checked:[/green] {item_content}")
             break
 
     if not found:
+        if json_mode:
+            emit_json(
+                {
+                    "error": f"Item not found: {item_text}",
+                    "available_items": list(phase.checklist),
+                }
+            )
+            return 1
         console.print(f"[red]Error:[/red] Item not found: {item_text}")
         console.print("Available items:")
         for item in phase.checklist:
@@ -351,7 +505,18 @@ def _run_spec_check(args) -> int:
     # Save
     try:
         save_spec(spec, spec_file)
+        if json_mode:
+            emit_json(
+                {
+                    "file": str(spec_file),
+                    "phase": phase_name,
+                    "checked": checked_item,
+                }
+            )
         return 0
     except Exception as e:
+        if json_mode:
+            emit_json({"error": f"Error saving spec: {e}"})
+            return 1
         console.print(f"[red]Error saving spec:[/red] {e}")
         return 1
