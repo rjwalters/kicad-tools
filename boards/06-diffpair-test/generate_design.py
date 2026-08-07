@@ -33,6 +33,7 @@ If no output directory is specified, files are written to ./output/.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -345,10 +346,35 @@ def _find_sexp_blocks(text: str, token: str) -> list[str]:
     return blocks
 
 
+# Issue #4536: sequence counter for deterministic repair-copper UUIDs.
+# Reset at the top of ``route_pcb`` so every regen mints the same sequence.
+_REPAIR_UUID_COUNTER = 0
+
+
+def _reset_repair_uuid_counter() -> None:
+    """Reset the deterministic repair-UUID sequence (start of a regen)."""
+    global _REPAIR_UUID_COUNTER
+    _REPAIR_UUID_COUNTER = 0
+
+
 def _generate_uuid() -> str:
+    """Deterministic UUID for pour-repair / bridge copper (#4536).
+
+    ``kicad-cli`` (invoked by every ``kct zones fill`` round of the repair
+    loop) re-saves the board with tracks ordered by UUID.  The #4536 regen
+    matrix showed that once the wall-clock sources were removed, the ONLY
+    remaining artifact difference between two same-seed runs was the file
+    order of the stitch/repair copper -- because these emitters minted
+    random ``uuid.uuid4()`` values, each refill sorted the identical
+    copper differently.  A uuid5 over a per-run sequence number is stable
+    run-to-run (the repair passes' call sequence is deterministic once
+    routing is) while staying unique within the artifact.
+    """
+    global _REPAIR_UUID_COUNTER
+    _REPAIR_UUID_COUNTER += 1
     import uuid as _uuid
 
-    return str(_uuid.uuid4())
+    return str(_uuid.uuid5(_uuid.NAMESPACE_OID, f"board06-pour-repair:{_REPAIR_UUID_COUNTER}"))
 
 
 def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
@@ -2224,6 +2250,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print("Routing PCB...")
     print("=" * 60)
 
+    # Issue #4536: repair-copper UUIDs are minted from a deterministic
+    # sequence (see ``_generate_uuid``); reset it so back-to-back regens
+    # in one process mint identical sequences.
+    _reset_repair_uuid_counter()
+
     # JLCPCB tier-1 design rules: 0.15mm trace / 0.15mm space / 0.3mm via.
     # Grid must be <= clearance/2 for DRC compliance (0.05 <= 0.15/2 = 0.075 OK).
     # Via diameter chosen tight (0.45mm) so escape vias fit between
@@ -2691,14 +2722,36 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # ``getattr(args, "per_net_timeout", None) or None`` -> None
         # (route_cmd.py:3272 etc.).
         #
-        # ``timeout=360.0`` is retained as an outer SAFETY BACKSTOP only -- it
-        # must NOT fire, or it re-introduces the load-dependent cutoff the
-        # iteration budget removes.  The negotiated loop's banking work
-        # completes well under 360s on this board (see the #3413 phase-6 note
-        # above).
+        # ``timeout=None`` (#4536): this stage previously carried a
+        # ``timeout=360.0`` wall-clock SAFETY BACKSTOP with a comment claiming
+        # it "must NOT fire".  Instrumented multi-run evidence (issue #4536,
+        # 4-run same-host matrix) showed the phase's natural runtime STRADDLES
+        # that value, so the backstop fired mid-iteration-4 in EVERY run -- at
+        # a load-dependent net boundary ("Timeout during reroute at net 0/19"
+        # vs "net 1/19", 363.1-367.0s) -- and the #3989 remaining-budget
+        # per-net caps additionally cut the iteration-4 zero-overflow recovery
+        # at load-dependent points (routed 9/18 vs 9/19), so the four baseline
+        # runs serialized four DISTINCT artifacts (different copper counts,
+        # 1599-1602 segments).  With ``timeout=None`` the routed copper became
+        # count- and content-identical run to run (byte-identical logs and
+        # step-8 serialization), leaving only the uuid-sort file-order
+        # residual fixed in ``_generate_uuid`` / ``_stitch_uuid`` (#4536).
+        # A finite backstop near the natural runtime re-introduces
+        # the straddle, and ANY finite ``timeout`` keeps the wall-clock
+        # per-net caps active (core.py derives them from the REMAINING stage
+        # budget each iteration, #3989) -- so determinism requires running
+        # this stage with no wall-clock budget at all.  The stage stays
+        # bounded by its deterministic iteration exits instead: the per-net
+        # 1M node-expansion budget wired into the Autorouter above, the 12M
+        # memory backstop, ``max_iterations=10``, best-stall patience 2, and
+        # the #4463 zero-overflow fixed-point exit.
+        # ``tests/test_board06_determinism.py`` (gated behind
+        # ``KCT_BOARD06_DETERMINISM=1``) is the regression guard: two
+        # consecutive same-seed runs must produce identical uuid-normalized
+        # artifacts.
         return router.route_all_negotiated(
             per_net_timeout=None,
-            timeout=360.0,
+            timeout=None,
             seed=42,
         )
 
@@ -3355,6 +3408,24 @@ def main() -> int:
     """
     import argparse
     import random
+
+    # Issue #4536: pin the interpreter hash seed BY CONSTRUCTION before any
+    # routing code runs.  The README's shadow/census repro commands export
+    # ``PYTHONHASHSEED=42`` by hand, but a plain regen invocation did not.
+    # This is defensive hygiene for every str-keyed set/dict iteration in
+    # the in-process router AND the subprocess passes (``kct zones fill``,
+    # ``kct stitch`` inherit the pinned env).  NOTE: the #4536 matrix
+    # proved the pin alone is NOT sufficient for artifact byte-identity --
+    # the residual ~2300-line reorder was driven by random uuid4 values on
+    # stitch/repair copper being re-sorted by kicad-cli's UUID-ordered
+    # board save (fixed via deterministic UUID minting in
+    # ``_generate_uuid`` here and ``_stitch_uuid`` in stitch_cmd.py).
+    # ``PYTHONHASHSEED`` only takes effect at interpreter startup,
+    # so re-exec once with it pinned; the guard makes the exec a no-op when
+    # the wrapper (or the re-exec itself) already pinned it.
+    if os.environ.get("PYTHONHASHSEED") != "42":
+        os.environ["PYTHONHASHSEED"] = "42"
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     parser = argparse.ArgumentParser(
         prog="generate_design",

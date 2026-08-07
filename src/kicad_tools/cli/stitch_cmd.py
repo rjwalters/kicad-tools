@@ -2979,6 +2979,28 @@ def get_via_layers(pad_layer: str, target_layer: str | None) -> tuple[str, str]:
         return ("B.Cu", "F.Cu")
 
 
+def _stitch_uuid(*parts: object) -> str:
+    """Deterministic, content-derived UUID for stitch-emitted copper.
+
+    Issue #4536: ``kicad-cli`` (which ``kct zones fill`` shells out to)
+    re-saves the whole board with tracks ordered by their UUID, so copper
+    minted with random ``uuid.uuid4()`` values lands at a *different file
+    position on every run* even when the placed geometry is byte-identical.
+    Board-06's regen-determinism matrix isolated this as the residual
+    nondeterminism source after the wall-clock fixes: two runs whose
+    routing logs and copper multisets were identical still serialized
+    ~2300 differing lines because each refill re-sorted the randomly
+    keyed stitch/repair copper differently.
+
+    Deriving the UUID from the placed element's own content (uuid5 over
+    net/layer/geometry) keeps stitch output stable across identical runs
+    while remaining unique per distinct element -- two *different* vias or
+    segments can never share a key, and a genuine duplicate placement
+    would be a bug upstream of UUID minting.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, "kct-stitch:" + ":".join(str(p) for p in parts)))
+
+
 def add_via_to_pcb(sexp: SExp, placement: ViaPlacement) -> None:
     """Add a via to the PCB S-expression."""
     via = via_node(
@@ -2988,7 +3010,15 @@ def add_via_to_pcb(sexp: SExp, placement: ViaPlacement) -> None:
         drill=placement.drill,
         layers=placement.layers,
         net=placement.pad.net_number,
-        uuid_str=str(uuid.uuid4()),
+        uuid_str=_stitch_uuid(
+            "via",
+            placement.via_x,
+            placement.via_y,
+            placement.size,
+            placement.drill,
+            placement.layers,
+            placement.pad.net_number,
+        ),
         via_type=placement.via_type,
     )
     sexp.append(via)
@@ -3017,7 +3047,14 @@ def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
                 width=trace.width,
                 layer=trace.layer,
                 net=trace.pad.net_number,
-                uuid_str=str(uuid.uuid4()),
+                uuid_str=_stitch_uuid(
+                    "seg",
+                    points[i],
+                    points[i + 1],
+                    trace.width,
+                    trace.layer,
+                    trace.pad.net_number,
+                ),
             )
             sexp.append(seg)
     elif trace.is_dogleg:
@@ -3031,7 +3068,14 @@ def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
             width=trace.width,
             layer=trace.layer,
             net=trace.pad.net_number,
-            uuid_str=str(uuid.uuid4()),
+            uuid_str=_stitch_uuid(
+                "seg",
+                (trace.pad.x, trace.pad.y),
+                (trace.intermediate_x, trace.intermediate_y),
+                trace.width,
+                trace.layer,
+                trace.pad.net_number,
+            ),
         )
         sexp.append(seg1)
 
@@ -3044,7 +3088,14 @@ def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
             width=trace.width,
             layer=trace.layer,
             net=trace.pad.net_number,
-            uuid_str=str(uuid.uuid4()),
+            uuid_str=_stitch_uuid(
+                "seg",
+                (trace.intermediate_x, trace.intermediate_y),
+                (trace.via_x, trace.via_y),
+                trace.width,
+                trace.layer,
+                trace.pad.net_number,
+            ),
         )
         sexp.append(seg2)
     else:
@@ -3057,7 +3108,14 @@ def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
             width=trace.width,
             layer=trace.layer,
             net=trace.pad.net_number,
-            uuid_str=str(uuid.uuid4()),
+            uuid_str=_stitch_uuid(
+                "seg",
+                (trace.pad.x, trace.pad.y),
+                (trace.via_x, trace.via_y),
+                trace.width,
+                trace.layer,
+                trace.pad.net_number,
+            ),
         )
         sexp.append(seg)
 

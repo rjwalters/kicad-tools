@@ -124,15 +124,70 @@ declared but DRC tolerated at "non-strict" while #2648 was pending.
 Both dependencies have since landed; the remaining tolerated residual is
 the 18-error diff-pair quality block documented under "CI Gate" below.
 
-## Measuring Changes: the Shadow Phase Is Deterministic, Full Regen Is Not (#4536)
+## Measuring Changes: Regen Determinism (#4536)
 
-Full board-06 regeneration (`generate_design.py --step route`) is
+Full board-06 regeneration (`generate_design.py --step route`) was
 run-to-run nondeterministic downstream of the coupled diff-pair
-pre-phase --- two same-seed runs of unmodified `main` can differ by
-thousands of lines ([#4536], open).  Every agent that measures a board-06
-change by diffing two full regens rediscovers this the hard way; this
-section exists so that discovery is a paragraph instead of a multi-hour
-detour.
+pre-phase --- two same-seed runs of unmodified `main` could differ by
+thousands of lines ([#4536]).  Two instrumented run matrices localized
+**two** sources:
+
+1. **Dominant: wall-clock truncation.**  The negotiated stage's
+   `timeout=360.0` backstop straddled the phase's own natural runtime
+   (363--367 s measured) and fired mid-iteration at a load-dependent net
+   boundary in **every** run (different copper counts, 1599--1602
+   segments), and any finite stage timeout also keeps the #3989
+   remaining-budget per-net wall-clock caps active.  Fixed by removing
+   wall-clock control flow from the negotiated stage (`timeout=None`;
+   the stage is bounded by its deterministic iteration exits: per-net
+   node-expansion budget, memory backstop, `max_iterations=10`,
+   best-stall patience, and the #4463 zero-overflow fixed-point exit)
+   and pinning `PYTHONHASHSEED=42` by construction at the
+   `generate_design.py` entry point (one-shot re-exec), so plain
+   invocations no longer depend on the caller exporting it.
+
+2. **Residual: UUID-sorted file order.**  With the wall clock removed,
+   runs produced byte-identical routing logs and identical copper
+   *multisets* yet still ~2300 differing artifact lines.  Stage-snapshot
+   comparison across two runs proved every stage through the repair-via
+   placement identical, with divergence entering at the first post-repair
+   `kct zones fill` --- `kicad-cli` re-saves the board with tracks
+   ordered by UUID, and the stitch/pour-repair emitters minted random
+   `uuid.uuid4()` values, so each run's refills sorted the *identical*
+   copper into a different file order (isolation test: two fills of the
+   same file are deterministic; a fill of a byte-equivalent file with
+   different UUIDs reorders).  Fixed by minting deterministic UUIDs:
+   content-derived uuid5 in `kct stitch` (`_stitch_uuid`) and
+   sequence-derived uuid5 in this board's `_generate_uuid`.
+
+**Determinism guard**: `tests/test_board06_determinism.py` runs two
+consecutive same-seed shadow-OFF regens and asserts identical segment /
+via counts, then byte-identity after normalizing uuid values (and
+nothing else --- `kicad-cli` mints random uuid4s for the pads/properties
+the generator emits without UUID fields, so raw byte identity can never
+hold; all *copper* UUIDs are deterministic after #4536).  It costs two
+full regens (~25 min), so it is skipped unless explicitly enabled:
+
+```bash
+KCT_BOARD06_DETERMINISM=1 uv run pytest tests/test_board06_determinism.py -v -s
+```
+
+**Scope-guard convention** (PR #4526 discussion): "flag-OFF run must
+produce a byte-identical committed artifact" is decidable for board-06
+again, with two provisos --- compare *uuid-normalized* text, and note
+the committed artifact predates the #4536 fix, so regen-vs-committed
+diffs remain expected until the artifact is next regenerated; the
+run-to-run invariant (regen A vs regen B at the same commit) is the one
+the test enforces.  Same-host runs only --- cross-host determinism is
+#4561's axis, and shadow-ON determinism remains out of scope.  One more
+proviso: run the two regens *sequentially on an otherwise-quiet host*
+(the smoke test's own protocol).  Under extreme concurrent load
+(measured at load-average ~90: parallel full test suites + mypy on the
+same host) one of three post-fix runs flipped a single
+stagnation-recovery reroute from success to failure and produced
+different (valid) copper --- a resource-exhaustion sensitivity distinct
+from the deterministic-logic sources fixed here (filed as #4724 with the
+preserved evidence).
 
 **The shadow-construction phase itself is fully deterministic.** This was
 established independently more than once during a 5-issue diffpair sweep
