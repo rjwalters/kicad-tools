@@ -14,16 +14,26 @@ jobs:
     name: Build distribution
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v4
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "latest"
+          # setup-uv >=5 auto-enables the Actions cache on hosted runners
+          # (and >=9 no longer prunes it before upload); keep the pre-v5
+          # no-cache behavior these jobs were written against.
+          enable-cache: false
 
       - name: Build package
         run: uv build
 
-      - uses: actions/upload-artifact@v4
+      # upload@v7 / download@v8 are a verified-compatible pair: both speak
+      # the same v4-era artifact service API, the upload keeps the default
+      # zipped archive, and the name-based download extracts to `path`
+      # exactly as v4 did.
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -34,14 +44,20 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
 
-      - uses: astral-sh/setup-uv@v4
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "latest"
+          # setup-uv >=5 auto-enables the Actions cache on hosted runners
+          # (and >=9 no longer prunes it before upload); keep the pre-v5
+          # no-cache behavior these jobs were written against.
+          enable-cache: false
 
       - name: Publish to PyPI
         run: uv publish

@@ -18,6 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The other merge paths (fresh write, marked-block replace, user-content
   append) stay silent, and merged output is byte-identical to before.
 
+### Changed
+
+- **CI: GitHub Actions bumped off deprecated Node 20 runtimes** (#4677) —
+  every job log printed "Node.js 20 is deprecated" because six actions
+  across five workflow files were pinned to Node-20-era majors. Bumped:
+  `actions/checkout` v4→v7, `actions/setup-python` v5→v7,
+  `actions/github-script` v7→v9, `actions/upload-artifact` v4→v7,
+  `actions/download-artifact` v4→v8, and `astral-sh/setup-uv` v4→v9.0.0
+  (exact pin — setup-uv stopped publishing major tags at v8). setup-uv
+  invocations gained an explicit `enable-cache: false` to preserve the
+  pre-v5 no-cache behavior (v5 auto-enables the Actions cache on hosted
+  runners and v9 stopped pruning it before upload). The `ci.yml` container
+  jobs keep their deliberate curl one-liner installs. No behavior change
+  intended beyond the runtime bump.
+
 ## [0.20.0] - 2026-08-06
 
 ### Summary

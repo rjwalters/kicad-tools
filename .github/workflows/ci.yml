@@ -14,13 +14,19 @@ jobs:
     name: Lint & Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v4
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "latest"
+          # setup-uv >=5 auto-enables the Actions cache on hosted runners
+          # (and >=9 no longer prunes it before upload); keep the pre-v5
+          # no-cache behavior these jobs were written against.
+          enable-cache: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -46,11 +52,17 @@ jobs:
     name: Type Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v4
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "latest"
+          # setup-uv >=5 auto-enables the Actions cache on hosted runners
+          # (and >=9 no longer prunes it before upload); keep the pre-v5
+          # no-cache behavior these jobs were written against.
+          enable-cache: false
 
       - name: Install dependencies
         run: uv sync --frozen --extra dev
@@ -105,10 +117,10 @@ jobs:
             ca-certificates curl git cmake build-essential
           kicad-cli --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        # Official one-liner instead of setup-uv@v4: avoids action-host
+        # Official one-liner instead of setup-uv: avoids action-host
         # coupling inside the container (mirrors the smoke job).
         run: |
           set -euo pipefail
@@ -151,13 +163,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v4
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "latest"
+          # setup-uv >=5 auto-enables the Actions cache on hosted runners
+          # (and >=9 no longer prunes it before upload); keep the pre-v5
+          # no-cache behavior these jobs were written against.
+          enable-cache: false
 
-      # Note: deliberately NOT using actions/setup-python@v5 here. That action
+      # Note: deliberately NOT using actions/setup-python here. That action
       # exports Python_ROOT_DIR=/opt/hostedtoolcache/Python/.../x64, which is
       # sticky for cmake's find_package(Python ...) — even after activating
       # the uv venv with `source .venv/bin/activate`, cmake locates the
@@ -280,10 +298,10 @@ jobs:
             exit 1
           }
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        # setup-uv@v4 should work inside the container, but installing via
+        # setup-uv should work inside the container, but installing via
         # the official one-liner avoids any action-host coupling and keeps
         # the install deterministic across image refreshes.
         run: |
@@ -318,17 +336,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Need the merge-base for `git diff origin/main...HEAD` (default
           # fetch-depth: 1 makes the diff fail with "unknown revision").
           fetch-depth: 0
 
-      - uses: astral-sh/setup-uv@v4
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "latest"
+          # setup-uv >=5 auto-enables the Actions cache on hosted runners
+          # (and >=9 no longer prunes it before upload); keep the pre-v5
+          # no-cache behavior these jobs were written against.
+          enable-cache: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -583,10 +607,10 @@ jobs:
             ca-certificates curl git cmake build-essential
           kicad-cli --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        # Official one-liner instead of setup-uv@v4: avoids action-host
+        # Official one-liner instead of setup-uv: avoids action-host
         # coupling inside the container (mirrors the test + smoke jobs).
         run: |
           set -euo pipefail
@@ -812,10 +836,10 @@ jobs:
             ca-certificates curl git cmake build-essential
           kicad-cli --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        # Official one-liner instead of setup-uv@v4: avoids action-host
+        # Official one-liner instead of setup-uv: avoids action-host
         # coupling inside the container (mirrors the test + smoke +
         # diffpair-routing-regression jobs).
         run: |
@@ -938,10 +962,10 @@ jobs:
             ca-certificates curl git cmake build-essential
           kicad-cli --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        # Official one-liner instead of setup-uv@v4: avoids action-host
+        # Official one-liner instead of setup-uv: avoids action-host
         # coupling inside the container (mirrors the test + smoke jobs).
         run: |
           set -euo pipefail
@@ -1063,7 +1087,7 @@ jobs:
             ca-certificates curl git cmake build-essential
           kicad-cli --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         run: |
@@ -1159,7 +1183,7 @@ jobs:
             ca-certificates curl git cmake build-essential
           kicad-cli --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         run: |
@@ -1262,7 +1286,7 @@ jobs:
             ca-certificates curl git cmake build-essential
           kicad-cli --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         run: |
@@ -1409,7 +1433,7 @@ jobs:
             ca-certificates curl git cmake build-essential
           kicad-cli --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         run: |
@@ -1570,7 +1594,7 @@ jobs:
             ca-certificates curl git cmake build-essential
           kicad-cli --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         run: |
@@ -1776,7 +1800,7 @@ jobs:
             ca-certificates curl git cmake build-essential
           kicad-cli --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         run: |
@@ -1891,7 +1915,7 @@ jobs:
             ca-certificates curl git cmake build-essential
           kicad-cli --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         run: |
