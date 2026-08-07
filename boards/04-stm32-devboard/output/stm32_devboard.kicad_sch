@@ -3147,7 +3147,7 @@
 		(dnp no)
 		(uuid "abf936d1-21c6-47fb-b6bc-f647318e3f65")
 		(property "Reference" "C16"
-			(at 199.39 80.01 0)
+			(at 199.39 77.47 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3155,7 +3155,7 @@
 			)
 		)
 		(property "Value" "4.7uF"
-			(at 199.39 82.55 0)
+			(at 199.39 80.01 0)
 			(effects
 				(font
 					(size 1.27 1.27)

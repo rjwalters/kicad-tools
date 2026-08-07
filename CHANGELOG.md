@@ -45,6 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Board-04: C16 field overlap on the committed schematic** (#4675) — the
+  fleet's only genuine `sch_field_overlap` advisory (`C16.Value` text
+  overlapping U2's body in `stm32_devboard.kicad_sch`) is resolved by a
+  cosmetic-only two-line edit shifting C16's `Reference`/`Value` fields one
+  2.54 mm grid step up. The originally suggested `kct sch tidy --refs C16`
+  was measured to *regress* the finding (1 warning → 2) because tidy's
+  canonical below-body placement has no collision avoidance and pushed both
+  fields deeper into U2's body — manual placement was required. Netlist/BOM
+  identity preserved; no generator or lint-rule changes.
+
 - **`kct net-status --net X` output scoping** (#4682) — two `--net` defects
   that made the filter untrustworthy. (1) `--net X --why` ignored the filter
   entirely (`--why` short-circuited before net validation and
