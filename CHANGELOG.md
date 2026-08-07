@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`kct pipeline` route-skip under `--voltage-map` now auto-runs a
+  `kct creepage` audit as the skip gate** (#4649) — refining the #4607 loud
+  refusal: when the board is already `>=`95% routed (recommend_skip) and no
+  `--force` is given, the route step spawns a non-destructive
+  `kct creepage <board> --voltage-map ... --standard ... --pollution-degree
+  ... --material-group ... --census-threshold ...` subprocess on the
+  existing copper instead of refusing outright. The destructive re-route
+  stays skipped, and the route step succeeds iff the audit exits clean; any
+  non-zero exit (including exit 2, the #4354 EXIT_HV_UNCLASSIFIED vacuity
+  guard, which is called out distinctly in the failure message) aborts the
+  pipeline. The gate is strict `returncode == 0` — deliberately not routed
+  through the shared soft exit-2-5 subprocess semantics. If the audit
+  subprocess cannot launch at all, the step falls back to the #4607
+  refusal message (manual `kct creepage` or `--force`), and `--dry-run`
+  reports the would-be audit without spawning anything. Skips without a
+  voltage map, forced re-routes, and the actual-route exit-3/4 escalation
+  are byte-identical to before.
+
 - **Local CI-equivalent gate script as an Actions-outage backstop** (#4671)
   — new `scripts/ci/local-gate.sh` mirrors the `.github/workflows/ci.yml`
   job set locally: `--cheap` (default) runs the six cheap gates,

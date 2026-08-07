@@ -1058,6 +1058,183 @@ class TestRouteVoltageMapFatalSplit:
         assert rc == 0
 
 
+class TestRouteSkipCreepageAuditGate:
+    """The route-skip path under --voltage-map is gated on a creepage audit.
+
+    Issue #4649 (refining the #4607 loud refusal): a recommend_skip board
+    with a voltage map spawns a non-destructive `kct creepage` audit on the
+    existing copper instead of refusing outright -- the (destructive)
+    re-route stays skipped, and the route step succeeds iff the audit exits
+    clean.  A launch failure falls back to the #4607 refusal.
+
+    The gate is strict ``returncode == 0``: `kct creepage` exit 2 is
+    EXIT_HV_UNCLASSIFIED (#4354 vacuity guard), which the shared
+    _run_subprocess_step helper would soft-pass -- these tests pin that it
+    fails the gate instead.
+    """
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_audit_clean_skip_proceeds_with_creepage_argv(self, mock_run, routed_pcb: Path):
+        """Clean audit: skip proceeds; argv is `creepage` with the mapped flag names."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(
+            pcb_file=routed_pcb,
+            quiet=True,
+            voltage_map="vm.json",
+            creepage_standard="iec62368",
+            pollution_degree=3,
+            material_group="II",
+            hv_threshold=60.0,
+        )
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert results[0].success is True
+        assert results[0].skipped is True
+        assert "creepage audit clean" in results[0].message
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "creepage" in cmd_args
+        assert "route" not in cmd_args
+        assert cmd_args[cmd_args.index("--voltage-map") + 1] == "vm.json"
+        # Two flag names DIFFER from the `kct route` passthrough:
+        # creepage_standard -> --standard, hv_threshold -> --census-threshold.
+        assert cmd_args[cmd_args.index("--standard") + 1] == "iec62368"
+        assert cmd_args[cmd_args.index("--pollution-degree") + 1] == "3"
+        assert cmd_args[cmd_args.index("--material-group") + 1] == "II"
+        assert cmd_args[cmd_args.index("--census-threshold") + 1] == "60.0"
+        # The route-argv spellings must not leak into the audit argv.
+        assert "--creepage-standard" not in cmd_args
+        assert "--hv-threshold" not in cmd_args
+
+    @pytest.mark.parametrize("returncode", [1, 3, 4, 5])
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_audit_nonzero_fails_route_step(self, mock_run, routed_pcb: Path, returncode: int):
+        """Any non-zero audit exit fails the route step and aborts the pipeline.
+
+        Exits 3-5 would soft-pass through _run_subprocess_step's shared
+        semantics; the audit gate must be strict returncode == 0.
+        """
+        mock_run.return_value = MagicMock(returncode=returncode, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, voltage_map="vm.json")
+        results = run_pipeline(ctx, [PipelineStep.ROUTE, PipelineStep.FIX_DRC, PipelineStep.AUDIT])
+
+        # Pipeline must stop at the route step -- creepage-dirty copper does
+        # not flow on to downstream steps.
+        assert len(results) == 1
+        assert results[0].success is False
+        assert results[0].skipped is False
+        assert results[0].warning is False
+        assert "kct creepage" in results[0].message
+        assert "--force" in results[0].message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_audit_exit_2_hv_unclassified_is_fatal(self, mock_run, routed_pcb: Path):
+        """Exit 2 (EXIT_HV_UNCLASSIFIED vacuity guard) fails the gate, loudly.
+
+        Under _run_subprocess_step's soft semantics exit 2 would pass as
+        "completed with warnings" and the skip would proceed on an
+        unauditable board -- exactly the false pass this gate prevents.  The
+        message must distinguish vacuity from a measured-pair failure.
+        """
+        mock_run.return_value = MagicMock(returncode=2, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, voltage_map="vm.json")
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert results[0].success is False
+        assert results[0].warning is False
+        assert "HV-unclassified" in results[0].message
+        assert "not a measured-pair failure" in results[0].message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_no_voltage_map_skip_spawns_no_subprocess(self, mock_run, routed_pcb: Path):
+        """Without a voltage map the skip is byte-identical to the historical skip."""
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True)
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert results[0].success is True
+        assert results[0].skipped is True
+        mock_run.assert_not_called()
+        assessment = _assess_routing_completeness(routed_pcb, ctx.route_skip_threshold)
+        assert results[0].message == assessment.summary
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_unrouted_board_route_argv_unchanged(self, mock_run, unrouted_pcb: Path):
+        """The audit only runs on the skip path; a re-route keeps the route argv."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, voltage_map="vm.json")
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert results[0].success is True
+        cmd_args = mock_run.call_args[0][0]
+        assert "route" in cmd_args
+        assert "creepage" not in cmd_args
+        # Route-argv spellings, unchanged from #4607.
+        assert cmd_args[cmd_args.index("--creepage-standard") + 1] == "iec60664"
+        assert cmd_args[cmd_args.index("--hv-threshold") + 1] == "30.0"
+        assert "--standard" not in cmd_args
+        assert "--census-threshold" not in cmd_args
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_launch_failure_falls_back_to_refusal(self, mock_run, routed_pcb: Path):
+        """A subprocess that cannot launch falls back to the #4607 refusal."""
+        mock_run.side_effect = FileNotFoundError("python interpreter vanished")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, voltage_map="vm.json")
+        results = run_pipeline(ctx, [PipelineStep.ROUTE, PipelineStep.FIX_DRC])
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert results[0].skipped is False
+        assert "refusing to skip" in results[0].message
+        assert "kct creepage" in results[0].message
+        assert "--force" in results[0].message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_dry_run_describes_audit_without_subprocess(self, mock_run, routed_pcb: Path):
+        """Dry-run on the skip path reports the would-be audit and spawns nothing."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_route
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, dry_run=True, voltage_map="vm.json")
+        result = _run_step_route(ctx, Console(quiet=True))
+
+        assert result.success is True
+        assert "[dry-run]" in result.message
+        assert "Would audit existing copper" in result.message
+        assert "kct creepage" in result.message
+        assert "--voltage-map vm.json" in result.message
+        mock_run.assert_not_called()
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_main_exit_0_on_clean_audit(self, mock_run, routed_pcb: Path):
+        """End-to-end: a clean audit lets `kct pipeline --voltage-map` exit 0."""
+        from kicad_tools.cli import pipeline_cmd
+
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        rc = pipeline_cmd.main(
+            [str(routed_pcb), "--step", "route", "--voltage-map", "vm.json", "--quiet"]
+        )
+        assert rc == 0
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_main_exit_1_on_dirty_audit(self, mock_run, routed_pcb: Path):
+        """End-to-end: a dirty audit makes `kct pipeline --voltage-map` exit non-zero."""
+        from kicad_tools.cli import pipeline_cmd
+
+        mock_run.return_value = MagicMock(returncode=1, stderr="", stdout="")
+
+        rc = pipeline_cmd.main(
+            [str(routed_pcb), "--step", "route", "--voltage-map", "vm.json", "--quiet"]
+        )
+        assert rc == 1
+
+
 class TestProjectInput:
     """Tests for .kicad_pro input support."""
 

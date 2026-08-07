@@ -931,6 +931,119 @@ def _run_subprocess_step(
         return False, f"failed: {e}"
 
 
+def _audit_existing_copper_for_skip(ctx: PipelineContext, console: Console) -> PipelineResult:
+    """Gate the route-step skip on a ``kct creepage`` audit of existing copper.
+
+    HV skip gate (issue #4649, refining the #4607 refusal): the pipeline's
+    primary input is an already routed board, and the HV pairwise-clearance
+    audit otherwise only runs inside the ``kct route`` subprocess the skip
+    avoids.  Instead of refusing the skip outright, run a non-destructive
+    ``kct creepage`` audit on the existing copper: the (destructive)
+    re-route stays skipped, and the route step succeeds iff the audit exits
+    clean.  If the audit subprocess cannot launch at all, fall back to the
+    #4607 loud refusal (manual ``kct creepage`` or ``--force``) rather than
+    a raw traceback.
+    """
+    # `kct creepage` names two of the shared HV flags differently from the
+    # `kct route` passthrough: `creepage_standard` maps to --standard and
+    # `hv_threshold` maps to --census-threshold (documented as aligned with
+    # optimize-placement --hv-threshold).  Do not copy the route argv.
+    audit_args = [
+        "--voltage-map",
+        str(ctx.voltage_map),
+        "--standard",
+        ctx.creepage_standard,
+        "--pollution-degree",
+        str(ctx.pollution_degree),
+        "--material-group",
+        ctx.material_group,
+        "--census-threshold",
+        str(ctx.hv_threshold),
+    ]
+    manual_cmd = f"kct creepage {ctx.pcb_file.name} " + " ".join(audit_args)
+
+    if ctx.dry_run:
+        return PipelineResult(
+            step=PipelineStep.ROUTE,
+            success=True,
+            message=(f"[dry-run] Would audit existing copper (skip re-route): {manual_cmd}"),
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Auditing existing copper (creepage) on {ctx.pcb_file.name}...")
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "creepage",
+        str(ctx.pcb_file),
+        *audit_args,
+    ]
+
+    # Strict returncode == 0 gate -- deliberately NOT _run_subprocess_step.
+    # That helper soft-passes exits 2-5, but for `kct creepage` exit 1 means
+    # a measured pair failed its bound and exit 2 is EXIT_HV_UNCLASSIFIED
+    # (#4354 vacuity guard: the board looks mains-like but no HV net was
+    # classified).  Both must fail this gate; a soft-passed exit 2 would let
+    # the skip proceed on an unauditable board -- exactly the false pass
+    # this gate exists to prevent.
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(ctx.pcb_file.parent),
+            capture_output=not ctx.verbose,
+            text=True,
+        )
+    except Exception as e:
+        # Fallback refusal (#4607): the audit could not run, so refuse the
+        # silent skip and point at the manual audit / --force.
+        return PipelineResult(
+            step=PipelineStep.ROUTE,
+            success=False,
+            message=(
+                "route: board is already routed so the route step would be "
+                "skipped, but --voltage-map is set and the creepage audit "
+                f"subprocess could not run ({e}); refusing to skip "
+                f"silently. Audit the existing copper with `{manual_cmd}`, "
+                "or pass --force to re-route with the audit."
+            ),
+        )
+
+    if result.returncode == 0:
+        return PipelineResult(
+            step=PipelineStep.ROUTE,
+            success=True,
+            message=("route: skipped (already routed); creepage audit clean on existing copper"),
+            skipped=True,
+        )
+
+    from .commands.creepage import EXIT_HV_UNCLASSIFIED
+
+    if result.returncode == EXIT_HV_UNCLASSIFIED:
+        reason = (
+            f"exit {EXIT_HV_UNCLASSIFIED} (HV-unclassified): the board "
+            "looks mains-like but no HV net could be classified, so the "
+            "audit is vacuous -- not a measured-pair failure"
+        )
+    else:
+        reason = f"exit {result.returncode}: existing copper failed the creepage audit"
+    stderr_tail = ""
+    stderr = (result.stderr or "").strip()
+    if stderr:
+        stderr_tail = f" [{stderr.splitlines()[-1]}]"
+    return PipelineResult(
+        step=PipelineStep.ROUTE,
+        success=False,
+        message=(
+            "route: re-route skipped (already routed), but the creepage "
+            f"audit on the existing copper failed with --voltage-map -- "
+            f"{reason}.{stderr_tail} Inspect with `{manual_cmd}`, or pass "
+            "--force to re-route with the audit."
+        ),
+    )
+
+
 def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
     """Run routing step if the board is not yet sufficiently routed.
 
@@ -942,36 +1055,25 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
     other pipeline steps (or are inherently complete).  ``--force`` always
     re-runs the router.
 
-    HV guard (issue #4607): with ``--voltage-map`` set the skip path refuses
-    loudly instead of skipping, because the HV pairwise-clearance audit only
-    runs inside the routing subprocess -- a silent skip would report success
-    on possibly creepage-dirty copper.
+    HV skip gate (issues #4607/#4649): with ``--voltage-map`` set the skip
+    path runs a non-destructive ``kct creepage`` audit on the existing
+    copper instead of skipping silently, because the HV pairwise-clearance
+    audit otherwise only runs inside the routing subprocess.  The skip
+    proceeds only when the audit exits clean; if the audit subprocess
+    cannot launch, the step falls back to the #4607 loud refusal.
     """
     assessment = _assess_routing_completeness(ctx.pcb_file, ctx.route_skip_threshold)
 
     if assessment.recommend_skip and not ctx.force:
-        # HV guard (issue #4607): the pipeline's primary input is an already
-        # routed board, and the HV pairwise-clearance audit only runs inside
-        # the `kct route` subprocess this skip avoids.  Silently skipping
-        # would report success on possibly creepage-dirty copper, so with a
-        # voltage map in play the skip path refuses loudly instead.  A forced
-        # re-route would be destructive to existing copper, so the user is
-        # pointed at `kct creepage` (non-destructive audit) or an explicit
-        # `--force`.
+        # HV skip gate (issues #4607/#4649): a silent skip would report
+        # success on possibly creepage-dirty copper, so with a voltage map
+        # in play the skip is gated on a non-destructive `kct creepage`
+        # audit of the existing copper (see
+        # _audit_existing_copper_for_skip).  A forced re-route would be
+        # destructive to existing copper, so a failed audit points the user
+        # at the manual audit or an explicit `--force`.
         if ctx.voltage_map:
-            return PipelineResult(
-                step=PipelineStep.ROUTE,
-                success=False,
-                message=(
-                    "route: board is already routed so the route step would "
-                    "be skipped, but --voltage-map is set and the HV "
-                    "pairwise-clearance audit only runs during routing; "
-                    "refusing to skip silently. Audit the existing copper "
-                    f"with `kct creepage {ctx.pcb_file.name} --voltage-map "
-                    f"{ctx.voltage_map}`, or pass --force to re-route with "
-                    "the audit."
-                ),
-            )
+            return _audit_existing_copper_for_skip(ctx, console)
         return PipelineResult(
             step=PipelineStep.ROUTE,
             success=True,
