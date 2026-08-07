@@ -278,6 +278,8 @@ def test_min_only_json_schema_unchanged(tmp_path, capsys):
     _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5", "--format", "json"])
     payload = json.loads(capsys.readouterr().out)
     # Exactly the phase-1 top-level keys -- no phase-2 fields leak in.
+    # (``gate_passed`` / ``waived_count`` are always-on additive verdict keys,
+    # #4687 -- the exit-code gate and waiver tally, present in both schemas.)
     assert set(payload.keys()) == {
         "board",
         "net_class",
@@ -286,6 +288,8 @@ def test_min_only_json_schema_unchanged(tmp_path, capsys):
         "pair_count",
         "pairs",
         "passed",
+        "gate_passed",
+        "waived_count",
     }
     for pair in payload["pairs"]:
         # Drift-guard: ``relationship`` is now an always-on additive key (#4403);

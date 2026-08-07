@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The other merge paths (fresh write, marked-block replace, user-content
   append) stay silent, and merged output is byte-identical to before.
 
+- **`kct creepage --format json` now serializes the exit-code verdict**
+  (#4687) — the report-level JSON always carries `gate_passed` (the
+  waiver-aware verdict the CLI exit code follows) and `waived_count`
+  alongside the existing raw, waiver-blind `passed`, in both the phase-1
+  (`--min`) and standard-derived schemas. Previously the only verdict field
+  in the document was `passed`, so under `--waive-same-footprint` a JSON
+  consumer read `passed: false` while the process exited 0. Additive keys
+  only; `passed` semantics, per-pair `pass`/`waived` serialization, and the
+  `kct audit` manufacturing-readiness gate are unchanged.
+
 ### Changed
 
 - **CI: GitHub Actions bumped off deprecated Node 20 runtimes** (#4677) —

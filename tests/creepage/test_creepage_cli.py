@@ -82,6 +82,10 @@ def test_json_census_schema(tmp_path, capsys):
     assert payload["pair_count"] == len(payload["pairs"])
     assert payload["pair_count"] >= 2  # HV-vs-GND and HV-vs-edge
     assert payload["passed"] is True
+    # #4687: the exit-code verdict + waived count are always serialized; with no
+    # waiver active gate_passed is identical to the raw passed.
+    assert payload["gate_passed"] is True
+    assert payload["waived_count"] == 0
 
     kinds = {p["kind"] for p in payload["pairs"]}
     assert {"conductor", "edge"} <= kinds
@@ -128,6 +132,8 @@ def test_no_hv_nets_json_empty_census(tmp_path, capsys):
     assert payload["pairs"] == []
     assert payload["pair_count"] == 0
     assert payload["passed"] is True
+    assert payload["gate_passed"] is True  # vacuously true, like passed (#4687)
+    assert payload["waived_count"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +285,9 @@ def test_benign_suspect_named_board_exits_zero(tmp_path, capsys):
 def test_same_footprint_tagged_in_json(tmp_path, capsys):
     pcb = _write(tmp_path, board_same_footprint_only_source())
     ncm = _hv_map_file(tmp_path)
-    _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.0", "--format", "json"])
+    rc = _run(
+        ["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.0", "--format", "json"]
+    )
     payload = json.loads(capsys.readouterr().out)
     src = next(p for p in payload["pairs"] if p["net_b"] == "SRC_NEG")
     gnd = next(p for p in payload["pairs"] if p["net_b"] == "GND")
@@ -287,6 +295,12 @@ def test_same_footprint_tagged_in_json(tmp_path, capsys):
     assert gnd["relationship"] == "board"
     # Without the waiver flag nothing is marked waived.
     assert "waived" not in src
+    # #4687: no waiver -> gate_passed mirrors the raw passed and both agree with
+    # the exit code.
+    assert rc == 1
+    assert payload["passed"] is False
+    assert payload["gate_passed"] is False
+    assert payload["waived_count"] == 0
 
 
 def test_waiver_off_same_footprint_fail_exits_nonzero(tmp_path, capsys):
@@ -350,7 +364,7 @@ def test_waiver_on_board_fail_still_exits_nonzero(tmp_path, capsys):
 def test_waiver_on_json_marks_waived_true(tmp_path, capsys):
     pcb = _write(tmp_path, board_same_footprint_only_source())
     ncm = _hv_map_file(tmp_path)
-    _run(
+    rc = _run(
         [
             "creepage",
             str(pcb),
@@ -370,6 +384,37 @@ def test_waiver_on_json_marks_waived_true(tmp_path, capsys):
     assert "waived" not in gnd  # board pairs are never waived
     # The report-level passed stays False (raw) -- only the exit code (gate) flips.
     assert payload["passed"] is False
+    # #4687: the JSON now also carries the verdict the exit code was computed
+    # from, so a CI consumer keying on gate_passed agrees with the process.
+    assert rc == 0
+    assert payload["gate_passed"] is True
+    assert payload["waived_count"] == sum(1 for p in payload["pairs"] if p.get("waived"))
+    assert payload["waived_count"] >= 1
+
+
+def test_waiver_on_board_fail_json_gate_passed_false(tmp_path, capsys):
+    # A board-level fail keeps gate_passed False even with waived pairs (#4687).
+    pcb = _write(tmp_path, board_same_footprint_fail_source())
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--min",
+            "1.0",
+            "--waive-same-footprint",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["passed"] is False
+    assert payload["gate_passed"] is False
+    assert payload["waived_count"] == sum(1 for p in payload["pairs"] if p.get("waived"))
+    assert payload["waived_count"] >= 1
 
 
 def test_missing_pcb_file_errors(tmp_path, capsys):

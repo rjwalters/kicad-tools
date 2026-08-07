@@ -390,7 +390,8 @@ class CreepageReport:
     """Full census of HV creepage/clearance pairs for a board.
 
     In phase-1 mode (manual ``--min`` only) ``standard`` is ``None`` and the
-    serialized schema is byte-for-byte identical to phase 1.  In phase-2 mode a
+    serialized schema is the phase-1 schema (plus the additive report-level
+    verdict keys ``gate_passed`` / ``waived_count``, #4687).  In phase-2 mode a
     ``standard`` context (id/edition/PD/material group + derived-requirement
     provenance) is attached.
     """
@@ -456,7 +457,14 @@ class CreepageReport:
         return self.voltage_map is not None
 
     def to_dict(self) -> dict[str, Any]:
-        # Phase-1 backward compatibility: no standard -> exact phase-1 schema.
+        # Verdict semantics (#4687): ``passed`` is the RAW, waiver-blind result
+        # (what ``kct audit`` keys off); ``gate_passed`` is the waiver-aware
+        # verdict the standalone CLI exit code follows.  Both are always
+        # serialized so JSON consumers can gate unconditionally on
+        # ``gate_passed`` -- without waivers the two are identical.
+        waived_count = sum(1 for p in self.pairs if p.waived)
+        # Phase-1 backward compatibility: no standard -> phase-1 schema (plus
+        # the additive verdict keys above, #4687).
         if self.standard is None:
             return {
                 "board": self.board,
@@ -466,6 +474,8 @@ class CreepageReport:
                 "pair_count": len(self.pairs),
                 "pairs": [p.to_dict() for p in self.pairs],
                 "passed": self.passed,
+                "gate_passed": self.gate_passed,
+                "waived_count": waived_count,
             }
         d: dict[str, Any] = {
             "board": self.board,
@@ -492,6 +502,8 @@ class CreepageReport:
             "pair_count": len(self.pairs),
             "pairs": [p.to_dict() for p in self.pairs],
             "passed": self.passed,
+            "gate_passed": self.gate_passed,
+            "waived_count": waived_count,
         }
         # Per-net voltage mode (#4371): the requirement varies per pair, so the
         # report-level scalar requirement / working voltage are null (already set

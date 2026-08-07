@@ -849,3 +849,54 @@ def test_relationship_serialized_always_and_waived_only_when_true(tmp_path):
     assert same_fp.to_dict()["waived"] is True
     assert board.to_dict()["relationship"] == "board"
     assert "waived" not in board.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Report-level verdict serialization: gate_passed + waived_count (Issue #4687)
+# ---------------------------------------------------------------------------
+
+
+def test_to_dict_phase1_serializes_gate_passed_and_waived_count(tmp_path):
+    # The phase-1 (no standard) schema always carries BOTH verdicts plus the
+    # waived count -- gate_passed is what the CLI exit code follows.
+    report = _census_samefp(_load(tmp_path, board_same_footprint_only_source()))
+    d = report.to_dict()
+    assert d["passed"] is False
+    assert d["gate_passed"] is False  # no waiver active: identical to passed
+    assert d["waived_count"] == 0
+
+    for p in report.pairs:
+        if p.relationship == "same_footprint":
+            p.waived = True
+    n_waived = sum(1 for p in report.pairs if p.waived)
+    assert n_waived >= 1
+    d = report.to_dict()
+    assert d["passed"] is False  # raw verdict unchanged (kct audit gate, #4403)
+    assert d["gate_passed"] is True  # the exit-code verdict (#4687)
+    assert d["waived_count"] == n_waived
+
+
+def test_to_dict_phase2_serializes_gate_passed_and_waived_count(tmp_path):
+    # The phase-2 (standard) schema branch carries the same verdict fields.
+    report = _census_samefp(_load(tmp_path, board_same_footprint_only_source()))
+    report.standard = "iec60664"  # exercise the phase-2 serialization branch
+    report.standard_edition = "2007"
+    for p in report.pairs:
+        if p.relationship == "same_footprint":
+            p.waived = True
+    n_waived = sum(1 for p in report.pairs if p.waived)
+    d = report.to_dict()
+    assert d["standard"] == "iec60664"
+    assert d["passed"] is False
+    assert d["gate_passed"] is True
+    assert d["waived_count"] == n_waived
+
+
+def test_to_dict_empty_report_verdicts_vacuously_true():
+    # Zero pairs: both verdicts vacuously true, zero waived (#4687 edge case).
+    from kicad_tools.creepage.engine import CreepageReport
+
+    d = CreepageReport(net_class="HV", min_mm=1.0).to_dict()
+    assert d["passed"] is True
+    assert d["gate_passed"] is True
+    assert d["waived_count"] == 0

@@ -565,7 +565,12 @@ def _add_creepage_parser(subparsers) -> None:
         "--format",
         choices=["table", "json"],
         default="table",
-        help="Output format (default: table)",
+        help=(
+            "Output format (default: table).  JSON carries two verdicts (#4687): "
+            "'passed' is the raw, waiver-blind result (what kct audit uses), "
+            "while 'gate_passed' honors --waive-same-footprint and is what the "
+            "exit code follows -- CI consumers should key on 'gate_passed'."
+        ),
     )
 
 
