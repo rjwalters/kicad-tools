@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Local CI-equivalent gate script as an Actions-outage backstop** (#4671)
+  — new `scripts/ci/local-gate.sh` mirrors the `.github/workflows/ci.yml`
+  job set locally: `--cheap` (default) runs the six cheap gates,
+  `--full` adds the long board end-to-end jobs, `--release` adds the
+  board-03 routing baseline + changelog gap report used to ship v0.20.0
+  through the 2026-08-06 outage, and `--list`/per-job selection are
+  supported. Advisory jobs (diffpair/matchgroup regressions) report but
+  never flip the exit code, and a missing `kicad-cli` yields SKIP, both
+  mirroring CI. A new drift guard
+  (`tests/test_local_gate_manifest.py`) asserts the script's manifest
+  stays in sync with the ci.yml job ids. RELEASING.md documents the
+  outage-fallback procedure (operator sign-off required) and records the
+  ephemeral-runner evaluation verdict.
+
 - **Stderr warning when `merge_dru_floors` migrates a legacy sidecar**
   (#4676) — the pre-#4600 legacy-replace branch added in #4667 now emits a
   one-line stderr notice naming the `.kicad_dru` file (threaded from both

@@ -178,6 +178,54 @@ the commit the tag references, runs `uv build`, and the `publish` job runs
 the mechanism that makes the tag — and therefore the tag's ordering relative to
 the merge — load-bearing.
 
+## Actions outage fallback (local CI-equivalent gate)
+
+When GitHub Actions is down or badly degraded (as during the ~6-hour
+2026-08-06 outage that wedged 11 runs mid-release), the merge/release gate can
+be substituted with the checked-in local gate — **with explicit operator
+sign-off for each gate substitution**. This formalizes the ad-hoc procedure
+that kept v0.20.0 on schedule and caught release blocker #4667 before CI ever
+could.
+
+The playbook that worked in the 2026-08-06 outage, now scripted:
+
+1. **Run the local gate against a clean integration worktree** (not a dirty
+   working copy — the script warns if the tree is dirty):
+
+   ```bash
+   scripts/ci/local-gate.sh --release
+   ```
+
+   `--release` runs the cheap CI gates (ruff format + check, baseline-gated
+   mypy, the full non-slow pytest suite with the C++ backend built,
+   cpp-build-check, kicad-cli round-trip smoke, routed-PCB DRC check) plus the
+   two release extras used in the outage: the board-03 routing baseline
+   (`tests/router/test_board03_routing_baseline.py`) and
+   `scripts/changelog_gap_report.py`. Use `--full` to add the long board
+   end-to-end jobs (multiple hours), `--list` to see the job manifest, or name
+   individual jobs. The manifest is drift-guarded against
+   `.github/workflows/ci.yml` by `tests/test_local_gate_manifest.py`.
+
+2. **Operator sign-off**: merging or tagging on the strength of a local gate
+   run (instead of green CI) requires explicit human operator approval,
+   recorded on the PR/release thread. The local gate is a backstop, not a
+   replacement — advisory jobs and kicad-cli-dependent steps have
+   documented parity caveats (see the script header).
+
+3. **Reconcile once Actions recovers**: trigger one CI run on the `main` tip
+   (an empty commit or re-run works) and confirm it is green. Any divergence
+   between that run and the local gate result is a bug in the gate script —
+   file it.
+
+**Ephemeral-runner verdict** (recorded per issue #4671): a standing
+self-hosted runner pool was evaluated during the outage and **rejected** — on
+a public repository it is a fork-PR code-execution liability, and it still
+depends on GitHub's Actions control plane, which was itself degraded during
+the incident (so it would not have helped). An *ephemeral* on-demand cloud
+runner (restricted runner group, torn down after use) remains a possible
+follow-up if outages recur, but the cheaper, safer backstop is the local gate
+above; no runner infrastructure is maintained for this repo.
+
 ## Quick checklist
 
 - [ ] `uv run python scripts/changelog_gap_report.py` exits 0 with an empty gap
