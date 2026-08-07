@@ -274,6 +274,8 @@ kct check <pcb_file> [options]
 | `--refill-zones` | Refill zone fills in-place via `kicad-cli pcb drc --refill-zones --save-board` before checking (mutates the board file; kills stale-fill clearance false positives, #4113) |
 | `--waivers PATH` | Path to a general `.kct_waivers.json` sidecar (schema v2) waiving findings for any rule (#4417). Auto-discovered next to the board when omitted |
 | `--courtyard-waivers PATH` | Path to a `.courtyard_waivers.json` sidecar waiving specific courtyard-overlap pairs (#4137). Auto-discovered next to the board when omitted |
+| `--max-fragment-fraction F` | Opt-in routing-quality gate (#4651): fail (exit 2) when the share of copper segments shorter than 0.25 mm exceeds `F` (0.0–1.0; equal passes). Default: unset (advisory metrics only) |
+| `--max-staircase-fraction F` | Opt-in routing-quality gate (#4651): fail (exit 2) when the share of short H/V staircase steps exceeds `F` (0.0–1.0; equal passes). Default: unset (advisory metrics only) |
 
 **Examples:**
 ```bash

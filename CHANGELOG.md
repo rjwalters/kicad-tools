@@ -27,6 +27,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exit code). A missing tool is always a reported `fail` row, never a
   traceback.
 
+- **Opt-in routing-quality threshold gate for `kct check`** (#4651) — new
+  `--max-fragment-fraction` / `--max-staircase-fraction` flags (on both the
+  `kct` and standalone `kct check` parsers) turn the #4623 advisory
+  routing-quality metrics into a real gate: when a supplied ceiling
+  (0.0–1.0) is exceeded, an error-severity
+  `routing_quality_fragment_fraction` / `routing_quality_staircase_fraction`
+  violation is emitted and the check exits 2 (a fraction exactly equal to
+  the ceiling passes). The `routing_quality` JSON object gains the applied
+  `thresholds`, a `gate_passed` verdict, and per-metric `gate_breaches`
+  when gating is enabled, so CI consumers can see why the gate fired.
+  Without the flags, behavior is byte-identical to the advisory-only
+  contract — no board starts failing without opting in. Because gating is
+  an explicit opt-in it also engages under `--drc-only`, and a metrics
+  crash with gating requested is a hard exit-1 (an explicitly requested
+  gate never silently passes because it could not measure). Threshold
+  evaluation lives in `kicad_tools.analysis.routing_quality`
+  (`evaluate_routing_quality_thresholds` / `ThresholdBreach`, exported
+  from `kicad_tools.analysis`).
+
+- **`zero_length_segment` DRC rule — zero-length copper segments are now
+  real, waivable findings** (#4651) — zero-length segments (start == end)
+  are always routing artifacts; the #4623 metrics counted them
+  (`zero_length_count`) but nothing reported them. A new
+  `zero_length_segment` rule (registered in `DRCChecker.check_all` and as
+  a `kct check` `--only`/`--skip` category) emits one warning per
+  zero-length segment with net, layer, and position, and flows through
+  the central `.kct_waivers.json` mechanism (#4417) — waivable per
+  segment (by the `layer@(x,y)` `items` id, which matches the reported
+  location) or per net (by `nets`). Detection reuses the analysis
+  module's coordinate tolerance, so the advisory stanza's count and the
+  rule's finding count always agree. Severity is warning (fatal under
+  `--strict`), not error: the #4651 fleet pre-check found board-05's
+  routed artifact carrying 5 zero-length segments, so error-by-default
+  would have broken a shipping board.
+
 - **`kct pipeline` route-skip under `--voltage-map` now auto-runs a
   `kct creepage` audit as the skip gate** (#4649) — refining the #4607 loud
   refusal: when the board is already `>=`95% routed (recommend_skip) and no

@@ -45,6 +45,12 @@ ANGLE_TOLERANCE_DEG = 0.5
 # common case; the epsilon only absorbs float noise.
 COORD_EPSILON_MM = 1e-6
 
+# Rule ids emitted by the opt-in threshold gate (issue #4651).  Defined
+# here (next to the metric definitions) so the CLI wire-in and any JSON
+# consumer share a single source for the identifiers.
+RULE_FRAGMENT_FRACTION = "routing_quality_fragment_fraction"
+RULE_STAIRCASE_FRACTION = "routing_quality_staircase_fraction"
+
 
 @dataclass(frozen=True)
 class RoutingQualityMetrics:
@@ -85,6 +91,120 @@ class RoutingQualityMetrics:
             "staircase_step_count": self.staircase_step_count,
             "staircase_fraction": self.staircase_fraction,
         }
+
+
+@dataclass(frozen=True)
+class ThresholdBreach:
+    """One routing-quality metric that exceeded its opt-in ceiling.
+
+    Produced by :func:`evaluate_routing_quality_thresholds` (issue
+    #4651).  The CLI converts each breach into a real ``DRCViolation``
+    so the gate participates in the normal verdict / exit-code path;
+    this dataclass stays free of any ``validate`` dependency so the
+    analysis package remains purely computational.
+
+    Attributes:
+        rule_id: Stable violation rule id
+            (:data:`RULE_FRAGMENT_FRACTION` /
+            :data:`RULE_STAIRCASE_FRACTION`).
+        metric: The ``RoutingQualityMetrics`` field name that breached
+            (e.g. ``"fragment_fraction"``).
+        actual: The measured value.
+        limit: The user-supplied ceiling it exceeded.
+        message: Human-readable description of the breach.
+    """
+
+    rule_id: str
+    metric: str
+    actual: float
+    limit: float
+    message: str
+
+
+def evaluate_routing_quality_thresholds(
+    metrics: RoutingQualityMetrics,
+    *,
+    max_fragment_fraction: float | None = None,
+    max_staircase_fraction: float | None = None,
+) -> list[ThresholdBreach]:
+    """Evaluate opt-in routing-quality ceilings over computed metrics.
+
+    Pure function (issue #4651): compares each supplied ceiling against
+    the corresponding metric and returns one :class:`ThresholdBreach`
+    per exceeded threshold.  A ``None`` ceiling means "not gated on this
+    metric" -- with both ceilings ``None`` the result is always empty,
+    which is exactly today's advisory-only behavior.
+
+    Comparison is strictly-greater-than: a metric exactly **equal** to
+    its ceiling passes (so ``--max-fragment-fraction 0.0`` fails only
+    when at least one fragment exists).
+    """
+    breaches: list[ThresholdBreach] = []
+    if max_fragment_fraction is not None and metrics.fragment_fraction > max_fragment_fraction:
+        breaches.append(
+            ThresholdBreach(
+                rule_id=RULE_FRAGMENT_FRACTION,
+                metric="fragment_fraction",
+                actual=metrics.fragment_fraction,
+                limit=max_fragment_fraction,
+                message=(
+                    f"Routing-quality gate: fragment_fraction "
+                    f"{metrics.fragment_fraction:.4f} exceeds the "
+                    f"--max-fragment-fraction ceiling {max_fragment_fraction:.4f} "
+                    f"({metrics.fragment_count} segment(s) shorter than "
+                    f"{FRAGMENT_LENGTH_MM} mm)"
+                ),
+            )
+        )
+    if max_staircase_fraction is not None and metrics.staircase_fraction > max_staircase_fraction:
+        breaches.append(
+            ThresholdBreach(
+                rule_id=RULE_STAIRCASE_FRACTION,
+                metric="staircase_fraction",
+                actual=metrics.staircase_fraction,
+                limit=max_staircase_fraction,
+                message=(
+                    f"Routing-quality gate: staircase_fraction "
+                    f"{metrics.staircase_fraction:.4f} exceeds the "
+                    f"--max-staircase-fraction ceiling {max_staircase_fraction:.4f} "
+                    f"({metrics.staircase_step_count} H/V staircase step(s) with "
+                    f"legs shorter than {STAIRCASE_STEP_MM} mm)"
+                ),
+            )
+        )
+    return breaches
+
+
+def routing_quality_gate_dict(
+    breaches: list[ThresholdBreach],
+    *,
+    max_fragment_fraction: float | None,
+    max_staircase_fraction: float | None,
+) -> dict[str, object]:
+    """Serialize the threshold-gate outcome for the ``routing_quality`` JSON.
+
+    Issue #4651: when gating is enabled, the ``routing_quality`` object
+    gains the applied thresholds and a pass/fail verdict so CI consumers
+    can see *why* the gate fired.  Emitted only when at least one
+    ceiling was supplied (the no-flag JSON contract stays byte-identical
+    to the advisory-only #4646 shape).
+    """
+    return {
+        "thresholds": {
+            "max_fragment_fraction": max_fragment_fraction,
+            "max_staircase_fraction": max_staircase_fraction,
+        },
+        "gate_passed": not breaches,
+        "gate_breaches": [
+            {
+                "rule_id": b.rule_id,
+                "metric": b.metric,
+                "actual": b.actual,
+                "limit": b.limit,
+            }
+            for b in breaches
+        ],
+    }
 
 
 def _quantize(point: tuple[float, float]) -> tuple[int, int]:

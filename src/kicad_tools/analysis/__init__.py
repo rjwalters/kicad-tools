@@ -41,9 +41,14 @@ from .net_status import (
 )
 from .routing_quality import (
     FRAGMENT_LENGTH_MM,
+    RULE_FRAGMENT_FRACTION,
+    RULE_STAIRCASE_FRACTION,
     STAIRCASE_STEP_MM,
     RoutingQualityMetrics,
+    ThresholdBreach,
     compute_routing_quality,
+    evaluate_routing_quality_thresholds,
+    routing_quality_gate_dict,
 )
 from .signal_integrity import (
     CrosstalkRisk,
@@ -68,6 +73,8 @@ from .trace_length import (
 
 __all__ = [
     "FRAGMENT_LENGTH_MM",
+    "RULE_FRAGMENT_FRACTION",
+    "RULE_STAIRCASE_FRACTION",
     "STAIRCASE_STEP_MM",
     "AnalogComponent",
     "Bottleneck",
@@ -93,6 +100,7 @@ __all__ = [
     "RoutingQualityMetrics",
     "Severity",
     "SignalIntegrityAnalyzer",
+    "ThresholdBreach",
     "TraceCrosstalkRisk",
     "TraceIntegrityAnalyzer",
     "ThermalAnalyzer",
@@ -104,5 +112,7 @@ __all__ = [
     "build_zone_net_map",
     "compute_routing_quality",
     "detect_analog_components",
+    "evaluate_routing_quality_thresholds",
     "infer_rail_voltage",
+    "routing_quality_gate_dict",
 ]

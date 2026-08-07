@@ -284,6 +284,13 @@ def run_check_command(args) -> int:
     # stays the single source of truth.
     if getattr(args, "sch_field_threshold", None) is not None:
         sub_argv.extend(["--sch-field-threshold", str(args.sch_field_threshold)])
+    # Issue #4651: forward the opt-in routing-quality threshold ceilings.
+    # Both default to None (advisory-only, no gating) so the inner parser's
+    # semantics stay the single source of truth.
+    if getattr(args, "max_fragment_fraction", None) is not None:
+        sub_argv.extend(["--max-fragment-fraction", str(args.max_fragment_fraction)])
+    if getattr(args, "max_staircase_fraction", None) is not None:
+        sub_argv.extend(["--max-staircase-fraction", str(args.max_staircase_fraction)])
     return check_main(sub_argv)
 
 

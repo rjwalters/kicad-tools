@@ -241,6 +241,7 @@ class DRCChecker:
         "check_single_pad_nets",
         "check_pad_grid_alignment",
         "check_via_in_pad",
+        "check_zero_length_segments",
         "check_zones",
     )
 
@@ -1116,6 +1117,27 @@ class DRCChecker:
             via-in-pad (e.g., jlcpcb-tier1, pcbway).
         """
         rule = ViaInPadRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_zero_length_segments(self) -> DRCResults:
+        """Check for zero-length copper trace segments (issue #4651).
+
+        Zero-length segments are always routing artifacts: the advisory
+        routing-quality metrics (#4623) count and exclude them; this
+        rule reports each one as a per-segment warning (with net, layer
+        and position) so they become actionable and waivable via the
+        central ``.kct_waivers.json`` mechanism (#4417).  Uses the same
+        detection tolerance as the analysis module so the advisory
+        stanza's ``zero_length_count`` and this rule's finding count
+        always agree.
+
+        Returns:
+            DRCResults containing one ``zero_length_segment`` warning
+            per zero-length segment.
+        """
+        from .rules.zero_length_segment import ZeroLengthSegmentRule
+
+        rule = ZeroLengthSegmentRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_zones(self) -> DRCResults:

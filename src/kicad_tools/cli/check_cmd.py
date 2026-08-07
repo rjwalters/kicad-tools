@@ -35,6 +35,8 @@ from kicad_tools.analysis.routing_quality import (
     STAIRCASE_STEP_MM,
     RoutingQualityMetrics,
     compute_routing_quality,
+    evaluate_routing_quality_thresholds,
+    routing_quality_gate_dict,
 )
 from kicad_tools.manufacturers import get_manufacturer_ids, get_profile
 from kicad_tools.schema.pcb import PCB
@@ -1117,6 +1119,7 @@ CHECK_CATEGORIES = [
     "single_pad_net",
     "solder_mask",
     "via_in_pad",
+    "zero_length_segment",
     "zones",
 ]
 
@@ -1496,8 +1499,57 @@ def main(argv: list[str] | None = None) -> int:
             "per-sheet-median variant is deferred."
         ),
     )
+    # Issue #4651: opt-in routing-quality threshold gate over the advisory
+    # #4623 metrics.  Default None = advisory-only (today's behavior).
+    parser.add_argument(
+        "--max-fragment-fraction",
+        dest="max_fragment_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #4651): fail the check when "
+            "the routed board's fragment_fraction (share of copper segments "
+            f"shorter than {FRAGMENT_LENGTH_MM} mm) exceeds this ceiling "
+            "(0.0-1.0). Exceeding emits an error-severity "
+            "routing_quality_fragment_fraction violation and exits 2; a "
+            "fraction exactly equal to the ceiling passes. Default: unset "
+            "(advisory-only metrics, no gating)."
+        ),
+    )
+    parser.add_argument(
+        "--max-staircase-fraction",
+        dest="max_staircase_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #4651): fail the check when "
+            "the routed board's staircase_fraction (share of copper segments "
+            f"that are H/V staircase steps with legs shorter than "
+            f"{STAIRCASE_STEP_MM} mm) exceeds this ceiling (0.0-1.0). "
+            "Exceeding emits an error-severity "
+            "routing_quality_staircase_fraction violation and exits 2; a "
+            "fraction exactly equal to the ceiling passes. Default: unset "
+            "(advisory-only metrics, no gating)."
+        ),
+    )
 
     args = parser.parse_args(argv)
+
+    # Issue #4651: validate the routing-quality ceilings up front.  The
+    # metrics are fractions in [0, 1], so anything outside that range is a
+    # usage error rather than a silently-inert gate.
+    for _flag, _value in (
+        ("--max-fragment-fraction", args.max_fragment_fraction),
+        ("--max-staircase-fraction", args.max_staircase_fraction),
+    ):
+        if _value is not None and not (0.0 <= _value <= 1.0):
+            print(
+                f"Error: {_flag} must be a fraction between 0.0 and 1.0, got {_value}",
+                file=sys.stderr,
+            )
+            return 1
 
     # Issue #4601: --no-net-class-map suppresses sidecar auto-discovery.
     # Pairing it with an explicit --net-class-map is a usage error rather
@@ -2019,6 +2071,78 @@ def main(argv: list[str] | None = None) -> int:
     # advisory ONLY -- it must not change the verdict or exit code.
     _maybe_emit_via_in_pad_tier_advisory(effective_mfr, results.violations)
 
+    # Issue #4623 / #4651: advisory routing-quality metrics + opt-in
+    # threshold gate.  Metrics are computed in meta mode -- skipped under
+    # --drc-only to keep the legacy stdout and on-disk JSON contracts
+    # byte-identical (#3750), mirroring how ``meta_checks`` is omitted --
+    # EXCEPT when a --max-*-fraction ceiling was passed: gating is an
+    # explicit opt-in, so it engages under --drc-only too (the advisory
+    # stanza and ``routing_quality`` JSON object then appear there as
+    # well).  Without threshold flags the metrics stay advisory ONLY:
+    # they never change the verdict, exit code, or meta rollup
+    # (including under --strict); a metrics crash degrades to a stderr
+    # warning, never a failed check.  With gating requested, a metrics
+    # crash IS fatal (exit 1) -- an explicitly requested gate must never
+    # silently pass because it could not measure.
+    drc_only = getattr(args, "drc_only", False)
+    rq_gating = args.max_fragment_fraction is not None or args.max_staircase_fraction is not None
+    routing_quality: RoutingQualityMetrics | None = None
+    if not drc_only or rq_gating:
+        try:
+            routing_quality = compute_routing_quality(pcb)
+        except Exception as exc:
+            if rq_gating:
+                print(
+                    f"Error: routing-quality metrics unavailable ({exc}); "
+                    "cannot evaluate --max-fragment-fraction / "
+                    "--max-staircase-fraction",
+                    file=sys.stderr,
+                )
+                return 1
+            print(
+                f"Warning: routing-quality metrics unavailable ({exc}); "
+                "continuing without the advisory stanza",
+                file=sys.stderr,
+            )
+    # Widened to dict[str, object] because the opt-in gate (below) merges
+    # in nested threshold/verdict structures alongside the scalar metrics.
+    routing_quality_dict: dict[str, object] | None = None
+    if routing_quality is not None:
+        routing_quality_dict = {**routing_quality.to_dict()}
+
+    # Issue #4651: evaluate the opt-in ceilings and convert each breach
+    # into a real error-severity violation so the gate participates in
+    # the normal verdict / exit-code path (table/JSON output, error
+    # counts, DRC sub-check status, meta rollup).  Severity is error by
+    # design: the ceiling only exists because the caller opted in, so
+    # exceeding it is a deliberate CI failure, not an advisory.  The
+    # ``routing_quality`` JSON object gains the applied thresholds and
+    # pass/fail verdict so consumers can see why the gate fired.
+    if rq_gating and routing_quality is not None and routing_quality_dict is not None:
+        rq_breaches = evaluate_routing_quality_thresholds(
+            routing_quality,
+            max_fragment_fraction=args.max_fragment_fraction,
+            max_staircase_fraction=args.max_staircase_fraction,
+        )
+        for rq_breach in rq_breaches:
+            results.add(
+                DRCViolation(
+                    rule_id=rq_breach.rule_id,
+                    severity="error",
+                    message=rq_breach.message,
+                    actual_value=rq_breach.actual,
+                    required_value=rq_breach.limit,
+                )
+            )
+        routing_quality_dict = {
+            **routing_quality_dict,
+            **routing_quality_gate_dict(
+                rq_breaches,
+                max_fragment_fraction=args.max_fragment_fraction,
+                max_staircase_fraction=args.max_staircase_fraction,
+            ),
+        }
+
     # Apply errors-only filter
     violations = list(results.violations)
     if args.errors_only:
@@ -2054,7 +2178,8 @@ def main(argv: list[str] | None = None) -> int:
     # Issue #3750: compute the meta-check rollup once and reuse it for
     # both the human stanza and the JSON envelope.  Skipped entirely
     # under --drc-only to preserve the legacy stdout/exit-code contract.
-    drc_only = getattr(args, "drc_only", False)
+    # (``drc_only`` itself is resolved earlier, before the routing-quality
+    # metrics block, #4651.)
     meta: MetaCheckResult | None = None
     if not drc_only:
         meta = run_meta_checks(
@@ -2063,24 +2188,6 @@ def main(argv: list[str] | None = None) -> int:
             schematic=getattr(args, "schematic", None),
             strict=args.strict,
         )
-
-    # Issue #4623: advisory routing-quality metrics.  Computed only in meta
-    # mode -- skipped entirely under --drc-only to keep the legacy stdout
-    # and on-disk JSON contracts byte-identical (#3750), mirroring how
-    # ``meta_checks`` is omitted.  Advisory ONLY: the metrics never change
-    # the verdict, exit code, or meta rollup (including under --strict);
-    # a metrics crash degrades to a stderr warning, never a failed check.
-    routing_quality: RoutingQualityMetrics | None = None
-    if not drc_only:
-        try:
-            routing_quality = compute_routing_quality(pcb)
-        except Exception as exc:
-            print(
-                f"Warning: routing-quality metrics unavailable ({exc}); "
-                "continuing without the advisory stanza",
-                file=sys.stderr,
-            )
-    routing_quality_dict = routing_quality.to_dict() if routing_quality is not None else None
 
     # Output results
     if args.format == "json":
@@ -2357,6 +2464,7 @@ def run_selected_checks(
         "single_pad_net": checker.check_single_pad_nets,
         "solder_mask": checker.check_solder_mask_pads,
         "via_in_pad": checker.check_via_in_pad,
+        "zero_length_segment": checker.check_zero_length_segments,
         "zones": checker.check_zones,
     }
 

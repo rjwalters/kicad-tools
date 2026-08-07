@@ -454,3 +454,304 @@ class TestCheckCmdAdvisoryWireIn:
         out = capsys.readouterr().out
         assert "Routing quality (advisory):" in out
         assert "0 across 0 net(s)" in out
+
+
+# ---------------------------------------------------------------------------
+# Issue #4651: opt-in threshold gating over the advisory metrics.
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateRoutingQualityThresholds:
+    """Unit tests for the pure threshold-evaluation function."""
+
+    @staticmethod
+    def _metrics(fragment_fraction: float = 0.0, staircase_fraction: float = 0.0):
+        return RoutingQualityMetrics(
+            total_segments=10,
+            nets_with_copper=2,
+            segments_per_net=5.0,
+            zero_length_count=0,
+            median_length_mm=1.0,
+            fragment_count=int(round(10 * fragment_fraction)),
+            fragment_fraction=fragment_fraction,
+            orthogonal_count=10,
+            diagonal_45_count=0,
+            off_axis_count=0,
+            staircase_step_count=int(round(10 * staircase_fraction)),
+            staircase_fraction=staircase_fraction,
+        )
+
+    def test_no_thresholds_no_breaches(self):
+        from kicad_tools.analysis.routing_quality import (
+            evaluate_routing_quality_thresholds,
+        )
+
+        m = self._metrics(fragment_fraction=1.0, staircase_fraction=1.0)
+        assert evaluate_routing_quality_thresholds(m) == []
+
+    def test_equal_to_ceiling_passes(self):
+        """AC: exceed -> violation; equal/below -> pass."""
+        from kicad_tools.analysis.routing_quality import (
+            evaluate_routing_quality_thresholds,
+        )
+
+        m = self._metrics(fragment_fraction=0.5, staircase_fraction=0.4)
+        assert (
+            evaluate_routing_quality_thresholds(
+                m, max_fragment_fraction=0.5, max_staircase_fraction=0.4
+            )
+            == []
+        )
+
+    def test_below_ceiling_passes(self):
+        from kicad_tools.analysis.routing_quality import (
+            evaluate_routing_quality_thresholds,
+        )
+
+        m = self._metrics(fragment_fraction=0.1, staircase_fraction=0.1)
+        assert (
+            evaluate_routing_quality_thresholds(
+                m, max_fragment_fraction=0.5, max_staircase_fraction=0.5
+            )
+            == []
+        )
+
+    def test_fragment_breach(self):
+        from kicad_tools.analysis.routing_quality import (
+            RULE_FRAGMENT_FRACTION,
+            evaluate_routing_quality_thresholds,
+        )
+
+        m = self._metrics(fragment_fraction=0.6)
+        breaches = evaluate_routing_quality_thresholds(m, max_fragment_fraction=0.5)
+        assert len(breaches) == 1
+        b = breaches[0]
+        assert b.rule_id == RULE_FRAGMENT_FRACTION
+        assert b.metric == "fragment_fraction"
+        assert b.actual == pytest.approx(0.6)
+        assert b.limit == pytest.approx(0.5)
+        assert "fragment_fraction" in b.message
+
+    def test_staircase_breach(self):
+        from kicad_tools.analysis.routing_quality import (
+            RULE_STAIRCASE_FRACTION,
+            evaluate_routing_quality_thresholds,
+        )
+
+        m = self._metrics(staircase_fraction=0.9)
+        breaches = evaluate_routing_quality_thresholds(m, max_staircase_fraction=0.42)
+        assert len(breaches) == 1
+        assert breaches[0].rule_id == RULE_STAIRCASE_FRACTION
+        assert breaches[0].metric == "staircase_fraction"
+
+    def test_both_breach(self):
+        from kicad_tools.analysis.routing_quality import (
+            evaluate_routing_quality_thresholds,
+        )
+
+        m = self._metrics(fragment_fraction=1.0, staircase_fraction=1.0)
+        breaches = evaluate_routing_quality_thresholds(
+            m, max_fragment_fraction=0.0, max_staircase_fraction=0.0
+        )
+        assert len(breaches) == 2
+
+    def test_zero_ceiling_passes_on_clean_board(self):
+        """--max-fragment-fraction 0.0 passes when zero fragments exist."""
+        from kicad_tools.analysis.routing_quality import (
+            evaluate_routing_quality_thresholds,
+        )
+
+        m = self._metrics(fragment_fraction=0.0, staircase_fraction=0.0)
+        assert (
+            evaluate_routing_quality_thresholds(
+                m, max_fragment_fraction=0.0, max_staircase_fraction=0.0
+            )
+            == []
+        )
+
+    def test_gate_dict_shape(self):
+        from kicad_tools.analysis.routing_quality import (
+            evaluate_routing_quality_thresholds,
+            routing_quality_gate_dict,
+        )
+
+        m = self._metrics(staircase_fraction=1.0)
+        breaches = evaluate_routing_quality_thresholds(m, max_staircase_fraction=0.5)
+        d = routing_quality_gate_dict(
+            breaches, max_fragment_fraction=None, max_staircase_fraction=0.5
+        )
+        assert d["thresholds"] == {
+            "max_fragment_fraction": None,
+            "max_staircase_fraction": 0.5,
+        }
+        assert d["gate_passed"] is False
+        assert d["gate_breaches"] == [
+            {
+                "rule_id": "routing_quality_staircase_fraction",
+                "metric": "staircase_fraction",
+                "actual": 1.0,
+                "limit": 0.5,
+            }
+        ]
+
+    def test_gate_dict_passing(self):
+        from kicad_tools.analysis.routing_quality import routing_quality_gate_dict
+
+        d = routing_quality_gate_dict([], max_fragment_fraction=0.5, max_staircase_fraction=None)
+        assert d["gate_passed"] is True
+        assert d["gate_breaches"] == []
+
+
+class TestCheckCmdThresholdGate:
+    """CLI wire-in tests for --max-fragment-fraction / --max-staircase-fraction.
+
+    The ``staircase_pcb`` fixture has staircase_fraction == 1.0 and
+    fragment_fraction == 0.0; ``clean_45_pcb`` has both at 0.0.
+    """
+
+    def test_staircase_ceiling_exceeded_fails(self, staircase_pcb: Path, capsys):
+        from kicad_tools.cli.check_cmd import main
+
+        rc = main(
+            [
+                str(staircase_pcb),
+                "--max-staircase-fraction",
+                "0.5",
+                "--format",
+                "json",
+                "--allow-incomplete",
+            ]
+        )
+        data = json.loads(capsys.readouterr().out)
+        assert rc == 2
+        gate_violations = [
+            v for v in data["violations"] if v["rule_id"] == "routing_quality_staircase_fraction"
+        ]
+        assert len(gate_violations) == 1
+        v = gate_violations[0]
+        assert v["severity"] == "error"
+        assert v["actual_value"] == pytest.approx(1.0)
+        assert v["required_value"] == pytest.approx(0.5)
+        rq = data["routing_quality"]
+        assert rq["gate_passed"] is False
+        assert rq["thresholds"]["max_staircase_fraction"] == pytest.approx(0.5)
+        assert rq["thresholds"]["max_fragment_fraction"] is None
+        assert rq["gate_breaches"][0]["metric"] == "staircase_fraction"
+
+    def test_equal_ceiling_passes(self, staircase_pcb: Path, capsys):
+        """staircase_fraction == 1.0 with ceiling 1.0 -> pass (AC)."""
+        from kicad_tools.cli.check_cmd import main
+
+        rc = main(
+            [
+                str(staircase_pcb),
+                "--max-staircase-fraction",
+                "1.0",
+                "--format",
+                "json",
+                "--allow-incomplete",
+            ]
+        )
+        data = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert data["routing_quality"]["gate_passed"] is True
+        assert data["routing_quality"]["gate_breaches"] == []
+        assert not [v for v in data["violations"] if v["rule_id"].startswith("routing_quality_")]
+
+    def test_clean_board_passes_zero_ceilings(self, clean_45_pcb: Path, capsys):
+        from kicad_tools.cli.check_cmd import main
+
+        rc = main(
+            [
+                str(clean_45_pcb),
+                "--max-fragment-fraction",
+                "0.0",
+                "--max-staircase-fraction",
+                "0.0",
+                "--allow-incomplete",
+            ]
+        )
+        capsys.readouterr()
+        assert rc == 0
+
+    def test_no_flags_json_has_no_gate_keys(self, staircase_pcb: Path, capsys):
+        """AC: no new flags -> byte-identical advisory-only contract."""
+        from kicad_tools.cli.check_cmd import main
+
+        rc = main([str(staircase_pcb), "--format", "json", "--allow-incomplete"])
+        data = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        rq = data["routing_quality"]
+        assert "thresholds" not in rq
+        assert "gate_passed" not in rq
+        assert "gate_breaches" not in rq
+
+    def test_gate_engages_under_drc_only(self, staircase_pcb: Path, capsys):
+        """Gating is an explicit opt-in, so it works under --drc-only too."""
+        from kicad_tools.cli.check_cmd import main
+
+        rc = main(
+            [
+                str(staircase_pcb),
+                "--drc-only",
+                "--max-staircase-fraction",
+                "0.5",
+                "--format",
+                "json",
+            ]
+        )
+        data = json.loads(capsys.readouterr().out)
+        assert rc == 2
+        assert data["routing_quality"]["gate_passed"] is False
+
+    def test_drc_only_without_flags_still_omits_routing_quality(self, staircase_pcb: Path, capsys):
+        from kicad_tools.cli.check_cmd import main
+
+        rc = main([str(staircase_pcb), "--drc-only", "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert "routing_quality" not in data
+
+    def test_out_of_range_ceiling_is_usage_error(self, staircase_pcb: Path, capsys):
+        from kicad_tools.cli.check_cmd import main
+
+        assert main([str(staircase_pcb), "--max-fragment-fraction", "1.5"]) == 1
+        assert main([str(staircase_pcb), "--max-staircase-fraction", "-0.1"]) == 1
+        err = capsys.readouterr().err
+        assert "must be a fraction between 0.0 and 1.0" in err
+
+    def test_metrics_crash_is_fatal_when_gating(self, staircase_pcb: Path, capsys, monkeypatch):
+        """An explicitly requested gate must never silently pass because it
+        could not measure."""
+        from kicad_tools.cli import check_cmd
+
+        def _boom(pcb):
+            raise RuntimeError("synthetic metrics failure 4651")
+
+        monkeypatch.setattr(check_cmd, "compute_routing_quality", _boom)
+        rc = check_cmd.main(
+            [str(staircase_pcb), "--max-staircase-fraction", "0.5", "--allow-incomplete"]
+        )
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "cannot evaluate" in err
+
+    def test_report_file_carries_gate_verdict(self, staircase_pcb: Path, tmp_path: Path, capsys):
+        from kicad_tools.cli.check_cmd import main
+
+        report = tmp_path / "report_4651.json"
+        rc = main(
+            [
+                str(staircase_pcb),
+                "--max-staircase-fraction",
+                "0.5",
+                "--output",
+                str(report),
+                "--allow-incomplete",
+            ]
+        )
+        capsys.readouterr()
+        assert rc == 2
+        data = json.loads(report.read_text())
+        assert data["routing_quality"]["gate_passed"] is False
+        assert data["summary"]["passed"] is False

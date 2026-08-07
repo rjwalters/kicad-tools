@@ -890,6 +890,40 @@ def _add_check_parser(subparsers) -> None:
             "threshold -- an adaptive per-sheet-median variant is deferred."
         ),
     )
+    # Issue #4651: opt-in routing-quality threshold gate over the advisory
+    # #4623 metrics.  Declared on BOTH parsers + forwarded by the shim (see
+    # the parser-drift guard in tests/test_cli_parser_drift.py, #4633).
+    check_parser.add_argument(
+        "--max-fragment-fraction",
+        dest="max_fragment_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #4651): fail the check when "
+            "the routed board's fragment_fraction (share of copper segments "
+            "shorter than 0.25 mm) exceeds this ceiling (0.0-1.0). Exceeding "
+            "emits an error-severity routing_quality_fragment_fraction "
+            "violation and exits 2; equal-to-ceiling passes. Default: unset "
+            "(advisory-only metrics, no gating)."
+        ),
+    )
+    check_parser.add_argument(
+        "--max-staircase-fraction",
+        dest="max_staircase_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #4651): fail the check when "
+            "the routed board's staircase_fraction (share of copper segments "
+            "that are H/V staircase steps with legs shorter than 0.6 mm) "
+            "exceeds this ceiling (0.0-1.0). Exceeding emits an "
+            "error-severity routing_quality_staircase_fraction violation and "
+            "exits 2; equal-to-ceiling passes. Default: unset (advisory-only "
+            "metrics, no gating)."
+        ),
+    )
 
 
 def _add_sch_parser(subparsers) -> None:
