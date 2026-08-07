@@ -1674,6 +1674,17 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # package -- the byte then has to wrap a 7x7 mm QFN.  The correct move is
     # a mirror, which KiCad expresses only as a layer flip.
     #
+    # #4560 UPDATE: DE_REVERSE_BUNDLE now proposes that mirror, so probe 0
+    # of a fresh run is ``U2 mirror`` (the rotate_180 numbers above are the
+    # pre-#4560 history; the rotate_180 KIND is still applyable from
+    # committed delta artifacts).  First host measurement (macOS arm64,
+    # seed 42, PYTHONHASHSEED=42): routed 25 -> 23, clearance 0 -> 69,
+    # REVERTED -- the flip fixes the ordering but relocates U2's whole
+    # escape problem to B.Cu.  Better than the rotate_180 it replaces
+    # (25 -> 16 host / 25 -> 14 CI) but still refused; decisions and final
+    # state are unchanged (0 kept, 26/31, same 5-net open set).  See the
+    # README section "Mirror probe (#4560)".
+    #
     # Probe 1, ON THE LOCAL HOST ONLY: a +1 net (26/31 -> 27/31,
     # MIPI_DAT0_N closes) that costs manufacturability -- two U1-escape
     # clearances drop to 0.076 / 0.094 mm against the 0.102 mm jlcpcb floor

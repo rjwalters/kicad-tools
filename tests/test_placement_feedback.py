@@ -167,6 +167,52 @@ class TestStrategyApplicator:
         assert result.success is False
         assert "cannot be applied to placement" in result.message
 
+    def test_apply_mirror_component_strategy(self):
+        """#4560: MIRROR_COMPONENT flips side/orientation/pads about the anchor
+        (KiCad left/right flip semantics -- pinned by tests/test_mirror_golden.py)."""
+
+        class _Pad:
+            def __init__(self):
+                self.position = (1.0, 0.5)
+                self.rotation = 45.0
+                self.layers = ["F.Cu", "F.Paste", "F.Mask"]
+
+        fp = MockFootprint("U9", 30.0, 40.0)
+        fp.rotation = 10.0
+        fp.layer = "F.Cu"
+        fp.pads = [_Pad()]
+        pcb = MockPCB()
+        pcb.footprints.append(fp)
+
+        strategy = ResolutionStrategy(
+            type=StrategyType.MIRROR_COMPONENT,
+            difficulty=Difficulty.MEDIUM,
+            confidence=0.9,
+            actions=[Action(type="mirror", target="U9", params={})],
+        )
+        applicator = StrategyApplicator()
+        # Flip about the anchor keeps the centre fixed: only existence matters.
+        assert applicator.is_safe_to_apply(strategy, pcb) is True
+
+        result = applicator.apply_strategy(pcb, strategy)
+        assert result.success is True
+        assert result.components_moved == ["U9"]
+        assert fp.position == (30.0, 40.0)
+        assert fp.layer == "B.Cu"
+        assert fp.rotation == 170.0  # 180 - 10
+        pad = fp.pads[0]
+        assert pad.position == (1.0, -0.5)  # local (x, y) -> (x, -y)
+        assert pad.rotation == 135.0  # absolute 180 - 45
+        assert pad.layers == ["B.Cu", "B.Paste", "B.Mask"]
+
+        # A second flip is the exact inverse (apply/revert symmetry).
+        applicator.apply_strategy(pcb, strategy)
+        assert fp.layer == "F.Cu"
+        assert fp.rotation == 10.0
+        assert pad.position == (1.0, 0.5)
+        assert pad.rotation == 45.0
+        assert pad.layers == ["F.Cu", "F.Paste", "F.Mask"]
+
     def test_is_safe_to_apply_valid(self):
         """Test safety check for valid strategy."""
         applicator = StrategyApplicator()

@@ -4075,7 +4075,7 @@ def _add_route_parser(subparsers) -> None:
     # feedback.  Distinct from --placement-feedback above: that loop is driven
     # by blocker geometry and can only translate, while this one is driven by
     # the stuck-net classifier's ranked fix ladder and can also execute the
-    # ``rotate_180`` de-reverse move on a reversed facing part.
+    # ``mirror`` layer-flip de-reverse move on a reversed facing part (#4560).
     route_parser.add_argument(
         "--placement-delta-feedback",
         action="store_true",

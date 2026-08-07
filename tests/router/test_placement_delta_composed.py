@@ -104,15 +104,17 @@ class TestRoutedPcbView:
         # FakeRouter has no routes -> nothing to merge -> pre-#4468 behaviour.
         assert loop._routed_pcb_view() is pcb
 
-    def test_proposer_classifies_the_view_and_still_emits_rotate_180(self, tmp_path: Path):
+    def test_proposer_classifies_the_view_and_still_emits_mirror(self, tmp_path: Path):
         pcb = _load(tmp_path, _facing_rows_bundle_board(reversed_rows=True))
         loop = PlacementDeltaFeedbackLoop(
             router=RoutedFakeRouter([], 0, lambda _r: []), pcb=pcb, verbose=False
         )
         deltas = loop._propose_deltas()
-        rotate = [d for d in deltas if d.kind == "rotate_180"]
-        assert rotate, f"expected a rotate_180 delta, got {[d.kind for d in deltas]}"
-        assert rotate[0].target_ref == "UB"
+        # #4560: the reversed bundle's proposal is a mirror (layer flip), not
+        # the chirality-preserving rotate_180.
+        mirror = [d for d in deltas if d.kind == "mirror"]
+        assert mirror, f"expected a mirror delta, got {[d.kind for d in deltas]}"
+        assert mirror[0].target_ref == "UB"
 
     def test_excluded_nets_are_not_diagnosed(self, tmp_path: Path):
         pcb = _load(tmp_path, _facing_rows_bundle_board(reversed_rows=True))

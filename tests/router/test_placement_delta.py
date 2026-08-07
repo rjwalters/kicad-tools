@@ -187,7 +187,10 @@ def _make_diag(net_name: str, actions, **kw) -> StuckNetDiagnosis:
 
 
 class TestMappingTable:
-    def test_de_reverse_maps_to_rotate_180_on_secondary_ref(self):
+    def test_de_reverse_maps_to_mirror_on_secondary_ref(self):
+        """#4560: DE_REVERSE_BUNDLE proposes a MIRROR (layer flip), replacing
+        the earlier rotate_180 -- rotation preserves the pin column's chirality
+        and structurally cannot un-reverse it (board-07 CI: routed 25 -> 14)."""
         diag = _make_diag(
             "DQ2",
             [RecommendedAction.DE_REVERSE_BUNDLE, RecommendedAction.ACCEPT_PLATEAU],
@@ -200,11 +203,12 @@ class TestMappingTable:
                 secondary_ref="UB",
             ),
         )
-        delta = delta_from_diagnosis(None, diag)  # pcb unused for rotate_180
+        delta = delta_from_diagnosis(None, diag)  # pcb unused for mirror
         assert delta is not None
-        assert delta.kind == "rotate_180"
+        assert delta.kind == "mirror"
         assert delta.target_ref == "UB"
-        assert delta.rotation_delta == 180.0
+        # A mirror is parameterless -- a left/right flip about the anchor.
+        assert delta.rotation_delta == 0.0
         assert delta.dx == 0.0 and delta.dy == 0.0
         assert delta.source_action == "de_reverse_bundle"
         assert delta.confidence == "medium"
@@ -247,9 +251,9 @@ class TestMappingTable:
 
 
 class TestSyntheticBoards:
-    def test_reversed_bundle_emits_rotate_180_on_secondary(self, tmp_path: Path):
-        """AC (a): a reversed 3+ member facing-row bundle -> rotate_180 on the
-        secondary (reversed) facing part."""
+    def test_reversed_bundle_emits_mirror_on_secondary(self, tmp_path: Path):
+        """AC (a): a reversed 3+ member facing-row bundle -> mirror on the
+        secondary (reversed) facing part (#4560)."""
         pcb = _load(tmp_path, _facing_rows_bundle_board(reversed_rows=True))
         diag = _diag(pcb, "DQ2")
         assert diag.classification is StuckClass.PLACEMENT_BOUND
@@ -259,12 +263,12 @@ class TestSyntheticBoards:
 
         delta = delta_from_diagnosis(pcb, diag)
         assert delta is not None
-        assert delta.kind == "rotate_180"
+        assert delta.kind == "mirror"
         assert delta.target_ref == diag.bundle_orientation.secondary_ref == "UB"
-        assert delta.rotation_delta == 180.0
+        assert delta.rotation_delta == 0.0
 
-    def test_co_oriented_bundle_emits_translate_not_rotate(self, tmp_path: Path):
-        """AC (b): a co-oriented saturated bundle -> translate (NOT rotate --
+    def test_co_oriented_bundle_emits_translate_not_mirror(self, tmp_path: Path):
+        """AC (b): a co-oriented saturated bundle -> translate (NOT mirror --
         de-reversing a co-oriented bundle would create crossings)."""
         pcb = _load(tmp_path, _facing_rows_bundle_board(reversed_rows=False))
         diag = _diag(pcb, "DQ2")
@@ -312,7 +316,7 @@ class TestSerializationAndPurity:
         assert delta is not None
         blob = json.dumps(delta.to_dict())  # must not raise
         loaded = json.loads(blob)
-        assert loaded["kind"] == "rotate_180"
+        assert loaded["kind"] == "mirror"
         assert loaded["target_ref"] == "UB"
         assert set(loaded.keys()) == {
             "net_name",
@@ -357,9 +361,9 @@ class TestBoard07:
     def pcb(self) -> PCB:
         return PCB.load(str(_BOARD07_ARTIFACT))
 
-    def test_ddr_self_crossing_nets_emit_rotate_180(self, pcb: PCB):
+    def test_ddr_self_crossing_nets_emit_mirror(self, pcb: PCB):
         """The reversed DDR byte (DQ3/DQ4, inversion_fraction ~= 1.0) each emit a
-        rotate_180 targeting the reversed facing QFN."""
+        mirror targeting the reversed facing QFN (#4560)."""
         result = classify_stuck_nets_from_pcb(pcb)
         ddr = [
             d
@@ -373,12 +377,12 @@ class TestBoard07:
             assert diag.bundle_orientation.inversion_fraction == pytest.approx(1.0)
             delta = delta_from_diagnosis(pcb, diag)
             assert delta is not None
-            assert delta.kind == "rotate_180"
-            assert delta.rotation_delta == 180.0
+            assert delta.kind == "mirror"
+            assert delta.rotation_delta == 0.0
             assert delta.target_ref == diag.bundle_orientation.secondary_ref
 
     def test_tmds_co_oriented_lanes_emit_translate(self, pcb: PCB):
-        """The co-oriented TMDS lanes emit translate, never rotate_180."""
+        """The co-oriented TMDS lanes emit translate, never mirror."""
         result = classify_stuck_nets_from_pcb(pcb)
         tmds = [d for d in result.diagnoses if d.net_name.startswith("TMDS_")]
         assert tmds, "expected stuck TMDS nets on the board-07 artifact"
@@ -395,7 +399,7 @@ class TestBoard07:
         result = classify_stuck_nets_from_pcb(pcb)
         deltas = deltas_from_result(pcb, result)
         kinds = {d.kind for d in deltas}
-        assert "rotate_180" in kinds
+        assert "mirror" in kinds
         assert "translate" in kinds
         assert all(isinstance(d, PlacementDelta) for d in deltas)
         # JSON round-trips for the whole batch.

@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 logger = logging.getLogger(__name__)
 
@@ -284,26 +284,53 @@ class Pad:
         # Store the Python value first via the default mechanism.
         super().__setattr__(name, value)
 
-        # Only ``rotation`` mirrors into the S-expression tree.  During
+        # ``rotation``, ``position`` and ``layers`` mirror into the
+        # S-expression tree (issue #4518 for rotation; #4560 extends the
+        # write-through to the fields a mirror/layer-flip mutates -- before
+        # that, assigning ``pad.position`` or ``pad.layers`` updated the
+        # dataclass but silently never reached ``PCB.save``, so a flipped
+        # board would have saved half-flipped with no error signal).  During
         # ``__init__`` (and for pads never linked to a node, e.g. freshly
         # instantiated library pads or test doubles) ``_sexp_node`` is None and
         # this is a no-op -- matching ``Footprint.__setattr__``'s guard.
-        if name != "rotation":
+        if name not in ("rotation", "position", "layers"):
             return
         sexp_node: SExp | None = self.__dict__.get("_sexp_node")
         if sexp_node is None:
             return
-        at_node = sexp_node.find_child("at")
-        if at_node is not None:
-            # ``rotation`` is always numeric; narrow to ``float`` so the SExp
-            # mutators receive their declared ``float`` type rather than the
-            # ``object`` of ``__setattr__``'s signature (keeps mypy at baseline,
-            # matching ``Footprint.__setattr__``'s already-baselined pattern).
-            angle = float(value)  # type: ignore[arg-type]
-            if len(at_node.children) >= 3:
-                at_node.set_value(2, angle)
-            elif angle != 0.0:
-                at_node.add(angle)
+
+        if name == "rotation":
+            at_node = sexp_node.find_child("at")
+            if at_node is not None:
+                # ``rotation`` is always numeric; narrow to ``float`` so the
+                # SExp mutators receive their declared ``float`` type rather
+                # than the ``object`` of ``__setattr__``'s signature (keeps
+                # mypy at baseline, matching ``Footprint.__setattr__``'s
+                # already-baselined pattern).
+                angle = float(value)  # type: ignore[arg-type]
+                if len(at_node.children) >= 3:
+                    at_node.set_value(2, angle)
+                elif angle != 0.0:
+                    at_node.add(angle)
+
+        elif name == "position":
+            # Pad ``(at x y ...)`` stores FOOTPRINT-LOCAL coordinates (no
+            # board-origin conversion, unlike ``Footprint.position``).
+            at_node = sexp_node.find_child("at")
+            if at_node is not None:
+                pos = cast("tuple[float, float]", value)
+                at_node.set_value(0, float(pos[0]))
+                at_node.set_value(1, float(pos[1]))
+
+        elif name == "layers":
+            layers_node = sexp_node.find_child("layers")
+            if layers_node is not None:
+                # Rebuild in place; quoted atoms because layer names ("F.Cu",
+                # "*.Mask") are strict-typed strings in the KiCad grammar.
+                layers_node.children = [
+                    SExp.quoted_atom(str(layer_name))
+                    for layer_name in value  # type: ignore[attr-defined]
+                ]
 
     @property
     def net(self) -> int:

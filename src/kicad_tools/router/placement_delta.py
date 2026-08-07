@@ -18,10 +18,16 @@ Phase 2 (#4467).
 Mapping rules (driven off the *top-ranked* action, honoring the ladder's
 deliberate omissions -- e.g. a reversed bus never gets ``WIDEN_CHANNEL``):
 
-* ``DE_REVERSE_BUNDLE`` -> ``kind="rotate_180"`` on the reversed facing part
-  (:attr:`BundleOrientation.secondary_ref`), ``rotation_delta = 180.0``.  This
-  is the geometric realization of "flip the facing pad column so the bundle
-  stops self-crossing".
+* ``DE_REVERSE_BUNDLE`` -> ``kind="mirror"`` on the reversed facing part
+  (:attr:`BundleOrientation.secondary_ref`): a KiCad-semantics layer flip
+  about the part's own anchor.  This REPLACES the earlier ``rotate_180``
+  proposal (issue #4560): rotation preserves the pin column's chirality, so
+  it structurally cannot un-reverse a mirrored pin order -- it only relocates
+  the whole facing column to the far side of the package (measured on
+  board-07 CI: routed 25 -> 14, reverted).  A mirror un-reverses the column
+  in place; KiCad expresses it as a flip to the other board side.  The
+  ``rotate_180`` *kind* remains fully supported by the Phase-2 applicator for
+  committed delta artifacts -- only the proposal changed.
 * ``MOVE_PART`` -> ``kind="translate"``: ``target_ref`` is the crowded foreign
   component nearest the stranded pad; ``(dx, dy)`` is a minimal bounded step
   toward the widest open escape arc.
@@ -79,10 +85,11 @@ class PlacementDelta:
     """A concrete, applyable placement change proposed for one stuck net.
 
     Data only -- emitting a ``PlacementDelta`` mutates nothing.  ``kind`` is one
-    of ``"translate"`` | ``"rotate_180"`` | ``"reorder_pins"``; the geometric
-    fields carry the move for the kinds that have one (``translate`` uses
-    ``dx``/``dy``; ``rotate_180`` uses ``rotation_delta``; ``reorder_pins``
-    carries rationale only).
+    of ``"translate"`` | ``"rotate_180"`` | ``"mirror"`` | ``"reorder_pins"``;
+    the geometric fields carry the move for the kinds that have one
+    (``translate`` uses ``dx``/``dy``; ``rotate_180`` uses ``rotation_delta``;
+    ``mirror`` is parameterless -- a left/right layer flip about the target's
+    own anchor, #4560; ``reorder_pins`` carries rationale only).
     """
 
     net_name: str
@@ -150,7 +157,7 @@ def delta_from_diagnosis(pcb: PCB, diag: StuckNetDiagnosis) -> PlacementDelta | 
     rationale = top.rationale
 
     if action is RecommendedAction.DE_REVERSE_BUNDLE:
-        return _rotate_180_delta(diag, confidence, rationale)
+        return _mirror_delta(diag, confidence, rationale)
     if action is RecommendedAction.MOVE_PART:
         return _translate_delta(pcb, diag, confidence, rationale)
     if action is RecommendedAction.REORDER_PINS:
@@ -177,17 +184,24 @@ def deltas_from_result(pcb: PCB, result: StuckClassifierResult) -> list[Placemen
 # --- per-kind builders ------------------------------------------------------
 
 
-def _rotate_180_delta(
+def _mirror_delta(
     diag: StuckNetDiagnosis, confidence: str, rationale: str
 ) -> PlacementDelta | None:
-    """DE_REVERSE_BUNDLE -> flip the reversed facing part 180 degrees.
+    """DE_REVERSE_BUNDLE -> mirror (layer-flip) the reversed facing part.
 
     The reversed part is the bundle's ``secondary_ref`` (the classifier resolves
     the two facing rows and reports ``primary_ref`` / ``secondary_ref`` with the
-    ``secondary`` being the one whose pad column runs opposite the primary).  A
-    180-degree rotation is the geometric realization of "flip the facing pad
-    column" so the bundle stops self-crossing.  Returns ``None`` when the facing
-    part could not be resolved (no applyable target).
+    ``secondary`` being the one whose pad column runs opposite the primary).
+
+    Ladder note (#4560): the geometric realization of "un-reverse the facing
+    pad column" is a MIRROR, not a rotation.  A 180-degree rotation preserves
+    the column's chirality -- it de-reverses the pad order only by relocating
+    the whole column to the far side of the package, which collapsed reach on
+    board-07 (CI: routed 25 -> 14, reverted).  The mirror is therefore the
+    single delta emitted for this verdict (``delta_from_diagnosis`` keeps its
+    one-delta-per-diagnosis contract); it is deterministic and parameterless
+    (a left/right flip about the target's own anchor).  Returns ``None`` when
+    the facing part could not be resolved (no applyable target).
     """
     orientation = diag.bundle_orientation
     if orientation is None or not orientation.secondary_ref:
@@ -195,8 +209,7 @@ def _rotate_180_delta(
     return PlacementDelta(
         net_name=diag.net_name,
         target_ref=orientation.secondary_ref,
-        kind="rotate_180",
-        rotation_delta=180.0,
+        kind="mirror",
         source_action=RecommendedAction.DE_REVERSE_BUNDLE.value,
         rationale=rationale,
         confidence=confidence,

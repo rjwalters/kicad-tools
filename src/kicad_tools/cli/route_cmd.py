@@ -2885,8 +2885,9 @@ def _run_placement_delta_feedback(
     :meth:`Autorouter.route_with_placement_delta_feedback`: classify the routed
     board, translate each ``PLACEMENT_BOUND`` / ``CONGESTION_SATURATED``
     diagnosis into a concrete :class:`PlacementDelta`, apply the top applyable
-    one (including the ``rotate_180`` de-reverse the geometry loop cannot
-    express), re-route, and keep it only on a strict routed-net increase.
+    one (including the ``mirror`` layer-flip de-reverse the geometry loop
+    cannot express, #4560), re-route, and keep it only on a strict routed-net
+    increase.
 
     Placement persistence (the second half of the composed path): when a delta
     is KEPT, the routed copper the router produced is geometrically valid only
@@ -13754,7 +13755,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         # Issue #4468 (epic #3438 Phase 3): classifier-driven placement-DELTA
         # feedback.  Runs after (and independently of) the geometry loop above:
         # it consumes the stuck-net classifier's ranked fix ladder and can
-        # execute the ``rotate_180`` de-reverse move the geometry loop cannot
+        # execute the ``mirror`` layer-flip de-reverse the geometry loop cannot
         # express.  When a delta is KEPT the helper persists the moved
         # placement to ``output_path`` and returns it, so the terminal
         # ``_write_routed_pcb`` reads its footprints from the board the routes

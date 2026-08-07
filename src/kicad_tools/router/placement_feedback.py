@@ -32,6 +32,14 @@ from kicad_tools.recovery import (
     StrategyType,
 )
 
+# Snapshot state shapes for the atomic keep/revert machinery (#3504 best
+# snapshot, #4518 pad angles, #4560 layers/pad positions for the mirror
+# delta).  Per-pad: ``(position, rotation, layers)`` with ``None`` marking an
+# attribute the pad object does not carry (test doubles).  Per-footprint:
+# ``((x, y), rotation, layer, [pad_state, ...])``.
+_PadState = tuple[tuple[float, float] | None, float | None, list[str] | None]
+_FootprintState = tuple[tuple[float, float], float, str | None, list[_PadState]]
+
 
 def detect_pf_stagnation(
     routed_history: list[int],
@@ -118,6 +126,12 @@ class PlacementDiffEntry:
     old_xy: tuple[float, float]
     new_xy: tuple[float, float]
     rotation_delta: float = 0.0
+    # Board side before/after (issue #4560): a kept mirror delta flips the
+    # component's layer, which position/rotation alone cannot express (a
+    # flip at rotation 90 leaves both unchanged).  ``None`` when the loop's
+    # board doubles carry no layer attribute.
+    old_layer: str | None = None
+    new_layer: str | None = None
 
     @property
     def distance_mm(self) -> float:
@@ -133,6 +147,8 @@ class PlacementDiffEntry:
             "new_xy": [self.new_xy[0], self.new_xy[1]],
             "rotation_delta": self.rotation_delta,
             "distance_mm": self.distance_mm,
+            "old_layer": self.old_layer,
+            "new_layer": self.new_layer,
         }
 
 
@@ -287,7 +303,9 @@ class PlacementFeedbackLoop:
         self._strategy_applicator = StrategyApplicator()
         # Snapshot of original positions, populated lazily the first time
         # a strategy is applied.  Used to build the placement diff.
-        self._original_positions: dict[str, tuple[tuple[float, float], float]] = {}
+        # ``ref -> ((x, y), rotation, layer)`` -- layer added by #4560 so a
+        # kept mirror (layer flip) is visible in the diff artifact.
+        self._original_positions: dict[str, tuple[tuple[float, float], float, str | None]] = {}
 
     def run(
         self,
@@ -356,9 +374,7 @@ class PlacementFeedbackLoop:
         # placement -- the saved artifact can contain opens/DRC at the new
         # pad positions.  Snapshot the placement ALONGSIDE the routes and
         # restore them together so the best snapshot is atomic.
-        best_placement_snapshot: dict[str, tuple[tuple[float, float], float, list[float]]] = (
-            self._snapshot_placement()
-        )
+        best_placement_snapshot: dict[str, _FootprintState] = self._snapshot_placement()
 
         # Issue #3474 (chorus R2): seed the best-known state with the
         # PRE-LOOP routes.  The #2840 snapshot only made the loop
@@ -945,7 +961,7 @@ class PlacementFeedbackLoop:
         return None
 
     def _snapshot_positions(self, refs: list[str]) -> None:
-        """Record the original (x, y, rotation) for each ref, once."""
+        """Record the original (x, y, rotation, layer) for each ref, once."""
         if self.pcb is None:
             return
         for ref in refs:
@@ -956,29 +972,39 @@ class PlacementFeedbackLoop:
                 continue
             pos = fp.position
             rotation = float(getattr(fp, "rotation", 0.0))
-            self._original_positions[ref] = ((pos[0], pos[1]), rotation)
+            layer = getattr(fp, "layer", None)
+            self._original_positions[ref] = (
+                (pos[0], pos[1]),
+                rotation,
+                str(layer) if layer is not None else None,
+            )
 
-    def _snapshot_placement(
-        self,
-    ) -> dict[str, tuple[tuple[float, float], float, list[float]]]:
-        """Capture every footprint's (x, y) position, rotation, and pad angles.
+    def _snapshot_placement(self) -> dict[str, _FootprintState]:
+        """Capture every footprint's position, rotation, layer, and pad state.
 
         Issue #3504: used to take an atomic best snapshot of the
         component placement alongside the best routes.  Returns a mapping
-        ``ref -> ((x, y), rotation, [pad_rotation, ...])``.  When no PCB is
+        ``ref -> ((x, y), rotation, layer, [pad_state, ...])``.  When no PCB is
         attached (routing-strategies-only mode) this returns an empty dict,
         which makes ``_restore_placement`` a no-op.
 
-        Issue #4518: the per-pad rotations are captured alongside the
+        Issue #4518: per-pad rotations are captured alongside the
         footprint-level rotation so that a reverted (non-improving) delta
         restores each pad's ABSOLUTE ``(at x y ANGLE)`` orientation too.  The
         applicator's ``rotate_180`` bumps every pad's ``.rotation`` in lockstep
         with ``fp.rotation`` (see ``StrategyApplicator._apply_rotate_component``),
         so restoring only the footprint angle would leave pad angles stale in the
-        other direction on revert.  Pads are captured in ``fp.pads`` list order,
-        which is stable, so restore round-trips by index.
+        other direction on revert.
+
+        Issue #4560: the mirror (layer-flip) delta additionally mutates the
+        footprint's ``layer``, every pad's local ``position`` and ``layers``
+        list, so all of those are captured too.  Each pad's state is a
+        ``(position | None, rotation | None, layers | None)`` triple over the
+        FULL ``fp.pads`` list (``None`` marks an attribute a test double does
+        not carry), so capture and restore are index-aligned by construction --
+        no hasattr-filtered parallel lists.
         """
-        snapshot: dict[str, tuple[tuple[float, float], float, list[float]]] = {}
+        snapshot: dict[str, _FootprintState] = {}
         if self.pcb is None:
             return snapshot
         for fp in getattr(self.pcb, "footprints", []):
@@ -987,29 +1013,41 @@ class PlacementFeedbackLoop:
                 continue
             pos = fp.position
             rotation = float(getattr(fp, "rotation", 0.0))
-            pad_rotations = [
-                float(pad.rotation) for pad in getattr(fp, "pads", []) if hasattr(pad, "rotation")
-            ]
-            snapshot[ref] = ((pos[0], pos[1]), rotation, pad_rotations)
+            layer = getattr(fp, "layer", None)
+            pad_states: list[_PadState] = []
+            for pad in getattr(fp, "pads", []):
+                pad_pos = getattr(pad, "position", None)
+                pad_states.append(
+                    (
+                        (pad_pos[0], pad_pos[1]) if pad_pos is not None else None,
+                        float(pad.rotation) if hasattr(pad, "rotation") else None,
+                        list(pad.layers) if hasattr(pad, "layers") else None,
+                    )
+                )
+            snapshot[ref] = (
+                (pos[0], pos[1]),
+                rotation,
+                str(layer) if layer is not None else None,
+                pad_states,
+            )
         return snapshot
 
-    def _restore_placement(
-        self,
-        snapshot: dict[str, tuple[tuple[float, float], float, list[float]]],
-    ) -> None:
-        """Restore footprint positions/rotations/pad angles from a snapshot.
+    def _restore_placement(self, snapshot: dict[str, _FootprintState]) -> None:
+        """Restore footprint position/rotation/layer/pad state from a snapshot.
 
         Issue #3504: counterpart to :meth:`_snapshot_placement`.  Writes
-        the captured ``(x, y)`` and rotation back onto each footprint so
-        the live ``self.pcb`` matches the placement the restored routes
-        were computed against.  Refs present in the PCB but absent from the
-        snapshot are left untouched (defensive against footprints added
-        mid-loop, which does not happen in practice).
+        the captured state back onto each footprint so the live ``self.pcb``
+        matches the placement the restored routes were computed against.
+        Refs present in the PCB but absent from the snapshot are left
+        untouched (defensive against footprints added mid-loop, which does
+        not happen in practice).
 
-        Issue #4518: also restores each pad's absolute ``.rotation`` from the
-        captured list (matched by ``fp.pads`` list order) so a reverted delta
-        leaves pad angles exactly as they were pre-delta, not just the
-        footprint-level rotation.
+        Issues #4518/#4560: also restores each pad's absolute ``.rotation``,
+        local ``.position`` and ``.layers`` plus the footprint's ``.layer``
+        (matched by ``fp.pads`` list order over the full list) so a reverted
+        mirror delta leaves the board on its original side with every pad's
+        geometry exactly as it was pre-delta.  ``None`` entries (attributes a
+        test double does not carry) are skipped.
         """
         if self.pcb is None or not snapshot:
             return
@@ -1017,17 +1055,25 @@ class PlacementFeedbackLoop:
             ref = getattr(fp, "reference", None)
             if ref is None or ref not in snapshot:
                 continue
-            (x, y), rotation, pad_rotations = snapshot[ref]
+            (x, y), rotation, layer, pad_states = snapshot[ref]
             fp.position = (x, y)
             if hasattr(fp, "rotation"):
                 fp.rotation = rotation
-            pads = [pad for pad in getattr(fp, "pads", []) if hasattr(pad, "rotation")]
-            # strict=False: capture and restore both filter on the same
-            # ``hasattr(pad, "rotation")`` predicate over the same stable
-            # ``fp.pads`` list, so lengths match in practice; tolerate a
-            # mismatch defensively rather than raising mid-revert.
-            for pad, pad_rotation in zip(pads, pad_rotations, strict=False):
-                pad.rotation = pad_rotation
+            if layer is not None and hasattr(fp, "layer"):
+                fp.layer = layer
+            # strict=False: defensive against a pad-count change mid-loop
+            # (does not happen in practice) -- tolerate rather than raising
+            # mid-revert.  Index alignment is exact because capture iterates
+            # the same stable ``fp.pads`` list without filtering.
+            for pad, (pad_pos, pad_rotation, pad_layers) in zip(
+                getattr(fp, "pads", []), pad_states, strict=False
+            ):
+                if pad_pos is not None and hasattr(pad, "position"):
+                    pad.position = pad_pos
+                if pad_rotation is not None and hasattr(pad, "rotation"):
+                    pad.rotation = pad_rotation
+                if pad_layers is not None and hasattr(pad, "layers"):
+                    pad.layers = list(pad_layers)
 
     def _build_placement_diff(self) -> list[PlacementDiffEntry]:
         """Build the placement diff from snapshotted original positions.
@@ -1041,17 +1087,23 @@ class PlacementFeedbackLoop:
         if self.pcb is None:
             return []
         diff: list[PlacementDiffEntry] = []
-        for ref, (old_xy, old_rot) in self._original_positions.items():
+        for ref, (old_xy, old_rot, old_layer) in self._original_positions.items():
             fp = self._find_footprint(ref)
             if fp is None:
                 continue
             new_xy = (fp.position[0], fp.position[1])
             new_rot = float(getattr(fp, "rotation", 0.0))
+            new_layer_attr = getattr(fp, "layer", None)
+            new_layer = str(new_layer_attr) if new_layer_attr is not None else None
             rotation_delta = new_rot - old_rot
+            # A mirror at rotation 90/270 changes NEITHER position nor rotation
+            # (180 - theta is a fixed point there), so the layer flip must be
+            # its own "moved" signal (issue #4560).
             moved = (
                 abs(new_xy[0] - old_xy[0]) > 1e-6
                 or abs(new_xy[1] - old_xy[1]) > 1e-6
                 or abs(rotation_delta) > 1e-6
+                or old_layer != new_layer
             )
             if not moved:
                 continue
@@ -1061,6 +1113,8 @@ class PlacementFeedbackLoop:
                     old_xy=old_xy,
                     new_xy=new_xy,
                     rotation_delta=rotation_delta,
+                    old_layer=old_layer,
+                    new_layer=new_layer,
                 )
             )
         # Sort by largest distance first so the most impactful moves
@@ -1252,8 +1306,9 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
     (:func:`~kicad_tools.router.stuck_classifier.classify_stuck_nets_from_pcb`)
     and Phase-1's translator
     (:func:`~kicad_tools.router.placement_delta.deltas_from_result`).  That lets
-    it execute the ``rotate_180`` (de-reverse a reversed facing QFN) move the
-    classifier recommends -- a move the blocker-geometry loop cannot express.
+    it execute the ``mirror`` (layer-flip the reversed facing QFN to un-reverse
+    its pad column, #4560) and ``rotate_180`` moves the classifier recommends --
+    moves the blocker-geometry loop cannot express.
 
     Relationship to the file-based, subprocess-driven
     :mod:`kicad_tools.router.placement_nudge` (#3865): both classify stuck nets
@@ -1262,8 +1317,8 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
     is translation-only.  This loop runs *in process* on the live
     :class:`~kicad_tools.router.core.Autorouter`, consumes typed
     :class:`~kicad_tools.router.placement_delta.PlacementDelta` objects
-    (including ``rotate_180``), and reuses the base loop's monotone best-snapshot
-    machinery for atomic keep/revert.
+    (including ``rotate_180`` and ``mirror``), and reuses the base loop's
+    monotone best-snapshot machinery for atomic keep/revert.
 
     Each outer iteration:
 
@@ -1420,6 +1475,15 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 affected_components=[delta.target_ref],
                 affected_nets=[delta.net_name],
             )
+        if delta.kind == "mirror":
+            return ResolutionStrategy(
+                type=StrategyType.MIRROR_COMPONENT,
+                difficulty=Difficulty.MEDIUM,
+                confidence=1.0,
+                actions=[Action(type="mirror", target=delta.target_ref, params={})],
+                affected_components=[delta.target_ref],
+                affected_nets=[delta.net_name],
+            )
         # reorder_pins (rationale-only in Phase 1) and any unknown kind.
         return None
 
@@ -1479,15 +1543,23 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             return list(pads)
         return list(getattr(self.router, "pads", {}).values())
 
-    def _snapshot_router_pads(self) -> list[tuple[Any, float, float]]:
-        """Capture each router Pad object's ``(x, y)`` for atomic restore."""
-        return [(pad, pad.x, pad.y) for pad in self._router_pads()]
+    def _snapshot_router_pads(self) -> list[tuple[Any, float, float, Any]]:
+        """Capture each router Pad's ``(x, y, layer)`` for atomic restore.
 
-    def _restore_router_pads(self, snapshot: list[tuple[Any, float, float]]) -> None:
-        """Restore router Pad coordinates captured by :meth:`_snapshot_router_pads`."""
-        for pad, x, y in snapshot:
+        Issue #4560: the mirror delta swaps an SMD pad's routing layer
+        (``F_CU <-> B_CU``), so a revert that restored only positions would
+        leave the router grid routing to phantom back-side pads.  ``layer`` is
+        ``None`` for pad doubles without the attribute (restore skips it).
+        """
+        return [(pad, pad.x, pad.y, getattr(pad, "layer", None)) for pad in self._router_pads()]
+
+    def _restore_router_pads(self, snapshot: list[tuple[Any, float, float, Any]]) -> None:
+        """Restore router Pad state captured by :meth:`_snapshot_router_pads`."""
+        for pad, x, y, layer in snapshot:
             pad.x = x
             pad.y = y
+            if layer is not None:
+                pad.layer = layer
 
     def _clearance_violation_count(self) -> int | None:
         """Router-level clearance-violation count, or ``None`` when unavailable.
@@ -1518,7 +1590,13 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         * ``rotate_180`` -> point-reflect every pad of the target ref through the
           footprint origin (a 180-degree rotation about the origin is exactly a
           reflection through it), matching what the PCB-frame classifier sees
-          after ``fp.rotation += 180``.
+          after ``fp.rotation += 180``;
+        * ``mirror`` (#4560) -> reflect every pad of the target ref across the
+          VERTICAL axis through the footprint anchor (``x -> 2*cx - x``, ``y``
+          unchanged -- the absolute-frame image of KiCad's left/right flip,
+          pinned by the ``tests/fixtures/mirror_flip`` golden) and swap SMD pad
+          routing layers ``F_CU <-> B_CU``.  Through-hole pads mirror position
+          only (they span all layers).  Inner-layer SMD pads do not exist.
         """
         pads = self._router_pads()
         if delta.kind == "translate":
@@ -1535,6 +1613,24 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 if getattr(pad, "ref", "") == delta.target_ref:
                     pad.x = 2.0 * cx - pad.x
                     pad.y = 2.0 * cy - pad.y
+        elif delta.kind == "mirror":
+            from kicad_tools.router.layers import Layer
+
+            fp = self._find_footprint(delta.target_ref)
+            if fp is None:
+                return
+            cx = fp.position[0]
+            for pad in pads:
+                if getattr(pad, "ref", "") != delta.target_ref:
+                    continue
+                pad.x = 2.0 * cx - pad.x
+                if getattr(pad, "through_hole", False):
+                    continue
+                layer = getattr(pad, "layer", None)
+                if layer == Layer.F_CU:
+                    pad.layer = Layer.B_CU
+                elif layer == Layer.B_CU:
+                    pad.layer = Layer.F_CU
 
     # --- driver ------------------------------------------------------------
 

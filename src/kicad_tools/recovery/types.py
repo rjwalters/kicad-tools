@@ -39,6 +39,7 @@ class StrategyType(Enum):
     MOVE_COMPONENT = "move_component"  # Move a single component
     MOVE_MULTIPLE = "move_multiple"  # Move multiple components
     ROTATE_COMPONENT = "rotate_component"  # Rotate a single component in place
+    MIRROR_COMPONENT = "mirror_component"  # Flip a component to the other side (layer flip)
     ADD_VIA = "add_via"  # Add via to change layers
     CHANGE_LAYER = "change_layer"  # Route on different layer
     REROUTE_NET = "reroute_net"  # Reroute a single net
@@ -299,12 +300,13 @@ class Action:
     of a resolution strategy.
 
     Attributes:
-        type: Action type ("move", "add_via", "reroute", "change_layer").
+        type: Action type ("move", "rotate", "mirror", "add_via", "reroute",
+            "change_layer").
         target: Target of the action (component ref, net name, etc.).
         params: Action-specific parameters.
     """
 
-    type: str  # "move", "add_via", "reroute", "change_layer"
+    type: str  # "move", "rotate", "mirror", "add_via", "reroute", "change_layer"
     target: str  # Component ref, net name, etc.
     params: dict[str, Any] = field(default_factory=dict)
 

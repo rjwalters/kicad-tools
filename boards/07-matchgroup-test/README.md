@@ -270,6 +270,39 @@ run-to-run nondeterminism (#4536), on a cross-host axis: future
 threshold or known-open decisions for this board should be made against
 the CI numbers.
 
+#### Mirror probe (#4560) --- first measurement
+
+`DE_REVERSE_BUNDLE` now proposes `kind="mirror"` (a KiCad-semantics
+layer flip of `U2` about its own anchor) instead of `rotate_180`, so
+probe 0 of a fresh run is the mirror.  The structural diagnosis is
+unchanged and still correct --- 28/28 facing pad pairs invert between
+`U1` and `U2`, and a flip is the only orientation move that can
+un-reverse a mirrored pin order (rotate_180 preserves chirality).
+
+First measurement, **host-qualified per the divergence note above**
+(macOS arm64, solo, `--seed 42`, `PYTHONHASHSEED=42`):
+
+* probe 0 `U2` **mirror**: routed `25 -> 23`, clearance `0 -> 69`,
+  reverted.  The flip moves `U2`'s pad column to `B.Cu`, which
+  un-reverses the bundle *ordering* but relocates the entire DDR escape
+  problem to the back side, where the routed baseline's copper and the
+  skipped power fanout already live --- reach drops and the
+  clearance-regression gate fires.  For calibration: the rotate_180 it
+  replaces measured `25 -> 16` on this host (`25 -> 14` on CI), so the
+  mirror is the better probe of the two, but neither survives.
+* probe 1 `U3` translate: routed `25 -> 26`, clearance `0 -> 2`,
+  reverted --- the same host-only marginal keep/refuse case documented
+  above, refused again by the clearance gate.
+
+Final state is bit-identical in shape to the committed baseline: 10
+deltas proposed, 0 kept, exit `pd_reverted`, 26/31 reach, the identical
+5-net open set (`DQ3`, `DQ4`, `MIPI_DAT0_N`, `TMDS_D0_N`, `TMDS_D1_N`).
+The atomic revert (placement + router pads + routes + grid, now
+layer-aware) restored the board exactly; the delta artifact records both
+refusals with `routed_before`/`routed_after` and `revert_reason`.  CI
+numbers for the mirror probe should be recorded from this change's
+board-07 e2e job when available.
+
 ### Fresh per-net verdict (`kct net-status --incomplete --why`)
 
 Measured on the committed routed PCB and reproduced by a from-scratch

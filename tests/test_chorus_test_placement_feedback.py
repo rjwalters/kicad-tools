@@ -369,12 +369,17 @@ class TestPlacementFeedbackOnSyntheticBlockedPath:
         # so a malformed entry would silently corrupt the CI artifact.
         # ----------------------------------------------------------------
         first_entry_dict = result.placement_diff[0].to_dict()
+        # ``old_layer``/``new_layer`` added by #4560 (mirror/layer-flip
+        # deltas): a kept flip at rotation 90 changes neither position nor
+        # rotation, so the board side must be part of the diff schema.
         assert set(first_entry_dict.keys()) == {
             "ref",
             "old_xy",
             "new_xy",
             "rotation_delta",
             "distance_mm",
+            "old_layer",
+            "new_layer",
         }, (
             f"PlacementDiffEntry.to_dict() returned unexpected keys: "
             f"{set(first_entry_dict.keys())}.  The CLI persists this "

@@ -9,7 +9,9 @@ The driver's keep/revert/skip logic is exercised with a lightweight
 current pad geometry, plus an injected ``delta_proposer`` -- this isolates the
 loop's transaction semantics from real routing physics.  A separate test drives
 the *real* classifier -> translator pipeline on the reversed-bundle fixture to
-confirm the driver's default proposer emits the expected ``rotate_180`` delta.
+confirm the driver's default proposer emits the expected ``mirror`` delta
+(#4560; the ``rotate_180`` *kind* remains supported for delta artifacts and is
+still exercised below).
 """
 
 from __future__ import annotations
@@ -90,11 +92,24 @@ def _rotated_pad_board(tmp_path: Path):
 
 
 class MockPad:
-    """Minimal pad stub carrying only the ``.rotation`` the applicator and the
-    snapshot/restore path read (issue #4518)."""
+    """Minimal pad stub for the applicator and snapshot/restore paths.
 
-    def __init__(self, rotation: float = 0.0):
+    ``rotation`` is always present (issue #4518).  ``position``/``layers`` are
+    set ONLY when passed (issue #4560) -- the mirror applicator and the
+    layer-aware snapshot guard on ``hasattr``, so a bare stub keeps exercising
+    the tolerant path while a full stub exercises the flip."""
+
+    def __init__(
+        self,
+        rotation: float = 0.0,
+        position: tuple[float, float] | None = None,
+        layers: list[str] | None = None,
+    ):
         self.rotation = rotation
+        if position is not None:
+            self.position = position
+        if layers is not None:
+            self.layers = list(layers)
 
 
 class MockFootprint:
@@ -105,13 +120,23 @@ class MockFootprint:
         y: float,
         rotation: float = 0.0,
         pad_rotations: list[float] | None = None,
+        layer: str | None = None,
+        pads: list | None = None,
     ):
         self.reference = reference
         self.position = (x, y)
         self.rotation = rotation
+        # ``layer`` set only when given (#4560): the layer-aware snapshot and
+        # the mirror applicator guard on ``hasattr(fp, "layer")``.
+        if layer is not None:
+            self.layer = layer
         # Default empty (existing tests): the applicator/snapshot pad loops are
-        # no-ops.  Pass ``pad_rotations`` to exercise the #4518 pad-angle sync.
-        self.pads: list = [MockPad(r) for r in (pad_rotations or [])]
+        # no-ops.  Pass ``pad_rotations`` to exercise the #4518 pad-angle sync,
+        # or ``pads`` for full #4560 mirror stubs.
+        if pads is not None:
+            self.pads: list = list(pads)
+        else:
+            self.pads = [MockPad(r) for r in (pad_rotations or [])]
 
 
 class MockPCB:
@@ -125,11 +150,18 @@ class MockPCB:
 
 
 class FakePad:
-    def __init__(self, x: float, y: float, ref: str, pin: str = "1"):
+    def __init__(
+        self, x: float, y: float, ref: str, pin: str = "1", layer=None, through_hole=False
+    ):
         self.x = x
         self.y = y
         self.ref = ref
         self.pin = pin
+        self.through_hole = through_hole
+        # Router-pad layer set only when given (#4560): the mirror transform
+        # and layer-aware router-pad snapshot guard via ``getattr``.
+        if layer is not None:
+            self.layer = layer
 
 
 class FakeRouter:
@@ -198,6 +230,15 @@ def _rotate_delta(ref: str = "UB", net: str = "DQ2") -> PlacementDelta:
         target_ref=ref,
         kind="rotate_180",
         rotation_delta=180.0,
+        source_action="de_reverse_bundle",
+    )
+
+
+def _mirror_delta(ref: str = "UB", net: str = "DQ2") -> PlacementDelta:
+    return PlacementDelta(
+        net_name=net,
+        target_ref=ref,
+        kind="mirror",
         source_action="de_reverse_bundle",
     )
 
@@ -340,6 +381,107 @@ class TestApplicatorRotate:
 
 
 # --------------------------------------------------------------------------- #
+# Applicator: mirror / layer-flip support (#4560)                              #
+# --------------------------------------------------------------------------- #
+
+
+def _mirror_strategy(ref: str) -> ResolutionStrategy:
+    return ResolutionStrategy(
+        type=StrategyType.MIRROR_COMPONENT,
+        difficulty=Difficulty.MEDIUM,
+        confidence=1.0,
+        actions=[Action(type="mirror", target=ref, params={})],
+    )
+
+
+class TestApplicatorMirror:
+    """Mock-level coverage of ``_apply_mirror_component``; the real-PCB
+    semantics are pinned against KiCad's own flip by the golden pair in
+    ``tests/test_mirror_golden.py``."""
+
+    @staticmethod
+    def _full_fp(rotation: float = 30.0) -> MockFootprint:
+        return MockFootprint(
+            "UB",
+            10.0,
+            20.0,
+            rotation=rotation,
+            layer="F.Cu",
+            pads=[
+                MockPad(rotation=30.0, position=(-1.6, -1.0), layers=["F.Cu", "F.Mask"]),
+                MockPad(rotation=75.0, position=(-1.6, 1.0), layers=["F.Cu", "F.Mask"]),
+                MockPad(rotation=30.0, position=(2.0, -0.8), layers=["*.Cu", "*.Mask"]),
+            ],
+        )
+
+    def test_mirror_flips_layer_rotation_and_pads(self):
+        fp = self._full_fp()
+        pcb = MockPCB([fp])
+        result = StrategyApplicator().apply_strategy(pcb, _mirror_strategy("UB"))
+        assert result.success is True
+        assert result.components_moved == ["UB"]
+        # Anchor fixed; side + orientation per the KiCad-pinned transform.
+        assert fp.position == (10.0, 20.0)
+        assert fp.layer == "B.Cu"
+        assert fp.rotation == 150.0  # 180 - 30
+        # Pads: local (x, y) -> (x, -y); absolute angle a -> 180 - a;
+        # SMD layers side-swapped, through-hole *.Cu/*.Mask untouched.
+        assert [p.position for p in fp.pads] == [(-1.6, 1.0), (-1.6, -1.0), (2.0, 0.8)]
+        assert [p.rotation for p in fp.pads] == [150.0, 105.0, 150.0]
+        assert fp.pads[0].layers == ["B.Cu", "B.Mask"]
+        assert fp.pads[2].layers == ["*.Cu", "*.Mask"]
+
+    def test_mirror_from_back_returns_to_front(self):
+        fp = self._full_fp()
+        pcb = MockPCB([fp])
+        applicator = StrategyApplicator()
+        applicator.apply_strategy(pcb, _mirror_strategy("UB"))
+        applicator.apply_strategy(pcb, _mirror_strategy("UB"))
+        assert fp.layer == "F.Cu"
+        assert fp.rotation == 30.0
+        assert [p.position for p in fp.pads] == [(-1.6, -1.0), (-1.6, 1.0), (2.0, -0.8)]
+        assert [p.rotation for p in fp.pads] == [30.0, 75.0, 30.0]
+
+    def test_mirror_tolerates_bare_doubles(self):
+        """Footprints/pads without layer/position/layers attributes must not
+        raise (the same tolerance contract as the rotate applicator)."""
+
+        class _BarePad:
+            pass
+
+        fp = MockFootprint("UB", 0.0, 0.0, rotation=0.0)
+        fp.pads = [_BarePad()]
+        result = StrategyApplicator().apply_strategy(MockPCB([fp]), _mirror_strategy("UB"))
+        assert result.success is True
+        assert fp.rotation == 180.0  # 180 - 0
+        assert not hasattr(fp, "layer")
+        assert not hasattr(fp.pads[0], "rotation")
+
+    def test_mirror_missing_component_fails(self):
+        result = StrategyApplicator().apply_strategy(MockPCB([]), _mirror_strategy("UB"))
+        assert result.success is False
+
+    def test_mirror_wrong_action_type_fails(self):
+        strategy = ResolutionStrategy(
+            type=StrategyType.MIRROR_COMPONENT,
+            difficulty=Difficulty.MEDIUM,
+            confidence=1.0,
+            actions=[Action(type="rotate", target="UB", params={})],
+        )
+        result = StrategyApplicator().apply_strategy(
+            MockPCB([MockFootprint("UB", 0.0, 0.0)]), strategy
+        )
+        assert result.success is False
+
+    def test_mirror_is_safe_to_apply(self):
+        applicator = StrategyApplicator()
+        pcb = MockPCB([MockFootprint("UB", 10.0, 20.0)])
+        # Flip about the anchor keeps the centre fixed -- only existence matters.
+        assert applicator.is_safe_to_apply(_mirror_strategy("UB"), pcb) is True
+        assert applicator.is_safe_to_apply(_mirror_strategy("UB"), MockPCB([])) is False
+
+
+# --------------------------------------------------------------------------- #
 # PlacementDelta.from_dict round-trip (#4467)                                  #
 # --------------------------------------------------------------------------- #
 
@@ -348,6 +490,11 @@ class TestPlacementDeltaRoundTrip:
     def test_rotate_delta_round_trips(self):
         d = _rotate_delta()
         assert PlacementDelta.from_dict(d.to_dict()) == d
+
+    def test_mirror_delta_round_trips(self):
+        d = _mirror_delta()
+        assert PlacementDelta.from_dict(d.to_dict()) == d
+        assert d.to_dict()["kind"] == "mirror"
 
     def test_translate_delta_round_trips(self):
         d = PlacementDelta(
@@ -455,6 +602,109 @@ class TestDeltaFeedbackKeepRevert:
 
 
 # --------------------------------------------------------------------------- #
+# Driver: mirror delta keep / revert is LAYER-aware (#4560)                    #
+# --------------------------------------------------------------------------- #
+
+
+class TestDeltaFeedbackMirror:
+    """Mirror plumbing through the loop: ``_strategy_from_delta`` builds a
+    MIRROR_COMPONENT (no longer skipped-as-unknown), ``_apply_delta_to_router_pads``
+    mirrors router pads across the anchor's vertical axis and swaps SMD layers,
+    and BOTH snapshot/revert paths restore layers as well as geometry."""
+
+    @staticmethod
+    def _mirror_fixture(failed_predicate):
+        from kicad_tools.router.layers import Layer
+
+        fp = MockFootprint(
+            "UB",
+            10.0,
+            10.0,
+            rotation=30.0,
+            layer="F.Cu",
+            pads=[MockPad(rotation=30.0, position=(2.0, 1.0), layers=["F.Cu", "F.Mask"])],
+        )
+        pcb = MockPCB([fp])
+        router = FakeRouter([FakePad(12.0, 10.0, "UB", "2", layer=Layer.F_CU)], 2, failed_predicate)
+        loop = PlacementDeltaFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            delta_proposer=lambda _pcb: [_mirror_delta()],
+        )
+        return loop, router, pcb, fp
+
+    def test_strategy_from_delta_builds_mirror_strategy(self):
+        loop, _router, _pcb, _fp = self._mirror_fixture(_rotate_never_helps)
+        strategy = loop._strategy_from_delta(_mirror_delta())
+        assert strategy is not None
+        assert strategy.type == StrategyType.MIRROR_COMPONENT
+        assert strategy.actions[0].type == "mirror"
+        assert strategy.actions[0].target == "UB"
+
+    def test_improving_mirror_is_kept_with_layer_flip(self):
+        from kicad_tools.router.layers import Layer
+
+        # UB router pad starts at x=12; mirroring about the anchor (10, 10)
+        # reflects it to x=8, which the predicate reads as "net 2 routed".
+        loop, router, pcb, fp = self._mirror_fixture(_rotate_fixes_net2)
+        result = loop.run_delta(max_adjustments=3)
+        assert result.success is True
+        assert [d.kind for d in result.applied_deltas] == ["mirror"]
+        # PCB side flipped and kept.
+        assert fp.layer == "B.Cu"
+        assert fp.rotation == 150.0  # 180 - 30
+        assert fp.pads[0].position == (2.0, -1.0)
+        assert fp.pads[0].layers == ["B.Cu", "B.Mask"]
+        # Router side mirrored + layer-swapped and kept.
+        assert _ub_pad(router).x == pytest.approx(8.0)
+        assert _ub_pad(router).layer == Layer.B_CU
+        # The diff artifact records the side change (a flip at rotation 90
+        # would move nothing, so the layer IS the signal).
+        entry = next(e for e in result.placement_diff if e.ref == "UB")
+        assert (entry.old_layer, entry.new_layer) == ("F.Cu", "B.Cu")
+        assert entry.to_dict()["new_layer"] == "B.Cu"
+
+    def test_non_improving_mirror_reverts_layers_atomically(self):
+        from kicad_tools.router.layers import Layer
+
+        loop, router, pcb, fp = self._mirror_fixture(_rotate_never_helps)
+        result = loop.run_delta(max_adjustments=3)
+        assert result.applied_deltas == []
+        assert result.exit_reason == "pd_reverted"
+        # PCB side fully restored: footprint layer/rotation AND every pad's
+        # position, angle, and layer list.
+        assert fp.layer == "F.Cu"
+        assert fp.rotation == 30.0
+        assert fp.pads[0].position == (2.0, 1.0)
+        assert fp.pads[0].rotation == 30.0
+        assert fp.pads[0].layers == ["F.Cu", "F.Mask"]
+        # Router side restored: position AND routing layer.
+        assert _ub_pad(router).x == pytest.approx(12.0)
+        assert _ub_pad(router).layer == Layer.F_CU
+        assert result.placement_diff == []
+
+    def test_router_pad_mirror_spares_through_hole_layers(self):
+        from kicad_tools.router.layers import Layer
+
+        fp = MockFootprint("UB", 10.0, 10.0, layer="F.Cu")
+        pcb = MockPCB([fp])
+        smd = FakePad(12.0, 10.0, "UB", "1", layer=Layer.F_CU)
+        pth = FakePad(8.5, 11.0, "UB", "2", layer=Layer.F_CU, through_hole=True)
+        router = FakeRouter([smd, pth], 2, _rotate_never_helps)
+        loop = PlacementDeltaFeedbackLoop(router=router, pcb=pcb, verbose=False)
+
+        loop._apply_delta_to_router_pads(_mirror_delta())
+
+        # Both mirror across the anchor's vertical axis (y untouched)...
+        assert (smd.x, smd.y) == (pytest.approx(8.0), 10.0)
+        assert (pth.x, pth.y) == (pytest.approx(11.5), 11.0)
+        # ...but only the SMD pad changes routing layer.
+        assert smd.layer == Layer.B_CU
+        assert pth.layer == Layer.F_CU
+
+
+# --------------------------------------------------------------------------- #
 # Driver: anchor / budget / kind skips (with logged reason)                    #
 # --------------------------------------------------------------------------- #
 
@@ -524,12 +774,12 @@ class TestDeltaFeedbackSkips:
 
 
 # --------------------------------------------------------------------------- #
-# Real classifier -> translator emits the rotate_180 delta the driver consumes #
+# Real classifier -> translator emits the mirror delta the driver consumes     #
 # --------------------------------------------------------------------------- #
 
 
 class TestClassifierEmitsDelta:
-    def test_reversed_bundle_default_proposer_emits_rotate_180(self, tmp_path: Path):
+    def test_reversed_bundle_default_proposer_emits_mirror(self, tmp_path: Path):
         pcb = _load(tmp_path, _facing_rows_bundle_board(reversed_rows=True))
         # A loop with the DEFAULT proposer (classifier -> translator); no router
         # call needed -- we only exercise proposal.
@@ -537,10 +787,11 @@ class TestClassifierEmitsDelta:
             router=FakeRouter([], 0, lambda _r: []), pcb=pcb, verbose=False
         )
         deltas = loop._propose_deltas()
-        rotate = [d for d in deltas if d.kind == "rotate_180"]
-        assert rotate, f"expected a rotate_180 delta, got {[d.kind for d in deltas]}"
-        assert rotate[0].target_ref == "UB"
-        assert rotate[0].rotation_delta == 180.0
+        # #4560: DE_REVERSE_BUNDLE now proposes the chirality-fixing mirror.
+        mirror = [d for d in deltas if d.kind == "mirror"]
+        assert mirror, f"expected a mirror delta, got {[d.kind for d in deltas]}"
+        assert mirror[0].target_ref == "UB"
+        assert mirror[0].rotation_delta == 0.0
 
 
 # --------------------------------------------------------------------------- #

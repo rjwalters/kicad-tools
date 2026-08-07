@@ -16357,8 +16357,9 @@ class Autorouter:
         each iteration classifies the current placement, translates every
         PLACEMENT_BOUND / CONGESTION_SATURATED diagnosis into a
         :class:`~kicad_tools.router.placement_delta.PlacementDelta` (Phase 1,
-        #4466), applies the top applyable delta (including ``rotate_180`` to
-        de-reverse a facing part), re-routes, and keeps the change only on a
+        #4466), applies the top applyable delta (including ``mirror`` to
+        de-reverse a facing part by layer flip, #4560), re-routes, and keeps
+        the change only on a
         strict routed-net increase -- otherwise reverts placement + routes
         atomically.
 
