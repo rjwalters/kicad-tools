@@ -1961,3 +1961,167 @@ def test_unnamed_net_fixture_kct_check_lvs_line_passes() -> None:
     )
     assert sub.status == "PASSED", f"LVS line: {sub.status} ({sub.detail})"
     assert sub.detail == "label + copper: 0 mismatch(es)"
+
+
+# ---------------------------------------------------------------------------
+# Endpoint-in-pad-copper bonding (issue #4678)
+# ---------------------------------------------------------------------------
+#
+# The legacy endpoint->pad bond required the segment endpoint to sit within
+# POSITION_TOLERANCE (0.01 mm) of the pad *center*.  A trace legally ending
+# inside pad copper but off-center stranded the pad -> a false LVS ``open``
+# that no flag could override (the tapeout Gate 1 wedge).  Step 2a3 bonds an
+# endpoint that lies inside the pad's eroded copper box (or whose trace
+# end-cap penetrates it by > 1 um) on a shared copper layer.
+
+
+def _pcb_endpoint_in_pad(
+    trace_end: tuple[float, float],
+    *,
+    trace_layer: str = "F.Cu",
+    width: float = 0.25,
+) -> str:
+    """Two-pad board: R1.1 (1x1 mm pad at 100,100) and R2.1 (at 110,100).
+
+    A single trace runs from R2.1's center to ``trace_end``.  With the
+    default geometry the endpoint lands *inside* R1.1's copper (box x in
+    [99.5, 100.5]) but 0.3 mm from the pad center — far beyond the legacy
+    0.01 mm center-proximity tolerance.
+    """
+    ex, ey = trace_end
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000f1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-f1-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-f1-val"))
+    (pad "1" smd roundrect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "SIG"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000f2")
+    (at 110 100)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-f2-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-f2-val"))
+    (pad "1" smd roundrect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "SIG"))
+  )
+  (segment (start 110 100) (end {ex} {ey}) (width {width}) (layer "{trace_layer}") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000f3"))
+)
+"""
+
+
+_ENDPOINT_SCHEMATIC: dict[tuple[str, str], str | None] = {
+    ("R1", "1"): "SIG",
+    ("R2", "1"): "SIG",
+}
+
+
+@requires_shapely
+def test_endpoint_inside_pad_copper_off_center_bonds(tmp_path: Path) -> None:
+    """Repro of the #4678 false open: endpoint in pad copper, off-center.
+
+    The trace ends at (100.3, 100) — inside R1.1's 1x1 mm copper box but
+    0.3 mm from the pad center (30x the legacy tolerance).  The pads must
+    land in ONE component: this is real galvanic contact, and kicad-cli,
+    ``kct net-status`` (strict) and ``kct route --complete`` all agree.
+    """
+    pcb_path = _write(tmp_path, "b.kicad_pcb", _pcb_endpoint_in_pad((100.3, 100.0)))
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    assert frozenset({"R1.1", "R2.1"}) in partition, f"partition={partition}"
+    assert len(partition) == 1
+
+
+@requires_shapely
+def test_endpoint_in_pad_lvs_leg_reports_connected(tmp_path: Path) -> None:
+    """The LVS copper diff is CLEAN on the #4678 repro (no false open)."""
+    pcb_path = _write(tmp_path, "b.kicad_pcb", _pcb_endpoint_in_pad((100.3, 100.0)))
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    result = compare_partitions(_ENDPOINT_SCHEMATIC, partition)
+    assert result.clean, f"expected clean LVS, got {result.mismatches}"
+
+
+@requires_shapely
+def test_endpoint_outside_pad_across_clearance_gap_does_not_bond(
+    tmp_path: Path,
+) -> None:
+    """Negative guard: an endpoint across a clearance moat must NOT bond.
+
+    The trace ends at (100.75, 100): R1.1's copper edge is at x=100.5, the
+    0.25 mm-wide trace's end-cap reaches back to x=100.625, leaving a
+    0.125 mm copper-to-copper clearance gap.  Bonding here would fabricate
+    a connection across legal clearance — masking real opens (and, with a
+    foreign net, minting false connects).  SIG must stay split (a real open).
+    """
+    pcb_path = _write(tmp_path, "b.kicad_pcb", _pcb_endpoint_in_pad((100.75, 100.0)))
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    assert frozenset({"R1.1"}) in partition, f"partition={partition}"
+    result = compare_partitions(_ENDPOINT_SCHEMATIC, partition)
+    assert not result.clean
+    assert any(m.net_a == "SIG" for m in result.opens)
+
+
+@requires_shapely
+def test_endpoint_in_pad_layer_gate_preserved(tmp_path: Path) -> None:
+    """A B.Cu trace ending under an F.Cu-only pad's copper must NOT bond.
+
+    Preserves the softstart false-short fix: XY overlap across disjoint
+    copper layers is not a connection — a trace may legally run (and end)
+    directly under an SMD pad on another layer.
+    """
+    pcb_path = _write(
+        tmp_path,
+        "b.kicad_pcb",
+        _pcb_endpoint_in_pad((100.3, 100.0), trace_layer="B.Cu"),
+    )
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    assert frozenset({"R1.1"}) in partition, f"partition={partition}"
+
+
+def test_endpoint_in_pad_shapely_absent_falls_back_to_legacy(tmp_path: Path) -> None:
+    """Core-only installs (no shapely) keep the legacy behavior, no crash."""
+    from unittest import mock
+
+    pcb_path = _write(tmp_path, "b.kicad_pcb", _pcb_endpoint_in_pad((100.3, 100.0)))
+    with mock.patch("kicad_tools.validate.connectivity._has_shapely", return_value=False):
+        partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    # Legacy center-proximity model: the off-center endpoint does not bond,
+    # so the pads stay split (the historical false open) — but nothing raises.
+    assert frozenset({"R1.1"}) in partition
+    assert frozenset({"R2.1"}) in partition
+
+
+@requires_shapely
+def test_endpoint_in_pad_bond_carries_across_segment_chain(tmp_path: Path) -> None:
+    """The 2a3 bond joins the pad to the WHOLE chain, not just one segment.
+
+    R2.1 -> corner -> (100.3, 100) via two chained segments: the endpoint-in-
+    pad bond on the second segment must connect R1.1 to R2.1 through the
+    chain component (the ``segment_extra_nodes`` plumbing, mirroring 2a2).
+    """
+    pcb = _pcb_endpoint_in_pad((100.3, 100.0))
+    # Replace the single segment with a two-segment chain through a corner.
+    pcb = pcb.replace(
+        '  (segment (start 110 100) (end 100.3 100.0) (width 0.25) (layer "F.Cu") (net 1)\n'
+        '    (uuid "00000000-0000-0000-0000-0000000000f3"))\n',
+        '  (segment (start 110 100) (end 105 95) (width 0.25) (layer "F.Cu") (net 1)\n'
+        '    (uuid "00000000-0000-0000-0000-0000000000f3"))\n'
+        '  (segment (start 105 95) (end 100.3 100.0) (width 0.25) (layer "F.Cu") (net 1)\n'
+        '    (uuid "00000000-0000-0000-0000-0000000000f4"))\n',
+    )
+    assert "(end 105 95)" in pcb, "chain rewrite did not apply"
+    pcb_path = _write(tmp_path, "b.kicad_pcb", pcb)
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    assert frozenset({"R1.1", "R2.1"}) in partition, f"partition={partition}"

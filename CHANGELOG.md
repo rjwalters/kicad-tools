@@ -104,6 +104,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged (the #4587 typo guard stays loud, integer maps stay
   byte-identical, and absent names are judged only against a *supplied* stack,
   never guessed).
+- **LVS copper leg no longer reports a false `open` when a trace endpoint
+  lands inside pad copper but off the pad center** (#4678) — the copper
+  partition extractor (`ConnectivityValidator.extract_pad_partition`, the
+  primitive behind `kct check`'s LVS copper leg, `lvs/recipe.py`, and
+  tapeout Gate 1) only bonded a track endpoint to a pad whose *center* was
+  within the legacy 0.01 mm proximity tolerance, so a trace legally
+  terminating inside a pad's copper but away from its center stranded the
+  pad into its own island and surfaced as an unoverridable `open` —
+  contradicting `kct net-status` (strict), `kct route --complete`, and
+  `kicad-cli` on the same artifact, and wedging tapeout with a finding no
+  flag could waive. A new geometric bonding step (2a3) now ties an endpoint
+  to any pad whose eroded copper box (`POUR_PAD_ERODE` 0.1 mm inset, the
+  same guard as the via-in-pad and pour bonds) contains it — or whose box
+  the trace's rounded end-cap penetrates by > 1 µm — on a shared copper
+  layer, and carries the bond across the whole segment chain. The model
+  stays label-free (no `net_name` reads), an endpoint across a real
+  clearance moat can never fuse (negative test included), and
+  shapely-absent core installs keep the previous behavior. All four
+  connectivity consumers now agree by construction, with no flag
+  discipline required.
 
 - **Board-04: C16 field overlap on the committed schematic** (#4675) — the
   fleet's only genuine `sch_field_overlap` advisory (`C16.Value` text

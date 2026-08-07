@@ -777,6 +777,29 @@ class ConnectivityValidator:
                     ):
                         _connect(node_id, pad_id)
 
+        # 2a3. Geometric endpoint-in-pad-copper bonding (issue #4678).  Step
+        #      2a only bonds a segment endpoint to a pad whose *center* is
+        #      within ``POSITION_TOLERANCE`` (0.01 mm) of the endpoint.  A
+        #      trace that legally terminates inside a pad's copper but away
+        #      from the pad center — routers do this routinely on wide pads —
+        #      was invisible to that test, stranding the pad in its own
+        #      component and surfacing as a false LVS ``open`` that no flag
+        #      could override (the tapeout Gate 1 wedge).  Bond an endpoint
+        #      to any pad whose *eroded* copper box contains it (or whose
+        #      eroded box the endpoint's swept trace cap, radius ``width/2``,
+        #      penetrates) on a shared copper layer.  The
+        #      ``POUR_PAD_ERODE`` inset plus the ``> 1 µm`` cap-penetration
+        #      guard mirror steps 2c2 / 2a2: copper across a real clearance
+        #      moat (≥ 0.1 mm on any DRC-clean board) can never fuse, so this
+        #      only adds true galvanic contact — an endpoint physically inside
+        #      pad copper IS connected, exactly as kicad-cli and the strict
+        #      net-status model report it.  Bonds are injected via
+        #      ``segment_extra_nodes`` so the chain builder (2b) carries them
+        #      across the whole segment chain.  Requires shapely; core-only
+        #      installs keep the legacy center-proximity behavior.
+        if _has_shapely():
+            self._connect_endpoint_in_pad(segments, pad_layers, segment_extra_nodes)
+
         # 2b. Segment chains: pads connected through a chain of segments that
         #     share endpoints are galvanically connected even with no pad at
         #     the intermediate junctions.  Reuse the existing chain builder,
@@ -1671,6 +1694,111 @@ class ConnectivityValidator:
                 return eroded
         return circle
 
+    def _eroded_pad_polygons(self) -> dict[str, Any]:
+        """Board-frame eroded copper polygon per pad (``"REF.PAD"`` keys).
+
+        Shared geometry cache for the via-in-pad (2c2) and endpoint-in-pad
+        (2a3) bonding steps: each pad's :meth:`_pad_copper_polygon` (size box,
+        footprint-rotated, ``POUR_PAD_ERODE`` inset).  Pads without a numeric
+        number / real reference are skipped, matching
+        :meth:`extract_pad_partition` step 1.  Requires shapely (returns
+        point geometries / ``None`` entries are filtered out).
+        """
+        pad_polygons: dict[str, Any] = {}
+        for fp in self.pcb.footprints:
+            if not fp.reference or fp.reference.startswith("#"):
+                continue
+            for pad in fp.pads:
+                if pad.number is None or pad.number == "":
+                    continue
+                poly = self._pad_copper_polygon(fp, pad)
+                if poly is not None:
+                    pad_polygons[f"{fp.reference}.{pad.number}"] = poly
+        return pad_polygons
+
+    def _connect_endpoint_in_pad(
+        self,
+        segments: list,
+        pad_layers: dict[str, list[str]],
+        segment_extra_nodes: dict[int, set[str]],
+    ) -> None:
+        """Bond segment endpoints landing inside pad copper (issue #4678).
+
+        A track endpoint that lies inside a pad's copper is galvanic contact
+        with that pad — KiCad's own connectivity, ``kct net-status`` (strict)
+        and ``kct route --complete`` all treat it as connected.  The legacy
+        center-proximity test (step 2a, ``POSITION_TOLERANCE`` = 0.01 mm from
+        the pad *center*) missed it, so the LVS copper leg reported a false
+        ``open`` that blocked tapeout Gate 1 with no override.
+
+        Bond condition (conservative by construction):
+
+        * shared copper layer — the pad's copper must exist on the segment's
+          layer (``*.Cu`` through-hole pads match any copper layer), and
+        * the endpoint lies inside the pad's **eroded** copper box
+          (:meth:`_pad_copper_polygon`, ``POUR_PAD_ERODE`` = 0.1 mm inset), or
+          the endpoint's swept trace end-cap (KiCad tracks have rounded ends
+          of radius ``width / 2``) penetrates that eroded box by **more than
+          1 µm** (the step-2a2 strictly-positive contact-depth guard).
+
+        The 0.1 mm erosion exceeds the box-vs-true-shape approximation error
+        (roundrect/oval corner rounding), and DRC clearance keeps any
+        *foreign* trace's copper ≥ 0.1 mm away from pad copper — its endpoint
+        centerline sits a further ``width / 2`` (end-cap radius) beyond that —
+        so an endpoint across a real clearance moat can NEVER bond.  Only
+        true copper contact is added; no false-short path is introduced.
+
+        Bonds are recorded in ``segment_extra_nodes`` (segment index → node
+        ids), which :meth:`_build_segment_chains` unions into the segment's
+        chain component — so the pad joins every pad reachable through the
+        chain, exactly like the 2a2 via-barrel bonds.  Requires ``shapely``
+        (guarded by the caller); shapely-absent installs keep the legacy
+        center-proximity behavior.
+        """
+        pad_polygons = self._eroded_pad_polygons()
+        if not pad_polygons:
+            return
+
+        # Cheap bounding prefilter: skip the shapely test unless the endpoint
+        # is within the pad box's half-diagonal plus the trace end-cap radius
+        # of the pad center.  Uses the *uneroded* box bound, so it can only
+        # over-admit (the exact eroded test below decides), never miss.
+        pad_bounds: dict[str, tuple[float, float, float]] = {}
+        for fp in self.pcb.footprints:
+            if not fp.reference or fp.reference.startswith("#"):
+                continue
+            for pad in fp.pads:
+                if pad.number is None or pad.number == "":
+                    continue
+                pad_id = f"{fp.reference}.{pad.number}"
+                if pad_id not in pad_polygons:
+                    continue
+                cx, cy = self._transform_pad_position(
+                    pad.position, fp.position[0], fp.position[1], fp.rotation
+                )
+                w, h = pad.size
+                pad_bounds[pad_id] = (cx, cy, math.hypot(w, h) / 2.0)
+
+        for seg_index, seg in enumerate(segments):
+            cap_radius = max((seg.width or 0.0) / 2.0, 0.0)
+            for endpoint in (seg.start, seg.end):
+                ex, ey = endpoint
+                point = _ShapelyPoint(endpoint)
+                for pad_id, (cx, cy, bound) in pad_bounds.items():
+                    reach = bound + cap_radius
+                    dx, dy = ex - cx, ey - cy
+                    if dx * dx + dy * dy > reach * reach:
+                        continue
+                    # Layer gate: the pad's copper must exist on the
+                    # segment's layer for the trace metal to touch it.
+                    if not self._pad_copper_on_layer(pad_layers.get(pad_id, []), seg.layer):
+                        continue
+                    dist = pad_polygons[pad_id].distance(point)
+                    # Inside the eroded box (dist == 0), or the trace end-cap
+                    # penetrates it by > 1 µm (strictly positive contact).
+                    if dist == 0.0 or dist < cap_radius - 1e-3:
+                        segment_extra_nodes.setdefault(seg_index, set()).add(pad_id)
+
     def _connect_via_in_pad(
         self,
         pad_positions: dict[str, tuple[float, float]],
@@ -1697,16 +1825,7 @@ class ConnectivityValidator:
         drops.  Requires ``shapely`` (guarded by the caller).
         """
         # Board-frame eroded copper box per pad.
-        pad_polygons: dict[str, Any] = {}
-        for fp in self.pcb.footprints:
-            if not fp.reference or fp.reference.startswith("#"):
-                continue
-            for pad in fp.pads:
-                if pad.number is None or pad.number == "":
-                    continue
-                poly = self._pad_copper_polygon(fp, pad)
-                if poly is not None:
-                    pad_polygons[f"{fp.reference}.{pad.number}"] = poly
+        pad_polygons = self._eroded_pad_polygons()
 
         for node_id in synthetic_nodes:
             pos = pad_positions.get(node_id)
