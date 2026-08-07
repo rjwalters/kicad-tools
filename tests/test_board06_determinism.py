@@ -101,7 +101,15 @@ _UUID_RE = re.compile(r'\(uuid "[0-9a-fA-F-]+"\)')
 
 
 def _normalize_uuids(text: str) -> str:
-    """Mask uuid4 values (and ONLY uuid4 values) for content comparison."""
+    """Mask every ``(uuid "...")`` value for content comparison.
+
+    This masks *all* UUIDs -- both the random uuid4s KiCad mints for
+    footprints/zones and the deterministic uuid5 copper UUIDs from the
+    #4536 fix -- not just uuid4.  Identity is still enforced positionally:
+    two artifacts only compare equal if their UUID fields occur at the same
+    offsets in the same order, so a UUID-driven reorder still shows up as a
+    diff even though the values themselves are masked.
+    """
     return _UUID_RE.sub('(uuid "X")', text)
 
 
@@ -139,7 +147,14 @@ def _run_route_regen(out_dir: Path) -> str:
 
 
 def _copper_counts(text: str) -> tuple[int, int]:
-    """(segment, via) node counts -- the count-identity invariant."""
+    """(segment, via) node counts -- the count-identity invariant.
+
+    Substring counting is safe for the current KiCad s-expression grammar:
+    no ``(segments``/``(via_...`` (or any other ``(segment*``/``(via*``)
+    token exists in a ``.kicad_pcb``, so these prefixes match only the
+    copper element headers.  If KiCad ever adds such a token this needs to
+    become a token-aware count.
+    """
     return text.count("(segment"), text.count("(via")
 
 

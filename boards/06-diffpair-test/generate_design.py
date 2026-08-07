@@ -3409,24 +3409,6 @@ def main() -> int:
     import argparse
     import random
 
-    # Issue #4536: pin the interpreter hash seed BY CONSTRUCTION before any
-    # routing code runs.  The README's shadow/census repro commands export
-    # ``PYTHONHASHSEED=42`` by hand, but a plain regen invocation did not.
-    # This is defensive hygiene for every str-keyed set/dict iteration in
-    # the in-process router AND the subprocess passes (``kct zones fill``,
-    # ``kct stitch`` inherit the pinned env).  NOTE: the #4536 matrix
-    # proved the pin alone is NOT sufficient for artifact byte-identity --
-    # the residual ~2300-line reorder was driven by random uuid4 values on
-    # stitch/repair copper being re-sorted by kicad-cli's UUID-ordered
-    # board save (fixed via deterministic UUID minting in
-    # ``_generate_uuid`` here and ``_stitch_uuid`` in stitch_cmd.py).
-    # ``PYTHONHASHSEED`` only takes effect at interpreter startup,
-    # so re-exec once with it pinned; the guard makes the exec a no-op when
-    # the wrapper (or the re-exec itself) already pinned it.
-    if os.environ.get("PYTHONHASHSEED") != "42":
-        os.environ["PYTHONHASHSEED"] = "42"
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-
     parser = argparse.ArgumentParser(
         prog="generate_design",
         description="Board 06 (diffpair-test) design generator + Phase 4N CI re-route hook.",
@@ -3657,5 +3639,39 @@ def main() -> int:
         return 1
 
 
+def _reexec_with_pinned_hash_seed() -> None:
+    """Re-exec this script once with ``PYTHONHASHSEED=42`` pinned.
+
+    Issue #4536: pin the interpreter hash seed BY CONSTRUCTION before any
+    routing code runs.  The README's shadow/census repro commands export
+    ``PYTHONHASHSEED=42`` by hand, but a plain regen invocation did not.
+    This is defensive hygiene for every str-keyed set/dict iteration in
+    the in-process router AND the subprocess passes (``kct zones fill``,
+    ``kct stitch`` inherit the pinned env).  NOTE: the #4536 matrix
+    proved the pin alone is NOT sufficient for artifact byte-identity --
+    the residual ~2300-line reorder was driven by random uuid4 values on
+    stitch/repair copper being re-sorted by kicad-cli's UUID-ordered
+    board save (fixed via deterministic UUID minting in ``_generate_uuid``
+    here and ``_stitch_uuid`` in stitch_cmd.py).
+
+    ``PYTHONHASHSEED`` only takes effect at interpreter startup, so the
+    only way to pin it from inside the process is to re-exec.  The guard
+    makes the exec a no-op when the wrapper (or the re-exec itself)
+    already pinned it.
+
+    This MUST stay out of :func:`main` — ``os.execv`` replaces the whole
+    process, so calling it from ``main()`` would destroy any in-process
+    caller (e.g. the pytest workers in
+    ``tests/test_board_06_partial_route_fastfail.py``, which import this
+    module and call ``main()`` directly).  Only real CLI invocations,
+    where this script owns the process and ``sys.argv`` is its own, may
+    re-exec.
+    """
+    if os.environ.get("PYTHONHASHSEED") != "42":
+        os.environ["PYTHONHASHSEED"] = "42"
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 if __name__ == "__main__":
+    _reexec_with_pinned_hash_seed()
     sys.exit(main())
