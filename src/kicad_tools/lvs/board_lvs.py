@@ -56,6 +56,19 @@ from kicad_tools.sexp import SExp, parse_file
 # all once both sides are recognized as placeholders.
 _PLACEHOLDER_NET_RE = re.compile(r"^Net-\(.*\)$")
 
+# --- Label-leg vacuity guard (issue #4681, mirroring copper's #4005 guard) ---
+#
+# Sentinel ``ref`` carried by the single synthetic mismatch emitted when the
+# PCB side contributes **zero** net bindings (see :func:`compare_netlists`).
+# Angle brackets keep it out of the legal KiCad reference-designator space,
+# the same convention as :data:`kicad_tools.lvs.copper_lvs.VACUOUS_NET`.
+NETLIST_VACUOUS_REF = "<vacuous>"
+
+# Sentinel "net name" carried on the synthetic vacuity record's ``pcb_net``
+# side: it states explicitly that the PCB supplied no evidence, instead of
+# the ``null`` a real unconnected pad would carry.
+NETLIST_VACUOUS_NET = "<no-pcb-evidence>"
+
 
 def _is_placeholder_net(name: str | None) -> TypeGuard[str]:
     """True when ``name`` is an auto-generated (unnamed-net) placeholder.
@@ -97,6 +110,19 @@ class LVSResult:
 
     clean: bool
     mismatches: tuple[LVSMismatch, ...]
+
+    @property
+    def vacuous(self) -> bool:
+        """True when this result is the PCB-evidence vacuity verdict (#4681).
+
+        A vacuous result means the PCB side supplied zero net bindings
+        (see :func:`compare_netlists`), so the comparator observed
+        nothing — ``clean`` is forced ``False`` and the sole mismatch
+        carries ``ref=NETLIST_VACUOUS_REF``.  Derived from the mismatch
+        list (not stored) so JSON round-trips and hand-built results
+        preserve it, mirroring ``CopperLVSResult.vacuous``.
+        """
+        return any(m.ref == NETLIST_VACUOUS_REF for m in self.mismatches)
 
 
 class BoardNetlistMismatch(Exception):
@@ -307,12 +333,51 @@ def compare_netlists(sch_path: str | Path, pcb_path: str | Path) -> LVSResult:
         :class:`LVSResult`.  Always returned -- mismatches are data, not
         exceptions.  Callers (recipes) raise
         :class:`BoardNetlistMismatch` themselves when they want to fail.
+
+        **Vacuity guard (issue #4681):** when the PCB supplies zero net
+        bindings while the board has pads and the schematic binds >=1
+        pin, the result is a single synthetic mismatch with
+        ``ref=NETLIST_VACUOUS_REF`` / ``pcb_net=NETLIST_VACUOUS_NET``
+        (and ``LVSResult.vacuous`` is ``True``) instead of one
+        pseudo-mismatch per bound schematic pin.  The result is still
+        dirty: no evidence is not a pass (same rationale as the copper
+        leg's #4005 guard).
     """
     sch_path = Path(sch_path)
     pcb_path = Path(pcb_path)
 
     sch_map = _schematic_pin_to_net(sch_path)
     pcb_map = _pcb_pin_to_net(pcb_path)
+
+    # --- Vacuity guard (issue #4681, mirroring the copper leg's #4005
+    #     guard): when the PCB side supplies **zero** net bindings — every
+    #     pad lacks a ``(net ...)`` child or carries only the empty net-0
+    #     name — while the board has pads and the schematic binds at least
+    #     one pin, the comparator has no PCB evidence at all.  Diffing
+    #     anyway would emit one pseudo-mismatch per bound schematic pin
+    #     (264 all-``pcb_net=null`` records on the #4681 board), which
+    #     reads as N real defects instead of one degraded input.  Refuse:
+    #     return a single synthetic record so the result is still dirty
+    #     (no evidence is not a pass) and consumers see an explicit
+    #     vacuous verdict.
+    #
+    #     Raw (pre-normalization) bindings count as evidence on purpose:
+    #     an explicit no-connect sentinel (``unconnected-(REF-PIN-PadN)``)
+    #     is a deliberate per-pad binding even though it normalizes to
+    #     ``None`` below, so a small board of NC pads still gets the real
+    #     per-pad diff (test_board_lvs_nc_sentinel.py pins that).  Any
+    #     board with >=1 net-bearing pad is likewise unchanged — genuine
+    #     partial mismatches keep their per-pad records.
+    sch_bound = sum(1 for v in sch_map.values() if v is not None)
+    pcb_bound = sum(1 for v in pcb_map.values() if v)  # non-None AND non-empty
+    if pcb_map and sch_bound and not pcb_bound:
+        vacuity = LVSMismatch(
+            ref=NETLIST_VACUOUS_REF,
+            pad=f"board_pads={len(pcb_map)}",
+            schematic_net=f"sch_bound_pins={sch_bound}",
+            pcb_net=NETLIST_VACUOUS_NET,
+        )
+        return LVSResult(clean=False, mismatches=(vacuity,))
 
     # The PCB's net 0 — encoded as an empty-string ``(net 0 "")`` net
     # name — is the "no connection" placeholder, not a real net.

@@ -312,13 +312,29 @@ def build_lvs_payload(
 ) -> dict:
     """Assemble the v1 ``lvs.json`` payload (shared producer, issue #4616).
 
-    ``mismatches`` carries the label-based mismatches (unchanged from the
-    historical board-00 schema so ``_parse_lvs`` and the e2e asserter keep
-    working).  ``copper_mismatches`` is an additive field recording the
-    copper-extracted shorts/opens so a copper-dirty board is reflected too.
+    **Leg mapping (issue #4681, explicit so consumers pair the arrays
+    with the right comparator):**
+
+    * ``mismatches``        — the **label-based (netlist) leg**
+      (:func:`kicad_tools.lvs.board_lvs.compare_netlists`): per-pin
+      ``{ref, pad, schematic_net, pcb_net}`` records diffing each pad's
+      declared ``(net ...)`` label against the schematic.  Unchanged
+      from the historical board-00 schema so ``_parse_lvs`` and the e2e
+      asserter keep working.
+    * ``copper_mismatches`` — the **copper-extracted leg**
+      (:func:`kicad_tools.lvs.copper_lvs.compare_copper_netlist`):
+      ``{kind, net_a, net_b, pad_a, pad_b}`` shorts/opens diffing the
+      physical copper partition against the schematic.  Additive field
+      so a copper-dirty board is reflected too.
+
     ``copper_vacuous`` / ``copper_bound_pad_count`` (additive, #4005
     review) record whether the copper verdict carried any schematic
     evidence; a vacuous copper leg forces ``clean=false``.
+    ``netlist_vacuous`` (additive, #4681) is the label leg's sibling
+    flag: ``true`` when the PCB supplied zero net bindings, in which
+    case ``mismatches`` holds a single synthetic
+    ``ref="<vacuous>"`` record instead of one pseudo-mismatch per bound
+    schematic pin.
 
     This is the **single** producer of the v1 record shapes.  Besides
     :func:`write_lvs_report` (which writes ``output/lvs.json`` with the
@@ -342,7 +358,8 @@ def build_lvs_payload(
     Returns:
         A JSON-safe dict in the stable v1 key order: ``$schema``,
         ``clean``, ``mismatches``, ``copper_mismatches``,
-        ``copper_vacuous``, ``copper_bound_pad_count``.
+        ``copper_vacuous``, ``copper_bound_pad_count``,
+        ``netlist_vacuous``.
     """
     payload: dict = {}
     if include_schema:
@@ -375,6 +392,8 @@ def build_lvs_payload(
     if copper_result is not None:
         payload["copper_vacuous"] = copper_result.vacuous
         payload["copper_bound_pad_count"] = copper_result.bound_pad_count
+    if label_result is not None:
+        payload["netlist_vacuous"] = label_result.vacuous
     return payload
 
 

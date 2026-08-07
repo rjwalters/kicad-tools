@@ -783,6 +783,26 @@ def _stage_board02_unrouted(dest_dir: Path) -> Path:
     return _strip_all_segments(BOARD_02_PCB, dest_dir / BOARD_02_PCB.name)
 
 
+def _strip_all_pad_nets(src_pcb: Path, dest_pcb: Path) -> Path:
+    """Copy ``src_pcb`` to ``dest_pcb`` with every pad's ``(net ...)`` child removed.
+
+    Reproduces the #4681 board shape: the PCB side supplies **zero** net
+    bindings, so the label leg has no evidence at all.  The copper leg is
+    untouched — :meth:`ConnectivityValidator.extract_pad_partition` never
+    reads pad net labels.
+    """
+    from kicad_tools.sexp import SExp, parse_file
+
+    doc = parse_file(src_pcb)
+    for fp in doc.find_all("footprint"):
+        for pad in fp.find_all("pad"):
+            pad.children = [
+                c for c in pad.children if not (isinstance(c, SExp) and c.name == "net")
+            ]
+    dest_pcb.write_text(doc.to_string() + "\n")
+    return dest_pcb
+
+
 def _stage_board00_both_legs_dirty(dest_dir: Path) -> Path:
     """Stage a board 00 copy that is dirty on **both** LVS comparators.
 
@@ -871,6 +891,7 @@ class TestCheckLVSFullFidelity:
         assert lvs["copper_vacuous"] is False
         assert lvs["copper_bound_pad_count"] is not None
         assert lvs["copper_bound_pad_count"] > 0
+        assert lvs["netlist_vacuous"] is False
 
     def test_payload_omitted_when_lvs_not_run(self, drc_clean_pcb: Path, capsys):
         """No schematic -> NOT RUN -> {status, detail} only."""
@@ -993,6 +1014,76 @@ class TestCheckLVSFullFidelity:
             )
         for record in sub.data["mismatches"]:
             assert f"{record['ref']}.{record['pad']} sch=" in out
+
+
+class TestCheckLVSVacuousLabelLeg:
+    """A net-less PCB degrades loudly, and ``detail`` names both legs (#4681).
+
+    The filed board emitted 264 label records, every one ``pcb_net:
+    null`` — the PCB side supplied zero net bindings, so each bound
+    schematic pin trivially "mismatched" — while ``detail`` reported the
+    *copper* leg's 2 findings.  Two fixes are pinned here: the label leg
+    now returns one explicit vacuous verdict instead of N pseudo-records,
+    and ``detail`` names both legs' outcomes so a consumer can pair the
+    prose with the right embedded array.
+    """
+
+    def test_netless_board_reports_vacuous_not_per_pin_records(self, tmp_path: Path, capsys):
+        """Zero PCB net bindings -> one synthetic record + netlist_vacuous."""
+        from kicad_tools.cli.check_cmd import main
+        from kicad_tools.lvs.board_lvs import NETLIST_VACUOUS_NET, NETLIST_VACUOUS_REF
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+        _strip_all_pad_nets(pcb, pcb)
+
+        assert main([str(pcb), "--format", "json"]) == 2
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        assert lvs["status"] == "FAILED"  # no evidence is not a pass
+        assert lvs["netlist_vacuous"] is True
+        # ONE synthetic record — not one pseudo-mismatch per bound pin.
+        assert len(lvs["mismatches"]) == 1
+        assert lvs["mismatches"][0]["ref"] == NETLIST_VACUOUS_REF
+        assert lvs["mismatches"][0]["pcb_net"] == NETLIST_VACUOUS_NET
+        # ``detail`` spells out the vacuity and names the other leg too.
+        assert "label: vacuous" in lvs["detail"]
+        assert "copper: 0 mismatch(es)" in lvs["detail"]
+
+    def test_detail_counts_match_embedded_arrays(self, tmp_path: Path, capsys):
+        """Regression (#4681): per-leg counts in ``detail`` == array lengths.
+
+        The filer paired ``detail`` ("copper: 2 mismatch(es)") with the
+        ``mismatches`` array (264 records) because the prose named only
+        one leg.  Both legs' counts now appear, and each equals the
+        length of its embedded array.
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_both_legs_dirty(tmp_path)
+
+        assert main([str(pcb), "--format", "json"]) == 2
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        copper_count = int(lvs["detail"].split("copper: ")[1].split(" mismatch(es)")[0])
+        label_count = int(lvs["detail"].split("label: ")[1].split(" mismatch(es)")[0])
+        assert copper_count == len(lvs["copper_mismatches"]) > 0
+        assert label_count == len(lvs["mismatches"]) > 0
+        assert lvs["netlist_vacuous"] is False
+
+    def test_label_dirty_detail_names_copper_leg_too(self, tmp_path: Path, capsys):
+        """Copper-clean/label-dirty boards also name both legs in ``detail``."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+        _swap_d1_pad_nets_in_pcb(pcb, pcb)
+
+        assert main([str(pcb), "--format", "json"]) == 2
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        assert lvs["detail"].startswith("label: ")
+        assert "; copper: 0 mismatch(es)" in lvs["detail"]
+        label_count = int(lvs["detail"].split("label: ")[1].split(" mismatch(es)")[0])
+        assert label_count == len(lvs["mismatches"]) == 2
 
 
 # ---------------------------------------------------------------------------

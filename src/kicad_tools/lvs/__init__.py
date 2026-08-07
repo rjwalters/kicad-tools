@@ -43,6 +43,8 @@ Public API:
 """
 
 from kicad_tools.lvs.board_lvs import (
+    NETLIST_VACUOUS_NET,
+    NETLIST_VACUOUS_REF,
     BoardNetlistMismatch,
     LVSMismatch,
     LVSResult,
@@ -72,6 +74,8 @@ __all__ = [
     "FreshCopperCheckError",
     "LVSMismatch",
     "LVSResult",
+    "NETLIST_VACUOUS_NET",
+    "NETLIST_VACUOUS_REF",
     "VACUOUS_KIND",
     "VACUOUS_NET",
     "_ref_of",

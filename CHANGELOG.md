@@ -277,6 +277,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   placement, zones, nets untouched) and DRC output is identical pre/post.
   Renders remain git-ignored; the gallery picks up the fix at the next
   operator redeploy.
+- **`kct check` LVS: net-less PCBs no longer emit one pseudo-mismatch per
+  schematic pin, and `detail` names both comparator legs** (#4681) — on a
+  board whose pads carry no `(net ...)` bindings, the label-based (netlist)
+  leg used to emit one all-`pcb_net: null` record per bound schematic pin
+  (264 on the filed board) while the `detail` prose reported only the
+  copper leg's count, so consumers naturally paired `detail` with the
+  wrong array. The label leg now has a vacuity guard mirroring the copper
+  leg's #4005 guard: zero PCB net bindings (with pads present and >=1
+  bound schematic pin) yields a single synthetic record
+  (`ref="<vacuous>"`, `pcb_net="<no-pcb-evidence>"`, evidence counters in
+  the other fields) and an additive `netlist_vacuous: true` flag in both
+  `lvs.json` and `meta_checks.lvs`; the result is still dirty (no
+  evidence is not a pass). Explicit no-connect sentinels count as raw
+  evidence, so all-NC boards and genuine partial mismatches keep their
+  per-pad records. Whenever either leg is dirty, `kct check`'s LVS
+  `detail` now names both legs' outcomes (e.g.
+  `copper: 2 mismatch(es): ...; label: 264 mismatch(es)` or
+  `label: vacuous (no PCB pad carries a net binding); copper: 0
+  mismatch(es)`), and `build_lvs_payload`'s docstring states the leg
+  mapping explicitly (`mismatches` = label leg, `copper_mismatches` =
+  copper leg). v1 `lvs.json` keys/shapes are unchanged; additions only.
 
 - **Softstart lattice proofs: re-pin to the current fixture + content-hash
   drift guard** (#4670) — the local-only softstart routing proof

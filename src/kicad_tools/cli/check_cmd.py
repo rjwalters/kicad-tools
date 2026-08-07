@@ -705,6 +705,15 @@ def _lvs_subcheck(sch_path: Path | None, pcb_path: Path) -> SubCheckResult:
     copper-dirty board the label findings appeared in *no* output.  The
     copper-dirty branch is now a ``detail``-selection branch, not a
     return, and both legs are always carried.
+
+    Issue #4681: whenever either leg is dirty, ``detail`` names **both**
+    legs' outcomes so a consumer can pair the prose with the right
+    embedded array — ``mismatches`` is the label (netlist) leg,
+    ``copper_mismatches`` the copper leg (see
+    :func:`kicad_tools.lvs.build_lvs_payload`).  A label leg with zero
+    PCB net bindings reports an explicit ``vacuous`` verdict (single
+    synthetic record + ``netlist_vacuous: true``) instead of one
+    pseudo-mismatch per bound schematic pin.
     """
     if sch_path is None:
         return SubCheckResult(
@@ -745,16 +754,28 @@ def _lvs_subcheck(sch_path: Path | None, pcb_path: Path) -> SubCheckResult:
         include_schema=False,
     )
 
+    # Issue #4681: the label leg's outcome, phrased for the ``detail``
+    # line.  A vacuous verdict (zero PCB net bindings) is spelled out so
+    # nobody reads the single synthetic ``mismatches`` record as a real
+    # per-pin finding.
+    if result.vacuous:
+        label_summary = "label: vacuous (no PCB pad carries a net binding)"
+    else:
+        label_summary = f"label: {len(label_records)} mismatch(es)"
+
     if not copper.clean:
         # The copper-extracted gate is the soundness-critical one: surface
         # it first.  Show up to the first 3 records in a stable order.
+        # The label leg's count rides along (#4681) so ``detail`` names
+        # both legs and a consumer knows which array holds which findings.
         preview = ", ".join(
             f"{m.kind} {m.pad_a}({m.net_a})/{m.pad_b}({m.net_b})" for m in copper_records[:3]
         )
         suffix = "" if len(copper_records) <= 3 else f" (+{len(copper_records) - 3} more)"
         return SubCheckResult(
             status="FAILED",
-            detail=f"copper: {len(copper_records)} mismatch(es): {preview}{suffix}",
+            detail=f"copper: {len(copper_records)} mismatch(es): {preview}{suffix}"
+            f"; {label_summary}",
             data=data,
         )
 
@@ -762,6 +783,13 @@ def _lvs_subcheck(sch_path: Path | None, pcb_path: Path) -> SubCheckResult:
         return SubCheckResult(
             status="PASSED",
             detail="label + copper: 0 mismatch(es)",
+            data=data,
+        )
+
+    if result.vacuous:
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"{label_summary}; copper: 0 mismatch(es)",
             data=data,
         )
 
@@ -773,7 +801,8 @@ def _lvs_subcheck(sch_path: Path | None, pcb_path: Path) -> SubCheckResult:
     suffix = "" if len(label_records) <= 3 else f" (+{len(label_records) - 3} more)"
     return SubCheckResult(
         status="FAILED",
-        detail=f"label: {len(label_records)} mismatch(es): {preview}{suffix}",
+        detail=f"label: {len(label_records)} mismatch(es): {preview}{suffix}"
+        "; copper: 0 mismatch(es)",
         data=data,
     )
 

@@ -313,6 +313,7 @@ def test_build_lvs_payload_preserves_v1_key_order() -> None:
         "copper_mismatches",
         "copper_vacuous",
         "copper_bound_pad_count",
+        "netlist_vacuous",
     ]
 
 
@@ -324,6 +325,7 @@ def test_build_lvs_payload_embedded_form_drops_schema_and_clean() -> None:
         "copper_mismatches",
         "copper_vacuous",
         "copper_bound_pad_count",
+        "netlist_vacuous",
     ]
 
 
@@ -348,8 +350,41 @@ def test_check_meta_lvs_payload_shares_lvs_json_record_shapes() -> None:
         assert [set(r) for r in embedded[field]] == [set(r) for r in on_disk[field]]
     assert embedded["copper_vacuous"] == on_disk["copper_vacuous"]
     assert embedded["copper_bound_pad_count"] == on_disk["copper_bound_pad_count"]
+    assert embedded["netlist_vacuous"] == on_disk["netlist_vacuous"]
     # The check envelope adds only its own two keys on top of the v1 fields.
     assert set(embedded) - set(on_disk) == {"status", "detail"}
+
+
+def test_build_lvs_payload_netlist_vacuous_flag() -> None:
+    """``netlist_vacuous`` mirrors the label leg's vacuity verdict (#4681)."""
+    from kicad_tools.lvs.board_lvs import NETLIST_VACUOUS_NET, NETLIST_VACUOUS_REF
+
+    vacuous_label = LVSResult(
+        clean=False,
+        mismatches=(
+            LVSMismatch(
+                ref=NETLIST_VACUOUS_REF,
+                pad="board_pads=264",
+                schematic_net="sch_bound_pins=264",
+                pcb_net=NETLIST_VACUOUS_NET,
+            ),
+        ),
+    )
+    assert vacuous_label.vacuous is True
+
+    payload = recipe.build_lvs_payload(_CLEAN_COPPER, vacuous_label, include_schema=False)
+    assert payload["netlist_vacuous"] is True
+    # The synthetic record is the ONLY label record — not one per pin.
+    assert len(payload["mismatches"]) == 1
+    assert payload["mismatches"][0]["ref"] == NETLIST_VACUOUS_REF
+
+    # Genuine mismatches do not trip the flag.
+    dirty = recipe.build_lvs_payload(_CLEAN_COPPER, _DIRTY_LABEL, include_schema=False)
+    assert dirty["netlist_vacuous"] is False
+
+    # Leg not run -> key omitted (same contract as ``copper_vacuous``).
+    no_label = recipe.build_lvs_payload(_CLEAN_COPPER, None, include_schema=False)
+    assert "netlist_vacuous" not in no_label
 
 
 def test_build_lvs_payload_is_exported_from_package() -> None:
