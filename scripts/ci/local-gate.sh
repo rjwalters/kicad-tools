@@ -50,7 +50,8 @@
 #     committed boards/*/output/ path (check_routed_drc.py keys its
 #     allowlist/mfr override off the repo-relative path). CI runs in a
 #     throwaway checkout; locally this script backs up the committed file
-#     first and restores it afterwards, pass or fail.
+#     first and restores it afterwards -- pass, fail, or Ctrl-C (the restore
+#     runs from an EXIT/INT/TERM trap scoped to the staged window).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -202,10 +203,20 @@ job_matchgroup_routing_regression() {
     --seed 42
 }
 
+# Idempotent restore of a staged-over committed file (see below). Safe to call
+# twice: the backup is removed on the first successful restore.
+_restore_committed_from_backup() {
+  local bak=$1 committed=$2
+  [ -f "$bak" ] || return 0
+  cp "$bak" "$committed"
+  rm -f "$bak"
+}
+
 # Helper for the DRC re-check steps in board jobs 03/04/06/07: those gates
 # stage the fresh routed PCB over the committed path (check_routed_drc.py
 # keys allowlist/mfr overrides off the repo-relative path). CI's checkout is
-# throwaway; locally we back up and restore the committed file, pass or fail.
+# throwaway; locally we back up and restore the committed file, pass or fail
+# -- including on Ctrl-C, via a trap scoped to the staged window.
 _check_drc_over_committed_path() {
   local fresh=$1 committed=$2
   local bak
@@ -213,9 +224,22 @@ _check_drc_over_committed_path() {
   cp "$committed" "$bak"
   cp "$fresh" "$committed"
   local rc=0
-  uv run python scripts/ci/check_routed_drc.py "$committed" || rc=$?
-  cp "$bak" "$committed"
-  rm -f "$bak"
+  # The traps live in a nested subshell so they cover only the window in
+  # which the committed file is staged over (an EXIT trap set directly in
+  # this function would also fire at job-subshell exit, long after the
+  # restore). INT/TERM restore and then re-raise the signal on the subshell
+  # itself (after clearing the traps) so the caller still sees a
+  # killed-by-signal child -- i.e. Ctrl-C keeps aborting the run instead of
+  # being reported as a pass.
+  (
+    trap '_restore_committed_from_backup "$bak" "$committed"' EXIT
+    trap 'trap - INT EXIT; _restore_committed_from_backup "$bak" "$committed"; kill -INT "$BASHPID"' INT
+    trap 'trap - TERM EXIT; _restore_committed_from_backup "$bak" "$committed"; kill -TERM "$BASHPID"' TERM
+    uv run python scripts/ci/check_routed_drc.py "$committed"
+  ) || rc=$?
+  # Belt-and-braces: if the subshell died without running its traps (SIGKILL),
+  # restore here. No-op on the normal path.
+  _restore_committed_from_backup "$bak" "$committed"
   return "$rc"
 }
 
@@ -511,7 +535,23 @@ for job in "${SELECTED[@]}"; do
   echo "=============================================================="
   start=$SECONDS
   rc=0
-  ("$fn") || rc=$?
+  # LOAD-BEARING: do NOT "simplify" this back to `("$fn") || rc=$?`.
+  # Bash disables errexit inside any compound command that is an operand of
+  # `||` / `&&` / `if`, and that suppression is inherited by the subshell and
+  # every function it calls -- so only a job's LAST command would decide
+  # PASS/FAIL (a failing `ruff format --check` followed by a passing
+  # `ruff check` reported PASS). Running the subshell as its own statement,
+  # with an explicit `set -e` inside it (the outer `set +e` is inherited),
+  # keeps errexit live for every command in the job. The SKIP sentinel still
+  # works: `return $SKIP_RC` exits the subshell with 75.
+  # Regression-guarded by tests/test_local_gate_manifest.py.
+  set +e
+  (
+    set -e
+    "$fn"
+  )
+  rc=$?
+  set -e
   elapsed=$((SECONDS - start))
   if [ "$rc" -eq 0 ]; then
     status="PASS"

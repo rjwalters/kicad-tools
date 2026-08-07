@@ -12,14 +12,22 @@ If this test fails after you edited ci.yml: update the ``CHEAP_JOBS`` /
 ``scripts/ci/local-gate.sh`` to match, or -- for a job that genuinely cannot
 be mirrored locally -- add it to ``CI_ONLY_JOBS`` below with a comment
 explaining why.
+
+This module also guards the runner loop's failure semantics: a job whose
+*non-final* command fails must report FAIL.  ``("$fn") || rc=$?`` silently
+broke that (bash disables errexit inside a ``||`` operand, and the
+suppression is inherited by the subshell), so a failing ``ruff format
+--check`` followed by a passing ``ruff check`` reported PASS.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +91,69 @@ def test_local_gate_list_has_no_duplicates() -> None:
     """Each job id appears exactly once in --list output."""
     listed = _local_gate_list()
     assert len(listed) == len(set(listed)), f"duplicate job ids in --list: {listed}"
+
+
+def _gate_with_stub_jobs(tmp_path: Path, stub_defs: str) -> Path:
+    """Copy the real gate script, overriding some job_<id> bodies with stubs.
+
+    The stub definitions are injected immediately before the runner section
+    (bash keeps the *last* definition of a function), so the copy exercises
+    the real dispatch loop -- the code under test -- while the job bodies are
+    replaced by deterministic no-uv stubs.
+    """
+    source = LOCAL_GATE.read_text()
+    marker = "usage() {"
+    assert marker in source, "runner section marker moved; update this test"
+    head, sep, tail = source.partition(marker)
+    dest_dir = tmp_path / "scripts" / "ci"
+    dest_dir.mkdir(parents=True)
+    dest = dest_dir / "local-gate.sh"
+    dest.write_text(f"{head}{stub_defs}\n{sep}{tail}")
+    return dest
+
+
+def _run_gate(script: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(script), *args],
+        capture_output=True,
+        text=True,
+        cwd=script.parent,
+    )
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="gate requires uv on PATH")
+def test_job_with_failing_intermediate_command_reports_fail(tmp_path: Path) -> None:
+    """A job whose non-final command fails must FAIL, not PASS.
+
+    Regression guard for the ``("$fn") || rc=$?`` errexit-suppression bug:
+    with that dispatch, only a job's last command decided PASS/FAIL.
+    """
+    script = _gate_with_stub_jobs(
+        tmp_path,
+        "job_lint() {\n  false\n  true\n}\n",
+    )
+    result = _run_gate(script, "lint")
+
+    assert ">>> lint: FAIL" in result.stdout, (
+        "runner loop swallowed a failing non-final command in job_lint:\n"
+        f"{result.stdout}\n{result.stderr}"
+    )
+    assert result.returncode == 1, f"expected blocking-failure exit 1, got {result.returncode}"
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="gate requires uv on PATH")
+def test_skip_sentinel_still_reports_skip(tmp_path: Path) -> None:
+    """`return $SKIP_RC` from a job must still report SKIP and exit 0."""
+    script = _gate_with_stub_jobs(
+        tmp_path,
+        'job_lint() {\n  return "$SKIP_RC"\n}\n',
+    )
+    result = _run_gate(script, "lint")
+
+    assert ">>> lint: SKIP" in result.stdout, (
+        f"SKIP sentinel not honored:\n{result.stdout}\n{result.stderr}"
+    )
+    assert result.returncode == 0, f"SKIP must not flip the exit code, got {result.returncode}"
 
 
 def test_ci_only_jobs_do_not_leak_stale_entries() -> None:
