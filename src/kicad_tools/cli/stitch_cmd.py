@@ -291,6 +291,18 @@ class StitchResult:
     # Each entry is (pad, reason).  These pads are ALSO recorded in
     # ``pads_skipped`` so existing summaries still count them.
     needs_routed_fanout: list[tuple[PadInfo, str]] = field(default_factory=list)
+    # Issue #4679: number of pads enumerated on the target nets, BEFORE any
+    # connectivity gating.  Lets the output distinguish "the target nets have
+    # no pads at all" (say so explicitly, naming the nets) from "N pads found,
+    # all already connected" -- previously both printed the same misleading
+    # "No unconnected pads found on target nets." message.
+    pads_found: int = 0
+    # Issue #4679: non-empty when the strict copper-contact connectivity model
+    # (NetStatusAnalyzer, the engine behind `kct net-status`) could not run
+    # for the target nets; stitch then falls back to the legacy proximity
+    # gate and the output surfaces this so a stitch/net-status disagreement
+    # is never silent.
+    strict_model_error: str = ""
 
 
 @dataclass
@@ -381,24 +393,89 @@ DEFAULT_THERMAL_REFERENCE_PREFIXES: tuple[str, ...] = ("Q",)
 
 
 def get_net_map(sexp: SExp) -> dict[int, str]:
-    """Build a mapping of net number to net name."""
-    net_map = {}
+    """Build a mapping of net number to net name.
+
+    KiCad 10's ``kicad-cli pcb drc --save-board`` deletes the top-level
+    ``(net N "name")`` declaration table and rewrites every inline reference
+    to the name-only ``(net "NAME")`` form (issue #4679; mirrors
+    ``PCB._synthesize_net_table``, issue #4416).  When no header declarations
+    survive, synthesize a stable table from the inline name-only references
+    (document order, numbered from 1) so name-based lookups keep working --
+    otherwise every pad/segment/via on such a board is invisible to stitch.
+    """
+    net_map: dict[int, str] = {}
     for child in sexp.iter_children():
         if child.tag == "net":
             net_num = child.get_int(0)
             net_name = child.get_string(1)
             if net_num is not None and net_name is not None:
                 net_map[net_num] = net_name
-    return net_map
+    if net_map:
+        return net_map
+
+    # No header table: synthesize from inline name-only references.
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _collect(node: SExp) -> None:
+        net_node = node.find_child("net")
+        if net_node is not None and net_node.get_int(0) is None:
+            name = net_node.get_string(0)
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+
+    for child in sexp.iter_children():
+        if child.tag in ("segment", "arc", "via", "zone"):
+            _collect(child)
+        elif child.tag == "footprint":
+            for pad in child.find_children("pad"):
+                _collect(pad)
+    return dict(enumerate(names, start=1))
+
+
+def get_name_to_net_map(sexp: SExp) -> dict[str, int]:
+    """Build the reverse mapping of net name to net number.
+
+    Used by :func:`resolve_net_num` to resolve KiCad-10 name-only inline
+    references ``(net "NAME")`` back to a numeric net id (issue #4679).
+    """
+    return {name: num for num, name in get_net_map(sexp).items() if name}
+
+
+def resolve_net_num(net_node: SExp | None, name_to_num: dict[str, int]) -> int | None:
+    """Resolve an inline pad/segment/via net reference to a net number.
+
+    Supports all three inline dialects (issue #4679):
+
+    * ``(net N)`` and ``(net N "NAME")`` -- numeric reference (KiCad <= 9)
+    * ``(net "NAME")`` -- KiCad 10 name-only reference (also emitted by
+      ``kicad-cli pcb drc --save-board``)
+
+    Args:
+        net_node: The ``net`` child node of a pad/segment/via, or ``None``.
+        name_to_num: Reverse net map from :func:`get_name_to_net_map`.
+
+    Returns:
+        The net number, or ``None`` when the node is absent or the name
+        cannot be resolved.
+    """
+    if net_node is None:
+        return None
+    num = net_node.get_int(0)
+    if num is not None:
+        return num
+    name = net_node.get_string(0)
+    if name:
+        return name_to_num.get(name)
+    return None
 
 
 def get_net_number(sexp: SExp, net_name: str) -> int | None:
     """Get the net number for a given net name."""
-    for child in sexp.iter_children():
-        if child.tag == "net":
-            name = child.get_string(1)
-            if name == net_name:
-                return child.get_int(0)
+    for num, name in get_net_map(sexp).items():
+        if name == net_name:
+            return num
     return None
 
 
@@ -658,8 +735,16 @@ def find_all_plane_nets(sexp: SExp) -> dict[str, str]:
 
 
 def find_pads_on_nets(sexp: SExp, net_names: set[str]) -> list[PadInfo]:
-    """Find all pads (SMD and through-hole) on the specified nets."""
+    """Find all pads (SMD and through-hole) on the specified nets.
+
+    Handles numeric ``(net N "NAME")`` and KiCad-10 name-only ``(net "NAME")``
+    pad references (issue #4679): before the fix, name-only pads resolved to
+    ``None`` and were silently dropped, so ``kct stitch`` reported "No
+    unconnected pads found" on boards rewritten by ``kicad-cli --save-board``
+    even when ``kct net-status`` named stranded pads on the same nets.
+    """
     net_map = get_net_map(sexp)
+    name_to_num = {name: num for num, name in net_map.items() if name}
     target_net_nums = {num for num, name in net_map.items() if name in net_names}
 
     pads = []
@@ -705,11 +790,11 @@ def find_pads_on_nets(sexp: SExp, net_names: set[str]) -> list[PadInfo]:
             if pad_type not in ("smd", "thru_hole"):
                 continue
 
-            # Check if pad is on a target net
+            # Check if pad is on a target net (numeric or name-only ref)
             net_node = pad.find_child("net")
             if not net_node:
                 continue
-            net_num = net_node.get_int(0)
+            net_num = resolve_net_num(net_node, name_to_num)
             if net_num not in target_net_nums:
                 continue
 
@@ -785,6 +870,7 @@ def find_smd_pad_bboxes_on_nets(
         angles).
     """
     bboxes: list[tuple[int, float, float, float, float]] = []
+    name_to_num = get_name_to_net_map(sexp)
 
     for fp in sexp.iter_children():
         if fp.tag != "footprint":
@@ -812,7 +898,7 @@ def find_smd_pad_bboxes_on_nets(
             net_node = pad.find_child("net")
             if not net_node:
                 continue
-            net_num = net_node.get_int(0)
+            net_num = resolve_net_num(net_node, name_to_num)
             if net_num is None or net_num not in net_numbers:
                 continue
 
@@ -892,6 +978,7 @@ def find_all_pad_bboxes(
     bboxes: list[tuple[float, float, float, float, int]] = []
     if exclude_nets is None:
         exclude_nets = set()
+    name_to_num = get_name_to_net_map(sexp)
 
     for fp in sexp.iter_children():
         if fp.tag != "footprint":
@@ -913,7 +1000,7 @@ def find_all_pad_bboxes(
             net_node = pad.find_child("net")
             if not net_node:
                 continue
-            net_num = net_node.get_int(0)
+            net_num = resolve_net_num(net_node, name_to_num)
             if net_num is None or net_num in exclude_nets:
                 continue
 
@@ -1020,12 +1107,13 @@ def _via_drill_inside_pad_bbox(
 def find_existing_vias(sexp: SExp, net_numbers: set[int]) -> list[tuple[float, float, int]]:
     """Find existing vias on the specified nets. Returns list of (x, y, net_num)."""
     vias = []
+    name_to_num = get_name_to_net_map(sexp)
     for child in sexp.iter_children():
         if child.tag == "via":
             net_node = child.find_child("net")
             if not net_node:
                 continue
-            net_num = net_node.get_int(0)
+            net_num = resolve_net_num(net_node, name_to_num)
             if net_num not in net_numbers:
                 continue
 
@@ -1040,12 +1128,13 @@ def find_existing_vias(sexp: SExp, net_numbers: set[int]) -> list[tuple[float, f
 def find_existing_tracks(sexp: SExp, net_numbers: set[int]) -> list[tuple[float, float, int]]:
     """Find track endpoints on the specified nets. Returns list of (x, y, net_num)."""
     points = []
+    name_to_num = get_name_to_net_map(sexp)
     for child in sexp.iter_children():
         if child.tag == "segment":
             net_node = child.find_child("net")
             if not net_node:
                 continue
-            net_num = net_node.get_int(0)
+            net_num = resolve_net_num(net_node, name_to_num)
             if net_num not in net_numbers:
                 continue
 
@@ -1079,13 +1168,14 @@ def find_all_track_segments(sexp: SExp, exclude_nets: set[int] | None = None) ->
     segments = []
     if exclude_nets is None:
         exclude_nets = set()
+    name_to_num = get_name_to_net_map(sexp)
 
     for child in sexp.iter_children():
         if child.tag == "segment":
             net_node = child.find_child("net")
             if not net_node:
                 continue
-            net_num = net_node.get_int(0)
+            net_num = resolve_net_num(net_node, name_to_num)
             if net_num is None or net_num in exclude_nets:
                 continue
 
@@ -1132,13 +1222,14 @@ def find_all_board_vias(
     vias = []
     if exclude_nets is None:
         exclude_nets = set()
+    name_to_num = get_name_to_net_map(sexp)
 
     for child in sexp.iter_children():
         if child.tag == "via":
             net_node = child.find_child("net")
             if not net_node:
                 continue
-            net_num = net_node.get_int(0)
+            net_num = resolve_net_num(net_node, name_to_num)
             if net_num is None or net_num in exclude_nets:
                 continue
 
@@ -1177,6 +1268,7 @@ def find_all_pads(
     pads = []
     if exclude_nets is None:
         exclude_nets = set()
+    name_to_num = get_name_to_net_map(sexp)
 
     for fp in sexp.iter_children():
         if fp.tag != "footprint":
@@ -1200,7 +1292,7 @@ def find_all_pads(
             net_node = pad.find_child("net")
             if not net_node:
                 continue
-            net_num = net_node.get_int(0)
+            net_num = resolve_net_num(net_node, name_to_num)
             if net_num is None or net_num in exclude_nets:
                 continue
 
@@ -1279,6 +1371,7 @@ def find_all_drills(
         exclude_nets = set()
     if pad_exclude_nets is None:
         pad_exclude_nets = set()
+    name_to_num = get_name_to_net_map(sexp)
 
     for child in sexp.iter_children():
         # Vias
@@ -1288,7 +1381,7 @@ def find_all_drills(
             net_node = child.find_child("net")
             if not net_node:
                 continue
-            net_num = net_node.get_int(0)
+            net_num = resolve_net_num(net_node, name_to_num)
             if net_num is None or net_num in exclude_nets:
                 continue
             at_node = child.find_child("at")
@@ -1324,7 +1417,7 @@ def find_all_drills(
             net_node = pad.find_child("net")
             if not net_node:
                 continue
-            net_num = net_node.get_int(0)
+            net_num = resolve_net_num(net_node, name_to_num)
             if net_num is None or net_num in pad_exclude_nets:
                 continue
             drill_node = pad.find_child("drill")
@@ -3674,6 +3767,7 @@ def find_thermal_pad_candidates(
         pad (one entry per pad, not per footprint).
     """
     net_map = get_net_map(sexp)
+    name_to_num = {name: num for num, name in net_map.items() if name}
     target_net_nums = {num for num, name in net_map.items() if name in net_names}
 
     candidates: list[ThermalPadCandidate] = []
@@ -3727,11 +3821,11 @@ def find_thermal_pad_candidates(
             if pad_type not in ("smd", "thru_hole"):
                 continue
 
-            # Pad must be on a target plane net.
+            # Pad must be on a target plane net (numeric or name-only ref).
             net_node = pad.find_child("net")
             if not net_node:
                 continue
-            net_num = net_node.get_int(0)
+            net_num = resolve_net_num(net_node, name_to_num)
             if net_num not in target_net_nums:
                 continue
 
@@ -4455,6 +4549,36 @@ def run_blanket_stitch(
     return result
 
 
+def _compute_strict_pad_sets(
+    pcb_path: Path, net_names: set[str]
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Compute per-net strict-model pad connectivity sets (issue #4679).
+
+    Runs :class:`kicad_tools.analysis.net_status.NetStatusAnalyzer` -- the
+    strict copper-contact model behind ``kct net-status`` -- scoped to
+    ``net_names`` and returns ``(unconnected_by_net, connected_by_net)``,
+    each keyed by net name with values of ``REF.PAD`` pad-name sets.
+
+    ``run_stitch`` uses the unconnected sets to VETO the legacy proximity
+    heuristic's "already connected" skip for target nets that have real fill
+    copper, so a pad ``kct net-status`` reports as "needs via to plane" is in
+    stitch's work list by construction (the two tools can no longer silently
+    contradict each other on the same file).  The connected sets are returned
+    for completeness/diagnostics; they deliberately do NOT suppress stitching
+    (see the gate comment in ``run_stitch``).
+    """
+    from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+    analyzer = NetStatusAnalyzer(pcb_path, strict=True)
+    scoped = analyzer.analyze_nets(net_names)
+    unconnected: dict[str, set[str]] = {}
+    connected: dict[str, set[str]] = {}
+    for net in scoped.nets:
+        unconnected[net.net_name] = {p.full_name for p in net.unconnected_pads}
+        connected[net.net_name] = {p.full_name for p in net.connected_pads}
+    return unconnected, connected
+
+
 def run_stitch(
     pcb_path: Path,
     net_names: list[str],
@@ -4540,6 +4664,7 @@ def run_stitch(
     # Find pads on target nets
     net_name_set = set(net_names)
     pads = find_pads_on_nets(sexp, net_name_set)
+    result.pads_found = len(pads)
 
     if not pads:
         return result
@@ -4556,6 +4681,29 @@ def run_stitch(
     same_net_zone_polys: list[ZonePolygon] = []
     for net_name in net_names:
         same_net_zone_polys.extend(extract_zone_polygons(sexp, net_name))
+
+    # Issue #4679: strict-model veto data for the "already connected" gate.
+    #
+    # `kct net-status` decides connectivity with the strict copper-contact
+    # model (real shapely geometry, per-fill-island zone connectivity), while
+    # stitch historically used a 0.5mm endpoint-proximity heuristic
+    # (`is_pad_connected`) with no notion of "reaches the plane" -- so a pad
+    # net-status named as "needs via to plane" could be silently skipped as
+    # "connected" here (an SMD pad tied to a stub trace that never reaches
+    # the pour).  For every target net that has real fill copper we consult
+    # the strict model; its unconnected set VETOES a proximity-"connected"
+    # skip in the per-pad loop below, so the net-status remedy applies by
+    # construction.  Nets with no fill copper are exempt (nothing poured yet
+    # -- the strict island model has no plane to anchor to there and would
+    # flag every pad of an unrouted plane net except an arbitrary
+    # largest-island representative).
+    nets_with_fill = {fp.net_name for fp in same_net_filled_polys}
+    strict_sets: tuple[dict[str, set[str]], dict[str, set[str]]] | None = None
+    if nets_with_fill:
+        try:
+            strict_sets = _compute_strict_pad_sets(pcb_path, net_name_set)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            result.strict_model_error = f"{type(exc).__name__}: {exc}"
 
     # Find other-net copper for clearance checking to prevent shorts
     other_net_tracks = find_all_track_segments(sexp, exclude_nets=net_numbers)
@@ -4828,14 +4976,34 @@ def run_stitch(
         eff_other_net_tracks = other_net_tracks + cross_net_stitch_tracks
         eff_other_net_vias = other_net_vias + cross_net_stitch_vias
 
-        # Check if already connected
-        if is_pad_connected(
+        # Check if already connected (legacy proximity heuristic), then let
+        # the strict copper-contact model VETO a "connected" skip for filled
+        # nets (issue #4679).  The veto is one-directional on purpose:
+        #
+        # * A pad `kct net-status` names as "needs via to plane" (strict
+        #   unconnected) is in stitch's work list by construction, even when
+        #   a stub trace endpoint sits within the 0.5mm proximity radius --
+        #   the old silent "already connected" false skip.
+        # * The strict model never CREATES a skip: its "connected" set is
+        #   "largest island", which tie-breaks arbitrarily between singleton
+        #   islands when the fill bonds no pad at all, so trusting it to
+        #   suppress stitching would strand pads legacy stitching handled.
+        #   Extra vias are recoverable; stranded pads ship defects.
+        connected = is_pad_connected(
             pad,
             existing_vias,
             track_points,
             same_net_filled_polygons=same_net_filled_polys,
             same_net_zone_polygons=same_net_zone_polys,
+        )
+        if (
+            connected
+            and strict_sets is not None
+            and pad.net_name in nets_with_fill
+            and f"{pad.reference}.{pad.pad_number}" in strict_sets[0].get(pad.net_name, set())
         ):
+            connected = False
+        if connected:
             result.already_connected += 1
             continue
 
@@ -5478,8 +5646,29 @@ def output_result(
             )
             print(f"  {net_name} -> {layer}{source}")
 
+    # Issue #4679: surface a strict-model failure so a disagreement with
+    # `kct net-status` is never silent (stitch fell back to the legacy
+    # proximity gate for this run).
+    if result.strict_model_error:
+        print(
+            "\nWarning: strict connectivity model unavailable "
+            f"({result.strict_model_error}); fell back to the legacy "
+            "proximity gate -- results may disagree with `kct net-status`.",
+            file=sys.stderr,
+        )
+
     if not result.vias_added and not result.pads_skipped:
-        if result.already_connected > 0:
+        # Issue #4679: distinguish the three quiet outcomes explicitly --
+        # (a) the target nets have no pads at all (name them), (b) N pads
+        # found and every one already connected, (c) the legacy catch-all.
+        if result.pads_found == 0:
+            nets_str = ", ".join(result.target_nets) if result.target_nets else "(none)"
+            print(f"\nNo pads found on target net(s): {nets_str}")
+            print(
+                "  The net name(s) may not match any net on this board, or "
+                "the net(s) have zero pads -- cross-check with `kct net-status`."
+            )
+        elif result.already_connected > 0:
             print(f"\nAll {result.already_connected} pads already connected.")
         else:
             print("\nNo unconnected pads found on target nets.")

@@ -66,6 +66,10 @@ class NetStatus:
         plane_layers: All layers with copper zones for this net
         has_routing: Whether this net has any trace segments
         has_vias: Whether this net has any vias
+        source_file: Path of the analyzed ``.kicad_pcb`` file (as given to
+            the analyzer), used to render a copy-pasteable
+            :attr:`suggested_fix`. Empty when the analyzer was handed an
+            in-memory ``PCB`` with no path (issue #4679).
     """
 
     net_number: int
@@ -80,6 +84,7 @@ class NetStatus:
     has_routing: bool = False
     has_vias: bool = False
     has_filled_zone: bool = False  # A zone on this net produced fill copper
+    source_file: str = ""
 
     @property
     def connected_count(self) -> int:
@@ -169,11 +174,17 @@ class NetStatus:
 
     @property
     def suggested_fix(self) -> str:
-        """Suggest fix based on net type."""
+        """Suggest fix based on net type.
+
+        Uses the real analyzed filename (:attr:`source_file`) so the printed
+        remedy is copy-pasteable; before issue #4679 this hardcoded a literal
+        ``board.kicad_pcb`` regardless of the file analyzed.
+        """
         if self.is_plane_net:
             layers = self.plane_layers or ([self.plane_layer] if self.plane_layer else [])
             layers_info = ", ".join(layers) if layers else "unknown"
-            return f"kct stitch board.kicad_pcb --net {self.net_name} (zones on {layers_info})"
+            board = self.source_file or "board.kicad_pcb"
+            return f"kct stitch {board} --net {self.net_name} (zones on {layers_info})"
         return f"Route traces to connect {self.unconnected_count} pads"
 
     def to_dict(self) -> dict:
@@ -418,8 +429,13 @@ class NetStatusAnalyzer:
 
         if isinstance(pcb, (str, Path)):
             self.pcb = PCBClass.load(str(pcb))
+            # Remember the path as given so per-net suggested fixes can print
+            # a copy-pasteable command (issue #4679).
+            self.source_file: str = str(pcb)
         else:
             self.pcb = pcb
+            pcb_path = getattr(pcb, "path", None)
+            self.source_file = str(pcb_path) if pcb_path else ""
         self.strict = strict
         # Strict-mode geometry caches (Issue #4176), keyed by object id.
         self._segment_poly_cache: dict[int, Any] = {}
@@ -488,6 +504,40 @@ class NetStatusAnalyzer:
 
         return result
 
+    def analyze_nets(self, net_names: set[str] | frozenset[str] | list[str]) -> NetStatusResult:
+        """Analyze only the named nets (scoped work-list variant, issue #4679).
+
+        Runs the same per-net connectivity analysis as :meth:`analyze` but
+        restricted to ``net_names``, so callers that only care about a few
+        nets (e.g. ``kct stitch`` consulting the strict model for its target
+        plane nets) do not pay for a whole-board analysis.
+
+        Unlike :meth:`analyze`, the pour-net advisory reclassification pass is
+        skipped (irrelevant for a per-net work list);
+        ``NetStatusResult.advisory_incomplete_names`` is left empty.
+
+        Args:
+            net_names: Net names to analyze. Names that do not exist on the
+                board are silently absent from the result (callers can detect
+                this by comparing ``result.nets`` against their request).
+
+        Returns:
+            NetStatusResult containing status for just the selected nets.
+        """
+        wanted = set(net_names)
+        result = NetStatusResult()
+
+        nets = {n: net for n, net in self.pcb.nets.items() if n != 0 and net.name in wanted}
+        result.total_nets = len(nets)
+
+        zone_nets = self._build_zone_net_map()
+        for net_number, net in nets.items():
+            result.nets.append(self._analyze_net(net_number, net.name, zone_nets))
+
+        status_order = {"incomplete": 0, "unrouted": 1, "complete": 2}
+        result.nets.sort(key=lambda n: (status_order.get(n.status, 3), n.net_name))
+        return result
+
     def _build_zone_net_map(self) -> dict[int, list[str]]:
         """Build mapping of net numbers to zone layers.
 
@@ -515,6 +565,7 @@ class NetStatusAnalyzer:
         status = NetStatus(
             net_number=net_number,
             net_name=net_name,
+            source_file=self.source_file,
         )
 
         # Check if this is a plane net

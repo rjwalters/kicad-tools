@@ -96,6 +96,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guard test now fails if any future consumer calls `net_class_map_from_dict`
   directly — the invariant is *any sidecar accepted by one consumer is
   accepted by all of them*.
+- **`kct stitch` now honors the strict connectivity model `kct net-status`
+  prints its remedy from** (#4679) — net-status could name a plane-net pad
+  "needs via to plane" while running the printed
+  `kct stitch <file> --net <NET>` command reported "No unconnected pads
+  found on target nets". Three defects fixed. (1) *Model divergence*:
+  stitch's "already connected" gate was a 0.5mm endpoint-proximity heuristic
+  with no notion of "reaches the plane" — an SMD pad tied to a stub trace
+  going nowhere counted as connected. For target nets with real fill copper,
+  the strict copper-contact model (`NetStatusAnalyzer`, the engine behind
+  net-status, via a new scoped `analyze_nets()`) now VETOES a
+  proximity-"connected" skip for any pad it reports unconnected, so the
+  net-status remedy applies by construction; the veto is one-directional
+  (the strict model never *suppresses* stitching — its "largest island"
+  connected set tie-breaks arbitrarily when the fill bonds no pads) and
+  nets without fill copper keep the legacy gate unchanged. (2) *Name-only
+  net references*: stitch's pad/via/track/drill extractors silently dropped
+  KiCad-10 name-only `(net "NAME")` inline references (the `kicad-cli pcb
+  drc --save-board` dialect, which also deletes the header net table), so
+  on such boards stitch found NO pads at all — the exact "No unconnected
+  pads found" no-op the issue reproduced. A shared `resolve_net_num()`
+  resolver plus header-table synthesis in `get_net_map()` (mirroring
+  `PCB._synthesize_net_table`, #4416) makes all stitch extractors
+  dialect-aware. (3) *Output accounting*: stitch now distinguishes "No pads
+  found on target net(s): X" (naming the nets, with a cross-check hint)
+  from "All N pads already connected", and surfaces a stderr warning when
+  the strict model could not run — a stitch/net-status disagreement can no
+  longer be silent. Bonus: `NetStatus.suggested_fix` embeds the real
+  analyzed filename instead of a hardcoded `board.kicad_pcb`, so the
+  printed remedy is copy-pasteable.
 
 - **`kct net-status --net X` output scoping** (#4682) — two `--net` defects
   that made the filter untrustworthy. (1) `--net X --why` ignored the filter
