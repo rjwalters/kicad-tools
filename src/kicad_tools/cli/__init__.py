@@ -662,6 +662,8 @@ def _run_calibrate_command(args) -> int:
         sub_argv.append("--quick")
     if hasattr(args, "calibrate_output") and args.calibrate_output:
         sub_argv.extend(["-o", args.calibrate_output])
+    if hasattr(args, "calibrate_format") and args.calibrate_format != "text":
+        sub_argv.extend(["--format", args.calibrate_format])
     if hasattr(args, "calibrate_json") and args.calibrate_json:
         sub_argv.append("--json")
     if hasattr(args, "calibrate_verbose") and args.calibrate_verbose:

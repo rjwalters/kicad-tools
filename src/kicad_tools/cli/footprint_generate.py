@@ -30,6 +30,7 @@ import json
 import sys
 from pathlib import Path
 
+from kicad_tools.cli.format_options import add_format_flag, normalize_format_alias
 from kicad_tools.library.generators import (
     create_chip,
     create_dip,
@@ -317,9 +318,15 @@ def main(argv: list[str] | None = None) -> int:
         help="List available generators",
     )
     parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text); json is the same as --json",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
-        help="Output footprint data as JSON (instead of .kicad_mod format)",
+        help="Output footprint data as JSON instead of .kicad_mod format (same as --format json)",
     )
 
     subparsers = parser.add_subparsers(dest="generator_type", help="Footprint type")
@@ -334,7 +341,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     soic_parser.add_argument("--name", help="Custom footprint name")
     soic_parser.add_argument("-o", "--output", help="Output file path")
-    soic_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    soic_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
     soic_parser.set_defaults(func=generate_soic)
 
     # QFP subcommand
@@ -348,7 +357,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     qfp_parser.add_argument("--name", help="Custom footprint name")
     qfp_parser.add_argument("-o", "--output", help="Output file path")
-    qfp_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    qfp_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
     qfp_parser.set_defaults(func=generate_qfp)
 
     # QFN subcommand
@@ -365,7 +376,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     qfn_parser.add_argument("--name", help="Custom footprint name")
     qfn_parser.add_argument("-o", "--output", help="Output file path")
-    qfn_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    qfn_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
     qfn_parser.set_defaults(func=generate_qfn)
 
     # Chip subcommand
@@ -380,7 +393,9 @@ def main(argv: list[str] | None = None) -> int:
     chip_parser.add_argument("--metric", action="store_true", help="Use metric naming convention")
     chip_parser.add_argument("--name", help="Custom footprint name")
     chip_parser.add_argument("-o", "--output", help="Output file path")
-    chip_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    chip_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
     chip_parser.set_defaults(func=generate_chip)
 
     # SOT subcommand
@@ -393,7 +408,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     sot_parser.add_argument("--name", help="Custom footprint name")
     sot_parser.add_argument("-o", "--output", help="Output file path")
-    sot_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    sot_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
     sot_parser.set_defaults(func=generate_sot)
 
     # DIP subcommand
@@ -405,7 +422,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     dip_parser.add_argument("--name", help="Custom footprint name")
     dip_parser.add_argument("-o", "--output", help="Output file path")
-    dip_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    dip_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
     dip_parser.set_defaults(func=generate_dip)
 
     # Pin header subcommand
@@ -415,10 +434,30 @@ def main(argv: list[str] | None = None) -> int:
     header_parser.add_argument("--pitch", type=float, help="Pin pitch in mm (default: 2.54)")
     header_parser.add_argument("--name", help="Custom footprint name")
     header_parser.add_argument("-o", "--output", help="Output file path")
-    header_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    header_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
     header_parser.set_defaults(func=generate_pin_header)
 
+    # Canonical machine-output spelling on every shape subparser
+    # (--format json; the per-shape --json flags above are legacy aliases).
+    # See docs/reference/machine-output.md.
+    for shape_parser in (
+        soic_parser,
+        qfp_parser,
+        qfn_parser,
+        chip_parser,
+        sot_parser,
+        dip_parser,
+        header_parser,
+    ):
+        add_format_flag(shape_parser)
+
     args = parser.parse_args(argv)
+
+    # Either spelling requesting JSON wins; after this call args.json is
+    # True when --format json or --json was given.
+    normalize_format_alias(args)
 
     # Handle --list at top level
     if args.list:

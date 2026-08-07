@@ -5657,9 +5657,19 @@ def _add_placement_parser(subparsers) -> None:
         help="Comma-separated component refs to keep fixed (e.g., J1,J2,H1)",
     )
     placement_refine.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help=(
+            "Interface format; 'json' selects the JSON API mode "
+            "(read commands from stdin, write responses to stdout). "
+            "Canonical spelling of --json; see docs/reference/machine-output.md"
+        ),
+    )
+    placement_refine.add_argument(
         "--json",
         action="store_true",
-        help="JSON API mode (read commands from stdin, write responses to stdout)",
+        help="JSON API mode (same as --format json)",
     )
     placement_refine.add_argument("-v", "--verbose", action="store_true")
     placement_refine.add_argument(
@@ -8561,10 +8571,17 @@ def _add_calibrate_parser(subparsers) -> None:
         help="Output path for configuration file",
     )
     calibrate_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        dest="calibrate_format",
+        help="Output format (default: text); see docs/reference/machine-output.md",
+    )
+    calibrate_parser.add_argument(
         "--json",
         action="store_true",
         dest="calibrate_json",
-        help="Output configuration as JSON",
+        help="Output configuration as JSON (same as --format json)",
     )
     calibrate_parser.add_argument(
         "-v",

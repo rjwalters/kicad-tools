@@ -33,6 +33,7 @@ Detailed reference documentation:
 | Reference | Description |
 |-----------|-------------|
 | [CLI Commands](reference/cli.md) | Complete command-line reference |
+| [Machine Output](reference/machine-output.md) | The canonical `--format json` idiom: inventory, exemptions, rules |
 | [Python API](reference/api.md) | Module-by-module API documentation |
 | [Manufacturer Rules](reference/manufacturers.md) | JLCPCB, OSHPark, PCBWay design rules |
 | [Circuit Blocks](reference/circuit-blocks.md) | Reusable schematic building blocks |

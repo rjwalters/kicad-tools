@@ -1264,6 +1264,19 @@ Use `--format` to specify:
 kct symbols project.kicad_sch --format json
 ```
 
+### Machine output: `--format json` is canonical
+
+**`--format json` is the canonical machine-output spelling for every `kct`
+subcommand.** A few older commands (`placement refine`, `calibrate`, the
+`footprint generate` shape subcommands) also carry a boolean `--json` flag;
+it is a permanently supported **legacy alias** for `--format json` — the two
+spellings are equivalent, and either one requesting JSON wins. New commands
+must use `--format` with a `json` choice, never a new `--json` flag.
+
+See [Machine output](machine-output.md) for the full design note: the audited
+per-subcommand inventory, the exemption list, and the rules for adding
+machine output to new commands.
+
 ---
 
 ## Exit Codes

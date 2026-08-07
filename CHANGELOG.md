@@ -105,6 +105,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (BOM-vs-schematic fixed-column contract, version strings, escalation
   to WARNING) are deferred.
 
+- **`--format json` is now the canonical machine-output spelling across the
+  `kct` CLI** (#4543, from the copperhead survey #4520 idea 6) — new design
+  note `docs/reference/machine-output.md` records the decision, the audited
+  per-subcommand inventory (199 leaves as of this change: 124 already on
+  `--format json`, 72 prose-only, 4 exempt, 1 deferred to the route
+  workstream), and the rules for new commands; a new audit tool
+  `scripts/audit_machine_output.py` re-measures the inventory from the real
+  argparse tree. The two remaining `--json`-only commands gained the
+  canonical spelling additively: `kct placement refine --format json` and
+  `kct calibrate --format json` now work end-to-end (outer parser, shim
+  forwarding, inner parser) with the existing `--json` kept forever as a
+  documented legacy alias (either spelling requesting JSON wins), and the
+  7 `kct footprint generate` shape subcommands accept `--format json`
+  alongside their legacy `--json`. Shared helpers live in
+  `src/kicad_tools/cli/format_options.py`, and a new regression guard
+  (`tests/test_machine_output_idiom.py`) fails if any leaf subcommand ever
+  carries `--json` without the canonical `--format json`. Adding machine
+  output to the 72 prose-only subcommands is the separate mechanical sweep
+  (#4674).
+
 - **`kct pipeline` route-skip under `--voltage-map` now auto-runs a
   `kct creepage` audit as the skip gate** (#4649) — refining the #4607 loud
   refusal: when the board is already `>=`95% routed (recommend_skip) and no

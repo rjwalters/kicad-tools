@@ -208,6 +208,8 @@ def run_placement_command(args) -> int:
             sub_argv.extend(["-o", args.output])
         if getattr(args, "fixed", None):
             sub_argv.extend(["--fixed", args.fixed])
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         if getattr(args, "json", False):
             sub_argv.append("--json")
         if getattr(args, "verbose", False):

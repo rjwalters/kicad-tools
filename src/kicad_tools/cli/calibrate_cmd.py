@@ -66,9 +66,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Output path for configuration file",
     )
     parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
-        help="Output configuration as JSON",
+        help="Output configuration as JSON (same as --format json)",
     )
     parser.add_argument(
         "-v",
@@ -78,6 +84,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    # --format json and the legacy --json alias are equivalent; after this
+    # call args.json is True when either spelling requested JSON output.
+    from kicad_tools.cli.format_options import normalize_format_alias
+
+    normalize_format_alias(args)
 
     # Handle --show-gpu: display GPU capabilities and config
     if args.show_gpu:

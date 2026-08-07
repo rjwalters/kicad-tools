@@ -414,10 +414,15 @@ def cmd_place_unplaced(args) -> int:
 
 def cmd_refine(args) -> int:
     """Interactive placement refinement session."""
+    from kicad_tools.cli.format_options import normalize_format_alias
     from kicad_tools.cli.progress import spinner
     from kicad_tools.optim.query import process_json_request
     from kicad_tools.optim.session import PlacementSession
     from kicad_tools.schema.pcb import PCB
+
+    # --format json and the legacy --json alias are equivalent; after this
+    # call args.json is True when either spelling requested JSON API mode.
+    normalize_format_alias(args)
 
     quiet = getattr(args, "quiet", False)
 
@@ -2041,9 +2046,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Comma-separated component refs to keep fixed (e.g., J1,J2,H1)",
     )
     refine_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help=(
+            "Interface format; 'json' selects the JSON API mode "
+            "(read commands from stdin, write responses to stdout)"
+        ),
+    )
+    refine_parser.add_argument(
         "--json",
         action="store_true",
-        help="JSON API mode (read commands from stdin, write responses to stdout)",
+        help="JSON API mode (same as --format json)",
     )
     refine_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     refine_parser.add_argument(
