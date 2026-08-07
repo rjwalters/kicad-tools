@@ -211,6 +211,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Connectivity `validate(reconcile_native=True)` no longer discards the
+  internal classification** (#4551) — the native reconciliation path used to
+  wholesale-replace `result.issues` with kicad-cli relationships hardcoded as
+  `zone_island` with empty `unconnected_pads`, so `unrouted`/`partial`/
+  `isolated` always read 0 on machines with kicad-cli (board-03 unrouted:
+  internal 16 `partial`/68 unconnected pads collapsed to 37 `zone_island`/0).
+  Native relationships now keep their authoritative *count* (#4498 fleet
+  parity: board-03 = 13, board-05 = 57) but are classified by endpoint kind:
+  zone-only relationships stay `zone_island`, while pad-bearing relationships
+  inherit the internal classification for their net and carry the pad
+  endpoint descriptions in `unconnected_pads`. Two rendering/diagnostic
+  defects fixed alongside: kicad-cli's generic "Missing connection between
+  items" message is enriched at the source with the real endpoint refs
+  ("Pad 3 [GND] of U1 on B.Cu"), fixing the default table, JSON, and
+  `summary()` in one place; and an *unexpected* kicad-cli exit code during
+  reconciliation now emits a `RuntimeWarning` naming the exit code and the
+  internal issue count being silently substituted (the expected KiCad-less
+  degradations — no board path, kicad-cli not installed — stay silent).
+  `validate(reconcile_native=False)` behavior is unchanged.
+
 - **Boards 03/06/07: committed routed artifacts refreshed with corrected 3D
   model transforms** (#4585) — the kicad-tools.org gallery cards for
   `diffpair_test_routed` (board 06, mini-PCIe socket 90° off its pad column)

@@ -353,12 +353,31 @@ class ConnectivityValidator:
         result.connected_nets = connected_count
         result.zone_connected_nets = zone_connected_count
         if reconcile_native:
-            native_issues = self._native_unconnected_relationships()
+            # Issue #4551: map native relationships onto the internal
+            # classification instead of discarding it.  The per-net lookup
+            # carries the internal ``unrouted``/``partial``/``isolated``
+            # verdicts so that a native pad-bearing relationship keeps its
+            # internal type (and the reconciled result's per-type counts stay
+            # populated) while the native relationship *count* remains
+            # authoritative for the opt-in path (#4498 fleet parity).
+            internal_types = {
+                issue.net_name: issue.issue_type
+                for issue in result.issues
+                if issue.issue_type in ("unrouted", "partial", "isolated")
+            }
+            native_issues = self._native_unconnected_relationships(
+                internal_types=internal_types,
+                internal_issue_count=len(result.issues),
+            )
             if native_issues is not None:
                 result.issues = native_issues
         return result
 
-    def _native_unconnected_relationships(self) -> list[ConnectivityIssue] | None:
+    def _native_unconnected_relationships(
+        self,
+        internal_types: dict[str, str] | None = None,
+        internal_issue_count: int | None = None,
+    ) -> list[ConnectivityIssue] | None:
         """Return KiCad's per-item relationships, or ``None`` when unavailable.
 
         This is the explicit high-fidelity reconciliation path permitted by
@@ -373,6 +392,24 @@ class ConnectivityValidator:
         Refill-time connectivity is therefore authoritative for the opt-in
         path; it reports board05's exact current 57 without weakening the
         KiCad-less fail-visible model.
+
+        Args:
+            internal_types: Optional ``net_name -> issue_type`` lookup built
+                from the internal classification (``unrouted`` / ``partial``
+                / ``isolated``).  A native relationship with a pad endpoint
+                inherits the internal type for its net; zone-only
+                relationships (and nets the internal analysis did not flag)
+                keep ``zone_island``.
+            internal_issue_count: Number of internal issues that will be
+                silently substituted if this method returns ``None``.  Only
+                used to make the unexpected-exit-code warning actionable.
+
+        Returns ``None`` on the two *expected* degradations (PCB passed as an
+        object, kicad-cli not installed) without emitting anything; an
+        *unexpected* kicad-cli exit code also returns ``None`` but emits a
+        ``RuntimeWarning`` naming the exit code and the substituted internal
+        count (issue #4551 — the silent fallback made a kicad-cli crash
+        indistinguishable from the documented KiCad-less path).
         """
         if self.pcb_path is None:
             return None
@@ -405,6 +442,20 @@ class ConnectivityValidator:
                 check=False,
             )
             if proc.returncode not in (0, 5):
+                import warnings
+
+                substituted = (
+                    f"; substituting the internal analysis ({internal_issue_count} issue(s))"
+                    if internal_issue_count is not None
+                    else ""
+                )
+                warnings.warn(
+                    "kicad-cli pcb drc exited with unexpected code "
+                    f"{proc.returncode} during native connectivity "
+                    f"reconciliation{substituted}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 return None
             report = DRCReport.load(report_file.name)
 
@@ -412,16 +463,37 @@ class ConnectivityValidator:
         # ``unconnected_items`` collection, NOT in ``violations`` -- the
         # geometric collection keeps its pre-#4498 meaning for every
         # ``run_geometric_drc`` consumer.
+        lookup = internal_types or {}
         issues: list[ConnectivityIssue] = []
         for index, violation in enumerate(report.connectivity_items()):
             item_ids = tuple(violation.items) or (f"native-unconnected[{index}]",)
+            net_name = violation.nets[0] if violation.nets else "<native>"
+            # Issue #4551: classify by endpoint kind + internal lookup rather
+            # than hardcoding zone_island.  Zone-only relationships keep
+            # today's meaning; a relationship with a pad endpoint inherits the
+            # internal classification for its net when one exists, so the
+            # reconciled result's unrouted/partial/isolated views stay
+            # populated on unrouted boards.
+            pad_endpoints = tuple(
+                item_id for item_id in violation.items if not item_id.startswith("Zone ")
+            )
+            issue_type = lookup.get(net_name, "zone_island") if pad_endpoints else "zone_island"
+            # kicad-cli's top-level description is the generic "Missing
+            # connection between items"; the real endpoint refs live in the
+            # per-item descriptions.  Compose them into the message so the
+            # default table, JSON, and summary() all show actual pad/zone
+            # references (issue #4551).
+            message = violation.message
+            if message == "Missing connection between items" and len(item_ids) >= 2:
+                message = f"Missing connection between {item_ids[0]} and {item_ids[1]}"
             issues.append(
                 ConnectivityIssue(
                     severity="error",
-                    issue_type="zone_island",
-                    net_name=violation.nets[0] if violation.nets else "<native>",
-                    message=violation.message,
+                    issue_type=issue_type,
+                    net_name=net_name,
+                    message=message,
                     suggestion="Connect the items reported by kicad-cli",
+                    unconnected_pads=pad_endpoints,
                     islands=tuple((item_id,) for item_id in item_ids),
                 )
             )

@@ -151,8 +151,15 @@ def test_connectivity_and_geometry_contracts_hold_simultaneously(tmp_path, monke
     # Contract 1 -- connectivity sees all 12 relationships.
     result = ConnectivityValidator(board).validate(reconcile_native=True)
     assert len(result.issues) == 12
+    # Issue #4551 mapping: the pad<->zone relationships inherit the internal
+    # classification for GND, which on this board is itself ``zone_island``
+    # (the orphaned-fill issue), so the type set is unchanged here.
     assert {issue.issue_type for issue in result.issues} == {"zone_island"}
     assert result.error_count == 12
+    # Issue #4551: the generic kicad-cli message is enriched with the real
+    # endpoint descriptions, and pad endpoints populate unconnected_pads.
+    assert all("of U1 on B.Cu" in issue.message for issue in result.issues)
+    assert result.unconnected_pad_count == 12
 
     # Contract 2 -- geometry-only consumers see zero, from the same report.
     geo = run_geometric_drc(board)
@@ -233,6 +240,151 @@ def test_board03_connectivity_and_geometry_contracts_native(tmp_path) -> None:
         "board-03 is geometrically clean; connectivity relationships must not "
         f"be counted as geometric violations: {geometric.by_type}"
     )
+
+
+def _relationship_payload(item_pairs: list[tuple[str, str]]) -> dict:
+    """A KiCad-shaped JSON report with one relationship per endpoint pair."""
+    return {
+        "source": "board.kicad_pcb",
+        "violations": [],
+        "unconnected_items": [
+            {
+                "type": "unconnected_items",
+                "severity": "error",
+                "description": "Missing connection between items",
+                "items": [
+                    {"description": left, "pos": {"x": 1.0, "y": 1.0}},
+                    {"description": right, "pos": {"x": 2.0, "y": 2.0}},
+                ],
+            }
+            for left, right in item_pairs
+        ],
+        "schematic_parity": [],
+    }
+
+
+def test_reconcile_maps_native_relationships_onto_internal_types(tmp_path, monkeypatch) -> None:
+    """Issue #4551: native relationships inherit the internal classification.
+
+    ``PARTIALLY_CONNECTED_PCB`` classifies NET1 and GND internally as
+    ``partial``.  A native pad-bearing relationship on NET1 must carry that
+    type (so ``result.partial`` / ``unconnected_pad_count`` stay populated),
+    while a zone<->zone relationship keeps ``zone_island`` even though GND
+    also has an internal classification.  The native relationship *count*
+    stays authoritative (#4498 parity).
+    """
+    import subprocess
+
+    import kicad_tools.cli.runner as runner_mod
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(PARTIALLY_CONNECTED_PCB)
+
+    payload = _relationship_payload(
+        [
+            ("Pad 1 [NET1] of R2 on F.Cu", "Pad 1 [NET1] of R3 on F.Cu"),
+            ("Zone [GND] on F.Cu", "Zone [GND] on B.Cu"),
+        ]
+    )
+    monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda *a, **k: Path("/usr/bin/kicad-cli"))
+    monkeypatch.setattr(subprocess, "run", _fake_kicad_cli_drc(payload))
+
+    result = ConnectivityValidator(board).validate(reconcile_native=True)
+
+    # Count parity: exactly the native relationships, no merged list.
+    assert len(result.issues) == 2
+
+    pad_issue, zone_issue = result.issues
+    assert pad_issue.issue_type == "partial"
+    assert pad_issue.net_name == "NET1"
+    assert pad_issue.unconnected_pads == (
+        "Pad 1 [NET1] of R2 on F.Cu",
+        "Pad 1 [NET1] of R3 on F.Cu",
+    )
+    assert pad_issue.message == (
+        "Missing connection between Pad 1 [NET1] of R2 on F.Cu and Pad 1 [NET1] of R3 on F.Cu"
+    )
+
+    assert zone_issue.issue_type == "zone_island"
+    assert zone_issue.unconnected_pads == ()
+
+    # The reconciled result's per-type views are populated again.
+    assert len(result.partial) == 1
+    assert len(result.zone_islands) == 1
+    assert result.unconnected_pad_count == 2
+    assert result.error_count == 2
+
+
+def test_reconcile_warns_on_unexpected_kicad_cli_exit(tmp_path, monkeypatch) -> None:
+    """Issue #4551: an unexpected kicad-cli exit code is no longer silent.
+
+    The warning names the exit code and the internal issue count being
+    substituted, and the internal result is returned intact.
+    """
+    import subprocess
+
+    import kicad_tools.cli.runner as runner_mod
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(PARTIALLY_CONNECTED_PCB)
+    monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda *a, **k: Path("/usr/bin/kicad-cli"))
+
+    def _run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess([str(c) for c in cmd], 4, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    with pytest.warns(
+        RuntimeWarning,
+        match=r"unexpected code 4 .*substituting the internal analysis \(2 issue\(s\)\)",
+    ):
+        result = ConnectivityValidator(board).validate(reconcile_native=True)
+
+    # Internal classification substituted unchanged.
+    assert len(result.issues) == 2
+    assert {issue.issue_type for issue in result.issues} == {"partial"}
+
+
+def test_reconcile_expected_degradations_stay_silent(tmp_path, monkeypatch, recwarn) -> None:
+    """Issue #4551: the documented KiCad-less paths emit no warning."""
+    import kicad_tools.cli.runner as runner_mod
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(PARTIALLY_CONNECTED_PCB)
+
+    # kicad-cli not installed.
+    monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda *a, **k: None)
+    result = ConnectivityValidator(board).validate(reconcile_native=True)
+    assert len(result.issues) == 2
+
+    # PCB passed as an object (no path for kicad-cli to read).
+    result_obj = ConnectivityValidator(PCB.load(str(board))).validate(reconcile_native=True)
+    assert len(result_obj.issues) == 2
+
+    assert [w for w in recwarn.list if issubclass(w.category, RuntimeWarning)] == []
+
+
+def test_output_table_shows_native_endpoints_without_verbose(tmp_path, monkeypatch, capsys) -> None:
+    """Issue #4551: the default table shows real endpoint refs, not N generic lines."""
+    import subprocess
+
+    import kicad_tools.cli.runner as runner_mod
+    from kicad_tools.cli.validate_connectivity_cmd import output_table
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(PARTIALLY_CONNECTED_PCB)
+
+    payload = _relationship_payload([("Zone [GND] on F.Cu", "Pad 2 [GND] of R3 on F.Cu")])
+    monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda *a, **k: Path("/usr/bin/kicad-cli"))
+    monkeypatch.setattr(subprocess, "run", _fake_kicad_cli_drc(payload))
+
+    result = ConnectivityValidator(board).validate(reconcile_native=True)
+    output_table(result, board, verbose=False)
+
+    out = capsys.readouterr().out
+    assert "Zone [GND] on F.Cu" in out
+    assert "Pad 2 [GND] of R3 on F.Cu" in out
+    assert "Missing connection between items" not in out
 
 
 # PCB with fully connected nets (all pads connected via tracks)
