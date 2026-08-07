@@ -86,6 +86,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Softstart lattice proofs: re-pin to the current fixture + content-hash
+  drift guard** (#4670) — the local-only softstart routing proof
+  (`tests/router/lattice/test_softstart_routing.py`) failed at its topology
+  pre-assertion because the external fixture moved (softstart PR #26 NRST
+  star-break rework grew the anchor-star topology 287 → 295 connections).
+  The proof is re-pinned to the current artifact (softstart commit
+  `7800b04`) with re-measured completion floors, and both softstart lattice
+  test modules now pin the board file by sha256 via a shared
+  `tests/router/lattice/softstart_fixture.py` helper: fixture absent → skip
+  (unchanged CI semantics), fixture present but hash-mismatched → skip with
+  a message naming the pinned and observed hashes plus the re-pin
+  procedure, so future external drift reads as a self-explanatory skip
+  instead of a confusing assert failure. Test-only; CI never runs these
+  modules (the fixture symlink dangles there by design).
+
 - **`kct route --layers 2` no longer rejects a net-class-map whose
   `avoid_layers` names an inner layer** (#4685) — a well-formed KiCad copper
   layer name (`F.Cu`, `B.Cu`, `In<k>.Cu`) absent from the ACTIVE stack is now

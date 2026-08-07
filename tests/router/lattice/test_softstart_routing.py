@@ -8,11 +8,17 @@ at its true 2.6mm width.
 
 The board is a local-only external fixture (``boards/external/softstart``
 is a symlink that dangles in CI and fresh worktrees), so the whole module
-skips cleanly when it is absent -- exactly like the memory test.
+skips cleanly when it is absent -- exactly like the memory test.  The
+artifact is additionally pinned by content hash (``softstart_fixture``,
+issue #4670): a drifted fixture skips with an explicit message instead of
+failing the topology assert.
 
-Assertions (pinned to the measured 2026-07-16 P4 verdict; see #4271):
+Assertions (re-pinned 2026-08-07 against softstart commit 7800b04, after
+the NRST star-break rework -- softstart PR #26, R30/R31 -- grew the
+anchor-star topology 287 -> 295 connections; issue #4670.  Original P4
+verdict 2026-07-16, #4271):
 
-1. ``lattice_builds == 1`` at 287-connection scale (static substrate).
+1. ``lattice_builds == 1`` at 295-connection scale (static substrate).
 2. Zero cross-net short in the emitted copper (the #3906 invariant checked
    pairwise at the per-class copper gap).
 3. Completion >= the measured floor.
@@ -29,7 +35,6 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from pathlib import Path
 
 import pytest
 
@@ -39,27 +44,34 @@ from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
-_REPO = Path(__file__).resolve().parents[3]
-_SOFTSTART_DIR = _REPO / "boards/external/softstart/output_revc"
-_SOFTSTART = _SOFTSTART_DIR / "softstart_revc.kicad_pcb"
-_SIDECAR = _SOFTSTART_DIR / "net_class_map.json"
-
-# Measured floors -- pinned from the 2026-07-17 #4293 P4 re-measurement
-# (deterministic negotiation; measured 273/287 connections and 66/79 nets
-# fully connected at max_iterations=2, declines {no-path: 13,
-# pad-escape-end: 1}).  RAISED from the #4271 floors (255/55, measured
-# 267/63) because the oversize neck-down escape (#4293) converted 6 of the 7
-# pad-escape-end declines: the 2.6 mm HV_HICUR nets that could not exit the
-# dense fuse/terminal pad fields now escape at a legal neck and widen back to
-# the class width at the first lattice node.  Floors sit below the new
-# measurement for stability but above the #4271 reality, so a regression to
-# either the pre-#4293 or the epic floor (>= 40/79 nets) fails loudly.
-_CONNECTION_FLOOR = 265
-_NET_FLOOR = 60
-
-pytestmark = pytest.mark.skipif(
-    not _SOFTSTART.exists(), reason="local-only softstart fixture absent"
+from .softstart_fixture import (
+    SIDECAR as _SIDECAR,
 )
+from .softstart_fixture import (
+    SOFTSTART_BOARD as _SOFTSTART,
+)
+from .softstart_fixture import (
+    fixture_skip_reason,
+)
+
+# Measured floors -- re-pinned 2026-08-07 (#4670) against the 295-connection
+# fixture (softstart commit 7800b04, post-PR-#26 NRST star-break rework):
+# deterministic negotiation measured 288/295 connections and 78/84 nets
+# fully connected at max_iterations=2, declines {pad-escape-end: 1,
+# no-path: 6}.  History: the 2026-07-17 #4293 P4 re-measurement on the
+# 287-connection board was 273/287 and 66/79 (floors 265/60), itself RAISED
+# from the #4271 floors (255/55) when the oversize neck-down escape (#4293)
+# converted 6 of the 7 pad-escape-end declines.  Floors sit below the
+# current measurement for stability (same margins as the #4293 pin: 8
+# connections, 6 nets) but above the historical reality, so a regression to
+# the pre-#4293 or the epic floor (>= 40 nets) fails loudly.
+_CONNECTION_FLOOR = 280
+_NET_FLOOR = 72
+
+# Skip when the local-only fixture is absent (CI, fresh worktrees) OR when it
+# has drifted from the pinned content hash -- see softstart_fixture (#4670).
+_SKIP_REASON = fixture_skip_reason()
+pytestmark = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 
 
 def _load_connections() -> tuple[list, dict[int, str], dict[str, NetClassRouting]]:
@@ -101,7 +113,7 @@ def _load_connections() -> tuple[list, dict[int, str], dict[str, NetClassRouting
 
 def test_softstart_lattice_routing_proof() -> None:
     conns, name_by_net, class_by_name = _load_connections()
-    assert len(conns) == 287, "anchor-star topology of the rev-C fixture"
+    assert len(conns) == 295, "anchor-star topology of the rev-C fixture (pinned, #4670)"
 
     pf = LatticePathfinder.from_board(
         _SOFTSTART.read_text(),

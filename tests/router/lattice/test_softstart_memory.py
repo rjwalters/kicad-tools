@@ -8,26 +8,33 @@ this is the substrate-size proof only.
 
 The board is a local-only external fixture (``boards/external/softstart``
 is a symlink that dangles in CI and fresh worktrees), so the test skips
-cleanly when it is absent -- exactly like the chorus fixtures.
+cleanly when it is absent -- exactly like the chorus fixtures.  The
+artifact is additionally pinned by content hash (``softstart_fixture``,
+issue #4670): a drifted fixture skips with an explicit message.  Verified
+against softstart commit 7800b04 (2026-08-07): the outline is still
+160x100 mm after the PR-#26 NRST star-break rework, so the #4267 P0 grid
+baseline below remains the right denominator.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import pytest
 
 from kicad_tools.router.lattice.pathfinder import LatticePathfinder
 from kicad_tools.router.layers import LayerStack
 
-_REPO = Path(__file__).resolve().parents[3]
-_SOFTSTART = _REPO / "boards/external/softstart/output_revc/softstart_revc.kicad_pcb"
+from .softstart_fixture import SOFTSTART_BOARD as _SOFTSTART
+from .softstart_fixture import fixture_skip_reason
 
 _GRID_BYTES = 1.14e9  # measured grid footprint for softstart rev-C (#4267 P0)
 _BUDGET = 0.05  # "<= ~5 % of the grid" (issue #4278 acceptance 5)
 
+# Skip when the local-only fixture is absent (CI, fresh worktrees) OR when it
+# has drifted from the pinned content hash -- see softstart_fixture (#4670).
+_SKIP_REASON = fixture_skip_reason()
 
-@pytest.mark.skipif(not _SOFTSTART.exists(), reason="local-only softstart fixture absent")
+
+@pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 def test_softstart_revc_lattice_memory_under_five_percent_of_grid() -> None:
     text = _SOFTSTART.read_text()
     pf = LatticePathfinder.from_board(text, layer_stack=LayerStack.four_layer_all_signal())
