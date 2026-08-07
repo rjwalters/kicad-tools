@@ -17,6 +17,7 @@ from .rules.clearance import ClearanceRule, SegmentZoneClearanceRule, ViaZoneCle
 from .rules.connectivity import ConnectivityRule
 from .rules.copper_sliver import CopperSliverRule
 from .rules.courtyard import CourtyardOverlapRule
+from .rules.dangling_copper import DanglingCopperRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.diffpair_length_skew import DiffPairLengthSkewRule
 from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
@@ -227,6 +228,7 @@ class DRCChecker:
         "check_via_zone_clearances",
         "check_copper_slivers",
         "check_courtyard_overlap",
+        "check_dangling_copper",
         "check_diffpair_clearance_intra",
         "check_diffpair_length_skew",
         "check_diffpair_routing_continuity",
@@ -319,6 +321,16 @@ class DRCChecker:
         "connector_edge_access": CATEGORY_ADVISORY,
         "connector_edge_distance": CATEGORY_ADVISORY,
         "copper_sliver": CATEGORY_ADVISORY,
+        # Dangling copper (Issue #4680): warning-severity routing-quality
+        # advisories (antenna stubs / under-bonded vias), mirroring
+        # KiCad's default severity -- never fab-blocking.  Explicit
+        # entries are REQUIRED: ``track_dangling`` has no prefix rule and
+        # ``via_dangling`` would fall into the fab-blocking ``via``
+        # prefix.  ``dangling_copper`` is the rule-class id used only for
+        # bookkeeping, listed for coherence with its violation ids.
+        "dangling_copper": CATEGORY_ADVISORY,
+        "track_dangling": CATEGORY_ADVISORY,
+        "via_dangling": CATEGORY_ADVISORY,
         # Schematic field-geometry legibility lint (Issue #4595):
         # warning-severity readability advisories on the resolved sibling
         # schematic -- never fab-blocking.  Explicit entries are REQUIRED:
@@ -632,6 +644,29 @@ class DRCChecker:
             multi-pad net (severity error).
         """
         rule = ConnectivityRule(strict=self.strict_connectivity)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_dangling_copper(self) -> DRCResults:
+        """Check for dangling track ends and under-bonded vias.
+
+        Closes the Issue #4680 gap: ``kicad-cli pcb drc`` flags
+        ``track_dangling`` (traces with a free end -- unterminated
+        antennas on clock nets, abandoned route stubs) and
+        ``via_dangling`` (vias bonding copper on fewer than two layers),
+        but no kct rule tested endpoint termination -- a kct-only
+        workflow saw 0 of 69 such findings on the reporting board.
+
+        Both are routing-quality advisories, so violations are
+        ``severity="warning"`` to match kicad-cli's default severities
+        and avoid turning a soft quality note into a hard CI gate.  Has
+        its own CLI category (``dangling_copper``) so the geometric pass
+        can be skipped via ``--skip dangling_copper``.
+
+        Returns:
+            DRCResults containing ``track_dangling`` and ``via_dangling``
+            warnings.
+        """
+        rule = DanglingCopperRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_diffpair_clearance_intra(self) -> DRCResults:

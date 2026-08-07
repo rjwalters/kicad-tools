@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`kct check` now detects dangling copper natively: `track_dangling` +
+  `via_dangling`** (part of #4680, the #4612 gap shape for the remaining
+  rule classes) — a new `DanglingCopperRule`
+  (`validate/rules/dangling_copper.py`, CLI category `dangling_copper`)
+  flags tracks with a free end (one warning per track, at the first
+  dangling endpoint — antenna stubs / abandoned routes) and vias bonding
+  copper on fewer than two layers, closing two of the three kicad-cli
+  rule classes previously invisible to a kct-only workflow. The
+  termination predicate mirrors KiCad's geometric connectivity: an
+  endpoint is terminated by any other same-layer copper (segment cap or
+  body, track-arc chord, via barrel, pad, or **same-net** committed zone
+  fill) within `DRC_TOLERANCE`; via bonding is counted per spanned
+  copper layer. Both emit `severity="warning"` (KiCad default-severity
+  parity — never fab-blocking) and are classified reporting-advisory but
+  NOT gating-advisory. Cross-verified against `kicad-cli pcb drc`
+  10.0.5: exact count+location parity on a synthetic fixture and on 8/9
+  repo boards (including 3/3 track_dangling on board-05 and 12/12
+  via_dangling on board-07); the single divergence is a stub whose end
+  lies 0.14 mm outside a *committed* fill that `--refill-zones`
+  recomputes over — without refill kicad-cli agrees 3/3, i.e. kct is
+  exact on the committed copper it treats as source of truth. Known
+  limits documented in the module: track arcs terminate neighbours but
+  are not themselves tested for dangling; `isolated_copper` (the third
+  #4680 class) is a follow-up slice.
+
 - **`kct doctor` environment-preflight check group** (#4542, from the
   copperhead survey #4520 idea 5) — alongside the existing version-record
   drift check, `kct doctor` now runs four fail-soft runtime-prerequisite
