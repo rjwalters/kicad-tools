@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`tests/benchmark_results.json` untracked and gitignored** (#4684) — the
+  routing-benchmark test (`tests/test_router_integration.py`) rewrites this
+  file with wall-clock timings on every run, leaving the working tree
+  permanently dirty. Nothing reads the file and the tracked snapshot's
+  content was vacuous (all-zeros results), so it is now a local-only
+  artifact: removed from the index, added to `.gitignore`, and documented
+  as such in `tests/README.md`. The test still writes it locally —
+  behavior is unchanged for local inspection.
+
 - **CI: GitHub Actions bumped off deprecated Node 20 runtimes** (#4677) —
   every job log printed "Node.js 20 is deprecated" because six actions
   across five workflow files were pinned to Node-20-era majors. Bumped:

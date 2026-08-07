@@ -102,7 +102,8 @@ Committed under `tests/baselines/`:
 
 - `tests/baselines/chorus_test_revA.json` -- seeded from
   curator-aggregated numbers in issues #2295, #2517, #2595, #2604, and
-  `tests/benchmark_results.json` (PR #2296).  Issue #2611.
+  `tests/benchmark_results.json` (PR #2296; that file is now a local,
+  gitignored artifact — untracked in #4684).  Issue #2611.
 
 ### Updating a baseline
 

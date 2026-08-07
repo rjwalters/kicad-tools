@@ -350,7 +350,9 @@ class TestRoutingBenchmark:
             print(f"Segments: {stats.get('segments', 0)}")
             print(f"Vias: {stats.get('vias', 0)}")
 
-        # Write benchmark results to file for tracking
+        # Write benchmark results to a local, intentionally UNTRACKED file
+        # (gitignored since #4684). It is rewritten with wall-clock timings on
+        # every run and has no reader — do not re-add it to git.
         benchmark_file = Path(__file__).parent / "benchmark_results.json"
         with open(benchmark_file, "w") as f:
             json.dump(results, f, indent=2)

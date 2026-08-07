@@ -123,3 +123,7 @@ boards/*/*/output/*.kct.json
 
 # pytest-benchmark storage
 .benchmarks/
+
+# Local routing-benchmark artifact rewritten by tests/test_router_integration.py
+# on every run (untracked in #4684 — timing noise, no reader)
+tests/benchmark_results.json

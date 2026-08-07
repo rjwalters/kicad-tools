@@ -43,8 +43,12 @@ Most of the suite is a flat set of ~740 `test_*.py` modules at the root of
 | `baselines/` | Baseline snapshots for regression checks. |
 | `install/` | Installer / packaging tests. |
 
-Root-level support files: `conftest.py` (shared fixtures), `__init__.py`, and
-`benchmark_results.json`.
+Root-level support files: `conftest.py` (shared fixtures) and `__init__.py`.
+
+`benchmark_results.json` is a **local, gitignored artifact**: the routing
+benchmark test in `test_router_integration.py` rewrites it with wall-clock
+timings on every run. It exists only for local inspection and is intentionally
+not tracked (see #4684).
 
 ## C++ backend caveat
 
