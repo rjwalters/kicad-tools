@@ -21,7 +21,10 @@ Scenario coverage (per the #4680 acceptance criteria):
 * layer resolution honors per-polygon ``filled_polygon_layers`` --
   copper on another layer never anchors;
 * everything is ``severity="warning"`` and classified advisory-quality
-  for reporting but NOT gating-advisory.
+  for reporting but NOT gating-advisory;
+* the **known divergence** from KiCad's pad-in-cluster semantics is
+  pinned (``TestKnownDivergencePadCluster``) so the current, narrower
+  predicate cannot change silently.
 """
 
 from __future__ import annotations
@@ -405,7 +408,13 @@ _FILLED_BOARD = """(kicad_pcb (version 20240108) (generator "test")
 class TestEndToEndParsedBoard:
     def test_orphan_island_flagged_connected_island_clean(self, tmp_path):
         """On a parsed board: the island containing the GND track/via is
-        clean; the far corner island of the same zone is isolated."""
+        clean; the far corner island of the same zone is isolated.
+
+        NOTE: kicad-cli 10.0.5 reports **2** isolated_copper on this
+        board (the track+via island has no pad in its cluster) -- the
+        documented pad-cluster divergence, pinned by
+        ``TestKnownDivergencePadCluster`` below.
+        """
         from kicad_tools.schema.pcb import PCB
 
         board = tmp_path / "filled_board.kicad_pcb"
@@ -421,3 +430,70 @@ class TestEndToEndParsedBoard:
         # The orphan is the (25,25)..(35,35) island
         x, y = flagged[0].location
         assert 25.0 <= x <= 35.0 and 25.0 <= y <= 35.0
+
+
+# ---------------------------------------------------------------------------
+# Known divergence: KiCad's pad-in-cluster semantics (pinned, NOT implemented)
+# ---------------------------------------------------------------------------
+
+
+class TestKnownDivergencePadCluster:
+    """Pin the documented divergence from KiCad's actual predicate.
+
+    KiCad flags an island whose copper connectivity cluster contains no
+    **pad** (reached transitively through tracks/vias/touching fills).
+    This rule flags an island whose cluster is touched by no same-net
+    copper *at all*.  A pad-less track or via therefore clears kct's test
+    but not KiCad's, so kct's findings are a strict **subset** of
+    kicad-cli's: never a false positive, but pad-less clusters are
+    under-reported.
+
+    Measured on KiCad 10.0.5 against the committed fills (no
+    ``--refill-zones``); full evidence table in the *Known divergences*
+    section of :mod:`kicad_tools.validate.rules.zone_fill`.  These tests
+    assert the CURRENT behavior deliberately -- implementing full
+    pad-cluster semantics (a follow-up on #4680) should update them as a
+    visible decision, not silently flip a passing suite.
+    """
+
+    def test_island_held_only_by_padless_track_not_flagged(self):
+        """A same-net stub with no pad anywhere in its cluster anchors
+        the island here; kicad-cli still reports ``isolated_copper``."""
+        zone = _FakeZone(filled_polygons=[_SQUARE_FILL])
+        seg = _FakeSegment(start=(95.0, 105.0), end=(105.0, 105.0))
+        results = _run(segments=[seg], zones=[zone])
+        assert _flagged(results) == []
+
+    def test_island_held_only_by_padless_via_not_flagged(self):
+        """Same divergence with a via as the sole (pad-less) anchor."""
+        zone = _FakeZone(filled_polygons=[_SQUARE_FILL])
+        via = _FakeVia(position=(105.0, 105.0))
+        results = _run(vias=[via], zones=[zone])
+        assert _flagged(results) == []
+
+    def test_padless_cluster_end_to_end(self, tmp_path):
+        """Judge fixture for #4728: island A carries a same-net track
+        AND via but no pad.
+
+        kicad-cli 10.0.5 (no refill) reports **2** ``isolated_copper``
+        on this board -- both islands, because neither cluster reaches a
+        pad.  kct reports **1** (the geometric orphan only).
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        board = tmp_path / "padless_cluster.kicad_pcb"
+        board.write_text(_FILLED_BOARD)
+        pcb = PCB.load(str(board))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+
+        # kct: 1 (kicad-cli: 2) -- the divergence, in numbers.
+        assert len(_flagged(checker.check_isolated_copper())) == 1
+
+        # Compounding blind spot with the #4680 first slice: the
+        # pad-less stub terminates on the same-net committed fill, so
+        # ``track_dangling`` does not see it either.  (Its via barrel
+        # bonds only F.Cu, so ``via_dangling`` still fires -- this
+        # fixture is not entirely silent, but the isolated island that
+        # kicad-cli names is invisible to both kct rules.)
+        dangling = checker.check_dangling_copper()
+        assert [v for v in dangling.violations if v.rule_id == "track_dangling"] == []

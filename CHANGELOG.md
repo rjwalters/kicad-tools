@@ -29,9 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   classified reporting-advisory but NOT gating-advisory, with
   kicad-cli-parity messages (`Zone [GNDD] on In1.Cu, priority 0`).
   Cross-verified against `kicad-cli pcb drc` 10.0.5 on the committed
-  fills: exact parity on a synthetic orphan-island fixture (1/1, same
-  zone/layer attribution) and on all 8 repo boards (0/0 — no false
-  positives). The shared per-layer copper indexing moved to a reusable
+  fills: 0/0 on all 8 repo boards (no false positives), and matching
+  zone/layer attribution + message shape on a synthetic orphan-island
+  fixture. **Known divergence** (documented in the module and pinned by
+  tests): KiCad's own predicate requires a *pad* in the island's cluster,
+  while this rule accepts any same-net copper touch — so kct's findings
+  are a strict *subset* of kicad-cli's (never a false positive, but an
+  island held only by pad-less copper is under-reported; on the synthetic
+  fixture kicad-cli counts 2 where kct counts 1). Full pad-cluster
+  semantics need transitive copper clustering with fills as conductors —
+  a follow-up on #4680. The shared per-layer copper indexing moved to a reusable
   `build_copper_layer_indexes()` in `dangling_copper.py` so both #4680
   detectors consult identical committed-copper geometry.
 

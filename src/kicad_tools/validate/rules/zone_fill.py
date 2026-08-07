@@ -8,6 +8,56 @@ It also hosts :class:`IsolatedCopperRule` (Issue #4680): native detection
 of KiCad's ``isolated_copper`` DRC class -- zone-fill islands connected to
 nothing -- which was previously invisible to a kct-only workflow (199 of
 the 268 missed findings on the reporting board).
+
+Known divergences from kicad-cli (``isolated_copper``)
+------------------------------------------------------
+
+* **Pad-in-cluster semantics are not modeled** (the substantive one).
+  KiCad's predicate is *an island is isolated iff its copper connectivity
+  cluster contains no pad*, reached transitively through tracks, vias and
+  touching fills.  This rule's predicate is narrower: *an island is
+  isolated iff no same-net copper item (pad, via, segment, arc) touches
+  its cluster*.  A pad-less track or via therefore clears kct's test but
+  not KiCad's.
+
+  Measured on KiCad 10.0.5 with the committed fills (no ``--refill-zones``)
+  using the fixture embedded as ``_FILLED_BOARD`` in
+  ``tests/test_validate_isolated_copper.py`` -- two islands, one carrying
+  a same-net track **and** via but no pad:
+
+  ===========================================  =========  ===
+  Fixture variant                              kicad-cli  kct
+  ===========================================  =========  ===
+  track + via on island A (no pad anywhere)    2          1
+  + same-net pad directly on island A          1          1
+  + same-net pad off-island, reached by track  1          1
+  ===========================================  =========  ===
+
+  Consequence: **kct's findings are a strict subset of kicad-cli's** --
+  the rule never produces a false positive, but it under-reports islands
+  whose only copper contacts are themselves pad-less (a floating stub, an
+  orphaned via, or a dead pour arm).  Real-board impact is nil so far:
+  0/0 across all 8 repo boards.
+
+  This blind spot **compounds with the #4680 first slice**: ``track_dangling``
+  treats same-net committed fills as terminators, so the pad-less stub in
+  that cluster is not dangling either -- the whole pathological cluster can
+  yield *zero* kct findings while kicad-cli reports ``isolated_copper``.
+  (The barrel of a via bonding only one layer is still caught by
+  ``via_dangling``, so the fixture above is not entirely silent.)
+
+  Implementing KiCad's semantics needs a transitive copper-connectivity
+  clustering pass that treats fills as conductors and pads as the only
+  connectivity seeds -- a scope step up that likely belongs with the
+  ``validate/connectivity.py`` tracer rather than this rule.  Tracked as a
+  follow-up on #4680; the divergence is pinned by
+  ``TestKnownDivergencePadCluster`` so a future change to the predicate is
+  a deliberate, test-visible decision.
+* KiCad's zone island-removal settings (``island_removal_mode``,
+  ``island_area_min``) are not modeled: every committed island is judged,
+  regardless of the zone's configured island policy.
+* Track arcs participate as *anchors* (chord-approximated, as in
+  ``dangling_copper``); they are otherwise unmodeled copper primitives.
 """
 
 from __future__ import annotations
@@ -150,14 +200,20 @@ class _FillIsland:
 class IsolatedCopperRule(DRCRule):
     """Flag zone-fill islands connected to no other copper (Issue #4680).
 
-    Mirrors KiCad's ``isolated_copper`` DRC class: each committed
-    ``filled_polygon`` of a zone is one fill *island*; an island is
-    isolated when its same-net connectivity cluster contains no anchor
-    copper -- no pad, via, track segment, or track arc of the zone's net
-    touches it (directly, or transitively through another same-net
-    island on the same layer).  Orphaned pour islands are floating
-    copper on ground/supply planes: EMC antennas and misleading "this
-    plane is connected" visuals.
+    Detects a **strict subset** of KiCad's ``isolated_copper`` DRC class:
+    each committed ``filled_polygon`` of a zone is one fill *island*; an
+    island is isolated when its same-net connectivity cluster contains no
+    anchor copper -- no pad, via, track segment, or track arc of the
+    zone's net touches it (directly, or transitively through another
+    same-net island on the same layer).  Orphaned pour islands are
+    floating copper on ground/supply planes: EMC antennas and misleading
+    "this plane is connected" visuals.
+
+    KiCad's own predicate is stricter -- it requires a **pad** in the
+    island's cluster, so an island held only by pad-less copper is
+    isolated to kicad-cli but connected here.  That divergence (no false
+    positives, some under-reporting) is measured and pinned; see the
+    module docstring's *Known divergences* section.
 
     Detection model
     ---------------
@@ -199,8 +255,8 @@ class IsolatedCopperRule(DRCRule):
     name = "Isolated Copper"
     description = (
         "Detects zone-fill islands (committed filled_polygon copper) "
-        "touched by no pad, via, or track of their net (KiCad "
-        "isolated_copper parity)."
+        "touched by no pad, via, or track of their net (a subset of "
+        "KiCad's isolated_copper class)."
     )
 
     def check(

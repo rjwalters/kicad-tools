@@ -1227,6 +1227,12 @@ class DRCChecker:
         own CLI category (``isolated_copper``) so the geometric pass can
         be skipped via ``--skip isolated_copper``.
 
+        The predicate is a strict *subset* of KiCad's (which requires a
+        pad in the island's cluster), so findings never false-positive
+        but pad-less clusters are under-reported -- see the *Known
+        divergences* section of
+        :mod:`kicad_tools.validate.rules.zone_fill`.
+
         Returns:
             DRCResults containing one ``isolated_copper`` warning per
             orphaned fill island.
