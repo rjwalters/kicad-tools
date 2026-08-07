@@ -115,15 +115,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contradicting `kct net-status` (strict), `kct route --complete`, and
   `kicad-cli` on the same artifact, and wedging tapeout with a finding no
   flag could waive. A new geometric bonding step (2a3) now ties an endpoint
-  to any pad whose eroded copper box (`POUR_PAD_ERODE` 0.1 mm inset, the
-  same guard as the via-in-pad and pour bonds) contains it — or whose box
-  the trace's rounded end-cap penetrates by > 1 µm — on a shared copper
-  layer, and carries the bond across the whole segment chain. The model
-  stays label-free (no `net_name` reads), an endpoint across a real
-  clearance moat can never fuse (negative test included), and
-  shapely-absent core installs keep the previous behavior. All four
-  connectivity consumers now agree by construction, with no flag
-  discipline required.
+  to any pad whose eroded copper outline (`POUR_PAD_ERODE` 0.1 mm inset, the
+  same guard as the via-in-pad and pour bonds) contains it — or whose
+  outline the trace's rounded end-cap penetrates by > 1 µm — on a shared
+  copper layer, and carries the bond across the whole segment chain. That
+  outline is **shape-aware** (circle → disk, oval → stadium, rect/roundrect
+  → size box): the plain size box over-reaches a round pad's real copper on
+  the diagonals by more than the minimum clearance (0.211 mm on a 1.7 mm
+  header pad), which would let a 45° trace-bend vertex bond across a
+  DRC-legal gap — masking a real open on a same-net trace and minting a
+  phantom short on a foreign one (both directions regression-tested). The
+  model stays label-free (no `net_name` reads), an endpoint across a real
+  clearance moat does not fuse, and shapely-absent core installs keep the
+  previous behavior. All four connectivity consumers now agree by
+  construction, with no flag discipline required.
 
 - **Board-04: C16 field overlap on the committed schematic** (#4675) — the
   fleet's only genuine `sch_field_overlap` advisory (`C16.Value` text

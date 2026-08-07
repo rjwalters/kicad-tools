@@ -39,7 +39,8 @@ if TYPE_CHECKING:
 from kicad_tools._shapely import has_shapely as _has_shapely
 
 if _has_shapely():  # pragma: no cover - import guard exercised by environment
-    from shapely.geometry import Point as _ShapelyPoint  # type: ignore[import-untyped]
+    from shapely.geometry import LineString as _ShapelyLineString  # type: ignore[import-untyped]
+    from shapely.geometry import Point as _ShapelyPoint
     from shapely.geometry import Polygon as _ShapelyPolygon
 
 
@@ -1585,7 +1586,7 @@ class ConnectivityValidator:
     # line) keeps a non-empty eroded overlap.  Verified on boards 00/03/05.
     POUR_PAD_ERODE: float = 0.1
 
-    def _pad_copper_polygon(self, fp: Any, pad: Any) -> Any | None:
+    def _pad_copper_polygon(self, fp: Any, pad: Any, shape_aware: bool = False) -> Any | None:
         """Build a board-frame shapely polygon approximating a pad's copper.
 
         The pad's ``size`` box is rotated by the footprint rotation (KiCad's
@@ -1602,6 +1603,24 @@ class ConnectivityValidator:
         into a foreign pour (which would manufacture a false short).  A pad
         fully moated out (clearance all around, no spoke) stays clear of the
         solid region and is correctly left untied.
+
+        ``shape_aware=True`` replaces the size box with the pad's actual
+        outline family *before* eroding — ``circle`` → a disk of radius
+        ``min(w, h) / 2``, ``oval`` → a stadium (the centerline of the longer
+        local axis buffered by ``min(w, h) / 2``), everything else
+        (``rect`` / ``roundrect`` / ``custom`` / unknown) → the same box as
+        before.  This matters because the box **over-reaches real copper on
+        the diagonals** of a round pad: for a circle of diameter ``d`` the
+        eroded box corner sits ``(d / 2 − POUR_PAD_ERODE)·√2`` from the
+        center, which exceeds the true copper radius ``d / 2`` by more than
+        the 0.1016 mm minimum clearance once ``d ≳ 1.2 mm`` (0.211 mm of
+        over-reach on a 1.7 mm header pad).  Any *distance-to-copper* test
+        against that phantom corner can bond across a legal clearance moat.
+        See :meth:`_connect_endpoint_in_pad` for the failure this guards.
+
+        The shape-aware outline is inscribed in the same rotated size box, so
+        it is always a **subset** of the box geometry: enabling it can only
+        make a bond test stricter, never looser.
 
         Returns ``None`` when shapely is unavailable.  Falls back to a
         zero-area point geometry when the pad has no positive size.
@@ -1620,16 +1639,37 @@ class ConnectivityValidator:
         # rotation maps the pad's local box into the board frame.
         a = math.radians(-fp.rotation)
         cos_a, sin_a = math.cos(a), math.sin(a)
-        corners = [(-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)]
-        pts = [(cx + ox * cos_a - oy * sin_a, cy + ox * sin_a + oy * cos_a) for ox, oy in corners]
-        box = _ShapelyPolygon(pts)
+
+        def _to_board(ox: float, oy: float) -> tuple[float, float]:
+            return (cx + ox * cos_a - oy * sin_a, cy + ox * sin_a + oy * cos_a)
+
+        shape = (getattr(pad, "shape", "") or "").lower() if shape_aware else ""
+        base: Any
+        if shape in ("circle", "oval"):
+            radius = min(w, h) / 2.0
+            # Stadium half-length: 0 for a circle (and for a "square" oval,
+            # which KiCad renders as a circle), positive for a true oval.
+            half = abs(w - h) / 2.0
+            if half <= 0.0:
+                base = _ShapelyPoint((cx, cy)).buffer(radius)
+            else:
+                ends = [(-half, 0.0), (half, 0.0)] if w >= h else [(0.0, -half), (0.0, half)]
+                base = _ShapelyLineString([_to_board(*e) for e in ends]).buffer(radius)
+        else:
+            corners = [(-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)]
+            base = _ShapelyPolygon([_to_board(*c) for c in corners])
         if self.POUR_PAD_ERODE > 0:
-            eroded = box.buffer(-self.POUR_PAD_ERODE)
-            # Erosion can empty a very small pad; keep the original box so the
-            # pad is still testable rather than silently dropped.
+            eroded = base.buffer(-self.POUR_PAD_ERODE)
+            # Erosion can empty a very small pad (min dimension <= 0.2 mm);
+            # keep the un-eroded outline so the pad is still testable rather
+            # than silently dropped.  That collapses the erosion margin for
+            # such pads, but the box-vs-true-copper excess is then bounded by
+            # the half-diagonal of a <= 0.2 mm box (< 0.042 mm) — under any
+            # realistic minimum clearance — so no DRC-clean false connect can
+            # slip through the un-eroded fallback either.
             if not eroded.is_empty:
                 return eroded
-        return box
+        return base
 
     @staticmethod
     def _fill_solid_region(points: list[tuple[float, float]]) -> Any | None:
@@ -1694,15 +1734,25 @@ class ConnectivityValidator:
                 return eroded
         return circle
 
-    def _eroded_pad_polygons(self) -> dict[str, Any]:
+    def _eroded_pad_polygons(self, shape_aware: bool = False) -> dict[str, Any]:
         """Board-frame eroded copper polygon per pad (``"REF.PAD"`` keys).
 
         Shared geometry cache for the via-in-pad (2c2) and endpoint-in-pad
-        (2a3) bonding steps: each pad's :meth:`_pad_copper_polygon` (size box,
-        footprint-rotated, ``POUR_PAD_ERODE`` inset).  Pads without a numeric
+        (2a3) bonding steps: each pad's :meth:`_pad_copper_polygon`
+        (footprint-rotated, ``POUR_PAD_ERODE`` inset).  Pads without a numeric
         number / real reference are skipped, matching
         :meth:`extract_pad_partition` step 1.  Requires shapely (returns
         point geometries / ``None`` entries are filtered out).
+
+        ``shape_aware`` is forwarded to :meth:`_pad_copper_polygon`: step 2a3
+        passes ``True`` (it measures *distance* to pad copper from arbitrary
+        trace-bend vertices, where the box's diagonal over-reach on round pads
+        is a real false-connect hazard); steps 2c2/2d keep the historical box
+        (``False``) — they test via centers / pour solid regions, whose
+        exposure to the corner zone is negligible, and the
+        :data:`POUR_PAD_ERODE` constant was empirically tuned against the box
+        on boards 00/03/05.  Keeping them on the box preserves the
+        zero-fixture-churn property of this change.
         """
         pad_polygons: dict[str, Any] = {}
         for fp in self.pcb.footprints:
@@ -1711,7 +1761,7 @@ class ConnectivityValidator:
             for pad in fp.pads:
                 if pad.number is None or pad.number == "":
                     continue
-                poly = self._pad_copper_polygon(fp, pad)
+                poly = self._pad_copper_polygon(fp, pad, shape_aware=shape_aware)
                 if poly is not None:
                     pad_polygons[f"{fp.reference}.{pad.number}"] = poly
         return pad_polygons
@@ -1735,18 +1785,39 @@ class ConnectivityValidator:
 
         * shared copper layer — the pad's copper must exist on the segment's
           layer (``*.Cu`` through-hole pads match any copper layer), and
-        * the endpoint lies inside the pad's **eroded** copper box
-          (:meth:`_pad_copper_polygon`, ``POUR_PAD_ERODE`` = 0.1 mm inset), or
-          the endpoint's swept trace end-cap (KiCad tracks have rounded ends
-          of radius ``width / 2``) penetrates that eroded box by **more than
-          1 µm** (the step-2a2 strictly-positive contact-depth guard).
+        * the endpoint lies inside the pad's **eroded, shape-aware** copper
+          outline (:meth:`_pad_copper_polygon` with ``shape_aware=True``:
+          circle → disk, oval → stadium, rect/roundrect → size box, each
+          inset by ``POUR_PAD_ERODE`` = 0.1 mm), or the endpoint's swept
+          trace end-cap (KiCad tracks have rounded ends of radius
+          ``width / 2``) penetrates that eroded outline by **more than 1 µm**
+          (the step-2a2 strictly-positive contact-depth guard).
 
-        The 0.1 mm erosion exceeds the box-vs-true-shape approximation error
-        (roundrect/oval corner rounding), and DRC clearance keeps any
-        *foreign* trace's copper ≥ 0.1 mm away from pad copper — its endpoint
-        centerline sits a further ``width / 2`` (end-cap radius) beyond that —
-        so an endpoint across a real clearance moat can NEVER bond.  Only
-        true copper contact is added; no false-short path is introduced.
+        Soundness (and why the geometry must be shape-aware).  This step
+        measures a *distance* from an arbitrary trace vertex to the pad
+        polygon, so the polygon has to be contained in the pad's real copper
+        in **every** direction, not just on axis.  The plain size box is not:
+        for a circle pad of diameter ``d`` its eroded corner sticks out to
+        ``(d / 2 − 0.1)·√2``, over-reaching true copper by more than the
+        0.1016 mm minimum clearance for any ``d ≳ 1.2 mm`` (0.211 mm on a
+        1.7 mm header pad).  Against that phantom corner a 45° endpoint at a
+        DRC-legal 0.13–0.21 mm copper gap measured ``dist == 0`` and bonded —
+        masking a real open on a same-net trace, and minting a phantom short
+        on a foreign one.  Both directions were reproduced on DRC-clean
+        geometry (PR #4710 review) and are now regression-tested.
+
+        With the shape-aware outline the eroded polygon is contained in the
+        true copper with ≥ 0.1 mm of margin **in every direction** (rect and
+        roundrect are exact-or-inside by construction; circle/oval are the
+        true outline inset by 0.1 mm).  DRC clearance keeps a *foreign*
+        trace's copper ≥ 0.1016 mm from that copper, and its endpoint
+        centerline sits a further ``width / 2`` (end-cap radius) beyond the
+        copper edge, so the measured distance stays above ``width / 2`` and
+        the bond does not fire.  The claim is therefore scoped, not absolute:
+        it holds for the pad-shape families modelled here, and a ``custom``
+        (polygon-primitive) pad still falls back to the size box — such a pad
+        can in principle over-reach on a concave outline, which is a known,
+        documented approximation rather than a soundness proof.
 
         Bonds are recorded in ``segment_extra_nodes`` (segment index → node
         ids), which :meth:`_build_segment_chains` unions into the segment's
@@ -1755,14 +1826,19 @@ class ConnectivityValidator:
         (guarded by the caller); shapely-absent installs keep the legacy
         center-proximity behavior.
         """
-        pad_polygons = self._eroded_pad_polygons()
+        # Shape-aware geometry (circle -> disk, oval -> stadium, rect /
+        # roundrect -> box): this step measures distance from arbitrary trace
+        # vertices, so the box's diagonal over-reach on round pads would bond
+        # across a legal clearance moat (see the soundness note above).
+        pad_polygons = self._eroded_pad_polygons(shape_aware=True)
         if not pad_polygons:
             return
 
         # Cheap bounding prefilter: skip the shapely test unless the endpoint
         # is within the pad box's half-diagonal plus the trace end-cap radius
-        # of the pad center.  Uses the *uneroded* box bound, so it can only
-        # over-admit (the exact eroded test below decides), never miss.
+        # of the pad center.  Uses the *uneroded box* bound — a superset of
+        # every shape-aware outline — so it can only over-admit (the exact
+        # eroded test below decides), never miss.
         pad_bounds: dict[str, tuple[float, float, float]] = {}
         for fp in self.pcb.footprints:
             if not fp.reference or fp.reference.startswith("#"):
@@ -1794,8 +1870,9 @@ class ConnectivityValidator:
                     if not self._pad_copper_on_layer(pad_layers.get(pad_id, []), seg.layer):
                         continue
                     dist = pad_polygons[pad_id].distance(point)
-                    # Inside the eroded box (dist == 0), or the trace end-cap
-                    # penetrates it by > 1 µm (strictly positive contact).
+                    # Inside the eroded outline (dist == 0), or the trace
+                    # end-cap penetrates it by > 1 µm (strictly positive
+                    # contact depth).
                     if dist == 0.0 or dist < cap_radius - 1e-3:
                         segment_extra_nodes.setdefault(seg_index, set()).add(pad_id)
 
@@ -1823,6 +1900,15 @@ class ConnectivityValidator:
         pad's copper (clearance forbids it), so this cannot manufacture a
         false short; it only recovers a real via-in-pad bond the centre test
         drops.  Requires ``shapely`` (guarded by the caller).
+
+        This step deliberately keeps the plain **box** approximation (it does
+        not pass ``shape_aware=True``, unlike step 2a3): it is a containment
+        test on a via *centre point*, not a distance measurement from an
+        arbitrary vertex, and a via centre landing in a round pad's phantom
+        corner zone would have to sit outside the pad's real copper entirely —
+        a DRC violation on a foreign net.  Staying on the box also preserves
+        the empirically-tuned :data:`POUR_PAD_ERODE` behaviour on boards
+        00/03/05.
         """
         # Board-frame eroded copper box per pad.
         pad_polygons = self._eroded_pad_polygons()
