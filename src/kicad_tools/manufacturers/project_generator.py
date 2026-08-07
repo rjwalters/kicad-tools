@@ -375,6 +375,7 @@ def write_drc_constraints(
             merge_dru_floors(
                 existing_dru,
                 generate_dru(rules, manufacturer_name=manufacturer_id, net_classes=net_classes),
+                path=dru_path,
             ),
             encoding="utf-8",
         )

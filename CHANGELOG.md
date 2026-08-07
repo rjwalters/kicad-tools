@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Stderr warning when `merge_dru_floors` migrates a legacy sidecar**
+  (#4676) — the pre-#4600 legacy-replace branch added in #4667 now emits a
+  one-line stderr notice naming the `.kicad_dru` file (threaded from both
+  `kct check --emit-dru` and `write_drc_constraints` via a new optional
+  `path` kwarg), so a hand-authored file caught by the detector's narrow
+  documented false-positive window is replaced loudly instead of silently.
+  The other merge paths (fresh write, marked-block replace, user-content
+  append) stay silent, and merged output is byte-identical to before.
+
 ## [0.20.0] - 2026-08-06
 
 ### Summary

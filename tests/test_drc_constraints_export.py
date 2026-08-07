@@ -407,6 +407,87 @@ class TestDruManagedBlockMerge:
         # Re-emitting is byte-stable.
         assert self._emit(board) == merged
 
+    def test_legacy_replace_warns_on_stderr_exactly_once(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ):
+        """The legacy-replace branch warns to stderr; all others are silent.
+
+        Issue #4676 (review follow-up to #4667): the strict legacy detector
+        has a narrow documented false-positive window -- a hand-authored
+        file matching exactly the generated grammar is replaced.  The
+        one-line stderr warning makes that replacement visible; it must
+        fire ONLY on the legacy branch so it is a reliable migration
+        signal, and it must name the file when a path is supplied.
+        """
+        from kicad_tools.manufacturers.dru_generator import (
+            generate_dru,
+            merge_dru_floors,
+        )
+
+        fresh = generate_dru(
+            get_profile("jlcpcb-tier1").get_design_rules(layers=4),
+            manufacturer_name="jlcpcb-tier1",
+        )
+        legacy = generate_dru(
+            get_profile("jlcpcb").get_design_rules(layers=2), manufacturer_name="jlcpcb"
+        )
+        dru_path = tmp_path / "demo.kicad_dru"
+
+        # Legacy branch with a path: exactly one stderr line naming the file.
+        warned = merge_dru_floors(legacy, fresh, path=dru_path)
+        err = capsys.readouterr().err
+        assert err.count("\n") == 1
+        assert str(dru_path) in err
+        assert "pre-#4600 generated sidecar" in err
+        assert "#4667" in err
+
+        # Legacy branch without a path: still warns, with a generic name.
+        merge_dru_floors(legacy, fresh)
+        err = capsys.readouterr().err
+        assert "pre-#4600 generated sidecar" in err
+        assert ".kicad_dru content" in err
+
+        # The warning is additive only: output is identical with/without path.
+        assert warned == merge_dru_floors(legacy, fresh)
+        capsys.readouterr()
+
+        # Silent: fresh write (existing=None) ...
+        marked = merge_dru_floors(None, fresh, path=dru_path)
+        # ... marked-block replace (also the idempotent second merge of a
+        # migrated file, so the warning fires at most once per migration) ...
+        assert merge_dru_floors(warned, fresh, path=dru_path) == warned
+        merge_dru_floors(marked, fresh, path=dru_path)
+        # ... and user-content append.
+        user_file = '(version 1)\n(rule "My HV Gap"\n  (constraint clearance (min 2.5mm)))\n'
+        appended = merge_dru_floors(user_file, fresh, path=dru_path)
+        assert user_file.strip("\n") in appended
+        assert capsys.readouterr().err == ""
+
+    def test_legacy_replace_warning_reaches_stderr_via_write_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ):
+        """``write_drc_constraints`` threads the real path into the warning."""
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text(
+            generate_dru(
+                get_profile("jlcpcb").get_design_rules(layers=2), manufacturer_name="jlcpcb"
+            ),
+            encoding="utf-8",
+        )
+
+        self._emit(board)
+        err = capsys.readouterr().err
+        assert str(dru) in err
+        assert "pre-#4600 generated sidecar" in err
+
+        # Second emit hits the marked-replace branch: silence.
+        self._emit(board)
+        assert capsys.readouterr().err == ""
+
     def test_committed_board_sidecars_are_marked(self):
         """Every committed ``boards/*/output/*.kicad_dru`` uses the marked format.
 

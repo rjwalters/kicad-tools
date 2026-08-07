@@ -2249,6 +2249,7 @@ def _emit_drc_sidecars(
                         manufacturer_name=manufacturer_id,
                         net_classes=net_classes,
                     ),
+                    path=dru_path,
                 ),
                 encoding="utf-8",
             )

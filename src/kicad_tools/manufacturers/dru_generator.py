@@ -17,11 +17,14 @@ Usage:
 from __future__ import annotations
 
 import re
+import sys
 from typing import TYPE_CHECKING, Sequence
 
 from .base import DesignRules
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from kicad_tools.router.rules import NetClassRouting
 
 # ---------------------------------------------------------------------------
@@ -111,7 +114,11 @@ def _strip_version_header(content: str) -> str:
     return re.sub(r"^\s*\(version[^)]*\)\s*\n?", "", content, count=1)
 
 
-def merge_dru_floors(existing: str | None, dru_content: str) -> str:
+def merge_dru_floors(
+    existing: str | None,
+    dru_content: str,
+    path: str | Path | None = None,
+) -> str:
     """Merge :func:`generate_dru` output into ``.kicad_dru`` content (#4600).
 
     The tier-floor rules are wrapped in a sentinel-delimited managed block and
@@ -145,9 +152,20 @@ def merge_dru_floors(existing: str | None, dru_content: str) -> str:
             file does not exist yet.
         dru_content: Fresh :func:`generate_dru` output (with its leading
             version header) to install as the managed block.
+        path: Optional path of the ``.kicad_dru`` file the content came
+            from, used only to name the file in the one-line stderr warning
+            emitted when the legacy-replace branch fires (see below).  Has
+            no effect on the merged output.
 
     Returns:
         The full merged ``.kicad_dru`` file content.
+
+    Warning behavior (#4676): when the legacy pre-#4600 branch is taken --
+    and only then -- a one-line notice is printed to stderr, because the
+    strict detector has a narrow documented false-positive window (a
+    hand-authored file matching exactly the generated grammar and rule
+    families is replaced).  The other branches stay silent so the warning
+    is a reliable signal that the legacy migration specifically occurred.
     """
     body = _strip_version_header(dru_content).strip("\n")
     block = f"{DRU_FLOORS_BLOCK_BEGIN}\n{body}\n{DRU_FLOORS_BLOCK_END}"
@@ -166,7 +184,17 @@ def merge_dru_floors(existing: str | None, dru_content: str) -> str:
     if _is_legacy_generated_dru(existing):
         # Pre-#4600 clobber-written sidecar: the whole file is our own
         # generated output, so replace it with the marked block instead of
-        # appending a duplicate copy of every floor (#4667).
+        # appending a duplicate copy of every floor (#4667).  Warn so the
+        # rare hand-authored file caught by the detector's documented
+        # false-positive window is replaced loudly, not silently (#4676).
+        name = str(path) if path is not None else ".kicad_dru content"
+        print(
+            f"Warning: {name}: pre-#4600 generated sidecar detected -- "
+            f"replaced with the marked managed block (see Issue #4667). "
+            f"Hand-authored rules matching the generated grammar are treated "
+            f"as generated; restore from VCS if this file was yours.",
+            file=sys.stderr,
+        )
         return f"{DRU_VERSION_HEADER}\n\n{block}\n"
 
     # Append; ensure a version header exists (mirrors ``merge_dru_block``).
