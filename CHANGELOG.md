@@ -26,6 +26,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1 on drift **or** any `fail`-status preflight (`warn` never affects the
   exit code). A missing tool is always a reported `fail` row, never a
   traceback.
+- **`--transactional` snapshot/rollback for in-place board mutations**
+  (#4541, from the copperhead survey #4520 idea 4) — new file-scoped
+  transaction helper `kicad_tools.transaction.board_transaction()` snapshots
+  the mutated file's bytes on entry and, on failure (exception, Ctrl-C, or
+  an explicit `rollback()` on a non-zero exit path), restores it
+  byte-identical via an atomic tmp-sibling + `os.replace` write while
+  preserving the failed attempt as a `<file>.failed-<UTC-timestamp>`
+  forensic sidecar (suppressible with `keep_failed=False`). Success leaves
+  no litter; unchanged files are skipped on rollback; files created inside
+  the transaction are removed again; subprocess mutations of the file are
+  covered too. Adopted as an opt-in `--transactional` flag on two flagship
+  commands: `kct fix-drc` (wraps the whole multi-pass run; rolls back on
+  exit 1 no-progress and exit 3 connectivity-rollback, while exit 2 partial
+  repair keeps the applied fixes; the existing per-pass connectivity
+  snapshot machinery is unchanged) and `kct pcb sync-netlist` (rolls back
+  on any non-zero exit; with `-o`, a partially-written output file is
+  removed and the input is never touched). Default behavior of both
+  commands without the flag is byte-for-byte unchanged. The git-scoped
+  variant (repo-wide `reset --hard` + `clean -fd` per copperhead) was
+  rejected — see the issue for rationale; broader adoption across the other
+  in-place mutating commands is a follow-up backlog.
 
 - **`kct pipeline` route-skip under `--voltage-map` now auto-runs a
   `kct creepage` audit as the skip gate** (#4649) — refining the #4607 loud

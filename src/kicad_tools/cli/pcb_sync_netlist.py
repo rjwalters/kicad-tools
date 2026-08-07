@@ -11,8 +11,11 @@ Supports --dry-run to preview changes without modifying files.
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from kicad_tools.transaction import board_transaction
 
 
 @dataclass
@@ -828,6 +831,7 @@ def run_sync_netlist(
     force: bool = False,
     auto_rename: bool = False,
     remove_orphan_nets: bool = False,
+    transactional: bool = False,
 ) -> int:
     """Run the sync-netlist command.
 
@@ -844,10 +848,50 @@ def run_sync_netlist(
             before applying renames.
         remove_orphan_nets: If True, remove nets with no pad references after
             net assignment.
+        transactional: If True, snapshot the target file before syncing and
+            roll it back byte-identical on failure (exception, Ctrl-C, or a
+            non-zero exit).  The failed attempt is preserved as a
+            ``<file>.failed-<timestamp>`` sidecar (issue #4541).
 
     Returns:
         Exit code (0 for success, 1 for errors).
     """
+    # --transactional (issue #4541): the mutated file is the output path
+    # when given, otherwise the input PCB (in-place overwrite).  Exceptions
+    # and Ctrl-C roll back via the context manager; the exit-code failure
+    # path (sync errors -> exit 1) rolls back explicitly.
+    target_path = output_path or pcb_path
+    with board_transaction(target_path, enabled=transactional) as txn:
+        exit_code = _run_sync_netlist_impl(
+            schematic_path=schematic_path,
+            pcb_path=pcb_path,
+            dry_run=dry_run,
+            output_path=output_path,
+            output_format=output_format,
+            remove_orphans=remove_orphans,
+            force=force,
+            auto_rename=auto_rename,
+            remove_orphan_nets=remove_orphan_nets,
+        )
+        if exit_code != 0:
+            txn.rollback()
+            for line in txn.report_lines():
+                print(line, file=sys.stderr)
+        return exit_code
+
+
+def _run_sync_netlist_impl(
+    schematic_path: Path,
+    pcb_path: Path,
+    dry_run: bool = False,
+    output_path: Path | None = None,
+    output_format: str = "text",
+    remove_orphans: bool = False,
+    force: bool = False,
+    auto_rename: bool = False,
+    remove_orphan_nets: bool = False,
+) -> int:
+    """Sync implementation shared by the transactional and plain paths."""
     # First pass: compute diff (renames not applied yet unless auto_rename)
     result = sync_netlist(
         schematic_path=schematic_path,

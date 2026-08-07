@@ -3321,3 +3321,152 @@ class TestCategoryAlignment:
             f"fix-drc reported {fix_drc_count} violations but check reported "
             f"{check_count}; the two tools must use the same DRC categories"
         )
+
+
+# ── --transactional flag (issue #4541) ──────────────────────────────
+
+
+class TestTransactionalFlag:
+    """Tests for the opt-in --transactional snapshot/rollback wrapper."""
+
+    def test_success_leaves_no_sidecar_or_tmp_litter(
+        self, pcb_clearance: Path, report_clearance: Path, tmp_path: Path
+    ):
+        """A successful transactional run keeps the repairs and leaves no litter."""
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--transactional",
+                "--no-connectivity-check",
+                "--quiet",
+            ]
+        )
+        assert result in (0, 2)
+        assert list(tmp_path.glob("*.failed-*")) == []
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_exception_rolls_back_byte_identical(
+        self, pcb_clearance: Path, report_clearance: Path, tmp_path: Path, monkeypatch
+    ):
+        """A crash mid-repair restores the input and preserves a sidecar."""
+        from kicad_tools.cli import fix_drc_cmd
+
+        original_bytes = pcb_clearance.read_bytes()
+
+        def corrupt_and_raise(**kwargs):
+            kwargs["output_path"].write_text("(kicad_pcb corrupted mid-write")
+            raise RuntimeError("simulated crash mid-repair")
+
+        monkeypatch.setattr(fix_drc_cmd, "_run_single_pass", corrupt_and_raise)
+
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            main(
+                [
+                    str(pcb_clearance),
+                    "--drc-report",
+                    str(report_clearance),
+                    "--transactional",
+                    "--no-connectivity-check",
+                    "--quiet",
+                ]
+            )
+
+        assert pcb_clearance.read_bytes() == original_bytes
+        sidecars = list(tmp_path.glob("*.failed-*"))
+        assert len(sidecars) == 1
+        assert sidecars[0].read_text() == "(kicad_pcb corrupted mid-write"
+
+    def test_no_progress_exit_1_rolls_back(
+        self, pcb_clearance: Path, report_clearance: Path, tmp_path: Path, monkeypatch
+    ):
+        """The non-zero-exit failure path (exit 1) rolls back too (#4541)."""
+        from kicad_tools.cli import fix_drc_cmd
+
+        original_bytes = pcb_clearance.read_bytes()
+
+        def corrupt_without_progress(**kwargs):
+            # Mutates the file but reports zero repairs -> exit code 1.
+            kwargs["output_path"].write_text("(kicad_pcb formatting-drift-only rewrite)")
+            return (
+                RepairResult(total_violations=1, repaired=0),
+                DrillRepairResult(),
+            )
+
+        monkeypatch.setattr(fix_drc_cmd, "_run_single_pass", corrupt_without_progress)
+
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--transactional",
+                "--no-connectivity-check",
+                "--quiet",
+            ]
+        )
+
+        assert result == 1
+        assert pcb_clearance.read_bytes() == original_bytes
+        assert len(list(tmp_path.glob("*.failed-*"))) == 1
+
+    def test_default_behavior_unchanged_without_flag(
+        self, pcb_clearance: Path, report_clearance: Path, tmp_path: Path, monkeypatch
+    ):
+        """Without --transactional there is no snapshot, rollback, or sidecar."""
+        from kicad_tools.cli import fix_drc_cmd
+
+        def corrupt_and_raise(**kwargs):
+            kwargs["output_path"].write_text("corrupted")
+            raise RuntimeError("simulated crash mid-repair")
+
+        monkeypatch.setattr(fix_drc_cmd, "_run_single_pass", corrupt_and_raise)
+
+        with pytest.raises(RuntimeError):
+            main(
+                [
+                    str(pcb_clearance),
+                    "--drc-report",
+                    str(report_clearance),
+                    "--no-connectivity-check",
+                    "--quiet",
+                ]
+            )
+
+        # opt-in semantics: the corruption survives and no sidecar appears
+        assert pcb_clearance.read_text() == "corrupted"
+        assert list(tmp_path.glob("*.failed-*")) == []
+
+    def test_outer_parser_forwards_transactional(self, monkeypatch):
+        """kct fix-drc --transactional reaches the inner parser (drift guard)."""
+        from kicad_tools.cli.commands.validation import run_fix_drc_command
+
+        captured: dict[str, list[str]] = {}
+
+        def fake_main(sub_argv):
+            captured["argv"] = sub_argv
+            return 0
+
+        monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd.main", fake_main)
+
+        class Args:
+            pcb = "board.kicad_pcb"
+            drc_report = None
+            mfr = "jlcpcb"
+            layers = 2
+            max_displacement = 0.5
+            margin = 0.01
+            only = None
+            output = None
+            dry_run = False
+            max_passes = 1
+            local_reroute = True
+            no_connectivity_check = False
+            verify = False
+            transactional = True
+            format = "text"
+            quiet = False
+
+        assert run_fix_drc_command(Args()) == 0
+        assert "--transactional" in captured["argv"]

@@ -3096,3 +3096,170 @@ class TestSyncOffBoardWarnings:
 
         assert not any("placed outside board outline" in w for w in result.warnings)
         assert not any("No Edge.Cuts outline detected" in w for w in result.warnings)
+
+
+# ── --transactional flag (issue #4541) ──────────────────────────────
+
+
+class TestTransactionalFlag:
+    """Tests for the opt-in --transactional snapshot/rollback wrapper."""
+
+    def test_parser_accepts_transactional_flag(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "pcb",
+                "sync-netlist",
+                "--schematic",
+                "test.kicad_sch",
+                "--transactional",
+                "test.kicad_pcb",
+            ]
+        )
+        assert args.transactional is True
+
+    def test_success_leaves_no_sidecar(self, tmp_path):
+        """A clean transactional sync leaves no sidecar or tmp litter."""
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(MINIMAL_PCB_MATCHING)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False, transactional=True)
+
+        assert rc == 0
+        assert list(tmp_path.glob("*.failed-*")) == []
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_save_failure_rolls_back_byte_identical(self, tmp_path, monkeypatch):
+        """A failed save (exit 1) restores the input PCB and keeps a sidecar."""
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_MISSING_R1)
+        original_bytes = pcb.read_bytes()
+
+        def corrupt_and_raise(self, path):
+            Path(path).write_text("(kicad_pcb corrupted mid-save")
+            raise OSError("disk full mid-save")
+
+        monkeypatch.setattr(PCB, "save", corrupt_and_raise)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False, transactional=True)
+
+        assert rc == 1  # save failure lands in result.errors -> exit 1
+        assert pcb.read_bytes() == original_bytes
+        sidecars = list(tmp_path.glob("*.failed-*"))
+        assert len(sidecars) == 1
+        assert sidecars[0].read_text() == "(kicad_pcb corrupted mid-save"
+
+    def test_exception_rolls_back_byte_identical(self, tmp_path, monkeypatch):
+        """An exception escaping the sync restores the input PCB."""
+        from kicad_tools.cli import pcb_sync_netlist as mod
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_MISSING_R1)
+        original_bytes = pcb.read_bytes()
+
+        def corrupt_and_raise(pcb_obj, schematic_path):
+            pcb.write_text("half-written by a crash")
+            raise RuntimeError("simulated crash mid-sync")
+
+        monkeypatch.setattr(mod, "_assign_nets_from_schematic", corrupt_and_raise)
+
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            mod.run_sync_netlist(sch, pcb, dry_run=False, transactional=True)
+
+        assert pcb.read_bytes() == original_bytes
+        assert len(list(tmp_path.glob("*.failed-*"))) == 1
+
+    def test_default_behavior_unchanged_without_flag(self, tmp_path, monkeypatch):
+        """Without transactional=True there is no rollback and no sidecar."""
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_MISSING_R1)
+
+        def corrupt_and_raise(self, path):
+            Path(path).write_text("(kicad_pcb corrupted mid-save")
+            raise OSError("disk full mid-save")
+
+        monkeypatch.setattr(PCB, "save", corrupt_and_raise)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False)
+
+        assert rc == 1
+        # opt-in semantics: the corruption survives and no sidecar appears
+        assert pcb.read_text() == "(kicad_pcb corrupted mid-save"
+        assert list(tmp_path.glob("*.failed-*")) == []
+
+    def test_output_path_rollback_removes_created_file(self, tmp_path, monkeypatch):
+        """With -o, a failed sync removes the partially-written output file."""
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        out = tmp_path / "out.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_MISSING_R1)
+        original_bytes = pcb.read_bytes()
+
+        def corrupt_and_raise(self, path):
+            Path(path).write_text("(kicad_pcb corrupted mid-save")
+            raise OSError("disk full mid-save")
+
+        monkeypatch.setattr(PCB, "save", corrupt_and_raise)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False, output_path=out, transactional=True)
+
+        assert rc == 1
+        assert not out.exists()  # created-then-failed output is removed
+        assert pcb.read_bytes() == original_bytes  # input never touched
+        # forensic sidecar preserves the partial output
+        sidecars = list(tmp_path.glob("out.kicad_pcb.failed-*"))
+        assert len(sidecars) == 1
+
+    def test_dispatcher_forwards_transactional(self, tmp_path, monkeypatch):
+        """The pcb sync-netlist dispatcher forwards the flag."""
+        from kicad_tools.cli.commands import pcb as pcb_commands
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(MINIMAL_PCB_MATCHING)
+
+        captured: dict[str, object] = {}
+
+        def fake_run(**kwargs):
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr("kicad_tools.cli.pcb_sync_netlist.run_sync_netlist", fake_run)
+
+        class Args:
+            schematic = str(sch)
+            output = None
+            dry_run = False
+            format = "text"
+            remove_orphans = False
+            force = False
+            auto_rename = False
+            remove_orphan_nets = False
+            transactional = True
+
+        rc = pcb_commands._run_sync_netlist_command(Args(), pcb)
+        assert rc == 0
+        assert captured["transactional"] is True

@@ -29,6 +29,7 @@ from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import ViolationType
 from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
 from kicad_tools.manufacturers.base import DesignRules
+from kicad_tools.transaction import board_transaction
 
 
 @dataclass
@@ -194,6 +195,17 @@ Examples:
         action="store_true",
         help="Suppress progress output (for scripting)",
     )
+    parser.add_argument(
+        "--transactional",
+        action="store_true",
+        help=(
+            "Snapshot the output file before repairing and roll it back "
+            "byte-identical if the run fails (exception, Ctrl-C, no-progress "
+            "exit 1, or connectivity-rollback exit 3); the failed attempt is "
+            "preserved as a <file>.failed-<timestamp> sidecar. Exit 2 "
+            "(partial repair) keeps the applied repairs."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -212,16 +224,51 @@ Examples:
         print("Error: --max-passes must be at least 1", file=sys.stderr)
         return 1
 
-    # Effective max passes: dry-run forces single pass since no geometry changes
-    effective_max_passes = 1 if args.dry_run else args.max_passes
-
-    # Get initial DRC report
+    # Get initial DRC report (detection only -- does not mutate the board)
     report = _get_drc_report(args.drc_report, pcb_path, manufacturer=args.mfr, layers=args.layers)
     if report is None:
         return 1
 
     # Determine output path used for saving
     output_path = Path(args.output) if args.output else pcb_path
+
+    if not getattr(args, "transactional", False):
+        return _execute_repair(args, pcb_path, output_path, report)
+
+    # --transactional (issue #4541): wrap the whole multi-pass run in a
+    # file-scoped snapshot/rollback transaction.  Exceptions and Ctrl-C roll
+    # back via the context manager; the exit-code failure paths (1 = no
+    # progress / error, 3 = connectivity rollback) roll back explicitly.
+    # Exit 2 (partial repair) keeps the applied repairs -- boards with
+    # non-repairable violations (silkscreen, edge clearance, ...) can never
+    # reach exit 0, so treating 2 as failure would discard valid repairs on
+    # nearly every real board.  The per-pass connectivity snapshot machinery
+    # inside _execute_repair is unchanged; it serves semantic regression
+    # rollback mid-run, while this transaction provides whole-command
+    # failure safety.
+    with board_transaction(output_path) as txn:
+        exit_code = _execute_repair(args, pcb_path, output_path, report)
+        if exit_code in (1, 3):
+            txn.rollback()
+            for line in txn.report_lines():
+                print(line, file=sys.stderr)
+        return exit_code
+
+
+def _execute_repair(
+    args: argparse.Namespace,
+    pcb_path: Path,
+    output_path: Path,
+    report: DRCReport,
+) -> int:
+    """Run the multi-pass repair loop and return the command exit code.
+
+    Split out of :func:`main` so ``--transactional`` can wrap the whole
+    mutation in a :func:`kicad_tools.transaction.board_transaction`
+    (issue #4541) without duplicating the pass logic.
+    """
+    # Effective max passes: dry-run forces single pass since no geometry changes
+    effective_max_passes = 1 if args.dry_run else args.max_passes
 
     # --verify: snapshot violation counts from pure-Python DRC before repair
     verify_before: DRCReport | None = None
@@ -434,9 +481,10 @@ Examples:
 
         # Re-run detection for next pass (unless this is the last allowed pass)
         if pass_num < effective_max_passes:
-            report = _run_python_drc(output_path, manufacturer=args.mfr, layers=args.layers)
-            if report is None:
+            next_report = _run_python_drc(output_path, manufacturer=args.mfr, layers=args.layers)
+            if next_report is None:
                 break
+            report = next_report
 
     # Output results
     if not args.quiet:
