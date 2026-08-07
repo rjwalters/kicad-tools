@@ -53,7 +53,12 @@ from kicad_tools.transaction import board_transaction
 # ``via_dangling`` does carry numeric values (bonded layers vs. the
 # 2-layer minimum) but is unrepairable for the same reason, so it is
 # excluded on the same grounds rather than on the values technicality.
-_UNREPAIRABLE_TOPOLOGY_RULE_IDS = frozenset({"track_dangling", "via_dangling"})
+#
+# ``isolated_copper`` (#4680, second slice) is likewise topological: an
+# orphaned zone-fill island has no ``required_value`` and no clearance
+# nudge can connect it -- the fix is a routing/zone decision (stitch it,
+# re-fill, or accept the island).  Same exclusion, same rationale.
+_UNREPAIRABLE_TOPOLOGY_RULE_IDS = frozenset({"track_dangling", "via_dangling", "isolated_copper"})
 
 
 @dataclass

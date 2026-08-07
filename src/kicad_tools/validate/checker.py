@@ -27,7 +27,7 @@ from .rules.match_group_length_skew import MatchGroupLengthSkewRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.silkscreen import check_all_silkscreen
 from .rules.via_in_pad import ViaInPadRule
-from .rules.zone_fill import ZoneFillRule
+from .rules.zone_fill import IsolatedCopperRule, ZoneFillRule
 from .violations import DRCResults, DRCViolation
 
 if TYPE_CHECKING:
@@ -242,6 +242,7 @@ class DRCChecker:
         "check_dimensions",
         "check_edge_clearances",
         "check_impedance",
+        "check_isolated_copper",
         "check_match_group_length_skew",
         "check_silkscreen",
         "check_solder_mask_pads",
@@ -338,6 +339,12 @@ class DRCChecker:
         "dangling_copper": CATEGORY_ADVISORY,
         "track_dangling": CATEGORY_ADVISORY,
         "via_dangling": CATEGORY_ADVISORY,
+        # Isolated copper (Issue #4680, second slice): orphaned zone-fill
+        # islands.  Warning-severity quality advisory mirroring KiCad's
+        # default severity (project_generator.py pins it to "warning") --
+        # floating pour copper is an EMC/cosmetic concern, never
+        # fab-blocking.
+        "isolated_copper": CATEGORY_ADVISORY,
         # Schematic field-geometry legibility lint (Issue #4595):
         # warning-severity readability advisories on the resolved sibling
         # schematic -- never fab-blocking.  Explicit entries are REQUIRED:
@@ -1200,6 +1207,31 @@ class DRCChecker:
             DRCResults containing zone fill violations
         """
         rule = ZoneFillRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_isolated_copper(self) -> DRCResults:
+        """Check committed zone-fill islands for isolation (Issue #4680).
+
+        Closes the second half of the #4680 gap: ``kicad-cli pcb drc``
+        flags ``isolated_copper`` (zone-fill islands connected to
+        nothing -- 199 of the 268 findings a kct-only workflow missed on
+        the reporting board), but no kct rule examined the committed
+        ``filled_polygon`` copper for orphaned islands.
+
+        Detection consumes only *committed* fill polygons (this repo's
+        copper source of truth); with no committed fills the rule
+        degrades silently rather than presenting "0 isolated" as a
+        clean bill (``check_zones`` owns the unfilled-zone warning).
+        Findings are ``severity="warning"`` (KiCad default-severity
+        parity) and classified advisory-quality for reporting.  Has its
+        own CLI category (``isolated_copper``) so the geometric pass can
+        be skipped via ``--skip isolated_copper``.
+
+        Returns:
+            DRCResults containing one ``isolated_copper`` warning per
+            orphaned fill island.
+        """
+        rule = IsolatedCopperRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_pad_grid_alignment(

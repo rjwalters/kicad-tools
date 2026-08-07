@@ -205,6 +205,132 @@ def _collect_track_arcs(pcb: PCB) -> list[_TrackArc]:
     return arcs
 
 
+def _segment_copper(segment: Segment) -> Any | None:
+    """Shapely copper outline of a segment (round end caps)."""
+    from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
+
+    if segment.width <= 0:
+        return None
+    radius = segment.width / 2.0
+    if segment.start == segment.end:
+        return Point(segment.start).buffer(radius)
+    return LineString([segment.start, segment.end]).buffer(radius)
+
+
+def build_copper_layer_indexes(
+    pcb: PCB,
+    copper_layers: list[str],
+    resolve_net: Any,
+    *,
+    include_fills: bool = True,
+) -> dict[str, _LayerIndex]:
+    """Collect every copper feature per layer and index it in an STRtree.
+
+    Shared by :class:`DanglingCopperRule` and the ``isolated_copper``
+    detector (:class:`~kicad_tools.validate.rules.zone_fill.IsolatedCopperRule`)
+    so both consult identical committed-copper geometry (Issue #4680).
+
+    Args:
+        pcb: The PCB whose copper to index.
+        copper_layers: Names of the board's copper layers.
+        resolve_net: ``(net_number, net_name) -> int`` resolver for the
+            KiCad-10 name-only net dialect.
+        include_fills: When False, zone ``filled_polygon`` copper is
+            excluded -- the isolated-copper detector treats fills as
+            *subjects*, not anchors (an isolated island must not anchor
+            another isolated island; same-net island transitivity is
+            handled by that rule's own union pass).
+
+    Returns:
+        Mapping of copper-layer name -> :class:`_LayerIndex`.
+    """
+    from shapely.geometry import LineString, Point
+
+    items_by_layer: dict[str, list[_CopperItem]] = {}
+
+    def add(layer: str, item: _CopperItem) -> None:
+        items_by_layer.setdefault(layer, []).append(item)
+
+    for segment in pcb.segments:
+        geom = _segment_copper(segment)
+        if geom is None or not segment.layer:
+            continue
+        add(
+            segment.layer,
+            _CopperItem(
+                kind="segment",
+                geom=geom,
+                net_number=resolve_net(segment.net_number, segment.net_name),
+                net_name=segment.net_name,
+                key=id(segment),
+            ),
+        )
+
+    for arc in _collect_track_arcs(pcb):
+        add(
+            arc.layer,
+            _CopperItem(
+                kind="arc",
+                geom=LineString(arc.points).buffer(arc.width / 2.0),
+                net_number=resolve_net(arc.net_number, arc.net_name),
+                net_name=arc.net_name,
+            ),
+        )
+
+    for via in pcb.vias:
+        radius = via.size / 2.0
+        if radius <= 0:
+            continue
+        disc = Point(via.position).buffer(radius)
+        item_net = resolve_net(via.net_number, via.net_name)
+        for layer in copper_layers:
+            if via_spans_layer(via.layers, layer):
+                add(
+                    layer,
+                    _CopperItem(
+                        kind="via",
+                        geom=disc,
+                        net_number=item_net,
+                        net_name=via.net_name,
+                        key=id(via),
+                    ),
+                )
+
+    for footprint in pcb.footprints:
+        for pad in footprint.pads:
+            polygon = _pad_polygon(pad, footprint)
+            if polygon is None:
+                continue
+            pad_net = resolve_net(pad.net_number, pad.net_name)
+            for layer in copper_layers:
+                if _pad_on_layer(pad, layer):
+                    add(
+                        layer,
+                        _CopperItem(
+                            kind="pad",
+                            geom=polygon,
+                            net_number=pad_net,
+                            net_name=pad.net_name,
+                            key=id(pad),
+                        ),
+                    )
+
+    if include_fills:
+        for layer, fills in _collect_zone_fills(pcb).items():
+            for fill in fills:
+                add(
+                    layer,
+                    _CopperItem(
+                        kind="fill",
+                        geom=fill.polygon,
+                        net_number=fill.net_number,
+                        net_name=fill.net_name,
+                    ),
+                )
+
+    return {layer: _LayerIndex(items) for layer, items in items_by_layer.items()}
+
+
 class DanglingCopperRule(DRCRule):
     """Flag dangling track ends and under-bonded vias.
 
@@ -274,18 +400,6 @@ class DanglingCopperRule(DRCRule):
             return names
         return ["F.Cu", "B.Cu"]
 
-    @staticmethod
-    def _segment_copper(segment: Segment) -> Any | None:
-        """Shapely copper outline of a segment (round end caps)."""
-        from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
-
-        if segment.width <= 0:
-            return None
-        radius = segment.width / 2.0
-        if segment.start == segment.end:
-            return Point(segment.start).buffer(radius)
-        return LineString([segment.start, segment.end]).buffer(radius)
-
     def _build_layer_indexes(
         self,
         pcb: PCB,
@@ -293,92 +407,7 @@ class DanglingCopperRule(DRCRule):
         resolve_net: Any,
     ) -> dict[str, _LayerIndex]:
         """Collect every copper feature per layer and index it."""
-        from shapely.geometry import Point
-
-        items_by_layer: dict[str, list[_CopperItem]] = {}
-
-        def add(layer: str, item: _CopperItem) -> None:
-            items_by_layer.setdefault(layer, []).append(item)
-
-        for segment in pcb.segments:
-            geom = self._segment_copper(segment)
-            if geom is None or not segment.layer:
-                continue
-            add(
-                segment.layer,
-                _CopperItem(
-                    kind="segment",
-                    geom=geom,
-                    net_number=resolve_net(segment.net_number, segment.net_name),
-                    net_name=segment.net_name,
-                    key=id(segment),
-                ),
-            )
-
-        for arc in _collect_track_arcs(pcb):
-            from shapely.geometry import LineString
-
-            add(
-                arc.layer,
-                _CopperItem(
-                    kind="arc",
-                    geom=LineString(arc.points).buffer(arc.width / 2.0),
-                    net_number=resolve_net(arc.net_number, arc.net_name),
-                    net_name=arc.net_name,
-                ),
-            )
-
-        for via in pcb.vias:
-            radius = via.size / 2.0
-            if radius <= 0:
-                continue
-            disc = Point(via.position).buffer(radius)
-            item_net = resolve_net(via.net_number, via.net_name)
-            for layer in copper_layers:
-                if via_spans_layer(via.layers, layer):
-                    add(
-                        layer,
-                        _CopperItem(
-                            kind="via",
-                            geom=disc,
-                            net_number=item_net,
-                            net_name=via.net_name,
-                            key=id(via),
-                        ),
-                    )
-
-        for footprint in pcb.footprints:
-            for pad in footprint.pads:
-                polygon = _pad_polygon(pad, footprint)
-                if polygon is None:
-                    continue
-                pad_net = resolve_net(pad.net_number, pad.net_name)
-                for layer in copper_layers:
-                    if _pad_on_layer(pad, layer):
-                        add(
-                            layer,
-                            _CopperItem(
-                                kind="pad",
-                                geom=polygon,
-                                net_number=pad_net,
-                                net_name=pad.net_name,
-                                key=id(pad),
-                            ),
-                        )
-
-        for layer, fills in _collect_zone_fills(pcb).items():
-            for fill in fills:
-                add(
-                    layer,
-                    _CopperItem(
-                        kind="fill",
-                        geom=fill.polygon,
-                        net_number=fill.net_number,
-                        net_name=fill.net_name,
-                    ),
-                )
-
-        return {layer: _LayerIndex(items) for layer, items in items_by_layer.items()}
+        return build_copper_layer_indexes(pcb, copper_layers, resolve_net)
 
     # ------------------------------------------------------------------
     # Termination predicate
