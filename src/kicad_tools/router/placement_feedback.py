@@ -1810,6 +1810,23 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 # DRC-nudge / clearance stages all read ``router.grid``, so a
                 # grid still holding the reverted attempt's occupancy silently
                 # degrades the output the loop just promised to leave untouched).
+                #
+                # Issue #4560: a mirror ALSO moves the footprint's cosmetics
+                # (silk/fab texts + graphics, in both the Python objects and
+                # the raw S-expression children ``PCB.save`` writes), and those
+                # live OUTSIDE ``_snapshot_placement`` -- texts/graphics carry
+                # no per-object node back-reference, so there is nothing to
+                # snapshot them by.  Re-apply the mirror first: it is an
+                # involution (``test_double_flip_is_identity``), so the second
+                # application returns the cosmetics to their original side and
+                # geometry, and the placement restore immediately below erases
+                # the residual round-trip drift it leaves on layer/rotation/
+                # pads.  Without this, a run that reverts a mirror and later
+                # KEEPS another delta saves a board whose copper is on the
+                # front while its silk/fab is mirrored onto the back -- the
+                # silent half-flip this issue exists to close.
+                if delta.kind == "mirror":
+                    self._strategy_applicator.apply_strategy(self.pcb, strategy)
                 self._restore_placement(pre_placement)
                 self._restore_router_pads(pre_pads)
                 self._rebuild_grid_for_routes(pre_routes)

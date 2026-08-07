@@ -52,7 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vertical axis and swaps SMD `F_CU ↔ B_CU`), and **all four
   snapshot/revert paths are now layer-aware** (footprint layer, pad
   positions/angles/layer lists, router-pad layers), so a reverted probe
-  restores the board exactly. The placement-diff artifact records
+  restores the board exactly. Because footprint texts/graphics carry no
+  S-expression back-reference and so cannot be snapshotted, a reverted
+  **mirror** additionally re-applies the flip (an involution) before the
+  placement restore — without that, a run that reverts a mirror and then
+  keeps a later delta would `save()` a board whose copper is on the front
+  while its silk/fab is mirrored onto the back. The placement-diff artifact
+  records
   `old_layer`/`new_layer` (a flip at rotation 90 changes neither position
   nor rotation, so the layer is the signal). The `rotate_180` delta kind
   remains fully supported for committed artifacts; only the

@@ -705,6 +705,115 @@ class TestDeltaFeedbackMirror:
 
 
 # --------------------------------------------------------------------------- #
+# Driver: a REVERTED mirror leaves no cosmetic residue on disk (#4560)         #
+# --------------------------------------------------------------------------- #
+
+_MIRROR_FRONT = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "mirror_flip" / "mirror_front.kicad_pcb"
+)
+
+
+def _u1(pcb):
+    return next(fp for fp in pcb.footprints if fp.reference == "U1")
+
+
+def _xy(point) -> tuple[float, float]:
+    # Round to the serializer's precision so an exact-equality comparison is
+    # meaningful across a save/reparse round trip.
+    return (round(point[0], 6), round(point[1], 6))
+
+
+def _cosmetic_state(fp) -> dict:
+    """Layer + geometry of every footprint text/graphic, order-stable."""
+    return {
+        "texts": [(t.layer, _xy(t.position)) for t in fp.texts],
+        "graphics": [(g.layer, _xy(g.start), _xy(g.end)) for g in fp.graphics],
+    }
+
+
+class TestRevertedMirrorLeavesNoCosmeticResidue:
+    """The revert-then-keep sequence, on a REAL board that gets SAVED.
+
+    ``_snapshot_placement`` cannot capture footprint texts/graphics (they carry
+    no S-expression back-reference), so a reverted mirror used to leave the
+    part's silk/fab mirrored onto the BACK side while its pads/copper sat back
+    on the front.  With zero kept deltas the mutated PCB is discarded by
+    ``route_cmd`` and the leak never reaches disk -- but a run that reverts the
+    mirror and then KEEPS a later delta calls ``pcb.save()`` and persists the
+    half-flip with no error signal.  This drives exactly that sequence and
+    asserts the cosmetics are upright in BOTH the live objects and the file.
+    """
+
+    @staticmethod
+    def _loop(pcb):
+        # U1's anchor is x=100; the router pad starts 2mm to its right.
+        #   mirror    -> x = 2*100 - 102 = 98   (still failing -> reverted)
+        #   translate -> x = 102 + 1    = 103   (routes  -> kept)
+        pad = FakePad(102.0, 100.0, "U1", "1")
+
+        def _needs_the_translate(router: FakeRouter) -> list[int]:
+            return [] if abs(router.pads[("U1", "1")].x - 103.0) < 1e-6 else [2]
+
+        router = FakeRouter([pad], 2, _needs_the_translate)
+        translate = PlacementDelta(
+            net_name="DQ2",
+            target_ref="U1",
+            kind="translate",
+            dx=1.0,
+            source_action="move_component",
+        )
+        loop = PlacementDeltaFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            # Both candidates every iteration; ``probed`` dedup makes the loop
+            # take the mirror first and fall through to the translate after the
+            # revert (the mixed-run shape the leak needs).
+            delta_proposer=lambda _pcb: [_mirror_delta("U1"), translate],
+        )
+        return loop, router
+
+    def test_revert_then_keep_saves_upright_cosmetics(self, tmp_path: Path):
+        from kicad_tools.schema.pcb import PCB
+
+        original = _cosmetic_state(_u1(PCB.load(str(_MIRROR_FRONT))))
+        original_x = _u1(PCB.load(str(_MIRROR_FRONT))).position[0]
+
+        pcb = PCB.load(str(_MIRROR_FRONT))
+        loop, _router = self._loop(pcb)
+        result = loop.run_delta(max_adjustments=3)
+
+        # The sequence under test actually happened: mirror reverted, then a
+        # LATER delta kept (so the board is saved rather than discarded).
+        assert [d.kind for d in result.reverted_deltas] == ["mirror"]
+        assert [d.kind for d in result.applied_deltas] == ["translate"]
+
+        # Live objects: the reverted mirror left nothing behind.
+        fp = _u1(pcb)
+        assert fp.layer == "F.Cu"
+        assert fp.rotation == pytest.approx(30.0, abs=1e-6)
+        assert _cosmetic_state(fp) == original
+        assert all(t.layer.startswith("F.") for t in fp.texts)
+
+        # ...and the SAVED file agrees (the representation that ships).
+        out = tmp_path / "after_revert_then_keep.kicad_pcb"
+        pcb.save(str(out))
+        reloaded = _u1(PCB.load(str(out)))
+        assert reloaded.layer == "F.Cu"
+        assert _cosmetic_state(reloaded) == original
+        # Only the kept translate moved anything.
+        assert reloaded.position[0] == pytest.approx(original_x + 1.0, abs=1e-6)
+
+        # The board's layer-definition table spells silk as `(5 "F.SilkS" ...)`,
+        # so a `(layer "B.SilkS")` reference can only come from the leak.
+        text = out.read_text()
+        assert '(layer "B.SilkS")' not in text
+        assert '(layer "B.Fab")' not in text
+        assert '(layer "F.SilkS")' in text
+        assert "(justify mirror)" not in text
+
+
+# --------------------------------------------------------------------------- #
 # Driver: anchor / budget / kind skips (with logged reason)                    #
 # --------------------------------------------------------------------------- #
 

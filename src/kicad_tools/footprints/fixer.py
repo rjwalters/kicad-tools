@@ -194,9 +194,11 @@ class FootprintFixer:
 
         # Apply changes if not dry run
         if not dry_run:
-            # Note: This modifies the Footprint object but not the underlying
-            # S-expression. For full persistence, we'd need to implement
-            # PCB.update_footprint_pad_position()
+            # Note: assigning ``Pad.position`` writes through to the pad's
+            # ``(at x y ...)`` S-expression node (issue #4560), so these
+            # adjustments persist through ``PCB.save`` for any pad parsed from
+            # a board file.  Pads never linked to a node (freshly instantiated
+            # library pads, test doubles) update the dataclass only.
             pad1.position = new_pos1
             pad2.position = new_pos2
 

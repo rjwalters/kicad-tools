@@ -173,12 +173,24 @@ class TestMirrorSerializes:
             assert mine.position == pytest.approx(theirs.position, abs=_TOL)
             assert (mine.rotation - theirs.rotation) % 360.0 == pytest.approx(0.0, abs=_TOL)
             assert mine.layers == theirs.layers
-        # Cosmetic children followed to the back side in the file too (the
-        # board's layer-definition table legitimately still names F.SilkS,
-        # so assert on ``(layer ...)`` references only).
+        # Cosmetic children followed to the back side in the file too, with
+        # the y-negation applied -- layer names alone would not catch a
+        # side-swap that forgot the geometry (the board's layer-definition
+        # table legitimately still names F.SilkS, so assert on ``(layer ...)``
+        # references only).
         text = out.read_text()
         assert '(layer "F.SilkS")' not in text
         assert '(layer "B.SilkS")' in text
+        silk_reloaded = [g for g in reloaded.graphics if g.layer == "B.SilkS"]
+        silk_golden = [g for g in golden.graphics if g.layer == "B.SilkS"]
+        assert len(silk_reloaded) == len(silk_golden) == 1
+        assert silk_reloaded[0].start == pytest.approx(silk_golden[0].start, abs=_TOL)
+        assert silk_reloaded[0].end == pytest.approx(silk_golden[0].end, abs=_TOL)
+        # The transform is a y-negation of the ORIGINAL local coordinates.
+        front_silk = next(g for g in _u1(PCB.load(str(_FRONT))).graphics if g.layer == "F.SilkS")
+        assert silk_reloaded[0].start == pytest.approx(
+            (front_silk.start[0], -front_silk.start[1]), abs=_TOL
+        )
 
     @pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="kicad-cli not installed")
     def test_kicad_cli_drc_cross_gate(self, tmp_path: Path):
