@@ -215,9 +215,14 @@ def run_check_command(args) -> int:
         sub_argv.append("--errors-only")
     if args.strict:
         sub_argv.append("--strict")
-    # Issue #4176: forward the connectivity real-geometry opt-in.
+    # Issue #4176 / #4673: strict (real-geometry) connectivity is now the
+    # default; --strict-connectivity is a compatibility no-op but is still
+    # forwarded verbatim, and --legacy-connectivity is the opt-out that
+    # actually changes behavior (it wins if both are given).
     if getattr(args, "strict_connectivity", False):
         sub_argv.append("--strict-connectivity")
+    if getattr(args, "legacy_connectivity", False):
+        sub_argv.append("--legacy-connectivity")
     # Issue #3920: forward an explicit --mfr regardless of value so that
     # check_main can distinguish "no flag given" (None → auto-resolve from
     # sidecar/project.kct) from an explicit choice that must always win. The

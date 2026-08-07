@@ -608,8 +608,10 @@ class TestConnectivityRuleRegistry:
 
 
 class TestConnectivityRuleStrict:
-    """Issue #4176: ``ConnectivityRule(strict=True)`` uses real geometric
-    copper contact, so a net the default tolerance model over-connects fires."""
+    """Issues #4176 / #4673: ``ConnectivityRule`` decides connectivity by real
+    geometric copper contact BY DEFAULT (strict), so a net the legacy
+    tolerance model over-connects fires; ``strict=False`` /
+    ``--legacy-connectivity`` is the explicit legacy opt-out."""
 
     # Two pads joined by two thin segments whose inner endpoints are 0.009mm
     # apart (< 0.01 tolerance) on perpendicular headings.  At 0.001mm width the
@@ -632,7 +634,9 @@ class TestConnectivityRuleStrict:
 """
     )
 
-    def test_default_passes_strict_fires(self, tmp_path: Path) -> None:
+    def test_default_is_strict_and_fires_legacy_opt_out_passes(self, tmp_path: Path) -> None:
+        """#4673: strict (real geometry) is the DEFAULT; ``strict=False`` is
+        the legacy opt-out that preserves the old tolerance model."""
         import pytest
 
         pytest.importorskip("shapely")
@@ -645,14 +649,18 @@ class TestConnectivityRuleStrict:
         pcb = PCB.load(pcb_path)
         rules = get_profile("jlcpcb").get_design_rules(2, 1.0)
 
-        # Default (tolerance) model over-connects: no error.
-        assert ConnectivityRule().check(pcb, rules).error_count == 0
-        # Strict (real geometry) model: the pads are on separate copper -> error.
-        strict = ConnectivityRule(strict=True).check(pcb, rules)
-        assert strict.error_count == 1
-        assert strict.errors[0].nets == ("SIG",)
+        # Default = strict (real geometry): the pads are on separate copper
+        # -> error.  No ``strict`` argument anywhere -- this pins the real
+        # constructor default consumers hit (#4673).
+        default = ConnectivityRule().check(pcb, rules)
+        assert default.error_count == 1
+        assert default.errors[0].nets == ("SIG",)
+        # Explicit strict matches the default.
+        assert ConnectivityRule(strict=True).check(pcb, rules).error_count == 1
+        # Legacy opt-out (tolerance model) over-connects: no error.
+        assert ConnectivityRule(strict=False).check(pcb, rules).error_count == 0
 
-    def test_checker_forwards_strict_connectivity(self, tmp_path: Path) -> None:
+    def test_checker_defaults_strict_and_forwards_legacy_opt_out(self, tmp_path: Path) -> None:
         import pytest
 
         pytest.importorskip("shapely")
@@ -663,5 +671,33 @@ class TestConnectivityRuleStrict:
         pcb_path.write_text(self._OVER_CONNECT_PCB)
         pcb = PCB.load(pcb_path)
 
-        assert DRCChecker(pcb).check_connectivity().error_count == 0
+        # #4673: DRCChecker defaults strict -> the over-connected net fires.
+        assert DRCChecker(pcb).check_connectivity().error_count == 1
         assert DRCChecker(pcb, strict_connectivity=True).check_connectivity().error_count == 1
+        # Legacy opt-out preserved.
+        assert DRCChecker(pcb, strict_connectivity=False).check_connectivity().error_count == 0
+
+    def test_cli_default_strict_and_legacy_flag(self, tmp_path: Path) -> None:
+        """CLI wiring (#4673): default is strict; ``--legacy-connectivity``
+        restores the legacy model; ``--strict-connectivity`` is a no-op that
+        restates the default; ``--legacy-connectivity`` wins if both given."""
+        import pytest
+
+        pytest.importorskip("shapely")
+        from kicad_tools.cli.check_cmd import main
+
+        pcb_path = tmp_path / "over_connect.kicad_pcb"
+        pcb_path.write_text(self._OVER_CONNECT_PCB)
+        # --drc-only scopes the exit code to the DRC result (the meta
+        # rollup would exit 2 INCOMPLETE here regardless, because the
+        # fixture has no schematic for ERC/LVS).
+        argv = [str(pcb_path), "--only", "connectivity", "--drc-only"]
+
+        # Default: strict -> the over-connected net fires (exit 2).
+        assert main(list(argv)) == 2
+        # --strict-connectivity: accepted no-op, same result.
+        assert main([*argv, "--strict-connectivity"]) == 2
+        # --legacy-connectivity: legacy tolerance model over-connects -> pass.
+        assert main([*argv, "--legacy-connectivity"]) == 0
+        # Precedence: --legacy-connectivity wins over the no-op.
+        assert main([*argv, "--strict-connectivity", "--legacy-connectivity"]) == 0

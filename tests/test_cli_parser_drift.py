@@ -818,6 +818,57 @@ def test_no_net_class_map_is_on_both_check_parsers():
 
 @pytest.mark.parametrize(
     "flag",
+    ["--strict-connectivity", "--legacy-connectivity"],
+)
+def test_connectivity_mode_flags_are_on_both_check_parsers(flag):
+    """#4673 flag-inversion pin: the connectivity-mode flags live on BOTH parsers.
+
+    ``--legacy-connectivity`` is the behavior-changing opt-out of the new
+    strict (real-geometry) connectivity default; ``--strict-connectivity``
+    is kept as a compatibility no-op restating the default.  Both must be
+    accepted by the outer ``kct check`` parser (the user-facing surface)
+    and the inner ``check_cmd.py`` parser.
+    """
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    assert flag in inner, f"{flag} is missing from the inner check_cmd.py parser"
+    assert flag in outer, (
+        f"{flag} is missing from the outer parser.py check subparser "
+        "(`kct check` would reject it with 'unrecognized arguments')"
+    )
+
+
+def test_check_shim_forwards_legacy_connectivity():
+    """The outer shim must forward ``--legacy-connectivity`` to the inner main.
+
+    Declaring the flag on the outer parser alone would parse it and then
+    discard it (#2819 failure mode) -- the user would silently get the
+    strict default instead of the requested legacy model.
+    """
+    from kicad_tools.cli.commands.validation import run_check_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["check", "board.kicad_pcb", "--legacy-connectivity"])
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        assert run_check_command(args) == 0
+    sub_argv = inner_main.call_args[0][0]
+    assert "--legacy-connectivity" in sub_argv, (
+        f"run_check_command dropped --legacy-connectivity; got {sub_argv}"
+    )
+
+    # Absent flag must not be forwarded (default strict behavior preserved).
+    args = create_parser().parse_args(["check", "board.kicad_pcb"])
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        run_check_command(args)
+    sub_argv = inner_main.call_args[0][0]
+    assert "--legacy-connectivity" not in sub_argv, (
+        "--legacy-connectivity forwarded even though it was not supplied"
+    )
+
+
+@pytest.mark.parametrize(
+    "flag",
     ["--refill-zones", "--courtyard-waivers", "--waivers"],
 )
 def test_drifted_check_flags_are_on_both_parsers(flag):

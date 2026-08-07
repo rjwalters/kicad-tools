@@ -672,10 +672,22 @@ def _add_check_parser(subparsers) -> None:
         dest="strict_connectivity",
         action="store_true",
         help=(
-            "Decide the connectivity DRC rule by REAL geometric copper contact "
-            "(shapely polygon intersection) instead of the default 0.01mm "
-            "endpoint-proximity tolerance, matching KiCad (issue #4176). "
-            "Requires shapely. Distinct from --strict (warnings fatal)."
+            "No-op kept for script compatibility: real-geometry (strict) "
+            "connectivity is now the DEFAULT for the connectivity DRC rule "
+            "(issue #4673, matching kct net-status since issue #4557). Use "
+            "--legacy-connectivity to opt back into the old proximity model. "
+            "Distinct from --strict (warnings fatal)."
+        ),
+    )
+    check_parser.add_argument(
+        "--legacy-connectivity",
+        dest="legacy_connectivity",
+        action="store_true",
+        help=(
+            "Opt the connectivity DRC rule back into the LEGACY 0.01mm "
+            "endpoint-proximity model (the pre-#4673 default). Takes "
+            "precedence over --strict-connectivity (a no-op) if both are "
+            "given."
         ),
     )
     check_parser.add_argument(

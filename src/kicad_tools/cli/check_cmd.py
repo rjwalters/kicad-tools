@@ -1222,15 +1222,30 @@ def main(argv: list[str] | None = None) -> int:
         dest="strict_connectivity",
         action="store_true",
         help=(
-            "Decide the connectivity DRC rule by REAL geometric copper contact "
-            "(shapely polygon intersection) instead of the default 0.01mm "
-            "endpoint-proximity tolerance. The default model unions a segment "
-            "endpoint with a pad/via/segment whenever their reference points "
-            "land within 0.01mm, even when the actual copper (segment width, "
-            "pad shape) does not touch -- so it can pass a net that "
-            "'kicad-cli pcb drc' reports as unconnected. --strict-connectivity "
-            "matches KiCad's connectivity semantics (issue #4176). Requires "
-            "shapely. (Distinct from --strict, which makes warnings fatal.)"
+            "No-op kept for script compatibility: real-geometry (strict) "
+            "connectivity is now the DEFAULT (issue #4673, matching the "
+            "kct net-status default from issue #4557). The connectivity DRC "
+            "rule decides copper unions by REAL geometric copper contact "
+            "(shapely polygon intersection), matching KiCad's connectivity "
+            "semantics (issue #4176). Use --legacy-connectivity to opt back "
+            "into the old 0.01mm endpoint-proximity model. (Distinct from "
+            "--strict, which makes warnings fatal.)"
+        ),
+    )
+    parser.add_argument(
+        "--legacy-connectivity",
+        dest="legacy_connectivity",
+        action="store_true",
+        help=(
+            "Opt the connectivity DRC rule back into the LEGACY 0.01mm "
+            "endpoint-proximity model (the pre-#4673 default). The legacy "
+            "model unions a segment endpoint with a pad/via/segment whenever "
+            "their reference points land within 0.01mm even when the actual "
+            "copper does not touch -- so it can pass a net that 'kicad-cli "
+            "pcb drc' reports as unconnected, and it reports false opens on "
+            "poured boards that the strict default correctly bonds. Takes "
+            "precedence over --strict-connectivity (a no-op) if both are "
+            "given."
         ),
     )
     parser.add_argument(
@@ -1936,7 +1951,11 @@ def main(argv: list[str] | None = None) -> int:
             # graceful no-op (AC5).
             emit_measurements=True,
             courtyard_waivers=courtyard_waivers,
-            strict_connectivity=args.strict_connectivity,
+            # Issue #4673: strict (real-geometry) connectivity is the
+            # default; --legacy-connectivity is the explicit opt-out and
+            # takes precedence over --strict-connectivity, which is now a
+            # compatibility no-op restating the default.
+            strict_connectivity=not getattr(args, "legacy_connectivity", False),
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)

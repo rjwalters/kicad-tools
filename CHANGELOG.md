@@ -95,6 +95,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`kct check`'s connectivity DRC rule now uses the strict real-geometry
+  model by default** (#4673, the #4557 follow-up) — `ConnectivityRule`,
+  `DRCChecker(strict_connectivity=...)`, and both `kct check` CLI parsers
+  now default to deciding segment↔segment / segment↔pad / segment↔via
+  unions by real shapely copper-shape intersection (KiCad semantics,
+  #4176) instead of the legacy 0.01mm endpoint-proximity tolerance, so
+  `kct check` finally agrees with `kct net-status` (strict default since
+  #4557) and with `kicad-cli`: endpoint-proximity false opens on poured
+  boards can no longer appear, and over-connected nets the legacy model
+  passed now correctly fire. Fleet verification (boards 00-07 committed
+  routed artifacts) measured **zero count change** — the pour residuals
+  the legacy model once reported are already absorbed by the #3914
+  advisory suppression and the #4229 pad-in-pour fix, which apply in
+  both models, so the flip removes the model divergence without moving
+  any baseline. New `--legacy-connectivity` flag opts back
+  into the old proximity model; `--strict-connectivity` is kept as an
+  accepted no-op for script compatibility (it now restates the default)
+  and `--legacy-connectivity` wins when both are given. Strict mode
+  requires shapely (a core dependency since #3824) and fails loud if it
+  is missing. `connectivity` remains classified advisory and excluded
+  from the routed-DRC CI gate, so blocking-gate behavior is unchanged.
+  The known blind-via/unspanned-pad over-connect residual (a blind via
+  whose 2D copper overlaps a pad on a layer the via does not span still
+  bonds to it) is documented and pinned by a test rather than fixed —
+  rare geometry, and the failure direction matches the legacy model's
+  over-connect bias.
+
 - **`tests/benchmark_results.json` untracked and gitignored** (#4684) — the
   routing-benchmark test (`tests/test_router_integration.py`) rewrites this
   file with wall-clock timings on every run, leaving the working tree

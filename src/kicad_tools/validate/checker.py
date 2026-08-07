@@ -75,7 +75,7 @@ class DRCChecker:
         verbose: bool = False,
         emit_measurements: bool = False,
         courtyard_waivers: CourtyardWaivers | None = None,
-        strict_connectivity: bool = False,
+        strict_connectivity: bool = True,
         copper_oz_outer: float | None = None,
         copper_oz_inner: float | None = None,
     ) -> None:
@@ -128,16 +128,21 @@ class DRCChecker:
                 entry (instead of blocking errors), and an ``info`` "unused
                 waiver" finding for entries naming an absent component.  When
                 omitted, every overlap is a blocking error (Issue #4137).
-            strict_connectivity: When True, ``check_connectivity`` decides
-                segment↔segment / segment↔pad / segment↔via unions by real
-                geometric copper contact (shapely polygon intersection)
-                instead of the default 0.01mm endpoint-proximity tolerance,
-                matching KiCad's connectivity semantics (Issue #4176).  A net
-                whose copper the default model over-connects (reported
-                "complete" while ``kicad-cli pcb drc`` finds it unconnected)
-                then correctly fires the connectivity rule.  Default False
-                preserves the legacy tolerance model so existing ``kct check``
-                output is unchanged.
+            strict_connectivity: When True (the default since Issue #4673,
+                matching the ``kct net-status`` default flipped by Issue
+                #4557), ``check_connectivity`` decides segment↔segment /
+                segment↔pad / segment↔via unions by real geometric copper
+                contact (shapely polygon intersection) instead of the legacy
+                0.01mm endpoint-proximity tolerance, matching KiCad's
+                connectivity semantics (Issue #4176).  A net whose copper the
+                legacy model over-connects (reported "complete" while
+                ``kicad-cli pcb drc`` finds it unconnected) then correctly
+                fires the connectivity rule, and the legacy model's
+                endpoint-proximity false opens on poured boards disappear.
+                Pass False (``kct check --legacy-connectivity``) to opt back
+                into the legacy tolerance model.  Strict mode requires
+                shapely (a core dependency since #3824) and fails loud if it
+                is missing.
             copper_oz_outer: Optional override for the *ampacity* gate's
                 outer-layer (F.Cu / B.Cu) copper weight in oz (Issue #4326).
                 When provided, replaces ``design_rules.outer_copper_oz``
@@ -163,8 +168,10 @@ class DRCChecker:
         self.courtyard_waivers = courtyard_waivers
         # Issue #4176: when True, the connectivity rule decides segment /
         # pad / via unions by real geometric copper contact (shapely polygon
-        # intersection) instead of the default 0.01mm endpoint-proximity
-        # tolerance, matching KiCad.  Default False preserves legacy behavior.
+        # intersection) instead of the legacy 0.01mm endpoint-proximity
+        # tolerance, matching KiCad.  Default True since Issue #4673 (the
+        # #4557 strict-default flip extended from net-status to kct check);
+        # pass False to opt back into the legacy tolerance model.
         self.strict_connectivity = strict_connectivity
         self.warn_on_inactive_skew_rules = warn_on_inactive_skew_rules
         self.verbose = verbose

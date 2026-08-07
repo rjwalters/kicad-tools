@@ -71,19 +71,25 @@ class ConnectivityRule(DRCRule):
     name = "Net Connectivity"
     description = "Detects multi-pad nets that are not fully connected by traces, vias, or zones"
 
-    def __init__(self, *, strict: bool = False) -> None:
+    def __init__(self, *, strict: bool = True) -> None:
         """Create the connectivity rule.
 
         Args:
             strict: Forwarded to :class:`NetStatusAnalyzer` as its ``strict``
-                flag (Issue #4176).  When ``True``, segment↔segment /
-                segment↔pad / segment↔via connectivity is decided by real
-                geometric copper contact (shapely polygon intersection)
-                instead of the default 0.01mm endpoint-proximity tolerance, so
-                a net kct's default model over-connects (reported "complete"
-                while ``kicad-cli pcb drc`` finds it unconnected) correctly
-                fires here.  The default (``False``) preserves the legacy
-                tolerance model so existing ``kct check`` output is unchanged.
+                flag (Issue #4176).  When ``True`` (the default since Issue
+                #4673, matching the ``NetStatusAnalyzer`` /
+                ``kct net-status`` default flipped by Issue #4557),
+                segment↔segment / segment↔pad / segment↔via connectivity is
+                decided by real geometric copper contact (shapely polygon
+                intersection) instead of the legacy 0.01mm endpoint-proximity
+                tolerance, so a net the legacy model over-connects (reported
+                "complete" while ``kicad-cli pcb drc`` finds it unconnected)
+                correctly fires here — and the endpoint-proximity *false
+                opens* the legacy model reports on poured boards disappear.
+                Pass ``False`` (``kct check --legacy-connectivity``) to opt
+                back into the legacy tolerance model.  Strict mode requires
+                shapely (a core dependency since #3824) and fails loud if it
+                is missing.
         """
         self.strict = strict
 

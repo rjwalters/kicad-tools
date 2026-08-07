@@ -437,3 +437,79 @@ def test_two_disjoint_fills_not_unioned(strict: bool):
     )
     assert gnd.connected_count == 1
     assert gnd.unconnected_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #4673 Part 3: blind-via / unspanned-pad bonding residual (PINNED).
+#
+# In strict mode, via copper geometries are deliberately LAYER-UNFILTERED when
+# bonding to pads (``copper_geoms.extend((self._via_geom(via), None) ...)`` and
+# the chain-merge ``_find_pads_touching_geom(via_geom, pad_positions)`` call in
+# ``net_status.py``).  Rationale: a via barrel is modeled as one vertical
+# copper cylinder, and for the overwhelmingly-common through-via the barrel
+# really does reach every layer, so filtering would only add cost.  The
+# accepted consequence -- flagged in the #4665 review and pinned here rather
+# than fixed -- is that a BLIND via whose 2D copper footprint overlaps a pad
+# on a layer the via does NOT span still bonds to that pad, over-connecting
+# relative to the physical board (KiCad would report the open).  The geometry
+# is rare (a blind via landing exactly on top of an unspanned pad is itself a
+# layout smell that other DRC rules flag), and the failure direction matches
+# the legacy model's known over-connect bias rather than introducing a new
+# false-open class.  If the layer-span filter is ever added, these pins must
+# be flipped DELIBERATELY (first test's expectation becomes "incomplete") --
+# and the fleet connectivity counts re-verified.
+# ---------------------------------------------------------------------------
+
+
+def _blind_via_board(*, via_layers: str) -> str:
+    """Two F.Cu pads joined only through a B.Cu trace + two vias at the pad centers.
+
+    The vias span ``via_layers``.  With a through span (``"F.Cu" "B.Cu"``) the
+    bond is physically real.  With a blind ``"In1.Cu" "B.Cu"`` span the via
+    copper never reaches F.Cu, so the F.Cu pads are physically open -- but the
+    2D via footprint still overlaps the pad copper.
+    """
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal)
+    (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "")
+  (net 1 "SIG")
+  (footprint "R" (layer "F.Cu") (uuid "fp1") (at 100 100)
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (uuid "r1"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG")))
+  (footprint "R" (layer "F.Cu") (uuid "fp2") (at 110 100)
+    (property "Reference" "R2" (at 0 0 0) (layer "F.SilkS") (uuid "r2"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG")))
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "B.Cu") (net 1) (uuid "s1"))
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers {via_layers}) (net 1) (uuid "v1"))
+  (via (at 110 100) (size 0.6) (drill 0.3) (layers {via_layers}) (net 1) (uuid "v2"))
+)
+"""
+
+
+def test_pin_blind_via_bonds_unspanned_pad_overconnect():
+    """PIN (#4673 Part 3): a blind via overlapping an unspanned pad still bonds.
+
+    The In1.Cu-B.Cu blind vias never reach F.Cu, so the F.Cu pads are
+    physically open; KiCad would report SIG unconnected.  Strict mode's
+    layer-unfiltered via->pad bonding nonetheless reports ``complete``.
+    This test pins the ACCEPTED over-connect residual -- see the block
+    comment above for the rationale.  If via->pad bonding gains a
+    layer-span filter, flip this expectation to ``incomplete``.
+    """
+    board = _blind_via_board(via_layers='"In1.Cu" "B.Cu"')
+    assert _status(board, "SIG", strict=True) == "complete"
+
+
+def test_through_via_bonds_pads_legitimately():
+    """Control for the pin above: through-vias really do span F.Cu.
+
+    Identical geometry with F.Cu-B.Cu through-vias is physically connected;
+    both the current behavior and any future layer-span-filtered fix must
+    keep reporting ``complete`` here.
+    """
+    board = _blind_via_board(via_layers='"F.Cu" "B.Cu"')
+    assert _status(board, "SIG", strict=True) == "complete"
