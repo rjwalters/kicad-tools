@@ -174,7 +174,12 @@ class TestCategoryListMatchesDispatcher:
     #   used here leaves ``sch_path=None``, making the closure a silent
     #   no-op.  It is deliberately NOT a checker method / NOT in
     #   ``CHECK_ALL_METHODS`` -- the checker is PCB-scoped.
-    NON_CHECKER_CATEGORIES = frozenset({"sch_fields"})
+    # * ``doc_drift`` (Issue #4540): kct:doc-pin marker lint.  It runs on
+    #   the board README + repo ground-truth files located from the PCB
+    #   *path*, and the bare call here leaves ``pcb_path=None``, making
+    #   the closure a silent no-op.  Same rationale: not a checker
+    #   method, not in ``CHECK_ALL_METHODS``.
+    NON_CHECKER_CATEGORIES = frozenset({"sch_fields", "doc_drift"})
 
     def test_categories_list_equals_dispatcher_keys(self) -> None:
         checker = _build_minimal_checker()

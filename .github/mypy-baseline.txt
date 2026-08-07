@@ -1446,6 +1446,7 @@ src/kicad_tools/validate/consistency.py	misc	Need more than N values to unpack (
 src/kicad_tools/validate/consistency.py	misc	Need more than N values to unpack (N expected)
 src/kicad_tools/validate/diffpair_engagement.py	assignment	Incompatible types in assignment (expression has type "NetClassRouting | None", variable has type "NetClassRouting")
 src/kicad_tools/validate/diffpair_skew.py	assignment	Incompatible types in assignment (expression has type "NetClassRouting | None", variable has type "NetClassRouting")
+src/kicad_tools/validate/doc_drift.py	import-untyped	Library stubs not installed for "yaml"
 src/kicad_tools/validate/filters.py	assignment	Incompatible types in assignment (expression has type "ERCViolation", variable has type "DRCViolation")
 src/kicad_tools/validate/filters.py	import-not-found	Cannot find implementation or library stub for module named "tomli"
 src/kicad_tools/validate/filters.py	unused-ignore	Unused "type: ignore" comment

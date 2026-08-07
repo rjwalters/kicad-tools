@@ -430,7 +430,15 @@ The gate is a sibling of the `diffpair-routing-regression` job (board
 1. Re-routes board 07 from scratch with
    `python boards/07-matchgroup-test/generate_design.py --step route --seed 42`.
 2. Asserts the resulting DRC error count is within the per-board
-   allowlist in `.github/routed-drc-tolerance.yml` (currently 80).
+   allowlist in `.github/routed-drc-tolerance.yml` (currently 8:
+   4x `diffpair_length_skew` + 4x `diffpair_routing_continuity`;
+   ratcheted 35 -> 14 -> 9 -> 8 -- see the board-07 comment block in
+   the yml.  Per the #4008 unified-counter change, both gate arms
+   compare the identical advisory-filtered *blocking* count).
+   <!-- kct:doc-pin drc-tolerance boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb = 8 -->
+   The claim above is machine-checked by `kct check --only doc_drift`
+   (issue #4540): ratcheting the yml without updating this README
+   trips `doc_drift_stale_pin`.
 3. Asserts the `match_group_length_skew` DRC rule was actually
    exercised --- i.e., `rules_checked_by_rule["match_group_length_skew"] >= 1`
    in the `DRCChecker` summary.  Without this assertion a regression

@@ -326,6 +326,13 @@ class DRCChecker:
         # Manufacturing bucket and there is no "sch" prefix fallback.
         "sch_field_offset": CATEGORY_ADVISORY,
         "sch_field_overlap": CATEGORY_ADVISORY,
+        # Doc-drift lint (Issue #4540): INFO-severity documentation
+        # staleness advisories (kct:doc-pin markers vs machine ground
+        # truth) -- never fab-blocking.  Explicit entries are REQUIRED:
+        # category_for_rule defaults unknown ids to the fab-blocking
+        # Manufacturing bucket and there is no "doc" prefix fallback.
+        "doc_drift_stale_pin": CATEGORY_ADVISORY,
+        "doc_drift_unresolvable_pin": CATEGORY_ADVISORY,
         "impedance": CATEGORY_ADVISORY,
         "diffpair_clearance_intra": CATEGORY_ADVISORY,
         "diffpair_length_skew": CATEGORY_ADVISORY,

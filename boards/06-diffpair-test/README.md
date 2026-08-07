@@ -308,6 +308,10 @@ The job:
    three gated paths --- committed-artifact `routed-pcb-drc-check`,
    seed-42 Diff-Pair Routing Regression, and the Board 06 E2E fresh
    regen --- agreeing at 18).
+   <!-- kct:doc-pin drc-tolerance boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb = 18 -->
+   The claim above is machine-checked by `kct check --only doc_drift`
+   (issue #4540): ratcheting the yml without updating this README
+   trips `doc_drift_stale_pin`.
 4. Asserts each of the three diff-pair DRC rule_ids was actually
    exercised by the check, i.e. the JSON summary's
    `rules_checked_by_rule[rule_id] >= 1` for each of:

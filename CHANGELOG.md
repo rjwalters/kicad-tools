@@ -62,6 +62,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routed artifact carrying 5 zero-length segments, so error-by-default
   would have broken a shipping board.
 
+- **LLM-free doc-drift sub-gate in `kct check`** (#4540, from the
+  copperhead workflow survey #4520 idea 3) — new advisory `doc_drift`
+  category (`--only doc_drift` / `--skip doc_drift`) that diffs opt-in
+  `<!-- kct:doc-pin <resolver> <key> = <value> -->` markers in the board
+  README against machine ground truth via a resolver registry
+  (`src/kicad_tools/validate/doc_drift.py`). v1 ships one resolver,
+  `drc-tolerance` (the per-board pin in
+  `.github/routed-drc-tolerance.yml`; an absent entry resolves to the
+  yml's strict-0 convention), and two INFO-severity rule ids:
+  `doc_drift_stale_pin` (claimed value != resolved ground truth, message
+  quotes doc `file:line`, both values, and the source) and
+  `doc_drift_unresolvable_pin` (unknown resolver / typo'd routed-PCB
+  path, so the gate can't rot silently). Findings never enter
+  `error_count`, the verdict, exit codes, or any fab/tapeout gate; free
+  prose is never parsed, and zero markers / missing README / missing
+  tolerance file all pass silently (bootstrap carve-out). Markers are
+  onboarded for board 06 (18) and board 07 (8) — fixing board 07's stale
+  "currently 80" README prose to the actual pin of 8 — so a future yml
+  ratchet without the README edit trips the check. v2 candidates
+  (BOM-vs-schematic fixed-column contract, version strings, escalation
+  to WARNING) are deferred.
+
 - **`kct pipeline` route-skip under `--voltage-map` now auto-runs a
   `kct creepage` audit as the skip gate** (#4649) — refining the #4607 loud
   refusal: when the board is already `>=`95% routed (recommend_skip) and no

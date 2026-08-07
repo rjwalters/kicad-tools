@@ -1108,6 +1108,7 @@ CHECK_CATEGORIES = [
     "diffpair_length_skew",
     "diffpair_routing_continuity",
     "dimensions",
+    "doc_drift",
     "edge",
     "impedance",
     "match_group_length_skew",
@@ -2032,6 +2033,7 @@ def main(argv: list[str] | None = None) -> int:
         pad_grid_auto_derive=pad_grid_auto_derive,
         sch_path=sch_path,
         sch_field_threshold=args.sch_field_threshold,
+        pcb_path=pcb_path,
     )
 
     # Issue #4417: apply general waivers centrally, once, AFTER all checks run.
@@ -2383,6 +2385,7 @@ def run_selected_checks(
     pad_grid_auto_derive: bool = True,
     sch_path: Path | None = None,
     sch_field_threshold: float = DEFAULT_SCH_FIELD_THRESHOLD_MM,
+    pcb_path: Path | None = None,
 ) -> DRCResults:
     """Run the selected DRC checks based on filters.
 
@@ -2406,6 +2409,12 @@ def run_selected_checks(
             that only exercise PCB-scoped checks are unaffected.
         sch_field_threshold: ``sch_field_offset`` distance threshold in
             mm (issue #4595; strictly-greater-than comparison).
+        pcb_path: Path of the ``.kicad_pcb`` under check, used only by
+            the ``doc_drift`` category (issue #4540) to locate the board
+            README and repo root -- the PCB is never re-parsed.  Must
+            default to ``None`` so library callers that only exercise
+            PCB-object-scoped checks are unaffected; the category is
+            then a silent no-op.
     """
     results = DRCResults()
 
@@ -2434,6 +2443,20 @@ def run_selected_checks(
 
         return check_schematic_fields(sch_path, threshold_mm=sch_field_threshold)
 
+    # Issue #4540: LLM-free doc-drift lint (kct:doc-pin markers vs
+    # machine ground truth).  Dispatched as a CLI-level closure (like
+    # ``pad_grid`` / ``sch_fields``) because it needs the PCB *path* to
+    # locate the board README and repo root -- it is intentionally NOT a
+    # ``DRCChecker`` method and NOT part of ``CHECK_ALL_METHODS``.  With
+    # no pcb_path it is a silent no-op; all findings are INFO severity
+    # (advisory, never blocking).
+    def _doc_drift_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.validate.doc_drift import check_doc_drift
+
+        return check_doc_drift(pcb_path)
+
     # Map of category to check method.  This dict MUST stay a superset
     # of the methods invoked by ``DRCChecker.check_all`` (i.e., every
     # name in ``DRCChecker.CHECK_ALL_METHODS`` must be referenced as a
@@ -2453,6 +2476,7 @@ def run_selected_checks(
         "diffpair_length_skew": checker.check_diffpair_length_skew,
         "diffpair_routing_continuity": checker.check_diffpair_routing_continuity,
         "dimensions": checker.check_dimensions,
+        "doc_drift": _doc_drift_check,
         "edge": checker.check_edge_clearances,
         "impedance": checker.check_impedance,
         "match_group_length_skew": checker.check_match_group_length_skew,
