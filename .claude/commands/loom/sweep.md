@@ -1860,6 +1860,8 @@ That entry goes to stderr and is appended to `.loom/logs/main-quarantine.log` (o
 - **It is a rescue, never a discard.** The full diff survives in the stash; recover it with `git stash show -p <sha>` and replay it into the owning issue worktree.
 - **Baselined dirt is spared.** Only the paths the check flagged as *new* are stashed, so an operator's unrelated working-tree edits are untouched.
 - **It is verified.** After stashing, the check re-runs detection and only reports success (exit `4`) if main is back at the baseline; a residual-dirt result is reported as a failure (exit `3`), never as a partial success.
+- **An empty quarantine is never created (#5185).** The offending path set is re-derived from a fresh `git status` immediately before the stash push, so dirt that a concurrent sweep / the builder's own commit resolved in the meantime is dropped from the pathspec instead of producing a content-free stash entry. When nothing is left to rescue, no stash is pushed and the check emits `"result":"no_op"` and exits `0` (main is provably at the baseline — treat it exactly like any other exit `0`). `"result":"quarantined_empty"` marks the residual race where an entry was created but captured nothing.
+- **The rescue ref stays outstanding until a human reconciles it.** Nothing drops it automatically, and `git stash`'s reflog is shared by every linked worktree, so entries accumulate. List them with `./.loom/scripts/check-main-clean.sh --list-quarantined` (also surfaced as a `Quarantined work` section by `./.loom/bin/loom status`).
 
 **Do NOT restore contamination piecemeal.** Per-file `git checkout -- <path>` / `rm <path>` sequences are forbidden as the remediation path: they are what produced the half-restored main checkout this section exists to prevent, and a main checkout that is neither the baseline nor the builder's intended change is worse than either extreme. If for any reason you must remediate by hand (e.g. `--quarantine` itself failed and returned `3`), do it as a **single** `git stash push --include-untracked -m "loom-quarantine: run=$RUN_ID issue=$N" -- <all offending paths>` — one operation, all paths, logged.
 
@@ -2207,6 +2209,23 @@ This is advisory-only. The script always exits `0` and **must not block** the sw
 - **Up to date:** prints nothing to stderr; a one-line stdout confirmation (suppressible with `--quiet`, matching `check-host-sleep.sh`).
 
 If the check warns, the operator should refresh local `main` (and re-sync installed copies if their install flow does so) before relying on stacked-dependency or auto-reconcile behavior mid-sweep.
+
+## Outstanding Quarantine Stashes (#5185)
+
+`check-main-clean.sh --quarantine` (see the Wave Lifecycle "Backstop" step above) rescues contamination it finds in the main worktree into a labeled `git stash` entry — `On <branch>: loom-quarantine: run=<RUN_ID> issue=<N>` — rather than discarding it. This is correct and loses no data, but the quarantine is otherwise recorded only in the structured `.loom/logs/main-quarantine.log` JSON log; nothing surfaces that a rescue stash is outstanding. A labeled stash can therefore sit indefinitely with nobody aware there is quarantined work to reconcile — noticed, if at all, only by chance (e.g. an unrelated command that happens to count stashes).
+
+**Before the first wave — or, on the daemon path, before the first `mcp__loom__dispatch_sweep` call** — run the quarantine-stash check and surface its output to the user (same timing and sibling role as the Host Sleep Readiness and Main Branch Freshness checks above):
+
+```bash
+./.loom/scripts/check-quarantine-stashes.sh
+```
+
+This is advisory-only. The script always exits `0` and **must not block** the sweep — proceed regardless of what it prints. It is strictly **read-only**: it never pops, drops, or applies a stash. `refs/stash` is shared across every worktree of the repo (not per-worktree — see the #4821 note under "CRITICAL: Only Builders parallelize"), so the check is meaningful regardless of which worktree it runs from:
+
+- **≥1 outstanding `loom-quarantine:` stash:** prints a bordered warning to stderr listing each stash's `stash@{N}` selector, relative age, and label (run id / issue number), with `git stash show -p <ref>` / `git stash apply <ref>` as the inspection/reconciliation commands.
+- **None outstanding:** prints nothing to stderr; a one-line stdout confirmation (suppressible with `--quiet`, matching `check-host-sleep.sh` / `check-main-freshness.sh`).
+
+If the check warns, the operator should reconcile each listed stash into the issue worktree it belongs to (or consciously drop it) — this does not block the current sweep, but stale quarantines accumulate silently otherwise.
 
 ## Sweep Child Working-Set Contract (#3980)
 

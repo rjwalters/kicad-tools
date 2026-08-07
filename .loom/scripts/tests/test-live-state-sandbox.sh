@@ -244,6 +244,72 @@ snap_size=$(
 check "$([[ "${snap_size:-0}" -ge 6 ]] && echo 0 || echo 1)" \
     "snapshot covers both the \$HOME/.loom and the checkout state roots ($snap_size paths)"
 
+# ============================================================
+# 9. Supervisor IDENTITY (#5501): sandboxing paths does not sandbox
+#    LOOM_LAUNCHD_LABEL / LOOM_WATCHDOG_LABEL — a path-clean run whose label
+#    resolves to the REAL production identity must fail the guard too.
+# ============================================================
+
+# 9a. A scratch label passes cleanly.
+check "$(live_state_sandbox_assert_supervisor_scoped "com.example.scratch-1234" && echo 0 || echo 1)" \
+    "a scratch LOOM_LAUNCHD_LABEL passes the supervisor-identity guard"
+
+# 9b. The REAL production launchd label fails loudly.
+case9b_err="$WORKDIR/case9b.err"
+live_state_sandbox_assert_supervisor_scoped "com.rjwalters.loom-daemon" 2>"$case9b_err"
+rc9b=$?
+check "$([[ "$rc9b" -ne 0 ]] && echo 0 || echo 1)" \
+    "the REAL production launchd label FAILS the supervisor-identity guard (rc=$rc9b)"
+check "$(grep -q 'com.rjwalters.loom-daemon' "$case9b_err" && echo 0 || echo 1)" \
+    "the guard names the offending production label in its failure output" "$(cat "$case9b_err")"
+
+# 9c. The REAL production watchdog label fails loudly too (second arg).
+case9c_err="$WORKDIR/case9c.err"
+live_state_sandbox_assert_supervisor_scoped "com.example.scratch-5678" "com.rjwalters.loom-daemon-watchdog" 2>"$case9c_err"
+rc9c=$?
+check "$([[ "$rc9c" -ne 0 ]] && echo 0 || echo 1)" \
+    "the REAL production watchdog label FAILS the supervisor-identity guard (rc=$rc9c)"
+
+# 9d. Reading ambient env (no args) catches a harness that EXPORTED the real
+#     label before calling live_state_sandbox_init — the exact #5501 shape.
+case9d_err="$WORKDIR/case9d.err"
+(
+    eval "$NEUTRAL_ENV"
+    export HOME="$FAKE_HOME"
+    export LOOM_LAUNCHD_LABEL="com.rjwalters.loom-daemon"
+    cd "$FAKE_REPO" || exit 1
+    live_state_sandbox_init "$WORKDIR/sandbox9d"
+) 2>"$case9d_err"
+rc9d=$?
+check "$([[ "$rc9d" -ne 0 ]] && echo 0 || echo 1)" \
+    "live_state_sandbox_init itself fails when the ambient LOOM_LAUNCHD_LABEL is the real one (rc=$rc9d, #5501 AC1)"
+
+# 9e. live_state_sandbox_assert_untouched ALSO re-checks the supervisor
+#     identity, in case a case exports the real label sometime AFTER init.
+case9e_err="$WORKDIR/case9e.err"
+(
+    eval "$NEUTRAL_ENV"
+    export HOME="$FAKE_HOME"
+    cd "$FAKE_REPO" || exit 1
+    live_state_sandbox_snapshot
+    live_state_sandbox_init "$WORKDIR/sandbox9e" >/dev/null
+    export LOOM_LAUNCHD_LABEL="com.rjwalters.loom-daemon"
+    live_state_sandbox_assert_untouched
+) 2>"$case9e_err"
+rc9e=$?
+check "$([[ "$rc9e" -ne 0 ]] && echo 0 || echo 1)" \
+    "live_state_sandbox_assert_untouched fails when the real label was set AFTER init (rc=$rc9e)"
+
+# 9f. The LOOM_DAEMON_STOP_DRYRUN bypass (#5501 AC2): the supported way to
+#     exercise default-label semantics is exempt from the guard.
+check "$(
+    eval "$NEUTRAL_ENV"
+    export LOOM_DAEMON_STOP_DRYRUN=1
+    live_state_sandbox_assert_supervisor_scoped "com.rjwalters.loom-daemon" "com.rjwalters.loom-daemon-watchdog" \
+        && echo 0 || echo 1
+)" \
+    "LOOM_DAEMON_STOP_DRYRUN=1 bypasses the guard for the real labels (the supported dry-run seam)"
+
 echo
 echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed"
 [[ "$TESTS_FAILED" -eq 0 ]]

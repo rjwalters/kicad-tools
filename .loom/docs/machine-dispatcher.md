@@ -14,7 +14,7 @@ loom <command> [options]
 |---------|--------------|
 | `start` | Start the machine-level `loom-daemon` (delegates to `loom-daemon-start.sh`) |
 | `stop`  | Stop the machine-level `loom-daemon` (delegates to `loom-daemon-stop.sh`) |
-| `restart` | Restart the machine-level `loom-daemon` (drain-and-roll; falls back to stop+start) |
+| `restart` | Restart the machine-level `loom-daemon` (supervised in-place relaunch, **not** a drain; falls back to stop+start) |
 | `status`| Show machine-level + current-repo status (read-only) |
 | `sweep <issue>` | Dispatch `/loom:sweep <issue>` for the current repo |
 | `update`| Refresh the user-scoped mcp-loom bundle (#4230), then thin-delegate the daemon update to `loom-daemon-update.sh` |
@@ -232,16 +232,24 @@ confusing than useful in machine mode.
 
 ### `restart` verb (Gap 3)
 
-`loom restart` mirrors `start`/`stop` — same collision guard — and prefers a
-**drain-and-roll** restart: it first tries the daemon's own supervised restart
-IPC (`loom-daemon restart`, #4077), which can apply a code update without
-touching the loaded launchd job at all. If that is unavailable (not
-launchd-managed) or refused (not currently running, or a pre-#4077 binary), it
-falls back to a plain stop-then-start via the same checkout-resolved
-lifecycle-script delegates — on launchd this does bootout+bootstrap the job,
-which no longer tears down in-flight sweeps on a current build (every sweep
-runs in its own process group, #5081), though it still cannot apply a plist
-`EnvironmentVariables` change without that reload (#4995).
+`loom restart` mirrors `start`/`stop` — same collision guard — and prefers the
+**supervised in-place** restart: it first tries the daemon's own restart IPC
+(`loom-daemon restart`, #4077), which can apply a code update without touching
+the loaded launchd job at all. If that is unavailable (not supervised) or
+refused (not currently running, or a pre-#4077 binary), it falls back to a plain
+stop-then-start via the same checkout-resolved lifecycle-script delegates — on
+launchd this does bootout+bootstrap the job, which no longer tears down
+in-flight sweeps on a current build (every sweep runs in its own process group,
+#5081), though it still cannot apply a plist `EnvironmentVariables` change
+without that reload (#4995).
+
+> **It is not a drain (#5119).** A plain `loom restart` does not wait for
+> in-flight work, and what happens to that work is **supervisor-specific**: on
+> launchd sweep/role-run children reparent to pid 1 and survive, while on
+> systemd they sit in the daemon unit's cgroup and the stop job terminates them.
+> The wrapper no longer claims otherwise, and the primitive prints the
+> supervisor-specific truth. Use `loom-daemon restart --drain` when in-flight
+> sweeps must finish first.
 
 ### Sweep dispatch on a multi-repo worker host (#4299)
 

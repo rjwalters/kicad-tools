@@ -323,7 +323,10 @@ reserved for tracked files.
        — the marker word, the separator run (space, `_`, `-`, `.`) in front of
        it, and any timestamp or copy index (digits and separators) behind it —
        and what remains must be a non-empty stem that names a **base sibling**:
-       another tracked file `<base>.<ext>`, same extension, **same directory**.
+       another tracked file `<base>.<ext>`, same extension, **same directory**,
+       matched **case-insensitively** (same rationale as condition 1 — this
+       preserves real-world filesystem behavior on macOS/Windows, where
+       `Connectors.kicad_sch` and `connectors.kicad_sch` name the same file).
        `connectors_backup_20260427_163100.kicad_sch` → `connectors.kicad_sch`,
        `schematic copy.kicad_sch` → `schematic.kicad_sch`, `sheet - Copy
        2.kicad_sch` → `sheet.kicad_sch`, `parser.orig.rs` → `parser.rs`. The

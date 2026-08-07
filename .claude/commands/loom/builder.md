@@ -708,6 +708,26 @@ Before opening a PR that touches build-time code:
 
 If no downstream cap is documented, ask in the PR description rather than assuming there is none.
 
+### Your Environment Is Not a Clean Shell — Check Before Trusting Test Failures
+
+**A dispatched sweep/daemon child inherits `LOOM_FORCE_SCOPE=protected` and `LOOM_GUARD_DECISION_LOG=1`** from the dispatcher's own process environment (set in `loom-daemon-start.sh` to let a headless agent force-push/reset-hard its own branch without stalling on an unanswerable guard ASK). These are agent-wide — inherited by *every* subprocess you run, not just your own git operations.
+
+**Consequence**: if the repo you are working in ships its own guard-hook test suite that asserts the guard's *factory-default* behavior (default force-push/reset-hard `ask` tier, decision-log off by default — e.g. a suite named like `test-guard-destructive*.sh`), your ambient environment overrides exactly the defaults that suite is testing. Running that suite as a dispatched agent can produce dozens of failures that do **not** reproduce in a clean human shell on the identical commit — this has already caused a Builder to misread the failures as "main is broken" and close a valid, unrelated issue as a false duplicate (#5388).
+
+**Before drawing any conclusion from a failing test suite** (especially one where the failures don't match what the issue/PR under investigation would plausibly cause), check your own environment first:
+
+```bash
+env | grep -E '^LOOM_(FORCE_SCOPE|GUARD_DECISION_LOG)='
+```
+
+If either is set and the suite exercises guard-hook / force-push / reset-hard behavior, re-run it with the ambient overrides stripped before trusting the result:
+
+```bash
+env -u LOOM_FORCE_SCOPE -u LOOM_GUARD_DECISION_LOG <test-suite-command>
+```
+
+Full background: `.loom/docs/guard-hooks.md` → "Known consequence".
+
 ## Guidelines
 
 - **Pick the right work**: Choose issues labeled `loom:issue` (human-approved) that match your capabilities

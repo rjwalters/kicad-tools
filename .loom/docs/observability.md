@@ -38,14 +38,14 @@ this pipeline is infrastructure **you** deploy and point your own daemons at.
 
 ## 1. Enable telemetry on a daemon
 
-Add the `observability` block to that host's `.loom/config.json`:
+Add the `observability` block to that host's `.loom/config.json` — **except**
+`ingestKeyFile`, see the callout below:
 
 ```json
 {
   "observability": {
     "enabled": true,
     "endpoint": "https://<your-worker>.workers.dev/ingest",
-    "ingestKeyFile": "/etc/loom/observability-ingest.key",
     "batchSize": 50,
     "flushIntervalSecs": 30,
     "queueCapacity": 2000
@@ -62,7 +62,7 @@ Precedence is **env > config > default**, the same rule every other
 |---|---|---|
 | `enabled` | `LOOM_OBSERVABILITY_ENABLED` | `false` |
 | `endpoint` | `LOOM_OBSERVABILITY_ENDPOINT` | unset (disables export) |
-| `ingestKeyFile` | `LOOM_OBSERVABILITY_INGEST_KEY_FILE` | unset (disables export) |
+| `ingestKeyFile` | `LOOM_OBSERVABILITY_INGEST_KEY_FILE` | `$HOME/.loom/observability/ingest.key` |
 | `batchSize` | `LOOM_OBSERVABILITY_BATCH_SIZE` | 50 |
 | `flushIntervalSecs` | `LOOM_OBSERVABILITY_FLUSH_INTERVAL_SECS` | 30 |
 | `queueCapacity` | `LOOM_OBSERVABILITY_QUEUE_CAPACITY` | 2000 |
@@ -71,11 +71,31 @@ Precedence is **env > config > default**, the same rule every other
 The ingest key is **never inline in config** — `ingestKeyFile` is a path the
 daemon reads once at startup and holds only in memory, sent solely as an
 `Authorization: Bearer` header. A misconfigured block (missing endpoint or
-key file) degrades to off; it does not crash the daemon. Source of truth:
-`loom-daemon/src/observability/mod.rs`'s module doc (config resolution,
-FLAGS-OFF posture, read-only invariant) and its `collector.rs` / `queue.rs` /
-`exporter.rs` / `sender.rs` siblings (collector, durable queue, exporter
-trait + HTTPS implementation, retry-drain loop).
+unreadable key file) degrades to off; it does not crash the daemon. Source of
+truth: `loom-daemon/src/observability/mod.rs`'s module doc (config
+resolution, FLAGS-OFF posture, read-only invariant) and its `collector.rs` /
+`queue.rs` / `exporter.rs` / `sender.rs` siblings (collector, durable queue,
+exporter trait + HTTPS implementation, retry-drain loop).
+
+**`ingestKeyFile` must never be committed to the shared `.loom/config.json`**
+— unlike every other `observability.*` key above, it is host-specific by
+definition (every host's key lives at a different, unshareable path). It
+defaults to `$HOME/.loom/observability/ingest.key`, so the common case needs
+no config value at all: install each host's key at that conventional path
+(`dashboard/docs/deploy-runbook.md` step 9a) and leave `ingestKeyFile` unset
+everywhere. A host that genuinely needs a non-default path (e.g. a system
+path for a service account) sets it in the gitignored, per-host
+`.loom-local/local.json` override tier (`config_resolver.rs`, highest
+precedence) or via `$LOOM_OBSERVABILITY_INGEST_KEY_FILE` — never in the
+committed file. Issue #5336 is exactly the failure mode this avoids: a
+macOS `ingestKeyFile` value was committed to this repo's own shared
+`.loom/config.json` and every other host that `git pull`ed `main` inherited
+a path to a key file that did not exist on it, with telemetry silently off
+for a day before anyone noticed.
+`./defaults/scripts/check-ingest-key-file.sh` validates the resolved path on
+any host — readable, and not a path copied from a different host's
+`$HOME` — usable both right after provisioning a host and as a periodic
+fleet-wide regression check.
 
 ## 2. What gets sent: the wire schema
 
@@ -164,7 +184,8 @@ loom-daemon status --json | jq -e '.observability_export.state == "healthy"'
 
 | `state` | Meaning | Rendered as |
 |---|---|---|
-| `disabled` | Exporter not running: `enabled=false`, or enabled but under-configured (no endpoint / no readable ingest key / `otlp` without the Cargo feature) | `Observability: disabled …` |
+| `disabled` | Exporter deliberately not running: `enabled=false`, or the block is absent. **Never** reported for `enabled: true` — see `misconfigured` below (#5337) | `Observability: disabled …` |
+| `misconfigured` | `enabled: true`, but a required piece of config could not be resolved (no endpoint, no `ingestKeyFile`, or that file is missing/unreadable/empty, or `otlp` without the Cargo feature) — a config error to fix, not a benign off-by-choice state (#5337) | `Observability: MISCONFIGURED …` |
 | `starting` | Running, nothing acked yet, still inside the grace window (3 × `flushIntervalSecs`, floored at 10 min) — a just-rolled daemon, not a fault | `Observability: starting …` |
 | `never_exported` | Running well past the grace window and **no batch has ever been acked** — the silent failure mode | `Observability: NEVER EXPORTED …` |
 | `healthy` | Batches are being acked and the ids agree | `Observability: OK …` |
@@ -175,14 +196,21 @@ loom-daemon status --json | jq -e '.observability_export.state == "healthy"'
 `started_at`, `last_success_at`, `last_failure_at`, `last_failure_detail`,
 `records_exported`, `consecutive_failures`, and `flush_interval_secs`. A `null`
 `observability_export` means the daemon binary predates #5083 — "cannot tell",
-never "disabled"; restart the daemon onto a current binary.
+never "disabled"; restart the daemon onto a current binary. Under
+`misconfigured`, `endpoint` reflects whatever piece of config *did* resolve
+(`null` only when the endpoint itself is what's missing) and
+`last_failure_detail` names the offending path plus the underlying error (e.g.
+an `ingestKeyFile` `io::Error`'s `Display`, which includes the OS errno) — the
+same "never the key itself" discipline every other error surface in this
+module uses.
 
-The health section keeps its anomaly-only contract. It now recognizes two
-additional *non-green* conditions — `never_exported` and `failing` — which are
-anomalies by the same rule that already admitted `host_id_mismatch`; `healthy`,
-`starting`, and `disabled` still render nothing at all. When a section does
-render, its `detail` payload carries the full `observability_export` record, so
-a machine consumer of `loom-daemon health --json` gets the positive facts too.
+The health section keeps its anomaly-only contract. It now recognizes three
+additional *non-green* conditions — `misconfigured`, `never_exported`, and
+`failing` — which are anomalies by the same rule that already admitted
+`host_id_mismatch`; `healthy`, `starting`, and `disabled` still render nothing
+at all. When a section does render, its `detail` payload carries the full
+`observability_export` record, so a machine consumer of `loom-daemon health
+--json` gets the positive facts too.
 
 **Note on scope**: this is a *transport-level* signal — it answers "are batches
 being acked", not "is every record kind being enqueued". A host can report

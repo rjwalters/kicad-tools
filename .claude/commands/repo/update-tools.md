@@ -155,7 +155,23 @@ git -C <source> pull --ff-only
 
 **Loom updates go through `resync-installed.sh`, not `install.sh`.** Note the
 path: the resync script lives in the **target** repo's `.loom/scripts/`, not in
-the source clone, unlike every other row above. It is the non-destructive,
+the source clone, unlike every other row above. That `<this-repo>/` prefix
+documents **which copy of the script to run**, not a target argument the script
+consumes — the asymmetry with the sibling rows is deliberate. In every other row
+the trailing `<this-repo>` is a positional argument that **selects** the repo the
+installer acts on; `resync-installed.sh` takes **no positional target** and
+rejects one with exit `1` (its arg loop matches only `--dry-run`/`-n`,
+`--quiet`/`-q`, `--allow-worktree`, `--help`/`-h`). It resolves its target from
+the **current working directory** via `git rev-parse --git-common-dir`
+(worktree-safe — this points at the primary checkout even from a linked
+worktree), never from its own path on disk. So do **not** "fix" the Loom row to look like its siblings by appending a
+target path: the script would reject the command with an error that does not
+obviously point back to the cause. What guarantees cwd is the target repo at this
+point is that `/repo:update-tools` runs in the target repo's working directory
+and nothing earlier in step 4 changes it — the source clone is only ever reached
+through `git -C <source> …`, never a `cd`. Any future refactor that moves this
+line must preserve that invariant, or it will silently resync whichever repo cwd
+happens to be. It is the non-destructive,
 idempotent update path — it reports per-file updated/created/unchanged/skipped,
 never clobbers a symlinked install target, and re-stamps `loom_version` /
 `loom_commit` / `last_resync` into `.loom/install-metadata.json` on a successful
@@ -176,6 +192,23 @@ the drift:
 
 Confirm that separately with the user; do not escalate to it just because a
 resync pass exited non-zero — see the re-run caveat first.
+
+**Anvil and kicad-tools rows verified correct as written (issue #135) — do not
+re-investigate.** Unlike Loom, neither installer refuses a non-interactive
+reinstall over an existing install, so `<source>/scripts/install-anvil.sh
+<this-repo>` and `<source>/scripts/install-kct.sh <this-repo>` both succeed on
+a second run and need no resync-equivalent or destructive-fallback split:
+
+- **Anvil** (`rjwalters/anvil` `scripts/install-anvil.sh`, checked at `8302890`):
+  Stage 3's "active-install guard" only sets `UPGRADE=true` when `.anvil/`
+  already exists and proceeds — no exit, no confirmation gate bypassed by
+  `-y`. The installer's own `--help` text tells consumers to "re-run
+  `install-anvil.sh .` from the anvil checkout" to upgrade.
+- **kicad-tools** (`rjwalters/kicad-tools` `scripts/install-kct.sh`, checked at
+  `87561cf`): the header comment states outright "Re-running the installer is
+  the upgrade/idempotency path: a second run with the same args adds no
+  duplicate CLAUDE.md block and no duplicate dependency" — Stage 5 explicitly
+  no-ops when the dependency is already present and up to date.
 
 **Re-run caveat: `resync-installed.sh` syncs itself.** The script is part of the
 `.loom/scripts/` payload it updates, so the copy that starts the run is the

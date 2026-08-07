@@ -309,6 +309,36 @@ cat .loom/config.json.bak
 `loom-daemon init` against a workspace that already has a `.loom/config.json`, so
 repeat provisioning passes cannot re-enter this path on a tuned host.
 
+### `install.sh` refuses to run: "Another Loom install is already running" (#4928)
+
+`install.sh`'s `--quick` / `--clean` paths take a per-target lock at
+`<target>/.loom/.install.lock` before any destructive phase, because two
+installers racing over one target interleave one run's uninstall (which stages
+Loom file deletions and strips the Loom sections out of `CLAUDE.md` /
+`.gitignore` **in place**) with the other's copy phase. The message names the
+owning PID, host, and phase:
+
+```bash
+cat <target>/.loom/.install.lock   # pid / host / started / phase
+```
+
+- **The PID is alive** — a real install is in flight (a `cargo build --release`
+  can run for minutes; it emits a progress line every 15s). Wait for it.
+- **The PID is gone** — the next installer reclaims the lock automatically; you
+  should never need to delete it. If you do (e.g. a lock written by another
+  host, which cannot be liveness-probed and is only reclaimed after
+  `LOOM_INSTALL_LOCK_MAX_AGE`, default 6h), `rm -f <target>/.loom/.install.lock`.
+
+If the lock's `phase` is `uninstalling` / `installing` / `restoring`, that run
+died **inside the destructive window** and the target may be partially
+uninstalled. The next installer prints the recovery commands; the short form is:
+
+```bash
+git -C <target> status --short
+git -C <target> restore --staged --worktree -- .loom .claude CLAUDE.md .gitignore
+git -C <target> stash list | grep loom-install   # changes the installer stashed, if any
+```
+
 ### Daemon won't start
 
 ```bash
@@ -323,6 +353,64 @@ tail -f ~/.loom/daemon.log
 which claude
 
 # Install if missing (see Claude Code documentation)
+```
+
+### `loom-daemon: command not found` over plain ssh (#5393)
+
+```
+$ ssh loom-worker-2 'loom-daemon workspace list'
+bash: line 1: loom-daemon: command not found
+```
+
+`loom-daemon` is installed at `~/.local/bin/loom-daemon`, which is added to PATH
+by your **login shell's rc file**. `ssh host <cmd>` runs a *non-login,
+non-interactive* shell that never sources that rc file, so `~/.local/bin` is not
+on PATH and the bare name does not resolve. (The same mechanism produces the
+false "missing dependency" from `install.sh` — see [`install.sh` reports a
+dependency that is installed](#installsh-reports-a-dependency-that-is-installed-5393)
+below.)
+
+Three supported ways to drive `loom-daemon` over ssh, in order of preference:
+
+1. **Source the login profile** so PATH is populated exactly as it is
+   interactively:
+
+   ```bash
+   ssh loom-worker-2 'bash -lc "loom-daemon workspace list"'
+   ```
+
+2. **Call the fixed install location** directly — the machine-level install path
+   is stable, so no PATH is needed:
+
+   ```bash
+   ssh loom-worker-2 '~/.local/bin/loom-daemon workspace list'
+   ```
+
+3. **Let Loom's own scripts resolve it** — every in-tree caller sources
+   `defaults/scripts/lib/locate-daemon-bin.sh` (`loom_locate_daemon_bin`), which
+   already probes `$LOOM_DAEMON_BIN` → PATH → `${LOOM_DAEMON_BIN_DIR:-$HOME/.local/bin}`
+   → repo-local build output (#4875). Point new fleet automation at that helper
+   rather than reimplementing per-caller path probing.
+
+### `install.sh` reports a dependency that is installed (#5393)
+
+```
+$ ssh loom-worker-1 'cd ~/GitHub/loom && ./install.sh --quick -y ~/GitHub/repo'
+✗ Error: Missing required dependencies: pnpm cargo -- cannot continue ...
+```
+
+Same root cause as the daemon case above: over a non-login ssh shell, PATH lacks
+the per-user install roots (`~/.cargo/bin`, `~/.local/bin`, `/opt/homebrew/bin`,
+…), so tools that are installed and runnable look absent. `install.sh` now
+probes those roots directly: a tool found there is used (its directory is added
+to PATH for the rest of the install) and reported with a `not on this shell's
+PATH` warning rather than as missing. Only tools that are absent from **every**
+probed root are treated as genuinely missing — a distinction that matters
+because the two need different fixes (install the tool vs. fix PATH). If you
+prefer to fix PATH once up front, run the whole install under a login shell:
+
+```bash
+ssh loom-worker-1 'bash -lc "cd ~/GitHub/loom && ./install.sh --quick -y ~/GitHub/repo"'
 ```
 
 ### Sweep output invisible when invoked with `2>&1`
@@ -464,6 +552,22 @@ in the primary clone (`stash_ref`/`stash_commit` are logged to
 `.loom/logs/main-quarantine.log`) rather than simply finding your branch
 intact.
 
+**Discovering an outstanding quarantine without prior knowledge that one
+occurred (#5185).** Both #5185 incidents above were noticed only by chance —
+an unrelated hygiene command happened to count stashes and flag one that had
+not existed at session start. `git stash list` and the structured
+`.loom/logs/main-quarantine.log` are both authoritative, but neither is
+something an operator thinks to check unprompted. `/loom:sweep` now runs
+`./.loom/scripts/check-quarantine-stashes.sh` before its first wave (see
+"Outstanding Quarantine Stashes" in `defaults/.claude/commands/loom/sweep.md`)
+— a non-blocking, read-only advisory that lists every outstanding
+`loom-quarantine:` stash (its `stash@{N}` selector, age, and run/issue label)
+whenever one exists. Run it manually at any time to check without waiting for
+a sweep:
+```bash
+./.loom/scripts/check-quarantine-stashes.sh
+```
+
 **A note on the quarantine's stash message**: `check-main-clean.sh` passes an
 explicit `-m "loom-quarantine: $QUARANTINE_LABEL"` message to `git stash
 push`, but `git stash list` always prefixes stash entries with `On
@@ -476,6 +580,61 @@ scope here — `stash_message` is also emitted as a structured field in the
 form — but if you are debugging a quarantine, read the `On <branch>:` prefix
 as "which branch happened to be checked out at quarantine time," not as
 "which branch's changes were protected."
+
+### Finding outstanding quarantine stashes (#5185)
+
+**Symptom**: none — that is the problem. A quarantine is loud at the moment it
+happens (a `main-clean.quarantine` line on stderr and in
+`.loom/logs/main-quarantine.log`) and silent forever afterwards. Nothing drops
+the rescue stash, nothing reminds anyone it exists, so entries pile up: 29 on
+one host, oldest 7 days; five in a consumer repo inside 24 hours, none
+reconciled. They were noticed only because an unrelated hygiene command
+happened to count stashes.
+
+**List them**:
+
+```bash
+./.loom/scripts/check-main-clean.sh --list-quarantined          # human-readable
+./.loom/scripts/check-main-clean.sh --list-quarantined --json   # machine-readable
+```
+
+The same count (and the newest few entries) appears as a `Quarantined work`
+section in `./.loom/bin/loom status`, so an outstanding quarantine is
+discoverable without knowing one happened. The report is read-only — it never
+pops, drops, or reorders anything — and exits 0 whether or not anything is
+outstanding.
+
+It covers every Loom producer that pushes to the stash stack, not just
+`check-main-clean.sh --quarantine`'s `loom-quarantine:` entries (the Auditor's
+`auditor-tmp-drift-stash-<epoch>` shelf is the other one), and flags any entry
+that captured **nothing** — those are pure noise and safe to drop.
+
+**Reconciling an entry**:
+
+1. **Identify by commit, not by index.** `stash@{N}` shifts every time anything
+   pushes, and `refs/stash` is one stack shared by the primary clone and every
+   linked worktree — so the index you read a minute ago may name a different
+   entry now. The report prints each entry's commit sha for exactly this reason.
+2. **Read it**: `git -C <main> stash show -p --include-untracked <commit>`.
+3. **Check liveness before dropping anything.** Each quarantine entry carries
+   `run=sweep-<...>` and `issue=<N>`. An entry naming a **finished** run whose
+   issue is **closed** is almost certainly superseded; one naming a live sweep
+   or an open issue may be the only copy of that work. This is the judgement a
+   human cannot make by eye across dozens of entries, and it is why bulk
+   "prune anything that looks stale" is unsafe on a busy host.
+4. **Replay, don't pop.** To recover the work, apply the diff **inside the
+   owning issue worktree** rather than `git stash pop`-ing it back into the
+   primary clone — a pop in a shared stack can restore someone else's entry
+   (see "Never use bare `git stash` for ad-hoc WIP" in `builder.md`), and it
+   puts the contamination straight back where the backstop will quarantine it
+   again.
+
+**Empty entries**: an entry flagged `[EMPTY]` recorded nothing. These came from
+a race between the contamination snapshot and the stash push; the push is now
+preceded by a fresh re-derivation of the offending paths, so new ones should
+not appear (and a quarantine with nothing left to rescue logs
+`"result":"no_op"` and creates no stash at all). Existing empty entries carry
+no work and can be dropped once you have confirmed the flag.
 
 ## Several unrelated things hang at once (macOS Gatekeeper / `syspolicyd`)
 

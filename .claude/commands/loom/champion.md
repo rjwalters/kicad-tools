@@ -43,7 +43,11 @@ fresh claim from a concurrent Champion evaluation, #4954), as well as
 `loom:operator-only` and `loom:blocked` — both put an issue permanently outside
 Champion's promotion authority per `champion-issue-promo.md`'s "When NOT to
 Promote", so there is no reason to hand them into the evaluation pass at all
-(#5163). Excluding them here, not just in the evaluation step, so a batch
+(#5163). Also exclude `loom:issue` and `loom:building` — promotion adds
+`loom:issue` but deliberately leaves `loom:curated` in place as a permanent
+milestone marker (see note below), so without this exclusion every
+already-promoted or already-claimed issue keeps matching this query forever
+(#5285). Excluding them here, not just in the evaluation step, so a batch
 doesn't re-discover work another pass already claimed or that is already
 terminal — `title`/`body` feed `champion-issue-promo.md`'s body-hash
 idempotency check (the issue's aggregate `updatedAt` is deliberately NOT used
@@ -58,16 +62,30 @@ gh issue list \
   --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
   select([.labels[].name] | contains(["loom:operator-only"]) | not) |
   select([.labels[].name] | contains(["loom:blocked"]) | not) |
+  select([.labels[].name] | contains(["loom:issue"]) | not) |
+  select([.labels[].name] | contains(["loom:building"]) | not) |
   "#\(.number) \(.title)"'
 ```
+
+> **Why the `loom:issue`/`loom:building` exclusion is required, not optional**:
+> Promotion is additive — it adds `loom:issue` (or, once a Builder claims the
+> work, `loom:building`) but never removes the originating proposal label
+> (`loom:curated`, `loom:architect`, `loom:hermit`, `loom:auditor`). That
+> label is a permanent milestone marker ("this went through curation/this was
+> a proposal"), not a queue-membership flag — see CLAUDE.md's "Note on label
+> cleanup". So a discovery query that filters *only* on the proposal label,
+> with no exclusion for the labels promotion actually adds, matches
+> already-handled issues forever and wastes an evaluation-subagent dispatch
+> on each pass (#5285).
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-issue-promo.md`**.
 
 ### Priority 3: Architect/Hermit/Auditor Proposals Ready to Promote
 
 If no curated issues need promotion, check for well-formed proposals. Same
-`loom:evaluating`/`loom:operator-only`/`loom:blocked` exclusion and
-`title`/`body` fetch as Priority 2 above:
+`loom:evaluating`/`loom:operator-only`/`loom:blocked`/`loom:issue`/
+`loom:building` exclusion (see Priority 2's note on why the latter two are
+required) and `title`/`body` fetch as Priority 2 above:
 
 ```bash
 # Check for Architect proposals
@@ -79,6 +97,8 @@ gh issue list \
   --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
   select([.labels[].name] | contains(["loom:operator-only"]) | not) |
   select([.labels[].name] | contains(["loom:blocked"]) | not) |
+  select([.labels[].name] | contains(["loom:issue"]) | not) |
+  select([.labels[].name] | contains(["loom:building"]) | not) |
   "#\(.number) \(.title) [architect]"'
 
 # Check for Hermit proposals
@@ -90,6 +110,8 @@ gh issue list \
   --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
   select([.labels[].name] | contains(["loom:operator-only"]) | not) |
   select([.labels[].name] | contains(["loom:blocked"]) | not) |
+  select([.labels[].name] | contains(["loom:issue"]) | not) |
+  select([.labels[].name] | contains(["loom:building"]) | not) |
   "#\(.number) \(.title) [hermit]"'
 
 # Check for Auditor bug reports
@@ -101,6 +123,8 @@ gh issue list \
   --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
   select([.labels[].name] | contains(["loom:operator-only"]) | not) |
   select([.labels[].name] | contains(["loom:blocked"]) | not) |
+  select([.labels[].name] | contains(["loom:issue"]) | not) |
+  select([.labels[].name] | contains(["loom:building"]) | not) |
   "#\(.number) \(.title) [auditor]"'
 ```
 

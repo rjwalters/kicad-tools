@@ -442,9 +442,26 @@ if [[ "${BASH_SOURCE[0]:-$0}" == "${0}" ]]; then
         jq -cn --arg message "$_GH_APP_LAST_ERROR" '{status:"not_configured", message:$message}'
         exit 0
       fi
-      if _gh_app_token=$(github_app_get_token "$_nwo"); then
-        jq -cn --arg token "$_gh_app_token" --arg installation_id "$GITHUB_APP_INSTALLATION_ID" \
-          --arg app_id "$_GH_APP_ID" --arg expires_at "$GITHUB_APP_TOKEN_EXPIRES_AT" \
+      # `github_app_get_token` sets GITHUB_APP_INSTALLATION_ID /
+      # GITHUB_APP_TOKEN_EXPIRES_AT as a side effect, but `$(...)` command
+      # substitution runs its command in a SUBSHELL -- those assignments never
+      # propagate back to this (the parent) shell, so reading them directly
+      # after the substitution always sees the pre-call (empty) values (the
+      # root cause of `installation_id` always coming back empty in the CLI
+      # envelope). Fix: emit them as two extra output lines from INSIDE the
+      # same subshell (`github_app_get_token` itself always emits exactly one
+      # trailing-newline-terminated line -- the token), then split the
+      # captured 3-line output back apart out here (#5401).
+      if _gh_app_out=$(
+        github_app_get_token "$_nwo" &&
+          printf '%s\n%s' "$GITHUB_APP_INSTALLATION_ID" "$GITHUB_APP_TOKEN_EXPIRES_AT"
+      ); then
+        _gh_app_token="${_gh_app_out%%$'\n'*}"
+        _gh_app_rest="${_gh_app_out#*$'\n'}"
+        _gh_app_installation_id="${_gh_app_rest%%$'\n'*}"
+        _gh_app_expires_at="${_gh_app_rest#*$'\n'}"
+        jq -cn --arg token "$_gh_app_token" --arg installation_id "$_gh_app_installation_id" \
+          --arg app_id "$_GH_APP_ID" --arg expires_at "$_gh_app_expires_at" \
           '{status:"ok", token:$token, installation_id:$installation_id, app_id:$app_id, expires_at:$expires_at}'
       else
         jq -cn --arg message "$_GH_APP_LAST_ERROR" '{status:"error", message:$message}'

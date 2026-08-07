@@ -1009,6 +1009,16 @@ export LOOM_PROVISION_ALLOW_SCRIPT=1
 # any test regresses into one, this decoy dies and the final assertion fails.
 # Spawned OUTSIDE $BASE_WORKDIR's path so the trap's `pkill -f "$BASE_WORKDIR"`
 # does not sweep it; killed explicitly below.
+#
+# Deliberately NOT renamed per #5548's "test fixtures should not be named
+# `loom-daemon`" fix: the whole point of this fixture is to BE a process
+# named `loom-daemon` so the label-blind pgrep tier it decoys has something
+# to (not) match -- renaming it would defeat the test. It is tracked via
+# bg_proc_track/bg_proc_reap (EXIT/INT/TERM traps) like every other
+# background fixture in this suite, so it does not additionally widen
+# #5548's "orphaned past all cleanup" risk beyond what SIGKILL of the test
+# runner already allows for any tracked fixture (a hard, documented
+# bash/POSIX limit -- see lib/bg-proc-trap.sh).
 DECOY_DIR="$(mktemp -d)"
 cat > "$DECOY_DIR/loom-daemon" <<'EOF'
 #!/usr/bin/env bash

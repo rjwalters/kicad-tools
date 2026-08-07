@@ -140,27 +140,52 @@ strip_literal_text() {
 # narrows what this ONE check can see; it never widens what it misses.
 # =============================================================================
 
-# Mask the BODY of a heredoc whose consuming command is `cat`, whose
-# delimiter is quoted (`cat <<'EOF' ... EOF` / `cat <<"EOF" ... EOF`, and the
-# `<<-` tab-stripping variant), AND whose `cat` invocation is captured by a
-# command substitution ($()/backtick) that is the value of a known
-# non-executing text-data flag. This is exactly the CLAUDE.md-documented
-# idiom for multi-line commit/PR-body text: `git commit -m "$(cat <<'EOF'
-# ... EOF)"`. A QUOTED delimiter guarantees bash performs no
-# $()/backtick/$VAR expansion within the body, so the body is 100% literal
-# text; the flag-capture requirement guarantees that literal text is used as
-# inert data (a message/title/search value) rather than executed.
+# Mask the BODY of a heredoc whose consuming command is either of two
+# provably-inert forms:
 #
-# Deliberately narrower than "any heredoc" on TWO axes:
+#   1. `cat`, whose delimiter is quoted (`cat <<'EOF' ... EOF` /
+#      `cat <<"EOF" ... EOF`, and the `<<-` tab-stripping variant), AND whose
+#      `cat` invocation is captured by a command substitution ($()/backtick)
+#      that is the value of a known non-executing text-data flag. This is
+#      exactly the CLAUDE.md-documented idiom for multi-line commit/PR-body
+#      text: `git commit -m "$(cat <<'EOF' ... EOF)"`.
+#   2. `git commit -F -` / `git commit --file=-` (issue #5328), whose
+#      delimiter is likewise quoted AND which is PROVABLY the command that
+#      consumes the heredoc (see the "provable statement anchor" rules in the
+#      function below, hardened twice by #5333). `git commit -F -`/`--file=-`
+#      reads its commit message from stdin and NEVER re-emits it anywhere --
+#      unlike `cat`, there is no `git commit -F - | bash`-style escape hatch,
+#      so ONCE `git commit` is proven to be the consuming command it is itself
+#      the confinement proof, and case 1's capture-into-a-flag check (`capre`)
+#      is not needed. That proof is load-bearing: every known bypass of this
+#      branch has been a way to make some OTHER command (an interpreter
+#      reading the heredoc as live script) look like `git commit`.
+#
+# A QUOTED delimiter guarantees bash performs no $()/backtick/$VAR expansion
+# within the body, so the body is 100% literal text in both cases; case 1's
+# flag-capture requirement additionally guarantees that literal text is used
+# as inert data (a message/title/search value) rather than executed -- a
+# guarantee case 2 gets for free from `git commit` itself never executing or
+# forwarding its stdin.
+#
+# Deliberately narrower than "any heredoc" on THREE axes:
 #   1. A heredoc feeding an INTERPRETER (`bash <<'EOF' ... EOF`, `sh <<EOF`)
-#      is genuinely live code, so masking is gated on the word immediately
-#      before `<<` being `cat`.
+#      is genuinely live code, so masking is gated on the word/phrase
+#      immediately before `<<` being `cat` OR `git commit -F -`/`--file=-`.
 #   2. `cat` never executes its body, but its stdout can still be routed INTO
 #      a shell on the same command line -- `cat <<'EOF' | bash`, or a captured
 #      `eval "$(cat <<'EOF' ...)"`. Masking those would blind this
-#      catastrophic-tier guard to a real invocation, so masking is ALSO gated
-#      on `cat` being captured into a text-data flag's $()/backtick value (see
-#      the `capre` confinement check inside the function).
+#      catastrophic-tier guard to a real invocation, so masking of a
+#      cat-heredoc is ALSO gated on `cat` being captured into a text-data
+#      flag's $()/backtick value (see the `capre` confinement check inside
+#      the function). This second gate does NOT apply to the `git commit -F
+#      -`/`--file=-` form -- `git commit` cannot route its stdin onward to a
+#      shell the way `cat`'s stdout can.
+#   3. The `git commit -F -`/`--file=-` form is instead gated on a PROVABLE
+#      statement anchor (#5333): the opener's own text and every physical line
+#      before it must be free of shell quoting/escaping, so the boundary that
+#      makes `git commit` the consuming command cannot be faked. Details and
+#      the enumerated attack shapes live on `commit_stdin_re` below.
 #
 # Mirrors the #5087 lesson: only a heredoc block that is PROVABLY CLOSED
 # inside the buffer (its bare delimiter line is found) gets its body masked.
@@ -177,11 +202,104 @@ mask_cat_heredoc_bodies() {
         # VALUE of a known non-executing text-data flag. `capre` must match the
         # tail of the opener-line text that sits immediately before the `cat`
         # token (see the confinement check below).
-        capre = "(^|[ \t])(-m|--message|--body|--notes|--title|--comment|--search)[ \t]*=?[ \t]*(" DQ "|" SQ ")?[ \t]*([$][(]|" BT ")[ \t]*$"
+        #
+        # Also recognizes `gh api ... -f <field>=` for known text-bearing
+        # fields (issue #5172): the field syntax of `gh api` (`-f
+        # body=<value>`) is a DIFFERENT shape from the `--body <value>` flags
+        # above -- a
+        # two-token `-f <field>=` prefix, not a single `--<flagname>` token --
+        # so it needs its own alternative rather than falling out of the
+        # existing flag list.
+        capre = "(^|[ \t])((-m|--message|--body|--notes|--title|--comment|--search)[ \t]*=?|-f[ \t]+(body|message|comment|title|notes|search)=)[ \t]*(" DQ "|" SQ ")?[ \t]*([$][(]|" BT ")[ \t]*$"
+        # `git commit -F -` (space-separated stdin marker) or
+        # `git commit --file=-` (attached, "=" form only -- matches git'"'"'s own
+        # documented long-option syntax) immediately before `<<`, with any
+        # number of other whitespace-separated tokens/flags between `commit`
+        # and the `-F`/`--file=` flag (issue #5328).
+        #
+        # PROVABLE STATEMENT ANCHOR (issue #5333, two Judge findings). Masking
+        # here is only sound when `git commit` is genuinely the command that
+        # CONSUMES this heredoc. Every known bypass smuggles some other
+        # command -- an interpreter that runs the body as live script, e.g.
+        # `bash -s -- ... <<'"'"'EOF'"'"'`, which takes `git`, `commit`, `-F`, `-` as
+        # mere positional parameters ($1..$4) -- in front of a `git commit -F -`
+        # decoy. Three anchors were tried and two proved forgeable:
+        #
+        #   v1 `(^|[^A-Za-z0-9_])`   -- any non-word char: `bash -s -- git
+        #      commit -F - <<'"'"'EOF'"'"'` matched on the plain SPACE. Forged.
+        #   v2 `(^|[;&|(BT])`        -- a control operator or start-of-LINE. Still
+        #      forgeable three ways: (a) `^` is start of a PHYSICAL line, but a
+        #      backslash-newline continuation joins physical lines into ONE
+        #      logical command, so `bash -s -- \<newline>git commit -F - <<...`
+        #      matched at column 1 while bash saw one `bash -s` command; (b) an
+        #      ESCAPED operator (`bash -s -- \; git commit -F - <<...`) is a
+        #      literal `;` argument to bash, not a separator; (c) a QUOTED
+        #      operator or quoted newline (`bash -s -- "x ; git commit -F -
+        #      <<'"'"'EOF'"'"'` with the quote closing later) does the same.
+        #      A fourth, unrelated to the anchor: the v1/v2 middle-token class
+        #      `[^ \t]+` swallowed metacharacters, so `git commit -a;bash -s --
+        #      -F - <<...` matched as if it were one git command.
+        #   v3 (current) -- an operator/start-of-line anchor that is PROVEN
+        #      unquoted and unescaped, by requiring the whole prefix to be
+        #      shell-inert:
+        #        * `commit_stdin_re` restricts the tokens between `commit` and
+        #          `-F -`/`--file=-` to a metacharacter-free charset, closing (d).
+        #        * `commit_pre_safe_re` requires EVERY character of the opener
+        #          line before `<<` to come from a charset with no quote (SQ/DQ/
+        #          backtick), no backslash and no expansion character, so any
+        #          `;`/`&`/`|`/`(` matched by the anchor is necessarily a real
+        #          control operator -- closing (b) and the same-line half of (c).
+        #        * `prefix_inert[]` (computed in END) requires every physical
+        #          line BEFORE the opener to be free of quotes, backslashes and
+        #          heredoc openers, so the newline that `^` anchors to is a real
+        #          command terminator: it cannot be a backslash-continuation
+        #          (no backslash exists to continue with -- closing (a)), it
+        #          cannot sit inside a multi-line quoted string (no quote is
+        #          open -- closing the rest of (c)), and it cannot sit inside
+        #          another heredoc'"'"'s body (no earlier `<<` -- which also rules
+        #          out an outer UNQUOTED-delimiter heredoc, where `$(...)` in
+        #          what looks like an inner commit-message body is expanded, and
+        #          therefore executed, by the outer shell).
+        #
+        # A backtick is no longer accepted as an anchor: it is a quoting
+        # (command-substitution) character, so `commit_pre_safe_re` excludes it
+        # from the prefix and the alternative could never fire. Shell KEYWORDS
+        # (`then`/`do`/...) are likewise not anchors -- a keyword-spelled word
+        # can be a bare positional argument (`bash -s -- x then git commit -F -`).
+        #
+        # This is deliberately conservative in the fail-safe direction: a
+        # legitimate-but-unprovable shape (quotes or a backslash anywhere in
+        # the prefix, a second heredoc in the same buffer, `git -C "$W" commit
+        # -F -`) simply masks NOTHING, leaving the body visible to the
+        # merge-redirect grep exactly as before this feature existed. The only
+        # commands affected by that conservatism are ones whose commit message
+        # also quotes the disallowed phrase -- a false deny there is
+        # recoverable, a false allow on this catastrophic-tier guard is not.
+        commit_stdin_re = "(^|[;&|(])[ \t]*git[ \t]+commit([ \t]+[A-Za-z0-9_.,:/@%+=-]+)*[ \t]+(-F[ \t]+-|--file=-)[ \t]*$"
+        # Every character permitted anywhere in the opener line before `<<`.
+        # Excludes SQ/DQ/backtick (quoting), backslash (escaping) and the
+        # expansion/redirection metacharacters $ ! ~ * ? [ ] { } < > # so that
+        # no quoting or escaping can be in effect at the anchor position.
+        commit_pre_safe_re = "^[A-Za-z0-9 \t_.,:/@%+=;&|()-]*$"
     }
     { lines[NR] = $0 }
     END {
         nl = NR
+        # prefix_inert[i] = 1 iff EVERY physical line before line i is free of
+        # shell quoting (SQ/DQ/backtick), escaping (backslash) and heredoc
+        # openers (`<<`). Only then is the newline that ends line i-1 provably
+        # a real command terminator rather than a backslash-newline
+        # continuation, a newline inside a multi-line quoted string, or a line
+        # inside another heredoc'"'"'s body -- the three ways the start-of-line
+        # anchor in commit_stdin_re was forged (#5333). Computed once, before
+        # the scan, so the very first line of the buffer always qualifies.
+        inert = 1
+        for (i = 1; i <= nl; i++) {
+            prefix_inert[i] = inert
+            if (index(lines[i], SQ) || index(lines[i], DQ) || index(lines[i], BT)) inert = 0
+            else if (index(lines[i], "\\")) inert = 0
+            else if (index(lines[i], "<<")) inert = 0
+        }
         for (i = 1; i <= nl; i++) {
             line = lines[i]
             off = 1
@@ -190,10 +308,17 @@ mask_cat_heredoc_bodies() {
                 if (p == 0) break
                 p = off + p - 1
                 off = p + 2
-                # Require the word immediately before `<<` (ignoring
-                # trailing whitespace) to be a bare "cat".
+                # Require the word/phrase immediately before `<<` (ignoring
+                # trailing whitespace) to be a bare "cat" OR a `git commit
+                # -F -`/`--file=-` stdin invocation (#5328) that is provably
+                # anchored to a real statement boundary (#5333 -- see the
+                # commit_stdin_re / commit_pre_safe_re / prefix_inert notes in
+                # BEGIN above; all three conditions are required).
                 pre = substr(line, 1, p - 1)
-                if (pre !~ /(^|[^A-Za-z0-9_])cat[ \t]*$/) continue
+                is_cat_word = (pre ~ /(^|[^A-Za-z0-9_])cat[ \t]*$/)
+                is_commit_stdin = (pre ~ commit_stdin_re && pre ~ commit_pre_safe_re && prefix_inert[i])
+                if (!is_cat_word && !is_commit_stdin) continue
+                if (is_cat_word) {
                 # HARDENING (#5109 follow-up, PR #5115 review): the word before
                 # `<<` being `cat` is NOT sufficient -- `cat` never executes its
                 # own body, but its stdout can still reach a shell on the SAME
@@ -213,6 +338,17 @@ mask_cat_heredoc_bodies() {
                 before_cat = pre
                 sub(/cat[ \t]*$/, "", before_cat)
                 if (before_cat !~ capre) continue
+                }
+                # is_commit_stdin needs no capre-style capture check --
+                # `git commit -F -`/`--file=-` never forwards its stdin
+                # anywhere, so once the three-part statement anchor above has
+                # proven `git commit` really is the command consuming this
+                # heredoc (issue #5333), the consuming command itself is the
+                # confinement proof. The `rest` check further below also
+                # rejects an opener line that itself ends in a backslash-newline
+                # continuation (the trailing backslash is non-whitespace after
+                # the quoted delimiter), so the body-start line index used for
+                # masking is always the real first body line.
                 start = p + 2
                 if (substr(line, start, 1) == "-") start++
                 while (substr(line, start, 1) == " " || substr(line, start, 1) == "\t") start++
@@ -249,6 +385,204 @@ mask_cat_heredoc_bodies() {
     }'
 }
 
+# =============================================================================
+# TWO-HOP HEREDOC-VARIABLE INDIRECTION MASKING (issue #5172)
+#
+# mask_cat_heredoc_bodies() above only recognizes a cat-heredoc captured
+# DIRECTLY by a known text-data flag/field, e.g. `-m "$(cat <<'EOF' ... EOF)"`.
+# It does NOT recognize the equally common two-STEP idiom of assigning that
+# heredoc to a shell variable first, then referencing the variable later:
+#
+#   BODY="$(cat <<'EOF'
+#   ...prose that quotes the disallowed phrase as a documented example...
+#   EOF
+#   )"
+#   gh api "repos/OWNER/REPO/issues/N/comments" -f body="$BODY"
+#
+# Here the literal phrase text lives in the heredoc body at DEFINITION time;
+# the LATER reference is only the variable name ($BODY), never the phrase
+# itself. Raw substring scanning still catches the phrase living in the
+# heredoc body, even though nothing in the command actually executes it — the
+# false-positive class this function closes.
+#
+# mask_var_assigned_heredoc_bodies() masks such a heredoc's body at its point
+# of DEFINITION, but ONLY when it can prove every LATER reference to that same
+# variable -- in ANY bash form: $VAR, ${VAR}, or any parameter-expansion
+# variant ${VAR:0:100} / ${VAR#pat} / ${VAR:-def} / ... (#5297) -- elsewhere in
+# the command is itself confined to a known non-executing text-data flag/field
+# value, AND that at least one such reference was actually observed. A variable
+# with ZERO detectable references is never masked: it may be reached through an
+# indirection this literal scan cannot see (`${!REF}`, `eval` of a computed
+# name), so leaving the body unmasked (and thus scanned/denied) fails safe. The
+# confinement allowlist is the same as
+# mask_cat_heredoc_bodies/mask_data_flag_values (-m/--message/--body/--notes/
+# --title/--comment/--search, or `gh api -f <field>=`). If ANY later
+# reference to the variable falls OUTSIDE that confined context -- `eval
+# "$VAR"`, `bash -c "$VAR"`, the bare variable used as a command, or simply no
+# recognizable safe usage -- the heredoc body is left COMPLETELY UNMASKED, so
+# a genuine two-hop bypass (assign `gh pr merge 123` to a variable via
+# heredoc, then `eval` it) still denies exactly as before. Masking only ever
+# narrows what this ONE check misses; it never widens it -- same invariant as
+# every other masking function in this file.
+#
+# A variable reference that falls INSIDE a candidate heredoc's OWN body (the
+# variable mentioning its own name as prose, e.g. describing this very fix) is
+# excluded from the confinement scan -- it is inert text, not a later live
+# reference -- by blanking every candidate's body span before scanning.
+# =============================================================================
+mask_var_assigned_heredoc_bodies() {
+    printf '%s' "$1" | awk '
+    BEGIN {
+        SQ = sprintf("%c", 39)
+        DQ = sprintf("%c", 34)
+        # A bare shell variable assignment (`VAR=`/`VAR="`/`VAR=$SQ`) directly
+        # capturing `$(cat`. Deliberately distinct from capre in
+        # mask_cat_heredoc_bodies() above: a recognized text-data FLAG always
+        # starts with `-`, which this identifier-only pattern can never match,
+        # so the two confinement modes never collide.
+        varassign_re = "(^|[ \t;&|(])[A-Za-z_][A-Za-z0-9_]*=(" DQ "|" SQ ")?[ \t]*[$][(][ \t]*$"
+        safe_flag  = "(-m|--message|--body|--notes|--title|--comment|--search)[ \t]*=?[ \t]*(" DQ "|" SQ ")?$"
+        safe_field = "-f[ \t]+(body|message|comment|title|notes|search)=(" DQ "|" SQ ")?$"
+        ncand = 0
+    }
+    { lines[NR] = $0 }
+    END {
+        nl = NR
+        for (i = 1; i <= nl; i++) {
+            line = lines[i]
+            off = 1
+            while (1) {
+                p = index(substr(line, off), "<<")
+                if (p == 0) break
+                p = off + p - 1
+                off = p + 2
+                pre = substr(line, 1, p - 1)
+                if (pre !~ /(^|[^A-Za-z0-9_])cat[ \t]*$/) continue
+                before_cat = pre
+                sub(/cat[ \t]*$/, "", before_cat)
+                if (match(before_cat, varassign_re) == 0) continue
+                seg = substr(before_cat, RSTART, RLENGTH)
+                if (match(seg, /[A-Za-z_][A-Za-z0-9_]*/) == 0) continue
+                vn = substr(seg, RSTART, RLENGTH)
+                start = p + 2
+                if (substr(line, start, 1) == "-") start++
+                while (substr(line, start, 1) == " " || substr(line, start, 1) == "\t") start++
+                qc = substr(line, start, 1)
+                if (qc != SQ && qc != DQ) continue
+                start++
+                wordend = start
+                while (substr(line, wordend, 1) ~ /^[A-Za-z0-9_]$/) wordend++
+                if (wordend <= start) continue
+                if (substr(line, wordend, 1) != qc) continue
+                delim = substr(line, start, wordend - start)
+                rest = substr(line, wordend + 1)
+                if (rest ~ /[^ \t]/) continue
+                closeat = 0
+                for (j = i + 1; j <= nl; j++) {
+                    trimmed = lines[j]
+                    sub(/^[ \t]+/, "", trimmed)
+                    if (trimmed == delim) { closeat = j; break }
+                }
+                if (closeat == 0) continue
+                ncand++
+                cand_var[ncand] = vn
+                cand_bstart[ncand] = i + 1
+                cand_bend[ncand] = closeat - 1
+                break
+            }
+        }
+        if (ncand == 0) {
+            out = lines[1]
+            for (i = 2; i <= nl; i++) out = out "\n" lines[i]
+            printf "%s", out
+            exit
+        }
+        # Build a scan buffer with every CANDIDATE heredocs own body blanked
+        # (never masked to X -- a plain blank cannot itself spell "$VAR"),
+        # so a variables OWN prose mentioning its own name never gates its
+        # own masking decision.
+        scanbuf = ""
+        for (i = 1; i <= nl; i++) {
+            ln = lines[i]
+            is_body = 0
+            for (c = 1; c <= ncand; c++) {
+                if (i >= cand_bstart[c] && i <= cand_bend[c]) { is_body = 1; break }
+            }
+            if (is_body) { gsub(/./, " ", ln) }
+            scanbuf = scanbuf (i > 1 ? "\n" : "") ln
+        }
+        buflen = length(scanbuf)
+        for (c = 1; c <= ncand; c++) {
+            vn = cand_var[c]
+            vlen = length(vn)
+            confined = 1
+            nref = 0
+            pos = 1
+            while (pos <= buflen) {
+                rem = substr(scanbuf, pos)
+                # A later reference to the heredoc-assigned variable in ANY
+                # bash form, not just the exact "$VAR" / closed "${VAR}"
+                # literals: the braced search matches "${VAR" as a PREFIX, so
+                # every parameter-expansion variant -- ${VAR}, ${VAR:0:100},
+                # ${VAR#pat}, ${VAR:-def}, ${VAR/a/b}, ... -- is caught (#5297).
+                # The simple "$VAR" form never occurs inside "${VAR" (the char
+                # after "$" is "{", not the name), so the two searches are
+                # disjoint. Whichever occurs first is examined first.
+                ib = index(rem, "${" vn)
+                is = index(rem, "$" vn)
+                if (ib == 0 && is == 0) break
+                useb = (ib > 0 && (is == 0 || ib <= is))
+                if (useb) {
+                    abspos = pos + ib - 1
+                    mlen = 2 + vlen
+                    aftch = substr(scanbuf, abspos + mlen, 1)
+                    if (aftch ~ /^[A-Za-z0-9_]$/) {
+                        # "${VARX..." -- a DIFFERENT variable whose name merely
+                        # starts with vn; skip past this "${" and keep scanning.
+                        pos = abspos + 2
+                        continue
+                    }
+                } else {
+                    abspos = pos + is - 1
+                    mlen = 1 + vlen
+                    aftch = substr(scanbuf, abspos + mlen, 1)
+                    if (aftch ~ /^[A-Za-z0-9_]$/) {
+                        # "$VARX" -- a different variable; skip past this "$".
+                        pos = abspos + 1
+                        continue
+                    }
+                }
+                nref++
+                prefix = substr(scanbuf, 1, abspos - 1)
+                if (prefix !~ safe_flag && prefix !~ safe_field) {
+                    confined = 0
+                    break
+                }
+                pos = abspos + mlen
+            }
+            # Mask ONLY when at least one later reference was found AND every
+            # such reference was confined. Zero detected references is NOT
+            # proof of safety: the variable may be reached through a form this
+            # literal scan cannot see -- indirect expansion `${!REF}`, `eval`
+            # of a computed name, etc. (#5297) -- so a heredoc-assigned body
+            # is left UNMASKED (and thus scanned/denied) unless we positively
+            # observed its every reference confined to a known text-data slot.
+            cand_mask[c] = (confined == 1 && nref > 0) ? 1 : 0
+        }
+        for (c = 1; c <= ncand; c++) {
+            if (cand_mask[c] != 1) continue
+            for (j = cand_bstart[c]; j <= cand_bend[c]; j++) {
+                body = lines[j]
+                gsub(/./, "X", body)
+                lines[j] = body
+            }
+        }
+        out = lines[1]
+        for (i = 2; i <= nl; i++) out = out "\n" lines[i]
+        printf "%s", out
+    }'
+}
+
 # Mask the quoted VALUE of known non-executing, text-only flags used by
 # git/gh subcommands: -m/--message, --body, --notes, --title, --comment,
 # --search. A near-duplicate of strip_literal_text() above (which is used
@@ -258,12 +592,17 @@ mask_cat_heredoc_bodies() {
 # a span that still contains an unmasked `$(`/backtick (e.g. real command
 # substitution, not yet neutralized by the heredoc pass above) is left
 # completely untouched.
+#
+# Also recognizes `gh api ... -f <field>=<value>` for known text-bearing
+# fields (issue #5172): `gh api`'s field syntax is `-f key=value`, a
+# two-token shape distinct from the single `--<flagname> value` flags above,
+# so it needs its own alternative in the same regex.
 mask_data_flag_values() {
     printf '%s' "$1" | awk '
     BEGIN {
         SQ = sprintf("%c", 39)
         DQ = sprintf("%c", 34)
-        re = "(^|[ \t\n])(--message|--body|--notes|--title|--comment|--search|-m)[ \t]*=?[ \t]*(" \
+        re = "(^|[ \t\n])((--message|--body|--notes|--title|--comment|--search|-m)[ \t]*=?|-f[ \t]+(body|message|comment|title|notes|search)=)[ \t]*(" \
              DQ "[^" DQ "]*" DQ "|" SQ "[^" SQ "]*" SQ ")"
         buf = ""
     }
@@ -553,13 +892,15 @@ ask() {
 # LOOM: Prefer merge-pr.sh over gh pr merge
 # =============================================================================
 
-# Match against a MASKED copy of $COMMAND (issue #5109, extended by #5155) so
-# a mention of the phrase inside a cat-heredoc commit-message body, a
-# --search/--body/-m/etc quoted value, or a quoted POSITIONAL argument to a
-# known non-executing command (grep/rg/check-duplicate.sh) doesn't
+# Match against a MASKED copy of $COMMAND (issue #5109, extended by #5155 and
+# #5172) so a mention of the phrase inside a cat-heredoc commit-message body,
+# a --search/--body/-m/etc quoted value (including the `gh api -f
+# field=value` shape), a quoted POSITIONAL argument to a known non-executing
+# command (grep/rg/check-duplicate.sh), or a heredoc assigned to a shell
+# variable and only referenced later via that variable, doesn't
 # false-positive as a real invocation. See the masking functions' doc
 # comments above for exactly what is (and is NOT) neutralized.
-GH_PR_MERGE_SCAN_TEXT=$(mask_data_flag_values "$(mask_command_positional_args "$(mask_cat_heredoc_bodies "$COMMAND")")")
+GH_PR_MERGE_SCAN_TEXT=$(mask_data_flag_values "$(mask_command_positional_args "$(mask_var_assigned_heredoc_bodies "$(mask_cat_heredoc_bodies "$COMMAND")")")")
 if echo "$GH_PR_MERGE_SCAN_TEXT" | grep -qE 'gh\s+pr\s+merge'; then
     # Resolve the merge-pr.sh path for the current repo context. Prefer an
     # in-repo installed copy (./.loom/scripts/merge-pr.sh); fall back to the

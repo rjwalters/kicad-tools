@@ -79,6 +79,20 @@ If you want the machine-level end state (no per-repo copies at all), run
 `loom migrate` (Phase 6 / #4254) — it untracks the legacy copies, after which
 `ensure_project_hook_wiring` stops writing project entries on its own.
 
+### Backup retention (#5387)
+
+Both `provision_loom_hooks()` and `deprovision_loom_hooks()` back up the
+operator's `~/.claude/settings.json` to a timestamped
+`settings.json.loom-backup-<UTC timestamp>` sibling before mutating it, via a
+shared `_phook_backup_settings()` helper in `scripts/install/provision-hooks.sh`.
+That helper guards against unbounded accumulation two ways: it **skips**
+writing a new backup when the file is byte-identical to the most recent
+existing backup (so repeated `install.sh` runs with no settings change add
+nothing), and it **prunes** older backups beyond the most recent 5 once a
+genuinely new backup is written (so settings that do change between installs
+still bound the total count). Nothing else in the repo prunes these files, so
+restoring from one is a manual `cp settings.json.loom-backup-<ts> settings.json`.
+
 ### Config tiers
 
 The guard toggles below are documented against `.loom/config.json` for historical
@@ -452,6 +466,49 @@ typed; `$`/`~` are copied through untouched, so a file genuinely named `$X` or
 `~` (single-quoted or escaped) is still a plain relative literal (#4382 / #4921
 unchanged); and an **unterminated** quote falls back to the raw token — today's
 verdict in both directions, never widening a deny into an allow.
+
+**Quoted `cd` arguments are still absolute (issue #4933).** #4926 fixed quoting
+on the write-*target* side; a quoted **`cd` argument** was a separate hole,
+reached entirely inside `extract_write_targets()`'s awk — `strip_target_quoting()`
+never touches it. `cd '<main>' && echo x > f.sh` from a linked-worktree cwd built
+`curcwd` from the `cd` argument's token verbatim (quote characters intact), so
+`'/main/checkout'` / `"/main/checkout"` failed the `~ /^\//` classification and
+was joined as if **relative** — fabricating `curcwd` as `<worktree>/'/main/checkout'`
+instead of recognizing it as absolute, and the relative write target then
+resolved back inside the acting worktree's own sentinel — **allowed**. The awk
+`cd` handler now strips a leading/matching-trailing quote from a **copy** of the
+argument used *only* to decide absolute-vs-relative; `curcwd` itself is still
+built from the **raw, quote-preserved** token, because `curcwd` is the only
+value threaded to the shell layer and the unresolved-`$` detector there
+(`mark_expandable_dollars`, #4921/#4927) needs the quote characters to tell a
+**literal** `$` inside a single-quoted span (`cd '$FOO'` — a directory really
+named `$FOO`, deliberately *not* denied) from an **expandable** one (bare or
+double-quoted, which fails closed). The shell layer re-strips quoting for its
+own cwd join, exactly mirroring the target side's raw-vs-`strip_target_quoting()`
+split. `qsplit()`'s verbatim-token contract (which `extract_rm_targets()` /
+`parse_force_ops()` depend on) is untouched, and an unbalanced/unterminated
+quote leaves the classification copy unchanged — the same fallback contract as
+#4926.
+
+**PARTIALLY quoted `cd` arguments were still absolute too (issue #5363).**
+#4933's leading/matching-trailing quote strip only recognized a **fully**
+quoted `cd` argument (`'/abs/path'`, `"/abs/path"`) — it peels one leading
+quote character and, only if the *last* character of the token is the same
+quote character, one trailing one. A **partially** quoted argument, where the
+quote closes mid-token instead of at the end — `cd '<main>'/defaults` — still
+starts with a quote character, so it failed that narrow leading/trailing test
+and fell through unchanged, still classified as **relative**: the same
+masked-allow shape as #4933/#4926, reached through a partially- rather than
+fully-quoted `cd` argument. The awk `cd` handler now runs a full
+character-by-character quote-removal scan (`strip_cd_quoting()`, sharing the
+same single/double-quote nesting rules as `strip_target_quoting()`'s shell
+scanner, though implemented separately since awk cannot call into it) over
+the **entire** classification copy rather than peeling only a
+leading/matching-trailing pair, so `'<main>'/defaults` correctly unquotes to
+`<main>/defaults` and classifies as absolute. `curcwd` itself is still built
+from the raw, quote-preserved token exactly as before (unchanged by #5363),
+and an unbalanced/unterminated quote leaves the classification copy unchanged
+— the same fallback contract as #4926/#4933.
 
 The guard is **on by default**. It is resolved in this order (highest precedence first):
 
@@ -954,6 +1011,24 @@ A headless sweep runs under `--dangerously-skip-permissions`, where the guard `P
 | `LOOM_FORCE_SCOPE` | `protected` | Let an agent force-push / hard-reset its **own** working branch without a stall; force-push to `main`/`master`/default stays a **hard DENY** via `ALWAYS_BLOCK_PATTERNS`. |
 
 `guards.forceScope: "protected"` is the **Loom-recommended default for autonomous repos** — set it in committed `.loom/config.json` for repos that run the daemon, or rely on the start-script env default. The shipped hook default remains `"all"` (byte-for-byte unchanged for non-autonomous installs).
+
+**Known consequence — ambient, agent-wide, not per-invocation (#5388):** these two env vars are exported once on the daemon's own process and inherited by the *entire* subprocess tree of every dispatched child — not just the guard hook's own `PreToolUse` invocations. There is no way to hand them to only "the guard hook protecting the sweep's own git operations" without also handing them to every other command the dispatched agent runs, including a **managed repo's own test suite**. A suite that asserts the guard's *factory-default* behavior (e.g. `hooks/repo/tests/test-guard-destructive.sh` asserting the default force-push/reset-hard `ask` tier or decision-log-off) will observe these ambient overrides instead of the defaults it is testing — a clean-shell run and a dispatched-agent run of the identical suite, on the identical commit, can disagree by dozens of failures. This has already caused a dispatched Builder to misread the resulting failures as evidence that `main` was broken and close a valid, unrelated issue as a false duplicate.
+
+If you are a dispatched agent and you are about to trust a test suite's output — especially one that exercises guard-hook / force-push / reset-hard behavior — check first:
+
+```bash
+env | grep -E '^LOOM_(FORCE_SCOPE|GUARD_DECISION_LOG)='
+```
+
+If either is set and the suite under test asserts guard defaults, re-run it with the ambient overrides stripped before drawing any conclusion from the result:
+
+```bash
+env -u LOOM_FORCE_SCOPE -u LOOM_GUARD_DECISION_LOG <test-suite-command>
+```
+
+This is also called out directly in the dispatched agent's own brief — see `defaults/roles/builder.md` → "Build Verification During Implementation" — rather than left as a fact an agent has to already know to look up here.
+
+**Other dispatcher-exported `LOOM_*` vars (#5388 survey)**: `loom-daemon-start.sh` / `sweep_registry/dispatch.rs` also export `LOOM_WORKSPACE`, `LOOM_WORK_FINDER`, `LOOM_MAIN_HEALTH_GATE`, `LOOM_PID_FILE`, `LOOM_TERMINAL_ID`, `LOOM_SWEEP_CLAIM_OWNED`, `LOOM_RUNTIME`, `LOOM_ROLE`, `BG_WAIT_CEILING_ENV`, and the experiment allowlist (`LOOM_MODEL_EXPERIMENT`, `LOOM_MODEL_EXPERIMENT_CANARY`, `LOOM_TRANSCRIPT_ARCHIVE`) into every dispatched child. None of these are read by a *managed repo's own* tooling — they are Loom-internal dispatch/orchestration knobs a repo's test suite has no reason to assert against, unlike `LOOM_FORCE_SCOPE`/`LOOM_GUARD_DECISION_LOG` which name-collide with values a repo's **own installed guard hook** (shipped by Loom into every managed repo) reads and whose factory defaults a repo's own suite plausibly tests. If a future dispatcher-exported var is likewise consumed by shipped repo tooling with an assertable default, treat it the same way — surface it in this doc's "Known consequence" and in the Builder brief, not just as an env-var reference table entry.
 
 **Standing per-trigger review policy** — a periodic support role (the **Auditor**, see `.loom/roles/auditor.md`) tails `.loom/logs/guard-decisions.log`, dedups by `pattern`, and files **one issue per distinct trigger** observed in autonomous runs, proposing to either (a) **allowlist / refine** the guard for the in-scope op or (b) **confirm it stays flagged**. Over time this converges the guard to dangerous-only. The dedup + summarize one-liner:
 

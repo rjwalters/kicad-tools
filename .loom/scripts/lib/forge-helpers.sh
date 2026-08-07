@@ -605,6 +605,70 @@ forge_get_commit_status() {
   fi
 }
 
+# Get GitHub Actions workflow runs (or the Gitea Actions equivalent) for a
+# commit, independent of the Checks API.
+# Usage: forge_get_workflow_runs NWO COMMIT_SHA
+# Returns JSON: {"workflow_runs": [{"name": ..., "status": ..., "conclusion": ...}]}
+#
+# Why this exists (#5495): the Checks API (forge_get_check_runs, above) only
+# ever reports check-runs that already exist -- a workflow_run that is still
+# `queued` and has not yet dispatched a single job has ZERO check-runs, so it
+# is completely invisible to analyze_status()'s counts. If a handful of
+# other, faster/independent workflows for the same commit have already
+# completed, `success > 0 && pending == 0` was satisfied and the overall
+# status was reported as "success" even though the primary CI workflow
+# hadn't run a single job yet. This helper queries workflow-run state
+# directly (not check-run state) so a still-queued/in_progress run can be
+# folded into the pending count regardless of how many check-runs exist.
+#
+# GitHub: GET /repos/{nwo}/actions/runs?head_sha={sha} -- authoritative,
+#   filtered server-side by head_sha.
+# Gitea: GET /repos/{owner}/{repo}/actions/tasks -- Gitea's Actions task-list
+#   API has no head_sha filter, so this filters client-side over the
+#   (default first page of) returned tasks. This is best-effort: a commit
+#   whose task fell off the first page would not be found, degrading back to
+#   the pre-#5495 behavior for that commit rather than failing loudly. Any
+#   fetch/parse failure returns an empty list the same way, so callers can
+#   treat "no signal" identically to "definitely not pending" -- deliberately
+#   fail-open here (unlike e.g. forge_get_issue_state's fail-unsafe contract)
+#   because this only ever *adds* to the pending count; a false negative just
+#   reproduces the exact false-success bug this helper exists to fix, never
+#   a new failure mode.
+forge_get_workflow_runs() {
+  local nwo="$1"
+  local commit="$2"
+
+  if [[ "$FORGE_TYPE" == "gitea" ]]; then
+    forge_split_nwo "$nwo"
+    local tasks_json
+    tasks_json=$(gitea_api GET "repos/$FORGE_OWNER/$FORGE_REPO/actions/tasks" 2>/dev/null) || {
+      echo '{"workflow_runs": []}'
+      return 0
+    }
+    echo "$tasks_json" | jq --arg sha "$commit" '{
+      workflow_runs: [(.workflow_runs // [])[] | select(.head_sha == $sha) | {
+        name: (.name // .display_title // "workflow"),
+        status: .status,
+        conclusion: (.conclusion // null)
+      }]
+    }' 2>/dev/null || echo '{"workflow_runs": []}'
+  else
+    local runs_json
+    runs_json=$(gh api "repos/$nwo/actions/runs?head_sha=$commit&per_page=100" \
+      --header "Accept: application/vnd.github+json" 2>/dev/null) || {
+      echo '{"workflow_runs": []}'
+      return 0
+    }
+    echo "$runs_json" | jq '{
+      workflow_runs: [(.workflow_runs // [])[] | {
+        name: .name,
+        status: .status,
+        conclusion: .conclusion
+      }]
+    }' 2>/dev/null || echo '{"workflow_runs": []}'
+  fi
+}
+
 # --- PR Listing Helpers ---
 
 # List merged PRs.

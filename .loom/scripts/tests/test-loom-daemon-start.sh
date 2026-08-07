@@ -813,16 +813,18 @@ else
 fi
 rm -rf "$SH4_HOME"
 
-# ---------- dropped-env-key detection on re-render (#4522) ----------
+# ---------- dropped-env-key detection on re-render (#4522, preserve-by-default #5344) ----------
 # Root cause under test: render_launchd_plist / render_systemd_unit render the
 # EnvironmentVariables dict / Environment= lines strictly from whatever THIS
 # invocation has exported -- so a re-render from a context missing the
 # operator's exports (a watchdog, a bare re-run, another tool shelling out to
 # this script) used to silently replace a richer installed plist/unit with a
 # narrower one (every LOOM_SAFEHOUSE_* key + LOOM_WORK_FINDER gone, no trace).
-# warn_dropped_env_keys() now diffs the KEY sets (not values) between the
-# installed file and the freshly-rendered replacement and warns before the
-# overwrite happens.
+# warn_dropped_env_keys() diffs the KEY sets (not values) between the
+# installed file and the freshly-rendered replacement, warns, AND (#5344, by
+# default) carries each dropped key's installed VALUE forward into the
+# replacement before it is installed -- a re-render can now only widen or
+# match the installed file, never narrow it, unless --force-env is passed.
 
 # ---------- launchd (plist) path -- exercised read-only via --print-plist,
 # same technique as the #4172 PATH-drift tests above (the real launchd
@@ -876,6 +878,21 @@ else
     echo "  output: $dek2_out"
 fi
 
+# DEK2b (#5344): the previewed plist itself -- not just the warning -- carries
+# the dropped key's INSTALLED value forward by default.
+dek2b_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_SAFEHOUSE_ENABLED \
+    HOME="$DEK_HOME" LOOM_MACHINE_CHECKOUT="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    bash "$START_SCRIPT" --print-plist 2>/dev/null )
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$dek2b_out" | grep -A1 '<key>LOOM_SAFEHOUSE_ENABLED</key>' | grep -q '<string>1</string>'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} dropped-env-key (plist): a re-render missing an exported key still carries its installed value forward by default (#5344)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} dropped-env-key (plist): a re-render missing an exported key still carries its installed value forward by default"
+    echo "  output: $dek2b_out"
+fi
+
 # DEK3. Re-rendering with the SAME (or a superset of) keys does not warn.
 dek3_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE HOME="$DEK_HOME" LOOM_MACHINE_CHECKOUT="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" \
     LOOM_SAFEHOUSE_ENABLED=1 LOOM_WORK_FINDER=1 LOOM_DAEMON_PATH_EXTRA=/extra/bin LOOM_DAEMON_BIN="$FAKE_BIN" \
@@ -902,6 +919,22 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "${RED}✗${NC} dropped-env-key (plist): --force-env suppresses the warning"
     echo "  output: $dek4_out"
+fi
+
+# DEK4b (#5344): --force-env doesn't just suppress the warning -- it actually
+# lets the key stay dropped from the previewed plist (inverted semantics: the
+# flag now means "narrow for real", not merely "quiet about it").
+dek4b_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_SAFEHOUSE_ENABLED \
+    HOME="$DEK_HOME" LOOM_MACHINE_CHECKOUT="$DEK_HOME" LOOM_LAUNCHD_LABEL="$DEK_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    bash "$START_SCRIPT" --print-plist --force-env 2>/dev/null )
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! echo "$dek4b_out" | grep -q '<key>LOOM_SAFEHOUSE_ENABLED</key>'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} dropped-env-key (plist): --force-env actually drops the key from the render, not just the warning (#5344)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} dropped-env-key (plist): --force-env actually drops the key from the render, not just the warning"
+    echo "  output: $dek4b_out"
 fi
 rm -rf "$DEK_HOME"
 
@@ -987,13 +1020,19 @@ fi
 
 sleep 30 & DEK_SD_PID2=$!
 bg_proc_track "$DEK_SD_PID2"
+# #5409: the fixture install above had LOOM_WORK_FINDER=1, and this re-render
+# leaves it unexported (default-off) -- exactly the AC1 detected-downgrade
+# shape (covered on its own by the "autonomy downgrade (systemd)" tests
+# above). This test is about the UNRELATED LOOM_SAFEHOUSE_ENABLED drop, so
+# pass --no-work-finder explicitly to state that transition on purpose and
+# reach the dropped-env-key code path instead of being refused before it.
 dek6_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_SAFEHOUSE_ENABLED \
     PATH="$DEK_SD_BIN:$PATH" HOME="$DEK_SD_HOME" \
     LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$DEK_SD_UNIT" \
     LOOM_DAEMON_BIN="$FAKE_BIN" \
     LOOM_SOCKET_PATH="$DEK_SD_HOME/.loom/loom-daemon.sock" \
     LOOM_AUTONOMY_MARKER="$DEK_SD_HOME/.loom/autonomy-desired" \
-    bash "$START_SCRIPT" --no-launchd 2>&1 )
+    bash "$START_SCRIPT" --no-launchd --no-work-finder 2>&1 )
 kill "$DEK_SD_PID2" 2>/dev/null || true
 if [[ -f "$DEK_SD_HOME/.loom/.daemon.pid" ]]; then
     kill "$(cat "$DEK_SD_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
@@ -1010,12 +1049,13 @@ else
     echo "  output: $dek6_out"
 fi
 TESTS_RUN=$((TESTS_RUN + 1))
-if [[ -f "$DEK_SD_UNIT_PATH" ]] && ! grep -q 'LOOM_SAFEHOUSE_ENABLED' "$DEK_SD_UNIT_PATH"; then
+if [[ -f "$DEK_SD_UNIT_PATH" ]] && grep -q 'LOOM_SAFEHOUSE_ENABLED=1' "$DEK_SD_UNIT_PATH"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} dropped-env-key (systemd): the WARNED narrowing still actually installs (warn, don't block)"
+    echo -e "${GREEN}✓${NC} dropped-env-key (systemd): the WARNED key is carried forward by default, not dropped (#5344)"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} dropped-env-key (systemd): the WARNED narrowing still actually installs"
+    echo -e "${RED}✗${NC} dropped-env-key (systemd): the WARNED key is carried forward by default, not dropped"
+    cat "$DEK_SD_UNIT_PATH" 2>/dev/null | sed 's/^/    /'
 fi
 
 # DEK7. --force-env suppresses the warning on the real install path too.
@@ -1036,13 +1076,16 @@ if [[ -f "$DEK_SD_HOME/.loom/.daemon.pid" ]]; then
 fi
 sleep 30 & DEK_SD_PID4=$!
 bg_proc_track "$DEK_SD_PID4"
+# #5409: same rationale as DEK6 above -- --no-work-finder states the
+# LOOM_WORK_FINDER 1->0 transition explicitly so this stays a pure --force-env
+# test, not entangled with the unrelated AC1 detected-downgrade refusal.
 dek7_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_SAFEHOUSE_ENABLED \
     PATH="$DEK_SD_BIN:$PATH" HOME="$DEK_SD_HOME" \
     LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$DEK_SD_UNIT" \
     LOOM_DAEMON_BIN="$FAKE_BIN" \
     LOOM_SOCKET_PATH="$DEK_SD_HOME/.loom/loom-daemon.sock" \
     LOOM_AUTONOMY_MARKER="$DEK_SD_HOME/.loom/autonomy-desired" \
-    bash "$START_SCRIPT" --no-launchd --force-env 2>&1 )
+    bash "$START_SCRIPT" --no-launchd --no-work-finder --force-env 2>&1 )
 kill "$DEK_SD_PID4" 2>/dev/null || true
 if [[ -f "$DEK_SD_HOME/.loom/.daemon.pid" ]]; then
     kill "$(cat "$DEK_SD_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
@@ -1067,6 +1110,15 @@ elif [[ -f "$DEK_SD_HOME/.loom/.daemon.flags" ]] && grep -q -- '--force-env' "$D
 else
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} dropped-env-key (systemd): --force-env is excluded from the persisted .daemon.flags file"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -f "$DEK_SD_UNIT_PATH" ]] && ! grep -q 'LOOM_SAFEHOUSE_ENABLED' "$DEK_SD_UNIT_PATH"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} dropped-env-key (systemd): --force-env actually drops the key from the installed unit, not just the warning (#5344)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} dropped-env-key (systemd): --force-env actually drops the key from the installed unit, not just the warning"
+    cat "$DEK_SD_UNIT_PATH" 2>/dev/null | sed 's/^/    /'
 fi
 rm -rf "$DEK_SD_HOME"
 
@@ -1309,14 +1361,12 @@ make_sd_stub "$AD8_LOG" "$AD8_SLEEP_PID1"
 kill "$AD8_SLEEP_PID1" 2>/dev/null || true
 rm -f "$AD8_HOME/.loom/.daemon.pid"
 
-# AD8. A plain re-install (no flags) both warns AND still actually
-#      installs/starts (advisory only, never blocks -- matching the #4522
-#      dropped-env-key precedent). This is the issue's required test case:
-#      "prior-plist-had-work-finder + plain restart -> warning emitted",
-#      systemd sibling.
-sleep 30 & AD8_SLEEP_PID2=$!
-bg_proc_track "$AD8_SLEEP_PID2"
-make_sd_stub "$AD8_LOG" "$AD8_SLEEP_PID2"
+# AD8. A plain re-install (no flags) on the RECOVERY path now REFUSES (exit
+#      1) rather than warn-and-continue (#5409 AC1 -- the #4693 mitigation
+#      was warn-only and a fleet host lost ~1h of dispatch because the
+#      warning scrolled past during an already-focused recovery). This is the
+#      issue's required test case: "prior-unit-had-work-finder + plain
+#      restart -> refused", systemd sibling of AD1.
 ad8_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     PATH="$SD_BIN:$PATH" HOME="$AD8_HOME" LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$AD_SD_UNIT" \
     LOOM_DAEMON_BIN="$FAKE_BIN" \
@@ -1324,7 +1374,7 @@ ad8_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     LOOM_AUTONOMY_MARKER="$AD8_HOME/.loom/autonomy-desired" \
     bash "$START_SCRIPT" --no-launchd 2>&1 )
 ad8_rc=$?
-assert_eq "0" "$ad8_rc" "autonomy downgrade (systemd): the WARNED downgrade still actually installs/starts (warn, don't block, #4693)"
+assert_eq "1" "$ad8_rc" "autonomy downgrade (systemd): a DETECTED downgrade on a real start now REFUSES rather than warn-and-continue (#5409 AC1)"
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$ad8_out" | grep -qi 'autonomy downgrade' && echo "$ad8_out" | grep -q 'LOOM_WORK_FINDER: 1 -> 0'; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -1334,9 +1384,171 @@ else
     echo -e "${RED}✗${NC} autonomy downgrade (systemd): prior-unit-had-work-finder + plain restart warns and names the transition"
     echo "  output: $ad8_out"
 fi
-kill "$AD8_SLEEP_PID2" 2>/dev/null || true
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$ad8_out" | grep -qi 'refusing to start' && echo "$ad8_out" | grep -qi -- '--work-finder'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} autonomy downgrade (systemd): the refusal names the explicit-flag escape hatch (#5409 AC1)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} autonomy downgrade (systemd): the refusal names the explicit-flag escape hatch"
+    echo "  output: $ad8_out"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+# Exactly ONE "enable --now" total across BOTH invocations above (the first,
+# successful "prior unit" install; the second, refused re-run) proves the
+# refusal happened before the install step ran a second time -- not just
+# that it happened to exit non-zero afterward.
+ad8_enable_count="$(grep -c -- "--user enable --now $AD_SD_UNIT" "$AD8_LOG" 2>/dev/null || true)"
+if [[ "$ad8_enable_count" == "1" && ! -f "$AD8_HOME/.loom/.daemon.pid" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} autonomy downgrade (systemd): a refused start never actually (re)installs or writes a pid file"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} autonomy downgrade (systemd): a refused start never actually (re)installs or writes a pid file"
+    echo "  enable-now count: $ad8_enable_count; systemctl calls: $(cat "$AD8_LOG" 2>/dev/null)"
+fi
+
+# AD9. The escape hatch: the SAME detected downgrade, but with an explicit
+#      --work-finder this invocation -- proceeds normally (exit 0), proving
+#      the refusal is only for the SILENT case, not a hard block on ever
+#      re-installing over a prior autonomous unit.
+sleep 30 & AD9_SLEEP_PID=$!
+bg_proc_track "$AD9_SLEEP_PID"
+make_sd_stub "$AD8_LOG" "$AD9_SLEEP_PID"
+ad9_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    PATH="$SD_BIN:$PATH" HOME="$AD8_HOME" LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$AD_SD_UNIT" \
+    LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$AD8_HOME/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$AD8_HOME/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd --work-finder 2>&1 )
+ad9_rc=$?
+assert_eq "0" "$ad9_rc" "autonomy downgrade (systemd): an explicit --work-finder on the SAME detected-downgrade host proceeds normally (#5409 AC1 escape hatch)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! echo "$ad9_out" | grep -qi 'autonomy downgrade'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} autonomy downgrade (systemd): an explicit --work-finder is not silent -- no warning, no refusal (#5409)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} autonomy downgrade (systemd): an explicit --work-finder is not silent -- no warning, no refusal"
+    echo "  output: $ad9_out"
+fi
+kill "$AD9_SLEEP_PID" 2>/dev/null || true
 rm -f "$AD8_HOME/.loom/.daemon.pid"
 rm -rf "$AD8_HOME"
+
+# ---------- nohup fallback tier (#5437) ----------
+# Regression for the bug this issue reports: PRIOR_AUTONOMY_FILE is NEVER set
+# on this tier (no plist/unit is ever rendered here -- see the "Left empty on
+# the nohup fallback tier" comment above), so before this fix `old_val` was
+# unconditionally empty and EVERY bare restart following ANY prior successful
+# start (autonomous or not) looked identical to check_autonomy_downgrade_key
+# -- both left "old_val empty, marker present", which (post-#5409) now hard
+# REFUSES instead of merely warning. write_intent_marker()'s new work_finder=/
+# health_gate= fields give this tier the same "what was the ACTUAL prior
+# value" signal the plist/unit extractors give the launchd/systemd tiers.
+# Exercised through the REAL nohup install path (--no-launchd --no-systemd,
+# a real backgrounded $DAEMON_BIN, same technique as the "bare (zero-arg)
+# background start" fixture above) -- not a read-only --print-plist/--unit
+# inspection, since the nohup tier has no such inspection mode.
+mkdir -p "$WORKDIR/ad10" "$WORKDIR/ad11"
+
+# AD10. Bare restart after a PRIOR BARE start on the nohup tier: the marker's
+#       persisted work_finder=0/health_gate=0 means old_val=="0" (no
+#       transition) -- must stay completely silent (#5437 AC1), the exact
+#       false-positive this issue reports.
+( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    LOOM_DAEMON_BIN="$BG_FAKE_BIN" \
+    LOOM_SOCKET_PATH="$WORKDIR/ad10/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$WORKDIR/ad10/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd --no-systemd >/dev/null 2>&1 )
+if [[ -f "$WORKDIR/.loom/.daemon.pid" ]]; then
+    kill "$(cat "$WORKDIR/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
+fi
+rm -f "$WORKDIR/.loom/.daemon.pid"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -qx 'work_finder=0' "$WORKDIR/ad10/autonomy-desired" 2>/dev/null \
+    && grep -qx 'health_gate=0' "$WORKDIR/ad10/autonomy-desired" 2>/dev/null; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} nohup tier: write_intent_marker persists the actual work_finder=/health_gate= values (#5437)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} nohup tier: write_intent_marker persists the actual work_finder=/health_gate= values"
+    cat "$WORKDIR/ad10/autonomy-desired" 2>/dev/null | sed 's/^/    /'
+fi
+
+ad10_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    LOOM_DAEMON_BIN="$BG_FAKE_BIN" \
+    LOOM_SOCKET_PATH="$WORKDIR/ad10/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$WORKDIR/ad10/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd --no-systemd 2>&1 )
+ad10_rc=$?
+assert_eq "0" "$ad10_rc" "autonomy downgrade (nohup): a bare restart after a PRIOR bare start exits 0 (#5437 AC1)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! echo "$ad10_out" | grep -qi 'autonomy downgrade'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} autonomy downgrade (nohup): bare-after-bare restart is silent -- no WARNING/ERROR (#5437 AC1, the reported regression)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} autonomy downgrade (nohup): bare-after-bare restart is silent -- no WARNING/ERROR"
+    echo "  output: $ad10_out"
+fi
+if [[ -f "$WORKDIR/.loom/.daemon.pid" ]]; then
+    kill "$(cat "$WORKDIR/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
+fi
+rm -f "$WORKDIR/.loom/.daemon.pid"
+rm -rf "$WORKDIR/ad10"
+
+# AD11. Bare restart after a PRIOR AUTONOMOUS start on the nohup tier: the
+#       marker's persisted work_finder=1 means old_val=="1" -- the guard's
+#       actual intent must be preserved, so this still REFUSES (exit 1), the
+#       nohup sibling of AD8 (systemd) / AD1 (plist) (#5437 AC2).
+( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    LOOM_WORK_FINDER=1 LOOM_DAEMON_BIN="$BG_FAKE_BIN" \
+    LOOM_SOCKET_PATH="$WORKDIR/ad11/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$WORKDIR/ad11/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd --no-systemd >/dev/null 2>&1 )
+if [[ -f "$WORKDIR/.loom/.daemon.pid" ]]; then
+    kill "$(cat "$WORKDIR/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
+fi
+rm -f "$WORKDIR/.loom/.daemon.pid"
+
+ad11_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    LOOM_DAEMON_BIN="$BG_FAKE_BIN" \
+    LOOM_SOCKET_PATH="$WORKDIR/ad11/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$WORKDIR/ad11/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd --no-systemd 2>&1 )
+ad11_rc=$?
+assert_eq "1" "$ad11_rc" "autonomy downgrade (nohup): a bare restart after a PRIOR AUTONOMOUS start still REFUSES (#5437 AC2 -- the guard's intent is preserved, not overcorrected away)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$ad11_out" | grep -qi 'autonomy downgrade' && echo "$ad11_out" | grep -q 'LOOM_WORK_FINDER: 1 -> 0'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} autonomy downgrade (nohup): prior-marker-had-work-finder + plain restart warns and names the transition (#5437)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} autonomy downgrade (nohup): prior-marker-had-work-finder + plain restart warns and names the transition"
+    echo "  output: $ad11_out"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$ad11_out" | grep -qi 'refusing to start' && echo "$ad11_out" | grep -qi -- '--work-finder'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} autonomy downgrade (nohup): the refusal names the explicit-flag escape hatch (#5437)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} autonomy downgrade (nohup): the refusal names the explicit-flag escape hatch"
+    echo "  output: $ad11_out"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ ! -f "$WORKDIR/.loom/.daemon.pid" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} autonomy downgrade (nohup): a refused start never actually forks the daemon or writes a pid file"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} autonomy downgrade (nohup): a refused start never actually forks the daemon or writes a pid file"
+    kill "$(cat "$WORKDIR/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
+fi
+rm -f "$WORKDIR/.loom/.daemon.pid"
+rm -rf "$WORKDIR/ad11"
 
 # ---------- KillMode=mixed real-systemd regression (#4862) ----------
 # The stub-based systemd tests above assert the RENDERED TEXT of the unit
@@ -1674,6 +1886,461 @@ fi
 else
     echo "  (skipping real launchd bootout/bootstrap #5081 regression: not running on Darwin)"
 fi
+
+# ---------- watchdog self-heal for an ALREADY-RUNNING daemon (#5343) ----------
+# heal_watchdog_provisioning_gap closes the gap where a daemon was armed by a
+# path OTHER than a fresh loom-daemon-start.sh run (e.g. `fleet add-worker`'s
+# hand-rolled systemd unit install, or the daemon's own startup marker
+# healing, #4331) -- both can leave the autonomy-desired marker present with
+# NO watchdog ever provisioned. Each case below fabricates that state directly
+# (a live "already running" pid file + a hand-written marker) WITHOUT ever
+# running the real daemon-unit install path, so these tests isolate the
+# self-heal branch from the fresh-start provisioning path already covered by
+# S2/WD1/WD2 above. Uses the same LOOM_SYSTEMD_FORCE + stub systemctl seam.
+HEAL_UNIT="loom-daemon-heal-test-$$.service"
+HEAL_TIMER="${HEAL_UNIT%.service}-watchdog.timer"
+
+# H1. Marker present + daemon already running + watchdog NOT yet provisioned
+#     -> re-running loom-daemon-start.sh provisions it (the watchdog TIMER is
+#     enable --now'd), the run still reports "already running", exits 0, and
+#     never restarts/stops the daemon's own unit.
+HEAL1_REPO="$(mktemp -d)"
+mkdir -p "$HEAL1_REPO/.loom/scripts/cli" "$HEAL1_REPO/.loom/logs"
+cp "$SCRIPT_DIR/../cli/loom-daemon-watchdog.sh" "$HEAL1_REPO/.loom/scripts/cli/loom-daemon-watchdog.sh"
+HEAL1_HOME="$(mktemp -d)"; mkdir -p "$HEAL1_HOME/.loom/logs"
+HEAL1_LOG="$WORKDIR/heal1-sd.log"; : > "$HEAL1_LOG"
+make_sd_stub "$HEAL1_LOG" "0"
+sleep 60 >/dev/null 2>&1 & HEAL1_SLEEP_PID=$!
+bg_proc_track "$HEAL1_SLEEP_PID"
+echo "$HEAL1_SLEEP_PID" > "$HEAL1_REPO/.loom/.daemon.pid"
+cat > "$HEAL1_REPO/.loom/autonomy-desired" <<MARKER
+started_at=2026-01-01T00:00:00Z
+use_launchd=false
+use_systemd=true
+systemd_unit=$HEAL_UNIT
+MARKER
+heal1_out=$( cd "$HEAL1_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    PATH="$SD_BIN:$PATH" HOME="$HEAL1_HOME" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$HEAL_UNIT" \
+    LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$HEAL1_REPO/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$HEAL1_REPO/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd 2>&1 )
+heal1_rc=$?
+assert_eq "0" "$heal1_rc" "watchdog self-heal (#5343): re-run against an already-running daemon exits 0"
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$heal1_out" | grep -qi 'already running' \
+    && grep -q -- "--user enable --now $HEAL_TIMER" "$HEAL1_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} watchdog self-heal (#5343): marker present + job missing -> provisions the watchdog on an already-running daemon"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} watchdog self-heal (#5343): marker present + job missing -> provisions the watchdog on an already-running daemon"
+    echo "  output: $heal1_out"
+    echo "  systemctl calls: $(cat "$HEAL1_LOG")"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! grep -qE "(restart|stop) $HEAL_UNIT" "$HEAL1_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} watchdog self-heal (#5343): the already-running daemon unit itself is never restarted/stopped"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} watchdog self-heal (#5343): the already-running daemon unit itself is never restarted/stopped"
+    echo "  systemctl calls: $(cat "$HEAL1_LOG")"
+fi
+kill "$HEAL1_SLEEP_PID" 2>/dev/null || true
+rm -rf "$HEAL1_REPO" "$HEAL1_HOME"
+
+# H2. Marker present + watchdog job ALREADY present -> repeated re-runs stay a
+#     harmless no-op (provision_watchdog_job_systemd's own idempotency is
+#     already covered by WD1/WD2 above; this asserts the SELF-HEAL call path
+#     reaches it safely twice in a row without erroring).
+HEAL2_REPO="$(mktemp -d)"
+mkdir -p "$HEAL2_REPO/.loom/scripts/cli" "$HEAL2_REPO/.loom/logs"
+cp "$SCRIPT_DIR/../cli/loom-daemon-watchdog.sh" "$HEAL2_REPO/.loom/scripts/cli/loom-daemon-watchdog.sh"
+HEAL2_HOME="$(mktemp -d)"; mkdir -p "$HEAL2_HOME/.loom/logs"
+HEAL2_LOG="$WORKDIR/heal2-sd.log"; : > "$HEAL2_LOG"
+make_sd_stub "$HEAL2_LOG" "0"
+sleep 60 >/dev/null 2>&1 & HEAL2_SLEEP_PID=$!
+bg_proc_track "$HEAL2_SLEEP_PID"
+echo "$HEAL2_SLEEP_PID" > "$HEAL2_REPO/.loom/.daemon.pid"
+cat > "$HEAL2_REPO/.loom/autonomy-desired" <<MARKER
+started_at=2026-01-01T00:00:00Z
+use_launchd=false
+use_systemd=true
+systemd_unit=$HEAL_UNIT
+MARKER
+heal2_rc=1
+for _heal2_pass in 1 2; do
+    heal2_out=$( cd "$HEAL2_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+        PATH="$SD_BIN:$PATH" HOME="$HEAL2_HOME" \
+        LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$HEAL_UNIT" \
+        LOOM_DAEMON_BIN="$FAKE_BIN" \
+        LOOM_SOCKET_PATH="$HEAL2_REPO/.loom/loom-daemon.sock" \
+        LOOM_AUTONOMY_MARKER="$HEAL2_REPO/.loom/autonomy-desired" \
+        bash "$START_SCRIPT" --no-launchd 2>&1 )
+    heal2_rc=$?
+done
+unset _heal2_pass
+assert_eq "0" "$heal2_rc" "watchdog self-heal (#5343): repeated re-runs against an already-provisioned watchdog stay exit 0 (idempotent no-op)"
+[[ "$heal2_rc" == "0" ]] || echo "  output (last pass): $heal2_out"
+kill "$HEAL2_SLEEP_PID" 2>/dev/null || true
+rm -rf "$HEAL2_REPO" "$HEAL2_HOME"
+
+# H3. Marker ABSENT -> no provisioning attempt at all (nothing was ever
+#     "desired") -- zero watchdog-scoped systemctl calls are logged.
+HEAL3_REPO="$(mktemp -d)"
+mkdir -p "$HEAL3_REPO/.loom/scripts/cli" "$HEAL3_REPO/.loom/logs"
+cp "$SCRIPT_DIR/../cli/loom-daemon-watchdog.sh" "$HEAL3_REPO/.loom/scripts/cli/loom-daemon-watchdog.sh"
+HEAL3_HOME="$(mktemp -d)"; mkdir -p "$HEAL3_HOME/.loom/logs"
+HEAL3_LOG="$WORKDIR/heal3-sd.log"; : > "$HEAL3_LOG"
+make_sd_stub "$HEAL3_LOG" "0"
+sleep 60 >/dev/null 2>&1 & HEAL3_SLEEP_PID=$!
+bg_proc_track "$HEAL3_SLEEP_PID"
+echo "$HEAL3_SLEEP_PID" > "$HEAL3_REPO/.loom/.daemon.pid"
+# Deliberately NO autonomy-desired marker written at $HEAL3_REPO/.loom/autonomy-desired.
+heal3_out=$( cd "$HEAL3_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    PATH="$SD_BIN:$PATH" HOME="$HEAL3_HOME" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$HEAL_UNIT" \
+    LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$HEAL3_REPO/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$HEAL3_REPO/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd 2>&1 )
+heal3_rc=$?
+assert_eq "0" "$heal3_rc" "watchdog self-heal (#5343): marker absent -> re-run against an already-running daemon still exits 0"
+[[ "$heal3_rc" == "0" ]] || echo "  output: $heal3_out"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ ! -s "$HEAL3_LOG" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} watchdog self-heal (#5343): marker absent -> no provisioning attempt (zero systemctl calls)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} watchdog self-heal (#5343): marker absent -> no provisioning attempt"
+    echo "  systemctl calls: $(cat "$HEAL3_LOG")"
+fi
+kill "$HEAL3_SLEEP_PID" 2>/dev/null || true
+rm -rf "$HEAL3_REPO" "$HEAL3_HOME"
+
+# H4. Escalation when NO scheduled-job mechanism exists on this platform tier
+#     (--no-launchd --no-systemd escape hatch, mirroring the nohup-fallback
+#     tier, #5343 AC4): marker present + daemon already running -> files ONE
+#     tracking issue via a STUB create-issue.sh (never a real forge call),
+#     deduped by a sentinel file so a second re-run does not re-file.
+HEAL4_REPO="$(mktemp -d)"
+mkdir -p "$HEAL4_REPO/.loom/scripts/cli" "$HEAL4_REPO/.loom/logs"
+cp "$SCRIPT_DIR/../cli/loom-daemon-watchdog.sh" "$HEAL4_REPO/.loom/scripts/cli/loom-daemon-watchdog.sh"
+HEAL4_ISSUE_LOG="$WORKDIR/heal4-create-issue.log"; : > "$HEAL4_ISSUE_LOG"
+cat > "$HEAL4_REPO/.loom/scripts/create-issue.sh" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "$HEAL4_ISSUE_LOG"
+echo "https://example.invalid/issues/1"
+STUB
+chmod +x "$HEAL4_REPO/.loom/scripts/create-issue.sh"
+sleep 60 >/dev/null 2>&1 & HEAL4_SLEEP_PID=$!
+bg_proc_track "$HEAL4_SLEEP_PID"
+echo "$HEAL4_SLEEP_PID" > "$HEAL4_REPO/.loom/.daemon.pid"
+cat > "$HEAL4_REPO/.loom/autonomy-desired" <<MARKER
+started_at=2026-01-01T00:00:00Z
+use_launchd=false
+use_systemd=false
+MARKER
+heal4_out=$( cd "$HEAL4_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$HEAL4_REPO/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$HEAL4_REPO/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd --no-systemd 2>&1 )
+heal4_rc=$?
+assert_eq "0" "$heal4_rc" "watchdog escalation (#5343 AC4): re-run against an already-running nohup-tier daemon exits 0"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -s "$HEAL4_ISSUE_LOG" ]] && grep -q -- '--title' "$HEAL4_ISSUE_LOG" && grep -qi 'cannot be scheduled' "$HEAL4_ISSUE_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} watchdog escalation (#5343 AC4): files a tracking issue via create-issue.sh when no scheduled-job mechanism exists"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} watchdog escalation (#5343 AC4): files a tracking issue when no scheduled-job mechanism exists"
+    echo "  create-issue.sh calls: $(cat "$HEAL4_ISSUE_LOG")"
+    echo "  output: $heal4_out"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -f "$HEAL4_REPO/.loom/.watchdog-unprovisionable-escalated" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} watchdog escalation (#5343 AC4): writes a dedup sentinel after filing"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} watchdog escalation (#5343 AC4): writes a dedup sentinel after filing"
+fi
+heal4b_out=$( cd "$HEAL4_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$HEAL4_REPO/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$HEAL4_REPO/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd --no-systemd 2>&1 )
+heal4b_rc=$?
+TESTS_RUN=$((TESTS_RUN + 1))
+# Each create-issue.sh invocation carries exactly one --title flag, so counting
+# THAT (not raw lines -- the multi-line --body heredoc spans several) is the
+# correct per-call counter.
+heal4_call_count="$(grep -c -- '--title' "$HEAL4_ISSUE_LOG")"
+if [[ "$heal4b_rc" == "0" && "$heal4_call_count" == "1" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} watchdog escalation (#5343 AC4): the dedup sentinel suppresses re-filing on a subsequent re-run"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} watchdog escalation (#5343 AC4): the dedup sentinel suppresses re-filing on a subsequent re-run"
+    echo "  create-issue.sh calls after re-run: $(cat "$HEAL4_ISSUE_LOG")"
+    [[ "$heal4b_rc" == "0" ]] || echo "  output: $heal4b_out"
+fi
+kill "$HEAL4_SLEEP_PID" 2>/dev/null || true
+rm -rf "$HEAL4_REPO"
+
+# ---------- already-running guard: flags-ignored notice (#5409 secondary papercut) ----------
+# Before #5409, a --work-finder/--no-work-finder/--health-gate/--no-health-gate/
+# --from-config passed to an invocation that lands on the already-running-guard
+# path (H1-H4 above) was silently accepted and did nothing -- WANT_WORK_FINDER
+# (etc.) was computed but never read on this path. Not previously covered: the
+# existing "already running" assertions above (H1-H4) test the watchdog-
+# provisioning self-heal, not flag handling.
+AC4_REPO="$(mktemp -d)"
+mkdir -p "$AC4_REPO/.loom/scripts/cli" "$AC4_REPO/.loom/logs"
+cp "$SCRIPT_DIR/../cli/loom-daemon-watchdog.sh" "$AC4_REPO/.loom/scripts/cli/loom-daemon-watchdog.sh"
+AC4_HOME="$(mktemp -d)"; mkdir -p "$AC4_HOME/.loom/logs"
+AC4_LOG="$WORKDIR/ac4-sd.log"; : > "$AC4_LOG"
+AC4_UNIT="loom-daemon-ac4-test-$$.service"
+make_sd_stub "$AC4_LOG" "0"
+sleep 60 >/dev/null 2>&1 & AC4_SLEEP_PID=$!
+bg_proc_track "$AC4_SLEEP_PID"
+echo "$AC4_SLEEP_PID" > "$AC4_REPO/.loom/.daemon.pid"
+cat > "$AC4_REPO/.loom/autonomy-desired" <<MARKER
+started_at=2026-01-01T00:00:00Z
+use_launchd=false
+use_systemd=true
+systemd_unit=$AC4_UNIT
+MARKER
+# AC4a. --work-finder against an already-running daemon: exits 0 (still a
+#       no-op, matching the pre-existing "already running" contract) but now
+#       says explicitly that the flag was ignored, instead of staying silent.
+ac4a_out=$( cd "$AC4_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    PATH="$SD_BIN:$PATH" HOME="$AC4_HOME" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$AC4_UNIT" \
+    LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$AC4_REPO/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$AC4_REPO/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd --work-finder 2>&1 )
+ac4a_rc=$?
+assert_eq "0" "$ac4a_rc" "already-running guard (#5409): --work-finder against an already-running daemon still exits 0 (no-op)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$ac4a_out" | grep -qi 'already running' \
+    && echo "$ac4a_out" | grep -qi 'ignoring' \
+    && echo "$ac4a_out" | grep -q -- '--work-finder'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} already-running guard (#5409): --work-finder is explicitly reported as ignored, not silently accepted"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} already-running guard (#5409): --work-finder is explicitly reported as ignored, not silently accepted"
+    echo "  output: $ac4a_out"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! grep -qE "(restart|stop) $AC4_UNIT" "$AC4_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} already-running guard (#5409): the flag-ignored notice still never restarts/stops the running unit"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} already-running guard (#5409): the flag-ignored notice still never restarts/stops the running unit"
+    echo "  systemctl calls: $(cat "$AC4_LOG")"
+fi
+
+# AC4b. A bare re-run (no flags at all) against the same already-running
+#       daemon must NOT print the "ignoring" notice -- there is nothing to
+#       ignore, so the message must not fire unconditionally.
+ac4b_out=$( cd "$AC4_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    PATH="$SD_BIN:$PATH" HOME="$AC4_HOME" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$AC4_UNIT" \
+    LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$AC4_REPO/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$AC4_REPO/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd 2>&1 )
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! echo "$ac4b_out" | grep -qi 'ignoring'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} already-running guard (#5409): a bare re-run with no flags prints no ignored-flag notice"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} already-running guard (#5409): a bare re-run with no flags prints no ignored-flag notice"
+    echo "  output: $ac4b_out"
+fi
+kill "$AC4_SLEEP_PID" 2>/dev/null || true
+rm -rf "$AC4_REPO" "$AC4_HOME"
+
+# ---------- --heal-watchdog-only: periodic host-resident re-provisioning (#5405) ----------
+# #5343's heal_watchdog_provisioning_gap() only ever fires as a SIDE EFFECT of
+# re-running this script (an operator by hand, `fleet add-worker`, or the
+# already-running-guard exercised by H1-H4 above) -- a host that was
+# provisioned pre-#5343 and simply keeps running forever never gets healed.
+# --heal-watchdog-only is the narrow standalone entry point a host-resident
+# periodic caller (the daemon's own watchdog_provisioning_guard loop) can
+# invoke safely and repeatedly. Unlike H1-H4, these fixtures deliberately do
+# NOT fabricate an "already running" PID file -- the whole point of this flag
+# is to work independent of that state -- and assert the daemon-start path
+# (binary invocation, PID file creation) is never reached.
+
+# H5. Marker present + watchdog NOT yet provisioned + NO pid file at all (the
+#     already-running guard's branch is never even reached) -> still
+#     provisions the watchdog, and never invokes the daemon binary or writes
+#     a PID file.
+HEAL5_REPO="$(mktemp -d)"
+mkdir -p "$HEAL5_REPO/.loom/scripts/cli" "$HEAL5_REPO/.loom/logs"
+cp "$SCRIPT_DIR/../cli/loom-daemon-watchdog.sh" "$HEAL5_REPO/.loom/scripts/cli/loom-daemon-watchdog.sh"
+HEAL5_HOME="$(mktemp -d)"; mkdir -p "$HEAL5_HOME/.loom/logs"
+HEAL5_LOG="$WORKDIR/heal5-sd.log"; : > "$HEAL5_LOG"
+HEAL5_BIN_LOG="$WORKDIR/heal5-bin.log"; : > "$HEAL5_BIN_LOG"
+make_sd_stub "$HEAL5_LOG" "0"
+cat > "$HEAL5_REPO/.loom/autonomy-desired" <<MARKER
+started_at=2026-01-01T00:00:00Z
+use_launchd=false
+use_systemd=true
+systemd_unit=$HEAL_UNIT
+MARKER
+heal5_out=$( cd "$HEAL5_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    PATH="$SD_BIN:$PATH" HOME="$HEAL5_HOME" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$HEAL_UNIT" \
+    LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$HEAL5_REPO/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$HEAL5_REPO/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd --heal-watchdog-only 2>&1 )
+heal5_rc=$?
+assert_eq "0" "$heal5_rc" "--heal-watchdog-only (#5405): exits 0 with no PID file present at all"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q -- "--user enable --now $HEAL_TIMER" "$HEAL5_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --heal-watchdog-only (#5405): provisions the watchdog even though the already-running guard is never reached"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --heal-watchdog-only (#5405): provisions the watchdog even though the already-running guard is never reached"
+    echo "  output: $heal5_out"
+    echo "  systemctl calls: $(cat "$HEAL5_LOG")"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ ! -f "$HEAL5_REPO/.loom/.daemon.pid" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --heal-watchdog-only (#5405): never writes a PID file (never attempts to start a daemon, AC2)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --heal-watchdog-only (#5405): never writes a PID file (never attempts to start a daemon, AC2)"
+fi
+rm -rf "$HEAL5_REPO" "$HEAL5_HOME"
+
+# H6. Idempotent: two back-to-back passes both exit 0 and stay a harmless
+#     no-op once provisioned (mirrors H2's guarantee for the guard-triggered
+#     path, extended to the standalone flag).
+HEAL6_REPO="$(mktemp -d)"
+mkdir -p "$HEAL6_REPO/.loom/scripts/cli" "$HEAL6_REPO/.loom/logs"
+cp "$SCRIPT_DIR/../cli/loom-daemon-watchdog.sh" "$HEAL6_REPO/.loom/scripts/cli/loom-daemon-watchdog.sh"
+HEAL6_HOME="$(mktemp -d)"; mkdir -p "$HEAL6_HOME/.loom/logs"
+HEAL6_LOG="$WORKDIR/heal6-sd.log"; : > "$HEAL6_LOG"
+make_sd_stub "$HEAL6_LOG" "0"
+cat > "$HEAL6_REPO/.loom/autonomy-desired" <<MARKER
+started_at=2026-01-01T00:00:00Z
+use_launchd=false
+use_systemd=true
+systemd_unit=$HEAL_UNIT
+MARKER
+heal6_rc=1
+for _heal6_pass in 1 2; do
+    heal6_out=$( cd "$HEAL6_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+        PATH="$SD_BIN:$PATH" HOME="$HEAL6_HOME" \
+        LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$HEAL_UNIT" \
+        LOOM_DAEMON_BIN="$FAKE_BIN" \
+        LOOM_SOCKET_PATH="$HEAL6_REPO/.loom/loom-daemon.sock" \
+        LOOM_AUTONOMY_MARKER="$HEAL6_REPO/.loom/autonomy-desired" \
+        bash "$START_SCRIPT" --no-launchd --heal-watchdog-only 2>&1 )
+    heal6_rc=$?
+done
+unset _heal6_pass
+assert_eq "0" "$heal6_rc" "--heal-watchdog-only (#5405): repeated invocations against an already-provisioned watchdog stay exit 0 (idempotent)"
+[[ "$heal6_rc" == "0" ]] || echo "  output (last pass): $heal6_out"
+rm -rf "$HEAL6_REPO" "$HEAL6_HOME"
+
+# H7. Marker ABSENT -> --heal-watchdog-only is a pure no-op (zero systemctl
+#     calls), exits 0.
+HEAL7_REPO="$(mktemp -d)"
+mkdir -p "$HEAL7_REPO/.loom/scripts/cli" "$HEAL7_REPO/.loom/logs"
+cp "$SCRIPT_DIR/../cli/loom-daemon-watchdog.sh" "$HEAL7_REPO/.loom/scripts/cli/loom-daemon-watchdog.sh"
+HEAL7_HOME="$(mktemp -d)"; mkdir -p "$HEAL7_HOME/.loom/logs"
+HEAL7_LOG="$WORKDIR/heal7-sd.log"; : > "$HEAL7_LOG"
+make_sd_stub "$HEAL7_LOG" "0"
+# Deliberately NO autonomy-desired marker written at $HEAL7_REPO/.loom/autonomy-desired.
+heal7_out=$( cd "$HEAL7_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    PATH="$SD_BIN:$PATH" HOME="$HEAL7_HOME" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$HEAL_UNIT" \
+    LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$HEAL7_REPO/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$HEAL7_REPO/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd --heal-watchdog-only 2>&1 )
+heal7_rc=$?
+assert_eq "0" "$heal7_rc" "--heal-watchdog-only (#5405): marker absent -> exits 0"
+[[ "$heal7_rc" == "0" ]] || echo "  output: $heal7_out"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ ! -s "$HEAL7_LOG" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --heal-watchdog-only (#5405): marker absent -> no provisioning attempt (zero systemctl calls)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --heal-watchdog-only (#5405): marker absent -> no provisioning attempt"
+    echo "  systemctl calls: $(cat "$HEAL7_LOG")"
+fi
+rm -rf "$HEAL7_REPO" "$HEAL7_HOME"
+
+# H8. Regression guard for the "skip the daemon-binary lookup" behavior: an
+#     unresolvable $DAEMON_BIN (no LOOM_DAEMON_BIN, nothing named
+#     `loom-daemon` on PATH, no build-output-relative candidate under this
+#     fixture's repo root) must NOT turn into the "binary not found" exit 1 --
+#     --heal-watchdog-only never needs a daemon binary at all.
+HEAL8_REPO="$(mktemp -d)"
+mkdir -p "$HEAL8_REPO/.loom/scripts/cli" "$HEAL8_REPO/.loom/logs"
+cp "$SCRIPT_DIR/../cli/loom-daemon-watchdog.sh" "$HEAL8_REPO/.loom/scripts/cli/loom-daemon-watchdog.sh"
+HEAL8_HOME="$(mktemp -d)"; mkdir -p "$HEAL8_HOME/.loom/logs"
+HEAL8_LOG="$WORKDIR/heal8-sd.log"; : > "$HEAL8_LOG"
+make_sd_stub "$HEAL8_LOG" "0"
+cat > "$HEAL8_REPO/.loom/autonomy-desired" <<MARKER
+started_at=2026-01-01T00:00:00Z
+use_launchd=false
+use_systemd=true
+systemd_unit=$HEAL_UNIT
+MARKER
+# A curated PATH (never a bare -i env wipe, and never the real $PATH
+# unmodified): keeps enough of the toolchain (a modern bash, coreutils) for
+# the script itself to run, while excluding every directory a `loom-daemon`
+# binary could plausibly be resolved from (an operator's real
+# $HOME/.local/bin, this repo's own build output, etc.) -- deliberately does
+# NOT include $HEAL8_HOME/.local/bin (never created) or $PWD/target/*.
+HEAL8_PATH="$SD_BIN:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+heal8_out=$( cd "$HEAL8_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_DAEMON_BIN -u LOOM_PREFER_REPO_BUILD -u LOOM_DAEMON_BIN_DIR \
+    HOME="$HEAL8_HOME" \
+    PATH="$HEAL8_PATH" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$HEAL_UNIT" \
+    LOOM_SOCKET_PATH="$HEAL8_REPO/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$HEAL8_REPO/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd --heal-watchdog-only 2>&1 )
+heal8_rc=$?
+assert_eq "0" "$heal8_rc" "--heal-watchdog-only (#5405): an unresolvable daemon binary is never fatal"
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! echo "$heal8_out" | grep -qi 'binary not found'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --heal-watchdog-only (#5405): skips the daemon-binary lookup entirely"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --heal-watchdog-only (#5405): skips the daemon-binary lookup entirely"
+    echo "  output: $heal8_out"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q -- "--user enable --now $HEAL_TIMER" "$HEAL8_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --heal-watchdog-only (#5405): still provisions the watchdog with no resolvable daemon binary"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --heal-watchdog-only (#5405): still provisions the watchdog with no resolvable daemon binary"
+    echo "  systemctl calls: $(cat "$HEAL8_LOG")"
+fi
+rm -rf "$HEAL8_REPO" "$HEAL8_HOME"
 
 # ============================================================
 # Live daemon state guard (#5179, adopted here per #5191): every live `.loom`

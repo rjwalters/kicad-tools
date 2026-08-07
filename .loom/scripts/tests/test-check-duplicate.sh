@@ -100,7 +100,18 @@ trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
 # check-duplicate.sh's `loom-daemon --version` probe fails and it falls back
 # to the `gh` stub below (byte-for-byte the documented fallback path,
 # defaults/scripts/check-duplicate.sh). Keeps this test independent of
-# whether a real loom-daemon happens to be installed on the host. ---
+# whether a real loom-daemon happens to be installed on the host.
+#
+# NOT renamed per #5548's "test fixtures should not be named `loom-daemon`"
+# fix, unlike the fixtures in test-loom-status.sh / test-gh-cached.sh /
+# test-loom-daemon-watchdog.sh: check-duplicate.sh resolves this binary via a
+# bare `command -v loom-daemon` PATH lookup with no LOOM_DAEMON_BIN-style
+# override, so the literal name is load-bearing here -- renaming it would
+# stop check-duplicate.sh from finding it at all, defeating the test. This
+# poses no #5548-shaped liveness-check risk in practice: the stub is invoked
+# synchronously (`exit 1`, no backgrounding, no loop), so even a leaked copy
+# left on disk after a failed trap can never appear as a running process for
+# a `pgrep`-style liveness check to match. ---
 cat > "$STUB_DIR/loom-daemon" <<'STUB'
 #!/usr/bin/env bash
 exit 1

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # test-install-stash-scope.sh — regression tests for the reinstall stash guard
-# scoping (issue #3597).
+# scoping (issue #3597; issue #5289 added tests 4-5).
 #
 # The `--quick` reinstall (install.sh) and `--clean` install (install-loom.sh)
 # guards used to run an unscoped `git stash push`, sweeping sibling installers'
 # uncommitted tracked changes into the stash and leaving a half-old/half-new
 # hybrid tree. The fix scopes the stash to the intersection of the dirty set
-# with Loom's ownership set (manifest paths + .gitignore) via
+# with Loom's ownership set (manifest paths + .gitignore + CLAUDE.md) via
 # scripts/install/stash-scope.sh::_emit_loom_owned_dirty_paths.
 #
 # Strategy: source the real helper against a temp git repo seeded with both a
@@ -15,7 +15,14 @@
 #   2. a pathspec-scoped `git stash push` leaves the sibling change untouched
 #      in the working tree and absent from the stash,
 #   3. a tree dirty with ONLY sibling changes yields no owned-dirty paths
-#      (callers skip the stash entirely).
+#      (callers skip the stash entirely),
+#   4. root CLAUDE.md carries the same explicit ownership-set carve-out
+#      `.gitignore` already has (issue #5289 — CLAUDE.md's Loom section is
+#      synthesized at install time, not copied from a literal defaults/
+#      file, so the manifest walk alone never lists it),
+#   5. a dirty root CLAUDE.md is actually selected for stashing by
+#      `_emit_loom_owned_dirty_paths` (the property the reinstall's
+#      in-block-edit conflict guard at install.sh:~1290 depends on).
 #
 # Usage:
 #   bash defaults/scripts/tests/test-install-stash-scope.sh
@@ -143,6 +150,50 @@ printf '{"version":"newer"}\n' > "$TMP_REPO/$SIBLING_PATH"
 
 SELECTED_SIBLING_ONLY="$(_emit_loom_owned_dirty_paths "$REPO_ROOT" "$TMP_REPO")"
 assert_eq "" "$SELECTED_SIBLING_ONLY" "sibling-only dirty tree produces no owned-dirty paths"
+
+echo "== Test 4: root CLAUDE.md is explicitly carved into the ownership set (issue #5289) =="
+# Root CLAUDE.md's Loom section is synthesized at install time from
+# LOOM_ROOT_POINTER (loom-daemon/src/init/scaffolding.rs) rather than copied
+# verbatim from a defaults/CLAUDE.md file, so `_emit_installed_files_manifest`'s
+# walk-of-defaults/ never enumerates it -- exactly the same gap `.gitignore`
+# already has an explicit carve-out for (it too is rewritten by
+# `loom-daemon init` but isn't part of the defaults/ walk). Without that
+# carve-out, `_emit_loom_owned_dirty_paths` never selects a dirty root
+# CLAUDE.md, so `install.sh --quick`'s reinstall never stashes an uncommitted
+# CLAUDE.md edit before the chained uninstall's marker-based `sed` strips the
+# Loom block -- silently destroying the edit with no conflict ever surfaced,
+# even when it landed *inside* the `<!-- BEGIN/END LOOM ORCHESTRATION -->`
+# markers (reproduction: issue #5289).
+if printf '%s\n' "$OWNERSHIP" | grep -qxF "CLAUDE.md"; then
+  pass "CLAUDE.md present in the Loom ownership set"
+else
+  fail "CLAUDE.md present in the Loom ownership set" "ownership set: $OWNERSHIP"
+fi
+if printf '%s\n' "$OWNERSHIP" | grep -qxF ".gitignore"; then
+  pass ".gitignore present in the Loom ownership set (sibling carve-out, #3588)"
+else
+  fail ".gitignore present in the Loom ownership set (sibling carve-out, #3588)" "ownership set: $OWNERSHIP"
+fi
+
+echo "== Test 5: a dirty root CLAUDE.md is selected for stashing (issue #5289) =="
+CLAUDE_TMP_REPO="$(mktemp -d "${TMPDIR:-/tmp}/loom-stash-scope-claude.XXXXXX")"
+git -C "$CLAUDE_TMP_REPO" init -q
+git -C "$CLAUDE_TMP_REPO" config user.email test@example.com
+git -C "$CLAUDE_TMP_REPO" config user.name "Test"
+printf '# Project\n\n<!-- BEGIN LOOM ORCHESTRATION -->\nold pointer\n<!-- END LOOM ORCHESTRATION -->\n' \
+  > "$CLAUDE_TMP_REPO/CLAUDE.md"
+git -C "$CLAUDE_TMP_REPO" add -A
+git -C "$CLAUDE_TMP_REPO" commit -qm "seed"
+printf '# Project\n\n<!-- BEGIN LOOM ORCHESTRATION -->\nUSER IN-BLOCK EDIT\n<!-- END LOOM ORCHESTRATION -->\n' \
+  > "$CLAUDE_TMP_REPO/CLAUDE.md"
+
+CLAUDE_SELECTED="$(_emit_loom_owned_dirty_paths "$REPO_ROOT" "$CLAUDE_TMP_REPO")"
+if printf '%s\n' "$CLAUDE_SELECTED" | grep -qxF "CLAUDE.md"; then
+  pass "dirty root CLAUDE.md is selected for stashing"
+else
+  fail "dirty root CLAUDE.md is selected for stashing" "selected: [$CLAUDE_SELECTED]"
+fi
+rm -rf "$CLAUDE_TMP_REPO"
 
 echo ""
 echo "Ran $TESTS_RUN test(s): $TESTS_PASSED passed, $TESTS_FAILED failed"

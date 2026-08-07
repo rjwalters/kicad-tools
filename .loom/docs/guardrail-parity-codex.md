@@ -192,6 +192,42 @@ hole for shell-derived writes.
 Untrusted JSON values are **never interpolated into a shell command**: paths and
 commands are passed to `jq`/`awk`/`python3` on stdin or as `--arg` values.
 
+### `workdir` anchor validation (issue #4767)
+
+`tool_input.workdir` on the `shell` tool is a **model-chosen** field — unlike
+the event's top-level `cwd`, which is runtime-supplied and never reachable
+from the model (the same distinction "Runtime discrimination" above draws for
+the payload shape). The bridge merges `workdir` into `GUARD_CWD`, which becomes
+the `cwd` of the normalized guard request `guard-destructive-generic.sh`
+consumes for its #4178 Bash write-confinement block.
+
+That block derives its main-checkout anchor (`_WT_MAIN_ROOT`) from `cwd` via
+`git rev-parse --git-common-dir`, falling back to `REPO_ROOT` (itself resolved
+from the same `cwd` via `git rev-parse --show-toplevel`) when that resolution
+is unavailable. A `cwd` that is not inside a git repo at all makes **both**
+come up empty, and the block's containment test **silently `continue`s past
+every write** when the anchor is empty — it has nothing to compare against. Because `workdir` is model-controlled, a Codex worker could
+therefore choose `workdir: "/tmp"` (or `"/"`, or any other out-of-repo path) to
+turn off managed-worktree write confinement for every subsequent redirect/
+`tee`/`sed -i`/`cp`/`mv` in the same call — while `rm -rf /`, protected-branch
+force-push, and the Loom workflow denials (all cwd-independent pattern
+matches) stayed correctly enforced throughout, so the gap was narrow but real.
+
+**Resolution.** After `GUARD_CWD` is computed, the bridge requires it to
+resolve to the same `git-common-dir/..` main-checkout root as the trusted
+anchor — the event's own `cwd`, falling back to the provisioned
+`--project-root` if the event `cwd` is not itself a repo (`main_root_of()` in
+`guard-codex-bridge.sh`, the identical idiom `guard-destructive-generic.sh`
+already uses for the same comparison). A `workdir` that fails this — not
+inside a git repo, nonexistent, or a *different* repo than the acting
+session's — `fail_closed`s instead of handing the sub-guards a rootless `cwd`.
+A `workdir` that resolves into the SAME repo (absolute or relative, including
+the common `"."` no-op) is unaffected. Covered by the `workdir anchor
+validation` section of `test-guard-codex-bridge.sh`: `/tmp`, `/`, a
+foreign/non-repo absolute path, a nonexistent directory, and a relative
+`workdir` that walks out of both the worktree and the repo, each asserted
+against `>` redirect, `tee`, `cp`, `mv`, and `sed -i`.
+
 ### Provisioning and trust
 
 `defaults/scripts/provision-codex-hooks.sh install|verify|remove` owns the
@@ -462,6 +498,11 @@ Known, documented, and accepted for tier-2. None is silent.
    Making Codex stricter here would fork the policy table, which this phase
    explicitly does not do. Closing the fallback case is a shared-policy change
    for both runtimes, and is out of scope for #4495.
+
+   **~~A model-chosen `workdir` could defeat this entirely.~~ CLOSED (issue
+   #4767).** See "`workdir` anchor validation" above — the bridge now requires
+   `workdir` to resolve into the same repo as the acting session before
+   trusting it, instead of handing the sub-guards a rootless `cwd`.
 3. **Command-pattern blocking now comes from Loom, not Codex.** With the managed
    hook in place, `DROP DATABASE`, `DELETE` without `WHERE`, `git push --force
    origin main`, fork bombs, and `curl … | sh` are matched by

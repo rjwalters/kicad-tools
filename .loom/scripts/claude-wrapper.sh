@@ -662,6 +662,61 @@ PYEOF
     return 0  # Always succeed — this is a warning-only check
 }
 
+# Warn — but never abort — when the current workspace is not marked trusted
+# in ~/.claude.json (issue #5314). Claude Code silently ignores every
+# `permissions.allow` entry in an untrusted workspace's `.claude/settings.json`
+# and only says so on a line buried inside the session transcript ("Ignoring
+# N permissions.allow entries ... this workspace has not been trusted"),
+# which is easy to miss in a headless sweep log. This is a sibling of
+# check_global_mcp_configs (#5033) above: same warn-only, non-aborting
+# contract, same ~/.claude.json read.
+#
+# Provisioning (`loom-daemon workspace add`, and transitively `fleet
+# add-worker` / `loom migrate`, which both shell out to it) is the primary
+# fix — it seeds the trust bit at registration time. This check exists for
+# the residual cases provisioning cannot cover: a workspace spawned into
+# without ever having been registered, or a `~/.claude.json` edited/reset
+# after registration.
+#
+# Scoped to the `claude` runtime only: `hasTrustDialogAccepted` is a
+# Claude-Code-CLI-specific concept with no equivalent in the other runtime
+# adapters' (`spawn-codex.sh` / `spawn-aider.sh` / `spawn-generic.sh`) config
+# surfaces, so this check has no reason to run for them.
+check_workspace_trust() {
+    local global_config="${HOME}/.claude.json"
+    local workspace="${WORKSPACE}"
+
+    if [[ ! -f "${global_config}" ]]; then
+        log_warn "⚠ ~/.claude.json not found — workspace '${workspace}' is not marked trusted; permissions.allow entries will be silently ignored until it is registered (loom-daemon workspace add ${workspace}) or the trust dialog is accepted interactively once"
+        return 0
+    fi
+
+    # Emits "1" (trusted), "0" (present but not trusted / missing entry), or
+    # nothing on unparseable JSON / missing python3 — mirrors
+    # check_global_mcp_configs's silent-fallthrough-on-malformed-input
+    # contract so a broken ~/.claude.json never turns this into a false
+    # warning (or a crash).
+    local trusted
+    trusted=$(python3 - "${global_config}" "${workspace}" 2>/dev/null <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+    entry = cfg.get('projects', {}).get(sys.argv[2], {})
+    print('1' if entry.get('hasTrustDialogAccepted') is True else '0')
+except Exception:
+    pass
+PYEOF
+)
+
+    if [[ "${trusted}" == "0" ]]; then
+        log_warn "⚠ Workspace '${workspace}' is not trusted in ~/.claude.json (projects[\"${workspace}\"].hasTrustDialogAccepted != true) — permissions.allow entries will be silently ignored"
+        log_warn "Fix: loom-daemon workspace add ${workspace}  (or accept the trust dialog interactively once)"
+    fi
+
+    return 0  # Always succeed — this is a warning-only check
+}
+
 # Ordered explicit candidate directories for the node toolchain (#5032).
 # claude-wrapper.sh runs from launchd jobs and `ssh host 'cmd'` non-login
 # shells that never source the login profile, so /opt/homebrew/bin (Apple
@@ -2309,6 +2364,10 @@ run_preflight_checks() {
     # Warn about missing global MCP binaries from ~/.claude.json (issue #3033).
     # This is non-fatal: warnings are logged but pre-flight always succeeds.
     check_global_mcp_configs
+
+    # Warn about an untrusted workspace surfacing only inside sweep transcripts
+    # (issue #5314). Non-fatal, same as the check above.
+    check_workspace_trust
 
     log_info "All pre-flight checks passed"
     return 0

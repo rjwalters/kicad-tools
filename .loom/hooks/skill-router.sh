@@ -160,6 +160,45 @@ for (( i=0; i<ROUTE_COUNT; i++ )); do
     fi
 done
 
+# =============================================================================
+# ANTI-ROUTE SUPPRESSION (#5327)
+# =============================================================================
+# A prompt can hit a route pattern by keyword coincidence while explicitly
+# declining Loom involvement, e.g. "fix this yourself without loom" or "we
+# don't need to use loom for every tiny change" — both contain "fix" and would
+# otherwise route to /loom:doctor. Suppress the match when a decline phrase is
+# present, using literal (non-regex) substring checks against the full prompt
+# — literal so this guard, like the task-notification guard above, cannot
+# itself false-positive on ordinary human text.
+#
+# INVARIANT: every phrase below must mention "loom" explicitly. Bare
+# single-word phrases ("myself", "inline", "directly") suppress ordinary
+# prompts that never decline Loom at all — e.g. "review this PR directly" or
+# "clean up this code inline" — so they are deliberately excluded. Suppression
+# requires an explicit decline of Loom, never a stylistic adverb.
+if [[ -n "$MATCHED_AGENT" ]]; then
+    ANTI_ROUTE_PHRASES=(
+        "without loom"
+        "don't use loom"
+        "do not use loom"
+        "don't need to use loom"
+        "do not need to use loom"
+        "no need to use loom"
+        "no need for a loom"
+        "no loom"
+        "not use loom"
+        "not via loom"
+    )
+    for phrase in "${ANTI_ROUTE_PHRASES[@]}"; do
+        if [[ "$PROMPT_LOWER" == *"$phrase"* ]]; then
+            log_hook_error "Suppressed route to $MATCHED_AGENT: anti-route phrase '$phrase' matched"
+            MATCHED_AGENT=""
+            MATCHED_DESC=""
+            break
+        fi
+    done
+fi
+
 # No route matched: emit nothing at all (issue #3609). The agent table used to
 # ride along on EVERY prompt; now it only accompanies a genuine route match, so
 # non-matching turns are a silent exit — no additionalContext, no token cost.

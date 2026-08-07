@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # test-worktree-nested-symlinks.sh — Tests for nested-node_modules + linkPaths symlinking (#3528)
+# and root node_modules / .mcp.json exclude coverage (#5474)
 #
 # Verifies worktree.sh symlinks per-package node_modules and configurable
 # gitignored artifact paths from the main workspace into a fresh worktree,
@@ -18,6 +19,11 @@
 #   5. Missing jq (simulated via PATH override) skips the linkPaths step silently.
 #   6. A forced ln -s failure (dst pre-exists as a real file) warns and worktree
 #      creation still succeeds (exit 0).
+#   7. The root node_modules symlink and the .mcp.json symlink both get
+#      .git/info/exclude entries too — including the trailing-slash-only
+#      `.gitignore` (`node_modules/`) repro from #5474, where a clean
+#      `git status --porcelain` depends entirely on the exclude entry (the
+#      .gitignore rule does not match the symlink at all).
 #
 # Pattern follows test-worktree-sentinel.sh / test-worktree-concurrency.sh:
 # throw-away bare origin + clone in a mktemp dir, copy worktree.sh + lib/,
@@ -283,6 +289,77 @@ if [[ -d "$WT" ]]; then
     pass "worktree directory created despite linkPaths processing"
 else
     fail "worktree directory missing after linkPaths processing"
+fi
+cleanup_repo "$REPO"
+
+# --- Test 7: root node_modules + .mcp.json get exclude entries (#5474) ---
+# Reproduces the exact hazard from #5474: a consumer repo whose .gitignore
+# uses ONLY the trailing-slash `node_modules/` form (matches directories only,
+# not the symlink worktree.sh creates) and has no .mcp.json ignore rule at
+# all. Before the fix, _append_worktree_exclude() was defined AFTER the root
+# node_modules symlink was created (and never called for the .mcp.json
+# symlink either), so both showed up as untracked noise in `git status`.
+echo ""
+echo "Test 7: root node_modules + .mcp.json symlinks recorded in .git/info/exclude"
+REPO=$(setup_repo)
+(
+    cd "$REPO"
+    # Trailing-slash-only .gitignore — the exact repro from the issue. A
+    # `node_modules/` rule matches directories only, not the symlink created
+    # here, so without an info/exclude entry the symlink shows as untracked.
+    # Trailing-slash node_modules/ plus the sentinel entries a correctly
+    # installed Loom repo's .gitignore carries (see repo .gitignore's
+    # "loom-managed" block) — kept here so the test isolates the node_modules
+    # / .mcp.json exclude behavior under test from unrelated sentinel noise.
+    cat > .gitignore <<'GITIGNORE'
+node_modules/
+.loom-in-use
+.loom-checkpoint
+.loom-managed
+GITIGNORE
+    mkdir -p node_modules
+    echo '{"name":"root"}' > package.json
+    echo '{"mcpServers":{}}' > .mcp.json
+    git add .gitignore package.json
+    git commit -q -m "add gitignore + package.json"
+    git push -q origin main
+
+    ./.loom/scripts/worktree.sh 5474 >/tmp/wt-root.$$ 2>&1 || {
+        echo "worktree.sh failed (see /tmp/wt-root.$$)"; cat /tmp/wt-root.$$
+    }
+)
+WT="$REPO/.loom/worktrees/issue-5474"
+assert_symlink "$WT/node_modules" "root node_modules symlinked into worktree"
+assert_symlink "$WT/.mcp.json" ".mcp.json symlinked into worktree"
+
+EXCLUDE="$(worktree_exclude_path "$WT")"
+assert_grep "node_modules" "$EXCLUDE" ".git/info/exclude records root node_modules"
+assert_grep ".mcp.json" "$EXCLUDE" ".git/info/exclude records .mcp.json"
+
+# The actual acceptance criterion from the issue: a fresh worktree in a repo
+# whose .gitignore only has the trailing-slash node_modules/ form must show a
+# clean git status, with no help from .gitignore matching the symlinks.
+(
+    cd "$WT"
+    STATUS_OUT="$(git status --porcelain 2>/dev/null)"
+    if [[ -z "$STATUS_OUT" ]]; then
+        pass "git status --porcelain is clean despite trailing-slash-only .gitignore"
+    else
+        fail "git status --porcelain not clean: $STATUS_OUT"
+    fi
+)
+
+# Idempotency: re-invoke worktree.sh — must not duplicate exclude entries.
+(
+    cd "$REPO"
+    ./.loom/scripts/worktree.sh 5474 >/tmp/wt-root2.$$ 2>&1 || true
+)
+ROOT_NM_COUNT=$(grep -cxF "node_modules" "$EXCLUDE" 2>/dev/null || echo 0)
+MCP_COUNT=$(grep -cxF ".mcp.json" "$EXCLUDE" 2>/dev/null || echo 0)
+if [[ "$ROOT_NM_COUNT" == "1" && "$MCP_COUNT" == "1" ]]; then
+    pass "root node_modules/.mcp.json exclude entries appear exactly once (no duplication)"
+else
+    fail "root node_modules/.mcp.json exclude entries duplicated (node_modules=$ROOT_NM_COUNT, mcp.json=$MCP_COUNT)"
 fi
 cleanup_repo "$REPO"
 

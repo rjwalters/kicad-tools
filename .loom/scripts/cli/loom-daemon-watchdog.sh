@@ -22,7 +22,12 @@
 #         (written by the daemon, #4011) is fresh.
 #   When intent says "a daemon should be running" but reality disagrees, it
 #   REPORTS loudly (a timestamped line to the watchdog log + stderr, which
-#   launchd captures) instead of staying silent.
+#   launchd captures) instead of staying silent — and, since #5391, it also
+#   RECOVERS: a confirmed-down daemon is restarted under bounded retries with
+#   exponential backoff behind a circuit breaker, escalating to a forge issue
+#   (not just a logfile) once the attempt budget is spent. See "GENERAL-CASE
+#   BOUNDED RECOVERY + CIRCUIT BREAKER (#5391)" below for the full policy and
+#   the reasoning behind recovering rather than only reporting.
 #
 # WHY A SECOND LAUNCHD JOB, NOT A RESIDENT PROCESS
 #   The reporter must live OUTSIDE the daemon process: a dead daemon cannot
@@ -161,15 +166,85 @@
 #   addresses at the source). Same narrow construction: an operator stop, a
 #   genuine crash, or a never-installed unit cannot produce this signature.
 #
+# GENERAL-CASE BOUNDED RECOVERY + CIRCUIT BREAKER (#5391)
+#   THE DECISION: this watchdog RECOVERS. It is not a report-only detector.
+#
+#   The #4232/#4862 gates above only ever covered ONE divergence signature
+#   ("loaded + down + last exit 0"). Every other confirmed outage — a genuine
+#   crash, a booted-out job, a never-relaunched unit, a dead pid with an
+#   unreachable socket — fell through to a plain `[DIVERGENCE] … Recover with:
+#   loom-daemon-start.sh` line and stopped there. Observed on one fleet host:
+#   252 such lines between 2026-07-28 and 2026-08-05, including a single
+#   continuous 1h40m outage that ended only because a human went looking. A
+#   detector that prints the exact recovery command every five minutes and never
+#   runs it is, operationally, indistinguishable from no watchdog at all.
+#
+#   The counter-argument to auto-restarting is real: a naive reviver pointed at
+#   a genuinely broken binary becomes a restart loop that burns tokens, hides
+#   the real fault, and hammers the forge. So this is deliberately NOT a naive
+#   reviver. Four constraints bound it:
+#
+#     1. BOUNDED ATTEMPTS. At most LOOM_WATCHDOG_RECOVER_MAX_ATTEMPTS (default
+#        5) recovery attempts per outage EPISODE — not per tick. The tally is
+#        durable (<loom dir>/.watchdog-recovery-state) so it survives the fact
+#        that each tick is a brand-new process, and it is cleared the moment a
+#        tick observes a healthy daemon (that, not a timer, is what ends an
+#        episode).
+#     2. EXPONENTIAL BACKOFF. Attempt N is only made once
+#        base × 2^(N-1) seconds (base LOOM_WATCHDOG_RECOVER_BACKOFF_SECS=60,
+#        capped at LOOM_WATCHDOG_RECOVER_BACKOFF_CAP_SECS=1800) have elapsed
+#        since the last attempt. Ticks inside the backoff window still report,
+#        they just do not re-run the recovery command. The attempt is recorded
+#        BEFORE the command runs, so an overlapping tick cannot double-fire it.
+#     3. CIRCUIT BREAKER. Once the attempt budget is spent the breaker LATCHES
+#        OPEN: no further automatic attempts are made for this episode, at all,
+#        until either a tick observes a healthy daemon or an operator deletes
+#        the state file. A broken binary therefore gets at most 5 restarts,
+#        never an unbounded loop.
+#     4. NEVER REVIVES A DELIBERATE STOP. An operator-stop exit signature
+#        (launchd `last exit status` 143/130/-15/-2; systemd
+#        ExecMainCode=killed with TERM/INT) is classified as intent and is
+#        NEVER auto-recovered — it is reported, loudly, and left alone. This
+#        preserves the #4232/#4862 narrow gates' own guarantee unchanged.
+#
+#   WHAT IT RUNS: the sibling ./loom-daemon-start.sh — the exact command this
+#   watchdog has always printed — replaying ONLY the autonomy flags the last
+#   start persisted to `<state home>/.daemon.flags` (#3968), filtered through a
+#   strict allowlist so the FLAGS-OFF/opt-in contract can never widen across a
+#   recovery. The invocation is wrapped in a hard wall-clock budget
+#   (LOOM_WATCHDOG_RECOVER_TIMEOUT_SECS, default 120) so a wedged start can
+#   never wedge the tick. Override the whole command with
+#   LOOM_WATCHDOG_RECOVER_CMD; disable recovery entirely with
+#   LOOM_WATCHDOG_AUTO_RECOVER=0 (the watchdog then says so explicitly in its
+#   own DIVERGENCE text, so an operator can never mistake a report-only host
+#   for a self-healing one).
+#
+#   ESCALATION THAT DOES NOT REQUIRE TAILING A LOGFILE. When the breaker trips —
+#   or when recovery is structurally impossible on this host (disabled, no
+#   resolvable start script) and the outage has persisted for
+#   LOOM_WATCHDOG_RECOVER_MAX_ATTEMPTS consecutive ticks — the watchdog files
+#   ONE tracking issue on the forge via ./.loom/scripts/create-issue.sh (never a
+#   bare `gh issue create`), reusing the escalation channel #5343 already
+#   established in loom-daemon-start.sh. It is deduped by a persistent sentinel
+#   (<loom dir>/.watchdog-outage-escalated) so a multi-hour outage files exactly
+#   one issue, and the sentinel is cleared with the rest of the episode state as
+#   soon as a daemon is seen healthy again — so the NEXT outage escalates again.
+#   Best-effort and non-fatal: no forge auth, offline, or no create-issue.sh
+#   degrades to the log line it always was.
+#
 # EXIT CODES (a StartInterval/OnUnitActiveSec job's exit code does not affect
 # relaunch — these exist for testability and for a human running it by hand):
 #   0  no divergence — daemon healthy, OR no daemon expected AND none running
 #      (marker absent + nothing alive), OR the #4232/#4862 bounded
 #      auto-remediation (see above) successfully relaunched it via
-#      'launchctl kickstart' / 'systemctl --user start'
+#      'launchctl kickstart' / 'systemctl --user start', OR (#5391) the
+#      general-case bounded recovery successfully relaunched it via
+#      loom-daemon-start.sh
 #   1  DIVERGENCE / state mismatch reported — a daemon is expected but is not
 #      running (and either the #4232 remediation gate did not apply, or it fired
-#      but the daemon is still not confirmed running), or is running but its
+#      but the daemon is still not confirmed running, or #5391's bounded
+#      recovery ran/was deferred/was suppressed and the daemon is still down),
+#      or is running but its
 #      heartbeat is stale (possibly wedged), OR (#4398) it is running with a
 #      fresh heartbeat but its bounded IPC round-trip failed, OR (#4331) a daemon
 #      IS running while the marker is ABSENT (crash protection disarmed — a WARN
@@ -214,11 +289,36 @@
 #                                field, else OFF -- `systemctl` merely being on
 #                                PATH is not proof of a systemd-managed daemon).
 #                                0/false/no forces it off regardless of the marker.
-#   LOOM_WATCHDOG_KICKSTART_RECHECK_ATTEMPTS  #4232/#4862: how many times to re-check
-#                                for a live pid after the auto-kickstart / systemctl-start fallback
-#                                (default 3).
+#   LOOM_WATCHDOG_KICKSTART_RECHECK_ATTEMPTS  #4232/#4862/#5391: how many times to
+#                                re-check for a live pid after the auto-kickstart /
+#                                systemctl-start fallback, and after the #5391
+#                                general-case recovery (default 3).
 #   LOOM_WATCHDOG_KICKSTART_RECHECK_INTERVAL  #4232: seconds between re-checks
 #                                (default 1; may be fractional).
+#   LOOM_WATCHDOG_AUTO_RECOVER    #5391: 0/false/no disables the general-case
+#                                bounded recovery entirely — the watchdog then
+#                                becomes report-only for confirmed outages and
+#                                SAYS SO in its own DIVERGENCE text (default: on).
+#   LOOM_WATCHDOG_RECOVER_MAX_ATTEMPTS  #5391: circuit-breaker budget — recovery
+#                                attempts per outage episode before the breaker
+#                                latches open (default 5). Also the consecutive-tick
+#                                threshold at which a structurally un-recoverable
+#                                outage escalates.
+#   LOOM_WATCHDOG_RECOVER_BACKOFF_SECS  #5391: base backoff; attempt N waits
+#                                base × 2^(N-1) since the last attempt (default 60).
+#   LOOM_WATCHDOG_RECOVER_BACKOFF_CAP_SECS  #5391: backoff ceiling (default 1800).
+#   LOOM_WATCHDOG_RECOVER_TIMEOUT_SECS  #5391: hard wall-clock budget for the
+#                                recovery command itself (default 120).
+#   LOOM_WATCHDOG_RECOVER_CMD     #5391: override the recovery command (argv,
+#                                word-split). Default: the sibling
+#                                loom-daemon-start.sh + the allowlisted autonomy
+#                                flags persisted in <state home>/.daemon.flags.
+#   LOOM_WATCHDOG_RECOVERY_STATE  #5391: path to the durable episode state
+#                                (default <loom dir>/.watchdog-recovery-state).
+#   LOOM_WATCHDOG_ESCALATE        #5391: 0/false/no suppresses the forge-issue
+#                                escalation when the breaker trips (default: on).
+#   LOOM_WATCHDOG_ESCALATION_SENTINEL  #5391: dedupe sentinel for that escalation
+#                                (default <loom dir>/.watchdog-outage-escalated).
 #   LOOM_WATCHDOG_IPC_PROBE       #4398: 0/false/no disables the bounded in-band
 #                                IPC probe entirely (pid + heartbeat checks only).
 #   LOOM_WATCHDOG_STATUS_PROBE_TIMEOUT_SECS  #4398: hard external budget for the
@@ -259,6 +359,12 @@ show_help() {
 # Shared domain resolver (#4130): gui/<uid> ↦ user/<uid>, sourced verbatim so the
 # watchdog probes the daemon in the same domain the start put it in.
 _LOOM_LAUNCHD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)"
+# This script's own directory — the #5391 general-case recovery invokes its
+# SIBLING loom-daemon-start.sh from here (never a PATH lookup: the watchdog runs
+# from a launchd/systemd timer with a minimal, non-login environment, and the
+# recovery must relaunch the daemon from the SAME installed tree that provisioned
+# this watchdog, not whatever happens to be first on a stray PATH).
+_LOOM_WATCHDOG_CLI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 if [[ -r "$_LOOM_LAUNCHD_LIB_DIR/launchd-domain.sh" ]]; then
     # shellcheck source=../lib/launchd-domain.sh
     source "$_LOOM_LAUNCHD_LIB_DIR/launchd-domain.sh"
@@ -317,6 +423,24 @@ PROBE_STATE_FILE="${LOOM_WATCHDOG_IPC_PROBE_STATE:-$LOOM_DIR/.watchdog-probe-fai
 # Set true once a probe divergence has been REPORTED on this tick, so the
 # heartbeat section's otherwise-healthy exits still surface a non-zero code.
 PROBE_DIVERGED=false
+
+# ---------- general-case bounded-recovery knobs (#5391) ----------
+# See "GENERAL-CASE BOUNDED RECOVERY + CIRCUIT BREAKER (#5391)" in the header for
+# why every one of these bounds exists. Each falls back to its documented default
+# on a malformed value rather than erroring: a scheduled tick must never abort on
+# a typo'd env var and leave the host with no detector at all.
+RECOVER_ENABLED=true
+[[ "${LOOM_WATCHDOG_AUTO_RECOVER:-}" =~ ^(0|false|no)$ ]] && RECOVER_ENABLED=false
+RECOVER_MAX_ATTEMPTS="${LOOM_WATCHDOG_RECOVER_MAX_ATTEMPTS:-5}"
+[[ "$RECOVER_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || RECOVER_MAX_ATTEMPTS=5
+RECOVER_BACKOFF_SECS="${LOOM_WATCHDOG_RECOVER_BACKOFF_SECS:-60}"
+[[ "$RECOVER_BACKOFF_SECS" =~ ^[0-9]+$ ]] || RECOVER_BACKOFF_SECS=60
+RECOVER_BACKOFF_CAP_SECS="${LOOM_WATCHDOG_RECOVER_BACKOFF_CAP_SECS:-1800}"
+[[ "$RECOVER_BACKOFF_CAP_SECS" =~ ^[0-9]+$ ]] || RECOVER_BACKOFF_CAP_SECS=1800
+RECOVER_TIMEOUT_SECS="${LOOM_WATCHDOG_RECOVER_TIMEOUT_SECS:-120}"
+[[ "$RECOVER_TIMEOUT_SECS" =~ ^[0-9]+$ ]] || RECOVER_TIMEOUT_SECS=120
+RECOVERY_STATE_FILE="${LOOM_WATCHDOG_RECOVERY_STATE:-$LOOM_DIR/.watchdog-recovery-state}"
+ESCALATION_SENTINEL="${LOOM_WATCHDOG_ESCALATION_SENTINEL:-$LOOM_DIR/.watchdog-outage-escalated}"
 
 # Append a timestamped line to the watchdog log (best-effort) and echo to
 # stderr, which launchd captures to the job's StandardErrorPath. This IS the
@@ -764,6 +888,237 @@ run_ipc_probe() { # <live_pid> <proc_age_or_empty>
     fi
 }
 
+# ---------- general-case bounded recovery (#5391) ----------
+# Durable per-EPISODE state. Each watchdog tick is a brand-new process, so the
+# attempt tally, the backoff clock and the breaker latch cannot live in memory
+# the way the #4232/#4862 in-tick recheck loops do — they have to survive to the
+# next tick or the "bounded" half of "bounded recovery" is meaningless (an
+# in-memory counter reset every 300s IS an unbounded restart loop, just a slow
+# one). Format is `key=value` lines, read with the same tolerant reader the
+# marker uses: any malformed/missing field degrades to its zero value, which at
+# worst starts a fresh episode — never a crash on a scheduled tick.
+#   down_since    epoch of the first tick of this outage episode
+#   ticks         consecutive down ticks observed in this episode
+#   attempts      recovery attempts SPENT in this episode (the breaker budget)
+#   last_attempt  epoch of the most recent attempt (the backoff clock)
+recovery_state_get() { # <key>
+    local key="$1"
+    [[ -f "$RECOVERY_STATE_FILE" ]] || return 0
+    grep -E "^${key}=" "$RECOVERY_STATE_FILE" 2>/dev/null | head -n1 | cut -d= -f2-
+}
+
+recovery_state_write() { # <down_since> <ticks> <attempts> <last_attempt>
+    mkdir -p "$(dirname "$RECOVERY_STATE_FILE")" 2>/dev/null || true
+    printf 'down_since=%s\nticks=%s\nattempts=%s\nlast_attempt=%s\n' \
+        "$1" "$2" "$3" "$4" > "$RECOVERY_STATE_FILE" 2>/dev/null || true
+}
+
+# Ends the episode. Called from EVERY path that observes a healthy daemon —
+# observing health, not elapsed time, is what closes an episode, so a daemon
+# that flaps back up genuinely gets a fresh attempt budget while one that stays
+# down does not. The escalation sentinel is cleared with it so the NEXT outage
+# files its own tracking issue instead of being deduped against a resolved one.
+recovery_state_clear() {
+    rm -f "$RECOVERY_STATE_FILE" "$ESCALATION_SENTINEL" 2>/dev/null || true
+}
+
+# base × 2^(N-1), capped. Pure arithmetic, no subshell — this runs on every down
+# tick. The cap is what stops a long outage from pushing the next attempt beyond
+# any useful horizon once an operator does fix the underlying fault.
+recovery_backoff_for() { # <attempt-number, 1-based>
+    local n="$1" backoff="$RECOVER_BACKOFF_SECS" i=1
+    while (( i < n )); do
+        backoff=$(( backoff * 2 ))
+        (( backoff >= RECOVER_BACKOFF_CAP_SECS )) && { backoff="$RECOVER_BACKOFF_CAP_SECS"; break; }
+        i=$(( i + 1 ))
+    done
+    echo "$backoff"
+}
+
+# Classify the supervisor's recorded last-exit as an OPERATOR STOP (SIGTERM /
+# SIGINT) rather than a fault. Sets `operator_stop_detail` non-empty when it is.
+#
+# This is the #5391 recovery's hard "never revive a deliberate stop" guard, and
+# it is deliberately the SAME evidence the #4232/#4862 narrow gates read (the
+# supervisor's own record), just interpreted for the opposite decision: those
+# gates fire ONLY on exit 0, this one refuses to fire on a termination signal.
+# loom-daemon-stop.sh also removes the autonomy-desired marker (so a scripted
+# stop never reaches this code at all — the marker-absent path handles it), but a
+# hand-`kill`ed daemon leaves the marker behind, and reviving THAT would be
+# exactly the "watchdog fought the operator" failure mode.
+detect_operator_stop_signature() {
+    operator_stop_detail=""
+    if [[ -n "$launchd_service" ]] && command -v launchctl >/dev/null 2>&1; then
+        local last_status
+        last_status="$(launchctl print "$launchd_service" 2>/dev/null \
+            | grep -oE 'last exit (code|status)[[:space:]]*=[[:space:]]*[-0-9]+' \
+            | head -n1 | grep -oE '[-0-9]+$')"
+        case "$last_status" in
+            143|130|-15|-2)
+                operator_stop_detail="launchd records the job's last exit status as ${last_status} (SIGTERM/SIGINT — the signature of an operator-initiated stop, not a fault)"
+                ;;
+        esac
+    elif [[ -n "$systemd_service" ]] && command -v systemctl >/dev/null 2>&1; then
+        local exec_code exec_status
+        exec_code="$(systemctl --user show -p ExecMainCode --value "$systemd_service" 2>/dev/null)"
+        exec_status="$(systemctl --user show -p ExecMainStatus --value "$systemd_service" 2>/dev/null)"
+        if [[ "$exec_code" == "killed" ]]; then
+            case "$exec_status" in
+                TERM|INT|15|2)
+                    operator_stop_detail="systemd records the unit's main process as killed by SIG${exec_status} (the signature of an operator-initiated stop, not a fault)"
+                    ;;
+            esac
+        elif [[ "$exec_code" == "exited" ]]; then
+            case "$exec_status" in
+                143|130)
+                    operator_stop_detail="systemd records the unit's main process as exiting ${exec_status} (SIGTERM/SIGINT — the signature of an operator-initiated stop, not a fault)"
+                    ;;
+            esac
+        fi
+    fi
+}
+
+# Resolve the recovery argv into RECOVER_ARGV. Returns 1 (with
+# RECOVER_ARGV_DETAIL explaining why) when nothing runnable exists — the caller
+# must then report that fact explicitly, never silently do nothing.
+#
+# The default is the SIBLING loom-daemon-start.sh — literally the command every
+# previous [DIVERGENCE] line told the operator to run — invoked through `bash`
+# so a resynced install that lost its +x bit still recovers. Autonomy flags are
+# replayed from the `.daemon.flags` record loom-daemon-start.sh persists (#3968)
+# through a STRICT ALLOWLIST: the FLAGS-OFF/opt-in contract must not widen across
+# an unattended recovery, and nothing outside the five autonomy flags that file
+# can legitimately contain is ever passed through to an exec.
+resolve_recovery_argv() {
+    RECOVER_ARGV=()
+    RECOVER_ARGV_DETAIL=""
+
+    if [[ -n "${LOOM_WATCHDOG_RECOVER_CMD:-}" ]]; then
+        # shellcheck disable=SC2206  # deliberate word-splitting of the argv override
+        read -r -a RECOVER_ARGV <<< "$LOOM_WATCHDOG_RECOVER_CMD"
+        if (( ${#RECOVER_ARGV[@]} == 0 )); then
+            RECOVER_ARGV_DETAIL="LOOM_WATCHDOG_RECOVER_CMD is set but contains no command"
+            return 1
+        fi
+        RECOVER_ARGV_DETAIL="LOOM_WATCHDOG_RECOVER_CMD override: ${RECOVER_ARGV[*]}"
+        return 0
+    fi
+
+    local start_script="$_LOOM_WATCHDOG_CLI_DIR/loom-daemon-start.sh"
+    if [[ ! -r "$start_script" ]]; then
+        RECOVER_ARGV_DETAIL="no readable loom-daemon-start.sh beside this watchdog (${start_script}) — nothing to recover with"
+        return 1
+    fi
+    RECOVER_ARGV=(bash "$start_script")
+
+    local flags_file="" line
+    [[ -n "$PID_FILE" ]] && flags_file="$(dirname "$PID_FILE")/.daemon.flags"
+    if [[ -n "$flags_file" && -r "$flags_file" ]]; then
+        while IFS= read -r line; do
+            case "$line" in
+                --from-config|--work-finder|--health-gate|--no-work-finder|--no-health-gate)
+                    RECOVER_ARGV+=("$line") ;;
+                *) : ;;   # anything else is dropped, deliberately and silently
+            esac
+        done < "$flags_file"
+    fi
+    RECOVER_ARGV_DETAIL="${RECOVER_ARGV[*]}"
+    return 0
+}
+
+# Re-check liveness after a recovery attempt, reusing the SAME out-of-band probe
+# the rest of this script uses plus one authoritative socket round-trip — so
+# "recovered" means exactly what "healthy" means everywhere else in this file,
+# never a weaker ad-hoc test. Returns 0 when a daemon is confirmed back.
+# detect_daemon_liveness() clobbers liveness_detail, so the caller saves and
+# restores it for the still-down report.
+recovery_recheck_alive() {
+    local attempts="${LOOM_WATCHDOG_KICKSTART_RECHECK_ATTEMPTS:-3}"
+    local interval="${LOOM_WATCHDOG_KICKSTART_RECHECK_INTERVAL:-1}"
+    [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=3
+    local i=0
+    while (( i < attempts )); do
+        detect_daemon_liveness
+        [[ "$daemon_alive" == "true" ]] && return 0
+        sleep "$interval" 2>/dev/null || sleep 1
+        i=$(( i + 1 ))
+    done
+    # The out-of-band signals may legitimately lag a fresh relaunch (a pid file
+    # not yet rewritten, a supervisor still settling). Ask the socket last: it is
+    # the authoritative signal per #5118, and a daemon that ANSWERS is up no
+    # matter what the pid file says.
+    probe_socket_liveness
+    if [[ "$socket_verdict" == "answered" ]]; then
+        daemon_alive=true
+        liveness_detail="a daemon ANSWERS on ${SOCKET_PATH} after recovery (${socket_detail})"
+        return 0
+    fi
+    return 1
+}
+
+# ---------- out-of-band escalation when recovery cannot fix it (#5391) ----------
+# The whole point of this issue: an operator must not have to tail
+# daemon-watchdog.log to learn that autonomy died. Reuses the escalation channel
+# #5343 already established in loom-daemon-start.sh (create-issue.sh, never a
+# bare `gh issue create` — see CLAUDE.md), deduped by a persistent sentinel so a
+# multi-hour outage files exactly ONE issue rather than one per 300s tick.
+# Best-effort and NON-FATAL throughout: no create-issue.sh, no forge auth, or an
+# offline host degrades back to the log line it always was.
+escalate_daemon_outage() { # <reason-summary>
+    local reason="$1"
+    [[ "${LOOM_WATCHDOG_ESCALATE:-}" =~ ^(0|false|no)$ ]] && return 1
+    [[ -f "$ESCALATION_SENTINEL" ]] && return 1
+
+    local repo_root issue_script
+    repo_root="$(marker_get repo_root)"
+    issue_script=""
+    if [[ -n "$repo_root" && -x "$repo_root/.loom/scripts/create-issue.sh" ]]; then
+        issue_script="$repo_root/.loom/scripts/create-issue.sh"
+    elif [[ -n "$repo_root" && -x "$repo_root/defaults/scripts/create-issue.sh" ]]; then
+        issue_script="$repo_root/defaults/scripts/create-issue.sh"
+    elif [[ -x "$_LOOM_WATCHDOG_CLI_DIR/../create-issue.sh" ]]; then
+        issue_script="$_LOOM_WATCHDOG_CLI_DIR/../create-issue.sh"
+    fi
+    [[ -n "$issue_script" ]] || return 1
+
+    local hostname_str body
+    hostname_str="$(hostname 2>/dev/null || echo unknown-host)"
+    body="$(cat <<EOF
+\`loom-daemon-watchdog.sh\` has been unable to restore the loom-daemon on host
+\`$hostname_str\`. Autonomous dispatch is DOWN and the watchdog bounded-recovery loop
+has stopped trying — this issue is the escalation of last resort (#5391), filed so the
+outage does not sit unnoticed in a logfile.
+
+- **Host**: \`$hostname_str\`
+- **Socket**: \`$SOCKET_PATH\`
+- **Intent marker**: \`$MARKER\` (present — a daemon IS expected here)
+- **Observed**: $liveness_detail
+- **Why recovery stopped**: $reason
+- **Recovery command**: \`${RECOVER_ARGV_DETAIL:-<none resolvable>}\`
+- **Watchdog log**: \`$WATCHDOG_LOG\`
+- **Episode state**: \`$RECOVERY_STATE_FILE\`
+
+**To recover by hand**: run \`./.loom/scripts/cli/loom-daemon-start.sh [flags]\` on that
+host and inspect \`loom-daemon status\`. The watchdog resumes automatic recovery (with a
+fresh attempt budget) as soon as any tick observes a healthy daemon; deleting
+\`$RECOVERY_STATE_FILE\` resets the circuit breaker immediately.
+
+Filed automatically by the loom-daemon-watchdog.sh outage escalation (#5391). Deduped by a
+sentinel at \`$ESCALATION_SENTINEL\`, which is cleared automatically once the daemon is
+healthy again.
+EOF
+)"
+    if "$issue_script" \
+        --title "loom-daemon is DOWN on $hostname_str and watchdog recovery is exhausted" \
+        --body "$body" \
+        --label "loom:triage" >/dev/null 2>&1; then
+        mkdir -p "$(dirname "$ESCALATION_SENTINEL")" 2>/dev/null || true
+        date -u '+%Y-%m-%dT%H:%M:%SZ' > "$ESCALATION_SENTINEL" 2>/dev/null || true
+        return 0
+    fi
+    return 1
+}
+
 # ---------- 1. intent: is a daemon expected at all? ----------
 if [[ ! -f "$MARKER" ]]; then
     # A missing marker is SUPPOSED to mean "deliberately stopped (or never
@@ -819,6 +1174,11 @@ if [[ ! -f "$MARKER" ]]; then
     # Nothing alive ⇒ the load-bearing quiet case: a deliberate stop (which also
     # boots out the daemon job, so nothing is found here) must never page.
     # Preserve the silent OK exactly as before.
+    # #5391: intent is gone, so any outage episode recorded against the previous
+    # intent is over — clear it (and its escalation sentinel) so a future
+    # start→crash gets a full attempt budget rather than inheriting a tripped
+    # breaker from before the operator's deliberate stop.
+    recovery_state_clear
     report OK "no autonomy-desired marker at $MARKER — no daemon expected; nothing to check."
     exit 0
 fi
@@ -993,6 +1353,7 @@ if [[ "$daemon_alive" != "true" ]]; then
             done
             if [[ -n "$recheck_pid" ]]; then
                 report OK "auto-remediation succeeded: 'launchctl kickstart' relaunched ${launchd_service} (new pid ${recheck_pid})."
+                recovery_state_clear   # #5391: a live daemon ends the episode
                 exit 0
             fi
             report DIVERGENCE \
@@ -1035,6 +1396,7 @@ if [[ "$daemon_alive" != "true" ]]; then
             done
             if [[ -n "$recheck_pid" ]]; then
                 report OK "auto-remediation succeeded: 'systemctl --user start' relaunched ${systemd_service} (new pid ${recheck_pid})."
+                recovery_state_clear   # #5391: a live daemon ends the episode
                 exit 0
             fi
             report DIVERGENCE \
@@ -1043,10 +1405,125 @@ if [[ "$daemon_alive" != "true" ]]; then
         fi
     fi
 
+    # ---------- 2d. general-case bounded recovery + circuit breaker (#5391) ----------
+    # Reaching here means: a daemon is EXPECTED, it is CONFIRMED down (the
+    # out-of-band signal says so and, where a probe was possible, the socket
+    # agreed — the "I cannot tell" shapes already exited 3 above), and neither
+    # narrow #4232/#4862 gate applied. Until #5391 this was a dead end: report
+    # the recovery command, never run it. On one fleet host that produced 252
+    # identical [DIVERGENCE] lines in eight days, one of them spanning a
+    # continuous 1h40m outage. Now it recovers — bounded, backed off, and behind
+    # a circuit breaker (see the header for the full policy and its rationale).
+    now_epoch="$(date -u +%s)"
+    ep_down_since="$(recovery_state_get down_since)"
+    [[ "$ep_down_since" =~ ^[0-9]+$ ]] || ep_down_since="$now_epoch"
+    ep_ticks="$(recovery_state_get ticks)";             [[ "$ep_ticks" =~ ^[0-9]+$ ]] || ep_ticks=0
+    ep_attempts="$(recovery_state_get attempts)";       [[ "$ep_attempts" =~ ^[0-9]+$ ]] || ep_attempts=0
+    ep_last_attempt="$(recovery_state_get last_attempt)"; [[ "$ep_last_attempt" =~ ^[0-9]+$ ]] || ep_last_attempt=0
+    ep_ticks=$(( ep_ticks + 1 ))
+    outage_secs=$(( now_epoch - ep_down_since ))
+    (( outage_secs < 0 )) && outage_secs=0
+
+    # recover_skip_reason non-empty ⇒ no attempt on THIS tick.
+    # recover_possible=false      ⇒ no attempt can EVER be made this episode, so
+    #                               the outage escalates on tick count alone
+    #                               rather than waiting for a budget that will
+    #                               never be spent.
+    recover_skip_reason=""
+    recover_possible=true
+    RECOVER_ARGV_DETAIL=""
+    detect_operator_stop_signature
+    if [[ -n "$operator_stop_detail" ]]; then
+        recover_possible=false
+        recover_skip_reason="NO auto-recovery was attempted: ${operator_stop_detail}. Reviving a deliberate stop is the one action this watchdog must never take (#4232/#4862/#5391). Restart it explicitly with ./.loom/scripts/cli/loom-daemon-start.sh, or clear the intent with ./.loom/scripts/cli/loom-daemon-stop.sh so this stops reporting."
+    elif [[ "$RECOVER_ENABLED" != "true" ]]; then
+        recover_possible=false
+        recover_skip_reason="NO auto-recovery was attempted: it is DISABLED on this host (LOOM_WATCHDOG_AUTO_RECOVER=0). This watchdog is REPORT-ONLY for this outage — an installed watchdog job here means DETECTION, not self-healing, and nothing will bring the daemon back but you."
+    elif ! resolve_recovery_argv; then
+        recover_possible=false
+        recover_skip_reason="NO auto-recovery was attempted: ${RECOVER_ARGV_DETAIL}. This watchdog is therefore REPORT-ONLY on this host — an installed watchdog job here means DETECTION, not self-healing — until that is fixed."
+    elif (( ep_attempts >= RECOVER_MAX_ATTEMPTS )); then
+        recover_skip_reason="CIRCUIT BREAKER OPEN: ${ep_attempts} bounded recovery attempts (budget ${RECOVER_MAX_ATTEMPTS}) have already been spent on this outage and none restored the daemon. NO further automatic attempts will be made until a tick observes a healthy daemon or ${RECOVERY_STATE_FILE} is deleted — deliberately, so a genuinely broken binary is restarted a bounded number of times instead of forever."
+    else
+        recover_next_backoff="$(recovery_backoff_for $(( ep_attempts + 1 )))"
+        recover_since_last=$(( now_epoch - ep_last_attempt ))
+        if (( ep_attempts > 0 && recover_since_last < recover_next_backoff )); then
+            # A deferral, NOT a permanent skip: recover_possible stays true, so
+            # this tick does not count toward the un-recoverable escalation.
+            recover_skip_reason="recovery attempt $(( ep_attempts + 1 )) of ${RECOVER_MAX_ATTEMPTS} is BACKED OFF for another $(( recover_next_backoff - recover_since_last ))s (exponential backoff: ${recover_next_backoff}s after ${ep_attempts} failed attempt(s)) — reporting only on this tick."
+        fi
+    fi
+
+    if [[ -z "$recover_skip_reason" ]]; then
+        ep_attempts=$(( ep_attempts + 1 ))
+        ep_last_attempt="$now_epoch"
+        # Record the attempt BEFORE running it. The command may take up to
+        # RECOVER_TIMEOUT_SECS, and an overlapping tick (a long recovery vs. a
+        # short StartInterval) must see the spent attempt and the started
+        # backoff clock rather than firing a second concurrent start.
+        recovery_state_write "$ep_down_since" "$ep_ticks" "$ep_attempts" "$ep_last_attempt"
+        report DIVERGENCE \
+            "A daemon is EXPECTED (autonomy-desired marker present, started $(marker_get started_at)) but is NOT running: ${liveness_detail}. Autonomous dispatch has stopped (down ${outage_secs}s across ${ep_ticks} consecutive watchdog ticks). AUTO-RECOVERING now — bounded attempt ${ep_attempts} of ${RECOVER_MAX_ATTEMPTS} (#5391), running: ${RECOVER_ARGV_DETAIL}"
+        recover_saved_liveness_detail="$liveness_detail"
+        if command -v bounded_run >/dev/null 2>&1; then
+            bounded_run "$RECOVER_TIMEOUT_SECS" "${RECOVER_ARGV[@]}" >/dev/null 2>&1
+            recover_rc=$?
+        else
+            # No shared lib/bounded-run.sh: still recover, just unbounded. A
+            # missing optional helper must never turn recovery off (the same
+            # graceful-degradation rule the IPC probe follows).
+            "${RECOVER_ARGV[@]}" >/dev/null 2>&1
+            recover_rc=$?
+        fi
+        if recovery_recheck_alive; then
+            report OK \
+                "auto-recovery SUCCEEDED on attempt ${ep_attempts} of ${RECOVER_MAX_ATTEMPTS} after a ${outage_secs}s outage: ${liveness_detail}. Recovery command exited ${recover_rc} (#5391)."
+            recovery_state_clear
+            exit 0
+        fi
+        liveness_detail="$recover_saved_liveness_detail"
+        recover_skip_reason="Bounded recovery attempt ${ep_attempts} of ${RECOVER_MAX_ATTEMPTS} RAN ('${RECOVER_ARGV_DETAIL}', exit ${recover_rc}) and the daemon is STILL not confirmed running."
+        if (( ep_attempts < RECOVER_MAX_ATTEMPTS )); then
+            recover_skip_reason="${recover_skip_reason} The next attempt is backed off by $(recovery_backoff_for $(( ep_attempts + 1 )))s."
+        else
+            recover_skip_reason="${recover_skip_reason} The CIRCUIT BREAKER is now OPEN: the attempt budget is spent, so no further automatic attempts will be made until a tick observes a healthy daemon or ${RECOVERY_STATE_FILE} is deleted."
+        fi
+    fi
+
+    # ---------- out-of-band escalation (#5391) ----------
+    # Escalate exactly once per episode, either when the breaker has tripped or
+    # when no attempt is even possible on this host and the outage has persisted
+    # for the same number of consecutive ticks. Everything below is best-effort:
+    # a failed escalation degrades to the log line, never to a failed tick.
+    escalate_reason=""
+    if (( ep_attempts >= RECOVER_MAX_ATTEMPTS )); then
+        escalate_reason="the circuit breaker is OPEN — ${ep_attempts} bounded recovery attempts were spent and the daemon is still down"
+    elif [[ "$recover_possible" != "true" ]] && (( ep_ticks >= RECOVER_MAX_ATTEMPTS )); then
+        escalate_reason="automatic recovery is not possible on this host, and the outage has persisted for ${ep_ticks} consecutive watchdog ticks (${outage_secs}s)"
+    fi
+    escalation_note=""
+    if [[ -n "$escalate_reason" ]]; then
+        if [[ -f "$ESCALATION_SENTINEL" ]]; then
+            escalation_note=" This outage has ALREADY been escalated out-of-band (sentinel ${ESCALATION_SENTINEL})."
+        elif escalate_daemon_outage "$escalate_reason"; then
+            escalation_note=" ESCALATED out-of-band: filed a forge tracking issue so this outage is not confined to a logfile nobody tails (#5391)."
+        else
+            escalation_note=" Out-of-band escalation was NOT possible (disabled, no create-issue.sh reachable, or the forge call failed), so THIS LOGFILE IS THE ONLY SIGNAL for this outage — ${WATCHDOG_LOG}."
+        fi
+    fi
+
+    recovery_state_write "$ep_down_since" "$ep_ticks" "$ep_attempts" "$ep_last_attempt"
     report DIVERGENCE \
-        "A daemon is EXPECTED (autonomy-desired marker present, started $(marker_get started_at)) but is NOT running: ${liveness_detail}. Autonomous dispatch has stopped. Recover with: ./.loom/scripts/cli/loom-daemon-start.sh [flags]  (or 'loom-daemon status' to inspect)."
+        "A daemon is EXPECTED (autonomy-desired marker present, started $(marker_get started_at)) but is NOT running: ${liveness_detail}. Autonomous dispatch has stopped (down ${outage_secs}s across ${ep_ticks} consecutive watchdog ticks). ${recover_skip_reason}${escalation_note} Recover with: ./.loom/scripts/cli/loom-daemon-start.sh [flags]  (or 'loom-daemon status' to inspect)."
     exit 1
 fi
+
+# #5391: reaching here means a daemon is CONFIRMED alive. Observing health — not
+# elapsed time, not a tick count — is what ends an outage episode, so clear the
+# attempt tally, the backoff clock and the escalation sentinel here. A daemon
+# that flaps back up therefore gets a full fresh attempt budget for its next
+# outage, while one that stays down never does.
+recovery_state_clear
 
 # ---------- 3. reality: does the daemon still ANSWER over its socket? ----------
 # The two checks above are both out-of-band; this is the only in-band one (#4398).

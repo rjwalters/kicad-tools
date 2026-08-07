@@ -23,6 +23,13 @@
 #   - --quarantine atomically stashes NEW dirt (tracked + untracked) to a rescue
 #     ref, leaves main byte-identical to the baseline, preserves the full diff in
 #     the stash, spares baselined dirt, and exits 4 (#4380)
+#   - --quarantine re-derives the offending paths immediately before the stash
+#     push, so dirt resolved concurrently produces a `no_op` result and NO empty
+#     stash entry; a push that creates no new entry is never reported as a
+#     successful quarantine naming the previous entry's sha (#5185)
+#   - --list-quarantined reports outstanding Loom-produced stash entries
+#     (human + --json), covers every Loom producer, ignores human stashes, flags
+#     empty entries, and always exits 0 (#5185)
 #
 # Usage:
 #   ./.loom/scripts/tests/test-check-main-clean.sh
@@ -511,6 +518,253 @@ if [[ "$RC1" -eq 2 && "$RC2" -eq 2 ]]; then
 else
     fail "expected 2/2, got label=$RC1 log=$RC2"
 fi
+
+# ========================================================================
+# Quarantine race: re-derive offending paths before the push (#5185)
+# ========================================================================
+# The offending path set used to be computed from ONE early `git status`
+# snapshot and then handed to `git stash push` much later. On a busy host the
+# dirt could be resolved in between (a concurrent sweep, the builder's own
+# commit, a cleanup pass) — and the stale pathspec then produced either an
+# EMPTY stash entry (pure noise on a stash stack shared by every worktree,
+# burying the real entries) or a no-op push that the success path still
+# reported as "quarantined", naming whatever sha happened to be on top of the
+# stack. Both are reproduced here with a `git` shim that injects the race
+# deterministically.
+
+# Write a `git` shim into $1/git that counts `status --porcelain` invocations
+# in $1/count and runs $1/inject.sh just before the Nth one ($2), then execs
+# the real git. Lets a test resolve the contamination in exactly the window
+# between detection and the stash push.
+make_git_shim() {
+    local bindir="$1" nth="$2" real
+    real=$(command -v git)
+    mkdir -p "$bindir"
+    echo 0 > "$bindir/count"
+    cat > "$bindir/git" <<SHIM
+#!/usr/bin/env bash
+REAL="$real"
+BINDIR="$bindir"
+NTH="$nth"
+for a in "\$@"; do
+    if [[ "\$a" == "--porcelain" ]]; then
+        n=\$(( \$(cat "\$BINDIR/count") + 1 ))
+        echo "\$n" > "\$BINDIR/count"
+        if [[ "\$n" -eq "\$NTH" && -x "\$BINDIR/inject.sh" ]]; then
+            "\$BINDIR/inject.sh"
+        fi
+        break
+    fi
+done
+exec "\$REAL" "\$@"
+SHIM
+    chmod +x "$bindir/git"
+}
+
+echo "Test 27: dirt resolved between detection and push -> no_op, no empty stash"
+REPO=$(make_repo_with_source)
+SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-race.txt"
+( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 )
+printf 'original tracked content\ncontaminating edit\n' > "$REPO/tracked_source.py"
+
+SHIMDIR=$(mktemp -d)
+make_git_shim "$SHIMDIR" 2          # 1st --porcelain = detection, 2nd = re-derivation
+cat > "$SHIMDIR/inject.sh" <<INJECT
+#!/usr/bin/env bash
+# The race: something else restores the contaminated file just before the push.
+printf 'original tracked content\n' > "$REPO/tracked_source.py"
+INJECT
+chmod +x "$SHIMDIR/inject.sh"
+
+out=$( cd "$REPO" && PATH="$SHIMDIR:$PATH" "$SCRIPT" --baseline "$SNAP" --quarantine \
+        --label "run=RACE issue=5185" 2>&1 ); RC=$?
+STASH_LIST=$(git -C "$REPO" stash list)
+if [[ "$RC" -eq 0 ]] \
+   && [[ "$out" == *'"result":"no_op"'* ]] \
+   && [[ "$out" != *'"result":"quarantined"'* ]] \
+   && [[ -z "$STASH_LIST" ]]; then
+    pass "no stash created and a distinct no_op event logged when the dirt vanishes"
+else
+    fail "expected rc=0 + no_op event + empty stash list, got rc=$RC; stash='$STASH_LIST'; out=$out"
+fi
+rm -rf "$SHIMDIR"
+rm -rf "$REPO"
+
+echo "Test 28: partial race quarantines only the paths still dirty at push time"
+REPO=$(make_repo_with_source)
+SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-race2.txt"
+( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 )
+printf 'original tracked content\ncontaminating edit\n' > "$REPO/tracked_source.py"
+printf 'def leaked():\n    return 42\n' > "$REPO/leaked_module.py"
+
+SHIMDIR=$(mktemp -d)
+make_git_shim "$SHIMDIR" 2
+cat > "$SHIMDIR/inject.sh" <<INJECT
+#!/usr/bin/env bash
+# Only ONE of the two offending paths is resolved concurrently.
+printf 'original tracked content\n' > "$REPO/tracked_source.py"
+INJECT
+chmod +x "$SHIMDIR/inject.sh"
+
+out=$( cd "$REPO" && PATH="$SHIMDIR:$PATH" "$SCRIPT" --baseline "$SNAP" --quarantine \
+        --label "run=RACE2 issue=5185" 2>&1 ); RC=$?
+json_line=$(printf '%s\n' "$out" | grep '"event":"main-clean.quarantine"' | head -1)
+STASH_FILES=$(git -C "$REPO" stash show --name-only --include-untracked 'stash@{0}' 2>/dev/null || true)
+if [[ "$RC" -eq 4 ]] \
+   && [[ "$json_line" == *'"result":"quarantined"'* ]] \
+   && [[ "$json_line" == *"leaked_module.py"* ]] \
+   && [[ "$json_line" != *"tracked_source.py"* ]] \
+   && [[ "$STASH_FILES" == *"leaked_module.py"* ]]; then
+    pass "stale path dropped from the pathspec; only the live contamination is rescued"
+else
+    fail "expected exit 4 naming only leaked_module.py, got rc=$RC; line=$json_line; files=$STASH_FILES"
+fi
+rm -rf "$SHIMDIR"
+rm -rf "$REPO"
+
+echo "Test 29: a push that creates no new entry is not reported as a quarantine"
+REPO=$(make_repo_with_source)
+# Pre-existing UNRELATED stash entry: the pre-#5185 code read refs/stash after
+# the push and would have reported THIS sha as its rescue ref.
+printf 'someone elses wip\n' > "$REPO/other_wip.txt"
+git -C "$REPO" stash push --include-untracked -q -m "unrelated human wip" -- other_wip.txt
+PRE_STASH_SHA=$(git -C "$REPO" rev-parse refs/stash)
+
+SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-race3.txt"
+( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 )
+printf 'original tracked content\ncontaminating edit\n' > "$REPO/tracked_source.py"
+
+# Shim whose `stash push` silently resolves the dirt WITHOUT creating an entry
+# (git's own "No local changes to save" no-op shape: exit 0, nothing pushed).
+SHIMDIR=$(mktemp -d)
+REAL_GIT=$(command -v git)
+cat > "$SHIMDIR/git" <<SHIM
+#!/usr/bin/env bash
+REAL="$REAL_GIT"
+for a in "\$@"; do
+    if [[ "\$a" == "push" ]]; then
+        for b in "\$@"; do
+            if [[ "\$b" == "stash" ]]; then
+                printf 'original tracked content\n' > "$REPO/tracked_source.py"
+                echo "No local changes to save"
+                exit 0
+            fi
+        done
+        break
+    fi
+done
+exec "\$REAL" "\$@"
+SHIM
+chmod +x "$SHIMDIR/git"
+
+out=$( cd "$REPO" && PATH="$SHIMDIR:$PATH" "$SCRIPT" --baseline "$SNAP" --quarantine \
+        --label "run=RACE3 issue=5185" 2>&1 ); RC=$?
+json_line=$(printf '%s\n' "$out" | grep '"event":"main-clean.quarantine"' | head -1)
+if [[ "$RC" -eq 0 ]] \
+   && [[ "$json_line" == *'"result":"no_op"'* ]] \
+   && [[ "$json_line" != *"$PRE_STASH_SHA"* ]] \
+   && [[ "$(git -C "$REPO" rev-parse refs/stash)" == "$PRE_STASH_SHA" ]]; then
+    pass "no_op result, and the unrelated pre-existing stash is not claimed as the rescue ref"
+else
+    fail "expected rc=0 + no_op not naming $PRE_STASH_SHA, got rc=$RC; line=$json_line"
+fi
+rm -rf "$SHIMDIR"
+rm -rf "$REPO"
+
+# ========================================================================
+# --list-quarantined: operator-facing surface for outstanding stashes (#5185)
+# ========================================================================
+# A quarantine was only ever recorded in the structured log, so rescue stashes
+# accumulated unreconciled (29 on one host, oldest 7 days) and were noticed by
+# accident. This mode is the surface that makes them discoverable.
+
+echo "Test 30: --list-quarantined reports nothing when the stack is clean"
+REPO=$(make_repo_with_source)
+out=$( cd "$REPO" && "$SCRIPT" --list-quarantined 2>&1 ); RC=$?
+outj=$( cd "$REPO" && "$SCRIPT" --list-quarantined --json 2>&1 ); RCJ=$?
+if [[ "$RC" -eq 0 && "$RCJ" -eq 0 ]] \
+   && [[ "$out" == *"no outstanding"* ]] \
+   && [[ "$outj" == *'"count":0'* ]] \
+   && [[ "$outj" == *'"stashes":[]'* ]]; then
+    pass "exit 0 with an explicit empty report (human + json)"
+else
+    fail "expected empty reports, got rc=$RC/$RCJ; out=$out; json=$outj"
+fi
+
+echo "Test 31: --list-quarantined surfaces a quarantine stash with its attribution"
+SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-list.txt"
+( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 )
+printf 'def leaked():\n    return 42\n' > "$REPO/leaked_module.py"
+( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" --quarantine \
+    --label "run=sweep-LISTTEST issue=5185" >/dev/null 2>&1 ); RC=$?
+if [[ "$RC" -ne 4 ]]; then fail "Test 31 setup: expected exit 4 from --quarantine, got $RC"; fi
+QSHA=$(git -C "$REPO" rev-parse refs/stash)
+out=$( cd "$REPO" && "$SCRIPT" --list-quarantined 2>&1 ); RC=$?
+outj=$( cd "$REPO" && "$SCRIPT" --list-quarantined --json 2>&1 )
+if [[ "$RC" -eq 0 ]] \
+   && [[ "$out" == *"1 outstanding"* ]] \
+   && [[ "$out" == *"${QSHA:0:12}"* ]] \
+   && [[ "$outj" == *'"count":1'* ]] \
+   && [[ "$outj" == *'"producer":"quarantine"'* ]] \
+   && [[ "$outj" == *'"issue":"5185"'* ]] \
+   && [[ "$outj" == *'"run":"sweep-LISTTEST"'* ]] \
+   && [[ "$outj" == *'"empty":false'* ]]; then
+    pass "outstanding quarantine listed with commit, issue and run attribution"
+else
+    fail "expected the quarantine listed with attribution, got rc=$RC; out=$out; json=$outj"
+fi
+
+echo "Test 32: --list-quarantined covers other Loom producers, ignores human stashes"
+printf 'drift\n' > "$REPO/drift.txt"
+git -C "$REPO" stash push --include-untracked -q -m "auditor-tmp-drift-stash-1785796450" -- drift.txt
+printf 'my own wip\n' > "$REPO/human_wip.txt"
+git -C "$REPO" stash push --include-untracked -q -m "human scratch, not Loom's" -- human_wip.txt
+outj=$( cd "$REPO" && "$SCRIPT" --list-quarantined --json 2>&1 ); RC=$?
+if [[ "$RC" -eq 0 ]] \
+   && [[ "$outj" == *'"count":2'* ]] \
+   && [[ "$outj" == *'"producer":"auditor-drift"'* ]] \
+   && [[ "$outj" != *"human scratch"* ]]; then
+    pass "auditor drift stash included, human stash excluded"
+else
+    fail "expected count 2 including auditor-drift and excluding the human stash, got rc=$RC; json=$outj"
+fi
+rm -rf "$REPO"
+
+echo "Test 33: --list-quarantined flags an EMPTY entry"
+REPO=$(make_repo_with_source)
+# Reproduce the entries observed in the wild (three of five quarantine stashes
+# in one consumer repo held nothing at all). Built with plumbing because modern
+# git refuses to create an empty stash — the same stash-commit shape (working
+# tree + index parents, tree identical to HEAD's) with nothing recorded.
+EMPTY_MSG="On master: loom-quarantine: run=EMPTY issue=1"
+HEAD_SHA=$(git -C "$REPO" rev-parse HEAD)
+HEAD_TREE=$(git -C "$REPO" rev-parse 'HEAD^{tree}')
+INDEX_COMMIT=$(git -C "$REPO" commit-tree -p "$HEAD_SHA" -m "index on master" "$HEAD_TREE")
+EMPTY_STASH=$(git -C "$REPO" commit-tree -p "$HEAD_SHA" -p "$INDEX_COMMIT" -m "$EMPTY_MSG" "$HEAD_TREE")
+git -C "$REPO" update-ref --create-reflog refs/stash "$EMPTY_STASH" -m "$EMPTY_MSG"
+out=$( cd "$REPO" && "$SCRIPT" --list-quarantined 2>&1 ); RC=$?
+outj=$( cd "$REPO" && "$SCRIPT" --list-quarantined --json 2>&1 )
+if [[ "$RC" -eq 0 ]] \
+   && [[ "$out" == *"EMPTY"* ]] \
+   && [[ "$outj" == *'"empty":true'* ]] \
+   && [[ "$outj" == *'"empty_count":1'* ]]; then
+    pass "an entry that captured nothing is flagged EMPTY in both outputs"
+else
+    fail "expected an EMPTY flag, got rc=$RC; out=$out; json=$outj"
+fi
+rm -rf "$REPO"
+
+echo "Test 34: --list-quarantined rejects being combined with a check mode"
+REPO=$(make_repo_with_source)
+( cd "$REPO" && "$SCRIPT" --list-quarantined --quarantine >/dev/null 2>&1 ); RC1=$?
+( cd "$REPO" && "$SCRIPT" --list-quarantined --baseline "$REPO/nope.txt" >/dev/null 2>&1 ); RC2=$?
+( cd "$REPO" && "$SCRIPT" --json >/dev/null 2>&1 ); RC3=$?
+if [[ "$RC1" -eq 2 && "$RC2" -eq 2 && "$RC3" -eq 2 ]]; then
+    pass "exit 2 for --list-quarantined + check mode, and for a bare --json"
+else
+    fail "expected 2/2/2, got quarantine=$RC1 baseline=$RC2 json=$RC3"
+fi
+rm -rf "$REPO"
 
 # -------- Summary --------
 echo ""

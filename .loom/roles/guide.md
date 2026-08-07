@@ -369,19 +369,36 @@ delegates to it) detects orphaned work by cross-referencing GitHub
 `loom:building` labels against an authoritative liveness source (the
 `loom-daemon` registry / `.loom/locks/issue-<N>/`).
 
-**Recovery cases and actions:**
+**Recovery cases and actions** — these are the reason codes the native
+implementation actually emits (`untracked_building` orphans; the older
+`blocked_pr` / `stale_pr` rows described intended behavior that was never
+implemented and are gone):
 
 | Case | Condition | Auto-Recovery Action |
 |------|-----------|---------------------|
-| `no_pr` | `loom:building` but no worktree and no PR (>2h) | Reset to `loom:issue` |
-| `blocked_pr` | Has PR with `loom:changes-requested` label | Transition to `loom:blocked` |
-| `stale_pr` | Has PR but no activity for >24h | Flag only (needs manual review) |
+| `no_spawn_loop_entry` | `loom:building`, not live in any liveness source, no valid claim lock, no sweep journal on this host, label older than the grace period (`LOOM_LABEL_GRACE_PERIOD`, default 10m) | Reset to `loom:issue` |
+| `journal_pid_dead` | Same, but a sweep-journal entry exists and its recorded PID is dead | Reset to `loom:issue` |
+| `no_journal_record_stale` | Same, but the journal exists on this host and has **no** record for the issue — needs the longer stale-building threshold (`LOOM_STALE_BUILDING_HOURS`, default 4h) | Reset to `loom:issue` |
+
+Each reset also does a best-effort stale-worktree cleanup and posts a dedup'd
+`## Orphan Recovery` comment — a reset with **no** comment did not come from
+`loom-recover-orphans`.
 
 > **Fail-safe (#3651):** when no authoritative liveness source is available (no
 > reachable daemon registry and no `.loom/locks/`), `loom-recover-orphans` treats
 > every `loom:building` claim as ALIVE and recovers nothing — it never tears down
 > a live sweep. Use the manual verification below when you need to check a
 > specific issue by hand.
+
+> **Open linked PR blocks every reset (#5511):** before any of the three cases
+> above resets a label, the forge's closes-graph is queried for an **open** PR
+> linked to the issue (`Closes #N`, however the branch is named). A verified open
+> PR — or a probe that could not answer at all (forge outage, wedged `gh`) —
+> blocks the reset; only a *verified* "no open linked PR" lets it proceed. A
+> MERGED linked PR does not count as open. This closed the #5501 hole, where the
+> reset path consulted only registry liveness, the claim lock, and the journal —
+> never the forge — and so reset an issue whose `Closes` PR was open and actively
+> being treated.
 
 **Why proactive recovery matters:**
 
@@ -1005,6 +1022,43 @@ The Guide maintains three documents at the repository root:
 
 This phase supplements the existing `discover_project_goals()` function, which continues to read README.md for prioritization context.
 
+### Where This Phase Writes (a managed worktree, never the main checkout)
+
+**This is the only role phase that writes repository files, and it cannot write
+them where it starts.** The daemon's role runner launches every scheduled role
+with its working directory set to the **workspace root** — the main checkout
+(`loom-daemon/src/role_runner.rs` → `cmd.current_dir(workspace_root)`). Loom's
+worktree-isolation guards deny writes there:
+
+| Guard | What it denies |
+|-------|----------------|
+| `guard-worktree-paths.sh` | any `Edit`/`Write` whose path resolves into the main checkout while at least one managed worktree exists (the normal state on an active host) |
+| `guard-destructive-generic.sh` | the same target reached through Bash (`>`, `>>`, `tee`, `sed -i`, `cp`, `mv`) — retrying via Bash is **not** a workaround |
+
+So `Edit`-ing `WORK_LOG.md` in place is structurally impossible under
+role-runner dispatch, no matter how this prompt is worded. That was a silent,
+second root cause of the phase's 2026-02→2026-08 outage (#5413), independent of
+the `roleRunner.roles` allowlist gap (#5392/#5407) that stopped it dispatching
+at all.
+
+**Do not disable a guard, and do not reach for `python3`/another interpreter to
+write the file.** Get a managed worktree — the same thing every Builder works
+in — and write there:
+
+```bash
+# Run this AFTER Step 1's open-docs-PR check has decided not to return early,
+# and BEFORE any of Steps 2-5. Idempotent: one stable slot, reused every tick.
+DOCS_WT="$(./.loom/scripts/docs-worktree.sh | tail -1)"
+echo "$DOCS_WT"   # e.g. <repo>/.loom/worktrees/docs-guide
+```
+
+`docs-worktree.sh` creates (or resets) `<worktree-root>/docs-guide` on a fresh
+`docs/guide-update-<UTC timestamp>` branch off `origin/<default-branch>`, writes
+the `.loom-managed` sentinel that makes writes inside it legal, and prints the
+absolute path as its only stdout line. **Every path in Steps 2-5 below is
+`"$DOCS_WT/<file>"`** — a bare `WORK_LOG.md` resolves against the main checkout
+and will be denied.
+
 ### State Tracking
 
 Derive high-water marks **from the committed documents themselves**, not from a
@@ -1018,19 +1072,50 @@ side-car state file.
 > are the durable source of truth for "what has already been recorded."
 
 Compute the high-water marks by scanning the existing `WORK_LOG.md` for the
-highest PR / issue number it already contains:
+highest PR / issue number it already contains. `work_log_max_pr()` /
+`work_log_max_issue()` remain available as general "highest N recorded"
+readings, but neither PR nor issue filtering uses a number watermark anymore
+— see `work_log_has_pr()` (#5516) and `work_log_has_issue()` (#5539) and the
+matching comments in `update_work_log()` below for why a pure number
+comparison silently and permanently drops out-of-order-closing PRs/issues.
 
 ```bash
 # Highest PR number already recorded in WORK_LOG.md (0 if none / file absent)
 work_log_max_pr() {
-  { grep -oE 'PR #[0-9]+' WORK_LOG.md 2>/dev/null | grep -oE '[0-9]+'; echo 0; } | sort -rn | head -1
+  { grep -oE 'PR #[0-9]+' "$DOCS_WT/WORK_LOG.md" 2>/dev/null | grep -oE '[0-9]+'; echo 0; } | sort -rn | head -1
 }
 
 # Highest closed-issue number already recorded in WORK_LOG.md (0 if none)
 work_log_max_issue() {
-  { grep -oE 'Issue #[0-9]+' WORK_LOG.md 2>/dev/null | grep -oE '[0-9]+'; echo 0; } | sort -rn | head -1
+  { grep -oE 'Issue #[0-9]+' "$DOCS_WT/WORK_LOG.md" 2>/dev/null | grep -oE '[0-9]+'; echo 0; } | sort -rn | head -1
+}
+
+# Whether "PR #<N>" is already literally recorded in WORK_LOG.md (#5516).
+# `grep -qx` matches a full extracted-number LINE exactly, so `#550` can
+# never false-match a recorded `#5501` the way a plain substring grep would.
+# This is the presence check update_work_log() uses INSTEAD of a pure
+# `.number > $last_pr` comparison — see the #5516 comment at its call site
+# for why number order cannot be trusted as a proxy for "already recorded".
+work_log_has_pr() {
+  grep -oE 'PR #[0-9]+' "$DOCS_WT/WORK_LOG.md" 2>/dev/null | grep -oE '[0-9]+' | grep -qx "$1"
+}
+
+# Whether "Issue #<N>" is already literally recorded in WORK_LOG.md (#5539,
+# mirroring work_log_has_pr()/#5516 above). Same `grep -qx` exact-line-match
+# reasoning: `#552` can never false-match a recorded `#5521`. This is the
+# presence check update_work_log() uses INSTEAD of a pure
+# `.number > $last_issue` comparison — see the #5539 comment at its call
+# site for why issue-close order cannot be trusted as a proxy for "already
+# recorded" any more than PR-merge order could.
+work_log_has_issue() {
+  grep -oE 'Issue #[0-9]+' "$DOCS_WT/WORK_LOG.md" 2>/dev/null | grep -oE '[0-9]+' | grep -qx "$1"
 }
 ```
+
+Read them from `$DOCS_WT` (a fresh checkout of `origin/<default-branch>`), not
+from the main checkout — the main checkout can be many commits behind on a host
+whose daemon has not pulled recently, which would re-append PRs that a previous
+tick already recorded.
 
 These are idempotent across a fresh checkout: whatever is already in the
 committed WORK_LOG.md defines the watermark, so the same PR is never appended
@@ -1059,38 +1144,152 @@ If a docs PR is already open, **skip the entire document maintenance phase** to 
 
 ### Step 2: Update WORK_LOG.md
 
-Append entries for newly merged PRs and closed issues since the last high-water mark.
+Append entries for newly merged PRs and newly closed issues not yet recorded
+(presence checks, not number watermarks — see #5516 and #5539 below).
 
 ```bash
+# #5454 BUG, DO NOT REINTRODUCE: this phase's OWN merged PRs must never count as
+# "new content". Every `docs: Guide document maintenance update` PR is itself a
+# merged PR, so if it is allowed into `new_prs`, merging PR N manufactures the
+# very "there is something to append" signal that justifies PR N+1 — the skip
+# branch below can never be true two ticks in a row and the phase emits a PR
+# forever (observed: 23 self-referential PRs, one every ~15-30 min, all carrying
+# zero-information WORK_LOG lines about themselves).
+#
+# Excluded by BOTH identifying marks the phase controls: the head-branch prefix
+# `docs-worktree.sh` creates (`docs/guide-update-<timestamp>` — the same prefix
+# Step 1's open-docs-PR guard matches on) and the exact title `create_docs_pr`
+# passes to `gh pr create` in Step 5. Either one alone is enough; requiring only
+# one to match keeps the filter working if a docs PR is ever retitled or lands
+# from a differently-named branch.
+#
+# Keep this expression a single line assigned exactly as written: the regression
+# suite (defaults/scripts/tests/test-guide-work-log-self-loop.sh) extracts THIS
+# line out of THIS file and runs it against fixtures, so the prompt and the test
+# can never drift apart.
+GUIDE_DOCS_PR_EXCLUDE='((.headRefName // "") | startswith("docs/guide-update")) or (.title == "docs: Guide document maintenance update")'
+
 update_work_log() {
-  # High-water marks come from the committed WORK_LOG.md (survives fresh checkout)
-  local last_pr=$(work_log_max_pr)
-  local last_issue=$(work_log_max_issue)
+  # Neither PRs nor issues are filtered by a number watermark anymore — see
+  # the #5516 (PR) and #5539 (issue) comments below. `work_log_max_issue()` /
+  # `work_log_max_pr()` are not called here at all; presence checks against
+  # the committed WORK_LOG.md decide what is new for both.
 
-  # Get newly merged PRs (after high-water mark)
-  local new_prs=$("$GH_READ" pr list --state merged --limit 50 --json number,title,mergedAt \
-    --jq "[.[] | select(.number > $last_pr)] | sort_by(.mergedAt) | reverse")
+  # #5516 BUG, DO NOT REINTRODUCE: PR numbers increase in CREATION order, not
+  # MERGE order — a lower-numbered PR can sit in review/Doctor longer than a
+  # higher-numbered PR that merges first (observed: #5507 opened before, but
+  # merged after, #5509). A pure `.number > $last_pr` filter drops that PR
+  # PERMANENTLY the instant the watermark passes its number, because
+  # `> $last_pr` can never become true for it again. So PR candidates below
+  # are NOT filtered by number at all — they are bounded by merge *date*, and
+  # kept/dropped via a presence check against the committed WORK_LOG.md
+  # (Option 1 of #5516's Suggested Fix) instead of a watermark comparison.
+  #
+  # Widen the window by date, not just count: a fixed `--limit 50` can still
+  # push an out-of-order PR out of the query entirely once 50 other PRs merge
+  # after it before this phase's next tick. `merged:>=$since` bounds the
+  # query by calendar time instead, so an out-of-order PR stays reachable for
+  # as long as it is plausible for one to sit in review — 30 days is a
+  # generous ceiling for Doctor/review dwell time. `--limit 200` on top is a
+  # safety cap, not the primary bound. Shared below with the issue-side
+  # `closed:>=$since` query (#5539) for the same reason: a flat `--limit 50`
+  # on closed issues can push an out-of-order closure out of the query too.
+  local since
+  since=$(date -u -d '30 days ago' +%Y-%m-%d 2>/dev/null || date -u -v-30d +%Y-%m-%d)
 
-  # Get newly closed issues (after high-water mark)
-  local new_issues=$("$GH_READ" issue list --state closed --limit 50 --json number,title,closedAt \
-    --jq "[.[] | select(.number > $last_issue)] | sort_by(.closedAt) | reverse")
+  # Get merged-PR candidates in the window, minus this phase's own docs PRs.
+  # `headRefName` MUST stay in the --json field list — jq cannot filter on a
+  # field gh was not asked to return, and `.headRefName` would silently be null.
+  local candidate_prs=$("$GH_READ" pr list --state merged --search "merged:>=$since" --limit 200 \
+    --json number,title,mergedAt,headRefName \
+    --jq "[.[] | select(($GUIDE_DOCS_PR_EXCLUDE) | not)] | sort_by(.mergedAt) | reverse")
+
+  # Presence check (#5516 fix): keep a candidate only if "PR #<N>" is not
+  # already literally recorded in WORK_LOG.md — not whether its number is
+  # above some watermark. This correctly KEEPS an out-of-order PR whose
+  # number is below every previously-recorded PR but was itself never
+  # written, and correctly DROPS anything (in or out of order, including
+  # docs PRs already excluded above) that a prior tick already recorded.
+  local new_prs="[]"
+  while IFS= read -r pr_json; do
+    [ -z "$pr_json" ] && continue
+    local n
+    n=$(printf '%s' "$pr_json" | jq -r '.number')
+    if ! work_log_has_pr "$n"; then
+      new_prs=$(printf '%s\n' "$new_prs" | jq -c --argjson pr "$pr_json" '. + [$pr]')
+    fi
+  done < <(printf '%s\n' "$candidate_prs" | jq -c '.[]')
+
+  # #5539 BUG, DO NOT REINTRODUCE: issues do not reliably CLOSE in number
+  # order either — a lower-numbered issue can stay open (blocked, deferred,
+  # reopened) longer than a higher-numbered issue that closes first
+  # (observed: 30 out-of-order-closed issues silently dropped from
+  # WORK_LOG.md). A pure `.number > $last_issue` filter drops that issue
+  # PERMANENTLY the instant the watermark passes its number, because
+  # `> $last_issue` can never become true for it again — the exact #5516
+  # failure shape, just on the issue side. So issue candidates below are NOT
+  # filtered by number at all — they are bounded by close *date*, and
+  # kept/dropped via a presence check against the committed WORK_LOG.md
+  # (mirroring #5516's Option 1 fix) instead of a watermark comparison.
+  #
+  # Widen the window by date, not just count: a fixed `--limit 50` can still
+  # push an out-of-order issue out of the query entirely once 50 other
+  # issues close after it before this phase's next tick. `closed:>=$since`
+  # bounds the query by calendar time instead (same 30-day `$since` computed
+  # above for PRs), so an out-of-order issue stays reachable for as long as
+  # it is plausible for one to sit open after a lower-numbered sibling
+  # closes.
+  local candidate_issues=$("$GH_READ" issue list --state closed --search "closed:>=$since" --limit 200 \
+    --json number,title,closedAt --jq 'sort_by(.closedAt) | reverse')
+
+  # Presence check (#5539 fix, mirroring #5516's work_log_has_pr): keep a
+  # candidate only if "Issue #<N>" is not already literally recorded in
+  # WORK_LOG.md — not whether its number is above some watermark. This
+  # correctly KEEPS an out-of-order issue whose number is below every
+  # previously-recorded issue but was itself never written, and correctly
+  # DROPS anything (in or out of order) that a prior tick already recorded.
+  local new_issues="[]"
+  while IFS= read -r issue_json; do
+    [ -z "$issue_json" ] && continue
+    local n
+    n=$(printf '%s' "$issue_json" | jq -r '.number')
+    if ! work_log_has_issue "$n"; then
+      new_issues=$(printf '%s\n' "$new_issues" | jq -c --argjson issue "$issue_json" '. + [$issue]')
+    fi
+  done < <(printf '%s\n' "$candidate_issues" | jq -c '.[]')
 
   # If nothing new, skip. NOTE: `printf '%s\n' "$VAR" | jq`, never `echo "$VAR"
   # | jq` — zsh's `echo` builtin reinterprets `\n`/`\t` escapes by default,
   # corrupting captured `gh --json` output before jq ever parses it (#5094).
+  # A tick whose only merged-PR candidates in the window are this phase's own
+  # docs PRs, or PRs already recorded, lands HERE — `new_prs` is empty after
+  # the exclusion/presence-check, so the phase reports "current" and returns
+  # 1, and (with WORK_PLAN/README also unchanged) Step 5's `git diff --cached
+  # --quiet` finds nothing to commit and creates no PR.
   if [ "$(printf '%s\n' "$new_prs" | jq 'length')" -eq 0 ] && [ "$(printf '%s\n' "$new_issues" | jq 'length')" -eq 0 ]; then
     echo "No new merged PRs or closed issues. WORK_LOG.md is current."
     return 1
   fi
 
-  # Group entries by date and prepend to WORK_LOG.md
+  # Group entries by date and prepend them to "$DOCS_WT/WORK_LOG.md" (below the
+  # header/comment block, above the newest existing `### ` section).
   # Format: ### YYYY-MM-DD
   #         - **PR #N**: Title
   #         - **Issue #N** (closed): Title
   #
-  # No side-car watermark to update: the newly-written PR/issue numbers ARE the
-  # new watermark the next tick reads back from WORK_LOG.md via work_log_max_pr /
-  # work_log_max_issue.
+  # Append ONLY what is in `$new_prs` / `$new_issues` — never hand-add a docs
+  # PR the filter above removed, and never "helpfully" log this tick's own PR.
+  #
+  # Write with the Edit/Write tool against the ABSOLUTE "$DOCS_WT/WORK_LOG.md"
+  # path — a repo-relative `WORK_LOG.md` resolves to the main checkout and is
+  # denied by the worktree-isolation guards (see "Where This Phase Writes").
+  #
+  # No side-car state to update: the newly-written entries themselves are
+  # what the next tick reads back from WORK_LOG.md — PR filtering via the
+  # `work_log_has_pr` presence check (#5516), issue filtering via the
+  # `work_log_has_issue` presence check (#5539). Excluded docs PRs are simply
+  # never written, so they are re-queried and re-filtered every tick no
+  # matter how long they sit outside WORK_LOG.md — harmless either way.
 
   return 0
 }
@@ -1110,55 +1309,118 @@ update_work_log() {
 
 Regenerate the roadmap from current GitHub label state. Only rewrite if labels have changed.
 
+The generated region of `WORK_PLAN.md` is delimited by
+`<!-- guide:plan-body:start -->` / `<!-- guide:plan-body:end -->`. **Everything
+between those markers is machine-generated and is overwritten wholesale; nothing
+else in the file is touched.** Put any hand-written annotation *outside* the
+markers — an annotation left inside is both wiped on the next tick and, until
+then, guarantees the "no changes" comparison below can never match.
+
 ```bash
-update_work_plan() {
-  # Fetch current label state
-  local urgent=$("$GH_READ" issue list --label "loom:urgent" --state open --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title)"')
-
-  local ready=$("$GH_READ" issue list --label "loom:issue" --state open --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title)"')
-
-  local proposed_architect=$("$GH_READ" issue list --label "loom:architect" --state open --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title) *(architect)*"')
-  local proposed_hermit=$("$GH_READ" issue list --label "loom:hermit" --state open --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title) *(hermit)*"')
-  local proposed_curated=$("$GH_READ" issue list --label "loom:curated" --state open --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title) *(curated)*"')
-  local proposed="${proposed_architect}${proposed_hermit:+$'\n'}${proposed_hermit}${proposed_curated:+$'\n'}${proposed_curated}"
-
-  local epics=$("$GH_READ" issue list --label "loom:epic" --state open --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title)"')
-
-  # Detect changes by comparing the freshly-rendered plan body against the
-  # committed WORK_PLAN.md — no gitignored hash side-car (which resets to "" on
-  # every fresh cron checkout). Use a portable hash: `md5` is macOS-only, so
-  # prefer `md5sum` (Linux / ubuntu runners) and fall back to `shasum`/`cksum`.
-  portable_hash() {
-    if command -v md5sum >/dev/null 2>&1; then md5sum | awk '{print $1}'
-    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
-    elif command -v md5 >/dev/null 2>&1; then md5 -q
-    else cksum | awk '{print $1}'; fi
+# Render the plan body EXACTLY as it will be written between the markers —
+# headings, blurbs, blank lines and all. `render_plan_body` is the single
+# source of truth for that region's shape.
+render_plan_body() {
+  # $1 = heading, $2 = blurb (may be empty), $3 = body (may be empty)
+  section() {
+    printf '## %s\n' "$1"
+    [ -n "$2" ] && printf '\n%s\n' "$2"
+    printf '\n%s\n' "${3:-_None._}"
   }
+  # Bullet count of a section body ("" -> 0), for the Backlog Balance table.
+  count() { [ -z "$1" ] && printf '0' || printf '%s\n' "$1" | grep -c '^- '; }
 
-  local content_hash=$(printf '%s' "${urgent}${ready}${proposed}${epics}" | portable_hash)
-  # Compare against a hash of the CURRENT committed WORK_PLAN.md body (the
-  # regenerated region). If unchanged, skip; the committed file is the state.
-  local last_hash=$(sed -n '/<!-- guide:plan-body:start -->/,/<!-- guide:plan-body:end -->/p' WORK_PLAN.md 2>/dev/null | portable_hash)
+  local urgent ready building review approved curated proposals epics
+  urgent=$("$GH_READ" issue list --label "loom:urgent" --state open --limit 200 --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title)"')
+  ready=$("$GH_READ" issue list --label "loom:issue" --state open --limit 200 --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title)"')
+  building=$("$GH_READ" issue list --label "loom:building" --state open --limit 200 --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title)"')
+  review=$("$GH_READ" pr list --label "loom:review-requested" --state open --limit 200 --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title)"')
+  approved=$("$GH_READ" pr list --label "loom:pr" --state open --limit 200 --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title)"')
+  curated=$("$GH_READ" issue list --label "loom:curated" --state open --limit 200 --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title) *(curated)*"')
+  local architect hermit
+  architect=$("$GH_READ" issue list --label "loom:architect" --state open --limit 200 --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title) *(architect)*"')
+  hermit=$("$GH_READ" issue list --label "loom:hermit" --state open --limit 200 --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title) *(hermit)*"')
+  proposals="${architect}${architect:+${hermit:+$'\n'}}${hermit}"
+  epics=$("$GH_READ" issue list --label "loom:epic" --state open --limit 200 --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title)"')
 
-  if [ "$content_hash" = "$last_hash" ]; then
+  section "Urgent" "Issues flagged as highest priority (\`loom:urgent\`)." "$urgent"
+  echo
+  section "Ready" "Human-approved issues ready for implementation (\`loom:issue\`)." "$ready"
+  echo
+  section "In Progress" "Issues currently being built (\`loom:building\`)." "$building"
+  echo
+  section "PRs Awaiting Review" "PRs waiting on Judge (\`loom:review-requested\`)." "$review"
+  echo
+  section "Approved (Awaiting Merge)" "PRs that passed review and are queued for Champion auto-merge (\`loom:pr\`)." "$approved"
+  echo
+  section "Proposed" "Issues carrying \`loom:curated\`." "$curated"
+  echo
+  section "Proposed (Architect / Hermit)" "" "$proposals"
+  echo
+  section "Epics" "" "$epics"
+  echo
+  # Derived from the same variables — no extra forge queries, and it can never
+  # disagree with the sections above the way a hand-maintained table would.
+  section "Backlog Balance" "" "$(printf '%s\n' \
+    '| Tier | Count |' \
+    '|------|-------|' \
+    "| Urgent | $(count "$urgent") |" \
+    "| Ready (\`loom:issue\`) | $(count "$ready") |" \
+    "| In Progress (\`loom:building\`) | $(count "$building") |" \
+    "| PRs awaiting review | $(count "$review") |" \
+    "| Approved PRs awaiting merge | $(count "$approved") |" \
+    "| Curated | $(count "$curated") |" \
+    "| Architect / Hermit proposals | $(count "$proposals") |" \
+    "| Active epics | $(count "$epics") |")"
+}
+
+update_work_plan() {
+  # Change detection: compare the freshly-rendered body against the body already
+  # committed between the markers. No gitignored side-car (which resets to "" on
+  # every fresh checkout) — the committed file IS the state.
+  #
+  # #5413 BUG, DO NOT REINTRODUCE: this used to hash the bare concatenation
+  # `${urgent}${ready}${proposed}${epics}` and compare it to a hash of
+  # `sed -n '/start/,/end/p' WORK_PLAN.md` — bullet lines with no headings vs. a
+  # file region *with* marker lines, headings and blurbs. Those two strings are
+  # different by construction, so the hashes could never be equal, the "skip"
+  # branch was dead code, and every tick unconditionally rewrote the file.
+  # Comparing the SAME rendered text on both sides is what makes the skip real;
+  # a hash buys nothing here, so compare the strings directly.
+  local new_body old_body
+  new_body="$(render_plan_body)"
+  # `sed '1d;$d'` drops the two marker lines, leaving only the generated region.
+  old_body="$(sed -n '/<!-- guide:plan-body:start -->/,/<!-- guide:plan-body:end -->/p' \
+    "$DOCS_WT/WORK_PLAN.md" 2>/dev/null | sed '1d;$d')"
+
+  if [ "$new_body" = "$old_body" ]; then
     echo "WORK_PLAN.md is current (no label changes detected)."
     return 1
   fi
 
-  # Regenerate WORK_PLAN.md with current state
-  # Use the template structure: Urgent, Ready, Proposed, Epics, wrapping the
-  # generated region in the <!-- guide:plan-body:start/end --> markers so the
-  # next tick can diff against it.
+  # Replace ONLY the text between the markers in "$DOCS_WT/WORK_PLAN.md" with
+  # $new_body (keep both marker lines, and everything outside them, untouched).
+  # Both sides above are `$(...)`-captured, so trailing newlines are stripped on
+  # both — only the internal structure has to match.
 
   return 0
 }
 ```
+
+The section set rendered above must stay in lockstep with the committed
+`WORK_PLAN.md`: if the file carries a section `render_plan_body` does not emit,
+that section is silently deleted on the next tick (and vice versa, the
+comparison mismatches until the file catches up). Adding a section means editing
+`render_plan_body` **and** the committed file in the same change.
 
 ### Step 4: Check README.md Staleness
 
@@ -1180,7 +1442,8 @@ check_readme_staleness() {
 
   echo "Architectural changes detected in PRs: $recent_prs"
   echo "Review README.md for staleness."
-  # The Guide should read the affected sections and update if needed
+  # The Guide should read the affected sections of "$DOCS_WT/README.md" and
+  # update them there if needed — never the main checkout's copy.
   return 0
 }
 ```
@@ -1191,34 +1454,37 @@ README updates should be **conservative**: only update sections that are clearly
 
 If any documents were updated, bundle all changes into a single PR.
 
+Every git operation runs against `$DOCS_WT` via `git -C`. The branch already
+exists — `docs-worktree.sh` created it — so **never** `git checkout -b` in the
+main checkout: that mutates the shared primary clone that concurrent sweeps,
+`check-main-clean.sh`, and the operator all assume is sitting on the default
+branch.
+
 ```bash
 create_docs_pr() {
-  local timestamp=$(date +%Y%m%d-%H%M%S)
-  local branch="docs/guide-update-${timestamp}"
+  local branch
+  branch="$(git -C "$DOCS_WT" branch --show-current)"
 
-  # Create branch from main
-  git checkout -b "$branch" main
-
-  # Stage all document changes
-  git add WORK_LOG.md WORK_PLAN.md README.md
+  # Stage all document changes (paths are relative to the worktree root, which
+  # is what `git -C "$DOCS_WT"` makes them).
+  git -C "$DOCS_WT" add WORK_LOG.md WORK_PLAN.md README.md
 
   # Check if there are actual changes to commit
-  if git diff --cached --quiet; then
+  if git -C "$DOCS_WT" diff --cached --quiet; then
     echo "No document changes to commit."
-    git checkout -
-    git branch -D "$branch"
     return
   fi
 
   # Commit and push
-  git commit -m "docs: update WORK_LOG, WORK_PLAN, and README
+  git -C "$DOCS_WT" commit -m "docs: update WORK_LOG, WORK_PLAN, and README
 
 Automated document maintenance by Guide triage agent."
 
-  git push -u origin "$branch"
+  git -C "$DOCS_WT" push -u origin "$branch"
 
-  # Create PR
-  gh pr create \
+  # Create PR. `gh pr create` infers the head branch from the working
+  # directory, so run it from inside the docs worktree.
+  (cd "$DOCS_WT" && gh pr create \
     --title "docs: Guide document maintenance update" \
     --label "loom:review-requested" \
     --body "$(cat <<'PRBODY'
@@ -1238,13 +1504,13 @@ See issue #1784 for the feature specification.
 ---
 *Automated by Guide role - document maintenance phase*
 PRBODY
-)"
+)")
 
   # No side-car state to update — the committed WORK_LOG.md / WORK_PLAN.md carried
-  # in this PR ARE the durable state the next cron tick reads back.
-
-  # Return to previous branch
-  git checkout -
+  # in this PR ARE the durable state the next tick reads back.
+  #
+  # Nothing to "return to": the main checkout was never switched off its branch,
+  # and the docs worktree is a persistent slot that the next tick resets.
 }
 ```
 
@@ -1255,25 +1521,41 @@ The full document maintenance flow runs at the end of each triage cycle:
 ```
 Document Maintenance Phase
   ├─ Check for open docs PR → skip if one exists
-  ├─ Update WORK_LOG.md (append new entries)
-  ├─ Update WORK_PLAN.md (regenerate if labels changed)
-  ├─ Check README.md staleness (only if architecture changed)
+  ├─ DOCS_WT=$(./.loom/scripts/docs-worktree.sh | tail -1)
+  │    └─ managed worktree on docs/guide-update-<timestamp>; the ONLY place
+  │       this phase may write (guards deny the main checkout)
+  ├─ Update "$DOCS_WT/WORK_LOG.md" (append new entries; this phase's OWN
+  │    docs PRs are filtered out — see the #5454 note in Step 2)
+  ├─ Update "$DOCS_WT/WORK_PLAN.md" (regenerate if labels changed)
+  ├─ Check "$DOCS_WT/README.md" staleness (only if architecture changed)
   ├─ If any changes:
-  │    ├─ Create branch: docs/guide-update-<timestamp>
-  │    ├─ Commit all document changes
+  │    ├─ Commit all document changes (git -C "$DOCS_WT")
   │    ├─ Push and create PR with loom:review-requested
   │    └─ (committed WORK_LOG.md / WORK_PLAN.md ARE the durable state)
   └─ If no changes: skip (no PR created)
 ```
 
 **Important constraints:**
+- **Every write goes to `$DOCS_WT`, never the main checkout** — the role runner
+  starts this role in the workspace root, where both worktree-isolation guards
+  deny writes. This was a silent root cause of the #5413 outage; do not "fix" a
+  denial by disabling a guard or switching write tool
+- The main checkout is never `git checkout`-ed onto another branch — concurrent
+  sweeps and `check-main-clean.sh` assume it stays on the default branch
 - Only one docs PR open at a time (prevents accumulation) — the open-PR check
   matches the `docs/guide-update` branch **prefix** (`head:` search), so it
-  catches the timestamped branches Step 5 creates
+  catches the timestamped branches `docs-worktree.sh` creates
 - High-water marks are derived from the committed WORK_LOG.md itself (not a
   gitignored side-car that resets every fresh cron checkout), so they survive
   across ticks and prevent duplicate WORK_LOG entries
-- WORK_PLAN is only regenerated when label state actually changes
+- **This phase's own merged docs PRs are excluded from `new_prs`** (#5454) — by
+  the `docs/guide-update` head-branch prefix *or* the exact
+  `docs: Guide document maintenance update` title. Without that exclusion the
+  phase is self-perpetuating: its own merged PR is "new content" for the next
+  tick, so merging PR N always justifies PR N+1 and the loop never terminates
+- WORK_PLAN is only regenerated when label state actually changes — which
+  requires `render_plan_body`'s output and the committed marker region to be
+  comparable byte-for-byte (see the #5413 bug note in Step 3)
 - README updates are conservative (stale sections only)
 - All changes go through the standard PR review pipeline
 

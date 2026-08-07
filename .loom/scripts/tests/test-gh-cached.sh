@@ -281,7 +281,14 @@ FAKE_DAEMON_DIR="$TMP_ROOT/daemon"
 mkdir -p "$FAKE_DAEMON_DIR"
 # A fake loom-daemon: `forge <e> list --cached` with --json succeeds and emits a
 # sentinel; any shape without --json exits 3 (decline), mirroring the real one.
-cat > "$FAKE_DAEMON_DIR/loom-daemon" <<'FAKE'
+#
+# Named `loom-daemon-mock`, NOT `loom-daemon` (#5548): gh-cached's
+# locate_loom_daemon() checks $LOOM_DAEMON_BIN (set explicitly below) BEFORE
+# falling back to a bare `which("loom-daemon")` PATH lookup, so this fixture
+# never needs the literal name to be resolved. A distinct name means a leaked
+# fixture can never forge a production `pgrep -f loom-daemon`-style liveness
+# check the way the incident describes.
+cat > "$FAKE_DAEMON_DIR/loom-daemon-mock" <<'FAKE'
 #!/usr/bin/env bash
 if [[ "$1" == "forge" && "$3" == "list" ]]; then
     if printf '%s\n' "$@" | grep -q -- '--json'; then
@@ -292,13 +299,16 @@ if [[ "$1" == "forge" && "$3" == "list" ]]; then
 fi
 exit 3
 FAKE
-chmod +x "$FAKE_DAEMON_DIR/loom-daemon"
+chmod +x "$FAKE_DAEMON_DIR/loom-daemon-mock"
 
-# Runner with the fake daemon on PATH and the ETag layer ENABLED.
+# Runner with the fake daemon pinned via LOOM_DAEMON_BIN and the ETag layer
+# ENABLED. FAKE_DAEMON_DIR is still added to PATH as a belt-and-suspenders
+# safety net for any code path that falls through to a PATH search, but
+# LOOM_DAEMON_BIN is what locate_loom_daemon() actually resolves first.
 ghc_etag() {
     PATH="$STUB_DIR:$FAKE_DAEMON_DIR:$PATH" \
     GH_CACHE_DIR="$CACHE_DIR" \
-    LOOM_DAEMON_BIN="$FAKE_DAEMON_DIR/loom-daemon" \
+    LOOM_DAEMON_BIN="$FAKE_DAEMON_DIR/loom-daemon-mock" \
       "$GH_CACHED" "$@"
 }
 

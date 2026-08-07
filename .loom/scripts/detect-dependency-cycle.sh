@@ -337,10 +337,10 @@ The declared \`Blocked by\` / \`Depends on\` / \`Requires\` references form a cl
 $pretty
 \`\`\`
 
-Every issue on that path is OPEN, and each one's progress is declared to depend on
-the next, so the loop can never resolve itself: each side re-derives "still blocked"
-on every pass, indefinitely. This is the deadlock shape that previously had to be
-found by hand.
+Every issue on that path is OPEN, and the progress of each node is declared to depend
+on the next, so the loop can never resolve itself: each side re-derives "still
+blocked" on every pass, indefinitely. This is the deadlock shape that previously had
+to be found by hand.
 
 Breaking a cycle is a human decision - which declared dependency edge is wrong, or
 which side ships a partial increment first - so Champion is routing this to

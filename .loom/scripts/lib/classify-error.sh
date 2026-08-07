@@ -281,6 +281,27 @@ _classify_error_codex() {
         return
     fi
 
+    # Model unsupported for this account's auth mode (issue #5499). Observed
+    # verbatim as a 400 `invalid_request_error` when an explicitly-pinned
+    # model (even a Codex-family one, e.g. `gpt-5-codex`) is forwarded to a
+    # ChatGPT-plan-authenticated profile: "The 'gpt-5-codex' model is not
+    # supported when using Codex with a ChatGPT account." Retrying the
+    # identical invocation can never succeed — the fault is the model/auth-mode
+    # pairing, not the transport or the account's quota — so this must NOT
+    # fall through to the generic RECOVERABLE catch-all below (the pre-#5499
+    # behavior, which retried this identically forever, burning an invocation
+    # every cadence tick). `spawn-codex.sh` independently guards against this
+    # by dropping a pinned model before launch when it detects a ChatGPT-plan
+    # profile (issue #5499); this classification is the backstop for every
+    # OTHER path that can still reach the CLI with a bad pin (the guard's own
+    # escape hatch `LOOM_CODEX_AUTH_MODE_CHECK=0`, a pre-existing/ambient
+    # `CODEX_HOME` the guard could not resolve in time, or a future caller
+    # that bypasses spawn-codex.sh entirely).
+    if echo "$output" | grep -qiE "is not supported when using codex with a chatgpt account"; then
+        echo "FATAL"
+        return
+    fi
+
     # --- TOKEN_EXHAUSTED: plan/quota exhaustion — rotate, mark `exhausted` ---
     # Strings taken verbatim from the 0.146.0 binary: "You've hit your usage
     # limit.", "You've reached your usage limit.", "You've reached your

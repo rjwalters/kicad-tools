@@ -17,12 +17,17 @@
 # loom-workspace, worktree-paths, methodology-inject, skill-router). Since
 # #5275 it also covers tests/install/ (installer/uninstaller unit suites) and
 # tests/hermit/ (the Hermit role's stateless-ceremony heuristic regression
-# guard) -- both were previously orphaned (no CI runner at all). Entries for
-# any external directory are qualified with their path relative to the repo
-# root (e.g. `tests/hooks/test-guard-destructive.sh`,
+# guard) -- both were previously orphaned (no CI runner at all). Since #5278
+# it also covers the top-level scripts/ directory (non-recursive — only
+# `scripts/test-*.sh` itself, not subdirectories), whose suites are invoked
+# directly as their own CI/build-gate steps rather than via run-ci-suites.sh;
+# they are listed in ci-excluded.txt with a "wired elsewhere" reason (see that
+# file) so run-ci-suites.sh doesn't double-run them. Entries for any external
+# directory are qualified with their path relative to the repo root (e.g.
+# `tests/hooks/test-guard-destructive.sh`,
 # `defaults/hooks/tests/test-skill-router.sh`,
-# `tests/install/test-forge-detect.sh`) so they can't collide with a
-# same-named suite in this directory.
+# `tests/install/test-forge-detect.sh`, `scripts/test-changelog.sh`) so they
+# can't collide with a same-named suite in this directory.
 #
 # Exit 0 = invariant holds; exit 1 = violation (details printed to stderr).
 
@@ -33,8 +38,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 WIRED_MANIFEST="$SCRIPT_DIR/ci-wired.txt"
 EXCLUDED_MANIFEST="$SCRIPT_DIR/ci-excluded.txt"
 # Directories of suites outside defaults/scripts/tests/ that this manifest
-# also governs, each relative to the repo root (#4769, #4451, #5275).
-EXTERNAL_TEST_DIRS=("tests/hooks" "defaults/hooks/tests" "tests/install" "tests/hermit")
+# also governs, each relative to the repo root (#4769, #4451, #5275, #5278).
+# The scan below is non-recursive (bash glob `test-*.sh` in each dir), so
+# "scripts" only picks up top-level scripts/test-*.sh, not subdirectories.
+EXTERNAL_TEST_DIRS=("tests/hooks" "defaults/hooks/tests" "tests/install" "tests/hermit" "scripts")
 
 fail=0
 err() { printf 'ERROR: %s\n' "$1" >&2; fail=1; }

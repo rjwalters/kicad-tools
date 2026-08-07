@@ -103,6 +103,8 @@ export GIT_COMMITTER_NAME="test" GIT_COMMITTER_EMAIL="test@example.com"
 #   defaults/docs/troubleshooting.md     -> .loom/docs/troubleshooting.md (drift)
 #   defaults/.loom/bin/loom              -> .loom/bin/loom (drift)
 #   defaults/.claude/commands/loom/x.md  -> .claude/commands/loom/x.md (drift)
+#   defaults/.claude/README.md           -> .claude/README.md (drift, #5264)
+#   defaults/.github/CONFIGURATION.md    -> .github/CONFIGURATION.md (drift, #5264)
 #   .loom/roles/custom-role.md           (repo-specific, no defaults/ counterpart)
 #   package.json ("version": "9.9.9")    (loom_version source for re-stamp)
 #   .loom/install-metadata.json          (re-stamp target; loom_source -> $repo)
@@ -112,9 +114,11 @@ make_fixture() {
     mkdir -p "$repo/defaults/hooks" "$repo/defaults/scripts/lib" \
              "$repo/defaults/roles" "$repo/defaults/docs" \
              "$repo/defaults/.loom/bin" "$repo/defaults/.claude/commands/loom" \
+             "$repo/defaults/.github" \
              "$repo/.loom/hooks" "$repo/.loom/scripts/lib" \
              "$repo/.loom/roles" "$repo/.loom/docs" \
-             "$repo/.loom/bin" "$repo/.claude/commands/loom"
+             "$repo/.loom/bin" "$repo/.claude/commands/loom" \
+             "$repo/.github"
     git -C "$repo" init -q
 
     printf 'A\n' > "$repo/defaults/hooks/guard.sh"
@@ -148,6 +152,14 @@ make_fixture() {
 
     printf 'CMD-NEW\n' > "$repo/defaults/.claude/commands/loom/builder.md"
     printf 'CMD-OLD\n' > "$repo/.claude/commands/loom/builder.md"
+
+    # Single-file consumer-install docs (#5264): .claude/README.md and
+    # .github/CONFIGURATION.md are copied verbatim into every consumer repo at
+    # install time but, prior to #5264, were never resynced afterward.
+    printf 'CLAUDE-README-NEW\n' > "$repo/defaults/.claude/README.md"
+    printf 'CLAUDE-README-OLD\n' > "$repo/.claude/README.md"
+    printf 'CONFIGURATION-NEW\n' > "$repo/defaults/.github/CONFIGURATION.md"
+    printf 'CONFIGURATION-OLD\n' > "$repo/.github/CONFIGURATION.md"
 
     # Version source + metadata re-stamp target.
     printf '{\n  "version": "9.9.9"\n}\n' > "$repo/package.json"
@@ -260,7 +272,7 @@ if [[ $RC -eq 2 ]]; then
 else
     fail "(i) --dry-run did not exit 2 across widened surfaces (got $RC)"
 fi
-for surf in "roles/builder.md" "docs/troubleshooting.md" "bin/loom" "commands/loom/builder.md"; do
+for surf in "roles/builder.md" "docs/troubleshooting.md" "bin/loom" "commands/loom/builder.md" ".claude/README.md" ".github/CONFIGURATION.md"; do
     if grep -q "$surf" <<<"$OUT"; then
         pass "(i) --dry-run reports drift for $surf"
     else
@@ -290,6 +302,16 @@ if [[ "$(cat "$REPO/.claude/commands/loom/builder.md")" == "CMD-NEW" ]]; then
     pass "(i) commands/loom/builder.md resynced from defaults"
 else
     fail "(i) commands/loom/builder.md not resynced"
+fi
+if [[ "$(cat "$REPO/.claude/README.md")" == "CLAUDE-README-NEW" ]]; then
+    pass "(i) .claude/README.md resynced from defaults (#5264)"
+else
+    fail "(i) .claude/README.md not resynced (#5264)"
+fi
+if [[ "$(cat "$REPO/.github/CONFIGURATION.md")" == "CONFIGURATION-NEW" ]]; then
+    pass "(i) .github/CONFIGURATION.md resynced from defaults (#5264)"
+else
+    fail "(i) .github/CONFIGURATION.md not resynced (#5264)"
 fi
 # second run is a clean no-op across the widened surfaces too
 OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
@@ -324,6 +346,43 @@ if [[ "$(cat "$REPO/.loom/roles/builder.md")" == "PINNED-ROLE" ]]; then
     pass "(k) pinned roles/builder.md NOT overwritten"
 else
     fail "(k) pinned roles/builder.md was overwritten despite resync-ignore"
+fi
+
+# --- (k2) .claude/README.md / .github/CONFIGURATION.md are gated on the ------
+#          destination already existing (never force-populated, #5264)
+echo "Test group 9b: single-file docs are not force-created for a consumer that never had them"
+REPO="$(make_fixture)"
+# make_fixture git-tracks both files (its `git add -A && git commit`), so a bare
+# `rm -f` would NOT simulate "a consumer that never had them" — it leaves a
+# *deleted-but-tracked* path that `git status --porcelain` reports as pending
+# dirt (` D .claude/README.md`). resync-installed.sh's dirty-tree hint
+# (suggest_commit_if_resync_only_dirt) then lists that path in its `git add`
+# suggestion, which the "not reported at all" assertion below greps for and
+# trips on. Drop the files from the index *and* the worktree and commit the
+# removal, so the fixture is genuinely a repo that never received them.
+git -C "$REPO" rm -q -- .claude/README.md .github/CONFIGURATION.md >/dev/null 2>&1
+git -C "$REPO" commit -qm "consumer install without the single-file docs" >/dev/null 2>&1
+if [[ -z "$(git -C "$REPO" status --porcelain -- .claude/README.md .github/CONFIGURATION.md)" ]]; then
+    pass "(k2) fixture precondition: both single-file docs are absent AND untracked"
+else
+    fail "(k2) fixture precondition: single-file docs still show as pending git changes"
+fi
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ ! -e "$REPO/.claude/README.md" ]]; then
+    pass "(k2) .claude/README.md not force-created when absent"
+else
+    fail "(k2) .claude/README.md was force-created despite being absent"
+fi
+if [[ ! -e "$REPO/.github/CONFIGURATION.md" ]]; then
+    pass "(k2) .github/CONFIGURATION.md not force-created when absent"
+else
+    fail "(k2) .github/CONFIGURATION.md was force-created despite being absent"
+fi
+if ! grep -q "\.claude/README\.md" <<<"$OUT" && ! grep -q "\.github/CONFIGURATION\.md" <<<"$OUT"; then
+    pass "(k2) absent single-file docs are not reported at all"
+else
+    fail "(k2) absent single-file docs were unexpectedly reported"
 fi
 
 # --- (l) symlinked install target is skipped, not clobbered ------------------
@@ -635,6 +694,119 @@ if grep -qi "could not refresh the loom-managed .gitignore block\|no loom-daemon
     pass "(#4280) missing binary produces a loud warning (not a silent skip)"
 else
     fail "(#4280) missing binary did not produce the expected warning"
+fi
+
+# --- (#5294) stale-binary regression: a loom-daemon binary compiled before a
+# given EPHEMERAL_PATTERNS entry existed, resolved ahead of a fresher
+# repo-local build under default (no LOOM_PREFER_REPO_BUILD) resolver
+# precedence, must not silently drop that pattern from the regenerated
+# .gitignore -- this is the exact mechanism that reintroduced #5267's gitlink
+# hazard 34 minutes after #5280 fixed it (05cf67e8). These fixtures use fake
+# `loom-daemon` shell-script stand-ins (each emitting a canned managed block
+# from a fixed pattern list) rather than the real Rust binary, so the
+# regression is reproducible without compiling two different daemon versions.
+#
+# make_fake_daemon_bin <dest> <pattern>... -- writes an executable at <dest>
+# that supports exactly `update-gitignore --help` (prints usage, exit 0) and
+# `update-gitignore <repo>` (rewrites <repo>/.gitignore's loom-managed block
+# to contain exactly the given patterns, preserving surrounding content).
+make_fake_daemon_bin() {
+    local dest="$1"; shift
+    mkdir -p "$(dirname "$dest")"
+    printf '%s\n' "$@" > "$dest.patterns"
+    cat > "$dest" <<'FAKE_DAEMON_EOF'
+#!/usr/bin/env bash
+set -u
+PATFILE="$0.patterns"
+if [[ "${1:-}" == "update-gitignore" ]]; then
+    if [[ "${2:-}" == "--help" ]]; then
+        echo "usage: loom-daemon update-gitignore <repo>"
+        exit 0
+    fi
+    repo="$2"
+    gi="$repo/.gitignore"
+    [[ -f "$gi" ]] || : > "$gi"
+    tmp="$(mktemp)"
+    awk 'BEGIN{skip=0} /# >>> loom-managed/{skip=1;next} /# <<< loom-managed/{skip=0;next} skip==0{print}' "$gi" > "$tmp"
+    {
+        cat "$tmp"
+        echo "# >>> loom-managed (do not edit) >>>"
+        echo "# Loom runtime state (don't commit these)"
+        cat "$PATFILE"
+        echo "# <<< loom-managed <<<"
+    } > "$gi"
+    rm -f "$tmp"
+    exit 0
+fi
+exit 1
+FAKE_DAEMON_EOF
+    chmod +x "$dest"
+}
+
+# A synthetic post_init.rs declaring an "old" pattern (present in every fake
+# binary below) plus a "just-added" pattern (present ONLY in the fresh
+# repo-local build) -- mirrors #5280 adding `.claude/worktrees/` to source
+# while a stale resolved binary still lacked it.
+write_fake_post_init() {
+    local repo="$1"
+    mkdir -p "$repo/loom-daemon/src/init"
+    cat > "$repo/loom-daemon/src/init/post_init.rs" <<'RUST_EOF'
+pub const EPHEMERAL_PATTERNS: &[&str] = &[
+    ".loom-in-use",
+    ".fake-newly-added-pattern/",
+];
+RUST_EOF
+}
+
+echo "Test group 12h: gitignore refresh prefers a repo-local build over a stale PATH binary when no \$LOOM_DAEMON_BIN override is set (#5294)"
+REPO="$(make_fixture)"
+write_fake_post_init "$REPO"
+make_fake_daemon_bin "$REPO/loom-daemon/target/release/loom-daemon" ".loom-in-use" ".fake-newly-added-pattern/"
+STALE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fake-path.XXXXXX")"
+make_fake_daemon_bin "$STALE_DIR/loom-daemon" ".loom-in-use"
+NO_BIN_HOME="$(mktemp -d)"
+OUT="$(cd "$REPO" && env -u LOOM_DAEMON_BIN PATH="$STALE_DIR:/usr/bin:/bin" HOME="$NO_BIN_HOME" \
+    LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT" 2>&1)"
+RC=$?
+rm -rf "$NO_BIN_HOME" "$STALE_DIR"
+if [[ $RC -eq 0 ]]; then
+    pass "(#5294) apply exits 0 with a stale PATH binary and a fresh repo-local build present"
+else
+    fail "(#5294) apply exits 0 with stale PATH + fresh repo build (got $RC)"
+fi
+GI_BLOCK="$(sed -n '/# >>> loom-managed/,/# <<< loom-managed/p' "$REPO/.gitignore")"
+if grep -qxF ".fake-newly-added-pattern/" <<<"$GI_BLOCK"; then
+    pass "(#5294) the newly-added source pattern landed in .gitignore (repo-local build was preferred over stale PATH)"
+else
+    fail "(#5294) newly-added pattern missing from .gitignore -- the stale PATH binary was used instead of the repo build"
+fi
+if grep -qi "regenerated .gitignore WITHOUT" <<<"$OUT"; then
+    fail "(#5294) unexpected stale-binary warning even though the repo build covered every source pattern"
+else
+    pass "(#5294) no stale-binary warning printed when the resolved binary satisfies all source patterns"
+fi
+
+echo "Test group 12i: gitignore refresh warns loudly -- never silently -- when only a stale binary resolves (#5294)"
+REPO="$(make_fixture)"
+write_fake_post_init "$REPO"
+# No repo-local build this time: resolution falls through to the stale PATH
+# binary (the pre-#5294-fix behavior this whole issue is about).
+STALE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fake-path.XXXXXX")"
+make_fake_daemon_bin "$STALE_DIR/loom-daemon" ".loom-in-use"
+NO_BIN_HOME="$(mktemp -d)"
+OUT="$(cd "$REPO" && env -u LOOM_DAEMON_BIN PATH="$STALE_DIR:/usr/bin:/bin" HOME="$NO_BIN_HOME" \
+    LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT" 2>&1)"
+RC=$?
+rm -rf "$NO_BIN_HOME" "$STALE_DIR"
+if [[ $RC -eq 0 ]]; then
+    pass "(#5294) apply still exits 0 when only a stale binary resolves"
+else
+    fail "(#5294) apply exits 0 with only a stale binary resolvable (got $RC)"
+fi
+if grep -qi "regenerated .gitignore WITHOUT" <<<"$OUT" && grep -qF ".fake-newly-added-pattern/" <<<"$OUT"; then
+    pass "(#5294) the dropped pattern is named in a loud warning instead of being silently lost"
+else
+    fail "(#5294) stale-binary warning did not name the missing pattern"
 fi
 
 # --- (#4285) targeted loom-workspace package.json version field edit --------

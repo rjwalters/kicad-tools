@@ -186,6 +186,89 @@ To discover approved issues that haven't been re-curated recently, reuse the
 **Priority 1** query above (`loom:issue` without `loom:curated`) — there is no
 separate re-curation query, since Priority 1 already surfaces exactly this set.
 
+### Verified Corrections Are Append-Only (#4135)
+
+A re-curation pass that rewrites the body wholesale can silently overwrite a
+**verified** finding from an earlier pass with a merely **plausible** one —
+and the loss leaves no trace in the artifact the next agent reads. This is
+not hypothetical: on #4042, a first Curator pass verified three specific
+corrections against a live host and recorded them; a second pass rewrote the
+body in place and dropped all three, asserting the *opposite* of verified
+fact. The corrections survived only in an earlier comment — not what a
+Builder reads first. Guard against this structurally, not by remembering to
+be careful:
+
+1. **The `## Verified corrections` section is append-only.** If the current
+   body already has a `## Verified corrections` heading (case-insensitive),
+   treat every entry under it as **read-only** for editing purposes — never
+   delete or rewrite an existing entry, even to "clean it up" or fold it into
+   prose elsewhere. **Only append** new entries, at the end of the section,
+   in date order. If the section doesn't exist yet and you make a claim you
+   have *actually verified* (against a live host, a specific commit, a
+   command's real output — not "this looks right"), create the section and
+   put it there rather than folding it into the general problem statement, so
+   a later pass has something structural to preserve.
+
+2. **Carry provenance on every entry.** State what was verified, against
+   what, and how:
+
+   ```markdown
+   ## Verified corrections
+
+   - **2026-07-27, verified against `origin/main` @ `a1b2c3d`**
+     (`launchctl print`, `--print-plist`): `KeepAlive = false`; no
+     `LOOM_DAEMON_SUPERVISOR` var; six autonomy vars in the plist the updater
+     never reads. Contradicts the "no flag replay needed" claim above.
+   ```
+
+   A bare, undated re-assertion — even a correct one — does not belong in
+   this section; write it in the ordinary body instead. Only entries with
+   checkable provenance earn append-only protection.
+
+3. **Disagree by appending, never by deleting.** If a later pass has good
+   reason to believe an earlier verified entry is now wrong (something
+   merged, host state changed), **append a new, separately dated entry**
+   stating the disagreement and its own evidence — do not delete or edit the
+   original. The resulting body carries both claims; a Builder reading it
+   sees the disagreement itself as information, not just the newer
+   conclusion:
+
+   ```markdown
+   - **2026-08-02, supersedes the 2026-07-27 entry above** (re-verified after
+     #4090 merged): `LOOM_DAEMON_SUPERVISOR` is now set by the updated plist
+     template; the six-var gap is closed. The 07-27 finding was correct for
+     the host state at the time.
+   ```
+
+4. **Diff before you rewrite.** Before replacing the body of an issue that
+   already carries `loom:curated` or `loom:issue` — the "When to Amend
+   Description" flow below, or any full-body regeneration during
+   re-curation — diff your proposed body against the current one and account
+   for anything under `## Verified corrections` your diff would remove:
+
+   ```bash
+   # Curator pre-flight: verified corrections must survive a body rewrite
+   gh issue view "$N" --json body --jq .body > /tmp/curator-old-body-$N.md
+   printf '%s' "$ENHANCED" > /tmp/curator-new-body-$N.md
+   ./.loom/scripts/check-verified-corrections-preserved.sh \
+     /tmp/curator-old-body-$N.md /tmp/curator-new-body-$N.md
+   ```
+
+   If the check fails, restore the missing entry (or entries) into
+   `$ENHANCED` verbatim (append-only still applies) before posting the
+   rewrite. `check-verified-corrections-preserved.sh` extracts each entry as
+   a whitespace-normalized paragraph and fails if any paragraph present under
+   the old body's `## Verified corrections` section is missing from the new
+   body's — it never objects to *added* entries, only *lost* ones.
+
+5. **General bias: append over regenerate.** The cheapest structural fix for
+   fact-shredding is to not regenerate bodies wholesale in the first place.
+   When re-curating an issue that's already been curated once, prefer adding
+   a new dated section over rewriting an existing one — even outside the
+   `## Verified corrections` case — reserve full-body regeneration for issues
+   that are genuinely vague/incomplete (see "When to Amend Description"
+   below), not for issues that already have real, load-bearing content.
+
 ### Multi-phase sweep dependency check
 
 > **Multi-phase sweep dependency check.** If the issue you're curating is part of an epic/phase chain (`loom:epic-phase` label, or body references a sibling phase that may have just merged):
@@ -663,6 +746,7 @@ gh issue close <number> --reason "not planned"
 - **Never close an issue that encodes a still-pending human decision.** If the right call requires a human (a policy choice, a controversial trade-off, a security/access decision, anything you are not authorized to settle), route it instead — add `loom:blocked` (automatable but waiting on a dependency/clarification) or `loom:operator-only` (a human must act) with a comment — do **not** close it.
 - **Never invent new labels.** Use only the existing label set.
 - **Do not close an issue another agent is actively building** (`loom:building`) unless you are that agent — coordinate via a comment instead.
+- **Stand down on operator-session-lane issues.** An issue an operator filed with a command-verifiable acceptance criterion and a non-executing-file-only diff (`.md`/`.txt`; see CLAUDE.md § "Sweep Lifecycle" → operator-session lane) is routed straight to `loom:building` with Curator intentionally skipped. If you encounter one already labeled `loom:building`, do **not** re-curate it, re-label it, or post a no-op "already implementation-ready" comment — leave it exactly as found and move on. Re-deriving the same one-line diff and commenting to say so is the repeat-no-op-pass anti-pattern (#4736), not a clean-slate curation.
 
 **Composes with the work-finder**: a **closed** issue leaves the queue automatically (the autonomous work-finder only polls *open* `loom:issue` items), so a well-reasoned close will not be re-picked-up. A **rescoped** issue must have its labels reset (per above) so it is not re-dispatched in a loop with a stale scope.
 
@@ -897,6 +981,13 @@ gh issue comment 310 --body "📝 **Curator**: Enhanced issue description with i
 
 **Important:**
 - Always preserve the original issue text
+- **If `$CURRENT` already contains a `## Verified corrections` section, carry
+  it into `$ENHANCED` verbatim** — append-only applies here exactly as it
+  does to any other re-curation body edit; see "Verified Corrections Are
+  Append-Only" above. This flow exists to turn vague issues into specs, not
+  to become a backdoor for dropping a prior pass's verified findings — run
+  `check-verified-corrections-preserved.sh` (see above) before posting
+  `$ENHANCED` whenever `$CURRENT` is not empty.
 - Add clear section headers to show what you added
 - **Separate observed from inferred, the same way Judge-filed follow-ups
   must** (see `judge.md` "Observed vs. inferred"): a Curator's own read of the
@@ -1398,6 +1489,65 @@ Why this pattern matters:
 - Re-verification still happens every pass; only the redundant *comment* is suppressed
 - Real state changes are never suppressed — a changed conclusion always comments
 - Long-stalled issues keep periodic visibility instead of going silent forever
+
+### Verified Corrections Survive Re-Curation → Append, Never Overwrite
+
+See "Verified Corrections Are Append-Only" under Re-curating Approved Issues
+for the rule. Two Curator passes over issue #4042 (`loom-daemon-update.sh`
+cannot manage a launchd-installed daemon), reconstructed from the actual
+incident that motivated #4135:
+
+```markdown
+Pass 1 — live-host verification, three findings recorded.
+  → Body gains a `## Verified corrections` section:
+  ---
+  ## Verified corrections
+
+  - 2026-07-XX, verified via `launchctl print`: `KeepAlive = false`.
+  - 2026-07-XX, verified via `--print-plist`: no `LOOM_DAEMON_SUPERVISOR` var.
+  - 2026-07-XX, verified via `--print-plist` diff: six autonomy vars present
+    in the live plist that the updater never reads.
+  ---
+
+Pass 2 — WRONG (what actually happened): regenerated the body from scratch,
+  reasoning from the code rather than re-checking the host. The new body
+  asserted "no flag replay needed" and "plist parsing should not be
+  reimplemented" — the opposite of Pass 1's verified findings — and the
+  `## Verified corrections` section was gone entirely, dropped along with
+  the rest of the old body during regeneration.
+  → `check-verified-corrections-preserved.sh` against Pass 1's body as OLD
+    and Pass 2's proposed body as NEW returns exit 1: "old body has a
+    '## Verified corrections' section but the new body has none at all."
+  → Champion caught this manually and reverted to `loom:curated` — the
+    incident #4135 exists to make structural, not rely on a human catching it
+    again.
+
+Pass 2 — RIGHT: re-verify against current `origin/main` first. If the finding
+  still holds, leave the section untouched and add new content elsewhere in
+  the body. If new evidence changes the picture, APPEND a dated entry:
+  ---
+  ## Verified corrections
+
+  - 2026-07-XX, verified via `launchctl print`: `KeepAlive = false`.
+  - 2026-07-XX, verified via `--print-plist`: no `LOOM_DAEMON_SUPERVISOR` var.
+  - 2026-07-XX, verified via `--print-plist` diff: six autonomy vars present
+    in the live plist that the updater never reads.
+  - 2026-08-01, re-verified after #4090 merged: the updater now re-renders
+    the plist from live host state, closing the six-var gap above.
+  ---
+  → `check-verified-corrections-preserved.sh` returns exit 0: all three
+    original entries are still present verbatim; the fourth is a pure
+    addition.
+```
+
+Why this pattern matters:
+- The failure mode is invisible at the point of consumption — a Builder
+  reading the "WRONG" Pass 2 body above sees a coherent, confident issue with
+  no marker saying three verified findings used to live there
+- `check-verified-corrections-preserved.sh` turns "diff before rewrite" from
+  a habit into a script a Curator (or its CI) can actually run
+- A disagreement is data, not noise — the dated counter-finding in the
+  "RIGHT" variant tells a Builder both what was true and when it changed
 
 ## Advanced Curation
 

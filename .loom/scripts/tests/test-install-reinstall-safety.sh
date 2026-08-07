@@ -396,6 +396,139 @@ rm -rf "$T4"
 echo ""
 
 echo "================================================================"
+echo "Group 5: --dry-run (issue #5517) -- plan-only, zero mutation, exit 0"
+echo "================================================================"
+echo ""
+
+# Case 1: fresh (not-yet-installed) target -- install.sh --dry-run prints a
+# plan, exits 0, and leaves the target byte-for-byte empty.
+T5=$(mktemp -d /tmp/loom-dry-run-fresh-test.XXXXXX)
+git -C "$T5" init --quiet
+git -C "$T5" config user.email "test@test.com"
+git -C "$T5" config user.name "Test"
+git -C "$T5" commit --allow-empty -m "init" --quiet
+PRE_T5_SHA="$(git -C "$T5" rev-parse HEAD)"
+
+OUTPUT5="$("$INSTALL_SH" --dry-run "$T5" < /dev/null 2>&1)"
+EXIT5=$?
+assert_zero_exit "$EXIT5" "Case 1: install.sh --dry-run on a fresh target exits 0"
+assert_contains "$OUTPUT5" "DRY RUN" "Case 1: output announces a dry run"
+assert_contains "$OUTPUT5" "What Will Be Installed" "Case 1: output prints the planned-writes summary"
+
+POST_T5_SHA="$(git -C "$T5" rev-parse HEAD)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$PRE_T5_SHA" == "$POST_T5_SHA" ]] && [[ -z "$(git -C "$T5" status --porcelain)" ]] && [[ ! -d "$T5/.loom" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: Case 1: target is untouched (no .loom/, clean git status, HEAD unchanged)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: Case 1: target was mutated by --dry-run"
+fi
+
+rm -rf "$T5"
+echo ""
+
+# Case 2: existing install + --dry-run --confirm-reinstall WITHOUT -y/--quick.
+# Mirrors the real reinstall gate exactly: NON_INTERACTIVE is false here (no
+# -y/--quick/--full), so a real run would hit the interactive "Proceed with
+# reinstall?" prompt -- the preview must say so, not fabricate a removal plan
+# for a branch the real invocation would never reach.
+T6=$(mktemp -d /tmp/loom-dry-run-noninteractive-test.XXXXXX)
+mkdir -p "$T6/.loom"
+echo '{}' > "$T6/.loom/config.json"
+git -C "$T6" init --quiet
+git -C "$T6" config user.email "test@test.com"
+git -C "$T6" config user.name "Test"
+git -C "$T6" add -A
+git -C "$T6" commit -m "existing install" --quiet
+PRE_T6_SHA="$(git -C "$T6" rev-parse HEAD)"
+
+OUTPUT6="$("$INSTALL_SH" --dry-run --confirm-reinstall "$T6" < /dev/null 2>&1)"
+EXIT6=$?
+assert_zero_exit "$EXIT6" "Case 2: install.sh --dry-run --confirm-reinstall (no -y) exits 0"
+assert_contains "$OUTPUT6" "would be prompted" "Case 2: preview says a real run would hit the interactive prompt"
+
+POST_T6_SHA="$(git -C "$T6" rev-parse HEAD)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$PRE_T6_SHA" == "$POST_T6_SHA" ]] && [[ -z "$(git -C "$T6" status --porcelain)" ]] && [[ -f "$T6/.loom/config.json" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: Case 2: existing install left completely untouched"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: Case 2: existing install was mutated by --dry-run"
+fi
+
+rm -rf "$T6"
+echo ""
+
+# Case 3: existing install + --dry-run --quick --confirm-reinstall -- this IS
+# the destructive-reinstall branch (matches install.sh's own INSTALL_TYPE=="1"
+# gate). The preview must show the concrete removal plan (via
+# scripts/uninstall-loom.sh --dry-run) and leave the target byte-identical.
+T7=$(mktemp -d /tmp/loom-dry-run-destructive-test.XXXXXX)
+mkdir -p "$T7/.loom"
+echo '{}' > "$T7/.loom/config.json"
+git -C "$T7" init --quiet
+git -C "$T7" config user.email "test@test.com"
+git -C "$T7" config user.name "Test"
+git -C "$T7" add -A
+git -C "$T7" commit -m "existing install" --quiet
+PRE_T7_SHA="$(git -C "$T7" rev-parse HEAD)"
+PRE_T7_FILES="$(find "$T7" -type f -not -path '*/.git/*' | sort | xargs md5sum 2>/dev/null)"
+
+OUTPUT7="$("$INSTALL_SH" --dry-run --quick --confirm-reinstall "$T7" < /dev/null 2>&1)"
+EXIT7=$?
+assert_zero_exit "$EXIT7" "Case 3: install.sh --dry-run --quick --confirm-reinstall exits 0"
+assert_contains "$OUTPUT7" "DESTRUCTIVE reinstall" "Case 3: preview names the destructive-reinstall plan"
+assert_contains "$OUTPUT7" ".loom/config.json" "Case 3: preview lists the concrete file(s) that would be removed"
+
+POST_T7_SHA="$(git -C "$T7" rev-parse HEAD)"
+POST_T7_FILES="$(find "$T7" -type f -not -path '*/.git/*' | sort | xargs md5sum 2>/dev/null)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$PRE_T7_SHA" == "$POST_T7_SHA" ]] && [[ "$PRE_T7_FILES" == "$POST_T7_FILES" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: Case 3: target files are byte-identical before/after (nothing removed)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: Case 3: target files changed despite --dry-run"
+fi
+
+rm -rf "$T7"
+echo ""
+
+# Case 4: scripts/uninstall-loom.sh --dry-run directly -- Step 1-3 build/report
+# the removal manifest, exit 0 before Step 4 (worktree)/5 (removal)/6
+# (smart-remove writes) ever run.
+T8=$(mktemp -d /tmp/loom-dry-run-uninstall-direct-test.XXXXXX)
+mkdir -p "$T8/.loom/roles" "$T8/.loom/scripts"
+echo '{}' > "$T8/.loom/config.json"
+git -C "$T8" init --quiet
+git -C "$T8" config user.email "test@test.com"
+git -C "$T8" config user.name "Test"
+git -C "$T8" add -A
+git -C "$T8" commit -m "existing install" --quiet
+PRE_T8_SHA="$(git -C "$T8" rev-parse HEAD)"
+
+OUTPUT8="$("$UNINSTALL_SH" --local --dry-run "$T8" < /dev/null 2>&1)"
+EXIT8=$?
+assert_zero_exit "$EXIT8" "Case 4: uninstall-loom.sh --local --dry-run exits 0 without -y"
+assert_contains "$OUTPUT8" "DRY RUN" "Case 4: output announces a dry run"
+assert_contains "$OUTPUT8" ".loom/config.json" "Case 4: output lists the concrete file(s) that would be removed"
+
+POST_T8_SHA="$(git -C "$T8" rev-parse HEAD)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$PRE_T8_SHA" == "$POST_T8_SHA" ]] && [[ -z "$(git -C "$T8" status --porcelain)" ]] && [[ -f "$T8/.loom/config.json" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: Case 4: target left completely untouched"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: Case 4: target was mutated by --dry-run"
+fi
+
+rm -rf "$T8"
+echo ""
+
+echo "================================================================"
 echo "Tests run:    $TESTS_RUN"
 echo -e "Tests passed: ${GREEN}$TESTS_PASSED${NC}"
 if [[ "$TESTS_FAILED" -gt 0 ]]; then

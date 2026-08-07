@@ -73,7 +73,8 @@ ls .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null
 
 # Then fall back to root manifests / build files, in this order of specificity:
 #   package.json      -> node/pnpm/npm build+test (read its "scripts")
-#   Cargo.toml (root) -> cargo build --release / cargo test
+#   Cargo.toml (root) -> cargo build --release / cargo test (unless CI uses
+#                         nextest — see the Rust extraction step below)
 #   pyproject.toml    -> python build; pytest / tox / nox for tests
 #   Makefile          -> make build / make test (read the targets first)
 #   (none of the above, no CI) -> see Step D3 "nothing to build/launch"
@@ -84,6 +85,39 @@ done
 
 Use the **discovered** command as `$BUILD_CMD` / `$TEST_CMD` in the workflow
 below. If CI already defines them, that is authoritative — reuse it verbatim.
+
+**Rust: extract CI's exact test invocation instead of guessing `cargo test`.**
+A generic `cargo test --workspace` guess is not always what CI actually runs —
+`cargo nextest` (process-per-test isolation) and `cargo test` (shared-process,
+multi-threaded) can produce **different** results for the same test suite on a
+busy/contended host, so guessing wrong can manufacture false "test failure on
+main" signals. When `Cargo.toml` exists at the repo root, extract CI's own
+`--workspace`-scoped nextest command before falling back to a generic guess:
+
+```bash
+if [[ -f Cargo.toml ]]; then
+    NEXTEST_CMD=$(rg -n 'cargo nextest run.*--workspace' .github/workflows/*.yml \
+        .github/workflows/*.yaml 2>/dev/null \
+        | head -1 | sed -E 's/^[^:]+:[0-9]+:[[:space:]]*(- )?(run:[[:space:]]*)?//')
+    if [[ -n "$NEXTEST_CMD" ]]; then
+        TEST_CMD="$NEXTEST_CMD"   # byte-for-byte reuse, flags included (e.g. --profile ci)
+    else
+        TEST_CMD="cargo test --workspace"   # no nextest reference found — unchanged fallback
+    fi
+fi
+```
+
+- Prefer a `--workspace`-scoped `cargo nextest run` line over a `--package`-scoped
+  one if a workflow has both (e.g. a package-specific feature-flag job) — the
+  fallback needs to cover the whole repo, not one crate.
+- If `.github/workflows/` doesn't exist, or no workflow file references `cargo
+  nextest run`, fall back to the existing generic default (`cargo test
+  --workspace`) unchanged — do not require `nextest` to be installed or treat it
+  as a hard dependency for repos that don't use it.
+- CI's Rust validation may span more than one command (e.g. a separate `cargo
+  test --workspace --doc` run for doctests, since nextest doesn't execute them,
+  or a feature-flag-specific job) — the extraction above only needs the
+  general-purpose `--workspace` suite; it is not meant to replicate every job.
 
 **Step D2 — detect the launchable artifact (what does "run it" mean here?):**
 
@@ -554,7 +588,9 @@ gh issue list --state open --search "build failure" --limit 500 --json number,ti
 
 ```bash
 # DO: Run the full build and test suite USING THE DISCOVERED COMMANDS
-#     (the two lines below are illustrative Loom-repo examples, not instructions):
+#     (the two lines below are illustrative Loom-repo examples, not instructions
+#     — for the real $TEST_CMD on a Rust repo, see the Step D1 nextest
+#     extraction above, which this "cargo test" is deliberately simplified from):
 #       pnpm install && pnpm build && pnpm test     # a Node repo
 #       cargo build --release && cargo test         # a Rust repo
 eval "$BUILD_CMD" && eval "$TEST_CMD"

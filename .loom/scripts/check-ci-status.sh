@@ -2,8 +2,16 @@
 # check-ci-status.sh - Check CI status for the latest main branch commit
 #
 # Supports both GitHub and Gitea forges. Forge detection is automatic.
-# - GitHub: uses Check Runs API + commit status API
-# - Gitea: uses commit status API only (mapped to check-run shape)
+# - GitHub: uses Check Runs API + commit status API + Actions workflow-run API
+# - Gitea: uses commit status API (mapped to check-run shape) + Actions
+#   task-list API for workflow-run state
+#
+# A queued/in_progress workflow run with zero dispatched jobs has zero
+# check-runs, so the workflow-run API call above is folded into the pending
+# count independently of check-run counts -- otherwise other, unrelated,
+# already-completed checks for the same commit could make this script report
+# overall "success" before the primary CI workflow has run a single job
+# (#5495).
 #
 # Usage:
 #   ./check-ci-status.sh [--commit SHA]
@@ -142,8 +150,21 @@ get_ci_status() {
         combined_status='{"state": "unknown", "statuses": []}'
     }
 
+    # Get workflow-run state directly (independent of the Checks API). A
+    # queued/in_progress workflow run with zero dispatched jobs has zero
+    # check-runs and is otherwise invisible to analyze_status() -- see
+    # forge_get_workflow_runs's doc comment and issue #5495.
+    local workflow_runs
+    workflow_runs=$(forge_get_workflow_runs "$REPO_NWO" "$commit") || {
+        # Not critical if this fails - check runs are the primary signal
+        workflow_runs='{"workflow_runs": []}'
+    }
+
     # Merge results
-    echo "$check_runs" | jq --argjson status "$combined_status" '. + {combined_status: $status}'
+    echo "$check_runs" | jq \
+        --argjson status "$combined_status" \
+        --argjson wf "$workflow_runs" \
+        '. + {combined_status: $status, workflow_runs: ($wf.workflow_runs // [])}'
 }
 
 analyze_status() {
@@ -154,6 +175,9 @@ analyze_status() {
 
     local check_runs
     check_runs=$(echo "$data" | jq -c '.check_runs // []')
+
+    local workflow_runs
+    workflow_runs=$(echo "$data" | jq -c '.workflow_runs // []')
 
     local combined_state
     combined_state=$(echo "$data" | jq -r '.combined_status.state // "unknown"')
@@ -192,6 +216,21 @@ analyze_status() {
         esac
     done < <(echo "$check_runs" | jq -c '.[]')
 
+    # Analyze workflow runs (#5495): a workflow run that is `queued` or
+    # `in_progress` counts as pending even when it has dispatched zero jobs
+    # yet -- and therefore has no corresponding entries at all in $check_runs
+    # above. This is deliberately additive-only: a `completed` workflow run
+    # contributes nothing here because its job-level detail already arrived
+    # via $check_runs (double-counting it would risk over-counting success/
+    # failure, not just pending).
+    while IFS= read -r run; do
+        local wf_status
+        wf_status=$(echo "$run" | jq -r '.status')
+        if [[ "$wf_status" != "completed" ]]; then
+            ((pending++))
+        fi
+    done < <(echo "$workflow_runs" | jq -c '.[]')
+
     # Determine overall status
     local overall_status
     if [[ $failure -gt 0 ]]; then
@@ -223,6 +262,7 @@ analyze_status() {
         --argjson pending "$pending" \
         --argjson skipped "$skipped" \
         --argjson check_runs "$check_runs" \
+        --argjson workflow_runs "$workflow_runs" \
         '{
             commit: $commit,
             short_sha: $short_sha,
@@ -236,7 +276,8 @@ analyze_status() {
                 pending: $pending,
                 skipped: $skipped
             },
-            check_runs: $check_runs
+            check_runs: $check_runs,
+            workflow_runs: $workflow_runs
         }'
 }
 
@@ -294,11 +335,13 @@ else
         echo "$RESULT" | jq -r '.check_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled") | "  - \(.name): \(.conclusion)"'
     fi
 
-    # Show pending checks
+    # Show pending checks (check-runs with dispatched jobs, plus workflow
+    # runs that are queued/in_progress with no dispatched jobs yet — #5495)
     if [[ "$PENDING_COUNT" -gt 0 ]]; then
         echo ""
         echo "Pending checks:"
         echo "$RESULT" | jq -r '.check_runs[] | select(.status != "completed") | "  - \(.name): \(.status)"'
+        echo "$RESULT" | jq -r '.workflow_runs[] | select(.status != "completed") | "  - \(.name): \(.status) (workflow run)"'
     fi
 
     echo ""

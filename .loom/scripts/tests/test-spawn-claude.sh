@@ -1216,6 +1216,200 @@ fi
 rm -rf "$PRIO_DIR"
 
 # ============================================================
+# Section 7b: per-sweep CPU quota (issue #5111)
+#
+# Nothing bounded a sweep's CPU, so an agent-written driver could run N
+# concurrent CPU-bound processes and saturate an entire host. On a host with
+# a reachable `systemd --user` manager, spawn-claude.sh wraps the final
+# `claude`/`claude-wrapper.sh` exec in `systemd-run --user --scope -p
+# CPUQuota=<budget*100>%` (an actual kernel cgroup quota); everywhere else
+# (this dev host included) it degrades to advisory-only: the computed budget
+# is still exported as LOOM_SWEEP_CPU_BUDGET_CORES, but nothing wraps the
+# exec. Both branches are exercised below — `LOOM_SYSTEMD_FORCE=1` (the same
+# test-only seam lib/systemd-user.sh already exposes) drives the enforced
+# path deterministically on any OS, including this macOS dev host.
+# ============================================================
+
+echo ""
+echo "Testing spawn-claude.sh CPU quota (#5111)..."
+
+CPU_DIR="$(mktemp -d)"
+trap 'rm -rf "$TEST_WS" "$STUB_DIR" "$CPU_DIR"' EXIT
+
+cat > "$CPU_DIR/claude" <<'STUB'
+#!/usr/bin/env bash
+echo "stub-claude budget=${LOOM_SWEEP_CPU_BUDGET_CORES:-unset}"
+STUB
+chmod +x "$CPU_DIR/claude"
+
+# Deterministic core count for every test below, regardless of host.
+cat > "$CPU_DIR/nproc" <<'STUB'
+#!/usr/bin/env bash
+echo 8
+STUB
+chmod +x "$CPU_DIR/nproc"
+
+# Fake `systemd-run` that (1) logs its invocation and (2) actually execs the
+# wrapped command after stripping the leading flags/properties up to `--`, so
+# the stub `claude` behind it still runs and the assertions can see its
+# output too — mirrors how a real `systemd-run --scope` hands off to its
+# target.
+SYSTEMD_RUN_LOG="$CPU_DIR/systemd-run.log"
+cat > "$CPU_DIR/systemd-run" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "$SYSTEMD_RUN_LOG"
+args=("\$@")
+skip=0
+for ((i = 0; i < \${#args[@]}; i++)); do
+    if [[ "\${args[i]}" == "--" ]]; then
+        skip=\$((i + 1))
+        break
+    fi
+done
+exec "\${args[@]:skip}"
+STUB
+chmod +x "$CPU_DIR/systemd-run"
+
+# `is_linux_systemd`'s LOOM_SYSTEMD_FORCE=1 branch still probes `command -v
+# systemctl`, so a stub must be on PATH for the forced branch to engage.
+cat > "$CPU_DIR/systemctl" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$CPU_DIR/systemctl"
+
+# Test: with no systemd --user manager reachable (the default on this dev
+# host, and on every macOS worker in this fleet today), the budget is still
+# computed and exported, but nothing wraps the exec — advisory-only.
+output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CPU_DIR:$PATH" \
+    env -u LOOM_SYSTEMD_FORCE \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "CPU budget = 6 core(s) of 8 (reserved 2)" "$output" \
+    "spawn-claude computes budget = total - reserved(2) with no env/config set (#5111)"
+assert_contains "stub-claude budget=6" "$output" \
+    "spawn-claude exports LOOM_SWEEP_CPU_BUDGET_CORES to the child (#5111)"
+assert_contains "advisory-only" "$output" \
+    "spawn-claude logs advisory-only when no systemd --user manager is reachable (#5111)"
+
+# Test: LOOM_SYSTEMD_FORCE=1 drives the enforced path — the final exec is
+# wrapped in `systemd-run --user --scope -p CPUQuota=<budget*100>%`.
+: > "$SYSTEMD_RUN_LOG"
+output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CPU_DIR:$PATH" \
+    LOOM_SYSTEMD_FORCE=1 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "enforcing CPUQuota=600% via systemd --user scope" "$output" \
+    "spawn-claude enforces CPUQuota=600% (6 cores * 100) when a systemd --user scope is available (#5111)"
+assert_contains "stub-claude budget=6" "$output" \
+    "the wrapped stub claude still runs and sees the exported budget (#5111)"
+assert_contains "CPUQuota=600%" "$(cat "$SYSTEMD_RUN_LOG")" \
+    "systemd-run is actually invoked with the computed CPUQuota (#5111)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$(cat "$SYSTEMD_RUN_LOG")" != *"RuntimeMaxSec"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: no RuntimeMaxSec property is set when the wall-clock ceiling is left at its disabled default (#5111)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: no RuntimeMaxSec property is set when the wall-clock ceiling is left at its disabled default (#5111)"
+fi
+
+# Test: LOOM_SWEEP_RESERVED_CORES overrides the default reservation.
+: > "$SYSTEMD_RUN_LOG"
+output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CPU_DIR:$PATH" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SWEEP_RESERVED_CORES=4 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "CPU budget = 4 core(s) of 8 (reserved 4)" "$output" \
+    "LOOM_SWEEP_RESERVED_CORES overrides the default reservation (#5111)"
+assert_contains "CPUQuota=400%" "$(cat "$SYSTEMD_RUN_LOG")" \
+    "the overridden reservation is reflected in the enforced CPUQuota (#5111)"
+
+# Test: a reservation >= total cores still yields at least a 1-core budget
+# (never a zero/negative quota that would deadlock the sweep).
+: > "$SYSTEMD_RUN_LOG"
+output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CPU_DIR:$PATH" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SWEEP_RESERVED_CORES=99 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "CPU budget = 1 core(s) of 8 (reserved 99)" "$output" \
+    "an over-large reservation clamps the budget to a floor of 1 core, never 0 (#5111)"
+assert_contains "CPUQuota=100%" "$(cat "$SYSTEMD_RUN_LOG")" \
+    "the floor budget is reflected as CPUQuota=100% (#5111)"
+
+# Test: LOOM_SWEEP_WALLCLOCK_CEILING_SECS adds a RuntimeMaxSec property to
+# the same systemd-run invocation — the driver-level wall-clock bound, not
+# just each leaf process's own timeout.
+: > "$SYSTEMD_RUN_LOG"
+output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CPU_DIR:$PATH" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SWEEP_WALLCLOCK_CEILING_SECS=21600 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "RuntimeMaxSec=21600" "$(cat "$SYSTEMD_RUN_LOG")" \
+    "LOOM_SWEEP_WALLCLOCK_CEILING_SECS adds a RuntimeMaxSec property when set (#5111)"
+assert_contains "RuntimeMaxSec=21600s" "$output" \
+    "spawn-claude logs the applied wall-clock ceiling (#5111)"
+
+# Test: autonomous.spawnReservedCores / autonomous.spawnWallClockCeilingSecs
+# config knobs are honored when no env override is set (env > config >
+# default precedence, mirroring the #4233 niceness knobs).
+CPU_CFG_WS="$(mktemp -d)"
+mkdir -p "$CPU_CFG_WS/.loom/tokens"
+chmod 700 "$CPU_CFG_WS/.loom/tokens"
+echo -n "fake-token-cfg" > "$CPU_CFG_WS/.loom/tokens/alpha.token"
+chmod 600 "$CPU_CFG_WS/.loom/tokens/alpha.token"
+cat > "$CPU_CFG_WS/.loom/config.json" <<'EOF'
+{ "autonomous": { "spawnReservedCores": 3, "spawnWallClockCeilingSecs": 7200 } }
+EOF
+: > "$SYSTEMD_RUN_LOG"
+output=$(LOOM_WORKSPACE="$CPU_CFG_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CPU_DIR:$PATH" \
+    LOOM_SYSTEMD_FORCE=1 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "CPU budget = 5 core(s) of 8 (reserved 3)" "$output" \
+    "autonomous.spawnReservedCores config knob is honored (#5111)"
+assert_contains "RuntimeMaxSec=7200" "$(cat "$SYSTEMD_RUN_LOG")" \
+    "autonomous.spawnWallClockCeilingSecs config knob is honored (#5111)"
+
+# Test: an explicit LOOM_SWEEP_RESERVED_CORES env still wins over the config
+# knob.
+: > "$SYSTEMD_RUN_LOG"
+output=$(LOOM_WORKSPACE="$CPU_CFG_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CPU_DIR:$PATH" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SWEEP_RESERVED_CORES=1 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "CPU budget = 7 core(s) of 8 (reserved 1)" "$output" \
+    "LOOM_SWEEP_RESERVED_CORES env wins over autonomous.spawnReservedCores config (#5111)"
+rm -rf "$CPU_CFG_WS"
+
+# Test: LOOM_SWEEP_CPU_QUOTA=0 disables the entire mechanism — no budget
+# export, no systemd-run wrap, byte-for-byte pre-#5111 behavior.
+: > "$SYSTEMD_RUN_LOG"
+output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CPU_DIR:$PATH" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "CPU quota mechanism disabled" "$output" \
+    "LOOM_SWEEP_CPU_QUOTA=0 disables the mechanism (#5111)"
+assert_contains "stub-claude budget=unset" "$output" \
+    "LOOM_SWEEP_CPU_BUDGET_CORES is not exported when the mechanism is disabled (#5111)"
+assert_eq "" "$(cat "$SYSTEMD_RUN_LOG")" \
+    "systemd-run is never invoked when LOOM_SWEEP_CPU_QUOTA=0 (#5111)"
+
+# Test: a failing systemd-run probe (e.g. the cpu controller isn't delegated
+# to the user manager) degrades to advisory-only rather than replacing the
+# process with a failing exec — the spawn must never be blocked by this.
+FAIL_DIR="$(mktemp -d)"
+cp "$CPU_DIR/claude" "$CPU_DIR/nproc" "$CPU_DIR/systemctl" "$FAIL_DIR/"
+cat > "$FAIL_DIR/systemd-run" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+chmod +x "$FAIL_DIR/systemd-run"
+output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$FAIL_DIR:$PATH" \
+    LOOM_SYSTEMD_FORCE=1 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "probe failed" "$output" \
+    "a failing systemd-run probe is logged and degrades to advisory-only, not a hard failure (#5111)"
+assert_contains "stub-claude budget=6" "$output" \
+    "the spawn still completes (unwrapped) after a failed probe (#5111)"
+rm -rf "$FAIL_DIR"
+
+rm -rf "$CPU_DIR"
+
+# ============================================================
 # Section 8: claude-wrapper.sh `Execution error` retry + permanent-death
 #            diagnostics (issue #4255)
 #

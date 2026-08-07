@@ -68,8 +68,68 @@ Env overrides (each wins over config for that key):
 | `LOOM_SAFEHOUSE_ROOMS_BY_REPO` | `rooms.byRepo`, as `repo=room[,repo=room…]` (#4225) |
 | `LOOM_SAFEHOUSE_ROOM_CLAIMS` | `rooms.claims` — dedicated peer-claim coordination room (#4713) |
 
-**Socket resolution**: configured `socket` → `$LOOM_SAFEHOUSE_SOCKET` →
-`$SAFEHOUSED_SOCKET`. If none resolves, narration logs one `warn!` and stays off.
+**Socket resolution** (precedence **env > config**, `resolve_socket` in
+`loom-daemon/src/safehouse.rs`; the bash-side worker-injection path
+(`defaults/scripts/lib/mcp-config.sh`'s `loom_mcp_safehouse_socket()`) mirrors
+the same chain): `$LOOM_SAFEHOUSE_SOCKET` → `$SAFEHOUSED_SOCKET` (the
+unprefixed convention `safehoused` clients also read) → the configured
+`socket` value. If none resolves, narration logs one `warn!` and stays off — no
+built-in `$HOME`-relative default, since safehouse is opt-in per-host.
+
+**`socket` must never be committed to the shared `.loom/config.json`** — like
+`observability.ingestKeyFile` (`observability.md`), it is host-specific by
+definition (every host's `safehoused` binds a different, unshareable path). Leave
+it unset in the committed file and either install `safehoused` at the
+conventional path each host's `$SAFEHOUSED_SOCKET` already points at, or set a
+per-host override in the gitignored `.loom-local/local.json` tier
+(`config_resolver.rs`, highest precedence) or via `$LOOM_SAFEHOUSE_SOCKET` —
+never in the committed file. #5457 is exactly the failure mode this avoids: a
+macOS `safehouse.socket` path was committed to this repo's own shared
+`.loom/config.json`, and — because `resolve_socket` checked the configured
+value *before* env at the time — every other host that `git pull`ed `main`
+inherited a path to a socket that did not exist on it, with no env override able
+to take effect while that stale path stayed committed.
+
+**Why there is still no built-in default, even after #5523.** #5457's fix left
+a gap: with the committed default gone and nothing installed in its place, an
+affected host's `safehouse.enabled: true` silently resolved to no socket at
+all, and the only signal was a `log_warn` inside each sweep's own per-role log
+— nobody was tailing those, so a real host ran with **zero** safehouse
+narration for 11 hours before a human noticed the public 2amlogic.com fleet
+pulse had gone stale (#5523). The tempting fix — teach the resolver a
+conventional-path fallback (e.g. `~/.loom/safehoused/state/safehoused.sock`) —
+was deliberately **rejected** for #5523: a code-level default *would* avoid
+re-triggering #5457's exact mechanism (it can't go stale via `git pull` the
+way a committed value can), but it would reintroduce the same underlying risk
+in a different shape — "resolves to *something*" would quietly stop meaning
+"actually reaches a live `safehoused`", which is precisely the gap that let
+#5523 run unnoticed. #5523's fix instead makes the **absence** loud and cheap
+to detect, in two ways, without touching this resolution chain at all:
+
+- `spawn-claude.sh`'s warning, when `safehouse.enabled` is true and no socket
+  resolves, now names the consequence ("no safehouse narration will be
+  recorded... the 2amlogic.com public fleet pulse is fed exclusively from
+  safehouse narration") instead of only the mechanism ("skipping safehouse MCP
+  injection") — still a `log_warn`, never a failed spawn (the degradation
+  contract above is unchanged: `safehouse.enabled: false`/absent stays a
+  byte-for-byte no-op, and `enabled: true` never blocks a sweep).
+- **`defaults/scripts/check-safehouse-socket.sh`** (installed as
+  `.loom/scripts/check-safehouse-socket.sh`) is a new standalone, on-demand
+  check that reports — per managed repo, without reading a single sweep log —
+  whether `safehouse.enabled` is set and, if so, whether a socket resolves AND
+  is present on disk. With no arguments it walks this host's machine-level
+  workspace registry (`~/.loom/workspaces.json`, the same registry
+  `loom-daemon workspace add/list` manages) and checks every registered repo
+  in one pass; pass explicit repo roots to check a subset. `--json` emits a
+  parseable array (`{repo, enabled, socket, present, status}` per repo) for
+  scripting/cron. It exits `0` when every repo is either not configured or
+  resolved-and-present, and `1` the moment any repo is enabled with an
+  unreachable socket — the exact condition #5523 needed surfaced. Unlike the
+  pre-existing static `Safehouse:` line in `loom-daemon-start.sh`'s startup
+  banner (below), this check has **no dependency on the daemon
+  (re)starting** — it can be run any time, which is what the incident
+  actually needed: the affected daemon never restarted across the 11-hour
+  window, so its own start-time check never re-ran.
 
 ### Room routing by attention class (`safehouse.rooms`, #4225)
 
@@ -312,8 +372,10 @@ hand is still documented as the debug fallback.
    controls this) for the next step.
 4. **Socket env or config.** Either export `SAFEHOUSED_SOCKET=<path>` (the
    convention safehoused's own clients read) machine-wide, or set
-   `safehouse.socket` explicitly in this host's `.loom/config.json` — see
-   [Socket resolution](#configuration) above for the full precedence.
+   `safehouse.socket` in this host's gitignored `.loom-local/local.json`
+   override (never in the shared, committed `.loom/config.json` — see the
+   callout above) — see [Socket resolution](#configuration) above for the
+   full precedence.
 5. **Enable the `safehouse` config block** in `.loom/config.json` (per
    workspace, since it lives in the per-repo config tier) or export
    `LOOM_SAFEHOUSE_ENABLED=1` machine-wide:
@@ -364,8 +426,8 @@ reboot — the interactive-host counterpart to the cloud-host provisioning path
 Parameters (precedence **flag > env > config > default**): `--bin`
 (`SAFEHOUSED_BIN`, else `command -v safehoused`); `--exec "<argv>"`
 (`SAFEHOUSED_EXEC`) for a full ExecStart override when safehoused needs flags;
-`--socket` (else the shared `safehouse.socket` → `$LOOM_SAFEHOUSE_SOCKET` →
-`$SAFEHOUSED_SOCKET` chain the daemon resolves); `--config`
+`--socket` (else the `$LOOM_SAFEHOUSE_SOCKET` → `$SAFEHOUSED_SOCKET` →
+`safehouse.socket` chain the daemon resolves); `--config`
 (`SAFEHOUSED_CONFIG`); `--log` (default `~/.loom/logs/safehoused.log`);
 `--label` / `--unit` for the launchd label / systemd unit name.
 
@@ -824,10 +886,17 @@ what feeds the public fleet feed on 2amlogic.com. Loom is the producer:
 - `defaults/scripts/cli/loom-daemon-start.sh` — (#4345) the static
   pre-connect `Safehouse:` line, via `lib/mcp-config.sh`'s existing
   `loom_mcp_safehouse_enabled`/`loom_mcp_safehouse_socket` resolvers.
+- `defaults/scripts/check-safehouse-socket.sh` — (#5523) the standalone,
+  daemon-restart-independent per-repo socket-resolution drift check described
+  above under "Socket resolution".
 - Tests: `safehouse.rs`'s `mod tests` (state-cell + wire-rendering cases),
   `workspace_pool.rs`'s `mod tests` (pool wiring), `ipc.rs`'s
   `test_build_daemon_status_reports_halt_and_in_flight` (report field),
-  `defaults/scripts/tests/test-loom-daemon-start.sh` (start-wrapper line).
+  `defaults/scripts/tests/test-loom-daemon-start.sh` (start-wrapper line),
+  `defaults/scripts/tests/test-mcp-config.sh` §13 (#5523: the loudened
+  spawn-claude.sh warning text + check-safehouse-socket.sh's not-configured /
+  resolved / unreachable-no-socket / unreachable-missing-file / multi-repo /
+  `--json` behavior).
 
 ## Peer-claim coordination: cross-host soft claim (#4028)
 

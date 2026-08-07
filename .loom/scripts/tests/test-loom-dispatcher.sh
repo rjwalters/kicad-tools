@@ -392,8 +392,20 @@ Environment=LOOM_WORK_FINDER=1
 Environment=LOOM_MAIN_HEALTH_GATE=1
 Environment=PATH=/opt/sentinel-4581/bin:/usr/bin:/bin
 EOF
+# Fake `uname` -> Linux so the systemd-gated harvest branch fires
+# deterministically regardless of the REAL host OS this suite happens to run
+# on (mirrors Test 16d's Darwin override below, in the opposite direction —
+# #5169). Without this, a real Darwin host takes scripts/loom's Darwin branch
+# unconditionally and never reads the systemd-unit fixture this test writes,
+# so the harvest finds nothing and every assertion below fails.
+FAKE_UNAME_LINUX_BIN=$(mktemp -d)
+cat > "$FAKE_UNAME_LINUX_BIN/uname" <<'EOF'
+#!/usr/bin/env bash
+echo "Linux"
+EOF
+chmod +x "$FAKE_UNAME_LINUX_BIN/uname"
 set +e
-out=$(cd "$CONSUMER" && PATH="/usr/bin:/bin" HOME="$HOME_HARVEST" LOOM_HOME="$CHK_HARVEST" bash "$DISPATCHER" restart --machine 2>&1)
+out=$(cd "$CONSUMER" && PATH="$FAKE_UNAME_LINUX_BIN:/usr/bin:/bin" HOME="$HOME_HARVEST" LOOM_HOME="$CHK_HARVEST" bash "$DISPATCHER" restart --machine 2>&1)
 rc=$?
 set -e 2>/dev/null || true
 assert_eq "$rc" "0" "harvest-and-preserve restart fallback still exits 0"
@@ -435,6 +447,61 @@ set -e 2>/dev/null || true
 assert_eq "$rc" "6" "restart fallback aborts (exit 6) when the live plist cannot be parsed"
 assert_contains "$out" "Refusing to fall back" "abort message explains the refusal"
 assert_not_contains "$out" "STUB_START" "aborted fallback never reaches start_target (no silently-narrowed relaunch)"
+
+# Test 16d only covers the UNREADABLE-plist abort path. The happy-path launchd
+# harvest (a real, parseable plist -> re-exported env reaching start_target's
+# re-render) had no coverage anywhere — #5169. Needs a REAL `plutil` + `jq` to
+# exercise harvest_plist_env's actual parse path (a hand-rolled parser would
+# test the test, not the production code), so this mirrors
+# test-loom-daemon-update.sh's scenario-21/22 guard: skip on a host without
+# plutil (i.e. every Linux CI runner) rather than fail on a genuinely
+# macOS-only dependency.
+if command -v plutil >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    echo "Test 16f: 'loom restart --machine' harvests + re-exports a real, readable launchd plist's LOOM_* env before the bare-exec fallback (#4581 happy path)"
+    CHK_HARVEST_GOOD=$(make_checkout_with_harvest)
+    HOME_LAUNCHD_GOOD=$(mktemp -d)
+    mkdir -p "$HOME_LAUNCHD_GOOD/Library/LaunchAgents"
+    cat > "$HOME_LAUNCHD_GOOD/Library/LaunchAgents/com.rjwalters.loom-daemon.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rjwalters.loom-daemon</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LOOM_DAEMON_SUPERVISOR</key>
+        <string>launchd</string>
+        <key>LOOM_WORK_FINDER</key>
+        <string>1</string>
+        <key>LOOM_MAIN_HEALTH_GATE</key>
+        <string>1</string>
+        <key>PATH</key>
+        <string>/opt/sentinel-4581/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
+EOF
+    # Fake `uname` -> Darwin so the launchd-gated harvest branch fires
+    # deterministically regardless of the real host OS (same pattern as Test
+    # 16d/16b). The REAL plutil/jq on PATH do the actual parsing.
+    FAKE_UNAME_BIN2=$(mktemp -d)
+    cat > "$FAKE_UNAME_BIN2/uname" <<'EOF'
+#!/usr/bin/env bash
+echo "Darwin"
+EOF
+    chmod +x "$FAKE_UNAME_BIN2/uname"
+    set +e
+    out=$(cd "$CONSUMER" && PATH="$FAKE_UNAME_BIN2:$PATH" HOME="$HOME_LAUNCHD_GOOD" LOOM_HOME="$CHK_HARVEST_GOOD" bash "$DISPATCHER" restart --machine 2>&1)
+    rc=$?
+    set -e 2>/dev/null || true
+    assert_eq "$rc" "0" "harvest-and-preserve restart fallback from a real launchd plist still exits 0"
+    assert_contains "$out" "LOOM_WORK_FINDER=[1]" "harvested LOOM_WORK_FINDER from a real plist reaches start_target's re-render"
+    assert_contains "$out" "LOOM_MAIN_HEALTH_GATE=[1]" "harvested LOOM_MAIN_HEALTH_GATE from a real plist reaches start_target's re-render"
+    assert_contains "$out" "preserved 2 LOOM_*/token env var(s)" "dispatcher reports the harvested count (real plist)"
+else
+    echo "Test 16f: SKIP (plutil and/or jq not on PATH — harvest_plist_env is a macOS-only production path)"
+fi
 
 echo "Test 16e: 'loom restart --machine' still falls back cleanly when this checkout predates daemon-env-harvest.sh (#4581 backward-compat)"
 CHK_NO_HARVEST_LIB=$(make_checkout)

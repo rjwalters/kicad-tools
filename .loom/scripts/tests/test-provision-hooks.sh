@@ -12,6 +12,8 @@
 #   - pre-existing non-Loom hooks + permissions are preserved
 #   - invalid existing JSON -> soft-fail (return 1) with NO write
 #   - a backup file is written before the first mutation
+#   - backups are deduped (byte-identical to the last one -> skipped) and
+#     bounded to a retention count, on BOTH provision and deprovision (#5387)
 #   - the wired command WRAPPER behaves: no-ops outside a Loom workspace (AC3),
 #     execs the machine-checkout hook inside one (AC1), and defers to a present
 #     per-repo .loom/hooks/ copy (transition dedup, design decision 3)
@@ -150,6 +152,40 @@ backups=$(find "$HOME7/.claude" -maxdepth 1 -name 'settings.json.loom-backup-*' 
 bfile=$(find "$HOME7/.claude" -maxdepth 1 -name 'settings.json.loom-backup-*' | head -1)
 assert_eq "$(jq -r '.permissions.allow[0]' "$bfile")" "Bash(x:*)" "backup preserves the pre-mutation content"
 
+# ── Test 7b: unchanged settings between runs -> no new backup (#5387) ────────
+echo "Test 7b: re-running with unchanged settings does not add a new backup (#5387)"
+# HOME7's settings.json was mutated by Test 7's provision call (raw ->
+# hooks-wired) — that transition is itself a real content change, so a SECOND
+# call legitimately backs up the now-wired state once (its own new backup).
+# The interesting assertion is the THIRD call onward: install.sh run
+# repeatedly with the settings already stable must stop adding backups.
+sleep 1
+provision_loom_hooks "$HOME7/.claude" >/dev/null 2>&1
+count_before_7b=$(find "$HOME7/.claude" -maxdepth 1 -name 'settings.json.loom-backup-*' | wc -l | tr -d ' ')
+sleep 1  # ensure a distinguishable timestamp would exist if a new backup WERE written
+provision_loom_hooks "$HOME7/.claude" >/dev/null 2>&1
+count_after_7b=$(find "$HOME7/.claude" -maxdepth 1 -name 'settings.json.loom-backup-*' | wc -l | tr -d ' ')
+assert_eq "$count_after_7b" "$count_before_7b" "no new backup written when settings.json is unchanged since the last backup"
+
+# ── Test 7c: bounded retention across repeated CHANGING runs (#5387) ─────────
+echo "Test 7c: backup count stays bounded across repeated settings-changing runs (#5387)"
+HOME7C=$(mktemp -d); mkdir -p "$HOME7C/.claude"
+i=0
+while [[ "$i" -lt 8 ]]; do
+    printf '{"permissions":{"allow":["Bash(x%d:*)"]}}\n' "$i" > "$HOME7C/.claude/settings.json"
+    provision_loom_hooks "$HOME7C/.claude" >/dev/null 2>&1
+    # Re-seed with new, non-Loom content so the NEXT provision sees changed
+    # settings again (provision_loom_hooks itself mutates the file with the
+    # wired hooks, which would otherwise make every subsequent call a no-op
+    # dedup case rather than a genuinely changing run).
+    i=$((i + 1))
+    sleep 1  # force a distinguishable %Y%m%dT%H%M%SZ timestamp per iteration
+done
+count_7c=$(find "$HOME7C/.claude" -maxdepth 1 -name 'settings.json.loom-backup-*' | wc -l | tr -d ' ')
+[[ "$count_7c" -le 5 ]] && pass "backup count bounded to retention limit (5) after 8 changing runs (got $count_7c)" \
+    || fail "backup count exceeded retention limit after 8 changing runs (got $count_7c)"
+[[ "$count_7c" -ge 1 ]] && pass "at least one backup survives pruning" || fail "pruning removed every backup"
+
 # ── Test 8: the wired WRAPPER command behaves correctly ──────────────────────
 echo "Test 8: the wired command wrapper — workspace gate, machine exec, transition dedup"
 # Build a fake machine checkout whose guard-destructive.sh prints a sentinel.
@@ -221,6 +257,44 @@ S9="$HOME9/.claude/settings.json"
 assert_eq "$(count_marker "$S9" guard-destructive.sh)" "0" "deprovision removed the Loom hook entries"
 assert_eq "$(jq -r '[.hooks.PreToolUse[]? | .hooks[]? | .command | select(. == ".claude/hooks/my-own-guard.sh")] | length' "$S9")" "1" "operator's own hook preserved after deprovision"
 assert_eq "$(jq -r '.permissions.allow[0]' "$S9")" "Bash(x:*)" "operator's permissions preserved after deprovision"
+
+# ── Test 9b: deprovision's backups are also deduped (#5387 edge case) ────────
+echo "Test 9b: deprovision does not write a duplicate backup for repeated byte-identical settings (#5387)"
+HOME9B=$(mktemp -d); mkdir -p "$HOME9B/.claude"
+SETTINGS_9B='{ "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [
+  { "type": "command", "command": "/machine/checkout/defaults/hooks/guard-destructive.sh" }
+] } ] }, "permissions": { "allow": ["Bash(x:*)"] } }'
+echo "$SETTINGS_9B" > "$HOME9B/.claude/settings.json"
+deprovision_loom_hooks "$HOME9B/.claude" >/dev/null 2>&1
+count_before_9b=$(find "$HOME9B/.claude" -maxdepth 1 -name 'settings.json.loom-backup-*' | wc -l | tr -d ' ')
+[[ "$count_before_9b" -ge 1 ]] && pass "deprovision wrote a backup before its first mutation" || fail "deprovision did not write a backup"
+sleep 1  # ensure a distinguishable timestamp would exist if a new backup WERE (wrongly) written
+# Restore the SAME pre-mutation content and run deprovision again — it still
+# has Loom entries to strip (so it does not early-return before reaching the
+# backup step), but the content is byte-identical to what the last backup
+# already captured.
+echo "$SETTINGS_9B" > "$HOME9B/.claude/settings.json"
+deprovision_loom_hooks "$HOME9B/.claude" >/dev/null 2>&1
+count_after_9b=$(find "$HOME9B/.claude" -maxdepth 1 -name 'settings.json.loom-backup-*' | wc -l | tr -d ' ')
+assert_eq "$count_after_9b" "$count_before_9b" "deprovision does not write a duplicate backup when the pre-mutation content repeats"
+
+# ── Test 9c: deprovision's backups are also bounded (#5387 edge case) ────────
+echo "Test 9c: deprovision backup count stays bounded across repeated changing runs (#5387)"
+HOME9C=$(mktemp -d); mkdir -p "$HOME9C/.claude"
+i=0
+while [[ "$i" -lt 8 ]]; do
+    cat > "$HOME9C/.claude/settings.json" <<EOF
+{ "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [
+  { "type": "command", "command": "/machine/checkout/defaults/hooks/guard-destructive.sh" }
+] } ] }, "permissions": { "allow": ["Bash(x${i}:*)"] } }
+EOF
+    deprovision_loom_hooks "$HOME9C/.claude" >/dev/null 2>&1
+    i=$((i + 1))
+    sleep 1  # force a distinguishable %Y%m%dT%H%M%SZ timestamp per iteration
+done
+count_9c=$(find "$HOME9C/.claude" -maxdepth 1 -name 'settings.json.loom-backup-*' | wc -l | tr -d ' ')
+[[ "$count_9c" -le 5 ]] && pass "deprovision backup count bounded to retention limit (5) after 8 changing runs (got $count_9c)" \
+    || fail "deprovision backup count exceeded retention limit after 8 changing runs (got $count_9c)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ensure_project_hook_wiring — the project-level fallback (#4401)

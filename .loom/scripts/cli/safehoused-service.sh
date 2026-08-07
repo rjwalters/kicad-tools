@@ -44,8 +44,8 @@
 #                     Default: the resolved binary alone (no invented flags).
 #   --socket PATH     The AF_UNIX socket safehoused binds. Resolved (when not
 #                     passed) via the SAME env>config>default chain the daemon
-#                     and worker MCP injection use (safehouse.socket config >
-#                     $LOOM_SAFEHOUSE_SOCKET > $SAFEHOUSED_SOCKET). Baked into
+#                     and worker MCP injection use ($LOOM_SAFEHOUSE_SOCKET >
+#                     $SAFEHOUSED_SOCKET > safehouse.socket config). Baked into
 #                     the service env as SAFEHOUSED_SOCKET so the daemon and its
 #                     clients agree on one path.
 #   --config PATH     safehoused's own config file. Env SAFEHOUSED_CONFIG. Baked
@@ -305,7 +305,7 @@ REPO_ROOT="$(find_repo_root)"
 SAFEHOUSED_BIN="${OPT_BIN:-${SAFEHOUSED_BIN:-}}"
 RESOLVED_BIN="$(locate_safehoused_bin)"
 
-# Socket: flag > (config > LOOM_SAFEHOUSE_SOCKET > SAFEHOUSED_SOCKET via the
+# Socket: flag > (LOOM_SAFEHOUSE_SOCKET > SAFEHOUSED_SOCKET > config via the
 # shared resolver). The resolver soft-degrades to empty when nothing resolves.
 RESOLVED_SOCKET="$OPT_SOCKET"
 if [[ -z "$RESOLVED_SOCKET" ]] && command -v loom_mcp_safehouse_socket >/dev/null 2>&1; then

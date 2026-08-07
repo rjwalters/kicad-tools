@@ -2650,7 +2650,14 @@ else
         # Hard-fail on provisioning failure: a soft warn here (the pre-#4053
         # behavior) left the exit code at 0, which is exactly the "reports
         # success while shipping nothing" defect this issue closes.
-        if ! provision_machine_daemon "$NEW_BIN"; then
+        #
+        # $REPO_ROOT is always a genuine Loom SOURCE checkout here (this
+        # script rebuilds from source — see the REPO_ROOT resolution above),
+        # so $REPO_ROOT/defaults is available; pass it through so an
+        # already-installed standalone daemon picks up (or refreshes) its
+        # `loom-daemon init` recovery payload on every update, not only on
+        # first install (#5389).
+        if ! provision_machine_daemon "$NEW_BIN" "" "$REPO_ROOT/defaults"; then
             err "Machine-level provisioning FAILED (see above). Refusing to report success; the freshly-built binary is at $NEW_BIN — set LOOM_DAEMON_BIN=$NEW_BIN to use it directly."
             exit 1
         fi
@@ -2683,8 +2690,13 @@ if [[ "$NO_RESTART" == "true" ]]; then
             echo "'launchctl bootout $LAUNCHD_SERVICE' no longer kills in-flight sweeps on a current build (#5081 — each sweep runs in its own process group and reparents to pid 1), but a hand-run bootout+bootstrap can still race and leave the daemon down (bootout is asynchronous); prefer --relaunch above, which settles/retries/verifies the relaunch safely."
         elif [[ "$DAEMON_MANAGER" == "systemd" ]]; then
             echo "The running (systemd-managed) daemon is still the PRE-update binary. Restart it with:"
-            echo "  $PROVISION_TARGET restart --drain   (RECOMMENDED, Issue #5138: pauses dispatch, waits for in-flight sweeps to finish, THEN relaunches — an immediate restart here can kill sweeps and land the unit in 'failed', #5119)"
-            echo "  $PROVISION_TARGET restart      (immediate/non-drained — only if you have confirmed nothing is in flight)"
+            # #5119: NOT "in-flight sweeps preserved" here -- unlike launchd, a
+            # systemd stop job runs over the unit's whole cgroup, so a plain
+            # restart's exit(0) reaps every sweep/role-run child with it. The
+            # drain variant is the one that genuinely preserves them, which is
+            # why it leads (and is the default on systemd, #5138).
+            echo "  $PROVISION_TARGET restart --drain   (RECOMMENDED, Issue #5138: pauses dispatch, waits for in-flight sweeps to finish, THEN relaunches — the preserving variant; an immediate restart here can kill sweeps and land the unit in 'failed', #5119)"
+            echo "  $PROVISION_TARGET restart      (immediate/non-drained — in-flight sweeps AND role runs in the unit cgroup ARE terminated; only if you have confirmed nothing is in flight)"
             echo "(this two-step --no-restart + manual restart is equivalent to a single 'loom-daemon-update.sh --drain' invocation, which builds + provisions + drain-restarts in one command — drain is also the DEFAULT on systemd for a plain 'loom-daemon-update.sh' run, no flag needed)"
             echo "If that binary predates #4267 and refuses the restart, re-render + relaunch under supervision:"
             echo "  loom-daemon-update.sh --relaunch   (preserves the live unit's LOOM_* env; SIGTERMs the daemon so sweep children reparent)"
@@ -3022,6 +3034,27 @@ echo "Starting loom-daemon with preserved flags: ${RESTART_ARGS[*]:-<none>}"
 # macOS).
 if [[ "${#RESTART_ARGS[@]}" -gt 0 ]]; then
     "$START_SCRIPT" "${RESTART_ARGS[@]}"
+elif [[ "$FLAGS_SOURCE" == "$FLAGS_FILE" ]]; then
+    # Issue #5429: a persisted-flags FILE that EXISTS but is empty is a
+    # CONFIRMED prior FLAGS-OFF state (distinct from the "no file at all"
+    # branch below, which is genuinely a guess). A bare `$START_SCRIPT`
+    # invocation here would leave WANT_WORK_FINDER/WANT_HEALTH_GATE unset,
+    # which loom-daemon-start.sh's autonomy-downgrade refusal (#4011/#5409)
+    # cannot distinguish from a silent, un-intentional default -- and the
+    # autonomy-desired intent marker it checks is written unconditionally on
+    # ANY successful start (autonomous or not, see write_intent_marker in
+    # loom-daemon-start.sh), so it is already present on every restart of a
+    # daemon that was already running, regardless of whether autonomy was
+    # ever on. That mismatch made this exact restart refuse with exit 1
+    # whenever the marker pre-existed (e.g. immediately after a prior start
+    # in the same process lifetime), even though the persisted-flags file
+    # unambiguously says "no flags". Passing --no-work-finder/--no-health-gate
+    # explicitly states that confirmed intent (byte-identical resulting
+    # LOOM_WORK_FINDER=0/LOOM_MAIN_HEALTH_GATE=0 env — see the non-`--from-config`
+    # branch in loom-daemon-start.sh, "on" is the only value forced differently
+    # from "unset") while satisfying the downgrade check's own "explicit ask is
+    # not silent" exemption.
+    "$START_SCRIPT" --no-work-finder --no-health-gate
 else
     "$START_SCRIPT"
 fi

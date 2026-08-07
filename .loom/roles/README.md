@@ -31,7 +31,7 @@ To edit a role definition:
 | `builder` | Feature implementation | Manual |
 | `champion` | Proposal evaluation and PR auto-merge | 10min |
 | `curator` | Issue enhancement | 5min |
-| `doctor` | Bug fixes and PR feedback | Manual |
+| `doctor` | Bug fixes and PR feedback | 5min |
 | `driver` | Plain shell environment | Manual |
 | `guide` | Issue triage and prioritization | 15min |
 | `hermit` | Code simplification proposals | 15min |

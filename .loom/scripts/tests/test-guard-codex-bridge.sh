@@ -337,6 +337,63 @@ assert_bridge "nested bash -c does not launder a catastrophic command" deny \
         "$(jq -nc '{command:["bash","-lc","bash -c \"rm -rf /\""]}')" "$WT")")"
 
 echo
+echo "=== workdir anchor validation (issue #4767) ==="
+#
+# `tool_input.workdir` is a MODEL-CHOSEN field (unlike the event's top-level
+# `cwd`). A `workdir` that is not inside the acting session's own git repo
+# must not silently leave GUARD_CWD rootless — that is exactly what let a
+# managed-worktree write past guard-destructive-generic.sh's #4178
+# confinement block before this fix (its `_WT_MAIN_ROOT` came up empty and
+# the containment test `continue`d past every write). Every vector here
+# targets the MAIN CHECKOUT with an absolute path, so if the bridge ever
+# regresses to trusting a rootless/foreign workdir, these turn from `deny`
+# into `allow` — exactly the fixture in the issue's reproduction table.
+
+# A second, unrelated git repo — "resolves to a valid repo" is not enough;
+# it must be the SAME repo as the acting session's.
+OTHER_REPO="$(mktemp -d)"
+git init -q "$OTHER_REPO"
+
+workdir_write_case() {
+    local desc="$1" workdir="$2" command="$3" expected="$4"
+    assert_bridge "$desc" "$expected" \
+        "$(run_bridge "$(codex_event shell "$(jq -nc --arg c "$command" --arg wd "$workdir" '{command:["bash","-lc",$c], workdir:$wd}')" "$WT")")"
+}
+
+for wd_desc_pair in \
+    "/tmp|an out-of-repo absolute path (/tmp)" \
+    "/|the filesystem root (/)" \
+    "${OTHER_REPO}|a non-repo/foreign-repo absolute path" \
+    "${WT}/does/not/exist|a nonexistent directory" \
+    "../../../../../../../../..|a relative workdir that escapes the worktree AND the repo" \
+    ; do
+    wd="${wd_desc_pair%%|*}"
+    desc="${wd_desc_pair#*|}"
+    workdir_write_case "workdir=$desc, redirect into the main checkout -> deny" \
+        "$wd" "echo pwned > $TMPROOT/CLAUDE.md" deny
+    workdir_write_case "workdir=$desc, tee into the main checkout -> deny" \
+        "$wd" "echo pwned | tee $TMPROOT/CLAUDE.md" deny
+    workdir_write_case "workdir=$desc, cp into the main checkout -> deny" \
+        "$wd" "cp $WT/src/a.txt $TMPROOT/CLAUDE.md" deny
+    workdir_write_case "workdir=$desc, mv into the main checkout -> deny" \
+        "$wd" "mv $WT/src/a.txt $TMPROOT/CLAUDE.md" deny
+    workdir_write_case "workdir=$desc, sed -i on the main checkout -> deny" \
+        "$wd" "sed -i '' 's/a/b/' $TMPROOT/CLAUDE.md" deny
+done
+
+# The valid, matching-repo case must be unaffected: a legitimate workdir
+# (absolute, pointing at the acting worktree) still allows a write inside it
+# and still denies escapes into the main checkout.
+workdir_write_case "workdir=the acting worktree (absolute) -> write inside it allowed" \
+    "$WT" "echo ok > $WT/src/workdir-ok.txt" allow
+workdir_write_case "workdir=the acting worktree (absolute) -> write to main checkout still denied" \
+    "$WT" "echo pwned > $TMPROOT/CLAUDE.md" deny
+workdir_write_case "workdir='.' (relative, matches event cwd) -> write to main checkout still denied" \
+    "." "echo pwned > $TMPROOT/CLAUDE.md" deny
+
+rm -rf "$OTHER_REPO"
+
+echo
 echo "=== alternate Codex execution payload shapes ==="
 
 assert_bridge "shell_command {cmd: string}" deny \

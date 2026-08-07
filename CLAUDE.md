@@ -35,7 +35,7 @@ suspect the auto-detection missed something (e.g. a touched build flag).
 See `README.md` "Fresh worktree checklist" for the full setup sequence.
 
 <!-- BEGIN REPO-SKILLS -->
-This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.8.0 installed —
+This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.8.1 installed —
 general repository hygiene and environment commands invoked as `/repo:<command>`. Run
 `/repo:help` for the command list, or see `.claude/skills/repo/SKILL.md` for the full
 guide. Hygiene commands apply safe, reversible fixes by default and report each

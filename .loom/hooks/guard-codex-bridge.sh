@@ -525,6 +525,35 @@ extract_workdir() {
 }
 
 # ---------------------------------------------------------------------------
+# `workdir` anchor validation (issue #4767)
+# ---------------------------------------------------------------------------
+#
+# `tool_input.workdir` is a MODEL-CHOSEN field of the Codex shell tool — unlike
+# the top-level `.cwd` on the event, which is runtime-supplied and never
+# reachable from the model (see the header's "RUNTIME DISCRIMINATION" note).
+# When it merges into GUARD_CWD below, a `workdir` that is simply not inside a
+# git repo (e.g. `/tmp` or `/`) leaves GUARD_CWD rootless. Rootless is not
+# neutral: guard-destructive-generic.sh's #4178 worktree-write-confinement
+# block derives its main-checkout anchor from that same cwd, finds nothing,
+# and silently `continue`s past its containment test — the model can pick an
+# out-of-repo workdir to make writes that must be denied hit that gap instead.
+#
+# main_root_of() resolves the true main-checkout root the SAME way
+# guard-destructive-generic.sh's #4178 block does (`git-common-dir/..`, which
+# is always the main checkout even from a linked worktree), so "resolves to
+# the same git common dir" here means exactly what the sub-guard means by it.
+# Empty output on any non-repo / nonexistent / unreadable path — never a
+# fatal error, always a value the caller can compare against.
+main_root_of() {
+    local dir="$1" common root
+    [[ -n "$dir" && -d "$dir" ]] || return 0
+    common=$(cd "$dir" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || return 0
+    [[ -n "$common" ]] || return 0
+    root=$(cd "$dir" 2>/dev/null && cd "$common/.." 2>/dev/null && pwd -P) || return 0
+    printf '%s' "$root"
+}
+
+# ---------------------------------------------------------------------------
 # PATCH normalization
 # ---------------------------------------------------------------------------
 #
@@ -599,8 +628,35 @@ if [[ "$TOOL_CLASS" == "shell" ]]; then
         elif [[ -n "$EVENT_CWD" ]]; then
             GUARD_CWD="${EVENT_CWD%/}/$WORKDIR"
         fi
-        if declare -F loom_canonical_path >/dev/null 2>&1; then
-            GUARD_CWD="$(loom_canonical_path "$GUARD_CWD" "$EVENT_CWD")"
+        # Deliberately NOT run through loom_canonical_path here (unlike the
+        # PATCH path's target-path canonicalization below): GUARD_CWD is a
+        # `cd` target for the sub-guards, not a path comparison operand, and
+        # guard-destructive-generic.sh's own #4178 write-confinement block
+        # already does its own symlink-aware resolution — it compares a
+        # write target against BOTH the physical (`pwd -P`) and logical
+        # (`pwd`) spelling of the main-checkout root specifically so a
+        # symlinked ancestor (e.g. macOS's `/tmp` -> `/private/tmp`) still
+        # matches. Pre-resolving GUARD_CWD to its physical form here would
+        # collapse that logical spelling before the sub-guard ever sees it,
+        # silently reopening the same symlinked-ancestor hole for any call
+        # that sets `workdir` at all (#4767 review finding).
+
+        # #4767: workdir is model-chosen and just merged into GUARD_CWD above.
+        # Require it to resolve into the SAME repository as the runtime-trusted
+        # anchor (the event's own cwd, falling back to the provisioned
+        # --project-root when the event cwd is not itself a repo) before it is
+        # handed to the sub-guards. Anything else — not inside a git repo,
+        # nonexistent, or a different repo entirely — fails closed rather than
+        # emitting the rootless cwd guard-destructive-generic.sh's #4178 block
+        # would silently skip its containment test on. main_root_of() resolves
+        # through `cd`/`git rev-parse`, which follow symlinks on their own, so
+        # this comparison needs no pre-canonicalized input either.
+        GUARD_MAIN_ROOT="$(main_root_of "$GUARD_CWD")"
+        ANCHOR_MAIN_ROOT="$(main_root_of "$EVENT_CWD")"
+        [[ -z "$ANCHOR_MAIN_ROOT" ]] && ANCHOR_MAIN_ROOT="$(main_root_of "$PROJECT_ROOT")"
+
+        if [[ -z "$GUARD_MAIN_ROOT" || -z "$ANCHOR_MAIN_ROOT" || "$GUARD_MAIN_ROOT" != "$ANCHOR_MAIN_ROOT" ]]; then
+            fail_closed "tool '$TOOL_NAME' set workdir '$WORKDIR', which does not resolve to the same git repository as the acting session (cwd '$EVENT_CWD'). A model-chosen workdir outside the session's own repository cannot be trusted as a write-confinement anchor."
         fi
     fi
 

@@ -110,6 +110,15 @@ chmod +x "$FAKE_ROOT/scripts/install-loom.sh"
 # better than skipping the whole suite wherever pnpm is absent, which would
 # have left the #4888 regression uncovered in CI.
 #
+# Since #5394 the gate does more than *run* `pnpm --version` -- it parses the
+# version out of the output, and a probe failure lands pnpm in MISSING_DEPS
+# ("present but not runnable"), aborting the run before it reaches the
+# reinstall logic under test. The stub line below therefore has to stay
+# parseable: install.sh scans for a semver token anywhere in the output, so
+# `pnpm (loom test stub) 0.0.0` satisfies it. Anything that prints no semver
+# at all would red-light this suite for a reason unrelated to its subject --
+# tests/install/test-pnpm-runnable-check.sh pins both sides of that parse.
+#
 # `git` is deliberately NOT stubbed: it is used for real (fixture repo, HEAD
 # and `git status --porcelain` assertions), which is why it keeps the hard
 # `command -v git` skip-guard above instead.
