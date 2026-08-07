@@ -1632,7 +1632,7 @@ def main(argv: list[str] | None = None) -> int:
         ncm_path = _discover_net_class_map_sidecar(pcb_path)
 
     if ncm_path is not None:
-        from kicad_tools.router.rules import net_class_map_from_dict
+        from kicad_tools.router.rules import net_class_map_from_path
 
         if not ncm_path.exists():
             # Only reachable via an explicit flag (the auto-probe returns
@@ -1642,8 +1642,10 @@ def main(argv: list[str] | None = None) -> int:
         ncm_load_error: str | None = None
         net_class_map = None
         try:
-            ncm_data = json.loads(ncm_path.read_text())
-            net_class_map = net_class_map_from_dict(ncm_data)
+            # Canonical loader (issue #4683): the board path resolves
+            # layer-name tokens like "B.Cu" against the board's actual
+            # copper count, matching `kct route`'s acceptance exactly.
+            net_class_map = net_class_map_from_path(ncm_path, pcb_path=pcb_path)
         except json.JSONDecodeError as e:
             ncm_load_error = f"parsing net-class-map JSON: {e}"
         except (TypeError, ValueError) as e:

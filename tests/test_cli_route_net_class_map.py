@@ -977,3 +977,376 @@ class TestLayerNamePreloadResolution:
         _rc, captured = self._capture_preload(minimal_pcb_4layer, sidecar, tmp_path)
         assert captured["map"]["PGND"].preferred_layers == [0, 3]
         assert captured["map"]["PGND"].avoid_layers == [1, 2]
+
+
+# =============================================================================
+# Issue #4683: canonical sidecar loader + cross-consumer invariant
+# =============================================================================
+
+# 2-layer variant: B.Cu must resolve to grid index 1 here, not 3.
+MINIMAL_PCB_2LAYER = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "PGND")
+  (gr_rect (start 100 100) (end 150 150)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+)
+"""
+
+# A minimal-but-real 4-layer board every sidecar CONSUMER can operate on:
+# outline, an AC_LINE trace on F.Cu, and a GND plane pour on In1.Cu (so
+# ``zones hv-keepout`` has a plane layer to carve).
+CONSUMER_PCB_4LAYER = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "AC_LINE")
+  (net 2 "GND")
+  (gr_line (start 100 100) (end 160 100) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 160 100) (end 160 140) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 160 140) (end 100 140) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 100 140) (end 100 100) (layer "Edge.Cuts") (width 0.1))
+  (segment (start 110 110) (end 150 110) (width 0.5) (layer "F.Cu") (net 1))
+  (zone
+    (net 2)
+    (net_name "GND")
+    (layer "In1.Cu")
+    (uuid "gnd-plane-uuid")
+    (hatch edge 0.5)
+    (priority 0)
+    (connect_pads (clearance 0.25))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.4) (thermal_bridge_width 0.35))
+    (polygon
+      (pts
+        (xy 101 101)
+        (xy 159 101)
+        (xy 159 139)
+        (xy 101 139)
+      )
+    )
+    (filled_polygon
+      (layer "In1.Cu")
+      (pts
+        (xy 101 101)
+        (xy 159 101)
+        (xy 159 139)
+        (xy 101 139)
+      )
+    )
+  )
+)
+"""
+
+# The filer's exact sidecar shape from issue #4683 (softstart rev-C): layer
+# NAMES, including the stack-dependent "B.Cu".
+HV_SIDECAR_ENTRY = {
+    "name": "HV",
+    "preferred_layers": ["F.Cu", "B.Cu"],
+    "avoid_layers": ["In1.Cu", "In2.Cu"],
+    "layer_cost_multiplier": 2.0,
+}
+
+
+@pytest.fixture
+def consumer_pcb_4layer(tmp_path: Path) -> Path:
+    p = tmp_path / "consumer4.kicad_pcb"
+    p.write_text(CONSUMER_PCB_4LAYER)
+    return p
+
+
+@pytest.fixture
+def hv_sidecar(tmp_path: Path) -> Path:
+    p = tmp_path / "hv_ncm.json"
+    p.write_text(json.dumps({"AC_LINE": dict(HV_SIDECAR_ENTRY)}))
+    return p
+
+
+class TestNetClassMapFromPath:
+    """Unit tests for the canonical loader (issue #4683)."""
+
+    def test_missing_file_raises_file_not_found(self, tmp_path: Path):
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        with pytest.raises(FileNotFoundError, match="net-class-map file not found"):
+            net_class_map_from_path(tmp_path / "nope.json")
+
+    def test_malformed_json_raises_json_decode_error(self, tmp_path: Path):
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        bad = tmp_path / "bad.json"
+        bad.write_text("{not json")
+        with pytest.raises(json.JSONDecodeError):
+            net_class_map_from_path(bad)
+
+    def test_b_cu_resolves_with_pcb_text_4layer(self, hv_sidecar: Path):
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        ncm = net_class_map_from_path(hv_sidecar, pcb_text=CONSUMER_PCB_4LAYER)
+        assert ncm["AC_LINE"].preferred_layers == [0, 3]
+        assert ncm["AC_LINE"].avoid_layers == [1, 2]
+
+    def test_b_cu_resolves_with_pcb_path_4layer(self, hv_sidecar: Path, consumer_pcb_4layer: Path):
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        ncm = net_class_map_from_path(hv_sidecar, pcb_path=consumer_pcb_4layer)
+        assert ncm["AC_LINE"].preferred_layers == [0, 3]
+
+    def test_b_cu_resolves_to_one_on_2layer_board(self, tmp_path: Path):
+        """Edge case from the curator's test plan: 2-layer B.Cu -> 1, not 3."""
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        sidecar = tmp_path / "ncm2.json"
+        sidecar.write_text(json.dumps({"PGND": {"name": "HV", "avoid_layers": ["B.Cu"]}}))
+        ncm = net_class_map_from_path(sidecar, pcb_text=MINIMAL_PCB_2LAYER)
+        assert ncm["PGND"].avoid_layers == [1]
+
+    def test_b_cu_without_any_stack_fails_loud(self, hv_sidecar: Path):
+        """No stack source at all: B.Cu keeps the actionable hard error."""
+        from kicad_tools.router.rules import LayerResolutionError, net_class_map_from_path
+
+        with pytest.raises(LayerResolutionError, match="B.Cu"):
+            net_class_map_from_path(hv_sidecar)
+
+    def test_explicit_layer_stack_wins_over_pcb_text(self, hv_sidecar: Path):
+        """A pre-resolved stack (route's --layers table) takes precedence."""
+        from kicad_tools.router import LayerStack
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        ncm = net_class_map_from_path(
+            hv_sidecar,
+            pcb_text=CONSUMER_PCB_4LAYER,
+            layer_stack=LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig(),
+        )
+        # B.Cu is the LAST copper index of the six-layer stack, not 3.
+        assert ncm["AC_LINE"].preferred_layers == [0, 5]
+
+    def test_unreadable_pcb_path_is_best_effort(self, tmp_path: Path):
+        """A missing board degrades to no-stack: F.Cu still resolves."""
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        sidecar = tmp_path / "ncm.json"
+        sidecar.write_text(json.dumps({"PGND": {"name": "HV", "avoid_layers": ["F.Cu"]}}))
+        ncm = net_class_map_from_path(sidecar, pcb_path=tmp_path / "missing.kicad_pcb")
+        assert ncm["PGND"].avoid_layers == [0]
+
+    def test_integer_sidecar_needs_no_stack(self, tmp_path: Path):
+        """Backwards compatibility: integer indices load with no board at all."""
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        sidecar = tmp_path / "ncm.json"
+        sidecar.write_text(
+            json.dumps({"PGND": {"name": "HV", "preferred_layers": [0, 3], "avoid_layers": [1, 2]}})
+        )
+        ncm = net_class_map_from_path(sidecar)
+        assert ncm["PGND"].preferred_layers == [0, 3]
+        assert ncm["PGND"].avoid_layers == [1, 2]
+
+
+class TestCrossConsumerSidecarInvariant:
+    """One B.Cu-bearing sidecar must load in EVERY --net-class-map consumer.
+
+    Regression guard for issue #4683: the #4587 hardening was applied only to
+    ``kct route``, so the same sidecar that routed a board made ``kct
+    creepage`` / ``kct check`` / ``kct zones hv-keepout`` exit 1 and made
+    ``kct audit`` silently drop its HV classes.  Invariant (issue body): *any
+    sidecar accepted by one consumer must be accepted by all of them.*
+
+    Each consumer test spies on ``rules.net_class_map_from_dict`` (delegating
+    to the real function) to prove the sidecar was parsed WITH a resolved
+    stack: ``B.Cu`` -> grid index 3 on the shared 4-layer fixture.
+    """
+
+    @contextlib.contextmanager
+    def _spy_resolutions(self):
+        """Record every (layer_stack, resolved map) seen by from_dict."""
+        from kicad_tools.router import rules as _rules
+
+        real = _rules.net_class_map_from_dict
+        calls: list[dict] = []
+
+        def spy(data, layer_stack=None):
+            result = real(data, layer_stack=layer_stack)
+            calls.append({"layer_stack": layer_stack, "map": result})
+            return result
+
+        with patch.object(_rules, "net_class_map_from_dict", spy):
+            yield calls
+
+    def _assert_hv_resolved(self, calls: list[dict]):
+        assert calls, "consumer never parsed the net-class-map sidecar"
+        for call in calls:
+            nc = call["map"]["AC_LINE"]
+            assert nc.preferred_layers == [0, 3], "B.Cu must resolve to grid index 3"
+            assert nc.avoid_layers == [1, 2]
+
+    def test_creepage_accepts_b_cu_sidecar(
+        self, consumer_pcb_4layer: Path, hv_sidecar: Path, capsys
+    ):
+        """The filer's exact failure: ``kct creepage`` exit-1'd on B.Cu."""
+        pytest.importorskip("shapely")
+        from kicad_tools.cli.commands.creepage import run_creepage_command
+        from kicad_tools.cli.parser import create_parser
+
+        args = create_parser().parse_args(
+            [
+                "creepage",
+                str(consumer_pcb_4layer),
+                "--net-class-map",
+                str(hv_sidecar),
+                "--min",
+                "1.5",
+            ]
+        )
+        with self._spy_resolutions() as calls:
+            rc = run_creepage_command(args)
+
+        err = capsys.readouterr().err
+        assert "invalid net-class-map structure" not in err
+        assert "cannot be resolved without a layer stack" not in err
+        assert rc == 0
+        self._assert_hv_resolved(calls)
+
+    def test_check_accepts_b_cu_sidecar(self, consumer_pcb_4layer: Path, hv_sidecar: Path, capsys):
+        from kicad_tools.cli.check_cmd import main as check_main
+
+        with self._spy_resolutions() as calls:
+            check_main(
+                [
+                    str(consumer_pcb_4layer),
+                    "--net-class-map",
+                    str(hv_sidecar),
+                    "--allow-incomplete",
+                ]
+            )
+
+        err = capsys.readouterr().err
+        assert "invalid net-class-map structure" not in err
+        assert "cannot be resolved without a layer stack" not in err
+        self._assert_hv_resolved(calls)
+
+    def test_zones_hv_keepout_accepts_b_cu_sidecar(
+        self, consumer_pcb_4layer: Path, hv_sidecar: Path, capsys
+    ):
+        pytest.importorskip("shapely")
+        from kicad_tools.cli.zones_cmd import main as zones_main
+
+        with self._spy_resolutions() as calls:
+            rc = zones_main(
+                [
+                    "hv-keepout",
+                    str(consumer_pcb_4layer),
+                    "--net-class-map",
+                    str(hv_sidecar),
+                    "--clearance",
+                    "1.6",
+                    "--dry-run",
+                    "-q",
+                ]
+            )
+
+        err = capsys.readouterr().err
+        assert "invalid net-class-map structure" not in err
+        assert "cannot be resolved without a layer stack" not in err
+        assert rc == 0
+        self._assert_hv_resolved(calls)
+
+    def test_audit_drc_no_longer_silently_drops_sidecar(
+        self, consumer_pcb_4layer: Path, hv_sidecar: Path, caplog
+    ):
+        """auditor.py:_check_drc -- the SILENT degradation site (missed by the issue)."""
+        import logging
+
+        from kicad_tools.audit import ManufacturingAudit
+        from kicad_tools.schema.pcb import PCB
+
+        audit = ManufacturingAudit(
+            consumer_pcb_4layer, manufacturer="jlcpcb", net_class_map_path=hv_sidecar
+        )
+        pcb = PCB.load(consumer_pcb_4layer)
+        with caplog.at_level(logging.WARNING):
+            with self._spy_resolutions() as calls:
+                audit._check_drc(pcb)
+
+        assert "Failed to load net-class-map" not in caplog.text
+        self._assert_hv_resolved(calls)
+
+    def test_audit_isolation_no_longer_silently_drops_sidecar(
+        self, consumer_pcb_4layer: Path, hv_sidecar: Path, caplog
+    ):
+        """auditor.py:_check_isolation -- the HV SAFETY GATE degradation site."""
+        import logging
+
+        pytest.importorskip("shapely")
+        from kicad_tools.audit import ManufacturingAudit
+        from kicad_tools.schema.pcb import PCB
+
+        audit = ManufacturingAudit(
+            consumer_pcb_4layer, manufacturer="jlcpcb", net_class_map_path=hv_sidecar
+        )
+        pcb = PCB.load(consumer_pcb_4layer)
+        with caplog.at_level(logging.WARNING):
+            with self._spy_resolutions() as calls:
+                status = audit._check_isolation(pcb)
+
+        assert "failed to load net-class-map" not in caplog.text.lower()
+        self._assert_hv_resolved(calls)
+        # The sidecar actually engaged: AC_LINE classified HV.
+        assert status.hv_present is True
+
+    def test_route_accepts_b_cu_sidecar(
+        self, consumer_pcb_4layer: Path, hv_sidecar: Path, tmp_path: Path
+    ):
+        """kct route keeps accepting the sidecar (was already fixed by #4587)."""
+        with self._spy_resolutions() as calls:
+            _run_route_preload(consumer_pcb_4layer, hv_sidecar, tmp_path)
+        self._assert_hv_resolved(calls)
+
+    def test_no_consumer_bypasses_the_canonical_loader(self):
+        """Structural guard: no src call site may use from_dict directly.
+
+        A future consumer that calls ``net_class_map_from_dict(data)`` bare
+        would recreate exactly the #4683 divergence (one sidecar, divergent
+        validity across commands).  Everything outside ``router/rules.py``
+        must go through :func:`net_class_map_from_path`, which pairs parsing
+        with board-stack resolution.
+        """
+        import re as _re
+
+        import kicad_tools
+
+        src_root = Path(kicad_tools.__file__).parent
+        offenders: list[str] = []
+        for py in sorted(src_root.rglob("*.py")):
+            if py.name == "rules.py" and py.parent.name == "router":
+                continue  # the canonical loader's own home
+            if _re.search(r"net_class_map_from_dict\(", py.read_text()):
+                offenders.append(str(py.relative_to(src_root)))
+        assert offenders == [], (
+            "net_class_map_from_dict() called directly outside router/rules.py "
+            f"in {offenders}: use net_class_map_from_path(..., pcb_path=...) so "
+            "layer-name sidecars stay valid for every consumer (issue #4683)"
+        )

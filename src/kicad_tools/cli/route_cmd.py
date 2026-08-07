@@ -12082,7 +12082,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     if getattr(args, "net_class_map", None) is not None:
         import json as _ncm_json
 
-        from kicad_tools.router.rules import net_class_map_from_dict
+        from kicad_tools.router.rules import net_class_map_from_path
 
         ncm_path = Path(args.net_class_map).resolve()
         if not ncm_path.exists():
@@ -12125,8 +12125,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
             # below with an actionable message rather than a silent wrong index.
             _ncm_layer_stack = None
         try:
-            args._loaded_net_class_map = net_class_map_from_dict(
-                _ncm_data, layer_stack=_ncm_layer_stack
+            # Canonical loader (issue #4683): shared with kct check / creepage /
+            # zones / audit so one sidecar is valid for every consumer.  The
+            # stack resolved from --layers above wins; JSON validity was
+            # already established by the _ncm_data parse.
+            args._loaded_net_class_map = net_class_map_from_path(
+                ncm_path, layer_stack=_ncm_layer_stack
             )
         except (TypeError, ValueError) as e:
             print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)

@@ -651,8 +651,12 @@ def _print_batch_summary(gen, quiet: bool) -> None:
         print(f"\nCreated {zone_count} zone(s)")
 
 
-def _load_net_class_map(path_str: str | None):
+def _load_net_class_map(path_str: str | None, pcb_path: Path | None = None):
     """Load a net-class-map JSON sidecar (shared with ``kct creepage``).
+
+    Uses the canonical :func:`net_class_map_from_path` loader (issue #4683)
+    so layer-name tokens like ``"B.Cu"`` resolve against the board's actual
+    copper count -- the same sidecar ``kct route`` accepts must load here.
 
     Returns ``(net_class_map, error_message)``.  On success ``error_message``
     is ``None``; on failure ``net_class_map`` is ``None`` and the caller should
@@ -663,13 +667,13 @@ def _load_net_class_map(path_str: str | None):
 
     import json
 
-    from kicad_tools.router.rules import net_class_map_from_dict
+    from kicad_tools.router.rules import net_class_map_from_path
 
     ncm_path = Path(path_str)
     if not ncm_path.exists():
         return None, f"net-class-map file not found: {ncm_path}"
     try:
-        return net_class_map_from_dict(json.loads(ncm_path.read_text())), None
+        return net_class_map_from_path(ncm_path, pcb_path=pcb_path), None
     except json.JSONDecodeError as e:
         return None, f"parsing net-class-map JSON: {e}"
     except (TypeError, ValueError) as e:
@@ -712,7 +716,9 @@ def _run_hv_keepout(args) -> int:
         )
         return 1
 
-    net_class_map, ncm_error = _load_net_class_map(getattr(args, "net_class_map", None))
+    net_class_map, ncm_error = _load_net_class_map(
+        getattr(args, "net_class_map", None), pcb_path=pcb_path
+    )
     if ncm_error is not None:
         print(f"Error: {ncm_error}", file=sys.stderr)
         return 1

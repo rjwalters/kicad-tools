@@ -673,10 +673,15 @@ class TestSidecarAutoLoad:
         assert f"ignoring malformed net-class-map sidecar {scar}" in captured.err
         assert _mg_error_count(captured.out) == 0
 
-    def test_auto_sidecar_with_back_copper_avoid_layer_warns(self, tmp_path: Path, capsys):
-        """AC10: ``avoid_layers: ["B.Cu"]`` is rejected by
-        ``net_class_map_from_dict`` (no LayerStack is threaded at this
-        callsite) -- that must warn audibly and continue, never crash."""
+    def test_auto_sidecar_with_back_copper_avoid_layer_loads(self, tmp_path: Path, capsys):
+        """Issue #4683: ``avoid_layers: ["B.Cu"]`` now LOADS at this callsite.
+
+        The canonical loader threads the board's layer stack, so ``B.Cu``
+        resolves against the actual copper count (index 1 on this 2-layer
+        board) instead of being rejected -- the same sidecar ``kct route``
+        accepts must auto-load here too.  The sidecar genuinely engages:
+        the DDR group-skew rule fires.
+        """
         from kicad_tools.cli.check_cmd import main
 
         pcb = _write_matchgroup_board(tmp_path)
@@ -689,8 +694,30 @@ class TestSidecarAutoLoad:
         rc = main(self._mg_argv(pcb))
         captured = capsys.readouterr()
         assert rc != 1
+        assert "ignoring malformed net-class-map sidecar" not in captured.err
+        assert f"auto-loaded net-class-map sidecar: {scar}" in captured.err
+        # The loaded sidecar engages the group-skew rule on this board.
+        assert _mg_error_count(captured.out) >= 1
+
+    def test_auto_sidecar_with_unresolvable_layer_token_warns(self, tmp_path: Path, capsys):
+        """AC10 (re-anchored for #4683): a genuinely unresolvable layer token
+        in an auto-discovered sidecar warns audibly and continues, never
+        crashes."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _write_matchgroup_board(tmp_path)
+        scar = tmp_path / "ddr.net_class_map.json"
+        payload = {
+            name: {**entry, "avoid_layers": ["Bogus.Cu"]}
+            for name, entry in MATCHGROUP_SIDECAR.items()
+        }
+        scar.write_text(json.dumps(payload, indent=2))
+
+        rc = main(self._mg_argv(pcb))
+        captured = capsys.readouterr()
+        assert rc != 1
         assert f"ignoring malformed net-class-map sidecar {scar}" in captured.err
-        assert "B.Cu" in captured.err
+        assert "Bogus.Cu" in captured.err
         # Still degrades to no-sidecar behaviour rather than crashing.
         assert _mg_error_count(captured.out) == 0
 

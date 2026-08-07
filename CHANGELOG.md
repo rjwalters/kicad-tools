@@ -55,6 +55,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields deeper into U2's body — manual placement was required. Netlist/BOM
   identity preserved; no generator or lint-rule changes.
 
+- **`--net-class-map` sidecars with layer NAMES (`"B.Cu"`) now load in every
+  consumer, not just `kct route`** (#4683) — the #4587 hardening made an
+  unresolvable layer token a hard error inside `net_class_map_from_dict` but
+  only `route_cmd` was taught to pass the board's layer stack, so the very
+  sidecar `kct route` accepted made `kct creepage` / `kct check` /
+  `kct zones hv-keepout` exit 1 without doing any work (blocking the HV
+  creepage safety gate; regression vs `45744d0a`), and — worse — made
+  `kct audit` **silently** drop the sidecar in both `_check_drc` and the HV
+  `_check_isolation` safety gate (warning-only degradation). A new canonical
+  loader, `net_class_map_from_path(path, *, pcb_text=, pcb_path=,
+  layer_stack=)` in `router/rules.py`, pairs sidecar parsing with best-effort
+  board-stack detection; all five consumer call sites now use it, resolving
+  `"B.Cu"` against the board's actual copper count (grid index 3 on a 4-layer
+  board, 1 on a 2-layer board) exactly as `kct route` does. Integer-index
+  sidecars and stack-less library callers are unchanged, and a structural
+  guard test now fails if any future consumer calls `net_class_map_from_dict`
+  directly — the invariant is *any sidecar accepted by one consumer is
+  accepted by all of them*.
+
 - **`kct net-status --net X` output scoping** (#4682) — two `--net` defects
   that made the filter untrustworthy. (1) `--net X --why` ignored the filter
   entirely (`--why` short-circuited before net validation and

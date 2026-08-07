@@ -884,18 +884,23 @@ class ManufacturingAudit:
         try:
             import json as _json
 
-            from kicad_tools.router.rules import net_class_map_from_dict
+            from kicad_tools.router.rules import net_class_map_from_path
             from kicad_tools.validate import DRCChecker
 
             # Load optional net-class-map sidecar (Issue #2684).  When
             # supplied, enables the diff-pair routing-continuity and
             # length-skew rules to re-derive engagement / skew state on
             # routed boards.  When absent, rules degrade to no-ops.
+            # Canonical loader (issue #4683): passing the board path resolves
+            # layer-name tokens like "B.Cu" against the board's actual copper
+            # count -- without it, a sidecar `kct route` accepts was silently
+            # dropped here and the diff-pair rules no-op'd without a signal.
             net_class_map = None
             if self.net_class_map_path is not None:
                 try:
-                    ncm_data = _json.loads(self.net_class_map_path.read_text())
-                    net_class_map = net_class_map_from_dict(ncm_data)
+                    net_class_map = net_class_map_from_path(
+                        self.net_class_map_path, pcb_path=self.pcb_path
+                    )
                 except (OSError, _json.JSONDecodeError, TypeError, ValueError) as e:
                     logger.warning(
                         "Failed to load net-class-map from %s: %s",
@@ -1226,15 +1231,17 @@ class ManufacturingAudit:
 
         # Parse the net-class-map sidecar with the SAME block _check_drc uses
         # so HV selection agrees with the diff-pair DRC rules (issue #2684).
+        # Canonical loader (issue #4683): the board path resolves layer-name
+        # tokens like "B.Cu" so the HV ISOLATION SAFETY GATE cannot silently
+        # run without its HV classes on a sidecar that `kct route` accepts.
         net_class_map = None
         if self.net_class_map_path is not None:
             try:
-                import json as _json
+                from kicad_tools.router.rules import net_class_map_from_path
 
-                from kicad_tools.router.rules import net_class_map_from_dict
-
-                ncm_data = _json.loads(self.net_class_map_path.read_text())
-                net_class_map = net_class_map_from_dict(ncm_data)
+                net_class_map = net_class_map_from_path(
+                    self.net_class_map_path, pcb_path=self.pcb_path
+                )
             except (OSError, ValueError, TypeError) as e:
                 logger.warning(
                     "Isolation check: failed to load net-class-map from %s: %s",

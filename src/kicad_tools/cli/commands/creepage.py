@@ -161,18 +161,21 @@ def run_creepage_command(args) -> int:
             print(f"Error: standard-table lookup failed: {e}", file=sys.stderr)
             return 1
 
-    # Load the optional net-class map sidecar (reuses net_class_map_from_dict).
+    # Load the optional net-class map sidecar via the canonical loader
+    # (issue #4683): passing the board path resolves layer-name tokens like
+    # "B.Cu" against the board's ACTUAL copper count, exactly as `kct route`
+    # does -- one sidecar must be valid for every consumer.
     net_class_map = None
     ncm_arg = getattr(args, "net_class_map", None)
     if ncm_arg:
-        from kicad_tools.router.rules import net_class_map_from_dict
+        from kicad_tools.router.rules import net_class_map_from_path
 
         ncm_path = Path(ncm_arg)
         if not ncm_path.exists():
             print(f"Error: net-class-map file not found: {ncm_path}", file=sys.stderr)
             return 1
         try:
-            net_class_map = net_class_map_from_dict(json.loads(ncm_path.read_text()))
+            net_class_map = net_class_map_from_path(ncm_path, pcb_path=pcb_path)
         except json.JSONDecodeError as e:
             print(f"Error: parsing net-class-map JSON: {e}", file=sys.stderr)
             return 1

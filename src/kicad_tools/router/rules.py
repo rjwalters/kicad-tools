@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Literal
 from .layers import Layer, LayerStack
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from pathlib import Path
+
     from .pairwise_clearance import PairwiseClearanceTable
 
 # Allowed values for :attr:`NetClassRouting.route_via`.
@@ -1794,6 +1796,90 @@ def net_class_map_from_dict(
             # names both the bad token and the net it belongs to (#4587).
             raise LayerResolutionError(f"net-class entry {net_name!r}: {e}") from e
     return result
+
+
+def net_class_map_from_path(
+    path: "str | Path",
+    *,
+    pcb_text: str | None = None,
+    pcb_path: "str | Path | None" = None,
+    layer_stack: LayerStack | None = None,
+) -> dict[str, "NetClassRouting"]:
+    """Load a ``--net-class-map`` JSON sidecar the way EVERY consumer must.
+
+    Canonical loader (issue #4683).  The #4587 hardening made an unresolvable
+    layer token (``"B.Cu"``, whose grid index depends on the board's copper
+    count) a hard :class:`LayerResolutionError` inside
+    :func:`net_class_map_from_dict` -- but only ``kct route`` was updated to
+    pass a layer stack.  Every other consumer (``kct creepage``, ``kct check``,
+    ``kct zones hv-keepout``, ``kct audit``) kept calling
+    ``net_class_map_from_dict(data)`` bare, so the SAME sidecar that routed a
+    board was rejected by the sign-off gates that validate the router's output.
+    This function is the single place that pairs "parse the sidecar" with
+    "resolve the board's layer stack" so a future consumer cannot recreate the
+    divergence: the invariant is *any sidecar accepted by one consumer is
+    accepted by all of them* (see also #4404, the same bug class for
+    ``_comment`` keys).
+
+    Stack resolution precedence:
+
+    1. ``layer_stack`` -- an already-resolved stack (e.g. ``kct route``'s
+       ``--layers``-flag table) is used as-is.
+    2. ``pcb_text`` -- raw ``.kicad_pcb`` contents, fed to
+       :func:`kicad_tools.router.io.detect_layer_stack`.
+    3. ``pcb_path`` -- read best-effort, then detected as in (2).
+
+    Stack resolution is best-effort (mirroring ``route_cmd``'s preload): if
+    the board cannot be read or detection fails, the map is still parsed with
+    ``layer_stack=None`` -- stack-independent tokens (``"F.Cu"``,
+    ``"In<k>.Cu"``) resolve, and ``"B.Cu"`` fails loud with an actionable
+    message rather than a silent wrong index.
+
+    Args:
+        path: Path to the sidecar JSON file.
+        pcb_text: Optional raw ``.kicad_pcb`` contents for stack detection.
+        pcb_path: Optional path to the board file for stack detection
+            (read best-effort; ignored when ``pcb_text`` is given).
+        layer_stack: Optional pre-resolved stack; wins over both of the above.
+
+    Returns:
+        The parsed ``{net_name: NetClassRouting}`` map.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist.
+        json.JSONDecodeError: If the sidecar is not valid JSON.
+        TypeError: If the sidecar structure is not a dict-of-dicts.
+        ValueError: If an entry is malformed, or -- as
+            :class:`LayerResolutionError` -- if a layer token cannot be
+            resolved against the (possibly absent) stack.
+    """
+    import json
+    from pathlib import Path as _Path
+
+    sidecar_path = _Path(path)
+    if not sidecar_path.exists():
+        raise FileNotFoundError(f"net-class-map file not found: {sidecar_path}")
+    data = json.loads(sidecar_path.read_text())
+
+    stack = layer_stack
+    if stack is None:
+        # Function-scope import: router.io imports router.rules at module
+        # level, so a top-level import here would be circular.
+        from .io import detect_layer_stack
+
+        text = pcb_text
+        if text is None and pcb_path is not None:
+            try:
+                text = _Path(pcb_path).read_text()
+            except OSError:
+                text = None
+        if text is not None:
+            try:
+                stack = detect_layer_stack(text)
+            except (KeyError, OSError, ValueError):
+                stack = None
+
+    return net_class_map_from_dict(data, layer_stack=stack)
 
 
 # Threshold for classifying a 2-pin signal net as "simple" (short) vs "complex" (long).
