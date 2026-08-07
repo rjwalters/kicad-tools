@@ -2964,11 +2964,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # FET->motor PHASE pads are scattered across the whole board, so a
     # bounding-box pour island shorts against the rail pours.  Net: PHASE
     # connectivity is placement-bound on this board and needs a targeted
-    # U3-south relayout / escape-channel relief -- now tracked concretely as
-    # #4548 (re-add board-05's escape-corridor reservation opt-in after CI
-    # blocking-count validation), which targets exactly this PHASE_A/B/C
-    # south-escape-channel congestion.  Left skipped here until #4548 lands so
-    # the committed routing does not regress.
+    # U3-south relayout / escape-channel relief.  #4548 landed the
+    # escape-corridor-reservation opt-in (see the flag below) targeting
+    # exactly this PHASE_A/B/C south-escape-channel congestion.  PHASE_A/B/C
+    # stay in this skip list for now: un-skipping them is the follow-on
+    # payoff step and is only taken on CI-measured evidence that the
+    # blocking count does not regress (per #3822 the board-05 CI job is the
+    # only authoritative instrument for this board).
     skip_nets = ["+24V", "+5V", "+3V3", "GND", "PHASE_A", "PHASE_B", "PHASE_C"]
 
     cmd = [
@@ -3073,6 +3075,15 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # sanctioned "require explicit opt-in" remedy: the unsafe grid is now a
         # deliberate, documented choice instead of a silent default.
         "--allow-unsafe-grid",
+        # Issue #4548: congestion-aware escape-corridor reservation, re-added
+        # after #4519 (PR #4547) made it a selective, bounded, inner-layer
+        # signal (2886 reserved cells over layers [1,2] on this board vs the
+        # 25875-cell / all-layer footprint that regressed PR #4509).  Targets
+        # the U3-south escape-channel congestion behind the residual
+        # ISENSE_A-/B-/C- + PHASE_A/B/C blocking cohort.  Gated on the CI-
+        # measured blocking_incomplete_count (<= the pre-#4548 baseline of 6,
+        # run 31150150866); per #3822 a local macOS regen is non-authoritative.
+        "--escape-corridor-reservation",
         "--skip-nets",
         ",".join(skip_nets),
     ]

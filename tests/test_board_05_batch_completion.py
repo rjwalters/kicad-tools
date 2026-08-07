@@ -196,13 +196,20 @@ def test_main_pipeline_gate_pins_route_allowance_zero() -> None:
         )
 
 
-def test_design_does_not_enable_escape_corridor_reservation() -> None:
-    """#4519 gates the corridor-reservation opt-in; #4476 must not sneak it in.
+def test_design_enables_escape_corridor_reservation() -> None:
+    """#4548 lands the corridor-reservation opt-in; keep it from drifting OUT.
 
-    ``--escape-corridor-reservation`` regressed this board's blocking gate
-    (11 -> 13) when it was opted in during PR #4509, so it stays OFF until
-    #4519 lands measured-safe selectivity.
+    The untuned ``--escape-corridor-reservation`` regressed this board's
+    blocking gate (11 -> 13) when it was opted in during PR #4509, so it
+    stayed OFF until #4519 (PR #4547) made the reservation selective,
+    bounded, and inner-layer.  #4548 then re-added the opt-in gated on the
+    CI-measured ``blocking_incomplete_count`` (<= the pre-#4548 baseline of
+    6).  This guard is the same drift protection as before, flipped: the
+    flag must now stay IN the ``kct route`` recipe -- removing it silently
+    reverts a CI-validated routing improvement.
     """
     text = DESIGN_PY.read_text()
-    assert "--escape-corridor-reservation" not in text
-    assert "escape_corridor_reservation" not in text
+    assert "--escape-corridor-reservation" in text, (
+        "board-05's route recipe must pass --escape-corridor-reservation "
+        "(#4548, CI-validated opt-in; tuned by #4519/PR #4547)"
+    )

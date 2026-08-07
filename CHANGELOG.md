@@ -59,6 +59,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pair whose emitted leg would enter a rule area declines and emits
   nothing) now has direct test coverage. No behavior change for well-formed
   inputs.
+- **Board-05 escape-corridor-reservation opt-in re-added after CI
+  blocking-count validation** (#4548) — `boards/05-bldc-motor-controller/design.py`
+  now passes `--escape-corridor-reservation` in its `kct route` recipe. The
+  untuned reservation regressed the board's blocking gate when first opted
+  in (PR #4509, reverted); #4519 / PR #4547 made it a selective, bounded,
+  inner-layer signal (2886 reserved cells over layers [1,2] on this board
+  vs the 25875-cell / all-layer regression footprint), and this opt-in is
+  gated on the CI-measured `blocking_incomplete_count` staying at or below
+  the pre-#4548 main baseline of 6 (run 31150150866; per #3822 the CI job
+  is the only authoritative instrument for board-05). The guard test
+  `tests/test_board_05_batch_completion.py` is flipped to pin the flag IN
+  the recipe (same drift protection, inverted). PHASE_A/B/C remain in
+  `skip_nets`; un-skipping them is the follow-on payoff step, taken only on
+  CI-measured evidence.
 
 - **Local CI-equivalent gate script as an Actions-outage backstop** (#4671)
   — new `scripts/ci/local-gate.sh` mirrors the `.github/workflows/ci.yml`
