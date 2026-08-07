@@ -32,7 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact on the committed copper it treats as source of truth. Known
   limits documented in the module: track arcs terminate neighbours but
   are not themselves tested for dangling; `isolated_copper` (the third
-  #4680 class) is a follow-up slice.
+  #4680 class) is a follow-up slice. `kct fix-drc` is deliberately
+  unaffected: its pure-Python DRC fallback filters both advisories out
+  (`_UNREPAIRABLE_TOPOLOGY_RULE_IDS`) because no clearance nudge can
+  repair a free track end, so a pre-existing stub cannot flip `fix-drc`
+  to the "non-repairable violations detected" exit code — `kct check`
+  remains the place these findings surface.
 
 - **`kct doctor` environment-preflight check group** (#4542, from the
   copperhead survey #4520 idea 5) — alongside the existing version-record

@@ -274,6 +274,14 @@ def minimal_pcb(tmp_path: Path) -> Path:
 # - Board outline with adequate edge clearance
 # - Traces with proper clearance from pads
 # - Silkscreen text with adequate height (1.0mm >= JLCPCB 0.8mm minimum)
+# - Every track end lands on copper: the GND trace runs from R1 pad 1 to
+#   the TP1 test-point pad (issue #4680).  Before ``track_dangling``
+#   detection existed the trace floated in free space at (122,125)-(115,125)
+#   with both ends touching nothing, which made the "clean" contract
+#   untrue -- the ``--strict`` tests that read this fixture assert that
+#   *no* warning is raised, so the copper here must genuinely terminate.
+#   TP1 exists so the far end lands on a pad while GND stays fully routed
+#   (a second GND pad with no copper to it would trip ``connectivity``).
 DRC_CLEAN_PCB = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -309,7 +317,18 @@ DRC_CLEAN_PCB = """(kicad_pcb
     (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
       (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
   )
-  (segment (start 122 125) (end 115 125) (width 0.25) (layer "F.Cu") (net 1)
+  (footprint "TestPoint:TestPoint_Pad_1.0x1.0mm"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000030")
+    (at 115 125)
+    (property "Reference" "TP1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000031"))
+    (property "Value" "GND" (at 0 1.5 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-000000000032"))
+    (pad "1" smd roundrect (at 0 0) (size 1.0 1.0)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (segment (start 124.49 125) (end 115 125) (width 0.25) (layer "F.Cu") (net 1)
     (uuid "00000000-0000-0000-0000-000000000020"))
 )
 """

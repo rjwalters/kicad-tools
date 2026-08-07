@@ -292,13 +292,22 @@ _PCB_TEMPLATE = """(kicad_pcb
 """
 
 # Four alternating H/V 0.4 mm legs: 100% staircase steps ("terrible" metrics).
+#
+# The legs close into a ring so that every endpoint is shared with the
+# perpendicular neighbour (issue #4680): the metrics stay identically
+# terrible (4 segments, 4 orthogonal, 4 staircase steps, 1 net with
+# copper) while no track end dangles, so the ``--strict`` assertion in
+# ``test_terrible_metrics_never_change_exit_code`` measures what it
+# means to -- that *routing-quality metrics* never move the exit code --
+# instead of tripping over unrelated ``track_dangling`` warnings from
+# copper that floated in free space.
 _STAIRCASE_SEGMENTS = """  (segment (start 110 110) (end 110.4 110) (width 0.25) (layer "F.Cu") (net 1)
     (uuid "00000000-0000-0000-0000-000000000020"))
   (segment (start 110.4 110) (end 110.4 110.4) (width 0.25) (layer "F.Cu") (net 1)
     (uuid "00000000-0000-0000-0000-000000000021"))
-  (segment (start 110.4 110.4) (end 110.8 110.4) (width 0.25) (layer "F.Cu") (net 1)
+  (segment (start 110.4 110.4) (end 110 110.4) (width 0.25) (layer "F.Cu") (net 1)
     (uuid "00000000-0000-0000-0000-000000000022"))
-  (segment (start 110.8 110.4) (end 110.8 110.8) (width 0.25) (layer "F.Cu") (net 1)
+  (segment (start 110 110.4) (end 110 110) (width 0.25) (layer "F.Cu") (net 1)
     (uuid "00000000-0000-0000-0000-000000000023"))
 """
 

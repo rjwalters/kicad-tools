@@ -1347,6 +1347,38 @@ class TestPurePythonDRCFallback:
             assert v.required_value_mm is not None
             assert v.actual_value_mm is not None
 
+    def test_fallback_excludes_unrepairable_topology_advisories(self, tmp_path: Path):
+        """Dangling-copper advisories stay out of the fallback report (#4680).
+
+        ``fix-drc`` only repairs metric violations (nudge copper until a
+        measured distance clears a required minimum), so topology
+        findings it can never act on are filtered out of
+        ``_run_python_drc``.  This also keeps the "every converted
+        violation has required + actual values" contract above intact --
+        ``track_dangling`` has no numeric requirement at all.
+        """
+        from kicad_tools.cli.fix_drc_cmd import (
+            _UNREPAIRABLE_TOPOLOGY_RULE_IDS,
+            _run_python_drc,
+        )
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.checker import DRCChecker
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        # Guard against a vacuous assertion: both traces float in free
+        # space, so the underlying checker really does flag them.
+        checked = DRCChecker(PCB.load(pcb_file), layers=2).check_all()
+        assert any(v.rule_id == "track_dangling" for v in checked.violations)
+
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+        # The repairable clearance violations survive the filter ...
+        assert report.violation_count > 0
+        # ... but the topology advisories do not.
+        assert all(v.type_str not in _UNREPAIRABLE_TOPOLOGY_RULE_IDS for v in report.violations)
+
     def test_fallback_used_when_no_kicad_cli(self, tmp_path: Path, monkeypatch):
         """_get_drc_report should fall back to pure-Python DRC when kicad-cli is missing."""
         from kicad_tools.cli import fix_drc_cmd
@@ -3297,8 +3329,20 @@ class TestCategoryAlignment:
         assert "solder_mask" in CHECK_CATEGORIES
 
     def test_check_and_fix_drc_same_categories(self, tmp_path: Path):
-        """check and fix-drc pure-Python DRC should produce the same violation count."""
-        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+        """check and fix-drc pure-Python DRC should produce the same violation count.
+
+        The single documented exception is
+        ``fix_drc_cmd._UNREPAIRABLE_TOPOLOGY_RULE_IDS`` (issue #4680):
+        dangling-copper advisories are deliberately dropped from the
+        fix-drc fallback because no nudge can repair them.  Subtracting
+        exactly that set from the check-side count keeps this guard's
+        real intent -- fix-drc must not silently omit a whole DRC
+        *category* -- while making the one intentional filter explicit.
+        """
+        from kicad_tools.cli.fix_drc_cmd import (
+            _UNREPAIRABLE_TOPOLOGY_RULE_IDS,
+            _run_python_drc,
+        )
         from kicad_tools.schema.pcb import PCB
         from kicad_tools.validate.checker import DRCChecker
 
@@ -3315,7 +3359,9 @@ class TestCategoryAlignment:
         pcb = PCB.load(pcb_file)
         checker = DRCChecker(pcb)
         results = checker.check_all()
-        check_count = len(results.violations)
+        check_count = len(
+            [v for v in results.violations if v.rule_id not in _UNREPAIRABLE_TOPOLOGY_RULE_IDS]
+        )
 
         assert fix_drc_count == check_count, (
             f"fix-drc reported {fix_drc_count} violations but check reported "

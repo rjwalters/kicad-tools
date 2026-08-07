@@ -31,6 +31,30 @@ from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
 from kicad_tools.manufacturers.base import DesignRules
 from kicad_tools.transaction import board_transaction
 
+# Topology advisories that are deliberately excluded from the pure-Python
+# DRC fallback report (issue #4680).
+#
+# ``fix-drc`` repairs *metric* violations: it nudges copper until a
+# measured distance clears a required minimum.  Every violation it
+# reports therefore carries a ``required_value_mm`` / ``actual_value_mm``
+# pair, which the repairers and the ``--verify`` before/after delta both
+# read (and ``tests/test_fix_drc_cmd.py`` pins as a contract).
+#
+# ``track_dangling`` is purely topological -- a free track end has no
+# numeric requirement to compare against (its ``required_value`` is
+# ``None`` by construction), and no nudge can repair it: the fix is to
+# route the stub somewhere or delete it, which is a routing decision,
+# not a clearance repair.  Including such findings would (a) break the
+# values contract and (b) make ``fix-drc`` exit 2 with "non-repairable
+# violations detected" on any board carrying a pre-existing stub, even
+# when there is nothing for it to do.  ``kct check`` remains the place
+# these advisories surface.
+#
+# ``via_dangling`` does carry numeric values (bonded layers vs. the
+# 2-layer minimum) but is unrepairable for the same reason, so it is
+# excluded on the same grounds rather than on the values technicality.
+_UNREPAIRABLE_TOPOLOGY_RULE_IDS = frozenset({"track_dangling", "via_dangling"})
+
 
 @dataclass
 class PassResult:
@@ -829,6 +853,10 @@ def _run_python_drc(
     silkscreen, solder mask) so that ``fix-drc`` can report the full
     scope of violations even when it can only repair a subset.
 
+    Unrepairable *topology* advisories are dropped from the converted
+    report -- see :data:`_UNREPAIRABLE_TOPOLOGY_RULE_IDS` for the
+    rationale.
+
     Args:
         pcb_path: Path to the PCB to check.
         manufacturer: Manufacturer profile that supplies the clearance
@@ -845,6 +873,9 @@ def _run_python_drc(
         pcb = PCB.load(pcb_path)
         checker = DRCChecker(pcb, manufacturer=manufacturer, layers=layers)
         results = checker.check_all()
+        results.violations = [
+            v for v in results.violations if v.rule_id not in _UNREPAIRABLE_TOPOLOGY_RULE_IDS
+        ]
 
         return drc_results_to_report(results, pcb_path)
 
