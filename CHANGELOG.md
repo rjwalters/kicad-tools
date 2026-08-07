@@ -119,6 +119,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Boards 03/06/07: committed routed artifacts refreshed with corrected 3D
+  model transforms** (#4585) — the kicad-tools.org gallery cards for
+  `diffpair_test_routed` (board 06, mini-PCIe socket 90° off its pad column)
+  and `matchgroup_test_routed` (board 07, 1x9 header pins unseated + HDMI
+  receptacle 180° flipped) showed misoriented component bodies because the
+  committed artifacts' `(model ...)` refs predated the #4583 rotation-sign
+  fix (#4617) and the #4584 LCSC per-part rotate/offset overrides (#4631).
+  All three artifacts are re-baked via the new `kct pcb add-3d-models
+  --refresh` (#4586/#4660): board 03's four SW_SPST_TL3342 buttons go
+  `rz 90 → -90`, board 06's `PCIE_Mini_Edge` (LCSC C444929) picks up its
+  per-part `-90` override, and board 07's 1x9 header / HDMI receptacle get
+  sign-corrected rotate + offset re-bakes. Metadata-only: stripping the
+  `(model ...)` blocks pre/post leaves byte-identical files (copper,
+  placement, zones, nets untouched) and DRC output is identical pre/post.
+  Renders remain git-ignored; the gallery picks up the fix at the next
+  operator redeploy.
+
 - **Softstart lattice proofs: re-pin to the current fixture + content-hash
   drift guard** (#4670) — the local-only softstart routing proof
   (`tests/router/lattice/test_softstart_routing.py`) failed at its topology
