@@ -86,7 +86,7 @@ kct [--help] [--version] <command> [options]
 | | `interactive` | Launch interactive REPL mode |
 | | `run` | Run a Python script with the kicad-tools interpreter |
 | | `build-native` | Build the C++ router backend (10-100x faster routing) |
-| | `doctor` | Diagnose kicad-tools installation health (version-record drift) |
+| | `doctor` | Diagnose kicad-tools installation health (version-record drift + environment preflight) |
 
 ---
 

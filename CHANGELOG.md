@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`kct doctor` environment-preflight check group** (#4542, from the
+  copperhead survey #4520 idea 5) — alongside the existing version-record
+  drift check, `kct doctor` now runs four fail-soft runtime-prerequisite
+  preflights, each reported `ok`/`warn`/`fail` with a human detail and an
+  actionable remedy: `native-backend` (wraps `probe_backend_info()`; missing
+  `.so` is a loud `warn` — the most common cause of "router is slow" false
+  alarms), `kicad-cli` (presence is `fail` when absent, KiCad-8+ version
+  floor is `warn`), `python-env` (Python >= 3.10 floor + shapely core-dep
+  importability, both `fail` — a broken/partial install), and `kct-path`
+  (warns when a PATH-resolved `kct` shadows a different project-pinned
+  version — a stale global install makes new subcommands read as
+  `invalid choice`). `--format json` output is additive: the version-drift
+  keys are unchanged and the new group lands under a top-level
+  `"environment"` key. Default exit stays advisory 0; `--strict` now exits
+  1 on drift **or** any `fail`-status preflight (`warn` never affects the
+  exit code). A missing tool is always a reported `fail` row, never a
+  traceback.
+
 - **`kct pipeline` route-skip under `--voltage-map` now auto-runs a
   `kct creepage` audit as the skip gate** (#4649) — refining the #4607 loud
   refusal: when the board is already `>=`95% routed (recommend_skip) and no

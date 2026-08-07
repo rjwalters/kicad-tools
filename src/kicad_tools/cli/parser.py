@@ -7867,14 +7867,22 @@ def _add_doctor_parser(subparsers) -> None:
     """Add doctor subcommand parser for environment/installation health checks."""
     doctor_parser = subparsers.add_parser(
         "doctor",
-        help="Diagnose kicad-tools installation health (version-record drift)",
+        help=(
+            "Diagnose kicad-tools installation health "
+            "(version-record drift + environment preflight)"
+        ),
         description=(
-            "Check the health of a kicad-tools installation. The first check is "
-            "version-record drift: the installed package version (ground truth) is "
-            "compared against the records the installer stamps into a consumer repo "
-            "(pyproject.toml dependency pin, .kct/install-metadata.json, and the "
-            "CLAUDE.md marker block). Advisory by default; use --strict to exit "
-            "non-zero on drift so it can gate CI / pre-commit hooks."
+            "Check the health of a kicad-tools installation. Two check groups run: "
+            "(1) version-record drift -- the installed package version (ground truth) "
+            "is compared against the records the installer stamps into a consumer "
+            "repo (pyproject.toml dependency pin, .kct/install-metadata.json, and "
+            "the CLAUDE.md marker block); (2) environment preflight -- runtime "
+            "prerequisites are probed fail-soft (native C++ router backend, "
+            "kicad-cli presence + KiCad 8+ version, Python/shapely install health, "
+            "and a PATH 'kct' shadowing the active environment). Each preflight "
+            "reports ok/warn/fail with an actionable remedy. Advisory by default; "
+            "use --strict to exit non-zero on drift or any failed preflight so it "
+            "can gate CI / pre-commit hooks."
         ),
     )
     doctor_parser.add_argument(
@@ -7895,7 +7903,10 @@ def _add_doctor_parser(subparsers) -> None:
         "--strict",
         dest="doctor_strict",
         action="store_true",
-        help="Exit 1 when any version record has drifted (default: advisory exit 0)",
+        help=(
+            "Exit 1 when any version record has drifted or any environment "
+            "preflight fails (warns stay advisory; default: advisory exit 0)"
+        ),
     )
 
 

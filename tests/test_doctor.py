@@ -15,12 +15,26 @@ import pytest
 from kicad_tools.doctor import (
     CLAUDE_MD,
     INSTALL_METADATA,
+    KCT_PATH,
+    KICAD_CLI,
+    NATIVE_BACKEND,
     PYPROJECT_DEPENDENCY,
     PYPROJECT_PROJECT_VERSION,
+    PYTHON_ENV,
     DriftReport,
+    EnvironmentReport,
+    PreflightResult,
+    PreflightStatus,
     RecordStatus,
+    check_environment,
+    check_kct_path,
+    check_kicad_cli,
+    check_native_backend,
+    check_python_env,
     check_version_drift,
+    environment_to_dict,
     normalize_version,
+    render_environment_text,
     render_text,
     report_to_dict,
 )
@@ -74,6 +88,64 @@ def get(report: DriftReport, name: str):
         if r.name == name:
             return r
     raise AssertionError(f"record {name!r} not in report")
+
+
+# --- environment-preflight fixture builders (issue #4542) ------------------
+
+
+def ok_result(name=NATIVE_BACKEND):
+    return PreflightResult(name, PreflightStatus.OK, "synthetic ok", None)
+
+
+def fail_result(name=KICAD_CLI):
+    return PreflightResult(name, PreflightStatus.FAIL, "synthetic fail", "do the thing")
+
+
+def warn_result(name=NATIVE_BACKEND):
+    return PreflightResult(name, PreflightStatus.WARN, "synthetic warn", "do the thing")
+
+
+def patch_environment(monkeypatch, *checks):
+    """Replace the CLI's environment probe with a synthetic report.
+
+    Keeps the CLI tests hermetic: the real preflights depend on the host
+    (KiCad install, native ``.so``, PATH contents) and spawn subprocesses.
+    """
+    report = EnvironmentReport(checks=list(checks))
+    monkeypatch.setattr("kicad_tools.doctor.check_environment", lambda **kwargs: report)
+    return report
+
+
+def probe_info_available(build=12, required=12):
+    """A ``probe_backend_info()``-shaped dict for an installed backend."""
+    return {
+        "available": True,
+        "version": "1.0.0",
+        "build_version": build,
+        "required_build_version": required,
+        "extension_path": "/some/where/router_cpp.cpython-312-darwin.so",
+        "unavailable_reason": None,
+        "probe": {"mode": "in-process", "failed": False, "error": None},
+    }
+
+
+def probe_info_unavailable(reason="No module named 'kicad_tools.router.router_cpp'"):
+    return {
+        "available": False,
+        "version": None,
+        "build_version": None,
+        "required_build_version": 12,
+        "extension_path": None,
+        "unavailable_reason": reason,
+        "probe": {"mode": "in-process", "failed": False, "error": None},
+    }
+
+
+def probe_info_failed(error="probe subprocess timed out"):
+    return {
+        "available": False,
+        "probe": {"mode": "subprocess", "failed": True, "error": error},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -427,35 +499,39 @@ def test_render_text_clean(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_cli_advisory_exit_zero_on_drift(tmp_path, capsys):
+def test_cli_advisory_exit_zero_on_drift(tmp_path, capsys, monkeypatch):
     from kicad_tools.cli import main
 
+    patch_environment(monkeypatch, ok_result())
     write_consumer_pyproject_tag(tmp_path, "v0.0.1")  # guaranteed drift
     rc = main(["doctor", "--root", str(tmp_path)])
     assert rc == 0  # advisory by default
     assert "DRIFT" in capsys.readouterr().out
 
 
-def test_cli_strict_exit_one_on_drift(tmp_path, capsys):
+def test_cli_strict_exit_one_on_drift(tmp_path, capsys, monkeypatch):
     from kicad_tools.cli import main
 
+    patch_environment(monkeypatch, ok_result())
     write_consumer_pyproject_tag(tmp_path, "v0.0.1")
     rc = main(["doctor", "--root", str(tmp_path), "--strict"])
     assert rc == 1
 
 
-def test_cli_strict_exit_zero_when_clean(tmp_path, capsys):
+def test_cli_strict_exit_zero_when_clean(tmp_path, capsys, monkeypatch):
     from kicad_tools import __version__
     from kicad_tools.cli import main
 
+    patch_environment(monkeypatch, ok_result())
     write_consumer_pyproject_tag(tmp_path, f"v{__version__}")
     rc = main(["doctor", "--root", str(tmp_path), "--strict"])
     assert rc == 0
 
 
-def test_cli_json_format(tmp_path, capsys):
+def test_cli_json_format(tmp_path, capsys, monkeypatch):
     from kicad_tools.cli import main
 
+    patch_environment(monkeypatch, ok_result())
     write_consumer_pyproject_tag(tmp_path, "v0.0.1")
     rc = main(["doctor", "--root", str(tmp_path), "--format", "json"])
     assert rc == 0
@@ -464,10 +540,11 @@ def test_cli_json_format(tmp_path, capsys):
     assert payload["has_drift"] is True
 
 
-def test_cli_strict_exit_zero_on_informational_sha(tmp_path):
+def test_cli_strict_exit_zero_on_informational_sha(tmp_path, monkeypatch):
     """--strict must not fail on informational (sha/editable) records."""
     from kicad_tools.cli import main
 
+    patch_environment(monkeypatch, ok_result())
     (tmp_path / "pyproject.toml").write_text(
         "[project]\n"
         'name = "my-board"\n'
@@ -481,3 +558,353 @@ def test_cli_strict_exit_zero_on_informational_sha(tmp_path):
     )
     rc = main(["doctor", "--root", str(tmp_path), "--strict"])
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Environment preflight: native-backend (issue #4542)
+# ---------------------------------------------------------------------------
+
+
+def test_native_backend_ok_when_available_and_current():
+    result = check_native_backend(probe_fn=probe_info_available)
+    assert result.name == NATIVE_BACKEND
+    assert result.status is PreflightStatus.OK
+    assert "1.0.0" in result.detail
+    assert "12/12" in result.detail
+    assert "router_cpp.cpython-312-darwin.so" in result.detail
+    assert result.remedy is None
+
+
+def test_native_backend_warn_when_stale_build():
+    result = check_native_backend(probe_fn=lambda: probe_info_available(build=11, required=12))
+    assert result.status is PreflightStatus.WARN
+    assert "stale" in result.detail
+    assert result.remedy == "kct build-native"
+
+
+def test_native_backend_warn_when_unavailable():
+    result = check_native_backend(probe_fn=lambda: probe_info_unavailable("no compiler"))
+    assert result.status is PreflightStatus.WARN
+    assert "no compiler" in result.detail
+    assert result.remedy == "kct build-native"
+
+
+def test_native_backend_fail_when_probe_cannot_run():
+    result = check_native_backend(probe_fn=probe_info_failed)
+    assert result.status is PreflightStatus.FAIL
+    assert "probe subprocess timed out" in result.detail
+    assert result.remedy is not None
+
+
+# ---------------------------------------------------------------------------
+# Environment preflight: kicad-cli
+# ---------------------------------------------------------------------------
+
+
+def _cli_at(path="/usr/bin/kicad-cli"):
+    from pathlib import Path
+
+    return lambda: Path(path)
+
+
+def test_kicad_cli_ok_with_v8():
+    result = check_kicad_cli(find_cli_fn=_cli_at(), version_fn=lambda cli: "8.0.6")
+    assert result.name == KICAD_CLI
+    assert result.status is PreflightStatus.OK
+    assert "/usr/bin/kicad-cli" in result.detail
+    assert "8.0.6" in result.detail
+    assert result.remedy is None
+
+
+def test_kicad_cli_ok_with_newer_major():
+    result = check_kicad_cli(find_cli_fn=_cli_at(), version_fn=lambda cli: "9.0.0")
+    assert result.status is PreflightStatus.OK
+
+
+def test_kicad_cli_warn_below_compat_floor():
+    result = check_kicad_cli(find_cli_fn=_cli_at(), version_fn=lambda cli: "7.0.11")
+    assert result.status is PreflightStatus.WARN
+    assert "7.0.11" in result.detail
+    assert "8+" in result.detail
+    assert result.remedy is not None
+
+
+def test_kicad_cli_warn_when_version_unqueryable():
+    result = check_kicad_cli(find_cli_fn=_cli_at(), version_fn=lambda cli: None)
+    assert result.status is PreflightStatus.WARN
+    assert "could not be queried" in result.detail
+
+
+def test_kicad_cli_warn_when_version_unparseable():
+    result = check_kicad_cli(find_cli_fn=_cli_at(), version_fn=lambda cli: "nightly-build")
+    assert result.status is PreflightStatus.WARN
+    assert "unrecognized" in result.detail
+
+
+def test_kicad_cli_fail_when_not_found():
+    result = check_kicad_cli(find_cli_fn=lambda: None, version_fn=lambda cli: "8.0.6")
+    assert result.status is PreflightStatus.FAIL
+    assert result.remedy == "Install KiCad 8 from https://www.kicad.org/download/"
+
+
+# ---------------------------------------------------------------------------
+# Environment preflight: python-env
+# ---------------------------------------------------------------------------
+
+
+def test_python_env_ok():
+    result = check_python_env(has_shapely_fn=lambda: True, version_info=(3, 12, 1))
+    assert result.name == PYTHON_ENV
+    assert result.status is PreflightStatus.OK
+    assert "3.12.1" in result.detail
+    assert "shapely" in result.detail
+    assert result.remedy is None
+
+
+def test_python_env_ok_on_live_interpreter():
+    # The suite itself runs on >= 3.10, so the live floor comparison passes.
+    result = check_python_env(has_shapely_fn=lambda: True)
+    assert result.status is PreflightStatus.OK
+
+
+def test_python_env_fail_below_floor():
+    result = check_python_env(has_shapely_fn=lambda: True, version_info=(3, 9, 5))
+    assert result.status is PreflightStatus.FAIL
+    assert "3.9.5" in result.detail
+    assert "3.10" in result.detail
+    assert result.remedy is not None
+
+
+def test_python_env_fail_without_shapely_uses_hint_verbatim():
+    from kicad_tools._shapely import SHAPELY_INSTALL_HINT
+
+    result = check_python_env(has_shapely_fn=lambda: False, version_info=(3, 12, 1))
+    assert result.status is PreflightStatus.FAIL
+    assert "shapely" in result.detail
+    assert result.remedy == SHAPELY_INSTALL_HINT
+
+
+def test_python_env_fail_reports_both_problems():
+    result = check_python_env(has_shapely_fn=lambda: False, version_info=(3, 8, 0))
+    assert result.status is PreflightStatus.FAIL
+    assert "3.8.0" in result.detail
+    assert "shapely" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# Environment preflight: kct-path (PATH-shadowed install)
+# ---------------------------------------------------------------------------
+
+
+def test_kct_path_ok_when_not_on_path():
+    result = check_kct_path(installed_version="0.20.0", which_fn=lambda name: None)
+    assert result.name == KCT_PATH
+    assert result.status is PreflightStatus.OK
+    assert result.remedy is None
+
+
+def test_kct_path_ok_when_versions_match():
+    result = check_kct_path(
+        installed_version="0.20.0",
+        which_fn=lambda name: "/home/u/.local/bin/kct",
+        path_version_fn=lambda path: "kicad-tools 0.20.0",
+    )
+    assert result.status is PreflightStatus.OK
+    assert "/home/u/.local/bin/kct" in result.detail
+
+
+def test_kct_path_warn_when_path_kct_is_older():
+    result = check_kct_path(
+        installed_version="0.20.0",
+        which_fn=lambda name: "/home/u/.local/bin/kct",
+        path_version_fn=lambda path: "kicad-tools 0.15.1",
+    )
+    assert result.status is PreflightStatus.WARN
+    assert "/home/u/.local/bin/kct" in result.detail
+    assert "0.15.1" in result.detail
+    assert "0.20.0" in result.detail
+    assert "OLDER" in result.detail
+    assert "invalid choice" in result.detail
+    assert result.remedy is not None
+    assert "uv run kct" in result.remedy
+
+
+def test_kct_path_warn_when_path_kct_is_newer():
+    result = check_kct_path(
+        installed_version="0.18.0",
+        which_fn=lambda name: "/usr/local/bin/kct",
+        path_version_fn=lambda path: "kicad-tools 0.20.0",
+    )
+    assert result.status is PreflightStatus.WARN
+    assert "0.18.0" in result.detail
+    assert "0.20.0" in result.detail
+    assert "OLDER" not in result.detail
+
+
+def test_kct_path_warn_when_version_unqueryable():
+    result = check_kct_path(
+        installed_version="0.20.0",
+        which_fn=lambda name: "/home/u/.local/bin/kct",
+        path_version_fn=lambda path: None,
+    )
+    assert result.status is PreflightStatus.WARN
+    assert "could not be queried" in result.detail
+
+
+def test_kct_path_warn_when_version_unparseable():
+    result = check_kct_path(
+        installed_version="0.20.0",
+        which_fn=lambda name: "/home/u/.local/bin/kct",
+        path_version_fn=lambda path: "no digits here",
+    )
+    assert result.status is PreflightStatus.WARN
+    assert "unrecognized" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# Environment preflight: aggregate + rendering + fail-soft
+# ---------------------------------------------------------------------------
+
+
+def _injected_environment(**overrides):
+    kwargs = {
+        "installed_version": "0.20.0",
+        "probe_fn": probe_info_available,
+        "find_cli_fn": _cli_at(),
+        "version_fn": lambda cli: "8.0.6",
+        "has_shapely_fn": lambda: True,
+        "version_info": (3, 12, 1),
+        "which_fn": lambda name: None,
+        "path_version_fn": lambda path: None,
+    }
+    kwargs.update(overrides)
+    return check_environment(**kwargs)
+
+
+def test_environment_fixed_check_order():
+    report = _injected_environment()
+    assert [c.name for c in report.checks] == [NATIVE_BACKEND, KICAD_CLI, PYTHON_ENV, KCT_PATH]
+    assert report.ok is True
+    assert report.has_fail is False
+    assert report.has_warn is False
+
+
+def test_environment_fail_soft_on_raising_probe():
+    def exploding_probe():
+        raise RuntimeError("boom")
+
+    report = _injected_environment(probe_fn=exploding_probe)
+    native = report.checks[0]
+    assert native.name == NATIVE_BACKEND
+    assert native.status is PreflightStatus.FAIL
+    assert "RuntimeError" in native.detail
+    assert "boom" in native.detail
+    assert report.has_fail is True
+    assert report.ok is False
+
+
+def test_environment_warn_does_not_clear_ok_flag_semantics():
+    report = _injected_environment(probe_fn=probe_info_unavailable)
+    assert report.has_warn is True
+    assert report.has_fail is False
+    assert report.ok is True  # ok mirrors --strict semantics: warns are advisory
+
+
+def test_environment_to_dict_shape_and_determinism():
+    payload_a = environment_to_dict(_injected_environment())
+    payload_b = environment_to_dict(_injected_environment())
+    assert set(payload_a) == {"check", "ok", "has_fail", "has_warn", "checks"}
+    assert payload_a["check"] == "environment"
+    assert len(payload_a["checks"]) == 4
+    for check in payload_a["checks"]:
+        assert set(check) == {"name", "status", "detail", "remedy"}
+    # Same environment in => byte-identical report out.
+    assert json.dumps(payload_a, sort_keys=True) == json.dumps(payload_b, sort_keys=True)
+
+
+def test_render_environment_text_clean():
+    text = render_environment_text(_injected_environment())
+    assert "environment preflight" in text
+    assert "OK: environment preflight passed." in text
+    assert NATIVE_BACKEND in text
+
+
+def test_render_environment_text_fail_names_check_and_remedy():
+    text = render_environment_text(_injected_environment(find_cli_fn=lambda: None))
+    assert "FAIL: environment preflight failed: kicad-cli" in text
+    assert "remedy: Install KiCad 8" in text
+
+
+def test_render_environment_text_warn_is_advisory():
+    text = render_environment_text(_injected_environment(probe_fn=probe_info_unavailable))
+    assert "WARN: environment degraded (advisory): native-backend" in text
+    assert "remedy: kct build-native" in text
+
+
+# ---------------------------------------------------------------------------
+# CLI glue: environment group (issue #4542)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_default_exit_zero_with_failing_preflight(tmp_path, capsys, monkeypatch):
+    from kicad_tools import __version__
+    from kicad_tools.cli import main
+
+    patch_environment(monkeypatch, fail_result())
+    write_consumer_pyproject_tag(tmp_path, f"v{__version__}")  # clean drift
+    rc = main(["doctor", "--root", str(tmp_path)])
+    assert rc == 0  # advisory by default
+    assert "FAIL" in capsys.readouterr().out
+
+
+def test_cli_strict_exit_one_on_preflight_fail(tmp_path, monkeypatch):
+    from kicad_tools import __version__
+    from kicad_tools.cli import main
+
+    patch_environment(monkeypatch, fail_result())
+    write_consumer_pyproject_tag(tmp_path, f"v{__version__}")  # clean drift
+    rc = main(["doctor", "--root", str(tmp_path), "--strict"])
+    assert rc == 1
+
+
+def test_cli_strict_exit_zero_on_preflight_warn_only(tmp_path, monkeypatch):
+    from kicad_tools import __version__
+    from kicad_tools.cli import main
+
+    patch_environment(monkeypatch, warn_result(), ok_result(KICAD_CLI))
+    write_consumer_pyproject_tag(tmp_path, f"v{__version__}")
+    rc = main(["doctor", "--root", str(tmp_path), "--strict"])
+    assert rc == 0
+
+
+def test_cli_json_includes_environment_additively(tmp_path, capsys, monkeypatch):
+    from kicad_tools.cli import main
+
+    patch_environment(monkeypatch, ok_result(), fail_result())
+    write_consumer_pyproject_tag(tmp_path, "v0.0.1")
+    rc = main(["doctor", "--root", str(tmp_path), "--format", "json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    # Existing drift keys keep their shape.
+    assert payload["check"] == "version-drift"
+    assert payload["has_drift"] is True
+    assert len(payload["records"]) == 4
+    # New content lands under the additive "environment" key.
+    env = payload["environment"]
+    assert env["check"] == "environment"
+    assert env["ok"] is False
+    assert env["has_fail"] is True
+    assert [c["status"] for c in env["checks"]] == ["ok", "fail"]
+
+
+def test_cli_text_renders_both_groups(tmp_path, capsys, monkeypatch):
+    from kicad_tools import __version__
+    from kicad_tools.cli import main
+
+    patch_environment(monkeypatch, ok_result())
+    write_consumer_pyproject_tag(tmp_path, f"v{__version__}")
+    rc = main(["doctor", "--root", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "kct doctor: version-record drift" in out
+    assert "kct doctor: environment preflight" in out
