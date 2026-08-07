@@ -21,10 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remaining-budget per-net wall-clock caps also stayed active. Fixed:
   `boards/06-diffpair-test/generate_design.py` now runs the negotiated
   stage with `timeout=None` — bounded by its deterministic iteration
-  exits (per-net node-expansion budget, memory backstop,
-  `max_iterations=10`, best-stall patience, #4463 zero-overflow
+  exits (per-net node-expansion budget, memory backstop, a
+  `max_iterations=3` count bound that reproduces where the wall clock
+  empirically cut, best-stall patience, #4463 zero-overflow
   fixed-point) instead of wall clock — and pins `PYTHONHASHSEED=42` by
-  construction (one-shot re-exec at the entry point). **Residual:** with
+  construction (one-shot re-exec at the entry point). **Reach-deciding:**
+  the relief rescue's probe / displaced-victim re-land sub-searches were
+  bounded by a flat 10 s wall clock that straddles their 8–12 s natural
+  time on CI runners; because a rescue rolls back entirely when a victim
+  does not re-land, that value decided routed reach on machine speed
+  alone (board-06 seed-42 landed 21/21 on one runner and 20/21 on
+  another from line-identical logs). `Autorouter.route_all_negotiated`
+  gained `deterministic_rescue=` (default off), which bounds those
+  sub-searches by the deterministic per-net node-expansion cap instead;
+  board 06 opts in. **Residual:** with
   the wall clock removed, runs still serialized ~2300 differing lines
   from *identical* copper multisets, because `kicad-cli` (invoked by
   every `kct zones fill` round) re-saves the board with tracks ordered

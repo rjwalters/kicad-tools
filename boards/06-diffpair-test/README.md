@@ -129,8 +129,8 @@ the 18-error diff-pair quality block documented under "CI Gate" below.
 Full board-06 regeneration (`generate_design.py --step route`) was
 run-to-run nondeterministic downstream of the coupled diff-pair
 pre-phase --- two same-seed runs of unmodified `main` could differ by
-thousands of lines ([#4536]).  Two instrumented run matrices localized
-**two** sources:
+thousands of lines ([#4536]).  Instrumented run matrices plus a CI-log
+bisection localized **three** sources:
 
 1. **Dominant: wall-clock truncation.**  The negotiated stage's
    `timeout=360.0` backstop straddled the phase's own natural runtime
@@ -140,13 +140,36 @@ thousands of lines ([#4536]).  Two instrumented run matrices localized
    remaining-budget per-net wall-clock caps active.  Fixed by removing
    wall-clock control flow from the negotiated stage (`timeout=None`;
    the stage is bounded by its deterministic iteration exits: per-net
-   node-expansion budget, memory backstop, `max_iterations=10`,
+   node-expansion budget, memory backstop, `max_iterations=3`,
    best-stall patience, and the #4463 zero-overflow fixed-point exit)
    and pinning `PYTHONHASHSEED=42` by construction at the
    `generate_design.py` entry point (one-shot re-exec), so plain
    invocations no longer depend on the caller exporting it.
+   `max_iterations=3` is the *deterministic* replacement for what the
+   backstop was doing: in every instrumented run (4 local baselines and
+   the green CI run 31214686048) the 360 s cut landed at the very start
+   of iteration 4, and iterations 4+ are provably discarded by the
+   end-of-loop lex restore, so bounding the count reproduces the
+   historical trajectory *and* saves the 9--14 minutes the discarded
+   round cost.  Do not raise it back to the default 10 without
+   re-measuring --- the board-06 E2E CI job ran to 29m45s of its 30-min
+   ceiling with iteration 4 enabled.
 
-2. **Residual: UUID-sorted file order.**  With the wall clock removed,
+2. **Reach-deciding: the relief rescue's 10 s sub-search wall clock.**
+   Board-06 reach is decided at negotiated iteration 2 by ONE relief
+   rescue (`MIPI_RST`), which rips four MIPI blockers and commits only
+   if all four re-land (the no-net-loss transaction guarantee).  Those
+   re-lands were bounded by a flat 10 s wall clock that straddles their
+   8--12 s natural time on GitHub runners, so the same commit produced
+   21/21 on one runner and 20/21 on another from routing logs that are
+   line-identical up to the rescue.  Fixed with
+   `route_all_negotiated(deterministic_rescue=True)` (default off
+   elsewhere), which bounds the rescue's probe / re-land sub-searches by
+   the deterministic per-net node-expansion cap instead.  This flag is
+   **load-bearing for `REQUIRED_SIGNAL_REACH = 21`** in
+   `scripts/ci/check_diffpair_coverage.py`.
+
+3. **Residual: UUID-sorted file order.**  With the wall clock removed,
    runs produced byte-identical routing logs and identical copper
    *multisets* yet still ~2300 differing artifact lines.  Stage-snapshot
    comparison across two runs proved every stage through the repair-via

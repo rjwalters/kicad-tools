@@ -2743,15 +2743,50 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # this stage with no wall-clock budget at all.  The stage stays
         # bounded by its deterministic iteration exits instead: the per-net
         # 1M node-expansion budget wired into the Autorouter above, the 12M
-        # memory backstop, ``max_iterations=10``, best-stall patience 2, and
-        # the #4463 zero-overflow fixed-point exit.
+        # memory backstop, the ``max_iterations=3`` bound below, best-stall
+        # patience 2, and the #4463 zero-overflow fixed-point exit.
         # ``tests/test_board06_determinism.py`` (gated behind
         # ``KCT_BOARD06_DETERMINISM=1``) is the regression guard: two
         # consecutive same-seed runs must produce identical uuid-normalized
         # artifacts.
+        #
+        # ``max_iterations=3`` (#4536) -- LOAD-BEARING for RUNTIME; do not
+        # raise it back to the default 10 without re-measuring.  This is the
+        # DETERMINISTIC replacement for the truncation the 360 s backstop used
+        # to perform: in every instrumented run (4 local baselines + CI run
+        # 31214686048) the backstop fired at the very START of iteration 4
+        # ("Timeout during reroute at net 0/19" / "net 0/21"), so iterations
+        # 0-3 are exactly the work the historical artifact was built from.
+        # Removing the wall clock let iteration 4 run to completion, which
+        # cost +9.3 min locally and +14 min on CI (the Board-06 E2E job landed
+        # at 29m45s against its 30-min ceiling) and changed NOTHING: iteration
+        # 4 regresses to connected=11/21, the end-of-loop lex restore discards
+        # it, and the committed state is the iteration-2 snapshot either way.
+        # ``best_stall_patience=2`` would also have exited after iteration 4,
+        # so 3 gives up no convergence headroom -- it just stops paying for a
+        # round whose result is provably discarded.  A count-based bound is
+        # reproducible where the wall-clock cut was not (the baseline matrix
+        # cut mid-net at load-dependent boundaries: net 0/19 vs net 1/19).
+        #
+        # ``deterministic_rescue=True`` (#4536) -- LOAD-BEARING for
+        # ``REQUIRED_SIGNAL_REACH = 21`` in
+        # ``scripts/ci/check_diffpair_coverage.py``.  Reach on this board is
+        # decided at ITERATION 2 by ONE relief rescue (``MIPI_RST``): it rips
+        # 4 MIPI blockers, and the transaction commits only if all 4 re-land.
+        # Those re-lands were bounded by a flat 10 s wall clock that straddles
+        # their 8-12 s natural time on GitHub runners, so the SAME code landed
+        # 21/21 on one runner (CI run 31214686048: "MIPI_RST ROUTED via
+        # conflict-free relief path; 4/4 displaced victim(s) re-landed") and
+        # 20/21 on another (run 31213011136: "only 3/4 displaced victim(s)
+        # re-landed -- rolling back"), with the routing logs line-identical up
+        # to that point.  Bounding those sub-searches by the per-net
+        # node-expansion cap instead makes the commit/rollback decision
+        # machine-independent -- the point of this issue.
         return router.route_all_negotiated(
             per_net_timeout=None,
             timeout=None,
+            max_iterations=3,
+            deterministic_rescue=True,
             seed=42,
         )
 

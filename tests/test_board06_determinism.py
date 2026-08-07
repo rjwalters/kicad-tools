@@ -10,7 +10,7 @@ Why this exists
 Issue #4536: two flag-OFF (shadow-OFF) regens of unmodified main differed
 by 9525 lines, making the "flag-OFF run must produce a byte-identical
 committed artifact" scope-guard convention undecidable for board-06.
-The instrumented run matrices (see the PR for #4536) localized TWO
+The instrumented run matrices (see the PR for #4536) localized THREE
 sources:
 
 1. **Dominant -- wall-clock truncation.** The negotiated phase's 360 s
@@ -21,9 +21,22 @@ sources:
    serialized four artifacts with *different copper counts* (1599-1602
    segments).  Fixed with ``timeout=None`` (the stage is bounded by its
    deterministic iteration exits instead) plus ``PYTHONHASHSEED`` pinned
-   by construction at the regen entry point.
+   by construction at the regen entry point.  ``max_iterations=3``
+   replaces the truncation the backstop used to perform, in deterministic
+   units: every instrumented run cut at the very start of iteration 4,
+   and iterations 4+ are provably discarded by the end-of-loop lex
+   restore.
 
-2. **Residual -- UUID-sorted file order.** With the wall clock removed,
+2. **Reach-deciding -- the relief rescue's 10 s sub-search wall clock.**
+   A rescue is a transaction: it rolls back unless every displaced
+   victim re-lands, so the budget those re-lands get decides routed
+   reach, not just runtime.  The flat 10 s budget straddles their 8-12 s
+   natural time on GitHub runners -- the same commit landed 21/21 and
+   20/21 on different runners from line-identical logs.  Fixed with
+   ``route_all_negotiated(deterministic_rescue=True)``, which bounds the
+   sub-searches by the deterministic per-net node-expansion cap.
+
+3. **Residual -- UUID-sorted file order.** With the wall clock removed,
    runs produced byte-identical logs and identical copper *multisets*,
    yet still ~2300 differing artifact lines: ``kicad-cli`` (invoked by
    every ``kct zones fill`` round) re-saves the board with tracks
@@ -45,7 +58,7 @@ else:
   difference and without affecting element order.  Each ``(uuid "...")``
   is replaced with ``(uuid "X")`` before comparison.  Positional identity
   is still required: the *number and location* of uuid-bearing nodes must
-  match exactly -- which, per source 2 above, only holds because
+  match exactly -- which, per source 3 above, only holds because
   stitch/repair copper UUIDs are now deterministic.
 * No timestamps or dates are present in the emitted ``kicad_pcb``
   (verified against the artifact header), so nothing else is masked.
