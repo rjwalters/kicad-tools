@@ -1101,6 +1101,7 @@ def auto_select_grid_resolution(
     board_height: float | None = None,
     max_cells: int = 500_000,
     candidates: list[float] | None = None,
+    engine: str = "grid",
 ) -> GridAutoSelection:
     """Automatically select optimal grid resolution based on pad positions.
 
@@ -1121,6 +1122,15 @@ def auto_select_grid_resolution(
                    to the fixed list.  This handles packages like
                    SSOP/TSSOP with 0.65mm pitch whose pads don't align
                    to any standard grid size.
+        engine: Route engine that will consume this grid (``--route-engine``:
+                ``"grid"`` / ``"mesh"`` / ``"lattice"``).  Issue #4690: the
+                memory-cap "may produce clearance violations" ``UserWarning``
+                predicts a *grid-routing* failure mode, so it is demoted to an
+                INFO log for the mesh/lattice engines, which emit no copper
+                from the grid (the same predicate as the #4271 gate skip).
+                Purely a diagnostics gate -- every returned field, including
+                ``memory_forced_unsafe_grid``, is computed identically for
+                every engine.
 
     Returns:
         GridAutoSelection with the chosen resolution and analysis details.
@@ -1454,6 +1464,27 @@ def auto_select_grid_resolution(
                 f"backstop.",
                 stacklevel=2,
             )
+        elif has_fine_pitch and engine != "grid":
+            # Issue #4690: the alarm below predicts a grid-routing failure mode
+            # ("routing may produce clearance violations at fine-pitch pads")
+            # and prescribes a grid-routing remedy ("increase max_cells").
+            # Under --route-engine mesh/lattice NO copper is emitted from the
+            # grid -- the same premise the #4271 safety-gate skip already
+            # states -- so both the prediction and the remedy are inapplicable,
+            # and the remedy is actively harmful (it steers the user toward a
+            # multi-million-cell grid that the #4242 budget cap refuses).
+            # Demote to INFO so the selection event stays observable without
+            # contradicting the gate-skip line printed in the same log.
+            logger.info(
+                "Auto-grid: memory budget cap selected grid %smm > clearance/2 "
+                "(%smm) even at max_cells=%s; --route-engine %s routes on exact "
+                "geometry (no copper is emitted from the grid), so no "
+                "grid-quantisation clearance risk applies.",
+                best_resolution,
+                recommended_max,
+                f"{effective_max_cells:,}",
+                engine,
+            )
         elif has_fine_pitch:
             # Genuine #3911 risk: the memory cap coerced a grid > clearance/2
             # AND the board carries fine-pitch pads whose inter-pad channel the
@@ -1518,6 +1549,7 @@ def compute_multi_resolution_plan(
     off_grid_escalation_threshold: float = 10.0,
     min_off_grid_pads_to_escalate: int = 2,
     min_escalation_fine_resolution: float = 0.005,
+    engine: str = "grid",
 ) -> MultiResolutionGridPlan | None:
     """Compute a multi-resolution grid plan for adaptive routing.
 
@@ -1556,6 +1588,10 @@ def compute_multi_resolution_plan(
             fine resolution (mm).  Lower than ``min_fine_resolution`` so
             the solver can find a (resolution, offset) that aligns
             sub-0.05mm pad coordinates (issue #2837).  Default 0.005mm.
+        engine: Route engine that will consume the plan; forwarded verbatim
+            to :func:`auto_select_grid_resolution` so the memory-cap
+            advisory is not emitted for engines that never route on the
+            grid (issue #4690).  Diagnostics-only; the plan is unchanged.
 
     Returns:
         MultiResolutionGridPlan if fine-pitch components detected or
@@ -1583,6 +1619,9 @@ def compute_multi_resolution_plan(
         board_width=board_width,
         board_height=board_height,
         max_cells=max_cells,
+        # Issue #4690: forward the route engine so the memory-cap advisory is
+        # not emitted for engines that never route on the grid.
+        engine=engine,
     )
     coarse_resolution = uniform_result.resolution
 
@@ -3756,6 +3795,13 @@ def load_pcb_for_routing(
         # the authoritative message).  Scope the warning emission to at-risk
         # fine-pitch boards; the strict-mode raise is unchanged (still gated on
         # ``strict_drc``), so this is a diagnostics-only narrowing.
+        #
+        # Issue #4690: narrow it further to the grid engine.  ``strategy`` IS
+        # the ``--route-engine`` selector; under ``mesh``/``lattice`` no copper
+        # is emitted from the grid (see the #4271 gate-skip rationale), so a
+        # "grid resolution may cause clearance violations" heads-up describes a
+        # failure mode those engines cannot have -- and directly contradicts
+        # the gate-skip line printed in the same log.
         _pad_positions = [
             PadPosition(x=pad["x"], y=pad["y"]) for comp in components for pad in comp["pads"]
         ]
@@ -3764,7 +3810,7 @@ def load_pcb_for_routing(
         validate_grid_resolution(
             rules.grid_resolution,
             rules.trace_clearance,
-            warn=_has_fine_pitch,
+            warn=_has_fine_pitch and strategy == "grid",
             strict=strict_drc,
         )
 

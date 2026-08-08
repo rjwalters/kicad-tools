@@ -10533,6 +10533,7 @@ def compute_dry_run_grid_plan(
     clearance: float,
     num_layers: int,
     max_cells: int,
+    engine: str = "grid",
 ) -> DryRunGridPlan | None:
     """Compute the analytical grid/cell/budget plan for ``--dry-run``.
 
@@ -10547,6 +10548,10 @@ def compute_dry_run_grid_plan(
         clearance: Trace clearance in mm (feeds the candidate DRC filter).
         num_layers: Number of routing layers (``layer_stack.num_layers``).
         max_cells: Cell budget from ``--max-cells``.
+        engine: Route engine (``--route-engine``), forwarded to the selector so
+            the memory-cap clearance advisory is not emitted for engines that
+            never route on the grid (issue #4690).  Diagnostics-only; every
+            reported figure is unchanged.
 
     Returns:
         A ``DryRunGridPlan``, or ``None`` if the board has no detectable
@@ -10576,6 +10581,7 @@ def compute_dry_run_grid_plan(
         board_width=board_width,
         board_height=board_height,
         max_cells=max_cells,
+        engine=engine,
     )
 
     # Off-grid counts keyed by resolution, from the selector's candidate trials.
@@ -12760,12 +12766,19 @@ def _main_impl(argv: list[str] | None = None) -> int:
         board_width = board_dims[0] if board_dims else None
         board_height = board_dims[1] if board_dims else None
         max_cells = getattr(args, "max_cells", 500_000)
+        # Issue #4690: the grid-quality advisories emitted below the selector
+        # describe (and prescribe remedies for) grid routing.  Thread the
+        # engine through so mesh/lattice runs do not receive advice that the
+        # #4271 gate-skip line -- printed a few lines later in the same log --
+        # simultaneously declares inapplicable.
+        _route_engine = getattr(args, "route_engine", "grid") or "grid"
         grid_auto_result = auto_select_grid_resolution(
             pads=pad_positions,
             clearance=args.clearance,
             board_width=board_width,
             board_height=board_height,
             max_cells=max_cells,
+            engine=_route_engine,
         )
 
         # When grid_strategy is adaptive (default), attempt multi-resolution
@@ -12783,6 +12796,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     board_width=board_width,
                     board_height=board_height,
                     max_cells=max_cells,
+                    engine=_route_engine,
                 )
             except Exception:
                 # Fall back: try with pad positions (won't have ref info)
@@ -12792,6 +12806,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     board_width=board_width,
                     board_height=board_height,
                     max_cells=max_cells,
+                    engine=_route_engine,
                 )
 
         if multi_res_plan is not None and multi_res_plan.is_multi_resolution:
@@ -12827,13 +12842,21 @@ def _main_impl(argv: list[str] | None = None) -> int:
         # blocked exactly the boards those engines exist for (softstart rev-C
         # falls in the #4242 grid gap: safe grid 0.0635mm exceeds every cell
         # budget).  The #3911 refusal stays fully intact for the grid engine.
-        _route_engine = getattr(args, "route_engine", "grid")
         if grid_auto_result.memory_forced_unsafe_grid and _route_engine != "grid":
             if not args.quiet:
                 print(
                     f"  Auto-grid safety gate: skipped for --route-engine "
                     f"{_route_engine} (no copper is routed on the grid; the "
                     f"{_route_engine} engine uses exact geometry)"
+                )
+                # Issue #4690: the memory cap bound, but --max-cells only buys a
+                # finer *grid*, which this engine does not route on.  Say so
+                # explicitly so the "increase max_cells" reflex (a multi-million
+                # cell grid the #4242 budget refuses) is not the takeaway.
+                print(
+                    "    (the auto-grid memory cap bound here, but --max-cells "
+                    f"tunes grid routing only and does not affect {_route_engine} "
+                    "results)"
                 )
         elif grid_auto_result.memory_forced_unsafe_grid and not (
             args.force or getattr(args, "allow_unsafe_grid", False)
@@ -13222,6 +13245,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             clearance=args.clearance,
             num_layers=layer_stack.num_layers,
             max_cells=getattr(args, "max_cells", 500_000),
+            engine=getattr(args, "route_engine", "grid") or "grid",
         )
         if dry_run_plan is not None:
             if not quiet:
@@ -13417,7 +13441,25 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     # Analyze fine-pitch components for grid compatibility warnings
     # This runs automatically to warn users about potential routing issues
-    if not quiet:
+    #
+    # Issue #4690: the whole report is about *grid* compatibility -- per-pad
+    # "off-grid by 0.02mm" advisories, "Use finer grid: --grid 0.0635", and the
+    # ">50% of pads are off-grid ... Routing quality will be degraded" WARNING.
+    # Under --route-engine mesh/lattice no copper is emitted from the grid (the
+    # grid object is a coordinate substrate only, per the #4271/#4283 record),
+    # so every line of it is inapplicable -- and it directly contradicts the
+    # "no copper is routed on the grid" gate-skip line in the same log.  Worse,
+    # its remedy is harmful here: refining the grid to 0.0635/0.025mm on a
+    # 160x100mm board demands millions of cells the #4242 budget cap refuses.
+    # Skip the analysis for non-grid engines and say why in one line.
+    _fine_pitch_engine = getattr(args, "route_engine", "grid") or "grid"
+    if not quiet and _fine_pitch_engine != "grid":
+        flush_print(
+            f"\n  Fine-pitch grid analysis: skipped for --route-engine "
+            f"{_fine_pitch_engine} (pads are reached by exact geometry, not by "
+            f"grid alignment)"
+        )
+    elif not quiet:
         from kicad_tools.router.fine_pitch import analyze_fine_pitch_components
         from kicad_tools.router.output import show_fine_pitch_warnings
 
