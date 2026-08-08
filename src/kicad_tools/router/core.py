@@ -155,19 +155,24 @@ _ESCAPE_CORRIDOR_INNER_LAYERS_ONLY = True
 
 # Issue #4536: wall-clock budget for the relief rescue's SUB-searches (the
 # min-conflict probe rounds and the displaced-victim re-land passes inside
-# :meth:`Autorouter._relief_rescue`).  This is the historical default and is
-# LOAD-BEARING for routed reach on any board that does not opt into
-# ``deterministic_rescue`` -- a victim that fails to re-land within the budget
-# rolls the whole transaction back (no-net-loss guarantee), so the value
-# decides whether the rescued net is kept or dropped.
+# :meth:`Autorouter._relief_rescue`).  This is the historical value and is
+# LOAD-BEARING for routed reach on every run that is NOT expansion-capped -- a
+# victim that fails to re-land within the budget rolls the whole transaction
+# back (no-net-loss guarantee), so the value decides whether the rescued net is
+# kept or dropped.
 #
 # On board-06 seed-42 the natural victim re-land time sits in the 8-12 s band on
 # GitHub's ubuntu runners, i.e. this 10 s value STRADDLES it: the same commit
 # reached 21/21 on one runner and 20/21 on another purely on machine speed (CI
 # runs 31214686048 vs 31213011136 are line-identical up to the MIPI_RST rescue
-# and then diverge on whether MIPI_CLK- re-lands).  Callers that need a
-# machine-independent artifact pass ``deterministic_rescue=True``, which bounds
-# these sub-searches by the deterministic per-net NODE-EXPANSION cap instead.
+# and then diverge on whether MIPI_CLK- re-lands).
+#
+# Issue #4730 therefore made ``deterministic_rescue=True`` the DEFAULT: whenever
+# a per-net node-expansion cap is active (``--deterministic-budget`` /
+# ``per_net_iterations``) these sub-searches are bounded by that cap instead and
+# this wall clock stops deciding reach.  It still binds -- unchanged, by
+# construction -- on capless runs and for callers that explicitly opt out with
+# ``deterministic_rescue=False``.
 RELIEF_SUBSEARCH_BUDGET_S = 10.0
 
 # Issue #4536: the wall clock kept under ``deterministic_rescue=True``.  It is
@@ -178,6 +183,18 @@ RELIEF_SUBSEARCH_BUDGET_S = 10.0
 # pure-Python A* fallback, 10-100x slower than the C++ backend) from grinding
 # for minutes inside a rescue, per the #3989 lesson.
 RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S = 120.0
+
+# Issue #4730: the fleet default for the relief-rescue sub-search bound, shared
+# by :meth:`Autorouter.route_all_negotiated`, :meth:`Autorouter._relief_rescue`
+# and the two-phase stall-relief hook (which calls ``_relief_rescue``
+# positionally, so it inherits this value).  Named rather than repeated as a
+# literal so the three sites cannot drift, and so the fleet A/B that flipped it
+# has a single greppable switch to flip back.
+#
+# Safe by construction: ``_relief_subsearch_budget`` only hands the sub-searches
+# to the node-expansion cap when one is ACTIVE, so a capless run selects
+# ``RELIEF_SUBSEARCH_BUDGET_S`` exactly as it did before the flip.
+DETERMINISTIC_RESCUE_DEFAULT = True
 
 
 @dataclass
@@ -8759,7 +8776,7 @@ class Autorouter:
         best_stall_patience: int | None = 2,
         best_stall_min_iterations: int = 2,
         early_bail_terminal_stall: bool = True,
-        deterministic_rescue: bool = False,
+        deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -8904,17 +8921,22 @@ class Autorouter:
                 True.  Set to ``False`` to force the historical
                 grind-to-budget behavior (A/B comparison / regression
                 bisection).
-            deterministic_rescue: Issue #4536 -- bound the relief
-                rescue's probe / victim-re-land sub-searches by the
-                deterministic per-net node-expansion cap instead of the
-                10 s wall clock, so a rescue commits or rolls back
+            deterministic_rescue: Issue #4536 / #4730 -- bound the
+                relief rescue's probe / victim-re-land sub-searches by
+                the deterministic per-net node-expansion cap instead of
+                the 10 s wall clock, so a rescue commits or rolls back
                 identically on every machine.  Requires an active
                 expansion cap (``--deterministic-budget`` /
                 ``per_net_iterations``); without one the wall clock is
-                kept.  Default False (historical behavior); board 06
-                opts in because its ``REQUIRED_SIGNAL_REACH`` gate is
-                decided by exactly one such rescue.  See
-                :meth:`_relief_subsearch_budget`.
+                kept, so a capless run is behavior-identical BY
+                CONSTRUCTION.  Default True (#4730): the rescue is a
+                transaction whose budget decides routed REACH, and a
+                10 s wall clock straddles the measured 8-12 s natural
+                re-land time on CI runners -- board 06 reached 21/21 on
+                a fast runner and 20/21 on a slow one at the same
+                commit.  Pass ``False`` to force the historical
+                wall-clock bound (A/B comparison / regression
+                bisection).  See :meth:`_relief_subsearch_budget`.
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -8995,23 +9017,13 @@ class Autorouter:
         # Issue #4536: record the relief-rescue sub-search bound in the log --
         # it decides whether a rescue commits (reach!), so it must be visible
         # in any routing log used as evidence.
-        if deterministic_rescue:
-            _rescue_budget = self._relief_subsearch_budget(per_net_timeout, True)
-            if _rescue_budget == RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S:
-                flush_print(
-                    "  Relief-rescue sub-search cap: iteration-bounded "
-                    "(per-net node-expansion cap; issue #4536) -- probe / "
-                    "victim-re-land outcomes are machine-independent; "
-                    f"{RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S:.0f}s wall clock kept "
-                    "only as a non-binding Python-fallback backstop"
-                )
-            else:
-                flush_print(
-                    "  Relief-rescue sub-search cap: "
-                    f"{_rescue_budget:.1f}s wall clock -- deterministic_rescue "
-                    "requested but no per-net node-expansion cap is active "
-                    "(issue #4536)"
-                )
+        #
+        # Issue #4730: ``deterministic_rescue`` now defaults to True, so the
+        # wall-clock arm is reached by ordinary capless runs that never
+        # "requested" anything -- its wording must stay neutral.  Only the
+        # opt-out arm can name a caller decision, because with a True default
+        # ``deterministic_rescue=False`` is necessarily explicit.
+        flush_print(self._relief_subsearch_bound_line(per_net_timeout, deterministic_rescue))
 
         # Issue #2587 / Epic #2556 Phase 1C-cont: Activate diff-pair partner
         # threading before negotiated routing begins.  This is the default
@@ -12484,8 +12496,15 @@ class Autorouter:
 
         The deterministic mode requires an active expansion cap; without
         one there is no deterministic bound to fall back on, so the
-        historical wall clock is kept (degrading to today's behavior
-        rather than to an unbounded search).
+        historical wall clock is kept (degrading to the pre-#4536
+        behavior rather than to an unbounded search).
+
+        Issue #4730 made ``deterministic_rescue=True`` the DEFAULT of
+        :meth:`route_all_negotiated` and :meth:`_relief_rescue`.  That
+        capless fallback is what makes the flipped default safe by
+        construction: it is scoped to exactly the runs that already have
+        a machine-independent bound to hand over to, and every capless
+        run keeps selecting ``RELIEF_SUBSEARCH_BUDGET_S`` unchanged.
         """
         if deterministic_rescue:
             expansion_cap = min(
@@ -12505,6 +12524,50 @@ class Autorouter:
             return min(RELIEF_SUBSEARCH_BUDGET_S, per_net_timeout)
         return RELIEF_SUBSEARCH_BUDGET_S
 
+    def _relief_subsearch_bound_line(
+        self, per_net_timeout: float | None, deterministic_rescue: bool
+    ) -> str:
+        """Routing-log line recording which relief-rescue sub-search bound is live.
+
+        Issue #4536 put this in the log because the bound decides whether a
+        rescue COMMITS -- i.e. it decides routed reach, so any routing log
+        used as A/B evidence has to say which one was in force.  The
+        ``iteration-bounded`` wording is the greppable evidence line; do not
+        reword it.
+
+        Issue #4730 flipped ``deterministic_rescue`` to default True, which
+        makes the wall-clock arm reachable by an ordinary capless run that
+        never "requested" anything -- so that arm's wording is NEUTRAL (it
+        states the fact, not a caller decision).  Only the opt-out arm names
+        a caller, because with a True default ``deterministic_rescue=False``
+        is necessarily explicit.
+
+        Emitted by both routing entry points that can reach a relief rescue:
+        :meth:`route_all_negotiated` and :meth:`route_all_two_phase` (whose
+        stall-relief hook, #3471, calls :meth:`_relief_rescue` positionally
+        and therefore inherits :data:`DETERMINISTIC_RESCUE_DEFAULT`).
+        """
+        budget = self._relief_subsearch_budget(per_net_timeout, deterministic_rescue)
+        if deterministic_rescue and budget == RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S:
+            return (
+                "  Relief-rescue sub-search cap: iteration-bounded "
+                "(per-net node-expansion cap; issue #4536) -- probe / "
+                "victim-re-land outcomes are machine-independent; "
+                f"{RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S:.0f}s wall clock kept "
+                "only as a non-binding Python-fallback backstop"
+            )
+        wall_clock = float(budget if budget else RELIEF_SUBSEARCH_BUDGET_S)
+        if deterministic_rescue:
+            return (
+                f"  Relief-rescue sub-search cap: {wall_clock:.1f}s wall clock -- "
+                "no per-net node-expansion cap is active, so the machine-dependent "
+                "bound is kept (issue #4536)"
+            )
+        return (
+            f"  Relief-rescue sub-search cap: {wall_clock:.1f}s wall clock -- "
+            "deterministic rescue disabled by caller (issue #4730)"
+        )
+
     def _relief_rescue(
         self,
         failed_net: int,
@@ -12517,7 +12580,7 @@ class Autorouter:
         elapsed_fn,
         depth: int = 0,
         deadline: float | None = None,
-        deterministic_rescue: bool = False,
+        deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
     ) -> bool:
         """Transactional relief rescue for a zero-overflow hard failure.
 
@@ -12546,10 +12609,14 @@ class Autorouter:
                 rescue.  When the deadline passes mid-rescue the
                 transaction rolls back verbatim and returns False, so
                 the bound costs nothing in correctness.
-            deterministic_rescue: Issue #4536 -- bound the rescue's
-                SUB-searches (probe rounds, victim re-lands) by the
-                deterministic per-net NODE-EXPANSION cap instead of the
-                ``RELIEF_SUBSEARCH_BUDGET_S`` wall clock.  See
+            deterministic_rescue: Issue #4536 / #4730 -- bound the
+                rescue's SUB-searches (probe rounds, victim re-lands) by
+                the deterministic per-net NODE-EXPANSION cap instead of
+                the ``RELIEF_SUBSEARCH_BUDGET_S`` wall clock.  Default
+                True (#4730), which also covers the two-phase stall-relief
+                hook that calls this method positionally; without an
+                active expansion cap the wall clock is kept, so capless
+                callers are unaffected.  See
                 :meth:`_relief_subsearch_budget` for the measurement that
                 motivates it and the load-bearing consequences.
 
@@ -14027,6 +14094,25 @@ class Autorouter:
         # Issue #2587 / Epic #2556 Phase 1C-cont: Activate diff-pair partner
         # threading before two-phase routing begins.
         self._prepare_routing()
+
+        # Issue #4730: this path reaches a relief rescue too -- the #3471
+        # stall-relief hook wired in ``_create_two_phase_router`` calls
+        # ``_relief_rescue`` positionally, so it inherits
+        # ``DETERMINISTIC_RESCUE_DEFAULT``.  ``kct route`` sends every
+        # escape-routed board here (``route_with_escape``), so without this
+        # line the boards whose gates the flip is measured against would have
+        # no record of which bound was live.
+        #
+        # Mirror the two-phase router's own #3474 per-net cap derivation so the
+        # reported wall clock is the one a rescue would actually get; with an
+        # expansion cap active both sides bypass the derivation and the
+        # deterministic arm is selected regardless of this value.
+        _banner_per_net_timeout = per_net_timeout
+        if per_net_timeout is None and not getattr(self, "_max_search_iterations", 0):
+            _banner_per_net_timeout = derive_per_net_cap(per_net_timeout, timeout)
+        flush_print(
+            self._relief_subsearch_bound_line(_banner_per_net_timeout, DETERMINISTIC_RESCUE_DEFAULT)
+        )
 
         tp_router = self._create_two_phase_router()
         result = tp_router.route_all(

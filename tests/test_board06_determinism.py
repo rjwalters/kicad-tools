@@ -34,7 +34,10 @@ sources:
    natural time on GitHub runners -- the same commit landed 21/21 and
    20/21 on different runners from line-identical logs.  Fixed with
    ``route_all_negotiated(deterministic_rescue=True)``, which bounds the
-   sub-searches by the deterministic per-net node-expansion cap.
+   sub-searches by the deterministic per-net node-expansion cap.  Board 06
+   opted in first (#4536); #4730 made that the DEFAULT for every
+   expansion-capped run, so the kwarg in ``generate_design.py`` is now
+   redundant-but-documentary rather than the only thing switching it on.
 
 3. **Residual -- UUID-sorted file order.** With the wall clock removed,
    runs produced byte-identical logs and identical copper *multisets*,
