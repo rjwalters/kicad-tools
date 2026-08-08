@@ -9,50 +9,25 @@ of KiCad's ``isolated_copper`` DRC class -- zone-fill islands connected to
 nothing -- which was previously invisible to a kct-only workflow (199 of
 the 268 missed findings on the reporting board).
 
+Since #4729 the rule implements KiCad's actual predicate -- *an island
+is isolated iff its copper connectivity cluster contains no pad*, where
+the cluster is grown transitively through tracks, vias and touching
+fills (:func:`~kicad_tools.validate.rules.dangling_copper.cluster_copper_kinds`).
+Verified against kicad-cli 10.0.5 on the committed fills (no
+``--refill-zones``) using ``tests/fixtures/drc/orphan_island*.kicad_pcb``
+-- two islands, one carrying a same-net track **and** via:
+
+===========================================  =========  ===
+Fixture variant                              kicad-cli  kct
+===========================================  =========  ===
+track + via on island A (no pad anywhere)    2          2
++ same-net pad directly on island A          1          1
++ same-net pad off-island, reached by track  1          1
+===========================================  =========  ===
+
 Known divergences from kicad-cli (``isolated_copper``)
 ------------------------------------------------------
 
-* **Pad-in-cluster semantics are not modeled** (the substantive one).
-  KiCad's predicate is *an island is isolated iff its copper connectivity
-  cluster contains no pad*, reached transitively through tracks, vias and
-  touching fills.  This rule's predicate is narrower: *an island is
-  isolated iff no same-net copper item (pad, via, segment, arc) touches
-  its cluster*.  A pad-less track or via therefore clears kct's test but
-  not KiCad's.
-
-  Measured on KiCad 10.0.5 with the committed fills (no ``--refill-zones``)
-  using the fixture embedded as ``_FILLED_BOARD`` in
-  ``tests/test_validate_isolated_copper.py`` -- two islands, one carrying
-  a same-net track **and** via but no pad:
-
-  ===========================================  =========  ===
-  Fixture variant                              kicad-cli  kct
-  ===========================================  =========  ===
-  track + via on island A (no pad anywhere)    2          1
-  + same-net pad directly on island A          1          1
-  + same-net pad off-island, reached by track  1          1
-  ===========================================  =========  ===
-
-  Consequence: **kct's findings are a strict subset of kicad-cli's** --
-  the rule never produces a false positive, but it under-reports islands
-  whose only copper contacts are themselves pad-less (a floating stub, an
-  orphaned via, or a dead pour arm).  Real-board impact is nil so far:
-  0/0 across all 8 repo boards.
-
-  This blind spot **compounds with the #4680 first slice**: ``track_dangling``
-  treats same-net committed fills as terminators, so the pad-less stub in
-  that cluster is not dangling either -- the whole pathological cluster can
-  yield *zero* kct findings while kicad-cli reports ``isolated_copper``.
-  (The barrel of a via bonding only one layer is still caught by
-  ``via_dangling``, so the fixture above is not entirely silent.)
-
-  Implementing KiCad's semantics needs a transitive copper-connectivity
-  clustering pass that treats fills as conductors and pads as the only
-  connectivity seeds -- a scope step up that likely belongs with the
-  ``validate/connectivity.py`` tracer rather than this rule.  Tracked as
-  #4729; the divergence is pinned by
-  ``TestKnownDivergencePadCluster`` so a future change to the predicate is
-  a deliberate, test-visible decision.
 * KiCad's zone island-removal settings (``island_removal_mode``,
   ``island_area_min``) are not modeled: every committed island is judged,
   regardless of the zone's configured island policy.
@@ -68,7 +43,7 @@ from typing import TYPE_CHECKING, Any
 from kicad_tools._shapely import require_shapely
 
 from ..violations import DRCResults, DRCViolation
-from .base import DRC_TOLERANCE, DRCRule
+from .base import DRCRule
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
@@ -198,22 +173,15 @@ class _FillIsland:
 
 
 class IsolatedCopperRule(DRCRule):
-    """Flag zone-fill islands connected to no other copper (Issue #4680).
+    """Flag zone-fill islands whose cluster reaches no pad (Issue #4680).
 
-    Detects a **strict subset** of KiCad's ``isolated_copper`` DRC class:
-    each committed ``filled_polygon`` of a zone is one fill *island*; an
-    island is isolated when its same-net connectivity cluster contains no
-    anchor copper -- no pad, via, track segment, or track arc of the
-    zone's net touches it (directly, or transitively through another
-    same-net island on the same layer).  Orphaned pour islands are
-    floating copper on ground/supply planes: EMC antennas and misleading
-    "this plane is connected" visuals.
-
-    KiCad's own predicate is stricter -- it requires a **pad** in the
-    island's cluster, so an island held only by pad-less copper is
-    isolated to kicad-cli but connected here.  That divergence (no false
-    positives, some under-reporting) is measured and pinned; see the
-    module docstring's *Known divergences* section.
+    Implements KiCad's ``isolated_copper`` predicate (pad-in-cluster
+    semantics landed in #4729): each committed ``filled_polygon`` of a
+    zone is one fill *island*; an island is isolated when its transitive
+    same-net copper connectivity cluster -- grown through touching
+    fills, track segments, arcs and via barrels -- contains **no pad**.
+    Orphaned pour islands are floating copper on ground/supply planes:
+    EMC antennas and misleading "this plane is connected" visuals.
 
     Detection model
     ---------------
@@ -222,19 +190,22 @@ class IsolatedCopperRule(DRCRule):
       (``zone.filled_polygons`` + ``filled_polygon_layer(i)`` -- this
       repo's copper source of truth, issues #3482/#3523/#3527), repaired
       with ``make_valid`` so no copper lobe is dropped (#3560).
-    * **Anchors** are the same per-layer copper indexes the
+    * **Conductors** are the same per-layer copper indexes the
       ``dangling_copper`` pass consults
       (:func:`~kicad_tools.validate.rules.dangling_copper.build_copper_layer_indexes`)
-      with fills *excluded*: an isolated island must never anchor
-      another isolated island.  Anchors must match the island's net
-      (resolved number first, name fallback for the KiCad-10 name-only
-      dialect) -- a foreign-net track touching an island is a clearance
-      violation, not a connection.
-    * **Transitivity**: same-net islands on the same layer that touch
-      each other form one cluster (union-find); the cluster is connected
-      iff any member island touches an anchor.  Cross-layer clusters
-      need a via to bridge, and that via is itself an anchor for every
-      island it touches, so no cross-layer union pass is required.
+      with fills *excluded* -- fill copper enters the graph as subjects,
+      so indexing it again would duplicate every island as a node.
+      Every edge requires a net match (resolved number first, name
+      fallback for the KiCad-10 name-only dialect): a foreign-net track
+      crossing an island is a clearance violation, not a connection.
+    * **Transitivity** is handled by
+      :func:`~kicad_tools.validate.rules.dangling_copper.cluster_copper_kinds`:
+      same-layer geometric touch within ``DRC_TOLERANCE`` between *any*
+      two nodes (island-island, island-track, track-track, ...), plus a
+      cross-layer union of the per-layer instances of one via barrel or
+      through-hole pad.  So a pad reached only through a multi-hop chain
+      of tracks, or only across a via on another layer, still clears the
+      island -- and a cluster of pad-less copper does not.
     * One warning per isolated island, matching kicad-cli's per-island
       reporting (``Zone [GNDD] on In1.Cu, priority 0``) so counts agree.
 
@@ -255,8 +226,8 @@ class IsolatedCopperRule(DRCRule):
     name = "Isolated Copper"
     description = (
         "Detects zone-fill islands (committed filled_polygon copper) "
-        "touched by no pad, via, or track of their net (a subset of "
-        "KiCad's isolated_copper class)."
+        "whose transitive same-net copper cluster contains no pad "
+        "(KiCad isolated_copper parity)."
     )
 
     def check(
@@ -303,9 +274,11 @@ class IsolatedCopperRule(DRCRule):
                 return name_to_number.get(name, 0)
             return number
 
-        anchors = build_copper_layer_indexes(pcb, copper_layers, resolve_net, include_fills=False)
+        conductors = build_copper_layer_indexes(
+            pcb, copper_layers, resolve_net, include_fills=False
+        )
 
-        connected = self._connected_flags(islands, anchors)
+        connected = self._connected_flags(islands, conductors)
 
         for island, is_connected in zip(islands, connected, strict=True):
             if is_connected:
@@ -387,91 +360,25 @@ class IsolatedCopperRule(DRCRule):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _connected_flags(islands: list[_FillIsland], anchors: dict) -> list[bool]:
-        """Per-island connected verdicts with same-layer transitivity.
+    def _connected_flags(islands: list[_FillIsland], conductors: dict) -> list[bool]:
+        """Per-island connected verdicts: KiCad's pad-in-cluster test.
 
-        Union-find over touching same-net islands per layer, then a
-        cluster is connected iff any member touches a same-net anchor.
+        Delegates the transitive copper clustering to
+        :func:`~kicad_tools.validate.rules.dangling_copper.cluster_copper_kinds`
+        (each island is one cluster seed) and reports an island as
+        connected iff a **pad** is present in its cluster.  Tracks, arcs
+        and via barrels are conductors that extend the cluster, never
+        terminals that satisfy it on their own (#4729).
         """
-        from shapely import box  # type: ignore[import-untyped]
-        from shapely.strtree import STRtree  # type: ignore[import-untyped]
+        from .dangling_copper import ClusterSeed, cluster_copper_kinds
 
-        def probe(geom: Any) -> Any:
-            # Tolerance-expanded bbox probe: STRtree queries are pure
-            # bbox tests, so copper within DRC_TOLERANCE of the island
-            # but with a disjoint bbox would otherwise be missed (the
-            # dangling_copper rule expands its probes identically).
-            minx, miny, maxx, maxy = geom.bounds
-            return box(
-                minx - DRC_TOLERANCE,
-                miny - DRC_TOLERANCE,
-                maxx + DRC_TOLERANCE,
-                maxy + DRC_TOLERANCE,
+        seeds = [
+            ClusterSeed(
+                layer=island.layer,
+                geom=island.polygon,
+                net_number=island.net_number,
+                net_name=island.net_name,
             )
-
-        parent = list(range(len(islands)))
-
-        def find(i: int) -> int:
-            while parent[i] != i:
-                parent[i] = parent[parent[i]]
-                i = parent[i]
-            return i
-
-        def union(a: int, b: int) -> None:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[rb] = ra
-
-        by_layer: dict[str, list[int]] = {}
-        for idx, island in enumerate(islands):
-            by_layer.setdefault(island.layer, []).append(idx)
-
-        anchored: list[bool] = [False] * len(islands)
-
-        for layer, indices in by_layer.items():
-            # Same-layer, same-net island-island transitivity.
-            tree = STRtree([islands[i].polygon for i in indices])
-            for idx in indices:
-                island = islands[idx]
-                for other_pos in tree.query(probe(island.polygon)):
-                    other_idx = indices[int(other_pos)]
-                    if other_idx <= idx:
-                        continue
-                    other = islands[other_idx]
-                    if island.net_number != other.net_number:
-                        continue
-                    if island.polygon.distance(other.polygon) <= DRC_TOLERANCE:
-                        union(idx, other_idx)
-            # Direct anchoring by same-net pad / via / segment / arc.
-            index = anchors.get(layer)
-            if index is None:
-                continue
-            for idx in indices:
-                island = islands[idx]
-                for item in index.candidates(probe(island.polygon)):
-                    if not _anchor_net_matches(island, item):
-                        continue
-                    if item.geom.distance(island.polygon) <= DRC_TOLERANCE:
-                        anchored[idx] = True
-                        break
-
-        cluster_connected: dict[int, bool] = {}
-        for idx in range(len(islands)):
-            root = find(idx)
-            cluster_connected[root] = cluster_connected.get(root, False) or anchored[idx]
-        return [cluster_connected[find(idx)] for idx in range(len(islands))]
-
-
-def _anchor_net_matches(island: _FillIsland, item: Any) -> bool:
-    """Same-net test between a fill island and an anchor copper item.
-
-    Prefer resolved net numbers; fall back to name equality for the
-    KiCad-10 name-only dialect.  Islands always carry a nonzero resolved
-    net number (no-net zones are skipped as subjects), so an anchor with
-    no net identity at all never connects.
-    """
-    if island.net_number and item.net_number:
-        return bool(island.net_number == item.net_number)
-    if island.net_name and item.net_name:
-        return bool(island.net_name == item.net_name)
-    return False
+            for island in islands
+        ]
+        return ["pad" in kinds for kinds in cluster_copper_kinds(conductors, seeds)]
