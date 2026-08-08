@@ -771,6 +771,274 @@ class TestPreservedNetResolutionDomain:
 
 
 # =============================================================================
+# Issue #4688: auto-skipped pour nets join the resolution domain (phase 3)
+# =============================================================================
+
+
+class TestAutoSkippedPourNetResolutionDomain:
+    """Sidecar keys naming AUTO-SKIPPED pour nets must not false-positive.
+
+    ``_auto_skip_pour_nets`` removes zone-satisfied pour nets (``GND``,
+    ``+3.3V``) from routing before the router loads, so those nets enter
+    neither ``router.net_names`` (their pads are rewritten to net 0) nor
+    ``router.existing_routes`` (they have zone copper, not route copper).
+    The two-phase #4622 resolver therefore reported their exact-name sidecar
+    keys as unmatched — ``'GND' -> nearest board net(s): /PGND`` — crying
+    wolf on the two most important power nets of every board with pours.
+
+    The fix is a strictly additive **phase 3** over the auto-skipped names
+    stashed on ``args._auto_skipped_net_names`` (mirrors
+    :class:`TestPreservedNetResolutionDomain`, the #4622 twin).
+    """
+
+    def test_auto_skipped_pour_key_resolves_without_warning(self, capsys):
+        """The reported defect: exact-name pour keys no longer warn."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE", 2: "/PGND"})
+        loaded = {
+            "GND": _sidecar_entry("Power", clearance=0.3),
+            "+3.3V": _sidecar_entry("Power", clearance=0.3),
+        }
+        args = SimpleNamespace(
+            _loaded_net_class_map=loaded,
+            _auto_skipped_net_names=["+3.3V", "GND"],
+        )
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        # Merge disposition: phase-3 keys ARE rekeyed into router.net_class_map
+        # so post-route DRC sees the pour nets' overrides.
+        assert router.net_class_map["GND"].clearance == pytest.approx(0.3)
+        assert router.net_class_map["+3.3V"].clearance == pytest.approx(0.3)
+        err = capsys.readouterr().err
+        assert "WARNING" not in err
+        assert "GND" not in err
+
+    def test_merged_count_includes_pour_matches(self, capsys):
+        """The ``merged N/M`` numerator counts phase-3 matches + annotates."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE"})
+        loaded = {
+            "FUSED_LINE": _sidecar_entry("HV", clearance=1.0),
+            "GND": _sidecar_entry("Power", clearance=0.3),
+            "+3.3V": _sidecar_entry("Power", clearance=0.3),
+        }
+        args = SimpleNamespace(
+            _loaded_net_class_map=loaded,
+            _auto_skipped_net_names=["GND", "+3.3V"],
+        )
+
+        _apply_net_class_map_sidecar(router, args, quiet=False)
+
+        out = capsys.readouterr()
+        assert "merged 3/3 sidecar entries" in out.out
+        assert "(2 apply to auto-skipped pour nets)" in out.out
+        assert "WARNING" not in out.err
+
+    def test_single_pour_match_annotation_grammar(self, capsys):
+        """One phase-3 match reads ``1 applies``, not ``1 apply``."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE"})
+        loaded = {"GND": _sidecar_entry("Power", clearance=0.3)}
+        args = SimpleNamespace(
+            _loaded_net_class_map=loaded,
+            _auto_skipped_net_names=["GND"],
+        )
+
+        _apply_net_class_map_sidecar(router, args, quiet=False)
+
+        assert "(1 applies to auto-skipped pour nets)" in capsys.readouterr().out
+
+    def test_key_matching_no_domain_still_warns_under_quiet(self, capsys):
+        """Rev-B protection: a genuine typo still warns, even with --quiet."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE"})
+        loaded = {
+            "GND": _sidecar_entry("Power", clearance=0.3),
+            "LINE_TYPO": _sidecar_entry("HV", clearance=1.0),
+        }
+        args = SimpleNamespace(
+            _loaded_net_class_map=loaded,
+            _auto_skipped_net_names=["GND"],
+        )
+
+        # quiet=True is the softstart-rev-B condition: the warning must
+        # still reach stderr even with --quiet.
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert "LINE_TYPO" not in router.net_class_map
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "1/2 entries matched" in err
+        assert "LINE_TYPO" in err
+        # The resolved pour key no longer consumes a hint slot.
+        assert "'GND'" not in err
+
+    def test_unmatched_hint_can_name_a_pour_net(self, capsys):
+        """Nearest-name hints draw on the pour domain too."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE"})
+        loaded = {"PGND": _sidecar_entry("Power", clearance=0.3)}  # typo-ish
+        args = SimpleNamespace(
+            _loaded_net_class_map=loaded,
+            _auto_skipped_net_names=["GND"],
+        )
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        err = capsys.readouterr().err
+        assert "0/1 entries matched" in err
+        assert "GND" in err
+
+    def test_suffix_collision_does_not_regress_routable_match(self, capsys):
+        """Additive guard: a phase-1 match cannot become ambiguous.
+
+        A naive union of routable ``/HV/LINE`` and auto-skipped ``/LV/LINE``
+        would turn the bare key ``LINE`` ambiguous and apply it to NEITHER —
+        silently dropping the clearance of a net that IS being routed.
+        Phase 3 only sees keys phases 1-2 left unmatched.
+        """
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/HV/LINE"})
+        loaded = {"LINE": _sidecar_entry("HV", clearance=2.0)}
+        args = SimpleNamespace(
+            _loaded_net_class_map=loaded,
+            _auto_skipped_net_names=["/LV/LINE"],
+        )
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map["/HV/LINE"].clearance == pytest.approx(2.0)
+        assert "/LV/LINE" not in router.net_class_map
+        err = capsys.readouterr().err
+        assert "AMBIGUOUS" not in err
+        assert "WARNING" not in err
+
+    def test_suffix_collision_does_not_regress_preserved_match(self, capsys):
+        """Same additive guard for a phase-2 (preserved) match."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router_with_preserved({5: "NODE_A"}, {1: "/HV/LINE"})
+        loaded = {"LINE": _sidecar_entry("HV", clearance=2.0)}
+        args = SimpleNamespace(
+            _loaded_net_class_map=loaded,
+            _auto_skipped_net_names=["/LV/LINE"],
+        )
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map["/HV/LINE"].clearance == pytest.approx(2.0)
+        err = capsys.readouterr().err
+        assert "AMBIGUOUS" not in err
+        assert "WARNING" not in err
+
+    @pytest.mark.parametrize("placement", ["routable", "preserved", "auto_skipped"])
+    def test_exact_name_key_never_unmatched(self, placement, capsys):
+        """Invariant (issue suggestion 3): a key byte-equal to a board net
+        name never lands in ``unmatched`` when that net is routable,
+        preserved, or auto-skipped."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        name = "+3.3V"
+        routable = {1: name} if placement == "routable" else {1: "/OTHER"}
+        preserved = {2: name} if placement == "preserved" else {}
+        skipped = [name] if placement == "auto_skipped" else []
+        router = _stub_router_with_preserved(routable, preserved)
+        loaded = {name: _sidecar_entry("Power", clearance=0.3)}
+        args = SimpleNamespace(
+            _loaded_net_class_map=loaded,
+            _auto_skipped_net_names=skipped,
+        )
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map[name].clearance == pytest.approx(0.3)
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_ambiguous_within_pour_domain_applied_to_neither(self, capsys):
+        """A key ambiguous among POUR nets is still applied to neither."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({5: "NODE_A"})
+        loaded = {"GND": _sidecar_entry("Power", clearance=0.3)}
+        args = SimpleNamespace(
+            _loaded_net_class_map=loaded,
+            _auto_skipped_net_names=["/A/GND", "/B/GND"],
+        )
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert "/A/GND" not in router.net_class_map
+        assert "/B/GND" not in router.net_class_map
+        err = capsys.readouterr().err
+        assert "AMBIGUOUS" in err
+        assert "0/1 entries matched" in err
+
+    def test_absent_attribute_is_a_no_op(self, capsys):
+        """A router path that never stashed the attribute behaves as before."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE"})
+        loaded = {
+            "FUSED_LINE": _sidecar_entry("Heavy", priority=5),
+            "GND": _sidecar_entry("Power", clearance=0.3),
+        }
+        args = SimpleNamespace(_loaded_net_class_map=loaded)  # no stash
+
+        _apply_net_class_map_sidecar(router, args, quiet=True)
+
+        assert router.net_class_map["/FUSED_LINE"].priority == 5
+        err = capsys.readouterr().err
+        assert "1/2 entries matched" in err
+        assert "'GND'" in err
+
+    def test_empty_list_is_a_no_op(self, capsys):
+        """A board with zero pour nets: phase-3 domain empty, output unchanged."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "/FUSED_LINE"})
+        loaded = {"FUSED_LINE": _sidecar_entry("Heavy", priority=5)}
+        args = SimpleNamespace(
+            _loaded_net_class_map=loaded,
+            _auto_skipped_net_names=[],
+        )
+
+        _apply_net_class_map_sidecar(router, args, quiet=False)
+
+        out = capsys.readouterr()
+        assert router.net_class_map["/FUSED_LINE"].priority == 5
+        assert "merged 1/1 sidecar entries" in out.out
+        assert "apply to auto-skipped pour nets" not in out.out
+        assert "WARNING" not in out.err
+
+    def test_pour_name_overlapping_earlier_domain_is_dropped(self, capsys):
+        """A name in both an earlier domain and the stash resolves once."""
+        from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+
+        router = _stub_router({1: "GND"})
+        loaded = {"GND": _sidecar_entry("Power", clearance=0.3)}
+        args = SimpleNamespace(
+            _loaded_net_class_map=loaded,
+            _auto_skipped_net_names=["GND"],
+        )
+
+        _apply_net_class_map_sidecar(router, args, quiet=False)
+
+        out = capsys.readouterr()
+        assert router.net_class_map["GND"].clearance == pytest.approx(0.3)
+        assert "merged 1/1 sidecar entries" in out.out
+        # Resolved in phase 1, so no pour annotation.
+        assert "apply to auto-skipped pour nets" not in out.out
+        assert "WARNING" not in out.err
+
+
+# =============================================================================
 # Issue #4587: KiCad layer NAMES in the sidecar resolve at preload
 # =============================================================================
 

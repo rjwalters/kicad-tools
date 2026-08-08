@@ -3867,28 +3867,37 @@ def _preserved_net_names(router: "Autorouter", exclude: "set[str]") -> list[str]
 
 
 def _resolve_net_class_map_domains(
-    router: "Autorouter", user_keys
-) -> "tuple[NetClassMapResolution, list[str]]":
-    """Resolve sidecar keys against the routable *then* the preserved domain.
+    router: "Autorouter", user_keys, auto_skipped_names: "list[str] | None" = None
+) -> "tuple[NetClassMapResolution, list[str], int]":
+    """Resolve sidecar keys against the routable, preserved, then pour domains.
 
-    Returns the merged :class:`NetClassMapResolution` plus the union of both
-    name domains (for the nearest-name hints in the unresolved diagnostic).
+    Returns the merged :class:`NetClassMapResolution`, the union of the name
+    domains (for the nearest-name hints in the unresolved diagnostic), and
+    the number of keys resolved in phase 3 (for the summary-line annotation).
 
-    **Two-phase and strictly additive** (Issue #4622).  Phase 1 resolves every
-    key against ``router.net_names`` exactly as before.  Phase 2 re-resolves
-    *only* the keys phase 1 left unmatched, against the preserved-only names.
+    **Multi-phase and strictly additive** (Issues #4622, #4688).  Phase 1
+    resolves every key against ``router.net_names`` exactly as before.
+    Phase 2 re-resolves *only* the keys phase 1 left unmatched, against the
+    preserved-only names.  Phase 3 (Issue #4688) re-resolves the keys still
+    unmatched after phases 1-2 against ``auto_skipped_names`` — the exact
+    board net names ``_auto_skip_pour_nets`` removed from routing (pour nets
+    satisfied by zones, plus ``route_via="manual"`` nets).  Those nets carry
+    only zone copper, so they enter neither ``router.net_names`` nor
+    ``router.existing_routes`` and previously produced false "no similar
+    board net found" warnings for GND / +3.3V on every board with pours.
 
-    A naive union of the two domains would be one line shorter and would also
+    A naive union of the domains would be one line shorter and would also
     make the reported repro pass, but it is wrong: :func:`resolve_net_key`
     matches on the suffix after the last ``/``, so a union can make a
     currently-**resolved** key **ambiguous** — routable ``/HV/LINE`` plus
     preserved ``/LV/LINE`` turns a bare ``LINE`` key ambiguous, and ambiguous
     keys are deliberately applied to *neither* candidate.  That would silently
     drop the clearance of a net that *is* being routed this pass: a new
-    instance of the very bug class this fixes.  Two-phase cannot do that,
-    because a key that resolved in phase 1 never reaches phase 2.
+    instance of the very bug class this fixes.  The phased scheme cannot do
+    that, because a key that resolved in an earlier phase never reaches a
+    later one.
 
-    A key matching no net in *either* domain still lands in ``unmatched``, so
+    A key matching no net in *any* domain still lands in ``unmatched``, so
     genuine typos keep producing the (never ``--quiet``-suppressed) warning.
     """
     from kicad_tools.router.net_names import (
@@ -3897,21 +3906,39 @@ def _resolve_net_class_map_domains(
     )
 
     routable_names = list(router.net_names.values())
-    primary = resolve_net_class_map_keys(user_keys, routable_names)
+    resolution = resolve_net_class_map_keys(user_keys, routable_names)
 
     preserved_names = _preserved_net_names(router, set(routable_names))
-    if not preserved_names or not primary.unmatched:
-        return primary, routable_names
+    if preserved_names and resolution.unmatched:
+        secondary = resolve_net_class_map_keys(resolution.unmatched, preserved_names)
+        resolution = NetClassMapResolution(
+            # Domains are disjoint by construction, so no resolved board net
+            # can be claimed by two phases.
+            resolved={**resolution.resolved, **secondary.resolved},
+            unmatched=list(secondary.unmatched),
+            ambiguous={**resolution.ambiguous, **secondary.ambiguous},
+        )
 
-    secondary = resolve_net_class_map_keys(primary.unmatched, preserved_names)
-    merged = NetClassMapResolution(
-        # Domains are disjoint by construction, so no resolved board net can
-        # be claimed by both phases.
-        resolved={**primary.resolved, **secondary.resolved},
-        unmatched=list(secondary.unmatched),
-        ambiguous={**primary.ambiguous, **secondary.ambiguous},
-    )
-    return merged, routable_names + preserved_names
+    # Phase 3 (Issue #4688): auto-skipped pour/manual net names, minus any
+    # already covered by the earlier domains (keeps the domains disjoint,
+    # preserving the additive argument above) and deduplicated defensively.
+    covered = set(routable_names) | set(preserved_names)
+    skipped_domain: list[str] = []
+    for name in auto_skipped_names or []:
+        if name and name not in covered and name not in skipped_domain:
+            skipped_domain.append(name)
+
+    pour_matched = 0
+    if skipped_domain and resolution.unmatched:
+        tertiary = resolve_net_class_map_keys(resolution.unmatched, skipped_domain)
+        pour_matched = len(tertiary.resolved)
+        resolution = NetClassMapResolution(
+            resolved={**resolution.resolved, **tertiary.resolved},
+            unmatched=list(tertiary.unmatched),
+            ambiguous={**resolution.ambiguous, **tertiary.ambiguous},
+        )
+
+    return resolution, routable_names + preserved_names + skipped_domain, pour_matched
 
 
 def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False) -> None:
@@ -3947,13 +3974,26 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
     widened with the net names carried by ``router.existing_routes`` using a
     **two-phase, additive** scheme (see :func:`_resolve_net_class_map_domains`).
 
+    Issue #4688: auto-skipped pour nets (zone-satisfied ``GND`` / ``+3.3V``
+    and ``route_via="manual"`` nets) have *only* zone copper, so they appear
+    in neither domain above and their exact-name sidecar keys false-positived
+    the misconfiguration warning.  A third resolution phase over
+    ``args._auto_skipped_net_names`` (stashed at the ``_auto_skip_pour_nets``
+    call sites) fixes that.  Phase-3-resolved keys ARE merged into
+    ``router.net_class_map``: harmless for routing (the nets' pads are
+    rewritten to net 0) and it lets downstream consumers — notably
+    post-route DRC via ``run_post_route_drc(net_class_map=...)`` — see the
+    pour nets' ``clearance`` / ``zone_connection`` overrides.
+
     Idempotent and a no-op when the flag was not supplied.
     """
     loaded = getattr(args, "_loaded_net_class_map", None)
     if loaded:
         from kicad_tools.router.net_names import nearest_net_names
 
-        resolution, diagnostic_net_names = _resolve_net_class_map_domains(router, loaded.keys())
+        resolution, diagnostic_net_names, pour_matched = _resolve_net_class_map_domains(
+            router, loaded.keys(), getattr(args, "_auto_skipped_net_names", None)
+        )
 
         # Apply overrides rekeyed to the board's actual net names so
         # ``self.net_class_map.get(net_name)`` finds them at routing time.
@@ -3965,9 +4005,15 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
         if not quiet:
             from kicad_tools.cli.progress import flush_print
 
+            pour_note = (
+                f" ({pour_matched} appl{'ies' if pour_matched == 1 else 'y'} "
+                "to auto-skipped pour nets)"
+                if pour_matched
+                else ""
+            )
             flush_print(
                 f"  Net-class map: merged {len(resolution.resolved)}/{resolution.total} "
-                "sidecar entries"
+                f"sidecar entries{pour_note}"
             )
 
     # Issue #4605: stash the ``spatial_keepouts`` rule-area filter block on
@@ -4977,6 +5023,10 @@ def route_with_layer_escalation(
 
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    # Issue #4688: stash the auto-skipped names (exact board net names) so the
+    # --net-class-map resolver's phase 3 can match sidecar keys naming them —
+    # they enter neither router.net_names nor router.existing_routes.
+    args._auto_skipped_net_names = list(_skipped)
 
     # Issue #3155: capture preserved copper ONCE from the staged input before
     # any routing or checkpoint write mutates it.  The escalation loop below
@@ -6055,6 +6105,10 @@ def route_with_rule_relaxation(
 
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    # Issue #4688: stash the auto-skipped names (exact board net names) so the
+    # --net-class-map resolver's phase 3 can match sidecar keys naming them —
+    # they enter neither router.net_names nor router.existing_routes.
+    args._auto_skipped_net_names = list(_skipped)
 
     # Get relaxation tiers
     tiers = get_relaxation_tiers(
@@ -8196,6 +8250,10 @@ def route_with_combined_escalation(
 
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    # Issue #4688: stash the auto-skipped names (exact board net names) so the
+    # --net-class-map resolver's phase 3 can match sidecar keys naming them —
+    # they enter neither router.net_names nor router.existing_routes.
+    args._auto_skipped_net_names = list(_skipped)
 
     # Get relaxation tiers
     tiers = get_relaxation_tiers(
@@ -12586,6 +12644,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=args.quiet)
+    # Issue #4688: stash the auto-skipped names (exact board net names) so the
+    # --net-class-map resolver's phase 3 can match sidecar keys naming them —
+    # they enter neither router.net_names nor router.existing_routes.
+    args._auto_skipped_net_names = list(_skipped)
 
     # Issue #3155: capture preserved copper once before routing/checkpoints.
     _preserve = bool(getattr(args, "preserve_existing", False))
