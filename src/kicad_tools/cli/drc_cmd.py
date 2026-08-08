@@ -21,6 +21,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..drc import (
     DRCReport,
@@ -31,6 +32,10 @@ from ..drc import (
 )
 from ..manufacturers import compare_design_rules, get_manufacturer_ids, get_profile
 from .runner import find_kicad_cli, run_drc
+
+if TYPE_CHECKING:
+    from ..drc.waivers import WaiverApplication
+    from ..validate.rules.waivers import Waivers
 
 # Default manufacturer for compatibility hints
 DEFAULT_HINT_MANUFACTURER = "jlcpcb"
@@ -122,6 +127,22 @@ def main(argv: list[str] | None = None) -> int:
         help="TOML file with [[drc.filters]] rules to suppress or reclassify violations",
     )
     parser.add_argument(
+        "--waivers",
+        dest="waivers",
+        default=None,
+        help=(
+            "Path to a .kct_waivers.json sidecar (schema version 2, the same "
+            "file kct check --waivers reads) waiving cross-gate DRC findings "
+            "by matching the violation's KiCad type against 'rule' and its "
+            "normalized component-ref set against 'items' (and optional "
+            "'nets'). Matched violations report as WAIVED and are excluded "
+            "from the error gate. Auto-discovered next to the input when this "
+            "flag is omitted (Issue #4691). Waived findings keep severity "
+            "'error' in JSON so the kct audit manufacturing gate stays "
+            "blocking by default; --mfr mode does not apply waivers."
+        ),
+    )
+    parser.add_argument(
         "--keep-report",
         action="store_true",
         help="Keep the DRC report file after running",
@@ -155,6 +176,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     input_path = Path(args.input)
+
+    # Load the optional .kct_waivers.json sidecar (Issue #4691) BEFORE running
+    # kicad-cli, so a bad explicit path fails fast.  Same load/degrade contract
+    # as `kct check --waivers`: an explicit --waivers path always wins and a
+    # missing/malformed explicit file is a hard error, while an auto-discovered
+    # sidecar that fails to parse degrades gracefully (warn + zero waivers).
+    # Discovery is anchored at the input path -- the board for .kicad_pcb
+    # input, the report's own directory for .json/.rpt input.
+    waivers, waiver_rc = _load_waivers(args.waivers, input_path)
+    if waiver_rc != 0:
+        return waiver_rc
 
     # Determine if input is PCB or report
     if input_path.suffix == ".kicad_pcb":
@@ -204,9 +236,27 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error loading filter config: {e}", file=sys.stderr)
             return 1
 
-    # Manufacturer check mode
+    # Manufacturer check mode.  Waivers are deliberately NOT applied here
+    # (Issue #4691, v1 scope): --mfr answers "can this fab build it?", which a
+    # design-intent waiver does not change.  Say so rather than silently
+    # ignoring a supplied sidecar.
     if args.mfr:
+        if waivers is not None and waivers.entries:
+            print(
+                "[INFO] --mfr manufacturer compatibility check does not apply "
+                "waivers; run without --mfr for the waived DRC gate.",
+                file=sys.stderr,
+            )
         return output_manufacturer_check(report, args.mfr, args.layers, args.verbose)
+
+    # Apply waivers to the parsed report (Issue #4691).  Runs before the
+    # --errors-only / --type / --net / --category filters and before the exit
+    # gate, so a waived finding is excluded from the errors list everywhere.
+    waiver_result = None
+    if waivers is not None and waivers.entries:
+        from ..drc.waivers import apply_waivers_to_report
+
+        waiver_result = apply_waivers_to_report(report, waivers)
 
     # Apply filters
     violations = list(report.violations)
@@ -239,10 +289,19 @@ def main(argv: list[str] | None = None) -> int:
     # Output
     if args.format == "json":
         output_json(
-            violations, report, show_suggestions=args.suggest, filtered_count=filter_ignored_count
+            violations,
+            report,
+            show_suggestions=args.suggest,
+            filtered_count=filter_ignored_count,
+            waiver_result=waiver_result,
         )
     elif args.format == "summary":
-        output_summary(violations, report, filtered_count=filter_ignored_count)
+        output_summary(
+            violations,
+            report,
+            filtered_count=filter_ignored_count,
+            waiver_result=waiver_result,
+        )
     else:
         output_table(
             violations,
@@ -251,17 +310,77 @@ def main(argv: list[str] | None = None) -> int:
             show_suggestions=args.suggest,
             layers=args.layers,
             filtered_count=filter_ignored_count,
+            waiver_result=waiver_result,
         )
 
-    # Exit code
+    # Exit code.  ``is_error`` already excludes waived findings (Issue #4691),
+    # so the gate is "nonzero iff UNWAIVED errors remain".  Waived findings are
+    # likewise kept out of the warning count so --strict never trips on them.
     error_count = sum(1 for v in violations if v.is_error)
-    warning_count = len(violations) - error_count
+    waived_count = sum(1 for v in violations if v.is_waived)
+    warning_count = len(violations) - error_count - waived_count
 
     if error_count > 0:
         return 1
     elif warning_count > 0 and args.strict:
         return 2
     return 0
+
+
+def _load_waivers(explicit: str | None, input_path: Path) -> tuple["Waivers | None", int]:
+    """Resolve the ``.kct_waivers.json`` sidecar for this run (Issue #4691).
+
+    Mirrors ``kct check --waivers`` exactly: an explicit path always wins and a
+    missing or malformed explicit file is a hard error; an auto-discovered
+    sidecar that fails to parse degrades to zero waivers with a warning.
+
+    Args:
+        explicit: The ``--waivers`` value, or None to auto-discover.
+        input_path: The PCB or report path used as the discovery anchor.
+
+    Returns:
+        ``(waivers, exit_code)``; a nonzero exit code means the caller must
+        return it immediately.
+    """
+    from ..validate.rules.waivers import discover_waivers_sidecar, load_waivers
+
+    if explicit is not None:
+        path: Path | None = Path(explicit).resolve()
+    else:
+        path = discover_waivers_sidecar(input_path)
+
+    if path is None:
+        return None, 0
+
+    if not path.exists():
+        print(f"Error: waivers file not found: {path}", file=sys.stderr)
+        return None, 1
+
+    try:
+        waivers = load_waivers(path)
+    except ValueError as e:
+        if explicit is not None:
+            print(f"Error: {e}", file=sys.stderr)
+            return None, 1
+        print(
+            f"WARNING: ignoring malformed waivers sidecar {path}: {e}",
+            file=sys.stderr,
+        )
+        return None, 0
+
+    if explicit is None:
+        print(f"[INFO] auto-loaded waivers sidecar: {path}", file=sys.stderr)
+    return waivers, 0
+
+
+def _print_unused_waivers(waiver_result: "WaiverApplication | None") -> None:
+    """Print the non-gating stale-waiver advisory block, if any."""
+    if waiver_result is None or not waiver_result.unused:
+        return
+    print(f"\n{'-' * 60}")
+    print("UNUSED WAIVERS (advisory, non-blocking):")
+    for message in waiver_result.unused_messages:
+        print(f"\n  [i] {message}")
 
 
 def run_drc_on_pcb(
@@ -311,10 +430,14 @@ def output_table(
     show_suggestions: bool = False,
     layers: int = 2,
     filtered_count: int = 0,
+    waiver_result: "WaiverApplication | None" = None,
 ) -> None:
     """Output violations as a formatted table."""
     error_count = sum(1 for v in violations if v.is_error)
-    warning_count = len(violations) - error_count
+    # Issue #4691/#4696: waived findings get their own bucket -- they are never
+    # folded into the warning count.
+    waived_count = sum(1 for v in violations if v.is_waived)
+    warning_count = len(violations) - error_count - waived_count
 
     print(f"\n{'=' * 60}")
     print("DRC VALIDATION SUMMARY")
@@ -328,62 +451,46 @@ def output_table(
     print("\nResults:")
     print(f"  Errors:     {error_count}")
     print(f"  Warnings:   {warning_count}")
+    if waived_count > 0:
+        print(f"  Waived:     {waived_count}")
     if filtered_count > 0:
         print(f"  Filtered:   {filtered_count} violations filtered")
 
     if not violations:
         print(f"\n{'=' * 60}")
         print("DRC PASSED - No violations found")
+        _print_unused_waivers(waiver_result)
         return
 
     # Group by type summary
     by_type: dict = {}
     for v in violations:
         if v.type_str not in by_type:
-            by_type[v.type_str] = {"errors": 0, "warnings": 0}
-        if v.is_error:
-            by_type[v.type_str]["errors"] += 1
-        else:
-            by_type[v.type_str]["warnings"] += 1
+            by_type[v.type_str] = {"errors": 0, "warnings": 0, "waived": 0}
+        by_type[v.type_str][_bucket(v)] += 1
 
     print(f"\n{'-' * 60}")
     print("BY TYPE:")
-    for vtype, counts in sorted(
-        by_type.items(), key=lambda x: -(x[1]["errors"] + x[1]["warnings"])
-    ):
-        parts = []
-        if counts["errors"]:
-            parts.append(f"{counts['errors']} error{'s' if counts['errors'] != 1 else ''}")
-        if counts["warnings"]:
-            parts.append(f"{counts['warnings']} warning{'s' if counts['warnings'] != 1 else ''}")
-        print(f"  {vtype}: {', '.join(parts)}")
+    for vtype, counts in sorted(by_type.items(), key=lambda x: -sum(x[1].values())):
+        print(f"  {vtype}: {_format_counts(counts)}")
 
     # Group by category summary
     by_category: dict = {}
     for v in violations:
         cat = v.category.value
         if cat not in by_category:
-            by_category[cat] = {"errors": 0, "warnings": 0}
-        if v.is_error:
-            by_category[cat]["errors"] += 1
-        else:
-            by_category[cat]["warnings"] += 1
+            by_category[cat] = {"errors": 0, "warnings": 0, "waived": 0}
+        by_category[cat][_bucket(v)] += 1
 
     print(f"\n{'-' * 60}")
     print("BY CATEGORY:")
-    for cat, counts in sorted(
-        by_category.items(), key=lambda x: -(x[1]["errors"] + x[1]["warnings"])
-    ):
-        parts = []
-        if counts["errors"]:
-            parts.append(f"{counts['errors']} error{'s' if counts['errors'] != 1 else ''}")
-        if counts["warnings"]:
-            parts.append(f"{counts['warnings']} warning{'s' if counts['warnings'] != 1 else ''}")
-        print(f"  {cat}: {', '.join(parts)}")
+    for cat, counts in sorted(by_category.items(), key=lambda x: -sum(x[1].values())):
+        print(f"  {cat}: {_format_counts(counts)}")
 
     # Detailed output
     errors = [v for v in violations if v.is_error]
-    warnings = [v for v in violations if not v.is_error]
+    warnings = [v for v in violations if not v.is_error and not v.is_waived]
+    waived = [v for v in violations if v.is_waived]
 
     if errors:
         print(f"\n{'-' * 60}")
@@ -400,6 +507,19 @@ def output_table(
         if len(warnings) > 10 and not verbose:
             print(f"\n  ... and {len(warnings) - 10} more warnings (use --verbose)")
 
+    # Issue #4691: waived findings stay visible in their own section so a
+    # reviewer can audit each documented exception, but never gate.
+    if waived:
+        print(f"\n{'-' * 60}")
+        print("WAIVED (documented exceptions, non-blocking):")
+        for v in waived:
+            _print_single(v, verbose, show_suggestions)
+            print(f"      Waiver reason: {v.waiver_reason}")
+            if v.waiver_issue:
+                print(f"      Waiver issue: {v.waiver_issue}")
+
+    _print_unused_waivers(waiver_result)
+
     print(f"\n{'=' * 60}")
     if errors:
         print("DRC FAILED - Fix errors before manufacturing")
@@ -407,8 +527,29 @@ def output_table(
         hint = _get_manufacturer_compatibility_hint(violations, layers=layers)
         if hint:
             print(hint)
-    else:
+    elif warnings:
         print("DRC WARNING - Review warnings")
+    else:
+        print("DRC PASSED - No unwaived violations")
+
+
+def _bucket(v: DRCViolation) -> str:
+    """Return the count bucket a violation belongs to (waived is its own)."""
+    if v.is_waived:
+        return "waived"
+    return "errors" if v.is_error else "warnings"
+
+
+def _format_counts(counts: dict) -> str:
+    """Render a {errors, warnings, waived} bucket dict, omitting empty buckets."""
+    parts = []
+    if counts.get("errors"):
+        parts.append(f"{counts['errors']} error{'s' if counts['errors'] != 1 else ''}")
+    if counts.get("warnings"):
+        parts.append(f"{counts['warnings']} warning{'s' if counts['warnings'] != 1 else ''}")
+    if counts.get("waived"):
+        parts.append(f"{counts['waived']} waived")
+    return ", ".join(parts)
 
 
 def _print_single(
@@ -418,7 +559,7 @@ def _print_single(
     indent: str = "  ",
 ) -> None:
     """Print a single violation."""
-    symbol = "X" if v.is_error else "!"
+    symbol = "~" if v.is_waived else ("X" if v.is_error else "!")
     print(f"\n{indent}[{symbol}] {v.type_str}")
     print(f"{indent}    {v.message}")
 
@@ -456,6 +597,7 @@ def output_json(
     report: DRCReport,
     show_suggestions: bool = False,
     filtered_count: int = 0,
+    waiver_result: "WaiverApplication | None" = None,
 ) -> None:
     """Output violations as JSON."""
     violations_data = []
@@ -466,10 +608,16 @@ def output_json(
             del v_dict["suggestions"]
         violations_data.append(v_dict)
 
+    # Issue #4691/#4696: waived findings are counted in their own bucket and
+    # never as warnings.  Each waived violation keeps its underlying
+    # "severity" and reports "status": "waived" (see DRCViolation.to_dict).
+    waived_count = sum(1 for v in violations if v.is_waived)
     summary: dict = {
         "errors": sum(1 for v in violations if v.is_error),
-        "warnings": sum(1 for v in violations if not v.is_error),
+        "warnings": sum(1 for v in violations if not v.is_error and not v.is_waived),
     }
+    if waived_count > 0:
+        summary["waived"] = waived_count
     if filtered_count > 0:
         summary["filtered"] = filtered_count
 
@@ -479,11 +627,16 @@ def output_json(
         "summary": summary,
         "violations": violations_data,
     }
+    if waiver_result is not None and waiver_result.unused:
+        data["unused_waivers"] = waiver_result.to_dict_list()
     print(json.dumps(data, indent=2))
 
 
 def output_summary(
-    violations: list[DRCViolation], report: DRCReport, filtered_count: int = 0
+    violations: list[DRCViolation],
+    report: DRCReport,
+    filtered_count: int = 0,
+    waiver_result: "WaiverApplication | None" = None,
 ) -> None:
     """Output violation summary by type."""
     if not violations:
@@ -491,32 +644,39 @@ def output_summary(
             print(f"No DRC violations found ({filtered_count} violations filtered).")
         else:
             print("No DRC violations found.")
+        _print_unused_waivers(waiver_result)
         return
 
     print(f"DRC Summary: {report.source_file}")
     print("=" * 50)
 
-    # Group by type
+    # Group by type.  Issue #4691/#4696: waived findings get a dedicated
+    # column -- folding them into "Warnings" is exactly the defect #4696
+    # reports against ``kct check --format summary``.
     by_type: dict = {}
     for v in violations:
         key = v.type_str
         if key not in by_type:
-            by_type[key] = {"errors": 0, "warnings": 0}
-        if v.is_error:
-            by_type[key]["errors"] += 1
-        else:
-            by_type[key]["warnings"] += 1
+            by_type[key] = {"errors": 0, "warnings": 0, "waived": 0}
+        by_type[key][_bucket(v)] += 1
 
-    print(f"{'Type':<25} {'Errors':<8} {'Warnings':<8}")
+    any_waived = any(c["waived"] for c in by_type.values())
+    waived_header = f" {'Waived':<8}" if any_waived else ""
+    print(f"{'Type':<25} {'Errors':<8} {'Warnings':<8}{waived_header}")
     print("-" * 50)
 
     for type_name, counts in sorted(by_type.items()):
-        print(f"{type_name:<25} {counts['errors']:<8} {counts['warnings']:<8}")
+        waived_col = f" {counts['waived']:<8}" if any_waived else ""
+        print(f"{type_name:<25} {counts['errors']:<8} {counts['warnings']:<8}{waived_col}")
 
     print("-" * 50)
     total_errors = sum(c["errors"] for c in by_type.values())
     total_warnings = sum(c["warnings"] for c in by_type.values())
-    print(f"{'TOTAL':<25} {total_errors:<8} {total_warnings:<8}")
+    total_waived = sum(c["waived"] for c in by_type.values())
+    waived_total_col = f" {total_waived:<8}" if any_waived else ""
+    print(f"{'TOTAL':<25} {total_errors:<8} {total_warnings:<8}{waived_total_col}")
+
+    _print_unused_waivers(waiver_result)
 
 
 def output_manufacturer_check(

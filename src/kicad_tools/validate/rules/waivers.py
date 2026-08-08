@@ -101,21 +101,44 @@ class Waiver:
     reason: str
     issue: str
 
-    def matches(self, violation: DRCViolation) -> bool:
-        """Return True when this waiver applies to ``violation``.
+    def matches_normalized(
+        self,
+        rule: str,
+        items: frozenset[str] | set[str],
+        nets: frozenset[str] | set[str],
+    ) -> bool:
+        """Engine-agnostic match core: rule id + normalized item / net sets.
+
+        This is the single definition of the waiver matching semantics.  Both
+        engines call it with their own already-normalized inputs so there is
+        exactly one waiver vocabulary (Issue #4691):
+
+        * ``kct check`` passes the finding's ``rule_id`` and its ``items`` /
+          ``nets`` tuples verbatim (see :meth:`matches`).
+        * ``kct drc`` passes KiCad's own ``type_str`` plus the refs extracted
+          from the kicad-cli item *descriptions* (see
+          :func:`kicad_tools.drc.waivers.apply_waivers_to_report`).
 
         Exact-set, order-insensitive match on ``items`` and (optionally)
         ``nets``.  An empty ``items`` / ``nets`` on the waiver means "do not
         constrain on that axis"; at least one axis is always populated (the
         loader enforces it).
         """
-        if violation.rule_id != self.rule:
+        if rule != self.rule:
             return False
-        if self.items and frozenset(violation.items) != self.items:
+        if self.items and frozenset(items) != self.items:
             return False
-        if self.nets and frozenset(violation.nets) != self.nets:
+        if self.nets and frozenset(nets) != self.nets:
             return False
         return True
+
+    def matches(self, violation: DRCViolation) -> bool:
+        """Return True when this waiver applies to a ``kct check`` finding."""
+        return self.matches_normalized(
+            violation.rule_id,
+            frozenset(violation.items),
+            frozenset(violation.nets),
+        )
 
 
 @dataclass
