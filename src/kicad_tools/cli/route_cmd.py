@@ -5006,6 +5006,9 @@ def route_with_layer_escalation(
     # zone for any net the user explicitly committed to pouring -- without
     # this, the all-power guard suppresses every zone and a --skip-nets
     # GND target ends up with neither traces nor a zone.
+    # Issue #4689: capture the user-supplied path for the banner BEFORE the
+    # staging rebind below re-points ``pcb_path`` at the staged output copy.
+    display_input_path = pcb_path
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
@@ -5091,7 +5094,7 @@ def route_with_layer_escalation(
         flush_print("=" * 60)
         flush_print("KiCad PCB Autorouter - Layer Escalation Mode")
         flush_print("=" * 60)
-        flush_print(f"Input:          {pcb_path}")
+        flush_print(f"Input:          {display_input_path}")
         flush_print(f"Output:         {output_path}")
         flush_print(f"Strategy:       {args.strategy}")
         flush_print(f"Max layers:     {args.max_layers}")
@@ -6088,6 +6091,9 @@ def route_with_rule_relaxation(
     # first so the user's INPUT is left untouched (issue #2548).
     # Issue #3092: forward user-supplied skip_nets as force_pour_nets (see
     # the layer-escalation site above for the rationale).
+    # Issue #4689: capture the user-supplied path for the banner BEFORE the
+    # staging rebind below re-points ``pcb_path`` at the staged output copy.
+    display_input_path = pcb_path
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
@@ -6148,7 +6154,7 @@ def route_with_rule_relaxation(
         flush_print("=" * 60)
         flush_print("KiCad PCB Autorouter - Adaptive Rules Mode")
         flush_print("=" * 60)
-        flush_print(f"Input:          {pcb_path}")
+        flush_print(f"Input:          {display_input_path}")
         flush_print(f"Output:         {output_path}")
         flush_print(f"Strategy:       {args.strategy}")
         flush_print(f"Manufacturer:   {args.manufacturer}")
@@ -8233,6 +8239,9 @@ def route_with_combined_escalation(
     # first so the user's INPUT is left untouched (issue #2548).
     # Issue #3092: forward user-supplied skip_nets as force_pour_nets (see
     # the layer-escalation site above for the rationale).
+    # Issue #4689: capture the user-supplied path for the banner BEFORE the
+    # staging rebind below re-points ``pcb_path`` at the staged output copy.
+    display_input_path = pcb_path
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
@@ -8296,7 +8305,7 @@ def route_with_combined_escalation(
         flush_print("=" * 60)
         flush_print("KiCad PCB Autorouter - Combined Escalation Mode")
         flush_print("=" * 60)
-        flush_print(f"Input:          {pcb_path}")
+        flush_print(f"Input:          {display_input_path}")
         flush_print(f"Output:         {output_path}")
         flush_print(f"Strategy:       {args.strategy}")
         flush_print(f"Manufacturer:   {args.manufacturer}")
@@ -12627,6 +12636,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
     # Issue #3092: forward user-supplied skip_nets as force_pour_nets so
     # an all-power board (e.g. board 01 VIN/VOUT/GND) still emits a zone
     # for any net the user explicitly committed to pouring.
+    # Issue #4689: capture the user-supplied path for the banner BEFORE the
+    # staging rebind below re-points ``pcb_path`` at the staged output copy.
+    display_input_path = pcb_path
     if getattr(args, "auto_pour", True):
         from kicad_tools.router.auto_pour import auto_pour_if_missing
 
@@ -12765,7 +12777,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         print("=" * 60)
         print("KiCad PCB Autorouter")
         print("=" * 60)
-        print(f"Input:    {pcb_path}")
+        print(f"Input:    {display_input_path}")
         print(f"Output:   {output_path}")
         print(f"Strategy: {args.strategy}")
         print(f"Layers:   {layer_stack.name} ({layer_stack.num_layers} layers)")

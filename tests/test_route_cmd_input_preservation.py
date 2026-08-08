@@ -252,3 +252,172 @@ class TestAutoPourDoesNotModifyInput:
 
         # Both outputs must zone the same set of nets.
         assert _zoned_nets(out1.read_text()) == _zoned_nets(out2.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Banner accuracy: the startup banner's ``Input:`` line must show the
+# user-supplied path, not the staged output copy (issue #4689).
+#
+# ``_stage_input_for_auto_pour`` rebinds ``pcb_path`` to ``output_path``
+# (see the helper tests above); the four functions that print the startup
+# banner AFTER staging used to report that rebound value on ``Input:``,
+# so the banner claimed the OUTPUT file was the input. Each site now
+# captures ``display_input_path`` before the rebind and prints that on
+# ``Input:`` instead.
+#
+# The #4263 analytical ``--dry-run`` short-circuit prints the banner and
+# returns before ``load_pcb_for_routing`` runs (auto-pour staging has
+# already happened by then), so it exercises exactly the bug path
+# cheaply. For the three escalation-mode functions (layer escalation,
+# rule relaxation, combined escalation), ``--dry-run`` only skips the
+# final save -- the full (near-instant, zero-net) routing loop still
+# runs -- but the banner assertion is identical.
+# ---------------------------------------------------------------------------
+
+
+class TestRouteStartupBannerInputLine:
+    """CLI-level (capsys) checks that ``Input:`` names the user's argument."""
+
+    def test_single_attempt_banner_shows_user_input(self, tmp_path: Path, capsys):
+        """Plain ``kct route IN -o OUT --no-auto-layers`` (the reporter's repro
+        path: single-attempt ``_main_impl``, banner at route_cmd.py:~12768)."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        input_pcb = tmp_path / "board.kicad_pcb"
+        output_pcb = tmp_path / "step1.kicad_pcb"
+        input_pcb.write_text(_make_pcb_with_pour_candidates())
+
+        rc = route_main([str(input_pcb), "-o", str(output_pcb), "--dry-run", "--no-auto-layers"])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        input_line = next(line for line in out.splitlines() if line.startswith("Input:"))
+        output_line = next(line for line in out.splitlines() if line.startswith("Output:"))
+
+        assert str(input_pcb) in input_line
+        assert str(output_pcb) not in input_line
+        assert str(output_pcb) in output_line
+
+    def test_layer_escalation_banner_shows_user_input(self, tmp_path: Path, capsys):
+        """``--auto-layers`` (the default) drives ``route_with_layer_escalation``
+        (banner at route_cmd.py:~5094)."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        input_pcb = tmp_path / "board.kicad_pcb"
+        output_pcb = tmp_path / "step1.kicad_pcb"
+        input_pcb.write_text(_make_pcb_with_pour_candidates())
+
+        rc = route_main([str(input_pcb), "-o", str(output_pcb), "--dry-run"])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        input_line = next(line for line in out.splitlines() if line.startswith("Input:"))
+        output_line = next(line for line in out.splitlines() if line.startswith("Output:"))
+
+        assert str(input_pcb) in input_line
+        assert str(output_pcb) not in input_line
+        assert str(output_pcb) in output_line
+
+    def test_rule_relaxation_banner_shows_user_input(self, tmp_path: Path, capsys):
+        """``--adaptive-rules --no-auto-layers`` drives
+        ``route_with_rule_relaxation`` (banner at route_cmd.py:~6151)."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        input_pcb = tmp_path / "board.kicad_pcb"
+        output_pcb = tmp_path / "step1.kicad_pcb"
+        input_pcb.write_text(_make_pcb_with_pour_candidates())
+
+        rc = route_main(
+            [
+                str(input_pcb),
+                "-o",
+                str(output_pcb),
+                "--dry-run",
+                "--no-auto-layers",
+                "--adaptive-rules",
+            ]
+        )
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        input_line = next(line for line in out.splitlines() if line.startswith("Input:"))
+        output_line = next(line for line in out.splitlines() if line.startswith("Output:"))
+
+        assert str(input_pcb) in input_line
+        assert str(output_pcb) not in input_line
+        assert str(output_pcb) in output_line
+
+    def test_combined_escalation_banner_shows_user_input(self, tmp_path: Path, capsys):
+        """``--adaptive-rules`` with default ``--auto-layers`` drives
+        ``route_with_combined_escalation`` (banner at route_cmd.py:~8299)."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        input_pcb = tmp_path / "board.kicad_pcb"
+        output_pcb = tmp_path / "step1.kicad_pcb"
+        input_pcb.write_text(_make_pcb_with_pour_candidates())
+
+        rc = route_main([str(input_pcb), "-o", str(output_pcb), "--dry-run", "--adaptive-rules"])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        input_line = next(line for line in out.splitlines() if line.startswith("Input:"))
+        output_line = next(line for line in out.splitlines() if line.startswith("Output:"))
+
+        assert str(input_pcb) in input_line
+        assert str(output_pcb) not in input_line
+        assert str(output_pcb) in output_line
+
+    def test_banner_input_equals_output_unchanged(self, tmp_path: Path, capsys):
+        """Pipeline case (``kct build``): input == output, so both banner
+        lines legitimately show the same path -- the fix must not disturb
+        this pre-existing, accidentally-correct case."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(_make_pcb_with_pour_candidates())
+
+        rc = route_main([str(pcb), "-o", str(pcb), "--dry-run", "--no-auto-layers"])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        input_line = next(line for line in out.splitlines() if line.startswith("Input:"))
+        output_line = next(line for line in out.splitlines() if line.startswith("Output:"))
+
+        assert str(pcb) in input_line
+        assert str(pcb) in output_line
+
+    def test_two_step_composition_banners_identify_the_right_file(self, tmp_path: Path, capsys):
+        """Two-step composition sanity check from the issue body: step 2's
+        banner must read ``Input: step1`` / ``Output: step2`` -- the two
+        lines differ and correctly identify which file was consumed."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        board = tmp_path / "board.kicad_pcb"
+        step1 = tmp_path / "step1.kicad_pcb"
+        step2 = tmp_path / "step2.kicad_pcb"
+        board.write_text(_make_pcb_with_pour_candidates())
+
+        # Step 1: board -> step1.
+        rc1 = route_main([str(board), "-o", str(step1), "--dry-run", "--no-auto-layers"])
+        assert rc1 == 0
+        out1 = capsys.readouterr().out
+        input_line1 = next(line for line in out1.splitlines() if line.startswith("Input:"))
+        output_line1 = next(line for line in out1.splitlines() if line.startswith("Output:"))
+        assert str(board) in input_line1
+        assert str(step1) in output_line1
+
+        # Step 1 must have produced step1.kicad_pcb for step 2 to consume.
+        assert step1.exists()
+
+        # Step 2: step1 -> step2.
+        rc2 = route_main([str(step1), "-o", str(step2), "--dry-run", "--no-auto-layers"])
+        assert rc2 == 0
+        out2 = capsys.readouterr().out
+        input_line2 = next(line for line in out2.splitlines() if line.startswith("Input:"))
+        output_line2 = next(line for line in out2.splitlines() if line.startswith("Output:"))
+
+        # The reported bug: step 2's banner used to show step2 (the OUTPUT)
+        # on the Input line. It must now show step1 (the actual input).
+        assert str(step1) in input_line2
+        assert str(step2) not in input_line2
+        assert str(step2) in output_line2
