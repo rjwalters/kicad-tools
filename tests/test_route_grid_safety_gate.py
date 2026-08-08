@@ -11,12 +11,35 @@ caller explicitly opts in with ``--allow-unsafe-grid`` or ``--force``.
 These tests drive ``route_cmd.main()`` up to the gate by stubbing the
 grid-analysis helpers (a real 200x200mm route would take minutes and the gate
 fires long before any copper is placed).
+
+Issue #4690 extends this file to the *rest* of the grid advisories that used to
+contradict the #4271 gate-skip line in the same log: the auto-grid memory-cap
+``UserWarning``, the ``validate_grid_resolution`` ``UserWarning``, and the
+fine-pitch component analysis ("N pads off-grid", "Use finer grid: --grid ...",
+"Routing quality will be degraded").  All three are now gated on the engine
+actually routing on the grid; all three must still fire for ``--route-engine
+grid``.
 """
 
+import logging
+import warnings
 from unittest.mock import patch
 
+import pytest
+
 from kicad_tools.cli import route_cmd
-from kicad_tools.router.io import GridAutoSelection, PadPosition
+from kicad_tools.router.io import (
+    DesignRules,
+    GridAutoSelection,
+    PadPosition,
+    auto_select_grid_resolution,
+    compute_multi_resolution_plan,
+    load_pcb_for_routing,
+)
+
+# Engines that never emit copper from the grid (#4271/#4283), so every
+# grid-quality advisory is inapplicable to them.
+_NON_GRID_ENGINES = ["lattice", "mesh"]
 
 
 class _GateReached(Exception):
@@ -165,3 +188,288 @@ def test_grid_engine_gate_unchanged_by_engine_bypass(tmp_path, capsys):
     assert code == 1
     assert gate_reached is False
     assert "--allow-unsafe-grid" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Issue #4690: the auto-grid memory-cap UserWarning
+# ---------------------------------------------------------------------------
+#
+# The board below is the #3911 reproducer from
+# ``tests/test_grid_auto_selection.py`` -- 20 pads on a 0.127mm imperial
+# lattice (so the #3441 rescue candidate does not help and never fires) plus
+# one 0.5mm-pitch pair that makes the board read as fine-pitch.  The memory
+# cap therefore coerces a grid > clearance/2 with a finer safe candidate
+# available: exactly the state that emits "memory budget cap forces".
+
+
+def _memory_capped_fine_pitch_pads() -> list[PadPosition]:
+    pads = [PadPosition(x=10.0 + i * 1.27 + 0.0635, y=20.0) for i in range(20)]
+    pads += [PadPosition(x=50.0, y=60.0), PadPosition(x=50.5, y=60.0)]
+    return pads
+
+
+def _select_memory_capped(**kwargs) -> tuple[GridAutoSelection, list[str]]:
+    """Run the selector on the memory-capped board, capturing warning texts."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = auto_select_grid_resolution(
+            _memory_capped_fine_pitch_pads(),
+            clearance=0.15,
+            board_width=100.0,
+            board_height=100.0,
+            max_cells=500_000,
+            candidates=[0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508],
+            **kwargs,
+        )
+    return result, [str(w.message) for w in caught]
+
+
+def test_memory_cap_warning_fires_for_default_engine():
+    """Callers that do not pass ``engine`` keep the pre-#4690 behavior."""
+    result, texts = _select_memory_capped()
+    assert result.memory_forced_unsafe_grid is True
+    assert any("memory budget cap forces" in t for t in texts), texts
+    assert any("Routing may produce clearance violations" in t for t in texts), texts
+
+
+def test_memory_cap_warning_fires_for_explicit_grid_engine():
+    """``engine="grid"`` is byte-identical to the default."""
+    result, texts = _select_memory_capped(engine="grid")
+    assert result.memory_forced_unsafe_grid is True
+    assert any("memory budget cap forces" in t for t in texts), texts
+
+
+@pytest.mark.parametrize("engine", _NON_GRID_ENGINES)
+def test_memory_cap_warning_suppressed_for_non_grid_engines(engine):
+    """No copper comes off the grid, so the clearance alarm must not fire.
+
+    The alarm both predicts a grid-routing failure ("may produce clearance
+    violations at fine-pitch pads") and prescribes a grid-routing remedy
+    ("increase max_cells"), directly contradicting the #4271 gate-skip line
+    printed in the same log -- and the remedy is actively harmful (it steers
+    the user toward a multi-million-cell grid the #4242 cap refuses).
+    """
+    _result, texts = _select_memory_capped(engine=engine)
+    assert not any("memory budget cap forces" in t for t in texts), texts
+    assert not any("Routing may produce clearance violations" in t for t in texts), texts
+
+
+@pytest.mark.parametrize("engine", _NON_GRID_ENGINES)
+def test_memory_forced_unsafe_grid_flag_still_computed_for_non_grid(engine):
+    """Suppression is diagnostics-only: the #3911 flag is engine-invariant.
+
+    The #4271 gate-skip line is printed *because* this flag is True, so
+    clearing it would silently delete the very message this issue keeps.
+    """
+    result, _texts = _select_memory_capped(engine=engine)
+    assert result.memory_forced_unsafe_grid is True
+    assert result.resolution == _select_memory_capped(engine="grid")[0].resolution
+
+
+@pytest.mark.parametrize("engine", _NON_GRID_ENGINES)
+def test_memory_cap_event_still_observable_at_info_for_non_grid(engine, caplog):
+    """Suppressed, not silenced: the event is demoted to an INFO log."""
+    with caplog.at_level(logging.INFO, logger="kicad_tools.router.io"):
+        _select_memory_capped(engine=engine)
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any(
+        "memory budget cap selected grid" in m and f"--route-engine {engine}" in m for m in messages
+    ), messages
+
+
+@pytest.mark.parametrize("engine", _NON_GRID_ENGINES)
+def test_multi_resolution_plan_forwards_engine_to_selector(engine):
+    """``compute_multi_resolution_plan`` is the adaptive-strategy call path."""
+    pads = _memory_capped_fine_pitch_pads()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        compute_multi_resolution_plan(
+            pads=pads,
+            clearance=0.15,
+            board_width=100.0,
+            board_height=100.0,
+            max_cells=500_000,
+            engine=engine,
+        )
+    texts = [str(w.message) for w in caught]
+    assert not any("memory budget cap forces" in t for t in texts), texts
+
+
+def test_multi_resolution_plan_warns_for_grid_engine():
+    """The same call on the grid engine still emits the advisory."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        compute_multi_resolution_plan(
+            pads=_memory_capped_fine_pitch_pads(),
+            clearance=0.15,
+            board_width=100.0,
+            board_height=100.0,
+            max_cells=500_000,
+        )
+    texts = [str(w.message) for w in caught]
+    assert any("memory budget cap forces" in t for t in texts), texts
+
+
+# ---------------------------------------------------------------------------
+# Issue #4690: the validate_grid_resolution UserWarning at the load site
+# ---------------------------------------------------------------------------
+
+_FINE_PITCH_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 0.3 0.3) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd rect (at 0.5 0) (size 0.3 0.3) (layers "F.Cu") (net 0 ""))
+  )
+)"""
+
+
+def _load_with_strategy(tmp_path, **kwargs) -> list[str]:
+    """Load a fine-pitch board on a grid > clearance/2, capturing warnings."""
+    pcb_file = tmp_path / "fine_pitch.kicad_pcb"
+    pcb_file.write_text(_FINE_PITCH_PCB)
+    # grid=0.15 > clearance/2 (0.1) but <= clearance (0.2): the advisory band.
+    rules = DesignRules(grid_resolution=0.15, trace_clearance=0.2)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        load_pcb_for_routing(
+            str(pcb_file),
+            rules=rules,
+            validate_drc=True,
+            strict_drc=False,
+            **kwargs,
+        )
+    return [str(w.message) for w in caught]
+
+
+def test_load_grid_resolution_warning_fires_for_grid_strategy(tmp_path):
+    """Default (grid) strategy keeps the #3942 fine-pitch heads-up."""
+    texts = _load_with_strategy(tmp_path)
+    assert any("may cause clearance violations" in t for t in texts), texts
+
+
+@pytest.mark.parametrize("engine", _NON_GRID_ENGINES)
+def test_load_grid_resolution_warning_suppressed_for_non_grid(tmp_path, engine):
+    """``strategy`` IS ``--route-engine``; mesh/lattice do not route on the grid."""
+    texts = _load_with_strategy(tmp_path, strategy=engine)
+    assert not any("may cause clearance violations" in t for t in texts), texts
+
+
+# ---------------------------------------------------------------------------
+# Issue #4690: the fine-pitch component analysis block in route_cmd
+# ---------------------------------------------------------------------------
+
+_OFF_GRID_ROUTABLE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (gr_rect (start 100 100) (end 130 120) (layer "Edge.Cuts"))
+  (net 0 "")
+  (net 1 "NET1")
+  (net 2 "NET2")
+  (footprint "U1"
+    (layer "F.Cu")
+    (at 105 105)
+    (fp_text reference "U1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0.03 0.03) (size 0.3 0.3) (layers "F.Cu") (net 1 "NET1"))
+    (pad "2" smd rect (at 0.53 0.03) (size 0.3 0.3) (layers "F.Cu") (net 2 "NET2"))
+  )
+  (footprint "U2"
+    (layer "F.Cu")
+    (at 120 115)
+    (fp_text reference "U2" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0.03 0.03) (size 0.3 0.3) (layers "F.Cu") (net 1 "NET1"))
+    (pad "2" smd rect (at 0.53 0.03) (size 0.3 0.3) (layers "F.Cu") (net 2 "NET2"))
+  )
+)"""
+
+# Every grid-quality string the lattice log must not contain.
+_GRID_ADVISORY_MARKERS = [
+    "Fine-Pitch Component Analysis",
+    "Fine-pitch components detected",
+    "pads off-grid",
+    "Use finer grid",
+    "Routing quality will be degraded",
+    "for better pad alignment",
+]
+
+
+def _route_cli(tmp_path, extra_args) -> tuple[int, list[str]]:
+    """Run ``route_cmd.main`` past the fine-pitch block on a tiny board.
+
+    ``--layers 2`` pins the fixed-layer path (``--auto-layers`` diverts to
+    ``route_with_layer_escalation``, which never reaches the block under test).
+    Returns the exit code and the texts of any ``warnings.warn`` emissions.
+    """
+    pcb_file = tmp_path / "off_grid.kicad_pcb"
+    pcb_file.write_text(_OFF_GRID_ROUTABLE_PCB)
+    out = tmp_path / "routed.kicad_pcb"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        code = route_cmd.main(
+            [
+                str(pcb_file),
+                "-o",
+                str(out),
+                "--grid",
+                "0.15",
+                "--clearance",
+                "0.2",
+                "--layers",
+                "2",
+                *extra_args,
+            ]
+        )
+    return code, [str(w.message) for w in caught]
+
+
+def test_fine_pitch_advisories_fire_for_grid_engine(tmp_path, capsys):
+    """The default grid engine keeps every advisory (#2254 behavior intact)."""
+    _route_cli(tmp_path, [])
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    for marker in _GRID_ADVISORY_MARKERS:
+        assert marker in combined, f"grid engine lost advisory {marker!r}"
+    assert "skipped for --route-engine" not in combined
+
+
+@pytest.mark.parametrize("engine", _NON_GRID_ENGINES)
+def test_fine_pitch_advisories_suppressed_for_non_grid_engines(tmp_path, engine, capsys):
+    """The whole grid-compatibility report is skipped, with a reason line.
+
+    This is the contradiction the issue reported: the same log said "no copper
+    is routed on the grid" and then recommended ``--grid 0.0635``.
+    """
+    _code, warn_texts = _route_cli(tmp_path, ["--route-engine", engine, "--strategy", "basic"])
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    for marker in _GRID_ADVISORY_MARKERS:
+        assert marker not in combined, f"{engine} engine still emitted {marker!r}"
+    assert f"Fine-pitch grid analysis: skipped for --route-engine {engine}" in combined
+    # ...and no grid-resolution UserWarning escaped either (io.py site).
+    assert not any("may cause clearance violations" in t for t in warn_texts), warn_texts
+
+
+@pytest.mark.parametrize("engine", ["grid", *_NON_GRID_ENGINES])
+def test_quiet_emits_no_fine_pitch_output_on_any_engine(tmp_path, engine, capsys):
+    """--quiet behavior is unchanged: neither branch prints (#4690 AC)."""
+    extra = ["--quiet", "--route-engine", engine]
+    if engine != "grid":
+        extra += ["--strategy", "basic"]
+    _route_cli(tmp_path, extra)
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    for marker in [*_GRID_ADVISORY_MARKERS, "Fine-pitch grid analysis: skipped"]:
+        assert marker not in combined, f"--quiet leaked {marker!r} on {engine}"
