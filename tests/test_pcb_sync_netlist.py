@@ -2790,8 +2790,16 @@ class TestBoard05SyncDriftRegression:
         dst_pcb = tmp_path / "bldc_controller_synced.kicad_pcb"
         shutil.copy(_BOARD_05_PCB, dst_pcb)
 
+        # Copy the schematic into tmp_path too: sync_netlist's kicad-cli
+        # path writes ``<stem>-netlist.kicad_net`` next to the schematic
+        # it is given, and passing the fixture-dir schematic directly
+        # would leave that untracked byproduct in tests/fixtures/ (#4735).
+        # The schematic is flat (single file), so one copy suffices.
+        dst_sch = tmp_path / "bldc_controller.kicad_sch"
+        shutil.copy(_BOARD_05_SCH, dst_sch)
+
         result = sync_netlist(
-            schematic_path=_BOARD_05_SCH,
+            schematic_path=dst_sch,
             pcb_path=dst_pcb,
             dry_run=False,
             remove_orphan_nets=True,
