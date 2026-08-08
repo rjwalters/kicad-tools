@@ -194,6 +194,15 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
 
     No-op when ``--deterministic-budget`` is not set, so legacy behaviour is
     preserved bit-for-bit.
+
+    Issue #4730: the pinned caps in (2)/(2b) are also what activates the
+    DETERMINISTIC relief-rescue sub-search bound.  ``route_all_negotiated``
+    defaults ``deterministic_rescue=True``, and
+    ``Autorouter._relief_subsearch_budget`` hands the rescue's probe /
+    victim-re-land searches over to the node-expansion cap only when one is
+    live -- so no ``kct route`` call site passes the flag explicitly, and a
+    run without ``--deterministic-budget`` keeps the historical
+    ``RELIEF_SUBSEARCH_BUDGET_S`` wall clock unchanged.
     """
     if not getattr(args, "deterministic_budget", False):
         return
@@ -5407,6 +5416,15 @@ def route_with_layer_escalation(
                     max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                 )
             elif args.strategy == "negotiated":
+                # Issue #4730: ``deterministic_rescue`` is deliberately NOT
+                # passed here.  Its default is ``DETERMINISTIC_RESCUE_DEFAULT``
+                # (True) and ``_relief_subsearch_budget`` only hands the relief
+                # rescue's sub-searches to the node-expansion cap when one is
+                # live, so the flag self-scopes to ``--deterministic-budget``
+                # runs and a plain ``kct route`` keeps the historical wall
+                # clock.  Wiring it to the CLI flag explicitly would be
+                # equivalent here but would hide that a caller who sets
+                # ``--per-net-iterations`` alone gets the same guarantee.
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
@@ -6355,6 +6373,15 @@ def route_with_rule_relaxation(
                     max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
                 )
             elif args.strategy == "negotiated":
+                # Issue #4730: ``deterministic_rescue`` is deliberately NOT
+                # passed here.  Its default is ``DETERMINISTIC_RESCUE_DEFAULT``
+                # (True) and ``_relief_subsearch_budget`` only hands the relief
+                # rescue's sub-searches to the node-expansion cap when one is
+                # live, so the flag self-scopes to ``--deterministic-budget``
+                # runs and a plain ``kct route`` keeps the historical wall
+                # clock.  Wiring it to the CLI flag explicitly would be
+                # equivalent here but would hide that a caller who sets
+                # ``--per-net-iterations`` alone gets the same guarantee.
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
