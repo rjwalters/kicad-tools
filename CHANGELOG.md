@@ -102,6 +102,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same `{"error": ...}` document. Audit
   (`scripts/audit_machine_output.py`): prose-only 49 → 33,
   format-json 148 → 164.
+- **`kct route --report-stage-quality`: per-stage routing-quality
+  instrumentation** (part of #4732, slice 1) — an opt-in, read-only probe
+  that measures fragment/staircase fractions, the true-45° share, the
+  zero-length count and the median segment length at each of the four
+  post-route mutation boundaries (`pre-optimize` → `post-optimize` →
+  `post-nudge` → `post-finalize`) and prints an advisory table with the
+  stage-to-stage deltas. #4615 measured only the *end* of that chain, so
+  nothing said which stage leaves the artifacts behind; this attributes
+  them. The metric core moved into a shared
+  `compute_routing_quality_from_records()` in
+  `analysis/routing_quality.py` (a neutral
+  `(start, end, layer, net)` record shape) so the router's in-memory
+  segments are measured with exactly the definitions the `kct check`
+  reporting (#4646) and opt-in gates (#4651) consume — per-stage numbers
+  are directly comparable to what `kct check` reports for the same
+  board. The probe never touches routes, the grid, or any optimizer
+  config: with the flag on vs. off, the routed copper and exit code are
+  identical, and the flag-off argv/output are unchanged. Wired into all
+  four `kct route` output paths (base + the three escalation paths).
+  First measurements: on board 03 the optimizer cuts segments 6838 → 621
+  (-91%) but the fragment *fraction* only moves 99.1% → 82.8%, and the
+  DRC nudge is essentially fraction-neutral while introducing a
+  zero-length segment — evidence for the "optimizer never targets
+  sub-0.25 mm fragments as such" hypothesis rather than the "nudge
+  re-introduces jogs" one.
+
 - **`kct check` now detects isolated copper natively: `isolated_copper`**
   (closes #4680, second slice — the dangling pair shipped separately
   below) — a new `IsolatedCopperRule` (`validate/rules/zone_fill.py`,

@@ -91,6 +91,17 @@ if TYPE_CHECKING:
 # not remove this alias without also updating those patch targets.
 from kicad_tools.router.auto_pour import auto_skip_pour_nets as _auto_skip_pour_nets  # noqa: E402
 
+# Issue #4732: the per-stage routing-quality probe's canonical stage labels.
+# Only the (cheap, pure-python) label constants are imported eagerly; the
+# recorder itself is constructed lazily in ``_make_stage_quality_recorder``
+# and only when ``--report-stage-quality`` is passed.
+from kicad_tools.router.quality_probe import (  # noqa: E402
+    STAGE_POST_FINALIZE,
+    STAGE_POST_NUDGE,
+    STAGE_POST_OPTIMIZE,
+    STAGE_PRE_OPTIMIZE,
+)
+
 # Issue #4634: the sidecar filename this writer emits is the same constant the
 # four sidecar *probes* share, so writer and readers cannot drift apart.
 from kicad_tools.sidecars import NET_CLASS_MAP_SIDECAR_BASENAME  # noqa: E402
@@ -1058,6 +1069,45 @@ def _finalize_committed_copper_or_demote(
             f"copper became a cross-net short after optimize/nudge: "
             f"{sorted(demoted)}"
         )
+
+
+def _make_stage_quality_recorder(args: argparse.Namespace) -> Any:
+    """Build the #4732 per-stage routing-quality recorder, or None.
+
+    Opt-in via ``--report-stage-quality``.  Returning ``None`` when the
+    flag is absent is what keeps the default path free of both the
+    measurement cost and the extra output -- the probe is purely
+    observational either way (it never touches routes, the grid, or any
+    optimizer config), so enabling it cannot change routed copper.
+    """
+    if not getattr(args, "report_stage_quality", False):
+        return None
+    from kicad_tools.router.quality_probe import StageQualityRecorder
+
+    return StageQualityRecorder()
+
+
+def _record_stage_quality(recorder: Any, stage: str, router: Any) -> None:
+    """Record one pipeline stage's routing quality (no-op when disabled).
+
+    Issue #4732: called at the four post-route mutation boundaries
+    (pre-optimize / post-optimize / post-nudge / post-finalize) from each
+    of the four ``kct route`` output paths.  Tolerates a missing router or
+    an empty route list so a wire-in can never fail a route that would
+    otherwise have succeeded.
+    """
+    if recorder is None or router is None:
+        return
+    recorder.record(stage, getattr(router, "routes", []) or [])
+
+
+def _print_stage_quality_report(recorder: Any, *, quiet: bool = False) -> None:
+    """Print the #4732 advisory per-stage table (no-op when disabled)."""
+    if recorder is None or quiet:
+        return
+    report = recorder.format_report()
+    if report:
+        print(report)
 
 
 def _engine_post_passes_enabled(
@@ -6114,6 +6164,14 @@ def route_with_layer_escalation(
         stall_label="layer escalation",
     )
 
+    # Issue #4732: opt-in per-stage routing-quality instrumentation.
+    # Read-only -- it measures the copper each stage hands to the next
+    # so the surviving fragment/staircase artifacts can be attributed
+    # to a stage instead of guessed at.  ``None`` (the default) makes
+    # every record/print below a no-op.
+    _stage_quality = _make_stage_quality_recorder(args)
+    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, final_result.router)
+
     # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
     # grid-engine-only -- lattice/mesh copper must not be touched.
     _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
@@ -6166,6 +6224,7 @@ def route_with_layer_escalation(
             args=args,
             quiet=quiet,
         )
+        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate)
@@ -6189,6 +6248,7 @@ def route_with_layer_escalation(
             args=args,
             quiet=quiet,
         )
+        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
@@ -6198,6 +6258,8 @@ def route_with_layer_escalation(
     # post-passes are skipped for non-grid engines (defense in depth).
     if final_result.router.routes:
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
+    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
+    _print_stage_quality_report(_stage_quality, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -6868,6 +6930,14 @@ def route_with_rule_relaxation(
         print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
         print("Consider adding layers for more manufacturing margin.")
 
+    # Issue #4732: opt-in per-stage routing-quality instrumentation.
+    # Read-only -- it measures the copper each stage hands to the next
+    # so the surviving fragment/staircase artifacts can be attributed
+    # to a stage instead of guessed at.  ``None`` (the default) makes
+    # every record/print below a no-op.
+    _stage_quality = _make_stage_quality_recorder(args)
+    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, final_result.router)
+
     # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
     # grid-engine-only -- lattice/mesh copper must not be touched.
     _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
@@ -6917,6 +6987,7 @@ def route_with_rule_relaxation(
             args=args,
             quiet=quiet,
         )
+        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate)
@@ -6938,6 +7009,7 @@ def route_with_rule_relaxation(
             args=args,
             quiet=quiet,
         )
+        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
@@ -6947,6 +7019,8 @@ def route_with_rule_relaxation(
     # post-passes are skipped for non-grid engines (defense in depth).
     if final_result.router.routes:
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
+    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
+    _print_stage_quality_report(_stage_quality, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -9128,6 +9202,14 @@ def route_with_combined_escalation(
         print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
         print("Consider redesigning placement for more margin.")
 
+    # Issue #4732: opt-in per-stage routing-quality instrumentation.
+    # Read-only -- it measures the copper each stage hands to the next
+    # so the surviving fragment/staircase artifacts can be attributed
+    # to a stage instead of guessed at.  ``None`` (the default) makes
+    # every record/print below a no-op.
+    _stage_quality = _make_stage_quality_recorder(args)
+    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, final_result.router)
+
     # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
     # grid-engine-only -- lattice/mesh copper must not be touched.
     _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
@@ -9177,6 +9259,7 @@ def route_with_combined_escalation(
             args=args,
             quiet=quiet,
         )
+        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate)
@@ -9198,6 +9281,7 @@ def route_with_combined_escalation(
             args=args,
             quiet=quiet,
         )
+        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
@@ -9207,6 +9291,8 @@ def route_with_combined_escalation(
     # post-passes are skipped for non-grid engines (defense in depth).
     if final_result.router.routes:
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
+    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
+    _print_stage_quality_report(_stage_quality, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -11833,6 +11919,18 @@ def _main_impl(argv: list[str] | None = None) -> int:
         help="Alias for --no-optimize (keep raw grid-step segments for debugging)",
     )
     parser.add_argument(
+        "--report-stage-quality",
+        action="store_true",
+        help=(
+            "Print advisory routing-quality metrics (fragment/staircase "
+            "fractions, 45-degree share, median segment length) measured "
+            "before optimize, after optimize, after the DRC nudge, and after "
+            "the finalize/demote backstop. Diagnostic only: the probe is "
+            "read-only and never changes routed copper or the exit code "
+            "(issue #4732)."
+        ),
+    )
+    parser.add_argument(
         "--auto-pour",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -14269,6 +14367,14 @@ def _main_impl(argv: list[str] | None = None) -> int:
     pre_segments = sum(len(r.segments) for r in router.routes)
     pre_vias = sum(len(r.vias) for r in router.routes)
 
+    # Issue #4732: opt-in per-stage routing-quality instrumentation.
+    # Read-only -- it measures the copper each stage hands to the next
+    # so the surviving fragment/staircase artifacts can be attributed
+    # to a stage instead of guessed at.  ``None`` (the default) makes
+    # every record/print below a no-op.
+    _stage_quality = _make_stage_quality_recorder(args)
+    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, router)
+
     # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
     # grid-engine-only -- lattice/mesh copper must not be touched.
     _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
@@ -14318,6 +14424,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             args=args,
             quiet=quiet,
         )
+        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
 
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate)
@@ -14339,6 +14446,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             args=args,
             quiet=quiet,
         )
+        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, router)
 
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
@@ -14348,6 +14456,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
     # post-passes are skipped for non-grid engines (defense in depth).
     if router.routes:
         _finalize_committed_copper_or_demote(router, quiet=quiet)
+    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, router)
+    _print_stage_quality_report(_stage_quality, quiet=quiet)
 
     if _post_passes_enabled and router.routes:
         # Get post-optimization statistics

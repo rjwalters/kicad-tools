@@ -3854,6 +3854,16 @@ def _add_route_parser(subparsers) -> None:
         dest="no_optimize",
         help="Alias for --no-optimize (keep raw grid-step segments for debugging)",
     )
+    # Issue #4732: advisory per-stage routing-quality instrumentation.
+    route_parser.add_argument(
+        "--report-stage-quality",
+        action="store_true",
+        help=(
+            "Print advisory routing-quality metrics per post-route stage "
+            "(pre-optimize / post-optimize / post-nudge / post-finalize). "
+            "Read-only diagnostic -- never changes routed copper"
+        ),
+    )
     # Issue #4502: tri-state default.  ``BooleanOptionalAction`` with
     # ``default=True`` collapses "user typed --auto-layers" and "user typed
     # nothing" into the same ``True``, so ``run_route_command`` could never

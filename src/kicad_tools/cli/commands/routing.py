@@ -541,6 +541,9 @@ def run_route_command(args) -> int:
         sub_argv.append("--allow-unsafe-grid")
     if getattr(args, "no_optimize", False):
         sub_argv.append("--no-optimize")
+    # Issue #4732: advisory per-stage routing-quality instrumentation.
+    if getattr(args, "report_stage_quality", False):
+        sub_argv.append("--report-stage-quality")
     # Issue #2388: --auto-layers is now enabled by default.  Forward only
     # the user's explicit choice (so the default takes effect when neither
     # is passed and --no-auto-layers is honored when disabled).
