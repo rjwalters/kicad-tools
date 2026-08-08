@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -478,7 +479,19 @@ def _assign_nets_from_schematic(pcb, schematic_path: Path) -> tuple[list[SyncAct
             export_netlist,
         )
 
-        netlist = export_netlist(str(schematic_path))
+        # Route the kicad-cli export byproduct into a temp directory.
+        #
+        # ``export_netlist`` defaults ``output_path`` to
+        # ``<schematic dir>/<stem>-netlist.kicad_net`` and never deletes
+        # it, so a bare call would drop an untracked netlist file beside
+        # the user's schematic on every sync (#4750).  ``export_netlist``
+        # returns a fully parsed ``Netlist``; nothing below re-reads the
+        # file, so the temp directory can be torn down immediately.
+        with tempfile.TemporaryDirectory(prefix="kct-sync-netlist-") as tmpdir:
+            netlist = export_netlist(
+                str(schematic_path),
+                output_path=Path(tmpdir) / f"{schematic_path.stem}-netlist.kicad_net",
+            )
     except Exception as exc:
         errors.append(f"Failed to export netlist for net assignment: {exc}")
         return actions, errors

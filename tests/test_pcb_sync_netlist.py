@@ -2479,7 +2479,7 @@ class TestNetAssignmentErrorSurfacing:
 
         (__builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__)
 
-        def mock_export_netlist(path):
+        def mock_export_netlist(path, *args, **kwargs):
             raise RuntimeError("kicad-cli not found")
 
         monkeypatch.setattr(
@@ -3271,3 +3271,139 @@ class TestTransactionalFlag:
         rc = pcb_commands._run_sync_netlist_command(Args(), pcb)
         assert rc == 0
         assert captured["transactional"] is True
+
+
+# Minimal kicad-cli-shaped netlist matching MINIMAL_SCHEMATIC (R1 + C1).
+FAKE_EXPORTED_NETLIST = """(export (version "E")
+  (components
+    (comp (ref "R1") (value "10k") (footprint "Resistor_SMD:R_0402"))
+    (comp (ref "C1") (value "100n") (footprint "Capacitor_SMD:C_0402")))
+  (nets
+    (net (code "1") (name "/N1")
+      (node (ref "R1") (pin "1"))
+      (node (ref "C1") (pin "1")))))
+"""
+
+
+class TestNetlistByproductLocation:
+    """``sync_netlist`` must not litter the user's project dir (#4750).
+
+    ``export_netlist`` defaults ``output_path`` to
+    ``<schematic dir>/<stem>-netlist.kicad_net`` and never deletes it, so
+    a bare call from ``_assign_nets_from_schematic`` dropped an untracked
+    netlist file beside the user's schematic on every run where kicad-cli
+    is installed.  These tests pin the explicit-temp-path threading.
+    """
+
+    @pytest.fixture
+    def project(self, tmp_path):
+        """A schematic + matching PCB in their own 'project' directory."""
+        proj = tmp_path / "project"
+        proj.mkdir()
+        sch = proj / "test.kicad_sch"
+        pcb = proj / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(MINIMAL_PCB_MATCHING)
+        return sch, pcb
+
+    @pytest.fixture
+    def fake_kicad_cli(self, monkeypatch):
+        """Force the kicad-cli export path with a stubbed subprocess.
+
+        The stub writes a real netlist file to whatever ``--output`` path
+        it is handed, exactly like kicad-cli does -- so the byproduct
+        lands wherever ``export_netlist`` decided it should, which is the
+        behavior under test.  Returns the list of captured output paths.
+        """
+        import subprocess as _subprocess
+
+        captured_outputs: list[Path] = []
+
+        monkeypatch.setattr(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            lambda: Path("/fake/kicad-cli"),
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            out = Path(cmd[cmd.index("--output") + 1])
+            captured_outputs.append(out)
+            out.write_text(FAKE_EXPORTED_NETLIST)
+            return _subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("kicad_tools.operations.netlist.subprocess.run", fake_run)
+        return captured_outputs
+
+    def test_kicad_cli_path_is_actually_exercised(self, project, fake_kicad_cli):
+        """Guard: the stub really runs, so the assertions below mean something."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = project
+        sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=True)
+
+        assert fake_kicad_cli, "kicad-cli export path was never taken"
+
+    def test_no_byproduct_beside_schematic(self, project, fake_kicad_cli):
+        """No ``*-netlist.kicad_net`` is left in the schematic's directory."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = project
+        before = {p.name for p in sch.parent.iterdir()}
+
+        result = sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=True)
+        assert not result.errors, f"sync_netlist errors: {result.errors}"
+
+        stray = sorted(p.name for p in sch.parent.glob("*-netlist.kicad_net"))
+        assert not stray, f"sync-netlist left byproducts beside the schematic: {stray}"
+        assert {p.name for p in sch.parent.iterdir()} == before
+
+    def test_export_output_lands_outside_project_dir(self, project, fake_kicad_cli):
+        """The explicit output path is a temp location, not the project dir."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = project
+        sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=True)
+
+        assert fake_kicad_cli
+        for out in fake_kicad_cli:
+            assert out.parent != sch.parent, f"export wrote into the project dir: {out}"
+
+    def test_temp_export_is_cleaned_up(self, project, fake_kicad_cli):
+        """The temp directory is torn down before ``sync_netlist`` returns."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = project
+        sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=True)
+
+        assert fake_kicad_cli
+        for out in fake_kicad_cli:
+            assert not out.exists(), f"temp netlist survived sync_netlist: {out}"
+            assert not out.parent.exists(), f"temp dir survived sync_netlist: {out.parent}"
+
+    def test_nets_still_assigned_from_exported_netlist(self, project, fake_kicad_cli):
+        """Routing the export through a temp path does not lose net data."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = project
+        result = sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=False)
+
+        assert not result.errors, f"sync_netlist errors: {result.errors}"
+        from kicad_tools.schema.pcb import PCB
+
+        synced = PCB.load(pcb)
+        named = {n.name for n in synced.nets.values() if n.name}
+        assert "N1" in named, f"exported net missing after sync: {sorted(named)}"
+
+    def test_python_fallback_writes_no_byproduct(self, project, monkeypatch):
+        """The pure-Python fallback path also leaves the project dir clean."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        monkeypatch.setattr("kicad_tools.operations.netlist.find_kicad_cli", lambda: None)
+
+        sch, pcb = project
+        before = {p.name for p in sch.parent.iterdir()}
+
+        result = sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=True)
+        assert not result.errors, f"sync_netlist errors: {result.errors}"
+
+        assert not list(sch.parent.glob("*-netlist.kicad_net"))
+        assert {p.name for p in sch.parent.iterdir()} == before

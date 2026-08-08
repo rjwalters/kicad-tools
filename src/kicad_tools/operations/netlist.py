@@ -815,7 +815,13 @@ def export_netlist(
 
     Args:
         sch_path: Path to .kicad_sch file
-        output_path: Output path for netlist (optional, uses temp)
+        output_path: Where kicad-cli writes the exported netlist file.  When
+            omitted, defaults to ``<sch_path dir>/<stem>-netlist.kicad_net``
+            -- i.e. *beside the schematic*, not a temp location -- and the
+            file is left in place after parsing.  Callers that do not want
+            that byproduct must pass an explicit path (e.g. inside a
+            ``tempfile.TemporaryDirectory``).  Unused by the pure-Python
+            fallback, which writes nothing.
         kicad_cli: Path to kicad-cli (auto-detected if not provided)
         format: Netlist format (kicadsexpr, kicadxml)
         fallback: If True, use pure Python extraction when kicad-cli fails
