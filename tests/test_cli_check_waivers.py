@@ -10,11 +10,13 @@ ignores ``waived``) stays blocking by default.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 from kicad_tools.cli import check_cmd
 from kicad_tools.drc.report import parse_json_report
+from kicad_tools.validate.violations import DRCResults, DRCViolation
 
 pytest.importorskip("shapely")
 
@@ -201,3 +203,119 @@ class TestCliWaivers:
         assert len(unused) == 1
         assert unused[0]["severity"] == "info"
         assert "x#2" in unused[0]["message"]
+
+
+class TestFormatSummaryWaived:
+    """Issue #4696: ``--format summary`` must not fold waived errors into
+
+    the ``Warnings`` column -- the per-rule table and the ``TOTAL`` row need
+    a dedicated ``Waived`` column, mirroring ``output_table``, so the
+    table's ``Warnings`` total agrees with the ``DRC:`` prose line.
+    """
+
+    def test_waived_error_gets_own_column_and_totals_agree_with_prose(self, tmp_path, capsys):
+        board = _board_file(tmp_path, refs_positions=[("U1", (10.0, 10.0)), ("C1", (11.0, 10.0))])
+        waiver = tmp_path / "w.json"
+        _write_waiver(
+            waiver,
+            [
+                {
+                    "rule": "courtyards_overlap",
+                    "items": ["U1", "C1"],
+                    "reason": "EE-mandated tight decoupling",
+                    "issue": "chorus#18",
+                }
+            ],
+        )
+        check_cmd.main(
+            [
+                str(board),
+                "--only",
+                "courtyard_overlap",
+                "--waivers",
+                str(waiver),
+                "--format",
+                "summary",
+            ]
+        )
+        out = capsys.readouterr().out
+        # The exit code is driven by the meta-check rollup (no schematic
+        # discovered next to this synthetic fixture -> INCOMPLETE); this
+        # test is only about the summary-format DRC accounting, not the
+        # exit code, so it doesn't assert `rc` here.
+
+        lines = out.splitlines()
+        header = next(line for line in lines if line.startswith("Rule ID"))
+        assert "Waived" in header
+
+        rule_row = next(line for line in lines if line.startswith("courtyards_overlap"))
+        # Columns: rule_id, errors, warnings, infos, waived.
+        _, errors, warnings, infos, waived = rule_row.split()
+        assert (errors, warnings, infos, waived) == ("0", "0", "0", "1")
+
+        total_row = next(line for line in lines if line.startswith("TOTAL"))
+        _, total_errors, total_warnings, total_infos, total_waived = total_row.split()
+        assert (total_errors, total_warnings, total_infos, total_waived) == ("0", "0", "0", "1")
+
+        # The prose "DRC:" line (from the meta-check stanza) is computed
+        # independently via `is_warning`, which also excludes waived
+        # findings -- the two totals must agree.
+        prose_match = re.search(
+            r"DRC:\s+\S+\s+\(\d+ rules checked, (\d+) error\(s\), (\d+) warning\(s\)\)",
+            out,
+        )
+        assert prose_match is not None
+        prose_errors, prose_warnings = prose_match.groups()
+        assert prose_errors == total_errors
+        assert prose_warnings == total_warnings
+
+    def test_output_summary_waived_warning_and_info_excluded_from_own_severity(
+        self, tmp_path, capsys
+    ):
+        """Direct unit test: waived warnings/infos must not leak into the
+
+        ``Warnings``/``Infos`` columns either -- the ``is_waived``-first
+        bucket order fixes all three severities at once (not just error).
+        """
+        violations = [
+            DRCViolation(
+                rule_id="clearance_trace_trace",
+                severity="warning",
+                message="waived warning",
+                waived=True,
+                waiver_reason="test",
+                waiver_issue="x#1",
+            ),
+            DRCViolation(
+                rule_id="clearance_trace_trace",
+                severity="warning",
+                message="live warning",
+            ),
+            DRCViolation(
+                rule_id="silkscreen_overlap",
+                severity="info",
+                message="waived info",
+                waived=True,
+                waiver_reason="test",
+                waiver_issue="x#2",
+            ),
+        ]
+        results = DRCResults(violations=violations, rules_checked=2)
+        check_cmd.output_summary(violations, results, tmp_path / "board.kicad_pcb")
+        out = capsys.readouterr().out
+
+        clearance_row = next(
+            line for line in out.splitlines() if line.startswith("clearance_trace_trace")
+        )
+        _, errors, warnings, infos, waived = clearance_row.split()
+        assert (errors, warnings, infos, waived) == ("0", "1", "0", "1")
+
+        silkscreen_row = next(
+            line for line in out.splitlines() if line.startswith("silkscreen_overlap")
+        )
+        _, s_errors, s_warnings, s_infos, s_waived = silkscreen_row.split()
+        assert (s_errors, s_warnings, s_infos, s_waived) == ("0", "0", "0", "1")
+
+        total_row = next(line for line in out.splitlines() if line.startswith("TOTAL"))
+        _, t_errors, t_warnings, t_infos, t_waived = total_row.split()
+        assert (t_errors, t_warnings, t_infos, t_waived) == ("0", "1", "0", "2")

@@ -3065,30 +3065,47 @@ def output_summary(
     print(f"DRC Summary: {pcb_path.name}")
     print("=" * 50)
 
-    # Group by rule_id
+    # Group by rule_id.
+    #
+    # Issue #4696: waived findings must land in their own bucket -- checking
+    # ``is_waived`` first, mirroring ``output_table`` (above) -- so a waived
+    # error/warning/info never inflates the ``Errors``/``Warnings``/``Infos``
+    # columns. Without this, every waived finding falls through the
+    # ``is_error``/``is_info`` cascade (both ``False`` for waived findings)
+    # into the bare ``else`` and is misreported as a warning, causing the
+    # table's TOTAL Warnings to disagree with the ``DRC:`` prose line (which
+    # is computed from ``is_warning`` and correctly excludes waived).
     by_rule: dict[str, dict[str, int]] = {}
     for v in violations:
         key = v.rule_id
         if key not in by_rule:
-            by_rule[key] = {"errors": 0, "warnings": 0, "infos": 0}
-        if v.is_error:
+            by_rule[key] = {"errors": 0, "warnings": 0, "infos": 0, "waived": 0}
+        if v.is_waived:
+            by_rule[key]["waived"] += 1
+        elif v.is_error:
             by_rule[key]["errors"] += 1
         elif v.is_info:
             by_rule[key]["infos"] += 1
         else:
             by_rule[key]["warnings"] += 1
 
-    print(f"{'Rule ID':<30} {'Errors':<8} {'Warnings':<10} {'Infos':<8}")
-    print("-" * 60)
+    print(f"{'Rule ID':<30} {'Errors':<8} {'Warnings':<10} {'Infos':<8} {'Waived':<8}")
+    print("-" * 68)
 
     for rule_id, counts in sorted(by_rule.items()):
-        print(f"{rule_id:<30} {counts['errors']:<8} {counts['warnings']:<10} {counts['infos']:<8}")
+        print(
+            f"{rule_id:<30} {counts['errors']:<8} {counts['warnings']:<10} "
+            f"{counts['infos']:<8} {counts['waived']:<8}"
+        )
 
-    print("-" * 60)
+    print("-" * 68)
     total_errors = sum(c["errors"] for c in by_rule.values())
     total_warnings = sum(c["warnings"] for c in by_rule.values())
     total_infos = sum(c["infos"] for c in by_rule.values())
-    print(f"{'TOTAL':<30} {total_errors:<8} {total_warnings:<10} {total_infos:<8}")
+    total_waived = sum(c["waived"] for c in by_rule.values())
+    print(
+        f"{'TOTAL':<30} {total_errors:<8} {total_warnings:<10} {total_infos:<8} {total_waived:<8}"
+    )
 
 
 if __name__ == "__main__":
