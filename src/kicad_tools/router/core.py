@@ -1048,6 +1048,12 @@ class Autorouter:
         # board-origin shift per PR #4603).  ``None`` = not yet resolved.
         # Consumed here by the lattice pairwise projection (#4602).
         self._pairwise_attach_zones_cache: tuple[Any, ...] | None = None
+        # Issue #4699: the preserved routes the CLI's ``_finalize_routes``
+        # actually re-emitted into the output board.  ``None`` = finalize has
+        # not run yet; the #4588 post-route pairwise gate audits this copper
+        # alongside ``self.routes`` so preserved trace copper is not
+        # structurally invisible to the safety gate.
+        self._emitted_preserved_routes: list[Any] | None = None
         # Issue #4605: optional ``spatial_keepouts`` sidecar filter block
         # (``{rule_area_name: {"except_classes": [...] | "only_classes":
         # [...]}}``), stashed by the CLI's ``_apply_net_class_map_sidecar``.
@@ -2700,7 +2706,14 @@ class Autorouter:
         from .lattice.pairwise import build_lattice_pairwise
 
         zones = self._pairwise_attach_zones_cache or ()
-        return build_lattice_pairwise(table, zones, self._net_name_to_id())
+        # Issue #4699: the #4506 exemption is layer-scoped (a zone waives a
+        # pair only on layers where BOTH nets have pad copper), so the search
+        # needs the board-layer-name -> lattice-index map to agree with the
+        # #4588 gate by construction.
+        layer_indices = {
+            layer_def.name: layer_def.index for layer_def in getattr(self.layer_stack, "layers", ())
+        }
+        return build_lattice_pairwise(table, zones, self._net_name_to_id(), layer_indices or None)
 
     def _net_name_to_id(self) -> dict[str, int]:
         """Net name -> id map (``net_names`` + a pad-derived fallback).

@@ -246,6 +246,75 @@ def test_build_lattice_pairwise_projects_names_to_ids() -> None:
     assert not pw.exempt(50.0, 50.0, HV, LV)
 
 
+def test_projected_zone_is_layer_scoped_like_the_gate() -> None:
+    """Issue #4699: search and #4588 gate must agree on the layer scoping.
+
+    An SMD rated footprint's pads exist on ``F.Cu`` only, so the zone waives
+    the pairwise term on lattice layer 0 and nowhere else.  If the search kept
+    the old layer-agnostic waiver it would happily commit inner-layer copper
+    the gate now condemns -- trading a silent pass for an unroutable board.
+    """
+    table = build_pairwise_clearance_table({"/HV_LINE": 300.0, "/LV_SENSE": 0.0}, dru=CLR)
+    zones = (
+        AttachZone(
+            10.0,
+            10.0,
+            20.0,
+            20.0,
+            frozenset({"HV_LINE", "LV_SENSE"}),
+            frozenset(
+                {("HV_LINE", frozenset({"F.Cu"})), ("LV_SENSE", frozenset({"F.Cu"}))},
+            ),
+        ),
+    )
+    pw = build_lattice_pairwise(
+        table,
+        zones,
+        {"/HV_LINE": HV, "/LV_SENSE": LV},
+        {"F.Cu": 0, "In1.Cu": 1, "B.Cu": 2},
+    )
+    assert pw is not None
+    assert pw.exempt(15.0, 15.0, HV, LV, 0)
+    assert not pw.exempt(15.0, 15.0, HV, LV, 1)
+    # No layer supplied (via-to-via) keeps the layer-agnostic verdict.
+    assert pw.exempt(15.0, 15.0, HV, LV)
+
+
+def test_committed_copper_respects_the_layer_scoped_zone() -> None:
+    """The predicate consuming the projection must honour the scoping too."""
+    zone = (5.0, -5.0, 15.0, 5.0, frozenset({HV, LV}), {HV: frozenset({0}), LV: frozenset({0})})
+    committed = _fresh(_projection(zones=(zone,)))
+    committed.add_run(0, [(5.0, 0.0), (15.0, 0.0)], net=HV, half_width=HALF)
+    committed.add_run(1, [(5.0, 0.0), (15.0, 0.0)], net=HV, half_width=HALF)
+
+    # Layer 0 is a pad layer of both nets -> waived, exactly as before #4699.
+    assert committed.seg_clear((5.0, 1.0), (15.0, 1.0), 0, LV, HALF, CLR)
+    # Layer 1 carries no pad copper for this footprint -> no waiver.
+    assert not committed.seg_clear((5.0, 1.0), (15.0, 1.0), 1, LV, HALF, CLR)
+
+
+def test_through_hole_zone_projection_stays_layer_agnostic() -> None:
+    """``*.Cu`` pads really do exist on every layer -- keep waiving there."""
+    table = build_pairwise_clearance_table({"/HV_LINE": 300.0, "/LV_SENSE": 0.0}, dru=CLR)
+    zones = (
+        AttachZone(
+            10.0,
+            10.0,
+            20.0,
+            20.0,
+            frozenset({"HV_LINE", "LV_SENSE"}),
+            frozenset(
+                {("HV_LINE", frozenset({"*.Cu"})), ("LV_SENSE", frozenset({"*.Cu"}))},
+            ),
+        ),
+    )
+    pw = build_lattice_pairwise(
+        table, zones, {"/HV_LINE": HV, "/LV_SENSE": LV}, {"F.Cu": 0, "In1.Cu": 1}
+    )
+    assert pw is not None
+    assert pw.exempt(15.0, 15.0, HV, LV, 1)
+
+
 def test_build_lattice_pairwise_dormant_cases_return_none() -> None:
     table = build_pairwise_clearance_table({"/HV_LINE": 300.0, "/LV_SENSE": 0.0}, dru=CLR)
     # No table at all.

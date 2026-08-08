@@ -216,6 +216,54 @@ def _detour_board() -> str:
 """
 
 
+def _preserved_violation_board() -> str:
+    """Board whose *preserved* copper already violates the requirement (#4699).
+
+    ``/HV_LINE`` and ``/LV_SENSE`` carry hand-placed ``(segment ...)`` copper
+    0.6 mm apart (0.4 mm edge-to-edge, well inside the 3.2 mm requirement and
+    well outside the 0.2 mm DRU floor) and have no pads at all, so the router
+    never re-routes them -- with ``--preserve-existing`` that copper is
+    re-emitted verbatim into the output.  ``/SIG_A`` is an ordinary two-pad
+    link in the far corner that gives the run something to route.
+
+    Pre-#4699 the post-route audit scanned ``router.routes`` only, so this
+    board routed to a clean SUCCESS while the file it wrote carried a 0.4 mm
+    gap at 300 V.
+    """
+    parts = [
+        _fp("R1", 10, 103.0, 120.0, _pad("1", 0, 0, 3, "/SIG_A")),
+        _fp("R2", 11, 127.0, 120.0, _pad("1", 0, 0, 3, "/SIG_A")),
+    ]
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "/HV_LINE")
+  (net 2 "/LV_SENSE")
+  (net 3 "/SIG_A")
+  (gr_rect (start 100 100) (end 130 124)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (segment (start 105 105) (end 125 105) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 105 105.6) (end 125 105.6) (width 0.2) (layer "F.Cu") (net 2))
+{"".join(parts)})
+"""
+
+
 def _strip_uuids(text: str) -> str:
     """Drop the freshly-generated per-element ``uuid`` lines from a board."""
     return re.sub(r'\(uuid "[^"]*"\)', "(uuid)", text)
@@ -597,6 +645,73 @@ class TestAttachZoneExemptionCoordinateSpace:
         assert "broken.kicad_pcb" in err
 
 
+class TestPreservedCopperIsInScope:
+    """Issue #4699: ``--preserve-existing`` copper is on the board, so audit it.
+
+    The #4588 gate scanned ``router.routes``.  Preserved copper is re-emitted
+    from a *separate* list, so a trace-to-trace shortfall involving it could
+    never be reported -- the run printed SUCCESS over a file it had just
+    written unsafe copper into.
+    """
+
+    def test_preserved_violation_fails_the_run_end_to_end(self, tmp_path: Path, capsys) -> None:
+        pcb = tmp_path / "preserved.kicad_pcb"
+        pcb.write_text(_preserved_violation_board())
+        vmap = _write_voltage_map(tmp_path)
+        out = tmp_path / "preserved_routed.kicad_pcb"
+
+        rc = route_main(
+            _route_args(pcb, out, "lattice", vmap) + ["--preserve-existing"],
+        )
+        captured = capsys.readouterr().out
+
+        assert rc != 0, f"expected a non-zero exit, got {rc}\n{captured}"
+        assert "SUCCESS:" not in captured
+        assert "pairwise HV clearance violations" in captured
+        assert "/HV_LINE vs /LV_SENSE" in captured or "/LV_SENSE vs /HV_LINE" in captured
+        # The banner explains the preserved-copper provenance (#4699).
+        assert "preserved" in captured
+
+    def test_same_board_without_voltage_map_is_still_a_strict_noop(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """Dormancy: the audit widening never engages without ``--voltage-map``."""
+        pcb = tmp_path / "preserved_noflag.kicad_pcb"
+        pcb.write_text(_preserved_violation_board())
+        out = tmp_path / "preserved_noflag_routed.kicad_pcb"
+
+        rc = route_main(
+            _route_args(pcb, out, "lattice", None) + ["--preserve-existing"],
+        )
+        captured = capsys.readouterr().out
+
+        assert rc == 0, captured
+        assert "SUCCESS:" in captured
+        assert "pairwise HV clearance violations" not in captured
+
+    def test_run_without_preserve_existing_does_not_audit_dropped_copper(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """Without ``--preserve-existing`` that copper is stripped, not written.
+
+        Auditing it anyway would fail a run over geometry the output does not
+        contain -- the mirror-image false signal of the bug being fixed.
+        """
+        pcb = tmp_path / "stripped.kicad_pcb"
+        pcb.write_text(_preserved_violation_board())
+        vmap = _write_voltage_map(tmp_path)
+        out = tmp_path / "stripped_routed.kicad_pcb"
+
+        rc = route_main(_route_args(pcb, out, "lattice", vmap))
+        captured = capsys.readouterr().out
+
+        assert rc == 0, captured
+        assert "SUCCESS:" in captured
+        assert "pairwise HV clearance violations" not in captured
+        # The violating copper really is absent from the written board.
+        assert "(net 1)" not in out.read_text()
+
+
 class TestAuditHelper:
     """Unit-level coverage of the gate helper's edge cases (no routing)."""
 
@@ -701,6 +816,140 @@ class TestAuditHelper:
             _pairwise_attach_zone_pcb_path=None,
         )
         assert _audit_pairwise_clearance(router, args) == []
+
+    def test_preserved_copper_is_audited_alongside_fresh_copper(self) -> None:
+        """Issue #4699: a fresh-vs-preserved pair must be reportable at all.
+
+        The gate scanned ``router.routes`` only, so under ``--preserve-existing``
+        (implied by ``--complete``) a trace-to-trace shortfall against copper
+        loaded from the input board was *structurally* unreportable -- four of
+        the nine violations in the #4699 report were in that class, and the
+        audit dutifully found zero.
+        """
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _audit_pairwise_clearance
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
+        from kicad_tools.router.primitives import Route, Segment
+
+        table = build_pairwise_clearance_table({"/HV": HV_VOLTS, "/LV": 0.0}, dru=0.2)
+        fresh = Route(
+            net=1,
+            net_name="/HV",
+            segments=[Segment(0, 0, 5, 0, 0.2, Layer.F_CU, net=1, net_name="/HV")],
+        )
+        preserved = Route(
+            net=2,
+            net_name="/LV",
+            segments=[Segment(0, 0.5, 5, 0.5, 0.2, Layer.F_CU, net=2, net_name="/LV")],
+        )
+        args = SimpleNamespace(_pairwise_required={("HV", "LV"): 3.2})
+        router = SimpleNamespace(
+            rules=SimpleNamespace(pairwise_clearance=table),
+            routes=[fresh],
+            existing_routes=[preserved],
+            _pairwise_attach_zone_pcb_path=None,
+        )
+
+        violations = _audit_pairwise_clearance(router, args)
+
+        assert len(violations) == 1, violations
+        assert {violations[0].net_a, violations[0].net_b} == {"/HV", "/LV"}
+        # Edge-to-edge gap is 0.3 mm (0.5 centre - two 0.1 half-widths).
+        assert violations[0].actual_mm == pytest.approx(0.3)
+
+    def test_preserved_vs_preserved_violations_are_reported_too(self) -> None:
+        """A pre-existing input-board defect still makes the OUTPUT unsafe.
+
+        Documented decision (#4699): the gate's contract is that a SUCCESS
+        banner means the *written* board is clean.  A shortfall between two
+        preserved routes was inherited rather than created by this run, but the
+        board is no safer for it, so it fails the run and the banner says where
+        it came from.
+        """
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _audit_pairwise_clearance
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
+        from kicad_tools.router.primitives import Route, Segment
+
+        table = build_pairwise_clearance_table({"/HV": HV_VOLTS, "/LV": 0.0}, dru=0.2)
+        preserved = [
+            Route(
+                net=1,
+                net_name="/HV",
+                segments=[Segment(0, 0, 5, 0, 0.2, Layer.F_CU, net=1, net_name="/HV")],
+            ),
+            Route(
+                net=2,
+                net_name="/LV",
+                segments=[Segment(0, 0.5, 5, 0.5, 0.2, Layer.F_CU, net=2, net_name="/LV")],
+            ),
+        ]
+        args = SimpleNamespace(_pairwise_required={("HV", "LV"): 3.2})
+        router = SimpleNamespace(
+            rules=SimpleNamespace(pairwise_clearance=table),
+            routes=[],
+            _emitted_preserved_routes=preserved,
+            _pairwise_attach_zone_pcb_path=None,
+        )
+
+        assert len(_audit_pairwise_clearance(router, args)) == 1
+
+    def test_preserved_copper_that_was_rerouted_is_not_double_audited(self) -> None:
+        """Only the preserved routes the output actually carries are scanned.
+
+        ``_finalize_routes`` drops a preserved route whose net was re-routed
+        (the fresh copper wins).  Auditing the dropped geometry would invent
+        violations against copper that is not on the board.
+        """
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _audited_trace_copper
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Route, Segment
+
+        fresh = Route(
+            net=1,
+            net_name="/HV",
+            segments=[Segment(0, 0, 5, 0, 0.2, Layer.F_CU, net=1, net_name="/HV")],
+        )
+        stale = Route(
+            net=1,
+            net_name="/HV",
+            segments=[Segment(0, 9, 5, 9, 0.2, Layer.F_CU, net=1, net_name="/HV")],
+        )
+        router = SimpleNamespace(routes=[fresh], existing_routes=[stale])
+
+        assert _audited_trace_copper(router) == [fresh]
+
+    def test_preserved_routes_are_rekeyed_by_name_not_by_stale_id(self) -> None:
+        """Name-vs-id disagreement must not silently mis-key the audit.
+
+        ``find_pairwise_violations`` prefers ``id_to_name`` over a route's own
+        ``net_name``; a preserved route carrying a stale id would then be
+        audited under a *different* net's voltage -- silently, and in the
+        permissive direction.
+        """
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _audited_trace_copper
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Route, Segment
+
+        preserved = Route(
+            net=77,  # stale numbering from a previous board revision
+            net_name="/LV",
+            segments=[Segment(0, 0.5, 5, 0.5, 0.2, Layer.F_CU, net=77, net_name="/LV")],
+        )
+        router = SimpleNamespace(routes=[], existing_routes=[preserved])
+
+        (audited,) = _audited_trace_copper(router, id_to_name={1: "/HV", 2: "/LV"})
+
+        assert audited.net == 2
+        assert audited.net_name == "/LV"
 
     def test_formatter_shape_and_more_tail(self) -> None:
         from kicad_tools.cli.route_cmd import _format_pairwise_violations

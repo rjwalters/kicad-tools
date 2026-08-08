@@ -336,7 +336,17 @@ def test_build_attach_zones_rotates_pad_extents_without_courtyard() -> None:
     )
 
 
-def test_build_attach_zones_uses_courtyard_bbox_and_margin() -> None:
+def test_build_attach_zones_ignores_the_courtyard_and_spans_the_pads() -> None:
+    """Issue #4699: the region is the PAD field, never the courtyard.
+
+    Pre-#4699 a resolvable courtyard polygon won outright, so the exemption
+    covered the part's whole body outline (here 2 x 4 mm + margin) -- copper
+    merely passing under the body was waived along with the copper that
+    genuinely necks down to the rated pins.  ``kct creepage`` waives no such
+    thing, which is how a gate-clean board could still fail the census.  The
+    zone now spans the connected pads (+ margin) only: the same 1.2 x 1.6 mm
+    box the pad-bounds path above produces, courtyard notwithstanding.
+    """
     footprint = SimpleNamespace(
         position=(10.0, 20.0),
         rotation=0.0,
@@ -355,7 +365,7 @@ def test_build_attach_zones_uses_courtyard_bbox_and_margin() -> None:
     )
     (zone,) = build_attach_zones([footprint], margin=0.5)
     assert (zone.min_x, zone.min_y, zone.max_x, zone.max_y) == pytest.approx(
-        (8.5, 17.5, 11.5, 22.5)
+        (8.9, 19.2, 11.1, 20.8)
     )
 
 
@@ -429,6 +439,122 @@ def test_find_pairwise_violations_attach_zone_never_waives_below_dru() -> None:
     ]
     zone = AttachZone(-1.0, -1.0, 6.0, 1.5, frozenset({"AC_LINE", "GND"}))
     assert len(find_pairwise_violations(routes, table, attach_zones=(zone,))) == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #4699: the attach-zone waiver is layer-scoped
+# ---------------------------------------------------------------------------
+
+
+def _smd_zone() -> AttachZone:
+    """A rated bridging footprint whose pads are SMD copper on ``F.Cu`` only."""
+    return AttachZone(
+        -1.0,
+        -1.0,
+        6.0,
+        1.5,
+        frozenset({"AC_LINE", "GND"}),
+        frozenset(
+            {("AC_LINE", frozenset({"F.Cu"})), ("GND", frozenset({"F.Cu"}))},
+        ),
+    )
+
+
+def _inner_layer_board_routes() -> list[Route]:
+    """The same HV/LV proximity as ``_hv_lv_board_routes``, but on ``In1.Cu``."""
+    return [
+        Route(
+            net=1,
+            net_name="/AC_LINE",
+            segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE", layer=Layer.IN1_CU)],
+        ),
+        Route(
+            net=2,
+            net_name="/GND",
+            segments=[_seg(0, 0.5, 5, 0.5, 2, "/GND", layer=Layer.IN1_CU)],
+        ),
+    ]
+
+
+def test_attach_zone_still_waives_on_a_layer_its_pads_occupy() -> None:
+    """The waiver survives where it is physically justified (pad layer)."""
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    assert find_pairwise_violations(_hv_lv_board_routes(), table, attach_zones=(_smd_zone(),)) == []
+
+
+def test_attach_zone_does_not_waive_copper_passing_underneath() -> None:
+    """Issue #4699: an XY bbox must not exempt a layer the part has no copper on.
+
+    ``AttachZone`` was layer-agnostic, so inner-layer copper merely crossing
+    *beneath* a rated SMD footprint was waived by a courtyard box it never
+    touches -- while ``kct creepage`` (which has no such waiver) condemned the
+    very same pair.  Two of the nine violations in the #4699 report were on
+    ``In1.Cu``.
+    """
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    violations = find_pairwise_violations(
+        _inner_layer_board_routes(), table, attach_zones=(_smd_zone(),)
+    )
+    assert len(violations) == 1, violations
+    assert violations[0].actual_mm == pytest.approx(0.3)
+
+
+def test_through_hole_pads_still_waive_on_every_layer() -> None:
+    """A ``*.Cu`` (through-hole) pad genuinely has copper on all layers."""
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    tht = AttachZone(
+        -1.0,
+        -1.0,
+        6.0,
+        1.5,
+        frozenset({"AC_LINE", "GND"}),
+        frozenset({("AC_LINE", frozenset({"*.Cu"})), ("GND", frozenset({"*.Cu"}))}),
+    )
+    assert find_pairwise_violations(_inner_layer_board_routes(), table, attach_zones=(tht,)) == []
+
+
+def test_zone_without_recorded_layers_keeps_the_agnostic_verdict() -> None:
+    """Hand-built / pre-#4699 zones (no ``net_layers``) are unrestricted."""
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    legacy = AttachZone(-1.0, -1.0, 6.0, 1.5, frozenset({"AC_LINE", "GND"}))
+    assert (
+        find_pairwise_violations(_inner_layer_board_routes(), table, attach_zones=(legacy,)) == []
+    )
+
+
+def test_build_attach_zones_records_per_net_pad_layers() -> None:
+    """The resolver captures each net's pad layers, wildcard included."""
+    footprint = SimpleNamespace(
+        position=(10.0, 20.0),
+        rotation=0.0,
+        graphics=[],
+        pads=[
+            SimpleNamespace(
+                position=(-0.4, 0.0),
+                size=(0.4, 0.6),
+                net_name="/AC_LINE",
+                layers=["F.Cu", "F.Paste", "F.Mask"],
+            ),
+            SimpleNamespace(
+                position=(0.4, 0.0),
+                size=(0.4, 0.6),
+                net_name="/GND",
+                layers=["*.Cu", "*.Mask"],
+            ),
+        ],
+    )
+    (zone,) = build_attach_zones([footprint], margin=0.5)
+    assert dict(zone.net_layers) == {
+        "AC_LINE": frozenset({"F.Cu"}),
+        "GND": frozenset({"*.Cu"}),
+    }
+    assert zone.covers_layer("/AC_LINE", Layer.F_CU)
+    assert not zone.covers_layer("/AC_LINE", Layer.IN1_CU)
+    # The through-hole net reaches every layer.
+    assert zone.covers_layer("/GND", Layer.IN1_CU)
+    # A pair is waived only where BOTH nets have pad copper.
+    assert zone.exempts(10.0, 20.0, "/AC_LINE", "/GND", Layer.F_CU)
+    assert not zone.exempts(10.0, 20.0, "/AC_LINE", "/GND", Layer.IN1_CU)
 
 
 # ---------------------------------------------------------------------------

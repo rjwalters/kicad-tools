@@ -226,7 +226,7 @@ class LatticeObstacleModel:
             rect = self.pad_rects[idx]
             grown = (rect[0] - extra_pw, rect[1] - extra_pw, rect[2] + extra_pw, rect[3] + extra_pw)
             if seg_rect_intersect(a, b, grown) and not pairwise.exempt_seg_pt(
-                a, b, (pad.x, pad.y), net, pad.net
+                a, b, (pad.x, pad.y), net, pad.net, layer
             ):
                 return True
         return False
@@ -499,7 +499,7 @@ class CommittedCopper:
                 req = pw.required(net, cnet)
                 if req > max(own_clr, iclr):
                     if d_cc < own_half + hw + req - 1e-9 and not pw.exempt_seg_seg(
-                        a, b, c, d, net, cnet
+                        a, b, c, d, net, cnet, layer
                     ):
                         return False
         # Issue #4597: honor the STORED via's class clearance the same way the
@@ -520,7 +520,7 @@ class CommittedCopper:
                     req = pw.required(net, vnet)
                     if req > max(own_clr, vclr):
                         if d_vp < self.via_radius + own_half + req - 1e-9 and not pw.exempt_seg_pt(
-                            a, b, point, net, vnet
+                            a, b, point, net, vnet, layer
                         ):
                             return False
             elif seg_body_crosses_pt(a, b, point):
@@ -560,7 +560,7 @@ class CommittedCopper:
                 req = pw.required(net, cnet)
                 if req > max(own_clr, iclr):
                     if d_cc < own_half + hw + req - 1e-9 and not pw.exempt_seg_pt(
-                        c, d, point, net, cnet
+                        c, d, point, net, cnet, layer
                     ):
                         return False
         # Issue #4597: ``max(own_clr, stored_via_clr)`` -- see ``seg_clear``.
@@ -576,7 +576,7 @@ class CommittedCopper:
                 req = pw.required(net, vnet)
                 if req > max(own_clr, vclr):
                     if d_vp < self.via_radius + own_half + req - 1e-9 and not pw.exempt_pt_pt(
-                        point, vpt, net, vnet
+                        point, vpt, net, vnet, layer
                     ):
                         return False
         return True
@@ -613,7 +613,7 @@ class CommittedCopper:
                     req = pw.required(net, cnet)
                     if req > max(self.clearance, iclr):
                         if d_cc < self.via_radius + hw + req - 1e-9 and not pw.exempt_seg_pt(
-                            c, d, point, net, cnet
+                            c, d, point, net, cnet, layer
                         ):
                             return False
         for vpt, vnet, vclr in self.vias:

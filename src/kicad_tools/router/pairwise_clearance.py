@@ -60,13 +60,53 @@ _PASS_TOLERANCE = 1e-4
 ATTACH_ZONE_MARGIN_MM = 0.5
 
 
+# KiCad's "this pad exists on every copper layer" wildcard (through-hole pads).
+ALL_COPPER_LAYERS = "*.Cu"
+
+
+def _norm_layer_key(layer: object) -> str:
+    """Normalise a layer reference to its KiCad name.
+
+    Accepts a :class:`~kicad_tools.core.types.CopperLayer` enum member (which
+    carries ``kicad_name``), a raw ``"F.Cu"``-style string, or anything whose
+    ``str()`` is the layer name.
+    """
+    name = getattr(layer, "kicad_name", None)
+    if isinstance(name, str):
+        return name
+    return str(layer)
+
+
 @dataclass(frozen=True)
 class AttachZone:
-    """Layer-agnostic rated-footprint necking region.
+    """Rated-footprint necking region (#4506), pad-scoped and layer-scoped.
 
     ``net_names`` contains every connected net terminating on the footprint.
     Pairwise widening is waived only when the gap point is inside the bbox and
     *both* nets are members; the scalar DRU check has already run separately.
+
+    Issue #4699 narrowed the region twice, because the gate's blanket
+    courtyard-bbox waiver silently disagreed with ``kct creepage``'s much
+    narrower ``--waive-same-footprint`` (component-internal pad pairs only) and
+    turned real trace-to-trace shortfalls into *silent* passes:
+
+    * **Pad-scoped** -- the bbox spans the footprint's CONNECTED PADS (plus
+      :data:`ATTACH_ZONE_MARGIN_MM`), not its courtyard.  The physical licence
+      for sub-creepage copper here is that the rated part's own pin pitch
+      dictates the spacing of the copper attaching to it; that argument covers
+      the pad field, not the body overhang / courtyard keep-out ring, where
+      through-traffic merely happens to pass.
+    * **Layer-scoped** -- ``net_layers`` records, per net, the copper layers on
+      which that net actually has pad copper on this footprint.  A pair is
+      waived on a given layer only when BOTH nets have pad copper there, so
+      copper crossing *under* an SMD part on an inner layer is no longer
+      exempted by an XY bbox it never touches.  Through-hole pads carry the
+      :data:`ALL_COPPER_LAYERS` wildcard and therefore still waive on every
+      layer, as the barrel geometry requires.
+
+    ``net_layers`` is optional: an empty frozenset (hand-built zones, older
+    callers) restores the pre-#4699 layer-agnostic behaviour, and a net absent
+    from it is unrestricted.
     """
 
     min_x: float
@@ -74,16 +114,48 @@ class AttachZone:
     max_x: float
     max_y: float
     net_names: frozenset[str]
+    net_layers: frozenset[tuple[str, frozenset[str]]] = frozenset()
 
-    def exempts(self, x: float, y: float, net_a: str, net_b: str) -> bool:
+    def layers_for(self, net: str) -> frozenset[str]:
+        """Copper layers on which ``net`` has pad copper here (empty = any)."""
+        if not self.net_layers:
+            return frozenset()
+        key = _norm_net_key(net)
+        for name, layers in self.net_layers:
+            if name == key:
+                return layers
+        return frozenset()
+
+    def covers_layer(self, net: str, layer: object) -> bool:
+        """True when ``net``'s pad copper reaches ``layer`` on this footprint."""
+        layers = self.layers_for(net)
+        if not layers or ALL_COPPER_LAYERS in layers:
+            return True
+        return _norm_layer_key(layer) in layers
+
+    def exempts(
+        self,
+        x: float,
+        y: float,
+        net_a: str,
+        net_b: str,
+        layer: object | None = None,
+    ) -> bool:
+        """True when this zone waives the pairwise widening for the pair.
+
+        ``layer`` is the copper layer the two conflicting objects share.
+        ``None`` means "no single layer applies" (e.g. a through-via against a
+        through-via) and keeps the layer-agnostic verdict.
+        """
         a = _norm_net_key(net_a)
         b = _norm_net_key(net_b)
-        return (
-            self.min_x <= x <= self.max_x
-            and self.min_y <= y <= self.max_y
-            and a in self.net_names
-            and b in self.net_names
-        )
+        if not (self.min_x <= x <= self.max_x and self.min_y <= y <= self.max_y):
+            return False
+        if a not in self.net_names or b not in self.net_names:
+            return False
+        if layer is None:
+            return True
+        return self.covers_layer(a, layer) and self.covers_layer(b, layer)
 
 
 def build_attach_zones(
@@ -91,44 +163,46 @@ def build_attach_zones(
     *,
     margin: float = ATTACH_ZONE_MARGIN_MM,
 ) -> tuple[AttachZone, ...]:
-    """Build flat courtyard-bbox attach zones once for a routing session.
+    """Build the flat pad-bbox attach zones once for a routing session.
 
-    The canonical courtyard polygon resolver supplies geometry when possible.
-    Footprints without a resolvable courtyard fall back to the transformed pad
-    bounding box, including pad extents.  Empty/unconnected/single-net
-    footprints cannot exempt a pair and are omitted.
+    The region is the bounding box of the footprint's *connected* pads plus
+    ``margin`` (issue #4699 -- pre-#4699 this preferred the far larger
+    courtyard polygon, which waived HV proximity across the whole body
+    outline).  Each zone also records, per net, the copper layers that net's
+    pads occupy, so the exemption cannot reach a layer the part has no copper
+    on.  Empty/unconnected/single-net footprints cannot exempt a pair and are
+    omitted.
     """
-    from shapely.geometry import Polygon  # type: ignore[import-untyped]
-
-    from kicad_tools.geometry.courtyard import _courtyard_polygon, _fp_transform
+    from kicad_tools.geometry.courtyard import _fp_transform
 
     zones: list[AttachZone] = []
     for footprint in footprints:
-        names = frozenset(_norm_net_key(pad.net_name) for pad in footprint.pads if pad.net_name)
+        connected = [pad for pad in footprint.pads if pad.net_name]
+        names = frozenset(_norm_net_key(pad.net_name) for pad in connected)
         if len(names) < 2:
             continue
 
         bounds: list[tuple[float, float, float, float]] = []
-        for side in ("F", "B"):
-            polygon = _courtyard_polygon(footprint, side, Polygon)
-            if polygon is not None:
-                min_x, min_y, max_x, max_y = polygon.bounds
-                bounds.append((float(min_x), float(min_y), float(max_x), float(max_y)))
-
-        if not bounds:
-            transform = _fp_transform(footprint)
-            for pad in footprint.pads:
-                x, y = transform(pad.position)
-                # Pad rotation is absolute in the board frame (it already
-                # includes the parent footprint rotation).  Project all four
-                # rectangular corners onto board axes so the fallback never
-                # excludes rotated pad copper.
-                angle = math.radians(-getattr(pad, "rotation", 0.0))
-                cos_rot = math.cos(angle)
-                sin_rot = math.sin(angle)
-                half_w = abs(cos_rot) * pad.size[0] / 2.0 + abs(sin_rot) * pad.size[1] / 2.0
-                half_h = abs(sin_rot) * pad.size[0] / 2.0 + abs(cos_rot) * pad.size[1] / 2.0
-                bounds.append((x - half_w, y - half_h, x + half_w, y + half_h))
+        layers_by_net: dict[str, set[str]] = {}
+        transform = _fp_transform(footprint)
+        for pad in connected:
+            x, y = transform(pad.position)
+            # Pad rotation is absolute in the board frame (it already
+            # includes the parent footprint rotation).  Project all four
+            # rectangular corners onto board axes so the bbox never
+            # excludes rotated pad copper.
+            angle = math.radians(-getattr(pad, "rotation", 0.0))
+            cos_rot = math.cos(angle)
+            sin_rot = math.sin(angle)
+            half_w = abs(cos_rot) * pad.size[0] / 2.0 + abs(sin_rot) * pad.size[1] / 2.0
+            half_h = abs(sin_rot) * pad.size[0] / 2.0 + abs(cos_rot) * pad.size[1] / 2.0
+            bounds.append((x - half_w, y - half_h, x + half_w, y + half_h))
+            key = _norm_net_key(pad.net_name)
+            copper = {
+                layer for layer in (getattr(pad, "layers", None) or ()) if layer.endswith(".Cu")
+            }
+            if copper:
+                layers_by_net.setdefault(key, set()).update(copper)
         if not bounds:
             continue
 
@@ -139,6 +213,9 @@ def build_attach_zones(
                 max(b[2] for b in bounds) + margin,
                 max(b[3] for b in bounds) + margin,
                 names,
+                frozenset(
+                    (net, frozenset(layers)) for net, layers in layers_by_net.items() if layers
+                ),
             )
         )
     return tuple(zones)
@@ -150,8 +227,9 @@ def _attach_zone_exempts(
     y: float,
     net_a: str,
     net_b: str,
+    layer: object | None = None,
 ) -> bool:
-    return any(zone.exempts(x, y, net_a, net_b) for zone in zones)
+    return any(zone.exempts(x, y, net_a, net_b, layer) for zone in zones)
 
 
 def _norm_net_key(name: str) -> str:
@@ -536,7 +614,7 @@ def segment_pair_violation(
         return None
     gap_x, gap_y = _closest_gap_midpoint(seg_a, seg_b)
     if gap >= floor - tolerance and _attach_zone_exempts(
-        attach_zones, gap_x, gap_y, a_name, b_name
+        attach_zones, gap_x, gap_y, a_name, b_name, seg_a.layer
     ):
         return None
     return PairwiseViolation(

@@ -1527,6 +1527,12 @@ def _finalize_routes(
     # otherwise appear twice (once from ``router.routes``, once from the
     # preserved set).  Skip any preserved route whose net id is present in
     # the freshly-routed set so the freshly-routed copper wins.
+    # Issue #4699: the post-route pairwise gate must audit the copper the
+    # OUTPUT actually carries, which is the freshly-routed set plus exactly the
+    # preserved routes re-emitted below.  Record that set on the router so
+    # ``_audited_trace_copper`` never has to re-derive (or guess) it.  Always
+    # set -- an empty list is the meaningful "nothing preserved" answer.
+    _emitted_preserved: list[Route] = []
     if preserve_existing:
         source_routes = preserved_routes if preserved_routes is not None else router.existing_routes
         if source_routes:
@@ -1543,8 +1549,9 @@ def _finalize_routes(
             preserved_sexp = _serialize_preserved_routes(
                 source_routes, exclude_net_ids=routed_net_ids, name_only=name_only
             )
+            _emitted_preserved = [r for r in source_routes if r.net not in routed_net_ids]
             if preserved_sexp:
-                emitted = [r for r in source_routes if r.net not in routed_net_ids]
+                emitted = _emitted_preserved
                 preserved_segments = sum(len(r.segments) for r in emitted)
                 preserved_vias = sum(len(r.vias) for r in emitted)
                 route_sexp = f"{route_sexp}\n\t{preserved_sexp}" if route_sexp else preserved_sexp
@@ -1553,6 +1560,10 @@ def _finalize_routes(
                         f"  Preserved existing: {preserved_segments} segments, "
                         f"{preserved_vias} vias ({len(emitted)} routes)"
                     )
+
+    # Issue #4699: hand the gate the exact preserved set that was written.
+    with contextlib.suppress(AttributeError):  # exotic router stand-ins
+        router._emitted_preserved_routes = _emitted_preserved
 
     # Step 3: Compute statistics from the cleaned routes
     stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
@@ -4249,6 +4260,60 @@ def _pairwise_attach_zones(router: "Autorouter") -> "tuple[AttachZone, ...]":
     return zones
 
 
+def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Route]":
+    """Every trace route the output board carries -- fresh AND preserved (#4699).
+
+    The #4588 gate audited ``router.routes`` only.  With ``--preserve-existing``
+    (implied by ``--complete``) the board ALSO carries the input board's copper,
+    re-emitted by :func:`_finalize_routes` from a separate list, so any
+    pairwise shortfall between fresh and preserved copper -- or between two
+    preserved routes -- was structurally unreportable.
+
+    Preference order for the preserved half:
+
+    1. ``router._emitted_preserved_routes`` -- recorded by
+       :func:`_finalize_routes` and therefore *exactly* the preserved routes
+       written to the output (empty list when nothing was preserved).  This is
+       always present after finalize, which every gate call site runs first.
+    2. ``router.existing_routes`` minus the re-routed net ids -- the same
+       dedupe rule :func:`_finalize_routes` applies, for callers (unit tests,
+       stand-in routers) that never went through finalize.
+
+    Preserved routes are re-keyed to the board's net ids by NAME where the name
+    resolves: ``find_pairwise_violations`` prefers ``id_to_name`` over a route's
+    own ``net_name``, so a preserved route whose id disagrees with the routing
+    session's numbering would otherwise be audited under the wrong net's
+    voltage -- the silent-blindness failure mode this issue is about.
+    """
+    from kicad_tools.router.primitives import Route
+
+    routes: list[Route] = list(getattr(router, "routes", None) or [])
+
+    preserved = getattr(router, "_emitted_preserved_routes", None)
+    if preserved is None:
+        source = list(getattr(router, "existing_routes", None) or [])
+        routed_net_ids = {r.net for r in routes} - set(getattr(router, "_stub_terminals", {}) or {})
+        preserved = [r for r in source if r.net not in routed_net_ids]
+
+    if preserved:
+        name_to_id = {name: nid for nid, name in (id_to_name or {}).items() if name}
+        for route in preserved:
+            net_id = name_to_id.get(route.net_name, route.net)
+            if net_id == route.net:
+                routes.append(route)
+            else:
+                # Shallow re-key: the segment/via lists are shared, not copied.
+                routes.append(
+                    Route(
+                        net=net_id,
+                        net_name=route.net_name,
+                        segments=route.segments,
+                        vias=route.vias,
+                    )
+                )
+    return routes
+
+
 def _audit_pairwise_clearance(
     router: "Autorouter", args, *, id_to_name=None
 ) -> "list[PairwiseViolation]":
@@ -4267,6 +4332,19 @@ def _audit_pairwise_clearance(
     by appending to ``router.routes``, so a whole-board scan of that list catches
     what the search let through, regardless of which search produced it.
 
+    Issue #4699: ``router.routes`` alone is NOT the board.  Under
+    ``--preserve-existing`` (which ``--complete`` implies) the copper loaded
+    from the input board is re-emitted verbatim from a separate list, so a
+    routes-only scan could never report a trace-to-trace shortfall involving
+    preserved copper -- four of the nine violations in the #4699 report were in
+    that structurally-invisible class.  The scan therefore runs over
+    :func:`_audited_trace_copper`: the freshly-routed copper PLUS exactly the
+    preserved routes ``_finalize_routes`` re-emitted, i.e. the trace copper the
+    output file actually carries.  Pre-existing input-board violations
+    consequently fail the run too -- deliberately: the gate's contract is that
+    a SUCCESS banner means the *written board* is clean, and a board is no
+    safer for having inherited its unsafe copper rather than routed it.
+
     Returns a list of :class:`~kicad_tools.router.pairwise_clearance.PairwiseViolation`
     sorted worst-shortfall-first.  A strict no-op (empty list, no board load, no
     scan) when ``--voltage-map`` was not supplied, so every pre-existing run is
@@ -4282,7 +4360,7 @@ def _audit_pairwise_clearance(
     table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
     if table is None:
         return []
-    routes = list(getattr(router, "routes", None) or [])
+    routes = _audited_trace_copper(router, id_to_name=id_to_name)
     if not routes:
         return []
 
@@ -4398,7 +4476,11 @@ def _print_pairwise_failure_banner(
     print("Routed copper is closer than the --voltage-map derived creepage")
     print("requirement for these net pairs. This board is NOT safe to manufacture.")
     print()
-    print("Scope of this gate: trace-to-trace, same layer only. Pad and via")
+    print("Scope of this gate: trace-to-trace, same layer only, over ALL trace")
+    print("copper the output carries -- freshly routed AND preserved (#4699).")
+    print("A finding between preserved routes was inherited from the input")
+    print("board, not created by this run; re-route those nets (or fix the")
+    print("input) -- the written board is unsafe either way. Pad and via")
     print("geometry are not scanned here -- 'kct creepage' is the authoritative")
     print("full census:")
     vm = getattr(args, "voltage_map", None)
