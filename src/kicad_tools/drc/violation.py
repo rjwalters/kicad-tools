@@ -545,6 +545,17 @@ class DRCViolation:
     # Fix suggestions (populated by generate_fix_suggestions)
     suggestions: list["FixSuggestion"] = field(default_factory=list)
 
+    # Waiver state (Issue #4691).  Populated by
+    # :func:`kicad_tools.drc.waivers.apply_waivers_to_report` when a
+    # ``.kct_waivers.json`` (schema v2) entry matches this finding.  Waived
+    # findings stay visible and keep their underlying ``severity`` (so the
+    # severity-keyed ``kct audit`` manufacturing gate stays blocking) but are
+    # excluded from :attr:`is_error` and therefore from the ``kct drc``
+    # exit gate.
+    waived: bool = False
+    waiver_reason: str | None = None
+    waiver_issue: str | None = None
+
     @property
     def category(self) -> ViolationCategory:
         """Infer root-cause category from violation type and context.
@@ -617,8 +628,18 @@ class DRCViolation:
 
     @property
     def is_error(self) -> bool:
-        """Check if this is an error (vs warning)."""
-        return self.severity == Severity.ERROR
+        """Check if this is a blocking error (vs warning, or a waived finding).
+
+        A waived finding (Issue #4691) keeps ``severity == Severity.ERROR`` but
+        is no longer blocking, so it is excluded here -- this is the single
+        place the ``kct drc`` exit gate reads.
+        """
+        return self.severity == Severity.ERROR and not self.waived
+
+    @property
+    def is_waived(self) -> bool:
+        """Check if a ``.kct_waivers.json`` entry matched this finding."""
+        return self.waived
 
     @property
     def is_clearance(self) -> bool:
@@ -687,6 +708,15 @@ class DRCViolation:
             "actual_value_mm": self.actual_value_mm,
             "delta_mm": self.delta_mm,
         }
+        if self.waived:
+            # Issue #4691 (mirrors the #4403 contract in validate/violations.py):
+            # ``status`` distinguishes a waived finding at a glance while
+            # ``severity`` above keeps the underlying (usually "error") value,
+            # so severity-keyed consumers such as ``kct audit`` stay blocking.
+            result["status"] = "waived"
+            result["waived"] = True
+            result["waiver_reason"] = self.waiver_reason
+            result["waiver_issue"] = self.waiver_issue
         if self.source_position:
             result["source_position"] = self.source_position.to_dict()
         if self.suggestions:
@@ -710,6 +740,14 @@ class DRCViolation:
 # Matches patterns like "Pad 1 of U3", "Pad A1 of U3", "of C12", etc.
 _REF_PATTERN = re.compile(r"\bof\s+([A-Z]+\d+)\b", re.IGNORECASE)
 
+# KiCad describes a *whole footprint* item as "Footprint C52" (the shape
+# courtyard-overlap findings use), which ``_REF_PATTERN`` above -- anchored on
+# "... of <REF>" -- never matches.  Waiver matching (Issue #4691) needs both
+# shapes, so it uses :func:`extract_item_refs` below rather than
+# ``_extract_component_refs``, whose narrower behaviour existing consumers
+# (category inference, same-component pad clearance) depend on.
+_FOOTPRINT_REF_PATTERN = re.compile(r"\bFootprint\s+([A-Z]+\d+)\b", re.IGNORECASE)
+
 
 def _extract_component_refs(items: list[str]) -> set[str]:
     """Extract unique component reference designators from DRC item strings.
@@ -721,6 +759,36 @@ def _extract_component_refs(items: list[str]) -> set[str]:
     for item in items:
         for match in _REF_PATTERN.finditer(item):
             refs.add(match.group(1).upper())
+    return refs
+
+
+def extract_item_refs(items: list[str]) -> set[str]:
+    """Normalize kicad-cli DRC item descriptions to a set of component refs.
+
+    The kicad-cli JSON report stores each involved item as a free-text
+    description rather than a structured reference (the item ``uuid`` is not
+    retained by the parser), so waiver matching normalizes those strings to
+    reference designators first (Issue #4691).  Both shapes KiCad emits are
+    covered::
+
+        "Footprint C52"                     -> {"C52"}
+        "Pad 6 [<no net>] of U3 on F.Cu"    -> {"U3"}
+
+    Items carrying no reference at all (e.g. ``"Track [GND] on F.Cu"``,
+    ``"Via [VBUS] on F.Cu"``) contribute nothing -- such findings are waivable
+    via the ``nets`` axis instead.
+
+    Args:
+        items: Item description strings from a :class:`DRCViolation`.
+
+    Returns:
+        The set of unique, upper-cased reference designators found.
+    """
+    refs: set[str] = set()
+    for item in items:
+        for pattern in (_REF_PATTERN, _FOOTPRINT_REF_PATTERN):
+            for match in pattern.finditer(item):
+                refs.add(match.group(1).upper())
     return refs
 
 

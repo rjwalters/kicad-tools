@@ -402,6 +402,17 @@ def _add_drc_parser(subparsers) -> None:
         help="Check against manufacturer design rules",
     )
     drc_parser.add_argument("--layers", type=int, default=2, help="Number of copper layers")
+    drc_parser.add_argument(
+        "--waivers",
+        dest="waivers",
+        default=None,
+        help=(
+            "Path to a .kct_waivers.json sidecar (schema v2) waiving DRC "
+            "findings by rule + component-ref set; matched findings report as "
+            "WAIVED and are excluded from the error gate. Auto-discovered next "
+            "to the input when omitted (Issue #4691)"
+        ),
+    )
 
 
 def _add_bom_parser(subparsers) -> None:

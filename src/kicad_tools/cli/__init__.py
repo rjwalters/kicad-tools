@@ -268,6 +268,10 @@ def _dispatch_command(args) -> int:
             sub_argv.extend(["--mfr", args.mfr])
         if args.layers != 2:
             sub_argv.extend(["--layers", str(args.layers)])
+        # Issue #4691: forward --waivers to the inner parser (a flag added only
+        # to the outer parser never reaches drc_cmd -- the #3159 drift trap).
+        if getattr(args, "waivers", None):
+            sub_argv.extend(["--waivers", args.waivers])
         return drc_cmd(sub_argv)
 
     elif args.command == "bom":

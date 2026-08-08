@@ -54,6 +54,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`kct drc --waivers`: the `.kct_waivers.json` schema now covers the
+  kicad-cli DRC cross-gate** (closes #4691) — the mandatory second-opinion
+  gate can finally state "0 unwaived errors" instead of a count comparison
+  against a known defect signature. `kct drc` reads the **same** schema-v2
+  sidecar as `kct check --waivers` (#4417) — same loader, same discovery
+  probe (`<dir>/`, `<dir>/output/`, `<dir>/../output/`), same exact-set
+  order-insensitive matching, same explicit-wins / discovered-degrades
+  contract — so one committed file carries every documented exception for a
+  board. Two normalizations bridge the engines: `rule` is matched against
+  KiCad's own violation type string verbatim (no translation table, so
+  kct-keyed ids such as `clearance_pad_pad` simply read as unused on this
+  side), and the kicad-cli item *descriptions* (the parser discards item
+  uuids) are normalized to component refs — `"Footprint C52"` → `C52`,
+  `"Pad 6 [<no net>] of U3 on F.Cu"` → `U3` — before matching, with
+  ref-less track/via findings waivable via the `nets` axis. Matched findings
+  render in a dedicated `WAIVED` section with their own count bucket in
+  table/summary output (never folded into warnings — the defect #4696
+  reports against `kct check --format summary`) and are excluded from the
+  exit gate, which is now nonzero iff **unwaived** errors remain;
+  `--format json` keeps the underlying `"severity": "error"` and adds
+  `"status": "waived"` plus `waiver_reason`/`waiver_issue`, so the
+  severity-keyed `kct audit` manufacturing gate stays blocking by default.
+  Waiver entries that match nothing surface as non-gating `UNUSED WAIVERS`
+  advisories (`unused_waivers` in JSON) rather than being injected into the
+  parsed report. `--mfr` compatibility mode does not apply waivers (a
+  design-intent waiver does not change what a fab can build) and says so.
+  With no flag and no sidecar present, output and exit codes are unchanged.
+  Replaces the downstream `drc_waivers.py` re-implementation in
+  project-shamrock/chorus.
 - **`kct check` now detects isolated copper natively: `isolated_copper`**
   (closes #4680, second slice — the dangling pair shipped separately
   below) — a new `IsolatedCopperRule` (`validate/rules/zone_fill.py`,

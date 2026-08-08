@@ -249,11 +249,37 @@ kct drc <report> [options]
 | `--mfr {jlcpcb,oshpark,pcbway,seeed}` | Apply manufacturer rules |
 | `--layers N` | Number of layers (default: 2) |
 | `--compare` | Compare manufacturer rules |
+| `--waivers PATH` | Path to a `.kct_waivers.json` sidecar (schema v2 — the same file `kct check --waivers` reads) waiving cross-gate findings by KiCad rule type + component-ref set (#4691). Auto-discovered next to the input when omitted. Not applied in `--mfr` mode |
+
+**Waivers (`--waivers`, #4691)**
+
+The `kicad-cli pcb drc` cross-gate reads the same schema-v2 sidecar as
+`kct check`, so one file carries every documented exception for a board:
+
+- `rule` matches KiCad's own violation type string verbatim
+  (`courtyards_overlap`, `clearance`, …) — no translation table, so
+  clearance-family entries keyed to kct rule ids (`clearance_pad_pad`) simply
+  read as unused on this side.
+- `items` matches the violation's **component-ref set**, normalized from the
+  kicad-cli item descriptions (`"Footprint C52"` → `C52`,
+  `"Pad 6 [<no net>] of U3 on F.Cu"` → `U3`). Matching is exact-set and
+  order-insensitive: a 2-item entry never waives a 3-item finding. Findings
+  with no refs at all (track/via-only) are waivable via `nets` instead.
+- Matched findings render in a dedicated `WAIVED` section with their own count
+  bucket (never as warnings) and are excluded from the exit gate — exit is
+  nonzero iff **unwaived** errors remain. `--format json` keeps the underlying
+  `"severity": "error"` and adds `"status": "waived"`, so the severity-keyed
+  `kct audit` manufacturing gate stays blocking by default.
+- Entries matching nothing print as non-gating `UNUSED WAIVERS` advisories
+  (and appear under `unused_waivers` in JSON), so stale waivers stay visible.
+- Explicit path wins and a missing/malformed explicit file is a hard error; a
+  malformed auto-discovered sidecar degrades to zero waivers with a warning.
 
 **Examples:**
 ```bash
 kct drc board.drc
 kct drc board.kicad_pcb --mfr jlcpcb
+kct drc board-drc.json --waivers .kct_waivers.json   # 0 unwaived errors gate
 kct drc --compare  # Show all manufacturer rules
 ```
 
