@@ -931,6 +931,33 @@ def _run_subprocess_step(
         return False, f"failed: {e}"
 
 
+def resolve_voltage_map_arg(voltage_map: str | None) -> str | None:
+    """Absolutize a user-supplied ``--voltage-map`` against the invocation cwd.
+
+    Issue #4751: the HV flag value is forwarded verbatim into subprocesses
+    that deliberately run with a working directory other than the one the
+    user invoked from -- :func:`run_creepage_skip_audit` uses
+    ``cwd=target_pcb.parent``, the pipeline route step uses
+    ``cwd=ctx.pcb_file.parent`` and ``kct build``'s route fallback uses
+    ``cwd=ctx.project_dir``.  ``kct creepage`` resolves the flag with a plain
+    ``Path(vmap_arg)`` against *its own* cwd, so a **relative** map path
+    combined with an ``--output-dir`` outside the project directory made the
+    audit look for the map in the wrong place and hard-fail the strict
+    exit-0 skip gate -- a spurious refusal for a legitimate invocation.
+
+    Resolving once at context-construction time (while the process cwd is
+    still the user's invocation cwd) makes every downstream forward --
+    audit argv, route passthrough, dry-run echo, and the ``kct creepage``
+    hint in the refusal message -- cwd-independent for free.
+
+    ``None`` (and the empty string) pass through untouched so the
+    ``if ctx.voltage_map:`` gates elsewhere keep their exact semantics.
+    """
+    if not voltage_map:
+        return voltage_map
+    return str(Path(voltage_map).resolve())
+
+
 def run_creepage_skip_audit(
     target_pcb: Path,
     *,
@@ -2592,7 +2619,9 @@ Examples:
         max_displacement=args.max_displacement,
         apply_sync=args.apply_sync,
         route_skip_threshold=args.route_skip_threshold,
-        voltage_map=args.voltage_map,
+        # Absolutize now, while cwd is still the user's invocation directory
+        # (#4751) -- the route/audit subprocesses run with a different cwd.
+        voltage_map=resolve_voltage_map_arg(args.voltage_map),
         creepage_standard=args.creepage_standard,
         pollution_degree=args.pollution_degree,
         material_group=args.material_group,

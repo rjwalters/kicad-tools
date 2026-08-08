@@ -1442,6 +1442,131 @@ class TestBuildRouteVoltageMapForwarding:
             assert flag not in argv
 
 
+class TestBuildVoltageMapAbsolutization:
+    """A relative ``--voltage-map`` survives an external ``-o`` (issue #4751).
+
+    ``_resolve_routed_pcb_path`` puts the routed artifact under
+    ``--output`` when set, and the route-skip creepage gate runs its audit
+    subprocess with ``cwd=<routed artifact>.parent``.  `kct creepage`
+    resolves ``--voltage-map`` with a plain ``Path(vmap_arg)`` against that
+    cwd, so a relative map path looked for the file in the output dir --
+    outside the project entirely -- and the strict exit-0 gate hard-failed
+    with a spurious "voltage-map file not found" refusal.  The first
+    (routing) build passed and the very next re-build failed.
+
+    The fix absolutizes the flag once in ``main()``, while the process cwd
+    is still the user's invocation directory.
+    """
+
+    @staticmethod
+    def _creepage_call(mock_run):
+        """Return the audit subprocess call (argv contains ``creepage``), or None.
+
+        The patch target is shared with every other ``subprocess.run`` in the
+        process, so the route step's neighbours (e.g. the smoke check) can
+        also land in ``call_args_list``.
+        """
+        for call in mock_run.call_args_list:
+            if call.args and "creepage" in call.args[0]:
+                return call
+        return None
+
+    def _arrange(self, tmp_path: Path) -> tuple[Path, Path, Path]:
+        """Project dir, an output dir OUTSIDE it, and a separate invocation cwd."""
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+
+        output_dir = tmp_path / "external_out"
+        output_dir.mkdir()
+        pcb = output_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        routed = output_dir / "board_routed.kicad_pcb"
+        routed.write_text("(kicad_pcb)")
+        # Routed sibling unambiguously newer -> the mtime skip guard fires.
+        os.utime(pcb, (1_000_000.0, 1_000_000.0))
+        os.utime(routed, (1_000_100.0, 1_000_100.0))
+
+        invocation_dir = tmp_path / "cwd"
+        invocation_dir.mkdir()
+        (invocation_dir / "vm.json").write_text("{}")
+
+        return project_dir, output_dir, invocation_dir
+
+    @staticmethod
+    def _argv(project_dir: Path, output_dir: Path, *extra: str) -> list[str]:
+        return [
+            str(project_dir),
+            "-o",
+            str(output_dir),
+            "--step",
+            "route",
+            "--no-smoke-check",
+            "--quiet",
+            *extra,
+        ]
+
+    def test_relative_map_with_external_output_dir_stays_locatable(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The reported shape: `kct build -o <external> --voltage-map ./vm.json`."""
+        from unittest.mock import MagicMock, patch
+
+        project_dir, output_dir, invocation_dir = self._arrange(tmp_path)
+        monkeypatch.chdir(invocation_dir)
+
+        with patch("kicad_tools.cli.pipeline_cmd.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            rc = main(self._argv(project_dir, output_dir, "--voltage-map", "vm.json"))
+
+        assert rc == 0
+        call = self._creepage_call(mock_run)
+        assert call is not None, "route-skip creepage audit never ran"
+        cmd_args = call.args[0]
+
+        forwarded = Path(cmd_args[cmd_args.index("--voltage-map") + 1])
+        assert forwarded.is_absolute()
+        assert forwarded == (invocation_dir / "vm.json").resolve()
+
+        # The audit subprocess runs from the EXTERNAL output dir, where a
+        # relative "vm.json" does not exist -- only the absolute path is
+        # locatable from there (this is the regression).
+        audit_cwd = Path(call.kwargs["cwd"])
+        assert audit_cwd.resolve() == output_dir.resolve()
+        assert not (audit_cwd / "vm.json").exists()
+        assert (audit_cwd / forwarded).exists()
+
+    def test_absolute_map_unchanged(self, tmp_path: Path, monkeypatch) -> None:
+        """An already-absolute ``--voltage-map`` is forwarded verbatim."""
+        from unittest.mock import MagicMock, patch
+
+        project_dir, output_dir, invocation_dir = self._arrange(tmp_path)
+        monkeypatch.chdir(invocation_dir)
+        absolute_map = (invocation_dir / "vm.json").resolve()
+
+        with patch("kicad_tools.cli.pipeline_cmd.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            main(self._argv(project_dir, output_dir, "--voltage-map", str(absolute_map)))
+
+        call = self._creepage_call(mock_run)
+        assert call is not None
+        cmd_args = call.args[0]
+        assert cmd_args[cmd_args.index("--voltage-map") + 1] == str(absolute_map)
+
+    def test_no_voltage_map_spawns_no_audit(self, tmp_path: Path, monkeypatch) -> None:
+        """Without the flag the skip path is unchanged (no audit subprocess)."""
+        from unittest.mock import MagicMock, patch
+
+        project_dir, output_dir, invocation_dir = self._arrange(tmp_path)
+        monkeypatch.chdir(invocation_dir)
+
+        with patch("kicad_tools.cli.pipeline_cmd.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            rc = main(self._argv(project_dir, output_dir))
+
+        assert rc == 0
+        assert self._creepage_call(mock_run) is None
+
+
 class TestBuildVoltageMapPassthroughHops:
     """Pin every hop of the build passthrough chain (issue #4607).
 

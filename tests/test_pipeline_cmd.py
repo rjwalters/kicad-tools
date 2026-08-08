@@ -1235,6 +1235,118 @@ class TestRouteSkipCreepageAuditGate:
         assert rc == 1
 
 
+class TestVoltageMapPathAbsolutization:
+    """``--voltage-map`` is absolutized at parse time (issue #4751).
+
+    The route-skip creepage audit runs its subprocess with
+    ``cwd=target_pcb.parent`` and the route step with
+    ``cwd=ctx.pcb_file.parent``, while `kct creepage` resolves the flag with
+    a plain ``Path(vmap_arg)`` against *its own* cwd.  A **relative**
+    ``--voltage-map`` therefore resolved against the artifact's directory
+    instead of the user's invocation directory -- and, with an output dir
+    outside the project, hard-failed the strict exit-0 gate with a spurious
+    "voltage-map file not found" refusal.
+    """
+
+    def test_none_passes_through(self):
+        from kicad_tools.cli.pipeline_cmd import resolve_voltage_map_arg
+
+        assert resolve_voltage_map_arg(None) is None
+
+    def test_relative_resolved_against_invocation_cwd(self, tmp_path: Path, monkeypatch):
+        from kicad_tools.cli.pipeline_cmd import resolve_voltage_map_arg
+
+        vmap = tmp_path / "vm.json"
+        vmap.write_text("{}")
+        monkeypatch.chdir(tmp_path)
+
+        resolved = resolve_voltage_map_arg("vm.json")
+        assert Path(resolved).is_absolute()
+        assert Path(resolved) == vmap.resolve()
+
+    def test_absolute_is_a_no_op(self, tmp_path: Path):
+        from kicad_tools.cli.pipeline_cmd import resolve_voltage_map_arg
+
+        vmap = (tmp_path / "vm.json").resolve()
+        vmap.write_text("{}")
+        assert resolve_voltage_map_arg(str(vmap)) == str(vmap)
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_skip_audit_argv_carries_locatable_absolute_map(
+        self, mock_run, routed_pcb: Path, tmp_path: Path, monkeypatch
+    ):
+        """Relative map + a board in another directory -> the audit can find it."""
+        from kicad_tools.cli import pipeline_cmd
+
+        invocation_dir = tmp_path / "cwd"
+        invocation_dir.mkdir()
+        vmap = invocation_dir / "vm.json"
+        vmap.write_text("{}")
+        monkeypatch.chdir(invocation_dir)
+
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        rc = pipeline_cmd.main(
+            [str(routed_pcb), "--step", "route", "--voltage-map", "vm.json", "--quiet"]
+        )
+        assert rc == 0
+
+        cmd_args = mock_run.call_args[0][0]
+        forwarded = Path(cmd_args[cmd_args.index("--voltage-map") + 1])
+        assert forwarded.is_absolute()
+        # The subprocess cwd is the board's directory, NOT the invocation
+        # directory -- so only an absolute path stays locatable.
+        assert Path(mock_run.call_args.kwargs["cwd"]).resolve() != invocation_dir.resolve()
+        assert (Path(mock_run.call_args.kwargs["cwd"]) / forwarded).exists()
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_passthrough_argv_carries_absolute_map(
+        self, mock_run, unrouted_pcb: Path, tmp_path: Path, monkeypatch
+    ):
+        """The re-route passthrough is absolutized by the same parse-time fix."""
+        from kicad_tools.cli import pipeline_cmd
+
+        invocation_dir = tmp_path / "cwd"
+        invocation_dir.mkdir()
+        (invocation_dir / "vm.json").write_text("{}")
+        monkeypatch.chdir(invocation_dir)
+
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        pipeline_cmd.main(
+            [str(unrouted_pcb), "--step", "route", "--voltage-map", "vm.json", "--quiet"]
+        )
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "route" in cmd_args
+        forwarded = Path(cmd_args[cmd_args.index("--voltage-map") + 1])
+        assert forwarded.is_absolute()
+        assert forwarded == (invocation_dir / "vm.json").resolve()
+
+    def test_dry_run_echo_renders_resolved_path(
+        self, routed_pcb: Path, tmp_path: Path, monkeypatch
+    ):
+        """The dry-run echo prints a copy-pasteable (absolute) map path."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_route, resolve_voltage_map_arg
+
+        invocation_dir = tmp_path / "cwd"
+        invocation_dir.mkdir()
+        vmap = invocation_dir / "vm.json"
+        vmap.write_text("{}")
+        monkeypatch.chdir(invocation_dir)
+
+        ctx = PipelineContext(
+            pcb_file=routed_pcb,
+            quiet=True,
+            dry_run=True,
+            voltage_map=resolve_voltage_map_arg("vm.json"),
+        )
+        result = _run_step_route(ctx, Console(quiet=True))
+
+        assert result.success is True
+        assert f"--voltage-map {vmap.resolve()}" in result.message
+
+
 class TestProjectInput:
     """Tests for .kicad_pro input support."""
 

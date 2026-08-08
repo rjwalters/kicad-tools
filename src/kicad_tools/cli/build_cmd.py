@@ -3475,6 +3475,10 @@ def main(argv: list[str] | None = None) -> int:
     if output_dir and not schematic and not pcb:
         schematic, pcb = _find_artifacts(project_dir, spec_file)
 
+    # Imported lazily (like the gate core at _audit_routed_artifact_for_skip)
+    # to keep `kct build` from paying pipeline_cmd's import cost eagerly.
+    from .pipeline_cmd import resolve_voltage_map_arg
+
     # Create build context
     ctx = BuildContext(
         project_dir=project_dir,
@@ -3491,7 +3495,11 @@ def main(argv: list[str] | None = None) -> int:
         optimize_placement=args.optimize_placement,
         smoke_check=not args.no_smoke_check,
         allow_incomplete=args.allow_incomplete,
-        voltage_map=args.voltage_map,
+        # Absolutize now, while cwd is still the user's invocation directory
+        # (#4751).  The route fallback runs with cwd=ctx.project_dir and the
+        # route-skip creepage audit with cwd=<routed artifact>.parent -- which,
+        # under -o/--output, is outside the project entirely.
+        voltage_map=resolve_voltage_map_arg(args.voltage_map),
         creepage_standard=args.creepage_standard,
         pollution_degree=args.pollution_degree,
         material_group=args.material_group,
