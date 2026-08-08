@@ -135,11 +135,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connected to nothing, closing the last of the three kicad-cli rule
   classes previously invisible to a kct-only workflow (199 of the 268
   missed findings on the reporting board). Each committed
-  `filled_polygon` is one island; an island is isolated when no
-  same-net pad, via, track segment, or track-arc touches its cluster
-  (same-layer same-net islands that touch each other are unioned first,
-  so an island bridged to anchored copper through a sibling island is
-  not a false positive). Detection consumes only the *committed* fill
+  `filled_polygon` is one island; an island is isolated when its
+  transitive same-net copper cluster contains no pad (see the #4729
+  entry under **Changed** — this shipped as a narrower "touched by no
+  same-net copper" predicate and was completed to KiCad parity before
+  release). Detection consumes only the *committed* fill
   polygons (this repo's copper source of truth): when zones were never
   filled the rule degrades silently rather than presenting "0 isolated"
   as a clean bill (`zone_unfilled` separately warns about those zones).
@@ -150,16 +150,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cross-verified against `kicad-cli pcb drc` 10.0.5 on the committed
   fills: 0/0 on all 8 repo boards (no false positives), and matching
   zone/layer attribution + message shape on a synthetic orphan-island
-  fixture. **Known divergence** (documented in the module and pinned by
-  tests): KiCad's own predicate requires a *pad* in the island's cluster,
-  while this rule accepts any same-net copper touch — so kct's findings
-  are a strict *subset* of kicad-cli's (never a false positive, but an
-  island held only by pad-less copper is under-reported; on the synthetic
-  fixture kicad-cli counts 2 where kct counts 1). Full pad-cluster
-  semantics need transitive copper clustering with fills as conductors —
-  tracked as #4729. The shared per-layer copper indexing moved to a reusable
-  `build_copper_layer_indexes()` in `dangling_copper.py` so both #4680
-  detectors consult identical committed-copper geometry.
+  fixture. Remaining known divergences (documented in the module):
+  KiCad's zone island-removal settings (`island_removal_mode`,
+  `island_area_min`) are not modeled, and track arcs participate as
+  chord-approximated conductors only. The shared per-layer copper indexing
+  moved to a reusable `build_copper_layer_indexes()` in
+  `dangling_copper.py` so both #4680 detectors consult identical
+  committed-copper geometry.
 
 - **`--format json` on the grouped-family subcommands (first #4674 batch:
   24 surfaces)** — the mechanical sweep executing #4543's canonical
@@ -446,6 +443,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kct audit` manufacturing-readiness gate are unchanged.
 
 ### Changed
+
+- **`isolated_copper` now implements KiCad's pad-in-cluster predicate**
+  (closes #4729, follow-up to #4680 / #4728) — an island is isolated iff
+  its **transitive** same-net copper cluster contains **no pad**, where
+  tracks, track arcs and via barrels are *conductors* that extend the
+  cluster rather than terminals that satisfy it. Previously any same-net
+  copper touch cleared an island, making kct's findings a strict subset
+  of kicad-cli's: an island held only by pad-less copper (a floating
+  stub, an orphaned via, a dead pour arm) was silently under-reported,
+  and the blind spot compounded with #4680's first slice, where the same
+  stub terminates on the committed fill and so is not `track_dangling`
+  either. The clustering pass is a new `cluster_copper_kinds()` in
+  `validate/rules/dangling_copper.py` (Option A of the issue's
+  architecture choice: it extends the shared committed-copper index
+  `build_copper_layer_indexes()` whose `_CopperItem.kind` already carried
+  the pad signal, leaving `connectivity.py` and both dangling-copper
+  predicates untouched). Union-find over islands + copper items with
+  same-layer geometric touch inside `DRC_TOLERANCE` plus a cross-layer
+  union of the per-layer instances of one via barrel / through-hole
+  `*.Cu` pad, so a pad reached over a multi-hop track chain or across a
+  via on another layer still clears an island. Every edge requires a net
+  match (resolved number first, name fallback) and a feature with no net
+  identity at all never unions — deliberately conservative, because an
+  over-eager union *suppresses* findings invisibly. **Finding counts can
+  only grow**; severity (`warning`), the advisory reporting category,
+  gating behavior and the degrade-silently guard on unfilled zones are
+  unchanged. Verified against kicad-cli 10.0.5 on the committed fills
+  (no `--refill-zones`) using the new
+  `tests/fixtures/drc/orphan_island{,_pad,_transitive}.kicad_pcb`
+  fixtures — exact parity at 2 / 1 / 1 findings (was 1 / 1 / 1) — and the
+  8-board fleet stays 0/0, cross-checked with kicad-cli on boards 03 and
+  05.
 
 - **`kct check`'s connectivity DRC rule now uses the strict real-geometry
   model by default** (#4673, the #4557 follow-up) — `ConnectivityRule`,
