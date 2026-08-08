@@ -36,8 +36,11 @@ sources:
    ``route_all_negotiated(deterministic_rescue=True)``, which bounds the
    sub-searches by the deterministic per-net node-expansion cap.  Board 06
    opted in first (#4536); #4730 made that the DEFAULT for every
-   expansion-capped run, so the kwarg in ``generate_design.py`` is now
+   expansion-capped run of ``route_all_negotiated`` -- the path this board
+   uses -- so the kwarg in ``generate_design.py`` is now
    redundant-but-documentary rather than the only thing switching it on.
+   (The two-phase/escape path keeps the wall clock; see
+   ``TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT`` for board 07's negative A/B.)
 
 3. **Residual -- UUID-sorted file order.** With the wall clock removed,
    runs produced byte-identical logs and identical copper *multisets*,

@@ -214,6 +214,14 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
     live -- so no ``kct route`` call site passes the flag explicitly, and a
     run without ``--deterministic-budget`` keeps the historical
     ``RELIEF_SUBSEARCH_BUDGET_S`` wall clock unchanged.
+
+    That flip is scoped to the NEGOTIATED entry point.  Escape-routed boards
+    (03/04/07) go through ``route_with_escape`` -> ``route_all_two_phase``,
+    which defaults to ``TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT`` (``False``)
+    because board 07 regressed on that path in the #4730 fleet A/B (changed
+    LVS open set, routed-DRC 8 -> 13).  ``--deterministic-budget`` therefore
+    still means "wall-clock rescue bound" on those boards; the constant is the
+    single switch to flip when the regression is understood.
     """
     if not getattr(args, "deterministic_budget", False):
         return
@@ -5807,6 +5815,15 @@ def route_with_layer_escalation(
                 # clock.  Wiring it to the CLI flag explicitly would be
                 # equivalent here but would hide that a caller who sets
                 # ``--per-net-iterations`` alone gets the same guarantee.
+                #
+                # The escape / two-phase branches above are silent too, but for
+                # the opposite reason: ``route_with_escape`` and
+                # ``route_all_two_phase`` default to
+                # ``TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT`` (False), the
+                # documented board-07 negative result, so the escape-routed
+                # boards keep the historical wall clock until that regression
+                # is understood.  Both call sites take the kwarg, so opting a
+                # board in is a one-line change here when it is.
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
@@ -6801,6 +6818,15 @@ def route_with_rule_relaxation(
                 # clock.  Wiring it to the CLI flag explicitly would be
                 # equivalent here but would hide that a caller who sets
                 # ``--per-net-iterations`` alone gets the same guarantee.
+                #
+                # The escape / two-phase branches above are silent too, but for
+                # the opposite reason: ``route_with_escape`` and
+                # ``route_all_two_phase`` default to
+                # ``TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT`` (False), the
+                # documented board-07 negative result, so the escape-routed
+                # boards keep the historical wall clock until that regression
+                # is understood.  Both call sites take the kwarg, so opting a
+                # board in is a one-line change here when it is.
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,

@@ -2783,9 +2783,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # node-expansion cap instead makes the commit/rollback decision
         # machine-independent -- the point of this issue.
         #
-        # #4730 made ``deterministic_rescue=True`` the fleet DEFAULT (it
-        # self-scopes to expansion-capped runs, and this board is one), so the
-        # explicit kwarg below is now redundant.  It is KEPT deliberately, as
+        # #4730 made ``deterministic_rescue=True`` the DEFAULT of
+        # ``route_all_negotiated`` (it self-scopes to expansion-capped runs,
+        # and this board is one; the two-phase/escape path stayed on the wall
+        # clock after board 07 regressed), so the explicit kwarg below is now
+        # redundant on this path.  It is KEPT deliberately, as
         # executable documentation of the load-bearing dependency above: this
         # board's reach gate must not silently inherit a default that a future
         # fleet-wide A/B could flip back.

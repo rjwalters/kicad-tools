@@ -7,12 +7,23 @@ the 8-12 s natural re-land time on CI runners, which made board-06's
 ``REQUIRED_SIGNAL_REACH`` gate a coin flip on machine speed.  These tests pin
 the selection table for the deterministic replacement.
 
-Issue #4730 made the deterministic bound the fleet DEFAULT
-(:data:`DETERMINISTIC_RESCUE_DEFAULT`).  That is only safe because the selector
-degrades to the historical wall clock whenever no per-net node-expansion cap is
-active, so a capless run is behavior-identical BY CONSTRUCTION -- the property
-the "inherited default" cases below lock down, alongside the signature defaults
-and the routing-log line that reports which bound is live.
+Issue #4730 made the deterministic bound the default of the NEGOTIATED entry
+point (:data:`DETERMINISTIC_RESCUE_DEFAULT`).  That is only safe because the
+selector degrades to the historical wall clock whenever no per-net
+node-expansion cap is active, so a capless run is behavior-identical BY
+CONSTRUCTION -- the property the "inherited default" cases below lock down,
+alongside the signature defaults and the routing-log line that reports which
+bound is live.
+
+The TWO-PHASE entry point is scoped OUT of that flip
+(:data:`TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT` is ``False``): board 07 -- the
+only board whose two-phase route fires rescues -- came back from the fleet A/B
+with a changed copper-LVS open set and routed-DRC 8 -> 13 against an allowlist
+of 8, and #4730's Acceptance forbids absorbing that.  ``TestTwoPhasePathScoping``
+pins both halves of the resolution: the path default stays historical, AND the
+bound is threaded through as a real per-call switch (the hook calls
+``_relief_rescue`` positionally, so a ``functools.partial`` is what makes an
+opt-in reachable at all).
 
 The methods only read two attributes off ``self``, so they are exercised against
 a lightweight stub rather than a full ``Autorouter`` (which would need a board).
@@ -20,12 +31,16 @@ a lightweight stub rather than a full ``Autorouter`` (which would need a board).
 
 from __future__ import annotations
 
+import functools
 import inspect
+from unittest.mock import MagicMock
 
+from kicad_tools.router import core
 from kicad_tools.router.core import (
     DETERMINISTIC_RESCUE_DEFAULT,
     RELIEF_SUBSEARCH_BUDGET_S,
     RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S,
+    TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT,
     Autorouter,
 )
 
@@ -106,11 +121,13 @@ class TestDeterministicRescueDefault:
         )
         assert default is DETERMINISTIC_RESCUE_DEFAULT
 
-    def test_two_phase_hook_arity_leaves_the_default_in_force(self):
+    def test_two_phase_hook_arity_keeps_the_flag_keyword_only_in_practice(self):
         """The #3471 stall-relief hook in ``algorithms/two_phase.py`` calls
         ``_relief_rescue`` POSITIONALLY with 8 arguments, so the flag must stay
-        behind them or that path would silently receive a victim count as its
-        rescue mode."""
+        behind them -- otherwise that path would silently receive a victim
+        count as its rescue mode, and the ``functools.partial`` that binds the
+        two-phase path's own default (#4730) would collide with a positional
+        argument."""
         params = list(inspect.signature(Autorouter._relief_rescue).parameters)
         assert params[0] == "self"
         assert params[1:9] == [
@@ -160,14 +177,18 @@ class TestReliefSubsearchBoundLine:
         assert "iteration-bounded" not in line
         assert f"{RELIEF_SUBSEARCH_BUDGET_S:.1f}s wall clock" in line
         assert "no per-net node-expansion cap is active" in line
-        assert "disabled by caller" not in line
+        assert "off for this route" not in line
 
-    def test_opt_out_names_the_caller_decision(self):
-        """With a True default, ``deterministic_rescue=False`` is necessarily
-        explicit -- the only arm that may attribute the choice to a caller."""
+    def test_off_arm_does_not_attribute_the_choice_to_one_source(self):
+        """``deterministic_rescue=False`` reaches this arm two ways -- an
+        explicit caller opt-out on the negotiated path, or
+        ``TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT`` on the two-phase path -- so
+        the wording must name both rather than blaming a caller."""
         stub = _BudgetStub(per_net_iterations=1_000_000)
         line = _line(stub, None, False)
-        assert "disabled by caller" in line
+        assert "off for this route" in line
+        assert "caller opt-out" in line
+        assert "two-phase path default" in line
         assert "iteration-bounded" not in line
         assert f"{RELIEF_SUBSEARCH_BUDGET_S:.1f}s wall clock" in line
 
@@ -179,3 +200,87 @@ class TestReliefSubsearchBoundLine:
             _line(capped, None, False),
         ):
             assert line.startswith("  Relief-rescue sub-search cap: ")
+
+
+class TestTwoPhasePathScoping:
+    """Issue #4730: the flip is scoped OUT of the two-phase path (board 07's
+    measured regression), and that path gets a real per-call switch."""
+
+    def test_two_phase_default_is_the_historical_wall_clock(self):
+        """The documented negative result: board 07's copper-LVS open set
+        changed and routed-DRC went 8 -> 13 over an allowlist of 8 when this
+        path inherited the flip, so it must stay off."""
+        assert TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT is False
+        assert TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT is not DETERMINISTIC_RESCUE_DEFAULT
+
+    def test_route_all_two_phase_takes_the_flag_and_defaults_it_to_the_path_value(self):
+        param = inspect.signature(Autorouter.route_all_two_phase).parameters.get(
+            "deterministic_rescue"
+        )
+        assert param is not None, "the two-phase path must expose the opt-in/opt-out"
+        assert param.default is TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT
+
+    def test_escape_entry_points_forward_the_flag(self):
+        """``kct route`` reaches the two-phase path through these, so the
+        switch has to exist there or boards 03/04/07 cannot be opted in."""
+        for method in (
+            Autorouter.route_with_escape,
+            Autorouter.route_with_escape_and_diffpairs,
+        ):
+            param = inspect.signature(method).parameters.get("deterministic_rescue")
+            assert param is not None, f"{method.__name__} must forward the flag"
+            assert param.default is TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT
+
+    def test_create_two_phase_router_binds_the_bound_onto_the_positional_hook(self, monkeypatch):
+        """The #3471 hook calls ``_relief_rescue`` positionally, so a plain
+        bound method carries no bound at all -- the partial is the fix."""
+        captured: dict = {}
+
+        class _FakeTwoPhaseRouter:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(core, "TwoPhaseRouter", _FakeTwoPhaseRouter)
+        stub = MagicMock()
+
+        Autorouter._create_two_phase_router(stub)
+        hook = captured["relief_rescue"]
+        assert isinstance(hook, functools.partial)
+        assert hook.keywords["deterministic_rescue"] is TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT
+
+        # The 8 positional arguments the hook passes must still land on the
+        # underlying method, with the bound arriving as a keyword.
+        hook(1, 2, 3, 4, 5, 6, 7, 8)
+        args, kwargs = stub._relief_rescue.call_args
+        assert args == (1, 2, 3, 4, 5, 6, 7, 8)
+        assert kwargs == {"deterministic_rescue": TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT}
+
+    def test_create_two_phase_router_honors_an_explicit_opt_in(self, monkeypatch):
+        captured: dict = {}
+
+        class _FakeTwoPhaseRouter:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(core, "TwoPhaseRouter", _FakeTwoPhaseRouter)
+        Autorouter._create_two_phase_router(MagicMock(), deterministic_rescue=True)
+        assert captured["relief_rescue"].keywords["deterministic_rescue"] is True
+
+    def test_route_all_two_phase_forwards_the_flag_to_hook_and_banner(self, monkeypatch):
+        """Both the wiring and the log line must report the value THIS call
+        runs under -- the banner previously hardcoded the module constant."""
+        printed: list[str] = []
+        monkeypatch.setattr(core, "flush_print", lambda line: printed.append(line))
+
+        for requested in (False, True):
+            printed.clear()
+            stub = MagicMock()
+            stub._relief_subsearch_bound_line.return_value = f"banner:{requested}"
+
+            Autorouter.route_all_two_phase(stub, deterministic_rescue=requested)
+
+            assert stub._create_two_phase_router.call_args.kwargs == {
+                "deterministic_rescue": requested
+            }
+            assert stub._relief_subsearch_bound_line.call_args.args[1] is requested
+            assert f"banner:{requested}" in printed
