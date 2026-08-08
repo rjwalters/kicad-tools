@@ -130,6 +130,177 @@ class _LayerIndex:
         return [self.items[i] for i in self._tree.query(query_geom)]
 
 
+@dataclass
+class ClusterSeed:
+    """A geometry whose transitive copper cluster is being interrogated.
+
+    Used by :func:`cluster_copper_kinds`.  ``isolated_copper`` seeds one
+    per committed zone-fill island; the seed itself participates in the
+    graph as a ``"fill"`` node, so seed-seed contact (two touching
+    islands) merges their clusters like any other copper contact.
+    """
+
+    layer: str
+    geom: Any  # shapely geometry in board-relative coordinates
+    net_number: int
+    net_name: str
+
+
+def copper_nets_match(a_number: int, a_name: str, b_number: int, b_name: str) -> bool:
+    """Same-net test between two copper features.
+
+    Prefer resolved net numbers; fall back to name equality for the
+    KiCad-10 name-only dialect.  A feature carrying **no** net identity
+    at all (number 0, empty name) never matches -- deliberately
+    conservative: an over-eager union silently *suppresses*
+    ``isolated_copper`` findings (see #4729), which is the failure mode
+    that is invisible to a green test suite.
+    """
+    if a_number and b_number:
+        return a_number == b_number
+    if a_name and b_name:
+        return a_name == b_name
+    return False
+
+
+def _tolerance_probe(geom: Any) -> Any:
+    """Bounding box of ``geom`` expanded by :data:`DRC_TOLERANCE`.
+
+    STRtree queries are pure bbox tests, so copper within tolerance of a
+    geometry but with a disjoint bbox would otherwise be missed.
+    """
+    from shapely import box  # type: ignore[import-untyped]
+
+    minx, miny, maxx, maxy = geom.bounds
+    return box(
+        minx - DRC_TOLERANCE,
+        miny - DRC_TOLERANCE,
+        maxx + DRC_TOLERANCE,
+        maxy + DRC_TOLERANCE,
+    )
+
+
+def cluster_copper_kinds(
+    indexes: dict[str, _LayerIndex],
+    seeds: list[ClusterSeed],
+) -> list[frozenset[str]]:
+    """Transitive copper-connectivity clustering (Issue #4729).
+
+    Builds KiCad's actual connectivity model over the committed-copper
+    geometry this module already indexes: **every copper item is a
+    conductor**, not a one-hop anchor.  Nodes are the ``seeds`` plus the
+    same-net items of ``indexes``; edges are
+
+    * **same-layer geometric touch** -- two same-net nodes whose copper
+      lies within :data:`DRC_TOLERANCE` of each other (STRtree-accelerated
+      with a tolerance-expanded bbox probe), and
+    * **cross-layer identity** -- a via barrel (and a through-hole
+      ``*.Cu`` pad) is indexed once per spanned layer with a shared
+      ``key``; all instances of one ``key`` are unioned, which is what
+      bridges a cluster between layers.
+
+    Args:
+        indexes: Per-layer copper indexes from
+            :func:`build_copper_layer_indexes`.  For ``isolated_copper``
+            these are built with ``include_fills=False``: fill copper
+            enters the graph as *seeds*, so indexing it again would
+            duplicate every island as a second node.
+        seeds: The geometries to interrogate.
+
+    Returns:
+        One ``frozenset`` of ``_CopperItem.kind`` values per seed (in
+        seed order) naming every kind present in that seed's cluster.
+        The seed's own ``"fill"`` kind is always a member.  Callers ask
+        set-membership questions of it -- ``isolated_copper``'s predicate
+        is exactly ``"pad" in kinds``.
+    """
+    from shapely.strtree import STRtree
+
+    if not seeds:
+        return []
+
+    # Only items sharing a seed's net identity can ever reach a seed
+    # (every edge requires a same-net match), so filtering here is
+    # semantics-preserving and keeps the graph small on real boards.
+    seed_numbers = {seed.net_number for seed in seeds if seed.net_number}
+    seed_names = {seed.net_name for seed in seeds if seed.net_name}
+
+    layers: list[str] = []
+    geoms: list[Any] = []
+    numbers: list[int] = []
+    names: list[str] = []
+    kinds: list[str] = []
+    keys: list[int | None] = []
+
+    for seed in seeds:
+        layers.append(seed.layer)
+        geoms.append(seed.geom)
+        numbers.append(seed.net_number)
+        names.append(seed.net_name)
+        kinds.append("fill")
+        keys.append(None)
+
+    for layer, index in indexes.items():
+        for item in index.items:
+            if not (
+                (item.net_number and item.net_number in seed_numbers)
+                or (item.net_name and item.net_name in seed_names)
+            ):
+                continue
+            layers.append(layer)
+            geoms.append(item.geom)
+            numbers.append(item.net_number)
+            names.append(item.net_name)
+            kinds.append(item.kind)
+            keys.append(item.key)
+
+    parent = list(range(len(geoms)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    by_layer: dict[str, list[int]] = {}
+    for node, layer_name in enumerate(layers):
+        by_layer.setdefault(layer_name, []).append(node)
+
+    for indices in by_layer.values():
+        tree = STRtree([geoms[i] for i in indices])
+        for i in indices:
+            for other_pos in tree.query(_tolerance_probe(geoms[i])):
+                j = indices[int(other_pos)]
+                if j <= i:
+                    continue
+                if not copper_nets_match(numbers[i], names[i], numbers[j], names[j]):
+                    continue
+                if geoms[i].distance(geoms[j]) <= DRC_TOLERANCE:
+                    union(i, j)
+
+    # Cross-layer bridging: a via / through-hole pad appears once per
+    # spanned layer under one shared ``key``.
+    by_key: dict[int, list[int]] = {}
+    for node, key in enumerate(keys):
+        if key is None:
+            continue
+        by_key.setdefault(key, []).append(node)
+    for group in by_key.values():
+        for node in group[1:]:
+            union(group[0], node)
+
+    kinds_by_root: dict[int, set[str]] = {}
+    for node in range(len(geoms)):
+        kinds_by_root.setdefault(find(node), set()).add(kinds[node])
+
+    return [frozenset(kinds_by_root[find(node)]) for node in range(len(seeds))]
+
+
 def _fill_net_matches(net_number: int, net_name: str, fill_item: _CopperItem) -> bool:
     """Same-net test between a track/via and a zone-fill copper item.
 
@@ -422,7 +593,7 @@ class DanglingCopperRule(DRCRule):
         index: _LayerIndex | None,
     ) -> bool:
         """True when some *other* copper item contains ``point_xy``."""
-        from shapely import box  # type: ignore[import-untyped]
+        from shapely import box
         from shapely.geometry import Point
 
         if index is None:
