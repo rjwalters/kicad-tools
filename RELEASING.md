@@ -96,6 +96,20 @@ git add pyproject.toml uv.lock CHANGELOG.md
 git commit -m "chore(release): bump version to X.Y.Z"
 ```
 
+Before pushing the branch, verify the lockfile actually matches the bumped
+version — this is the step the v0.20.0 release skipped (#4698: `uv.lock`
+stayed at 0.19.0, and every subsequent `uv` invocation dirtied every
+checkout until #4702):
+
+```bash
+uv lock --check    # must exit 0 — errors if uv.lock is stale vs pyproject.toml
+git diff --stat HEAD -- uv.lock   # expect no output (already committed above)
+```
+
+CI will **not** catch a stale lockfile: every CI job installs with
+`uv sync --frozen`, which trusts the lockfile without checking it against
+`pyproject.toml`. This local check is the only gate.
+
 ### (b) Open a pull request
 
 ```bash
@@ -230,7 +244,10 @@ above; no runner infrastructure is maintained for this repo.
 
 - [ ] `uv run python scripts/changelog_gap_report.py` exits 0 with an empty gap
       set (step (0)) — run this *before* the bump commit.
-- [ ] Version bumped in `pyproject.toml`; `uv.lock` regenerated to match.
+- [ ] Version bumped in `pyproject.toml`; `uv lock` run and the regenerated
+      `uv.lock` committed **in the same bump commit**.
+- [ ] `uv lock --check` exits 0 on the release branch before the PR is opened
+      (CI's `uv sync --frozen` will NOT catch a stale lockfile — #4698).
 - [ ] CHANGELOG entry added for `X.Y.Z`.
 - [ ] Confirmed `pyproject.toml` is authoritative (ignore the `package.json`
       npm misdetection in `/repo:release` Phase 2).
