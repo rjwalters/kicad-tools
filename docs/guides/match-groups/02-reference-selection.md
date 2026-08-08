@@ -1,8 +1,9 @@
 # 02 — Reference Selection
 
 `length_match_reference` decides **which trace's length the rest of the
-group must match**. Field declared at `src/kicad_tools/router/rules.py:632`;
-accessor `effective_length_match_reference()` at `rules.py:737`.
+group must match**. The `length_match_reference` field and its accessor
+`effective_length_match_reference()` both live in
+`src/kicad_tools/router/rules.py`.
 
 Reference board: [`boards/07-matchgroup-test`](../../../boards/07-matchgroup-test/)
 exercises all three policies.

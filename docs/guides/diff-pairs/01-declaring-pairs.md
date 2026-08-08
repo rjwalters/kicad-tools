@@ -23,8 +23,8 @@ usb_p = NetClassRouting(
 )
 ```
 
-Defined at `src/kicad_tools/router/rules.py:448`. This overrides KiCad group
-declarations and suffix inference.
+The `diffpair_partner` field lives in `src/kicad_tools/router/rules.py`. This
+overrides KiCad group declarations and suffix inference.
 
 ### 2. KiCad schematic DiffPair group
 

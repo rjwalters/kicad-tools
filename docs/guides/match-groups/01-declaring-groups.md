@@ -27,9 +27,9 @@ ddr_dq = NetClassRouting(
 )
 ```
 
-Field defined at `src/kicad_tools/router/rules.py:602`. Multiple net
-classes may declare the same group name — their members merge into a
-single group (the documented MIPI/HDMI lane-composition pattern; see
+The `length_match_group` field lives in `src/kicad_tools/router/rules.py`.
+Multiple net classes may declare the same group name — their members merge
+into a single group (the documented MIPI/HDMI lane-composition pattern; see
 guide 03). Overrides suffix inference at detection time
 (`match_group_detection.py:172`).
 

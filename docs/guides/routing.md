@@ -280,7 +280,7 @@ Diff-pair routing is configured per net class on
 - [DRC rules](diff-pairs/06-drc-rules.md) (`diffpair_clearance_intra`, `_routing_continuity`, `_length_skew`, `impedance`)
 
 The canonical pre-configured class is `NET_CLASS_HIGH_SPEED` in
-[`router/rules.py:675`](../../src/kicad_tools/router/rules.py) (already has
+[`router/rules.py`](../../src/kicad_tools/router/rules.py) (already has
 `coupled_routing=True`).
 
 ---

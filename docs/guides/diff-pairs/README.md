@@ -18,7 +18,7 @@ Epic #2556 (Phases 1–3).
 
 ## Canonical pre-configured class
 
-`NET_CLASS_HIGH_SPEED` in `src/kicad_tools/router/rules.py:675` already has
+`NET_CLASS_HIGH_SPEED` in `src/kicad_tools/router/rules.py` already has
 `coupled_routing=True`, `intra_pair_clearance=0.075`, and
 `length_critical=True` — opt nets into it via `high_speed_nets=[...]` on
 `Autorouter` rather than building a class from scratch.

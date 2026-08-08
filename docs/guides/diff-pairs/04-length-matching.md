@@ -7,7 +7,7 @@ per Issue #630, not pair skew).
 
 ## Field
 
-`NetClassRouting.skew_tolerance_mm` at `src/kicad_tools/router/rules.py:550`
+`NetClassRouting.skew_tolerance_mm` (in `src/kicad_tools/router/rules.py`)
 holds the maximum allowed `|L_p - L_n|` for pairs in this class:
 
 ```python
@@ -31,9 +31,11 @@ nc2 = NetClassRouting(name="MIPI", skew_tolerance_mm=0.04)
 assert nc2.effective_skew_tolerance() == 0.04
 ```
 
-Defined at `rules.py:604`. Default of `0.5 mm` covers USB 3.0 / PCIe Gen 2+
-(~0.5–1 mm), MIPI D-PHY (~1 mm), and DDR4 DQ-strobe (~0.5 mm); set `3.0`
-for USB 2.0 HS.
+The fallback is the `default` parameter of
+`NetClassRouting.effective_skew_tolerance()` in
+`src/kicad_tools/router/rules.py`. Default of `0.5 mm` covers USB 3.0 /
+PCIe Gen 2+ (~0.5–1 mm), MIPI D-PHY (~1 mm), and DDR4 DQ-strobe (~0.5 mm);
+set `3.0` for USB 2.0 HS.
 
 ## Measurement: `Autorouter.update_diffpair_skew`
 

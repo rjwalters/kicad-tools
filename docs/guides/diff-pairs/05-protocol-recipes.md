@@ -85,7 +85,7 @@ assert mipi.effective_skew_tolerance() == 0.038
 
 ## Notes
 
-- The pre-configured `NET_CLASS_HIGH_SPEED` (`router/rules.py:675`) is a
+- The pre-configured `NET_CLASS_HIGH_SPEED` (in `router/rules.py`) is a
   reasonable default for USB 3.0 / PCIe / MIPI when you opt nets in via
   `Autorouter(..., high_speed_nets=[...])` — only fork your own
   `NetClassRouting` when a per-protocol field above differs.

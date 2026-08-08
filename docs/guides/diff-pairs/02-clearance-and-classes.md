@@ -42,17 +42,18 @@ NetClassRouting(
 )
 ```
 
-`coupled_routing` (`rules.py:451`) defaults to `False`. When `False`, the
-pair's halves are still routed *as a pair* by the diff-pair dispatch — the
-intra-pair clearance is honored at the pathfinder layer — but the
-`CoupledPathfinder` geometric coupling is bypassed. Use this for hobby
+`coupled_routing` (in `src/kicad_tools/router/rules.py`) defaults to `False`.
+When `False`, the pair's halves are still routed *as a pair* by the diff-pair
+dispatch — the intra-pair clearance is honored at the pathfinder layer — but
+the `CoupledPathfinder` geometric coupling is bypassed. Use this for hobby
 boards where tight clearance suffices without forcing coupled geometry.
 
 ### Canonical opt-in: `NET_CLASS_HIGH_SPEED`
 
-The pre-configured `NET_CLASS_HIGH_SPEED` in `rules.py:675` already has
-`coupled_routing=True` and `intra_pair_clearance=0.075`. Opt nets into it via
-`Autorouter(..., high_speed_nets=[...])` instead of redeclaring the class.
+The pre-configured `NET_CLASS_HIGH_SPEED` in `src/kicad_tools/router/rules.py`
+already has `coupled_routing=True` and `intra_pair_clearance=0.075`. Opt nets
+into it via `Autorouter(..., high_speed_nets=[...])` instead of redeclaring the
+class.
 
 ## Manufacturer profiles
 
