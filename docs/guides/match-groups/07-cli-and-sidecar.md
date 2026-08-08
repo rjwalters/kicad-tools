@@ -55,7 +55,7 @@ with open("net_class_map.json", "w") as f:
     json.dump(sidecar, f, indent=2)
 ```
 
-`net_class_map_to_dict` is at `src/kicad_tools/router/rules.py:1021`.
+`net_class_map_to_dict` lives in `src/kicad_tools/router/rules.py`.
 Board 03 (`boards/03-usb-joystick/generate_design.py`) is the
 canonical emitter; board 07 follows the same pattern.
 

@@ -122,7 +122,20 @@ next to their routed PCB as `output/net_class_map.json` (see board 07's
 flag — that is the entire difference between its in-pipeline error count and
 a bare CLI run). The sidecar is produced from the board's
 `build_net_class_map()` via `net_class_map_to_dict` and consumed via
-`net_class_map_from_dict`.
+`net_class_map_from_path` (`kicad_tools.router.rules`), the canonical
+loader every consumer shares (#4683). The loader pairs "parse the sidecar"
+with "resolve the board's layer stack", so a sidecar accepted by one
+consumer is accepted by all of them. Stack-resolution precedence: an
+explicit `layer_stack` argument, else `pcb_text` (raw board contents), else
+`pcb_path` (read best-effort), else the map is parsed with
+`layer_stack=None` — stack-independent tokens like `F.Cu` / `In<k>.Cu`
+still resolve, while `B.Cu` (whose index depends on the copper count) fails
+loud rather than guessing. A well-formed copper-layer name absent from the
+*active* stack (e.g. an inner layer named in `avoid_layers` during a
+`--layers 2` pass) is treated as a vacuously satisfied constraint and
+dropped rather than rejecting the sidecar — silently for `avoid_layers`,
+with a one-line warning for `preferred_layers` (#4685, #4709). Malformed
+tokens (`Bogus.Cu`) remain fatal.
 
 **Auto-discovery.** When `--net-class-map` is omitted, `kct check` probes for a
 sidecar next to the board. Two filename conventions are accepted — the
