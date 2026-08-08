@@ -17,12 +17,25 @@ comparable across boards and over time.
 from __future__ import annotations
 
 import math
+from collections.abc import Hashable, Iterable
 from dataclasses import dataclass
 from statistics import median
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.schema.pcb import PCB, Segment
+
+# Issue #4732: the metric core is expressed over this neutral record shape
+# -- ``(start_xy, end_xy, layer_key, net_number)`` -- so producers other
+# than a schema ``PCB`` (notably the router's in-memory
+# ``router.primitives.Segment``, whose layer is a ``Layer`` enum and whose
+# endpoints are ``x1/y1/x2/y2`` floats) can be measured with the SAME
+# definitions the ``kct check`` gates consume.  ``layer_key`` only has to
+# be hashable and comparable for equality within a single call; the
+# staircase join never interprets it.  Keeping the core here (rather than
+# duplicating it router-side) is what makes per-stage router numbers
+# directly comparable to the numbers #4646/#4651 report on a board.
+QualitySegmentRecord = tuple[tuple[float, float], tuple[float, float], Hashable, int]
 
 # Segments shorter than this are counted as "fragments" -- copper slivers
 # that almost always indicate routing churn rather than intent.  Matches
@@ -236,10 +249,32 @@ def compute_routing_quality(pcb: PCB) -> RoutingQualityMetrics:
     Pure and side-effect free.  Gracefully handles a board with zero
     copper segments (all counts 0, fractions 0.0 -- never divides by
     zero).
+
+    Thin adapter over :func:`compute_routing_quality_from_records`; the
+    metric definitions live there so non-``PCB`` producers (issue #4732's
+    per-stage router instrumentation) measure identically.
     """
     segments: list[Segment] = list(pcb.segments)
-    total_segments = len(segments)
-    net_numbers = {seg.net_number for seg in segments if seg.net_number != 0}
+    return compute_routing_quality_from_records(
+        (seg.start, seg.end, seg.layer, seg.net_number) for seg in segments
+    )
+
+
+def compute_routing_quality_from_records(
+    records: Iterable[QualitySegmentRecord],
+) -> RoutingQualityMetrics:
+    """Compute routing-quality metrics over neutral segment records.
+
+    Issue #4732: the metric core, expressed over
+    ``(start_xy, end_xy, layer_key, net_number)`` tuples instead of a
+    schema ``PCB``.  :func:`compute_routing_quality` delegates here, so a
+    board measured through either entry point yields identical numbers.
+
+    Pure and side-effect free; ``records`` is consumed exactly once.
+    """
+    materialized: list[QualitySegmentRecord] = list(records)
+    total_segments = len(materialized)
+    net_numbers = {net for _s, _e, _layer, net in materialized if net != 0}
     nets_with_copper = len(net_numbers)
     segments_per_net = total_segments / nets_with_copper if nets_with_copper else 0.0
 
@@ -254,14 +289,14 @@ def compute_routing_quality(pcb: PCB) -> RoutingQualityMetrics:
     # orthogonal segments touching that point.  Only a perpendicular
     # partner makes a segment a staircase step, so a segment's own entry
     # can never make itself count.
-    short_orth_endpoints: dict[tuple[int, str, tuple[int, int]], set[str]] = {}
+    short_orth_endpoints: dict[tuple[int, Hashable, tuple[int, int]], set[str]] = {}
     # (segment orientation, net, layer, endpoints) for each short orthogonal
     # segment, revisited in the second pass.
-    short_orth_segments: list[tuple[str, int, str, tuple[int, int], tuple[int, int]]] = []
+    short_orth_segments: list[tuple[str, int, Hashable, tuple[int, int], tuple[int, int]]] = []
 
-    for seg in segments:
-        dx = seg.end[0] - seg.start[0]
-        dy = seg.end[1] - seg.start[1]
+    for start, end, layer, net_number in materialized:
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
         length = math.hypot(dx, dy)
         if length <= COORD_EPSILON_MM:
             zero_length_count += 1
@@ -275,11 +310,11 @@ def compute_routing_quality(pcb: PCB) -> RoutingQualityMetrics:
         if direction in ("horizontal", "vertical"):
             orthogonal_count += 1
             if length < STAIRCASE_STEP_MM:
-                p1 = _quantize(seg.start)
-                p2 = _quantize(seg.end)
-                short_orth_segments.append((direction, seg.net_number, seg.layer, p1, p2))
+                p1 = _quantize(start)
+                p2 = _quantize(end)
+                short_orth_segments.append((direction, net_number, layer, p1, p2))
                 for point in (p1, p2):
-                    key = (seg.net_number, seg.layer, point)
+                    key = (net_number, layer, point)
                     short_orth_endpoints.setdefault(key, set()).add(direction)
         elif direction == "diagonal_45":
             diagonal_45_count += 1
