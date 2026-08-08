@@ -28,7 +28,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from kicad_tools.analysis.routing_quality import (
     FRAGMENT_LENGTH_MM,
@@ -397,11 +397,33 @@ def _discover_fab_profile_sidecar(pcb_path: Path) -> Path | None:
     return None
 
 
+MfrResolutionSource = Literal["cli", "sidecar", "project_kct", "default"]
+"""Where an effective ``--mfr`` value came from (#4701).
+
+Mirrors the four precedence tiers of :func:`_resolve_effective_check_mfr` 1:1,
+so downstream consumers (e.g. the via-in-pad advisory) can word their output
+without re-deriving how the tier was resolved.
+"""
+
+
+class ResolvedMfr(NamedTuple):
+    """Result of :func:`_resolve_effective_check_mfr` (#4701).
+
+    ``source`` records which precedence tier produced ``mfr`` so callers can
+    report *how* the tier was resolved (declared vs. defaulted) instead of
+    only *what* it resolved to.
+    """
+
+    mfr: str
+    messages: list[str]
+    source: MfrResolutionSource
+
+
 def _resolve_effective_check_mfr(
     cli_mfr: str | None,
     pcb_path: Path,
     default: str = "jlcpcb",
-) -> tuple[str, list[str]]:
+) -> ResolvedMfr:
     """Resolve the manufacturer profile ``kct check`` judges against (#3920).
 
     A routed ``.kicad_pcb`` carries no embedded fab-tier hint, so bare ``kct
@@ -424,16 +446,18 @@ def _resolve_effective_check_mfr(
     handling).
 
     Returns:
-        ``(effective_mfr, messages)`` where ``messages`` are stderr lines
-        (``[INFO] auto-loaded ...`` / ``WARNING: ignoring ...``) the caller
-        should print.  Kept as return values (not printed here) so the
-        resolution is unit-testable in isolation.
+        A :class:`ResolvedMfr` of ``(effective_mfr, messages, source)`` where
+        ``messages`` are stderr lines (``[INFO] auto-loaded ...`` /
+        ``WARNING: ignoring ...``) the caller should print, and ``source``
+        names which precedence tier produced ``effective_mfr`` (#4701). Kept
+        as return values (not printed here) so the resolution is
+        unit-testable in isolation.
     """
     messages: list[str] = []
 
     # Precedence 1: an explicit flag always wins.
     if cli_mfr is not None:
-        return cli_mfr, messages
+        return ResolvedMfr(cli_mfr, messages, "cli")
 
     valid_ids = set(get_manufacturer_ids())
 
@@ -455,7 +479,7 @@ def _resolve_effective_check_mfr(
                 )
             else:
                 messages.append(f"[INFO] auto-loaded fab profile: {mfr} (from {sidecar})")
-                return mfr, messages
+                return ResolvedMfr(mfr, messages, "sidecar")
 
     # Precedence 3: project.kct target_fab.
     target_fab = resolve_target_fab_for_pcb(pcb_path)
@@ -468,10 +492,10 @@ def _resolve_effective_check_mfr(
             messages.append(
                 f"[INFO] auto-loaded fab profile: {target_fab} (from project.kct target_fab)"
             )
-            return target_fab, messages
+            return ResolvedMfr(target_fab, messages, "project_kct")
 
     # Precedence 4: historical default.
-    return default, messages
+    return ResolvedMfr(default, messages, "default")
 
 
 def _profile_supports_via_in_pad(mfr: str) -> bool:
@@ -488,15 +512,25 @@ def _profile_supports_via_in_pad(mfr: str) -> bool:
         return False
 
 
-def _maybe_emit_via_in_pad_tier_advisory(mfr: str, violations: Sequence) -> None:
+def _maybe_emit_via_in_pad_tier_advisory(
+    mfr: str,
+    violations: Sequence,
+    source: MfrResolutionSource = "default",
+) -> None:
     """Emit a non-blocking via-in-pad tier hint when it would help (#3920).
 
-    Belt-and-suspenders for a standalone routed board with NO ``fab_profile.json``
-    sidecar and NO ``project.kct``: if the active profile does not support
-    via-in-pad, the DRC results contain ``via_in_pad`` findings, and at least
-    one registered profile DOES permit via-in-pad, print a loud, actionable
-    stderr advisory naming the permitting tier.  This turns a scary,
-    unexplained ``FAILED`` into a self-explaining one.
+    If the active profile does not support via-in-pad, the DRC results
+    contain ``via_in_pad`` findings, and at least one registered profile DOES
+    permit via-in-pad, print a loud, actionable stderr advisory naming the
+    permitting tier.  This turns a scary, unexplained ``FAILED`` into a
+    self-explaining one.
+
+    ``source`` (from :func:`_resolve_effective_check_mfr`, #4701) says *how*
+    ``mfr`` was resolved, so the final sentence can distinguish a genuinely
+    defaulted tier from one the board explicitly declared (via ``--mfr``, a
+    ``fab_profile.json`` sidecar, or ``project.kct`` ``target_fab``) --
+    otherwise a declared-but-unsupported tier would misleadingly read as
+    "Defaulting to the base tier" even though nothing was defaulted.
 
     CRITICAL: this is advisory only.  It must NOT change the verdict or exit
     code -- it only prints to stderr.
@@ -524,12 +558,23 @@ def _maybe_emit_via_in_pad_tier_advisory(mfr: str, violations: Sequence) -> None
     if permitting is None:
         return
 
+    # #4701: the final sentence names *how* `mfr` was resolved so a declared
+    # (non-default) tier is never reported as "defaulted".
+    if source == "project_kct":
+        tail = f"Board declares {mfr!r} (project.kct target_fab)."
+    elif source == "sidecar":
+        tail = f"Board declares {mfr!r} (fab_profile.json sidecar)."
+    elif source == "cli":
+        tail = f"Profile {mfr!r} was passed explicitly via --mfr."
+    else:
+        tail = "Defaulting to the base tier."
+
     print(
         f"WARNING: {vip_count} via_in_pad finding(s) at profile {mfr!r}. "
         "Via-in-pad is a tier-gated capability: it is LEGAL at "
         f"{permitting} (via_in_pad_supported). If this board targets a higher "
         f"fab tier, re-run with --mfr {permitting} (or pass the intended "
-        "--mfr). Defaulting to the base tier.",
+        f"--mfr). {tail}",
         file=sys.stderr,
     )
 
@@ -1697,7 +1742,7 @@ def main(argv: list[str] | None = None) -> int:
     # FAILED on legal tier-gated geometry (e.g. via-in-pad, legal at
     # jlcpcb-tier1).  Precedence: explicit --mfr > fab_profile.json sidecar >
     # project.kct target_fab > jlcpcb default.  An explicit flag always wins.
-    effective_mfr, mfr_notices = _resolve_effective_check_mfr(args.mfr, pcb_path)
+    effective_mfr, mfr_notices, mfr_source = _resolve_effective_check_mfr(args.mfr, pcb_path)
     for _line in mfr_notices:
         print(_line, file=sys.stderr)
 
@@ -2115,13 +2160,14 @@ def main(argv: list[str] | None = None) -> int:
             skip_set,
         )
 
-    # Issue #3920 (Layer 2): belt-and-suspenders advisory for a standalone
-    # routed board with NO fab_profile.json sidecar and NO project.kct.  When
-    # the active profile does not permit via-in-pad yet the results contain
-    # via_in_pad findings AND a registered profile DOES permit them, print a
-    # loud, actionable stderr hint naming the permitting tier.  This is
-    # advisory ONLY -- it must not change the verdict or exit code.
-    _maybe_emit_via_in_pad_tier_advisory(effective_mfr, results.violations)
+    # Issue #3920 (Layer 2): non-blocking advisory when the active profile
+    # does not permit via-in-pad yet the results contain via_in_pad findings
+    # AND a registered profile DOES permit them.  Prints a loud, actionable
+    # stderr hint naming the permitting tier, worded per how `effective_mfr`
+    # was resolved (#4701) so a declared tier is never reported as
+    # "defaulted".  This is advisory ONLY -- it must not change the verdict
+    # or exit code.
+    _maybe_emit_via_in_pad_tier_advisory(effective_mfr, results.violations, source=mfr_source)
 
     # Issue #4623 / #4651: advisory routing-quality metrics + opt-in
     # threshold gate.  Metrics are computed in meta mode -- skipped under
