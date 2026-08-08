@@ -220,3 +220,42 @@ class TestMirrorSerializes:
         assert proc.returncode == 0, f"kicad-cli drc failed:\n{proc.stdout}\n{proc.stderr}"
         payload = json.loads(report.read_text())
         assert payload.get("violations", []) == []
+
+
+class TestJustifyResidue:
+    """The ``(justify mirror)`` toggle must not litter the file (#4736).
+
+    A double flip creates ``(justify mirror)`` from nothing and then empties
+    it again; the empty ``(justify)`` shell must be dropped so flip-flip
+    round-trips the text effects to their original byte shape.
+    """
+
+    def test_double_flip_leaves_no_empty_justify(self, tmp_path: Path):
+        pcb = PCB.load(str(_FRONT))
+        applicator = StrategyApplicator()
+        applicator.apply_strategy(pcb, _mirror_strategy())
+        applicator.apply_strategy(pcb, _mirror_strategy())
+        out = tmp_path / "double_flipped.kicad_pcb"
+        pcb.save(str(out))
+        text = out.read_text()
+        assert "(justify)" not in text
+        # The front fixture carries no (justify ...) nodes at all, so a
+        # flip-flip must not invent any.
+        assert "(justify" not in text
+
+    def test_unmirror_preserves_other_justify_tokens(self):
+        """Pre-existing ``(justify left mirror)`` un-mirrors to
+        ``(justify left)`` -- the node survives when non-mirror tokens
+        remain."""
+        from kicad_tools.sexp import parse_string
+
+        node = parse_string(
+            '(fp_text user "X" (at 0 0) (layer "F.SilkS") '
+            "(effects (font (size 1 1) (thickness 0.15)) (justify left mirror)))"
+        )
+        StrategyApplicator._mirror_cosmetic_node(node)
+        effects = node.find_child("effects")
+        assert effects is not None
+        justify = effects.find_child("justify")
+        assert justify is not None, "non-empty justify node must survive un-mirroring"
+        assert justify.values == ["left"]

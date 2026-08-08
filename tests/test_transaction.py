@@ -70,6 +70,45 @@ class TestExceptionRollback:
                 raise KeyboardInterrupt()
         assert board.read_bytes() == ORIGINAL
 
+    def test_exception_rollback_announces_sidecar_on_stderr(self, board: Path, capsys):
+        """The exception path prints report_lines() to stderr (#4736) --
+        without it the user never learns the forensic sidecar exists."""
+        with pytest.raises(RuntimeError):
+            with board_transaction(board):
+                board.write_bytes(b"mutated")
+                raise RuntimeError("boom")
+        err = capsys.readouterr().err
+        assert f"--transactional: rolled back {board}" in err
+        sidecars = _sidecars(board.parent)
+        assert len(sidecars) == 1
+        assert f"--transactional: failed attempt preserved at {sidecars[0]}" in err
+
+    def test_exception_rollback_keep_failed_false_claims_no_sidecar(self, board: Path, capsys):
+        """With keep_failed=False the announcement must not claim a sidecar
+        that was never written."""
+        with pytest.raises(RuntimeError):
+            with board_transaction(board, keep_failed=False):
+                board.write_bytes(b"mutated")
+                raise RuntimeError("boom")
+        err = capsys.readouterr().err
+        assert "rolled back" in err
+        assert "failed attempt preserved" not in err
+
+    def test_success_path_prints_nothing(self, board: Path, capsys):
+        """No announcement when the with block exits cleanly."""
+        with board_transaction(board):
+            board.write_bytes(ORIGINAL + b"(segment ok)\n")
+        assert capsys.readouterr().err == ""
+
+    def test_exit_code_rollback_path_prints_nothing_from_exit(self, board: Path, capsys):
+        """Explicit exit-code rollbacks return normally through __exit__
+        (exc_type is None), so the caller-side report_lines() print is the
+        only one -- no double announcement."""
+        with board_transaction(board) as txn:
+            board.write_bytes(b"mutated")
+            txn.rollback()
+        assert capsys.readouterr().err == ""
+
 
 # ── Explicit rollback API ───────────────────────────────────────────────
 

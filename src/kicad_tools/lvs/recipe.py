@@ -424,6 +424,16 @@ def _print_summary(
     if run_label and label_result is not None:
         if label_result.clean:
             print(f"\n   label-LVS PASS: 0 mismatches ({lvs_path.name})")
+        elif label_result.vacuous:
+            # Mirror the copper leg's dedicated VACUOUS line (#4736): the
+            # generic FAIL formatter would render the single synthetic
+            # ``<vacuous>`` record as a misleading "1 mismatch(es)".
+            print(
+                "\n   label-LVS VACUOUS (treated as FAIL): PCB binds 0 pins "
+                "-- no mismatches are detectable, so 'clean' would be "
+                "zero-evidence (#4681 guard).  Wire the board's pads to "
+                "nets or skip the LVS step explicitly."
+            )
         else:
             print(f"\n   label-LVS FAIL: {len(label_result.mismatches)} mismatch(es):")
             for lm in label_result.mismatches[:5]:

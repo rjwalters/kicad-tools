@@ -404,6 +404,43 @@ class TestBenchmarkReportJson:
         assert "Routing Benchmark Report" in out
 
 
+class TestBenchmarkRunDifficultyError:
+    """Bless the single-line difficulty error shared by text and JSON modes.
+
+    #4727 merged the historical two-line text error (``Unknown difficulty:
+    X`` + ``Valid options: ...``) into one ``_fail()`` message so both modes
+    share it; #4736 pins that as the intended format.  The argparse layer
+    already rejects bad ``--difficulty`` values via ``choices``, so this
+    internal guard is only reachable by callers that build the args
+    namespace directly -- drive it that way.
+    """
+
+    _MESSAGE = "Unknown difficulty: bogus (valid options: easy, medium, hard)"
+
+    def _run(self, fmt: str, capsys) -> tuple[int, str]:
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.commands.benchmark import run_benchmark_command
+
+        args = SimpleNamespace(
+            benchmark_command="run",
+            difficulty="bogus",
+            format=fmt,
+        )
+        rc = run_benchmark_command(args)
+        return rc, capsys.readouterr().out
+
+    def test_text_mode_single_line(self, capsys):
+        rc, out = self._run("text", capsys)
+        assert rc == 1
+        assert out.strip().splitlines() == [self._MESSAGE]
+
+    def test_json_mode_single_error_document(self, capsys):
+        rc, out = self._run("json", capsys)
+        assert rc == 1
+        assert json.loads(out) == {"error": self._MESSAGE}
+
+
 # ---------------------------------------------------------------------------
 # zones family emission (hermetic paths)
 # ---------------------------------------------------------------------------

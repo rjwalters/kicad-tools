@@ -387,6 +387,54 @@ def test_build_lvs_payload_netlist_vacuous_flag() -> None:
     assert "netlist_vacuous" not in no_label
 
 
+def test_vacuous_label_summary_prints_dedicated_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A vacuous label leg gets its own VACUOUS summary line (#4736), not the
+    generic ``label-LVS FAIL: 1 mismatch(es)`` with a ``<vacuous>``
+    pseudo-record.  The JSON payload is unchanged."""
+    from kicad_tools.lvs.board_lvs import NETLIST_VACUOUS_NET, NETLIST_VACUOUS_REF
+
+    vacuous_label = LVSResult(
+        clean=False,
+        mismatches=(
+            LVSMismatch(
+                ref=NETLIST_VACUOUS_REF,
+                pad="board_pads=264",
+                schematic_net="sch_bound_pins=264",
+                pcb_net=NETLIST_VACUOUS_NET,
+            ),
+        ),
+    )
+    _patch_comparators(monkeypatch, copper=_CLEAN_COPPER, label=vacuous_label)
+    with pytest.raises(BoardNetlistMismatch):
+        write_lvs_report(
+            Path("sch"), Path("pcb"), tmp_path, require_clean=True, fresh_copper_check=False
+        )
+    out = capsys.readouterr().out
+    assert "label-LVS VACUOUS (treated as FAIL)" in out
+    assert "label-LVS FAIL" not in out
+    assert "<vacuous>" not in out
+    # Print-formatting only: the payload still carries the synthetic record.
+    data = _read(tmp_path)
+    assert data["netlist_vacuous"] is True
+    assert data["mismatches"][0]["ref"] == NETLIST_VACUOUS_REF
+
+
+def test_genuine_dirty_label_summary_line_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Non-vacuous label failures keep the generic FAIL formatter."""
+    _patch_comparators(monkeypatch, copper=_CLEAN_COPPER, label=_DIRTY_LABEL)
+    with pytest.raises(BoardNetlistMismatch):
+        write_lvs_report(
+            Path("sch"), Path("pcb"), tmp_path, require_clean=True, fresh_copper_check=False
+        )
+    out = capsys.readouterr().out
+    assert "label-LVS FAIL: 1 mismatch(es):" in out
+    assert "label-LVS VACUOUS" not in out
+
+
 def test_build_lvs_payload_is_exported_from_package() -> None:
     import kicad_tools.lvs as lvs_pkg
 

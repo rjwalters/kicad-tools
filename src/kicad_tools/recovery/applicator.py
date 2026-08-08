@@ -472,6 +472,13 @@ class StrategyApplicator:
                     justify.children = [
                         c for c in justify.children if not (c.is_atom and c.value == "mirror")
                     ]
+                    if not justify.children:
+                        # Un-mirroring emptied the node (the flip-twice
+                        # case, where the first flip created it from
+                        # nothing): drop it entirely so a double flip
+                        # restores the pre-flip byte shape instead of
+                        # leaving an empty "(justify)" behind (#4736).
+                        effects.remove(justify)
                 else:
                     justify.add("mirror")
 

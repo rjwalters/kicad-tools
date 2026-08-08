@@ -55,6 +55,7 @@ Example::
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
@@ -129,6 +130,16 @@ class BoardTransaction:
         # the original exception rather than replacing it.
         if exc_type is not None:
             self.rollback()
+            # Announce the rollback and forensic sidecar on stderr (#4736):
+            # CLI adopters only print report_lines() on their explicit
+            # exit-code rollback paths, so without this the user never
+            # learns where the failed attempt was preserved.  Only reached
+            # when rollback() succeeded -- a TransactionRestoreError
+            # propagates past this point and already names the failed
+            # paths.  No overlap with the exit-code paths: those return
+            # normally through __exit__ with exc_type is None.
+            for line in self.report_lines():
+                print(line, file=sys.stderr)
         return False
 
     def rollback(self) -> None:
