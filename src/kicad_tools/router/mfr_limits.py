@@ -532,6 +532,70 @@ def resolve_edge_clearance(manufacturer: str | None) -> float | None:
     return None
 
 
+def resolve_min_trace_width(
+    manufacturer: str | None,
+    layers: int | None = None,
+    copper_oz: float | None = None,
+) -> float | None:
+    """Resolve the *check-side* minimum trace width floor for a manufacturer.
+
+    Shared resolution helper (Issue #4700), the trace-width analogue of
+    :func:`resolve_edge_clearance`.  Used by the ``kct route`` CLI to fill
+    the ``--trace-width`` default, guard explicitly-narrower widths, and
+    floor the ``--complete`` relaxation ladder, so route-time copper can
+    never fall below the floor that ``kct check --mfr`` enforces.
+
+    **This deliberately does NOT read** :attr:`MfrLimits.min_trace`.  That
+    field is layer-count- and copper-weight-agnostic (jlcpcb 0.127mm for
+    every configuration), whereas the DRC that ``kct check`` runs resolves
+    ``get_profile(mfr).get_design_rules(layers, copper_oz).min_trace_width_mm``
+    -- a per-``<layers>layer_<oz>oz`` value that is *higher* than
+    ``min_trace`` on heavy copper (jlcpcb ``4layer_2oz`` = 0.1524mm vs
+    ``min_trace`` = 0.127mm).  Flooring at ``min_trace`` would be a silent
+    no-op for exactly the configuration that reported this bug.
+
+    Args:
+        manufacturer: Manufacturer name (case-insensitive, aliases OK),
+            or ``None``/empty when no manufacturer is configured.
+        layers: Copper layer count for the profile lookup.  ``None`` uses
+            the profile default (4), matching
+            :meth:`ManufacturerProfile.get_design_rules`.
+        copper_oz: Outer-layer copper weight in oz for the profile lookup.
+            ``None`` uses the profile default (1.0).
+
+    Returns:
+        The profile's ``min_trace_width_mm`` in mm, or ``None`` when
+        ``manufacturer`` is falsy, unknown (no raise -- manufacturer
+        validation belongs to the CLI layer), the profile package is
+        unavailable, or the resolved floor is not positive.
+    """
+    if not manufacturer:
+        return None
+    try:
+        # Lazy import: ``kicad_tools.manufacturers`` pulls in YAML profile
+        # loading, and importing it at module scope would make the router
+        # package depend on it (and risks an import cycle).  Matches how
+        # ``cli/route_cmd.py`` reaches for ``get_profile``.
+        from kicad_tools.manufacturers import get_profile
+
+        profile = get_profile(manufacturer)
+        rules = profile.get_design_rules(
+            layers=int(layers) if layers else 4,
+            copper_oz=float(copper_oz) if copper_oz else 1.0,
+        )
+    except (ImportError, ValueError, KeyError, TypeError, IndexError, OSError):
+        return None
+
+    floor = getattr(rules, "min_trace_width_mm", None)
+    if floor is None:
+        return None
+    try:
+        floor = float(floor)
+    except (TypeError, ValueError):
+        return None
+    return floor if floor > 0 else None
+
+
 @dataclass
 class RelaxationTier:
     """A single design rule relaxation tier.

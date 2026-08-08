@@ -15,6 +15,7 @@ from kicad_tools.router.mfr_limits import (
     get_mfr_limits,
     get_mfr_size_tier_ladder,
     get_relaxation_tiers,
+    resolve_min_trace_width,
 )
 
 
@@ -611,3 +612,132 @@ class TestFindSmallestAdmittingTier:
         tier_canonical = find_smallest_admitting_tier(100, 100, "jlcpcb")
         tier_alias = find_smallest_admitting_tier(100, 100, "JLCPCB")
         assert tier_canonical == tier_alias
+
+
+class TestResolveMinTraceWidth:
+    """Issue #4700: the check-side minimum trace width resolver.
+
+    ``kct route`` used to floor its trace widths at
+    :attr:`MfrLimits.min_trace`, which is layer-count- and
+    copper-weight-agnostic, while ``kct check --mfr`` enforces the
+    per-``<layers>layer_<oz>oz`` ``min_trace_width_mm`` from the
+    manufacturer profile.  These tests pin the *divergence* -- a resolver
+    that read ``MfrLimits.min_trace`` would be a silent no-op for the
+    configuration that reported the bug.
+    """
+
+    def test_jlcpcb_4layer_2oz_is_the_reported_floor(self):
+        """jlcpcb 4-layer 2oz resolves 0.1524mm (the reporter's key)."""
+        assert resolve_min_trace_width("jlcpcb", 4, 2.0) == pytest.approx(0.1524)
+
+    def test_jlcpcb_2oz_floor_exceeds_mfr_limits_min_trace(self):
+        """The 2oz floor is STRICTLY above MfrLimits.min_trace (no-op guard).
+
+        This is the assertion that fails for a naive #4568-shaped fix: a
+        resolver delegating to ``MFR_JLCPCB.min_trace`` returns 0.127, which
+        is below the 0.150mm copper the reporter observed, so nothing would
+        be raised and the 63 ``dimension_trace_width`` errors would persist.
+        """
+        floor = resolve_min_trace_width("jlcpcb", 4, 2.0)
+        assert floor is not None
+        assert floor > MFR_JLCPCB.min_trace
+        # And it is above the reported 0.150mm emission, so it binds.
+        assert floor > 0.150
+
+    def test_jlcpcb_2layer_2oz_is_also_the_heavy_copper_floor(self):
+        assert resolve_min_trace_width("jlcpcb", 2, 2.0) == pytest.approx(0.1524)
+
+    def test_jlcpcb_1oz_floors_are_layer_keyed(self):
+        """1oz floors differ per layer count -- 2-layer is the coarser one."""
+        assert resolve_min_trace_width("jlcpcb", 2, 1.0) == pytest.approx(0.127)
+        assert resolve_min_trace_width("jlcpcb", 4, 1.0) == pytest.approx(0.1016)
+
+    def test_defaults_match_profile_defaults(self):
+        """Omitted layers/copper use the profile default (4-layer 1oz)."""
+        assert resolve_min_trace_width("jlcpcb") == resolve_min_trace_width("jlcpcb", 4, 1.0)
+
+    def test_alias_and_case_insensitive(self):
+        assert resolve_min_trace_width("JLCPCB", 4, 2.0) == resolve_min_trace_width(
+            "jlcpcb", 4, 2.0
+        )
+
+    def test_unknown_manufacturer_returns_none(self):
+        """Unknown manufacturer degrades to None -- validation is the CLI's job."""
+        assert resolve_min_trace_width("not-a-fab", 4, 1.0) is None
+
+    def test_falsy_manufacturer_returns_none(self):
+        assert resolve_min_trace_width(None) is None
+        assert resolve_min_trace_width("") is None
+
+    def test_every_known_manufacturer_resolves_a_positive_floor(self):
+        """Parity invariant: every routable tier has a check-side floor."""
+        for name in MFR_LIMITS:
+            for copper in (1.0, 2.0):
+                floor = resolve_min_trace_width(name, 4, copper)
+                assert floor is not None, f"{name} @ {copper}oz resolved no floor"
+                assert floor > 0
+
+
+class TestRelaxationLadderRespectsCheckSideFloor:
+    """Issue #4700: ``--complete`` tiers must never dip below the check floor."""
+
+    def test_default_ladder_dips_below_the_2oz_floor(self):
+        """Baseline: without the resolved floor the ladder emits sub-floor tiers.
+
+        This documents the second sub-floor emitter the fix has to close --
+        ``MfrLimits.min_trace`` (0.127) lets tier interpolation walk right
+        through 0.1524mm.
+        """
+        tiers = get_relaxation_tiers(
+            initial_trace_width=0.2,
+            initial_clearance=0.4,
+            initial_via_drill=0.3,
+            initial_via_diameter=0.6,
+            manufacturer="jlcpcb",
+        )
+        assert min(t.trace_width for t in tiers) < 0.1524
+
+    def test_resolved_floor_clamps_every_tier(self):
+        """Threading the resolved floor keeps every tier at or above it."""
+        floor = resolve_min_trace_width("jlcpcb", 4, 2.0)
+        tiers = get_relaxation_tiers(
+            initial_trace_width=0.2,
+            initial_clearance=0.4,
+            initial_via_drill=0.3,
+            initial_via_diameter=0.6,
+            manufacturer="jlcpcb",
+            min_trace_floor=floor,
+        )
+        assert floor is not None
+        for tier in tiers:
+            assert tier.trace_width >= floor - 1e-9, tier
+
+    def test_looser_check_floor_never_lowers_the_fab_minimum(self):
+        """A 1oz check floor below MfrLimits.min_trace is clamped back up."""
+        floor = resolve_min_trace_width("jlcpcb", 4, 1.0)
+        assert floor is not None and floor < MFR_JLCPCB.min_trace
+        tiers = get_relaxation_tiers(
+            initial_trace_width=0.2,
+            initial_clearance=0.4,
+            initial_via_drill=0.3,
+            initial_via_diameter=0.6,
+            manufacturer="jlcpcb",
+            min_trace_floor=floor,
+        )
+        assert min(t.trace_width for t in tiers) >= MFR_JLCPCB.min_trace - 1e-9
+
+    def test_parity_invariant_across_all_manufacturers(self):
+        """For every tier, a floored ladder passes the matching check floor."""
+        for name in MFR_LIMITS:
+            for copper in (1.0, 2.0):
+                floor = resolve_min_trace_width(name, 4, copper)
+                assert floor is not None
+                tiers = get_relaxation_tiers(
+                    initial_trace_width=0.25,
+                    initial_clearance=0.4,
+                    initial_via_drill=0.3,
+                    initial_via_diameter=0.6,
+                    manufacturer=name,
+                    min_trace_floor=floor,
+                )
+                assert all(t.trace_width >= floor - 1e-9 for t in tiers), (name, copper)

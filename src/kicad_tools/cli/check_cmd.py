@@ -38,6 +38,7 @@ from kicad_tools.analysis.routing_quality import (
     evaluate_routing_quality_thresholds,
     routing_quality_gate_dict,
 )
+from kicad_tools.cli.copper_weight import parse_copper_weight_arg
 from kicad_tools.manufacturers import get_manufacturer_ids, get_profile
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
@@ -254,75 +255,12 @@ def _find_pcb_file(directory: Path) -> Path | None:
     return None
 
 
-def _parse_copper_weight_arg(raw: str) -> tuple[float | None, float | None]:
-    """Parse a ``--copper`` value into ``(outer_oz, inner_oz)`` (Issue #4326).
-
-    Accepts two forms:
-
-    - **Scalar** -- ``"2"`` / ``"1.0"`` -- applies to both the outer and
-      inner layer classes, returning ``(oz, oz)``.
-    - **Keyed** -- ``"outer=2,inner=0.5"`` -- sets each layer class
-      independently.  A key omitted from the keyed form returns ``None`` for
-      that class, meaning "fall back to the stackup / profile for that layer
-      class" (so ``--copper outer=2`` overrides only the outer weight).
-
-    Raises:
-        ValueError: on empty input, unknown keys, duplicate keys, a
-            non-numeric value, or a non-positive weight -- mirroring the
-            ``--only`` / ``--skip`` category-validation contract (a clear
-            ``Error:`` + exit 1 at the call site).
-    """
-    text = raw.strip()
-    if not text:
-        raise ValueError("--copper value is empty")
-
-    if "=" not in text:
-        # Scalar form: one number for both layer classes.
-        try:
-            oz = float(text)
-        except ValueError:
-            raise ValueError(
-                f"invalid --copper value {raw!r} "
-                "(expected a number like '2' or a keyed form 'outer=2,inner=0.5')"
-            ) from None
-        if oz <= 0:
-            raise ValueError(f"--copper weight must be positive: {oz}")
-        return (oz, oz)
-
-    # Keyed form: comma-separated key=value tokens.
-    outer: float | None = None
-    inner: float | None = None
-    seen: set[str] = set()
-    for token in text.split(","):
-        token = token.strip()
-        if not token:
-            continue
-        if "=" not in token:
-            raise ValueError(f"invalid --copper token {token!r} (expected 'key=value')")
-        key, _, value = token.partition("=")
-        key = key.strip().lower()
-        value = value.strip()
-        if key not in ("outer", "inner"):
-            raise ValueError(f"unknown --copper key {key!r} (expected 'outer' or 'inner')")
-        if key in seen:
-            raise ValueError(f"duplicate --copper key {key!r}")
-        seen.add(key)
-        try:
-            oz = float(value)
-        except ValueError:
-            raise ValueError(
-                f"invalid --copper {key} value {value!r} (expected a number)"
-            ) from None
-        if oz <= 0:
-            raise ValueError(f"--copper {key} weight must be positive: {oz}")
-        if key == "outer":
-            outer = oz
-        else:
-            inner = oz
-
-    if outer is None and inner is None:
-        raise ValueError(f"--copper keyed form set no values: {raw!r}")
-    return (outer, inner)
+# Issue #4700: the ``--copper`` grammar is now shared with ``kct route`` so
+# both commands resolve the identical ``<layers>layer_<oz>oz`` manufacturer
+# design-rule key.  The implementation moved verbatim to
+# ``kicad_tools.cli.copper_weight``; this alias keeps the historical private
+# name (and its importers) working unchanged.
+_parse_copper_weight_arg = parse_copper_weight_arg
 
 
 def _net_class_map_sidecar_candidates(pcb_path: Path) -> list[Path]:

@@ -3481,7 +3481,20 @@ def _add_route_parser(subparsers) -> None:
             "effect when --grid is an explicit value."
         ),
     )
-    route_parser.add_argument("--trace-width", type=float, default=0.2, help="Trace width in mm")
+    route_parser.add_argument(
+        "--trace-width",
+        type=float,
+        default=None,
+        help=(
+            "Trace width in mm (default: 0.2, raised to the manufacturer's "
+            "minimum trace width when that floor is higher -- e.g. jlcpcb "
+            "with --copper 2 has a 0.1524mm floor). Issue #4700: the floor is "
+            "the SAME per-<layers>layer_<oz>oz value `kct check --mfr` "
+            "enforces. An explicit value BELOW the resolved floor is honored "
+            "but prints a stderr WARNING naming the dimension_trace_width "
+            "check it will fail; it is never a hard error."
+        ),
+    )
     route_parser.add_argument("--clearance", type=float, default=0.15, help="Clearance in mm")
     route_parser.add_argument(
         "--fine-pitch-clearance",
@@ -3942,6 +3955,23 @@ def _add_route_parser(subparsers) -> None:
         "--mfr",
         default="jlcpcb",
         help="Manufacturer for DRC validation and adaptive rules (default: jlcpcb)",
+    )
+    route_parser.add_argument(
+        "--copper",
+        default=None,
+        metavar="OZ",
+        help=(
+            "Copper weight in oz used to resolve the manufacturer's design "
+            "rules (Issue #4700), using the SAME grammar as `kct check "
+            "--copper`: scalar '--copper 2' applies to both layer classes, "
+            "keyed '--copper outer=2,inner=0.5' sets each independently. "
+            "Precedence: explicit --copper > the board's declared "
+            "(setup (stackup ...)) weight > 1oz. Heavy copper RAISES the "
+            "minimum trace width (jlcpcb 4-layer: 0.1016mm at 1oz, 0.1524mm "
+            "at 2oz), so passing the weight you will actually order keeps "
+            "route and `kct check --mfr` in agreement on "
+            "dimension_trace_width."
+        ),
     )
     route_parser.add_argument(
         "--high-performance",

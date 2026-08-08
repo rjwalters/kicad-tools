@@ -3389,6 +3389,7 @@ def load_pcb_for_routing(
     strategy: str = "grid",
     localize_lattice_to_region: bool = False,
     lattice_link_budget_s: float | None = None,
+    min_trace_width_floor: float | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -3486,6 +3487,19 @@ def load_pcb_for_routing(
                 the lattice netset negotiation aborts within
                 ``budget x link-count`` seconds and returns the best routes so
                 far.  ``None`` preserves the unbudgeted negotiation.
+        min_trace_width_floor: Issue #4700.  Minimum legal trace width (mm)
+                for the target fab tier -- the SAME
+                ``get_design_rules(layers, copper_oz).min_trace_width_mm``
+                that ``kct check --mfr`` enforces.  The built-in and
+                auto-classified net classes assembled below carry library
+                default widths (e.g. ``Differential`` = 0.15mm) that are
+                below that floor on heavy copper (jlcpcb 2oz = 0.1524mm),
+                so route emitted copper its own check rejected with
+                ``dimension_trace_width``.  When given, those library
+                defaults are raised to the floor.  Caller-supplied net
+                classes (merged into ``router.net_class_map`` afterwards)
+                are user data and are never rewritten here.  ``None``
+                (default) preserves the pre-#4700 widths exactly.
 
     Returns:
         Tuple of (Autorouter instance, net_map dict)
@@ -3791,6 +3805,33 @@ def load_pcb_for_routing(
                     net_class_map[_name] = _routing
     except Exception as e:  # noqa: BLE001 - classification is best-effort
         logger.debug(f"Auto net classification skipped: {e}")
+
+    # Issue #4700: raise LIBRARY-default net-class widths to the fab's own
+    # minimum trace width.  ``DEFAULT_NET_CLASS_MAP`` and the auto-classifier
+    # carry fixed widths (``Differential`` = 0.15mm) that sit below the
+    # per-<layers>layer_<oz>oz floor ``kct check --mfr`` enforces on heavy
+    # copper (jlcpcb 2oz = 0.1524mm) -- the source of the reported 63
+    # identical ``Trace width 0.150mm < minimum 0.152mm`` errors.  Only the
+    # map built above is touched: a caller's own net-class map is merged into
+    # ``router.net_class_map`` later and stays user data (the CLI warns about
+    # sub-floor authored widths instead of rewriting them).
+    _width_floor = min_trace_width_floor
+    if _width_floor is None:
+        # Same value carried on the effective rules (set by ``kct route``), so
+        # in-process callers that build DesignRules directly get the floor too
+        # -- and it is exactly the value the routing cache keys on.
+        _width_floor = getattr(rules, "min_trace_width_floor", None)
+    if _width_floor and _width_floor > 0:
+        for _cls_key, _cls in list(net_class_map.items()):
+            _width = getattr(_cls, "trace_width", None)
+            if _width is not None and _width < _width_floor:
+                net_class_map[_cls_key] = replace(_cls, trace_width=_width_floor)
+                logger.debug(
+                    "net class %s trace_width %.4gmm raised to fab minimum %.4gmm",
+                    getattr(_cls, "name", _cls_key),
+                    _width,
+                    _width_floor,
+                )
 
     router = Autorouter(
         width=board_width,

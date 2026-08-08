@@ -127,6 +127,16 @@ class CacheKey:
                 [net_a, net_b, float(required)]
                 for (net_a, net_b), required in pairwise.required_by_pair.items()
             )
+        # Issue #4700: the fab minimum trace width RAISES the built-in
+        # net-class widths (``Differential`` 0.15 -> jlcpcb 2oz 0.1524), so it
+        # changes the emitted copper.  Without it in the key, a ``--copper 1``
+        # run and a ``--copper 2`` run of the same board share an entry and the
+        # second silently gets the first's narrower traces back.  Absent floor
+        # -> ``rules_data`` is unchanged, so every pre-existing key is
+        # preserved byte-for-byte (same contract as the #4602 HV table above).
+        min_trace_floor = getattr(rules, "min_trace_width_floor", None)
+        if min_trace_floor:
+            rules_data["min_trace_width_floor"] = float(min_trace_floor)
         rules_json = json.dumps(rules_data, sort_keys=True)
         rules_hash = hashlib.sha256(rules_json.encode()).hexdigest()
 
@@ -297,6 +307,11 @@ class SubProblemSignature:
             "via_diameter": rules.via_diameter,
             "grid_resolution": rules.grid_resolution,
         }
+        # Issue #4700: see CacheKey.from_pcb_and_rules -- the fab minimum trace
+        # width changes the emitted copper, so it must key the signature too.
+        min_trace_floor = getattr(rules, "min_trace_width_floor", None)
+        if min_trace_floor:
+            rules_data["min_trace_width_floor"] = float(min_trace_floor)
         rules_json = json.dumps(rules_data, sort_keys=True)
         rules_hash = hashlib.sha256(rules_json.encode()).hexdigest()
 

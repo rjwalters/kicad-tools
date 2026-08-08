@@ -4583,6 +4583,244 @@ def _resolve_mfr_design_rules(args, layer_stack):
         return None
 
 
+# Issue #4700: the historical ``--trace-width`` argparse default, kept as a
+# named constant now that the flag itself carries a ``None`` sentinel so an
+# explicit value is distinguishable from "not given".
+DEFAULT_TRACE_WIDTH_MM = 0.2
+
+# Tolerance for "is this width below the floor" comparisons.  Widths are
+# authored in mm at 4 decimal places (0.1524 = 6 mil), so 1e-9 only absorbs
+# float representation error, never a real 0.0001mm difference.
+_TRACE_WIDTH_EPS = 1e-9
+
+
+def _effective_trace_width(args) -> float:
+    """Return ``args.trace_width``, falling back to the CLI default.
+
+    ``--trace-width`` carries a ``None`` sentinel (Issue #4700) so
+    :func:`_apply_manufacturer_trace_width_floor` can tell an explicit value
+    from an unset one.  ``_main_impl`` resolves the sentinel before dispatch,
+    but the route sub-flows are also called directly (tests, embedders), so
+    every consumer reads the width through this accessor and can never see
+    ``None``.
+    """
+    width = getattr(args, "trace_width", None)
+    return DEFAULT_TRACE_WIDTH_MM if width is None else float(width)
+
+
+def _effective_layer_count_for_rules(args, pcb_path) -> int | None:
+    """Resolve the copper layer count used for manufacturer rule lookup.
+
+    Mirrors the ``--layers`` handling of the routing sub-flows: an explicit
+    choice (``2`` / ``4`` / ``4-sig`` / ``4-all`` / ``6``) yields its numeric
+    prefix; ``auto`` detects the stack from the board.  Returns ``None`` when
+    detection fails, which makes the caller fall back to the profile default
+    rather than guess.
+    """
+    raw = getattr(args, "layers", "auto")
+    if raw and raw != "auto":
+        try:
+            return int(str(raw).split("-", 1)[0])
+        except (TypeError, ValueError):
+            return None
+    try:
+        from kicad_tools.router.io import detect_layer_stack
+
+        return int(detect_layer_stack(Path(pcb_path).read_text()).num_layers)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _resolve_route_copper_oz(
+    args, pcb_path, *, probe_stackup: bool = True
+) -> tuple[float | None, float | None]:
+    """Resolve ``(outer_oz, inner_oz)`` for the manufacturer rule lookup.
+
+    Same precedence as ``kct check`` (Issue #4326): an explicit ``--copper``
+    (keyed > scalar) wins, else the board's declared ``(setup (stackup ...))``
+    copper weight, else ``None`` (leave the profile default in place).
+
+    Args:
+        args: Parsed ``kct route`` arguments.
+        pcb_path: Path to the input board.
+        probe_stackup: When ``False``, skip the board parse entirely and use
+            only ``--copper``.  The caller passes ``False`` when no
+            manufacturer floor will be resolved, so a board without
+            ``--copper`` never pays for a parse whose result is unused.
+
+    Raises:
+        ValueError: when ``--copper`` is syntactically invalid -- the caller
+            reports it as ``Error: ...`` + exit 1, matching ``kct check``.
+    """
+    cli_outer: float | None = None
+    cli_inner: float | None = None
+    raw = getattr(args, "copper", None)
+    if raw is not None:
+        from kicad_tools.cli.copper_weight import parse_copper_weight_arg
+
+        cli_outer, cli_inner = parse_copper_weight_arg(raw)
+
+    stackup_outer: float | None = None
+    stackup_inner: float | None = None
+    if not probe_stackup or (cli_outer is not None and cli_inner is not None):
+        return (cli_outer, cli_inner)
+    try:
+        from kicad_tools.physics.stackup import Stackup
+        from kicad_tools.schema.pcb import PCB
+
+        derived = Stackup.from_pcb(PCB.load(str(pcb_path))).outer_inner_copper_oz()
+        if derived is not None:
+            stackup_outer, stackup_inner = derived
+    except Exception:  # noqa: BLE001 - never crash `route` on a stackup quirk
+        stackup_outer = stackup_inner = None
+
+    return (
+        cli_outer if cli_outer is not None else stackup_outer,
+        cli_inner if cli_inner is not None else stackup_inner,
+    )
+
+
+def _sub_floor_net_class_widths(net_class_map, floor: float) -> list[tuple[str, float]]:
+    """List ``(class_name, trace_width)`` entries narrower than ``floor``.
+
+    Net-class widths are user data (Issue #4700): they are reported, never
+    silently rewritten.  Deduplicated by class name and sorted narrowest
+    first so the warning names the worst offender up front.
+    """
+    if not net_class_map:
+        return []
+    worst: dict[str, float] = {}
+    for entry in net_class_map.values():
+        width = getattr(entry, "trace_width", None)
+        if width is None:
+            continue
+        try:
+            width = float(width)
+        except (TypeError, ValueError):
+            continue
+        if width >= floor - _TRACE_WIDTH_EPS:
+            continue
+        name = str(getattr(entry, "name", "?"))
+        if name not in worst or width < worst[name]:
+            worst[name] = width
+    return sorted(worst.items(), key=lambda kv: (kv[1], kv[0]))
+
+
+def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False) -> int:
+    """Resolve the trace-width default/floor from the manufacturer profile.
+
+    Issue #4700.  ``kct route --manufacturer X`` used to emit copper that
+    ``kct check --mfr X`` rejected with ``dimension_trace_width``, because
+    route floored at the layer/copper-agnostic
+    :attr:`MfrLimits.min_trace` (jlcpcb 0.127mm) while check enforces the
+    per-``<layers>layer_<oz>oz`` ``min_trace_width_mm`` (jlcpcb 4-layer 2oz:
+    0.1524mm).  This runs once in ``_main_impl`` -- before every route sub-flow
+    dispatch, next to the #4568 ``--edge-clearance`` auto-fill -- and:
+
+    1. resolves the copper weights (``--copper`` > board stackup > profile)
+       and stashes them on ``args`` for the ampacity advisory, the post-route
+       DRC and the ``.kicad_pro`` / ``.kicad_dru`` sidecars;
+    2. fills the ``--trace-width`` sentinel with ``max(0.2, floor)``;
+    3. warns (stderr, never suppressed by ``--quiet``, exit code unchanged)
+       when an explicit ``--trace-width``, an explicit ``--min-trace``, or a
+       net-class ``trace_width`` sits below the floor;
+    4. raises the ``--complete`` relaxation ladder's ``--min-trace`` floor to
+       the resolved value, so tier interpolation can no longer walk down
+       through sub-floor widths.
+
+    A no-op (default 0.2, no message, no warning) when no manufacturer floor
+    resolves, so behavior without ``--manufacturer`` is unchanged.
+
+    Returns:
+        ``0`` on success, ``1`` when ``--copper`` is malformed (the caller
+        returns that exit code, matching ``kct check``).
+    """
+    from kicad_tools.router.mfr_limits import resolve_min_trace_width
+
+    manufacturer = getattr(args, "manufacturer", None)
+    try:
+        copper_outer, copper_inner = _resolve_route_copper_oz(
+            args, pcb_path, probe_stackup=bool(manufacturer)
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    # Stash for the downstream consumers that already read ``copper_oz``
+    # (``_resolve_mfr_design_rules`` and the post-route DRC / sidecars).
+    args.copper_oz = float(copper_outer) if copper_outer else 1.0
+    args._copper_oz_inner = copper_inner
+
+    layers = _effective_layer_count_for_rules(args, pcb_path)
+    floor = resolve_min_trace_width(manufacturer, layers, copper_outer)
+    # Threaded into every ``load_pcb_for_routing`` call so the library-default
+    # net classes (``Differential`` = 0.15mm) are raised to the fab floor too:
+    # those, not ``--trace-width``, are what actually width the emitted copper
+    # for classified nets.
+    args._mfr_min_trace_floor = floor
+
+    explicit_width = getattr(args, "trace_width", None)
+    if explicit_width is None:
+        resolved = DEFAULT_TRACE_WIDTH_MM if floor is None else max(DEFAULT_TRACE_WIDTH_MM, floor)
+        args.trace_width = resolved
+        if floor is not None and resolved > DEFAULT_TRACE_WIDTH_MM and not quiet:
+            print(f"Trace width: {resolved:.4g}mm (from {manufacturer} manufacturer limits)")
+    elif floor is not None and float(explicit_width) < floor - _TRACE_WIDTH_EPS:
+        print(
+            f"WARNING: --trace-width {float(explicit_width):.4g}mm is below the "
+            f"{manufacturer} minimum trace width {floor:.4g}mm "
+            f"({_mfr_rule_key(layers, copper_outer)}). Routing will proceed, but "
+            f"`kct check --mfr {manufacturer}` will report dimension_trace_width "
+            f"errors on every trace at this width.",
+            file=sys.stderr,
+        )
+
+    if floor is None:
+        return 0
+
+    # Net-class widths are user data: report, never rewrite.
+    sub_floor = _sub_floor_net_class_widths(getattr(args, "_loaded_net_class_map", None), floor)
+    if sub_floor:
+        named = ", ".join(f"{name} ({width:.4g}mm)" for name, width in sub_floor[:5])
+        more = f", +{len(sub_floor) - 5} more" if len(sub_floor) > 5 else ""
+        print(
+            f"WARNING: {len(sub_floor)} net-class trace_width value(s) are below the "
+            f"{manufacturer} minimum trace width {floor:.4g}mm "
+            f"({_mfr_rule_key(layers, copper_outer)}): {named}{more}. These widths are "
+            f"honored as authored, but `kct check --mfr {manufacturer}` will report "
+            f"dimension_trace_width errors on their traces.",
+            file=sys.stderr,
+        )
+
+    # Relaxation ladder (``--complete`` / ``--adaptive-rules``): raise the
+    # floor so interpolated tiers cannot descend below the check-side minimum.
+    explicit_min_trace = getattr(args, "min_trace", None)
+    if explicit_min_trace is None:
+        # ``get_relaxation_tiers`` clamps with ``max(min_trace_floor,
+        # mfr.min_trace)``, so handing it the check-side floor can only RAISE
+        # the ladder (jlcpcb 4-layer 2oz: 0.127 -> 0.1524mm) and never lowers
+        # it below the fab capability minimum on the tiers where the
+        # check-side value is the looser of the two (4-layer 1oz: 0.1016).
+        args.min_trace = floor
+    elif float(explicit_min_trace) < floor - _TRACE_WIDTH_EPS:
+        print(
+            f"WARNING: --min-trace {float(explicit_min_trace):.4g}mm is below the "
+            f"{manufacturer} minimum trace width {floor:.4g}mm "
+            f"({_mfr_rule_key(layers, copper_outer)}); relaxation tiers may emit "
+            f"traces that `kct check --mfr {manufacturer}` rejects with "
+            f"dimension_trace_width.",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _mfr_rule_key(layers: int | None, copper_oz: float | None) -> str:
+    """Format the manufacturer design-rule key named in #4700 warnings."""
+    layer_text = f"{layers}-layer" if layers else "profile-default layers"
+    copper_text = f"{float(copper_oz):g}oz" if copper_oz else "1oz"
+    return f"{layer_text} {copper_text}"
+
+
 def _warn_layer_selection_advisories(args, layer_stack, *, is_auto: bool) -> None:
     """Emit Issue #4314 route-time layer-selection advisories to stderr.
 
@@ -5045,7 +5283,7 @@ def route_with_layer_escalation(
     fine_pitch_cl = getattr(args, "fine_pitch_clearance", None)
     rules = DesignRules(
         grid_resolution=args.grid,
-        trace_width=args.trace_width,
+        trace_width=_effective_trace_width(args),
         trace_clearance=args.clearance,
         via_drill=args.via_drill,
         via_diameter=args.via_diameter,
@@ -5054,6 +5292,11 @@ def route_with_layer_escalation(
         # to in-pad escape for fine-pitch LQFP/QFP (and SSOP/TSSOP) when the
         # manufacturer supports via-in-pad processing.
         manufacturer=getattr(args, "manufacturer", None),
+        # Issue #4700: the fab minimum trace width for the effective
+        # layers/copper key -- raises the library net-class widths and keys
+        # the routing cache so a --copper 2 run is never served a --copper 1
+        # route.
+        min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -6029,6 +6272,10 @@ def route_with_layer_escalation(
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
+            # Issue #4700: judge at the SAME copper weight the trace-width
+            # floor was resolved from (--copper > board stackup > 1oz), so
+            # the sidecars and this DRC agree with `kct check --copper`.
+            copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
             # Issue #2652, Epic #2556 Phase 2.5b: thread the autorouter's
             # net_class_map into the post-route DRC so the diff-pair
             # routing-continuity rule can re-derive its engagement state.
@@ -6200,7 +6447,7 @@ def route_with_rule_relaxation(
 
     # Get relaxation tiers
     tiers = get_relaxation_tiers(
-        initial_trace_width=args.trace_width,
+        initial_trace_width=_effective_trace_width(args),
         initial_clearance=args.clearance,
         initial_via_drill=args.via_drill,
         initial_via_diameter=args.via_diameter,
@@ -6305,6 +6552,11 @@ def route_with_rule_relaxation(
             # in to in-pad escape for fine-pitch LQFP/QFP/SSOP/TSSOP when
             # the manufacturer supports via-in-pad processing.
             manufacturer=getattr(args, "manufacturer", None),
+            # Issue #4700: the fab minimum trace width for the effective
+            # layers/copper key -- raises the library net-class widths and keys
+            # the routing cache so a --copper 2 run is never served a --copper 1
+            # route.
+            min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
             # Issue #2891: forward escalation-in-progress flag.
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -6568,7 +6820,10 @@ def route_with_rule_relaxation(
                 f"({final_result.completion * 100:.0f}% completion)"
             )
             print("\nFinal design rules:")
-            print(f"  Trace width: {final_result.trace_width:.3f}mm (was {args.trace_width}mm)")
+            print(
+                f"  Trace width: {final_result.trace_width:.3f}mm "
+                f"(was {_effective_trace_width(args)}mm)"
+            )
             print(f"  Clearance:   {final_result.clearance:.3f}mm (was {args.clearance}mm)")
             if final_result.tier > 0:
                 print(f"\n  Note: Rules were relaxed ({final_result.tier_description})")
@@ -6764,6 +7019,10 @@ def route_with_rule_relaxation(
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
+            # Issue #4700: judge at the SAME copper weight the trace-width
+            # floor was resolved from (--copper > board stackup > 1oz), so
+            # the sidecars and this DRC agree with `kct check --copper`.
+            copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
             # Issue #2652, Epic #2556 Phase 2.5b: thread the autorouter's
             # net_class_map into the post-route DRC so the diff-pair
             # routing-continuity rule can re-derive its engagement state.
@@ -8348,7 +8607,7 @@ def route_with_combined_escalation(
 
     # Get relaxation tiers
     tiers = get_relaxation_tiers(
-        initial_trace_width=args.trace_width,
+        initial_trace_width=_effective_trace_width(args),
         initial_clearance=args.clearance,
         initial_via_drill=args.via_drill,
         initial_via_diameter=args.via_diameter,
@@ -8499,6 +8758,11 @@ def route_with_combined_escalation(
                 # can opt in to in-pad escape for fine-pitch LQFP/QFP/SSOP/
                 # TSSOP when the manufacturer supports via-in-pad processing.
                 manufacturer=getattr(args, "manufacturer", None),
+                # Issue #4700: the fab minimum trace width for the effective
+                # layers/copper key -- raises the library net-class widths and keys
+                # the routing cache so a --copper 2 run is never served a --copper 1
+                # route.
+                min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
                 # Issue #2891: forward escalation-in-progress flag.
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -9014,6 +9278,10 @@ def route_with_combined_escalation(
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
+            # Issue #4700: judge at the SAME copper weight the trace-width
+            # floor was resolved from (--copper > board stackup > 1oz), so
+            # the sidecars and this DRC agree with `kct check --copper`.
+            copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
             # Issue #2652, Epic #2556 Phase 2.5b: thread the autorouter's
             # net_class_map into the post-route DRC so the diff-pair
             # routing-continuity rule can re-derive its engagement state.
@@ -10584,8 +10852,18 @@ def _main_impl(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--trace-width",
         type=float,
-        default=0.2,
-        help="Trace width in mm (default: 0.2)",
+        default=None,
+        help=(
+            "Trace width in mm (default: 0.2, raised to the manufacturer's "
+            "minimum trace width when that floor is higher -- e.g. jlcpcb "
+            "with --copper 2 has a 0.1524mm floor). Issue #4700: the floor "
+            "is the SAME per-<layers>layer_<oz>oz value `kct check --mfr` "
+            "enforces, so route never emits copper its own check rejects. "
+            "An explicit value BELOW the resolved floor is honored (for "
+            "deliberate exploration) but prints a stderr WARNING naming the "
+            "dimension_trace_width check it will fail; it is never a hard "
+            "error."
+        ),
     )
     parser.add_argument(
         "--clearance",
@@ -11356,6 +11634,23 @@ def _main_impl(argv: list[str] | None = None) -> int:
         help=(
             "Manufacturer profile for DRC validation (default: jlcpcb). "
             "Determines minimum clearances, trace widths, and other design rules."
+        ),
+    )
+    parser.add_argument(
+        "--copper",
+        default=None,
+        metavar="OZ",
+        help=(
+            "Copper weight in oz used to resolve the manufacturer's design "
+            "rules (Issue #4700), using the SAME grammar as `kct check "
+            "--copper`: scalar form '--copper 2' applies to both outer and "
+            "inner layers; keyed form '--copper outer=2,inner=0.5' sets each "
+            "layer class independently. Precedence: explicit --copper > the "
+            "board's declared (setup (stackup ...)) copper weight > 1oz. "
+            "Heavy copper RAISES the minimum trace width (jlcpcb 4-layer: "
+            "0.1016mm at 1oz, 0.1524mm at 2oz), so passing the weight you "
+            "will actually order keeps route and `kct check --mfr` in "
+            "agreement on dimension_trace_width."
         ),
     )
     parser.add_argument(
@@ -12621,6 +12916,18 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     f"(from {args.manufacturer} manufacturer limits)"
                 )
 
+    # Issue #4700: resolve the trace-width default / floor from the SAME
+    # per-<layers>layer_<oz>oz manufacturer rule ``kct check --mfr`` enforces,
+    # so route can no longer emit copper its own matching check rejects with
+    # ``dimension_trace_width``.  Runs here -- before every route sub-flow
+    # dispatch, alongside the #4568 edge-clearance auto-fill -- so the
+    # default multi-layer, rule-relaxation and single-layer paths all share
+    # one resolution.  ``args._loaded_net_class_map`` is already populated
+    # above, so authored sub-floor class widths are reported here too.
+    _rc = _apply_manufacturer_trace_width_floor(args, pcb_path, quiet=args.quiet)
+    if _rc != 0:
+        return _rc
+
     # Issue #3400: resolve the effective ``starting_layers`` value with the
     # precedence CLI flag > project.kct EscalationPolicy field > default 2.
     # This runs before every escalation dispatch so all paths share the
@@ -12825,7 +13132,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     rules = DesignRules(
         grid_resolution=args.grid,
         grid_origin_offset=grid_origin_offset,
-        trace_width=args.trace_width,
+        trace_width=_effective_trace_width(args),
         trace_clearance=args.clearance,
         via_drill=args.via_drill,
         via_diameter=args.via_diameter,
@@ -12834,6 +13141,11 @@ def _main_impl(argv: list[str] | None = None) -> int:
         # to in-pad escape for fine-pitch SSOP/TSSOP when the manufacturer
         # supports via-in-pad processing.
         manufacturer=getattr(args, "manufacturer", None),
+        # Issue #4700: the fab minimum trace width for the effective
+        # layers/copper key -- raises the library net-class widths and keys
+        # the routing cache so a --copper 2 run is never served a --copper 1
+        # route.
+        min_trace_width_floor=getattr(args, "_mfr_min_trace_floor", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -13112,7 +13424,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         fine_pitch_report = analyze_fine_pitch_components(
             pads=router.pads,
             grid_resolution=args.grid,
-            trace_width=args.trace_width,
+            trace_width=_effective_trace_width(args),
             clearance=args.clearance,
         )
         if fine_pitch_report.has_warnings:
@@ -14504,6 +14816,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
             manufacturer=args.manufacturer,
             layers=layer_stack.num_layers,
             quiet=quiet,
+            # Issue #4700: judge at the SAME copper weight the trace-width
+            # floor was resolved from (--copper > board stackup > 1oz), so
+            # the sidecars and this DRC agree with `kct check --copper`.
+            copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
             # Issue #2652, Epic #2556 Phase 2.5b: see other call sites.
             net_class_map=getattr(router, "net_class_map", None),
             # Issue #4178: forward --strict-drc (see other call sites).

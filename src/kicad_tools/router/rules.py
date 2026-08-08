@@ -105,6 +105,17 @@ class DesignRules:
     # preserving pre-#2605 deferred-pin behavior on fine-pitch SSOP/TSSOP.
     manufacturer: str | None = None
 
+    # Fab minimum trace width for the effective layers/copper key (Issue #4700)
+    # The SAME ``get_design_rules(layers, copper_oz).min_trace_width_mm`` that
+    # ``kct check --mfr`` enforces -- NOT the layer/copper-agnostic
+    # ``MfrLimits.min_trace``.  ``load_pcb_for_routing`` raises the built-in /
+    # auto-classified net-class widths (``Differential`` = 0.15mm) to this
+    # value so route cannot emit copper its own check rejects with
+    # ``dimension_trace_width``, and the routing cache keys on it so a run at
+    # one copper weight is never served a route computed at another.  ``None``
+    # (default) preserves pre-#4700 widths and cache keys byte-for-byte.
+    min_trace_width_floor: float | None = None
+
     # Manufacturer-tier escalation in progress flag (Issue #2891)
     # When True, the escape router demotes the "Cannot escape ... does not
     # support via-in-pad" ERROR log (escape.py Issue #2880) to DEBUG level

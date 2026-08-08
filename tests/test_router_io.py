@@ -31,6 +31,7 @@ from kicad_tools.router.io import (
     validate_routes,
 )
 from kicad_tools.router.layers import Layer, LayerStack
+from kicad_tools.router.mfr_limits import resolve_min_trace_width
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import (
@@ -4278,3 +4279,219 @@ class TestExtractBoardDimensionsGrLine:
         assert dims is not None
         assert dims[0] == pytest.approx(65.0)
         assert dims[1] == pytest.approx(56.0)
+
+
+# --- Issue #4700: route -> check trace-width parity -------------------------
+
+# Two pads on net DIFF_P.  The auto-classifier assigns that name the built-in
+# ``Differential`` class, whose library-default ``trace_width`` is 0.15mm --
+# BELOW jlcpcb's 0.1524mm floor at 2oz copper, and the exact 0.150mm emission
+# the reporter measured 63 times.  Placed well inboard of a 20x20 outline so a
+# single straight segment routes deterministically in well under a second.
+_PARITY_PCB_TWO_PADS = """  (footprint "Resistor_SMD:R_0805"
+    (layer "F.Cu")
+    (at 4 10)
+    (fp_text reference "R1" (at 0 -2) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "DIFF_P"))
+  )
+  (footprint "Resistor_SMD:R_0805"
+    (layer "F.Cu")
+    (at 14 10)
+    (fp_text reference "R2" (at 0 -2) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "DIFF_P"))
+  )
+"""
+
+
+def _write_parity_pcb(tmp_path, name="parity"):
+    return _write_edge_pcb(tmp_path, name=f"{name}_in.kicad_pcb", extra=_PARITY_PCB_TWO_PADS)
+
+
+def _route_for_parity(tmp_path, *, extra_argv=(), name="parity"):
+    """Route the DIFF_P fixture at jlcpcb / 2oz and return the routed PCB."""
+    from kicad_tools.cli import route_cmd
+
+    pcb_file = _write_parity_pcb(tmp_path, name=name)
+    out_file = tmp_path / f"{name}_out.kicad_pcb"
+    rc = route_cmd.main(
+        [
+            str(pcb_file),
+            "-o",
+            str(out_file),
+            "--manufacturer",
+            "jlcpcb",
+            "--copper",
+            "2",
+            "--layers",
+            "2",
+            "--skip-drc",
+            "--quiet",
+            *extra_argv,
+        ]
+    )
+    assert rc == 0, f"route failed with exit {rc}"
+    return out_file
+
+
+def _trace_width_violations(pcb_path, *, layers=2, copper_oz=2.0, manufacturer="jlcpcb"):
+    """Run the same rule `kct check --mfr` runs and return its width errors."""
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+
+    results = DRCChecker(
+        PCB.load(str(pcb_path)),
+        manufacturer=manufacturer,
+        layers=layers,
+        copper_oz=copper_oz,
+    ).check_all()
+    return [v for v in results.violations if v.rule_id == "dimension_trace_width"]
+
+
+class TestRouteCheckTraceWidthParity:
+    """Issue #4700: copper from `route --manufacturer X` passes `check --mfr X`.
+
+    The reporter's invariant (item 3): both commands read a manufacturer
+    profile, so any ``dimension_trace_width`` divergence between them is a
+    tooling bug by construction.  ``route`` used to floor at the
+    layer/copper-agnostic ``MfrLimits.min_trace`` (jlcpcb 0.127mm) while
+    ``check`` enforces the per-``<layers>layer_<oz>oz`` ``min_trace_width_mm``
+    (0.1524mm at 2oz), so route emitted copper its own check rejected.
+    """
+
+    def test_routed_copper_passes_the_matching_check(self, tmp_path):
+        """The reporter's scenario: no --trace-width, jlcpcb, 2oz copper.
+
+        The routed net classifies as ``Differential`` (library default
+        0.15mm), so pre-fix this emitted 0.150mm copper -- exactly the
+        reported ``Trace width 0.150mm < minimum 0.152mm`` error.
+        """
+        out_file = _route_for_parity(tmp_path)
+
+        from kicad_tools.schema.pcb import PCB
+
+        segments = PCB.load(str(out_file)).segments
+        assert segments, "fixture must actually emit copper for this to mean anything"
+
+        floor = resolve_min_trace_width("jlcpcb", 2, 2.0)
+        assert floor == pytest.approx(0.1524)
+        assert min(seg.width for seg in segments) >= floor
+        assert _trace_width_violations(out_file) == []
+
+    def test_naive_min_trace_floor_would_not_have_fixed_it(self, tmp_path, monkeypatch):
+        """A floor sourced from ``MfrLimits.min_trace`` is a SILENT NO-OP.
+
+        This is the trap: 0.127mm is below the 0.150mm the ``Differential``
+        class emits, so nothing is raised and the reporter's errors survive.
+        Pinning it here keeps a future refactor from "simplifying"
+        ``resolve_min_trace_width`` back onto ``MfrLimits.min_trace``.
+        """
+        from kicad_tools.cli import route_cmd
+        from kicad_tools.router.mfr_limits import MFR_JLCPCB
+
+        monkeypatch.setattr(
+            "kicad_tools.router.mfr_limits.resolve_min_trace_width",
+            lambda *a, **k: MFR_JLCPCB.min_trace,
+        )
+        assert MFR_JLCPCB.min_trace == pytest.approx(0.127)
+
+        pcb_file = _write_parity_pcb(tmp_path, name="naive")
+        out_file = tmp_path / "naive_out.kicad_pcb"
+        assert (
+            route_cmd.main(
+                [
+                    str(pcb_file),
+                    "-o",
+                    str(out_file),
+                    "--manufacturer",
+                    "jlcpcb",
+                    "--copper",
+                    "2",
+                    "--layers",
+                    "2",
+                    "--skip-drc",
+                    "--quiet",
+                ]
+            )
+            == 0
+        )
+
+        from kicad_tools.schema.pcb import PCB
+
+        assert min(s.width for s in PCB.load(str(out_file)).segments) == pytest.approx(0.15)
+        violations = _trace_width_violations(out_file)
+        assert violations, "the naive floor must reproduce the reported failure"
+        assert violations[0].actual_value == pytest.approx(0.15)
+        assert violations[0].required_value == pytest.approx(0.1524)
+
+    def test_sub_floor_width_is_warned_about_at_route_time(self, tmp_path, capsys):
+        """An explicit sub-floor width is announced, not silently emitted."""
+        _route_for_parity(tmp_path, extra_argv=("--trace-width", "0.15"), name="warned")
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "0.1524" in err
+        assert "dimension_trace_width" in err
+
+    def test_no_manufacturer_floor_keeps_library_widths(self, tmp_path):
+        """Without a resolvable floor the pre-#4700 class widths pass through."""
+        rules = DesignRules(grid_resolution=0.25)
+        router, _ = load_pcb_for_routing(
+            str(_write_parity_pcb(tmp_path, name="untouched")),
+            rules=rules,
+            validate_drc=False,
+        )
+        assert router.net_class_map["DIFF_P"].trace_width == pytest.approx(0.15)
+
+    def test_library_class_widths_are_raised_to_the_floor(self, tmp_path):
+        """``load_pcb_for_routing(min_trace_width_floor=...)`` clamps defaults."""
+        router, _ = load_pcb_for_routing(
+            str(_write_parity_pcb(tmp_path, name="clamped")),
+            rules=DesignRules(grid_resolution=0.25, manufacturer="jlcpcb"),
+            validate_drc=False,
+            min_trace_width_floor=0.1524,
+        )
+        assert router.net_class_map["DIFF_P"].trace_width == pytest.approx(0.1524)
+        # Classes already above the floor are untouched (no widening).
+        assert router.net_class_map["GND"].trace_width == pytest.approx(0.5)
+
+    def test_parity_holds_for_every_manufacturer_at_1oz_and_2oz(self, tmp_path):
+        """By construction: the resolved route width clears each tier's floor.
+
+        Runs the CLI's own resolution (not a reimplementation) for every
+        manufacturer in ``MFR_LIMITS`` and asserts the width it would route
+        with -- and every relaxation tier below it -- is at or above the floor
+        ``kct check --mfr`` enforces for that layers/copper key.
+        """
+        from argparse import Namespace
+
+        from kicad_tools.cli import route_cmd
+        from kicad_tools.router.mfr_limits import MFR_LIMITS, get_relaxation_tiers
+
+        pcb_file = _write_parity_pcb(tmp_path, name="parity_matrix")
+
+        for mfr in MFR_LIMITS:
+            for copper, layers in ((1.0, 2), (2.0, 2), (1.0, 4), (2.0, 4)):
+                args = Namespace(
+                    manufacturer=mfr,
+                    copper=str(copper),
+                    layers=str(layers),
+                    trace_width=None,
+                    min_trace=None,
+                    quiet=True,
+                    _loaded_net_class_map=None,
+                )
+                assert route_cmd._apply_manufacturer_trace_width_floor(args, pcb_file) == 0
+
+                floor = resolve_min_trace_width(mfr, layers, copper)
+                assert floor is not None
+                assert args.trace_width >= floor, (mfr, copper, layers)
+                assert args._mfr_min_trace_floor == pytest.approx(floor)
+
+                tiers = get_relaxation_tiers(
+                    initial_trace_width=args.trace_width,
+                    initial_clearance=0.4,
+                    initial_via_drill=0.3,
+                    initial_via_diameter=0.6,
+                    manufacturer=mfr,
+                    min_trace_floor=args.min_trace,
+                )
+                assert all(t.trace_width >= floor - 1e-9 for t in tiers), (mfr, copper, layers)

@@ -433,7 +433,12 @@ def run_route_command(args) -> int:
     # tests/test_cli_parser_drift.py.
     if getattr(args, "max_cells", 500_000) != 500_000:
         sub_argv.extend(["--max-cells", str(args.max_cells)])
-    if args.trace_width != 0.2:
+    # Issue #4700: --trace-width now carries a ``None`` sentinel (unset) so the
+    # inner command can raise the default to the manufacturer's own minimum
+    # trace width.  Forward it only when the user actually passed a value --
+    # forwarding the sentinel would both crash the float parse and defeat the
+    # auto-fill.  Flag-off argv stays byte-identical.
+    if getattr(args, "trace_width", None) is not None:
         sub_argv.extend(["--trace-width", str(args.trace_width)])
     if args.clearance != 0.15:
         sub_argv.extend(["--clearance", str(args.clearance)])
@@ -584,6 +589,11 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--min-clearance-floor", str(args.min_clearance_floor)])
     if getattr(args, "manufacturer", "jlcpcb") != "jlcpcb":
         sub_argv.extend(["--manufacturer", args.manufacturer])
+    # Issue #4700: the copper weight selects the manufacturer design-rule row
+    # (``<layers>layer_<oz>oz``) the trace-width floor is resolved from, so it
+    # must reach the inner command verbatim.
+    if getattr(args, "copper", None) is not None:
+        sub_argv.extend(["--copper", str(args.copper)])
     if getattr(args, "high_performance", False):
         sub_argv.append("--high-performance")
     if getattr(args, "skip_drc", False):

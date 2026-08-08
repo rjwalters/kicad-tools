@@ -7,6 +7,31 @@ passed through the command handler to the underlying route_cmd.main().
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
+
+def _route_forward_args(**overrides) -> SimpleNamespace:
+    """Minimal ``kct route`` args namespace for the argv-forwarding tests."""
+    base = {
+        "pcb": "test.kicad_pcb",
+        "output": None,
+        "strategy": "negotiated",
+        "skip_nets": None,
+        "grid": "auto",
+        "trace_width": 0.2,
+        "clearance": 0.15,
+        "via_drill": 0.3,
+        "via_diameter": 0.6,
+        "mc_trials": 10,
+        "iterations": 15,
+        "verbose": False,
+        "dry_run": True,
+        "quiet": True,
+        "power_nets": None,
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
 
 class TestRouteCommandGridParameter:
     """Tests for --grid parameter handling in route command."""
@@ -241,6 +266,7 @@ class TestRouteCommandDefaultConsistency:
     def test_parser_defaults_match_handler_checks(self):
         """Verify parser defaults match the values checked in routing.py handler."""
 
+        from kicad_tools.cli import route_cmd
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
@@ -252,7 +278,13 @@ class TestRouteCommandDefaultConsistency:
         # These should match the checks in routing.py
         assert args.grid == "auto", "Grid default should be 'auto'"
         assert args.clearance == 0.15, "Clearance default should be 0.15"
-        assert args.trace_width == 0.2, "Trace width default should be 0.2"
+        # Issue #4700: --trace-width carries a ``None`` sentinel so the command
+        # can tell "unset" from an explicit 0.2 and raise the default to the
+        # manufacturer's own minimum trace width.  The effective default is
+        # still 0.2 (see DEFAULT_TRACE_WIDTH_MM / _effective_trace_width).
+        assert args.trace_width is None, "Trace width default should be the None sentinel"
+        assert route_cmd.DEFAULT_TRACE_WIDTH_MM == 0.2, "Effective trace width default is 0.2"
+        assert route_cmd._effective_trace_width(args) == 0.2
         assert args.via_drill == 0.3, "Via drill default should be 0.3"
         assert args.via_diameter == 0.6, "Via diameter default should be 0.6"
 
@@ -1219,3 +1251,225 @@ class TestRouteParserPerNetTimeoutFlag:
         help_text = help_output.getvalue()
         assert "--per-net-timeout" in help_text
         assert "--timeout" in help_text
+
+
+class TestManufacturerTraceWidthFloor:
+    """Issue #4700: --trace-width resolves from the manufacturer's own floor.
+
+    ``kct route --manufacturer jlcpcb`` used to emit copper below the very
+    floor ``kct check --mfr jlcpcb`` enforces, because route floored at the
+    layer/copper-agnostic ``MfrLimits.min_trace`` (0.127mm) while check reads
+    the per-``<layers>layer_<oz>oz`` ``min_trace_width_mm`` (0.1524mm at 2oz).
+    """
+
+    @staticmethod
+    def _args(**overrides):
+        from argparse import Namespace
+
+        base = {
+            "manufacturer": "jlcpcb",
+            "copper": None,
+            "layers": "4",
+            "trace_width": None,
+            "min_trace": None,
+            "quiet": False,
+            "_loaded_net_class_map": None,
+        }
+        base.update(overrides)
+        return Namespace(**base)
+
+    @staticmethod
+    def _pcb(tmp_path):
+        """A minimal board with no explicit stackup (profile default copper)."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20221018) (generator test)\n)\n")
+        return pcb
+
+    def test_unset_width_is_raised_to_the_2oz_floor(self, tmp_path, capsys):
+        """max(0.2, floor) with the floor reported once on stdout."""
+        from kicad_tools.cli import route_cmd
+
+        args = self._args(copper="2", trace_width=None)
+        # A wide-ish explicit-free run: the 0.1524 floor is below 0.2, so the
+        # default stands -- but the ladder floor must be raised.
+        assert route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path)) == 0
+        assert args.trace_width == 0.2
+        assert args.min_trace == pytest.approx(0.1524)
+        assert args.copper_oz == 2.0
+
+    def test_binding_floor_raises_the_default_and_announces_it(self, tmp_path, capsys):
+        """A floor above 0.2 raises the default and prints one summary line."""
+        from unittest.mock import patch
+
+        from kicad_tools.cli import route_cmd
+
+        args = self._args(copper="2", trace_width=None)
+        with patch.object(route_cmd, "DEFAULT_TRACE_WIDTH_MM", 0.1):
+            with patch(
+                "kicad_tools.router.mfr_limits.resolve_min_trace_width",
+                return_value=0.1524,
+            ):
+                assert (
+                    route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path)) == 0
+                )
+        assert args.trace_width == pytest.approx(0.1524)
+        out = capsys.readouterr().out
+        assert "Trace width:" in out
+        assert "jlcpcb" in out
+
+    def test_non_binding_floor_leaves_the_default_untouched(self, tmp_path, capsys):
+        """jlcpcb 4-layer 1oz floor (0.1016) does not move the 0.2 default."""
+        from kicad_tools.cli import route_cmd
+
+        args = self._args()
+        route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path))
+        assert args.trace_width == 0.2
+        assert "Trace width:" not in capsys.readouterr().out
+
+    def test_explicit_sub_floor_width_warns_but_is_honored(self, tmp_path, capsys):
+        """The reporter's exact emission: 0.150mm against the 0.1524mm floor."""
+        from kicad_tools.cli import route_cmd
+
+        args = self._args(copper="2", trace_width=0.15)
+        route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path))
+
+        # Honored, never silently rewritten.
+        assert args.trace_width == 0.15
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "0.15" in err
+        assert "0.1524" in err
+        assert "jlcpcb" in err
+        assert "4-layer 2oz" in err
+        assert "dimension_trace_width" in err
+
+    def test_explicit_width_at_the_floor_does_not_warn(self, tmp_path, capsys):
+        from kicad_tools.cli import route_cmd
+
+        args = self._args(copper="2", trace_width=0.1524)
+        route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path))
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_explicit_min_trace_below_the_floor_warns(self, tmp_path, capsys):
+        from kicad_tools.cli import route_cmd
+
+        args = self._args(copper="2", min_trace=0.127)
+        route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path))
+        # User override wins, but the divergence is announced.
+        assert args.min_trace == 0.127
+        err = capsys.readouterr().err
+        assert "--min-trace" in err
+        assert "dimension_trace_width" in err
+
+    def test_net_class_widths_are_reported_never_rewritten(self, tmp_path, capsys):
+        from kicad_tools.cli import route_cmd
+        from kicad_tools.router.rules import NetClassRouting
+
+        ncm = {"DP": NetClassRouting(name="DIFFERENTIAL", trace_width=0.15)}
+        args = self._args(copper="2", _loaded_net_class_map=ncm)
+        route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path))
+
+        assert ncm["DP"].trace_width == 0.15  # user data untouched
+        err = capsys.readouterr().err
+        assert "DIFFERENTIAL" in err
+        assert "dimension_trace_width" in err
+
+    def test_no_manufacturer_is_a_complete_no_op(self, tmp_path, capsys):
+        from kicad_tools.cli import route_cmd
+
+        args = self._args(manufacturer=None, copper=None)
+        route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path))
+        assert args.trace_width == 0.2
+        assert args.min_trace is None
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
+    def test_unknown_manufacturer_degrades_gracefully(self, tmp_path):
+        from kicad_tools.cli import route_cmd
+
+        args = self._args(manufacturer="not-a-fab")
+        assert route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path)) == 0
+        assert args.trace_width == 0.2
+        assert args.min_trace is None
+
+    def test_malformed_copper_exits_1(self, tmp_path, capsys):
+        from kicad_tools.cli import route_cmd
+
+        args = self._args(copper="bogus")
+        assert route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path)) == 1
+        assert "Error:" in capsys.readouterr().err
+
+    def test_keyed_copper_form_parses_like_check(self, tmp_path):
+        from kicad_tools.cli import route_cmd
+        from kicad_tools.cli.check_cmd import _parse_copper_weight_arg
+
+        assert _parse_copper_weight_arg("outer=2,inner=0.5") == (2.0, 0.5)
+        args = self._args(copper="outer=2,inner=0.5")
+        route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path))
+        assert args.copper_oz == 2.0
+        assert args._copper_oz_inner == 0.5
+        assert args.min_trace == pytest.approx(0.1524)
+
+    def test_layer_count_drives_the_1oz_floor(self, tmp_path):
+        from kicad_tools.cli import route_cmd
+
+        two = self._args(layers="2")
+        route_cmd._apply_manufacturer_trace_width_floor(two, self._pcb(tmp_path))
+        four = self._args(layers="4-sig")
+        route_cmd._apply_manufacturer_trace_width_floor(four, self._pcb(tmp_path))
+        assert two.min_trace == pytest.approx(0.127)
+        assert four.min_trace == pytest.approx(0.1016)
+
+
+class TestRouteCopperFlagPlumbing:
+    """Issue #4700: `kct route --copper` exists and forwards verbatim."""
+
+    def test_parser_accepts_copper_scalar_and_keyed(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        assert parser.parse_args(["route", "b.kicad_pcb", "--copper", "2"]).copper == "2"
+        keyed = parser.parse_args(["route", "b.kicad_pcb", "--copper", "outer=2,inner=0.5"])
+        assert keyed.copper == "outer=2,inner=0.5"
+
+    def test_copper_default_is_none(self):
+        from kicad_tools.cli.parser import create_parser
+
+        assert create_parser().parse_args(["route", "b.kicad_pcb"]).copper is None
+
+    def test_route_help_documents_the_floor_behavior(self):
+        import contextlib
+        from io import StringIO
+
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        help_output = StringIO()
+        with contextlib.redirect_stdout(help_output), contextlib.suppress(SystemExit):
+            parser.parse_args(["route", "--help"])
+
+        help_text = help_output.getvalue()
+        assert "--copper" in help_text
+        # The warn-not-error contract is documented in --help per #4700.
+        assert "dimension_trace_width" in help_text
+
+    def test_forwarder_omits_unset_trace_width(self):
+        """The None sentinel must not be forwarded as the string 'None'."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = _route_forward_args(trace_width=None)
+        with patch("kicad_tools.cli.route_cmd.main", return_value=0) as mock_main:
+            run_route_command(args)
+        sub_argv = mock_main.call_args[0][0]
+        assert "--trace-width" not in sub_argv
+
+    def test_forwarder_passes_explicit_trace_width_and_copper(self):
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = _route_forward_args(trace_width=0.15, copper="2")
+        with patch("kicad_tools.cli.route_cmd.main", return_value=0) as mock_main:
+            run_route_command(args)
+        sub_argv = mock_main.call_args[0][0]
+        assert sub_argv[sub_argv.index("--trace-width") + 1] == "0.15"
+        assert sub_argv[sub_argv.index("--copper") + 1] == "2"
