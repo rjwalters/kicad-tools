@@ -83,6 +83,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   With no flag and no sidecar present, output and exit codes are unchanged.
   Replaces the downstream `drc_waivers.py` re-implementation in
   project-shamrock/chorus.
+- **`--format json` on the 16 mutating `kct sch` subcommands** (part of
+  #4674, second batch of the #4543 machine-output sweep) — `sch
+  add-bypass-cap`, `add-component`, `add-junction`, `add-label`,
+  `add-no-connect`, `add-pull-resistor`, `add-wire`, `disconnect`,
+  `insert-inline`, `reconnect-pin`, `replace`, `set-footprint`,
+  `set-label-direction`, `set-reference`, `set-symbol-property` and
+  `set-value` now accept the canonical `--format json` and emit one
+  deterministic change-summary document on stdout
+  (`{"command", "schematic", "dry_run", "success", ...}`) instead of prose.
+  Each of the 16 lives in its own inner module, so they share a new
+  wrapper (`cli/sch_json.py`) that brackets the existing prose
+  implementation rather than rewriting 16 report writers: prose is
+  captured and discarded, `record(...)` accumulates the per-command
+  summary, and captured stderr is replayed after the document (and
+  becomes the `error` value on failure). Exit codes and text-mode output
+  are unchanged. The `sch` shim's own "file not found" guard now emits
+  the same `{"error": ...}` document. Audit
+  (`scripts/audit_machine_output.py`): prose-only 49 → 33,
+  format-json 148 → 164.
 - **`kct check` now detects isolated copper natively: `isolated_copper`**
   (closes #4680, second slice — the dangling pair shipped separately
   below) — a new `IsolatedCopperRule` (`validate/rules/zone_fill.py`,

@@ -23,6 +23,7 @@ from kicad_tools.cli.modify_schematic import (
     find_symbol_text_range,
     set_symbol_flag_text,
 )
+from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
 from kicad_tools.cli.sch_set_footprint import _collect_schematic_files
 
 # Recognized symbol-level boolean flags
@@ -54,11 +55,35 @@ def run_set_symbol_property(
     value: str,
     dry_run: bool = False,
     backup: bool = True,
+    output_format: str = "text",
 ) -> int:
     """Run the set-symbol-property operation.
 
+    With ``output_format="json"`` the prose report is replaced by a single
+    machine-readable change summary (see :mod:`kicad_tools.cli.sch_json`).
+
     Returns 0 on success, 1 on error.
     """
+    return run_with_json_summary(
+        "set-symbol-property",
+        schematic_path,
+        lambda: _run_set_symbol_property(
+            schematic_path, ref, property_name, value, dry_run, backup
+        ),
+        output_format=output_format,
+        dry_run=dry_run,
+    )
+
+
+def _run_set_symbol_property(
+    schematic_path: Path,
+    ref: str,
+    property_name: str,
+    value: str,
+    dry_run: bool,
+    backup: bool,
+) -> int:
+    """Prose implementation of :func:`run_set_symbol_property`."""
     if not schematic_path.exists():
         print(f"Error: File not found: {schematic_path}", file=sys.stderr)
         return 1
@@ -80,6 +105,13 @@ def run_set_symbol_property(
             file=sys.stderr,
         )
         return 1
+
+    record(
+        reference=ref,
+        property=property_name,
+        value=normalized,
+        applied=False,
+    )
 
     # Collect all schematic files (root + sub-sheets)
     all_files = _collect_schematic_files(schematic_path)
@@ -107,6 +139,7 @@ def run_set_symbol_property(
             flag_match = re.search(rf"\({re.escape(property_name)}\s+(yes|no)\)", block)
             if flag_match:
                 old_val = flag_match.group(1)
+                record(old_value=old_val, file=str(sch_file))
                 print(
                     f"  {ref}: {property_name} '{old_val}' -> '{normalized}' (in {sch_file.name})"
                 )
@@ -130,6 +163,7 @@ def run_set_symbol_property(
         # Write back
         if backup:
             bak = create_backup(sch_file)
+            record(backup=str(bak))
             print(f"  Backup: {bak.name}")
 
         try:
@@ -138,6 +172,7 @@ def run_set_symbol_property(
             print(f"Error writing {sch_file}: {e}", file=sys.stderr)
             return 1
 
+        record(applied=True, file=str(sch_file))
         print(f"  {msg} (in {sch_file.name})")
         return 0
 
@@ -183,6 +218,8 @@ def main(argv: list[str] | None = None):
         help="Skip creating backup files",
     )
 
+    add_format_flag(parser)
+
     args = parser.parse_args(argv)
 
     return run_set_symbol_property(
@@ -192,6 +229,7 @@ def main(argv: list[str] | None = None):
         value=args.value,
         dry_run=args.dry_run,
         backup=not args.no_backup,
+        output_format=args.format,
     )
 
 

@@ -1082,6 +1082,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_replace.add_argument("--footprint", help="New footprint")
     sch_replace.add_argument("--dry-run", action="store_true", help="Show changes without applying")
     sch_replace.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(sch_replace)
 
     # sch set-footprint
     sch_set_fp = sch_subparsers.add_parser(
@@ -1113,6 +1114,7 @@ def _add_sch_parser(subparsers) -> None:
         action="store_true",
         help="Fail on any pin-count mismatch, even in batch mode",
     )
+    add_format_flag(sch_set_fp)
 
     # sch assign-footprints
     sch_assign_fp = sch_subparsers.add_parser(
@@ -1229,6 +1231,7 @@ def _add_sch_parser(subparsers) -> None:
         "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
     )
     sch_set_val.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(sch_set_val)
 
     # sch set-reference
     sch_set_ref = sch_subparsers.add_parser(
@@ -1246,6 +1249,7 @@ def _add_sch_parser(subparsers) -> None:
         "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
     )
     sch_set_ref.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(sch_set_ref)
 
     # sch set-symbol-property
     sch_set_prop = sch_subparsers.add_parser(
@@ -1267,6 +1271,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_set_prop.add_argument(
         "--backup", action="store_true", help="Create backup before modifying"
     )
+    add_format_flag(sch_set_prop)
 
     # sch sync-hierarchy
     sch_sync = sch_subparsers.add_parser(
@@ -1342,6 +1347,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_set_label_dir.add_argument(
         "--backup", action="store_true", help="Create backup before modifying"
     )
+    add_format_flag(sch_set_label_dir)
     # sch add-no-connect
     sch_add_nc = sch_subparsers.add_parser("add-no-connect", help="Add no-connect markers to pins")
     sch_add_nc.add_argument("schematic", help="Path to .kicad_sch file")
@@ -1358,6 +1364,7 @@ def _add_sch_parser(subparsers) -> None:
         "--dry-run", "-n", action="store_true", help="Preview without modifying"
     )
     sch_add_nc.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(sch_add_nc)
 
     # sch add-component
     sch_add_comp = sch_subparsers.add_parser(
@@ -1403,6 +1410,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_add_comp.add_argument(
         "--backup", action="store_true", help="Create backup before modifying"
     )
+    add_format_flag(sch_add_comp)
 
     # sch add-bypass-cap
     sch_add_bypass = sch_subparsers.add_parser(
@@ -1442,6 +1450,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_add_bypass.add_argument(
         "--backup", action="store_true", help="Create backup before modifying"
     )
+    add_format_flag(sch_add_bypass)
 
     # sch add-pull-resistor
     sch_add_pull = sch_subparsers.add_parser(
@@ -1493,6 +1502,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_add_pull.add_argument(
         "--force", action="store_true", help="Place even if collision detected"
     )
+    add_format_flag(sch_add_pull)
 
     # sch add-wire
     sch_add_wire = sch_subparsers.add_parser("add-wire", help="Add wire segments to the schematic")
@@ -1526,6 +1536,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_add_wire.add_argument(
         "--backup", action="store_true", help="Create backup before modifying"
     )
+    add_format_flag(sch_add_wire)
 
     # sch add-junction
     sch_add_junc = sch_subparsers.add_parser("add-junction", help="Add a junction to the schematic")
@@ -1544,6 +1555,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_add_junc.add_argument(
         "--backup", action="store_true", help="Create backup before modifying"
     )
+    add_format_flag(sch_add_junc)
 
     # sch add-label
     sch_add_label = sch_subparsers.add_parser(
@@ -1587,6 +1599,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_add_label.add_argument(
         "--backup", action="store_true", help="Create backup before modifying"
     )
+    add_format_flag(sch_add_label)
 
     # sch cleanup-wires
     sch_cleanup = sch_subparsers.add_parser(
@@ -1710,6 +1723,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_insert_inline.add_argument(
         "--backup", action="store_true", help="Create backup before modifying"
     )
+    add_format_flag(sch_insert_inline)
 
     # sch disconnect
     sch_disconnect = sch_subparsers.add_parser("disconnect", help="Disconnect a pin from its net")
@@ -1729,6 +1743,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_disconnect.add_argument(
         "--backup", action="store_true", help="Create backup before modifying"
     )
+    add_format_flag(sch_disconnect)
 
     # sch reconnect-pin
     sch_reconnect_pin = sch_subparsers.add_parser(
@@ -1750,6 +1765,7 @@ def _add_sch_parser(subparsers) -> None:
     sch_reconnect_pin.add_argument(
         "--backup", action="store_true", help="Create backup before modifying"
     )
+    add_format_flag(sch_reconnect_pin)
 
     # sch move-component
     sch_move_component = sch_subparsers.add_parser(

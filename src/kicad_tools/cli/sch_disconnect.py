@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
 from kicad_tools.schema import LibraryManager, Schematic
 from kicad_tools.sexp import SExp
 
@@ -183,9 +184,16 @@ def run_disconnect(args) -> int:
         )
         return 1
 
+    record(
+        pin={"reference": args.ref, "pin": args.pin, "position": [pos[0], pos[1]]},
+        wires_removed=0,
+        no_connect_added=False,
+    )
+
     # Preview mode
     if args.dry_run:
         wires = _find_wires_at_point(sch, pos)
+        record(wires_to_remove=len(wires), no_connect_added=bool(args.add_nc))
         print("DRY RUN - No changes will be made")
         print("=" * 60)
         print(f"Pin: {args.ref} pin {args.pin} at ({pos[0]:.2f}, {pos[1]:.2f})")
@@ -198,10 +206,15 @@ def run_disconnect(args) -> int:
     if args.backup:
         backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
+        record(backup=backup_path)
         print(f"Backup created: {backup_path}")
 
     # Execute disconnect
     result = disconnect_pin(sch, pos, add_no_connect=args.add_nc)
+    record(
+        wires_removed=result.wires_removed,
+        no_connect_added=bool(result.no_connect_added),
+    )
 
     if result.wires_removed == 0:
         print(f"No wires found at {args.ref} pin {args.pin} ({pos[0]:.2f}, {pos[1]:.2f})")
@@ -234,8 +247,16 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
+    add_format_flag(parser)
+
     args = parser.parse_args(argv)
-    return run_disconnect(args)
+    return run_with_json_summary(
+        "disconnect",
+        args.schematic,
+        lambda: run_disconnect(args),
+        output_format=args.format,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

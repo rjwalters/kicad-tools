@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.instances import build_instance_path, find_project_name
@@ -383,6 +384,18 @@ def run_add_bypass_cap(args) -> int:
             )
             break
 
+    record(
+        target={"reference": args.ref, "pin": args.pin, "position": [pin_pos[0], pin_pos[1]]},
+        capacitor={
+            "reference": cap_reference,
+            "value": args.value,
+            "position": [cap_pos[0], cap_pos[1]],
+        },
+        ground={"net": args.ground_net, "position": [gnd_pos[0], gnd_pos[1]]},
+        planned=[{"kind": a.kind, "description": a.description} for a in planned],
+        placed=False,
+    )
+
     # --- Report planned actions ---
     if args.dry_run:
         print("DRY RUN - No changes will be made")
@@ -399,6 +412,7 @@ def run_add_bypass_cap(args) -> int:
     if args.backup:
         backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
+        record(backup=backup_path)
         print(f"Backup created: {backup_path}")
 
     # --- Apply changes ---
@@ -450,6 +464,8 @@ def run_add_bypass_cap(args) -> int:
 
     # 6. Save
     sch.save()
+
+    record(placed=True)
 
     print("\nBypass capacitor placed successfully:")
     print(f"  Reference: {cap_reference}")
@@ -556,8 +572,16 @@ def main(argv=None):
     parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
+    add_format_flag(parser)
+
     args = parser.parse_args(argv)
-    return run_add_bypass_cap(args)
+    return run_with_json_summary(
+        "add-bypass-cap",
+        args.schematic,
+        lambda: run_add_bypass_cap(args),
+        output_format=args.format,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

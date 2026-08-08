@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
 from kicad_tools.schema.instances import build_instance_path, find_project_name
@@ -458,6 +459,19 @@ def run_add_component(args) -> int:
                     )
                     break  # One junction per target point is enough
 
+    record(
+        lib_id=args.lib_id,
+        reference=args.reference or None,
+        value=args.value or None,
+        footprint=args.footprint or None,
+        position=[position[0], position[1]],
+        rotation=rotation,
+        mirror=mirror or None,
+        power_symbol=is_power,
+        planned=[{"kind": a.kind, "description": a.description} for a in planned],
+        placed=False,
+    )
+
     # --- Report planned actions ---
     if args.dry_run:
         print("DRY RUN - No changes will be made")
@@ -474,6 +488,7 @@ def run_add_component(args) -> int:
     if args.backup:
         backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
+        record(backup=backup_path)
         print(f"Backup created: {backup_path}")
 
     # --- Apply changes ---
@@ -565,6 +580,13 @@ def run_add_component(args) -> int:
     # 6. Save
     sch.save()
 
+    record(
+        placed=True,
+        lib_id=sym_instance.lib_id,
+        reference=sym_instance.reference,
+        value=sym_instance.value,
+    )
+
     print(f"\nComponent placed successfully: {sym_instance.lib_id}")
     if not is_power:
         print(f"  Reference: {sym_instance.reference}")
@@ -622,8 +644,16 @@ def main(argv=None):
     parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
+    add_format_flag(parser)
+
     args = parser.parse_args(argv)
-    return run_add_component(args)
+    return run_with_json_summary(
+        "add-component",
+        args.schematic,
+        lambda: run_add_component(args),
+        output_format=args.format,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

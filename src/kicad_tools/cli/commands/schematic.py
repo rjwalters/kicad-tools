@@ -34,7 +34,16 @@ def run_sch_command(args) -> int:
 
     schematic_path = Path(args.schematic)
     if not schematic_path.exists():
-        print(f"Error: File not found: {schematic_path}", file=sys.stderr)
+        message = f"Error: File not found: {schematic_path}"
+        # The shim's own guard runs before any inner module, so it has to
+        # honour --format json itself (#4674) -- otherwise the one error every
+        # sch leaf can hit is the one error that never produces a document.
+        if getattr(args, "format", None) == "json":
+            from ..format_options import emit_json
+
+            emit_json({"command": args.sch_command, "error": message, "success": False})
+        else:
+            print(message, file=sys.stderr)
         return 1
 
     if args.sch_command == "summary":
@@ -181,6 +190,7 @@ def run_sch_command(args) -> int:
             backup=getattr(args, "backup", True),
             validate=getattr(args, "validate", True),
             strict=getattr(args, "strict", False),
+            output_format=getattr(args, "format", "text"),
         )
 
     elif args.sch_command == "suggest-footprint":
@@ -223,6 +233,7 @@ def run_sch_command(args) -> int:
             map_path=map_path,
             dry_run=getattr(args, "dry_run", False),
             backup=getattr(args, "backup", True),
+            output_format=getattr(args, "format", "text"),
         )
 
     elif args.sch_command == "set-reference":
@@ -236,6 +247,7 @@ def run_sch_command(args) -> int:
             map_path=map_path,
             dry_run=getattr(args, "dry_run", False),
             backup=getattr(args, "backup", True),
+            output_format=getattr(args, "format", "text"),
         )
 
     elif args.sch_command == "set-symbol-property":
@@ -248,6 +260,7 @@ def run_sch_command(args) -> int:
             value=args.value,
             dry_run=getattr(args, "dry_run", False),
             backup=getattr(args, "backup", True),
+            output_format=getattr(args, "format", "text"),
         )
 
     elif args.sch_command == "replace":
@@ -262,6 +275,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--dry-run")
         if args.backup:
             sub_argv.append("--backup")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return replace_main(sub_argv) or 0
 
     elif args.sch_command == "sync-hierarchy":
@@ -308,6 +323,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--dry-run")
         if args.backup:
             sub_argv.append("--backup")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return set_label_dir_main(sub_argv) or 0
 
     elif args.sch_command == "add-no-connect":
@@ -330,6 +347,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--dry-run")
         if args.backup:
             sub_argv.append("--backup")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return add_nc_main(sub_argv) or 0
 
     elif args.sch_command == "add-component":
@@ -360,6 +379,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--dry-run")
         if args.backup:
             sub_argv.append("--backup")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return add_comp_main(sub_argv) or 0
 
     elif args.sch_command == "add-bypass-cap":
@@ -379,6 +400,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--dry-run")
         if args.backup:
             sub_argv.append("--backup")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return add_bypass_main(sub_argv) or 0
 
     elif args.sch_command == "add-pull-resistor":
@@ -407,6 +430,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--backup")
         if args.force:
             sub_argv.append("--force")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return add_pull_main(sub_argv) or 0
 
     elif args.sch_command == "add-wire":
@@ -422,6 +447,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--dry-run")
         if args.backup:
             sub_argv.append("--backup")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return add_wire_main(sub_argv) or 0
 
     elif args.sch_command == "add-junction":
@@ -433,6 +460,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--dry-run")
         if args.backup:
             sub_argv.append("--backup")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return add_junc_main(sub_argv) or 0
 
     elif args.sch_command == "add-label":
@@ -451,6 +480,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--dry-run")
         if args.backup:
             sub_argv.append("--backup")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return add_label_main(sub_argv) or 0
 
     elif args.sch_command == "cleanup-wires":
@@ -522,6 +553,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--dry-run")
         if args.backup:
             sub_argv.append("--backup")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return insert_inline_main(sub_argv) or 0
 
     elif args.sch_command == "disconnect":
@@ -540,6 +573,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--dry-run")
         if args.backup:
             sub_argv.append("--backup")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return disconnect_main(sub_argv) or 0
 
     elif args.sch_command == "reconnect-pin":
@@ -564,6 +599,8 @@ def run_sch_command(args) -> int:
             sub_argv.append("--dry-run")
         if args.backup:
             sub_argv.append("--backup")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return reconnect_pin_main(sub_argv) or 0
 
     elif args.sch_command == "move-component":

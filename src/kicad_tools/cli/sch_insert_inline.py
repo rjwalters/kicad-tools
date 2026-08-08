@@ -54,6 +54,7 @@ from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
 from kicad_tools.schema.library import LibrarySymbol
 
+from .sch_json import add_format_flag, record, run_with_json_summary
 from .sch_remove_wire import (
     _wire_start_end,
     find_nearest_wire,
@@ -492,6 +493,24 @@ def run_insert_inline(args) -> int:
             )
         )
 
+    record(
+        component={
+            "lib_id": args.lib_id,
+            "reference": reference,
+            "value": args.value,
+            "footprint": args.footprint,
+            "position": [comp_pos[0], comp_pos[1]],
+            "rotation": rotation,
+        },
+        wire={
+            "start": [effective_start[0], effective_start[1]],
+            "end": [effective_end[0], effective_end[1]],
+        },
+        pins={"a": args.pin_a, "b": args.pin_b},
+        planned=[{"kind": a.kind, "description": a.description} for a in planned],
+        inserted=False,
+    )
+
     # --- Report planned actions ---
     if args.dry_run:
         print("DRY RUN - No changes will be made")
@@ -508,6 +527,7 @@ def run_insert_inline(args) -> int:
     if args.backup:
         backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
+        record(backup=backup_path)
         print(f"Backup created: {backup_path}")
 
     # --- Apply changes ---
@@ -552,6 +572,8 @@ def run_insert_inline(args) -> int:
 
     # 6. Save
     sch.save()
+
+    record(inserted=True)
 
     print("\nComponent inserted inline successfully:")
     print(f"  Reference: {reference}")
@@ -616,8 +638,16 @@ def main(argv=None):
     parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
+    add_format_flag(parser)
+
     args = parser.parse_args(argv)
-    return run_insert_inline(args)
+    return run_with_json_summary(
+        "insert-inline",
+        args.schematic,
+        lambda: run_insert_inline(args),
+        output_format=args.format,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

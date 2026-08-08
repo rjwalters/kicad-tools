@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import Schematic
 
@@ -145,6 +146,13 @@ def run_add_wire(args) -> int:
                     )
                     break  # One junction per point is enough
 
+    record(
+        planned=[{"kind": a.kind, "description": a.description} for a in planned],
+        junction_points=[[p[0], p[1]] for p in junction_points],
+        wires_added=0,
+        junctions_added=0,
+    )
+
     if not planned:
         print("No wire segments to add (all zero-length after snapping)")
         return 0
@@ -165,6 +173,7 @@ def run_add_wire(args) -> int:
     if args.backup:
         backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
+        record(backup=backup_path)
         print(f"Backup created: {backup_path}")
 
     # Apply changes: add wire segments
@@ -183,6 +192,8 @@ def run_add_wire(args) -> int:
 
     # Save
     sch.save()
+
+    record(wires_added=wires_added, junctions_added=len(junction_points))
 
     print(f"\nWires added: {wires_added}")
     if junction_points:
@@ -222,9 +233,16 @@ def main(argv=None):
     )
     parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(parser)
 
     args = parser.parse_args(argv)
-    return run_add_wire(args)
+    return run_with_json_summary(
+        "add-wire",
+        args.schematic,
+        lambda: run_add_wire(args),
+        output_format=args.format,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

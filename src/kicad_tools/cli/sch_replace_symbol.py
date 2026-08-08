@@ -36,6 +36,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
 from kicad_tools.operations.symbol_ops import replace_symbol_lib_id
 
 
@@ -57,9 +58,20 @@ def main(argv=None):
     )
     parser.add_argument("--dry-run", action="store_true", help="Show changes without modifying")
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(parser)
 
     args = parser.parse_args(argv)
+    return run_with_json_summary(
+        "replace",
+        args.schematic,
+        lambda: run_replace_symbol(args),
+        output_format=args.format,
+        dry_run=args.dry_run,
+    )
 
+
+def run_replace_symbol(args) -> int:
+    """Execute the replace command against a parsed argument namespace."""
     # Validate input
     if not Path(args.schematic).exists():
         print(f"Error: File not found: {args.schematic}", file=sys.stderr)
@@ -69,6 +81,7 @@ def main(argv=None):
     if args.backup and not args.dry_run:
         backup_path = f"{args.schematic}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(args.schematic, backup_path)
+        record(backup=backup_path)
         print(f"Backup created: {backup_path}")
 
     try:
@@ -87,6 +100,27 @@ def main(argv=None):
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    record(
+        reference=result.reference,
+        old_lib_id=result.old_lib_id,
+        new_lib_id=result.new_lib_id,
+        old_pin_count=result.old_pin_count,
+        new_pin_count=result.new_pin_count,
+        changes=list(result.changes_made),
+        pin_type_changes=[
+            {
+                "pin_number": ptc.pin_number,
+                "pin_name": ptc.pin_name,
+                "old_type": ptc.old_type,
+                "new_type": ptc.new_type,
+            }
+            for ptc in result.pin_type_changes
+        ],
+        wires_adjusted=result.wires_adjusted,
+        preserved_properties=list(result.preserved_properties),
+        lib_symbol_updated=bool(result.lib_symbol_updated),
+    )
 
     # Output results
     if args.dry_run:
@@ -132,6 +166,8 @@ def main(argv=None):
             print("   The embedded pin definitions were NOT updated.")
             print("   Use --lib-path to provide the new symbol's library file")
             print("   so that pin types are updated and ERC regressions are avoided.")
+
+    return 0
 
 
 if __name__ == "__main__":

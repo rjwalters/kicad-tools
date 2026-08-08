@@ -30,6 +30,7 @@ from kicad_tools.cli.modify_schematic import (
     find_symbol_text_range,
     set_footprint_text,
 )
+from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
 from kicad_tools.core.sexp_file import load_footprint
 from kicad_tools.footprints.library_path import (
     LibraryPaths,
@@ -182,6 +183,7 @@ def run_set_footprint(
     strict: bool = False,
     config_override: str | Path | None = None,
     mapping: dict[str, str] | None = None,
+    output_format: str = "text",
 ) -> int:
     """Run the set-footprint operation.
 
@@ -199,8 +201,44 @@ def run_set_footprint(
     do not abort unless ``strict=True``. ``ref``/``footprint``/``map_path``
     are ignored when ``mapping`` is provided.
 
+    With ``output_format="json"`` the prose report is replaced by a single
+    machine-readable change summary (see :mod:`kicad_tools.cli.sch_json`).
+
     Returns 0 on success, 1 on error.
     """
+    return run_with_json_summary(
+        "set-footprint",
+        schematic_path,
+        lambda: _run_set_footprint(
+            schematic_path=schematic_path,
+            ref=ref,
+            footprint=footprint,
+            map_path=map_path,
+            dry_run=dry_run,
+            backup=backup,
+            validate=validate,
+            strict=strict,
+            config_override=config_override,
+            mapping=mapping,
+        ),
+        output_format=output_format,
+        dry_run=dry_run,
+    )
+
+
+def _run_set_footprint(
+    schematic_path: Path,
+    ref: str | None,
+    footprint: str | None,
+    map_path: Path | None,
+    dry_run: bool,
+    backup: bool,
+    validate: bool,
+    strict: bool,
+    config_override: str | Path | None,
+    mapping: dict[str, str] | None,
+) -> int:
+    """Prose implementation of :func:`run_set_footprint`."""
     if not schematic_path.exists():
         print(f"Error: File not found: {schematic_path}", file=sys.stderr)
         return 1
@@ -236,6 +274,10 @@ def run_set_footprint(
         return 1
 
     single_ref_mode = not batch_mode
+    record(
+        batch_mode=batch_mode,
+        assignments=[{"reference": r, "footprint": f} for r, f in sorted(mapping.items())],
+    )
 
     # --- Pin-count validation (best-effort, before any modification) ---
     if validate:
@@ -327,6 +369,13 @@ def run_set_footprint(
                 print(f"Error writing {sch_file}: {e}", file=sys.stderr)
                 total_errors += 1
 
+    record(
+        changed=total_changed,
+        errors=total_errors,
+        not_found=sorted(remaining),
+        files_modified=sorted(str(f) for f in modified_files),
+    )
+
     # Summary
     print()
     if dry_run:
@@ -377,6 +426,7 @@ def main(argv: list[str] | None = None):
         action="store_true",
         help="Fail on any pin-count mismatch, even in batch mode",
     )
+    add_format_flag(parser)
 
     args = parser.parse_args(argv)
 
@@ -403,6 +453,7 @@ def main(argv: list[str] | None = None):
         backup=not args.no_backup,
         validate=args.validate,
         strict=args.strict,
+        output_format=args.format,
     )
 
 

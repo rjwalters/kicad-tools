@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 
 from kicad_tools.cli.modify_schematic import create_backup
+from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
 from kicad_tools.cli.sch_re_annotate import (
     _apply_reference_rename,
     _extract_symbols_from_text,
@@ -89,11 +90,33 @@ def run_set_reference(
     map_path: Path | None = None,
     dry_run: bool = False,
     backup: bool = True,
+    output_format: str = "text",
 ) -> int:
     """Run the set-reference operation.
 
+    With ``output_format="json"`` the prose report is replaced by a single
+    machine-readable change summary (see :mod:`kicad_tools.cli.sch_json`).
+
     Returns 0 on success, 1 on error.
     """
+    return run_with_json_summary(
+        "set-reference",
+        schematic_path,
+        lambda: _run_set_reference(schematic_path, ref, new_ref, map_path, dry_run, backup),
+        output_format=output_format,
+        dry_run=dry_run,
+    )
+
+
+def _run_set_reference(
+    schematic_path: Path,
+    ref: str | None,
+    new_ref: str | None,
+    map_path: Path | None,
+    dry_run: bool,
+    backup: bool,
+) -> int:
+    """Prose implementation of :func:`run_set_reference`."""
     if not schematic_path.exists():
         print(f"Error: File not found: {schematic_path}", file=sys.stderr)
         return 1
@@ -145,6 +168,8 @@ def run_set_reference(
             print(f"Error: {err}", file=sys.stderr)
         return 1
 
+    record(renames=[{"from": o, "to": n} for o, n in sorted(mapping.items())])
+
     # Dry-run output
     if dry_run:
         print(f"Dry run: {len(mapping)} reference(s) would be renamed:")
@@ -194,6 +219,11 @@ def run_set_reference(
                 print(f"Error writing {sch_file}: {e}", file=sys.stderr)
                 return 1
 
+    record(
+        renamed=len(mapping),
+        files_modified=sorted(str(f) for f in modified_files),
+    )
+
     # Summary
     total_renamed = len(mapping)
     print(f"Renamed {total_renamed} reference(s) across {len(modified_files)} file(s).")
@@ -225,6 +255,7 @@ def main(argv: list[str] | None = None):
         "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
     )
     parser.add_argument("--no-backup", action="store_true", help="Skip creating backup files")
+    add_format_flag(parser)
 
     args = parser.parse_args(argv)
 
@@ -249,6 +280,7 @@ def main(argv: list[str] | None = None):
         map_path=args.map_file,
         dry_run=args.dry_run,
         backup=not args.no_backup,
+        output_format=args.format,
     )
 
 

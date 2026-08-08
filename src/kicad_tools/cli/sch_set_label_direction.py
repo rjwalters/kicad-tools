@@ -23,6 +23,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
+
 VALID_SHAPES = ("input", "output", "bidirectional", "tri_state", "passive")
 
 
@@ -259,9 +261,20 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
     )
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(parser)
 
     args = parser.parse_args(argv)
+    return run_with_json_summary(
+        "set-label-direction",
+        args.schematic,
+        lambda: _run_set_label_direction(args),
+        output_format=args.format,
+        dry_run=args.dry_run,
+    )
 
+
+def _run_set_label_direction(args) -> int:
+    """Execute set-label-direction against a parsed argument namespace."""
     schematic_path = Path(args.schematic)
     if not schematic_path.exists():
         print(f"Error: File not found: {schematic_path}", file=sys.stderr)
@@ -283,6 +296,24 @@ def main(argv: list[str] | None = None) -> int:
     if not result.success:
         print(f"Error: {result.error}", file=sys.stderr)
         return 1
+
+    record(
+        name=args.name,
+        shape=args.shape,
+        changes=[
+            {
+                "file": c.file_path,
+                "element_type": c.element_type,
+                "label_name": c.label_name,
+                "line_number": c.line_number,
+                "old_shape": c.old_shape,
+                "new_shape": c.new_shape,
+            }
+            for c in sorted(result.changes, key=lambda c: (c.file_path, c.line_number))
+        ],
+        labels_changed=len(result.changes),
+        files_modified=sorted(result.files_modified),
+    )
 
     if not result.changes:
         print(result.error or f"No labels named '{args.name}' found.")

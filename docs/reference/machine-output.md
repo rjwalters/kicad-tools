@@ -52,20 +52,22 @@ below is issue **#4674** and should build on these helpers.
 Measured by programmatic introspection of the real argparse tree
 (`create_parser()`, recursive walk of `_SubParsersAction` leaves) — not grep:
 
-| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 batch 1 |
-|---|---|---|---|
-| `--format` with a `json` choice | 124 | 124 | 148 |
-| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 |
-| `--json` boolean only | 2 | **0** | 0 |
-| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** |
-| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 |
+| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 b1 | After #4674 b2 |
+|---|---|---|---|---|
+| `--format` with a `json` choice | 124 | 124 | 148 | 164 |
+| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 | 2 |
+| `--json` boolean only | 2 | **0** | 0 | 0 |
+| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** | 0 |
+| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 | 33 |
 
 The first #4674 batch swept the grouped-subcommand families -- `mfr` (7),
 `spec` (5), `placement fix/nudge/snap/align/distribute` (5), `zones
 add/batch/fill/hv-keepout` (4), `benchmark run/compare` (2) -- and added the
 `json` choice to `benchmark report`, closing the `format-nojson` bucket.
-The remaining 49 prose-only leaves (the 16 `sch` mutating commands, `stitch`,
-and the long tail of single commands) stay on the #4674 backlog below.
+
+The second batch swept the 16 mutating `sch` leaves. The remaining 33
+prose-only leaves (`stitch` and the long tail of single commands, plus the 4
+exempt and the deferred `route`) stay on the #4674 backlog below.
 
 Issue #4543 closed the `--json`-only bucket by adding `--format {text,json}`
 alongside the existing `--json` on both commands (outer parser, forwarding
@@ -133,7 +135,40 @@ commands should emit a JSON change-summary (precedent: `kct sch tidy`,
 `benchmark report` (the former `format-nojson` holdout).
 `tests/test_format_json_sweep.py` guards these surfaces.
 
-**Remaining actionable (44)** — the audit's `prose-only` bucket reads 49
+**Done (second #4674 batch, 16 surfaces):** the mutating `sch` family --
+`add-bypass-cap`, `add-component`, `add-junction`, `add-label`,
+`add-no-connect`, `add-pull-resistor`, `add-wire`, `disconnect`,
+`insert-inline`, `reconnect-pin`, `replace`, `set-footprint`,
+`set-label-direction`, `set-reference`, `set-symbol-property`, `set-value`.
+
+Unlike the grouped families, each of these lives in its own inner module, so
+they share one wrapper -- `src/kicad_tools/cli/sch_json.py` -- rather than 16
+hand-written JSON writers. It brackets the existing prose implementation:
+in JSON mode the prose is captured and discarded, the inner module's
+`record(...)` / `append(...)` calls accumulate the per-command change
+summary, and exactly one document is printed. Captured stderr is replayed
+after the document (and becomes the `error` value when the exit code is
+non-zero), so the exit codes and the diagnostics both survive unchanged.
+The shared envelope is:
+
+```json
+{
+  "command": "add-junction",
+  "schematic": "board.kicad_sch",
+  "dry_run": true,
+  "success": true
+}
+```
+
+plus the command's own keys (e.g. `changed` / `not_found` / `files_modified`
+for the `set-*` batch commands, `planned` / `placed` for the `add-*`
+placement commands). `commands/schematic.py`'s own "file not found" guard
+runs before any inner module, so it emits the same `{"error": ...}` document
+itself. `tests/test_format_json_sweep_sch.py` guards these 16 surfaces
+(outer flag, both shim shapes, emission, determinism, error documents, and
+that `--dry-run` still writes nothing).
+
+**Remaining actionable (28)** — the audit's `prose-only` bucket reads 33
 because it also counts the 4 exempt commands and the deferred `route`
 (sections above):
 
@@ -148,11 +183,6 @@ because it also counts the 4 exempt commands and the deferred `route`
 - `pcb export-dsn`, `pcb import-ses`
 - `pipeline`
 - `reason`, `report generate`, `route-auto`
-- `sch add-bypass-cap`, `sch add-component`, `sch add-junction`,
-  `sch add-label`, `sch add-no-connect`, `sch add-pull-resistor`,
-  `sch add-wire`, `sch disconnect`, `sch insert-inline`, `sch reconnect-pin`,
-  `sch replace`, `sch set-footprint`, `sch set-label-direction`,
-  `sch set-reference`, `sch set-symbol-property`, `sch set-value`
 - `screenshot`
 - `stitch` (single command, but its 6k-line inner module has a bespoke
   multi-phase report — batch it alone)

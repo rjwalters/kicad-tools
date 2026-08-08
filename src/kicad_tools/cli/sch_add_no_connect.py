@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
 from kicad_tools.schema import LibraryManager, Schematic
 from kicad_tools.sexp import SExp
 
@@ -201,6 +202,8 @@ def run_add_no_connect(args) -> int:
         print(f"Error: Schematic not found: {schematic_path}", file=sys.stderr)
         return 1
 
+    record(markers=[], markers_added=0)
+
     # Set up library manager
     lib_manager = LibraryManager()
 
@@ -251,6 +254,19 @@ def run_add_no_connect(args) -> int:
             )
         ]
 
+    record(
+        markers=[
+            {
+                "reference": a.reference,
+                "pin": a.pin_number,
+                "pin_name": a.pin_name,
+                "position": [a.position[0], a.position[1]],
+            }
+            for a in actions
+        ],
+        markers_added=0,
+    )
+
     # Report planned changes
     if args.dry_run:
         print("DRY RUN - No changes will be made")
@@ -270,11 +286,13 @@ def run_add_no_connect(args) -> int:
     if args.backup:
         backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
+        record(backup=backup_path)
         print(f"Backup created: {backup_path}")
 
     # Apply changes
     count = add_no_connect_markers(sch, actions)
     sch.save()
+    record(markers_added=count)
 
     print(f"\nAdded {count} no-connect marker(s)")
     return 0
@@ -296,9 +314,16 @@ def main(argv=None):
     parser.add_argument("--lib", action="append", dest="libs", help="Specific library file")
     parser.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(parser)
 
     args = parser.parse_args(argv)
-    return run_add_no_connect(args)
+    return run_with_json_summary(
+        "add-no-connect",
+        args.schematic,
+        lambda: run_add_no_connect(args),
+        output_format=args.format,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":
