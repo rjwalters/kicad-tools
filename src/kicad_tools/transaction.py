@@ -59,13 +59,27 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
-from typing import Literal
+from typing import Literal, NamedTuple
 
 __all__ = [
     "BoardTransaction",
+    "RollbackMark",
     "TransactionRestoreError",
     "board_transaction",
 ]
+
+
+class RollbackMark(NamedTuple):
+    """High-water mark into a transaction's rollback record.
+
+    Obtained from :meth:`BoardTransaction.mark` and passed back to
+    :meth:`BoardTransaction.report_lines` to report only what a *single*
+    rollback did, rather than everything accumulated since transaction
+    entry (issue #4752).
+    """
+
+    restored: int
+    sidecars: int
 
 
 class TransactionRestoreError(RuntimeError):
@@ -129,6 +143,12 @@ class BoardTransaction:
         # propagates.  A TransactionRestoreError raised here chains onto
         # the original exception rather than replacing it.
         if exc_type is not None:
+            # Scope the announcement to THIS rollback (#4752): ``restored``
+            # / ``sidecars`` accumulate for the whole transaction lifetime,
+            # so an adopter that already rolled back earlier in the same
+            # ``with`` block would otherwise see those older lines replayed
+            # here alongside the new ones.
+            mark = self.mark()
             self.rollback()
             # Announce the rollback and forensic sidecar on stderr (#4736):
             # CLI adopters only print report_lines() on their explicit
@@ -138,7 +158,7 @@ class BoardTransaction:
             # propagates past this point and already names the failed
             # paths.  No overlap with the exit-code paths: those return
             # normally through __exit__ with exc_type is None.
-            for line in self.report_lines():
+            for line in self.report_lines(since=mark):
                 print(line, file=sys.stderr)
         return False
 
@@ -222,12 +242,35 @@ class BoardTransaction:
             counter += 1
         return candidate
 
-    def report_lines(self) -> list[str]:
-        """Human-readable summary of the last rollback (for CLI stderr)."""
+    def mark(self) -> RollbackMark:
+        """Capture the current rollback high-water mark.
+
+        Take a mark *before* a :meth:`rollback` and pass it to
+        :meth:`report_lines` afterwards to report only that rollback's
+        effects (issue #4752).
+        """
+        return RollbackMark(len(self.restored), len(self.sidecars))
+
+    def report_lines(self, since: RollbackMark | None = None) -> list[str]:
+        """Human-readable rollback summary (for CLI stderr).
+
+        ``restored`` / ``sidecars`` accumulate over the whole transaction
+        lifetime, so with the default ``since=None`` this reports *every*
+        rollback the transaction has performed.  That is what the
+        print-once-and-exit CLI adopters want.  A caller that runs several
+        operations inside one ``with`` block should instead take a
+        :meth:`mark` before each rollback and pass it here, so earlier,
+        unrelated lines are not replayed.
+
+        Args:
+            since: Only report paths recorded after this mark.  ``None``
+                (default) reports the whole transaction lifetime.
+        """
+        start = since if since is not None else RollbackMark(0, 0)
         lines: list[str] = []
-        for path in self.restored:
+        for path in self.restored[start.restored :]:
             lines.append(f"--transactional: rolled back {path} to its pre-command state")
-        for sidecar in self.sidecars:
+        for sidecar in self.sidecars[start.sidecars :]:
             lines.append(f"--transactional: failed attempt preserved at {sidecar}")
         return lines
 

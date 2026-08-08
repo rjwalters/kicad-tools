@@ -18,6 +18,17 @@ class Difficulty(Enum):
     MEDIUM = "medium"
     HARD = "hard"
 
+    @classmethod
+    def values(cls) -> list[str]:
+        """The difficulty vocabulary, in declaration order.
+
+        Single source of truth for the CLI (issue #4752): both the
+        ``kct benchmark run --difficulty`` argparse ``choices`` and the
+        "valid options" text of the handler's unknown-difficulty error
+        derive from this, so neither can drift from the enum.
+        """
+        return [member.value for member in cls]
+
 
 @dataclass
 class BenchmarkCase:

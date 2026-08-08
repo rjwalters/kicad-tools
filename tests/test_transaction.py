@@ -149,6 +149,63 @@ class TestExplicitRollback:
         assert any("failed attempt preserved" in line for line in lines)
 
 
+# ── Report scoping (multi-operation transactions) ───────────────────────
+
+
+class TestReportScoping:
+    """``restored``/``sidecars`` accumulate for the whole transaction, so a
+    caller running several operations in one ``with`` block must be able to
+    report just one rollback's effects (issue #4752)."""
+
+    def test_report_lines_since_mark_excludes_earlier_rollback(self, board: Path):
+        with board_transaction(board) as txn:
+            board.write_bytes(b"first attempt")
+            txn.rollback()
+            mark = txn.mark()
+            board.write_bytes(b"second attempt")
+            txn.rollback()
+
+        # txn.sidecars is chronological (filename sort is not).
+        first_sidecar, second_sidecar = txn.sidecars
+        scoped = txn.report_lines(since=mark)
+        assert len([ln for ln in scoped if "rolled back" in ln]) == 1
+        assert any(str(second_sidecar) in ln for ln in scoped)
+        assert not any(str(first_sidecar) in ln for ln in scoped)
+
+    def test_report_lines_default_still_covers_whole_lifetime(self, board: Path):
+        """Back-compat for the print-once-and-exit CLI adopters."""
+        with board_transaction(board) as txn:
+            board.write_bytes(b"first attempt")
+            txn.rollback()
+            board.write_bytes(b"second attempt")
+            txn.rollback()
+
+        lines = txn.report_lines()
+        assert len([ln for ln in lines if "rolled back" in ln]) == 2
+        assert len([ln for ln in lines if "failed attempt preserved" in ln]) == 2
+
+    def test_mark_on_fresh_transaction_is_zeroed(self, board: Path):
+        with board_transaction(board) as txn:
+            assert txn.mark() == (0, 0)
+
+    def test_exception_path_does_not_replay_earlier_rollback(self, board: Path, capsys):
+        """The ``__exit__`` announcement covers only the rollback it triggered."""
+        with pytest.raises(RuntimeError):
+            with board_transaction(board) as txn:
+                board.write_bytes(b"first attempt")
+                txn.rollback()  # earlier, unrelated operation
+                board.write_bytes(b"second attempt")
+                raise RuntimeError("boom")
+
+        err = capsys.readouterr().err
+        first_sidecar, second_sidecar = txn.sidecars
+        # One restore line, and only the sidecar from the failing operation.
+        assert len(re.findall(r"--transactional: rolled back ", err)) == 1
+        assert str(second_sidecar) in err
+        assert str(first_sidecar) not in err
+        assert board.read_bytes() == ORIGINAL
+
+
 # ── Forensic sidecar ────────────────────────────────────────────────────
 
 

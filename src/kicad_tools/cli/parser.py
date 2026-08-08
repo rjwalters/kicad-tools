@@ -8,6 +8,13 @@ The parser is organized into subparsers for each major command category.
 import argparse
 
 from kicad_tools import __version__
+
+# ``--difficulty`` choices come from the Difficulty enum itself so they cannot
+# drift from the handler's "valid options" error text (issue #4752).  The
+# benchmark package's runner/generators are import-light (the router is behind
+# TYPE_CHECKING), so this costs ~2.5 ms on top of an already-imported
+# ``kicad_tools`` -- measured, and well under 1% of CLI startup.
+from kicad_tools.benchmark.cases import Difficulty
 from kicad_tools.cli.format_options import add_format_flag
 from kicad_tools.manufacturers import get_all_manufacturer_names
 
@@ -8220,7 +8227,7 @@ def _add_benchmark_parser(subparsers) -> None:
     )
     benchmark_run.add_argument(
         "--difficulty",
-        choices=["easy", "medium", "hard"],
+        choices=Difficulty.values(),
         help="Filter by difficulty level",
     )
     benchmark_run.add_argument(
