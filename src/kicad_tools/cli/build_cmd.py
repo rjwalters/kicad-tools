@@ -1559,6 +1559,52 @@ def _run_route_recipe(
     )
 
 
+def _audit_routed_artifact_for_skip(
+    ctx: BuildContext, console: Console, routed_pcb: Path
+) -> BuildResult:
+    """Gate a route-skip on a ``kct creepage`` audit of the routed artifact.
+
+    HV skip gate (issue #4733, extending #4649 to ``kct build``): each of the
+    three route-skip paths in :func:`_run_step_route` returns success before
+    any ``ctx.voltage_map`` check, so a ``kct build --voltage-map`` on an
+    already-routed board would otherwise skip routing with zero creepage
+    auditing -- the exact false pass #4649 closed for ``kct pipeline``.
+
+    Thin :class:`BuildResult` wrapper over the shared
+    :func:`~kicad_tools.cli.pipeline_cmd.run_creepage_skip_audit` core: the
+    (destructive) re-route stays skipped, and the step succeeds iff the
+    audit of ``routed_pcb`` (the routed artifact -- NOT ``ctx.pcb_file``,
+    which is the unrouted PCB and may be ``None``) exits clean.  The gate is
+    strict ``returncode == 0`` with the exit-2 EXIT_HV_UNCLASSIFIED vacuity
+    discrimination; a launch failure falls back to the #4607-style refusal.
+    ``--force`` bypasses the skip paths entirely and re-routes with the
+    audit.
+
+    On success (clean audit or dry-run) ``output_file`` is ``routed_pcb`` so
+    downstream build steps see the same context as the ungated skip.
+    """
+    from .pipeline_cmd import run_creepage_skip_audit
+
+    success, message = run_creepage_skip_audit(
+        routed_pcb,
+        voltage_map=str(ctx.voltage_map),
+        creepage_standard=ctx.creepage_standard,
+        pollution_degree=ctx.pollution_degree,
+        material_group=ctx.material_group,
+        hv_threshold=ctx.hv_threshold,
+        dry_run=ctx.dry_run,
+        quiet=ctx.quiet,
+        verbose=ctx.verbose,
+        console=console,
+    )
+    return BuildResult(
+        step="route",
+        success=success,
+        message=message,
+        output_file=routed_pcb if success else None,
+    )
+
+
 def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     """Run the autorouting step.
 
@@ -1603,6 +1649,10 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     if not ctx.force and ctx.routed_pcb_file and ctx.routed_pcb_file.exists():
         if not ctx.quiet:
             console.print(f"  Recipe already produced routed PCB: {ctx.routed_pcb_file.name}")
+        # HV skip gate (#4733): with --voltage-map set, the skip must audit
+        # the existing copper before reporting success.
+        if ctx.voltage_map:
+            return _audit_routed_artifact_for_skip(ctx, console, ctx.routed_pcb_file)
         return BuildResult(
             step="route",
             success=True,
@@ -1622,6 +1672,10 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
                 if expected_routed.stat().st_mtime >= ctx.pcb_file.stat().st_mtime:
                     if not ctx.quiet:
                         console.print(f"  Found existing routed PCB: {expected_routed.name}")
+                    # HV skip gate (#4733): audit the routed sibling before
+                    # letting the skip report success under --voltage-map.
+                    if ctx.voltage_map:
+                        return _audit_routed_artifact_for_skip(ctx, console, expected_routed)
                     return BuildResult(
                         step="route",
                         success=True,
@@ -1640,6 +1694,10 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
                 routed_file = routed_files[0]
                 if not ctx.quiet:
                     console.print(f"  Found existing routed PCB: {routed_file.name}")
+                # HV skip gate (#4733): audit the discovered routed artifact
+                # before letting the skip report success under --voltage-map.
+                if ctx.voltage_map:
+                    return _audit_routed_artifact_for_skip(ctx, console, routed_file)
                 return BuildResult(
                     step="route",
                     success=True,

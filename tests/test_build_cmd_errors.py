@@ -1165,6 +1165,219 @@ class TestBuildRouteHvRecipeRefusal:
         assert result.success is True
 
 
+_ROUTE_SKIP_PATHS = ["recorded", "sibling", "glob"]
+
+_ROUTE_SKIP_UNGATED_MESSAGES = {
+    "recorded": "Skipping route: recipe-produced routed PCB already present",
+    "sibling": "Using existing routed PCB (newer than unrouted)",
+    "glob": "Using existing routed PCB",
+}
+
+
+def _route_skip_ctx(tmp_path: Path, skip_path: str) -> tuple[BuildContext, Path]:
+    """Arrange a BuildContext that takes the requested route-skip path.
+
+    ``skip_path`` selects one of the three early-return skip paths in
+    ``_run_step_route`` (issue #4733):
+
+    - ``"recorded"``: Path A -- ``ctx.routed_pcb_file`` recorded by the PCB
+      step (issues #3971/#3977)
+    - ``"sibling"``: Path B -- ``*_routed`` sibling newer than the unrouted
+      PCB
+    - ``"glob"``: Path C -- recursive-glob fallback (no unrouted PCB)
+
+    Returns ``(ctx, routed_artifact)`` where ``routed_artifact`` is the file
+    that path's skip preserves (and the creepage gate must audit).
+    """
+    ctx = BuildContext(project_dir=tmp_path, spec_file=None)
+    ctx.mfr = "jlcpcb"
+    ctx.quiet = True
+    ctx.verbose = False
+    ctx.dry_run = False
+    ctx.force = False
+    ctx.output_dir = None
+    ctx.spec = None
+    ctx.routed_pcb_file = None
+
+    routed = tmp_path / "board_routed.kicad_pcb"
+    routed.write_text("(kicad_pcb)")
+
+    if skip_path == "recorded":
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        ctx.pcb_file = pcb_file
+        ctx.routed_pcb_file = routed
+    elif skip_path == "sibling":
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        # Make the routed sibling unambiguously newer than the unrouted PCB
+        # so the mtime guard fires regardless of filesystem granularity.
+        os.utime(pcb_file, (1_000_000.0, 1_000_000.0))
+        os.utime(routed, (1_000_100.0, 1_000_100.0))
+        ctx.pcb_file = pcb_file
+    elif skip_path == "glob":
+        ctx.pcb_file = None
+    else:  # pragma: no cover - test wiring error
+        raise ValueError(f"unknown skip_path: {skip_path}")
+
+    return ctx, routed
+
+
+class TestBuildRouteSkipCreepageAuditGate:
+    """kct build's three route-skip paths are gated on a creepage audit.
+
+    Issue #4733 (extending #4649 from `kct pipeline` to `kct build`): each
+    of the three early-return skip paths in ``_run_step_route`` (recorded
+    recipe artifact, newer routed sibling, recursive-glob fallback) returned
+    success before any ``ctx.voltage_map`` check, so a `kct build
+    --voltage-map` on an already-routed board skipped routing with zero
+    creepage auditing.  With the gate, each path runs the shared
+    non-destructive `kct creepage` audit against **that path's routed
+    artifact** (not the unrouted ``ctx.pcb_file``) and the skip succeeds iff
+    the audit exits clean.
+
+    The gate reuses the pipeline's core, so ``pipeline_cmd.subprocess.run``
+    is the patch target -- the same one `TestRouteSkipCreepageAuditGate`
+    in tests/test_pipeline_cmd.py uses.
+    """
+
+    @pytest.mark.parametrize("skip_path", _ROUTE_SKIP_PATHS)
+    def test_clean_audit_skip_proceeds_with_creepage_argv(
+        self, tmp_path: Path, skip_path: str
+    ) -> None:
+        """Clean audit: skip succeeds; argv audits the routed artifact."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        ctx, routed = _route_skip_ctx(tmp_path, skip_path)
+        ctx.voltage_map = "vm.json"
+        ctx.creepage_standard = "iec62368"
+        ctx.pollution_degree = 3
+        ctx.material_group = "II"
+        ctx.hv_threshold = 60.0
+
+        with patch("kicad_tools.cli.pipeline_cmd.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            result = _run_step_route(ctx, Console(quiet=True))
+
+        assert result.success is True
+        assert "creepage audit clean" in result.message
+        # Downstream steps must still receive the routed artifact.
+        assert result.output_file == routed
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "creepage" in cmd_args
+        assert "route" not in cmd_args
+        # The audit target is the ROUTED artifact, never the unrouted PCB.
+        assert str(routed) in cmd_args
+        if ctx.pcb_file is not None:
+            assert str(ctx.pcb_file) not in cmd_args
+        assert cmd_args[cmd_args.index("--voltage-map") + 1] == "vm.json"
+        # Two flag names DIFFER from the `kct route` passthrough:
+        # creepage_standard -> --standard, hv_threshold -> --census-threshold.
+        assert cmd_args[cmd_args.index("--standard") + 1] == "iec62368"
+        assert cmd_args[cmd_args.index("--pollution-degree") + 1] == "3"
+        assert cmd_args[cmd_args.index("--material-group") + 1] == "II"
+        assert cmd_args[cmd_args.index("--census-threshold") + 1] == "60.0"
+        # The route-argv spellings must not leak into the audit argv.
+        assert "--creepage-standard" not in cmd_args
+        assert "--hv-threshold" not in cmd_args
+
+    @pytest.mark.parametrize("returncode", [1, 2, 3, 4, 5])
+    @pytest.mark.parametrize("skip_path", _ROUTE_SKIP_PATHS)
+    def test_audit_nonzero_fails_route_step(
+        self, tmp_path: Path, skip_path: str, returncode: int
+    ) -> None:
+        """Any non-zero audit exit fails the route step (strict gate).
+
+        Exits 2-5 would soft-pass through _run_subprocess_step's shared
+        semantics; exit 2 is EXIT_HV_UNCLASSIFIED (#4354 vacuity guard) and
+        the message must distinguish vacuity from a measured-pair failure.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        ctx, _routed = _route_skip_ctx(tmp_path, skip_path)
+        ctx.voltage_map = "vm.json"
+
+        with patch("kicad_tools.cli.pipeline_cmd.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=returncode, stderr="", stdout="")
+            result = _run_step_route(ctx, Console(quiet=True))
+
+        assert result.success is False
+        assert result.output_file is None
+        assert "kct creepage" in result.message
+        assert "--force" in result.message
+        if returncode == 2:
+            assert "HV-unclassified" in result.message
+            assert "not a measured-pair failure" in result.message
+
+    @pytest.mark.parametrize("skip_path", _ROUTE_SKIP_PATHS)
+    def test_launch_failure_falls_back_to_refusal(self, tmp_path: Path, skip_path: str) -> None:
+        """A subprocess that cannot launch falls back to the #4607 refusal."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        ctx, _routed = _route_skip_ctx(tmp_path, skip_path)
+        ctx.voltage_map = "vm.json"
+
+        with patch("kicad_tools.cli.pipeline_cmd.subprocess.run") as mock_run:
+            mock_run.side_effect = FileNotFoundError("python interpreter vanished")
+            result = _run_step_route(ctx, Console(quiet=True))
+
+        assert result.success is False
+        assert result.output_file is None
+        assert "refusing to skip" in result.message
+        assert "kct creepage" in result.message
+        assert "--force" in result.message
+
+    @pytest.mark.parametrize("skip_path", _ROUTE_SKIP_PATHS)
+    def test_no_voltage_map_skip_unchanged(self, tmp_path: Path, skip_path: str) -> None:
+        """Without a voltage map, each skip path spawns nothing and is unchanged."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        ctx, routed = _route_skip_ctx(tmp_path, skip_path)
+        assert ctx.voltage_map is None  # BuildContext default
+
+        with patch("kicad_tools.cli.pipeline_cmd.subprocess.run") as mock_run:
+            result = _run_step_route(ctx, Console(quiet=True))
+
+        mock_run.assert_not_called()
+        assert result.success is True
+        assert result.message == _ROUTE_SKIP_UNGATED_MESSAGES[skip_path]
+        assert result.output_file == routed
+
+    @pytest.mark.parametrize("skip_path", _ROUTE_SKIP_PATHS)
+    def test_dry_run_describes_audit_without_subprocess(
+        self, tmp_path: Path, skip_path: str
+    ) -> None:
+        """Dry-run on a gated skip path reports the would-be audit, spawns nothing."""
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        ctx, routed = _route_skip_ctx(tmp_path, skip_path)
+        ctx.voltage_map = "vm.json"
+        ctx.dry_run = True
+
+        with patch("kicad_tools.cli.pipeline_cmd.subprocess.run") as mock_run:
+            result = _run_step_route(ctx, Console(quiet=True))
+
+        mock_run.assert_not_called()
+        assert result.success is True
+        assert "[dry-run]" in result.message
+        assert "Would audit existing copper" in result.message
+        assert "kct creepage" in result.message
+        assert "--voltage-map vm.json" in result.message
+        # Downstream dry-run steps see the same context as before the gate.
+        assert result.output_file == routed
+
+
 class TestBuildRouteVoltageMapForwarding:
     """The generic `kct route` fallback must receive the HV flags (issue #4607).
 
