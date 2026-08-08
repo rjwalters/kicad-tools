@@ -68,9 +68,10 @@ def _run_benchmark(args) -> int:
         try:
             difficulty_filter = Difficulty(difficulty)
         except ValueError:
-            return _fail(
-                args, f"Unknown difficulty: {difficulty} (valid options: easy, medium, hard)"
-            )
+            # Vocabulary comes from the enum itself (#4752) so this message
+            # cannot drift from the parser's --difficulty choices.
+            valid = ", ".join(Difficulty.values())
+            return _fail(args, f"Unknown difficulty: {difficulty} (valid options: {valid})")
 
     runner = BenchmarkRunner(base_dir=Path.cwd(), verbose=verbose and not json_mode)
 

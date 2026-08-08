@@ -244,6 +244,39 @@ class Net:
     name: str
 
 
+def _sync_at_angle(owner: object, at_node: SExp, angle: float) -> None:
+    """Write *angle* into an ``(at x y [angle])`` node, residue-free.
+
+    KiCad omits the angle token entirely when the rotation is zero, so a
+    node that arrived as a 2-token ``(at x y)`` must go back to 2 tokens
+    when its angle returns to zero.  Otherwise a mirror/un-mirror (or
+    rotate-and-back) round trip leaves a cosmetic ``(at x y 0)`` behind in
+    the saved file -- harmless to KiCad, but diff noise (issue #4752).
+
+    Only the token *this* write-through appended is ever removed, tracked
+    per-owner via ``_at_angle_synthetic``: a node the file supplied as an
+    explicit 3-token ``(at x y 0)`` keeps its zero, so byte-fidelity for
+    boards written that way is unchanged.  Nodes carrying extra trailing
+    tokens (4+ children) are never trimmed either.
+
+    Args:
+        owner: The ``Pad``/``Footprint`` owning *at_node* (holds the
+            synthetic-token flag in its ``__dict__``).
+        at_node: The ``(at ...)`` S-expression node to update.
+        angle: The new rotation in degrees.
+    """
+    if len(at_node.children) >= 3:
+        synthetic = owner.__dict__.get("_at_angle_synthetic", False)
+        if angle == 0.0 and synthetic and len(at_node.children) == 3:
+            del at_node.children[2]
+            owner.__dict__["_at_angle_synthetic"] = False
+        else:
+            at_node.set_value(2, angle)
+    elif angle != 0.0:
+        at_node.add(angle)
+        owner.__dict__["_at_angle_synthetic"] = True
+
+
 @dataclass
 class Pad:
     """Component pad."""
@@ -307,11 +340,7 @@ class Pad:
                 # than the ``object`` of ``__setattr__``'s signature (keeps
                 # mypy at baseline, matching ``Footprint.__setattr__``'s
                 # already-baselined pattern).
-                angle = float(value)  # type: ignore[arg-type]
-                if len(at_node.children) >= 3:
-                    at_node.set_value(2, angle)
-                elif angle != 0.0:
-                    at_node.add(angle)
+                _sync_at_angle(self, at_node, float(value))  # type: ignore[arg-type]
 
         elif name == "position":
             # Pad ``(at x y ...)`` stores FOOTPRINT-LOCAL coordinates (no
@@ -801,10 +830,7 @@ class Footprint:
         elif name == "rotation":
             at_node = sexp_node.find_child("at")
             if at_node is not None:
-                if len(at_node.children) >= 3:
-                    at_node.set_value(2, value)
-                elif value != 0.0:
-                    at_node.add(value)
+                _sync_at_angle(self, at_node, float(value))  # type: ignore[arg-type]
 
         elif name == "layer":
             layer_node = sexp_node.find_child("layer")

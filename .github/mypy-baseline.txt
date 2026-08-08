@@ -994,10 +994,8 @@ src/kicad_tools/schema/instances.py	attr-defined	"object" has no attribute "uuid
 src/kicad_tools/schema/instances.py	unused-ignore	Unused "type: ignore" comment
 src/kicad_tools/schema/instances.py	unused-ignore	Unused "type: ignore" comment
 src/kicad_tools/schema/library.py	assignment	Incompatible types in assignment (expression has type "str | None", variable has type "str")
-src/kicad_tools/schema/pcb.py	arg-type	Argument N to "add" of "SExp" has incompatible type "object"; expected "SExp | str | int | float"
 src/kicad_tools/schema/pcb.py	arg-type	Argument N to "extract_bom" has incompatible type "Path"; expected "str"
 src/kicad_tools/schema/pcb.py	arg-type	Argument N to "int" has incompatible type "str | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
-src/kicad_tools/schema/pcb.py	arg-type	Argument N to "set_value" of "SExp" has incompatible type "object"; expected "str | int | float"
 src/kicad_tools/schema/pcb.py	arg-type	Argument N to "set_value" of "SExp" has incompatible type "object"; expected "str | int | float"
 src/kicad_tools/schema/pcb.py	assignment	Incompatible types in assignment (expression has type "Net | None", variable has type "Net")
 src/kicad_tools/schema/pcb.py	assignment	Incompatible types in assignment (expression has type "Net | None", variable has type "Net")
