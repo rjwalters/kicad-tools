@@ -1248,6 +1248,13 @@ class Autorouter:
         # best routes found so far.  ``None`` preserves the unbudgeted
         # (iteration-capped only) behaviour.
         self._lattice_link_budget_s: float | None = None
+        # Issue #4697: ABSOLUTE wall-clock cap (a ``time.monotonic()`` stamp)
+        # for the lattice netset negotiation, sourced from the CLI's
+        # ``--timeout`` routing deadline.  Unlike ``_lattice_link_budget_s``
+        # (which scales with link count) this is a hard ceiling that does not
+        # grow with the netset: whichever of the two fires first bounds the
+        # run.  ``None`` means "no absolute cap" (legacy behaviour).
+        self._lattice_deadline: float | None = None
         # Issue #4477 (epic #4465, Phase 4): pad endpoints (``"REF.PIN"``) for
         # every connection dispatched into the lattice negotiation, keyed by
         # the SAME key ``pf.failure_reasons`` uses.  Lets a ``--complete``
@@ -3220,10 +3227,24 @@ class Autorouter:
         # -- the deadline scales with the number of links being closed so a
         # small cohort stays bounded while a larger set is still given
         # proportional headroom.  ``None`` preserves the unbudgeted behaviour.
+        #
+        # Issue #4697: the per-link budget is no longer ``--complete``-only --
+        # the CLI now derives it from ``--per-net-timeout`` for every lattice
+        # run -- and ``--timeout`` additionally supplies an ABSOLUTE ceiling
+        # (``_lattice_deadline``).  When both are present the TIGHTER one wins,
+        # so ``--timeout`` can only ever shorten the run: the whole-netset
+        # negotiation (which runs once, so ``route_all``'s between-nets check
+        # can never fire mid-run) finally has a bound the user can set.
         deadline: float | None = None
         if self._lattice_link_budget_s and self._lattice_link_budget_s > 0:
             link_count = max(1, len(connections) + len(coupled))
             deadline = time.monotonic() + self._lattice_link_budget_s * link_count
+        if self._lattice_deadline is not None:
+            deadline = (
+                self._lattice_deadline
+                if deadline is None
+                else min(deadline, self._lattice_deadline)
+            )
         routes_by_key, stats = pf.route_netset(
             connections,
             coupled=coupled,

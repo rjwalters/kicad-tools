@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--timeout` / `--per-net-timeout` now actually bound the lattice
+  engine** (#4697) — `kct route --route-engine lattice` was time-bounded
+  **only** under `--complete`. Everywhere else both flags were accepted,
+  echoed in the routing banner, and silently discarded, producing
+  observed 60+ minute unbounded runs on `--strategy basic` — the only
+  strategy the #4280 gate allows on the lattice. Root cause: the lattice
+  negotiates the whole netset in a single `route_netset()` call, so
+  `route_all()`'s between-nets `timeout` check can never fire mid-run,
+  and the negotiation's only bound (`deadline`) was derived solely from
+  `args._complete_link_budget_s`, which nothing but `--complete` stamps.
+  Fixed at that seam: `--per-net-timeout` now supplies the per-link
+  budget on **every** lattice run (same `budget x link-count` scaling
+  `--complete` already used), and `--timeout` supplies an absolute
+  monotonic ceiling threaded through `load_pcb_for_routing(...,
+  lattice_deadline=)`; when both are present the tighter bound wins.
+  `--complete`'s existing stamp still wins verbatim (#4472 semantics
+  unchanged), and `--per-net-timeout 0` (e.g. under
+  `--deterministic-budget`, where a wall-clock bound would destroy
+  reproducibility) still yields an unbudgeted negotiation. A truncated
+  run reports partial results with the existing `deadline-exceeded`
+  decline reason rather than dying silently. Also: the six bare
+  `router.route_all()` CLI dispatch sites now forward the user's budgets
+  (binding them on the grid engine and silencing the #2794 no-timeout
+  guard that fired pointing straight back at those lines), and the
+  routing banner no longer claims a budget the dispatched engine does
+  not enforce — on the lattice it labels `--per-net-timeout` as the
+  per-link budget it really is, labels `--timeout` as a hard cap, and
+  says loudly when a run is unbounded.
 - **Board-06 regen is same-host run-to-run deterministic again** (#4536) —
   two same-seed flag-OFF regens could differ by thousands of lines,
   making the "flag-OFF run must produce a byte-identical committed

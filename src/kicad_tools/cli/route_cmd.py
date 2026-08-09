@@ -5656,8 +5656,12 @@ def route_with_layer_escalation(
                     # Issue #4472 (epic #4465, Phase 2): --complete localizes the
                     # lattice build + static masks to the region box, and bounds
                     # each link's search with a per-link wall-clock budget.
+                    # Issue #4697: that per-link budget is no longer --complete-only
+                    # (it now derives from --per-net-timeout on every lattice run),
+                    # and --timeout supplies an absolute ceiling alongside it.
                     localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                    lattice_link_budget_s=getattr(args, "_complete_link_budget_s", None),
+                    lattice_link_budget_s=_resolve_lattice_link_budget(args),
+                    lattice_deadline=_lattice_absolute_deadline(args),
                     # Issue #4170 (Phase 2b-1): board-relative boundary stub
                     # terminals whose tip cells are carved open as same-net
                     # reconnection targets (None when no --region / no stubs).
@@ -5815,7 +5819,16 @@ def route_with_layer_escalation(
                     best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
                 )
             elif args.strategy == "basic":
-                router.route_all()
+                # Issue #4697: forward the user's budgets rather than calling
+                # route_all() bare (which tripped the #2794 no-timeout guard
+                # pointing straight back here).  This binds the GRID engine;
+                # the lattice is bounded upstream by the deadline stamped on
+                # the router at load time, since its single whole-netset
+                # negotiation never reaches route_all's between-nets check.
+                router.route_all(
+                    timeout=_budgeted_timeout(args),
+                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                )
             elif args.strategy == "monte-carlo":
                 router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
@@ -6650,8 +6663,12 @@ def route_with_rule_relaxation(
                     # Issue #4472 (epic #4465, Phase 2): --complete localizes the
                     # lattice build + static masks to the region box, and bounds
                     # each link's search with a per-link wall-clock budget.
+                    # Issue #4697: that per-link budget is no longer --complete-only
+                    # (it now derives from --per-net-timeout on every lattice run),
+                    # and --timeout supplies an absolute ceiling alongside it.
                     localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                    lattice_link_budget_s=getattr(args, "_complete_link_budget_s", None),
+                    lattice_link_budget_s=_resolve_lattice_link_budget(args),
+                    lattice_deadline=_lattice_absolute_deadline(args),
                     # Issue #4170 (Phase 2b-1): board-relative boundary stub
                     # terminals whose tip cells are carved open as same-net
                     # reconnection targets (None when no --region / no stubs).
@@ -6787,7 +6804,16 @@ def route_with_rule_relaxation(
                     best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
                 )
             elif args.strategy == "basic":
-                router.route_all()
+                # Issue #4697: forward the user's budgets rather than calling
+                # route_all() bare (which tripped the #2794 no-timeout guard
+                # pointing straight back here).  This binds the GRID engine;
+                # the lattice is bounded upstream by the deadline stamped on
+                # the router at load time, since its single whole-netset
+                # negotiation never reaches route_all's between-nets check.
+                router.route_all(
+                    timeout=_budgeted_timeout(args),
+                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                )
             elif args.strategy == "monte-carlo":
                 router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
@@ -8868,8 +8894,12 @@ def route_with_combined_escalation(
                         # Issue #4472 (epic #4465, Phase 2): --complete localizes the
                         # lattice build + static masks to the region box, and bounds
                         # each link's search with a per-link wall-clock budget.
+                        # Issue #4697: that per-link budget is no longer --complete-only
+                        # (it now derives from --per-net-timeout on every lattice run),
+                        # and --timeout supplies an absolute ceiling alongside it.
                         localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                        lattice_link_budget_s=getattr(args, "_complete_link_budget_s", None),
+                        lattice_link_budget_s=_resolve_lattice_link_budget(args),
+                        lattice_deadline=_lattice_absolute_deadline(args),
                         # Issue #4170 (Phase 2b-1): board-relative boundary stub
                         # terminals whose tip cells are carved open as same-net
                         # reconnection targets (None when no --region / no stubs).
@@ -8991,7 +9021,16 @@ def route_with_combined_escalation(
                         best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
                     )
                 elif args.strategy == "basic":
-                    router.route_all()
+                    # Issue #4697: forward the user's budgets rather than calling
+                    # route_all() bare (which tripped the #2794 no-timeout guard
+                    # pointing straight back here).  This binds the GRID engine;
+                    # the lattice is bounded upstream by the deadline stamped on
+                    # the router at load time, since its single whole-netset
+                    # negotiation never reaches route_all's between-nets check.
+                    router.route_all(
+                        timeout=_budgeted_timeout(args),
+                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                    )
                 elif args.strategy == "monte-carlo":
                     router.route_all_monte_carlo(
                         num_trials=args.mc_trials,
@@ -10129,6 +10168,67 @@ def _resolve_complete_link_budget(args) -> float:
     if t and t > 0:
         return float(t)
     return _COMPLETE_LINK_BUDGET_DEFAULT_S
+
+
+def _resolve_lattice_link_budget(args) -> float | None:
+    """Per-link wall-clock budget (seconds) for the lattice netset negotiation.
+
+    Issue #4697.  Generalizes :func:`_resolve_complete_link_budget` (which was
+    ``--complete``-only, issue #4472) to EVERY lattice invocation, because the
+    lattice negotiates the whole netset in a single ``route_netset`` call --
+    ``route_all``'s between-nets ``timeout`` check therefore never fires
+    mid-run and the per-link ``deadline`` is the only bound the engine knows.
+    Before this, ``--per-net-timeout`` was accepted, echoed in the routing
+    banner, and silently discarded on every non-``--complete`` lattice run.
+
+    Precedence:
+
+    1. ``--complete``'s stamp (``args._complete_link_budget_s``) wins verbatim
+       when present, preserving #4472 semantics (including its 60 s backstop
+       when ``--per-net-timeout`` is disabled).
+    2. Otherwise an active ``--per-net-timeout`` (default 30 s) becomes the
+       per-link budget, exactly as ``--complete`` already treats it.
+    3. ``--per-net-timeout 0`` (explicitly disabled -- e.g. under
+       ``--deterministic-budget``, where a wall-clock bound would destroy
+       reproducibility) yields ``None``: no per-link budget, preserving the
+       legacy unbudgeted negotiation.  ``--timeout`` can still cap such a run
+       via :func:`_lattice_absolute_deadline`.
+
+    The value is inert on the grid/mesh engines (only
+    ``Autorouter._negotiate_lattice_netset`` reads it), so it is resolved
+    unconditionally rather than gated on ``--route-engine``.
+    """
+    stamped = getattr(args, "_complete_link_budget_s", None)
+    if stamped is not None:
+        return float(stamped)
+    t = getattr(args, "per_net_timeout", None)
+    if t and t > 0:
+        return float(t)
+    return None
+
+
+def _lattice_absolute_deadline(args) -> float | None:
+    """Absolute ``time.monotonic()`` ceiling for a lattice run, or ``None``.
+
+    Issue #4697.  ``--timeout`` is documented as a TOTAL wall-clock budget for
+    the whole invocation, but the lattice never saw it: the deadline it honors
+    was only ever derived from ``--complete``'s per-link budget.  This returns
+    the already-computed routing deadline (``args._routing_deadline``, stamped
+    by :func:`_set_wall_clock_deadline` with the ``--auto-fix`` reserve already
+    carved out) so the lattice negotiation aborts no later than the rest of the
+    routing pipeline does.
+
+    An ABSOLUTE timestamp is threaded rather than a duration because the
+    whole-board lattice build happens between the CLI stamping the budget and
+    the negotiation starting; a "seconds from now" value would silently grant
+    the build's runtime as extra routing budget.
+
+    ``None`` when the user passed no ``--timeout`` (legacy: no absolute cap).
+    """
+    deadline = getattr(args, "_routing_deadline", None)
+    if deadline is None:
+        deadline = getattr(args, "_wall_clock_deadline", None)
+    return float(deadline) if deadline is not None else None
 
 
 def _apply_complete_localization(args, pcb_path: Path) -> int:
@@ -13375,8 +13475,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 # Issue #4472 (epic #4465, Phase 2): --complete localizes the
                 # lattice build + static masks to the region box, and bounds
                 # each link's search with a per-link wall-clock budget.
+                # Issue #4697: that per-link budget is no longer --complete-only
+                # (it now derives from --per-net-timeout on every lattice run),
+                # and --timeout supplies an absolute ceiling alongside it.
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                lattice_link_budget_s=getattr(args, "_complete_link_budget_s", None),
+                lattice_link_budget_s=_resolve_lattice_link_budget(args),
+                lattice_deadline=_lattice_absolute_deadline(args),
                 # Issue #4170 (Phase 2b-1): board-relative boundary stub
                 # terminals whose tip cells are carved open as same-net
                 # reconnection targets (None when no --region / no stubs).
@@ -13444,8 +13548,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 # Issue #4472 (epic #4465, Phase 2): --complete localizes the
                 # lattice build + static masks to the region box, and bounds
                 # each link's search with a per-link wall-clock budget.
+                # Issue #4697: that per-link budget is no longer --complete-only
+                # (it now derives from --per-net-timeout on every lattice run),
+                # and --timeout supplies an absolute ceiling alongside it.
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                lattice_link_budget_s=getattr(args, "_complete_link_budget_s", None),
+                lattice_link_budget_s=_resolve_lattice_link_budget(args),
+                lattice_deadline=_lattice_absolute_deadline(args),
                 # Issue #4170 (Phase 2b-1): board-relative boundary stub
                 # terminals whose tip cells are carved open as same-net
                 # reconnection targets (None when no --region / no stubs).
@@ -13899,11 +14007,35 @@ def _main_impl(argv: list[str] | None = None) -> int:
         # Route
         if not quiet:
             flush_print(f"\n--- Routing ({args.strategy}) ---")
+            # Issue #4697: the banner must not claim a budget the dispatched
+            # engine does not enforce.  The lattice negotiates the whole netset
+            # in ONE call, so ``--per-net-timeout`` is spent there as a PER-LINK
+            # budget scaled by link count -- not as a per-net A* cutoff -- and
+            # ``--timeout`` is a hard ceiling on that single negotiation.  Say
+            # so, and say so loudly when neither bound is in force.
+            _banner_engine = getattr(args, "route_engine", "grid") or "grid"
             if args.timeout:
-                flush_print(f"  Timeout: {args.timeout}s")
+                _cap_note = (
+                    " (hard cap on the lattice negotiation)"
+                    if (_banner_engine == "lattice")
+                    else ""
+                )
+                flush_print(f"  Timeout: {args.timeout}s{_cap_note}")
             per_net_timeout_val = getattr(args, "per_net_timeout", None)
             if per_net_timeout_val:
-                flush_print(f"  Per-net timeout: {per_net_timeout_val}s")
+                if _banner_engine == "lattice":
+                    flush_print(
+                        f"  Per-net timeout: {per_net_timeout_val}s "
+                        f"(lattice: per-LINK budget; netset deadline = "
+                        f"{per_net_timeout_val}s x link count)"
+                    )
+                else:
+                    flush_print(f"  Per-net timeout: {per_net_timeout_val}s")
+            elif _banner_engine == "lattice" and not args.timeout:
+                flush_print(
+                    "  Per-net timeout: disabled (0) -- the lattice negotiation "
+                    "is UNBOUNDED; pass --timeout to cap it"
+                )
             # Issue #2610: report the iteration backstop override if set.
             # Issue #2819: the inner parser now declares the flag (default=0),
             # so the attribute is guaranteed to exist; ``or 0`` preserves the
@@ -14003,7 +14135,16 @@ def _main_impl(argv: list[str] | None = None) -> int:
                                         getattr(args, "early_stop_patience", 2) or None
                                     ),
                                 )
-                            return router.route_all()
+                            # Issue #4697: forward the user's budgets rather than calling
+                            # route_all() bare (which tripped the #2794 no-timeout guard
+                            # pointing straight back here).  This binds the GRID engine;
+                            # the lattice is bounded upstream by the deadline stamped on
+                            # the router at load time, since its single whole-netset
+                            # negotiation never reaches route_all's between-nets check.
+                            return router.route_all(
+                                timeout=_budgeted_timeout(args),
+                                per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                            )
 
                         # coupled_only=True so pairs that the
                         # CoupledPathfinder cannot handle (3-pad nets,
@@ -14077,7 +14218,16 @@ def _main_impl(argv: list[str] | None = None) -> int:
                             best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
                         )
                     else:
-                        return router.route_all()
+                        # Issue #4697: forward the user's budgets rather than calling
+                        # route_all() bare (which tripped the #2794 no-timeout guard
+                        # pointing straight back here).  This binds the GRID engine;
+                        # the lattice is bounded upstream by the deadline stamped on
+                        # the router at load time, since its single whole-netset
+                        # negotiation never reaches route_all's between-nets check.
+                        return router.route_all(
+                            timeout=_budgeted_timeout(args),
+                            per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                        )
 
                 adaptive_result = adaptive_router.route_adaptive(
                     nets=adaptive_nets,
@@ -14238,7 +14388,16 @@ def _main_impl(argv: list[str] | None = None) -> int:
             elif args.bus_routing and args.strategy == "basic":
                 return router.route_all_with_buses(bus_config)
             elif args.strategy == "basic":
-                return router.route_all()
+                # Issue #4697: forward the user's budgets rather than calling
+                # route_all() bare (which tripped the #2794 no-timeout guard
+                # pointing straight back here).  This binds the GRID engine;
+                # the lattice is bounded upstream by the deadline stamped on
+                # the router at load time, since its single whole-netset
+                # negotiation never reaches route_all's between-nets check.
+                return router.route_all(
+                    timeout=_budgeted_timeout(args),
+                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                )
             elif args.differential_pairs and args.strategy in ("monte-carlo", "evolutionary"):
                 # Issue #2464: MC/GA reset the grid per trial (see
                 # _reset_for_new_trial), which would wipe pre-routed

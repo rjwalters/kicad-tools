@@ -3428,6 +3428,7 @@ def load_pcb_for_routing(
     strategy: str = "grid",
     localize_lattice_to_region: bool = False,
     lattice_link_budget_s: float | None = None,
+    lattice_deadline: float | None = None,
     min_trace_width_floor: float | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
@@ -3526,6 +3527,13 @@ def load_pcb_for_routing(
                 the lattice netset negotiation aborts within
                 ``budget x link-count`` seconds and returns the best routes so
                 far.  ``None`` preserves the unbudgeted negotiation.
+        lattice_deadline: Issue #4697.  Optional ABSOLUTE wall-clock ceiling --
+                a ``time.monotonic()`` timestamp, not a duration -- stamped on
+                ``router._lattice_deadline``.  Sourced from the CLI
+                ``--timeout`` routing deadline so a lattice run cannot outlive
+                the total budget the user asked for.  When both this and
+                ``lattice_link_budget_s`` are set the TIGHTER bound wins.
+                ``None`` means "no absolute ceiling".
         min_trace_width_floor: Issue #4700.  Minimum legal trace width (mm)
                 for the target fab tier -- the SAME
                 ``get_design_rules(layers, copper_oz).min_trace_width_mm``
@@ -4054,6 +4062,12 @@ def load_pcb_for_routing(
     # negotiation (``--complete``); ``None`` preserves the unbudgeted loop.
     if lattice_link_budget_s is not None:
         router._lattice_link_budget_s = lattice_link_budget_s
+
+    # Issue #4697: absolute wall-clock ceiling (monotonic timestamp) for the
+    # lattice netset negotiation, derived from ``--timeout``.  ``None``
+    # preserves "bounded only by the per-link budget (or not at all)".
+    if lattice_deadline is not None:
+        router._lattice_deadline = lattice_deadline
 
     # Issue #4170 (Phase 2b-1): carve bare boundary stub endpoints open as
     # same-net A* targets and store them for the Autorouter target-merge shim.
