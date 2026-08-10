@@ -12685,11 +12685,15 @@ class Autorouter:
             deterministic_rescue: Issue #4536 / #4730 -- bound the
                 rescue's SUB-searches (probe rounds, victim re-lands) by
                 the deterministic per-net NODE-EXPANSION cap instead of
-                the ``RELIEF_SUBSEARCH_BUDGET_S`` wall clock.  Default
-                True (#4730), which also covers the two-phase stall-relief
-                hook that calls this method positionally; without an
-                active expansion cap the wall clock is kept, so capless
-                callers are unaffected.  See
+                the ``RELIEF_SUBSEARCH_BUDGET_S`` wall clock.  Defaults to
+                :data:`DETERMINISTIC_RESCUE_DEFAULT` (``False`` -- #4730
+                measured a board-07 regression with it on, so it stays
+                opt-in).  The two-phase stall-relief hook calls this
+                method POSITIONALLY, so it carries the value on a
+                ``functools.partial`` bound in
+                :meth:`_create_two_phase_router` rather than inheriting
+                this signature default.  Without an active expansion cap
+                the wall clock is kept either way.  See
                 :meth:`_relief_subsearch_budget` for the measurement that
                 motivates it and the load-bearing consequences.
 
