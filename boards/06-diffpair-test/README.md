@@ -165,14 +165,11 @@ bisection localized **three** sources:
    line-identical up to the rescue.  Fixed with
    `route_all_negotiated(deterministic_rescue=True)`, which bounds the
    rescue's probe / re-land sub-searches by the deterministic per-net
-   node-expansion cap instead.  This board opted in first (#4536); #4730
-   made it the **default** for every expansion-capped *negotiated* run
-   (`--deterministic-budget` / `per_net_iterations`), leaving capless runs
-   on the historical wall clock by construction — and leaving the
-   escape/two-phase path (boards 03/04/07) on it too, where board 07's
-   measured regression scoped the flip out
-   (`TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT`).  The explicit `True` here
-   is kept as documentation because it is **load-bearing for
+   node-expansion cap instead.  This board opted in first (#4536) and
+   remains an explicit opt-in: #4730 proposed making it the fleet default
+   and withdrew the flip on a measured board-07 regression, so
+   `DETERMINISTIC_RESCUE_DEFAULT` is `False` on every entry point.  The
+   `True` here is therefore not documentary — it is **load-bearing for
    `REQUIRED_SIGNAL_REACH = 21`** in
    `scripts/ci/check_diffpair_coverage.py`.
 

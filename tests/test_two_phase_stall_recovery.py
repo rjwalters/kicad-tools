@@ -359,11 +359,22 @@ class TestTwoPhaseStallReliefRescue:
             )
 
     def test_create_two_phase_router_threads_relief_rescue(self, autorouter_with_two_phase):
-        """``_create_two_phase_router`` must thread ``_relief_rescue``."""
+        """``_create_two_phase_router`` must thread ``_relief_rescue``.
+
+        Issue #4730 wrapped the hook in a ``functools.partial`` so the
+        sub-search bound can ride along on a call the #3471 hook makes
+        POSITIONALLY -- unwrap it before identity-checking the method, and
+        pin the bound keyword while we are here.
+        """
+        import functools
+
+        from kicad_tools.router.core import DETERMINISTIC_RESCUE_DEFAULT
+
         ar = autorouter_with_two_phase
-        tp_router = ar._create_two_phase_router()
-        assert tp_router._relief_rescue is not None
-        assert tp_router._relief_rescue.__func__ is type(ar)._relief_rescue
+        hook = ar._create_two_phase_router()._relief_rescue
+        assert isinstance(hook, functools.partial)
+        assert hook.func.__func__ is type(ar)._relief_rescue
+        assert hook.keywords == {"deterministic_rescue": DETERMINISTIC_RESCUE_DEFAULT}
 
     def test_relief_invoked_for_ripup_fast_fails(self, autorouter_with_two_phase):
         """Nets the rip-up could not rescue must each get one relief

@@ -206,22 +206,14 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
     No-op when ``--deterministic-budget`` is not set, so legacy behaviour is
     preserved bit-for-bit.
 
-    Issue #4730: the pinned caps in (2)/(2b) are also what activates the
-    DETERMINISTIC relief-rescue sub-search bound.  ``route_all_negotiated``
-    defaults ``deterministic_rescue=True``, and
-    ``Autorouter._relief_subsearch_budget`` hands the rescue's probe /
-    victim-re-land searches over to the node-expansion cap only when one is
-    live -- so no ``kct route`` call site passes the flag explicitly, and a
-    run without ``--deterministic-budget`` keeps the historical
-    ``RELIEF_SUBSEARCH_BUDGET_S`` wall clock unchanged.
-
-    That flip is scoped to the NEGOTIATED entry point.  Escape-routed boards
-    (03/04/07) go through ``route_with_escape`` -> ``route_all_two_phase``,
-    which defaults to ``TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT`` (``False``)
-    because board 07 regressed on that path in the #4730 fleet A/B (changed
-    LVS open set, routed-DRC 8 -> 13).  ``--deterministic-budget`` therefore
-    still means "wall-clock rescue bound" on those boards; the constant is the
-    single switch to flip when the regression is understood.
+    Issue #4730: the pinned caps in (2)/(2b) are what a DETERMINISTIC
+    relief-rescue sub-search bound would hand its probe / victim-re-land
+    searches to -- but that bound stays OPT-IN
+    (``DETERMINISTIC_RESCUE_DEFAULT`` is ``False``): board 07 regressed with it
+    on (changed LVS open set, routed-DRC 8 -> 13 against an allowlist main sits
+    exactly at), so ``--deterministic-budget`` still means "wall-clock rescue
+    bound" for every ``kct route`` caller.  No call site passes the flag; the
+    constant is the single switch to flip when that regression is understood.
     """
     if not getattr(args, "deterministic_budget", False):
         return
@@ -5807,23 +5799,16 @@ def route_with_layer_escalation(
                 )
             elif args.strategy == "negotiated":
                 # Issue #4730: ``deterministic_rescue`` is deliberately NOT
-                # passed here.  Its default is ``DETERMINISTIC_RESCUE_DEFAULT``
-                # (True) and ``_relief_subsearch_budget`` only hands the relief
-                # rescue's sub-searches to the node-expansion cap when one is
-                # live, so the flag self-scopes to ``--deterministic-budget``
-                # runs and a plain ``kct route`` keeps the historical wall
-                # clock.  Wiring it to the CLI flag explicitly would be
-                # equivalent here but would hide that a caller who sets
-                # ``--per-net-iterations`` alone gets the same guarantee.
-                #
-                # The escape / two-phase branches above are silent too, but for
-                # the opposite reason: ``route_with_escape`` and
-                # ``route_all_two_phase`` default to
-                # ``TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT`` (False), the
-                # documented board-07 negative result, so the escape-routed
-                # boards keep the historical wall clock until that regression
-                # is understood.  Both call sites take the kwarg, so opting a
-                # board in is a one-line change here when it is.
+                # passed here -- and neither is it on the escape / two-phase
+                # branches above.  Every one of those entry points defaults to
+                # ``DETERMINISTIC_RESCUE_DEFAULT`` (False), the documented
+                # board-07 negative result: with the deterministic bound in
+                # force board 07's copper-LVS open set changed and its
+                # routed-DRC went 8 -> 13 against an allowlist main sits
+                # exactly at.  So ``kct route`` keeps the historical wall clock
+                # on every path until that regression is understood.  All the
+                # call sites take the kwarg, so opting a board in is a one-line
+                # change here once its own A/B backs it.
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
@@ -6810,23 +6795,16 @@ def route_with_rule_relaxation(
                 )
             elif args.strategy == "negotiated":
                 # Issue #4730: ``deterministic_rescue`` is deliberately NOT
-                # passed here.  Its default is ``DETERMINISTIC_RESCUE_DEFAULT``
-                # (True) and ``_relief_subsearch_budget`` only hands the relief
-                # rescue's sub-searches to the node-expansion cap when one is
-                # live, so the flag self-scopes to ``--deterministic-budget``
-                # runs and a plain ``kct route`` keeps the historical wall
-                # clock.  Wiring it to the CLI flag explicitly would be
-                # equivalent here but would hide that a caller who sets
-                # ``--per-net-iterations`` alone gets the same guarantee.
-                #
-                # The escape / two-phase branches above are silent too, but for
-                # the opposite reason: ``route_with_escape`` and
-                # ``route_all_two_phase`` default to
-                # ``TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT`` (False), the
-                # documented board-07 negative result, so the escape-routed
-                # boards keep the historical wall clock until that regression
-                # is understood.  Both call sites take the kwarg, so opting a
-                # board in is a one-line change here when it is.
+                # passed here -- and neither is it on the escape / two-phase
+                # branches above.  Every one of those entry points defaults to
+                # ``DETERMINISTIC_RESCUE_DEFAULT`` (False), the documented
+                # board-07 negative result: with the deterministic bound in
+                # force board 07's copper-LVS open set changed and its
+                # routed-DRC went 8 -> 13 against an allowlist main sits
+                # exactly at.  So ``kct route`` keeps the historical wall clock
+                # on every path until that regression is understood.  All the
+                # call sites take the kwarg, so opting a board in is a one-line
+                # change here once its own A/B backs it.
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,

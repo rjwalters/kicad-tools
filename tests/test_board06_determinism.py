@@ -35,12 +35,11 @@ sources:
    20/21 on different runners from line-identical logs.  Fixed with
    ``route_all_negotiated(deterministic_rescue=True)``, which bounds the
    sub-searches by the deterministic per-net node-expansion cap.  Board 06
-   opted in first (#4536); #4730 made that the DEFAULT for every
-   expansion-capped run of ``route_all_negotiated`` -- the path this board
-   uses -- so the kwarg in ``generate_design.py`` is now
-   redundant-but-documentary rather than the only thing switching it on.
-   (The two-phase/escape path keeps the wall clock; see
-   ``TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT`` for board 07's negative A/B.)
+   opted in first (#4536) and still opts in explicitly: #4730 proposed
+   making it the fleet default and withdrew the flip on a measured
+   board-07 regression, so ``DETERMINISTIC_RESCUE_DEFAULT`` is ``False``
+   and the kwarg in ``generate_design.py`` is the only thing switching the
+   bound on for this board.
 
 3. **Residual -- UUID-sorted file order.** With the wall clock removed,
    runs produced byte-identical logs and identical copper *multisets*,

@@ -7,23 +7,19 @@ the 8-12 s natural re-land time on CI runners, which made board-06's
 ``REQUIRED_SIGNAL_REACH`` gate a coin flip on machine speed.  These tests pin
 the selection table for the deterministic replacement.
 
-Issue #4730 made the deterministic bound the default of the NEGOTIATED entry
-point (:data:`DETERMINISTIC_RESCUE_DEFAULT`).  That is only safe because the
-selector degrades to the historical wall clock whenever no per-net
-node-expansion cap is active, so a capless run is behavior-identical BY
-CONSTRUCTION -- the property the "inherited default" cases below lock down,
-alongside the signature defaults and the routing-log line that reports which
-bound is live.
+Issue #4730 proposed making the deterministic bound the fleet default and
+WITHDREW the flip: board 07 -- routed through the NEGOTIATED entry point --
+came back from the A/B with a changed copper-LVS open set and routed-DRC
+8 -> 13 against an allowlist of 8, and #4730's Acceptance forbids absorbing
+that.  So :data:`DETERMINISTIC_RESCUE_DEFAULT` is ``False`` on every entry
+point (``TestDeterministicRescueDefault``) and board 06 keeps its explicit
+opt-in.
 
-The TWO-PHASE entry point is scoped OUT of that flip
-(:data:`TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT` is ``False``): board 07 -- the
-only board whose two-phase route fires rescues -- came back from the fleet A/B
-with a changed copper-LVS open set and routed-DRC 8 -> 13 against an allowlist
-of 8, and #4730's Acceptance forbids absorbing that.  ``TestTwoPhasePathScoping``
-pins both halves of the resolution: the path default stays historical, AND the
-bound is threaded through as a real per-call switch (the hook calls
-``_relief_rescue`` positionally, so a ``functools.partial`` is what makes an
-opt-in reachable at all).
+What the issue did land is the per-call switch, pinned by
+``TestPerCallThreading``: every entry point that can reach a rescue takes
+``deterministic_rescue``, and the two-phase stall-relief hook -- which calls
+``_relief_rescue`` POSITIONALLY -- carries it on a ``functools.partial``, so a
+future flip is a value change rather than a rewiring job.
 
 The methods only read two attributes off ``self``, so they are exercised against
 a lightweight stub rather than a full ``Autorouter`` (which would need a board).
@@ -40,7 +36,6 @@ from kicad_tools.router.core import (
     DETERMINISTIC_RESCUE_DEFAULT,
     RELIEF_SUBSEARCH_BUDGET_S,
     RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S,
-    TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT,
     Autorouter,
 )
 
@@ -103,18 +98,26 @@ class TestReliefSubsearchBudget:
 
 
 class TestDeterministicRescueDefault:
-    """Issue #4730: the deterministic bound is the fleet default."""
+    """Issue #4730: the deterministic bound stays OPT-IN, on every path."""
 
-    def test_route_all_negotiated_defaults_to_the_deterministic_bound(self):
+    def test_the_flip_stayed_withdrawn(self):
+        """The measured negative result: with the bound on by default, board
+        07's copper-LVS open set changed and its routed-DRC went 8 -> 13 over
+        an allowlist of 8 that main sits exactly at (CI runs 31281260812 and
+        31283738762 vs main's 31277512785).  #4730's Acceptance forbids
+        absorbing that, so the default must remain ``False`` until board 07's
+        rescue outcome is understood."""
+        assert DETERMINISTIC_RESCUE_DEFAULT is False
+
+    def test_route_all_negotiated_uses_the_shared_default(self):
         default = (
             inspect.signature(Autorouter.route_all_negotiated)
             .parameters["deterministic_rescue"]
             .default
         )
         assert default is DETERMINISTIC_RESCUE_DEFAULT
-        assert DETERMINISTIC_RESCUE_DEFAULT is True
 
-    def test_relief_rescue_defaults_to_the_deterministic_bound(self):
+    def test_relief_rescue_uses_the_shared_default(self):
         """The recursion and the two-phase hook both land on this default."""
         default = (
             inspect.signature(Autorouter._relief_rescue).parameters["deterministic_rescue"].default
@@ -126,8 +129,7 @@ class TestDeterministicRescueDefault:
         ``_relief_rescue`` POSITIONALLY with 8 arguments, so the flag must stay
         behind them -- otherwise that path would silently receive a victim
         count as its rescue mode, and the ``functools.partial`` that binds the
-        two-phase path's own default (#4730) would collide with a positional
-        argument."""
+        bound (#4730) would collide with a positional argument."""
         params = list(inspect.signature(Autorouter._relief_rescue).parameters)
         assert params[0] == "self"
         assert params[1:9] == [
@@ -142,83 +144,74 @@ class TestDeterministicRescueDefault:
         ]
         assert params.index("deterministic_rescue") >= 9
 
-    def test_inherited_default_without_a_cap_keeps_the_wall_clock(self):
-        """The safety property of the flip: capless runs are byte-identical to
-        the pre-#4730 behavior because there is no deterministic bound to hand
-        over to."""
-        stub = _BudgetStub()
-        assert _budget(stub, None, DETERMINISTIC_RESCUE_DEFAULT) == RELIEF_SUBSEARCH_BUDGET_S
-        assert _budget(stub, 4.0, DETERMINISTIC_RESCUE_DEFAULT) == 4.0
-        assert _budget(stub, None, DETERMINISTIC_RESCUE_DEFAULT) == _budget(stub, None, False)
-
-    def test_inherited_default_with_a_cap_hands_over_to_the_node_budget(self):
-        stub = _BudgetStub(per_net_iterations=1_000_000, max_search_iterations=12_000_000)
-        assert (
-            _budget(stub, None, DETERMINISTIC_RESCUE_DEFAULT) == RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S
+    def test_default_selects_exactly_the_historical_bound(self):
+        """The safety property of the withdrawal: an inherited default is
+        indistinguishable from an explicit opt-out, capped or not."""
+        for stub in (
+            _BudgetStub(),
+            _BudgetStub(per_net_iterations=1_000_000, max_search_iterations=12_000_000),
+        ):
+            assert _budget(stub, None, DETERMINISTIC_RESCUE_DEFAULT) == _budget(stub, None, False)
+            assert _budget(stub, 4.0, DETERMINISTIC_RESCUE_DEFAULT) == _budget(stub, 4.0, False)
+        assert _budget(_BudgetStub(), None, DETERMINISTIC_RESCUE_DEFAULT) == (
+            RELIEF_SUBSEARCH_BUDGET_S
         )
 
 
 class TestReliefSubsearchBoundLine:
-    """The routing-log line is the greppable A/B evidence for the flip."""
+    """The routing-log line is the greppable A/B evidence for the bound."""
 
     def test_cap_active_reports_the_iteration_bound(self):
         stub = _BudgetStub(per_net_iterations=1_000_000, max_search_iterations=12_000_000)
-        line = _line(stub, None, DETERMINISTIC_RESCUE_DEFAULT)
+        line = _line(stub, None, True)
         # Load-bearing evidence token -- board CI logs are grepped for it.
         assert "iteration-bounded" in line
         assert "machine-independent" in line
         assert "requested" not in line
 
-    def test_inherited_default_without_a_cap_does_not_claim_a_request(self):
-        """#4730 acceptance: with a True default, an ordinary capless run never
-        'requested' anything, so the wall-clock arm must stay neutral."""
-        line = _line(_BudgetStub(), None, DETERMINISTIC_RESCUE_DEFAULT)
+    def test_opt_in_without_a_cap_states_the_fact_not_a_request(self):
+        """This arm is reached by an opt-in run that simply has no expansion
+        cap to hand the sub-searches to, so it reports the bound rather than
+        attributing a decision."""
+        line = _line(_BudgetStub(), None, True)
         assert "requested" not in line
         assert "iteration-bounded" not in line
         assert f"{RELIEF_SUBSEARCH_BUDGET_S:.1f}s wall clock" in line
         assert "no per-net node-expansion cap is active" in line
         assert "off for this route" not in line
 
-    def test_off_arm_does_not_attribute_the_choice_to_one_source(self):
-        """``deterministic_rescue=False`` reaches this arm two ways -- an
-        explicit caller opt-out on the negotiated path, or
-        ``TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT`` on the two-phase path -- so
-        the wording must name both rather than blaming a caller."""
+    def test_off_arm_names_the_default_and_the_way_in(self):
+        """``deterministic_rescue=False`` is what ordinary runs inherit, so the
+        wording must not blame a caller -- it says this is the default and how
+        to opt in."""
         stub = _BudgetStub(per_net_iterations=1_000_000)
-        line = _line(stub, None, False)
+        line = _line(stub, None, DETERMINISTIC_RESCUE_DEFAULT)
         assert "off for this route" in line
-        assert "caller opt-out" in line
-        assert "two-phase path default" in line
+        assert "the default" in line
+        assert "deterministic_rescue=True" in line
         assert "iteration-bounded" not in line
         assert f"{RELIEF_SUBSEARCH_BUDGET_S:.1f}s wall clock" in line
 
     def test_every_arm_carries_the_same_greppable_prefix(self):
         capped = _BudgetStub(per_net_iterations=1_000_000)
         for line in (
+            _line(capped, None, True),
+            _line(_BudgetStub(), None, True),
             _line(capped, None, DETERMINISTIC_RESCUE_DEFAULT),
-            _line(_BudgetStub(), None, DETERMINISTIC_RESCUE_DEFAULT),
-            _line(capped, None, False),
         ):
             assert line.startswith("  Relief-rescue sub-search cap: ")
 
 
-class TestTwoPhasePathScoping:
-    """Issue #4730: the flip is scoped OUT of the two-phase path (board 07's
-    measured regression), and that path gets a real per-call switch."""
+class TestPerCallThreading:
+    """Issue #4730's durable half: every path that can reach a rescue carries
+    the bound per call, so opting one in is a measured value change."""
 
-    def test_two_phase_default_is_the_historical_wall_clock(self):
-        """The documented negative result: board 07's copper-LVS open set
-        changed and routed-DRC went 8 -> 13 over an allowlist of 8 when this
-        path inherited the flip, so it must stay off."""
-        assert TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT is False
-        assert TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT is not DETERMINISTIC_RESCUE_DEFAULT
-
-    def test_route_all_two_phase_takes_the_flag_and_defaults_it_to_the_path_value(self):
+    def test_route_all_two_phase_takes_the_flag(self):
         param = inspect.signature(Autorouter.route_all_two_phase).parameters.get(
             "deterministic_rescue"
         )
         assert param is not None, "the two-phase path must expose the opt-in/opt-out"
-        assert param.default is TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT
+        assert param.default is DETERMINISTIC_RESCUE_DEFAULT
 
     def test_escape_entry_points_forward_the_flag(self):
         """``kct route`` reaches the two-phase path through these, so the
@@ -229,7 +222,18 @@ class TestTwoPhasePathScoping:
         ):
             param = inspect.signature(method).parameters.get("deterministic_rescue")
             assert param is not None, f"{method.__name__} must forward the flag"
-            assert param.default is TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT
+            assert param.default is DETERMINISTIC_RESCUE_DEFAULT
+
+    def test_hierarchical_delegation_forwards_an_explicit_opt_in(self):
+        """``route_all_negotiated(hierarchical=True)`` hands the whole route to
+        the two-phase path; dropping the flag there would silently discard a
+        caller's opt-in."""
+        stub = MagicMock()
+        stub._negotiated_timeout_cap = None
+
+        Autorouter.route_all_negotiated(stub, hierarchical=True, deterministic_rescue=True)
+
+        assert stub.route_all_two_phase.call_args.kwargs["deterministic_rescue"] is True
 
     def test_create_two_phase_router_binds_the_bound_onto_the_positional_hook(self, monkeypatch):
         """The #3471 hook calls ``_relief_rescue`` positionally, so a plain
@@ -246,14 +250,14 @@ class TestTwoPhasePathScoping:
         Autorouter._create_two_phase_router(stub)
         hook = captured["relief_rescue"]
         assert isinstance(hook, functools.partial)
-        assert hook.keywords["deterministic_rescue"] is TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT
+        assert hook.keywords["deterministic_rescue"] is DETERMINISTIC_RESCUE_DEFAULT
 
         # The 8 positional arguments the hook passes must still land on the
         # underlying method, with the bound arriving as a keyword.
         hook(1, 2, 3, 4, 5, 6, 7, 8)
         args, kwargs = stub._relief_rescue.call_args
         assert args == (1, 2, 3, 4, 5, 6, 7, 8)
-        assert kwargs == {"deterministic_rescue": TWO_PHASE_DETERMINISTIC_RESCUE_DEFAULT}
+        assert kwargs == {"deterministic_rescue": DETERMINISTIC_RESCUE_DEFAULT}
 
     def test_create_two_phase_router_honors_an_explicit_opt_in(self, monkeypatch):
         captured: dict = {}
@@ -268,7 +272,7 @@ class TestTwoPhasePathScoping:
 
     def test_route_all_two_phase_forwards_the_flag_to_hook_and_banner(self, monkeypatch):
         """Both the wiring and the log line must report the value THIS call
-        runs under -- the banner previously hardcoded the module constant."""
+        runs under -- the banner must not fall back to the module constant."""
         printed: list[str] = []
         monkeypatch.setattr(core, "flush_print", lambda line: printed.append(line))
 
