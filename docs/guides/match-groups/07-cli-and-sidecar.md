@@ -16,18 +16,18 @@ kct route board.kicad_pcb \
     -o routed.kicad_pcb
 ```
 
-The `--length-match-groups` flag (Epic #2661 Phase 3H, see
-`src/kicad_tools/cli/route_cmd.py:3475`) engages
+The `--length-match-groups` flag (Epic #2661 Phase 3H, registered in
+`_main_impl` in `src/kicad_tools/cli/route_cmd.py`) engages
 `Autorouter.apply_match_group_tuning` after routing completes.
 
 ### Why both `--length-match-diffpairs` AND `--length-match-groups`
 
 The pipeline runs `--length-match-diffpairs` **first** (within-pair
-tuning) then `--length-match-groups` (cross-lane tuning) — see
-`route_cmd.py:5265-5270`. Order matters for MIPI/HDMI lane groups
-(guide 03): within-pair invariants must be established before
-cross-lane tuning can preserve them via symmetric serpentine
-insertion.
+tuning) then `--length-match-groups` (cross-lane tuning) — both blocks
+live in `_main_impl` in `src/kicad_tools/cli/route_cmd.py`, in that
+order. Order matters for MIPI/HDMI lane groups (guide 03): within-pair
+invariants must be established before cross-lane tuning can preserve
+them via symmetric serpentine insertion.
 
 If you only have single-ended buses (DDR data byte, parallel address
 bus, no diff pairs), you may pass `--length-match-groups` alone.

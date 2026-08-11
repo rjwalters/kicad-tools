@@ -8,10 +8,10 @@ the pair (intra-pair) and the gap between the pair and everything else
 
 `NetClassRouting` (`src/kicad_tools/router/rules.py`) exposes both:
 
-| Field | Line | Meaning |
-|---|---|---|
-| `clearance` | 405 | Inter-net clearance, applied between this class's nets and everything else. |
-| `intra_pair_clearance` | 425 | Within-pair clearance, applied only to the two halves of a declared pair. `None` → falls back to `clearance`. |
+| Field | Meaning |
+|---|---|
+| `clearance` | Inter-net clearance, applied between this class's nets and everything else. |
+| `intra_pair_clearance` | Within-pair clearance, applied only to the two halves of a declared pair. `None` → falls back to `clearance`. |
 
 Read `intra_pair_clearance` via the accessor, never the field directly:
 

@@ -36,7 +36,7 @@ duplicate the pair-name list in Python.
 
 Net names with matching `_P`/`_N` or `+`/`-` suffixes are detected
 automatically by `parse_differential_signal` in
-`src/kicad_tools/router/diffpair.py:365`. Examples that auto-detect:
+`src/kicad_tools/router/diffpair.py`. Examples that auto-detect:
 
 - `USB_D+` / `USB_D-`
 - `PCIE_TX_P` / `PCIE_TX_N`
@@ -46,9 +46,9 @@ automatically by `parse_differential_signal` in
 
 USB-C `CC1`/`CC2` and `SBU1`/`SBU2` *look* like a diff pair but are
 electrically single-ended orientation/sideband pins. `is_single_ended_refused`
-in `src/kicad_tools/router/diffpair.py:240` refuses them at suffix-inference
-time, and `should_engage_coupled` in `diffpair.py:296` re-applies the refusal
-at the engagement layer — so even an explicit `diffpair_partner="USB_CC2"`
+in `src/kicad_tools/router/diffpair.py` refuses them at suffix-inference time,
+and `should_engage_coupled` in the same module re-applies the refusal at the
+engagement layer — so even an explicit `diffpair_partner="USB_CC2"`
 declaration **cannot** force coupled routing on these pins (Issue #2527
 curator lesson).
 

@@ -14,9 +14,12 @@ Guards the doc/code coupling for ``docs/guides/diff-pairs/``:
   ``docs/guides/routing.md`` (``router.auto_detect_diff_pairs``,
   ``router.route_diff_pairs``, ``router.add_diff_pair``,
   ``router.set_length_match``, ``router.enable_serpentine``, and the
-  diff-pair-shaped ``router.route_net("USB_D")`` example) are gone.
+  diff-pair-shaped ``router.route_net("USB_D")`` example) are gone;
+* no guide cites source by ``<file>.py:NNN`` line number (issue #4764 —
+  line numbers rot on every refactor; guides must anchor on symbols),
+  and every symbol a guide anchors on still exists in the file it names.
 
-Issue: #2659.  Epic: #2556 (Phase 4M).
+Issue: #2659.  Epic: #2556 (Phase 4M).  Line-citation guard: #4764.
 """
 
 from __future__ import annotations
@@ -40,6 +43,86 @@ STALE_API_TOKENS = (
     "add_diff_pair",
     "set_length_match",
     "enable_serpentine",
+)
+
+# A ``<file>.py:NNN`` citation anywhere in a guide.  Issue #4764 measured 20
+# of 32 such citations rotten (62.5%) across the diff-pair / match-group
+# guide trees, one of them off by 8,569 lines.  ``core.py`` is ~19k lines and
+# ``route_cmd.py`` ~15k, so line citations into them have no useful
+# half-life.  Guides must name the symbol and the file instead.
+LINE_CITATION_RE = re.compile(r"\.py:\d+")
+
+# Symbol anchors the diff-pair guides make, as
+# ``(guide filename, symbol, source file relative to the repo root)``.
+#
+# Each row is checked in BOTH directions: the symbol must still appear in the
+# guide (so a doc edit cannot silently drop or misspell the anchor) and in the
+# source file the guide names (so a source-side rename goes red here instead
+# of rotting quietly).  Seeded from the issue #4764 inventory.
+CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
+    # 01 — declaring pairs
+    ("01-declaring-pairs.md", "diffpair_partner", "src/kicad_tools/router/rules.py"),
+    (
+        "01-declaring-pairs.md",
+        "parse_differential_signal",
+        "src/kicad_tools/router/diffpair.py",
+    ),
+    (
+        "01-declaring-pairs.md",
+        "is_single_ended_refused",
+        "src/kicad_tools/router/diffpair.py",
+    ),
+    ("01-declaring-pairs.md", "should_engage_coupled", "src/kicad_tools/router/diffpair.py"),
+    # 02 — clearance and net classes
+    ("02-clearance-and-classes.md", "intra_pair_clearance", "src/kicad_tools/router/rules.py"),
+    ("02-clearance-and-classes.md", "coupled_routing", "src/kicad_tools/router/rules.py"),
+    ("02-clearance-and-classes.md", "NET_CLASS_HIGH_SPEED", "src/kicad_tools/router/rules.py"),
+    (
+        "02-clearance-and-classes.md",
+        "effective_intra_pair_clearance",
+        "src/kicad_tools/router/rules.py",
+    ),
+    # 03 — impedance-driven sizing
+    ("03-impedance-and-sizing.md", "target_diff_impedance", "src/kicad_tools/router/rules.py"),
+    (
+        "03-impedance-and-sizing.md",
+        "impedance_tolerance_percent",
+        "src/kicad_tools/router/rules.py",
+    ),
+    (
+        "03-impedance-and-sizing.md",
+        "StackupMismatchWarning",
+        "src/kicad_tools/router/diffpair_impedance.py",
+    ),
+    (
+        "03-impedance-and-sizing.md",
+        "apply_impedance_driven_sizing",
+        "src/kicad_tools/router/diffpair_impedance.py",
+    ),
+    # 04 — length matching
+    ("04-length-matching.md", "skew_tolerance_mm", "src/kicad_tools/router/rules.py"),
+    ("04-length-matching.md", "effective_skew_tolerance", "src/kicad_tools/router/rules.py"),
+    ("04-length-matching.md", "update_diffpair_skew", "src/kicad_tools/router/core.py"),
+    # 06 — DRC rules
+    (
+        "06-drc-rules.md",
+        "DiffPairClearanceIntraRule",
+        "src/kicad_tools/validate/rules/diffpair_clearance_intra.py",
+    ),
+    (
+        "06-drc-rules.md",
+        "DiffPairRoutingContinuityRule",
+        "src/kicad_tools/validate/rules/diffpair_routing_continuity.py",
+    ),
+    (
+        "06-drc-rules.md",
+        "DiffPairLengthSkewRule",
+        "src/kicad_tools/validate/rules/diffpair_length_skew.py",
+    ),
+    ("06-drc-rules.md", "ImpedanceRule", "src/kicad_tools/validate/rules/impedance.py"),
+    ("06-drc-rules.md", "ViolationType", "src/kicad_tools/drc/violation.py"),
+    ("06-drc-rules.md", "from_string", "src/kicad_tools/drc/violation.py"),
+    ("06-drc-rules.md", "_ALIASES", "src/kicad_tools/drc/violation.py"),
 )
 
 
@@ -182,6 +265,65 @@ def test_no_stale_api_references() -> None:
         f"{found}.  These APIs do not exist in src/kicad_tools/; the docs "
         f"must not reference them."
     )
+
+
+def test_no_line_number_citations() -> None:
+    """No guide cites source code by ``<file>.py:NNN`` line number.
+
+    Line numbers rot on every refactor and nothing else in the suite
+    notices.  Issue #4749 fixed the ``rules.py`` subset; issue #4764 found
+    20 of 32 remaining citations wrong, including one off by 8,569 lines.
+    Cite ``symbol`` + ``path/to/file.py`` instead — that survives a
+    refactor and ``test_cited_symbols_exist`` can verify it.
+    """
+    offenders: list[str] = []
+    for path in sorted(DIFFPAIR_DOCS.glob("*.md")):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if LINE_CITATION_RE.search(line):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}: {line.strip()}")
+
+    assert not offenders, (
+        "Line-number source citations found in the diff-pair guides:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nReplace each with a symbol anchor — e.g. "
+        "`update_diffpair_skew` in `src/kicad_tools/router/core.py` — and "
+        "add the (guide, symbol, source file) row to CITED_SYMBOLS."
+    )
+
+
+def test_cited_symbols_exist() -> None:
+    """Every symbol the diff-pair guides anchor on exists where they say.
+
+    Checked in both directions per ``CITED_SYMBOLS`` row: the symbol must
+    still be present in the guide (a doc rewrite cannot silently drop the
+    anchor and leave a bare, useless file path) and in the source file the
+    guide names (a source-side rename must fail here rather than rot).
+    """
+    for guide_name, symbol, source_rel in CITED_SYMBOLS:
+        # Whole-word match so a near-miss rename (``update_diffpair_skewz``)
+        # cannot satisfy the check by substring.
+        word = re.compile(rf"\b{re.escape(symbol)}\b")
+
+        guide_path = DIFFPAIR_DOCS / guide_name
+        assert guide_path.is_file(), f"CITED_SYMBOLS names a missing guide: {guide_path}"
+        guide_text = guide_path.read_text(encoding="utf-8")
+        assert word.search(guide_text), (
+            f"{guide_path.relative_to(REPO_ROOT)} no longer mentions the "
+            f"symbol {symbol!r}.  Either restore the anchor or drop its row "
+            f"from CITED_SYMBOLS in {Path(__file__).name}."
+        )
+
+        source_path = REPO_ROOT / source_rel
+        assert source_path.is_file(), (
+            f"{guide_path.relative_to(REPO_ROOT)} cites {source_rel}, which "
+            f"does not exist.  Update the guide and CITED_SYMBOLS."
+        )
+        assert word.search(source_path.read_text(encoding="utf-8")), (
+            f"{guide_path.relative_to(REPO_ROOT)} cites symbol {symbol!r} in "
+            f"{source_rel}, but that name no longer appears in the file.  "
+            f"It was probably renamed — update the guide (and this row) to "
+            f"the live name."
+        )
 
 
 def test_all_guides_present() -> None:

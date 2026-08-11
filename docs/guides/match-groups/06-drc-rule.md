@@ -2,8 +2,8 @@
 
 The DRC rule `match_group_length_skew` (Issue #2702, Epic #2661
 Phase 2G) validates the routed lane-to-lane skew of every detected
-match group. Source:
-`src/kicad_tools/validate/rules/match_group_length_skew.py:153`.
+match group. Source: `MatchGroupLengthSkewRule` in
+`src/kicad_tools/validate/rules/match_group_length_skew.py`.
 
 ## What it detects
 
@@ -28,12 +28,12 @@ re-derive group membership from the PCB alone. Two producer-side
 paths feed the rule:
 
 1. **In-process** — `MatchGroupTracker` populated during routing
-   (`Autorouter.update_match_group_skew` at
-   `src/kicad_tools/router/core.py:7350`). Used by the `kct route`
+   (`Autorouter.update_match_group_skew` in
+   `src/kicad_tools/router/core.py`). Used by the `kct route`
    pipeline.
 2. **Standalone** — the `--net-class-map` JSON sidecar. The
-   `derive_group_skew_data` helper at
-   `src/kicad_tools/validate/match_group_skew.py:77` re-derives
+   `derive_group_skew_data` helper in
+   `src/kicad_tools/validate/match_group_skew.py` re-derives
    group membership and per-net lengths from the routed PCB +
    sidecar map.
 
@@ -45,10 +45,9 @@ sidecar.
 ## Rule ID
 
 The public string is `match_group_length_skew` — exactly the
-`ViolationType.MATCH_GROUP_LENGTH_SKEW` enum value at
-`src/kicad_tools/drc/violation.py:157`. The enum is aliased
-explicitly in the `from_string` map at
-`src/kicad_tools/drc/violation.py:299`:
+`ViolationType.MATCH_GROUP_LENGTH_SKEW` enum value in
+`src/kicad_tools/drc/violation.py`. The enum is aliased explicitly in
+the `_ALIASES` map inside `ViolationType.from_string` in that module:
 
 ```python
 ViolationType.from_string("match_group_length_skew") is ViolationType.MATCH_GROUP_LENGTH_SKEW

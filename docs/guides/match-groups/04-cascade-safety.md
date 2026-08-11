@@ -4,11 +4,13 @@ The match-group tuner inserts serpentines until every member is within
 `length_match_tolerance_mm` of the reference — **bounded** by three
 constants in `src/kicad_tools/router/match_group_tuning.py`:
 
-| Constant | Value | Source line |
-|---|---|---|
-| `MAX_INSERTS_PER_GROUP_MEMBER_SMALL=3` | per-member budget for groups with `N <= 4` | `match_group_tuning.py:153` |
-| `MAX_INSERTS_PER_GROUP_MEMBER_LARGE=2` | per-member budget for groups with `N > 4` | `match_group_tuning.py:161` |
-| `MAX_TOTAL_INSERTS_PER_GROUP=16` | absolute cumulative ceiling across the group | `match_group_tuning.py:169` |
+All three are module-level constants of that module:
+
+| Constant | Meaning |
+|---|---|
+| `MAX_INSERTS_PER_GROUP_MEMBER_SMALL=3` | per-member budget for groups with `N <= 4` |
+| `MAX_INSERTS_PER_GROUP_MEMBER_LARGE=2` | per-member budget for groups with `N > 4` |
+| `MAX_TOTAL_INSERTS_PER_GROUP=16` | absolute cumulative ceiling across the group |
 
 ## Why the bounds exist
 
@@ -29,8 +31,10 @@ after just 1–2 symmetric inserts per lane.
 
 ## When the tuner gives up: `reason` field
 
-`TuneResult.reason` reports why a member could not reach tolerance.
-Defined at `match_group_tuning.py:608-722`:
+`TuneResult.reason` reports why a member could not reach tolerance. The
+`TuneResult` dataclass is defined in
+`src/kicad_tools/router/match_group_tuning.py`, and `tune_match_group_v2`
+in the same module populates the field:
 
 | Reason | Meaning |
 |---|---|

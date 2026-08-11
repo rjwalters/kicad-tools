@@ -122,8 +122,8 @@ Issue #3308 (June 2026): `route_demo.py` is a thin wrapper that
 delegates to `generate_design.py:route_pcb()`.  This guarantees the
 demo recipe and the end-to-end build recipe share a single
 implementation -- they cannot drift again.  `kct build --step route`
-also invokes `route_demo.py` (see
-`src/kicad_tools/cli/build_cmd.py:1189`), so all three entry points
+also invokes `route_demo.py` (see `_run_step_route` in
+`src/kicad_tools/cli/build_cmd.py`), so all three entry points
 (``route_demo.py``, ``kct build --step route``, ``generate_design.py``)
 now produce the same routed output.
 

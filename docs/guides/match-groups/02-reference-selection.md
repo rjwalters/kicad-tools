@@ -14,8 +14,8 @@ exercises all three policies.
 
 The longest routed net becomes the reference; every shorter member is
 serpentined up to its length. Matches the legacy `tune_match_group`
-semantics at `router/optimizer/serpentine.py:438`. Use this when no
-member of the group has special timing-budget constraints.
+semantics in `src/kicad_tools/router/optimizer/serpentine.py`. Use this
+when no member of the group has special timing-budget constraints.
 
 ```python
 from kicad_tools.router.rules import NetClassRouting
@@ -68,11 +68,15 @@ mipi_csi_data = NetClassRouting(
 
 ## Precedence
 
-Detection at `match_group_detection.py:418-432` records the policy
-verbatim on `MatchGroup.length_match_reference`. `MatchGroupTracker.get_reference_length`
-consumes it: explicit name first (must exist in the group's measured
-lengths), `None` falls back to the longest, `"clock"` is a no-op in
-Phase 1A and the longest wins.
+`_resolve_reference` in `src/kicad_tools/router/match_group_detection.py`
+resolves the policy at detection time into a concrete
+`MatchGroup.reference_net_id`: an explicit net name must be a member of
+the group (otherwise it logs a warning and yields `None`), `None` stays
+`None`, and `"clock"` is handed to `_resolve_clock_sentinel`.
+`MatchGroupTracker.get_reference_length` in
+`src/kicad_tools/router/match_group_length.py` then consumes that id — a
+set id gives the pace-car length, `None` falls back to the longest
+routed member.
 
 ## See also
 

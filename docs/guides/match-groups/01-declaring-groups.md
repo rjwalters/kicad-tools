@@ -30,8 +30,8 @@ ddr_dq = NetClassRouting(
 The `length_match_group` field lives in `src/kicad_tools/router/rules.py`.
 Multiple net classes may declare the same group name — their members merge
 into a single group (the documented MIPI/HDMI lane-composition pattern; see
-guide 03). Overrides suffix inference at detection time
-(`match_group_detection.py:172`).
+guide 03). Overrides suffix inference at detection time (in
+`detect_match_groups`, `src/kicad_tools/router/match_group_detection.py`).
 
 ### 2. Legacy `Autorouter.add_match_group(...)` API
 
@@ -46,16 +46,18 @@ router.add_match_group(
 )
 ```
 
-Defined at `src/kicad_tools/router/core.py:7211`. Lower priority than
-explicit declarations — a legacy group whose members are already
-claimed by an EXPLICIT class is dropped (see `detect_match_groups` at
-`match_group_detection.py:172`).
+`Autorouter.add_match_group` is defined in
+`src/kicad_tools/router/core.py`. Lower priority than explicit
+declarations — a legacy group whose members are already claimed by an
+EXPLICIT class is dropped (see `detect_match_groups` in
+`src/kicad_tools/router/match_group_detection.py`).
 
 ### 3. Suffix inference (opt-in, last resort)
 
 Off by default. Enable by passing `enable_suffix_inference=True` to
-`detect_match_groups()`. The detector consults `BUS_GROUP_PATTERNS` at
-`match_group_detection.py:110`, which recognises:
+`detect_match_groups()`. The detector consults the `BUS_GROUP_PATTERNS`
+table in `src/kicad_tools/router/match_group_detection.py`, which
+recognises:
 
 - `DQ\d+` → `DDR_DATA`
 - `CSI_DAT\d+_[PN]` → `MIPI_CSI_DATA`

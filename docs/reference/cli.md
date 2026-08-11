@@ -1369,8 +1369,8 @@ epilog in [`src/kicad_tools/cli/route_cmd.py`](../../src/kicad_tools/cli/route_c
 
 ### `kct fleet status`
 
-Source of truth: module docstring at
-[`src/kicad_tools/cli/fleet_cmd.py:17-21`](../../src/kicad_tools/cli/fleet_cmd.py).
+Source of truth: the `Exit Codes:` section of the module docstring in
+[`src/kicad_tools/cli/fleet_cmd.py`](../../src/kicad_tools/cli/fleet_cmd.py).
 
 | Code | Meaning |
 |------|---------|

@@ -58,6 +58,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still run a bare incremental `uv run mypy src/`, so the trap and its
   `rm -rf .mypy_cache` remedy are now documented in `CLAUDE.md`, `README.md`'s
   fresh-worktree checklist, and `docs/contributing/development.md`.
+- **Guide source citations are symbol-anchored, and a test now keeps them
+  that way** (#4764) — a follow-up to #4749 measured 20 of 32 `<file>.py:NNN`
+  citations under `docs/guides/` wrong (62.5%), the worst off by 8,569 lines
+  (`docs/guides/diff-pairs/04-length-matching.md` sent readers to
+  `router/core.py:6926` for `update_diffpair_skew`, which lives at 15495).
+  Two could not be repaired by refreshing a number at all — the guides cited
+  `_collect_explicit_match_groups`, renamed to `_gather_explicit_groups`, and
+  claimed `detect_match_groups` records the reference policy verbatim on
+  `MatchGroup.length_match_reference`, when `_resolve_reference` actually
+  resolves it into a concrete `MatchGroup.reference_net_id`. All 32 citations
+  in the diff-pair / match-group guides are now `symbol` + file-path anchors
+  (the convention PR #4753 established), as are the three rotten ones in
+  `docs/reference/api.md`, `docs/reference/cli.md`, and
+  `boards/03-usb-joystick/README.md`, plus the equally stale `Line` /
+  `Source line` table columns in `02-clearance-and-classes.md`,
+  `03-impedance-and-sizing.md`, and `04-cascade-safety.md`. Because the rot
+  reaccumulated across 8 files even after #4749 was filed, the fix is not
+  just the sweep: `tests/test_diffpair_docs.py` and
+  `tests/test_match_group_docs.py` each gain `test_no_line_number_citations`
+  (bans `\.py:\d+` outright in their guide tree) and `test_cited_symbols_exist`
+  (whole-word checks each anchored symbol in **both** the guide and the source
+  file it names, so a doc rewrite that drops the anchor and a source-side
+  rename both go red). The 26 citations under `docs/investigations/`,
+  `docs/research/`, and `boards/07-matchgroup-test/diagnostic-runs/` are
+  deliberately untouched — those are dated forensic records where the line
+  number *is* the evidence.
 - **The relief rescue's deterministic sub-search bound stays opt-in — the
   fleet-default flip is withdrawn** (#4730) — #4536 gave
   `Autorouter.route_all_negotiated` a `deterministic_rescue=` opt-in that

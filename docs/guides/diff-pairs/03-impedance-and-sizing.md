@@ -8,11 +8,11 @@ intra_pair_clearance)` from the PCB stackup. From Epic #2556 Phase 3K
 
 `NetClassRouting` (`src/kicad_tools/router/rules.py`):
 
-| Field | Line | Use |
-|---|---|---|
-| `target_diff_impedance` | 486 | Differential impedance in Ω (e.g. 90 for USB 2.0, 100 for USB 3.0 / PCIe / MIPI). |
-| `target_single_impedance` | 504 | Single-ended impedance in Ω (50 for clocks; 75 for video/coax). |
-| `impedance_tolerance_percent` | 515 | DRC firing threshold, default 10.0 %. |
+| Field | Use |
+|---|---|
+| `target_diff_impedance` | Differential impedance in Ω (e.g. 90 for USB 2.0, 100 for USB 3.0 / PCIe / MIPI). |
+| `target_single_impedance` | Single-ended impedance in Ω (50 for clocks; 75 for video/coax). |
+| `impedance_tolerance_percent` | DRC firing threshold, default 10.0 %. |
 
 When `target_diff_impedance` is set, the router calls
 `kicad_tools.router.diffpair_impedance.apply_impedance_driven_sizing` to
@@ -40,8 +40,8 @@ ended nets in the same class consume the single value.
 The impedance solver reads the board's stackup (dielectric thickness, εr,
 copper thickness). When the actual stackup deviates from the JLCPCB tier-1
 calibration baseline (FR-4, εr=4.5, 35 µm Cu) the solver emits a
-`StackupMismatchWarning` from
-`src/kicad_tools/router/diffpair_impedance.py:76`. The warning is included
+`StackupMismatchWarning`, defined in
+`src/kicad_tools/router/diffpair_impedance.py`. The warning is included
 in the route result so consumers can flag the discrepancy at CI time.
 
 When the stackup is unknown, the solver falls back to the JLCPCB tier-1

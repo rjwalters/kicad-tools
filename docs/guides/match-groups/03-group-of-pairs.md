@@ -2,7 +2,7 @@
 
 MIPI and HDMI lane groups are **groups whose members are themselves
 differential pairs**. The Phase 2F symmetric-serpentine path
-(`match_group_tuning.tune_match_group_v2`, `router/match_group_tuning.py:214`)
+(`tune_match_group_v2` in `src/kicad_tools/router/match_group_tuning.py`)
 preserves within-pair coupling while equalising lane-to-lane length.
 
 Reference board: [`boards/07-matchgroup-test`](../../../boards/07-matchgroup-test/)
@@ -48,7 +48,8 @@ mipi_lane_1 = NetClassRouting(
 
 Two separate `NetClassRouting` instances declare `length_match_group="MIPI_CSI"`;
 detection merges their members into a single group (see
-`match_group_detection.py:318`, `_collect_explicit_match_groups`).
+`_gather_explicit_groups` in
+`src/kicad_tools/router/match_group_detection.py`).
 
 ## Worked example: 3-lane MIPI CSI
 
@@ -66,7 +67,9 @@ within `length_match_tolerance_mm=0.05`.
 ## Engagement order
 
 The CLI runs `--length-match-diffpairs` **before** `--length-match-groups`
-(see `cli/route_cmd.py:5265-5270`). This is intentional: within-pair
+(the `length_match_groups` block runs after the `length_match_diffpairs`
+one inside `_main_impl`, `src/kicad_tools/cli/route_cmd.py`). This is
+intentional: within-pair
 serpentines establish the per-pair invariant first, then cross-lane
 group tuning operates on pairs whose intra-pair skew is already
 within tolerance. Reversing the order would let group tuning corrupt

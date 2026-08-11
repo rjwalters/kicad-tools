@@ -12,11 +12,15 @@ Guards the doc/code coupling for ``docs/guides/match-groups/``:
 * the cascade-safety constants documented in ``04-cascade-safety.md``
   match the live values in ``router/match_group_tuning.py``;
 * all seven guides are present;
+* no guide cites source by ``<file>.py:NNN`` line number (issue #4764 —
+  line numbers rot on every refactor; guides must anchor on symbols),
+  and every symbol a guide anchors on still exists in the file it names;
 * each guide stays under the size cap (50 lines for README, 100 for the
   numbered guides) so we keep the "don't create monster doc files"
   invariant from Epic #2556 Phase 4M.
 
 Issue: #2725.  Epic: #2661 (Phase 3M).  Mirrors ``test_diffpair_docs.py``.
+Line-citation guard: #4764.
 """
 
 from __future__ import annotations
@@ -30,6 +34,122 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MATCH_GROUP_DOCS = REPO_ROOT / "docs" / "guides" / "match-groups"
 ROUTING_GUIDE = REPO_ROOT / "docs" / "guides" / "routing.md"
+
+# A ``<file>.py:NNN`` citation anywhere in a guide.  See issue #4764: the
+# whole "Source line" column of 04-cascade-safety.md was wrong while
+# ``test_cascade_safety_constants_match_code`` guarded the column next to it.
+LINE_CITATION_RE = re.compile(r"\.py:\d+")
+
+# Symbol anchors the match-group guides make, as
+# ``(guide filename, symbol, source file relative to the repo root)``.
+#
+# Each row is checked in BOTH directions: the symbol must still appear in the
+# guide (so a doc edit cannot silently drop or misspell the anchor) and in the
+# source file the guide names (so a source-side rename goes red here instead
+# of rotting quietly).  ``_gather_explicit_groups`` is the regression this
+# table exists for — 03-group-of-pairs.md cited it under its pre-rename name
+# ``_collect_explicit_match_groups`` for long enough that a line-number
+# refresh could not have repaired the citation.
+CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
+    # 01 — declaring groups
+    ("01-declaring-groups.md", "length_match_group", "src/kicad_tools/router/rules.py"),
+    (
+        "01-declaring-groups.md",
+        "detect_match_groups",
+        "src/kicad_tools/router/match_group_detection.py",
+    ),
+    (
+        "01-declaring-groups.md",
+        "BUS_GROUP_PATTERNS",
+        "src/kicad_tools/router/match_group_detection.py",
+    ),
+    ("01-declaring-groups.md", "add_match_group", "src/kicad_tools/router/core.py"),
+    # 02 — reference selection
+    ("02-reference-selection.md", "length_match_reference", "src/kicad_tools/router/rules.py"),
+    (
+        "02-reference-selection.md",
+        "effective_length_match_reference",
+        "src/kicad_tools/router/rules.py",
+    ),
+    (
+        "02-reference-selection.md",
+        "tune_match_group",
+        "src/kicad_tools/router/optimizer/serpentine.py",
+    ),
+    (
+        "02-reference-selection.md",
+        "_resolve_reference",
+        "src/kicad_tools/router/match_group_detection.py",
+    ),
+    (
+        "02-reference-selection.md",
+        "_resolve_clock_sentinel",
+        "src/kicad_tools/router/match_group_detection.py",
+    ),
+    (
+        "02-reference-selection.md",
+        "reference_net_id",
+        "src/kicad_tools/router/match_group_detection.py",
+    ),
+    (
+        "02-reference-selection.md",
+        "get_reference_length",
+        "src/kicad_tools/router/match_group_length.py",
+    ),
+    # 03 — groups whose members are diff pairs
+    (
+        "03-group-of-pairs.md",
+        "tune_match_group_v2",
+        "src/kicad_tools/router/match_group_tuning.py",
+    ),
+    (
+        "03-group-of-pairs.md",
+        "_gather_explicit_groups",
+        "src/kicad_tools/router/match_group_detection.py",
+    ),
+    ("03-group-of-pairs.md", "_main_impl", "src/kicad_tools/cli/route_cmd.py"),
+    ("03-group-of-pairs.md", "length_match_groups", "src/kicad_tools/cli/route_cmd.py"),
+    # 04 — cascade safety
+    (
+        "04-cascade-safety.md",
+        "MAX_INSERTS_PER_GROUP_MEMBER_SMALL",
+        "src/kicad_tools/router/match_group_tuning.py",
+    ),
+    (
+        "04-cascade-safety.md",
+        "MAX_INSERTS_PER_GROUP_MEMBER_LARGE",
+        "src/kicad_tools/router/match_group_tuning.py",
+    ),
+    (
+        "04-cascade-safety.md",
+        "MAX_TOTAL_INSERTS_PER_GROUP",
+        "src/kicad_tools/router/match_group_tuning.py",
+    ),
+    ("04-cascade-safety.md", "TuneResult", "src/kicad_tools/router/match_group_tuning.py"),
+    (
+        "04-cascade-safety.md",
+        "tune_match_group_v2",
+        "src/kicad_tools/router/match_group_tuning.py",
+    ),
+    # 06 — the DRC rule
+    (
+        "06-drc-rule.md",
+        "MatchGroupLengthSkewRule",
+        "src/kicad_tools/validate/rules/match_group_length_skew.py",
+    ),
+    ("06-drc-rule.md", "update_match_group_skew", "src/kicad_tools/router/core.py"),
+    (
+        "06-drc-rule.md",
+        "derive_group_skew_data",
+        "src/kicad_tools/validate/match_group_skew.py",
+    ),
+    ("06-drc-rule.md", "MATCH_GROUP_LENGTH_SKEW", "src/kicad_tools/drc/violation.py"),
+    ("06-drc-rule.md", "_ALIASES", "src/kicad_tools/drc/violation.py"),
+    # 07 — CLI and sidecar
+    ("07-cli-and-sidecar.md", "_main_impl", "src/kicad_tools/cli/route_cmd.py"),
+    ("07-cli-and-sidecar.md", "apply_match_group_tuning", "src/kicad_tools/router/core.py"),
+    ("07-cli-and-sidecar.md", "net_class_map_to_dict", "src/kicad_tools/router/rules.py"),
+)
 
 
 def _read_python_code_blocks(md_path: Path) -> list[str]:
@@ -194,6 +314,70 @@ def test_no_stale_api_references() -> None:
         f"directory.  Add the cross-link back; the routing guide must "
         f"point users to docs/guides/match-groups/."
     )
+
+
+def test_no_line_number_citations() -> None:
+    """No guide cites source code by ``<file>.py:NNN`` line number.
+
+    Line numbers rot on every refactor and nothing else in the suite
+    notices.  Issue #4749 fixed the ``rules.py`` subset; issue #4764 found
+    20 of 32 remaining citations wrong, including one off by 8,569 lines.
+    Cite ``symbol`` + ``path/to/file.py`` instead — that survives a
+    refactor and ``test_cited_symbols_exist`` can verify it.
+    """
+    offenders: list[str] = []
+    for path in sorted(MATCH_GROUP_DOCS.glob("*.md")):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if LINE_CITATION_RE.search(line):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}: {line.strip()}")
+
+    assert not offenders, (
+        "Line-number source citations found in the match-group guides:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nReplace each with a symbol anchor — e.g. "
+        "`_gather_explicit_groups` in "
+        "`src/kicad_tools/router/match_group_detection.py` — and add the "
+        "(guide, symbol, source file) row to CITED_SYMBOLS."
+    )
+
+
+def test_cited_symbols_exist() -> None:
+    """Every symbol the match-group guides anchor on exists where they say.
+
+    Checked in both directions per ``CITED_SYMBOLS`` row: the symbol must
+    still be present in the guide (a doc rewrite cannot silently drop the
+    anchor and leave a bare, useless file path) and in the source file the
+    guide names (a source-side rename must fail here rather than rot).
+
+    Negative control for this test: change ``_gather_explicit_groups`` back
+    to ``_collect_explicit_match_groups`` in ``03-group-of-pairs.md`` and
+    this test goes red on the "guide no longer mentions" assertion.
+    """
+    for guide_name, symbol, source_rel in CITED_SYMBOLS:
+        # Whole-word match so a near-miss rename (``detect_match_groupsz``)
+        # cannot satisfy the check by substring.
+        word = re.compile(rf"\b{re.escape(symbol)}\b")
+
+        guide_path = MATCH_GROUP_DOCS / guide_name
+        assert guide_path.is_file(), f"CITED_SYMBOLS names a missing guide: {guide_path}"
+        guide_text = guide_path.read_text(encoding="utf-8")
+        assert word.search(guide_text), (
+            f"{guide_path.relative_to(REPO_ROOT)} no longer mentions the "
+            f"symbol {symbol!r}.  Either restore the anchor or drop its row "
+            f"from CITED_SYMBOLS in {Path(__file__).name}."
+        )
+
+        source_path = REPO_ROOT / source_rel
+        assert source_path.is_file(), (
+            f"{guide_path.relative_to(REPO_ROOT)} cites {source_rel}, which "
+            f"does not exist.  Update the guide and CITED_SYMBOLS."
+        )
+        assert word.search(source_path.read_text(encoding="utf-8")), (
+            f"{guide_path.relative_to(REPO_ROOT)} cites symbol {symbol!r} in "
+            f"{source_rel}, but that name no longer appears in the file.  "
+            f"It was probably renamed — update the guide (and this row) to "
+            f"the live name."
+        )
 
 
 def test_all_guides_present() -> None:
