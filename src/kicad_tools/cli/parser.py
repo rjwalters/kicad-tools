@@ -3872,8 +3872,8 @@ def _add_route_parser(subparsers) -> None:
         action="store_true",
         help=(
             "Print advisory routing-quality metrics per post-route stage "
-            "(pre-optimize / post-optimize / post-nudge / post-finalize). "
-            "Read-only diagnostic -- never changes routed copper"
+            "(pre-optimize / post-optimize / post-nudge / post-consolidate / "
+            "post-finalize). Read-only diagnostic -- never changes routed copper"
         ),
     )
     # Issue #4502: tri-state default.  ``BooleanOptionalAction`` with

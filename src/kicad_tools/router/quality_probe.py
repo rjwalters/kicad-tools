@@ -51,7 +51,27 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 STAGE_PRE_OPTIMIZE = "pre-optimize"
 STAGE_POST_OPTIMIZE = "post-optimize"
 STAGE_POST_NUDGE = "post-nudge"
+# Issue #4732 slice 2: the topology-preserving collinear consolidation
+# pass that now runs after the DRC nudge (see
+# :mod:`kicad_tools.router.optimizer.consolidate`).  Recorded only when
+# the pass actually ran, so ``--no-optimize`` and non-grid engines still
+# show the stages they really executed.
+STAGE_POST_CONSOLIDATE = "post-consolidate"
 STAGE_POST_FINALIZE = "post-finalize"
+
+# Width of the ``stage`` column in :meth:`StageQualityRecorder.format_report`,
+# derived from the labels above so adding a longer stage name can never
+# knock the numeric columns out of alignment again.
+_STAGE_COLUMN_WIDTH = max(
+    len(_label)
+    for _label in (
+        STAGE_PRE_OPTIMIZE,
+        STAGE_POST_OPTIMIZE,
+        STAGE_POST_NUDGE,
+        STAGE_POST_CONSOLIDATE,
+        STAGE_POST_FINALIZE,
+    )
+)
 
 # Metrics whose stage-to-stage movement is the point of the probe.  Both
 # are "lower is better", which the delta arrow rendering assumes.
@@ -147,9 +167,12 @@ class StageQualityRecorder:
         if not self._stages:
             return ""
 
+        # The stage column is sized to the LONGEST label
+        # (``post-consolidate``, 16 chars) -- a narrower field silently
+        # pushes the numeric columns out of alignment for that one row.
         header = (
             "\n--- Routing quality by stage (advisory, issue #4732) ---\n"
-            f"  {'stage':<14} {'segs':>7} {'frag%':>7} {'stair%':>7} "
+            f"  {'stage':<{_STAGE_COLUMN_WIDTH}} {'segs':>7} {'frag%':>7} {'stair%':>7} "
             f"{'45deg%':>7} {'zero':>5} {'median_mm':>10}"
         )
         lines = [header]
@@ -160,7 +183,7 @@ class StageQualityRecorder:
             # not reconstructed here.
             diag_pct = m.diagonal_45_fraction * 100.0
             lines.append(
-                f"  {entry.stage:<14} {m.total_segments:>7d} "
+                f"  {entry.stage:<{_STAGE_COLUMN_WIDTH}} {m.total_segments:>7d} "
                 f"{m.fragment_fraction * 100.0:>7.1f} "
                 f"{m.staircase_fraction * 100.0:>7.1f} "
                 f"{diag_pct:>7.1f} {m.zero_length_count:>5d} "

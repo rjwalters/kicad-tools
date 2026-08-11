@@ -692,6 +692,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`kct route` now runs a topology-preserving collinear consolidation pass
+  after the DRC nudge** (#4732, slice 2 — follows the slice-1
+  `--report-stage-quality` instrumentation in #4746) — the post-route
+  pipeline ended `optimize -> nudge -> finalize` with nothing that
+  consolidated the copper the nudge produced, and slice-1 measurement showed
+  the existing `TraceOptimizer` leaving **93.1% sub-0.25 mm fragments** on
+  board 03 with the median segment length pinned exactly at the 0.05 mm grid
+  step. Per-pass instrumentation pins the cause on the issue's **hypothesis 1
+  (collision conservatism)** and rules the rest out: `merge_collinear` takes
+  6838 -> 1490 segments but has **2725 of its 8075 candidate merges (33.7%)
+  vetoed by `path_is_clear`**, each veto chopping a collinear run in two;
+  every later pass is flat (zigzag 1490 -> 1490, staircase 1490 -> 1485,
+  45-corner 1485 -> 1488, pull-tight 1488 -> 1486), the DRC nudge is flat
+  (hypothesis 4 is *not* the cause on this board), and
+  `TraceOptimizer.optimize_route`'s revert-on-regression connectivity guard
+  fires **zero** times across all 37 routes. Those vetoes are false positives
+  by construction — a merged `A-B` + `B-C` adds no copper anywhere, so the
+  grid checker rejects it only because rasterizing one long clearance
+  envelope touches cells the two short ones did not. The new
+  `router/optimizer/consolidate.py` pass therefore needs no collision checker
+  to be safe, because it changes neither the copper nor the topology it would
+  be judged on: it removes only vertices of degree **exactly 2** whose two
+  incident segments are collinear, anti-parallel about the vertex, and share
+  layer / net / width, so every junction, terminal, via and pad vertex
+  survives by construction and the merged segment is the **exact union** of
+  what it replaces (checked, not asserted — a length guard rejects any run
+  whose merged length differs from the sum of its parts, and on the written
+  artifact every point of the pre-pass copper lies on the post-pass copper
+  and vice versa to 3e-14 mm, with per-`(net, layer)` trace length identical
+  to 1e-6 mm). Vertex keys are
+  deliberately layer-blind to match `validate_net_connectivity`'s own
+  layer-blind endpoint union-find; pad and via positions are protected
+  points; zero-length segments are counted toward vertex degree (so they
+  block a smoothing) but never merged, and the pass provably introduces
+  none. It commits through the same grid transaction the optimizer uses
+  (`apply_route_transform_grid_synced`, factored out of
+  `optimize_routes_grid_synced` — #3507/#3511 semantics unchanged) and is
+  wrapped in the same connectivity snapshot/enforce guard, with
+  `_finalize_committed_copper_or_demote` still the unconditional backstop.
+  Measured with everything else held fixed (same seed, same flags, only the
+  pass toggled): **board 03** 1486 -> 252 segments, `fragment_fraction`
+  93.1% -> 57.5%, 45°-diagonal share 7.3% -> 38.1%, 13/13 nets;
+  **board 02** 476 -> 295 segments, `fragment_fraction` 80.7% -> 58.3%,
+  8/8 nets. DRC state is identical before/after on both boards under
+  `kct check` (0 errors) *and* the `kicad-cli pcb drc --refill-zones`
+  cross-gate (identical violation and unconnected-item histograms), and
+  `kct pcb net-audit` output is byte-identical apart from the input path.
+  Gated exactly like the optimizer: `--no-optimize` / `--raw` bypasses it,
+  and `--route-engine lattice|mesh` without `--lattice-optimize` never
+  reaches it (#4281). `--report-stage-quality` gains a `post-consolidate`
+  row, recorded only when the pass actually ran. No board artifacts were
+  regenerated — all measurement ran in a scratch directory.
 - **`isolated_copper` now implements KiCad's pad-in-cluster predicate**
   (closes #4729, follow-up to #4680 / #4728) — an island is isolated iff
   its **transitive** same-net copper cluster contains **no pad**, where

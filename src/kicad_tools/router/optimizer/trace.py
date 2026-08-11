@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from ..layers import Layer
 from ..primitives import Route, Segment
 from .algorithms import (
@@ -88,6 +90,37 @@ def optimize_routes_grid_synced(
     Returns:
         The new ``router.routes`` list (also assigned on the router).
     """
+    return apply_route_transform_grid_synced(router, optimizer.optimize_route, skip_nets=skip_nets)
+
+
+def apply_route_transform_grid_synced(
+    router,
+    transform: Callable[[Route], Route],
+    *,
+    skip_nets: set[int] | None = None,
+) -> list[Route]:
+    """Replace every route with ``transform(route)`` keeping the grid in sync.
+
+    The grid-transactional machinery
+    :func:`optimize_routes_grid_synced` documents (#3507 incremental
+    unmark/mark, #3511 batched ``resync_route_occupancy``) is not
+    specific to the optimizer -- issue #4732's post-nudge consolidation
+    pass needs exactly the same transaction.  This is that machinery,
+    parameterized by the per-route transform; ``optimize_routes_grid_synced``
+    is the ``optimizer.optimize_route`` specialization of it and its
+    docstring remains the canonical explanation of *why* each step
+    exists.
+
+    Args:
+        router: ``Autorouter`` whose ``routes`` are replaced in place.
+        transform: Callable mapping a route to its replacement.  Returning
+            the input object (or an equal one) marks the route unchanged
+            and skips the grid transaction for it.
+        skip_nets: Net IDs whose routes pass through untouched (#3508).
+
+    Returns:
+        The new ``router.routes`` list (also assigned on the router).
+    """
     grid = router.grid
     optimized_routes: list[Route] = []
     # Issue #3511: (old, new) pairs for every MUTATED route, replayed
@@ -98,7 +131,7 @@ def optimize_routes_grid_synced(
         if skip_nets is not None and route.net in skip_nets:
             optimized_routes.append(route)
             continue
-        optimized = optimizer.optimize_route(route)
+        optimized = transform(route)
         if optimized is not route and (
             optimized.segments == route.segments and optimized.vias == route.vias
         ):

@@ -13,10 +13,10 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
 - **Deterministic output**: 22 routes / 24 vias / 327.93mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
-  has fully converged.  Segment count is 476 on macOS-arm64 as of the
-  2026-07-14 #4196 re-baseline (up from 393; routes/vias/length/reach
+  has fully converged.  Segment count is 274 on macOS-arm64 as of the
+  2026-08-11 #4732 re-baseline (down from 476; routes/vias/length/reach
   are byte-identical, only the collinear resplit count moved -- see the
-  #4196 note in ``test_routing_output_deterministic_across_seeds``).
+  #4732 note in ``test_routing_output_deterministic_across_seeds``).
   Segment count is platform- and KiCad-version-sensitive collinear
   resplitting at identical geometry and is NOT itself a
   manufacturability signal; it is guarded by a loose band while the
@@ -648,7 +648,24 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # regression + determinism guards, so this band is intentionally loose.
     # See the #3545 PLATFORM NOTE above for the macOS-arm64 vs
     # Linux-x86_64 collinear-merge float-rounding divergence mechanism.
-    EXPECTED_SEGMENTS_RANGE = (390, 490)
+    #
+    # Re-baselined 2026-08-11 for Issue #4732 (post-nudge collinear
+    # consolidation): macOS-arm64 drops 476 -> 274 segments while routes
+    # (22), vias (24), total length (327.93mm) and reach (8/8) stay
+    # BYTE-IDENTICAL -- again the benign collinear-resplit axis, this
+    # time in the coarser direction.  The new pass merges every maximal
+    # run of collinear degree-2 segments, which is exactly the axis the
+    # #3545/#4196 PLATFORM NOTES describe as platform-divergent: the
+    # macOS-vs-Linux gap came from ``merge_collinear``'s float collision
+    # probe vetoing a different subset of merges on each platform, and
+    # the consolidation pass recovers *all* of those vetoed merges on
+    # both.  So the band is expected to NARROW and largely converge
+    # across platforms rather than split further; it is set around the
+    # measured 274 with generous room for whatever residual divergence
+    # survives.  If CI Linux-x86_64 lands outside it, widen the band --
+    # the routes/vias/length pins above are what would signal a real
+    # regression, and they are untouched.
+    EXPECTED_SEGMENTS_RANGE = (240, 340)
     got_routes, got_segments, got_vias, got_length = ref
     exact = (got_routes, got_vias, got_length)
     expected_exact = (EXPECTED_ROUTES, EXPECTED_VIAS, EXPECTED_LENGTH)
@@ -665,11 +682,13 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     lo, hi = EXPECTED_SEGMENTS_RANGE
     assert lo <= got_segments <= hi, (
         f"Board 02 segment count {got_segments} outside the documented "
-        f"platform band [{lo}, {hi}] (macOS-arm64: 476, Linux-x86_64: "
-        "~390-399; see PLATFORM NOTE above and the #4196 re-baseline).  "
+        f"platform band [{lo}, {hi}] (macOS-arm64: 274 post-#4732; "
+        "pre-#4732 it was 476 on macOS-arm64 / ~390-399 on Linux-x86_64 -- "
+        "see PLATFORM NOTE above and the #4196 / #4732 re-baselines).  "
         "Routes/vias/length matched the exact pin, so this is a change in "
         "collinear segmentation -- investigate merge_collinear/path_is_clear "
-        "behaviour before widening the band.  NOTE: segment count is "
+        "and the #4732 consolidation pass before widening the band.  "
+        "NOTE: segment count is "
         "platform/KiCad-version-sensitive and is NOT itself a "
         "manufacturability signal; the exact routes/vias/length pins and "
         "the cross-seed equality check are the real guards."

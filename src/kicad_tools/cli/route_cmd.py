@@ -99,6 +99,7 @@ from kicad_tools.router.auto_pour import auto_skip_pour_nets as _auto_skip_pour_
 # CONSTRUCTION of the recorder (``_make_stage_quality_recorder``), which is
 # where the measurement cost actually lives.
 from kicad_tools.router.quality_probe import (  # noqa: E402
+    STAGE_POST_CONSOLIDATE,
     STAGE_POST_FINALIZE,
     STAGE_POST_NUDGE,
     STAGE_POST_OPTIMIZE,
@@ -1143,6 +1144,66 @@ def _resolve_route_engine(args: argparse.Namespace) -> str:
     namespace: argparse's ``choices`` guarantees a non-empty string.
     """
     return getattr(args, "route_engine", "grid") or "grid"
+
+
+def _run_consolidation_pass(
+    router: Any,
+    args: argparse.Namespace,
+    *,
+    post_passes_enabled: bool,
+    stage_recorder: Any = None,
+    quiet: bool = False,
+) -> None:
+    """Run the #4732 post-nudge collinear consolidation pass.
+
+    The pipeline used to end ``optimize -> nudge -> finalize`` with no
+    consolidation after the nudge, and the optimizer's own
+    ``merge_collinear`` leaves a third of its candidates unmerged because
+    each one is gated on a collision check (measured on board 03: 2725 of
+    8075 candidates vetoed).  This pass is topology- and
+    copper-preserving by construction -- it only removes degree-2
+    vertices between collinear, same-width, same-layer, same-net
+    segments, so the merged segment is the exact union of what it
+    replaces.  See :mod:`kicad_tools.router.optimizer.consolidate` for
+    the full measurement and the safety argument.
+
+    Gating mirrors the optimizer exactly: skipped for non-grid engines
+    without ``--lattice-optimize`` (#4281) and bypassed by
+    ``--no-optimize`` / ``--raw``.  The guard stack is the same one the
+    optimize and nudge phases use (connectivity snapshot + enforce),
+    with :func:`_finalize_committed_copper_or_demote` still the
+    unconditional backstop downstream.
+
+    No collision checker is supplied on purpose: a merged segment covers
+    exactly the copper its parts already covered, so a veto on it can
+    only be a rasterization artifact of the grid walk, never a real
+    hazard -- and passing the pipeline's checker in would simply
+    reproduce the ``merge_collinear`` veto this pass exists to recover.
+    The union property is enforced structurally instead (degree-2 +
+    collinear + anti-parallel) and checked by the length guard in
+    :func:`~kicad_tools.router.optimizer.consolidate.consolidate_segments`.
+    """
+    if not post_passes_enabled or getattr(args, "no_optimize", False):
+        return
+    if not getattr(router, "routes", None):
+        return
+
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.router.optimizer import consolidate_routes_grid_synced
+
+    snapshot = _connectivity_snapshot(router)
+    with spinner("Consolidating traces...", quiet=quiet):
+        stats = consolidate_routes_grid_synced(router)
+    _enforce_connectivity_invariant_or_exit(
+        router,
+        snapshot,
+        phase="consolidate",
+        args=args,
+        quiet=quiet,
+    )
+    _record_stage_quality(stage_recorder, STAGE_POST_CONSOLIDATE, router)
+    if not quiet and stats.runs_merged:
+        print(f"  Consolidation: {stats.summary()}")
 
 
 def _engine_post_passes_enabled(
@@ -6309,6 +6370,16 @@ def route_with_layer_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
+    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
+    # geometric passes so it also absorbs fragments the nudge introduced.
+    _run_consolidation_pass(
+        final_result.router,
+        args,
+        post_passes_enabled=_post_passes_enabled,
+        stage_recorder=_stage_quality,
+        quiet=quiet,
+    )
+
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -7093,6 +7164,16 @@ def route_with_rule_relaxation(
             quiet=quiet,
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
+
+    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
+    # geometric passes so it also absorbs fragments the nudge introduced.
+    _run_consolidation_pass(
+        final_result.router,
+        args,
+        post_passes_enabled=_post_passes_enabled,
+        stage_recorder=_stage_quality,
+        quiet=quiet,
+    )
 
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
@@ -9378,6 +9459,16 @@ def route_with_combined_escalation(
             quiet=quiet,
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
+
+    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
+    # geometric passes so it also absorbs fragments the nudge introduced.
+    _run_consolidation_pass(
+        final_result.router,
+        args,
+        post_passes_enabled=_post_passes_enabled,
+        stage_recorder=_stage_quality,
+        quiet=quiet,
+    )
 
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
@@ -12087,8 +12178,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         help=(
             "Print advisory routing-quality metrics (fragment/staircase "
             "fractions, 45-degree share, median segment length) measured "
-            "before optimize, after optimize, after the DRC nudge, and after "
-            "the finalize/demote backstop. Diagnostic only: the probe is "
+            "before optimize, after optimize, after the DRC nudge, after the "
+            "collinear consolidation pass, and after the finalize/demote "
+            "backstop. Diagnostic only: the probe is "
             "read-only and never changes routed copper or the exit code "
             "(issue #4732)."
         ),
@@ -14737,6 +14829,16 @@ def _main_impl(argv: list[str] | None = None) -> int:
             quiet=quiet,
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, router)
+
+    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
+    # geometric passes so it also absorbs fragments the nudge introduced.
+    _run_consolidation_pass(
+        router,
+        args,
+        post_passes_enabled=_post_passes_enabled,
+        stage_recorder=_stage_quality,
+        quiet=quiet,
+    )
 
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less

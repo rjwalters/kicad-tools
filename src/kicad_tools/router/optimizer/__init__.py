@@ -37,6 +37,12 @@ from .collision import (
     make_collision_checker,
 )
 from .config import OptimizationConfig, OptimizationStats
+from .consolidate import (
+    ConsolidationStats,
+    consolidate_net_routes,
+    consolidate_routes_grid_synced,
+    consolidate_segments,
+)
 from .serpentine import (
     SerpentineConfig,
     SerpentineGenerator,
@@ -45,7 +51,11 @@ from .serpentine import (
     add_serpentine,
     tune_match_group,
 )
-from .trace import TraceOptimizer, optimize_routes_grid_synced
+from .trace import (
+    TraceOptimizer,
+    apply_route_transform_grid_synced,
+    optimize_routes_grid_synced,
+)
 from .via_optimizer import (
     LayerConnectivityError,
     ViaOptimizationConfig,
@@ -56,6 +66,7 @@ from .via_optimizer import (
 
 __all__ = [
     "CollisionChecker",
+    "ConsolidationStats",
     "GridCollisionChecker",
     "VectorCollisionChecker",
     "make_collision_checker",
@@ -71,6 +82,10 @@ __all__ = [
     "ViaOptimizationStats",
     "ViaOptimizer",
     "add_serpentine",
+    "apply_route_transform_grid_synced",
+    "consolidate_net_routes",
+    "consolidate_routes_grid_synced",
+    "consolidate_segments",
     "optimize_route_vias",
     "optimize_routes_grid_synced",
     "tune_match_group",

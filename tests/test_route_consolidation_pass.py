@@ -40,8 +40,15 @@ from kicad_tools.analysis.routing_quality import (
     compute_routing_quality_from_records,
 )
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.primitives import Route, Segment
+from kicad_tools.router.optimizer.consolidate import (
+    ConsolidationStats,
+    consolidate_net_routes,
+    consolidate_routes_grid_synced,
+    consolidate_segments,
+)
+from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.quality_probe import (
+    STAGE_POST_CONSOLIDATE,
     STAGE_POST_FINALIZE,
     STAGE_POST_NUDGE,
     STAGE_POST_OPTIMIZE,
@@ -539,6 +546,425 @@ class TestRouteCmdHelpers:
 
 
 # ---------------------------------------------------------------------------
+# Slice 2: the topology-preserving collinear consolidation pass
+# ---------------------------------------------------------------------------
+
+
+def _chain(points: list[tuple[float, float]], **kwargs) -> list[Segment]:
+    """Segments walking ``points`` in order."""
+    return [_router_seg(a, b, **kwargs) for a, b in zip(points, points[1:], strict=False)]
+
+
+def _fragment_run(n: int = 5, step: float = 0.05) -> list[Segment]:
+    """``n`` collinear sub-0.25 mm fragments along +x from the origin."""
+    return _chain([(i * step, 0.0) for i in range(n + 1)])
+
+
+def _total_length(segments: list[Segment]) -> float:
+    from math import hypot
+
+    return sum(hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segments)
+
+
+class _FakeGrid:
+    """Records the grid transaction ``apply_route_transform_grid_synced`` drives."""
+
+    def __init__(self) -> None:
+        self.unmarked: list[Route] = []
+        self.marked: list[Route] = []
+        self.cpp_marked: list[Route] = []
+        self.resyncs: list[list[tuple[Route, Route]]] = []
+
+    def unmark_route(self, route: Route) -> None:
+        self.unmarked.append(route)
+
+    def mark_route(self, route: Route) -> None:
+        self.marked.append(route)
+
+    def _mark_route_on_cpp_cells(self, route: Route) -> None:
+        self.cpp_marked.append(route)
+
+    def resync_route_occupancy(self, pairs) -> None:
+        self.resyncs.append(list(pairs))
+
+
+class _FakeRouter:
+    """Minimal ``Autorouter`` surface the consolidation pass touches."""
+
+    def __init__(self, routes: list[Route], pads: dict | None = None, nets: dict | None = None):
+        self.routes = routes
+        self.grid = _FakeGrid()
+        # ``snapshot_connectivity`` (the guard wrapped around the pass in
+        # ``route_cmd``) reads all three unconditionally.
+        self.pads = pads if pads is not None else {}
+        self.nets = nets if nets is not None else {}
+        self.net_names: dict[int, str] = {}
+
+
+class TestConsolidateSegments:
+    """The segment-level core: what may merge, and what may never merge."""
+
+    def test_collinear_fragment_run_collapses_to_one_segment(self):
+        segments = _fragment_run(5)
+        out, stats = consolidate_segments(segments)
+        assert len(out) == 1
+        assert (out[0].start, out[0].end) == ((0.0, 0.0), (0.25, 0.0))
+        assert stats.segments_before == 5
+        assert stats.segments_after == 1
+        assert stats.runs_merged == 1
+        assert stats.segments_removed == 4
+
+    def test_merged_segment_inherits_width_layer_net_and_name(self):
+        segments = _chain([(0.0, 0.0), (0.05, 0.0), (0.10, 0.0)], net=7, layer=Layer.B_CU)
+        out, _stats = consolidate_segments(segments)
+        assert len(out) == 1
+        assert out[0].width == segments[0].width
+        assert out[0].layer is Layer.B_CU
+        assert out[0].net == 7
+        assert out[0].net_name == segments[0].net_name
+
+    def test_total_copper_length_is_preserved(self):
+        """The pass is a union, not a shortcut: length in == length out."""
+        segments = _fragment_run(9)
+        out, _stats = consolidate_segments(segments)
+        assert _total_length(out) == pytest.approx(_total_length(segments))
+
+    def test_corner_is_not_merged(self):
+        """A direction change is a real vertex -- both legs survive."""
+        segments = _chain([(0.0, 0.0), (0.5, 0.0), (0.5, 0.5)])
+        out, stats = consolidate_segments(segments)
+        assert len(out) == 2
+        assert stats.runs_merged == 0
+
+    def test_t_junction_vertex_is_never_smoothed_away(self):
+        """Degree-3 vertex: the run splits at the branch instead of spanning it."""
+        run = _fragment_run(4)  # (0,0) .. (0.20, 0)
+        branch = _router_seg((0.10, 0.0), (0.10, 0.5))
+        out, _stats = consolidate_segments([*run, branch])
+        endpoints = {(s.start, s.end) for s in out}
+        assert ((0.0, 0.0), (0.10, 0.0)) in endpoints
+        assert ((0.10, 0.0), (0.20, 0.0)) in endpoints
+        assert ((0.10, 0.0), (0.10, 0.5)) in endpoints
+        assert len(out) == 3
+
+    def test_protected_point_survives_as_a_vertex(self):
+        """A pad/via position mid-run keeps its endpoint (issue #4732)."""
+        out, _stats = consolidate_segments(_fragment_run(4), protected_points=[(0.10, 0.0)])
+        assert len(out) == 2
+        assert {(s.start, s.end) for s in out} == {
+            ((0.0, 0.0), (0.10, 0.0)),
+            ((0.10, 0.0), (0.20, 0.0)),
+        }
+
+    def test_backtracking_pair_is_not_merged(self):
+        """Anti-parallel guard: a doubled-back pair would lose copper."""
+        segments = [
+            _router_seg((0.0, 0.0), (0.20, 0.0)),
+            _router_seg((0.20, 0.0), (0.10, 0.0)),
+        ]
+        out, stats = consolidate_segments(segments)
+        assert len(out) == 2
+        assert stats.runs_merged == 0
+
+    def test_layer_change_is_not_merged(self):
+        segments = [
+            _router_seg((0.0, 0.0), (0.05, 0.0), layer=Layer.F_CU),
+            _router_seg((0.05, 0.0), (0.10, 0.0), layer=Layer.B_CU),
+        ]
+        out, stats = consolidate_segments(segments)
+        assert len(out) == 2
+        assert stats.runs_merged == 0
+
+    def test_net_change_is_not_merged(self):
+        segments = [
+            _router_seg((0.0, 0.0), (0.05, 0.0), net=1),
+            _router_seg((0.05, 0.0), (0.10, 0.0), net=2),
+        ]
+        out, stats = consolidate_segments(segments)
+        assert len(out) == 2
+        assert stats.runs_merged == 0
+
+    def test_width_change_is_not_merged(self):
+        a = _router_seg((0.0, 0.0), (0.05, 0.0))
+        b = _router_seg((0.05, 0.0), (0.10, 0.0))
+        b.width = a.width * 2
+        out, stats = consolidate_segments([a, b])
+        assert len(out) == 2
+        assert stats.runs_merged == 0
+
+    def test_collision_veto_keeps_the_originals(self):
+        """A checker that rejects the candidate must not lose copper."""
+        segments = _fragment_run(5)
+        out, stats = consolidate_segments(segments, path_is_clear=lambda _seg: False)
+        assert out == list(segments)
+        assert stats.runs_merged == 0
+        assert stats.runs_vetoed == 1
+
+    def test_a_permissive_checker_still_merges(self):
+        out, stats = consolidate_segments(_fragment_run(5), path_is_clear=lambda _seg: True)
+        assert len(out) == 1
+        assert stats.runs_vetoed == 0
+
+    def test_zero_length_segment_is_neither_merged_nor_orphaned(self):
+        """#4732 slice-1 finding 2: the DRC nudge can emit a zero-length segment.
+
+        It must survive the pass untouched AND block the smoothing of the
+        vertex it sits on -- otherwise deleting that vertex would strand it
+        as its own connectivity component.
+        """
+        run = _fragment_run(4)
+        degenerate = _router_seg((0.10, 0.0), (0.10, 0.0))
+        out, _stats = consolidate_segments([*run, degenerate])
+        assert degenerate in out
+        assert ((0.0, 0.0), (0.10, 0.0)) in {(s.start, s.end) for s in out}
+        assert ((0.10, 0.0), (0.20, 0.0)) in {(s.start, s.end) for s in out}
+
+    def test_pass_never_introduces_a_zero_length_segment(self):
+        """#4716's waivable ``zero_length_segment`` rule must stay unfired."""
+        for segments in (_fragment_run(7), _chain([(0.0, 0.0), (0.5, 0.0), (0.5, 0.5)])):
+            out, _stats = consolidate_segments(segments)
+            assert all((s.start != s.end) for s in out)
+
+    def test_output_order_follows_input_order(self):
+        segments = [
+            *_fragment_run(3),  # indices 0..2, run along +x to (0.15, 0)
+            _router_seg((5.0, 5.0), (5.5, 5.0)),  # untouched loner
+        ]
+        out, _stats = consolidate_segments(segments)
+        assert [(s.start, s.end) for s in out] == [
+            ((0.0, 0.0), (pytest.approx(0.15), 0.0)),
+            ((5.0, 5.0), (5.5, 5.0)),
+        ]
+
+    def test_empty_and_single_segment_inputs_are_returned_unchanged(self):
+        assert consolidate_segments([]) == ([], ConsolidationStats())
+        lone = [_router_seg((0.0, 0.0), (1.0, 0.0))]
+        out, stats = consolidate_segments(lone)
+        assert out == lone
+        assert stats == ConsolidationStats(segments_before=1, segments_after=1)
+
+
+class TestConsolidateNetRoutes:
+    """Route-level bookkeeping: ownership, vias, and additive Route fields."""
+
+    def test_a_route_of_fragments_is_consolidated(self):
+        route = _route(_fragment_run(6))
+        out, stats = consolidate_net_routes([route])
+        assert len(out) == 1
+        assert len(out[0].segments) == 1
+        assert stats.routes_changed == 1
+        assert stats.runs_merged == 1
+
+    def test_unchanged_routes_keep_their_identity(self):
+        """``grid.routes`` bookkeeping depends on object identity."""
+        route = _route(_chain([(0.0, 0.0), (0.5, 0.0), (0.5, 0.5)]))
+        out, stats = consolidate_net_routes([route])
+        assert out[0] is route
+        assert stats.routes_changed == 0
+
+    def test_via_position_is_protected(self):
+        route = Route(
+            net=1,
+            net_name="NET1",
+            segments=_fragment_run(4),
+            vias=[
+                Via(
+                    x=0.10,
+                    y=0.0,
+                    drill=0.3,
+                    diameter=0.6,
+                    layers=(Layer.F_CU, Layer.B_CU),
+                    net=1,
+                )
+            ],
+        )
+        out, _stats = consolidate_net_routes([route])
+        assert {(s.start, s.end) for s in out[0].segments} == {
+            ((0.0, 0.0), (0.10, 0.0)),
+            ((0.10, 0.0), (0.20, 0.0)),
+        }
+        assert len(out[0].vias) == 1
+
+    def test_pad_position_is_protected(self):
+        route = _route(_fragment_run(4))
+        out, _stats = consolidate_net_routes([route], pad_positions=[(0.10, 0.0)])
+        assert len(out[0].segments) == 2
+
+    def test_is_escape_survives_consolidation(self):
+        """#3441: additive ``Route`` fields must not be reset by a rebuild."""
+        route = Route(net=1, net_name="NET1", segments=_fragment_run(5), is_escape=True)
+        out, _stats = consolidate_net_routes([route])
+        assert out[0] is not route
+        assert out[0].is_escape is True
+
+    def test_a_sibling_routes_landing_point_is_a_junction(self):
+        """Degree is counted over the NET, not the route (cross-route T)."""
+        trunk = _route(_fragment_run(4))
+        stub = _route([_router_seg((0.10, 0.0), (0.10, 0.5))])
+        out, _stats = consolidate_net_routes([trunk, stub])
+        assert len(out[0].segments) == 2
+        assert out[1] is stub
+
+    def test_segments_never_migrate_between_routes(self):
+        """Two routes meeting end-to-end merge nothing (owner mismatch)."""
+        left = _route(_chain([(0.0, 0.0), (0.05, 0.0)]))
+        right = _route(_chain([(0.05, 0.0), (0.10, 0.0)]))
+        out, stats = consolidate_net_routes([left, right])
+        assert stats.runs_merged == 0
+        assert out[0] is left
+        assert out[1] is right
+
+
+class TestConsolidateRoutesGridSynced:
+    """The router-level entry point and its grid transaction."""
+
+    def test_consolidates_and_drives_the_grid_transaction(self):
+        route = _route(_fragment_run(6))
+        router = _FakeRouter([route])
+        stats = consolidate_routes_grid_synced(router)
+        assert stats.segments_before == 6
+        assert stats.segments_after == 1
+        assert len(router.routes) == 1
+        assert router.routes[0] is not route
+        # Old copper ripped, new copper marked on both grids, one batched resync.
+        assert router.grid.unmarked == [route]
+        assert router.grid.marked == [router.routes[0]]
+        assert router.grid.cpp_marked == [router.routes[0]]
+        assert len(router.grid.resyncs) == 1
+
+    def test_no_grid_transaction_when_nothing_merges(self):
+        route = _route(_chain([(0.0, 0.0), (0.5, 0.0), (0.5, 0.5)]))
+        router = _FakeRouter([route])
+        stats = consolidate_routes_grid_synced(router)
+        assert stats.runs_merged == 0
+        assert router.routes[0] is route
+        assert router.grid.unmarked == []
+        assert router.grid.resyncs == []
+
+    def test_skip_nets_routes_pass_through_untouched(self):
+        """#3508 parity: a diff-pair / length-tuned net is never rewritten."""
+        protected = _route(_fragment_run(6), net=2)
+        ordinary = _route(_fragment_run(6), net=1)
+        router = _FakeRouter([protected, ordinary])
+        stats = consolidate_routes_grid_synced(router, skip_nets={2})
+        assert router.routes[0] is protected
+        assert len(router.routes[0].segments) == 6
+        assert len(router.routes[1].segments) == 1
+        assert stats.segments_before == 6  # only the un-skipped net is counted
+
+    def test_pads_from_router_metadata_are_protected(self):
+        route = _route(_fragment_run(4))
+        pad = SimpleNamespace(x=0.10, y=0.0)
+        router = _FakeRouter([route], pads={("R1", "1"): pad}, nets={1: [("R1", "1")]})
+        consolidate_routes_grid_synced(router)
+        assert len(router.routes[0].segments) == 2
+
+    def test_a_router_without_pad_metadata_still_works(self):
+        router = _FakeRouter([_route(_fragment_run(4))])
+        consolidate_routes_grid_synced(router)
+        assert len(router.routes[0].segments) == 1
+
+    def test_nets_are_consolidated_independently(self):
+        a = _route(_fragment_run(4), net=1)
+        b = _route(_fragment_run(4), net=2)
+        router = _FakeRouter([a, b])
+        stats = consolidate_routes_grid_synced(router)
+        assert stats.runs_merged == 2
+        assert stats.routes_changed == 2
+        assert all(len(r.segments) == 1 for r in router.routes)
+
+
+class TestRunConsolidationPassGating:
+    """``route_cmd._run_consolidation_pass`` gating (#4281 / ``--no-optimize``)."""
+
+    def _router(self) -> _FakeRouter:
+        return _FakeRouter([_route(_fragment_run(6))])
+
+    def test_runs_on_the_grid_engine_by_default(self, capsys):
+        from kicad_tools.cli import route_cmd
+
+        router = self._router()
+        recorder = StageQualityRecorder()
+        route_cmd._run_consolidation_pass(
+            router,
+            SimpleNamespace(no_optimize=False, strict=False, verbose=False),
+            post_passes_enabled=True,
+            stage_recorder=recorder,
+        )
+        assert len(router.routes[0].segments) == 1
+        assert recorder.get(STAGE_POST_CONSOLIDATE) is not None
+        assert "Consolidation:" in capsys.readouterr().out
+
+    def test_no_optimize_bypasses_the_pass(self):
+        from kicad_tools.cli import route_cmd
+
+        router = self._router()
+        recorder = StageQualityRecorder()
+        route_cmd._run_consolidation_pass(
+            router,
+            SimpleNamespace(no_optimize=True, strict=False, verbose=False),
+            post_passes_enabled=True,
+            stage_recorder=recorder,
+        )
+        assert len(router.routes[0].segments) == 6
+        assert recorder.stages == []
+
+    def test_disabled_post_passes_bypass_the_pass(self):
+        """#4281: lattice/mesh copper is never touched without --lattice-optimize."""
+        from kicad_tools.cli import route_cmd
+
+        router = self._router()
+        recorder = StageQualityRecorder()
+        route_cmd._run_consolidation_pass(
+            router,
+            SimpleNamespace(no_optimize=False, strict=False, verbose=False),
+            post_passes_enabled=False,
+            stage_recorder=recorder,
+        )
+        assert len(router.routes[0].segments) == 6
+        assert recorder.stages == []
+
+    def test_an_empty_router_is_a_noop(self):
+        from kicad_tools.cli import route_cmd
+
+        route_cmd._run_consolidation_pass(
+            _FakeRouter([]),
+            SimpleNamespace(no_optimize=False, strict=False, verbose=False),
+            post_passes_enabled=True,
+        )
+
+    def test_quiet_suppresses_the_summary_line(self, capsys):
+        from kicad_tools.cli import route_cmd
+
+        route_cmd._run_consolidation_pass(
+            self._router(),
+            SimpleNamespace(no_optimize=False, strict=False, verbose=False),
+            post_passes_enabled=True,
+            quiet=True,
+        )
+        assert "Consolidation:" not in capsys.readouterr().out
+
+    def test_wired_into_every_route_output_path(self):
+        """All four ``kct route`` output paths must call the pass.
+
+        The optimize/nudge wire-in has historically been copy-pasted into
+        four places; a fifth caller that forgets it would silently ship
+        un-consolidated copper on the escalation paths.
+        """
+        import inspect
+
+        from kicad_tools.cli import route_cmd
+
+        for fn in (
+            route_cmd.route_with_layer_escalation,
+            route_cmd.route_with_rule_relaxation,
+            route_cmd.route_with_combined_escalation,
+            route_cmd._main_impl,
+        ):
+            assert "_run_consolidation_pass(" in inspect.getsource(fn), fn.__name__
+
+
+# ---------------------------------------------------------------------------
 # End-to-end pipeline: a real ``kct route`` on a tiny synthetic board
 # ---------------------------------------------------------------------------
 
@@ -645,10 +1071,28 @@ class TestEndToEndPipeline:
             STAGE_PRE_OPTIMIZE,
             STAGE_POST_OPTIMIZE,
             STAGE_POST_NUDGE,
+            STAGE_POST_CONSOLIDATE,
             STAGE_POST_FINALIZE,
         ):
             assert stage in stdout, f"missing stage {stage!r} in:\n{stdout}"
         assert out.exists()
+
+    def test_stage_table_columns_stay_aligned(self):
+        """``post-consolidate`` is the longest label -- it must not shift columns."""
+        recorder = StageQualityRecorder()
+        for stage in (STAGE_PRE_OPTIMIZE, STAGE_POST_CONSOLIDATE):
+            recorder.record(stage, [_route(_staircase_router_segments())])
+        rows = [
+            line
+            for line in recorder.format_report().splitlines()
+            if line.strip().startswith(("stage", STAGE_PRE_OPTIMIZE, STAGE_POST_CONSOLIDATE))
+            and "->" not in line
+        ]
+        assert len(rows) == 3
+        # Every field after the stage label is fixed-width, so aligned rows
+        # are exactly equal in length -- a too-narrow stage column makes the
+        # ``post-consolidate`` row longer than the others.
+        assert len({len(line) for line in rows}) == 1, rows
 
     def test_no_stage_table_without_the_flag(self, tmp_path: Path):
         code, stdout, _out = _run_route(tmp_path)
@@ -689,6 +1133,32 @@ class TestEndToEndPipeline:
         rows = _parse_stage_table(stdout)
         assert STAGE_PRE_OPTIMIZE in rows
         assert STAGE_POST_OPTIMIZE not in rows
+        # Slice 2: ``--no-optimize`` bypasses consolidation as well, so the
+        # copper the user asked to keep raw stays raw.
+        assert STAGE_POST_CONSOLIDATE not in rows
+
+    def test_consolidation_never_regresses_the_tracked_fractions(self, tmp_path: Path):
+        """Slice 2's contract: post-consolidate is never worse than post-nudge."""
+        _code, stdout, _out = _run_route(tmp_path, "--report-stage-quality")
+        rows = _parse_stage_table(stdout)
+        assert {STAGE_POST_NUDGE, STAGE_POST_CONSOLIDATE} <= set(rows)
+        nudge, consolidated = rows[STAGE_POST_NUDGE], rows[STAGE_POST_CONSOLIDATE]
+        assert consolidated["segs"] <= nudge["segs"]
+        assert consolidated["frag"] <= nudge["frag"] + 1e-9
+        assert consolidated["stair"] <= nudge["stair"] + 1e-9
+
+    def test_consolidation_preserves_connectivity_and_exit_code(self, tmp_path: Path):
+        """Net-status parity: the pass must not cost a routed net."""
+        code, stdout, out = _run_route(tmp_path, "--report-stage-quality")
+        assert code == 0, stdout
+        assert "Nets routed:     2/2" in stdout, stdout
+        assert out.exists()
+
+    def test_finalize_matches_consolidate(self, tmp_path: Path):
+        """Nothing downstream of the pass re-fragments the copper."""
+        _code, stdout, _out = _run_route(tmp_path, "--report-stage-quality")
+        rows = _parse_stage_table(stdout)
+        assert rows[STAGE_POST_FINALIZE] == rows[STAGE_POST_CONSOLIDATE]
 
 
 def _parse_stage_table(stdout: str) -> dict[str, dict[str, float]]:
@@ -698,6 +1168,7 @@ def _parse_stage_table(stdout: str) -> dict[str, dict[str, float]]:
         STAGE_PRE_OPTIMIZE,
         STAGE_POST_OPTIMIZE,
         STAGE_POST_NUDGE,
+        STAGE_POST_CONSOLIDATE,
         STAGE_POST_FINALIZE,
     }
     for line in stdout.splitlines():
