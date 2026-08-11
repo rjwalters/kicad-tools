@@ -1320,8 +1320,9 @@ machine output to new commands.
 
 The router exposes a finer-grained ladder so CI can tell partial routing
 apart from clean routing with DRC issues. Source of truth: the `exit codes:`
-epilog in [`src/kicad_tools/cli/route_cmd.py`](../../src/kicad_tools/cli/route_cmd.py)
-(`build_parser`), expanded by the `# Exit codes:` comment block in `main()`.
+epilog in [`src/kicad_tools/cli/route_cmd.py`](../../src/kicad_tools/cli/route_cmd.py),
+expanded by the `# Exit codes:` comment block — both live in `_main_impl`
+(`main` is a thin wrapper around it).
 
 | Code | Meaning |
 |------|---------|

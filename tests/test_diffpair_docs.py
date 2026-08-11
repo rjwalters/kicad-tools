@@ -60,6 +60,8 @@ LINE_CITATION_RE = re.compile(r"\.py:\d+")
 # source file the guide names (so a source-side rename goes red here instead
 # of rotting quietly).  Seeded from the issue #4764 inventory.
 CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
+    # README — the entry point still carries a symbol+file anchor
+    ("README.md", "NET_CLASS_HIGH_SPEED", "src/kicad_tools/router/rules.py"),
     # 01 — declaring pairs
     ("01-declaring-pairs.md", "diffpair_partner", "src/kicad_tools/router/rules.py"),
     (
@@ -74,6 +76,7 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
     ),
     ("01-declaring-pairs.md", "should_engage_coupled", "src/kicad_tools/router/diffpair.py"),
     # 02 — clearance and net classes
+    ("02-clearance-and-classes.md", "NetClassRouting", "src/kicad_tools/router/rules.py"),
     ("02-clearance-and-classes.md", "intra_pair_clearance", "src/kicad_tools/router/rules.py"),
     ("02-clearance-and-classes.md", "coupled_routing", "src/kicad_tools/router/rules.py"),
     ("02-clearance-and-classes.md", "NET_CLASS_HIGH_SPEED", "src/kicad_tools/router/rules.py"),
@@ -83,6 +86,7 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
         "src/kicad_tools/router/rules.py",
     ),
     # 03 — impedance-driven sizing
+    ("03-impedance-and-sizing.md", "NetClassRouting", "src/kicad_tools/router/rules.py"),
     ("03-impedance-and-sizing.md", "target_diff_impedance", "src/kicad_tools/router/rules.py"),
     (
         "03-impedance-and-sizing.md",
@@ -100,6 +104,11 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
         "src/kicad_tools/router/diffpair_impedance.py",
     ),
     # 04 — length matching
+    (
+        "04-length-matching.md",
+        "DiffPairLengthTracker",
+        "src/kicad_tools/router/diffpair_length.py",
+    ),
     ("04-length-matching.md", "skew_tolerance_mm", "src/kicad_tools/router/rules.py"),
     ("04-length-matching.md", "effective_skew_tolerance", "src/kicad_tools/router/rules.py"),
     ("04-length-matching.md", "update_diffpair_skew", "src/kicad_tools/router/core.py"),

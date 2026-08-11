@@ -80,7 +80,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (bans `\.py:\d+` outright in their guide tree) and `test_cited_symbols_exist`
   (whole-word checks each anchored symbol in **both** the guide and the source
   file it names, so a doc rewrite that drops the anchor and a source-side
-  rename both go red). The 26 citations under `docs/investigations/`,
+  rename both go red). A third suite, `tests/test_docs_source_citations.py`,
+  runs the same two checks over the docs the per-subtree suites cannot see —
+  `docs/reference/*.md`, `boards/*/README.md`, and the top-level
+  `docs/guides/*.md` — which is exactly where an unguarded rewrite of
+  `docs/reference/api.md` invented a `Footprint.to_sexp` that has never
+  existed (the real round-trip path is `Footprint.__setattr__` →
+  `Footprint._sync_attr_node`). That sweep also corrected two further false
+  claims the new coverage exposed: `api.md` said `locked` is emitted inside
+  `(attr ...)` when KiCad 10 requires the top-level `(locked yes)` form
+  (#3457), and `cli.md` attributed the `kct route` exit-code epilog to a
+  `build_parser` that does not exist in `route_cmd.py` (both it and the
+  `# Exit codes:` block live in `_main_impl`). The 26 citations under
+  `docs/investigations/`,
   `docs/research/`, and `boards/07-matchgroup-test/diagnostic-runs/` are
   deliberately untouched — those are dated forensic records where the line
   number *is* the evidence.

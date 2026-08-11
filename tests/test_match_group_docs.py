@@ -65,6 +65,7 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
     ),
     ("01-declaring-groups.md", "add_match_group", "src/kicad_tools/router/core.py"),
     # 02 — reference selection
+    ("02-reference-selection.md", "NetClassRouting", "src/kicad_tools/router/rules.py"),
     ("02-reference-selection.md", "length_match_reference", "src/kicad_tools/router/rules.py"),
     (
         "02-reference-selection.md",
@@ -93,10 +94,16 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "02-reference-selection.md",
+        "MatchGroupTracker",
+        "src/kicad_tools/router/match_group_length.py",
+    ),
+    (
+        "02-reference-selection.md",
         "get_reference_length",
         "src/kicad_tools/router/match_group_length.py",
     ),
     # 03 — groups whose members are diff pairs
+    ("03-group-of-pairs.md", "NetClassRouting", "src/kicad_tools/router/rules.py"),
     (
         "03-group-of-pairs.md",
         "tune_match_group_v2",
@@ -132,6 +139,11 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
         "src/kicad_tools/router/match_group_tuning.py",
     ),
     # 06 — the DRC rule
+    (
+        "06-drc-rule.md",
+        "MatchGroupTracker",
+        "src/kicad_tools/router/match_group_length.py",
+    ),
     (
         "06-drc-rule.md",
         "MatchGroupLengthSkewRule",

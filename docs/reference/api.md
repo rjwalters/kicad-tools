@@ -96,13 +96,16 @@ pcb.save()
 As of PR #2830, all five footprint attribute fields **round-trip cleanly**
 through `PCB.save` — set them on the Python side and the resulting
 `.kicad_pcb` will reflect the change exactly. Source of truth: the
-`Footprint` dataclass fields and `Footprint.to_sexp` in
+`Footprint` dataclass fields plus `Footprint.__setattr__`, which calls
+`Footprint._sync_attr_node` to rebuild the footprint's `(attr ...)` node
+in place on every assignment, in
 [`src/kicad_tools/schema/pcb.py`](../../src/kicad_tools/schema/pcb.py).
+`PCB.save` then serialises that node.
 
 | Field | Type | Effect in KiCad |
 |-------|------|-----------------|
 | `attr` | `str` | Footprint type token: `"smd"`, `"through_hole"`, or `""` |
-| `locked` | `bool` | Footprint cannot be moved (`(locked)` token inside `(attr ...)`) |
+| `locked` | `bool` | Footprint cannot be moved — emitted as a top-level `(locked yes)` child, never as a token inside `(attr ...)` (issue #3457) |
 | `dnp` | `bool` | Do Not Place (`(dnp)` token inside `(attr ...)`) |
 | `exclude_from_pos_files` | `bool` | Omit from CPL / pick-and-place export |
 | `exclude_from_bom` | `bool` | Omit from BOM export |
