@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
+import tempfile
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -6805,8 +6806,21 @@ class PCB:
         """
         from ..operations.netlist import export_netlist
 
-        # Export netlist from schematic
-        netlist = export_netlist(schematic_path)
+        # Export netlist from schematic, routing the kicad-cli byproduct
+        # into a temp directory.
+        #
+        # ``export_netlist`` defaults ``output_path`` to
+        # ``<schematic dir>/<stem>-netlist.kicad_net`` and never deletes it,
+        # so a bare call would drop an unrequested netlist file beside the
+        # user's schematic on every import (#4750, #4763).  ``export_netlist``
+        # returns a fully parsed ``Netlist``; nothing below re-reads the
+        # file, so the temp directory can be torn down immediately.
+        sch = Path(schematic_path)
+        with tempfile.TemporaryDirectory(prefix="kct-import-netlist-") as tmpdir:
+            netlist = export_netlist(
+                schematic_path,
+                output_path=Path(tmpdir) / f"{sch.stem}-netlist.kicad_net",
+            )
 
         # Import using the netlist
         return self.import_from_netlist(

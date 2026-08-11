@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`PCB.import_from_schematic()` no longer drops a `*-netlist.kicad_net`
+  beside the user's schematic** (#4763) — the same defect #4750 fixed in
+  `pcb sync-netlist`, at the second call site. `export_netlist` defaults
+  `output_path` to `<schematic dir>/<stem>-netlist.kicad_net` and leaves the
+  file in place after parsing, so a bare call from `import_from_schematic`
+  (and from `PCB.from_schematic()`, which delegates to it) littered an
+  unrequested export byproduct into the project directory on every import
+  where kicad-cli is installed. The export now goes to an explicit path inside
+  a `tempfile.TemporaryDirectory`, which is torn down before the call returns;
+  `export_netlist` returns a fully parsed `Netlist`, so nothing downstream
+  re-reads the file and import results are unchanged. This also stops the test
+  suite from rewriting a **tracked** fixture: `TestImportFromSchematicIntegration`
+  runs the real kicad-cli against `tests/fixtures/simple_rc.kicad_sch`, so every
+  developer with kicad-cli got a dirty working tree from ` M
+  tests/fixtures/simple_rc-netlist.kicad_net` after a test run. That fixture —
+  an orphaned byproduct with zero consumers, committed by this very bug and
+  carrying an absolute developer path in its `(source ...)` line — is deleted.
+  New byproduct-location tests (a guard that the stubbed kicad-cli path really
+  runs, plus project-dir-listing, temp-cleanup, `str`-path, Python-fallback,
+  and export-failure cases) pin the behavior, and the integration tests now
+  assert the fixtures directory is unchanged across the call.
 - **The relief rescue's deterministic sub-search bound stays opt-in — the
   fleet-default flip is withdrawn** (#4730) — #4536 gave
   `Autorouter.route_all_negotiated` a `deterministic_rescue=` opt-in that
