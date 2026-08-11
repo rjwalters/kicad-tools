@@ -175,8 +175,8 @@ Behavior notes:
 - Only `is_active = 1` rows are imported; `expires_at` is **not** used as a filter
   (observed rows carry stale timestamps while still authenticating — health comes
   from `loom-daemon tokens check`).
-- Token filenames use the same derivation as `bootstrap` (`robb@2amlogic.com` →
-  `robb-2amlogic.token`), so an account keeps one identity across both paths and
+- Token filenames use the same derivation as `bootstrap` (`alice@example.com` →
+  `alice-example.token`), so an account keeps one identity across both paths and
   re-importing overwrites in place.
 - Idempotent: unchanged tokens are left untouched. `index.json` records
   `source: monitor-db` (distinct from the `monitor` snapshot) and, as always,
