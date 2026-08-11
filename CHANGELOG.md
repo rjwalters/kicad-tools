@@ -30,6 +30,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs, plus project-dir-listing, temp-cleanup, `str`-path, Python-fallback,
   and export-failure cases) pin the behavior, and the integration tests now
   assert the fixtures directory is unchanged across the call.
+- **The mypy baseline gate now runs cold, so a stale `.mypy_cache/` can no
+  longer invent a "NEW type error"** (#4767) —
+  `scripts/ci/check_mypy_baseline.py` invoked a bare `mypy src/` with no cache
+  control of any kind (no `--cache-dir`, no `cache_dir` in `[tool.mypy]`, no
+  `MYPY_CACHE_DIR` anywhere in the tree), so every local run reused the
+  incremental cache at `<cwd>/.mypy_cache`. CI is structurally the opposite —
+  there is no `actions/cache` in `.github/workflows/` and the Type Check job
+  pins `astral-sh/setup-uv` with `enable-cache: false` — so CI is always cold
+  and local is always warm, and only the local verdict was untrustworthy. The
+  cache outlives the tree it was computed from: `.mypy_cache/` is gitignored,
+  so `git reset --hard`, `git clean -fd` (ignored paths need `-x`), a rebase,
+  a force-push, and a Loom worktree reuse all leave it in place. Because the
+  gate diffs a signature multiset over all of `src/`, one replayed cached
+  error anywhere trips exit 2 and prints a filename unrelated to the diff —
+  which is what cost two independent PR reviews a cycle each during the
+  2026-08-08/09 sweep (PRs #4746, #4762), both on a phantom error in
+  `recovery/strategy.py`, a file neither PR touched. `run_mypy()` now passes
+  `--no-incremental` by default, and `--incremental` (alias `--warm-cache`)
+  is the documented opt-in for a tight burn-down loop. Measured cost of the
+  default: ~20 s vs ~0.5 s warm on `src/` — a price CI already paid on every
+  push. Exit-code semantics (0 within baseline / 1 tool failure / 2 new
+  errors), `diff_against_baseline`, `write_baseline`, and the #4558
+  version-drift guard are all unchanged, and `.github/mypy-baseline.txt` is
+  byte-identical (a new test pins both nanobind signatures so a future
+  `--update` cannot silently drop one). `pnpm typecheck` / `pnpm check:all`
+  still run a bare incremental `uv run mypy src/`, so the trap and its
+  `rm -rf .mypy_cache` remedy are now documented in `CLAUDE.md`, `README.md`'s
+  fresh-worktree checklist, and `docs/contributing/development.md`.
 - **The relief rescue's deterministic sub-search bound stays opt-in — the
   fleet-default flip is withdrawn** (#4730) — #4536 gave
   `Autorouter.route_all_negotiated` a `deterministic_rescue=` opt-in that

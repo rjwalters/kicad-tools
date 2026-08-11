@@ -34,6 +34,20 @@ suspect the auto-detection missed something (e.g. a touched build flag).
 
 See `README.md` "Fresh worktree checklist" for the full setup sequence.
 
+## Type checks: distrust a local mypy error outside your diff
+
+`.mypy_cache/` is gitignored, so it survives `git reset --hard`,
+`git clean -fd`, rebases, and worktree reuse — bare `mypy` /
+`pnpm typecheck` can replay an error computed against an older tree, in a
+file nobody touched. CI never reproduces it (no `actions/cache`; the Type
+Check job pins `enable-cache: false`), which is exactly how two PR reviews
+lost a cycle each to a phantom failure.
+
+`scripts/ci/check_mypy_baseline.py` is immune by construction — it runs
+`--no-incremental` (~20 s; `--incremental` opts back into the cache). For
+anything else, `rm -rf .mypy_cache` and re-run **before** investigating. Never
+use `--update` to make a phantom error go away; it bakes it into the baseline.
+
 <!-- BEGIN REPO-SKILLS -->
 This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.10.0 installed —
 general repository hygiene and environment commands invoked as `/repo:<command>`. Run

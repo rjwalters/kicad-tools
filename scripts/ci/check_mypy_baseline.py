@@ -31,6 +31,25 @@ This means:
   * Adding a brand-new error -> gate fails.
   * Moving code around (line numbers shift) -> gate passes.
 
+Why this gate runs COLD (no incremental cache) by default
+---------------------------------------------------------
+``run_mypy`` passes ``--no-incremental`` so a pre-existing ``.mypy_cache/``
+can never influence the verdict.  CI is structurally always-cold -- there is
+no ``actions/cache`` in ``.github/workflows/`` and the Type Check job pins
+``astral-sh/setup-uv`` with ``enable-cache: false`` -- while a local run is
+incremental by default, so the two execution models disagreed and only the
+local one was unreliable.  During the 2026-08-08/09 sweep that asymmetry cost
+two independent Judges a review cycle each (PRs #4746 and #4762): both saw a
+"NEW" error in ``src/kicad_tools/recovery/strategy.py``, a file in neither
+diff, replayed from a stale cache in a reused issue worktree.  ``.mypy_cache/``
+is gitignored, so ``git reset --hard``, a worktree reset, and ``git clean -fd``
+all leave it in place; nothing in the sweep clears it.
+
+The measured cost of going cold is ~20 s on ``src/`` (vs ~0.5 s warm), which
+CI already pays on every push.  Pass ``--incremental`` (alias ``--warm-cache``)
+to opt back into the cache for a tight burn-down loop -- but re-confirm any
+finding with a cold run before acting on it.
+
 Burn-down intent
 ----------------
 The baseline is a debt ledger, not a target.  When you fix type errors, run
@@ -123,15 +142,26 @@ def parse_mypy_output(output: str) -> Counter[str]:
     return counts
 
 
-def run_mypy(target: str) -> str:
+def run_mypy(target: str, *, incremental: bool = False) -> str:
     """Run mypy over ``target`` and return its combined stdout+stderr.
 
     Mypy exits 1 when it finds errors and 0 when clean; both are normal here.
     A different/failed invocation (e.g. config error) is detected by the
     caller via the absence of parseable error lines AND a non-summary tail.
+
+    ``incremental`` defaults to ``False``, which adds ``--no-incremental`` so a
+    stale ``.mypy_cache/`` cannot replay a phantom error into the gate's
+    verdict (see the module docstring: PRs #4746/#4762).  ``--no-incremental``
+    is preferred over ``--cache-dir=/dev/null``: it has the same effect on the
+    read path, is portable, and does not depend on a device node.  Pass
+    ``incremental=True`` only for a deliberate warm-cache burn-down loop.
     """
+    argv = ["mypy"]
+    if not incremental:
+        argv.append("--no-incremental")
+    argv.append(target)
     proc = subprocess.run(
-        ["mypy", target],
+        argv,
         capture_output=True,
         text=True,
         check=False,
@@ -348,6 +378,19 @@ def main(argv: list[str] | None = None) -> int:
         "Use this when burning down errors so the floor ratchets to the new count.",
     )
     parser.add_argument(
+        "--incremental",
+        "--warm-cache",
+        dest="incremental",
+        action="store_true",
+        help="Reuse mypy's incremental .mypy_cache/ instead of running cold. "
+        "OFF by default: CI never has a cache (no actions/cache; setup-uv pins "
+        "enable-cache: false), and a stale local cache has already produced "
+        "phantom 'NEW error' verdicts in files outside the diff (PRs #4746, "
+        "#4762). Use this only for a tight burn-down loop -- it trades ~20s of "
+        "runtime for a verdict CI cannot reproduce, so re-confirm any finding "
+        "with a cold run.",
+    )
+    parser.add_argument(
         "--mypy-output",
         default=None,
         help="Read mypy output from this file instead of invoking mypy "
@@ -363,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.mypy_output is not None:
         raw = Path(args.mypy_output).read_text()
     else:
-        raw = run_mypy(args.target)
+        raw = run_mypy(args.target, incremental=args.incremental)
         drift = mypy_version_drift()
 
     current = parse_mypy_output(raw)

@@ -28,9 +28,12 @@ Out of scope:
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
 import sys
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -142,6 +145,26 @@ def test_baseline_lines_have_signature_shape() -> None:
             continue
         parts = line.split("\t")
         assert len(parts) == 3, f"baseline line is not a 3-field signature: {line!r}"
+
+
+def test_baseline_keeps_both_nanobind_signatures() -> None:
+    """Both env-dependent nanobind signatures must survive any regeneration.
+
+    PR #3879 / issue #3877: the nanobind import diagnostic differs by whether
+    nanobind is installed (``import-not-found`` in a bare env vs
+    ``import-untyped`` in a native-built one).  The baseline deliberately
+    carries BOTH so the gate is green either way.  A ``--update`` run in a
+    native-built worktree drops the ``import-not-found`` line and breaks CI
+    Type Check, so pin the pair here rather than relying on review to catch it.
+    """
+    text = BASELINE_PATH.read_text()
+    for code in ("import-not-found", "import-untyped"):
+        expected = f"src/kicad_tools/cli/build_native_cmd.py\t{code}\t"
+        assert expected in text, (
+            f"baseline lost the nanobind {code!r} signature -- most likely a "
+            "`--update` run in an environment-specific worktree. Restore both "
+            "lines from origin/main before merging."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -392,3 +415,142 @@ def test_main_synthetic_output_skips_drift_guard(mod, tmp_path: Path, monkeypatc
     assert mod.main(["--baseline", str(baseline), "--mypy-output", str(mypy_out)]) == 0
     out = capsys.readouterr().out
     assert "MYPY VERSION DRIFT" not in out
+
+
+# ---------------------------------------------------------------------------
+# Cold-by-default incremental-cache control (issue #4767)
+#
+# CI is structurally always-cold (no actions/cache; setup-uv pins
+# enable-cache: false), while a local run is incremental by default.  Two
+# Judges (PRs #4746, #4762) burned a review cycle each on a stale-cache
+# phantom error, so the gate now disables the cache read by default.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingRun:
+    """Stand-in for ``subprocess.run`` that records argv and fakes a clean run."""
+
+    def __init__(self, stdout: str = "Success: no issues found in 1 source file\n") -> None:
+        self.argv: list[str] | None = None
+        self._stdout = stdout
+
+    def __call__(self, argv, *_args, **_kwargs):
+        self.argv = list(argv)
+        return SimpleNamespace(stdout=self._stdout, stderr="")
+
+
+def test_run_mypy_is_cold_by_default(mod, monkeypatch) -> None:
+    """The default invocation must disable the incremental cache read."""
+    rec = _RecordingRun()
+    monkeypatch.setattr(mod.subprocess, "run", rec)
+    mod.run_mypy("src/")
+    assert rec.argv == ["mypy", "--no-incremental", "src/"]
+
+
+def test_run_mypy_incremental_opt_out_drops_cold_flag(mod, monkeypatch) -> None:
+    """``incremental=True`` restores the warm-cache invocation verbatim."""
+    rec = _RecordingRun()
+    monkeypatch.setattr(mod.subprocess, "run", rec)
+    mod.run_mypy("src/", incremental=True)
+    assert rec.argv == ["mypy", "src/"]
+    assert "--no-incremental" not in rec.argv
+
+
+def test_main_runs_cold_by_default(mod, tmp_path: Path, monkeypatch) -> None:
+    """A real (non ``--mypy-output``) run threads the cold default through."""
+    seen: dict[str, object] = {}
+
+    def _fake_run_mypy(target: str, *, incremental: bool = False) -> str:
+        seen["target"] = target
+        seen["incremental"] = incremental
+        return "Success: no issues found in 1 source file\n"
+
+    monkeypatch.setattr(mod, "run_mypy", _fake_run_mypy)
+    monkeypatch.setattr(mod, "mypy_version_drift", lambda: None)
+    baseline = tmp_path / "baseline.txt"
+    assert mod.main(["--baseline", str(baseline)]) == 0
+    assert seen["incremental"] is False
+
+
+def test_main_incremental_flag_opts_into_warm_cache(mod, tmp_path: Path, monkeypatch) -> None:
+    """``--incremental`` / ``--warm-cache`` reach ``run_mypy``."""
+    seen: list[bool] = []
+
+    def _fake_run_mypy(target: str, *, incremental: bool = False) -> str:
+        seen.append(incremental)
+        return "Success: no issues found in 1 source file\n"
+
+    monkeypatch.setattr(mod, "run_mypy", _fake_run_mypy)
+    monkeypatch.setattr(mod, "mypy_version_drift", lambda: None)
+    baseline = tmp_path / "baseline.txt"
+    assert mod.main(["--baseline", str(baseline), "--incremental"]) == 0
+    assert mod.main(["--baseline", str(baseline), "--warm-cache"]) == 0
+    assert seen == [True, True]
+
+
+def test_incremental_flag_is_documented_in_help(mod, capsys) -> None:
+    """The escape hatch is useless if `--help` does not explain the trade-off."""
+    with pytest.raises(SystemExit):
+        mod.main(["--help"])
+    help_text = capsys.readouterr().out
+    assert "--incremental" in help_text
+    assert "--warm-cache" in help_text
+    assert ".mypy_cache" in help_text
+
+
+def test_mypy_output_runs_never_invoke_mypy(mod, tmp_path: Path, monkeypatch) -> None:
+    """Synthetic ``--mypy-output`` runs must not touch the new flag path."""
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("run_mypy must not be invoked for --mypy-output runs")
+
+    monkeypatch.setattr(mod, "run_mypy", _boom)
+    out = _write(tmp_path, "mypy.txt", "src/a.py:10: error: bad thing  [misc]\n")
+    baseline = tmp_path / "baseline.txt"
+    assert mod.main(["--baseline", str(baseline), "--update", "--mypy-output", str(out)]) == 0
+    assert mod.main(["--baseline", str(baseline), "--mypy-output", str(out)]) == 0
+
+
+# Same byte length in both states, so the file's (mtime, size) validation key
+# is identical -- exactly the condition under which mypy replays a cached
+# result instead of re-checking.
+_STALE_STATE_A = 'def f() -> int:\n    return "a"\n'  # errors: str returned as int
+_STALE_STATE_B = 'def f() -> str:\n    return "a"\n'  # clean
+
+
+@pytest.mark.skipif(shutil.which("mypy") is None, reason="mypy binary not on PATH")
+def test_cold_run_ignores_a_poisoned_cache(mod, tmp_path: Path, monkeypatch) -> None:
+    """The property that matters: a stale cache cannot change the cold verdict.
+
+    Seeds ``.mypy_cache/`` from a state that errors, then swaps in a clean
+    state of identical byte length while restoring the original mtime.  The
+    warm run replays the stale error (this is the phantom failure from PRs
+    #4746/#4762 in miniature); the cold run must report the truth.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    module = project / "mod_a.py"
+    module.write_text(_STALE_STATE_A)
+    monkeypatch.chdir(project)
+
+    seeded = mod.run_mypy("mod_a.py", incremental=True)
+    assert "Incompatible return value type" in seeded, (
+        f"test premise broken: state A should error, got:\n{seeded}"
+    )
+    assert (project / ".mypy_cache").is_dir(), "warm run did not write a cache to poison"
+
+    stat_before = module.stat()
+    module.write_text(_STALE_STATE_B)
+    assert module.stat().st_size == stat_before.st_size, "states must be the same byte length"
+    os.utime(module, (stat_before.st_atime, stat_before.st_mtime))
+
+    warm = mod.run_mypy("mod_a.py", incremental=True)
+    cold = mod.run_mypy("mod_a.py")
+
+    assert "Incompatible return value type" in warm, (
+        f"test premise broken: the cache was not actually poisoned, got:\n{warm}"
+    )
+    assert "Incompatible return value type" not in cold, (
+        f"cold run replayed the stale cached error -- the gate is still trapped:\n{cold}"
+    )
+    assert mod.parse_mypy_output(cold) == Counter(), cold

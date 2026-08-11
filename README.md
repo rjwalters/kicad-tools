@@ -790,6 +790,15 @@ uv run ruff format .
    build it. After `cd` into the worktree, run `uv run kct build-native`
    once before any routing benchmarks.
 
+3. **If a local `mypy` error names a file outside your diff, `rm -rf
+   .mypy_cache` and re-run before investigating it.** `.mypy_cache/` is
+   gitignored, so it survives `git reset --hard`, `git clean -fd`, a rebase,
+   and a worktree reuse — bare `mypy` / `pnpm typecheck` can replay an error
+   computed against an older tree. CI is always cold (no `actions/cache`), so
+   it will not reproduce the phantom. `scripts/ci/check_mypy_baseline.py` is
+   already immune (it runs `--no-incremental`); see
+   [`docs/contributing/development.md`](docs/contributing/development.md#the-stale-mypy_cache-trap).
+
 The build's `nanobind` dependency is composed into the default dev
 dependency-group, so a plain `uv sync` keeps it resolved and a later
 `uv sync` (e.g. adding `--extra placement`) will not prune it. If you

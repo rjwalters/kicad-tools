@@ -269,6 +269,43 @@ ruff format src/
 mypy src/kicad_tools/
 ```
 
+CI does not run bare `mypy` — it runs the baseline gate, which fails only on
+errors beyond the committed `.github/mypy-baseline.txt` ledger:
+
+```bash
+uv run python scripts/ci/check_mypy_baseline.py
+```
+
+#### The stale `.mypy_cache/` trap
+
+**If a local type error names a file that is not in your diff, clear the cache
+and re-run before investigating it.**
+
+```bash
+rm -rf .mypy_cache     # or: /repo:tidy --caches
+```
+
+Bare `mypy`, `pnpm typecheck`, and `pnpm check:all` are all **incremental**:
+mypy reuses `<cwd>/.mypy_cache/`, validating each cached module by
+`(mtime, size)`. `.mypy_cache/` is gitignored, so `git reset --hard`,
+`git clean -fd` (ignored paths need `-x`), a rebase, a force-push, and a Loom
+worktree reset **all leave it in place** — a cache computed against an older
+tree can outlive that tree and replay an error that no longer exists.
+
+CI never hits this: there is no `actions/cache` in `.github/workflows/` and the
+Type Check job pins `astral-sh/setup-uv` with `enable-cache: false`, so every
+CI run is cold. That asymmetry is why a local "NEW type error" can be green on
+CI — it cost two independent PR reviews a cycle each during the 2026-08-08/09
+sweep (PRs #4746, #4762), both on a phantom error in a file neither PR touched.
+
+`scripts/ci/check_mypy_baseline.py` is immune by construction: it passes
+`--no-incremental`, so its verdict never depends on a cache. That costs ~20 s
+per run (vs ~0.5 s warm) on `src/`; pass `--incremental` (alias `--warm-cache`)
+for a tight burn-down loop, and re-confirm any finding cold before acting on it.
+
+Do **not** reach for `--update` to make a phantom error go away — that bakes it
+into the ledger. The remedy is a cold re-run.
+
 ### Pre-commit Hooks
 
 Install pre-commit hooks to run checks automatically:
