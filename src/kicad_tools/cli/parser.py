@@ -2874,6 +2874,7 @@ def _add_pcb_parser(subparsers) -> None:
         dest="output",
         help="Output DSN file path (default: <pcb-stem>.dsn next to input)",
     )
+    add_format_flag(pcb_export_dsn)
 
     # pcb import-ses
     pcb_import_ses = pcb_subparsers.add_parser(
@@ -2890,6 +2891,7 @@ def _add_pcb_parser(subparsers) -> None:
         dest="output",
         help="Output PCB file path (default: overwrite input PCB)",
     )
+    add_format_flag(pcb_import_ses)
 
 
 def _add_lib_parser(subparsers) -> None:
@@ -2945,12 +2947,14 @@ def _add_lib_parser(subparsers) -> None:
         "create-symbol-lib", help="Create new symbol library (not yet implemented)"
     )
     lib_create_sym.add_argument("path", help="Path for new .kicad_sym file")
+    add_format_flag(lib_create_sym)
 
     # lib create-footprint-lib
     lib_create_fp = lib_subparsers.add_parser(
         "create-footprint-lib", help="Create new footprint library (not yet implemented)"
     )
     lib_create_fp.add_argument("path", help="Path for new .pretty directory")
+    add_format_flag(lib_create_fp)
 
     # lib generate-footprint
     lib_generate = lib_subparsers.add_parser(
@@ -2965,6 +2969,7 @@ def _add_lib_parser(subparsers) -> None:
     lib_generate.add_argument("--body-width", type=float, help="Body width in mm")
     lib_generate.add_argument("--body-size", type=float, help="Body size (square) in mm")
     lib_generate.add_argument("--prefix", help="Footprint name prefix")
+    add_format_flag(lib_generate)
 
     # lib export
     lib_export = lib_subparsers.add_parser("export", help="Export library to JSON")
@@ -5271,6 +5276,7 @@ def _add_parts_parser(subparsers) -> None:
         default="stats",
         help="Cache action (default: stats)",
     )
+    add_format_flag(parts_cache)
 
     # parts sync-catalog
     parts_sync = parts_subparsers.add_parser(
@@ -5283,6 +5289,7 @@ def _add_parts_parser(subparsers) -> None:
     parts_sync.add_argument(
         "--base-url", default=None, help="Override dataset base URL (advanced/testing)"
     )
+    add_format_flag(parts_sync)
 
     # parts suggest
     parts_suggest = parts_subparsers.add_parser(
@@ -5339,6 +5346,7 @@ def _add_datasheet_parser(subparsers) -> None:
     datasheet_download.add_argument(
         "--force", action="store_true", help="Force download even if cached"
     )
+    add_format_flag(datasheet_download)
 
     # datasheet list
     datasheet_list = datasheet_subparsers.add_parser("list", help="List cached datasheets")
@@ -5356,12 +5364,14 @@ def _add_datasheet_parser(subparsers) -> None:
     datasheet_cache.add_argument(
         "--older-than", type=int, help="For clear: only clear entries older than N days"
     )
+    add_format_flag(datasheet_cache)
 
     # datasheet convert
     ds_convert = datasheet_subparsers.add_parser("convert", help="Convert PDF to markdown")
     ds_convert.add_argument("pdf", help="Path to PDF file")
     ds_convert.add_argument("-o", "--output", help="Output file path (default: stdout)")
     ds_convert.add_argument("--pages", help="Page range (e.g., '1-10' or '1,2,5')")
+    add_format_flag(ds_convert)
 
     # datasheet extract-images
     ds_images = datasheet_subparsers.add_parser("extract-images", help="Extract images from PDF")

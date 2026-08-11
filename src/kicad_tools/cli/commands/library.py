@@ -83,15 +83,16 @@ def run_lib_command(args) -> int:
         )
 
     elif args.lib_command == "create-symbol-lib":
-        return create_symbol_library(args.path)
+        return create_symbol_library(args.path, getattr(args, "format", "text"))
 
     elif args.lib_command == "create-footprint-lib":
-        return create_footprint_library(args.path)
+        return create_footprint_library(args.path, getattr(args, "format", "text"))
 
     elif args.lib_command == "generate-footprint":
         return generate_footprint(
             args.library,
             args.type,
+            getattr(args, "format", "text"),
             pins=getattr(args, "pins", None),
             pitch=getattr(args, "pitch", None),
             body_width=getattr(args, "body_width", None),

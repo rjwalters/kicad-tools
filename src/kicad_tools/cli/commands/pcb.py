@@ -19,7 +19,17 @@ def run_pcb_command(args) -> int:
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        message = f"Error: File not found: {pcb_path}"
+        # This guard runs before any per-command handler, so it has to
+        # honour --format json itself (#4674) -- otherwise the one error
+        # every pcb leaf can hit is the one error that never produces a
+        # document.
+        if getattr(args, "format", None) == "json":
+            from ..format_options import emit_json
+
+            emit_json({"command": args.pcb_command, "error": message, "success": False})
+        else:
+            print(message, file=sys.stderr)
         return 1
 
     # Handle zones command
@@ -1655,6 +1665,10 @@ def _run_export_dsn_command(args, pcb_path: Path) -> int:
     """Handle the 'pcb export-dsn' command."""
     from kicad_tools.export.dsn import KiCadToDSNExporter
 
+    from ..format_options import emit_json
+
+    as_json = getattr(args, "format", "text") == "json"
+
     output = getattr(args, "output", None)
     if output is None:
         output = pcb_path.with_suffix(".dsn")
@@ -1665,8 +1679,34 @@ def _run_export_dsn_command(args, pcb_path: Path) -> int:
         exporter = KiCadToDSNExporter(str(pcb_path))
         exporter.export(str(output))
     except Exception as e:
-        print(f"Error exporting DSN: {e}", file=sys.stderr)
+        message = f"Error exporting DSN: {e}"
+        if as_json:
+            emit_json(
+                {
+                    "command": "export-dsn",
+                    "pcb": str(pcb_path),
+                    "output": str(output),
+                    "error": message,
+                    "success": False,
+                }
+            )
+            return 1
+        print(message, file=sys.stderr)
         return 1
+
+    if as_json:
+        emit_json(
+            {
+                "command": "export-dsn",
+                "pcb": str(pcb_path),
+                "output": str(output),
+                "layers": len(exporter.layers),
+                "nets": len(exporter.nets),
+                "components": len(exporter.footprints),
+                "success": True,
+            }
+        )
+        return 0
 
     print(f"Exported DSN to {output}")
     print(f"  Layers: {len(exporter.layers)}")
@@ -1679,24 +1719,56 @@ def _run_import_ses_command(args, pcb_path: Path) -> int:
     """Handle the 'pcb import-ses' command."""
     from kicad_tools.export.ses import SESToKiCadImporter
 
+    from ..format_options import emit_json
+
+    as_json = getattr(args, "format", "text") == "json"
     ses_path = Path(args.ses)
-    if not ses_path.exists():
-        print(f"Error: SES file not found: {ses_path}", file=sys.stderr)
-        return 1
 
     output = getattr(args, "output", None)
     if output is not None:
         output = Path(output)
+    dest = output or pcb_path
+
+    def fail(message: str) -> int:
+        if as_json:
+            emit_json(
+                {
+                    "command": "import-ses",
+                    "pcb": str(pcb_path),
+                    "ses": str(ses_path),
+                    "output": str(dest),
+                    "error": message,
+                    "success": False,
+                }
+            )
+        else:
+            print(message, file=sys.stderr)
+        return 1
+
+    if not ses_path.exists():
+        return fail(f"Error: SES file not found: {ses_path}")
 
     try:
         importer = SESToKiCadImporter(str(ses_path))
         importer.parse()
         importer.merge_into(str(pcb_path), str(output) if output else None)
     except Exception as e:
-        print(f"Error importing SES: {e}", file=sys.stderr)
-        return 1
+        return fail(f"Error importing SES: {e}")
 
-    dest = output or pcb_path
+    if as_json:
+        emit_json(
+            {
+                "command": "import-ses",
+                "pcb": str(pcb_path),
+                "ses": str(ses_path),
+                "output": str(dest),
+                "wires": len(importer.wires),
+                "vias": len(importer.vias),
+                "success": True,
+            }
+        )
+        return 0
+
     print(f"Imported SES routes into {dest}")
     print(f"  Wires: {len(importer.wires)}")
     print(f"  Vias: {len(importer.vias)}")

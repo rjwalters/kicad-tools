@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from kicad_tools.cli.format_options import add_format_flag, emit_json
 from kicad_tools.footprints.library_path import (
     detect_kicad_library_path,
 )
@@ -272,41 +273,76 @@ def _find_footprint(library: str, footprint_name: str) -> Path | None:
     return None
 
 
-def create_symbol_library(path: str) -> int:
+#: Exit code the three placeholder ``lib`` commands return ("not implemented").
+_NOT_IMPLEMENTED_EXIT = 2
+
+
+def _report_not_implemented(
+    command: str,
+    tracking_issue: int,
+    output_format: str,
+    **fields: Any,
+) -> int:
+    """Report an unimplemented ``lib`` command in the requested format.
+
+    The three placeholder commands have no work to do, so their whole
+    contract is *"not implemented, tracked by issue N"*.  Under
+    ``--format json`` (#4674) that has to be a document rather than prose,
+    otherwise a caller cannot distinguish "unimplemented" from a crash
+    without scraping stderr.  The exit code is unchanged in both modes.
+    """
+    url = f"https://github.com/rjwalters/kicad-tools/issues/{tracking_issue}"
+    if output_format == "json":
+        payload: dict[str, Any] = {
+            "command": command,
+            "implemented": False,
+            "error": f"{command} is not yet implemented",
+            "tracking_issue": url,
+            "success": False,
+        }
+        payload.update(fields)
+        emit_json(payload)
+        return _NOT_IMPLEMENTED_EXIT
+
+    print(f"Error: {command} is not yet implemented.", file=sys.stderr)
+    print(f"This feature requires: {url}")
+    return _NOT_IMPLEMENTED_EXIT
+
+
+def create_symbol_library(path: str, output_format: str = "text") -> int:
     """Create a new empty symbol library.
 
     Note: This feature requires issue #85 (Add symbol library creation and save support).
 
     Args:
         path: Path for the new .kicad_sym file
+        output_format: ``"text"`` (prose) or ``"json"`` (single document)
 
     Returns:
-        Exit code (0 for success)
+        Exit code (2 for "not implemented")
     """
-    print("Error: create-symbol-lib is not yet implemented.", file=sys.stderr)
-    print("This feature requires: https://github.com/rjwalters/kicad-tools/issues/85")
-    return 2  # Exit code 2 for "not implemented"
+    return _report_not_implemented("create-symbol-lib", 85, output_format, path=path)
 
 
-def create_footprint_library(path: str) -> int:
+def create_footprint_library(path: str, output_format: str = "text") -> int:
     """Create a new empty footprint library.
 
     Note: This feature requires issue #87 (Add FootprintLibrary class).
 
     Args:
         path: Path for the new .pretty directory
+        output_format: ``"text"`` (prose) or ``"json"`` (single document)
 
     Returns:
-        Exit code (0 for success)
+        Exit code (2 for "not implemented")
     """
-    print("Error: create-footprint-lib is not yet implemented.", file=sys.stderr)
-    print("This feature requires: https://github.com/rjwalters/kicad-tools/issues/87")
-    return 2
+    return _report_not_implemented("create-footprint-lib", 87, output_format, path=path)
 
 
 def generate_footprint(
     library: str,
     footprint_type: str,
+    output_format: str = "text",
     **kwargs,
 ) -> int:
     """Generate a parametric footprint.
@@ -316,14 +352,20 @@ def generate_footprint(
     Args:
         library: Target library path
         footprint_type: Footprint type (soic, qfp, chip, etc.)
+        output_format: ``"text"`` (prose) or ``"json"`` (single document)
         **kwargs: Type-specific options (pins, pitch, body-width, etc.)
 
     Returns:
-        Exit code (0 for success)
+        Exit code (2 for "not implemented")
     """
-    print("Error: generate-footprint is not yet implemented.", file=sys.stderr)
-    print("This feature requires: https://github.com/rjwalters/kicad-tools/issues/88")
-    return 2
+    return _report_not_implemented(
+        "generate-footprint",
+        88,
+        output_format,
+        library=library,
+        type=footprint_type,
+        parameters={key: value for key, value in sorted(kwargs.items()) if value is not None},
+    )
 
 
 def export_library(
@@ -494,6 +536,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Create new symbol library (not yet implemented)",
     )
     create_sym_parser.add_argument("path", help="Path for new .kicad_sym file")
+    add_format_flag(create_sym_parser)
 
     # lib create-footprint-lib (placeholder)
     create_fp_parser = subparsers.add_parser(
@@ -501,6 +544,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Create new footprint library (not yet implemented)",
     )
     create_fp_parser.add_argument("path", help="Path for new .pretty directory")
+    add_format_flag(create_fp_parser)
 
     # lib generate-footprint (placeholder)
     generate_parser = subparsers.add_parser(
@@ -518,6 +562,7 @@ def main(argv: list[str] | None = None) -> int:
     generate_parser.add_argument("--body-width", type=float, help="Body width in mm")
     generate_parser.add_argument("--body-size", type=float, help="Body size (square) in mm")
     generate_parser.add_argument("--prefix", help="Footprint name prefix")
+    add_format_flag(generate_parser)
 
     # lib export
     export_parser = subparsers.add_parser("export", help="Export library to JSON")
@@ -584,15 +629,16 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     elif args.lib_command == "create-symbol-lib":
-        return create_symbol_library(args.path)
+        return create_symbol_library(args.path, args.format)
 
     elif args.lib_command == "create-footprint-lib":
-        return create_footprint_library(args.path)
+        return create_footprint_library(args.path, args.format)
 
     elif args.lib_command == "generate-footprint":
         return generate_footprint(
             args.library,
             args.type,
+            args.format,
             pins=args.pins,
             pitch=args.pitch,
             body_width=args.body_width,

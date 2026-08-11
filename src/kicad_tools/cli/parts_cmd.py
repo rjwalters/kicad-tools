@@ -19,6 +19,8 @@ import json
 import sys
 from pathlib import Path
 
+from kicad_tools.cli.format_options import add_format_flag, emit_json
+
 
 def main(argv: list[str] | None = None) -> int:
     """Parts command entry point."""
@@ -146,14 +148,27 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Override dataset base URL (advanced/testing)",
     )
+    add_format_flag(sync_parser)
 
     # cache subcommand
     cache_parser = subparsers.add_parser("cache", help="Cache management")
+    add_format_flag(cache_parser)
     cache_subparsers = cache_parser.add_subparsers(dest="cache_action", help="Cache commands")
 
-    cache_subparsers.add_parser("stats", help="Show cache statistics")
-    cache_subparsers.add_parser("clear", help="Clear all cached parts")
-    cache_subparsers.add_parser("clear-expired", help="Clear expired entries only")
+    for _action in ("stats", "clear", "clear-expired"):
+        _action_parser = cache_subparsers.add_parser(
+            _action,
+            help={
+                "stats": "Show cache statistics",
+                "clear": "Clear all cached parts",
+                "clear-expired": "Clear expired entries only",
+            }[_action],
+        )
+        # SUPPRESS (not the usual "text" default) so an unspecified
+        # --format on the action subparser does not clobber the value
+        # parsed by ``cache_parser``: both ``parts cache --format json
+        # stats`` and ``parts cache stats --format json`` must work.
+        add_format_flag(_action_parser, default=argparse.SUPPRESS)
 
     args = parser.parse_args(argv)
 
@@ -181,23 +196,50 @@ def main(argv: list[str] | None = None) -> int:
 
 def _sync_catalog(args) -> int:
     """Handle the sync-catalog command."""
+    as_json = getattr(args, "format", "text") == "json"
+
+    def fail(message: str, hint: str | None = None) -> int:
+        if as_json:
+            payload = {
+                "command": "sync-catalog",
+                "error": message,
+                "success": False,
+            }
+            if hint:
+                payload["hint"] = hint
+            emit_json(payload)
+            return 1
+        print(f"Error: {message}", file=sys.stderr)
+        if hint:
+            print(hint, file=sys.stderr)
+        return 1
+
     try:
         from ..parts.jlcparts_catalog import JLCPARTS_DATA_BASE, sync_catalog
     except ImportError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
-        return 1
+        return fail(str(e), "Install with: pip install kicad-tools[parts]")
 
     base_url = args.base_url or JLCPARTS_DATA_BASE
     try:
-        dest = sync_catalog(base_url=base_url, force=args.force, progress=True)
+        # Progress chatter goes to stdout, which must stay a single JSON
+        # document in machine mode.
+        dest = sync_catalog(base_url=base_url, force=args.force, progress=not as_json)
     except ImportError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
-        return 1
+        return fail(str(e), "Install with: pip install kicad-tools[parts]")
     except Exception as e:
-        print(f"Error: failed to sync jlcparts catalog: {e}", file=sys.stderr)
-        return 1
+        return fail(f"failed to sync jlcparts catalog: {e}")
+
+    if as_json:
+        emit_json(
+            {
+                "command": "sync-catalog",
+                "base_url": base_url,
+                "force": bool(args.force),
+                "path": str(dest),
+                "success": True,
+            }
+        )
+        return 0
 
     print(f"Offline catalog available at: {dest}")
     return 0
@@ -343,6 +385,30 @@ def _cache(args) -> int:
     from ..parts import PartsCache
 
     cache = PartsCache()
+
+    if getattr(args, "format", "text") == "json":
+        action = args.cache_action or "stats"
+        payload: dict = {"command": "cache", "action": action, "success": True}
+        if action == "stats":
+            stats = cache.stats()
+            payload.update(
+                {
+                    "db_path": str(stats["db_path"]),
+                    "total": stats["total"],
+                    "valid": stats["valid"],
+                    "expired": stats["expired"],
+                    "ttl_days": stats["ttl_days"],
+                    "oldest": stats["oldest"],
+                    "newest": stats["newest"],
+                    "categories": dict(sorted(stats["categories"].items())),
+                }
+            )
+        elif action == "clear":
+            payload["cleared"] = cache.clear()
+        elif action == "clear-expired":
+            payload["cleared"] = cache.clear_expired()
+        emit_json(payload)
+        return 0
 
     if not args.cache_action or args.cache_action == "stats":
         stats = cache.stats()

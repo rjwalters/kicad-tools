@@ -28,6 +28,8 @@ def run_datasheet_command(args) -> int:
             sub_argv.extend(["-o", args.output])
         if args.force:
             sub_argv.append("--force")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return datasheet_main(sub_argv) or 0
 
     elif args.datasheet_command == "list":
@@ -40,6 +42,8 @@ def run_datasheet_command(args) -> int:
         sub_argv = ["cache", args.cache_action]
         if getattr(args, "older_than", None):
             sub_argv.extend(["--older-than", str(args.older_than)])
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return datasheet_main(sub_argv) or 0
 
     elif args.datasheet_command == "convert":
@@ -48,6 +52,8 @@ def run_datasheet_command(args) -> int:
             sub_argv.extend(["-o", args.output])
         if args.pages:
             sub_argv.extend(["--pages", args.pages])
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return datasheet_main(sub_argv) or 0
 
     elif args.datasheet_command == "extract-images":

@@ -237,6 +237,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--format json` on the 10 prose-only holdouts inside the `datasheet`,
+  `lib`, `parts` and `pcb` families** (part of #4674, third batch of the
+  #4543 machine-output sweep) — `datasheet cache`, `datasheet convert`,
+  `datasheet download`, `lib create-symbol-lib`, `lib create-footprint-lib`,
+  `lib generate-footprint`, `parts cache`, `parts sync-catalog`,
+  `pcb export-dsn` and `pcb import-ses` now accept the canonical
+  `--format json` and emit one deterministic document on stdout instead of
+  prose, wired end-to-end (outer parser → shim → inner parser/handler).
+  Each document is keyed by `command` plus that command's own summary:
+  `action`/`cleared` for the two cache commands, `path`/`file_size_bytes`/
+  `source` for `download`, `layers`/`nets`/`components` for `export-dsn`,
+  `wires`/`vias` for `import-ses`. The three `lib` commands are
+  unimplemented placeholders, so under JSON the non-implementation *is* the
+  payload (`{"implemented": false, "error": ..., "tracking_issue": ...}`)
+  and the exit code stays 2 — a caller can now distinguish "not
+  implemented" from a crash without scraping stderr. `datasheet convert`
+  carries its markdown under a `markdown` key when no `-o` sink was given.
+  `parts sync-catalog` suppresses its download progress chatter in JSON
+  mode so stdout stays a single document, and the inner `parts cache`
+  action subparsers default `--format` to `argparse.SUPPRESS` so the flag
+  works on either side of the action word. `commands/pcb.py`'s shared "file
+  not found" guard runs before every handler, so it now emits the same
+  `{"error": ...}` document — closing that hole for the ~20 `pcb` leaves
+  that already had `--format json`. Text-mode output and exit codes are
+  unchanged throughout. Audit (`scripts/audit_machine_output.py`):
+  prose-only 33 → 23, format-json 164 → 174.
 - **`kct drc --waivers`: the `.kct_waivers.json` schema now covers the
   kicad-cli DRC cross-gate** (closes #4691) — the mandatory second-opinion
   gate can finally state "0 unwaived errors" instead of a count comparison

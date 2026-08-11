@@ -52,22 +52,26 @@ below is issue **#4674** and should build on these helpers.
 Measured by programmatic introspection of the real argparse tree
 (`create_parser()`, recursive walk of `_SubParsersAction` leaves) — not grep:
 
-| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 b1 | After #4674 b2 |
-|---|---|---|---|---|
-| `--format` with a `json` choice | 124 | 124 | 148 | 164 |
-| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 | 2 |
-| `--json` boolean only | 2 | **0** | 0 | 0 |
-| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** | 0 |
-| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 | 33 |
+| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 b1 | b2 | b3 |
+|---|---|---|---|---|---|
+| `--format` with a `json` choice | 124 | 124 | 148 | 164 | 174 |
+| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 | 2 | 2 |
+| `--json` boolean only | 2 | **0** | 0 | 0 | 0 |
+| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** | 0 | 0 |
+| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 | 33 | 23 |
 
 The first #4674 batch swept the grouped-subcommand families -- `mfr` (7),
 `spec` (5), `placement fix/nudge/snap/align/distribute` (5), `zones
 add/batch/fill/hv-keepout` (4), `benchmark run/compare` (2) -- and added the
 `json` choice to `benchmark report`, closing the `format-nojson` bucket.
 
-The second batch swept the 16 mutating `sch` leaves. The remaining 33
-prose-only leaves (`stitch` and the long tail of single commands, plus the 4
-exempt and the deferred `route`) stay on the #4674 backlog below.
+The second batch swept the 16 mutating `sch` leaves.
+
+The third batch finished the four families that already spoke JSON on most
+of their leaves but still had prose-only holdouts -- `datasheet` (3), `lib`
+(3), `parts` (2), `pcb` (2). The remaining 23 prose-only leaves (`stitch`
+and the long tail of single commands, plus the 4 exempt and the deferred
+`route`) stay on the #4674 backlog below.
 
 Issue #4543 closed the `--json`-only bucket by adding `--format {text,json}`
 alongside the existing `--json` on both commands (outer parser, forwarding
@@ -168,19 +172,46 @@ itself. `tests/test_format_json_sweep_sch.py` guards these 16 surfaces
 (outer flag, both shim shapes, emission, determinism, error documents, and
 that `--dry-run` still writes nothing).
 
-**Remaining actionable (28)** — the audit's `prose-only` bucket reads 33
+**Done (third #4674 batch, 10 surfaces):** the prose-only holdouts inside
+four families whose other leaves already spoke JSON --
+`datasheet cache/convert/download`, `lib create-symbol-lib/`
+`create-footprint-lib/generate-footprint`, `parts cache/sync-catalog`,
+`pcb export-dsn/import-ses`. Each emits one document keyed by `command`
+plus that command's own summary (`cleared` / `action` for the two cache
+commands, `layers`/`nets`/`components` for `export-dsn`,
+`wires`/`vias` for `import-ses`, `path`/`file_size_bytes`/`source` for
+`download`). Three details worth reusing:
+
+- The three `lib` commands are **unimplemented placeholders** that exit 2.
+  Under JSON the non-implementation *is* the payload
+  (`{"implemented": false, "error": ..., "tracking_issue": ...}`) so a
+  caller can tell "not implemented" from a crash without scraping stderr;
+  the exit code is unchanged.
+- `datasheet convert` writes markdown to stdout when no `-o` is given, so
+  in JSON mode it carries the conversion under a `markdown` key; with
+  `-o` it reports `output` and omits `markdown`.
+- `parts cache` is the one swept surface whose *inner* parser has its own
+  subparsers. Its per-action subparsers declare `--format` with
+  `argparse.SUPPRESS` as the default, so an unspecified flag on the
+  action cannot clobber the value parsed by the `cache` parser
+  (`kct parts cache --format json stats` and
+  `kct parts cache stats --format json` both resolve to json).
+
+`commands/pcb.py`'s shared "file not found" guard runs before every `pcb`
+handler, so — like the `sch` shim in batch 2 — it now emits the same
+`{"error": ...}` document; that closes the hole for the ~20 `pcb` leaves
+that already had `--format json`. `tests/test_format_json_sweep_families.py`
+guards these 10 surfaces.
+
+**Remaining actionable (18)** — the audit's `prose-only` bucket reads 23
 because it also counts the 4 exempt commands and the deferred `route`
 (sections above):
 
 - `board-metrics`, `build`, `config`, `create-pcb`, `creepage-export-rules`
-- `datasheet cache`, `datasheet convert`, `datasheet download`
 - `ipc connect`, `ipc push-routes`, `ipc status`
-- `lib create-footprint-lib`, `lib create-symbol-lib`, `lib generate-footprint`
 - `mcp setup`
 - `optimize-placement`, `optimize-traces`
 - `panel`
-- `parts cache`, `parts sync-catalog`
-- `pcb export-dsn`, `pcb import-ses`
 - `pipeline`
 - `reason`, `report generate`, `route-auto`
 - `screenshot`

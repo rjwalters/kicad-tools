@@ -23,6 +23,7 @@ import json
 import sys
 from pathlib import Path
 
+from kicad_tools.cli.format_options import add_format_flag, emit_json
 from kicad_tools.utils import ensure_parent_dir
 
 
@@ -64,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Force download even if cached",
     )
+    add_format_flag(download_parser)
 
     # list subcommand
     list_parser = subparsers.add_parser("list", help="List cached datasheets")
@@ -88,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         help="For clear: only clear entries older than N days",
     )
+    add_format_flag(cache_parser)
 
     # convert subcommand (PDF parsing)
     convert_parser = subparsers.add_parser("convert", help="Convert PDF to markdown")
@@ -97,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         "--pages",
         help="Page range to convert (e.g., '1-10' or '1,2,5')",
     )
+    add_format_flag(convert_parser)
 
     # extract-images subcommand
     images_parser = subparsers.add_parser("extract-images", help="Extract images from PDF")
@@ -408,6 +412,7 @@ def _run_download(args) -> int:
     """Run datasheet download command."""
     from kicad_tools.datasheet.manager import DatasheetManager
 
+    as_json = getattr(args, "format", "text") == "json"
     manager = DatasheetManager()
 
     output_dir = Path(args.output) if args.output else None
@@ -418,6 +423,20 @@ def _run_download(args) -> int:
             output_dir=output_dir,
             force=args.force,
         )
+
+        if as_json:
+            emit_json(
+                {
+                    "command": "download",
+                    "part": args.part,
+                    "path": str(datasheet.local_path),
+                    "file_size_bytes": datasheet.file_size,
+                    "file_size_mb": round(datasheet.file_size_mb, 2),
+                    "source": datasheet.source,
+                    "success": True,
+                }
+            )
+            return 0
 
         print(f"Downloaded datasheet for {args.part}")
         print(f"  Path: {datasheet.local_path}")
@@ -431,6 +450,17 @@ def _run_download(args) -> int:
         # Surface install guidance instead of a misleading "no datasheet found",
         # mirroring how main()/_info()/_extract_package() already report missing
         # dependencies (issue #4139).
+        if as_json:
+            emit_json(
+                {
+                    "command": "download",
+                    "part": args.part,
+                    "error": str(e),
+                    "hint": "Install with: pip install kicad-tools[parts]",
+                    "success": False,
+                }
+            )
+            return 1
         print(f"Error: {e}", file=sys.stderr)
         print(
             "Install with: pip install kicad-tools[parts]",
@@ -438,6 +468,16 @@ def _run_download(args) -> int:
         )
         return 1
     except Exception as e:
+        if as_json:
+            emit_json(
+                {
+                    "command": "download",
+                    "part": args.part,
+                    "error": f"Failed to download datasheet: {e}",
+                    "success": False,
+                }
+            )
+            return 1
         print(f"Failed to download datasheet: {e}", file=sys.stderr)
         return 1
 
@@ -487,7 +527,11 @@ def _run_cache(args) -> int:
     """Run cache management command."""
     from kicad_tools.datasheet.manager import DatasheetManager
 
+    as_json = getattr(args, "format", "text") == "json"
     manager = DatasheetManager()
+
+    if as_json:
+        return _run_cache_json(manager, args)
 
     if args.action == "stats":
         stats = manager.cache_stats()
@@ -521,35 +565,108 @@ def _run_cache(args) -> int:
     return 0
 
 
+def _run_cache_json(manager, args) -> int:
+    """Emit the ``datasheet cache`` change/report summary as one document."""
+    payload: dict = {"command": "cache", "action": args.action, "success": True}
+
+    if args.action == "stats":
+        stats = manager.cache_stats()
+        payload.update(
+            {
+                "cache_dir": str(stats["cache_dir"]),
+                "total_count": stats["total_count"],
+                "valid_count": stats["valid_count"],
+                "expired_count": stats["expired_count"],
+                "total_size_mb": round(stats["total_size_mb"], 2),
+                "ttl_days": stats["ttl_days"],
+                "sources": dict(sorted(stats["sources"].items())),
+            }
+        )
+    elif args.action == "clear":
+        older_than = args.older_than
+        payload["older_than_days"] = older_than
+        payload["cleared"] = (
+            manager.clear_cache(older_than_days=older_than) if older_than else manager.clear_cache()
+        )
+    elif args.action == "clear-expired":
+        payload["cleared"] = manager.cache.clear_expired()
+
+    emit_json(payload)
+    return 0
+
+
 def _convert(args) -> int:
     """Handle convert command."""
+    as_json = getattr(args, "format", "text") == "json"
+
+    def fail(message: str) -> int:
+        if as_json:
+            emit_json(
+                {
+                    "command": "convert",
+                    "pdf": str(args.pdf),
+                    "error": message,
+                    "success": False,
+                }
+            )
+        else:
+            print(f"Error: {message}", file=sys.stderr)
+        return 1
+
     try:
         from ..datasheet.parser import DatasheetParser
     except ImportError as e:
+        if as_json:
+            emit_json(
+                {
+                    "command": "convert",
+                    "pdf": str(args.pdf),
+                    "error": str(e),
+                    "hint": "Install with: pip install kicad-tools[datasheet]",
+                    "success": False,
+                }
+            )
+            return 1
         print(f"Error: {e}", file=sys.stderr)
         print("Install with: pip install kicad-tools[datasheet]", file=sys.stderr)
         return 1
 
     pdf_path = Path(args.pdf)
     if not pdf_path.exists():
-        print(f"Error: File not found: {pdf_path}", file=sys.stderr)
-        return 1
+        return fail(f"File not found: {pdf_path}")
 
     try:
         parser = DatasheetParser(pdf_path)
         pages = _parse_pages(args.pages)
         markdown = parser.to_markdown(pages)
 
-        if args.output:
-            output_path = Path(args.output)
+        output_path = Path(args.output) if args.output else None
+        if output_path is not None:
             ensure_parent_dir(output_path).write_text(markdown)
+
+        if as_json:
+            payload = {
+                "command": "convert",
+                "pdf": str(pdf_path),
+                "output": str(output_path) if output_path else None,
+                "pages": args.pages,
+                "success": True,
+            }
+            if output_path is None:
+                # No sink to write to, so the conversion result *is* the
+                # payload -- otherwise the document would report success
+                # while discarding the only thing the command produced.
+                payload["markdown"] = markdown
+            emit_json(payload)
+            return 0
+
+        if output_path is not None:
             print(f"Converted to: {output_path}")
         else:
             print(markdown)
 
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+        return fail(str(e))
 
     return 0
 

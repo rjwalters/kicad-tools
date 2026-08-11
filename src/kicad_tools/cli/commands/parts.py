@@ -52,6 +52,8 @@ def run_parts_command(args) -> int:
 
     elif args.parts_command == "cache":
         sub_argv = ["cache", args.cache_action]
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return parts_main(sub_argv) or 0
 
     elif args.parts_command == "sync-catalog":
@@ -60,6 +62,8 @@ def run_parts_command(args) -> int:
             sub_argv.append("--force")
         if args.base_url:
             sub_argv.extend(["--base-url", args.base_url])
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         return parts_main(sub_argv) or 0
 
     elif args.parts_command == "suggest":
