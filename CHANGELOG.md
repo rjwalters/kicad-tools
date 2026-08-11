@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The relief rescue's deterministic sub-search bound stays opt-in — the
+  fleet-default flip is withdrawn** (#4730) — #4536 gave
+  `Autorouter.route_all_negotiated` a `deterministic_rescue=` opt-in that
+  bounds the rescue's probe / displaced-victim re-land sub-searches by the
+  per-net node-expansion cap instead of the 10 s wall clock, taking machine
+  speed out of a decision that determines routed reach. The follow-up proposed
+  making it the fleet default; the A/B says no. With the bound on by default,
+  board 07 — routed through the **negotiated** entry point, not two-phase —
+  came back with a changed copper-LVS open set (`DQ3, DQ4, MIPI_DAT0_N` →
+  `DQS_N, MIPI_DAT0_P`, breaking the `--expect-opens` drift guard) and
+  routed-DRC 8 → 13 against an allowlist main sits exactly at, for +1 net of
+  reach. Measured twice, on two heads and two runners. Per the issue's own
+  acceptance criteria that is not absorbable, so nothing was re-baselined (no
+  DRC tolerance raised, no expected-opens set rewritten, no reach floor
+  lowered) and `DETERMINISTIC_RESCUE_DEFAULT` is `False`. **What did ship is
+  the switch**: `deterministic_rescue=` is now a per-call parameter on every
+  entry point that can reach a rescue — `route_all_negotiated`,
+  `route_all_two_phase`, `_create_two_phase_router`, `route_with_escape`,
+  `route_with_escape_and_diffpairs`, and the `hierarchical=True` delegation
+  (which previously dropped an explicit opt-in on the way to the path that
+  actually runs the rescue). The #3471 two-phase stall-relief hook calls
+  `_relief_rescue` with 8 **positional** arguments, so the value rides on a
+  `functools.partial` bound in `_create_two_phase_router`; before this that
+  path had no switch at all. Both paths log which bound is live, so a future
+  A/B has its evidence line on every board. Board 06 keeps its explicit
+  `deterministic_rescue=True`, which is again the only thing switching the
+  bound on for its 21/21 reach gate. Behavior on every board is unchanged;
+  reattempting the flip means first understanding why board 07's rescues keep
+  copper that carries +5 DRC.
 - **`--timeout` / `--per-net-timeout` now actually bound the lattice
   engine** (#4697) — `kct route --route-engine lattice` was time-bounded
   **only** under `--complete`. Everywhere else both flags were accepted,
