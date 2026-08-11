@@ -12,16 +12,6 @@ The Champion acts as the final step in the PR pipeline, merging PRs that have pa
 
 ---
 
-## ⚠️ `--body @path` Does NOT Expand — It Posts the Literal String
-
-If you post a comment via `gh issue comment` / `gh pr comment` / `gh api ...
-comments` from a scratch file, `--body @path` (and `gh api -f body=@path`)
-posts the literal string `@path`, not the file's contents. **Full pitfall,
-incident citation, and fixes**:
-[`comment-body-literal-path.md`](comment-body-literal-path.md).
-
----
-
 ## Cached forge reads (`gh-cached`, #4667)
 
 Champion runs on a 10-minute cron alongside concurrent Judges and sweeps, all
@@ -114,11 +104,7 @@ if echo "$LABELS" | grep -qw "loom:changes-requested"; then
   # tick doesn't re-post while the contradiction is being resolved.
   # Cached ("$GH_READ") — a marker grep only answers "did I already post
   # this?", and your own `--clear-cache` after posting keeps it honest.
-  # `startswith`, not a bare substring match: a genuine notice always emits
-  # the marker as its literal first line, but a later comment can quote it
-  # in prose while discussing the notice without being the notice itself
-  # (#5371) — a substring match would then wrongly suppress the real post.
-  if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$JANITOR_MARKER\"))")" = "true" ]; then
+  if "$GH_READ" pr view "$PR_NUMBER" --json comments --jq '.comments[].body' | grep -qF "$JANITOR_MARKER"; then
     echo "Verdict-janitor notice already posted for #$PR_NUMBER — skipping (still not eligible to merge)"
   else
     gh pr comment "$PR_NUMBER" --body "$JANITOR_MARKER
@@ -277,15 +263,8 @@ HOLD_MARKER="<!-- champion:merge-risk-hold -->"
 # releases it. One call serves the whole precheck.
 PR_JSON=$(gh pr view "$PR_NUMBER" --json comments,commits,labels,headRefOid)
 
-# `startswith`, not `contains`: a genuine hold comment always emits the
-# marker as its literal first line, but a *later* comment (e.g. a Judge
-# approval) can legitimately quote or discuss the marker in prose without
-# being the hold's owning comment. `contains` + `last` would then select
-# that discussing comment instead of the real hold — HOLD_HEAD extraction
-# comes up empty and the release logic silently degrades to the less
-# precise fallback path (#5371).
 HOLD_BODY=$(jq -r --arg m "$HOLD_MARKER" \
-  '[.comments[] | select(.body | startswith($m))] | last | .body // ""' <<<"$PR_JSON")
+  '[.comments[] | select(.body | contains($m))] | last | .body // ""' <<<"$PR_JSON")
 
 if [ -z "$HOLD_BODY" ]; then
   PRIOR_HOLD=false          # never held — today's behavior, unchanged
@@ -294,7 +273,7 @@ else
   PRIOR_HOLD=true
   HOLD_OVERRIDE=false
   HOLD_AT=$(jq -r --arg m "$HOLD_MARKER" \
-    '[.comments[] | select(.body | startswith($m))] | last | .createdAt' <<<"$PR_JSON")
+    '[.comments[] | select(.body | contains($m))] | last | .createdAt' <<<"$PR_JSON")
   # Persisted state written by the hold template below:
   #   <!-- champion:hold-state head=<sha> -->
   # Empty for legacy holds posted before that line existed — the timestamp
@@ -448,15 +427,6 @@ else
 fi
 ```
 
-`$HOLD_REVERSAL_BLOCK` non-empty is also the exact signal that gates the
-`loom:operator` label removal (#5502) — this precheck already distinguishes
-"never held", "held and still bound" (which bails out at the STICKY HOLD
-branch above and never reaches here with a merge decision), and "held and
-genuinely released", so the label reuses that same computation instead of a
-second state-tracking mechanism. The actual `gh pr edit --remove-label` call
-lives in Step 2 below, in the same pass that posts this block's text — see
-"Step 2: Add Pre-Merge Comment".
-
 "Seems fine now", "re-evaluated, looks OK", or any restatement that would read
 the same against the original diff is **not** an acceptable flip rationale — if
 you cannot name what changed, the precheck should not have released the hold.
@@ -479,11 +449,7 @@ HEAD_SHA=$(jq -r '.headRefOid' <<<"$PR_JSON")
 # operator clearing comment, a new push, or a new Judge review — never by a
 # fresh re-read of the same diff.
 # Cached ("$GH_READ") — idempotency-marker grep; see "Cached forge reads".
-# `startswith`, not a bare substring match — same rationale as the
-# sticky-hold precheck above (#5371): a later comment quoting this marker
-# in prose must never be mistaken for the hold notice's own comment, or
-# the real notice silently never gets posted.
-if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$HOLD_MARKER\"))")" = "true" ]; then
+if "$GH_READ" pr view "$PR_NUMBER" --json comments --jq '.comments[].body' | grep -qF "$HOLD_MARKER"; then
   echo "Merge-risk hold already posted for #$PR_NUMBER — hold stands, no comment"
 else
   gh pr comment "$PR_NUMBER" --body "$HOLD_MARKER
@@ -508,17 +474,6 @@ Keeping \`loom:pr\`. This PR stays in the queue and is re-checked each tick agai
 ---
 *Automated by Champion role*"
 fi
-
-# loom:operator (#5502): the first-class "engine will not act further, a
-# human is the only transition out" pipeline state, applied alongside the
-# marker above (whether freshly posted this tick or already standing from an
-# earlier one — `--add-label` is idempotent, so it is safe to reassert every
-# tick the hold binds). UNLIKE loom:operator-only, this must NOT make
-# sweep/shepherd skip the PR — loom:pr is kept (see above) and the PR stays
-# in the normal re-evaluation queue precisely so the release precheck
-# (loom:auto-merge-ok / operator comment / new push / new Judge review, all
-# above) can still fire and clear it. Never applied in place of loom:pr.
-gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true
 # Skip this PR for this pass — do not merge.
 ```
 
@@ -823,16 +778,6 @@ EOF
   echo "Pre-merge comment failed for #$PR_NUMBER — NOT merging this pass"
   exit 1
 }
-
-# loom:operator removal (#5502) — the reversal companion to the hold-post
-# label add in criterion #2's "Hold behavior". Gated on the SAME
-# $HOLD_REVERSAL_BLOCK the comment above just posted (non-empty only when
-# PRIOR_HOLD=true AND the precheck found a genuine release — see "Reversal is
-# one mandatory comment" above), so this never fires on the never-held path
-# and always fires in the same pass as the reversal comment.
-if [ -n "$HOLD_REVERSAL_BLOCK" ]; then
-  gh pr edit "$PR_NUMBER" --remove-label "loom:operator" 2>/dev/null || true
-fi
 "$GH_READ" --clear-cache   # your own write must not be masked by your own cache
 ```
 
@@ -909,27 +854,6 @@ done
 
 After verifying issue closure, check for blocked issues that can now be unblocked.
 
-**Epic-aware dependency check (#5211).** This is *the* call site named first
-under "Affected Files" in issue #5211 — the bare `state != CLOSED` read below
-was the exact check that ran during the incident. For every `Blocked by /
-Depends on / Requires` reference on a `loom:blocked` issue, run
-`champion-common.md` → "Epic-Aware Blocker Check" (`extract_blocker_refs` →
-`parse_blocker_ref` → Step 2 classification — read that section now if any such
-reference is found; it also covers cross-repo `owner/repo#N` references, not
-just bare `#N`) instead of a bare `gh issue view $dep --json state` read. Act on
-`EPIC_BLOCK_STATE` per this table:
-
-| `EPIC_BLOCK_STATE` | Effect on unblocking `#$blocked` |
-|---|---|
-| `not-epic` | Unchanged — plain `state` check applies (`OPEN` keeps it blocked, `CLOSED` does not) |
-| `resolved` | Epic already closed — dependency satisfied, does not keep it blocked |
-| `blocked-not-started` / `blocked-in-progress` | Genuine, unresolved blocker — keeps `#$blocked` blocked, same as before this section existed |
-| `epic-complete-unpromoted` | **Do not treat this reference as a live block.** Run `champion-common.md` Step 4 with `DEPENDENT_ISSUE="$blocked"` (idempotent flag → bounded escalation) and let the *other* dependencies decide whether `#$blocked` unblocks — an issue whose only remaining obstacle is an epic whose `loom:epic-phase` children have all closed no longer stays blocked forever via this path |
-
-Only `epic-complete-unpromoted` changes behavior here — the common
-`blocked-not-started` / `blocked-in-progress` / `not-epic` cases keep blocking
-exactly as before, so the correct common case is not weakened.
-
 ```bash
 PR_NUMBER=$1
 CLOSED_ISSUE=$2
@@ -954,80 +878,26 @@ for blocked in $BLOCKED_ISSUES; do
   # Get the issue body to check ALL dependencies
   BLOCKED_BODY=$("$GH_READ" issue view "$blocked" --json body --jq '.body')
 
-  # Extract all referenced dependencies — cross-repo aware (#5211). Use
-  # `extract_blocker_refs` from champion-common.md → "Epic-Aware Blocker Check"
-  # Step 1: it generalizes the old two-stage `#N`-only pipeline (#4508) to ALSO
-  # capture an optional `owner/repo` prefix ahead of the `#N`, so a cross-repo
-  # epic blocker (the marketing#56 → klayout-tools#391 incident shape) is not
-  # misread as same-repo. It stays tolerant of markdown emphasis/colon and
-  # extracts every reference on a dependency line. An empty ALL_DEPS here would
-  # silently remove loom:blocked with no confirmation gate, so under-parsing is
-  # the highest-severity failure mode.
-  ALL_DEPS=$(extract_blocker_refs "$BLOCKED_BODY")
+  # Extract all referenced dependencies. Two-stage (#4508): stage 1 selects
+  # lines declaring a dependency phrase, tolerant of markdown emphasis/colon
+  # between the phrase and the first #N (e.g. "**Blocked by:** #1 (x), #3
+  # (y)"); stage 2 extracts every #N on those lines, not just the first — an
+  # empty ALL_DEPS here would silently remove loom:blocked with no
+  # confirmation gate, so under-parsing is the highest-severity failure mode.
+  ALL_DEPS=$(echo "$BLOCKED_BODY" | grep -E "(Blocked by|Depends on|Requires)[*_:[:space:]]*#[0-9]+" | grep -Eo "#[0-9]+" | grep -Eo "[0-9]+" | sort -u)
 
-  # owner/repo this Champion is running in — the fallback for bare `#N` refs.
-  # Derived from the git remote with zero API calls; NOT `gh repo view --json
-  # nameWithOwner`, which is GraphQL-backed and fails first under the exhaustion
-  # this path must survive.
-  THIS_REPO=$(git remote get-url origin 2>/dev/null \
-    | sed -E 's#^(git@[^:]+:|https?://[^/]+/)##; s#\.git$##')
-
-  # Check whether ALL dependencies are now resolved. For each reference, run the
-  # shared Epic-Aware Blocker Check (champion-common.md Step 1→2) instead of a
-  # bare `state != CLOSED` read, so an epic whose loom:epic-phase children have
-  # all closed (but which is itself still open) is not treated as a live block.
+  # Check if ALL dependencies are now closed
   ALL_RESOLVED=true
-  for ref in $ALL_DEPS; do
-    parse_blocker_ref "$ref" "$THIS_REPO" || continue
-    # Run champion-common.md → "Epic-Aware Blocker Check" Step 2 for
-    # BLOCKER_REPO/BLOCKER_NUM here — it sets EPIC_BLOCK_STATE.
-    case "$EPIC_BLOCK_STATE" in
-      resolved)
-        : ;;  # epic already closed — dependency satisfied
-      epic-complete-unpromoted)
-        # All loom:epic-phase children closed but the epic itself still open:
-        # the trap state (#5211). Do NOT treat this reference as a live block —
-        # run champion-common.md Step 4 (idempotent flag → bounded escalation)
-        # with DEPENDENT_ISSUE="$blocked", and let the other deps decide.
-        DEPENDENT_ISSUE="$blocked"
-        echo "  #$blocked: epic blocker $BLOCKER_REPO#$BLOCKER_NUM appears complete — not gating (see champion-common.md Step 4)"
-        ;;
-      blocked-not-started|blocked-in-progress)
-        echo "  Still blocked: epic dependency $BLOCKER_REPO#$BLOCKER_NUM still has open (or no) phase children"
-        ALL_RESOLVED=false
-        break ;;
-      *)
-        # not-epic (or unclassified): the original plain state check. Plain `gh`
-        # — NOT "$GH_READ": a stale CLOSED here removes `loom:blocked` from a
-        # still-blocked issue, the highest-severity failure mode in this block.
-        DEP_STATE=$(gh issue view "$BLOCKER_NUM" --repo "$BLOCKER_REPO" --json state --jq '.state' 2>/dev/null)
-        if [ "$DEP_STATE" != "CLOSED" ]; then
-          echo "  Still blocked: dependency $BLOCKER_REPO#$BLOCKER_NUM is still open"
-          ALL_RESOLVED=false
-          break
-        fi ;;
-    esac
-  done
-
-  # "Still blocked" is only a valid conclusion if waiting can ever end. Run the
-  # bounded, cross-repo cycle detector on exactly this branch (#5213) — see
-  # "Dependency-cycle detection" below for why it is gated here and nowhere else.
-  if [ "$ALL_RESOLVED" = false ]; then
-    # Second gate, before the walk: a cycle already surfaced on this issue is a
-    # human's to break, and re-walking it every pass buys nothing. One cached
-    # label read (backlog observation, not arbitration) replaces up to
-    # --max-nodes forge reads. Cached("$GH_READ") — see "Cached forge reads".
-    ALREADY_ROUTED=$("$GH_READ" issue view "$blocked" --json labels \
-      --jq '[.labels[].name] | index("loom:operator-only") // empty')
-
-    if [ -z "$ALREADY_ROUTED" ]; then
-      CYCLE_RC=0
-      ./.loom/scripts/detect-dependency-cycle.sh --issue "$blocked" --report || CYCLE_RC=$?
-      if [ "$CYCLE_RC" -eq 1 ]; then
-        echo "  Dependency CYCLE on #$blocked — surfaced and routed to loom:operator-only; not re-deriving 'still blocked'"
-      fi
+  # Plain `gh` — NOT "$GH_READ": a stale CLOSED here removes `loom:blocked`
+  # from a still-blocked issue, the highest-severity failure mode in this block.
+  for dep in $ALL_DEPS; do
+    DEP_STATE=$(gh issue view "$dep" --json state --jq '.state' 2>/dev/null)
+    if [ "$DEP_STATE" != "CLOSED" ]; then
+      echo "  Still blocked: dependency #$dep is still open"
+      ALL_RESOLVED=false
+      break
     fi
-  fi
+  done
 
   if [ "$ALL_RESOLVED" = true ]; then
     echo "  All dependencies resolved - unblocking #$blocked"
@@ -1041,50 +911,6 @@ All dependencies are now resolved. This issue is ready for implementation.
   fi
 done
 ```
-
-#### Dependency-cycle detection (#5213)
-
-**Why this exists.** Everything above is **single-hop and same-repo**: it asks "is
-the issue named in `Blocked by: #N` closed yet?". That question has no reachable
-answer when the declared dependencies form a **cycle** — A waits on B, B waits on
-A — so the loop above re-derives `Still blocked` on every pass, forever, and
-nothing in either issue's text makes the cycle visible. The incident that motivated
-this ran for weeks across two repos (an epic in one repo blocking a dependent in
-another, whose own output the epic's last remaining phase needed) and was only
-found by an operator walking 15 child issues by hand.
-
-**`./.loom/scripts/detect-dependency-cycle.sh --issue <N> [--repo <owner/repo>]`**
-closes that gap. It walks the same `(Blocked by|Depends on|Requires)` vocabulary
-this file already parses — but **N hops instead of one**, and **across repos**,
-following `owner/repo#N` and issue-URL references as well as bare `#N`. Exit codes
-mirror `check-duplicate.sh`: **0** = no cycle within the bounds, **1** = cycle
-detected, **2** = error. Read the marker lines on stdout (`CYCLE_PATH:`,
-`CYCLE_NODES:`, `CYCLE_FINGERPRINT:`, `SEARCH_TRUNCATED:`, `UNREADABLE:`) rather
-than re-deriving anything yourself.
-
-| Property | How the script guarantees it |
-|---|---|
-| **Bounded cost** | Hard caps on hops (`--max-depth`, default 4), distinct issues fetched (`--max-nodes`, default 25) and edges examined (`--max-steps`, default 500); each issue is fetched at most once per run; reads go through `gh-cached`. A bound that fires prints `SEARCH_TRUNCATED:` so `NO_CYCLE` is never mistaken for proof. |
-| **Not on every pass** | Two gates precede it. (1) It is invoked **only** on the `ALL_RESOLVED=false` branch above — i.e. only once the cheap single-hop check has already concluded "still blocked", so an issue that unblocks normally never pays for a walk. (2) An issue already carrying `loom:operator-only` is skipped outright — the cycle was surfaced on an earlier pass and a human owns it, so one cached label read replaces the whole walk from then on. |
-| **Surfaced, not silent** | `--report` posts **one** comment naming every node in the cycle and adds `loom:operator-only`. Breaking a cycle means deciding which declared edge is wrong or which side ships a partial first — a human decision Champion is not entitled to make. |
-| **Idempotent** | The comment carries `<!-- champion:dep-cycle:<fingerprint> -->`, fingerprinted on the cycle's **node set** (sorted), so the same cycle discovered from either side collapses to one identity and is commented once; a genuinely different cycle still gets its own comment. Same marker-and-skip shape as `champion-issue-promo.md`'s body-hash idempotency. |
-| **Fail-safe** | A `CLOSED` node ends that branch of the walk (a resolved edge cannot deadlock anyone), an unreadable cross-repo issue is reported as `UNREADABLE:` rather than crashing, and without `--report` the script is strictly read-only. |
-
-Do **not** remove `loom:blocked` when a cycle is found — the issue genuinely is
-blocked. The change is that a human now owns it (`loom:operator-only`) instead of
-Champion re-deriving the same dead conclusion on the next pass.
-
-**A cycle is not the same finding as a completed-but-unpromoted epic.** If an
-"Epic-Aware Blocker Check" section is present in `champion-common.md`, run it
-**first** and let the cycle detector see only what survives it: a blocker whose
-epic has in substance already shipped is a *resolvable* edge that the epic check
-clears on its own, and reporting it as a deadlock would put a human in front of an
-issue that needed no human. The two checks answer different questions — "has this
-blocker actually finished?" versus "can this blocker ever finish?" — and the
-detector is the fallback for the second, which only arises once the first has said
-no. They share no state and no marker (`champion:epic-block:*` vs.
-`champion:dep-cycle:*`), so either can land, be edited, or be removed without
-touching the other.
 
 ### Step 5.5: Create Follow-on Issues
 
@@ -1355,7 +1181,7 @@ fi
 
 If ANY safety criterion fails, do NOT merge. How the failure is handled depends on whether it is **transient** (clears on its own or on the next push — pending CI, conflicts being resolved, `UNKNOWN` mergeability), **terminal** (the PR has gone stale and cannot clear without a rebase), or a **merge-risk hold** (criterion #2 judged the PR to need a human merge).
 
-**Merge-risk holds** keep `loom:pr` like a transient failure, but comment **once** behind the `<!-- champion:merge-risk-hold -->` idempotency marker because the condition does not clear on its own, and additionally carry `loom:operator` (#5502) — the first-class "engine will not act further, a human is the only transition out" state, added alongside the marker and removed alongside its reversal, kept **filterable** without making sweep/shepherd skip the PR (see [`.loom/docs/label-state-machine.md`](../../../.loom/docs/label-state-machine.md)). Unlike a transient failure, the hold is **sticky**: later ticks re-check it against the release conditions (`loom:auto-merge-ok`, an explicit operator clearing comment, a new push, a new Judge review) rather than re-deriving it from a fresh axis read, and any merge that reverses one carries a mandatory reversal comment (#4742). The exact commands live with the criterion itself — see "Safety Criteria → 2. Merge-Risk Judgment → Sticky holds / Hold behavior"; do not duplicate them here.
+**Merge-risk holds** keep `loom:pr` like a transient failure, but comment **once** behind the `<!-- champion:merge-risk-hold -->` idempotency marker because the condition does not clear on its own. Unlike a transient failure, the hold is **sticky**: later ticks re-check it against the release conditions (`loom:auto-merge-ok`, an explicit operator clearing comment, a new push, a new Judge review) rather than re-deriving it from a fresh axis read, and any merge that reverses one carries a mandatory reversal comment (#4742). The exact commands live with the criterion itself — see "Safety Criteria → 2. Merge-Risk Judgment → Sticky holds / Hold behavior"; do not duplicate them here.
 
 ### Transient failures — keep `loom:pr`, retry next tick
 
@@ -1458,10 +1284,7 @@ STALE_MARKER="<!-- champion:stale-pr-notice -->"
 # Idempotency guard: only comment + relabel once. If a prior tick already
 # posted the stale notice, do nothing (prevents per-tick comment spam).
 # Cached ("$GH_READ") — idempotency-marker grep.
-# `startswith`, not a bare substring match — a later comment discussing or
-# quoting this marker must never be mistaken for the notice's own comment
-# and wrongly suppress the real post (#5371).
-if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$STALE_MARKER\"))")" = "true" ]; then
+if "$GH_READ" pr view "$PR_NUMBER" --json comments --jq '.comments[].body' | grep -qF "$STALE_MARKER"; then
   echo "Stale-PR notice already posted for #$PR_NUMBER — skipping"
 else
   gh pr comment "$PR_NUMBER" --body "$STALE_MARKER
@@ -1527,11 +1350,8 @@ Read the **whole** thread — that complete post-mortem view is the entire reaso
 
 ```bash
 # How many extra cycles this pass has already granted (0 for a first-time decision).
-# `startswith`, not a bare substring match — a comment that merely quotes
-# this marker while discussing a grant must not be double-counted as a
-# genuine grant (#5371).
 PRIOR_GRANTS=$("$GH_READ" pr view "$PR_NUMBER" --json comments \
-  --jq '[.comments[] | select(.body | startswith("<!-- champion:capped-pr-grant -->"))] | length')
+  --jq '[.comments[] | select(.body | contains("champion:capped-pr-grant"))] | length')
 ```
 
 The two comments the decision turns on are the **latest** Judge rejection and the **immediately preceding** one.
@@ -1609,10 +1429,7 @@ LATEST_REJECTION_ID=$(gh pr view "$PR_NUMBER" --json comments \
 PARK_MARKER="<!-- champion:capped-pr-parked:$LATEST_REJECTION_ID -->"
 
 # Cached ("$GH_READ") — idempotency-marker grep.
-# `startswith`, not a bare substring match — a later comment quoting this
-# marker in prose must never be mistaken for the verdict's own comment and
-# wrongly suppress the real post (#5371).
-if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$PARK_MARKER\"))")" = "true" ]; then
+if "$GH_READ" pr view "$PR_NUMBER" --json comments --jq '.comments[].body' | grep -qF "$PARK_MARKER"; then
   echo "Keep-parked verdict already posted for #$PR_NUMBER on this rejection — skipping"
 else
   gh pr comment "$PR_NUMBER" --body "$PARK_MARKER
@@ -1641,10 +1458,7 @@ PR_NUMBER=<number>
 CLOSE_MARKER="<!-- champion:capped-pr-close-recommended -->"
 
 # Cached ("$GH_READ") — idempotency-marker grep.
-# `startswith`, not a bare substring match — a later comment quoting this
-# marker in prose must never be mistaken for the recommendation's own
-# comment and wrongly suppress the real post (#5371).
-if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$CLOSE_MARKER\"))")" = "true" ]; then
+if "$GH_READ" pr view "$PR_NUMBER" --json comments --jq '.comments[].body' | grep -qF "$CLOSE_MARKER"; then
   echo "Close recommendation already posted for #$PR_NUMBER — skipping"
 else
   gh pr comment "$PR_NUMBER" --body "$CLOSE_MARKER

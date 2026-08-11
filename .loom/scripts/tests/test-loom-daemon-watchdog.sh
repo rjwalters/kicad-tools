@@ -113,19 +113,9 @@ back_date_file() { # <file> <seconds_ago>
 # observed failure: an inherited LOOM_PID_FILE pointed every case at the
 # operator's live ~/GitHub/loom/.loom/.daemon.pid. Listed BEFORE "$@" so the
 # dedicated LOOM_PID_FILE case can still set it.
-#
-# #5391: LOOM_WATCHDOG_AUTO_RECOVER=0 / LOOM_WATCHDOG_ESCALATE=0 are harness
-# DEFAULTS for the same reason LOOM_WATCHDOG_IPC_PROBE=0 is — every case above
-# section 30 asserts the DETECTION contract and must not, as a side effect,
-# exec the real loom-daemon-start.sh (which would try to start an actual daemon
-# on the test host) or file a real forge issue. Listed BEFORE "$@" so the
-# dedicated recovery cases in section 30+ can re-enable both, pointing
-# LOOM_WATCHDOG_RECOVER_CMD at a recorder stub.
 run_watchdog() {
     : > "$OUT"
     env LOOM_WATCHDOG_IPC_PROBE=0 LOOM_PID_FILE= LOOM_WORKSPACE= LOOM_MACHINE_CHECKOUT= \
-        LOOM_WATCHDOG_AUTO_RECOVER=0 LOOM_WATCHDOG_ESCALATE=0 \
-        LOOM_WATCHDOG_RECOVERY_STATE="$WORKDIR/.watchdog-recovery-state" \
         "$@" LOOM_AUTONOMY_MARKER="$MARKER" LOOM_WATCHDOG_LOG="$WDLOG" \
         LOOM_SOCKET_PATH="$WORKDIR/loom-daemon.sock" \
         LOOM_DAEMON_LAUNCHD=0 bash "$WATCHDOG" > "$OUT" 2>&1
@@ -138,8 +128,6 @@ run_watchdog() {
 run_watchdog_verbose() {
     : > "$OUT"
     env LOOM_WATCHDOG_IPC_PROBE=0 LOOM_PID_FILE= LOOM_WORKSPACE= LOOM_MACHINE_CHECKOUT= \
-        LOOM_WATCHDOG_AUTO_RECOVER=0 LOOM_WATCHDOG_ESCALATE=0 \
-        LOOM_WATCHDOG_RECOVERY_STATE="$WORKDIR/.watchdog-recovery-state" \
         "$@" LOOM_AUTONOMY_MARKER="$MARKER" LOOM_WATCHDOG_LOG="$WDLOG" \
         LOOM_SOCKET_PATH="$WORKDIR/loom-daemon.sock" \
         LOOM_DAEMON_LAUNCHD=0 bash "$WATCHDOG" --verbose > "$OUT" 2>&1
@@ -154,9 +142,7 @@ run_watchdog_verbose() {
 # supervisor says its job is down" as the unsupervised-daemon WARN — skipping
 # the very remediation gate these cases exist to pin down.
 SUPERVISOR_CASE_ENV=(LOOM_WATCHDOG_IPC_PROBE=0 LOOM_PID_FILE= LOOM_WORKSPACE=
-                     LOOM_MACHINE_CHECKOUT= LOOM_SOCKET_PATH="$WORKDIR/loom-daemon.sock"
-                     LOOM_WATCHDOG_AUTO_RECOVER=0 LOOM_WATCHDOG_ESCALATE=0
-                     LOOM_WATCHDOG_RECOVERY_STATE="$WORKDIR/.watchdog-recovery-state")
+                     LOOM_MACHINE_CHECKOUT= LOOM_SOCKET_PATH="$WORKDIR/loom-daemon.sock")
 
 log_has()  { grep -q "$1" "$WDLOG" 2>/dev/null; }
 log_hasi() { grep -qi "$1" "$WDLOG" 2>/dev/null; }
@@ -188,13 +174,7 @@ EOF
 # The watchdog shells out to the resolved `loom-daemon` binary for its bounded
 # in-band probe, so the probe is driven entirely by a stub binary pinned via
 # LOOM_DAEMON_BIN — no real daemon, no real socket, no `timeout` dependency on
-# the outcome. The stub is named `loom-daemon-mock`, NOT `loom-daemon` (#5548):
-# it is resolved solely via LOOM_DAEMON_BIN (never a PATH lookup by name), and
-# the `hang` mode below backgrounds an infinite loop that is the exact process
-# shape (`bash <path ending in loom-daemon>`, orphaned) a leaked #5548-style
-# fixture takes — a distinct name means a leak of this fixture, past this
-# suite's traps, could never forge a production `pgrep -f loom-daemon`-style
-# liveness check. Each mode reproduces one shape the classifier must handle:
+# the outcome. Each mode reproduces one shape the classifier must handle:
 #
 #   ok          successful IPC round-trip (exit 0)
 #   slow-ok     eventually-responsive round-trip (the #4279 under-load case):
@@ -210,20 +190,20 @@ make_daemon_stub() { # <mode> [sleep_secs]
     dir="$(mktemp -d)"
     case "$mode" in
         ok)
-            printf '#!/usr/bin/env bash\necho "no active quarantines"\nexit 0\n' > "$dir/loom-daemon-mock" ;;
+            printf '#!/usr/bin/env bash\necho "no active quarantines"\nexit 0\n' > "$dir/loom-daemon" ;;
         slow-ok)
-            printf '#!/usr/bin/env bash\nsleep %s\necho "no active quarantines"\nexit 0\n' "$secs" > "$dir/loom-daemon-mock" ;;
+            printf '#!/usr/bin/env bash\nsleep %s\necho "no active quarantines"\nexit 0\n' "$secs" > "$dir/loom-daemon" ;;
         hang)
-            printf '#!/usr/bin/env bash\nwhile true; do sleep 1; done\n' > "$dir/loom-daemon-mock" ;;
+            printf '#!/usr/bin/env bash\nwhile true; do sleep 1; done\n' > "$dir/loom-daemon" ;;
         unreachable)
-            printf '#!/usr/bin/env bash\necho "Could not reach loom-daemon at /tmp/x.sock: round-trip timed out after 5s" >&2\nexit 1\n' > "$dir/loom-daemon-mock" ;;
+            printf '#!/usr/bin/env bash\necho "Could not reach loom-daemon at /tmp/x.sock: round-trip timed out after 5s" >&2\nexit 1\n' > "$dir/loom-daemon" ;;
         usage)
-            printf '#!/usr/bin/env bash\necho "error: unrecognized subcommand" >&2\nexit 2\n' > "$dir/loom-daemon-mock" ;;
+            printf '#!/usr/bin/env bash\necho "error: unrecognized subcommand" >&2\nexit 2\n' > "$dir/loom-daemon" ;;
         daemon-err)
-            printf '#!/usr/bin/env bash\necho "Daemon error: workspace not registered" >&2\nexit 1\n' > "$dir/loom-daemon-mock" ;;
+            printf '#!/usr/bin/env bash\necho "Daemon error: workspace not registered" >&2\nexit 1\n' > "$dir/loom-daemon" ;;
         *) echo "unknown stub mode $mode" >&2; return 1 ;;
     esac
-    chmod +x "$dir/loom-daemon-mock"
+    chmod +x "$dir/loom-daemon"
     echo "$dir"
 }
 
@@ -744,7 +724,7 @@ fi
 STUB12="$(make_daemon_stub ok)"
 start_alive_and_fresh 12
 run_watchdog PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
-    LOOM_DAEMON_BIN="$STUB12/loom-daemon-mock"
+    LOOM_DAEMON_BIN="$STUB12/loom-daemon"
 kill "$LIVE_PID" 2>/dev/null || true
 assert_rc 0 "$RC" "probe succeeds: exits 0 (healthy, unchanged behavior)"
 if log_has DIVERGENCE; then
@@ -769,7 +749,7 @@ STUB13="$(make_daemon_stub hang)"
 start_alive_and_fresh 13
 t0=$(date +%s)
 run_watchdog PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
-    LOOM_DAEMON_BIN="$STUB13/loom-daemon-mock" \
+    LOOM_DAEMON_BIN="$STUB13/loom-daemon" \
     LOOM_WATCHDOG_STATUS_PROBE_TIMEOUT_SECS=2 \
     LOOM_WATCHDOG_IPC_PROBE_FAIL_THRESHOLD=3
 elapsed=$(( $(date +%s) - t0 ))
@@ -803,7 +783,7 @@ rm -rf "$PS_STUB_DIR" "$STUB13"
 STUB14="$(make_daemon_stub hang)"
 start_alive_and_fresh 14
 probe_env=(PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1
-    LOOM_DAEMON_BIN="$STUB14/loom-daemon-mock"
+    LOOM_DAEMON_BIN="$STUB14/loom-daemon"
     LOOM_WATCHDOG_STATUS_PROBE_TIMEOUT_SECS=2
     LOOM_WATCHDOG_IPC_PROBE_FAIL_THRESHOLD=2)
 run_watchdog "${probe_env[@]}"            # tick 1 -> failure 1 of 2
@@ -841,7 +821,7 @@ start_alive_and_fresh 15
 rm -rf "$PS_STUB_DIR"
 PS_STUB_DIR="$(make_ps_stub "00:00:10")"   # 10s old ⇒ inside the 90s default grace
 run_watchdog_verbose PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
-    LOOM_DAEMON_BIN="$STUB15/loom-daemon-mock" \
+    LOOM_DAEMON_BIN="$STUB15/loom-daemon" \
     LOOM_WATCHDOG_STATUS_PROBE_TIMEOUT_SECS=2 \
     LOOM_WATCHDOG_IPC_PROBE_FAIL_THRESHOLD=2
 kill "$LIVE_PID" 2>/dev/null || true
@@ -904,7 +884,7 @@ rm -rf "$STUB16_PS"
 STUB17="$(make_daemon_stub slow-ok 2)"
 start_alive_and_fresh 17
 run_watchdog PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
-    LOOM_DAEMON_BIN="$STUB17/loom-daemon-mock" \
+    LOOM_DAEMON_BIN="$STUB17/loom-daemon" \
     LOOM_WATCHDOG_STATUS_PROBE_TIMEOUT_SECS=15
 kill "$LIVE_PID" 2>/dev/null || true
 assert_rc 0 "$RC" "slow-but-responsive probe (2s < 15s budget): exits 0, not flagged as hung"
@@ -923,7 +903,7 @@ rm -rf "$PS_STUB_DIR" "$STUB17"
 STUB18="$(make_daemon_stub daemon-err)"
 start_alive_and_fresh 18
 run_watchdog PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
-    LOOM_DAEMON_BIN="$STUB18/loom-daemon-mock" LOOM_WATCHDOG_IPC_PROBE_FAIL_THRESHOLD=1
+    LOOM_DAEMON_BIN="$STUB18/loom-daemon" LOOM_WATCHDOG_IPC_PROBE_FAIL_THRESHOLD=1
 kill "$LIVE_PID" 2>/dev/null || true
 assert_rc 0 "$RC" "daemon answered with an application error: exits 0 (IPC demonstrably works)"
 if log_has DIVERGENCE; then
@@ -936,7 +916,7 @@ rm -rf "$PS_STUB_DIR" "$STUB18"
 STUB18B="$(make_daemon_stub usage)"
 start_alive_and_fresh 18b
 run_watchdog PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
-    LOOM_DAEMON_BIN="$STUB18B/loom-daemon-mock" LOOM_WATCHDOG_IPC_PROBE_FAIL_THRESHOLD=1
+    LOOM_DAEMON_BIN="$STUB18B/loom-daemon" LOOM_WATCHDOG_IPC_PROBE_FAIL_THRESHOLD=1
 kill "$LIVE_PID" 2>/dev/null || true
 assert_rc 0 "$RC" "probe subcommand unsupported by this build: exits 0 (graceful degrade)"
 if log_has DIVERGENCE; then
@@ -957,7 +937,7 @@ STUB19="$(make_daemon_stub ok)"
 start_alive_and_fresh 19
 printf '%s 5\n' "$LIVE_PID" > "$PROBE_STATE"
 run_watchdog PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
-    LOOM_DAEMON_BIN="$STUB19/loom-daemon-mock"
+    LOOM_DAEMON_BIN="$STUB19/loom-daemon"
 kill "$LIVE_PID" 2>/dev/null || true
 assert_rc 0 "$RC" "successful probe after a streak: exits 0"
 if [[ -f "$PROBE_STATE" ]]; then
@@ -971,7 +951,7 @@ STUB19B="$(make_daemon_stub unreachable)"
 start_alive_and_fresh 19b
 printf '999999 9\n' > "$PROBE_STATE"    # a streak owned by a DIFFERENT (dead) pid
 run_watchdog PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
-    LOOM_DAEMON_BIN="$STUB19B/loom-daemon-mock" LOOM_WATCHDOG_IPC_PROBE_FAIL_THRESHOLD=2
+    LOOM_DAEMON_BIN="$STUB19B/loom-daemon" LOOM_WATCHDOG_IPC_PROBE_FAIL_THRESHOLD=2
 kill "$LIVE_PID" 2>/dev/null || true
 assert_rc 1 "$RC" "failed probe after a relaunch: exits 1 (reported)"
 if log_hasi 'consecutive failure 1 of 2'; then
@@ -994,7 +974,7 @@ STUB20="$(make_daemon_stub hang)"
 start_alive_and_fresh 20
 t0=$(date +%s)
 run_watchdog PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=0 \
-    LOOM_DAEMON_BIN="$STUB20/loom-daemon-mock" \
+    LOOM_DAEMON_BIN="$STUB20/loom-daemon" \
     LOOM_WATCHDOG_STATUS_PROBE_TIMEOUT_SECS=2
 elapsed=$(( $(date +%s) - t0 ))
 kill "$LIVE_PID" 2>/dev/null || true
@@ -1018,7 +998,7 @@ start_alive_and_fresh 21
 t0=$(date +%s)
 run_watchdog PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
     LOOM_FORCE_PORTABLE_TIMEOUT=1 \
-    LOOM_DAEMON_BIN="$STUB21/loom-daemon-mock" \
+    LOOM_DAEMON_BIN="$STUB21/loom-daemon" \
     LOOM_WATCHDOG_STATUS_PROBE_TIMEOUT_SECS=2 \
     LOOM_WATCHDOG_IPC_PROBE_FAIL_THRESHOLD=3
 elapsed=$(( $(date +%s) - t0 ))
@@ -1049,7 +1029,7 @@ mv "$BOUNDED_RUN_LIB" "$BOUNDED_RUN_LIB_BAK"
 STUB22="$(make_daemon_stub unreachable)"
 start_alive_and_fresh 22
 run_watchdog_verbose PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
-    LOOM_DAEMON_BIN="$STUB22/loom-daemon-mock"
+    LOOM_DAEMON_BIN="$STUB22/loom-daemon"
 kill "$LIVE_PID" 2>/dev/null || true
 mv "$BOUNDED_RUN_LIB_BAK" "$BOUNDED_RUN_LIB"
 assert_rc 0 "$RC" "missing lib/bounded-run.sh: degrades to a skip, not a hard failure (exit 0)"
@@ -1084,7 +1064,7 @@ rm -f "$WORKDIR/pid23"
 write_marker "$WORKDIR/pid23" 60            # marker names a pid file that does not exist
 printf '%s pid=x ts=now\n' "$(date +%s)" > "$HEARTBEAT"
 : > "$WDLOG"
-run_watchdog_verbose LOOM_WATCHDOG_IPC_PROBE=1 LOOM_DAEMON_BIN="$STUB23/loom-daemon-mock"
+run_watchdog_verbose LOOM_WATCHDOG_IPC_PROBE=1 LOOM_DAEMON_BIN="$STUB23/loom-daemon"
 assert_rc 0 "$RC" "#5118 pid file ABSENT but socket answers: exits 0 (healthy via the IPC round-trip)"
 if log_has DIVERGENCE; then
     fail "#5118 pid file absent + socket answers: reported a DIVERGENCE ($(cat "$WDLOG"))"
@@ -1107,7 +1087,7 @@ echo "$dead24" > "$WORKDIR/pid24"
 write_marker "$WORKDIR/pid24" 60
 printf '%s pid=x ts=now\n' "$(date +%s)" > "$HEARTBEAT"
 : > "$WDLOG"
-run_watchdog_verbose LOOM_WATCHDOG_IPC_PROBE=1 LOOM_DAEMON_BIN="$STUB24/loom-daemon-mock"
+run_watchdog_verbose LOOM_WATCHDOG_IPC_PROBE=1 LOOM_DAEMON_BIN="$STUB24/loom-daemon"
 assert_rc 0 "$RC" "#5118 STALE pid file (dead pid) but socket answers: exits 0 (healthy)"
 if log_has DIVERGENCE; then
     fail "#5118 stale pid file + socket answers: reported a DIVERGENCE ($(cat "$WDLOG"))"
@@ -1122,7 +1102,7 @@ STUB25="$(make_daemon_stub unreachable)"
 rm -f "$WORKDIR/pid25"
 write_marker "$WORKDIR/pid25" 60
 : > "$WDLOG"
-run_watchdog LOOM_WATCHDOG_IPC_PROBE=1 LOOM_DAEMON_BIN="$STUB25/loom-daemon-mock"
+run_watchdog LOOM_WATCHDOG_IPC_PROBE=1 LOOM_DAEMON_BIN="$STUB25/loom-daemon"
 assert_rc 1 "$RC" "#5118 daemon genuinely down (socket unreachable): exits 1 on the FIRST tick"
 if log_has DIVERGENCE && log_hasi 'in-band probe confirms it'; then
     pass "#5118 daemon down: DIVERGENCE cites BOTH the out-of-band and in-band signals"
@@ -1206,7 +1186,7 @@ EOF
     env PATH="$STUB28:$PATH" LOOM_PID_FILE= LOOM_WORKSPACE= LOOM_MACHINE_CHECKOUT= \
         LOOM_SOCKET_PATH="$WORKDIR/loom-daemon.sock" \
         LOOM_AUTONOMY_MARKER="$MARKER" LOOM_WATCHDOG_LOG="$WDLOG" \
-        LOOM_WATCHDOG_IPC_PROBE=1 LOOM_DAEMON_BIN="$STUB28D/loom-daemon-mock" \
+        LOOM_WATCHDOG_IPC_PROBE=1 LOOM_DAEMON_BIN="$STUB28D/loom-daemon" \
         bash "$WATCHDOG" > "$OUT" 2>&1
     rc28=$?
     assert_rc 1 "$rc28" "#5118 supervisor down + socket answers: exits 1 (state mismatch)"
@@ -1236,435 +1216,6 @@ if grep -q 'LOOM_PID_FILE' <<< "$help_out_5118" && grep -qi 'UNDETERMINED' <<< "
     pass "--help documents LOOM_PID_FILE and the UNDETERMINED (exit 3) contract"
 else
     fail "--help should document LOOM_PID_FILE and the exit-3 UNDETERMINED contract"
-fi
-
-# ===================================================================
-# #5391 — GENERAL-CASE BOUNDED RECOVERY + CIRCUIT BREAKER.
-#
-# Everything below drives the divergence signature that produced the reported
-# incident: a daemon that is EXPECTED, CONFIRMED down, and does NOT match either
-# narrow #4232/#4862 auto-remediation gate ("loaded + down + last exit 0"). That
-# path was report-only, so a fleet host logged 252 identical `[DIVERGENCE] …
-# Recover with: loom-daemon-start.sh` lines in eight days — including a
-# continuous 1h40m outage — and never ran the command it kept printing.
-#
-# The recovery command is ALWAYS a stub pinned via LOOM_WATCHDOG_RECOVER_CMD:
-# no real loom-daemon-start.sh is ever executed, no real daemon started, and
-# (test 33 aside, which stubs create-issue.sh too) no forge call made. The
-# initial down state is the pid-file tier — a pid file naming a dead pid plus an
-# `unreachable` socket stub — so these cases are platform-independent: a launchd
-# host and a systemd host run the identical code path here.
-# ===================================================================
-
-RECOVERY_STATE="$WORKDIR/.watchdog-recovery-state"
-OUTAGE_SENTINEL="$WORKDIR/.watchdog-outage-escalated"
-
-# A recovery-command stub that appends one line per invocation to <log>.
-#   noop    records the call and changes nothing (recovery keeps failing)
-#   revive  records the call and writes a LIVE pid into <pidfile> (recovery works)
-#   hang    never returns — only the watchdog's own budget can end it
-make_recover_stub() { # <mode> <log> [pidfile] [pid]
-    local mode="$1" log="$2" pidfile="${3:-}" pid="${4:-}" dir
-    dir="$(mktemp -d)"
-    case "$mode" in
-        noop)
-            printf '#!/usr/bin/env bash\necho "recover $*" >> %s\nexit 1\n' "$log" > "$dir/recover.sh" ;;
-        revive)
-            printf '#!/usr/bin/env bash\necho "recover $*" >> %s\necho %s > %s\nexit 0\n' \
-                "$log" "$pid" "$pidfile" > "$dir/recover.sh" ;;
-        hang)
-            printf '#!/usr/bin/env bash\necho "recover $*" >> %s\nwhile true; do sleep 1; done\n' "$log" > "$dir/recover.sh" ;;
-        *) echo "unknown recover stub mode $mode" >&2; return 1 ;;
-    esac
-    chmod +x "$dir/recover.sh"
-    echo "$dir/recover.sh"
-}
-
-# Stand up "a daemon is expected and is CONFIRMED down" on the pid-file tier:
-# the marker names a pid file holding a dead pid, and the in-band socket probe
-# (stub mode `unreachable`) corroborates. Clears any prior episode state so each
-# case starts with a full attempt budget. Sets DOWN_STUB (caller must rm -rf).
-DOWN_STUB=""
-start_confirmed_down() { # <pid_file_suffix>
-    local dead
-    DOWN_STUB="$(make_daemon_stub unreachable)"
-    dead=$(sleeper); bg_proc_track "$dead"; kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null
-    echo "$dead" > "$WORKDIR/pid$1"
-    write_marker "$WORKDIR/pid$1" 60
-    : > "$WDLOG"
-    rm -f "$RECOVERY_STATE" "$OUTAGE_SENTINEL"
-}
-
-# Common env for the recovery cases: probe on (so the socket confirms the
-# outage), recovery ON, escalation OFF unless a case opts in, and a fast recheck
-# so a failing recovery does not add seconds per tick.
-recover_env() { # <recover-cmd> [extra KEY=VAL...]
-    local cmd="$1"; shift
-    echo LOOM_WATCHDOG_IPC_PROBE=1 \
-         LOOM_DAEMON_BIN="$DOWN_STUB/loom-daemon-mock" \
-         LOOM_WATCHDOG_AUTO_RECOVER=1 \
-         LOOM_WATCHDOG_RECOVER_CMD="$cmd" \
-         LOOM_WATCHDOG_KICKSTART_RECHECK_ATTEMPTS=1 \
-         LOOM_WATCHDOG_KICKSTART_RECHECK_INTERVAL=0.1 \
-         "$@"
-}
-
-# ---- 30. Confirmed outage ⇒ the watchdog RUNS the recovery, and succeeding ----
-#         ends the episode: exit 0, an OK "auto-recovery SUCCEEDED" report, and
-#         no leftover episode state. This is the whole point of #5391 — the
-#         252-divergence log line that never acted.
-LOG30="$WORKDIR/recover30.log"; : > "$LOG30"
-start_confirmed_down 30
-live30=$(sleeper); bg_proc_track "$live30"
-REC30="$(make_recover_stub revive "$LOG30" "$WORKDIR/pid30" "$live30")"
-# shellcheck disable=SC2046  # deliberate word-splitting of the env-assignment list
-run_watchdog $(recover_env "$REC30")
-kill "$live30" 2>/dev/null || true
-assert_rc 0 "$RC" "#5391 confirmed outage + successful recovery: exits 0"
-if [[ "$(wc -l < "$LOG30" | tr -d ' ')" == "1" ]]; then
-    pass "#5391 confirmed outage: the recovery command is actually INVOKED (exactly once)"
-else
-    fail "#5391 confirmed outage: expected exactly one recovery invocation, got '$(cat "$LOG30")'"
-fi
-if log_hasi 'auto-recovery SUCCEEDED'; then
-    pass "#5391 successful recovery: reported as a success, not a bare divergence"
-else
-    fail "#5391 successful recovery: missing the success report ($(cat "$WDLOG"))"
-fi
-if [[ -f "$RECOVERY_STATE" ]]; then
-    fail "#5391 successful recovery: episode state must be cleared"
-else
-    pass "#5391 successful recovery: episode state cleared (next outage gets a full budget)"
-fi
-rm -rf "$DOWN_STUB" "$(dirname "$REC30")"
-
-# ---- 31. Repeated failure ⇒ bounded attempts, then the breaker LATCHES ----
-#         With the backoff pinned to 0 every tick may attempt, so the ONLY thing
-#         that can stop the third tick from restarting again is the circuit
-#         breaker. Budget 2 ⇒ at most 2 invocations across 3 ticks, forever.
-LOG31="$WORKDIR/recover31.log"; : > "$LOG31"
-start_confirmed_down 31
-REC31="$(make_recover_stub noop "$LOG31")"
-rec31_env=$(recover_env "$REC31" LOOM_WATCHDOG_RECOVER_MAX_ATTEMPTS=2 LOOM_WATCHDOG_RECOVER_BACKOFF_SECS=0)
-# shellcheck disable=SC2086,SC2046
-run_watchdog $rec31_env; rc31a=$RC
-# shellcheck disable=SC2086,SC2046
-run_watchdog $rec31_env; rc31b=$RC
-: > "$WDLOG"
-# shellcheck disable=SC2086,SC2046
-run_watchdog $rec31_env; rc31c=$RC
-assert_rc 1 "$rc31a" "#5391 failing recovery (tick 1): exits 1"
-assert_rc 1 "$rc31b" "#5391 failing recovery (tick 2, budget spent): exits 1"
-assert_rc 1 "$rc31c" "#5391 failing recovery (tick 3, breaker open): exits 1"
-if [[ "$(wc -l < "$LOG31" | tr -d ' ')" == "2" ]]; then
-    pass "#5391 circuit breaker: exactly 2 recovery attempts across 3 down ticks (budget honored)"
-else
-    fail "#5391 circuit breaker: expected 2 invocations for a budget of 2, got $(wc -l < "$LOG31") ($(cat "$LOG31"))"
-fi
-if log_hasi 'CIRCUIT BREAKER OPEN'; then
-    pass "#5391 circuit breaker: the post-budget tick says the breaker is OPEN"
-else
-    fail "#5391 circuit breaker: expected a 'CIRCUIT BREAKER OPEN' report ($(cat "$WDLOG"))"
-fi
-if log_hasi 'consecutive watchdog ticks'; then
-    pass "#5391 circuit breaker: the report quantifies how long the outage has run"
-else
-    fail "#5391 circuit breaker: report should quantify the outage duration ($(cat "$WDLOG"))"
-fi
-rm -rf "$DOWN_STUB" "$(dirname "$REC31")"
-
-# ---- 32. Exponential backoff defers the NEXT attempt ----
-#         Same setup with a large backoff: tick 2 must report, but must NOT
-#         re-run the recovery command. Without this, a 300s cadence would mean a
-#         restart every 300s regardless of how hopeless it is.
-LOG32="$WORKDIR/recover32.log"; : > "$LOG32"
-start_confirmed_down 32
-REC32="$(make_recover_stub noop "$LOG32")"
-rec32_env=$(recover_env "$REC32" LOOM_WATCHDOG_RECOVER_MAX_ATTEMPTS=5 LOOM_WATCHDOG_RECOVER_BACKOFF_SECS=3600)
-# shellcheck disable=SC2086,SC2046
-run_watchdog $rec32_env
-: > "$WDLOG"
-# shellcheck disable=SC2086,SC2046
-run_watchdog $rec32_env; rc32=$RC
-assert_rc 1 "$rc32" "#5391 backoff: the deferred tick still reports the outage (exit 1)"
-if [[ "$(wc -l < "$LOG32" | tr -d ' ')" == "1" ]]; then
-    pass "#5391 backoff: the second tick does NOT re-run the recovery command"
-else
-    fail "#5391 backoff: expected 1 invocation, got $(wc -l < "$LOG32") ($(cat "$LOG32"))"
-fi
-if log_hasi 'BACKED OFF'; then
-    pass "#5391 backoff: the deferred tick explains that the attempt is backed off"
-else
-    fail "#5391 backoff: expected a 'BACKED OFF' explanation ($(cat "$WDLOG"))"
-fi
-rm -rf "$DOWN_STUB" "$(dirname "$REC32")"
-
-# ---- 33. Breaker trip ⇒ ONE out-of-band escalation, deduped by a sentinel ----
-#         The AC that matters most: an operator must learn about an unrecovered
-#         outage WITHOUT tailing daemon-watchdog.log. create-issue.sh is stubbed
-#         under the marker's repo_root, so no forge call leaves the tempdir.
-LOG33="$WORKDIR/recover33.log"; : > "$LOG33"
-ISSUE33="$WORKDIR/create-issue33.log"; : > "$ISSUE33"
-mkdir -p "$WORKDIR/.loom/scripts"
-# Records ONE line per invocation (title + labels) so the call count is a plain
-# line count; the multi-line body is captured separately for content assertions.
-BODY33="$WORKDIR/create-issue33-body.txt"; : > "$BODY33"
-cat > "$WORKDIR/.loom/scripts/create-issue.sh" <<EOF
-#!/usr/bin/env bash
-title=""; labels=""
-while [[ \$# -gt 0 ]]; do
-  case "\$1" in
-    --title|-t) title="\$2"; shift 2 ;;
-    --label|-l) labels="\$labels \$2"; shift 2 ;;
-    --body|-b)  printf '%s\n' "\$2" >> "$BODY33"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-echo "create-issue title=\$title labels=\$labels" >> "$ISSUE33"
-echo "https://example.invalid/issues/1"
-exit 0
-EOF
-chmod +x "$WORKDIR/.loom/scripts/create-issue.sh"
-start_confirmed_down 33
-REC33="$(make_recover_stub noop "$LOG33")"
-rec33_env=$(recover_env "$REC33" LOOM_WATCHDOG_RECOVER_MAX_ATTEMPTS=1 \
-    LOOM_WATCHDOG_RECOVER_BACKOFF_SECS=0 LOOM_WATCHDOG_ESCALATE=1 \
-    LOOM_WATCHDOG_ESCALATION_SENTINEL="$OUTAGE_SENTINEL")
-# shellcheck disable=SC2086,SC2046
-run_watchdog $rec33_env; rc33=$RC
-assert_rc 1 "$rc33" "#5391 escalation: the breaker-trip tick still exits 1"
-if [[ "$(wc -l < "$ISSUE33" | tr -d ' ')" == "1" ]]; then
-    pass "#5391 escalation: files exactly ONE forge issue when the breaker trips"
-else
-    fail "#5391 escalation: expected one create-issue.sh call, got $(wc -l < "$ISSUE33") ($(cat "$ISSUE33"))"
-fi
-if grep -q 'loom:triage' "$ISSUE33"; then
-    pass "#5391 escalation: the filed issue carries a triage label (enters the normal queue)"
-else
-    fail "#5391 escalation: expected a labelled filing ($(cat "$ISSUE33"))"
-fi
-if grep -qi 'circuit breaker is OPEN' "$BODY33" && grep -q 'loom-daemon-start.sh' "$BODY33"; then
-    pass "#5391 escalation: the issue body states why recovery stopped and how to fix it by hand"
-else
-    fail "#5391 escalation: issue body should explain the breaker state + manual recovery ($(cat "$BODY33"))"
-fi
-if [[ -f "$OUTAGE_SENTINEL" ]]; then
-    pass "#5391 escalation: a dedupe sentinel is written"
-else
-    fail "#5391 escalation: expected a dedupe sentinel at $OUTAGE_SENTINEL"
-fi
-if log_hasi 'ESCALATED out-of-band'; then
-    pass "#5391 escalation: the log records that the outage left the logfile"
-else
-    fail "#5391 escalation: expected an 'ESCALATED out-of-band' note ($(cat "$WDLOG"))"
-fi
-: > "$WDLOG"
-# shellcheck disable=SC2086,SC2046
-run_watchdog $rec33_env
-if [[ "$(wc -l < "$ISSUE33" | tr -d ' ')" == "1" ]]; then
-    pass "#5391 escalation: a second down tick does NOT file a duplicate issue"
-else
-    fail "#5391 escalation: duplicate filing on the next tick ($(cat "$ISSUE33"))"
-fi
-if log_hasi 'ALREADY been escalated'; then
-    pass "#5391 escalation: the repeat tick says the outage is already escalated"
-else
-    fail "#5391 escalation: expected an already-escalated note ($(cat "$WDLOG"))"
-fi
-rm -rf "$DOWN_STUB" "$(dirname "$REC33")" "$WORKDIR/.loom"
-rm -f "$OUTAGE_SENTINEL"
-
-# ---- 34. An operator stop is NEVER revived, even with recovery enabled ----
-#          The #4232/#4862 narrow-gate guarantee, preserved verbatim under the
-#          new policy: a unit whose main process was killed by SIGTERM is intent,
-#          not a fault. Uses the systemd stub (platform-independent) with
-#          ExecMainCode=killed/TERM — which also cannot trip the exit-0 gate.
-STUB34="$WORKDIR/stub34"; mkdir -p "$STUB34"
-LOG34="$WORKDIR/recover34.log"; : > "$LOG34"
-UNIT34="loom-daemon-test-operator-stop-$$.service"
-cat > "$STUB34/systemctl" <<EOF
-#!/usr/bin/env bash
-if [[ "\${1:-}" == "--user" ]]; then shift; fi
-case "\${1:-}" in
-  show)
-    case "\$*" in
-      *"-p MainPID"*)        echo "0" ;;
-      *"-p LoadState"*)      echo "loaded" ;;
-      *"-p ExecMainCode"*)   echo "killed" ;;
-      *"-p ExecMainStatus"*) echo "TERM" ;;
-      *)                     echo "" ;;
-    esac
-    ;;
-  *) exit 0 ;;
-esac
-EOF
-chmod +x "$STUB34/systemctl"
-cat > "$MARKER" <<EOF
-started_at=2026-07-27T00:00:00Z
-repo_root=$WORKDIR
-heartbeat_file=$HEARTBEAT
-heartbeat_interval_secs=60
-use_launchd=false
-use_systemd=true
-systemd_unit=$UNIT34
-socket_path=$WORKDIR/loom-daemon.sock
-EOF
-REC34="$(make_recover_stub noop "$LOG34")"
-: > "$WDLOG" "$OUT"
-rm -f "$RECOVERY_STATE"
-env PATH="$STUB34:$PATH" LOOM_PID_FILE= LOOM_WORKSPACE= LOOM_MACHINE_CHECKOUT= \
-    LOOM_SOCKET_PATH="$WORKDIR/loom-daemon.sock" LOOM_WATCHDOG_IPC_PROBE=0 \
-    LOOM_WATCHDOG_RECOVERY_STATE="$RECOVERY_STATE" LOOM_WATCHDOG_ESCALATE=0 \
-    LOOM_WATCHDOG_AUTO_RECOVER=1 LOOM_WATCHDOG_RECOVER_CMD="$REC34" \
-    LOOM_AUTONOMY_MARKER="$MARKER" LOOM_WATCHDOG_LOG="$WDLOG" \
-    bash "$WATCHDOG" > "$OUT" 2>&1
-rc34=$?
-assert_rc 1 "$rc34" "#5391 operator-stop signature: reported (exit 1), not revived"
-if [[ -s "$LOG34" ]]; then
-    fail "#5391 operator-stop signature: the recovery command must NEVER run ($(cat "$LOG34"))"
-else
-    pass "#5391 operator-stop signature: the recovery command is never invoked"
-fi
-if log_hasi 'operator-initiated stop'; then
-    pass "#5391 operator-stop signature: the report names it as a deliberate stop"
-else
-    fail "#5391 operator-stop signature: expected the deliberate-stop explanation ($(cat "$WDLOG"))"
-fi
-rm -rf "$(dirname "$REC34")"
-
-# ---- 35. A crash (ExecMainStatus=1) gets BOUNDED recovery, not the narrow ----
-#          gate. #4862's guarantee was "a crash never triggers a naive
-#          `systemctl --user start` revival"; that stays true — the narrow gate
-#          is still silent — while #5391's bounded, budgeted recovery does act.
-STUB35="$WORKDIR/stub35"; mkdir -p "$STUB35"
-LOG35="$WORKDIR/recover35.log"; : > "$LOG35"
-SYSLOG35="$WORKDIR/systemctl35.log"; : > "$SYSLOG35"
-UNIT35="loom-daemon-test-crash-$$.service"
-cat > "$STUB35/systemctl" <<EOF
-#!/usr/bin/env bash
-echo "\$*" >> "$SYSLOG35"
-if [[ "\${1:-}" == "--user" ]]; then shift; fi
-case "\${1:-}" in
-  show)
-    case "\$*" in
-      *"-p MainPID"*)        echo "0" ;;
-      *"-p LoadState"*)      echo "loaded" ;;
-      *"-p ExecMainCode"*)   echo "exited" ;;
-      *"-p ExecMainStatus"*) echo "1" ;;
-      *)                     echo "" ;;
-    esac
-    ;;
-  *) exit 0 ;;
-esac
-EOF
-chmod +x "$STUB35/systemctl"
-cat > "$MARKER" <<EOF
-started_at=2026-07-27T00:00:00Z
-repo_root=$WORKDIR
-heartbeat_file=$HEARTBEAT
-heartbeat_interval_secs=60
-use_launchd=false
-use_systemd=true
-systemd_unit=$UNIT35
-socket_path=$WORKDIR/loom-daemon.sock
-EOF
-REC35="$(make_recover_stub noop "$LOG35")"
-: > "$WDLOG" "$OUT"
-rm -f "$RECOVERY_STATE"
-env PATH="$STUB35:$PATH" LOOM_PID_FILE= LOOM_WORKSPACE= LOOM_MACHINE_CHECKOUT= \
-    LOOM_SOCKET_PATH="$WORKDIR/loom-daemon.sock" LOOM_WATCHDOG_IPC_PROBE=0 \
-    LOOM_WATCHDOG_RECOVERY_STATE="$RECOVERY_STATE" LOOM_WATCHDOG_ESCALATE=0 \
-    LOOM_WATCHDOG_AUTO_RECOVER=1 LOOM_WATCHDOG_RECOVER_CMD="$REC35" \
-    LOOM_WATCHDOG_KICKSTART_RECHECK_ATTEMPTS=1 LOOM_WATCHDOG_KICKSTART_RECHECK_INTERVAL=0.1 \
-    LOOM_AUTONOMY_MARKER="$MARKER" LOOM_WATCHDOG_LOG="$WDLOG" \
-    bash "$WATCHDOG" > "$OUT" 2>&1
-rc35=$?
-assert_rc 1 "$rc35" "#5391 crash + failed recovery: still exits 1"
-if grep -q -- '--user start ' "$SYSLOG35"; then
-    fail "#5391 crash: the #4862 narrow gate must still NOT fire 'systemctl --user start'"
-else
-    pass "#5391 crash: the #4862 narrow gate stays silent (no naive crash-loop revival)"
-fi
-if [[ "$(wc -l < "$LOG35" | tr -d ' ')" == "1" ]]; then
-    pass "#5391 crash: bounded recovery runs exactly once on this tick"
-else
-    fail "#5391 crash: expected exactly one bounded recovery attempt, got '$(cat "$LOG35")'"
-fi
-if log_hasi 'attempt 1 of'; then
-    pass "#5391 crash: the report numbers the attempt against the breaker budget"
-else
-    fail "#5391 crash: expected an 'attempt N of M' report ($(cat "$WDLOG"))"
-fi
-rm -rf "$(dirname "$REC35")"
-
-# ---- 36. Recovery DISABLED ⇒ the watchdog says so in its own words ----
-#          So an operator can never read "watchdog unit installed" as
-#          "self-healing host". This is the report-only half of the AC.
-start_confirmed_down 36
-: > "$WDLOG"
-run_watchdog LOOM_WATCHDOG_IPC_PROBE=1 LOOM_DAEMON_BIN="$DOWN_STUB/loom-daemon-mock" \
-    LOOM_WATCHDOG_AUTO_RECOVER=0
-assert_rc 1 "$RC" "#5391 recovery disabled: still reports the outage (exit 1)"
-if log_hasi 'REPORT-ONLY' && log_hasi 'DETECTION, not self-healing'; then
-    pass "#5391 recovery disabled: the report states it is DETECTION, not self-healing"
-else
-    fail "#5391 recovery disabled: expected an explicit report-only statement ($(cat "$WDLOG"))"
-fi
-rm -rf "$DOWN_STUB"
-
-# ---- 37. A healthy tick ENDS the episode (clears state + sentinel) ----
-#          Health, not elapsed time, is what resets the breaker — so a daemon
-#          that comes back gets a full budget for its next outage, and a
-#          resolved outage never dedupes the NEXT escalation.
-live37=$(sleeper); bg_proc_track "$live37"
-echo "$live37" > "$WORKDIR/pid37"
-write_marker "$WORKDIR/pid37" 60
-printf '%s pid=%s ts=now\n' "$(date +%s)" "$live37" > "$HEARTBEAT"
-printf 'down_since=1\nticks=9\nattempts=9\nlast_attempt=1\n' > "$RECOVERY_STATE"
-date -u '+%Y-%m-%dT%H:%M:%SZ' > "$OUTAGE_SENTINEL"
-: > "$WDLOG"
-run_watchdog LOOM_WATCHDOG_ESCALATION_SENTINEL="$OUTAGE_SENTINEL"
-kill "$live37" 2>/dev/null || true
-assert_rc 0 "$RC" "#5391 healthy tick after an outage: exits 0"
-if [[ -f "$RECOVERY_STATE" || -f "$OUTAGE_SENTINEL" ]]; then
-    fail "#5391 healthy tick: must clear the episode state AND the escalation sentinel"
-else
-    pass "#5391 healthy tick: episode state and escalation sentinel both cleared"
-fi
-
-# ---- 38. The recovery command itself is BOUNDED ----
-#          A wedged start must not wedge the tick — a StartInterval/timer job
-#          that never returns is exactly the crash-and-stay-dead shape this
-#          watchdog's whole design avoids.
-LOG38="$WORKDIR/recover38.log"; : > "$LOG38"
-start_confirmed_down 38
-REC38="$(make_recover_stub hang "$LOG38")"
-t38=$(date +%s)
-# shellcheck disable=SC2046
-run_watchdog $(recover_env "$REC38" LOOM_WATCHDOG_RECOVER_TIMEOUT_SECS=2)
-elapsed38=$(( $(date +%s) - t38 ))
-assert_rc 1 "$RC" "#5391 wedged recovery command: the tick still completes (exit 1)"
-if (( elapsed38 < 30 )); then
-    pass "#5391 wedged recovery command: the tick stayed bounded (${elapsed38}s)"
-else
-    fail "#5391 wedged recovery command: took ${elapsed38}s — the recovery budget did not hold"
-fi
-rm -rf "$DOWN_STUB" "$(dirname "$REC38")"
-
-# ---- 39. --help documents the recovery policy and its knobs ----
-help_out_5391=$(bash "$WATCHDOG" --help 2>/dev/null)
-if grep -q 'LOOM_WATCHDOG_AUTO_RECOVER' <<< "$help_out_5391" \
-    && grep -q 'LOOM_WATCHDOG_RECOVER_MAX_ATTEMPTS' <<< "$help_out_5391" \
-    && grep -q 'LOOM_WATCHDOG_RECOVER_BACKOFF_SECS' <<< "$help_out_5391"; then
-    pass "--help documents the #5391 bounded-recovery knobs"
-else
-    fail "--help missing the #5391 bounded-recovery knob documentation"
-fi
-if grep -qi 'CIRCUIT BREAKER' <<< "$help_out_5391" \
-    && grep -qi 'this watchdog RECOVERS' <<< "$help_out_5391"; then
-    pass "--help states the recover-vs-report-only decision and the circuit breaker"
-else
-    fail "--help should state the recover-vs-report-only decision explicitly"
 fi
 
 echo

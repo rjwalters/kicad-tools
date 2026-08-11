@@ -21,21 +21,11 @@
 # surface map — note the asymmetric source->target mapping):
 #   .loom/hooks/            <- defaults/hooks/            (top-level *.sh)
 #   .loom/scripts/          <- defaults/scripts/          (recursive)
-#   .loom/roles/            <- defaults/roles/            (recursive; SOURCE-side
-#                                                          symlinks resolved to
-#                                                          content, #5222 — all 17
-#                                                          defaults/roles/*.md are
-#                                                          symlinks to
-#                                                          .claude/commands/loom/*.md)
-#   .loom/docs/             <- defaults/docs/             (recursive; DESTINATION-side
-#                                                          symlinks skipped, e.g. this
-#                                                          dogfood repo's own
-#                                                          .loom/docs/*.md)
+#   .loom/roles/            <- defaults/roles/            (recursive)
+#   .loom/docs/             <- defaults/docs/             (recursive; symlinks skipped)
 #   .loom/runtimes/         <- defaults/runtimes/         (recursive; BACKFILLED if absent, #4688)
 #   .loom/bin/              <- defaults/.loom/bin/        (recursive; live consumer CLI)
 #   .claude/commands/loom/  <- defaults/.claude/commands/loom/ (recursive)
-#   .claude/README.md       <- defaults/.claude/README.md      (single file, #5264)
-#   .github/CONFIGURATION.md <- defaults/.github/CONFIGURATION.md (single file, #5264)
 #
 # It also applies one targeted field edit outside the pure-copy model (#4285):
 # a root package.json whose "name" is exactly "loom-workspace" (the Loom
@@ -69,12 +59,7 @@
 # command to run (#4332) — worth doing, since `main_health_gate.rs`'s
 # dirty-tree check treats byte-identical installed-surface dirt as ignorable
 # (never a reason to skip the gate) but does not commit on the operator's
-# behalf. Running this script here — including at a clean checkout pinned to
-# origin/main — is supported and expected, not a bug: `.loom/` in this repo is
-# a periodically-resynced snapshot of `defaults/`, not a live mirror, so any
-# `defaults/`-only merge that lands after the last "chore: resync installed
-# Loom surfaces" commit reintroduces drift that is real, deterministic, and
-# bounded only by how long it has been since that last resync commit (#5510).
+# behalf.
 #
 # ATOMIC WRITES + DEFERRED SELF-UPDATE (#4669): every file is installed by
 # staging a copy NEXT TO its destination and rename(2)-ing it into place, never
@@ -399,15 +384,11 @@ abs_file_path() {
 }
 
 # Octal permission bits of a path, or "" when unavailable (GNU stat, then BSD).
-# -L (dereference) so a symlinked source (e.g. defaults/roles/*.md -> the
-# .claude/commands/loom/*.md skillification target, #5222) reports the
-# REFERENT's mode rather than the symlink's own (typically 755/lrwxrwxrwx)
-# mode -- both GNU and BSD `stat` report the link's own bits without -L.
 file_mode() {
     local p="$1" m
-    m="$(stat -L -c '%a' "$p" 2>/dev/null)" || m=""
+    m="$(stat -c '%a' "$p" 2>/dev/null)" || m=""
     if [[ -z "$m" ]]; then
-        m="$(stat -L -f '%OLp' "$p" 2>/dev/null)" || m=""
+        m="$(stat -f '%OLp' "$p" 2>/dev/null)" || m=""
     fi
     printf '%s' "$m"
 }
@@ -592,22 +573,6 @@ apply_deferred_self_sync() {
 #                       ".claude/commands/loom", ".loom/bin").
 #   A missing src_dir is a silent no-op. Existing sync_one semantics (ignore
 #   list, symlink skip, idempotent copy, --dry-run) apply per file.
-#
-#   SOURCE-SIDE symlinks (#5222): all 17 defaults/roles/*.md files are
-#   symlinks to ../.claude/commands/loom/*.md (the skillification dedup, so
-#   the two copies of each role prompt never drift). Plain `find -type f`
-#   lstats each entry and a symlink never matches `-type f`, so those 17
-#   files silently fell out of the walk entirely -- not updated, not
-#   skipped, not counted -- and a consumer repo's installed .loom/roles/*.md
-#   (real file copies there, not symlinks) went stale forever while resync
-#   reported success. `find -L` dereferences before the type test, so a
-#   symlinked source is walked as the regular file it resolves to; `cp`
-#   (sync_one) and `cmp` both already dereference by default, so the
-#   destination gets the RESOLVED CONTENT, never a copied link. This is a
-#   source-side concern only -- the destination-side symlink guard in
-#   sync_one (`[[ -L "$dst" ]]`, protecting e.g. this dogfood repo's own
-#   .loom/roles/*.md and .loom/docs/*.md, which are themselves symlinks back
-#   into defaults/) is untouched and still runs first.
 resync_tree() {
     local src_dir="$1" dst_dir="$2" report_prefix="$3" defaults_prefix="$4"
     [[ -d "$src_dir" ]] || return 0
@@ -621,7 +586,7 @@ resync_tree() {
             continue
         fi
         sync_one "$src" "$dst_dir/$rel" "$report_prefix/$rel"
-    done < <(find -L "$src_dir" -type f -print0 2>/dev/null | sort -z)
+    done < <(find "$src_dir" -type f -print0 2>/dev/null | sort -z)
 }
 
 # ---------- canonical Repo Skills guard detection (#4041, #4894) ----------
@@ -743,23 +708,6 @@ if [[ -d "$REPO_ROOT/.loom/bin" ]]; then
 fi
 if [[ -d "$REPO_ROOT/.claude/commands/loom" ]]; then
     resync_tree "$DEFAULTS_DIR/.claude/commands/loom" "$REPO_ROOT/.claude/commands/loom" "commands/loom" ".claude/commands/loom"
-fi
-
-# ---------- single-file consumer-install docs (#5264) ----------
-#
-# .claude/README.md and .github/CONFIGURATION.md are copied verbatim into
-# every consumer repo at install time (scripts/install/manifest.sh) but, prior
-# to #5264, were never covered by this script's surface map — a fix to either
-# file landed on main but never reached an already-installed repo. Both are
-# single files (not directories), so resync_tree doesn't apply; sync_one
-# handles them directly, each gated on the destination already existing so a
-# consumer that never received the file (or deliberately removed it) is not
-# force-populated.
-if [[ -f "$REPO_ROOT/.claude/README.md" ]]; then
-    sync_one "$DEFAULTS_DIR/.claude/README.md" "$REPO_ROOT/.claude/README.md" ".claude/README.md"
-fi
-if [[ -f "$REPO_ROOT/.github/CONFIGURATION.md" ]]; then
-    sync_one "$DEFAULTS_DIR/.github/CONFIGURATION.md" "$REPO_ROOT/.github/CONFIGURATION.md" ".github/CONFIGURATION.md"
 fi
 
 # ---------- install the deferred self-copy, now that every surface settled ----
@@ -966,55 +914,6 @@ ensure_install_metadata_merge_driver() {
 }
 ensure_install_metadata_merge_driver
 
-# #5294: EPHEMERAL_PATTERNS is single-sourced in
-# loom-daemon/src/init/post_init.rs. Extract the pattern list directly from
-# that source file (not from a compiled binary) so refresh_gitignore_block can
-# verify the freshly-regenerated .gitignore against ground truth, independent
-# of which loom-daemon binary happened to write it. Best-effort: echoes
-# nothing (not a failure) if $SOURCE_ROOT isn't a full checkout with the daemon
-# crate present (e.g. a stripped-down install source).
-_gitignore_source_ephemeral_patterns() {
-    local post_init="$SOURCE_ROOT/loom-daemon/src/init/post_init.rs"
-    [[ -f "$post_init" ]] || return 0
-    awk '/pub const EPHEMERAL_PATTERNS/ { flag=1; next } flag && /^\];/ { exit } flag' "$post_init" \
-        | sed -n -E 's/^[[:space:]]*"([^"]*)",?[[:space:]]*$/\1/p'
-}
-
-# #5294: verify the managed block `$bin update-gitignore` just wrote actually
-# contains every pattern the CURRENT source declares. A `loom-daemon` binary
-# older than the just-pulled source has EPHEMERAL_PATTERNS compiled in from
-# whenever it was built — if that predates a pattern addition (e.g. #5280's
-# `.claude/worktrees/`), `update-gitignore` exits 0 having *silently* dropped
-# that pattern from the regenerated block. That is precisely how 05cf67e8
-# reintroduced #5267's gitlink hazard 34 minutes after #5280 fixed it, entirely
-# undetected until this issue. Never trust the exit code alone: name any
-# dropped pattern in a loud warning instead of a silent no-op.
-_gitignore_warn_if_stale() {
-    local bin="$1" post_init="$SOURCE_ROOT/loom-daemon/src/init/post_init.rs"
-    local -a missing=()
-    local pattern block
-
-    [[ -f "$post_init" ]] || return 0
-    [[ -f "$REPO_ROOT/.gitignore" ]] || return 0
-
-    block="$(sed -n '/# >>> loom-managed/,/# <<< loom-managed/p' "$REPO_ROOT/.gitignore")"
-    [[ -n "$block" ]] || return 0
-
-    while IFS= read -r pattern; do
-        [[ -n "$pattern" ]] || continue
-        grep -qxF -- "$pattern" <<<"$block" || missing+=("$pattern")
-    done < <(_gitignore_source_ephemeral_patterns)
-
-    if [[ "${#missing[@]}" -gt 0 ]]; then
-        warn "The resolved loom-daemon binary ($bin) regenerated .gitignore WITHOUT ${#missing[@]} pattern(s) that $post_init currently declares:"
-        for pattern in "${missing[@]}"; do
-            warn "    $pattern"
-        done
-        warn "  '$bin' is likely older than the source just synced (#5294) — rebuild loom-daemon"
-        warn "  (cargo build --release -p loom-daemon under $SOURCE_ROOT) and re-run resync-installed.sh."
-    fi
-}
-
 refresh_gitignore_block() {
     local locate_lib bin
     locate_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/locate-daemon-bin.sh"
@@ -1026,20 +925,12 @@ refresh_gitignore_block() {
     # shellcheck source=lib/locate-daemon-bin.sh
     # shellcheck disable=SC1091
     source "$locate_lib"
-    # #5294: this resync runs specifically because source just changed, so for
-    # THIS call only, hoist the resolver's normally-opt-in $LOOM_PREFER_REPO_BUILD=1
-    # precedence (repo build ahead of PATH / the machine-level install) -- a
-    # stale PATH/machine-level binary can predate a just-merged
-    # EPHEMERAL_PATTERNS entry and silently drop it from the regenerated block
-    # (exactly what happened in 05cf67e8, 34 minutes after #5280 added
-    # `.claude/worktrees/`). An explicit $LOOM_DAEMON_BIN still wins regardless
-    # -- loom_locate_daemon_bin checks it before this precedence tier. Scoped to
-    # this one call via a subshell env override; the library's own default
-    # (off) is unchanged for loom-daemon-start.sh and other production callers.
-    bin="$(LOOM_PREFER_REPO_BUILD=1 loom_locate_daemon_bin "$SOURCE_ROOT")"
+    # Prefer a binary in the source checkout (matches the version being synced);
+    # the resolver falls back to $LOOM_DAEMON_BIN / `loom-daemon` on PATH.
+    bin="$(loom_locate_daemon_bin "$SOURCE_ROOT")"
     if [[ -z "$bin" ]]; then
         warn "Could not refresh the Loom-managed .gitignore block: no loom-daemon binary resolved"
-        warn "  (\$LOOM_DAEMON_BIN -> repo build under $SOURCE_ROOT -> 'loom-daemon' on PATH -> machine-level install)."
+        warn "  (\$LOOM_DAEMON_BIN -> 'loom-daemon' on PATH -> build-output under $SOURCE_ROOT)."
         warn "  Newer runtime paths (e.g. .loom/sweep-checkpoint/, .loom/worktrees-local/) may stay untracked-and-unignored."
         return 0
     fi
@@ -1059,13 +950,7 @@ refresh_gitignore_block() {
     else
         warn ".gitignore refresh failed: '$bin update-gitignore' errored"
         warn "  (a pre-#4280 daemon lacks this subcommand — rebuild loom-daemon)."
-        return 0
     fi
-    # #5294: defense in depth -- verify the write actually landed every pattern
-    # the source declares, even after preferring a repo build above (that repo
-    # build itself might be stale, or absent so resolution fell through to
-    # PATH/machine-level anyway).
-    _gitignore_warn_if_stale "$bin"
 }
 refresh_gitignore_block
 
@@ -1121,7 +1006,7 @@ suggest_commit_if_resync_only_dirt() {
         path="${path%\"}"
         path="${path#\"}"
         case "$path" in
-            .loom/hooks/*|.loom/scripts/*|.loom/roles/*|.loom/docs/*|.loom/runtimes/*|.loom/bin/*|.claude/commands/loom/*|.claude/README.md|.github/CONFIGURATION.md|.loom/install-metadata.json|.gitattributes)
+            .loom/hooks/*|.loom/scripts/*|.loom/roles/*|.loom/docs/*|.loom/runtimes/*|.loom/bin/*|.claude/commands/loom/*|.loom/install-metadata.json|.gitattributes)
                 resync_paths+=("$path")
                 ;;
             *)

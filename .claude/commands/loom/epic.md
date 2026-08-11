@@ -12,14 +12,6 @@ When invoked with `/epic` or `/epic <description>`, you guide the user through:
 3. Creating the epic tracking issue
 4. Creating Phase 1 implementation issues
 
-## ⚠️ `--body @path` Does NOT Expand — It Posts the Literal String
-
-If you post a comment via `gh issue comment` / `gh pr comment` / `gh api ...
-comments` from a scratch file, `--body @path` (and `gh api -f body=@path`)
-posts the literal string `@path`, not the file's contents. **Full pitfall,
-incident citation, and fixes**:
-[`comment-body-literal-path.md`](comment-body-literal-path.md).
-
 ## Arguments
 
 **Arguments**: `$ARGUMENTS`

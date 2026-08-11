@@ -79,20 +79,6 @@ If you want the machine-level end state (no per-repo copies at all), run
 `loom migrate` (Phase 6 / #4254) — it untracks the legacy copies, after which
 `ensure_project_hook_wiring` stops writing project entries on its own.
 
-### Backup retention (#5387)
-
-Both `provision_loom_hooks()` and `deprovision_loom_hooks()` back up the
-operator's `~/.claude/settings.json` to a timestamped
-`settings.json.loom-backup-<UTC timestamp>` sibling before mutating it, via a
-shared `_phook_backup_settings()` helper in `scripts/install/provision-hooks.sh`.
-That helper guards against unbounded accumulation two ways: it **skips**
-writing a new backup when the file is byte-identical to the most recent
-existing backup (so repeated `install.sh` runs with no settings change add
-nothing), and it **prunes** older backups beyond the most recent 5 once a
-genuinely new backup is written (so settings that do change between installs
-still bound the total count). Nothing else in the repo prunes these files, so
-restoring from one is a manual `cp settings.json.loom-backup-<ts> settings.json`.
-
 ### Config tiers
 
 The guard toggles below are documented against `.loom/config.json` for historical
@@ -467,49 +453,6 @@ typed; `$`/`~` are copied through untouched, so a file genuinely named `$X` or
 unchanged); and an **unterminated** quote falls back to the raw token — today's
 verdict in both directions, never widening a deny into an allow.
 
-**Quoted `cd` arguments are still absolute (issue #4933).** #4926 fixed quoting
-on the write-*target* side; a quoted **`cd` argument** was a separate hole,
-reached entirely inside `extract_write_targets()`'s awk — `strip_target_quoting()`
-never touches it. `cd '<main>' && echo x > f.sh` from a linked-worktree cwd built
-`curcwd` from the `cd` argument's token verbatim (quote characters intact), so
-`'/main/checkout'` / `"/main/checkout"` failed the `~ /^\//` classification and
-was joined as if **relative** — fabricating `curcwd` as `<worktree>/'/main/checkout'`
-instead of recognizing it as absolute, and the relative write target then
-resolved back inside the acting worktree's own sentinel — **allowed**. The awk
-`cd` handler now strips a leading/matching-trailing quote from a **copy** of the
-argument used *only* to decide absolute-vs-relative; `curcwd` itself is still
-built from the **raw, quote-preserved** token, because `curcwd` is the only
-value threaded to the shell layer and the unresolved-`$` detector there
-(`mark_expandable_dollars`, #4921/#4927) needs the quote characters to tell a
-**literal** `$` inside a single-quoted span (`cd '$FOO'` — a directory really
-named `$FOO`, deliberately *not* denied) from an **expandable** one (bare or
-double-quoted, which fails closed). The shell layer re-strips quoting for its
-own cwd join, exactly mirroring the target side's raw-vs-`strip_target_quoting()`
-split. `qsplit()`'s verbatim-token contract (which `extract_rm_targets()` /
-`parse_force_ops()` depend on) is untouched, and an unbalanced/unterminated
-quote leaves the classification copy unchanged — the same fallback contract as
-#4926.
-
-**PARTIALLY quoted `cd` arguments were still absolute too (issue #5363).**
-#4933's leading/matching-trailing quote strip only recognized a **fully**
-quoted `cd` argument (`'/abs/path'`, `"/abs/path"`) — it peels one leading
-quote character and, only if the *last* character of the token is the same
-quote character, one trailing one. A **partially** quoted argument, where the
-quote closes mid-token instead of at the end — `cd '<main>'/defaults` — still
-starts with a quote character, so it failed that narrow leading/trailing test
-and fell through unchanged, still classified as **relative**: the same
-masked-allow shape as #4933/#4926, reached through a partially- rather than
-fully-quoted `cd` argument. The awk `cd` handler now runs a full
-character-by-character quote-removal scan (`strip_cd_quoting()`, sharing the
-same single/double-quote nesting rules as `strip_target_quoting()`'s shell
-scanner, though implemented separately since awk cannot call into it) over
-the **entire** classification copy rather than peeling only a
-leading/matching-trailing pair, so `'<main>'/defaults` correctly unquotes to
-`<main>/defaults` and classifies as absolute. `curcwd` itself is still built
-from the raw, quote-preserved token exactly as before (unchanged by #5363),
-and an unbalanced/unterminated quote leaves the classification copy unchanged
-— the same fallback contract as #4926/#4933.
-
 The guard is **on by default**. It is resolved in this order (highest precedence first):
 
 1. **`LOOM_GUARD_WORKTREE_ISOLATION` env var** — `0`/`false`/`no` disables the guard; `1`/`true`/`yes` forces it on. Overrides the config value.
@@ -792,33 +735,6 @@ prevention remains procedural, not just guard-enforced — prefer
 capture, scoped to one worktree, no shared stack) over ad-hoc `git stash`
 for WIP handling (see `defaults/roles/builder.md` / `defaults/roles/doctor.md`).
 
-**Headless baseline-diff pattern (#5217).** Because a busy repo almost always
-has two or more `.loom-managed` worktrees active, the collision ask above
-fires on nearly every occurrence of the legitimate, worktree-confined
-`git stash push && <baseline check> && git stash pop` sequence used to diff a
-clean baseline against in-progress WIP (clippy/shellcheck/test-output
-comparisons) — an unanswerable `ask` in a headless sweep with no human
-present. **The guard was deliberately NOT widened for it.** A same-chain
-"push and pop appear in one command, so allow" heuristic was considered and
-rejected: push and pop are two separate guard-approved Bash calls with an
-arbitrary-duration command running in between, so another worktree's
-concurrent `git stash push` can still land on the shared stack inside that
-window and the "pop" then restores the *wrong* entry — command shape alone
-cannot see that. Instead, `worktree.sh` gained a clean-and-restore pair that
-removes the shared-mutable-state precondition entirely:
-
-| Verb | What it does |
-|------|--------------|
-| `worktree.sh stash-push <N> [--include-untracked]` | Captures the worktree's uncommitted tracked diff with `git stash create` (which builds a stash-format commit but **never writes `refs/stash`**), anchors it under the per-issue ref `refs/loom/stash-baseline/issue-<N>`, then resets that one worktree to a clean `HEAD` baseline. With `--include-untracked`, untracked files (Loom runtime markers excluded) move to a per-issue holding directory instead. |
-| `worktree.sh stash-pop <N>` | Re-applies exactly what `stash-push <N>` captured from that same per-issue ref / holding directory, then clears them. Refuses loudly — **without discarding the captured baseline** — if nothing is pending or if re-applying conflicts. |
-
-Each issue gets its **own** ref rather than a slot on a shared stack, so no
-other worktree's stash operation can interleave, and neither verb's command
-text contains a raw `git stash pop|drop|clear` — so both are
-guard-transparent, not a guard exemption. Raw `git stash pop`/`drop`/`clear`
-stays exactly as gated as before, in the main checkout and in a linked
-worktree alike.
-
 **Examples**:
 
 ```bash
@@ -827,21 +743,13 @@ git stash pop
 git stash drop stash@{1}
 git stash clear
 
-# In a linked worktree (.loom/worktrees/issue-N) — allowed only while it is
-# the ONLY managed worktree; asks once a second one exists (#4821):
+# In a linked worktree (.loom/worktrees/issue-N) — allowed, no ask:
 cd .loom/worktrees/issue-42 && git stash pop
 
 # Never gated, in either location — these cannot remove a stash entry:
 git stash push -m "wip"
 git stash apply
 git stash list
-
-# Headless clean-baseline-vs-my-diff comparison — never gated, because
-# neither verb touches refs/stash (#5217):
-./.loom/scripts/worktree.sh stash-push 42
-cargo clippy --message-format=short > /tmp/baseline.txt   # clean-tree baseline
-./.loom/scripts/worktree.sh stash-pop 42
-cargo clippy --message-format=short > /tmp/with-wip.txt   # then diff the two
 
 # Opt out for a whole repo:
 #   .loom/config.json  ->  { "guards": { "stashScope": false } }
@@ -871,7 +779,7 @@ The fast path is **on by default**. It is resolved in this order (highest preced
 
 **Security — the fast path is a guard bypass by construction**, so admission is purely **structural** and conservative, never content-sensitive. A command is fast-pathed only when **all** of these hold (otherwise it falls through to the full path unchanged):
 
-- The raw command contains **none** of `;` `&` `|` `<` `>` backtick `$(` or a newline — this excludes all chaining, piping, redirection, and command substitution. So `git status && git push --force origin main`, `git status; rm -rf /`, and `git status $(rm -rf /)` all take the full path and are still denied. **One narrow exception (#5263):** a read-only search piped to a single read-only sink — `grep`/`egrep`/`fgrep`/`rg <args> | (head|tail|wc|cat|less|more)` — is still admitted (see the search-pipe carve-out below), because a bare `grep 'DROP TABLE' schema.sql` was already fast-pathed and the pipe to a pager/counter does not add any executing command.
+- The raw command contains **none** of `;` `&` `|` `<` `>` backtick `$(` or a newline — this excludes all chaining, piping, redirection, and command substitution. So `git status && git push --force origin main`, `git status; rm -rf /`, and `git status $(rm -rf /)` all take the full path and are still denied.
 - The **first token** is an exact allowlist match (never a wrapper — `bash -c`, `sh -c`, `eval`, `xargs`, `env … git status`, `sudo git status` are all excluded because their first token isn't allowlisted):
 
 | First token | Admitted form |
@@ -884,18 +792,10 @@ The fast path is **on by default**. It is resolved in this order (highest preced
 | `gh` | `gh <noun> view` / `gh <noun> list` (never `delete`/`close`/`archive`/…) |
 | `aws` | `aws <service> describe*` / `get*` / `list*`, and `aws s3 ls` |
 
-**`cat` and `ssh` are deliberately EXCLUDED** from the built-in first-token list, even though they are read-only in spirit:
+**`cat` and `ssh` are deliberately EXCLUDED** from the built-in list, even though they are read-only in spirit:
 
 - `cat` has a narrow existing `ASK` carve-out (`cat …/.ssh/…`, `cat …/.aws/credentials`); a blanket `cat` fast-path would silently skip it.
 - `ssh <host> '<cmd>'` wraps an **opaque remote command string** that the raw `ALWAYS_BLOCK` catastrophic scan still covers today; fast-pathing any `ssh …` would drop that coverage.
-
-**Search-pipe carve-out (#5263)** — the single documented exception to the "no `|`" rule above. A read-only search piped to one read-only sink is admitted, because the phrase the guard would otherwise fire on lives only inside the search command's quoted pattern argument (which is never executed). This fixes a self-defeating false positive: a bare `grep 'DROP TABLE' schema.sql` was already fast-pathed and allowed, but piping it to `head`/`less` to page the results (`grep 'DROP TABLE' schema.sql | head`) fell through to the full path, where the `sql-ddl` catastrophic check substring-matched the literal `DROP TABLE` in grep's own argument and **denied** — one of the most common interactive idioms. The carve-out admits **only** this exact shape:
-
-- **exactly one `|`**, and **none** of `;` `&` `<` `>` backtick `$(` or a newline anywhere — so wrapper (`bash -c '… | …'`), substitution (`$(…)`), and compound (`&&`/`;`) forms are untouched and keep denying via the full path (obfuscation still caught);
-- the **upstream** command word is a non-executing search: `grep`, `egrep`, `fgrep`, or `rg` (a real DDL executor like `mysql -e '…' | cat` or `psql -c '…' | head` has a non-search first token, so it is **not** admitted and still denies);
-- the **downstream** command word is a read-only sink: `head`, `tail`, `wc` (already fully allowlisted, so any arguments), or `cat`, `less`, `more` (admitted **only** as pure stdin consumers with no positional file operand — so `grep x | cat ~/.ssh/id_rsa` is **not** fast-pathed and the `cat` `.ssh`/`.aws` `ASK` carve-out above still fires).
-
-A second pipe, an unlisted sink, or a `cat`/`less`/`more` with a file operand all decline the carve-out and take the full path unchanged (a false negative is always safe). The carve-out is gated by the same `guards.readOnlyFastPath` / `LOOM_GUARD_READONLY_FASTPATH` toggle — disabling the fast path disables it too.
 
 **Optional extend-only escape hatch** — `guards.readOnlyFastPathExtra` is an array of **literal first-word commands** to add to the built-in list without hand-editing the Loom-managed `.claude/settings.json` (which the installer may overwrite). This directly answers "give operators a supported way to scope the matcher":
 
@@ -1012,24 +912,6 @@ A headless sweep runs under `--dangerously-skip-permissions`, where the guard `P
 
 `guards.forceScope: "protected"` is the **Loom-recommended default for autonomous repos** — set it in committed `.loom/config.json` for repos that run the daemon, or rely on the start-script env default. The shipped hook default remains `"all"` (byte-for-byte unchanged for non-autonomous installs).
 
-**Known consequence — ambient, agent-wide, not per-invocation (#5388):** these two env vars are exported once on the daemon's own process and inherited by the *entire* subprocess tree of every dispatched child — not just the guard hook's own `PreToolUse` invocations. There is no way to hand them to only "the guard hook protecting the sweep's own git operations" without also handing them to every other command the dispatched agent runs, including a **managed repo's own test suite**. A suite that asserts the guard's *factory-default* behavior (e.g. `hooks/repo/tests/test-guard-destructive.sh` asserting the default force-push/reset-hard `ask` tier or decision-log-off) will observe these ambient overrides instead of the defaults it is testing — a clean-shell run and a dispatched-agent run of the identical suite, on the identical commit, can disagree by dozens of failures. This has already caused a dispatched Builder to misread the resulting failures as evidence that `main` was broken and close a valid, unrelated issue as a false duplicate.
-
-If you are a dispatched agent and you are about to trust a test suite's output — especially one that exercises guard-hook / force-push / reset-hard behavior — check first:
-
-```bash
-env | grep -E '^LOOM_(FORCE_SCOPE|GUARD_DECISION_LOG)='
-```
-
-If either is set and the suite under test asserts guard defaults, re-run it with the ambient overrides stripped before drawing any conclusion from the result:
-
-```bash
-env -u LOOM_FORCE_SCOPE -u LOOM_GUARD_DECISION_LOG <test-suite-command>
-```
-
-This is also called out directly in the dispatched agent's own brief — see `defaults/roles/builder.md` → "Build Verification During Implementation" — rather than left as a fact an agent has to already know to look up here.
-
-**Other dispatcher-exported `LOOM_*` vars (#5388 survey)**: `loom-daemon-start.sh` / `sweep_registry/dispatch.rs` also export `LOOM_WORKSPACE`, `LOOM_WORK_FINDER`, `LOOM_MAIN_HEALTH_GATE`, `LOOM_PID_FILE`, `LOOM_TERMINAL_ID`, `LOOM_SWEEP_CLAIM_OWNED`, `LOOM_RUNTIME`, `LOOM_ROLE`, `BG_WAIT_CEILING_ENV`, and the experiment allowlist (`LOOM_MODEL_EXPERIMENT`, `LOOM_MODEL_EXPERIMENT_CANARY`, `LOOM_TRANSCRIPT_ARCHIVE`) into every dispatched child. None of these are read by a *managed repo's own* tooling — they are Loom-internal dispatch/orchestration knobs a repo's test suite has no reason to assert against, unlike `LOOM_FORCE_SCOPE`/`LOOM_GUARD_DECISION_LOG` which name-collide with values a repo's **own installed guard hook** (shipped by Loom into every managed repo) reads and whose factory defaults a repo's own suite plausibly tests. If a future dispatcher-exported var is likewise consumed by shipped repo tooling with an assertable default, treat it the same way — surface it in this doc's "Known consequence" and in the Builder brief, not just as an env-var reference table entry.
-
 **Standing per-trigger review policy** — a periodic support role (the **Auditor**, see `.loom/roles/auditor.md`) tails `.loom/logs/guard-decisions.log`, dedups by `pattern`, and files **one issue per distinct trigger** observed in autonomous runs, proposing to either (a) **allowlist / refine** the guard for the in-scope op or (b) **confirm it stays flagged**. Over time this converges the guard to dangerous-only. The dedup + summarize one-liner:
 
 ```bash
@@ -1040,23 +922,10 @@ New issues from this policy enter through normal intake (`loom:triage` → Curat
 
 **First refinement pass (#3898):**
 - `guards.forceScope:"protected"` recommended for autonomous repos (above).
-- The catastrophic scan no longer false-positives on **documentation text** — a dangerous command merely *mentioned* inside a multi-line `--body`/`-m`/`--title`/`--notes`/`--comment` value (e.g. `gh issue create --body "…"`) is redacted as a single span and does **not** deny, while a genuinely dangerous command, or a command-substitution `$(…)` smuggled inside such a value, still DENIES. (The one shape this pass could *not* cover — a value wrapped in `"$(cat <<'EOF' … EOF)"`, which necessarily contains `$(` — was closed later by the third pass below.)
+- The catastrophic scan no longer false-positives on **documentation text** — a dangerous command merely *mentioned* inside a multi-line `--body`/`-m`/`--title`/`--notes`/`--comment` value (e.g. `gh issue create --body "…"`) is redacted as a single span and does **not** deny, while a genuinely dangerous command, or a command-substitution `$(…)` smuggled inside such a value, still DENIES.
 - `git checkout .` / `git restore .` / `git clean -fd` **stay ASK** (evaluated, kept flagged): they irreversibly discard uncommitted/untracked work, so the standing policy files a per-trigger issue rather than blanket-allowlisting them. A repo that wants them to pass headless can add the command word to an allowlist per its own risk decision.
 
 **Second refinement pass (#4216):** `aws iam delete-*` and `az`/`gcloud … delete` were retiered from the catastrophic deny list to the **ungated ask tier**. A hard block on credential/resource deletion was over-broad — deleting an IAM key is often the *security-positive* step — and left only the undocumented script-file bypass as recourse. The deny→ask move is safe for autonomous mode by construction: a headless sweep's unanswered ASK still blocks (per the paragraph above), so nothing that was denied headless now silently runs; only a supervised interactive operator gains a confirm prompt. The patterns stay **ungated** (not folded into `guards.cloudCli`) so a repo disabling the cloud ASK category for EC2-churn convenience cannot silently bypass IAM deletion.
-
-**Third refinement pass (#5216):** the #3898 redaction above stops at any quoted flag value containing `$(` — the anti-smuggling floor that keeps `git commit -m "$(<destructive command>)"` denying. But Loom's own prescribed idiom for a multi-line comment body is `--body "$(cat <<'EOF' … EOF)"`, which *always* contains `$(`, so such a value was never redacted and a dangerous command merely **quoted inside the heredoc body as documentation** hard-denied the whole command (observed on a Judge approval for PR #4357, and reproducible for the #3679 force-push literals too — the gap was construction-specific, not pattern-specific). The guard now blanks the **body** of that one provably-inert shape before scanning, and every broad scan that could be tripped by such prose — the catastrophic `ALWAYS_BLOCK_PATTERNS` loop, the SQL-DDL deny, the `rm`-scope deny, the lifecycle deny, and the force-op / cloud-CLI asks — reads the redacted copy.
-
-Masking applies **only** when all of these hold, so a heredoc that is genuinely *executed* keeps denying:
-
-| Condition | Rejected example (still denies) |
-|-----------|--------------------------------|
-| Opener is the complete tail of a recognized text-carrying flag's quoted value, immediately after `$(cat` | `--body "$(bash <<'EOF' … EOF)"`, `cat <<'EOF' … EOF \| sh`, `sh -s <<'EOF' … EOF` — the body is live code to an inner interpreter |
-| Heredoc delimiter is **quoted** (`<<'EOF'` / `<<"EOF"`, `<<-` allowed) | `--body "$(cat <<EOF … EOF)"` — an unquoted delimiter lets the outer shell expand the body |
-| Block is **closed** in the same command buffer | an unterminated opener masks nothing (mirrors #5087) |
-| The line after the delimiter line is `)` + the same opening quote | `--body "$(cat <<'EOF' … EOF` ⏎ `rm -rf /` ⏎ `)"` — bash ends the heredoc and really runs the next line |
-
-This is deliberately narrower than the `mask_heredoc_bodies()` helper the write-target scanner uses: that one masks any closed heredoc body regardless of its consumer, an accepted fail-open there (#5117 Known Limitation 1) that must not be inherited by the hard-deny floor. **Known limitation** (recorded, not fixed): only the literal `cat`-consumed spelling above is recognized — an equivalent variant (`$(command cat <<'EOF' …)`, a heredoc opened on a continuation line, `) "` with a space before the closing quote) is simply not recognized and keeps false-positiving exactly as before. That is the safe direction: a pre-existing false positive, never a new bypass.
 
 ### When a Legitimate Operation Is Pattern-Blocked
 

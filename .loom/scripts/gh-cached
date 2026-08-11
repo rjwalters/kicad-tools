@@ -5,9 +5,7 @@ Drop-in replacement for `gh` that caches read-only command responses
 to reduce API calls. Mutations bypass the cache and invalidate
 related entries.
 
-Cache is file-backed in /tmp/gh-cache/ for cross-process sharing, scoped into
-a per-repo subdirectory (#5224) so two different repos on the same host never
-share cache entries even when they issue textually identical `gh` commands.
+Cache is file-backed in /tmp/gh-cache/ for cross-process sharing.
 
 Usage:
     gh-cached issue view 42 --json labels
@@ -17,17 +15,11 @@ Usage:
     gh-cached --cache-stats                            # show hit/miss statistics
 
 Environment:
-    GH_CACHE_DIR       Cache directory base (default: /tmp/gh-cache); the
-                        actual cache lives under a per-repo subdirectory of
-                        this path — see resolve_repo_id() below.
+    GH_CACHE_DIR       Cache directory (default: /tmp/gh-cache)
     GH_CACHE_TTL       Default TTL in seconds (default: 30)
     GH_CACHE_MAX_SIZE  Max cached entries (default: 256)
     GH_CACHE_DISABLE   Set to "1" to disable caching entirely
     GH_CACHE_DEBUG     Set to "1" for debug logging to stderr
-    GH_CACHE_REPO_ID   Override the resolved repo identity used to scope
-                        GH_CACHE_DIR (default: `git rev-parse
-                        --show-toplevel`). Mainly for tests and non-git
-                        working directories that still want isolation.
 """
 
 from __future__ import annotations
@@ -41,49 +33,7 @@ import time
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 
-
-def resolve_repo_id() -> str:
-    """Resolve a stable per-host-repo identity used to scope CACHE_DIR (#5224).
-
-    Two different repos on the same host issuing the textually identical `gh`
-    command must never share a cache entry — `cache_key()` alone only hashes
-    the `gh` argv, which says nothing about which repo it targets (most reads
-    routed through this wrapper have no explicit `--repo` and resolve via the
-    cwd's git remote). Scoping CACHE_DIR itself (rather than only extending
-    cache_key()'s hash input) also naturally repo-isolates enforce_max_size(),
-    invalidate_for_resource(), invalidate_all_for_type(), and clear_cache(),
-    since every one of them already operates on CACHE_DIR as-is.
-
-    Uses `git rev-parse --show-toplevel` — cheap, local, no network call —
-    mirroring the existing pattern of resolving $GH_READ once per session via
-    a local probe (defaults/docs/gh-cached.md). GH_CACHE_REPO_ID overrides the
-    resolved identity directly (used by tests, and as an escape hatch for
-    non-git working directories that still want isolation).
-    """
-    override = os.environ.get("GH_CACHE_REPO_ID", "")
-    if override:
-        return override
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if proc.returncode == 0:
-            top = proc.stdout.strip()
-            if top:
-                return top
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    # Not inside a git repo (or git unavailable): fall back to a fixed
-    # sentinel so behavior is deterministic rather than silently unscoped.
-    return "_no-repo"
-
-
-CACHE_DIR_BASE = os.environ.get("GH_CACHE_DIR", "/tmp/gh-cache")
-REPO_ID = resolve_repo_id()
-CACHE_DIR = os.path.join(CACHE_DIR_BASE, hashlib.sha256(REPO_ID.encode()).hexdigest()[:16])
+CACHE_DIR = os.environ.get("GH_CACHE_DIR", "/tmp/gh-cache")
 DEFAULT_TTL = int(os.environ.get("GH_CACHE_TTL", "30"))
 MAX_CACHE_SIZE = int(os.environ.get("GH_CACHE_MAX_SIZE", "256"))
 CACHE_DISABLED = os.environ.get("GH_CACHE_DISABLE", "") == "1"
@@ -449,7 +399,6 @@ def try_etag_list(resource_type: str, args: list[str]) -> tuple[str, int] | None
 
 def main() -> int:
     args = sys.argv[1:]
-    debug(f"REPO_ID={REPO_ID!r} CACHE_DIR={CACHE_DIR}")
 
     # Handle meta-commands
     if "--clear-cache" in args:

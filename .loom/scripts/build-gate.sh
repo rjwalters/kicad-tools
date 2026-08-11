@@ -26,19 +26,6 @@
 #     there is now no Python anywhere in the repo, load-bearing or otherwise,
 #     and no Python-conditional stage left to run.
 #   - bash scripts/test-installer.sh runs the 131-case installer suite.
-#   - bash scripts/test-changelog.sh runs scripts/changelog.sh's unit suite
-#     (#5196) against a disposable scratch repo (CHANGELOG_REPO_ROOT) -- no
-#     network, no dependency on this repo's own history, sub-second.
-#   - bash scripts/test-install-local-mode.sh (#5276) covers install-loom.sh
-#     --local/--gitignore mode -- no daemon build, no network, sub-second.
-#   - bash scripts/test-migrate-consumer.sh (#5276) covers scripts/install/
-#     migrate-consumer.sh (Epic #3835 Phase 6) against throwaway git fixtures
-#     -- no network, no real daemon, sub-second.
-#   - bash scripts/test-daemon-liveness.sh (#5548) regression-tests
-#     scripts/stop-daemon.sh's and scripts/start-daemon.sh's daemon-liveness
-#     pgrep matcher against a decoy fixture literally named `loom-daemon` --
-#     no real daemon build, PATH-stubs `pgrep` for the one case that would
-#     otherwise touch the live process table, sub-second.
 #   - mcp-loom (TypeScript) is intentionally EXCLUDED: it needs npm install/ci
 #     in a fresh worktree (no guaranteed warm node_modules), which adds
 #     unpredictable latency to a gate that also runs once per PR. CI still
@@ -165,17 +152,5 @@ cargo test --workspace --lib --bins
 
 echo "[build-gate] bash installer suite"
 bash scripts/test-installer.sh
-
-echo "[build-gate] bash changelog generator suite"
-bash scripts/test-changelog.sh
-
-echo "[build-gate] bash daemon-liveness pgrep suite (#5548)"
-bash scripts/test-daemon-liveness.sh
-
-echo "[build-gate] bash install --local/--gitignore mode suite"
-bash scripts/test-install-local-mode.sh
-
-echo "[build-gate] bash migrate-consumer suite"
-bash scripts/test-migrate-consumer.sh
 
 echo "[build-gate] all stages passed"

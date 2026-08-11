@@ -116,17 +116,6 @@ export LOOM_LAUNCHD_LABEL="$(launchd_sandbox_new_label)"
 # shellcheck source=lib/bg-proc-trap.sh
 source "$SCRIPT_DIR/lib/bg-proc-trap.sh"
 
-# Shared live-state sandbox (#5179). The snapshot MUST run here — before
-# live_state_sandbox_init below rewrites the LOOM_* state vars, and before any
-# sub-invocation can write anything — because it discovers WHICH paths are the
-# live ones by reading the ambient environment (a Loom agent session exports
-# LOOM_PID_FILE / LOOM_WORKSPACE / LOOM_DAEMON_BIN at the REAL production
-# paths, so this suite inherits them unless it says otherwise). The matching
-# live_state_sandbox_assert_untouched runs as the suite's final guard.
-# shellcheck source=lib/live-state-sandbox.sh
-source "$SCRIPT_DIR/lib/live-state-sandbox.sh"
-live_state_sandbox_snapshot
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -946,49 +935,37 @@ MINIMAL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
 BASE_WORKDIR="$(mktemp -d)"
 
-# ---------- live daemon state sandbox (#5179) ----------
-# ONE helper owns EVERY live-state path this suite could otherwise reach, so a
-# state file added to the daemon later is isolated by construction rather than
-# after it leaks in production. It supersedes the per-variable overrides that
-# used to live here, and covers (see lib/live-state-sandbox.sh for the full
-# rationale per variable):
-#
-#   LOOM_PID_FILE          the #5179 leak itself. The ambient value a Loom
-#                          agent session exports names the REAL .daemon.pid,
-#                          and it is tier 1 of daemon_pidfile.rs's resolver —
-#                          ahead of every other tier — so an un-overridden
-#                          suite does not get a neutral default, it inherits
-#                          the live path and rewrites it under a running
-#                          daemon (observed: a false `degraded` liveness
-#                          verdict on a healthy host, plus a poisoned input
-#                          for the #5118/#5126 watchdog).
-#   LOOM_AUTONOMY_MARKER   #4011/#5131: a restart path that reaches the real
-#                          loom-daemon-start.sh must never write the
-#                          operator's ~/.loom/autonomy-desired.
-#   LOOM_SOCKET_PATH       its parent is the daemon's `loom_dir`, so the
-#                          heartbeat + machine-level logs follow it into the
-#                          sandbox (start.sh documents this seam explicitly).
-#   LOOM_DAEMON_BIN_DIR    #4381 incident (see the checksum-guard writeup at
-#                          the top of this file): update.sh resolves its
-#                          machine-level install destination as
-#                          `${LOOM_DAEMON_BIN_DIR:-$HOME/.local/bin}` whenever
-#                          LOOM_DAEMON_BIN is unset, and tests 37/39/43
-#                          deliberately exercise that no-LOOM_DAEMON_BIN path.
-#   LOOM_DAEMON_BIN        #4902: unset, because the ambient agent-session
-#                          value names the real production binary and would
-#                          win over LOOM_DAEMON_BIN_DIR.
-#   LOOM_WORKSPACE /       unset, so each sub-invocation resolves its own
-#   LOOM_MACHINE_CHECKOUT  fixture instead of the live checkout / machine-mode
-#                          state home. Tests that need either pin it inline.
-#
-# Tests below that need a pinned value still set it on their own invocation
-# (e.g. `LOOM_DAEMON_BIN="$W1/..." bash ...`), which applies regardless.
-live_state_sandbox_init "$BASE_WORKDIR/live-state"
-
-# Supervisor identity, not a state path — the watchdog LaunchAgent must be
-# provisioned under the scratch label so a restart path can never touch the
-# real com.rjwalters.loom-daemon-watchdog job (#4011/#4078).
+# #4011: isolate the autonomy-desired marker + watchdog label suite-wide so a
+# restart path that reaches the real loom-daemon-start.sh can never write the
+# operator's real ~/.loom/autonomy-desired or provision the real
+# com.rjwalters.loom-daemon-watchdog LaunchAgent. Both are exported so every
+# sub-invocation (each cd'd into its own W* dir) inherits them.
+export LOOM_AUTONOMY_MARKER="$BASE_WORKDIR/autonomy-desired"
 export LOOM_WATCHDOG_LABEL="${LOOM_LAUNCHD_LABEL}-watchdog"
+
+# Machine-level provisioning sandbox (#4381 incident — see the checksum-guard
+# comment near the top of this file for the full writeup). loom-daemon-update.sh
+# resolves its machine-level install destination as
+# `${LOOM_DAEMON_BIN_DIR:-$HOME/.local/bin}` whenever LOOM_DAEMON_BIN is unset.
+# Most tests below pin LOOM_DAEMON_BIN explicitly (so this is inert for them),
+# but the ff-sync/staleness-detection tests (37/39/43) deliberately exercise the
+# no-LOOM_DAEMON_BIN path, and until this fix that meant an UNSANDBOXED
+# provision_machine_daemon() call landed on the operator's real
+# ~/.local/bin/loom-daemon. Exporting this suite-wide closes the hole for every
+# current call site AND any future one that forgets to set LOOM_DAEMON_BIN —
+# belt-and-braces with the checksum guard at both the top and bottom of this
+# file, which would otherwise be the only thing catching a regression.
+#
+# `unset LOOM_DAEMON_BIN` closes the other half of the hole (#4902): every
+# live Loom agent session (Builder/Judge/Doctor, ...) inherits an ambient
+# LOOM_DAEMON_BIN pointing at the real production binary, and
+# loom-daemon-update.sh's `PROVISION_TARGET="${LOOM_DAEMON_BIN:-$DEST_DIR/...}"`
+# lets that ambient value win over the LOOM_DAEMON_BIN_DIR sandbox above,
+# silently defeating it. Tests below that need LOOM_DAEMON_BIN pin it inline
+# on their own invocation (e.g. `LOOM_DAEMON_BIN="$W1/..." bash ...`), which
+# still applies regardless of this ambient unset.
+export LOOM_DAEMON_BIN_DIR="$BASE_WORKDIR/machine-level-bin-sandbox"
+unset LOOM_DAEMON_BIN
 
 # Binary-format sanity gate bypass (#4397, deferred from #4381's incident
 # review): provision_machine_daemon now refuses to install anything that
@@ -1009,16 +986,6 @@ export LOOM_PROVISION_ALLOW_SCRIPT=1
 # any test regresses into one, this decoy dies and the final assertion fails.
 # Spawned OUTSIDE $BASE_WORKDIR's path so the trap's `pkill -f "$BASE_WORKDIR"`
 # does not sweep it; killed explicitly below.
-#
-# Deliberately NOT renamed per #5548's "test fixtures should not be named
-# `loom-daemon`" fix: the whole point of this fixture is to BE a process
-# named `loom-daemon` so the label-blind pgrep tier it decoys has something
-# to (not) match -- renaming it would defeat the test. It is tracked via
-# bg_proc_track/bg_proc_reap (EXIT/INT/TERM traps) like every other
-# background fixture in this suite, so it does not additionally widen
-# #5548's "orphaned past all cleanup" risk beyond what SIGKILL of the test
-# runner already allows for any tracked fixture (a hard, documented
-# bash/POSIX limit -- see lib/bg-proc-trap.sh).
 DECOY_DIR="$(mktemp -d)"
 cat > "$DECOY_DIR/loom-daemon" <<'EOF'
 #!/usr/bin/env bash
@@ -5250,28 +5217,6 @@ else
     echo -e "${RED}✗${NC} real ${_PROD_DAEMON_BIN} CHANGED during this test run (#4381 regression!)"
     echo "  before: $_PROD_DAEMON_CHECKSUM_BEFORE"
     echo "  after:  $_PROD_DAEMON_CHECKSUM_AFTER"
-fi
-
-# ============================================================
-# 45. Live daemon state guard (#5179): every live `.loom` state path reachable
-#     from the ambient environment (the real $HOME/.loom, the live checkout's
-#     .loom, an ambient LOOM_PID_FILE / LOOM_WORKSPACE / LOOM_MACHINE_CHECKOUT)
-#     must be byte-and-mtime identical to its pre-suite snapshot — and a path
-#     that was ABSENT must still be absent. This is what converts the whole
-#     "state file leaked into production" class (#4087, #5131, #5179) from
-#     "discovered by an operator on a degraded host" into "caught by the suite":
-#     isolation alone is unfalsifiable, since each of the previous three fixes
-#     also LOOKED complete.
-# ============================================================
-TESTS_RUN=$((TESTS_RUN + 1))
-if live_state_sandbox_assert_untouched; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} no live .loom daemon state path was written during the suite ($(live_state_sandbox_snapshot_size) paths guarded, #5179)"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} a LIVE .loom daemon state path was written during this test run (#5179 regression!)"
-    echo "  sandbox in effect during the run:"
-    live_state_sandbox_describe | sed 's/^/    /'
 fi
 
 # ---------- summary ----------

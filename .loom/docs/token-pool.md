@@ -175,8 +175,8 @@ Behavior notes:
 - Only `is_active = 1` rows are imported; `expires_at` is **not** used as a filter
   (observed rows carry stale timestamps while still authenticating — health comes
   from `loom-daemon tokens check`).
-- Token filenames use the same derivation as `bootstrap` (`alice@example.com` →
-  `alice-example.token`), so an account keeps one identity across both paths and
+- Token filenames use the same derivation as `bootstrap` (`robb@2amlogic.com` →
+  `robb-2amlogic.token`), so an account keeps one identity across both paths and
   re-importing overwrites in place.
 - Idempotent: unchanged tokens are left untouched. `index.json` records
   `source: monitor-db` (distinct from the `monitor` snapshot) and, as always,
@@ -304,14 +304,6 @@ token hits its weekly limit.
    (ranking → allowlist → random), exports `CLAUDE_CODE_OAUTH_TOKEN`, then `exec`s
    `claude` (or pass `--use-wrapper` to layer on top of `claude-wrapper.sh` for
    retry behavior).
-
-This whole rotation scheme rests on one assumption: the installed Claude Code
-CLI honors `CLAUDE_CODE_OAUTH_TOKEN` over a locally logged-in Keychain
-account. `defaults/scripts/verify-token-precedence.sh` (#3236, operator-manual
--- run by hand once per Claude Code version, not wired into any automated
-check) confirms that assumption still holds by comparing `claude auth status`
-with a real Keychain login against the same command run with a deliberately
-bogus env token.
 
 ## Selection algorithm (`loom-daemon tokens select`)
 
@@ -537,52 +529,6 @@ delegates step 2/3's "is this candidate a recognized Loom workspace" question
 to the same registry-membership check `#4299` established for CLI
 `--workspace` defaulting (`workspace_registry::resolve_client_workspace_default`)
 rather than a second, parallel detection path.
-
-### `loom-daemon health`'s daemon-CWD-vs-operator-repo distinction (#5269)
-
-The precedence above governs **two separate mechanisms** that do not share a
-scope, and conflating them was the root cause of a "5h-stale ranking" incident
-where the documented remediation refreshed the wrong pool:
-
-1. **The self-refresh loop is per-repo-correct.** The daemon's own
-   `token_ranking_refresh.rs` background task re-runs `tokens check --ranking`
-   for **every registered repo independently**, resolving each repo's own pool
-   via the *unanchored* `resolve_tokens_dir(&repo.root)` (step 1/2 of the
-   precedence above, evaluated separately per repo). On a multi-repo daemon
-   this keeps every registered repo's OWN `.ranking` fresh on its own cadence,
-   regardless of which repo the daemon process happens to be running in.
-2. **`loom-daemon health`'s (and `status`'s) single machine-level tokens
-   section is anchored to the daemon's OWN `fallback_root`** — its launch CWD
-   or `LOOM_WORKSPACE`, resolved via `resolve_tokens_dir_anchored` (the full
-   precedence above). On a daemon managing several repos from a launch CWD
-   that is only one of them (e.g. a daemon started under `~/GitHub/anvil`
-   managing `~/GitHub/loom` too), this reports staleness for whichever pool
-   *that* anchoring resolves to — which is not necessarily any particular
-   other registered repo's own pool, and was never designed to answer "is
-   *my* repo's pool fresh" for an operator running the command from a
-   different registered repo.
-
-**The fix (#5269)**: `loom-daemon status`'s `per_repo` breakdown (see
-[daemon-reference.md](daemon-reference.md)) now carries each registered repo's
-own `token_pool_dir`/`ranking_present`/`ranking_age_secs`, populated with the
-exact same unanchored `resolve_tokens_dir(&repo.root)` the self-refresh loop
-already uses — so an operator asking about a specific repo gets that repo's
-own answer, independent of the daemon's launch CWD. `loom-daemon health`'s
-`tokens` section detail JSON (`--json`) surfaces this as `per_repo: [...]`
-alongside the existing single-pool `pool_path`/`ranking_present`/
-`ranking_age_secs` fields (which keep their original, narrower
-`fallback_root`-anchored meaning — the top-level fields are NOT replaced,
-only supplemented), and folds a bounded "`N of M` registered repos have their
-own pool's `.ranking` stale/missing" note into the human summary line when any
-repo is affected.
-
-**The workaround this incident's remediation used** — refreshing from `$HOME`
-happened to "fix" the daemon's top-level reading only because
-`per_repo_tokens_dir($HOME)` collapses to the same path as the default shared
-pool (`~/.loom/tokens`) — is now unnecessary for diagnosing (not necessarily
-for actually refreshing) a specific repo's own staleness: read that repo's
-line in `loom-daemon status --json`'s `per_repo` array, or
-`loom-daemon health --json`'s `tokens.detail.per_repo`, instead.
 
 ## Hard-fail on missing pool
 

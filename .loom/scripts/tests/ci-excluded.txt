@@ -15,12 +15,3 @@
 test-install-reinstall-safety.sh  Already wired in the "Installer Integration Tests" job (#4188); excluded here to avoid double-running it.
 test-spawn-codex.sh  Already wired in the "Codex Adapter Smoke (mocked)" job (#4468), which adds adapter-specific hermeticity guards; excluded here to avoid double-running it.
 test-spawn-claude.sh  Non-hermetic: spawn-claude.sh's token selection requires a built loom-daemon binary (#4228), absent on a fresh ubuntu runner (FATAL: no loom-daemon binary). Wiring it needs a cargo build step or a binary stub — follow-up.
-
-# scripts/ (repo root, top-level only) — since #5278. Each of these already
-# runs as its own direct step in ci.yml and/or build-gate.sh; excluded here
-# (rather than wired) to avoid double-running it via run-ci-suites.sh.
-scripts/test-changelog.sh  Already wired directly in build-gate.sh (bash scripts/test-changelog.sh); excluded here to avoid double-running it.
-scripts/test-install-local-mode.sh  Already wired directly in ci.yml's "Installer local/gitignore mode" step and build-gate.sh; excluded here to avoid double-running it.
-scripts/test-installer.sh  Already wired directly in ci.yml's "Installer Integration Tests" job and build-gate.sh; excluded here to avoid double-running it.
-scripts/test-migrate-consumer.sh  Already wired directly in ci.yml's "migrate-consumer" step and build-gate.sh; excluded here to avoid double-running it.
-scripts/test-daemon-liveness.sh  Already wired directly in build-gate.sh (bash scripts/test-daemon-liveness.sh, #5548); excluded here to avoid double-running it.

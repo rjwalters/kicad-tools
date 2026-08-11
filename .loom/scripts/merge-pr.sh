@@ -528,52 +528,12 @@ _check_no_open_stacked_children
 PARTIAL_OPEN_BEFORE_MERGE=""
 PARTIAL_CONFLICT_ISSUES=""
 
-# Strips Markdown fenced code blocks (``` ... ```) from stdin, one line at a
-# time: a fence-open/-close toggle drops everything between the fences
-# (inclusive of the fence markers themselves). Used so a `Part of #N` shown as
-# example/quoted text inside a fenced block reads as documentation, never a
-# live declaration (#5234).
-_strip_fenced_code_blocks() {
-  awk '
-    /^[[:space:]]*```/ { infence = !infence; next }
-    !infence { print }
-  '
-}
-
 # Issue numbers referenced with a NON-closing partial-increment keyword
-# (`Part of #N` / `Contributes to #N`, case-insensitive) as a DECLARATION, one
-# per line, deduped.
-#
-# "Declaration" is deliberately narrower than "appears anywhere in the body"
-# (#5234): a bare `grep` over the whole text also matched a mid-sentence,
-# backticked, conditional mention like "...say so and I will switch the
-# reference to `Part of #4574`" — prose describing a hypothetical, not a
-# declared intent — and treated it as authoritative, reopening a correctly
-# closed issue. To count as a declaration here the keyword must be
-# line-leading, optionally preceded by a list marker (`-`/`*`/`+`/numbered
-# `1.`/blockquote `>`) and/or whitespace — matching the actual shape this
-# convention produces (a one-line `Part of #123` / `Contributes to #456`
-# trailer, per builder-pr.md), not prose that merely references the pattern.
-#
-# Fenced code blocks are stripped first, then inline code spans (`` `...` ``)
-# are blanked so a backticked mention cannot itself satisfy the line-leading
-# anchor (the #5234 repro used backticks specifically to mark the reference as
-# hypothetical, not live).
-#
-# The second stage extracts `#N` tokens FIRST and only then strips the `#`.
-# Scanning the whole matched span for any digit run would also pick up the
-# numbered-list marker's own ordinal (`3. Part of #789` -> `3` and `789`),
-# which is exactly the false-positive-reopen class this guard exists to
-# prevent: a body carrying both `3. Part of #789` and a genuine `Closes #3`
-# would see #3 registered as a declared partial increment AND a closing
-# reference, and get reopened right after a correct close.
+# (`Part of #N` / `Contributes to #N`, case-insensitive), one per line, deduped.
 _partial_increment_refs() {
   { printf '%s\n' "$1" \
-      | _strip_fenced_code_blocks \
-      | sed -E 's/`[^`]*`//g' \
-      | grep -oiE '^[[:space:]]*([-*+>]|[0-9]+\.)?[[:space:]]*(Part of|Contributes to)[[:space:]]+#[0-9]+' \
-      | grep -oE '#[0-9]+' \
-      | tr -d '#' \
+      | grep -oiE '(Part of|Contributes to)[[:space:]]+#[0-9]+' \
+      | grep -oE '[0-9]+' \
       | sort -un; } || true
 }
 
@@ -605,23 +565,6 @@ _body_closing_refs() {
 _closing_ref_snippets() {
   { printf '%s\n' "$1" \
       | grep -oiE "\\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\\b[[:space:]]+#$2\\b" \
-      | sort -u | tr '\n' '|' | sed 's/|$//; s/|/", "/g'; } || true
-}
-
-# The literal declaration text (`Part of #N` / `Contributes to #N`) that
-# _partial_increment_refs read as authoritative for issue $2 inside text $1,
-# rendered the same way _closing_ref_snippets renders the closing-keyword side
-# (`snippet", "snippet`) — so the pre-merge warning can show an operator BOTH
-# sides of the conflict and judge for themselves whether the declaration was
-# real (AC #4, #5234). Runs the identical fenced-block/inline-code-span
-# stripping as _partial_increment_refs so the quoted snippet always matches
-# what was actually matched, never a code-block artifact.
-_partial_increment_ref_snippets() {
-  { printf '%s\n' "$1" \
-      | _strip_fenced_code_blocks \
-      | sed -E 's/`[^`]*`//g' \
-      | grep -oiE "^[[:space:]]*([-*+>]|[0-9]+\\.)?[[:space:]]*(Part of|Contributes to)[[:space:]]+#$2\\b" \
-      | sed -E 's/^[[:space:]]+//' \
       | sort -u | tr '\n' '|' | sed 's/|$//; s/|/", "/g'; } || true
 }
 
@@ -704,28 +647,23 @@ _check_partial_increment_close_conflict() {
     fi
     PARTIAL_CONFLICT_ISSUES="${PARTIAL_CONFLICT_ISSUES:+$PARTIAL_CONFLICT_ISSUES }$issue_num"
 
-    local body_offending commit_offending partial_offending dr=""
+    local body_offending commit_offending dr=""
     # Match _check_no_open_stacked_children's dry-run contract: report the
     # would-be outcome without claiming a merge is happening.
     [[ "${DRY_RUN:-false}" == "true" ]] && dr="[dry-run] "
     body_offending="$(_closing_ref_snippets "$pr_body" "$issue_num")"
     commit_offending="$(_closing_ref_snippets "$commit_messages" "$issue_num")"
-    # The declaration text itself (AC #4, #5234) — quoted alongside the closing
-    # keyword below so an operator can see both sides and judge for themselves
-    # whether the declaration was a real trailer or, e.g., prose that happened
-    # to survive the structural anchor.
-    partial_offending="$(_partial_increment_ref_snippets "$pr_body" "$issue_num")"
 
     # Name the source, because the operator remedy differs per source: edit the
     # PR body, reword/amend a commit, or unlink a Development-sidebar reference.
     if [[ -n "$body_offending" ]]; then
-      warning "${dr}Partial-increment conflict (#4569): PR #$PR_NUMBER declares a NON-closing \`Part of\`/\`Contributes to\` reference to #$issue_num (\"$partial_offending\"), but its body ALSO carries a closing reference to #$issue_num (\"$body_offending\") — GitHub honors a closing keyword ANYWHERE in the body, so merging this PR WILL close #$issue_num against the declared intent."
+      warning "${dr}Partial-increment conflict (#4569): PR #$PR_NUMBER declares a NON-closing \`Part of\`/\`Contributes to\` reference to #$issue_num, but its body ALSO carries a closing reference to #$issue_num (\"$body_offending\") — GitHub honors a closing keyword ANYWHERE in the body, so merging this PR WILL close #$issue_num against the declared intent."
       warning "  ${dr}merge-pr.sh would reopen #$issue_num immediately after the merge. To avoid the close/reopen flicker entirely, edit the PR body so no closing keyword is immediately followed by \`#$issue_num\` (e.g. write \`close the issue\` or \`close issue #$issue_num\` instead of \`close #$issue_num\`), then re-run this merge."
     elif [[ -n "$commit_offending" ]]; then
-      warning "${dr}Partial-increment conflict (#4595): PR #$PR_NUMBER declares a NON-closing \`Part of\`/\`Contributes to\` reference to #$issue_num (\"$partial_offending\"), but a closing keyword in a commit message of this PR references #$issue_num (\"$commit_offending\") — this merge squashes without overriding the commit message, so GitHub composes the squash message from these commits and merging WILL close #$issue_num against the declared intent."
+      warning "${dr}Partial-increment conflict (#4595): PR #$PR_NUMBER declares a NON-closing \`Part of\`/\`Contributes to\` reference to #$issue_num, but a closing keyword in a commit message of this PR references #$issue_num (\"$commit_offending\") — this merge squashes without overriding the commit message, so GitHub composes the squash message from these commits and merging WILL close #$issue_num against the declared intent."
       warning "  ${dr}merge-pr.sh would reopen #$issue_num immediately after the merge. To avoid the close/reopen flicker entirely, reword the offending commit message (\`git commit --amend\` / \`git rebase -i\` + force-push) so no closing keyword is immediately followed by \`#$issue_num\`, then re-run this merge."
     else
-      warning "${dr}Partial-increment conflict (#4569): PR #$PR_NUMBER declares a NON-closing \`Part of\`/\`Contributes to\` reference to #$issue_num (\"$partial_offending\"), but GitHub reports #$issue_num as a closing target of this PR (no closing keyword found in the body or commit messages — most likely a Development-sidebar link), so merging this PR WILL close #$issue_num against the declared intent."
+      warning "${dr}Partial-increment conflict (#4569): PR #$PR_NUMBER declares a NON-closing \`Part of\`/\`Contributes to\` reference to #$issue_num, but GitHub reports #$issue_num as a closing target of this PR (no closing keyword found in the body or commit messages — most likely a Development-sidebar link), so merging this PR WILL close #$issue_num against the declared intent."
       warning "  ${dr}merge-pr.sh would reopen #$issue_num immediately after the merge. To avoid the close/reopen flicker entirely, unlink #$issue_num from this PR's Development sidebar, then re-run this merge."
     fi
   done <<< "$partial_refs"

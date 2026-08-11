@@ -19,16 +19,6 @@ You operate as the middle tier in a three-tier approval system:
 
 ---
 
-## ⚠️ `--body @path` Does NOT Expand — It Posts the Literal String
-
-If you post a comment via `gh issue comment` / `gh pr comment` / `gh api ...
-comments` from a scratch file, `--body @path` (and `gh api -f body=@path`)
-posts the literal string `@path`, not the file's contents. **Full pitfall,
-incident citation, and fixes**:
-[`comment-body-literal-path.md`](comment-body-literal-path.md).
-
----
-
 ## Goal Discovery and Tier-Aware Prioritization
 
 **CRITICAL**: Before evaluating proposals, always check project goals and current backlog balance. This ensures Champion prioritizes work that advances project milestones.
@@ -172,87 +162,7 @@ For each proposal issue (`loom:curated`, `loom:architect`, `loom:hermit`, or `lo
 ### 2. Technical Feasibility
 - [ ] Solution approach is technically sound
 - [ ] No obvious blockers or dependencies
-- [ ] Declared blockers are *resolvable* — not a dependency cycle (see "Dependency-cycle gate" below)
 - [ ] Fits within existing architecture
-
-#### Epic-aware blocker sub-check (#5211)
-
-Before scoring "No obvious blockers or dependencies", scan the issue body for
-"Blocked by" / "Depends on" / "Requires" references (`extract_blocker_refs` in
-`champion-common.md` → "Epic-Aware Blocker Check" — read that section now if
-any such reference is found; it also covers cross-repo `owner/repo#N`
-references, not just bare `#N` in this repo). For each reference found, run
-that check (`parse_blocker_ref` → Step 2 classification) instead of a bare
-`gh issue view $dep --json state` read:
-
-| `EPIC_BLOCK_STATE` | Effect on this criterion |
-|---|---|
-| `not-epic` | Unchanged — plain state check applies (`OPEN` fails the criterion, `CLOSED` does not) |
-| `resolved` | Not a blocker — criterion unaffected |
-| `blocked-not-started` / `blocked-in-progress` | Genuine, unresolved blocker — criterion **fails**, same as before this section existed |
-| `epic-complete-unpromoted` | **Do not fail the criterion on this reference.** The shared check already posts (at most) one flag comment the first time it sees this exact blocker state and escalates to `loom:operator-only` on the next unchanged occurrence (see `champion-common.md` Step 4) — this evaluation does not re-block or re-comment beyond what that check already does |
-
-This is the only change this issue makes to criterion 2 — an issue whose
-*only* obstacle is an epic reference in the `epic-complete-unpromoted` state
-can now proceed to promotion (if every other criterion also passes) instead
-of failing indefinitely on a blocker that has, in substance, already shipped.
-
-#### Dependency-cycle gate (#5213)
-
-The "no obvious blockers or dependencies" check above is **single-hop and
-same-repo**: it looks at the `Blocked by`/`Depends on`/`Requires` references in
-this issue's body and asks whether each is closed. That is blind to a *cycle* —
-this issue waits on #B, and #B (or something #B waits on, possibly in another
-repo) waits back on this issue. Such an issue can never become promotable by
-waiting, and every future Champion pass re-derives the same conclusion.
-
-**Run the gate only when the proposal actually declares a blocker** — an issue
-whose body has no `(Blocked by|Depends on|Requires)` reference costs nothing:
-
-```bash
-ISSUE_NUMBER=<number>
-
-# Cheap trigger: does this proposal declare any dependency at all? Same
-# vocabulary as everywhere else (#4508), widened to cross-repo/URL refs.
-DECLARES_DEP=$("$GH_READ" issue view "$ISSUE_NUMBER" --json body --jq '.body' \
-  | grep -cE '(Blocked by|Depends on|Requires)[*_:[:space:]]*(([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#[0-9]+|https?://[^[:space:]),]+/issues/[0-9]+)')
-
-if [ "$DECLARES_DEP" -gt 0 ]; then
-  CYCLE_RC=0
-  ./.loom/scripts/detect-dependency-cycle.sh --issue "$ISSUE_NUMBER" --report || CYCLE_RC=$?
-  if [ "$CYCLE_RC" -eq 1 ]; then
-    # Criterion 2 FAILS. The script has already posted one comment naming every
-    # node in the cycle and added loom:operator-only. Do NOT promote, do NOT
-    # post a separate NEEDS REVISION verdict — a cycle is not something the
-    # proposal's author can fix by revising this issue's text, and
-    # loom:operator-only already excludes it from every future pass.
-    echo "#$ISSUE_NUMBER is in a dependency cycle — routed to loom:operator-only, skipping promotion"
-  fi
-fi
-```
-
-The detector is bounded by construction (default 4 hops, 25 fetched issues, 500
-edges; cached reads; `SEARCH_TRUNCATED:` printed whenever a bound fires so
-`NO_CYCLE` is never read as proof) and its comment is idempotent on the cycle's
-node set, so a cycle that survives several passes is surfaced exactly once. Full
-rationale, marker vocabulary and the bounded-cost table live in
-`champion-pr-merge.md` → "Dependency-cycle detection (#5213)"; both call sites
-run the same script, so there is one walk implementation to keep correct.
-
-**It also runs at most once per issue, without needing its own skip.** Adding
-`loom:operator-only` removes the issue from every future promotion pass —
-`champion.md`'s candidate queries already exclude that label, and "When NOT to
-Promote" below restates it — so the pass that finds a cycle is the last pass that
-walks it. Nothing here needs to be added to the body-hash idempotency machinery
-in "Idempotency check": that marker answers "has the proposal been revised", a
-question a cycle is indifferent to.
-
-**If an "Epic-aware blocker sub-check" is present under this criterion** (it
-resolves blockers whose epic has in substance already shipped), run it **first**
-and let this gate see only the blockers that survive it. A blocker the epic check
-clears is *resolvable*, not a deadlock, and reporting it as a cycle would put a
-human in front of an issue that needed no human. The two are independent
-mechanisms with independent markers — neither reads the other's state.
 
 ### 3. Implementation Clarity
 - [ ] Enough detail for a Builder to start work
@@ -310,18 +220,6 @@ Use conservative judgment. **Do NOT promote** if:
 **Applies to every proposal evaluated by this file** — `loom:curated`, `loom:architect`, `loom:hermit`, and `loom:auditor` alike — not just the `loom:architect` case that surfaced it.
 
 **The idempotency skip and the escalation threshold are one mechanism, not two** (#4967). Suppressing duplicate comments must never suppress the escalation that eventually puts a stuck proposal in front of a human — read "Bounding the silent skip" below before changing either half.
-
-**Does not shadow the Epic-Aware Blocker Check (#5211)**: this section's skip
-is keyed to a hash of the *proposal's own* title + body, which is exactly
-correct for detecting "has the proposal been revised" — but a dependent
-citing an epic as a blocker can sit at an unchanged body hash for weeks while
-the *epic* underneath it finishes. If the "Epic-aware blocker sub-check"
-under criterion 2 runs, it must run on **every** pass regardless of whether
-this section's marker match would otherwise skip silently — the two markers
-are independent (`champion:proposal-verdict:body-*` here vs.
-`champion:epic-block:*` in `champion-common.md`), and only the latter is
-keyed to the blocker's own state, so only the latter can detect a resolved
-blocker under an unrevised proposal body.
 
 ### Idempotency check (run BEFORE claiming — skip silently on a match, until the skips are capped)
 

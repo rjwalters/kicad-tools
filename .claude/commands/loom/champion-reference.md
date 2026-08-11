@@ -4,14 +4,6 @@ This file contains edge cases, complete workflow scripts, and troubleshooting in
 
 ---
 
-## ⚠️ `--body @path` Does NOT Expand — It Posts the Literal String
-
-If you post a comment via `gh issue comment` / `gh pr comment` / `gh api ...
-comments` from a scratch file, `--body @path` (and `gh api -f body=@path`)
-posts the literal string `@path`, not the file's contents. **Full pitfall,
-incident citation, and fixes**:
-[`comment-body-literal-path.md`](comment-body-literal-path.md).
-
 ## Edge Cases and Special Scenarios
 
 This section documents how Champion handles non-standard situations during PR auto-merge.

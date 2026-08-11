@@ -55,6 +55,12 @@ find . \( -name .git -o -name node_modules -o -name target \
           -o -name dist -o -name .venv \) -prune \
      -o -type f -size +10M -print
 
+# Orphaned environment content — packages still on disk that the current
+# lockfile no longer references. Detect the lockfile and its package manager;
+# the prune itself is an ASK item (see Categorize), never run from here.
+[ -f pnpm-lock.yaml ]     && echo "prunable: pnpm"   # pnpm prune
+[ -f package-lock.json ]  && echo "prunable: npm"    # npm prune
+
 # Git worktree roots — authoritative and tool-agnostic. RETAIN this output as a
 # path set for step 2's denylist; do not just print it. `--porcelain` gives one
 # `worktree <path>` line per entry, including worktrees that live outside this
@@ -167,7 +173,10 @@ regenerable build output, kept unless `--caches`); a **never-delete denylist**
 overrides both; everything else gitignored falls through to ASK.
 
 Apply these tests in order — **denylist first, then the SAFE and CACHE
-allowlists, then fall through to ASK**:
+allowlists, then fall through to ASK**. For empty directories specifically, a
+**reference scan runs after the allowlist match, as an additional net, not a
+replacement for it** — see the SAFE empty-directory bullet below; the
+denylist/allowlist check still runs first and still wins:
 
 **Never-delete denylist (always ASK, never SAFE or CACHE — checked first,
 overrides everything below, regardless of gitignore status):**
@@ -236,6 +245,22 @@ reserved for tracked files.
     neither gitignore nor the denylist — so this check must be applied to its
     output before anything is deleted.
 
+    **Reference scan (additional net, after the denylist check, not instead of
+    it).** The denylist above is an enumerated/prefix-matched allowlist of known
+    tools (`.loom/`, `.anvil/`, `.wrangler/`, git worktree roots); it does not
+    cover a tool that is not on that list — a custom app's own state/spool dir,
+    or a future tool's coordination root not yet added here. For any empty
+    directory that clears the denylist check, run a cheap cross-reference scan
+    before finalizing SAFE: `grep -rl` its path (or just its dirname, for a
+    generic name) across tracked files. Any hit — a script, config, or source
+    file that names the directory — demotes it from SAFE to ASK, reported with
+    its reason (e.g. "referenced by N files"), regardless of whether the
+    directory matched a named tool-scaffolding prefix. A directory with no
+    reference hit and no denylist match remains SAFE. This scan never *promotes*
+    anything the denylist already routed to ASK — it only ever demotes a
+    would-be SAFE empty directory, and only when the allowlist match already let
+    it through.
+
   Nothing in this category may be tracked by git or match a source-code
   extension.
 - **CACHE** — regenerable compilation/tool/build output. Same certainty as SAFE
@@ -259,6 +284,10 @@ reserved for tracked files.
   - **Any empty directory whose path matches the denylist** (a `.loom/`,
     `.anvil/`, or `.wrangler/` coordination or runtime-state dir) — emptiness
     is that tool's normal state, so it lands here rather than in SAFE.
+  - **Any empty directory demoted by the reference scan** (see the SAFE
+    empty-directory bullet above) — a tracked file references its path even
+    though it matched no denylist entry. Report it with the reason, e.g.
+    "referenced by N files", rather than silently skipping it.
   - **Any git worktree root** detected in step 1 — surfaced on its own
     `worktree:` inventory line (see Report), never auto-deleted, whether or not
     it is gitignored and whether or not it sits under a recognized tool
@@ -266,6 +295,41 @@ reserved for tracked files.
   - **Any gitignored file that does not match the SAFE or CACHE allowlist** (a
     novel/unrecognized cache dir, unrecognized local state) — when in doubt, it
     lands here, not in SAFE or CACHE.
+  - **An orphaned-environment prune offer**, when step 1 detected a lockfile
+    and its package manager. This is the one ASK entry that is a **verb, not a
+    path** — see below.
+
+  **The prune offer (ASK-tier, and why).** Dependency churn leaves packages in
+  `node_modules/` that the current lockfile no longer references. After a round
+  of major bumps, one real repo's `node_modules/` went from 60 MB to 106 MB
+  because `node_modules/.pnpm` retained both the old and new TypeScript side by
+  side — ~46 MB unreferenced by the lockfile. That is exactly the dead weight
+  from dependency churn that tidy exists to catch, and until now there was no
+  tier that could reach it: `node_modules/` is denylisted as an *environment*,
+  so the only options were keep-the-whole-tree or delete-the-whole-tree.
+
+  The prune is the missing middle. It removes **only** packages the lockfile
+  does not reference, so it cannot break the working install and forces no
+  reinstall of anything in use. It nonetheless lands in **ASK, not CACHE**:
+  it mutates an environment in place, and ASK is the tier whose contract is
+  *never automatic under any flag* (Apply, below). `--caches` deliberately does
+  not reach it. This **adds a tier and relaxes nothing** — `node_modules/`
+  full-tree deletion stays denylisted and ASK exactly as before.
+
+  Two things not to overstate:
+
+  - **pnpm is the real case; npm is usually a near-no-op.** `pnpm prune` clears
+    the `.pnpm` link farm, where the duplication actually accumulates. `npm
+    install` already reconciles extraneous packages as part of its own run, so
+    `npm prune` typically reclaims little. Offer it, but do not present the two
+    as equivalent wins. In a pnpm workspace the prune must be run recursively
+    (`-r`) or it only touches the root package.
+  - **A pre-run size estimate is optional.** Diffing `node_modules/.pnpm`
+    entries against lockfile references to predict the reclaim is real parsing
+    work on every run, for a number that can be wrong. Reporting the current
+    `node_modules/` size and the **actual** bytes freed afterwards — what every
+    other category effectively does — is enough. Compute the estimate only if
+    it is cheap and reliable in the repo at hand; never block the offer on it.
 
   Deciding which worktrees, branches, and stashes are *stale* remains
   [[reset]]'s job — point there instead of pruning them here. `/repo:tidy`'s
@@ -406,6 +470,7 @@ ASK:
   .env                     gitignored, 1 KB  ← credentials, never auto-deleted
   .venv/                   gitignored, 240 MB  ← virtualenv, expensive to rebuild
   node_modules/            gitignored, 310 MB  ← environment, reinstall via npm; not a --caches target
+  prune node_modules       pnpm-lock.yaml detected  ← run `pnpm prune` to drop lockfile-unreferenced packages
   .loom/locks/             gitignored, empty  ← coordination root, empty is normal state
   .wrangler/tmp/           gitignored, empty  ← tool runtime dir, empty between builds
   notes-scratch.md         untracked, 3 KB, modified today  ← might be real work
@@ -494,6 +559,16 @@ guessing** at a command that may not exist.
   needs tidy to *perform* it, that is a different command with a different
   safety story, not a flag on this one.
 
+**The prune offer, if accepted, runs the package manager's own verb and
+nothing else** — `pnpm prune` (add `-r` in a workspace) or `npm prune`, from
+the repo root. Never `git clean`, never `rm` inside `node_modules/`, and never
+a hand-rolled walk of `.pnpm`: the whole safety argument for this tier is that
+the package manager decides what is unreferenced, so bypassing it forfeits the
+guarantee. Report the actual bytes freed by measuring `node_modules/` before
+and after. If the prune command fails, report the failure and leave the tree
+alone — a partially pruned `node_modules/` is the package manager's to
+reconcile on the next install, not tidy's to repair.
+
 The default auto-delete is scoped to **SAFE-allowlisted paths only** (plus the
 CACHE allowlist when `--caches` is passed). Never pass a denylisted path
 (secrets, virtualenvs, `node_modules/`, tool-scaffolding roots, git worktree
@@ -546,3 +621,12 @@ inventory to confirm and report bytes freed.
    than deleting a worktree is telling the operator their 94 GB tree is clean.
    Sizing those roots is a `du` with no `-prune`, so it is opt-in behind
    `--sizes` and bounded per root; the report itself never is.
+10. **Prune only through the package manager** — the orphaned-environment
+   offer runs `pnpm prune` / `npm prune` and nothing else. Never `rm` inside
+   `node_modules/`, never `git clean` against it, never a hand-rolled walk of
+   `node_modules/.pnpm`. The tier is defensible *because* the package manager
+   decides what the lockfile no longer references; deciding that ourselves
+   forfeits the only guarantee that makes it safe. And the offer is ASK-tier,
+   so rule 7's `--caches` opt-in does not reach it and no flag makes it
+   automatic — `node_modules/` full-tree deletion remains denylisted and ASK
+   exactly as under rule 6.

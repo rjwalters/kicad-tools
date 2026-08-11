@@ -66,8 +66,6 @@ boards/*/*/output/*.kct.json
 # Loom model-cost experiment (canary A/B, #3725/#3731)
 # The CANARY confirmation MUST stay uncommitted by design -- a copied/committed
 # config can never confirm canary status. Local outcome-chain stats too.
-.loom/CANARY
-.loom/stats/
 # >>> loom-managed (do not edit) >>>
 # Loom runtime state (don't commit these)
 .loom-in-use
@@ -87,7 +85,6 @@ boards/*/*/output/*.kct.json
 .loom/interventions/
 .loom/worktrees/
 .loom/worktrees-local/
-.claude/worktrees/
 .loom/state.json
 .loom/mcp-command.json
 .loom/activity.db
@@ -117,7 +114,6 @@ boards/*/*/output/*.kct.json
 .loom/*.sock
 .loom/*.tmp
 .loom/*.bak
-.loom/.install.lock
 .loom/logs/
 # <<< loom-managed <<<
 

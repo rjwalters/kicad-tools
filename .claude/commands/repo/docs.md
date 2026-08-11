@@ -76,6 +76,12 @@ skill/command wikilinks, and nested CLAUDE.md paths. Fold its findings in the
 same way. Broken CLAUDE.md paths remain **critical** — they're the primary
 navigation paths for agents.
 
+That includes [[links]]' resolution rules, not just its finding list: where the
+repo declares an install-template mapping in `.repo/link-roots.json`, fold in
+the mapping table too and keep the "resolved via install mapping" annotation on
+individual links. A consolidated report that drops it turns a wrong mapping into
+a silent zero.
+
 ## Output Format
 
 One consolidated report, grouped by layer so it's clear which are mechanical

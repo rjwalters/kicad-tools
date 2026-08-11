@@ -165,12 +165,6 @@
 #                        Unset by default (no `-m` emitted).
 #   LOOM_CODEX_MODEL_CHECK  Set to 0 to disable the Claude-shaped-model refusal
 #                        below (issue #5028). Default on (`1`).
-#   LOOM_CODEX_AUTH_MODE_CHECK  Set to 0 to disable the ChatGPT-plan pinned-
-#                        model guard below (issue #5499): a ChatGPT-plan
-#                        profile only accepts its account's own default
-#                        model, so an explicitly pinned model (even a
-#                        Codex-family one) is dropped with a warning rather
-#                        than launched into a guaranteed 400. Default on (`1`).
 #   LOOM_EFFORT          Reasoning effort, mapped to
 #                        `-c model_reasoning_effort=<value>`. Skipped when an
 #                        explicit `-c model_reasoning_effort=` override is
@@ -653,54 +647,6 @@ else
     fi
 fi
 
-# --- ChatGPT-plan auth-mode guard for a pinned model (issue #5499) ---
-# A Codex profile authenticated via a ChatGPT PLAN (interactive `codex login`)
-# restricts the CLI to the account's own default model — an EXPLICITLY pinned
-# model, even a Codex-family one like `gpt-5-codex`, is rejected on the wire
-# with a 400 `invalid_request_error`: "The '<model>' model is not supported
-# when using Codex with a ChatGPT account." The Claude-shaped-model refusal
-# above cannot catch this: `gpt-5-codex` is correctly Codex-family, so it
-# passes that check — the real incompatibility is model vs AUTH MODE, not
-# model vs runtime family, and nothing before this point has verified it.
-#
-# Detected here, AFTER CODEX_HOME is resolved and BEFORE the CLI is ever
-# dispatched, via `codex login status`'s own designed-for-this wording
-# ("Logged in using ChatGPT" vs "Logged in using an API key") — never by
-# opening or parsing `auth.json` itself, which Loom treats as opaque mutable
-# state owned by Codex (see account_lifecycle.rs's module doc). A ChatGPT-plan
-# match DROPS the pinned model (with a warning) rather than launching a
-# doomed invocation — the account's own default model is exactly what a
-# manual `codex exec` with no `-m` uses successfully. This is a warn-and-drop,
-# not a hard refusal (unlike the Claude-shaped-model check): the pin is a
-# now-provably-wrong REQUEST, not a malformed one, and dropping it lets the
-# scheduled role/sweep still run productively on the account's own default
-# instead of dying every cadence tick.
-#
-# Skipped entirely under LOOM_CODEX_NO_EXEC (argv-preview mode promises to
-# "never touch the real CLI") and when no model is pinned at all (nothing to
-# drop). Bounded to 10s via bounded-run.sh — same budget
-# account_lifecycle.rs's `codex login status` call uses — so a wedged CLI
-# cannot hang a spawn. Escape hatch: LOOM_CODEX_AUTH_MODE_CHECK=0.
-CODEX_DROP_PINNED_MODEL=false
-if [[ -n "$EFFECTIVE_MODEL" && -z "${LOOM_CODEX_NO_EXEC:-}" \
-      && "${LOOM_CODEX_AUTH_MODE_CHECK:-1}" != "0" ]] \
-    && command -v codex >/dev/null 2>&1; then
-    _auth_mode_bounded_run_lib="${_SCRIPT_DIR}/lib/bounded-run.sh"
-    if [[ -f "$_auth_mode_bounded_run_lib" ]]; then
-        # shellcheck source=./lib/bounded-run.sh
-        source "$_auth_mode_bounded_run_lib"
-        _login_status_out="$(bounded_run 10 codex login status </dev/null 2>&1)"
-        _login_status_rc=$?
-        if [[ $_login_status_rc -eq 0 ]] \
-            && printf '%s' "$_login_status_out" | grep -qi "logged in using chatgpt"; then
-            log_warn "spawn-codex: this Codex profile is authenticated via a ChatGPT plan, which only supports the account's own default model (issue #5499)."
-            log_warn "spawn-codex: dropping the pinned model '$EFFECTIVE_MODEL' rather than launching a doomed invocation — the CLI 400s with \"model is not supported when using Codex with a ChatGPT account\"."
-            log_warn "spawn-codex: fix by omitting autonomous.roleRunner.roleModels/LOOM_MODEL/LOOM_CODEX_MODEL for this role/profile, or point it at an API-key-authenticated profile. Escape hatch: LOOM_CODEX_AUTH_MODE_CHECK=0."
-            CODEX_DROP_PINNED_MODEL=true
-        fi
-    fi
-fi
-
 # --- Managed hook readiness / trust preflight (issue #4495) ---
 #
 # Loom's guard intent is enforced for Codex through a managed `pre_tool_use`
@@ -797,35 +743,7 @@ CODEX_ARGS=()
 if [[ "$HAS_PROMPT" == "true" ]]; then
     CODEX_ARGS+=(exec)
 fi
-if [[ "$CODEX_DROP_PINNED_MODEL" == "true" ]]; then
-    # Issue #5499: strip the pinned `-m`/`--model` (both the two-token and
-    # `=`-joined single-token forms) that the ChatGPT-plan guard above decided
-    # not to forward. Filtered here, not skipped at push-time, so every OTHER
-    # passthrough arg (sandbox, effort, `-c` overrides, `--skip-git-repo-check`)
-    # is preserved unchanged regardless of where in PASSTHROUGH_ARGS the model
-    # flag landed.
-    _codex_filtered_args=()
-    _codex_skip_next_arg=false
-    for _codex_arg in ${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}; do
-        if [[ "$_codex_skip_next_arg" == "true" ]]; then
-            _codex_skip_next_arg=false
-            continue
-        fi
-        case "$_codex_arg" in
-            -m | --model)
-                _codex_skip_next_arg=true
-                continue
-                ;;
-            -m=* | --model=*)
-                continue
-                ;;
-        esac
-        _codex_filtered_args+=("$_codex_arg")
-    done
-    CODEX_ARGS+=(${_codex_filtered_args[@]+"${_codex_filtered_args[@]}"})
-else
-    CODEX_ARGS+=(${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"})
-fi
+CODEX_ARGS+=(${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"})
 if [[ "$HAS_PROMPT" == "true" ]]; then
     CODEX_ARGS+=("$PROMPT")
 fi

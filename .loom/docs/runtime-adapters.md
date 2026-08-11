@@ -537,12 +537,6 @@ the identical fail-closed rules, so a bad binding is caught any time an
 operator runs the command — not only the next time a role's tick actually hits
 it.
 
-**Bash fallback (#5277)**: `defaults/scripts/validate-roles.sh` runs the same
-role-dependency checks as `loom-daemon validate` without needing the Rust
-binary built — useful on a fresh source checkout or a shell-only CI step. It
-is operator-manual (no in-repo caller invokes it as a dependency); prefer
-`loom-daemon validate` when the binary is available.
-
 **Runtime manifest resolution and the bundled fallback (#5002).** The role and
 runtime manifest directories are resolved independently (#4688): each prefers
 `.loom/roles` / `.loom/runtimes` when the subdirectory exists on disk, and
@@ -669,46 +663,6 @@ model-selection block resolves an effective model (explicit `-m`/`--model` >
 `sonnet`, `haiku`, `fable`, or `claude*`, `@effort` stripped) logs the same fix
 options and exits `78` (`EX_CONFIG`) before any auth work. Escape hatch:
 `LOOM_CODEX_MODEL_CHECK=0`.
-
-#### ChatGPT-plan seats cannot serve a pinned model at all (#5499)
-
-The family-level checks above only catch a Claude-shaped model on a Codex
-runtime. They cannot catch a **Codex-family** model — e.g. `gpt-5-codex` — that
-still fails, because the real incompatibility is model vs the profile's **auth
-mode**, not model vs runtime family: a Codex profile authenticated via a
-ChatGPT plan (interactive `codex login`, as opposed to `codex login
---with-api-key`) only accepts the account's own default model. Pinning
-anything else — including a perfectly valid Codex model name — gets rejected
-on the wire with a 400 `invalid_request_error`:
-
-```
-The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT account.
-```
-
-**If the Codex profile a role/runtime binding points at is authenticated via a
-ChatGPT plan, omit `roleModels`/`LOOM_MODEL`/`LOOM_CODEX_MODEL` for that
-role entirely** and let the CLI use the account's own default — this is the
-single most likely first-run misconfiguration for a Codex-bound role, and the
-error text otherwise only ever surfaces in the role's own log
-(`role-<role>.log` or a sweep's per-issue log), never in `loom-daemon health`.
-
-`spawn-codex.sh` now guards against it directly: once CODEX_HOME is resolved
-and an explicit model is about to be forwarded, it runs `codex login status`
-(bounded, 10s) and checks the CLI's own wording — "Logged in using ChatGPT" vs
-"Logged in using an API key" — never `auth.json`'s contents, which Loom treats
-as opaque. A ChatGPT-plan match **drops** the pinned model (warning logged,
-invocation still runs on the account's default) rather than launching a
-doomed invocation. Escape hatch: `LOOM_CODEX_AUTH_MODE_CHECK=0`. Because this
-runs in the adapter every caller passes through — role runner, sweep dispatch,
-or a hand-run `LOOM_RUNTIME=codex` — it needs no daemon-side counterpart the
-way the family-level check above does.
-
-As defense in depth, `classify-error.sh`'s `codex` provider table now
-classifies this specific 400 as `FATAL` rather than the generic
-`RECOVERABLE` catch-all — the fault is the model/auth-mode pairing, not the
-transport, so retrying the identical invocation can never succeed. Before this
-the failure retried on every role-runner/sweep cadence tick indefinitely,
-burning one invocation per cycle.
 
 Daemon admission runs before any claim lock, forge mutation, account selection,
 log header, or child spawn. Successful sweep status and

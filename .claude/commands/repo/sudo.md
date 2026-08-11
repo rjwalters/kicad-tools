@@ -36,6 +36,17 @@ removes the *password* gate, not the guard's `ask`/`block` gates on risky
 commands (`rm -rf /`, force-push to `main`, cloud destruction, …). Granting
 passwordless root does not weaken any of those checks.
 
+**Run this from a host session, not from inside a Loom-managed repo session.**
+`/repo:sudo` configures *the machine*, not this repository's contents, and its
+write step (step 5) is deliberately built around `mktemp` — a path this repo's
+worktree-write-confinement guard can never resolve, so it is denied
+**fail-closed** whenever a managed worktree exists here. That denial is
+expected and must not be worked around: invoke `/repo:sudo` from a session
+outside a Loom-managed checkout, or have the operator run step 5's commands
+by hand in a plain shell/SSH login. Full explanation, and why the temp file
+must stay `mktemp`-created, is in the guard note in
+[step 5](#5-confirm-then-write--validate--roll-back).
+
 ## Usage
 
 ```
@@ -187,6 +198,43 @@ denied by the very file it is trying to remove. Validating `$TMP` first makes
 that failure mode impossible; the post-install full-chain check is then only a
 belt-and-suspenders proof that the include wiring is sound:
 
+> **Guard note — these two writes are denied inside a Loom-managed repo
+> session, by design.** The worktree-write-confinement guard
+> (`hooks/repo/guard-destructive.sh`, tag
+> `worktree-write-confinement-unresolved-var`) fails **closed** on any Bash
+> write whose target is an unexpanded shell variable, because it cannot tell
+> where the write will land. Both writes below are exactly that shape:
+>
+> - `} > "$TMP"` — `$TMP` holds `$(mktemp)`, a command substitution the guard's
+>   same-command variable resolution can never substitute (it only resolves a
+>   *literal* assigned value, and only for an **unquoted** `$NAME` token — a
+>   double-quoted `"$VAR"` target is left unresolved even when its value is a
+>   plain literal).
+> - `sudo cp "$TMP" "$DROPIN"` — `$DROPIN` is per-user by construction
+>   (`/etc/sudoers.d/$(id -un)-nopasswd`), so it cannot be spelled literally in
+>   this file at all.
+>
+> The deny is keyed to whether **any** managed worktree exists in the
+> repository, not to whether the current session is inside one, so it fires
+> from the main checkout too. With zero managed worktrees the guard fails open
+> and this step runs unchanged.
+>
+> **Do not "fix" this by hardcoding a predictable temp path.** `mktemp`'s
+> atomic `O_EXCL` creation is load-bearing here: the candidate is `chmod
+> 440`'d and then `sudo cp`'d into `/etc/sudoers.d/` **as root**. A guessable
+> name in a world-writable `/tmp` lets an attacker pre-create (and therefore
+> own) the path, redirect it through a symlink, or swap its contents between
+> `visudo -cf` and the `cp` — turning a guard-friendliness tweak into a
+> root-policy TOCTOU hole. A guard denial is strictly the safer failure.
+>
+> **What to do when it is denied**: stop and run the step from a host session
+> — a plain shell/SSH login, or any Claude session outside a Loom-managed
+> checkout — where this guard is not installed. Never route around it by
+> switching tools, weakening the temp path, or disabling
+> `guards.worktreeIsolation` / `REPO_GUARD_WORKTREE_ISOLATION` to push the
+> write through; those escape hatches are the operator's call, not the
+> agent's.
+
 ```bash
 USER_NAME="$(id -un)"
 DROPIN="/etc/sudoers.d/${USER_NAME}-nopasswd"
@@ -255,7 +303,9 @@ it later.
    grant line) and the target path, and act only on an explicit yes. There is
    no silent/auto-apply mode; confirmation is the only mode.
 2. **Validate the candidate before it goes live, then roll back on failure** —
-   the candidate is built at `0440` in a temp file and syntax-checked in
+   the candidate is built at `0440` in an `mktemp` file (the unpredictable,
+   `O_EXCL`-created path is a security property of this flow, not an
+   incidental detail — see the guard note in step 5) and syntax-checked in
    isolation with `sudo visudo -cf "$TMP"` **before** it is copied into
    `/etc/sudoers.d/`, so a malformed drop-in never becomes active policy (a
    sudoers.d file is live the instant it lands, and sudo fails closed on a
@@ -273,3 +323,9 @@ it later.
    the password gate, not the guard's `ask`/`block` gates on risky commands.
 6. **Prefer the smallest grant that unblocks the work** — offer `--scoped`
    (launchctl / pkill / spctl / renice) when blanket `ALL` root isn't needed.
+7. **Run it from a host session, and never weaken step 5 to satisfy a guard**
+   — this is machine-global setup, so it belongs outside a Loom-managed repo
+   session, where the worktree-write-confinement guard denies step 5's
+   `$TMP`/`$DROPIN` writes fail-closed. If that denial happens, hand the step
+   to the operator; do not hardcode a predictable temp path, switch tools, or
+   disable the guard to get the write through (see the guard note in step 5).

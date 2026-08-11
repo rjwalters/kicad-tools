@@ -248,41 +248,17 @@ def stopped_task_ids:
 #      </status>` or `<status>failed</status>` in the result text — NOT
 #      `<status>running</status>`, which is still pending) of the `agentId`
 #      recovered from the launch ack text (`agentId: <ID>`).
-#   c. Structural short-circuit (issue #5243): a dispatch with
-#      `input.run_in_background == false` is SYNCHRONOUS — the harness cannot
-#      advance the assistant's turn (let alone reach a Stop event) past a
-#      blocking tool_use until its result has actually landed, so that dispatch's
-#      FIRST and only `tool_result` is always the real, final result, never a
-#      launch ack (no separate async launch ack is structurally possible for a
-#      blocking call). For these ids ANY tool_result resolves the dispatch — the
-#      launch-ack text exclusion in (a) is skipped entirely, so a sync completion
-#      whose text incidentally contains the "Async agent launched successfully"
-#      boilerplate (e.g. shared harness ack wording) still resolves. This mirrors
-#      the `.name=="Bash" and (.input.run_in_background == true)` structural
-#      filter used by the background-Bash detector below. Only an EXPLICIT
-#      `== false` triggers this; an absent field stays on the (a)/(b) path (a
-#      plain Task with no field is already resolved by its ordinary tool_result
-#      via (a), so back-compat is unchanged).
 #
-# Deliberately does NOT treat an ASYNC dispatch's launch ack as resolution (that
-# is the exact #4389 hazard recurring on this tool) — for async ids only (a) or
-# (b) counts. A genuinely orphaned async Agent dispatch (no later distinct
-# tool_result, no terminal TaskOutput poll) still blocks, the true positive this
-# detector exists for.
+# Deliberately does NOT treat the launch ack itself as resolution (that is the
+# exact #4389 hazard recurring on this tool) — only (a) or (b) counts. A
+# genuinely orphaned Agent dispatch (no later distinct tool_result, no terminal
+# TaskOutput poll) still blocks, the true positive this detector exists for.
 UNRESOLVED_TASK_IDS=$(jq -s -r "$JQ_PRELUDE"'
   . as $t
   | (results) as $r
   | [ $t[]? | select(.type=="assistant") | .message.content[]?
       | select(.type=="tool_use" and (.name=="Task" or .name=="Agent"))
       | .id ] as $task_ids
-  # Synchronous (blocking) Task/Agent dispatch ids (issue #5243): an EXPLICIT
-  # run_in_background == false makes the call block, so its first tool_result is
-  # always the real completion — never a launch ack. Any tool_result on these
-  # ids resolves the dispatch (launch-ack text exclusion skipped for them).
-  | [ $t[]? | select(.type=="assistant") | .message.content[]?
-      | select(.type=="tool_use" and (.name=="Task" or .name=="Agent"))
-      | select(.input.run_in_background == false)
-      | .id ] as $sync_task_ids
   # TaskOutput polls: the poll tool_use id, and the agentId/task ref it names.
   | ( [ $t[]? | select(.type=="assistant") | .message.content[]?
         | select(.type=="tool_use" and .name=="TaskOutput")
@@ -313,7 +289,6 @@ UNRESOLVED_TASK_IDS=$(jq -s -r "$JQ_PRELUDE"'
             | ((.text | capture("agentId: (?<v>[A-Za-z0-9_-]+)")?).v) // empty ]
         ) as $agent_ids
       | if ($id_results | length) == 0 then $id
-        elif (($sync_task_ids | index($id)) != null) then empty
         elif ($real_completions | length) > 0 then empty
         elif ( [ $agent_ids[] | select(($polled_ok_refs | index(.)) != null) ]
                | length ) > 0 then empty

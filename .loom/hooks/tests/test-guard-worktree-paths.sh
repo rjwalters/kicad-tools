@@ -49,6 +49,11 @@ chmod +x "$TMPROOT/.loom/hooks/guard-worktree-paths.sh"
 # equivalent installed-layout path so the guards.worktreeIsolation /
 # worktree.root reads exercise the actual tiered resolution, not a stub.
 cp "$REPO_ROOT/defaults/scripts/lib/config-resolver.sh" "$TMPROOT/.loom/scripts/lib/config-resolver.sh"
+# The hook also sources ../scripts/lib/canonical-path.sh (#4495) for
+# symlink-aware target canonicalization. Stage it at the installed-layout path
+# so the symlink-escape cases below exercise the real resolver rather than the
+# lexical fallback.
+cp "$REPO_ROOT/defaults/scripts/lib/canonical-path.sh" "$TMPROOT/.loom/scripts/lib/canonical-path.sh"
 HOOK="$TMPROOT/.loom/hooks/guard-worktree-paths.sh"
 
 pass() { PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1)); printf "${GREEN}PASS${NC} %s\n" "$1"; }
@@ -268,6 +273,35 @@ else
     fail "jq absent -> allow (fail-open) (got exit=$code output=$out)"
 fi
 rm -rf "$NOJQ_DIR"
+
+# --- symlink escapes (#4495) -------------------------------------------------
+# The pre-#4495 normalization was purely lexical (os.path.normpath), so a
+# symlink INSIDE the worktree that points at the main checkout looked like an
+# in-worktree path and was allowed. loom_canonical_path resolves it.
+ln -sfn "$TMPROOT" "$WT/escape-to-main"
+result=$(run_hook "$WT/escape-to-main/CLAUDE.md")
+assert_deny "(e) symlink inside worktree -> main checkout is resolved and denied" "$result"
+
+# A symlink that stays inside the worktree must still be allowed.
+mkdir -p "$WT/real"
+ln -sfn "$WT/real" "$WT/link-to-real"
+result=$(run_hook "$WT/link-to-real/new-file.txt")
+assert_allow "(f) symlink inside worktree -> worktree stays allowed" "$result"
+
+# `..` traversal out of the worktree and back into the main checkout.
+result=$(run_hook "$WT/src/../../../../CLAUDE.md")
+assert_deny "(g) .. traversal out of the worktree into main -> deny" "$result"
+
+# A path with spaces and shell metacharacters must be handled as data, never
+# interpolated into a command.
+result=$(run_hook "$TMPROOT/a dir with spaces/\$(touch /tmp/loom-pwn); echo.md")
+assert_deny "(h) path with spaces + shell metacharacters -> deny, no interpolation" "$result"
+if [[ -e /tmp/loom-pwn ]]; then
+    fail "(h) shell metacharacters in a path were EXECUTED"
+    rm -f /tmp/loom-pwn
+else
+    pass "(h) shell metacharacters in a path were not executed"
+fi
 
 # --- defaults/ vs .loom/ sync ------------------------------------------------
 DEPLOY_HOOK="$REPO_ROOT/.loom/hooks/guard-worktree-paths.sh"

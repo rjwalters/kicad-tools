@@ -281,14 +281,7 @@ FAKE_DAEMON_DIR="$TMP_ROOT/daemon"
 mkdir -p "$FAKE_DAEMON_DIR"
 # A fake loom-daemon: `forge <e> list --cached` with --json succeeds and emits a
 # sentinel; any shape without --json exits 3 (decline), mirroring the real one.
-#
-# Named `loom-daemon-mock`, NOT `loom-daemon` (#5548): gh-cached's
-# locate_loom_daemon() checks $LOOM_DAEMON_BIN (set explicitly below) BEFORE
-# falling back to a bare `which("loom-daemon")` PATH lookup, so this fixture
-# never needs the literal name to be resolved. A distinct name means a leaked
-# fixture can never forge a production `pgrep -f loom-daemon`-style liveness
-# check the way the incident describes.
-cat > "$FAKE_DAEMON_DIR/loom-daemon-mock" <<'FAKE'
+cat > "$FAKE_DAEMON_DIR/loom-daemon" <<'FAKE'
 #!/usr/bin/env bash
 if [[ "$1" == "forge" && "$3" == "list" ]]; then
     if printf '%s\n' "$@" | grep -q -- '--json'; then
@@ -299,16 +292,13 @@ if [[ "$1" == "forge" && "$3" == "list" ]]; then
 fi
 exit 3
 FAKE
-chmod +x "$FAKE_DAEMON_DIR/loom-daemon-mock"
+chmod +x "$FAKE_DAEMON_DIR/loom-daemon"
 
-# Runner with the fake daemon pinned via LOOM_DAEMON_BIN and the ETag layer
-# ENABLED. FAKE_DAEMON_DIR is still added to PATH as a belt-and-suspenders
-# safety net for any code path that falls through to a PATH search, but
-# LOOM_DAEMON_BIN is what locate_loom_daemon() actually resolves first.
+# Runner with the fake daemon on PATH and the ETag layer ENABLED.
 ghc_etag() {
     PATH="$STUB_DIR:$FAKE_DAEMON_DIR:$PATH" \
     GH_CACHE_DIR="$CACHE_DIR" \
-    LOOM_DAEMON_BIN="$FAKE_DAEMON_DIR/loom-daemon-mock" \
+    LOOM_DAEMON_BIN="$FAKE_DAEMON_DIR/loom-daemon" \
       "$GH_CACHED" "$@"
 }
 
@@ -327,104 +317,6 @@ assert_eq "1" "$(call_count)" "a daemon-declined list shape falls through to a r
 reset_cache
 LOOM_ETAG_LIST_DISABLE=1 ghc_etag issue list --label "loom:issue" --state open --json number,title >/dev/null
 assert_eq "1" "$(call_count)" "LOOM_ETAG_LIST_DISABLE=1 bypasses the ETag path (falls to gh)"
-
-# --- 10. Multi-repo cache isolation (#5224) --------------------------------
-# CACHE_DIR is scoped per-repo so two different repos on the same host never
-# share a cache entry for a textually identical `gh` invocation — the bug
-# reported in #5224 (a leaked PR from an unrelated repo's cached `pr list`).
-echo ""
-echo "Testing multi-repo cache isolation (#5224)..."
-
-# GH_CACHE_REPO_ID is the direct override (used here as the "injected
-# repo-identity override for the test" per the issue's suggested test shape).
-ghc_repo() {
-    local repo_id="$1"; shift
-    PATH="$STUB_DIR:$PATH" \
-    GH_CACHE_DIR="$CACHE_DIR" \
-    GH_CACHE_TTL="${TTL_OVERRIDE:-30}" \
-    GH_CACHE_REPO_ID="$repo_id" \
-    LOOM_ETAG_LIST_DISABLE=1 \
-      "$GH_CACHED" "$@"
-}
-
-reset_cache
-echo '[{"number":4242,"labels":["loom:review-requested"]}]' > "$STATE_DIR/pr-list.json"
-repoA_out1=$(ghc_repo repoA pr list --label "loom:review-requested" --state open --limit 500)
-echo '[{"number":9999,"labels":["loom:review-requested"]}]' > "$STATE_DIR/pr-list.json"
-repoB_out1=$(ghc_repo repoB pr list --label "loom:review-requested" --state open --limit 500)
-assert_eq "2" "$(call_count)" "identical 'gh' args from two different repo identities both hit the real gh (no cross-repo cache hit)"
-case "$repoB_out1" in
-  *4242*) leaked="yes" ;;
-  *) leaked="no" ;;
-esac
-assert_eq "no" "$leaked" "repo B's read does not return repo A's cached PR #4242"
-
-# repoA's own cache is still warm and unaffected by repoB's read.
-repoA_out2=$(ghc_repo repoA pr list --label "loom:review-requested" --state open --limit 500)
-assert_eq "2" "$(call_count)" "repoA's own repeat read is still served from its own cache (unaffected by repoB's read)"
-assert_eq "$repoA_out1" "$repoA_out2" "…and returns repoA's original cached payload, not repoB's"
-
-# restore baseline listing for later blocks
-echo '[{"number":4242,"labels":["loom:review-requested"]}]' > "$STATE_DIR/pr-list.json"
-
-# Invalidation isolation ("Additional risk" in #5224): a mutation issued
-# under repoA's identity must not invalidate repoB's cached entry for a
-# numerically-identical resource id (both have a "#4242").
-reset_cache
-ghc_repo repoA pr view 4242 --json labels >/dev/null            # warm repoA: 1 call
-ghc_repo repoB pr view 4242 --json labels >/dev/null            # warm repoB: 2 calls
-ghc_repo repoA pr edit 4242 --add-label "loom:pr" >/dev/null    # mutation in repoA: 3 calls
-ghc_repo repoB pr view 4242 --json labels >/dev/null            # repoB re-read: still cached
-assert_eq "3" "$(call_count)" "a mutation issued under repoA's identity does not invalidate repoB's cached entry for the same resource id"
-
-# The real (non-override) resolution path: distinct git toplevels, not just
-# the GH_CACHE_REPO_ID override, must isolate too.
-if command -v git >/dev/null 2>&1; then
-    echo ""
-    echo "Testing multi-repo isolation via real distinct git toplevels..."
-
-    REPO_A_DIR="$TMP_ROOT/repoA"
-    REPO_B_DIR="$TMP_ROOT/repoB"
-    mkdir -p "$REPO_A_DIR" "$REPO_B_DIR"
-    git -C "$REPO_A_DIR" init -q
-    git -C "$REPO_B_DIR" init -q
-
-    ghc_cwd() {
-        local dir="$1"; shift
-        ( cd "$dir" && \
-          PATH="$STUB_DIR:$PATH" \
-          GH_CACHE_DIR="$CACHE_DIR" \
-          GH_CACHE_TTL="${TTL_OVERRIDE:-30}" \
-          LOOM_ETAG_LIST_DISABLE=1 \
-            "$GH_CACHED" "$@" )
-    }
-
-    reset_cache
-    echo '[{"number":1111,"labels":["loom:review-requested"]}]' > "$STATE_DIR/pr-list.json"
-    outA=$(ghc_cwd "$REPO_A_DIR" pr list --label "loom:review-requested" --state open --limit 500)
-    echo '[{"number":2222,"labels":["loom:review-requested"]}]' > "$STATE_DIR/pr-list.json"
-    outB=$(ghc_cwd "$REPO_B_DIR" pr list --label "loom:review-requested" --state open --limit 500)
-    assert_eq "2" "$(call_count)" "two distinct real git toplevels issuing the same 'gh' args both hit the real gh (default git-based resolution, not just the override)"
-    case "$outA" in
-      *1111*) sawA="yes" ;;
-      *) sawA="no" ;;
-    esac
-    assert_eq "yes" "$sawA" "repo A (a distinct real git toplevel) reads its own PR #1111 from the real gh"
-    case "$outB" in
-      *2222*) sawB="yes" ;;
-      *) sawB="no" ;;
-    esac
-    assert_eq "yes" "$sawB" "repo B (a distinct real git toplevel) reads its own PR #2222, not repo A's cached response"
-    case "$outB" in
-      *1111*) leaked2="yes" ;;
-      *) leaked2="no" ;;
-    esac
-    assert_eq "no" "$leaked2" "repo B (a distinct real git toplevel) does not see repo A's cached PR #1111"
-
-    echo '[{"number":4242,"labels":["loom:review-requested"]}]' > "$STATE_DIR/pr-list.json"
-else
-    echo "SKIP: git not available — skipping real-git-toplevel isolation test"
-fi
 
 # --- Summary ---------------------------------------------------------------
 echo ""

@@ -38,6 +38,12 @@ Run each of the following checks and compile results into a single report:
 - Markdown links (`[text](path)`) pointing to nonexistent files
 - CLAUDE.md paths that don't resolve
 - Skill/command cross-references to missing files
+- Links inside an **install-template tree** (an installer's `defaults/`, a
+  cookiecutter skeleton) resolve at their installed destination when the repo
+  declares the mapping in `.repo/link-roots.json`. Fold [[links]]' mapping table
+  into this report and say which mapping resolved a link — a mapping fails by
+  hiding errors, so it has to show its work. With no declaration, resolution is
+  unchanged.
 
 ### 4. Gitignore Issues (see [[gitignore]])
 - Files that are ignored but probably shouldn't be
@@ -78,7 +84,7 @@ Present findings as a table grouped by category:
 ### Summary
 - 2 README issues (0 critical, 1 warn, 1 info)
 - 1 orphan (0 critical, 0 warn, 1 info)
-- 0 broken links
+- 0 broken links (3 resolved via install mapping)
 - 0 gitignore issues
 - 3 stale branches
 ```

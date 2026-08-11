@@ -35,7 +35,7 @@ suspect the auto-detection missed something (e.g. a touched build flag).
 See `README.md` "Fresh worktree checklist" for the full setup sequence.
 
 <!-- BEGIN REPO-SKILLS -->
-This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.8.1 installed —
+This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.10.0 installed —
 general repository hygiene and environment commands invoked as `/repo:<command>`. Run
 `/repo:help` for the command list, or see `.claude/skills/repo/SKILL.md` for the full
 guide. Hygiene commands apply safe, reversible fixes by default and report each
@@ -49,6 +49,7 @@ Releases go through a **PR-based flow** — see [`RELEASING.md`](RELEASING.md) f
 the canonical process. Never push the version-bump commit directly to `main`;
 the version is bumped on a branch, merged via PR, and the `vX.Y.Z` tag is
 created **only after** the bump PR merges (the tag must point at a commit that
-is on `main`, because `publish.yml` builds the tag commit).<!-- BEGIN LOOM ORCHESTRATION -->
+
+<!-- BEGIN LOOM ORCHESTRATION -->
 This repository uses [Loom](https://github.com/rjwalters/loom) for AI-powered development orchestration — see the Loom repository for the full guide (roles, labels, worktrees, configuration). When installed, Loom also writes a locally-substituted copy of that guide to `.loom/CLAUDE.md`.
 <!-- END LOOM ORCHESTRATION -->

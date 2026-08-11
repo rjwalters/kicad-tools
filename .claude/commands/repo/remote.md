@@ -44,6 +44,7 @@ loom's `fleet add-worker`) invokes directly:
 ```
 repo-remote up [aws|gcp]              # DRY RUN: print the resolved plan + estimated cost as JSON, create NOTHING
 repo-remote up --yes [--json]        # provision (or reuse) with no prompts; requires pre-supplied cost-relevant config
+repo-remote up --yes --force         # additionally override the fleet-marker guard (see below)
 repo-remote status [--json]          # list instances tagged repo-remote=<name>
 repo-remote down [--yes] [--delete]  # dry-run listing without --yes; stop (or --delete to terminate) with --yes
 ```
@@ -55,6 +56,26 @@ billable size on its own. Plain `repo-remote up` (no `--yes`) is a dry run that
 prints the plan and estimated hourly cost and spends nothing, so a caller can
 implement a "plan shown before money is spent" check against the `--json`
 output (instance id, public IP, SSH alias, estimated hourly cost).
+
+The `--json` output for `up` (both the dry-run plan and a real provision) also
+carries `estimated_cost_approximate` (bool) and `estimated_cost_basis`
+(`"table"` | `"vcpu-scaled"` | `"heuristic"`) alongside
+`estimated_hourly_cost_usd`, so a caller can tell an exact price-table hit
+apart from a vCPU-count-scaled guess or a last-resort flat heuristic for an
+instance type with no price data at all — a confidently-wrong flat number is
+worse for cost consent than an honestly-vague one.
+
+`--force` is a **separate** override with a single job: it lets `up` reuse, or
+`down` stop/terminate, an instance carrying a **fleet marker** (see
+[Fleet-marked hosts: the reuse and teardown
+guard](#fleet-marked-hosts-the-reuse-and-teardown-guard)). It does **not**
+relax the cost gate — `--force` without a pre-supplied
+`REPO_REMOTE_INSTANCE_TYPE` still fails loudly.
+
+Exit codes: `0` success (including a dry-run plan), `2` missing/invalid required
+config (the cost gate), `3` provider authentication failed, `4` cloud operation
+failed, `5` refused to reuse a fleet-marked instance (pass `--force`), `64`
+usage error.
 
 ## Configuration — two layers
 
@@ -89,6 +110,9 @@ AWS_REGION=us-west-2
 # gcp instead: GCP_PROJECT, GCP_ZONE, GOOGLE_APPLICATION_CREDENTIALS=/abs/sa.json
 
 REPO_REMOTE_SSH_KEY=~/.ssh/id_ed25519     # key used for the SSH session (fine to share)
+                                           # AWS: its .pub is ALSO what resolves/imports the
+                                           # EC2 key pair at launch (repo#177) — the same key,
+                                           # two roles, so `up` never launches keyless.
 
 # --- dev-session auth (optional; used ON the VM) ---
 # Unlike the provisioning creds above, these DO travel to the VM so gh/claude
@@ -127,8 +151,16 @@ REPO_REMOTE_DOCKERFILE=./Dockerfile       # optional: build & run this checked-i
 REPO_REMOTE_SETUP="make setup"            # optional first-boot command; fallback when no Dockerfile
 
 # --- session ---
-REPO_REMOTE_IDLE_SHUTDOWN_MIN=120         # interactive-host default; use ~20 for daemon-managed/worker hosts (see below)
+REPO_REMOTE_IDLE_SHUTDOWN_MIN=120         # interactive-host default; use ~20 for daemon-managed/worker hosts; 0 disables the guard entirely (see below)
 REPO_REMOTE_IDLE_MARKER=                   # optional idle-exit marker path (default: /var/run/repo-remote-daemon-idle.marker)
+
+# --- fleet-marker guard (refuse to reuse a managed fleet host) ---
+REPO_REMOTE_FLEET_TAG_KEY=Fleet           # tag (AWS) / label (GCP) key that marks a managed fleet host; empty disables the check
+REPO_REMOTE_FLEET_TAG_VALUE=loom          # required value for that key; empty means "any non-empty value counts"
+
+# --- SSH ingress (AWS only; see "Security group and SSH ingress" below) ---
+REPO_REMOTE_SSH_CIDR=                     # optional: pin the SG's SSH-ingress CIDR (e.g. 203.0.113.7/32, or
+                                           # 0.0.0.0/0 as a deliberate opt-in); overrides current-IP detection outright
 ```
 
 Only `REPO_REMOTE_PROVIDER` (or a provider argument) and that provider's
@@ -273,6 +305,12 @@ gcloud compute instances list --filter="labels.repo-remote=<name>" \
 
 RUNNING → offer reuse; STOPPED → offer to start.
 
+3. **Before starting or SSH-aliasing anything you *reused*** (either branch
+   above), check the resolved instance's tags/labels for a **fleet marker** and
+   stop unless `--force` was given — see **Fleet-marked hosts: the reuse and
+   teardown guard** below (the same guard applies to `--down`/`down`). A
+   freshly created instance is never subject to this check.
+
 ### 4. Create the instance (with confirmation)
 
 **Before creating anything**, show the exact command, the machine spec
@@ -282,6 +320,17 @@ Requirements for the created instance:
 - Label/tag it `repo-remote=<repo-name>` so `--status`/`--down` only ever touch
   instances this command created
 - Ubuntu LTS image, disk size from config
+- **AWS: always attach a key pair** (`--key-name`), resolved from
+  `REPO_REMOTE_SSH_KEY`'s public key (`<REPO_REMOTE_SSH_KEY>.pub`) — an
+  existing account key pair with a matching fingerprint is reused,
+  otherwise the public key is imported as a new one. This must never be
+  skipped: a `run-instances` call with no `--key-name` launches an instance
+  with `KeyName: None`, which is unreachable via SSH by design (repo#177).
+  After creation, verify the launched instance's `KeyName` came back
+  non-null before reporting success. As belt-and-suspenders, the same
+  public key is also injected into `~ubuntu/.ssh/authorized_keys` via
+  cloud-init user-data on every boot, so the host stays reachable even if
+  key-pair attachment itself ever regresses.
 - For GPU hosts, see **GPU hosts** below — this needs a GPU-ready image and,
   on AWS, quota-aware handling.
 - Install an idle-shutdown guard (cron checking SSH sessions + CPU, running
@@ -290,16 +339,70 @@ Requirements for the created instance:
   its exact activity model, the daemon-host short-window recommendation, and the
   idle-exit marker contract.
 - AWS: security group allowing SSH from the user's IP only, using
-  `REPO_REMOTE_SSH_KEY`'s public key. GCP: prefer OS Login / IAP.
+  `REPO_REMOTE_SSH_KEY`'s public key — see **Security group and SSH ingress
+  (AWS)** below for exactly how the CIDR is resolved and verified. GCP: prefer
+  OS Login / IAP.
 
 If the zone/region is stocked out (common for GPU types), offer the nearest
 alternative zone or the next type down rather than failing.
+
+#### Security group and SSH ingress (AWS)
+
+A VPC's **default** security group has no SSH ingress rule at all, so
+attaching it silently (the old behavior when `REPO_REMOTE_SECURITY_GROUP` was
+unset) produces a box that times out on SSH indefinitely — `describe-security-groups`
+shows an empty ingress set as the only symptom. `repo-remote up` now
+resolve-or-creates a dedicated security group and proves SSH ingress actually
+landed before it ever calls `run-instances`:
+
+1. **Resolve the group.** `REPO_REMOTE_SECURITY_GROUP`, if set, wins outright
+   (unchanged). Otherwise, reuse a security group already tagged
+   `repo-remote=<repo-name>` from a prior run; otherwise create one with that
+   tag. This makes repeated `up` runs idempotent — no new SG accumulates per
+   invocation.
+2. **Resolve the CIDR.** `REPO_REMOTE_SSH_CIDR`, if set, wins outright
+   (including an explicit `0.0.0.0/0` opt-in). Otherwise, detect the current
+   IP via an HTTPS echo service (`checkip.amazonaws.com`) and use it as a
+   `/32` — but treat that detection as **unverified**: there is no reliable
+   way for this tooling to confirm the detected address is the one SSH egress
+   will actually use. Behind an HTTPS proxy it commonly isn't (an increasingly
+   common failure mode on agent hosts) — the echo service returns the proxy's
+   address, producing a correct-looking `/32` rule that can never match. If
+   detection fails outright (or you know it will be unreliable), set
+   `REPO_REMOTE_SSH_CIDR` yourself.
+3. **Fall back loudly, never silently.** If IP detection fails and
+   `REPO_REMOTE_SSH_CIDR` is unset, the rule falls back to `0.0.0.0/0` (SSH
+   remains key-only auth, so this is a scan-noise tradeoff, not an auth
+   bypass) with an explicit printed notice — never a `/32` that looks correct
+   but can never match.
+4. **Authorize idempotently.** `authorize-security-group-ingress` for tcp/22
+   from the resolved CIDR; a duplicate rule on a reused group counts as
+   success.
+5. **Verify before spending money.** `describe-security-groups` on the
+   resolved group must show a tcp/22 rule, or the run fails loudly (exit `4`)
+   before `run-instances` is ever called — this is what would have caught the
+   originally reported incident in-run instead of as a bare SSH timeout.
+6. **End-of-run reachability check.** After the SSH alias is written, `up`
+   probes it — `ssh -o ConnectTimeout=10 -o BatchMode=yes -o
+   StrictHostKeyChecking=accept-new <alias> true` — and fails loudly (exit
+   `4`) if it doesn't succeed, so an unreachable instance is caught in-run
+   rather than discovered on the next manual SSH attempt.
 
 #### The idle-shutdown guard
 
 The guard is a cron watchdog (`/usr/local/bin/repo-remote-idle-check`, run every
 minute) installed via cloud-init user-data. It powers the host off with
 `shutdown -h` once it has been idle for `REPO_REMOTE_IDLE_SHUTDOWN_MIN` minutes.
+
+**`REPO_REMOTE_IDLE_SHUTDOWN_MIN=0` (or any non-positive value) disables the
+guard outright** — no cron/watchdog script is installed at all. This is
+distinct from "a very long window": a long window still counts down and
+eventually shuts the host off, while `0` means the guard is never installed in
+the first place, so the host never self-shuts-down. Use this for hosts that
+must never be powered off by this mechanism (e.g. a persistent fleet-tagged
+worker) — do **not** rely on `0` as a stand-in for "infinite window," since
+prior to repo#163 that value made the guard's fallback countdown fire almost
+immediately instead.
 
 **Activity model (what keeps the host alive).** "Activity" is exactly two local
 signals: an **open SSH session** (`who`) **or** a **CPU load average > 0.2**.
@@ -355,6 +458,75 @@ anything ever writes the file:
 On a daemon-managed host the two stages compose: the daemon's own idle-exit
 (writing the marker) is the first stage; this guard, `IDLE_MIN` minutes later, is
 the second and final stage that actually powers the box off.
+
+#### Fleet-marked hosts: the reuse and teardown guard
+
+The idle guard above is attached **once, at creation** — this command never
+re-attaches user-data to an instance it reuses, so the guard a host carries is
+whatever it got the day it was created. What `up` reuse *does* do is **start a
+stopped instance and rewrite this repo's SSH alias to point at it**; what `down`
+does to that same resolved instance is **stop it, or — with `--delete` —
+terminate it, disk and all**. Both verbs resolve their target from the same
+handles — a pinned `REPO_REMOTE_INSTANCE_ID`, or the `repo-remote=<name>`
+tag/label — and neither handle ever expires. A box provisioned once for an
+ephemeral dev session can since have been repurposed into a persistent,
+daemon-managed fleet worker while still carrying the old tag, at which point
+ephemeral dev-session tooling would silently start-and-re-alias it (`up`) or
+stop/terminate it (`down`) as if it were still just a throwaway dev box. That is
+the second finding of the 2AMLogic/2am#52 incident, where `repo-remote=anvil`
+tooling kept rediscovering the host that had become `loom-worker-1`; `down
+--delete` against that same stale handle is the strictly worse outcome — the
+disk is gone, unrecoverable.
+
+**The check.** Before starting or aliasing a **reused** instance on `up` — on
+both AWS reuse branches (pinned id and `repo-remote=<name>` tag lookup) and on
+the GCP existing-instance branch — or before stopping/terminating **any**
+instance `down` resolves, the resolved instance's **AWS tags** / **GCP labels**
+are read and matched against a fleet marker, by default **`Fleet=loom`** (the
+tag 2am's own remediation sets on its persistent workers). If it matches:
+
+- **Without `--force`**: the run **stops with exit `5`** and a message naming the
+  instance, the marker it found, and the override. On `up`, nothing is started,
+  nothing is terminated, and the SSH alias is left untouched. On `down`, nothing
+  is stopped or terminated.
+- **With `--force`**: it warns loudly that it is about to touch what looks like a
+  managed fleet host, then proceeds as normal.
+
+**`down`'s multi-id batch semantics.** Unlike `up` (always exactly one resolved
+instance), AWS `down`'s tag-discovery path can resolve **multiple** instances at
+once. If **any** resolved instance in that set carries the fleet marker, the
+**whole batch is refused** — none of the resolved instances are stopped or
+terminated, not even the unmarked ones — rather than silently acting on a
+subset. `--force` overrides for the whole batch at once, the same as the
+single-instance case. A **dry run** (`down` without `--yes`) never touches a
+cloud resource, so it is never blocked by this guard even against a
+fleet-marked instance; instead, the dry-run listing **annotates** which of the
+listed instances carry the marker (via a `fleet_marked` array in `--json`
+output, or an inline `NOTE:` line otherwise) so an operator can see, before
+spending nothing, which instances a subsequent `--yes` run would refuse.
+
+**Configuration.**
+
+- `REPO_REMOTE_FLEET_TAG_KEY` — the tag/label key to look for. Defaults to
+  `Fleet`. **Set it to the empty string to disable the check entirely.** GCP
+  label keys are lower-case, so the configured key is lower-cased for the GCP
+  lookup (`Fleet` → `labels.fleet`).
+- `REPO_REMOTE_FLEET_TAG_VALUE` — the value that counts as a match. Defaults to
+  `loom`; comparison is case-insensitive (GCP lower-cases label values). Set it
+  to the empty string to treat *any* non-empty value of the key as a match.
+
+**Scope — what this deliberately is not.** It is a **provisioning-time check
+against declared metadata** an operator already had to set elsewhere, not an
+on-host "is `loom-daemon` running" heuristic. The idle guard's activity model
+above is unchanged, and gains no process-name veto from this; the two are
+independent. It also does not fire on **creation** (a brand-new instance has no
+prior role to protect) or on a **dry run** (`repo-remote up` without `--yes`
+touches no cloud resource at all).
+
+**Related but distinct**: if the fleet host should also never power itself off,
+that is the idle guard's `REPO_REMOTE_IDLE_SHUTDOWN_MIN=0` opt-out above. This
+guard stops *this tooling* from touching the host; that one stops the *host*
+from shutting itself down.
 
 #### GPU hosts
 
@@ -549,7 +721,8 @@ Both delegate to the shared script (`repo-remote status` / `repo-remote down`),
 which resolves the same two config layers and only ever touches instances
 carrying this repo's `repo-remote` tag. `repo-remote down` without `--yes` is a
 dry run that lists exactly what would stop; `--yes` acts, and `--delete`
-terminates.
+terminates. `down` is subject to the same fleet-marker guard as `up`'s reuse
+path — see **Fleet-marked hosts: the reuse and teardown guard** above.
 
 - `--status`: list all instances labeled `repo-remote=<repo-name>` with state
   and uptime; estimate accumulated cost. Uses the resolved credentials (shared
@@ -578,4 +751,5 @@ terminates.
    to `chmod 600` the shared `~/.config/repo/remote.env` if it's readable by
    others
 5. **Always install the idle-shutdown guard** — a VM that outlives the session
-   should turn itself off
+   should turn itself off, unless the guard is explicitly disabled via
+   `REPO_REMOTE_IDLE_SHUTDOWN_MIN=0`

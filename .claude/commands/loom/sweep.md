@@ -6,14 +6,6 @@ Process an explicit list of issues — **or an explicit/NL-described set of open
 >
 > If you need multi-account autonomous dispatch across many issues, use `/loom:loom` (it drives the `loom-daemon`). `/loom:sweep` is itself the single-issue lifecycle, and also covers the in-between case: "I have these N issues (or PRs), run them in this session, without spinning up a daemon."
 
-## ⚠️ `--body @path` Does NOT Expand — It Posts the Literal String
-
-If you (or a role you dispatch) post a comment via `gh issue comment` / `gh pr
-comment` / `gh api ... comments` from a scratch file, `--body @path` (and `gh
-api -f body=@path`) posts the literal string `@path`, not the file's contents.
-**Full pitfall, incident citation, and fixes**:
-[`comment-body-literal-path.md`](comment-body-literal-path.md).
-
 ## Arguments
 
 **Arguments**: $ARGUMENTS
@@ -240,26 +232,14 @@ All Mode C safeguards carry over unchanged: deduplicate the resulting PR numbers
     ```bash
     ./.loom/scripts/recover-orphaned-shepherds.sh --recover
     ```
-    - **Capability pre-probe (read-only, run at candidate resolution — BEFORE the confirmation gate).** The mutating `--recover` pass above runs only *after* the gate, but the operator needs to know *at* the gate whether it will actually reclaim anything, so probe the recovery path's availability during candidate resolution by invoking the script in its **default dry-run mode** (no `--recover` — it performs the same `loom_locate_daemon_bin` resolution and mutates nothing):
-      ```bash
-      ./.loom/scripts/recover-orphaned-shepherds.sh >/dev/null 2>orphan_probe.err; PROBE_RC=$?
-      ```
-      Route on the exit code and surface the outcome in the **candidate-set listing / confirmation-gate output** (same `⚠`-annotation channel as the "Operator-gate advisory scan"):
-      - **`PROBE_RC == 0`** → the binary resolved; the `--recover` pass will run after the gate. **Emit no warning** — this is the common path and must stay noise-free (no spurious annotation on a healthy host).
-      - **`PROBE_RC != 0` AND `orphan_probe.err` contains `no loom-daemon binary could be resolved`** → surface this **operator-actionable** line at the top of the candidate listing (above the per-issue rows, like the overlap warning):
-        > `⚠ orphan-claim recovery unavailable: no loom-daemon binary resolved — stale loom:building claims are NOT being actively reclaimed, only staleness-checked (updatedAt). Remedy: build/update loom-daemon (cargo build --release -p loom-daemon, or ./.loom/scripts/cli/loom-daemon-update.sh), then re-run.`
-      - **`PROBE_RC != 0` for any other reason** (e.g. a stale binary that predates the `recover-orphans` subcommand, or an unexpected failure) → surface a **distinct** line that quotes the first stderr line so the operator sees the real cause and knows a different remedy applies:
-        > `⚠ orphan-claim recovery pre-probe failed (exit <PROBE_RC>): "<first line of orphan_probe.err>" — stale loom:building claims will not be reclaimed this run; they fall through to the updatedAt staleness rule only.`
-      The two cases are **deliberately distinguished**: "no binary resolved" has a concrete build/install remedy, whereas any other non-zero exit is surfaced verbatim so the operator can diagnose it. This warning is **advisory only** — it never changes a planned action, never blocks the sweep, and never mutates a label; a stale `loom:building` claim still falls through to the `updatedAt` staleness rule in the taxonomy table.
-    - **Post-gate `--recover` pass.** After the operator confirms, run the mutating `--recover` command above. Best-effort at this point: a non-zero exit is logged and ignored (never abort the sweep) — the operator was already warned at the gate by the pre-probe, so this pass does not re-prompt. Any issue still labeled `loom:building` after it is re-checked inline by the staleness rule in the taxonomy table.
-    **Ordering is load-bearing**: the mutating `--recover` pass runs *only after* the operator confirms the resolved plan at the mandatory confirmation gate — never before (the read-only pre-probe is safe to run earlier because it mutates nothing). Both the pre-probe and the `--recover` pass are **skipped entirely under `--dry-run`** (the dry-run gate is read-only and EXITs before any mutation; the dry-run plan already states recovery is skipped). This preserves the file-wide "gate before mutation" invariant: nothing on disk or on the forge changes until the operator has confirmed (or `--dry-run` has printed and exited).
+    Best-effort: a non-zero exit is logged and ignored (never abort the sweep). Any issue still labeled `loom:building` after this pass is re-checked inline by the staleness rule in the taxonomy table. **Ordering is load-bearing**: this pass mutates labels, so it runs *only after* the operator confirms the resolved plan at the mandatory confirmation gate — never before. It is **skipped entirely under `--dry-run`** (the dry-run gate is read-only and EXITs before any mutation). This preserves the file-wide "gate before mutation" invariant: nothing on disk or on the forge changes until the operator has confirmed (or `--dry-run` has printed and exited).
   - **Candidate resolution (PRs, `--prs` present)** — every open PR, handed to the Mode C PR-set lifecycle (subagent path):
     ```bash
     "$GH_READ" pr list --state open --limit 100 --json number,title,labels
     ```
     Mode C's C0 pre-flight already skips PRs with no actionable label, `loom:operator-only`, or `loom:blocked`, and routes the rest by current label (Judge / Doctor → Judge / Merge) — so grabbing every open PR and letting C0 filter matches the "get every in-flight PR over the finish line" intent. Same zero-match / truncation edge-case rules apply, and the same rate-limit fallback: on a rate-limit signature, re-issue over REST per Mode C's "GraphQL-exhaustion fallback" (`repos/{owner}/{repo}/pulls?state=open&per_page=100`).
   - **Existing-PR routing (issues path)**: the sentinel adds **no** new PR-detection logic. Issues with an open linked PR are handed to the wave machinery, which routes an issue with one open linked PR to Judge (or Merge if the PR is already `loom:pr`) via the per-issue existing-PR probe (Wave Lifecycle step 1, #3359 + #3677 — the union of `closedByPullRequestsReferences` filtered to `state == OPEN` and timeline `cross-referenced` open-PR events, so a non-closing `Part of #N` PR is detected too). This is the single source of truth for existing-PR routing and **takes precedence over the label routing** in the taxonomy table (an issue with an open PR is driven to merge, never rebuilt).
-  - **Mandatory confirmation gate**: the sentinel path **always** displays the resolved candidate set (with the per-issue planned action from the taxonomy table) and awaits operator confirmation before spawning any agent — identical to Mode B/C's "display candidate set before spawning any agents" rule. A whole-backlog sweep must never auto-dispatch silently. Declining EXITs cleanly. **When the resolved plan has an unavoidable same-file overlap** (more overlapping candidates than waves to spread them across — see "Overlap-aware wave partitioning"), print the overlap warning **above** the candidate listing, naming the shared files and the specific candidates, so the operator can reorder or drop to `--builders-per-wave 1` before confirming. **When any candidate matched the "Operator-gate advisory scan"** (#5137, below), each matching candidate's line in this same listing carries its `⚠ body declares operator-gating: "<phrase>"` / `⚠ depends on #A, which is loom:operator-only` annotation(s) — advisory only, never a routing change; zero matches leave the listing byte-for-byte unchanged. **When the orphaned-claim recovery pre-probe found no usable `loom-daemon` binary (or failed for any other reason)** — see "Orphaned-claim recovery pass" above — its `⚠ orphan-claim recovery unavailable …` / `⚠ orphan-claim recovery pre-probe failed …` line is printed **above** the candidate listing too, so the operator knows stale `loom:building` claims will not be actively reclaimed this run before confirming; a clean pre-probe (exit 0) adds nothing.
+  - **Mandatory confirmation gate**: the sentinel path **always** displays the resolved candidate set (with the per-issue planned action from the taxonomy table) and awaits operator confirmation before spawning any agent — identical to Mode B/C's "display candidate set before spawning any agents" rule. A whole-backlog sweep must never auto-dispatch silently. Declining EXITs cleanly. **When the resolved plan has an unavoidable same-file overlap** (more overlapping candidates than waves to spread them across — see "Overlap-aware wave partitioning"), print the overlap warning **above** the candidate listing, naming the shared files and the specific candidates, so the operator can reorder or drop to `--builders-per-wave 1` before confirming. **When any candidate matched the "Operator-gate advisory scan"** (#5137, below), each matching candidate's line in this same listing carries its `⚠ body declares operator-gating: "<phrase>"` / `⚠ depends on #A, which is loom:operator-only` annotation(s) — advisory only, never a routing change; zero matches leave the listing byte-for-byte unchanged.
   - **Flag composition**: `--dry-run` resolves the candidate set, prints the standard issue-set (or PR-set) dry-run plan with wave grouping + the aggressive per-issue actions, and EXITs with no mutation (the Stage-0 dry-run contract is backend-independent — the orphaned-claim recovery pass is skipped under `--dry-run`). `--builders-per-wave N` and `--no-daemon` compose with the wave / Stage -1 machinery exactly as for Mode A/B. Stage -1 backend detection is unchanged: after `all` resolves the issue set, the normal strict-AND daemon/pool probe decides daemon-dispatch vs subagent fallthrough; `all --prs` (Mode C) always routes to the subagent path per the existing Mode C short-circuit.
 
 - **Aggressive candidate taxonomy** (the single source of truth for what `all` resolves and how each label class is routed — lives here beside the Mode B label logic so there is one definition). When `SWEEP_ALL_AGGRESSIVE=true`, **every** open issue is a candidate and is routed by its current label class:
@@ -1860,8 +1840,6 @@ That entry goes to stderr and is appended to `.loom/logs/main-quarantine.log` (o
 - **It is a rescue, never a discard.** The full diff survives in the stash; recover it with `git stash show -p <sha>` and replay it into the owning issue worktree.
 - **Baselined dirt is spared.** Only the paths the check flagged as *new* are stashed, so an operator's unrelated working-tree edits are untouched.
 - **It is verified.** After stashing, the check re-runs detection and only reports success (exit `4`) if main is back at the baseline; a residual-dirt result is reported as a failure (exit `3`), never as a partial success.
-- **An empty quarantine is never created (#5185).** The offending path set is re-derived from a fresh `git status` immediately before the stash push, so dirt that a concurrent sweep / the builder's own commit resolved in the meantime is dropped from the pathspec instead of producing a content-free stash entry. When nothing is left to rescue, no stash is pushed and the check emits `"result":"no_op"` and exits `0` (main is provably at the baseline — treat it exactly like any other exit `0`). `"result":"quarantined_empty"` marks the residual race where an entry was created but captured nothing.
-- **The rescue ref stays outstanding until a human reconciles it.** Nothing drops it automatically, and `git stash`'s reflog is shared by every linked worktree, so entries accumulate. List them with `./.loom/scripts/check-main-clean.sh --list-quarantined` (also surfaced as a `Quarantined work` section by `./.loom/bin/loom status`).
 
 **Do NOT restore contamination piecemeal.** Per-file `git checkout -- <path>` / `rm <path>` sequences are forbidden as the remediation path: they are what produced the half-restored main checkout this section exists to prevent, and a main checkout that is neither the baseline nor the builder's intended change is worse than either extreme. If for any reason you must remediate by hand (e.g. `--quarantine` itself failed and returned `3`), do it as a **single** `git stash push --include-untracked -m "loom-quarantine: run=$RUN_ID issue=$N" -- <all offending paths>` — one operation, all paths, logged.
 
@@ -2209,23 +2187,6 @@ This is advisory-only. The script always exits `0` and **must not block** the sw
 - **Up to date:** prints nothing to stderr; a one-line stdout confirmation (suppressible with `--quiet`, matching `check-host-sleep.sh`).
 
 If the check warns, the operator should refresh local `main` (and re-sync installed copies if their install flow does so) before relying on stacked-dependency or auto-reconcile behavior mid-sweep.
-
-## Outstanding Quarantine Stashes (#5185)
-
-`check-main-clean.sh --quarantine` (see the Wave Lifecycle "Backstop" step above) rescues contamination it finds in the main worktree into a labeled `git stash` entry — `On <branch>: loom-quarantine: run=<RUN_ID> issue=<N>` — rather than discarding it. This is correct and loses no data, but the quarantine is otherwise recorded only in the structured `.loom/logs/main-quarantine.log` JSON log; nothing surfaces that a rescue stash is outstanding. A labeled stash can therefore sit indefinitely with nobody aware there is quarantined work to reconcile — noticed, if at all, only by chance (e.g. an unrelated command that happens to count stashes).
-
-**Before the first wave — or, on the daemon path, before the first `mcp__loom__dispatch_sweep` call** — run the quarantine-stash check and surface its output to the user (same timing and sibling role as the Host Sleep Readiness and Main Branch Freshness checks above):
-
-```bash
-./.loom/scripts/check-quarantine-stashes.sh
-```
-
-This is advisory-only. The script always exits `0` and **must not block** the sweep — proceed regardless of what it prints. It is strictly **read-only**: it never pops, drops, or applies a stash. `refs/stash` is shared across every worktree of the repo (not per-worktree — see the #4821 note under "CRITICAL: Only Builders parallelize"), so the check is meaningful regardless of which worktree it runs from:
-
-- **≥1 outstanding `loom-quarantine:` stash:** prints a bordered warning to stderr listing each stash's `stash@{N}` selector, relative age, and label (run id / issue number), with `git stash show -p <ref>` / `git stash apply <ref>` as the inspection/reconciliation commands.
-- **None outstanding:** prints nothing to stderr; a one-line stdout confirmation (suppressible with `--quiet`, matching `check-host-sleep.sh` / `check-main-freshness.sh`).
-
-If the check warns, the operator should reconcile each listed stash into the issue worktree it belongs to (or consciously drop it) — this does not block the current sweep, but stale quarantines accumulate silently otherwise.
 
 ## Sweep Child Working-Set Contract (#3980)
 

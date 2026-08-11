@@ -32,25 +32,19 @@ test-bounded-run.sh
 test-build-rs-watchset.sh
 test-build-slot.sh
 test-champion-critical-file-check.sh
-test-check-ci-status.sh
 test-check-duplicate.sh
 test-check-git-identity.sh
 test-check-host-sleep.sh
-test-check-ingest-key-file.sh
 test-check-main-clean.sh
 test-check-main-freshness.sh
-test-check-quarantine-stashes.sh
 test-check-runtime-capabilities.sh
-test-check-verified-corrections-preserved.sh
 test-clean-stale-binary.sh
 test-cleanup-branches-pr-review-branch.sh
 test-config-resolver.sh
 test-config-tiers-cli-migration.sh
 test-default-branch.sh
 test-dependency-parse.sh
-test-detect-dependency-cycle.sh
 test-disk-headroom.sh
-test-docs-worktree.sh
 test-fleet-check.sh
 test-fleet-send.sh
 test-forge-helpers.sh
@@ -60,19 +54,13 @@ test-github-app-token.sh
 test-gitignore-guard.sh
 test-guard-codex-bridge.sh
 test-guard-hook-schema.sh
-test-guide-work-log-issue-out-of-order.sh
-test-guide-work-log-out-of-order-merge.sh
-test-guide-work-log-self-loop.sh
 test-install-active-session.sh
 test-install-full-reinstall-no-target-mutation.sh
-test-install-lock.sh
 test-install-pr-markers.sh
 test-install-source-guard.sh
 test-install-stash-scope.sh
 test-install-sync-labels.sh
-test-judge-fallback-cap.sh
 test-judge-fanout-experiment.sh
-test-live-state-sandbox.sh
 test-locate-daemon-bin.sh
 test-loom-daemon-launchd-plist.sh
 test-loom-daemon-start.sh
@@ -124,13 +112,11 @@ test-worktree-hookspath.sh
 test-worktree-json-purity.sh
 test-worktree-nested-symlinks.sh
 test-worktree-remote-branch-tracking.sh
-test-worktree-remove-squash-merge.sh
 test-worktree-remove.sh
 test-worktree-root-override.sh
 test-worktree-sentinel-reinvoke.sh
 test-worktree-sentinel.sh
 test-worktree-snapshot.sh
-test-worktree-stash-baseline.sh
 
 # tests/hooks/ (repo root) — Claude-path guard suites, wired since #4769.
 tests/hooks/test-guard-destructive-dispatcher.sh
@@ -143,22 +129,3 @@ defaults/hooks/tests/test-guard-loom-workspace.sh
 defaults/hooks/tests/test-guard-worktree-paths.sh
 defaults/hooks/tests/test-methodology-inject.sh
 defaults/hooks/tests/test-skill-router.sh
-
-# tests/install/ — installer/uninstaller unit suites, wired since #5275 (were
-# previously orphaned entirely — appeared in ci.yml only as a paths-filter
-# trigger, never as an invoked job step). All confirmed hermetic (no live
-# network/forge calls, fake/stub binaries only) and ubuntu-portable.
-tests/install/test-daemon-build-shortcut.sh
-tests/install/test-forge-detect.sh
-tests/install/test-git-repo-detection.sh
-tests/install/test-hooks-preserve.sh
-tests/install/test-manifest-freshness-after-hook-wiring.sh
-tests/install/test-pnpm-runnable-check.sh
-tests/install/test-provision-daemon.sh
-tests/install/test-uninstall-labels-block.sh
-tests/install/test-uninstall-preserve-siblings.sh
-
-# tests/hermit/ — the Hermit role's stateless-ceremony heuristic regression
-# guard, wired since #5275 (was previously orphaned, no CI runner at all).
-# Hermetic: python3 AST parsing over local fixtures only, no network.
-tests/hermit/test-stateless-ceremony.sh

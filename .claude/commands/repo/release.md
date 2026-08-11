@@ -357,6 +357,71 @@ the repo exposes (API, CLI, protocol, config, file formats):
 Use conventional-commit prefixes (`feat`/`fix`/`chore`…) as input. Recommend a
 level and **ask the user to confirm or override.**
 
+## Phase 3.5 — Version-citation check (advisory)
+
+Now that the bump level is confirmed and `$NEW` (the version this run is
+cutting) is known, check tracked markdown prose for citations of a version
+that has **neither shipped** (no `## <version>` section in `CHANGELOG.md`)
+**nor is the one about to ship** — that citation is either a stale/broken
+reference or an honest forward reference nobody circled back to resolve once
+the version actually shipped (repo#215, repo#228: `README.md` said "That was
+not true before 0.9.0" and `SKILL.md` said "as of 0.9.0 it holds" while
+`VERSION` was still `0.8.1` and neither guess was yet confirmed correct).
+**Advisory only — report and continue, never block the release.** No-op if
+`CHANGELOG.md` is absent, matching Phase 1.5.
+
+```bash
+if [ ! -f CHANGELOG.md ]; then
+  echo "(no CHANGELOG.md — skipping version-citation check)"
+else
+  # This repo's own header-citation STYLE, derived from CHANGELOG.md itself:
+  # does ANY header carry a leading 'v' (`## v1.2.3`)? If none do, this repo's
+  # own version vocabulary is bare ("1.2.3"), and a prose citation written
+  # WITH a leading 'v' ("since v0.10.0") is very likely naming something
+  # ELSE's release history, not this repo's — a real false-positive class: a
+  # workspace whose own docs extensively discuss a DIFFERENT tool's version
+  # history (e.g. "removed in v0.10.0" naming an embedded orchestrator, not
+  # this repo) would otherwise get flagged on every one of those references.
+  # If this repo's own headers DO sometimes carry a 'v', both forms count as
+  # this repo's own vocabulary.
+  V_PREFIX=""
+  grep -Eq '^##[[:space:]]+v[0-9]' CHANGELOG.md && V_PREFIX='v?'
+
+  # Version-boundary phrasing that plausibly cites a version's ship status.
+  # Anchoring the scan to this phrase list — rather than a bare
+  # \d+\.\d+\.\d+ scan over all markdown — is what keeps dependency pins
+  # ("loom 0.18.0"), image tags ("ubuntu:24.04"), and lockfile fields
+  # ("lockfileVersion: '9.0'") out of the results: none of them are written
+  # with this phrasing, and the two-dot/one-dot shapes of the latter two don't
+  # match the X.Y.Z pattern below regardless.
+  LEADIN='(before|since|after|until|prior to|as of|as early as|starting (in|with)|introduced in|added in|removed in|deprecated (in|since)|available (since|as of)|released in|shipped in|requires( at least)?)'
+
+  FOUND=0
+  for f in $(git ls-files '*.md' | grep -v -x 'CHANGELOG.md'); do
+    while IFS=: read -r lineno match; do
+      ver="$(printf '%s' "$match" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')"
+      [ "$ver" = "$NEW" ] && continue   # the version being cut is never flagged
+      # Reuse Phase 1.5's exact header-matching regex (bracket-optional,
+      # leading-'v'-optional, dots escaped literal) so the two checks can
+      # never disagree about what counts as a "shipped" version header.
+      ver_re="$(printf '%s' "$ver" | sed 's/\./\\./g')"
+      if grep -Eq "^##[[:space:]]+v?\[?${ver_re}\]?([[:space:]]|\$)" CHANGELOG.md; then
+        continue   # shipped — CHANGELOG.md already has a section for it
+      fi
+      echo "  CITED-UNSHIPPED: $f:$lineno: \"$match\""
+      FOUND=1
+    done < <(grep -inoE "${LEADIN}[[:space:]]+${V_PREFIX}[0-9]+\.[0-9]+\.[0-9]+" "$f")
+  done
+  [ "$FOUND" = 0 ] && echo "ok: no prose cites an unshipped, non-target version"
+fi
+```
+
+If any `CITED-UNSHIPPED:` line prints, surface it to the operator — it's either
+a stale/broken reference worth fixing now, or a legitimate forward reference to
+a release that hasn't happened yet (leave it; it resolves itself once that
+version ships, the way repo#215's two sentences did when 0.9.0 was cut). Either
+way this check is **advisory**: report and continue — never block Phase 4.
+
 ## Phase 4 — Draft the CHANGELOG
 
 > Seam `pre-changelog-style` fires before drafting — run any bound policy steps
@@ -392,18 +457,49 @@ as part of matching the file's format above — not as a separate Phase 5 step:
    back to a fuzzy text match only for bullets that cite no number). Keep a
    captured `## Unreleased` bullet only if none of its numbers already appear in
    the git-log-derived draft.
-4. Produce **one** combined entry headed with the new version + today's date,
+4. **Coherence check — read the merged item list as one document.** Changelog
+   entries are written serially, one PR at a time over the life of the release
+   cycle, but this section is read all at once, from the vantage point of the
+   finished release. That mismatch lets two individually-accurate entries land
+   in the same `## Unreleased` section while jointly asserting something
+   incoherent — a claim corrected and then the underlying thing fixed so the
+   original claim becomes true again, a default flipped and flipped back, a
+   limitation documented and then removed, a feature reworked or renamed
+   between when it was logged and now. Before producing the combined entry
+   below, read every item being folded — the captured `## Unreleased` bullets
+   **and** the git-log-derived draft items, together, as the single document a
+   release reader will see — and flag any pair that:
+   - **Contradicts or supersedes another** — read for meaning, not keywords;
+     this is a judgment call about what the entries jointly claim, not a
+     regex or pattern match.
+   - **Near-duplicates another** — the same underlying change logged twice
+     because it landed across two different PRs.
+
+   Report each flagged pair by quoting **both entries verbatim, side by
+   side**, so the operator sees the contradiction directly instead of being
+   told one exists — do not just name the entries or summarize the conflict.
+   This is report-and-confirm only: never rewrite, merge, reorder, or drop an
+   entry to resolve it. Ask the operator whether to hand-edit before
+   continuing, or proceed with the draft exactly as captured — either answer
+   is fine, and if the operator does nothing this check **does not block**
+   moving on to the next step. A clean set of items produces **no output at
+   all** — do not report "no contradictions found" or otherwise add
+   commentary when there is nothing to flag; this check must stay silent in
+   the common case.
+5. Produce **one** combined entry headed with the new version + today's date,
    positioned **where `## Unreleased` was** — since that heading conventionally
    sits at the very top, this is a rename-in-place (`## Unreleased` →
    `## X.Y.Z (date)`), not an append elsewhere and no reordering. The
    `## Unreleased` heading itself is removed as part of drafting.
 
 > Seam interaction: under a `pre-changelog-style (replace)` policy the default
-> draft heuristic — including this fold — is skipped per the seam's
-> "policy steps produce the entry; skip the default draft heuristic" semantics
-> (see the seam table below), so folding any `## Unreleased` section becomes the
+> draft heuristic — including this fold and its coherence check (step 4 above)
+> — is skipped per the seam's "policy steps produce the entry; skip the
+> default draft heuristic" semantics (see the seam table below), so folding
+> any `## Unreleased` section, and checking it for contradictions, becomes the
 > policy's responsibility. Under `augment` (the default), the seam's steps run
-> first and then this fold runs, so there is no conflict.
+> first and then this fold — including the coherence check — runs, so there is
+> no conflict.
 
 ## Phase 5 — Apply
 
@@ -418,7 +514,68 @@ Once approved:
    The `pre-apply` seam therefore needs **no** change for the fold: it fires
    before this insert, after drafting is complete, so it never observes an
    un-folded entry regardless of how the string was assembled.
-2. **Show the version-bearing files** the tool will touch, then bump. Dispatch on
+2. **Merged-work coverage check (advisory).** Cross-reference merged PRs since
+   the last tag against the entry just inserted above — the forward-looking
+   sibling of Phase 1.5's retrospective gate. Phase 1.5 catches a *shipped* tag
+   that turns out to be missing an entry; by then the release is already out
+   and the range is cold. This catches the same kind of gap *before* it ships:
+   work that merged into this range but never made it into the entry at all
+   (repo#229 — at v0.9.0, `aws_create()` shipped with `KeyName: None` (#182)
+   and `down` could terminate a repurposed fleet host's disk with no guard
+   (#171), and neither had a CHANGELOG line until the operator asked for the
+   range to be re-checked by hand). **Advisory only — report and continue,
+   never block**, matching Phase 1.5's and Phase 3.5's posture: plenty of
+   merged commits legitimately have no entry (a `docs:` fix, a dependency
+   bump, a revert pair), so the check must not let bookkeeping commits
+   dominate the list.
+
+   ```bash
+   # $last is the same previous-tag reference Phase 3 captured; HEAD here is
+   # still pre-tag (Phase 6 cuts the tag), so the range is exactly "everything
+   # unshipped a moment ago". Scope to the conventional-commit prefixes most
+   # likely to need a changelog line — feat/fix/security in scope by default,
+   # docs/chore/test/build NOT in scope. This default is what keeps a
+   # `docs: update WORK_LOG` commit, or a Dependabot `build(deps): …` bump,
+   # off the list without a single one of them being special-cased by name.
+   FILTER='^(feat|fix|security)(\(|:)'
+
+   FOUND=0
+   for sha in $(git log "${last}..HEAD" --format='%H'); do
+     subject="$(git log -1 --format='%s' "$sha")"
+     echo "$subject" | grep -Eq "$FILTER" || continue
+     # Same grep -oE '#[0-9]+' key the Unreleased fold's dedup step (above)
+     # uses, applied here to the FULL commit message rather than just the
+     # subject's trailing PR number — a squash-merge body commonly carries a
+     # "Closes #NNN" naming the ORIGINATING issue, which is what this repo's
+     # own entries usually cite (the issue number), not the merge's own PR
+     # number. A commit is counted as logged if ANY number it references
+     # already appears in CHANGELOG.md.
+     nums="$(git log -1 --format='%B' "$sha" | grep -oE '#[0-9]+' | tr -d '#' | sort -u)"
+     [ -n "$nums" ] || continue   # no #N anywhere — nothing to cross-reference (e.g. a local/rebased commit)
+     logged=0
+     for n in $nums; do
+       grep -Eq "#${n}([^0-9]|\$)" CHANGELOG.md && { logged=1; break; }
+     done
+     [ "$logged" = 1 ] && continue
+     echo "  UNLOGGED: $subject"
+     FOUND=1
+   done
+   [ "$FOUND" = 0 ] && echo "ok: every in-scope merged PR is referenced in this release's CHANGELOG entry"
+   ```
+
+   For each `UNLOGGED:` line, confirm with the operator, one at a time: draft
+   a bullet for it now (folding it into the entry just inserted, the same
+   move as a Phase 1.5 backfill) or confirm it's intentionally unlogged. Two
+   things commonly explain a legitimate confirm-and-move-on: the PR is cited
+   in `CHANGELOG.md` under the *issue* it closed rather than under its own PR
+   number (a real gap in this check — the git history carries the mapping
+   only when the squash-merge body happens to include a `Closes #N` line; when
+   it doesn't, no automated cross-reference can find it), or the change is
+   real but genuinely not release-note-worthy (an internal-only refactor typed
+   `fix:`, a security-classified doc tweak). Either answer is fine — this is
+   report-and-confirm only, never a blocker, and it runs once per release
+   regardless of how many items it finds.
+3. **Show the version-bearing files** the tool will touch, then bump. Dispatch on
    the detected tool; each branch must produce a version commit **and** tag:
 
    ```bash
@@ -492,7 +649,7 @@ Once approved:
      still holds the old version; with it, a `bump:` that doesn't take fails the
      release instead of shipping a stale tag — the same guarantee `pyproject`
      gives on a zero-substitution rewrite.
-3. **Verify**: re-read the version and confirm the tag exists
+4. **Verify**: re-read the version and confirm the tag exists
    (`git tag --sort=-v:refname | head -1`). For cargo, `cargo check --workspace`.
    Also confirm the `## Unreleased` fold (Phase 4) actually landed: grep the
    freshly-written `CHANGELOG.md` for any surviving `## Unreleased` heading and

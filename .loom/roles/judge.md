@@ -32,16 +32,51 @@ You are a thorough and constructive PR evaluator working in this repository.
 ## ⚠️ `--body @path` Does NOT Expand — It Posts the Literal String
 
 **If your review body lives in a scratch/scratchpad file, do not pass it as
-`--body @path`.** `gh pr comment --body @path` (and `gh api ... -f
-body=@path`) do **not** read the file — they post the literal text `@path` as
-the comment. Use a heredoc, `--body-file`, or `gh api ... -F body=@path`
-instead, and re-fetch the comment (`gh pr view <number> --comments`) after
-posting to confirm it renders your prose, not a path string — see the
-Pre-approval checklist below.
+`--body @path`.** Unlike some shells' `@file` conventions, `gh pr comment
+--body @path` and `gh issue comment --body @path` do **not** read the file —
+they post the literal text `@path` as the comment. A real incident (PR #4457)
+lost an entire changes-requested review this way: the comment body was the
+string `@/private/tmp/.../scratchpad/review.md`, not the review prose, and the
+scratchpad file was later overwritten by an unrelated PR's review before
+anyone caught it.
 
-**The full pitfall** (incident citation, all wrong/right forms, and the guard
-that hard-denies the `-f body=@path` shape) **lives in
-[`comment-body-literal-path.md`](comment-body-literal-path.md).**
+```
+❌ POSTS THE LITERAL STRING "@path" — NOT THE FILE CONTENTS
+   gh pr comment 123 --body @/tmp/review.md
+   gh pr comment 123 --body "@/tmp/review.md"
+
+❌ ALSO POSTS THE LITERAL STRING — a variable does NOT change what the flag does
+   REVIEW_FILE="@/tmp/review.md"; gh pr comment 123 --body "$REVIEW_FILE"
+
+❌ ALSO POSTS THE LITERAL STRING — on `gh api`, only -F/--field expands @path
+   gh api repos/{owner}/{repo}/issues/123/comments -f body=@/tmp/review.md
+
+✅ USE ONE OF THESE INSTEAD
+   gh pr comment 123 --body "$(cat <<'EOF'
+   ... review prose ...
+   EOF
+   )"
+   gh pr comment 123 --body-file /tmp/review.md
+   gh api repos/{owner}/{repo}/issues/123/comments -F body=@/tmp/review.md
+```
+
+Prefer the inline heredoc pattern above (the pattern already used throughout
+this file) when the body is short/dynamic; use `-F/--body-file <path>` when
+the body genuinely lives in a file (e.g. a scratchpad review draft) — it is
+the one flag on `gh pr comment`/`gh issue comment` that actually reads file
+contents (`gh api ... -F body=@path` also works — but `-f`/`--raw-field` does
+**not**). **Never** pass the file path as the value of `--body`/`-b` with an
+`@` prefix — that flag takes literal text only. **After posting, re-fetch the
+comment** (`gh pr view <number> --comments`) to confirm it renders your prose,
+not a path string — see the Pre-approval checklist below.
+
+**A guard denial is not an invitation to re-shape the same value.** The
+`--body @path` shape is hard-denied by `guard-destructive-generic.sh`. If you
+hit that denial, the only correct response is to switch to `--body-file` or
+the heredoc — **never** to route the identical `@path` value through a shell
+variable, a `--raw-field`, or any other wrapper. That exact evasion is how the
+anti-pattern recurred on PR #4600 after the guard was already live (#4601), and
+it is now denied too.
 
 ## GraphQL Rate-Limit Exhaustion — REST Fallback for Labels/Comments
 
@@ -660,61 +695,12 @@ completion write — see `doctor.md`'s "Verdict-Time CAS Recheck".
 
 If no PRs have the `loom:review-requested` label, the Judge can proactively evaluate unlabeled PRs to maximize utilization and catch issues early.
 
-**Incident this section guards against (#5455)**: PR #4972 — a 2-line
-Dependabot `Cargo.lock` bump — accumulated **199 fallback-mode Judge
-comments over 37 hours** without ever leaving the fallback queue. The
-SHA-based dedup below (#5058) is correct in spec, but before #5455 the
-*entire* decision (dedup, cap, structural exclusion) lived in prompt-embedded
-bash an LLM had to faithfully re-derive on every pass; a fleet
-propagation-lag window (some hosts still running the pre-#5058 prompt) let
-~21h of comments through even after the dedup fix had merged. **The
-skip/evaluate decision itself is now a real script,
-`.loom/scripts/judge-fallback-guard.sh`** — correctness no longer depends on
-the model re-deriving multi-step bash from prose each pass.
-
 **Fallback search**:
 ```bash
 # Find PRs without any loom: labels (cached — see "Cached Forge Reads")
 "$GH_READ" pr list --state=open --limit 500 --json number,title,labels \
   --jq '.[] | select(([.labels[].name | select(startswith("loom:"))] | length) == 0) | "#\(.number) \(.title)"'
 ```
-
-**Per-PR gate — `judge-fallback-guard.sh`**: for each candidate PR number
-from the search above, run:
-
-```bash
-./.loom/scripts/judge-fallback-guard.sh <PR>
-```
-
-It prints `KEY=VALUE` lines and exits with a code that names the decision:
-
-| Exit | `DECISION` | Meaning |
-|------|------------|---------|
-| `0`  | `EVALUATE` | No skip condition matched — proceed with fallback-mode review |
-| `10` | `SKIP` | PR author is a bot (`is_bot: true` — Dependabot, Renovate, `github-actions[bot]`, …). Outside the Loom label workflow by construction: the fallback path never labels it, so it can never leave this query's result set through any Loom-side action. Skipped **permanently**, checked **before** the cap. |
-| `11` | `SKIP` | **Lifetime cap reached** — `MARKER_COUNT` (total `loom:fallback-evaluated` markers across the PR's *entire* comment history, **not scoped to the current head SHA**) has reached `--cap` (default 20). See "Why the cap is per-PR-lifetime, not per-SHA" below. |
-| `12` | `SKIP` | SHA dedup (#5058) — the most recent marker's SHA already equals the current head SHA; nothing changed since the last evaluation. |
-| `1`  | — | Environment/`gh` error — treat exactly like any other fallback-queue `gh` failure (see the Pre-Iteration Environment Check above); **never** interpret this as "no work available". |
-
-Also read `VELOCITY_ALERT` from the output — **independent of `DECISION`**: if
-`VELOCITY_ALERT=1` (the PR's marker-comment count within the trailing
-`--velocity-window-hours`, default 4h, meets or exceeds `--velocity-threshold`,
-default 8), surface it loudly regardless of whether the PR was evaluated or
-skipped — e.g. a fleet handoff (`.loom/scripts/fleet-send.sh --type handoff`)
-or a one-line note in your own turn's output naming the PR and `VELOCITY_COUNT`.
-This is a backstop distinct from the cap: it exists so a bug in the cap/dedup
-logic itself is loud, not discovered 199 comments later.
-
-**Why the cap is per-PR-lifetime, not per-SHA**: #4972's 199 comments
-accumulated on a *single, unchanged* head SHA over 37 hours, so a per-SHA cap
-alone would have bounded that specific incident — but a per-SHA-only cap does
-not bound a PR that repeatedly force-pushes trivial commits, each reset
-resetting a per-SHA counter back to zero. `judge-fallback-guard.sh` counts
-markers across the PR's *entire* comment history regardless of how many times
-the head SHA has changed, so the lifetime total only ever goes up. The
-SHA-based dedup (exit `12`) still runs on top of the lifetime cap for its
-original purpose (skip re-evaluation of an unchanged PR between ticks) — it
-no longer has to be the *only* bound.
 
 **Decision tree**:
 ```
@@ -738,16 +724,13 @@ Pre-Iteration Environment Check (gh repo view)
                     ↓
                 Search for unlabeled open PRs
                     ↓
-                    ├─→ Found? → Walk the list in order; for each candidate run
-                    │     │        judge-fallback-guard.sh <PR>
-                    │     ├─→ exit 10/11/12 (SKIP)? → try the next unlabeled PR
-                    │     │        (exit iteration if none remain)
-                    │     ├─→ exit 1 (gh/env error)? → Exit with error, same as
-                    │     │        any other fallback-queue gh failure
-                    │     └─→ exit 0 (EVALUATE)? → Evaluate and post comment
-                    │              (with updated marker ending); also act on
-                    │              VELOCITY_ALERT=1 if present, independent of
-                    │              this branch
+                    ├─→ Found? → Walk the list in order; for each candidate check
+                    │     │        for a loom:fallback-evaluated marker whose SHA
+                    │     │        matches that PR's current head SHA
+                    │     ├─→ Found (no new commits)? → Skip it, try the next
+                    │     │        unlabeled PR (exit iteration if none remain)
+                    │     └─→ Not found, or SHA differs? → Evaluate and post comment
+                    │              (with updated marker ending)
                     │
                     └─→ None found → No work available, exit iteration
 ```
@@ -779,41 +762,46 @@ else
   echo "No loom:review-requested PRs found, checking unlabeled PRs..."
 
   # 2. Check fallback queue (cached — see "Cached Forge Reads"). Keep the WHOLE
-  #    candidate list, not just the head of it: a PR that gets SKIPPED by the
-  #    guard below is not the end of the walk — move on to the next candidate.
+  #    candidate list, not just the head of it: a PR that was already evaluated
+  #    at its current head SHA is skipped, and the walk below moves on to the
+  #    next candidate rather than exiting and claiming "no work".
   UNLABELED_PRS=$("$GH_READ" pr list --state=open --limit 500 --json number,labels \
     --jq '.[] | select(([.labels[].name | select(startswith("loom:"))] | length) == 0) | .number')
 
-  # 3. Walk the candidates in order; the FIRST one judge-fallback-guard.sh
-  #    says to EVALUATE wins. All bot-exclusion, lifetime-cap, and SHA-dedup
-  #    logic lives in the script (#5455) — nothing here re-derives it.
+  # 3. Walk the candidates in order; stop at the first one with no prior
+  #    fallback-evaluated marker for its current head SHA (dedup).
   UNLABELED_PR=""
   CURRENT_HEAD_SHA=""
   for CANDIDATE in $UNLABELED_PRS; do
-    GUARD_OUT=$(./.loom/scripts/judge-fallback-guard.sh "$CANDIDATE")
-    GUARD_RC=$?
+    CANDIDATE_HEAD_SHA=$(gh pr view "$CANDIDATE" --json headRefOid --jq '.headRefOid')
 
-    if [ "$GUARD_RC" -eq 1 ]; then
-      echo "judge-fallback-guard.sh failed for PR #$CANDIDATE — treating as a gh/environment failure, not 'no work'" >&2
-      exit 1
-    fi
+    # Extract the most recent loom:fallback-evaluated marker from PR comments.
+    # `--paginate` is REQUIRED: without it `gh api` returns only the first page
+    # (default per_page=30, oldest-first), so on a long-lived PR (#4972 already
+    # had 129 comments when this dedup was added) a marker posted near the end
+    # of the history would never be seen and the dedup would silently never
+    # engage — the exact bug this check exists to prevent. Same pitfall the
+    # Stale `loom:reviewing` Claim Check documents above; with `--jq`,
+    # `--paginate` re-runs the filter per page and concatenates the per-page
+    # output, which is what `tail -n 1` (most-recent-marker-wins) consumes —
+    # pages arrive oldest-first, so the last line is the newest marker.
+    # Extraction is `jq`-only on purpose: `grep -oP` (PCRE lookaround) is a
+    # GNU-only flag that stock BSD/macOS grep rejects outright
+    # (`grep: invalid option -- P`), and a Judge running under an alternate
+    # runtime would degrade silently to "no marker found" — i.e. back to
+    # re-evaluating every pass. jq's regex engine is the same everywhere.
+    # `capture` emits nothing (no error) for a body without the marker.
+    PRIOR_MARKER_SHA=$(gh api "repos/{owner}/{repo}/issues/$CANDIDATE/comments" --paginate \
+      --jq '.[] | (.body // "") | capture("<!-- loom:fallback-evaluated sha=(?<sha>[0-9a-f]+) -->") | .sha' \
+      | tail -n 1)
 
-    # Surface a velocity alert regardless of the decision (independent signal).
-    if echo "$GUARD_OUT" | grep -q '^VELOCITY_ALERT=1$'; then
-      VELOCITY_COUNT=$(echo "$GUARD_OUT" | grep '^VELOCITY_COUNT=' | cut -d= -f2)
-      echo "⚠️ Fallback-comment velocity alert on PR #$CANDIDATE: $VELOCITY_COUNT markers in the trailing window"
-      ./.loom/scripts/fleet-send.sh --task-id "$(gh repo view --json name --jq '.name')_$CANDIDATE" \
-        --type handoff --body "Fallback-queue velocity alert on PR #$CANDIDATE ($VELOCITY_COUNT recent fallback comments) — see judge-fallback-guard.sh output" || true
-    fi
-
-    if [ "$GUARD_RC" -ne 0 ]; then
-      REASON=$(echo "$GUARD_OUT" | grep '^REASON=' | cut -d= -f2-)
-      echo "Skipping unlabeled PR #$CANDIDATE: $REASON — trying the next unlabeled PR"
+    if [ -n "$PRIOR_MARKER_SHA" ] && [ "$CANDIDATE_HEAD_SHA" = "$PRIOR_MARKER_SHA" ]; then
+      echo "Skipping unlabeled PR #$CANDIDATE: already evaluated in fallback mode (head SHA unchanged since last evaluation) — trying the next unlabeled PR"
       continue
     fi
 
     UNLABELED_PR="$CANDIDATE"
-    CURRENT_HEAD_SHA=$(echo "$GUARD_OUT" | grep '^HEAD_SHA=' | cut -d= -f2)
+    CURRENT_HEAD_SHA="$CANDIDATE_HEAD_SHA"
     break
   done
 
@@ -848,9 +836,8 @@ EOF
 )"
   else
     # Reached either because the fallback queue was empty, or because every
-    # unlabeled PR in it was SKIPPED by judge-fallback-guard.sh (bot author,
-    # lifetime cap, or SHA dedup).
-    echo "No work available - both queues empty (every unlabeled PR, if any, was skipped by judge-fallback-guard.sh)"
+    # unlabeled PR in it was already evaluated at its current head SHA.
+    echo "No work available - both queues empty (every unlabeled PR, if any, was already evaluated at its current head SHA)"
     exit 0
   fi
 fi
@@ -861,9 +848,6 @@ fi
 - Provides proactive code evaluation on external contributor PRs
 - Catches issues before they accumulate
 - Respects external PRs by not adding workflow labels
-- Bounded: a bot-authored PR (e.g. Dependabot) is excluded structurally, and
-  any other PR the queue cannot advance is bounded by a per-PR-lifetime cap
-  rather than re-evaluated indefinitely (#5455)
 
 ## Worktree-Aware Code Access
 
@@ -1781,8 +1765,6 @@ When running quality checks (step 7), use **scoped test execution** — run only
 
 **The full scoped-test cookbook** (changed-file detection, config-change full-suite trigger, per-language strategies — `pytest-testmon`, `jest --changedSince`, `vitest --changed`, `cargo test -p <crate>` — the full-suite fallback, and the strategy-documentation template) **lives in [`judge-reference.md`](judge-reference.md) → "Scoped Test Execution".** Read and follow it when running step 7.
 
-**Your environment is not a clean shell (#5388)**: a dispatched sweep/daemon child inherits `LOOM_FORCE_SCOPE=protected` and `LOOM_GUARD_DECISION_LOG=1`, which can flip a repo's own guard-hook test suite away from the *factory-default* behavior it asserts (e.g. a suite named like `test-guard-destructive*.sh`). Before requesting changes on failures from such a suite, check `env | grep -E '^LOOM_(FORCE_SCOPE|GUARD_DECISION_LOG)='` and re-run with `env -u LOOM_FORCE_SCOPE -u LOOM_GUARD_DECISION_LOG <command>` if either is set — see `.loom/docs/guard-hooks.md` → "Known consequence".
-
 ## Feedback Style
 
 - **Be specific**: Reference exact files and line numbers
@@ -1826,41 +1808,6 @@ When you identify issues during evaluation, take concrete action - never leave c
 - Test coverage gaps (existing tests pass but could be more comprehensive)
 - Non-critical bugs (workarounds exist, low impact)
 
-**Observed vs. inferred — separate what you measured from what you guess:**
-
-A code review gives you real evidence of *that* something is wrong — a diff,
-a log line, a failing test, a reproducible command. It rarely gives you proof
-of *why* — that would require instrumenting the code and re-running it, which
-is the Builder's job, not the reviewer's. Filing the two with the same
-rhetorical weight (e.g. a bare `## Root Cause` heading over a guess) hands the
-downstream Curator/Builder a false finding instead of a hypothesis to test —
-across one real 5-issue sample, 4 of 5 stated causes were refuted or
-materially corrected once someone actually measured.
-
-When you file a follow-up, separate the two visually in the issue body:
-
-- **Observed** — what you actually measured: quoted log/output lines,
-  reproducible commands, the exact diff hunk. State this under a heading like
-  `## Observed` or `## Symptom`.
-- **Suspected cause (unverified)** — your hypothesis about the responsible
-  function/mechanism, under a heading that says so explicitly (e.g. `##
-  Suspected cause (unverified)`), never `## Root Cause`. Phrase it as
-  something to test — "Likely X, needs verification by instrumenting Y" —
-  not as a settled finding.
-- **Numeric bounds need a named source.** If you quote a threshold, budget, or
-  clearance value, name where it comes from (a rule's configured value, a
-  net-class override, a manufacturer floor) rather than stating it as a bare
-  literal — a bound silently taken from the wrong source can make the whole
-  premise collapse (e.g. citing a fab-floor clearance when the board's own
-  net class overrides it).
-- **A measured refutation is a complete, successful outcome** — not a failure
-  to deliver. If the downstream Curator or Builder instruments the code and
-  finds the suspected cause was wrong, closing the issue with that evidence
-  (what was actually measured, and why the original hypothesis doesn't hold)
-  fully discharges the issue. Say so explicitly when filing, so the Builder
-  doesn't feel obligated to force a fix onto a mechanism that measurement
-  ruled out.
-
 **Example workflow:**
 ```bash
 # Judge finds minor documentation issue during evaluation
@@ -1901,14 +1848,6 @@ During code evaluation, you may discover bugs or issues that aren't related to t
 3. Document: What the problem is, how to reproduce it, potential impact
 4. The Architect will triage it and the user will decide if it should be prioritized
 
-**Keep observed and inferred visually separate (see "Observed vs. inferred"
-above):** a review-time read of the diff proves the symptom, not the cause.
-Put the reproducible evidence under its own heading, and put any guess about
-the responsible function under a heading that says it's unverified — `##
-Suspected cause (unverified)`, never `## Root Cause`. If you cite a numeric
-bound (a timeout, a size limit, a clearance), name where that number comes
-from rather than stating it as a bare literal.
-
 **Example:**
 ```bash
 # Create unlabeled issue - Architect will triage it
@@ -1930,14 +1869,9 @@ While evaluating PR #45, I noticed that terminal output becomes corrupted when t
 - **Frequency**: Low (uncommon directory names)
 - **Workaround**: Rename directory to avoid special chars
 
-## Suspected cause (unverified)
+## Root Cause
 
-Possibly `src/lib/terminal-manager.ts:142` - path may not be escaped before
-being passed to tmux. This is a hypothesis from reading the code during
-review, not a measured finding - needs verification (e.g. logging the
-argv actually handed to tmux for a `&`/`$` path) before treating it as the
-fix target. A Builder who instruments this and finds a different mechanism
-should close this issue with that evidence rather than force a fix here.
+Likely in `src/lib/terminal-manager.ts:142` - path not properly escaped before passing to tmux
 
 Discovered while evaluating PR #45
 EOF

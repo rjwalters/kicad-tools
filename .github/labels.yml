@@ -179,9 +179,25 @@
 # - loom:reviewing (Judge reviewing PR)
 # - loom:treating (Doctor fixing bug/PR feedback)
 
+# PR verdict-label mutual exclusion (#4570): {loom:review-requested,
+# loom:reviewing, loom:changes-requested, loom:pr} form a mutually-exclusive
+# verdict class on a PR — at most ONE of these four should be present at a
+# time, with one legal transient exception: `loom:review-requested` and
+# `loom:reviewing` may coexist while a Judge's claim is active (the review is
+# in progress but has not yet produced a verdict). `loom:changes-requested`
+# and `loom:pr` are terminal verdicts and must never coexist with each other,
+# nor with a live `loom:reviewing` claim from a DIFFERENT actor's concurrent
+# review. A PR observed carrying `loom:pr` + `loom:changes-requested`
+# simultaneously is in an off-graph, contradictory state (see the PR #4560
+# incident, 2026-07-30) that must never be auto-merged — Champion's
+# Verdict-State Janitor (defaults/.claude/commands/loom/champion-pr-merge.md)
+# resolves it fail-safe (`loom:changes-requested` wins), and Judge/Doctor's
+# Verdict-Time CAS Recheck (judge.md / doctor.md) is the write-time guard that
+# prevents it from being produced in the first place.
+
 # Role-Specific Workflow Labels
 - name: loom:building
-  description: "Builder is implementing this issue. Applied by: Builder/Shepherd only (claim label)."
+  description: "Builder is implementing this issue. Applied by: Builder only (claim label)."
   color: "F59E0B"  # amber-500 - matches other in-progress states
 
 - name: loom:curating
@@ -189,11 +205,15 @@
   color: "F59E0B"  # amber-500 - matches other in-progress states
 
 - name: loom:treating
-  description: "Doctor is fixing this bug or addressing PR feedback. Applied by: Doctor only (claim label)."
+  description: "Doctor is fixing this bug or PR. Applied by: Doctor. Stale after LOOM_STALE_TREATING_MINUTES (60m)."
   color: "F59E0B"  # amber-500 - matches other in-progress states
 
 - name: loom:reviewing
   description: "Judge is reviewing this PR. Applied by: Judge only. Stale after LOOM_STALE_REVIEWING_MINUTES (30m)."
+  color: "F59E0B"  # amber-500 - matches other in-progress states
+
+- name: loom:evaluating
+  description: "Champion is evaluating this proposal (claim label, stale after 15m). Applied by: Champion only."
   color: "F59E0B"  # amber-500 - matches other in-progress states
 
 - name: loom:review-requested
@@ -209,7 +229,7 @@
   color: "DC2626"  # red-600 - indicates broken state
 
 - name: loom:auto-merge-ok
-  description: Override size limit for auto-merge (applied by Judge or human)
+  description: Override a Champion merge-risk hold (applied by Judge or human)
   color: "10B981"  # emerald-500 - signals safe to proceed
 
 - name: loom:ci-failure
@@ -251,16 +271,17 @@
   color: "DC2626"  # red-600
 
 - name: loom:abort
-  description: Signal to abort shepherd for this issue (returns to loom:issue)
+  description: Signal to abort the sweep for this issue (returns to loom:issue)
   color: "F97316"  # orange-500 - warning/signal color
 
-# loom:operator-only vs loom:blocked: operator-only = a human must act OUTSIDE
-# automation (credentials, infra, hardware) and sweep/shepherd skip it entirely;
+# loom:operator-only vs loom:blocked: operator-only = a human must act or rule
+# OUTSIDE automation (credentials, infra, hardware, or an owner-gated decision
+# on owner-tracked code) and sweep skips it entirely;
 # blocked = waiting on a dependency but otherwise automatable. Keep the
 # description at/under GitHub's 100-char label-description limit so sync-labels.sh
 # can create it (a longer description fails with HTTP 422 and the label never syncs).
 - name: loom:operator-only
-  description: "Requires human action outside automation (credentials, infra, hardware); sweep/shepherd skip"
+  description: "Requires human action or ruling outside automation (creds, infra, hardware); sweep skips"
   color: "F97316"  # orange-500 - operator-action signal (matches loom:abort)
 
 # Epic Labels

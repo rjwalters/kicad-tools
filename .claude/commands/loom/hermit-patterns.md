@@ -28,16 +28,6 @@ Full policy: `.loom/docs/gh-cached.md`.
 
 ---
 
-## ⚠️ `--body @path` Does NOT Expand — It Posts the Literal String
-
-If you post a comment via `gh issue comment` / `gh pr comment` / `gh api ...
-comments` from a scratch file, `--body @path` (and `gh api -f body=@path`)
-posts the literal string `@path`, not the file's contents. **Full pitfall,
-incident citation, and fixes**:
-[`comment-body-literal-path.md`](comment-body-literal-path.md).
-
----
-
 ## Detailed Code Smell Examples
 
 Look for these patterns that often indicate bloat:

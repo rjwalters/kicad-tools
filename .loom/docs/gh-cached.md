@@ -6,15 +6,6 @@ cache under `/tmp/gh-cache/`. Because the cache is on disk, it is shared
 **across processes on one host** — the N sweep / Judge / Champion sessions
 running concurrently against the same repo hit the same entries.
 
-The cache directory is further scoped **per repo** (#5224): the wrapper
-resolves `git rev-parse --show-toplevel` once per invocation (cheap, local, no
-network) and hashes it into a subdirectory of `GH_CACHE_DIR`, so two different
-repos on the same host issuing the textually identical `gh` invocation never
-read (or invalidate) each other's cached entries — the sessions sharing
-entries above are always sessions against the *same* repo. `GH_CACHE_REPO_ID`
-overrides the resolved identity directly when needed (tests, or a working
-directory that isn't a git repo).
-
 This document is the policy reference for **which** reads in the
 `/loom:sweep`, `/loom:judge`, and Champion-PR-merge skills go through the
 wrapper and which are deliberately left uncached (#4667). The motivating
@@ -217,11 +208,7 @@ stub `gh` on `PATH` and a temp `GH_CACHE_DIR`, asserting: repeated `pr list` /
 `issue list` / `pr view` reads hit the cache; `--no-cache` bypasses; `gh pr
 checks` and `gh repo view` are never cached; a wrapped `gh pr edit` /
 `gh pr comment` invalidates the cached reads of that PR (including the cached
-listing that contains it); a state change is observed once the TTL expires;
-and (#5224) two different repo identities — both via `GH_CACHE_REPO_ID` and
-via two real, distinct git toplevels — never share a cache read or an
-invalidation for the textually identical `gh` args, even when both repos have
-a numerically-identical resource id.
+listing that contains it); and a state change is observed once the TTL expires.
 
 ### Manual (inherently runtime — cannot be unit-tested)
 

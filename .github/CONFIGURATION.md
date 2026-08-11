@@ -4,17 +4,20 @@ This directory contains GitHub configuration templates that Loom installs into n
 
 ## Contents
 
-### Issue Templates
+Loom ships exactly these four files under `.github/` (installed by `scripts/install-loom.sh`'s
+defaults walk, which mirrors `defaults/.github/` into the workspace):
 
-**`ISSUE_TEMPLATE/task.yml`**
-- Single unified template for all development tasks
-- Supports: Bug Fix, Feature, Refactoring, Documentation, Testing, Infrastructure, Research, Improvement
-- Clearly explains that issues control the development process
-- Redirects discussions to GitHub Discussions
+- **`CONFIGURATION.md`** — this file
+- **`ISSUE_TEMPLATE/task.yml`** — single unified template for all development tasks (Bug Fix,
+  Feature, Refactoring, Documentation, Testing, Infrastructure, Research, Improvement); explains
+  that issues control the development process; redirects discussions to GitHub Discussions
+- **`ISSUE_TEMPLATE/config.yml`** — disables blank issues (forces template use) and links to
+  GitHub Discussions for non-task items
+- **`labels.yml`** — the authoritative label set for the label-based workflow (see below)
 
-**`ISSUE_TEMPLATE/config.yml`**
-- Disables blank issues (forces template use)
-- Links to GitHub Discussions for non-task items
+Everything else under a workspace's `.github/` (e.g. `workflows/`) is consumer-owned — Loom
+never installs, edits, or removes it. If you see a `.github/` file not in this list, it isn't
+from Loom.
 
 ## How It Works
 
@@ -23,7 +26,10 @@ This directory contains GitHub configuration templates that Loom installs into n
 1. Collaborator creates an issue (no auto-labeling)
 2. Issue starts with `loom:triage` label (from template)
 3. Enters the label-based workflow:
-   - Curator enhances → adds `loom:curated` (human approves → `loom:issue`)
+   - Curator enhances → adds `loom:curated`
+   - `loom:curated` → `loom:issue` promotion (human, Champion, or the `/loom:sweep`
+     orchestrator's approval gate — see `.loom/roles/curator.md` § "Who promotes
+     `loom:curated` → `loom:issue`" for the authoritative rule)
    - Builder implements → adds `loom:building`
    - Creates PR → adds `loom:review-requested`
    - Judge approves → adds `loom:pr`
@@ -31,12 +37,10 @@ This directory contains GitHub configuration templates that Loom installs into n
 
 ## Installation
 
-### Automatic Template Installation
-
-These templates are automatically copied to `<workspace>/.github/` during:
-- Initial workspace setup
-- Factory reset
-- New project creation
+These files are copied from `defaults/.github/` into `<workspace>/.github/` by
+`scripts/install-loom.sh`'s defaults-directory walk, and are re-synced on `loom update` /
+reinstall (they're on the Loom-shipped `.github/` allowlist, so a reinstall overwrites local
+edits to these four files — customize via `defaults/optional/` or a fork instead).
 
 ### Optional: External Issue Labeling Workflow
 
@@ -46,27 +50,15 @@ This workflow is not installed by default because it generates "No jobs were run
 
 ## Customization
 
-Workspaces can customize these templates after installation:
-- Modify issue template fields
-- Add additional workflows from `defaults/optional/`
-
-Changes to workspace `.github/` files don't affect the defaults.
+Workspaces can customize non-Loom-shipped `.github/` content freely (it's never touched by
+Loom). Customizing one of the four Loom-shipped files above will be clobbered on the next
+`loom update` / reinstall — instead add workflows from `defaults/optional/`, or fork.
 
 ## Label-Based Workflow
 
-The issue template integrates with Loom's label-based workflow coordination:
-
-| Label | Meaning | Who Sets It |
-|-------|---------|-------------|
-| `loom:triage` | New issue awaiting Curator enhancement | Issue template (automatic) |
-| `loom:curated` | Enhanced by Curator, awaiting human approval | Curator agent |
-| `loom:issue` | Approved for work, ready for Builder | Human (from curated) |
-| `loom:building` | Builder is implementing | Builder agent |
-| `loom:curating` | Curator is enhancing | Curator agent |
-| `loom:treating` | Doctor is fixing bug/PR feedback | Doctor agent |
-| `loom:review-requested` | PR needs review | Builder agent |
-| `loom:reviewing` | Judge is actively reviewing | Judge agent |
-| `loom:pr` | Approved for merge | Judge agent |
+The issue template integrates with Loom's label-based workflow coordination. `.github/labels.yml`
+is the authoritative label set (each label's `Applied by:` field states who sets it) — see that
+file rather than a table here, which would drift.
 
 See [WORKFLOWS.md](https://github.com/rjwalters/loom/blob/main/docs/workflows.md) for complete workflow documentation.
 

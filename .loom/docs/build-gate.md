@@ -136,9 +136,6 @@ stages in order under `set -euo pipefail`, aborting on the first non-zero exit:
    `loom-daemon/tests/` are deliberately excluded here — see "Local gate vs.
    CI" below.
 2. `bash scripts/test-installer.sh` — the 131-case bash installer suite.
-3. `bash scripts/test-changelog.sh` — `scripts/changelog.sh`'s unit suite
-   (#5196), against a disposable scratch repo (`CHANGELOG_REPO_ROOT`); no
-   network, no dependency on this repo's own history.
 
 **The gate requires no Python toolchain at all (epic #4081 Phase 4, #4557;
 finished by #4970).** Stage 2 used to be `cd loom-tools && uv run pytest

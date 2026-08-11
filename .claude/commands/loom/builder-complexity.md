@@ -2,14 +2,6 @@
 
 This document covers complexity assessment, issue decomposition, and scope management for the Builder role. For the core builder workflow, see `builder.md`.
 
-## ⚠️ `--body @path` Does NOT Expand — It Posts the Literal String
-
-If you post a comment via `gh issue comment` / `gh pr comment` / `gh api ...
-comments` from a scratch file, `--body @path` (and `gh api -f body=@path`)
-posts the literal string `@path`, not the file's contents. **Full pitfall,
-incident citation, and fixes**:
-[`comment-body-literal-path.md`](comment-body-literal-path.md).
-
 ## Never Abandon Work
 
 **You must NEVER stop work on a claimed issue without creating a clear path forward.**

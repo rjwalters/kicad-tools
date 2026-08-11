@@ -64,19 +64,6 @@
 # wrong (every self-update would silently disarm the detector — the exact bug
 # class #4011 fixes), so it must be an explicit signal.
 #
-# Test-only dry-run seam (#5501): a test proving "default label = the
-# operator's real stop, behaviour unchanged" needs LOOM_LAUNCHD_LABEL /
-# LOOM_WATCHDOG_LABEL to resolve to the REAL production values — but doing
-# that against a live host is exactly the incident this seam exists to close
-# (verifying #5131 booted the operator's real daemon, see #5501). With
-# LOOM_DAEMON_STOP_DRYRUN=1, this script still RESOLVES the pid / launchd job /
-# systemd unit it would act on (so the "what would this target" logic is fully
-# exercised), but every MUTATING action against it — kill -TERM/-KILL, launchctl
-# bootout (daemon + watchdog), systemctl --user disable --now (daemon +
-# watchdog) — becomes a logged "DRY-RUN: would ..." line instead of a real
-# syscall. Pair with LOOM_DAEMON_STOP_DRYRUN_LOG=<path> to capture those lines
-# for a test to grep instead of parsing captured stdout.
-#
 # Usage:
 #   ./.loom/scripts/cli/loom-daemon-stop.sh              Graceful stop (SIGTERM -> SIGKILL); clears the autonomy-desired marker
 #   ./.loom/scripts/cli/loom-daemon-stop.sh --force      Skip the grace window (SIGKILL)
@@ -86,13 +73,6 @@
 # Environment:
 #   LOOM_DAEMON_STOP_GRACE_SECS   Grace window before SIGKILL (default 10)
 #   LOOM_DAEMON_STOP_KEEP_INTENT  1/true/yes: preserve the autonomy-desired marker + watchdog (same as --restarting)
-#   LOOM_DAEMON_STOP_DRYRUN       1/true/yes: TEST-ONLY. Resolve the target pid/launchd
-#                                 job/systemd unit but never actually kill/bootout/disable
-#                                 it — logs "DRY-RUN: would ..." instead (#5501). The
-#                                 supported way to exercise default-label semantics
-#                                 without touching a real supervised job.
-#   LOOM_DAEMON_STOP_DRYRUN_LOG   Path to also append each dry-run action line to
-#                                 (in addition to stdout), for a test to grep.
 #   LOOM_LAUNCHD_LABEL            macOS only: the LaunchAgent label to bootout (default com.rjwalters.loom-daemon)
 #   LOOM_LAUNCHD_DOMAIN           macOS only: pin the launchd domain (gui/<uid> or
 #                                 user/<uid>); else auto-resolved gui→user (#4130).
@@ -194,20 +174,6 @@ fi
 PID_FILE="$DAEMON_STATE_HOME/.daemon.pid"
 GRACE_SECS="${LOOM_DAEMON_STOP_GRACE_SECS:-10}"
 
-# ---------- dry-run seam (#5501) ----------
-# See the header comment. Resolution stays real; every mutating action against
-# the resolved pid/job/unit is replaced by a logged line instead.
-DRYRUN=false
-if [[ "${LOOM_DAEMON_STOP_DRYRUN:-}" =~ ^(1|true|yes|on)$ ]]; then
-    DRYRUN=true
-fi
-dryrun_log() {
-    echo "DRY-RUN: $*"
-    if [[ -n "${LOOM_DAEMON_STOP_DRYRUN_LOG:-}" ]]; then
-        printf '%s\n' "$*" >> "$LOOM_DAEMON_STOP_DRYRUN_LOG"
-    fi
-}
-
 # ---------- autonomy-desired marker + watchdog (#4011) ----------
 SOCKET_PATH="${LOOM_SOCKET_PATH:-$HOME/.loom/loom-daemon.sock}"
 LOOM_DIR="$(dirname "$SOCKET_PATH")"
@@ -227,11 +193,7 @@ teardown_autonomy_intent() {
     wd_service="${LAUNCHD_DOMAIN}/${wd_label}"
     if [[ "$USE_LAUNCHD" == "true" ]] && command -v launchctl >/dev/null 2>&1; then
         if launchctl print "$wd_service" >/dev/null 2>&1; then
-            if [[ "$DRYRUN" == "true" ]]; then
-                dryrun_log "would launchctl bootout $wd_service (watchdog)"
-            else
-                launchctl bootout "$wd_service" >/dev/null 2>&1 || true
-            fi
+            launchctl bootout "$wd_service" >/dev/null 2>&1 || true
         fi
     fi
     # systemd --user watchdog timer+service teardown (#4260 sub-issue D),
@@ -244,13 +206,8 @@ teardown_autonomy_intent() {
         local sd_daemon_unit sd_wd_unit
         sd_daemon_unit="$(resolve_systemd_unit)"
         sd_wd_unit="${LOOM_WATCHDOG_LABEL:-${sd_daemon_unit%.service}-watchdog}"
-        if [[ "$DRYRUN" == "true" ]]; then
-            dryrun_log "would systemctl --user disable --now ${sd_wd_unit}.timer (watchdog)"
-            dryrun_log "would systemctl --user disable --now ${sd_wd_unit}.service (watchdog)"
-        else
-            systemctl --user disable --now "${sd_wd_unit}.timer" >/dev/null 2>&1 || true
-            systemctl --user disable --now "${sd_wd_unit}.service" >/dev/null 2>&1 || true
-        fi
+        systemctl --user disable --now "${sd_wd_unit}.timer" >/dev/null 2>&1 || true
+        systemctl --user disable --now "${sd_wd_unit}.service" >/dev/null 2>&1 || true
     fi
 }
 
@@ -313,10 +270,6 @@ launchd_job_pid() {
 # best-effort -- a job that was never loaded (or already unloaded) is a no-op.
 launchd_bootout_if_loaded() {
     if launchd_job_loaded; then
-        if [[ "$DRYRUN" == "true" ]]; then
-            dryrun_log "would launchctl bootout $LAUNCHD_SERVICE"
-            return 0
-        fi
         launchctl bootout "$LAUNCHD_SERVICE" >/dev/null 2>&1 || true
     fi
 }
@@ -342,19 +295,6 @@ if [[ "$IS_LINUX_SYSTEMD" == "true" ]]; then
     # scratch unit) should route to the pid-file tier, not a no-op disable.
     if systemctl --user is-active --quiet "$SYSTEMD_UNIT" 2>/dev/null \
         || systemctl --user is-enabled --quiet "$SYSTEMD_UNIT" 2>/dev/null; then
-        if [[ "$DRYRUN" == "true" ]]; then
-            # #5501: never actually stop/disable the resolved unit -- log the
-            # intended action and skip the mutating call + its post-disable
-            # verification (which assumes the disable really happened).
-            dryrun_log "would systemctl --user disable --now $SYSTEMD_UNIT"
-            if [[ "$KEEP_INTENT" != "true" ]]; then
-                teardown_autonomy_intent
-                ok "DRY-RUN: loom-daemon stop simulated (systemd unit $SYSTEMD_UNIT). Autonomy-desired marker cleared. No real action taken."
-            else
-                ok "DRY-RUN: loom-daemon stop simulated (systemd unit $SYSTEMD_UNIT). No real action taken."
-            fi
-            exit 0
-        fi
         echo "Stopping loom-daemon via systemd (systemctl --user disable --now $SYSTEMD_UNIT)..."
         systemctl --user disable --now "$SYSTEMD_UNIT" >/dev/null 2>&1 || true
         # Verify the unit is actually down — a disable --now that did not stop the
@@ -404,15 +344,6 @@ if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
     # label-blind kill would violate that scoping and contradict the #4054
     # label-scoped-stop discipline. With the default label we keep the fallback
     # as a genuine lost-PID-file recovery path.
-    # #5548 cross-reference: this tier's `pgrep -f` is still forgeable by a
-    # leaked test fixture whose path literally ends in `/loom-daemon` (the
-    # exact shape #5548 hit) -- the `(^|/)...$` anchor narrows it versus a
-    # bare substring match, but does not close that gap. No code change here:
-    # this is the intentionally-last-resort tier, already gated behind the
-    # default-label check above and already covered by a decoy regression
-    # test (test-loom-daemon-update.sh's suite-level decoy, #4078). #5548's
-    # actual fixes are in scripts/stop-daemon.sh, scripts/start-daemon.sh, and
-    # the renamed `loom-daemon-mock` test fixtures elsewhere in this repo.
     if [[ "$LAUNCHD_LABEL" == "$DEFAULT_LAUNCHD_LABEL" ]] && command -v pgrep >/dev/null 2>&1; then
         pid=$(pgrep -f '(^|/)loom-daemon$' 2>/dev/null | head -n1 || true)
     fi
@@ -422,57 +353,8 @@ if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
     warn "No running loom-daemon found (nothing to stop)."
     rm -f "$PID_FILE"
     launchd_bootout_if_loaded
-    # #5131: apply the SAME scoping to the teardown that already protects the
-    # kill. The pid resolver's last-resort  tier is deliberately skipped
-    # for a non-default LOOM_LAUNCHD_LABEL (#4078) — "stop THAT daemon, not
-    # whatever else is named loom-daemon". But the marker and watchdog are
-    # HOST-GLOBAL ($LOOM_DIR/autonomy-desired), while PID_FILE is per-workspace,
-    # so a label-scoped stop that legitimately finds nothing would still disarm
-    # the whole host and exit 0 — silently, since "nothing to stop" reads like a
-    # correct no-op.
-    #
-    # An invocation that scoped its label but NOT its marker is asking to stop
-    # one specific daemon; it is not asking to revoke host-wide autonomy. Only
-    # tear down when this stop owns that state: the default label (the
-    # operator's real daemon), or an explicit LOOM_AUTONOMY_MARKER (the caller
-    # scoped the marker too — what the test suites do via
-    # live_state_sandbox_init).
-    _teardown_is_in_scope=true
-    if [[ "$LAUNCHD_LABEL" != "$DEFAULT_LAUNCHD_LABEL" && -z "${LOOM_AUTONOMY_MARKER:-}" ]]; then
-        _teardown_is_in_scope=false
-    fi
-    if [[ "$KEEP_INTENT" != "true" ]]; then
-        if [[ "$_teardown_is_in_scope" == "true" ]]; then
-            teardown_autonomy_intent
-        else
-            warn "Label-scoped stop (LOOM_LAUNCHD_LABEL=$LAUNCHD_LABEL) found no daemon;"
-            warn "  leaving the host-global autonomy marker and watchdog untouched (#5131)."
-            warn "  Set LOOM_AUTONOMY_MARKER to scope the marker too, or use the default"
-            warn "  label, if this stop is meant to disarm the host."
-        fi
-    fi
-    exit 0
-fi
-
-if [[ "$DRYRUN" == "true" ]]; then
-    # #5501: a pid WAS resolved (possibly via the launchd-label fallback above,
-    # which is exactly how a #5501-shaped default-label test would reach the
-    # operator's real daemon) -- log what would happen and stop here, never
-    # sending a real signal, never calling launchctl bootout for real, and
-    # never running the "still alive" verification below (it assumes a real
-    # stop was attempted).
-    if [[ "$FORCE" == "true" ]]; then
-        dryrun_log "would SIGKILL pid $pid"
-    else
-        dryrun_log "would SIGTERM pid $pid (grace ${GRACE_SECS}s), escalating to SIGKILL on timeout"
-    fi
-    launchd_bootout_if_loaded
-    rm -f "$PID_FILE"
     if [[ "$KEEP_INTENT" != "true" ]]; then
         teardown_autonomy_intent
-        ok "DRY-RUN: loom-daemon stop simulated (pid $pid, target $LAUNCHD_SERVICE). Autonomy-desired marker cleared. No real signal or launchd/systemd action was taken."
-    else
-        ok "DRY-RUN: loom-daemon stop simulated (pid $pid, target $LAUNCHD_SERVICE). No real signal or launchd/systemd action was taken."
     fi
     exit 0
 fi
