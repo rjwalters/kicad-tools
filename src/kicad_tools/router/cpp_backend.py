@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 18
+_REQUIRED_CPP_BUILD_VERSION = 19
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -1500,6 +1500,33 @@ class CppPathfinder:
         if self._py_router is not None:
             self._py_router.set_attach_zones(self._attach_zones)
 
+    def _grid_layer_indices(self) -> dict[str, int] | None:
+        """KiCad copper-layer name -> C++ grid layer index (Issue #4507).
+
+        The #4506 attach zones record their pad layers by KiCad *name*
+        (``"F.Cu"``), while ``Grid3D`` speaks only grid layer indices.  The
+        grid's own ``_index_to_layer`` map is the authority for that
+        translation -- it is the same mapping ``layer_to_index`` inverts when
+        segments and vias cross the boundary, so a zone can never be scoped to
+        a layer index the stored copper does not use.
+
+        Returns ``None`` when the mapping is unavailable (a bare ``CppGrid``
+        built without ``from_routing_grid``), which keeps the zones
+        layer-agnostic -- exactly the pre-#4507 verdict.
+        """
+        index_to_layer = getattr(self._grid, "_index_to_layer", None)
+        if not index_to_layer:
+            return None
+        from .layers import Layer
+
+        names: dict[str, int] = {}
+        for index, enum_value in index_to_layer.items():
+            try:
+                names[Layer(enum_value).kicad_name] = int(index)
+            except ValueError:  # pragma: no cover - defensive
+                continue
+        return names or None
+
     def _sync_pairwise_domains_to_cpp(self) -> None:
         """Install the pairwise domain matrix + attach zones on the C++ grid.
 
@@ -1538,8 +1565,8 @@ class CppPathfinder:
                 self._pairwise_cpp_payload = False
                 return
             cpp_zones = []
-            for min_x, min_y, max_x, max_y, net_ids in attach_zones_to_net_ids(
-                self._attach_zones, self._net_name_to_id
+            for min_x, min_y, max_x, max_y, net_ids, net_layers in attach_zones_to_net_ids(
+                self._attach_zones, self._net_name_to_id, self._grid_layer_indices()
             ):
                 zone = router_cpp.AttachZone()
                 zone.min_x = min_x
@@ -1547,6 +1574,14 @@ class CppPathfinder:
                 zone.max_x = max_x
                 zone.max_y = max_y
                 zone.net_ids = net_ids
+                # Issue #4507: per-net pad layers, so the C++ waiver is scoped
+                # to the layers the rated part actually has copper on -- the
+                # same scoping the Python acceptance check applies (#4699).
+                # ``None`` leaves the map empty = layer-agnostic (unchanged).
+                if net_layers:
+                    zone.net_layers = {
+                        net_id: sorted(indices) for net_id, indices in net_layers.items()
+                    }
                 cpp_zones.append(zone)
             payload = (domains.net_to_domain, domains.matrix, cpp_zones)
             self._pairwise_cpp_payload = payload

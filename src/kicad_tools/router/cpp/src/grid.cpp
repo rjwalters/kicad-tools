@@ -512,7 +512,26 @@ float Grid3D::pairwise_required_clearance(int net_a, int net_b) const {
                           static_cast<size_t>(db)];
 }
 
-bool Grid3D::attach_zone_exempts(float x, float y, int net_a, int net_b) const {
+namespace {
+
+// Issue #4507: does ``net`` reach ``layer`` on this zone's rated footprint?
+//
+// A net absent from ``net_layers`` is unrestricted (through-hole ``*.Cu`` pad
+// copper, which Python omits from the projection precisely so the barrel keeps
+// waiving on every layer).  Layer lists are tiny -- at most the copper layers
+// one pad occupies -- so a linear scan beats any smarter container.
+inline bool zone_net_reaches_layer(const AttachZone& zone, int net, int layer) {
+    const auto it = zone.net_layers.find(net);
+    if (it == zone.net_layers.end()) return true;
+    for (int idx : it->second) {
+        if (idx == layer) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+bool Grid3D::attach_zone_exempts(float x, float y, int net_a, int net_b, int layer) const {
     for (const auto& zone : attach_zones_) {
         if (x < zone.min_x || x > zone.max_x || y < zone.min_y || y > zone.max_y) continue;
         bool has_a = false;
@@ -521,7 +540,14 @@ bool Grid3D::attach_zone_exempts(float x, float y, int net_a, int net_b) const {
             if (nid == net_a) has_a = true;
             if (nid == net_b) has_b = true;
         }
-        if (has_a && has_b) return true;
+        if (!has_a || !has_b) continue;
+        // Issue #4507: layer scoping.  ``layer < 0`` (no single layer applies)
+        // and an empty map both keep the pre-#4507 layer-agnostic verdict.
+        if (layer < 0 || zone.net_layers.empty()) return true;
+        if (zone_net_reaches_layer(zone, net_a, layer) &&
+            zone_net_reaches_layer(zone, net_b, layer)) {
+            return true;
+        }
     }
     return false;
 }
@@ -658,15 +684,25 @@ ValidationResult Grid3D::validate_route(
     // ``gap_point`` is a nullary callable returning the (x, y) mid-gap
     // coordinate consulted by the attach-zone exemption (#4506): a rated
     // domain-bridging footprint may neck the pair down to the scalar floor
-    // inside its courtyard, but never below it -- the exemption skips only
+    // inside its pad field, but never below it -- the exemption skips only
     // the widening, never ``base``.
+    //
+    // Issue #4507: ``zone_layer`` is the grid layer index the two compared
+    // pieces of copper share, or -1 where no single layer applies (via-vs-via).
+    // It layer-scopes the zone consult so this validator waives exactly what
+    // the layer-scoped Python acceptance check (``route_pairwise_violation``,
+    // narrowed by #4699) waives -- previously the C++ side was strictly more
+    // permissive, so the search could converge on copper the Python post-check
+    // then rejected, thrashing the negotiator.
     const bool pairwise_on = pairwise_active_;
-    auto widen = [&](float base, int foreign_net, auto&& gap_point) -> float {
+    auto widen = [&](float base, int foreign_net, int zone_layer, auto&& gap_point) -> float {
         if (!pairwise_on) return base;
         const float required = pairwise_required_clearance(exclude_net, foreign_net);
         if (required <= base) return base;
         const std::pair<float, float> p = gap_point();
-        if (attach_zone_exempts(p.first, p.second, exclude_net, foreign_net)) return base;
+        if (attach_zone_exempts(p.first, p.second, exclude_net, foreign_net, zone_layer)) {
+            return base;
+        }
         return required;
     };
 
@@ -790,7 +826,16 @@ ValidationResult Grid3D::validate_route(
             // is the midpoint between the pad centre and the closest point on
             // the candidate segment's centreline -- the pad analogue of the
             // Python validator's closest-approach midpoint.
-            required_clearance = widen(required_clearance, pad.net, [&]() {
+            // #4507: this loop is deliberately layer-BLIND (it compares the
+            // candidate against every pad, so a through-hole barrel is never
+            // missed), which makes the segment's layer the wrong key here: a
+            // spurious cross-layer seg-vs-SMD-pad pair would lose a waiver it
+            // physically deserves.  The pad's OWN layer is the copper layer
+            // this comparison is about, and it is the same layer the zone's
+            // per-net projection was derived from -- so an SMD pad keys on it
+            // and a through-hole pad (``layer_idx < 0``) stays layer-agnostic.
+            const int pad_zone_layer = pad.layer_idx;
+            required_clearance = widen(required_clearance, pad.net, pad_zone_layer, [&]() {
                 const auto cp = closest_point_on_segment(
                     pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
                 return std::pair<float, float>((pad.x + cp.first) / 2.0f,
@@ -834,7 +879,8 @@ ValidationResult Grid3D::validate_route(
             // domains; a net that is both the diff-pair partner and formally
             // cross-domain stays at ``intra_pair_clearance``.
             if (!is_partner) {
-                effective_clearance = widen(effective_clearance, other.net, [&]() {
+                // #4507: both segments are on ``seg.layer`` (enforced above).
+                effective_clearance = widen(effective_clearance, other.net, seg.layer, [&]() {
                     return closest_gap_midpoint(seg.x1, seg.y1, seg.x2, seg.y2,
                                                 other.x1, other.y1, other.x2, other.y2);
                 });
@@ -869,7 +915,8 @@ ValidationResult Grid3D::validate_route(
 
             // Issue #4510: cross-domain widening (partner branch wins).
             if (!is_partner) {
-                effective_clearance = widen(effective_clearance, sv.net, [&]() {
+                // #4507: the barrel crosses the candidate segment's layer.
+                effective_clearance = widen(effective_clearance, sv.net, seg.layer, [&]() {
                     const auto cp = closest_point_on_segment(
                         sv.x, sv.y, seg.x1, seg.y1, seg.x2, seg.y2);
                     return std::pair<float, float>((sv.x + cp.first) / 2.0f,
@@ -916,7 +963,9 @@ ValidationResult Grid3D::validate_route(
 
             // Issue #4510: cross-domain widening for the candidate via vs a
             // stored foreign segment (no diff-pair partner branch here).
-            const float effective_clearance = widen(via_clearance, seg.net, [&]() {
+            // #4507: the shared layer is the stored segment's (the candidate
+            // via's barrel spans it -- the loop above already checked that).
+            const float effective_clearance = widen(via_clearance, seg.net, seg.layer_idx, [&]() {
                 const auto cp = closest_point_on_segment(
                     via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2);
                 return std::pair<float, float>((via.x + cp.first) / 2.0f,
@@ -951,7 +1000,10 @@ ValidationResult Grid3D::validate_route(
 
             // Issue #4510: cross-domain widening for via-vs-via.  The gap
             // point is the midpoint of the two via centres.
-            const float effective_clearance = widen(via_clearance, sv.net, [&]() {
+            // #4507: two barrels share no single layer, so the zone consult
+            // stays layer-agnostic (``-1``) -- the same convention as
+            // ``LatticePairwise.exempt_pt_pt``'s default in the lattice engine.
+            const float effective_clearance = widen(via_clearance, sv.net, -1, [&]() {
                 return std::pair<float, float>((via.x + sv.x) / 2.0f, (via.y + sv.y) / 2.0f);
             });
 

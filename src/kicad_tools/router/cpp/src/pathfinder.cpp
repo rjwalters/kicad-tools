@@ -580,13 +580,15 @@ bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
             if (dist_sq > pair_r * pair_r) continue;
             // Attach-zone exemption (#4506) at the approximate gap midpoint:
             // a rated domain-bridging footprint may neck the pair down to the
-            // scalar floor inside its courtyard -- but the scalar floor was
+            // scalar floor inside its pad field -- but the scalar floor was
             // already enforced by the caller's inner scan, so waiving the
             // widening here is safe (mirrors ``validate_route``'s ``widen``).
+            // Issue #4507: scoped to THIS layer, so the search no longer
+            // accepts copper the layer-scoped Python check would reject.
             const auto fw = grid_.grid_to_world(cx, cy);
             const float mx = (cw.first + fw.first) * 0.5f;
             const float my = (cw.second + fw.second) * 0.5f;
-            if (grid_.attach_zone_exempts(mx, my, net, cell.net)) continue;
+            if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) continue;
             return true;
         }
     }
@@ -626,7 +628,10 @@ bool Pathfinder::cross_domain_via_blocked(int x, int y, int net) const {
                 const auto fw = grid_.grid_to_world(cx, cy);
                 const float mx = (cw.first + fw.first) * 0.5f;
                 const float my = (cw.second + fw.second) * 0.5f;
-                if (grid_.attach_zone_exempts(mx, my, net, cell.net)) continue;
+                // Issue #4507: the candidate via's barrel meets this copper ON
+                // ``layer``, so the waiver is scoped to it (a via passing a
+                // rated SMD part's pad field on an inner layer is not exempt).
+                if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) continue;
                 return true;
             }
         }
@@ -859,6 +864,9 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
             if (pair_req > required) {
                 const float mx = (candidate_x + sv.x) * 0.5f;
                 const float my = (candidate_y + sv.y) * 0.5f;
+                // Issue #4507: two barrels share no single layer, so this
+                // consult stays layer-agnostic (the defaulted ``layer = -1``),
+                // matching ``validate_route``'s via-via branch exactly.
                 if (!grid_.attach_zone_exempts(mx, my, net, sv.net)) {
                     required = pair_req;
                 }
