@@ -155,8 +155,10 @@ class StageQualityRecorder:
         lines = [header]
         for entry in self._stages:
             m = entry.metrics
-            nonzero = m.total_segments - m.zero_length_count
-            diag_pct = (m.diagonal_45_count / nonzero * 100.0) if nonzero else 0.0
+            # Issue #4765: the zero-length-excluded denominator is owned by
+            # RoutingQualityMetrics (like fragment_fraction / staircase_fraction),
+            # not reconstructed here.
+            diag_pct = m.diagonal_45_fraction * 100.0
             lines.append(
                 f"  {entry.stage:<14} {m.total_segments:>7d} "
                 f"{m.fragment_fraction * 100.0:>7.1f} "

@@ -105,6 +105,18 @@ def apply_waivers_to_report(report: DRCReport, waivers: Waivers) -> WaiverApplic
     (a 2-item waiver does not waive a 3-item finding) and, when the entry names
     ``nets``, on the violation's net set.  The first matching entry wins.
 
+    Caveat -- "exact-set" is exact over the NORMALIZED set, and
+    :func:`extract_item_refs` contributes nothing for a ref-less item
+    description such as ``"Track [GND] on F.Cu"`` or ``"Via [VBUS] on F.Cu"``.
+    A finding whose items are ``["Pad 1 of U3", "Track [GND] on F.Cu"]``
+    therefore normalizes to ``{"U3"}`` and IS matched by a one-item
+    ``items: ["U3"]`` entry -- i.e. such an entry waives a class of ``U3``
+    findings rather than the single reviewed one.  This is deliberate
+    (narrowing it would retroactively un-waive entries in existing sidecars,
+    issue #4765); an entry covering a finding with any ref-less item should
+    additionally constrain ``nets`` so it stays specific.  Pinned by
+    ``tests/test_cli_drc_waivers.py``.
+
     Waived violations keep their underlying ``severity`` (so severity-keyed
     consumers such as the ``kct audit`` manufacturing gate stay blocking) but
     report ``is_error is False``, which is what the ``kct drc`` exit gate reads.

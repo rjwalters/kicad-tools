@@ -334,6 +334,11 @@ def _load_waivers(explicit: str | None, input_path: Path) -> tuple["Waivers | No
     missing or malformed explicit file is a hard error; an auto-discovered
     sidecar that fails to parse degrades to zero waivers with a warning.
 
+    Issue #4765: for ``.json``/``.rpt`` report input the discovery anchor is
+    the report's own directory, so the board directory one level up (the
+    canonical ``boards/NN/`` home of ``.kct_waivers.json`` when the input is
+    ``boards/NN/output/drc.json``) is probed as a last resort.
+
     Args:
         explicit: The ``--waivers`` value, or None to auto-discover.
         input_path: The PCB or report path used as the discovery anchor.
@@ -348,6 +353,20 @@ def _load_waivers(explicit: str | None, input_path: Path) -> tuple["Waivers | No
         path: Path | None = Path(explicit).resolve()
     else:
         path = discover_waivers_sidecar(input_path)
+        if path is None and input_path.suffix in (".json", ".rpt"):
+            # Issue #4765: for REPORT input the anchor is the report, not the
+            # board -- and ``discover_waivers_sidecar`` probes ``<dir>/``,
+            # ``<dir>/output/`` and ``<dir>/../output/``.  For the canonical
+            # ``boards/NN/output/drc.json`` layout those collapse to
+            # ``boards/NN/output/`` (twice) and ``boards/NN/output/output/``,
+            # so the board directory -- exactly where the sidecar lives for
+            # the ``.kicad_pcb`` path -- is never probed.  Add that one
+            # anchor here rather than widening the shared discovery helper,
+            # which ``kct check --waivers`` also uses with correct
+            # ``.kicad_pcb`` anchoring.
+            board_dir_candidate = input_path.parent.parent / ".kct_waivers.json"
+            if board_dir_candidate.is_file():
+                path = board_dir_candidate
 
     if path is None:
         return None, 0

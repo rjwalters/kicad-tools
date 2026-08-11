@@ -283,6 +283,65 @@ class TestStageQualityRecorder:
         assert payload["stages"][0]["stage"] == STAGE_PRE_OPTIMIZE
         assert payload["stages"][0]["staircase_fraction"] == 1.0
 
+    def test_45deg_percentage_comes_from_the_metrics_property(self):
+        """Issue #4765: the denominator lives on RoutingQualityMetrics.
+
+        The rendered ``45deg%`` column must equal
+        ``diagonal_45_fraction * 100`` -- i.e. the formatter no longer
+        reconstructs the zero-length-excluded denominator that the dataclass
+        already owns for ``fragment_fraction`` / ``staircase_fraction``.
+        """
+        rec = StageQualityRecorder()
+        rec.record(STAGE_PRE_OPTIMIZE, [_route(_staircase_router_segments())])
+        rec.record(STAGE_POST_OPTIMIZE, [_route([_router_seg((0.0, 0.0), (0.9, 0.9))])])
+        for stage in (STAGE_PRE_OPTIMIZE, STAGE_POST_OPTIMIZE):
+            m = rec.get(stage)
+            assert m is not None
+            nonzero = m.total_segments - m.zero_length_count
+            expected = (m.diagonal_45_count / nonzero) if nonzero else 0.0
+            assert m.diagonal_45_fraction == pytest.approx(expected)
+        # The 45-degree route renders as 100.0 in the table; the staircase as 0.0.
+        report_lines = rec.format_report().splitlines()
+        pre_line = next(
+            line for line in report_lines if line.strip().startswith(STAGE_PRE_OPTIMIZE)
+        )
+        post_line = next(
+            line for line in report_lines if line.strip().startswith(STAGE_POST_OPTIMIZE)
+        )
+        assert pre_line.split()[4] == "0.0"
+        assert post_line.split()[4] == "100.0"
+
+    def test_45deg_fraction_is_zero_when_every_segment_is_zero_length(self):
+        """The all-zero-length denominator returns 0.0 rather than raising."""
+        from kicad_tools.analysis.routing_quality import RoutingQualityMetrics
+
+        m = RoutingQualityMetrics(
+            total_segments=3,
+            nets_with_copper=1,
+            segments_per_net=3.0,
+            zero_length_count=3,
+            median_length_mm=0.0,
+            fragment_count=0,
+            fragment_fraction=0.0,
+            orthogonal_count=0,
+            diagonal_45_count=0,
+            off_axis_count=0,
+            staircase_step_count=0,
+            staircase_fraction=0.0,
+        )
+        assert m.diagonal_45_fraction == 0.0
+
+    def test_45deg_fraction_is_not_a_serialized_field(self):
+        """Scope guard: ``to_dict()`` is a stable JSON contract."""
+        from kicad_tools.analysis.routing_quality import RoutingQualityMetrics
+
+        rec = StageQualityRecorder()
+        rec.record(STAGE_PRE_OPTIMIZE, [_route(_staircase_router_segments())])
+        m = rec.get(STAGE_PRE_OPTIMIZE)
+        assert m is not None
+        assert "diagonal_45_fraction" not in m.to_dict()
+        assert "diagonal_45_fraction" not in RoutingQualityMetrics.__dataclass_fields__
+
     def test_recorder_does_not_mutate_routes(self):
         """The probe is read-only -- that is what makes it copper-safe."""
         segments = _staircase_router_segments()
@@ -427,13 +486,42 @@ class TestRouteCmdHelpers:
         route_cmd._record_stage_quality(recorder, STAGE_PRE_OPTIMIZE, None)
         assert recorder.stages == []
 
-    def test_print_is_silent_when_quiet(self, capsys):
+    def test_print_survives_quiet(self, capsys):
+        """Issue #4765: an explicit --report-stage-quality outranks --quiet.
+
+        A non-None recorder can only exist when the user asked for the
+        report, so suppressing it under ``--quiet`` discarded an explicit
+        opt-in silently.  ``quiet`` is still accepted and ignored.
+        """
         from kicad_tools.cli import route_cmd
 
         recorder = StageQualityRecorder()
         recorder.record(STAGE_PRE_OPTIMIZE, [_route(_staircase_router_segments())])
         route_cmd._print_stage_quality_report(recorder, quiet=True)
+        assert "Routing quality by stage" in capsys.readouterr().out
+
+    def test_print_is_a_noop_when_disabled_even_without_quiet(self, capsys):
+        """The default path is unchanged: no flag => no recorder => no output."""
+        from kicad_tools.cli import route_cmd
+
+        route_cmd._print_stage_quality_report(None, quiet=True)
+        route_cmd._print_stage_quality_report(None, quiet=False)
         assert capsys.readouterr().out == ""
+
+    def test_recorder_import_is_not_function_local(self):
+        """Issue #4765: the recorder is imported at module scope.
+
+        ``route_cmd`` already imports the stage constants from
+        ``quality_probe`` eagerly, so the whole module is executed at import
+        time and a function-local import bought nothing.
+        """
+        import inspect
+
+        from kicad_tools.cli import route_cmd
+
+        source = inspect.getsource(route_cmd._make_stage_quality_recorder)
+        assert "import" not in source
+        assert route_cmd.StageQualityRecorder is StageQualityRecorder
 
     def test_print_emits_the_table(self, capsys):
         from kicad_tools.cli import route_cmd

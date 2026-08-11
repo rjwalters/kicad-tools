@@ -22,7 +22,10 @@ grid``.
 """
 
 import logging
+import re
 import warnings
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -277,6 +280,86 @@ def test_memory_cap_event_still_observable_at_info_for_non_grid(engine, caplog):
     ), messages
 
 
+# ---------------------------------------------------------------------------
+# Issue #4765: the sibling #3441 lattice-rescue warning gets the same gate
+#
+# NOTE: ``lattice_rescued`` is the #3441 PAD-LATTICE GRID rescue (grid
+# alignment to the board's dominant pad lattice).  It has nothing to do with
+# ``--route-engine lattice``.
+# ---------------------------------------------------------------------------
+
+
+def _lattice_rescue_pads() -> list[PadPosition]:
+    """The #3441 reproducer: a dominant 0.1mm lattice + a small off-lattice
+    cluster, so the rescue adopts 0.1mm (> clearance/2 = 0.075mm)."""
+    pads = [PadPosition(x=10.0 + i * 0.7, y=20.0 + j * 0.9) for i in range(10) for j in range(6)]
+    pads += [PadPosition(x=60.635 + k * 1.27, y=50.635) for k in range(6)]
+    return pads
+
+
+def _select_lattice_rescued(**kwargs) -> tuple[GridAutoSelection, list[str]]:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = auto_select_grid_resolution(
+            _lattice_rescue_pads(),
+            clearance=0.15,
+            board_width=100.0,
+            board_height=100.0,
+            max_cells=500_000,
+            candidates=[0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508],
+            **kwargs,
+        )
+    return result, [str(w.message) for w in caught]
+
+
+def test_lattice_rescue_warning_fires_for_grid_engine():
+    """The #3441 heads-up is unchanged where it applies."""
+    result, texts = _select_lattice_rescued(engine="grid")
+    assert result.lattice_rescued is True
+    assert any("lattice rescue selected grid" in t for t in texts), texts
+    assert any("Quantisation margin is reduced at fine-pitch pads" in t for t in texts), texts
+
+
+def test_lattice_rescue_warning_fires_for_default_engine():
+    """Callers that do not pass ``engine`` keep the pre-#4765 behavior."""
+    _result, texts = _select_lattice_rescued()
+    assert any("Quantisation margin is reduced at fine-pitch pads" in t for t in texts), texts
+
+
+@pytest.mark.parametrize("engine", _NON_GRID_ENGINES)
+def test_lattice_rescue_warning_suppressed_for_non_grid_engines(engine):
+    """The reduced-quantisation-margin prediction is a GRID failure mode.
+
+    Under mesh/lattice no copper comes off the grid, so predicting reduced
+    quantisation margin at fine-pitch pads contradicts the gate-skip line in
+    the same log -- the identical premise #4690 accepted for the sibling
+    memory-cap branch.
+    """
+    result, texts = _select_lattice_rescued(engine=engine)
+    assert result.lattice_rescued is True
+    assert not any("lattice rescue selected grid" in t for t in texts), texts
+    assert not any("Quantisation margin is reduced" in t for t in texts), texts
+
+
+@pytest.mark.parametrize("engine", _NON_GRID_ENGINES)
+def test_lattice_rescue_event_still_observable_at_info(engine, caplog):
+    """Suppressed, not silenced."""
+    with caplog.at_level(logging.INFO, logger="kicad_tools.router.io"):
+        _select_lattice_rescued(engine=engine)
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any(
+        "lattice rescue selected grid" in m and f"--route-engine {engine}" in m for m in messages
+    ), messages
+
+
+@pytest.mark.parametrize("engine", _NON_GRID_ENGINES)
+def test_lattice_rescue_selection_is_engine_invariant(engine):
+    """Diagnostics-only: every returned field matches the grid engine's."""
+    grid_result, _ = _select_lattice_rescued(engine="grid")
+    other_result, _ = _select_lattice_rescued(engine=engine)
+    assert other_result == grid_result
+
+
 @pytest.mark.parametrize("engine", _NON_GRID_ENGINES)
 def test_multi_resolution_plan_forwards_engine_to_selector(engine):
     """``compute_multi_resolution_plan`` is the adaptive-strategy call path."""
@@ -395,6 +478,39 @@ _OFF_GRID_ROUTABLE_PCB = """(kicad_pcb
   )
 )"""
 
+# Issue #4765: the same board with every pad ON the 0.15mm grid, so
+# ``analyze_fine_pitch_components`` reports ``has_warnings is False`` and the
+# GRID path prints nothing at all.  The non-grid path must print nothing
+# either -- announcing the skip of an analysis that had nothing to say is
+# noise the grid engine never emits.
+_ON_GRID_COARSE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (gr_rect (start 100 100) (end 130 120) (layer "Edge.Cuts"))
+  (net 0 "")
+  (net 1 "NET1")
+  (net 2 "NET2")
+  (footprint "U1"
+    (layer "F.Cu")
+    (at 105 105)
+    (fp_text reference "U1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "NET1"))
+    (pad "2" smd rect (at 1.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "NET2"))
+  )
+  (footprint "U2"
+    (layer "F.Cu")
+    (at 120 115.5)
+    (fp_text reference "U2" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "NET1"))
+    (pad "2" smd rect (at 1.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "NET2"))
+  )
+)"""
+
 # Every grid-quality string the lattice log must not contain.
 _GRID_ADVISORY_MARKERS = [
     "Fine-Pitch Component Analysis",
@@ -406,7 +522,7 @@ _GRID_ADVISORY_MARKERS = [
 ]
 
 
-def _route_cli(tmp_path, extra_args) -> tuple[int, list[str]]:
+def _route_cli(tmp_path, extra_args, board: str = _OFF_GRID_ROUTABLE_PCB) -> tuple[int, list[str]]:
     """Run ``route_cmd.main`` past the fine-pitch block on a tiny board.
 
     ``--layers 2`` pins the fixed-layer path (``--auto-layers`` diverts to
@@ -414,7 +530,7 @@ def _route_cli(tmp_path, extra_args) -> tuple[int, list[str]]:
     Returns the exit code and the texts of any ``warnings.warn`` emissions.
     """
     pcb_file = tmp_path / "off_grid.kicad_pcb"
-    pcb_file.write_text(_OFF_GRID_ROUTABLE_PCB)
+    pcb_file.write_text(board)
     out = tmp_path / "routed.kicad_pcb"
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -473,3 +589,78 @@ def test_quiet_emits_no_fine_pitch_output_on_any_engine(tmp_path, engine, capsys
     combined = captured.out + captured.err
     for marker in [*_GRID_ADVISORY_MARKERS, "Fine-pitch grid analysis: skipped"]:
         assert marker not in combined, f"--quiet leaked {marker!r} on {engine}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #4765: the skip line must not out-talk the grid path it replaces
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("engine", _NON_GRID_ENGINES)
+def test_skip_line_absent_when_the_board_has_no_fine_pitch_findings(tmp_path, engine, capsys):
+    """A clean board prints nothing on the grid path -- so nothing here either."""
+    _route_cli(
+        tmp_path,
+        ["--route-engine", engine, "--strategy", "basic"],
+        board=_ON_GRID_COARSE_PCB,
+    )
+    combined = "".join(capsys.readouterr())
+    # Sanity: the run really did reach the fine-pitch block.
+    assert "Total nets:" in combined
+    assert "Fine-pitch grid analysis: skipped" not in combined
+
+
+def test_clean_board_grid_output_is_unchanged(tmp_path, capsys):
+    """The control: the grid engine says nothing about a clean board either."""
+    _route_cli(tmp_path, [], board=_ON_GRID_COARSE_PCB)
+    combined = "".join(capsys.readouterr())
+    for marker in _GRID_ADVISORY_MARKERS:
+        assert marker not in combined, f"clean board emitted {marker!r} on the grid engine"
+
+
+@pytest.mark.parametrize("engine", _NON_GRID_ENGINES)
+def test_skip_line_still_prints_when_findings_exist(tmp_path, engine, capsys):
+    """...and the line keeps its exact wording when there IS something to skip."""
+    _route_cli(tmp_path, ["--route-engine", engine, "--strategy", "basic"])
+    combined = "".join(capsys.readouterr())
+    assert (
+        f"Fine-pitch grid analysis: skipped for --route-engine {engine} (pads are "
+        f"reached by exact geometry, not by grid alignment)" in combined.replace("\n", " ")
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #4765: one normalization helper for every ``route_engine`` read
+# ---------------------------------------------------------------------------
+
+
+class TestResolveRouteEngine:
+    def test_missing_attribute_defaults_to_grid(self):
+        assert route_cmd._resolve_route_engine(SimpleNamespace()) == "grid"
+
+    def test_none_normalizes_to_grid(self):
+        """The inconsistency this helper removes: six sites returned None here."""
+        assert route_cmd._resolve_route_engine(SimpleNamespace(route_engine=None)) == "grid"
+
+    def test_empty_string_normalizes_to_grid(self):
+        assert route_cmd._resolve_route_engine(SimpleNamespace(route_engine="")) == "grid"
+
+    @pytest.mark.parametrize("engine", ["grid", "mesh", "lattice"])
+    def test_explicit_engine_is_returned_verbatim(self, engine):
+        assert route_cmd._resolve_route_engine(SimpleNamespace(route_engine=engine)) == engine
+
+    def test_no_bare_route_engine_reads_remain(self):
+        """Every read goes through the helper.
+
+        The only surviving ``getattr(args, "route_engine", ...)`` calls are the
+        helper's own body and the ``--complete`` engine-selection block, which
+        compares against ``parser.get_default("route_engine")`` to detect "the
+        user did not choose" -- a different question that must NOT be
+        normalized away.
+        """
+        source = Path(route_cmd.__file__).read_text()
+        reads = re.findall(r'getattr\(args, "route_engine"[^)]*\)', source)
+        assert reads == [
+            'getattr(args, "route_engine", "grid")',
+            'getattr(args, "route_engine", engine_default)',
+        ], reads

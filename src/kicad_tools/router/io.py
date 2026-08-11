@@ -1128,9 +1128,12 @@ def auto_select_grid_resolution(
                 predicts a *grid-routing* failure mode, so it is demoted to an
                 INFO log for the mesh/lattice engines, which emit no copper
                 from the grid (the same predicate as the #4271 gate skip).
-                Purely a diagnostics gate -- every returned field, including
-                ``memory_forced_unsafe_grid``, is computed identically for
-                every engine.
+                Issue #4765 extends the same demotion to the sibling #3441
+                lattice-rescue ``UserWarning`` ("quantisation margin is
+                reduced at fine-pitch pads"), which predicts the same
+                grid-only failure mode.  Purely a diagnostics gate -- every
+                returned field, including ``memory_forced_unsafe_grid`` and
+                ``lattice_rescued``, is computed identically for every engine.
 
     Returns:
         GridAutoSelection with the chosen resolution and analysis details.
@@ -1454,16 +1457,35 @@ def auto_select_grid_resolution(
             # (DRC-sufficient per #2387) but > clearance/2, so keep an
             # honest -- and accurate -- heads-up rather than the "forced"
             # phrasing of the generic memory-cap warning.
-            warnings.warn(
+            rescue_prefix = (
                 f"Auto-grid: lattice rescue selected grid {best_resolution}mm "
                 f"(> clearance/2 = {recommended_max}mm, <= clearance = "
                 f"{clearance}mm) because it aligns the board's dominant pad "
                 f"lattice ({best_off_grid}/{total_pads} pads off-grid). "
-                f"Quantisation margin is reduced at fine-pitch pads; the "
-                f"router's edge-to-edge clearance enforcement is the "
-                f"backstop.",
-                stacklevel=2,
             )
+            if engine == "grid":
+                warnings.warn(
+                    rescue_prefix + "Quantisation margin is reduced at "
+                    "fine-pitch pads; the router's edge-to-edge clearance "
+                    "enforcement is the backstop.",
+                    stacklevel=2,
+                )
+            else:
+                # Issue #4765: same premise as the #4690 demotion below --
+                # the reduced-quantisation-margin prediction is a GRID
+                # routing failure mode, and under --route-engine mesh/lattice
+                # no copper is emitted from the grid, so it cannot apply.
+                # Keep the selection event observable at INFO instead of
+                # contradicting the gate-skip line printed in the same log.
+                # The rescue itself (and every returned field) is unchanged;
+                # only the reporting channel differs.
+                logger.info(
+                    "%s--route-engine %s routes on exact geometry (no copper "
+                    "is emitted from the grid), so no grid-quantisation "
+                    "clearance risk applies.",
+                    rescue_prefix,
+                    engine,
+                )
         elif has_fine_pitch and engine != "grid":
             # Issue #4690: the alarm below predicts a grid-routing failure mode
             # ("routing may produce clearance violations at fine-pitch pads")

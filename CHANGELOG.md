@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Nine polish fixes from the 2026-08-08/09 sweep's judge nits** (#4765) —
+  each a small correctness defect in code that shipped last sweep; none
+  changes routed copper or an exit code. (A) The `kct route` banner decided
+  its `UNBOUNDED` line from the raw `--timeout`/`--per-net-timeout` flags, so
+  `--complete --per-net-timeout 0` announced an unbounded lattice negotiation
+  while `_apply_complete_localization`'s 60 s per-link backstop was already
+  armed; it now keys off the resolved `_resolve_lattice_link_budget` /
+  `_lattice_absolute_deadline` values and reports the budget actually in
+  force. (B) `--quiet` silently discarded an explicitly-requested
+  `--report-stage-quality` table; the opt-in now wins (the `recorder is None`
+  guard already carried the entire "not requested" case). (C) The
+  "lazy" `StageQualityRecorder` import was a bare `sys.modules` hit — the
+  module is already executed by the eager stage-constant import — and is
+  hoisted to module scope with an accurate comment. (D) The `45deg%`
+  denominator moves from the renderer to a read-only
+  `RoutingQualityMetrics.diagonal_45_fraction` property, beside the
+  `fragment_fraction` / `staircase_fraction` contract (no new dataclass
+  field: `to_dict()` is a stable JSON contract). (E) A DRC finding that mixes
+  a pad with a ref-less track item normalizes to a smaller ref set than
+  "exact-set" suggests, so a one-ref waiver covers a *class* of findings; the
+  behaviour is kept (narrowing it would retroactively un-waive shipped
+  sidecars) but is now documented on `apply_waivers_to_report` and in
+  `docs/reference/cli.md`, pinned by regression tests, with `nets` as the
+  documented narrowing remedy. (F) `kct drc boards/NN/output/drc.json` never
+  probed `boards/NN/` for `.kct_waivers.json` (all three of the shared
+  discovery probes collapse into the report's own directory); report input
+  now falls back to the report directory's parent. (H) The documented
+  "4+ trailing tokens are never trimmed" path of `_sync_at_angle` gets its
+  first test. (I) The residual #3441 lattice-rescue `UserWarning`
+  ("quantisation margin is reduced at fine-pitch pads") predicts a grid-only
+  failure mode and is demoted to INFO for `--route-engine mesh|lattice`,
+  completing #4761's gate on the sibling branch; every `GridAutoSelection`
+  field stays engine-invariant. (J) All ~16 `args.route_engine` reads in
+  `route_cmd.py` now go through one `_resolve_route_engine` helper, so a
+  `route_engine=None` namespace can no longer resolve to `"grid"` at ten
+  sites and `None` at six (including three `strategy=` arguments to
+  `load_pcb_for_routing`). (K) The non-grid "Fine-pitch grid analysis:
+  skipped" line printed even on boards where the grid path prints nothing;
+  it is now gated on the same `has_warnings` predicate the grid path uses.
 - **`PCB.import_from_schematic()` no longer drops a `*-netlist.kicad_net`
   beside the user's schematic** (#4763) — the same defect #4750 fixed in
   `pcb sync-netlist`, at the second call site. `export_netlist` defaults

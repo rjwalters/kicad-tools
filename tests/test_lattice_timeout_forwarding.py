@@ -324,6 +324,34 @@ class TestBannerHonesty:
         captured = capsys.readouterr().out
         assert "Timeout: 0.001s (hard cap on the lattice negotiation)" in captured
 
+    def test_complete_backstop_is_reported_instead_of_unbounded(self, board, tmp_path, capsys):
+        """Issue #4765: ``--complete --per-net-timeout 0`` IS bounded.
+
+        ``_apply_complete_localization`` stamps the 60 s #4472 backstop on
+        ``args._complete_link_budget_s`` BEFORE the banner runs, and
+        ``_resolve_lattice_link_budget`` threads that value into the
+        negotiation -- so keying the banner off the raw flags claimed the
+        exact opposite of what the run does.
+        """
+        out = tmp_path / "out.kicad_pcb"
+        _lattice_route(board, out, "--complete", "--per-net-timeout", "0")
+        captured = capsys.readouterr().out.replace("\n", " ")
+        assert "UNBOUNDED" not in captured
+        assert (
+            f"the lattice negotiation is bounded at "
+            f"{_COMPLETE_LINK_BUDGET_DEFAULT_S:g}s per link" in captured
+        )
+
+    def test_unbounded_line_is_byte_identical_without_the_stamp(self, board, tmp_path, capsys):
+        """No stamp + no --timeout still prints the original wording."""
+        out = tmp_path / "out.kicad_pcb"
+        assert _lattice_route(board, out, "--per-net-timeout", "0") == 0
+        captured = capsys.readouterr().out
+        assert (
+            "  Per-net timeout: disabled (0) -- the lattice negotiation "
+            "is UNBOUNDED; pass --timeout to cap it" in captured
+        )
+
     def test_grid_banner_is_unannotated(self, board, tmp_path, capsys):
         out = tmp_path / "out.kicad_pcb"
         route_main(

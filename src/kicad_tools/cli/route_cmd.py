@@ -91,15 +91,19 @@ if TYPE_CHECKING:
 # not remove this alias without also updating those patch targets.
 from kicad_tools.router.auto_pour import auto_skip_pour_nets as _auto_skip_pour_nets  # noqa: E402
 
-# Issue #4732: the per-stage routing-quality probe's canonical stage labels.
-# Only the (cheap, pure-python) label constants are imported eagerly; the
-# recorder itself is constructed lazily in ``_make_stage_quality_recorder``
-# and only when ``--report-stage-quality`` is passed.
+# Issue #4732: the per-stage routing-quality probe's canonical stage labels
+# plus the recorder itself.  Issue #4765: the recorder used to be imported
+# function-locally to keep it "lazy", but importing the stage constants here
+# already executes the whole ``quality_probe`` module, so that inner import
+# was a bare ``sys.modules`` hit.  ``--report-stage-quality`` still gates
+# CONSTRUCTION of the recorder (``_make_stage_quality_recorder``), which is
+# where the measurement cost actually lives.
 from kicad_tools.router.quality_probe import (  # noqa: E402
     STAGE_POST_FINALIZE,
     STAGE_POST_NUDGE,
     STAGE_POST_OPTIMIZE,
     STAGE_PRE_OPTIMIZE,
+    StageQualityRecorder,
 )
 
 # Issue #4634: the sidecar filename this writer emits is the same constant the
@@ -1091,8 +1095,6 @@ def _make_stage_quality_recorder(args: argparse.Namespace) -> Any:
     """
     if not getattr(args, "report_stage_quality", False):
         return None
-    from kicad_tools.router.quality_probe import StageQualityRecorder
-
     return StageQualityRecorder()
 
 
@@ -1111,12 +1113,36 @@ def _record_stage_quality(recorder: Any, stage: str, router: Any) -> None:
 
 
 def _print_stage_quality_report(recorder: Any, *, quiet: bool = False) -> None:
-    """Print the #4732 advisory per-stage table (no-op when disabled)."""
-    if recorder is None or quiet:
+    """Print the #4732 advisory per-stage table (no-op when disabled).
+
+    Issue #4765: ``--quiet`` no longer cancels the table.  A non-None
+    recorder means the user passed ``--report-stage-quality``
+    (:func:`_make_stage_quality_recorder` returns None otherwise), so the
+    ``recorder is None`` guard already carries the entire "not requested"
+    case -- suppressing an explicit opt-in on top of that discarded the
+    request silently.  ``quiet`` is still ACCEPTED (call-site compatibility)
+    but deliberately ignored.
+    """
+    if recorder is None:
         return
     report = recorder.format_report()
     if report:
         print(report)
+
+
+def _resolve_route_engine(args: argparse.Namespace) -> str:
+    """The active ``--route-engine`` selector, normalized to a non-empty str.
+
+    Issue #4765: ``args.route_engine`` was read at ~16 sites in this module,
+    ten of which normalized a falsy value with ``or "grid"`` while six did
+    not -- so a programmatically-built ``Namespace`` carrying
+    ``route_engine=None`` resolved to ``"grid"`` at some sites and ``None``
+    at others (notably the ``strategy=`` argument of
+    ``load_pcb_for_routing`` in the escalation paths).  Every read now goes
+    through this one helper.  No behaviour change for a CLI-parsed
+    namespace: argparse's ``choices`` guarantees a non-empty string.
+    """
+    return getattr(args, "route_engine", "grid") or "grid"
 
 
 def _engine_post_passes_enabled(
@@ -1152,7 +1178,7 @@ def _engine_post_passes_enabled(
     absent-flag path is exactly the #4281 skip (byte-identical output for a
     plain ``--route-engine lattice`` run).
     """
-    engine = getattr(args, "route_engine", "grid") or "grid"
+    engine = _resolve_route_engine(args)
     if engine == "grid":
         return True
     if getattr(args, "lattice_optimize", False):
@@ -1192,7 +1218,7 @@ def _mark_nongrid_routes_for_post_pass(
     No-op unless the engine is non-grid AND ``--lattice-optimize`` is set, so the
     default path (and every grid run) is completely untouched.
     """
-    engine = getattr(args, "route_engine", "grid") or "grid"
+    engine = _resolve_route_engine(args)
     if engine == "grid" or not getattr(args, "lattice_optimize", False):
         return
     marked = 0
@@ -4247,7 +4273,7 @@ def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -
         # line that made the original false pass silent.  Every engine is
         # additionally covered by the post-route board audit
         # (``_audit_pairwise_clearance``).
-        engine = getattr(args, "route_engine", "grid") or "grid"
+        engine = _resolve_route_engine(args)
         enforcement = (
             "route-time rejection + post-route audit"
             if engine in ("grid", "lattice")
@@ -4549,7 +4575,7 @@ def _print_pairwise_failure_banner(
         f"{getattr(args, 'pollution_degree', 2)} --material-group "
         f"{getattr(args, 'material_group', 'IIIa')}"
     )
-    engine = getattr(args, "route_engine", "grid") or "grid"
+    engine = _resolve_route_engine(args)
     if engine not in ("grid", "lattice"):
         # Issue #4588 gates; grid (#4454/#4511) and lattice (#4602) avoid the
         # proximity during search, so a gate hit there means the geometry
@@ -5652,7 +5678,7 @@ def route_with_layer_escalation(
                     layer_stack=layer_stack,
                     force_python=force_python,
                     # Issue #4268: thread the mesh-router strategy selector through.
-                    strategy=getattr(args, "route_engine", "grid"),
+                    strategy=_resolve_route_engine(args),
                     validate_drc=not args.force,
                     strict_drc=False,
                     # Issue #3155: incremental routing.  When set, existing
@@ -6292,7 +6318,7 @@ def route_with_layer_escalation(
     if final_result.router.routes:
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
     _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
-    _print_stage_quality_report(_stage_quality, quiet=quiet)
+    _print_stage_quality_report(_stage_quality)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -6673,7 +6699,7 @@ def route_with_rule_relaxation(
                     layer_stack=layer_stack,
                     force_python=force_python,
                     # Issue #4268: thread the mesh-router strategy selector through.
-                    strategy=getattr(args, "route_engine", "grid"),
+                    strategy=_resolve_route_engine(args),
                     validate_drc=not args.force,
                     strict_drc=False,
                     # Issue #3155: incremental routing (see route_with_layer_escalation).
@@ -7077,7 +7103,7 @@ def route_with_rule_relaxation(
     if final_result.router.routes:
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
     _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
-    _print_stage_quality_report(_stage_quality, quiet=quiet)
+    _print_stage_quality_report(_stage_quality)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -8915,7 +8941,7 @@ def route_with_combined_escalation(
                         layer_stack=layer_stack,
                         force_python=force_python,
                         # Issue #4268: thread the mesh-router strategy selector through.
-                        strategy=getattr(args, "route_engine", "grid"),
+                        strategy=_resolve_route_engine(args),
                         validate_drc=not args.force,
                         strict_drc=False,
                         # Issue #3155: incremental routing (see route_with_layer_escalation).
@@ -9362,7 +9388,7 @@ def route_with_combined_escalation(
     if final_result.router.routes:
         _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
     _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
-    _print_stage_quality_report(_stage_quality, quiet=quiet)
+    _print_stage_quality_report(_stage_quality)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -9569,7 +9595,7 @@ def _validate_route_engine_strategy(args) -> int:
     grid`` -- this gate is a strict no-op on the production default), or 2
     (usage error) with a message on stderr naming the remedy.
     """
-    engine = getattr(args, "route_engine", "grid")
+    engine = _resolve_route_engine(args)
     if engine == "grid":
         return 0
 
@@ -12829,7 +12855,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     # Issue #4605: rule areas are honored by the lattice engine only -- warn
     # once (never gate) when another engine is about to ignore them.
-    _warn_rule_areas_other_engine(pcb_path, getattr(args, "route_engine", "grid") or "grid")
+    _warn_rule_areas_other_engine(pcb_path, _resolve_route_engine(args))
 
     # Issue #4431 (Phase 1): validate and load the optional --voltage-map early
     # (mirrors the --net-class-map preload above) so a missing file / malformed
@@ -13000,7 +13026,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         # engine through so mesh/lattice runs do not receive advice that the
         # #4271 gate-skip line -- printed a few lines later in the same log --
         # simultaneously declares inapplicable.
-        _route_engine = getattr(args, "route_engine", "grid") or "grid"
+        _route_engine = _resolve_route_engine(args)
         grid_auto_result = auto_select_grid_resolution(
             pads=pad_positions,
             clearance=args.clearance,
@@ -13474,7 +13500,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             clearance=args.clearance,
             num_layers=layer_stack.num_layers,
             max_cells=getattr(args, "max_cells", 500_000),
-            engine=getattr(args, "route_engine", "grid") or "grid",
+            engine=_resolve_route_engine(args),
         )
         if dry_run_plan is not None:
             if not quiet:
@@ -13496,7 +13522,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 layer_stack=layer_stack,
                 force_python=force_python,
                 # Issue #4268: thread the mesh-router strategy selector through.
-                strategy=getattr(args, "route_engine", "grid"),
+                strategy=_resolve_route_engine(args),
                 validate_drc=not args.force,
                 strict_drc=False,  # Only fail on hard constraint (grid > clearance)
                 # Issue #3155: incremental routing (see route_with_layer_escalation).
@@ -13570,7 +13596,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 layer_stack=layer_stack,
                 force_python=force_python,
                 # Issue #4268: thread the mesh-router strategy selector through.
-                strategy=getattr(args, "route_engine", "grid"),
+                strategy=_resolve_route_engine(args),
                 validate_drc=not args.force,
                 strict_drc=False,
                 load_existing_routes=getattr(args, "preserve_existing", False),
@@ -13689,16 +13715,17 @@ def _main_impl(argv: list[str] | None = None) -> int:
     # its remedy is harmful here: refining the grid to 0.0635/0.025mm on a
     # 160x100mm board demands millions of cells the #4242 budget cap refuses.
     # Skip the analysis for non-grid engines and say why in one line.
-    _fine_pitch_engine = getattr(args, "route_engine", "grid") or "grid"
-    if not quiet and _fine_pitch_engine != "grid":
-        flush_print(
-            f"\n  Fine-pitch grid analysis: skipped for --route-engine "
-            f"{_fine_pitch_engine} (pads are reached by exact geometry, not by "
-            f"grid alignment)"
-        )
-    elif not quiet:
+    #
+    # Issue #4765: say it ONLY when the grid path would have said something.
+    # ``analyze_fine_pitch_components`` is read-only pad arithmetic (it builds
+    # no grid), so it is still called on the non-grid path -- reusing the exact
+    # ``has_warnings`` predicate the grid path gates its output on -- and its
+    # own output is suppressed.  A board with no fine-pitch findings therefore
+    # prints nothing on EVERY engine, instead of announcing the absence of
+    # output that would have been absent anyway (#4690 noise).
+    _fine_pitch_engine = _resolve_route_engine(args)
+    if not quiet:
         from kicad_tools.router.fine_pitch import analyze_fine_pitch_components
-        from kicad_tools.router.output import show_fine_pitch_warnings
 
         fine_pitch_report = analyze_fine_pitch_components(
             pads=router.pads,
@@ -13706,6 +13733,16 @@ def _main_impl(argv: list[str] | None = None) -> int:
             trace_width=_effective_trace_width(args),
             clearance=args.clearance,
         )
+    if not quiet and _fine_pitch_engine != "grid":
+        if fine_pitch_report.has_warnings:
+            flush_print(
+                f"\n  Fine-pitch grid analysis: skipped for --route-engine "
+                f"{_fine_pitch_engine} (pads are reached by exact geometry, not by "
+                f"grid alignment)"
+            )
+    elif not quiet:
+        from kicad_tools.router.output import show_fine_pitch_warnings
+
         if fine_pitch_report.has_warnings:
             # Issue #3441: ``use_waypoint_injection`` is backend-aware --
             # waypoint injection (#2330) only exists in the pure-Python
@@ -14044,7 +14081,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             # budget scaled by link count -- not as a per-net A* cutoff -- and
             # ``--timeout`` is a hard ceiling on that single negotiation.  Say
             # so, and say so loudly when neither bound is in force.
-            _banner_engine = getattr(args, "route_engine", "grid") or "grid"
+            _banner_engine = _resolve_route_engine(args)
             if args.timeout:
                 _cap_note = (
                     " (hard cap on the lattice negotiation)"
@@ -14063,10 +14100,31 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 else:
                     flush_print(f"  Per-net timeout: {per_net_timeout_val}s")
             elif _banner_engine == "lattice" and not args.timeout:
-                flush_print(
-                    "  Per-net timeout: disabled (0) -- the lattice negotiation "
-                    "is UNBOUNDED; pass --timeout to cap it"
-                )
+                # Issue #4765: "UNBOUNDED" must be decided from the RESOLVED
+                # budgets, not the raw flags.  ``--complete`` stamps
+                # ``args._complete_link_budget_s`` (the 60s #4472 backstop)
+                # BEFORE this banner runs, and that stamp is what
+                # ``_resolve_lattice_link_budget`` threads into the
+                # negotiation -- so ``--complete --per-net-timeout 0`` IS
+                # bounded even though both flags read as "off".
+                _banner_link_budget = _resolve_lattice_link_budget(args)
+                if _banner_link_budget is not None:
+                    flush_print(
+                        f"  Per-net timeout: disabled (0) -- the lattice "
+                        f"negotiation is bounded at {_banner_link_budget:g}s "
+                        f"per link (netset deadline = {_banner_link_budget:g}s "
+                        f"x link count)"
+                    )
+                elif _lattice_absolute_deadline(args) is not None:
+                    flush_print(
+                        "  Per-net timeout: disabled (0) -- the lattice "
+                        "negotiation is bounded by this run's wall-clock deadline"
+                    )
+                else:
+                    flush_print(
+                        "  Per-net timeout: disabled (0) -- the lattice negotiation "
+                        "is UNBOUNDED; pass --timeout to cap it"
+                    )
             # Issue #2610: report the iteration backstop override if set.
             # Issue #2819: the inner parser now declares the flag (default=0),
             # so the attribute is guaranteed to exist; ``or 0`` preserves the
@@ -14689,7 +14747,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     if router.routes:
         _finalize_committed_copper_or_demote(router, quiet=quiet)
     _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, router)
-    _print_stage_quality_report(_stage_quality, quiet=quiet)
+    _print_stage_quality_report(_stage_quality)
 
     if _post_passes_enabled and router.routes:
         # Get post-optimization statistics

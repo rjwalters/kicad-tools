@@ -265,6 +265,21 @@ The `kicad-cli pcb drc` cross-gate reads the same schema-v2 sidecar as
   `"Pad 6 [<no net>] of U3 on F.Cu"` → `U3`). Matching is exact-set and
   order-insensitive: a 2-item entry never waives a 3-item finding. Findings
   with no refs at all (track/via-only) are waivable via `nets` instead.
+- **Caveat — findings that are only *partly* ref-less (#4765).** The ref set is
+  normalized from the item descriptions, and a track/via item contributes
+  nothing to it (`"Track [GND] on F.Cu"` yields no ref). So a finding whose
+  items are `["Pad 1 of U3", "Track [GND] on F.Cu"]` normalizes to `{U3}` and
+  *is* matched exactly by a one-item `"items": ["U3"]` entry — the entry waives
+  a whole class of `U3` findings, not just the one that was reviewed. This is
+  intentional (narrowing it would retroactively un-waive existing sidecars);
+  when any item in a finding carries no reference designator, additionally
+  constrain the entry with `"nets": [...]` so it stays specific to the finding
+  you actually reviewed.
+- Auto-discovery is anchored at the input path: the board directory for
+  `.kicad_pcb` input, and for `.json`/`.rpt` report input the report's own
+  directory plus its `output/` siblings — falling back to the report
+  directory's parent, so `kct drc boards/NN/output/drc.json` still finds
+  `boards/NN/.kct_waivers.json` (#4765).
 - Matched findings render in a dedicated `WAIVED` section with their own count
   bucket (never as warnings) and are excluded from the exit gate — exit is
   nonzero iff **unwaived** errors remain. `--format json` keeps the underlying

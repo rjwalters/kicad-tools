@@ -88,6 +88,21 @@ class RoutingQualityMetrics:
     staircase_step_count: int
     staircase_fraction: float
 
+    @property
+    def diagonal_45_fraction(self) -> float:
+        """Share of nonzero-length segments running at 45 degrees.
+
+        Issue #4765: the 45-degree share was the one fraction whose
+        zero-length-excluded denominator was reconstructed by a renderer
+        (``StageQualityRecorder.format_report``) instead of living beside
+        ``fragment_fraction`` / ``staircase_fraction`` on this class.  It is
+        a derived **property** rather than a field on purpose: :meth:`to_dict`
+        is a stable JSON contract, so the serialized keys stay exactly as
+        they were.  ``0.0`` when every segment is zero-length.
+        """
+        nonzero = self.total_segments - self.zero_length_count
+        return self.diagonal_45_count / nonzero if nonzero else 0.0
+
     def to_dict(self) -> dict[str, int | float]:
         """Serialize to the stable JSON contract emitted by ``kct check``."""
         return {

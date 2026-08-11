@@ -442,3 +442,139 @@ class TestReportModelUnaffected:
         again = apply_waivers_to_report(report, waivers)
         assert again.waived_count == 0
         assert len(again.unused) == 1
+
+
+# Two clearance findings that involve the SAME footprint ref (U3) against a
+# ref-less track item, on different nets.  ``extract_item_refs`` drops the
+# track, so both normalize to the identical ref set {"U3"}.
+_TWO_MIXED_FINDINGS: dict = {
+    **RECORDED_REPORT,
+    "violations": [
+        {
+            "type": "clearance",
+            "severity": "error",
+            "description": "Clearance violation (GND)",
+            "items": [
+                {"description": "Pad 1 [VBUS] of U3 on F.Cu", "uuid": "1", "pos": {}},
+                {"description": "Track [GND] on F.Cu", "uuid": "2", "pos": {}},
+            ],
+        },
+        {
+            "type": "clearance",
+            "severity": "error",
+            "description": "Clearance violation (SCL)",
+            "items": [
+                {"description": "Pad 2 [SDA] of U3 on F.Cu", "uuid": "3", "pos": {}},
+                {"description": "Track [SCL] on F.Cu", "uuid": "4", "pos": {}},
+            ],
+        },
+    ],
+}
+
+
+class TestPartiallyReflessFindings:
+    """Issue #4765: "exact-set" is exact over the NORMALIZED ref set.
+
+    A track/via item contributes no reference designator, so a finding that
+    mixes a pad with a track normalizes to a SMALLER set than its item count
+    suggests and is matched by a correspondingly small waiver.  That is
+    deliberate -- narrowing it would retroactively un-waive existing
+    sidecars -- so these tests pin the behaviour and demonstrate the ``nets``
+    remedy that keeps such an entry specific.
+    """
+
+    def test_refless_item_is_dropped_from_the_normalized_set(self):
+        assert extract_item_refs(["Pad 1 of U3", "Track [GND] on F.Cu"]) == {"U3"}
+
+    def test_one_ref_waiver_matches_the_mixed_finding(self, tmp_path, capsys):
+        report = _report(tmp_path, data=_TWO_MIXED_FINDINGS)
+        waiver = _waivers(
+            tmp_path / "w.json",
+            [{"rule": "clearance", "items": ["U3"], "reason": "reviewed", "issue": "#4765"}],
+        )
+        rc = drc_cmd.main([str(report), "--waivers", str(waiver), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        # Documented consequence: the entry waives the whole CLASS of U3
+        # clearance findings, not only the one that was reviewed.
+        assert data["summary"]["waived"] == 2
+
+    def test_adding_nets_narrows_the_same_waiver_to_one_finding(self, tmp_path, capsys):
+        report = _report(tmp_path, data=_TWO_MIXED_FINDINGS)
+        waiver = _waivers(
+            tmp_path / "w.json",
+            [
+                {
+                    "rule": "clearance",
+                    "items": ["U3"],
+                    "nets": ["VBUS", "GND"],
+                    "reason": "reviewed",
+                    "issue": "#4765",
+                }
+            ],
+        )
+        rc = drc_cmd.main([str(report), "--waivers", str(waiver), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert rc == 1  # the SCL/SDA finding is NOT waived
+        assert data["summary"]["waived"] == 1
+        waived = [v for v in data["violations"] if v.get("waived")]
+        assert waived[0]["nets"] == ["VBUS", "GND"]
+
+
+class TestReportInputDiscoversBoardDir:
+    """Issue #4765: ``boards/NN/output/drc.json`` must find ``boards/NN/``.
+
+    ``discover_waivers_sidecar`` is anchored at the input path, which for
+    report input is the report -- so its three probes collapse to the report
+    directory and ``<report dir>/output/``, never the board directory where
+    the sidecar lives for the ``.kicad_pcb`` path.
+    """
+
+    def _board_layout(self, tmp_path):
+        board_dir = tmp_path / "boards" / "07"
+        (board_dir / "output").mkdir(parents=True)
+        report = _report(board_dir / "output", data=RECORDED_REPORT)
+        return board_dir, report
+
+    def test_board_dir_sidecar_is_discovered_for_report_input(self, tmp_path, capsys):
+        board_dir, report = self._board_layout(tmp_path)
+        sidecar = _waivers(board_dir / ".kct_waivers.json", [COURTYARD_WAIVER, CLEARANCE_WAIVER])
+        rc = drc_cmd.main([str(report)])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert f"auto-loaded waivers sidecar: {sidecar}" in captured.err
+        assert "Waived:     2" in captured.out
+
+    def test_report_dir_sidecar_still_wins_over_the_board_dir(self, tmp_path, capsys):
+        board_dir, report = self._board_layout(tmp_path)
+        _waivers(board_dir / ".kct_waivers.json", [COURTYARD_WAIVER, CLEARANCE_WAIVER])
+        nearer = _waivers(board_dir / "output" / ".kct_waivers.json", [COURTYARD_WAIVER])
+        rc = drc_cmd.main([str(report)])
+        captured = capsys.readouterr()
+        assert rc == 1  # only the courtyard finding is waived by the nearer file
+        assert f"auto-loaded waivers sidecar: {nearer}" in captured.err
+
+    def test_explicit_path_still_wins(self, tmp_path, capsys):
+        board_dir, report = self._board_layout(tmp_path)
+        _waivers(board_dir / ".kct_waivers.json", [COURTYARD_WAIVER, CLEARANCE_WAIVER])
+        explicit = _waivers(tmp_path / "explicit.json", [COURTYARD_WAIVER])
+        rc = drc_cmd.main([str(report), "--waivers", str(explicit)])
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "auto-loaded waivers sidecar" not in captured.err
+        assert "Waived:     1" in captured.out
+
+    def test_missing_explicit_path_is_still_a_hard_error(self, tmp_path, capsys):
+        board_dir, report = self._board_layout(tmp_path)
+        _waivers(board_dir / ".kct_waivers.json", [COURTYARD_WAIVER])
+        rc = drc_cmd.main([str(report), "--waivers", str(tmp_path / "nope.json")])
+        assert rc == 1
+        assert "waivers file not found" in capsys.readouterr().err
+
+    def test_no_sidecar_anywhere_is_unchanged(self, tmp_path, capsys):
+        _board_dir, report = self._board_layout(tmp_path)
+        rc = drc_cmd.main([str(report)])
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "auto-loaded waivers sidecar" not in captured.err
+        assert "Errors:     2" in captured.out

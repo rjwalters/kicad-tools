@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,7 +28,8 @@ from kicad_tools.recovery import (
     StrategyApplicator,
     StrategyType,
 )
-from kicad_tools.schema.pcb import PCB
+from kicad_tools.schema.pcb import PCB, _sync_at_angle
+from kicad_tools.sexp.parser import SExp, parse_string
 
 _BOARD_TEMPLATE = """(kicad_pcb
 	(version 20260206)
@@ -153,6 +155,46 @@ class TestRotationWriteThroughResidue:
         lines = _at_lines(_saved(pcb, path))
         assert "(at 100 100 0)" in lines
         assert "(at 0 0 0)" in lines
+
+
+class TestExtraTrailingTokensAreNeverTrimmed:
+    """Issue #4765: the documented 4+-children non-trim path had no test.
+
+    ``_sync_at_angle`` only deletes the angle token from a node with EXACTLY
+    three children (``x y angle``).  A node carrying extra trailing tokens is
+    left structurally intact even when the write-through owns the angle token
+    and the angle returns to zero -- deleting index 2 there would corrupt the
+    node by shifting the trailing tokens into the angle slot.
+    """
+
+    @staticmethod
+    def _at_node(text: str) -> SExp:
+        return parse_string(text)
+
+    def test_four_token_node_keeps_all_children_when_angle_returns_to_zero(self):
+        node = self._at_node("(at 1 2 45 unlocked)")
+        owner = SimpleNamespace()
+        owner.__dict__["_at_angle_synthetic"] = True
+
+        _sync_at_angle(owner, node, 0.0)
+
+        assert len(node.children) == 4
+        assert node.children[2].value == 0.0
+        # The trailing token is untouched and the synthetic flag is retained
+        # (nothing was trimmed, so nothing was "given back").
+        assert node.children[3].value == "unlocked"
+        assert owner.__dict__["_at_angle_synthetic"] is True
+
+    def test_three_token_node_is_still_trimmed(self):
+        """The control: the same inputs minus the trailing token DO trim."""
+        node = self._at_node("(at 1 2 45)")
+        owner = SimpleNamespace()
+        owner.__dict__["_at_angle_synthetic"] = True
+
+        _sync_at_angle(owner, node, 0.0)
+
+        assert len(node.children) == 2
+        assert owner.__dict__["_at_angle_synthetic"] is False
 
 
 class TestMirrorRoundTripLeavesNoResidue:
