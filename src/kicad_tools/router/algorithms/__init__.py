@@ -25,6 +25,8 @@ from .negotiated import (
     PER_NET_CAP_STAGE_FRACTION,
     POST_NEGOTIATION_SWEEP_BUDGET_S,
     POST_NEGOTIATION_SWEEP_PER_NET_S,
+    POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S,
+    POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S,
     NegotiatedRouter,
     calculate_congestion_tuned_params,
     calculate_history_increment,
@@ -58,6 +60,9 @@ __all__ = [
     # Post-negotiation rescue sweep (Issue #4159)
     "POST_NEGOTIATION_SWEEP_BUDGET_S",
     "POST_NEGOTIATION_SWEEP_PER_NET_S",
+    # Deterministic-mode replacements for the two above (Issue #4724)
+    "POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S",
+    "POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S",
     # Per-net A* cap derivation (Issue #3474 R1)
     "PER_NET_CAP_FLOOR_S",
     "PER_NET_CAP_STAGE_FRACTION",

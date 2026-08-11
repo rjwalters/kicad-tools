@@ -72,6 +72,28 @@ GRACE_PASS_PER_NET_S = GRACE_PASS_TIER_CAPS_S[-1]
 POST_NEGOTIATION_SWEEP_BUDGET_S = 60.0
 POST_NEGOTIATION_SWEEP_PER_NET_S = 10.0
 
+# Issue #4724: the sweep bounds kept when the CALLER runs unbudgeted
+# (``timeout=None`` / ``per_net_timeout=None``) AND a per-net node-expansion
+# cap is active -- i.e. the deterministic-budget mode #4536 established, where
+# a wall clock must not decide anything.
+#
+# The two bounds above ARE load-bearing in that mode: a per-net search that
+# exhausts the 1,000,000-expansion cap costs ~11 s on a CI runner, so the 10 s
+# per-net cap STRADDLES it (the same straddle that made the relief rescue's
+# 10 s sub-search budget a coin flip on machine speed, #4536), and a handful of
+# stranded nets is enough for the 60 s whole-sweep ceiling to cut the tail at a
+# load-dependent net boundary.  Both decide WHICH nets get rescued -- routed
+# reach -- not merely runtime.
+#
+# These replacements are ~10x the natural times, matching
+# ``RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S``: deliberately NOT load-bearing, kept
+# only so the one path the expansion cap does not price in seconds (the
+# pure-Python A* fallback, 10-100x slower) cannot grind for many minutes inside
+# a post-loop sweep (the #3989 lesson).  Callers that DO pass a ``timeout``
+# keep the historical bounds unchanged.
+POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S = 600.0
+POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S = 120.0
+
 # Issue #3474 R1: abort threshold for a single grace attempt that grossly
 # overruns its cap.  ``route_fn`` legally spends a small multiple of the
 # per-call cap (see the ~15x note above), but a 100x+ overrun means a

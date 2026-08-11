@@ -26,6 +26,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+from .resource_guard import reraise_if_resource_exhaustion
+
 if TYPE_CHECKING:
     import numpy as np
 
@@ -2337,6 +2339,13 @@ class CppPathfinder:
         :meth:`_convert_result_to_route`.  Returns an empty dict (without
         caching) when no Python source grid is attached, so a later
         attachment can still populate the cache.
+
+        Issue #4724: the empty-dict fallback is CACHED and feeds two
+        routing decisions (neck-down widths and the fine-pitch clearance
+        carve-out), so absorbing a host ``MemoryError`` here would change
+        the emitted copper for the rest of the run on a loaded machine
+        only.  Exhaustion re-raises; a genuine data defect still degrades
+        to ``{}`` exactly as before.
         """
         pitches = self._component_pitches_cache
         if pitches is not None:
@@ -2347,6 +2356,7 @@ class CppPathfinder:
         try:
             pitches = py_grid.compute_component_pitches()
         except Exception:
+            reraise_if_resource_exhaustion("cpp_backend: component-pitch computation")
             pitches = {}
         self._component_pitches_cache = pitches
         return pitches
@@ -3422,6 +3432,7 @@ def create_hybrid_router(
     Returns:
         Either CppPathfinder or Python Router instance
     """
+    construction_error: str | None = None
     if _CPP_AVAILABLE and not force_python:
         try:
             cpp_grid = CppGrid.from_routing_grid(grid)
@@ -3433,13 +3444,23 @@ def create_hybrid_router(
                 max_search_iterations=max_search_iterations,
                 per_net_iterations=per_net_iterations,
             )
-        except Exception:
-            # Fall back to Python if C++ initialization fails
-            pass
+        except Exception as exc:
+            # Fall back to Python if C++ initialization fails.
+            #
+            # Issue #4724: NOT for a host allocation failure.  Building the
+            # C++ grid mirror is the largest single allocation in a route,
+            # so it is the likeliest place for memory pressure to land --
+            # and swapping the backend mid-run swaps the SEARCH, i.e. the
+            # run silently becomes a different (and 10-100x slower) run.
+            # Exhaustion aborts; a genuine construction defect still falls
+            # back, now with its type named in the log instead of being
+            # reported as "unknown reason".
+            reraise_if_resource_exhaustion("cpp_backend: C++ grid mirror construction")
+            construction_error = f"C++ backend construction failed: {type(exc).__name__}: {exc}"
 
     # Fall back to Python implementation
     if not force_python:
-        reason = _CPP_IMPORT_ERROR or "unknown reason"
+        reason = construction_error or _CPP_IMPORT_ERROR or "unknown reason"
         logger.warning(
             "C++ router backend not available -- using pure Python (10-100x slower). Reason: %s",
             reason,

@@ -45,6 +45,11 @@ class _BudgetStub:
 
     # Borrowed unbound so the stub gets the real selection logic without a board.
     _relief_subsearch_budget = Autorouter._relief_subsearch_budget
+    # Issue #4724 extracted the "is a node-expansion cap active?" question into
+    # a shared helper so the relief rescue and the post-negotiation sweep
+    # cannot drift on what deterministic mode means; the selector calls it on
+    # ``self``, so the stub borrows it too.
+    _active_expansion_cap = Autorouter._active_expansion_cap
 
     def __init__(self, per_net_iterations: int = 0, max_search_iterations: int = 0) -> None:
         self._per_net_iterations = per_net_iterations

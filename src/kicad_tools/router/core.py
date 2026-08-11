@@ -40,6 +40,8 @@ from .algorithms import (
     PER_NET_CAP_STAGE_FRACTION,
     POST_NEGOTIATION_SWEEP_BUDGET_S,
     POST_NEGOTIATION_SWEEP_PER_NET_S,
+    POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S,
+    POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S,
     HierarchicalRouter,
     MonteCarloRouter,
     MSTRouter,
@@ -98,6 +100,7 @@ from .placement_feedback import (
     write_placement_delta_json,
 )
 from .primitives import Obstacle, Pad, Route, Via
+from .resource_guard import reraise_if_resource_exhaustion
 from .rules import (
     DEFAULT_NET_CLASS_MAP,
     SIMPLE_NET_THRESHOLD_MM,
@@ -7953,6 +7956,10 @@ class Autorouter:
                 max_ripups_per_net=self._route_all_max_ripups_per_net,
             )
         except Exception as exc:  # pragma: no cover - defensive
+            # Issue #4724: a swallowed rip-up is a routing-decision change
+            # (the failed net stays failed), so host exhaustion aborts here
+            # rather than quietly costing the board a net.
+            reraise_if_resource_exhaustion("core: BLOCKED_BY_COMPONENT rip-up")
             flush_print(f"  BLOCKED_BY_COMPONENT rip-up raised {type(exc).__name__}: {exc}")
             return []
 
@@ -8134,6 +8141,9 @@ class Autorouter:
                 net_names=self.net_names,
             )
         except Exception as exc:  # pragma: no cover - defensive
+            # Issue #4724: see the route_all sibling above -- exhaustion must
+            # not be absorbed into "the rescue did not fire".
+            reraise_if_resource_exhaustion("core: BLOCKED_BY_COMPONENT rip-up (negotiated)")
             flush_print(
                 f"  BLOCKED_BY_COMPONENT rip-up (negotiated) raised {type(exc).__name__}: {exc}"
             )
@@ -12313,19 +12323,23 @@ class Autorouter:
                 # loop already timed out the remaining budget is spent, so the
                 # sweep runs on its own contained allowance.  The per-net cap
                 # keeps one genuinely-impossible net from eating the sweep.
-                sweep_remaining: float | None = None
-                if timeout is not None:
-                    sweep_remaining = timeout - (time.time() - start_time)
-                if sweep_remaining is not None and sweep_remaining > 0 and not timed_out:
-                    sweep_budget = min(POST_NEGOTIATION_SWEEP_BUDGET_S, sweep_remaining)
-                else:
-                    sweep_budget = POST_NEGOTIATION_SWEEP_BUDGET_S
-                sweep_deadline = time.time() + max(0.0, sweep_budget)
-                sweep_per_net = per_net_timeout
-                if sweep_per_net is None:
-                    sweep_per_net = POST_NEGOTIATION_SWEEP_PER_NET_S
-                else:
-                    sweep_per_net = min(sweep_per_net, POST_NEGOTIATION_SWEEP_PER_NET_S)
+                #
+                # Issue #4724: the selection lives in
+                # ``_post_negotiation_sweep_bounds`` because both bounds decide
+                # WHICH stranded nets get rescued -- an unbudgeted
+                # (deterministic-budget) caller hands them to the node-expansion
+                # cap instead of a wall clock, exactly as #4536 did for the
+                # relief rescue.  Budgeted callers are unchanged.
+                sweep_elapsed = time.time() - start_time
+                sweep_budget, sweep_per_net = self._post_negotiation_sweep_bounds(
+                    timeout, per_net_timeout, sweep_elapsed, timed_out
+                )
+                flush_print(
+                    self._post_negotiation_sweep_bound_line(
+                        timeout, per_net_timeout, sweep_elapsed, timed_out
+                    )
+                )
+                sweep_deadline = time.time() + sweep_budget
                 sweep_rescued = self._post_negotiation_sweep(
                     stranded_nets=sweep_stranded,
                     net_routes=net_routes,
@@ -12531,6 +12545,34 @@ class Autorouter:
             victims |= self.grid.find_relief_conflict_nets(route, net)
         return probe_routes, victims
 
+    def _active_expansion_cap(self) -> int:
+        """The binding per-net node-expansion cap, or ``0`` when uncapped.
+
+        The deterministic bound this router can hand a sub-search is the
+        SMALLER of the tuned per-net cap (``--per-net-iterations`` /
+        ``per_net_iterations``, #3881) and the memory backstop
+        (``--max-search-iterations``, #2610); ``--deterministic-budget``
+        sets both, an explicit flag may set only one.  ``0`` means neither
+        is active, i.e. there is no machine-independent bound available and
+        a wall clock has to stay in force.
+
+        Extracted (Issue #4724) so the relief rescue (#4536) and the
+        post-negotiation sweep (#4159) ask the SAME question -- a second
+        copy of this ``min()`` is exactly how two budget selectors drift
+        into disagreeing about what "deterministic mode" means.
+        """
+        return min(
+            (
+                cap
+                for cap in (
+                    getattr(self, "_per_net_iterations", 0),
+                    getattr(self, "_max_search_iterations", 0),
+                )
+                if cap
+            ),
+            default=0,
+        )
+
     def _relief_subsearch_budget(
         self, per_net_timeout: float | None, deterministic_rescue: bool
     ) -> float | None:
@@ -12575,20 +12617,8 @@ class Autorouter:
         now carries the value per call, so the choice is made where the
         measurement is.
         """
-        if deterministic_rescue:
-            expansion_cap = min(
-                (
-                    cap
-                    for cap in (
-                        getattr(self, "_per_net_iterations", 0),
-                        getattr(self, "_max_search_iterations", 0),
-                    )
-                    if cap
-                ),
-                default=0,
-            )
-            if expansion_cap:
-                return RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S
+        if deterministic_rescue and self._active_expansion_cap():
+            return RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S
         if per_net_timeout:
             return min(RELIEF_SUBSEARCH_BUDGET_S, per_net_timeout)
         return RELIEF_SUBSEARCH_BUDGET_S
@@ -12639,6 +12669,120 @@ class Autorouter:
             f"  Relief-rescue sub-search cap: {wall_clock:.1f}s wall clock -- "
             "deterministic rescue is off for this route (the default; opt in with "
             "deterministic_rescue=True; issue #4730)"
+        )
+
+    def _post_negotiation_sweep_bounds(
+        self,
+        timeout: float | None,
+        per_net_timeout: float | None,
+        elapsed: float,
+        timed_out: bool,
+    ) -> tuple[float, float | None]:
+        """Bounds for the #4159 post-negotiation rescue sweep.
+
+        Returns ``(whole_sweep_budget_s, per_net_budget_s)``.
+
+        Issue #4724.  The sweep decides WHICH stranded nets get one solo
+        re-attempt on the live grid, so both of its historical bounds --
+        ``POST_NEGOTIATION_SWEEP_BUDGET_S`` (60 s for the whole pass) and
+        ``POST_NEGOTIATION_SWEEP_PER_NET_S`` (10 s per net) -- decide routed
+        REACH, not runtime.  They were applied UNCONDITIONALLY, including on
+        the deterministic-budget callers that pass ``timeout=None`` /
+        ``per_net_timeout=None`` precisely so that no wall clock decides
+        anything (the #4536 rationale, board 06's regen).  A capped per-net
+        search that runs to its 1M-expansion cap costs ~11 s on a CI runner,
+        so the 10 s per-net bound straddles it exactly the way the relief
+        rescue's 10 s sub-search budget did.
+
+        Selection table -- the same shape as
+        :meth:`_relief_subsearch_budget`, so the two cannot drift:
+
+        * **Unbudgeted caller + active expansion cap** -> the deterministic
+          arm: the node-expansion cap is the binding bound and the returned
+          wall clocks are the ~10x non-binding backstops
+          (``POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S`` /
+          ``POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S``) that keep a
+          pure-Python fallback from grinding.
+        * **Unbudgeted caller, no expansion cap** -> unchanged 60 s / 10 s.
+          There is no machine-independent bound to fall back on, so the
+          historical wall clock is kept rather than degrading to an
+          unbounded sweep (identical reasoning to #4536's capless arm).
+        * **Budgeted caller** (``timeout`` set) -> unchanged: the sweep gets
+          ``min(60 s, remaining stage budget)`` when the loop exited with
+          budget left, else its own contained 60 s allowance, and the per-net
+          cap is clamped by any caller ``per_net_timeout``.
+
+        Args:
+            timeout: The stage wall-clock budget the caller passed, or
+                ``None`` for an unbudgeted (deterministic) run.
+            per_net_timeout: The caller's per-net A* budget, or ``None``.
+            elapsed: Seconds spent in the negotiated loop so far (used only
+                to compute the remaining stage budget of a budgeted caller).
+            timed_out: Whether the loop exited on the stage timeout (then
+                the remaining budget is spent and the sweep runs on its own
+                contained allowance, as before).
+        """
+        if timeout is None and per_net_timeout is None and self._active_expansion_cap():
+            return (
+                POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S,
+                POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S,
+            )
+
+        sweep_remaining: float | None = None
+        if timeout is not None:
+            sweep_remaining = timeout - elapsed
+        if sweep_remaining is not None and sweep_remaining > 0 and not timed_out:
+            sweep_budget = min(POST_NEGOTIATION_SWEEP_BUDGET_S, sweep_remaining)
+        else:
+            sweep_budget = POST_NEGOTIATION_SWEEP_BUDGET_S
+
+        sweep_per_net = per_net_timeout
+        if sweep_per_net is None:
+            sweep_per_net = POST_NEGOTIATION_SWEEP_PER_NET_S
+        else:
+            sweep_per_net = min(sweep_per_net, POST_NEGOTIATION_SWEEP_PER_NET_S)
+        return max(0.0, sweep_budget), sweep_per_net
+
+    def _post_negotiation_sweep_bound_line(
+        self,
+        timeout: float | None,
+        per_net_timeout: float | None,
+        elapsed: float,
+        timed_out: bool,
+    ) -> str:
+        """Routing-log line recording which sweep bound is live (Issue #4724).
+
+        Same evidence discipline as :meth:`_relief_subsearch_bound_line`
+        (#4536): the bound decides which stranded nets get a rescue, so a
+        routing log used as A/B evidence has to say which one was in force.
+        The ``iteration-bounded`` wording is the greppable evidence token;
+        do not reword it.
+        """
+        budget, per_net = self._post_negotiation_sweep_bounds(
+            timeout, per_net_timeout, elapsed, timed_out
+        )
+        if budget == POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S:
+            return (
+                "  Post-negotiation sweep bound: iteration-bounded "
+                "(per-net node-expansion cap; issue #4724) -- which stranded "
+                "nets are rescued is machine-independent; "
+                f"{POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S:.0f}s/"
+                f"{POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S:.0f}s wall "
+                "clocks kept only as non-binding Python-fallback backstops"
+            )
+        per_net_str = "unbounded" if per_net is None else f"{per_net:.1f}s"
+        if timeout is not None:
+            why = "the caller passed a stage timeout (issue #4159)"
+        elif per_net_timeout is not None:
+            why = "the caller passed an explicit per-net wall clock (issue #4159)"
+        else:
+            why = (
+                "no per-net node-expansion cap is active, so the "
+                "machine-dependent bound is kept (issue #4724)"
+            )
+        return (
+            f"  Post-negotiation sweep bound: {budget:.1f}s whole-sweep / "
+            f"{per_net_str} per-net wall clock -- {why}"
         )
 
     def _relief_rescue(
@@ -13692,6 +13836,14 @@ class Autorouter:
             per_net_timeout: Per-net A* budget for each solo attempt.
             deadline: Optional absolute ``time.time()`` ceiling for the
                 whole sweep.  Checked before each net.
+
+        Note:
+            Both bounds decide WHICH stranded nets get their one attempt,
+            so they are reach-determining, not runtime knobs.  The caller
+            selects them through
+            :meth:`_post_negotiation_sweep_bounds`, which hands an
+            unbudgeted (deterministic-budget) run to the per-net
+            node-expansion cap instead of a wall clock (Issue #4724).
 
         Returns:
             The list of net IDs successfully rescued (committed).

@@ -96,6 +96,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/research/`, and `boards/07-matchgroup-test/diagnostic-runs/` are
   deliberately untouched — those are dated forensic records where the line
   number *is* the evidence.
+- **Host resource exhaustion aborts a route instead of silently changing
+  one, and the post-negotiation rescue sweep stops using a wall clock in
+  deterministic mode** (#4724) — the residual, load-correlated divergence
+  left over from #4536: one board-06 regen taken on a host at load-average
+  ~90 re-landed one fewer net in stagnation recovery (`restored 5 / rerouted
+  6`) than five same-code runs on a quiet host (`restored 4 / rerouted 7`),
+  then diverged chaotically. Both artifacts were valid and passed every
+  gate, so nothing failed loudly — the run was simply not the run the same
+  command produces on a quiet machine. Two environment-sensitive decision
+  points are closed. **(1) Exception transparency:** the router's broad
+  `except Exception` handlers exist so a malformed board or a fixture grid
+  cannot abort a route, but they also absorbed `MemoryError` — converting a
+  *host* failure into a routing *decision* ("this Steiner cell is free",
+  "this component has no pitch", "this rip-up did not fire", "use the
+  10-100x slower Python backend"). A new `router/resource_guard.py`
+  re-raises resource exhaustion (`MemoryError`, `RecursionError`, `ENOMEM`
+  `OSError`, and a native `bad_alloc` rethrown as `RuntimeError`) with a
+  named `[resource-exhaustion]` line, applied to the seven broad handlers on
+  the negotiated reroute path; every ordinary exception keeps its historical
+  fallback byte-for-byte. The C++ grid-mirror fallback also now names the
+  failing exception type in its log instead of reporting "unknown reason".
+  **(2) Sweep budget semantics:** the #4159 post-negotiation rescue sweep
+  applied its 60 s whole-pass / 10 s per-net wall clocks even to callers
+  running unbudgeted (`timeout=None` / `per_net_timeout=None`) in the
+  deterministic-budget mode #4536 established precisely so no wall clock
+  decides anything — and a per-net search that runs to its 1M-expansion cap
+  costs ~11 s on a CI runner, so the 10 s bound straddled it the same way
+  the relief rescue's 10 s sub-search budget did. `_post_negotiation_sweep`
+  now selects its bounds through `_post_negotiation_sweep_bounds`, which
+  hands an unbudgeted run with an active node-expansion cap to the cap
+  (keeping 600 s / 120 s as non-binding Python-fallback backstops) and logs
+  which bound is live, mirroring #4536's evidence discipline. The arm
+  self-scopes by construction: every caller that passes a `timeout`, and
+  every capless run, keeps the historical numbers exactly. Also: the gated
+  board-06 determinism smoke test now prints host load-average before,
+  between and after its regens (and in its failure message) so a flake is
+  attributable to load rather than argued about. No board recipe, DRC
+  allowlist or reach floor is touched; reproducing the load-90 divergence
+  itself remains out of reach by construction.
 - **The relief rescue's deterministic sub-search bound stays opt-in — the
   fleet-default flip is withdrawn** (#4730) — #4536 gave
   `Autorouter.route_all_negotiated` a `deterministic_rescue=` opt-in that

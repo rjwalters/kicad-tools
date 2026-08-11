@@ -24,6 +24,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any, Callable
 
+from ..resource_guard import reraise_if_resource_exhaustion
+
 if TYPE_CHECKING:
     from ..primitives import Pad
 
@@ -103,6 +105,14 @@ def make_blocked_cell_predicate(
     behaviour is preserved byte-for-byte on grids that cannot answer
     occupancy queries.
 
+    Issue #4724: "any per-cell exception" excludes HOST resource
+    exhaustion.  Every fallback here changes where a Steiner branch point
+    lands -- i.e. it changes the routed result -- so absorbing a
+    ``MemoryError`` from the grid's occupancy scan would silently make a
+    loaded host route differently from a quiet one.  Each handler defers
+    to :func:`~..resource_guard.reraise_if_resource_exhaustion` first;
+    ordinary fixture/mock exceptions keep their historical fallback.
+
     Args:
         grid: ``RoutingGrid`` / ``CppGrid``-compatible object exposing
             ``get_routable_indices()``, ``is_blocked_for_net(gx, gy,
@@ -119,6 +129,7 @@ def make_blocked_cell_predicate(
     try:
         routable_indices: list[int] = list(grid.get_routable_indices())
     except Exception:
+        reraise_if_resource_exhaustion("steiner: routable-layer probe")
         return None
     if not routable_indices or not hasattr(grid, "is_blocked_for_net"):
         return None
@@ -134,6 +145,7 @@ def make_blocked_cell_predicate(
     except Exception:
         # Fixture/mock rules without these attributes: keep the 1-cell
         # margin.
+        reraise_if_resource_exhaustion("steiner: relocation-margin resolution")
         margin_cells = 1
 
     def _point_blocked(gx: int, gy: int) -> bool:
@@ -151,6 +163,7 @@ def make_blocked_cell_predicate(
                     return False
             return True
         except Exception:
+            reraise_if_resource_exhaustion("steiner: blocked-cell occupancy scan")
             return False
 
     return _point_blocked

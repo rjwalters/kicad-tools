@@ -87,7 +87,10 @@ Budget ~25 minutes for the two sequential regens, and run on an
 otherwise-quiet host: under extreme concurrent load (load-average ~90)
 a stagnation-recovery reroute can flip and produce different valid
 copper -- a resource-exhaustion sensitivity tracked separately as #4724,
-not a regression of the #4536 fixes.  See
+not a regression of the #4536 fixes.  The test prints the host
+load-average before, between and after the regens (and repeats it in any
+failure message) so a flaked run is attributable to load rather than
+argued about (#4724).  See
 ``boards/06-diffpair-test/README.md`` ("Measuring Changes") for how this
 test slots into the byte-identity scope-guard convention.
 """
@@ -116,6 +119,30 @@ BOARD_DIR = REPO_ROOT / "boards" / "06-diffpair-test"
 UNROUTED_PCB = BOARD_DIR / "output" / "diffpair_test.kicad_pcb"
 
 _UUID_RE = re.compile(r'\(uuid "[0-9a-fA-F-]+"\)')
+
+
+def _loadavg_line(when: str) -> str:
+    """One-line host load-average record for run attribution (Issue #4724).
+
+    The residual divergence #4724 tracks is LOAD-CORRELATED: the single
+    diverging run of the #4536 verification matrix was taken on a host at
+    load-average ~90 (two parallel pytest suites plus a mypy pass), and its
+    stagnation recovery re-landed one fewer net than the five quiet-host
+    runs.  Without the load recorded next to the result, a future flake of
+    this test is unattributable -- "the fix regressed" and "the host was
+    saturated" look identical in the failure message.
+
+    ``os.getloadavg`` is absent on Windows, where the record degrades to a
+    stated unavailability rather than failing the test.
+    """
+    try:
+        one, five, fifteen = os.getloadavg()
+    except (OSError, AttributeError):  # pragma: no cover - platform-dependent
+        return f"[board06-determinism] load-average {when}: unavailable on this platform"
+    return (
+        f"[board06-determinism] load-average {when}: "
+        f"{one:.2f} {five:.2f} {fifteen:.2f} (cpus={os.cpu_count()})"
+    )
 
 
 def _normalize_uuids(text: str) -> str:
@@ -185,14 +212,25 @@ def test_two_same_seed_route_regens_are_identical(tmp_path: Path) -> None:
     1. identical segment and via counts (count-identity), then
     2. byte-identity of the uuid-normalized artifacts.
     """
+    # Issue #4724: record the host load around each regen (visible under
+    # ``-s``, and captured in the failure message below) so a divergence can
+    # be attributed to -- or cleared of -- host saturation.
+    load_lines = [_loadavg_line("before run-a")]
+    print(load_lines[-1], flush=True)
     first = _run_route_regen(tmp_path / "run-a")
+    load_lines.append(_loadavg_line("between runs"))
+    print(load_lines[-1], flush=True)
     second = _run_route_regen(tmp_path / "run-b")
+    load_lines.append(_loadavg_line("after run-b"))
+    print(load_lines[-1], flush=True)
+    load_report = "\n".join(load_lines)
 
     counts_a = _copper_counts(first)
     counts_b = _copper_counts(second)
     assert counts_a == counts_b, (
         f"segment/via count mismatch between same-seed runs: "
-        f"run-a={counts_a} run-b={counts_b} (issue #4536 regression)"
+        f"run-a={counts_a} run-b={counts_b} (issue #4536 regression)\n"
+        f"{load_report}"
     )
 
     norm_a = _normalize_uuids(first)
@@ -212,6 +250,9 @@ def test_two_same_seed_route_regens_are_identical(tmp_path: Path) -> None:
             f"(first divergence at line {first_div + 1}; "
             f"{len(lines_a)} vs {len(lines_b)} lines).\n"
             f"run-a: {context_a}\nrun-b: {context_b}\n"
+            f"{load_report}\n"
             "See issue #4536 -- a wall-clock, hash-order, or random-UUID "
-            "file-order dependence has re-entered the board-06 route pipeline."
+            "file-order dependence has re-entered the board-06 route pipeline. "
+            "Check the load-average lines first: a saturated host is the "
+            "known #4724 sensitivity, not a #4536 regression."
         )
