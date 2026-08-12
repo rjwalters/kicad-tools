@@ -39,6 +39,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paths, so no engine can drift from the gate. Fully dormant without
   `--voltage-map`; a zone with no layer data keeps the previous agnostic
   verdict. `ROUTER_CPP_BUILD_VERSION` 18 -> 19 (run `kct build-native`).
+- **`DETERMINISTIC_RESCUE_DEFAULT`'s docblock now records *why* board 07
+  regressed instead of naming the investigation as future work** (#4770) —
+  documentation only; the constant's value is unchanged (`False`) and no
+  DRC allowlist or reach floor moved. The A/B was re-mined from the three
+  recorded CI runs and re-run locally at `HEAD` with the C++ backend built,
+  and both halves of the intuitive reading turn out to be wrong. **No net's
+  rescue flips commit-vs-rollback**: on board 07 the deterministic bound is a
+  straight reach *loss* in the negotiated pass (26/31 → 24/31), because a
+  single `DQ3` relief transaction that gives up in 2.6 s under the 10 s wall
+  clock instead runs **279.1 s — 46 % of the 600 s stage budget** and rolls
+  back anyway, so the pass completes 2 rip-up iterations instead of 5 and
+  never reaches the one that produces board 07's 26th net. The advertised
+  `+1 net` is then produced downstream by `PlacementDeltaFeedbackLoop`'s
+  `run_delta`, whose accept-gate is *relative* (`new_count > pre_count`): the
+  depressed baseline admits the `U3 translate` placement delta that `main`
+  refuses at 25 → 25, and that delta — not the rescue — carries the `+5 DRC`
+  (4× `clearance_pad_segment` at 0.094 mm on `DQ1`/`DQ2` and 0.076 mm on
+  `DQ4`/`DQS_N`, 2× `clearance_segment_via` at 0.049 mm on `DQ1`/`DQ2`, 1×
+  `match_group_length_skew` with `ADDR_BUS` at 11.030 mm instead of 0.000 mm,
+  less the `DQS_N`/`DQS_P` diff-pair pair that stops firing only because
+  `DQS_N` went unrouted). Five of the seven new errors sit on copper with no
+  connection to the reach delta at all. Recommendation recorded on #4730:
+  keep the opt-in permanently. The full journal (per-pass rescue tables,
+  per-violation attribution, reproduction recipe) lands in
+  `boards/07-matchgroup-test/diagnostic-runs/README.md`;
+  `_normalize_deterministic_budget`'s docstring and board 07's README are
+  updated in lockstep, and a new `TestPlacementDeltaFeedbackCaveat` pins the
+  two structural claims the finding rests on — that
+  `PlacementDeltaFeedbackLoop.run_delta` threads no `deterministic_rescue`
+  (so "flip the constant, not the CLI" stays true) and that
+  `Autorouter._post_negotiation_sweep_bounds` cannot see the flag (so the
+  #4159 sweep stays excluded as a confound).
 - **Nine polish fixes from the 2026-08-08/09 sweep's judge nits** (#4765) —
   each a small correctness defect in code that shipped last sweep; none
   changes routed copper or an exit code. (A) The `kct route` banner decided

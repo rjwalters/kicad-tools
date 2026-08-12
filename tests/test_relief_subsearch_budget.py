@@ -15,6 +15,12 @@ that.  So :data:`DETERMINISTIC_RESCUE_DEFAULT` is ``False`` on every entry
 point (``TestDeterministicRescueDefault``) and board 06 keeps its explicit
 opt-in.
 
+Issue #4770 measured why and made the opt-in PERMANENT: the bound does not
+buy board 07 a net, it loses two (26/31 -> 24/31 in the negotiated pass), and
+the reported ``+1 net / +5 DRC`` comes from the placement-delta feedback
+loop's relative accept-gate downstream.  ``TestPlacementDeltaFeedbackCaveat``
+pins the two structural claims that finding rests on.
+
 What the issue did land is the per-call switch, pinned by
 ``TestPerCallThreading``: every entry point that can reach a rescue takes
 ``deterministic_rescue``, and the two-phase stall-relief hook -- which calls
@@ -161,6 +167,46 @@ class TestDeterministicRescueDefault:
         assert _budget(_BudgetStub(), None, DETERMINISTIC_RESCUE_DEFAULT) == (
             RELIEF_SUBSEARCH_BUDGET_S
         )
+
+
+class TestPlacementDeltaFeedbackCaveat:
+    """Issue #4770: doc-drift guards for the two claims the A/B rests on.
+
+    The ``DETERMINISTIC_RESCUE_DEFAULT`` docblock tells the next person two
+    things that are only true as long as the code below stays as it is:
+
+    1. reproduce the A/B by flipping the CONSTANT, because board 07's
+       re-route passes go through :class:`PlacementDeltaFeedbackLoop`, which
+       forwards no ``deterministic_rescue`` -- so a CLI-level wiring is a
+       DIFFERENT experiment; and
+    2. the #4159 post-negotiation sweep bound is identical in both arms by
+       construction, which is what excludes it as a confound.
+
+    Neither is a behaviour this repo wants to freeze -- they are statements
+    the docblock makes.  If a future change falsifies one, this class goes
+    red so the docblock is corrected in the same PR instead of rotting into
+    a confidently wrong explanation.
+    """
+
+    def test_placement_delta_loop_forwards_no_deterministic_rescue(self):
+        """Claim 1.  If this fails, ``PlacementDeltaFeedbackLoop`` gained the
+        parameter -- update the docblock's "flip the constant, not the CLI"
+        paragraph, because a CLI wiring would then reach board 07's re-routes
+        and the two experiments would finally be equivalent."""
+        from kicad_tools.router.placement_feedback import PlacementDeltaFeedbackLoop
+
+        params = inspect.signature(PlacementDeltaFeedbackLoop.run_delta).parameters
+        assert "deterministic_rescue" not in params
+
+    def test_sweep_bound_cannot_see_the_rescue_flag(self):
+        """Claim 2.  ``_post_negotiation_sweep_bounds`` takes only
+        ``(timeout, per_net_timeout, elapsed, timed_out)``, so #4770's A/B
+        arms print the same ``Post-negotiation sweep bound:`` line (confirmed
+        empirically: ``60.0s whole-sweep / 10.0s per-net`` in both) and the
+        #4159 sweep is excluded as a cause of the ``+1 net / +5 DRC``."""
+        params = inspect.signature(Autorouter._post_negotiation_sweep_bounds).parameters
+        assert list(params)[1:] == ["timeout", "per_net_timeout", "elapsed", "timed_out"]
+        assert "deterministic_rescue" not in params
 
 
 class TestReliefSubsearchBoundLine:

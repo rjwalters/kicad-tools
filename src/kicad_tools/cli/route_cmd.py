@@ -217,8 +217,24 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
     (``DETERMINISTIC_RESCUE_DEFAULT`` is ``False``): board 07 regressed with it
     on (changed LVS open set, routed-DRC 8 -> 13 against an allowlist main sits
     exactly at), so ``--deterministic-budget`` still means "wall-clock rescue
-    bound" for every ``kct route`` caller.  No call site passes the flag; the
-    constant is the single switch to flip when that regression is understood.
+    bound" for every ``kct route`` caller.  No call site passes the flag.
+
+    Issue #4770 measured WHY and closed the question: the opt-in is permanent,
+    not provisional.  On board 07 the deterministic bound does not buy a net --
+    it LOSES two (26/31 -> 24/31 in the negotiated pass), because relief
+    sub-searches that used to die at 10 s run on toward the 120 s backstop and
+    the unchanged stage ``--timeout`` then covers 2 rip-up iterations instead
+    of 5.  The reported "+1 net / +5 DRC" is produced downstream by the
+    placement-delta feedback loop's RELATIVE accept-gate admitting a placement
+    delta ``main`` refuses.  Note the interaction this normalizer owns: (1)
+    sets ``per_net_timeout = 0.0``, which is falsy in
+    ``Autorouter._relief_subsearch_budget`` and therefore selects the same
+    ``RELIEF_SUBSEARCH_BUDGET_S`` branch ``None`` does -- so it is invariant
+    across both arms of that A/B and cannot explain the delta (it does bite
+    the post-negotiation sweep; that is issue #4776).  Read the
+    ``DETERMINISTIC_RESCUE_DEFAULT`` docblock in ``router/core.py`` and
+    ``boards/07-matchgroup-test/diagnostic-runs/README.md`` before touching
+    the constant.
     """
     if not getattr(args, "deterministic_budget", False):
         return

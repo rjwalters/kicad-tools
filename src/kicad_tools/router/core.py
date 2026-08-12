@@ -219,15 +219,68 @@ RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S = 120.0
 # attribution was wrong -- board 07 never reaches ``route_all_two_phase``, and
 # the regression reproduced unchanged.
 #
+# WHY, measured (issue #4770).  Both halves of the intuitive reading -- "a
+# rescue now commits, and its copper costs 5 DRC" -- are FALSE.  Full journal,
+# with the per-pass rescue tables and the reproduction recipe:
+# ``boards/07-matchgroup-test/diagnostic-runs/README.md``, section
+# "Deterministic relief-rescue bound: A/B measurement (#4770)".
+#
+#   * NO net's rescue flips commit-vs-rollback.  On board 07 the bound is a
+#     straight REACH LOSS in the negotiated pass: 26/31 -> 24/31.  Sub-searches
+#     that used to die at ``RELIEF_SUBSEARCH_BUDGET_S`` run on toward the
+#     120 s backstop, so the UNCHANGED ``--timeout 600`` stage budget covers
+#     2 rip-up iterations instead of 5.  One transaction carries most of it:
+#     ``DQ3``'s rescue gives up in 2.6 s under the 10 s bound (``has NO relief
+#     path``) but runs 279.1 s -- 46% of the whole stage -- under the
+#     deterministic one before rolling back anyway (``only 7/9 displaced
+#     victim(s) re-landed``).  The rip-up iteration that produces board 07's
+#     26th net is the one the flip cannot afford to run.
+#   * The "+1 net" is a PLACEMENT DELTA, not reach.  Board 07 re-routes under
+#     ``--placement-delta-feedback``, and ``PlacementDeltaFeedbackLoop``'s
+#     ``run_delta`` keeps a delta on ``new_count > pre_count`` -- a RELATIVE
+#     gate.  Entering the loop at 25 routed, main measures the ``U3 translate``
+#     probe at 25 -> 25 and REVERTS it (``Deltas kept: 0``); entering at 23,
+#     the flip measures 23 -> 27 and KEEPS it.  The depressed baseline is what
+#     admits it.
+#   * The "+5 DRC" is that delta's already-documented cost (see
+#     ``boards/07-matchgroup-test/README.md``, "Placement-delta feedback"), on
+#     copper that is not rescue output: 2x ``clearance_pad_segment`` +
+#     2x ``clearance_segment_via`` on ``DQ1``/``DQ2`` (routed in BOTH arms),
+#     2x ``clearance_pad_segment`` on ``DQ4``/``DQS_N``, and 1x
+#     ``match_group_length_skew`` with ``ADDR_BUS`` (``A0``-``A7``, disjoint
+#     from every net whose routed state changed) at 11.030 mm instead of
+#     0.000 mm -- less the ``DQS_N``/``DQS_P`` diff-pair skew + continuity pair
+#     that stops firing only because ``DQS_N`` went UNROUTED.
+#
+# So the trade is not "one more net for five more errors".  Held at a fixed
+# placement the bound COSTS board 07 two nets, and the apparent gain is a
+# second-order effect of a relative accept-gate.  #4770's recommendation,
+# recorded on #4730: keep the opt-in PERMANENTLY.  Reproducibility was never
+# the objection -- the A arm is bit-stable across two runners and two heads;
+# the outcome it makes machine-independent is simply the worse one here.
+#
+# Reproducing the A/B means flipping THIS CONSTANT, not wiring the CLI.
+# Board 07's re-route passes go through ``PlacementDeltaFeedbackLoop``, whose
+# ``negotiated_kwargs`` carries only ``timeout`` / ``per_net_timeout`` and
+# forwards no ``deterministic_rescue``; a CLI-level ``deterministic_rescue=``
+# on the ``route_all_negotiated`` call site would never reach them, so it would
+# be a DIFFERENT experiment from the one that produced the numbers above.
+# ``TestPlacementDeltaFeedbackCaveat`` in
+# ``tests/test_relief_subsearch_budget.py`` fails if that stops being true, so
+# this paragraph cannot rot silently.
+#
 # What #4730 did land is the per-call switch.  Every entry point above takes
 # ``deterministic_rescue``, and ``_create_two_phase_router`` binds it onto the
 # positional #3471 stall-relief hook with a ``functools.partial``, so opting a
 # path in (or a future fleet flip) is a value change backed by measurement
 # rather than a rewiring job.  Board 06 depends on the opt-in: it passes
 # ``deterministic_rescue=True`` explicitly because its 21/21 reach gate is
-# otherwise a coin flip on runner speed.  Reattempting the flip means first
-# understanding board 07's rescue outcome -- which nets its rescues keep, and
-# why the kept copper carries +5 DRC.
+# otherwise a coin flip on runner speed.  Board 07 is the opposite case and
+# #4770 settled it: it is sub-search-budget-STARVED, not straddled, so the
+# per-board opt-in is the right shape and this default is not a placeholder
+# awaiting more evidence.  What would have to change before the question is
+# worth reopening is board 07's INPUTS -- a rescue that cannot spend ~46% of a
+# stage budget and roll back (issue #4781) -- not another A/B of this flag.
 DETERMINISTIC_RESCUE_DEFAULT = False
 
 

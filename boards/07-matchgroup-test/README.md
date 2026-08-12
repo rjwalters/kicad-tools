@@ -225,6 +225,23 @@ refused.  The refusal is recorded, with its measurements, in
 section carries `routed_before` / `routed_after` and `revert_reason`) so
 the decision is auditable rather than invisible.
 
+**The acceptance test is *relative*, and #4770 measured what that costs.**
+`PlacementDeltaFeedbackLoop.run_delta` keeps a delta on
+`new_count > pre_count` --- a comparison against the reach the loop
+currently holds, not against an absolute floor.  So anything that
+*depresses* the initial negotiated pass's reach also lowers the bar this
+probe has to clear.  Issue #4770's A/B is the worked example: with the
+relief-rescue sub-search bound switched from its 10 s wall clock to the
+deterministic per-net expansion cap (#4730's withdrawn flip), the
+negotiated pass completes 2 rip-up iterations instead of 5 and enters the
+loop at 24/31 instead of 26/31 --- and *on CI* this same `U3` translate
+then measures 23 -> 27, clears the gate, and is **kept**, taking blocking
+DRC from 8 to 13 with exactly the 0.076 / 0.094 mm `U1`-escape clearances
+and the 11.03 mm `ADDR_BUS` skew described above.  The `+1 net` in that
+measurement is this delta, not a router improvement.  Full journal:
+`diagnostic-runs/README.md`, section "Deterministic relief-rescue bound:
+A/B measurement (#4770)".
+
 Two useful side effects of running the loop, both measured on the same
 host:
 
