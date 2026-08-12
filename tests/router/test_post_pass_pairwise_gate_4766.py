@@ -164,7 +164,7 @@ def _arm(router: Autorouter, *, zones: tuple[AttachZone, ...] = ()) -> None:
     router._pairwise_attach_zones_cache = zones
 
 
-class TestRouterPairwiseContext:
+class TestPairwisePathCheckerFromRouter:
     """The ONE router-derived context resolver every pairwise consumer shares.
 
     Both post-passes here and #4507's path-level predicate resolve their table,
