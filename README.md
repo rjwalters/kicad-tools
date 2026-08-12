@@ -854,7 +854,7 @@ kicad-tools ships its own Claude agent skills under `.claude/commands/kct/` (inv
 ## Related Projects
 
 - **[Zeo](https://github.com/zeodotdev/zeo)** — A KiCad fork with an integrated AI agent sidebar and MCP server. Takes a complementary approach: live editor manipulation via IPC vs. our offline file-based analysis and optimization.
-- **[kipy](https://github.com/zeodotdev/zeo-python)** — Python bindings for the KiCad 9.0+ IPC API. Could be used to push kicad-tools optimization results into a running KiCad instance.
+- **[kipy](https://gitlab.com/kicad/code/kicad-python)** — the official KiCad Python bindings (`kicad-python` on PyPI) for the KiCad IPC API. Requires a **running KiCad instance** with the IPC API enabled and a document open in an editor — every accessor is an RPC to the live editor; there is no offline file-reading path, so it cannot participate in headless/CI workflows. Evaluated and not adopted: see [docs/research/kipy-ipc-api-evaluation.md](docs/research/kipy-ipc-api-evaluation.md).
 
 ## License
 

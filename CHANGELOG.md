@@ -306,6 +306,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`docs/research/kipy-ipc-api-evaluation.md`** (#4779) — evaluation of `kipy` (official KiCad IPC-API bindings) and `kicad-mcp-kipy` as a parser cross-check; verdict: adopt nothing (live-editor-only RPC client, no offline path, cannot run DRC); also corrects the `README.md` "Related Projects" `kipy` entry to the canonical GitLab URL with the live-editor constraint stated.
+
 - **`--format json` on the 10 prose-only holdouts inside the `datasheet`,
   `lib`, `parts` and `pcb` families** (part of #4674, third batch of the
   #4543 machine-output sweep) — `datasheet cache`, `datasheet convert`,
