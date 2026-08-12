@@ -1353,8 +1353,17 @@ def test_layer_scoped_zone_converges_where_layer_agnostic_thrashes() -> None:
     # It found the legal answer: cross on the layer the rated part licences.
     assert "B_CU" in layers
 
-    blind_route, _, _, blind_fallback = _route_through_a_rated_gap(layer_scoped=False)
-    # The pre-#4507 shape cannot get there: it burns the resume budget on routes
-    # the layer-scoped gate rejects and ends up in the slow Python fallback.
+    blind_route, blind_violation, blind_layers, blind_fallback = _route_through_a_rated_gap(
+        layer_scoped=False
+    )
+    # The pre-#4507 shape cannot get there in the C++ search: it burns the
+    # resume budget on routes the layer-scoped gate rejects and ends up in the
+    # slow Python fallback.
     assert blind_fallback is True, "the agnostic baseline is expected to thrash into fallback"
-    assert blind_route is None
+    # Since the pure-Python fallback became pairwise-aware and layer-scoped
+    # itself (#4507, the search-time fallback slice), it now RESCUES the net --
+    # slowly, but gate-clean and on the licensed layer -- where it previously
+    # failed outright (``blind_route is None`` was the pinned pre-slice state).
+    assert blind_route is not None, "the pairwise-aware Python fallback should rescue the net"
+    assert blind_violation is None
+    assert "B_CU" in blind_layers

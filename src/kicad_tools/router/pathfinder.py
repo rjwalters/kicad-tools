@@ -24,7 +24,10 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .pairwise_clearance import PairwiseClearanceTable
 
 import numpy as np
 
@@ -58,6 +61,38 @@ def _astar_trace(message: str) -> None:
     sys.stderr.write(message)
     sys.stderr.write("\n")
     sys.stderr.flush()
+
+
+@dataclass(frozen=True)
+class _PairwiseSearchState:
+    """Net-id-space pairwise (HV-isolation) projection for the Python A*.
+
+    Issue #4507 / Epic #4431 Phase 2b parity: the C++ search consults a
+    per-net domain array + domain-pair widening matrix at search time
+    (``Pathfinder::cross_domain_trace_blocked`` /
+    ``cross_domain_via_blocked``), but the pure-Python fallback A* had only
+    the Phase-1 *post-route* gate -- so on an HV board the fallback proposed
+    HV-through-LV paths the gate then rejected, burning its budget instead of
+    converging.  This carrier is the Python mirror of the state
+    ``Grid3D::set_pairwise_domains`` holds on the C++ side, built by the same
+    :func:`~kicad_tools.router.pairwise_clearance.build_cpp_domain_matrix`
+    projection so the two searches cannot disagree.
+
+    Attributes:
+        net_to_domain: Indexed by net id; ``-1`` = participates in no
+            widening pair (the projection's dormant convention).
+        matrix: Dense symmetric ``matrix[dom_a][dom_b]`` of *widening*
+            values (mm) WITHOUT the DRU floor -- ``<= 0`` means "scalar
+            clearance already governs this pair".
+        max_widen: Largest matrix entry (mm); sizes the widened scan kernel.
+        id_to_name: Net id -> board net name, for the (name-keyed) #4506
+            attach-zone waiver.
+    """
+
+    net_to_domain: list[int]
+    matrix: list[list[float]]
+    max_widen: float
+    id_to_name: dict[int, str]
 
 
 @dataclass(frozen=True)
@@ -398,6 +433,17 @@ class Router:
         # behavior matches pre-#2559 (single-clearance) routing.
         self._net_name_to_id: dict[str, int] = {}
         self._attach_zones = ()
+
+        # Issue #4507 / Epic #4431 Phase 2b parity: cached search-time
+        # pairwise (HV-isolation) projection for the pure-Python A*.
+        # ``None`` = not yet computed for the current table; otherwise a
+        # ``(table_ref, state_or_None)`` pair where ``state_or_None`` is a
+        # ``_PairwiseSearchState`` (armed) or ``None`` (dormant -- no table
+        # pairs resolve onto this board's net ids).  Rebuilt lazily by
+        # ``_pairwise_search_state`` whenever the table identity changes and
+        # invalidated by ``set_net_name_to_id`` (the projection is keyed by
+        # net id).
+        self._pairwise_search_cache: tuple[object, _PairwiseSearchState | None] | None = None
 
         # Issue #2929: Per-A*-call wall-clock instrumentation.  When
         # ``_per_call_timing_enabled`` is True, every ``route()`` invocation
@@ -1273,6 +1319,9 @@ class Router:
         disables partner detection (everything falls back to ``clearance``).
         """
         self._net_name_to_id = dict(mapping)
+        # Issue #4507: the search-time pairwise projection is keyed by net id
+        # through this map -- rebuild it on the next consult.
+        self._pairwise_search_cache = None
 
     def set_attach_zones(self, zones) -> None:
         """Install precomputed rated-footprint necking regions."""
@@ -1546,7 +1595,8 @@ class Router:
             # Issue #3229: Apply Euclidean-disc filter so the diagonal
             # corners of the bounding square do not contribute.
             combined = combined & within_disc
-            return bool(np.any(combined))
+            if bool(np.any(combined)):
+                return True
         else:
             # Standard mode: block if any cell is blocked AND has different net
             # Issue #864: Same-net cells are passable (even overlapping clearance)
@@ -1557,7 +1607,16 @@ class Router:
             # Issue #3229: Apply Euclidean-disc filter so the diagonal
             # corners of the bounding square do not contribute.
             blocked_different_net = blocked_different_net & within_disc
-            return bool(np.any(blocked_different_net))
+            if bool(np.any(blocked_different_net)):
+                return True
+
+        # Issue #4507: the scalar disc is clear -- consult the cross-domain
+        # (HV-isolation) annulus, mirroring the C++
+        # ``Pathfinder::cross_domain_trace_blocked`` tail call in
+        # ``is_trace_blocked``.  No-op (single ``getattr`` + ``None`` test)
+        # unless a pairwise voltage-map table is installed AND it projects
+        # onto this board's net ids.
+        return self._cross_domain_trace_blocked(gx, gy, layer, net, radius)
 
     def _is_foreign_pad_metal_within_radius(
         self,
@@ -1776,7 +1835,11 @@ class Router:
 
         # Fast path: if no cells are blocked, via is not blocked
         if not np.any(blocked_arr):
-            return False
+            # Issue #4507: scalar disc clear -- consult the cross-domain
+            # (HV-isolation) annulus (C++ ``cross_domain_via_blocked`` mirror).
+            return self._cross_domain_via_blocked(
+                gx, gy, layer, net, radius if radius is not None else self._via_half_cells
+            )
 
         # Some cells are blocked - need detailed checking
         # Get indices of blocked cells only
@@ -1847,7 +1910,345 @@ class Router:
             if np.any(different_net):
                 return True
 
+        # Issue #4507: every scalar-disc cell is passable -- consult the
+        # cross-domain (HV-isolation) annulus (C++ ``cross_domain_via_blocked``
+        # mirror).
+        return self._cross_domain_via_blocked(
+            gx, gy, layer, net, radius if radius is not None else self._via_half_cells
+        )
+
+    # ------------------------------------------------------------------
+    # Search-time pairwise (HV-isolation) avoidance (Issue #4507)
+    # ------------------------------------------------------------------
+    #
+    # Python siblings of the C++ ``Pathfinder::cross_domain_trace_blocked`` /
+    # ``cross_domain_via_blocked`` kernels (#4511).  Phase 2b armed only the
+    # C++ search; the pure-Python fallback A* kept proposing HV-through-LV
+    # paths that the Phase-1 post-route gate (``route_pairwise_violation``)
+    # then rejected -- so a net that fell back on an HV board burned its
+    # budget instead of converging (observed directly by PR #4780's
+    # convergence fixture: the layer-agnostic arm "burns its resume budget
+    # into the Python fallback and returns None").
+    #
+    # Mirror notes vs. the C++ kernels:
+    # * Same projection (``build_cpp_domain_matrix``), same annulus shape
+    #   (scalar disc is the scalar kernel's job; only the ring out to the
+    #   widest pair is scanned), same per-pair radius arithmetic, same
+    #   layer-scoped #4506 attach-zone waiver at the gap midpoint.
+    # * ``half_mm`` uses the global ``rules`` widths (the C++ default when
+    #   ``set_search_pair_widths`` has not supplied per-net extents).
+    # * The diagonal-corner probe is NOT separately widened here: both
+    #   endpoints of a diagonal step already consult the annulus via
+    #   ``_is_trace_blocked``, and the ceil-rounded pair radius keeps the
+    #   mid-step within the requirement, so the gate cannot disagree.
+
+    def _pairwise_search_state(
+        self, table: "PairwiseClearanceTable"
+    ) -> _PairwiseSearchState | None:
+        """Project ``table`` onto net ids for the search kernels (cached).
+
+        Returns ``None`` (dormant) when the projection resolves fewer than
+        two participating nets on this board -- the same dormant signal
+        ``build_cpp_domain_matrix`` gives the C++ setter.  The cache is keyed
+        by table identity and invalidated by :meth:`set_net_name_to_id`.
+        """
+        cached = self._pairwise_search_cache
+        if cached is not None and cached[0] is table:
+            return cached[1]
+
+        from .pairwise_clearance import build_cpp_domain_matrix
+
+        projection = build_cpp_domain_matrix(table, self._net_name_to_id)
+        state: _PairwiseSearchState | None = None
+        if projection is not None:
+            max_widen = max((max(row) for row in projection.matrix), default=0.0)
+            if max_widen > 0.0:
+                state = _PairwiseSearchState(
+                    net_to_domain=projection.net_to_domain,
+                    matrix=projection.matrix,
+                    max_widen=max_widen,
+                    id_to_name={nid: name for name, nid in self._net_name_to_id.items()},
+                )
+        self._pairwise_search_cache = (table, state)
+        return state
+
+    def _cross_domain_trace_blocked(
+        self, gx: int, gy: int, layer: int, net: int, scalar_radius: int
+    ) -> bool:
+        """True when foreign cross-domain copper sits inside the widened ring.
+
+        Python mirror of ``Pathfinder::cross_domain_trace_blocked``.  Called
+        only after the scalar kernel has cleared the inner disc.
+        """
+        table = getattr(self.rules, "pairwise_clearance", None)
+        if table is None:
+            return False
+        state = self._pairwise_search_state(table)
+        if state is None:
+            return False
+        return self._cross_domain_annulus_blocked(
+            gx, gy, layer, net, scalar_radius, self.rules.trace_width / 2.0, state
+        )
+
+    def _cross_domain_via_blocked(
+        self, gx: int, gy: int, layer: int, net: int, scalar_radius: int
+    ) -> bool:
+        """Via sibling of :meth:`_cross_domain_trace_blocked` (one layer).
+
+        The C++ ``cross_domain_via_blocked`` scans every layer itself; here
+        the per-layer scan composes with ``_check_via_placement_cached``'s
+        existing all-layer loop, so coverage is identical for the layers the
+        scalar via check itself walks.
+        """
+        table = getattr(self.rules, "pairwise_clearance", None)
+        if table is None:
+            return False
+        state = self._pairwise_search_state(table)
+        if state is None:
+            return False
+        return self._cross_domain_annulus_blocked(
+            gx, gy, layer, net, scalar_radius, self.rules.via_diameter / 2.0, state
+        )
+
+    def _cross_domain_annulus_blocked(
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        scalar_radius: int,
+        half_mm: float,
+        state: _PairwiseSearchState,
+    ) -> bool:
+        """Shared annulus walk behind the trace/via cross-domain kernels.
+
+        Scans the ring between ``scalar_radius`` (exclusive -- the scalar
+        kernel's job) and the widest pairwise radius (inclusive) for blocked
+        foreign copper whose domain pair requires widening, honouring the
+        layer-scoped #4506 attach-zone waiver at the approximate gap
+        midpoint.  Out-of-bounds cells are skipped (the scalar kernel owns
+        the out-of-bounds verdict), matching the C++ kernels.
+        """
+        net_to_domain = state.net_to_domain
+        dom = net_to_domain[net] if 0 <= net < len(net_to_domain) else -1
+        if dom < 0:
+            return False
+
+        res = self.grid.resolution
+        # Issue #864 rounding idiom: round before ceil so FP noise cannot
+        # add a phantom cell of widening.
+        wide_r = max(1, math.ceil(round((half_mm + state.max_widen) / res, 6)))
+        if wide_r <= scalar_radius:
+            return False  # the matrix never widens beyond the scalar kernel
+
+        x1 = max(0, gx - wide_r)
+        y1 = max(0, gy - wide_r)
+        x2 = min(self.grid.cols, gx + wide_r + 1)
+        y2 = min(self.grid.rows, gy + wide_r + 1)
+        if x1 >= x2 or y1 >= y2:
+            return False
+
+        blocked_region = self.grid._blocked[layer, y1:y2, x1:x2]
+        if not bool(np.any(blocked_region)):
+            return False
+        net_region = self.grid._net[layer, y1:y2, x1:x2]
+
+        ys = np.arange(y1, y2)
+        xs = np.arange(x1, x2)
+        dy_grid = ys - gy
+        dx_grid = xs - gx
+        dist_sq = (dy_grid * dy_grid)[:, None] + (dx_grid * dx_grid)[None, :]
+        annulus = (dist_sq > scalar_radius * scalar_radius) & (dist_sq <= wide_r * wide_r)
+        # Only foreign real-net copper can trip a cross-domain rule; net 0
+        # (pour / unconnected convention) never carries a domain.
+        candidates = blocked_region & annulus & (net_region != net) & (net_region != 0)
+        if not bool(np.any(candidates)):
+            return False
+
+        from .pairwise_clearance import _attach_zone_exempts
+
+        matrix = state.matrix
+        zones = self._attach_zones
+        layer_obj = self._grid_layer_object(layer)
+        own_name = state.id_to_name.get(net, "")
+        cw = self.grid.grid_to_world(gx, gy)
+        cand_rows, cand_cols = np.nonzero(candidates)
+        for row, col in zip(cand_rows, cand_cols, strict=True):
+            foreign_net = int(net_region[row, col])
+            foreign_dom = (
+                net_to_domain[foreign_net] if 0 <= foreign_net < len(net_to_domain) else -1
+            )
+            if foreign_dom < 0:
+                continue
+            required = matrix[dom][foreign_dom]
+            if required <= 0.0:
+                continue  # same domain / no widening for this pair
+            # Widened radius for THIS specific pair (<= wide_r).  A cell in
+            # the annulus but outside this pair's requirement is fine.
+            pair_r = max(1, math.ceil(round((half_mm + required) / res, 6)))
+            if int(dist_sq[row, col]) > pair_r * pair_r:
+                continue
+            if zones:
+                # Attach-zone exemption (#4506) at the approximate gap
+                # midpoint, scoped to THIS layer (#4507) -- the same consult
+                # the C++ kernels make via ``Grid3D::attach_zone_exempts``.
+                fw = self.grid.grid_to_world(x1 + int(col), y1 + int(row))
+                mid_x = (cw[0] + fw[0]) * 0.5
+                mid_y = (cw[1] + fw[1]) * 0.5
+                foreign_name = state.id_to_name.get(foreign_net, "")
+                if _attach_zone_exempts(zones, mid_x, mid_y, own_name, foreign_name, layer_obj):
+                    continue
+            return True
         return False
+
+    def _pairwise_expanded_blocked(self, net: int, scalar_radius: int) -> np.ndarray | None:
+        """Pairwise (HV-isolation) widening bitmap for the A* hot loop.
+
+        Issue #4507: the Python A* hot loop consults the pre-dilated
+        ``compute_expanded_blocked`` bitmap (one array lookup per neighbor,
+        #2430) rather than the per-step ``_is_trace_blocked`` kernel -- so
+        search-time avoidance must be OR-ed into that bitmap.  For every
+        foreign domain whose pair with ``net``'s domain requires widening,
+        the foreign copper is dilated by the pair's widened radius; the
+        #4506 attach-zone waiver then clears the *pairwise contribution*
+        (never the scalar base bitmap) on the layers the zone licences.
+
+        The zone clearing uses the zone bbox expanded by half the pair
+        radius: a kernel-waived candidate ``c`` (gap midpoint inside the
+        bbox, foreign copper inside the bbox) always lies within
+        ``bbox (+) pair_r/2``, so the bitmap never seals an attach entry the
+        midpoint convention would admit.  Where the bitmap is marginally
+        more permissive than the per-cell kernel, the post-route
+        ``route_pairwise_violation`` gate stays authoritative.
+
+        Returns ``None`` when dormant (no table, no projection, or ``net``
+        participates in no widening pair) -- the caller then uses the scalar
+        bitmap unchanged, byte-identical to pre-#4507 behaviour.
+        """
+        table = getattr(self.rules, "pairwise_clearance", None)
+        if table is None:
+            return None
+        state = self._pairwise_search_state(table)
+        if state is None:
+            return None
+        net_to_domain = state.net_to_domain
+        dom = net_to_domain[net] if 0 <= net < len(net_to_domain) else -1
+        if dom < 0:
+            return None
+
+        from .pairwise_clearance import _norm_net_key
+
+        res = self.grid.resolution
+        half_mm = self.rules.trace_width / 2.0
+        own_key = _norm_net_key(state.id_to_name.get(net, ""))
+        net_ids_by_domain: dict[int, list[int]] = {}
+        for net_id, domain in enumerate(net_to_domain):
+            if domain >= 0:
+                net_ids_by_domain.setdefault(domain, []).append(net_id)
+
+        extra: np.ndarray | None = None
+        for foreign_dom, required in enumerate(state.matrix[dom]):
+            if foreign_dom == dom or required <= 0.0:
+                continue
+            pair_r = max(1, math.ceil(round((half_mm + required) / res, 6)))
+            if pair_r <= scalar_radius:
+                continue  # the scalar dilation already covers this pair
+            foreign_ids = net_ids_by_domain.get(foreign_dom)
+            if not foreign_ids:
+                continue
+            foreign_mask = self.grid._blocked & np.isin(self.grid._net, foreign_ids)
+            if not bool(np.any(foreign_mask)):
+                continue
+            pair_extra = self._dilate_zero_padded(foreign_mask, pair_r)
+            if self._attach_zones:
+                foreign_keys = {
+                    _norm_net_key(state.id_to_name.get(net_id, "")) for net_id in foreign_ids
+                }
+                half_waiver_mm = pair_r * res / 2.0
+                for zone in self._attach_zones:
+                    if own_key not in zone.net_names:
+                        continue
+                    member_keys = [key for key in foreign_keys if key in zone.net_names]
+                    if not member_keys:
+                        continue
+                    gx1, gy1 = self.grid.world_to_grid(
+                        zone.min_x - half_waiver_mm, zone.min_y - half_waiver_mm
+                    )
+                    gx2, gy2 = self.grid.world_to_grid(
+                        zone.max_x + half_waiver_mm, zone.max_y + half_waiver_mm
+                    )
+                    gx1 = max(0, gx1)
+                    gy1 = max(0, gy1)
+                    gx2 = min(self.grid.cols - 1, gx2)
+                    gy2 = min(self.grid.rows - 1, gy2)
+                    if gx1 > gx2 or gy1 > gy2:
+                        continue
+                    for layer_idx in range(self.grid.num_layers):
+                        layer_obj = self._grid_layer_object(layer_idx)
+                        if not zone.covers_layer(own_key, layer_obj):
+                            continue
+                        if not any(zone.covers_layer(key, layer_obj) for key in member_keys):
+                            continue
+                        pair_extra[layer_idx, gy1 : gy2 + 1, gx1 : gx2 + 1] = False
+            extra = pair_extra if extra is None else (extra | pair_extra)
+        return extra
+
+    def _dilate_zero_padded(self, mask: np.ndarray, radius: int) -> np.ndarray:
+        """Euclidean-disc dilation of ``mask`` treating out-of-bounds as EMPTY.
+
+        ``RoutingGrid._dilate_blocked``'s pure-NumPy fallback pads with ones
+        (out-of-bounds = blocked), which is correct for the scalar trace
+        radius (copper must stay half-width inside the board) but wrong for
+        the pairwise widening ring: the C++ ``cross_domain_trace_blocked``
+        annulus explicitly SKIPS out-of-bounds cells ("OOB is scalar's job").
+        Ones-padding there would seal a border band ``pair_r`` cells wide --
+        far beyond the board-edge rule -- and can wall off the only compliant
+        detour.  This helper mirrors the C++ convention with zero padding.
+        """
+        if radius <= 1:
+            return mask
+        disc = self.grid._get_disc_kernel(radius)
+        try:
+            # scipy is an optional dependency (same posture as
+            # ``RoutingGrid._dilate_blocked``); the ignore must tolerate both
+            # a missing package and missing stubs across check environments.
+            from scipy.ndimage import (  # type: ignore[import-untyped, import-not-found, unused-ignore]
+                binary_dilation,
+            )
+
+            structure = np.zeros((1, disc.shape[0], disc.shape[1]), dtype=np.bool_)
+            structure[0] = disc
+            return np.asarray(binary_dilation(mask, structure=structure), dtype=np.bool_)
+        except ImportError:
+            rows, cols = self.grid.rows, self.grid.cols
+            padded = np.zeros(
+                (self.grid.num_layers, rows + 2 * radius, cols + 2 * radius), dtype=np.bool_
+            )
+            padded[:, radius : radius + rows, radius : radius + cols] = mask
+            expanded = np.zeros_like(mask)
+            kernel_size = 2 * radius + 1
+            for dy in range(kernel_size):
+                for dx in range(kernel_size):
+                    if disc[dy, dx]:
+                        expanded |= padded[:, dy : dy + rows, dx : dx + cols]
+            return expanded
+
+    def _grid_layer_object(self, layer: int) -> Layer | None:
+        """Grid layer index -> :class:`Layer` enum member (or ``None``).
+
+        The #4506 attach zones scope their waiver by KiCad layer *name*;
+        the grid's own ``_index_to_layer`` map is the translation authority
+        (the same mapping ``layer_to_index`` inverts for segments and vias).
+        ``None`` -- the layer-agnostic waiver verdict -- is returned when the
+        index is unmapped, mirroring the C++ ``layer = -1`` convention.
+        """
+        enum_value = self.grid._index_to_layer.get(layer)
+        if enum_value is None:
+            return None
+        try:
+            return Layer(enum_value)
+        except ValueError:
+            return None
 
     # Issue #3438: per-conflicted-step penalty charged by the relief
     # probe when crossing a foreign usage-0 non-obstacle cell.  Must stay
@@ -2615,6 +3016,17 @@ class Router:
             # excluded from the hard bitmap (penalised per step instead).
             relief_mode=self.relief_mode and allow_sharing,
         )
+
+        # Issue #4507 / Epic #4431 Phase 2b parity: OR the pairwise
+        # (HV-isolation) widening into the hot-loop bitmap so the pure-Python
+        # A* avoids HV<->LV proximity at search time instead of discovering
+        # it at the post-route gate.  A HARD block in negotiated mode too,
+        # matching the C++ ``cross_domain_trace_blocked`` (a creepage
+        # requirement cannot "negotiate away").  ``None`` when dormant --
+        # the bitmap is then byte-identical to pre-#4507.
+        pairwise_extra = self._pairwise_expanded_blocked(start.net, net_trace_half_width_cells)
+        if pairwise_extra is not None:
+            expanded_blocked = expanded_blocked | pairwise_extra
 
         # Issue #2430: Build crossing grid index if routed segments exist.
         if self.rules.crossing_penalty > 0.0 and self._routed_segments:

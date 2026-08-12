@@ -1489,6 +1489,11 @@ class CppPathfinder:
         self._pairwise_cpp_payload = None
         # Issue #4530: the rebuilt payload must be re-pushed to the C++ grid.
         self._pairwise_cpp_installed = False
+        # Issue #4507: the pure-Python fallback router projects its own
+        # search-time pairwise (HV) domains through the same map -- keep it
+        # in lock-step so a fallback search on an HV board is not HV-blind.
+        if self._py_router is not None:
+            self._py_router.set_net_name_to_id(self._net_name_to_id)
 
     def set_attach_zones(self, zones) -> None:
         """Install precomputed rated-footprint necking regions."""
@@ -3059,6 +3064,11 @@ class CppPathfinder:
                 diagonal_routing=self._diagonal_routing,
             )
             self._py_router.set_attach_zones(self._attach_zones)
+            # Issue #4507: thread the net-name map through so the fallback
+            # A* can arm its search-time pairwise (HV-isolation) kernels --
+            # without it the domain projection is empty and the fallback
+            # stays HV-blind, thrashing against the Phase-1 post-route gate.
+            self._py_router.set_net_name_to_id(self._net_name_to_id)
 
         # Issue #3438: keep the fallback router's relief-probe mode in
         # lock-step with the C++ side (set via ``set_relief_mode``).

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The pure-Python fallback A* is now pairwise (HV-isolation) aware at search time** (#4507, epic #4431 Phase 2) — the hot-loop bitmap, `_is_trace_blocked`/`_is_via_blocked` kernels and the C++ backend's fallback-router threading now mirror the C++ `cross_domain_*` search kernels (same domain projection, per-pair widened radius, layer-scoped #4506 attach-zone waiver, out-of-bounds-is-empty ring dilation), so a net that falls back on an HV board converges instead of thrashing against the Phase-1 post-route gate; fully dormant without `--voltage-map`.
+
 - **`kct ipc push-routes` can now actually read a board** (#4788) — the
   handler imported the nonexistent `kicad_tools.pcb.parser` (dead since
   #2363) behind an `except ImportError`, so every invocation exited 1 with
