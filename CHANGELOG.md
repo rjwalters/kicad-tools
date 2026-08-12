@@ -19,6 +19,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stall-relief hook) are byte-identical; a `Relief-rescue transaction bound:`
   log line records which arm was live.
 
+- **The copper-moving `--lattice-optimize` post-passes now consult the pairwise
+  HV creepage predicate before accepting a move** (#4766, epic #4431) — PR
+  #4756 widened the post-route pairwise audit but left the geometric
+  post-passes pairwise-*blind*: `TraceOptimizer` (via
+  `optimize_routes_grid_synced`) gates its moves only on
+  `CollisionChecker.path_is_clear`, and both checker implementations resolve
+  clearance as the **scalar** `grid.rules.trace_clearance`, while
+  `drc_verify_and_nudge` translates segments by up to 0.2 mm with the same
+  scalar model. Either pass could therefore close a creepage gap the search had
+  deliberately opened, leaving the audit to fail a run the optimizer had just
+  broken. Both now run the same layer-scoped predicate the search and the #4588
+  gate run: the optimizer gets a route-level accept hook on
+  `apply_route_transform_grid_synced` that vetoes an optimized route
+  (`route_pairwise_violation` against `grid.routes`) **before** the grid
+  transaction is entered, and the nudge brackets itself with a board-level
+  `find_pairwise_violations` scan and reverts every route named in a net pair
+  that is present after but not before, using the entry snapshot it already
+  takes for the #3507 resync. Both gates only undo what the pass would
+  *introduce* — an inherited shortfall on the same net pair keeps its
+  optimization and stays the audit's to report, so the passes never mask copper
+  the gate exists to fail on. Collinear consolidation is deliberately **not**
+  gated and now says why in its module docstring: its merged segment is the
+  exact union of the segments it replaces, so no gap to foreign copper can
+  shrink. The veto is coarse (a route loses its whole optimization for one bad
+  move), so the counts are surfaced — vetoed routes on stderr after the
+  optimize pass and `pairwise_reverts` in the DRC-nudge summary — and the nudge
+  re-reports `remaining_violations` post-revert rather than the flattering
+  pre-revert count. Both passes derive their context from the router
+  (`rules.pairwise_clearance`, `_pairwise_attach_zones_cache`,
+  `_net_name_to_id()`) exactly as `Autorouter._lattice_pairwise_projection`
+  does, so all eight CLI call sites are untouched. Fully dormant without
+  `--voltage-map`: no table means no context, no gate and no scan, and no board
+  under `boards/` uses that flag. No C++ change (`ROUTER_CPP_BUILD_VERSION`
+  stays 19).
 - **The C++ router's HV attach-zone waiver is now layer-scoped, so the search
   stops proposing copper the pairwise gate rejects** (#4507, epic #4431 Phase
   2) — PR #4756 narrowed the #4506 rated-footprint exemption on the Python side

@@ -1010,6 +1010,95 @@ def find_pairwise_violations(
     return out
 
 
+class RouterPairwiseContext(NamedTuple):
+    """Everything a post-route pass needs to run the pairwise predicate (#4766).
+
+    The copper-*moving* post-passes (``TraceOptimizer`` via
+    :func:`~kicad_tools.router.optimizer.trace.optimize_routes_grid_synced`,
+    and :func:`~kicad_tools.router.drc_nudge.drc_verify_and_nudge`) were
+    pairwise-blind: their only hazard gate resolves clearance as the scalar
+    ``grid.rules.trace_clearance``, so they could close an HV creepage gap the
+    search had deliberately opened.  Both now consult the SAME predicate the
+    search and the #4588 audit use -- and they resolve it identically, through
+    this one context, so no pass can drift into a different verdict.
+
+    Attributes:
+        table: The installed ``rules.pairwise_clearance`` requirement table.
+        attach_zones: The #4506 rated-footprint necking regions, layer-scoped
+            per #4699 (``AttachZone.net_layers``).
+        id_to_name: Net id -> board net name, for routes whose ``net_name``
+            string is unset mid-pipeline (ids are authoritative there).
+    """
+
+    table: PairwiseClearanceTable
+    attach_zones: tuple[AttachZone, ...]
+    id_to_name: dict[int, str]
+
+
+def router_pairwise_context(router: object) -> RouterPairwiseContext | None:
+    """Derive the pairwise predicate context from a router (issue #4766).
+
+    Returns ``None`` -- the dormant signal that keeps every post-pass
+    byte-identical to the pre-#4766 path -- when no ``--voltage-map`` table is
+    installed, or when the installed table needs no widening for any pair.
+
+    Everything is read off the ``Autorouter`` itself, exactly as
+    :meth:`~kicad_tools.router.core.Autorouter._lattice_pairwise_projection`
+    already does for the lattice search:
+
+    * ``router.rules.pairwise_clearance`` -- the table
+      ``_apply_pairwise_clearance`` installs from ``--voltage-map``;
+    * ``router._pairwise_attach_zones_cache`` -- the memoised #4506 zone set the
+      CLI's ``_pairwise_attach_zones`` resolver warms (unset -> **no**
+      exemptions, i.e. the conservative "veto rather than silently waive"
+      direction, never an unsafe accept);
+    * ``router._net_name_to_id()`` (plus ``router.net_names``) inverted for
+      ``id_to_name``.
+
+    Deriving the context here rather than threading it through parameters is
+    what keeps the post-pass call sites (four for the optimizer, four for the
+    nudge, all in ``cli/route_cmd.py``) untouched.
+    """
+    rules = getattr(router, "rules", None)
+    table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
+    if table is None or not getattr(table, "required_by_pair", None):
+        return None
+
+    zones = tuple(getattr(router, "_pairwise_attach_zones_cache", None) or ())
+
+    id_to_name: dict[int, str] = {}
+    net_names = getattr(router, "net_names", None) or {}
+    if hasattr(net_names, "items"):
+        for net_id, name in net_names.items():
+            if name:
+                id_to_name.setdefault(int(net_id), str(name))
+    resolver = getattr(router, "_net_name_to_id", None)
+    if callable(resolver):
+        # Sorted so a name collision on one id resolves deterministically.
+        for name, net_id in sorted(resolver().items()):
+            id_to_name.setdefault(int(net_id), name)
+
+    return RouterPairwiseContext(table=table, attach_zones=zones, id_to_name=id_to_name)
+
+
+def violation_pair_key(violation: PairwiseViolation) -> tuple[str, str]:
+    """Order-independent, ``/``-stripped net-pair key of a violation (#4766)."""
+    a = _norm_net_key(violation.net_a)
+    b = _norm_net_key(violation.net_b)
+    return (a, b) if a <= b else (b, a)
+
+
+def violation_pair_keys(violations: Iterable[PairwiseViolation]) -> set[tuple[str, str]]:
+    """Set of :func:`violation_pair_key` values for a violation list (#4766).
+
+    The post-pass gates compare a before/after scan by *net pair*, not by
+    coordinate: a pre-existing (inherited) shortfall that merely moves must not
+    be mistaken for one the pass introduced, or the pass would start
+    "repairing" copper the #4588 audit is supposed to keep reporting.
+    """
+    return {violation_pair_key(v) for v in violations}
+
+
 def _resolve_net_name(id_to_name: Mapping[int, str] | None, net_id: int, fallback: str) -> str:
     """Resolve a net id to its board net name, falling back to a known string."""
     if id_to_name is not None:

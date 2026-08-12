@@ -52,9 +52,11 @@ from .serpentine import (
     tune_match_group,
 )
 from .trace import (
+    PairwiseRouteGate,
     TraceOptimizer,
     apply_route_transform_grid_synced,
     optimize_routes_grid_synced,
+    pairwise_route_gate,
 )
 from .via_optimizer import (
     LayerConnectivityError,
@@ -73,6 +75,7 @@ __all__ = [
     "LayerConnectivityError",
     "OptimizationConfig",
     "OptimizationStats",
+    "PairwiseRouteGate",
     "SerpentineConfig",
     "SerpentineGenerator",
     "SerpentineResult",
@@ -88,5 +91,6 @@ __all__ = [
     "consolidate_segments",
     "optimize_route_vias",
     "optimize_routes_grid_synced",
+    "pairwise_route_gate",
     "tune_match_group",
 ]

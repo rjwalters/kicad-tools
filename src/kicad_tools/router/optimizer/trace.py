@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 
 from ..layers import Layer
+from ..pairwise_clearance import (
+    PairwiseViolation,
+    RouterPairwiseContext,
+    route_pairwise_violation,
+    router_pairwise_context,
+    violation_pair_key,
+)
 from ..primitives import Route, Segment
 from .algorithms import (
     _find_staircase_end,
@@ -33,6 +41,124 @@ from .geometry import (
 )
 from .pcb import optimize_pcb, parse_net_names, parse_segments, replace_segments
 from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
+
+
+class PairwiseRouteGate:
+    """Route-level pairwise-clearance accept predicate (issue #4766).
+
+    The optimizer's own hazard gate (``TraceOptimizer._path_is_clear`` ->
+    ``CollisionChecker.path_is_clear``) resolves clearance as the **scalar**
+    ``grid.rules.trace_clearance`` in both checker implementations, so a
+    ``--voltage-map`` run's HV creepage requirement was invisible to it: the
+    pass could straighten, chamfer or pull-tight a trace straight through a gap
+    the search had deliberately opened, and only the post-route #4588 audit
+    would notice.
+
+    This gate runs the SAME predicate the search and the audit run
+    (:func:`~kicad_tools.router.pairwise_clearance.route_pairwise_violation`,
+    with the layer-scoped #4506/#4699 attach-zone exemption) against the
+    optimized geometry, and vetoes the move by keeping the pre-optimization
+    route.  It is deliberately checked **before** the grid transaction in
+    :func:`apply_route_transform_grid_synced`, so a vetoed route never enters
+    the unmark/mark window at all.
+
+    Two properties worth stating plainly:
+
+    * **The veto is coarse.**  A single bad move costs the whole route its
+      optimization, not just the offending segment.  That is the
+      correctness-first choice; the count is recorded (and reported) so the
+      loss is measurable rather than silent.  Segment-level granularity would
+      have to widen the R-tree broad phase first (``_rtree_clearance_inflation``
+      is cached pre-pairwise -- #4507/#4511 territory), so it is a follow-up.
+    * **It only vetoes what the pass would INTRODUCE.**  A route that already
+      violates the same net pair before optimization keeps its optimization:
+      inherited shortfalls are the audit's to report, and vetoing them would
+      merely freeze the geometry of every HV route on a board that arrived
+      dirty.  Anything else -- including a *different* pair appearing on an
+      already-dirty route -- is vetoed.
+    """
+
+    def __init__(self, router, context: RouterPairwiseContext) -> None:
+        self.router = router
+        self.context = context
+        self.vetoes = 0
+        self.worst: PairwiseViolation | None = None
+
+    def _foreign_routes(self) -> list[Route]:
+        """Committed copper to judge against.
+
+        ``grid.routes`` is what the grid ``Pathfinder``'s own route validator
+        uses, and at route *i* it holds post-optimize copper for ``0..i-1`` and
+        pre-optimize copper for ``i+1..n`` -- the same incremental-visibility
+        contract the pass already documents for its collision checker.  A stub
+        router without a grid falls back to ``router.routes``.
+        """
+        grid = getattr(self.router, "grid", None)
+        routes = getattr(grid, "routes", None)
+        if routes is None:
+            routes = getattr(self.router, "routes", None)
+        return list(routes) if routes is not None else []
+
+    def _violation(self, route: Route, net: int, foreign: list[Route]) -> PairwiseViolation | None:
+        return route_pairwise_violation(
+            route,
+            net,
+            foreign,
+            self.context.table,
+            id_to_name=self.context.id_to_name,
+            dru=self.context.table.dru,
+            attach_zones=self.context.attach_zones,
+        )
+
+    def __call__(self, original: Route, optimized: Route) -> bool:
+        """True to accept ``optimized``; False to keep ``original``."""
+        foreign = self._foreign_routes()
+        violation = self._violation(optimized, original.net, foreign)
+        if violation is None:
+            return True
+        # Only pay for the "was it already like this?" scan on a hit.
+        prior = self._violation(original, original.net, foreign)
+        if prior is not None and violation_pair_key(prior) == violation_pair_key(violation):
+            # Inherited shortfall on the same net pair: not introduced here.
+            return True
+        self.vetoes += 1
+        shortfall = violation.required_mm - violation.actual_mm
+        if self.worst is None or shortfall > (self.worst.required_mm - self.worst.actual_mm):
+            self.worst = violation
+        return False
+
+    def advisory(self) -> str | None:
+        """One-line summary of what the gate cost, or ``None`` if it cost nothing."""
+        if not self.vetoes or self.worst is None:
+            return None
+        return (
+            f"  HV pairwise gate: {self.vetoes} route(s) kept pre-optimization "
+            f"geometry (worst: {self.worst.net_a} vs {self.worst.net_b} "
+            f"{self.worst.actual_mm:.3f}mm < {self.worst.required_mm:.3f}mm required "
+            f"at ({self.worst.x:.3f}, {self.worst.y:.3f}))"
+        )
+
+    def report(self) -> None:
+        """Surface the veto count (issue #4766 AC8).
+
+        Printed to stderr, matching the router's existing advisory precedent
+        (``_warn_layer_selection_advisories``, #4314): ``--quiet``'s contract is
+        about stdout, and a silently-discarded optimization on a safety-critical
+        HV board is exactly the thing that must not go unreported.  Nothing is
+        printed when no route was vetoed, so every dormant (no ``--voltage-map``)
+        run stays byte-identical.
+        """
+        line = self.advisory()
+        if line is not None:
+            print(line, file=sys.stderr)
+
+
+def pairwise_route_gate(router) -> PairwiseRouteGate | None:
+    """Build the #4766 accept gate for ``router``, or ``None`` when dormant."""
+    context = router_pairwise_context(router)
+    if context is None:
+        return None
+    return PairwiseRouteGate(router, context)
 
 
 def optimize_routes_grid_synced(
@@ -87,10 +213,24 @@ def optimize_routes_grid_synced(
             the final artifact), and straightening one side of a
             coupled pair breaks the constant-gap geometry.
 
+    Issue #4766: under a ``--voltage-map`` run this pass also consults the
+    pairwise (HV creepage) predicate before accepting a route -- see
+    :class:`PairwiseRouteGate`.  Without a voltage map the gate is not built at
+    all and the pass is byte-identical to the pre-#4766 path.
+
     Returns:
         The new ``router.routes`` list (also assigned on the router).
     """
-    return apply_route_transform_grid_synced(router, optimizer.optimize_route, skip_nets=skip_nets)
+    gate = pairwise_route_gate(router)
+    routes = apply_route_transform_grid_synced(
+        router, optimizer.optimize_route, skip_nets=skip_nets, accept=gate
+    )
+    if gate is not None:
+        # Issue #4766 AC8: record the coarse-veto cost on the router (for
+        # tests / callers) and surface it once per pass.
+        router._pairwise_optimize_vetoes = gate.vetoes
+        gate.report()
+    return routes
 
 
 def apply_route_transform_grid_synced(
@@ -98,6 +238,7 @@ def apply_route_transform_grid_synced(
     transform: Callable[[Route], Route],
     *,
     skip_nets: set[int] | None = None,
+    accept: Callable[[Route, Route], bool] | None = None,
 ) -> list[Route]:
     """Replace every route with ``transform(route)`` keeping the grid in sync.
 
@@ -117,6 +258,14 @@ def apply_route_transform_grid_synced(
             the input object (or an equal one) marks the route unchanged
             and skips the grid transaction for it.
         skip_nets: Net IDs whose routes pass through untouched (#3508).
+        accept: Issue #4766: optional ``(original, transformed) -> bool``
+            veto hook, consulted BEFORE the grid transaction so a rejected
+            transform never enters the unmark/mark window.  ``False`` keeps
+            the original route object (identity-preserving, exactly as an
+            unchanged transform would).  ``None`` -- the default, and what
+            the copper-preserving consolidation pass uses -- disables the
+            hook entirely, so callers that opt out are byte-identical to the
+            pre-#4766 path.
 
     Returns:
         The new ``router.routes`` list (also assigned on the router).
@@ -132,6 +281,11 @@ def apply_route_transform_grid_synced(
             optimized_routes.append(route)
             continue
         optimized = transform(route)
+        if accept is not None and optimized is not route and not accept(route, optimized):
+            # Issue #4766: vetoed (e.g. the transform would close an HV
+            # pairwise gap).  Fall back to the pre-transform route BEFORE the
+            # grid transaction below, so the grid is never touched for it.
+            optimized = route
         if optimized is not route and (
             optimized.segments == route.segments and optimized.vias == route.vias
         ):

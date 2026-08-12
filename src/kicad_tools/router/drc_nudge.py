@@ -26,6 +26,7 @@ Usage::
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 from dataclasses import dataclass, field
@@ -42,6 +43,13 @@ from .geometry import (
 )
 from .io import ClearanceViolation, validate_routes
 from .layers import Layer
+from .pairwise_clearance import (
+    RouterPairwiseContext,
+    _norm_net_key,
+    find_pairwise_violations,
+    router_pairwise_context,
+    violation_pair_keys,
+)
 from .primitives import Pad, Route, Segment, Via
 from .via_clearance import segment_clears_foreign_via
 
@@ -63,6 +71,10 @@ class DRCNudgeResult:
     vias_merged: int = 0
     vias_nudged: int = 0
     passes_run: int = 0
+    # Issue #4766: routes restored to their entry geometry because the pass
+    # introduced an HV pairwise (creepage) shortfall that was not there before.
+    # Always 0 without a ``--voltage-map`` table.
+    pairwise_reverts: int = 0
     # Issue #2743: structured skip-reason counters so the user sees
     # "4/6 resolved; 2 unsupported (via-via anchored)" instead of a
     # silent 0/6 with no diagnostic.  Keyed by reason; integer counts.
@@ -85,6 +97,11 @@ class DRCNudgeResult:
             lines.append(f"  Vias nudged: {self.vias_nudged}")
         if self.vias_merged:
             lines.append(f"  Same-net vias merged: {self.vias_merged}")
+        if self.pairwise_reverts:
+            lines.append(
+                f"  HV pairwise gate: {self.pairwise_reverts} route(s) reverted to "
+                "pre-nudge geometry"
+            )
         if self.skipped:
             for reason, count in sorted(self.skipped.items()):
                 lines.append(f"  Skipped ({reason}): {count}")
@@ -1612,6 +1629,99 @@ def _find_segment(
 
 
 # ---------------------------------------------------------------------------
+# HV pairwise (creepage) revert gate -- issue #4766
+# ---------------------------------------------------------------------------
+
+
+# Bounded re-scan rounds for the pairwise revert.  Reverting a route restores
+# its ENTRY geometry, so the state walks monotonically back toward the
+# pre-pass configuration and this converges in practice after one round; the
+# cap only bounds the pathological mixed-state case (route X reverted while
+# route Y stayed nudged) and keeps the pass O(1) in scans.
+_PAIRWISE_REVERT_ROUNDS = 3
+
+
+def _pairwise_scan(router: Autorouter, context: RouterPairwiseContext) -> list:
+    """Board-level pairwise scan over ``router.routes`` (issue #4766)."""
+    return find_pairwise_violations(
+        router.routes,
+        context.table,
+        id_to_name=context.id_to_name,
+        dru=context.table.dru,
+        attach_zones=context.attach_zones,
+    )
+
+
+def _restore_route_geometry(live: Route, snapshot: Route) -> bool:
+    """Restore ``live``'s segments/vias from a ``copy_geometry`` snapshot.
+
+    Returns True when anything actually changed (the nudge mutates Segment and
+    Via objects in place, so an untouched route compares equal and is left
+    alone -- including its object identity).
+    """
+    if live.segments == snapshot.segments and live.vias == snapshot.vias:
+        return False
+    live.segments = [dataclasses.replace(seg) for seg in snapshot.segments]
+    live.vias = [dataclasses.replace(via) for via in snapshot.vias]
+    return True
+
+
+def _revert_new_pairwise_violations(
+    router: Autorouter,
+    context: RouterPairwiseContext,
+    before_keys: set[tuple[str, str]],
+    snapshot: list[tuple[Route, Route]],
+) -> int:
+    """Undo nudges that introduced a NEW pairwise (HV creepage) pair (#4766).
+
+    The nudge pass translates segments by up to ``max_displacement`` (0.2 mm)
+    using a purely scalar clearance model, so on a ``--voltage-map`` run it can
+    close a creepage gap it never measured.  This is the whole-pass mirror of
+    the optimizer's route-level gate: scan the board before and after, and
+    revert -- to the entry snapshot the pass already takes for the #3507 grid
+    resync -- every route named in a net pair that is present *after* but not
+    *before*.
+
+    Pre-existing (inherited) shortfalls are deliberately left alone: they are
+    the #4588 audit's to report, and "fixing" them here would mask copper the
+    gate is supposed to fail the run on.  Keying the comparison by net *pair*
+    rather than by coordinate is what makes that distinction hold when a
+    pre-existing violation merely moves.
+
+    Returns the number of routes whose geometry was restored.
+    """
+    by_route = {id(live): snap for snap, live in snapshot}
+    reverted = 0
+
+    for _ in range(_PAIRWISE_REVERT_ROUNDS):
+        new_keys = violation_pair_keys(_pairwise_scan(router, context)) - before_keys
+        if not new_keys:
+            break
+        offending = {name for key in new_keys for name in key}
+        changed = 0
+        for route in router.routes:
+            snap = by_route.get(id(route))
+            if snap is None:
+                continue
+            name = _norm_net_key(_resolve_route_net_name(route, context))
+            if name not in offending:
+                continue
+            if _restore_route_geometry(route, snap):
+                changed += 1
+        if not changed:
+            # Nothing left to undo (the offending copper is not this pass's).
+            break
+        reverted += changed
+
+    return reverted
+
+
+def _resolve_route_net_name(route: Route, context: RouterPairwiseContext) -> str:
+    """Net name a pairwise scan would report for ``route``."""
+    return context.id_to_name.get(route.net) or route.net_name or ""
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1657,19 +1767,52 @@ def drc_verify_and_nudge(
     true copper state.  The pass's OWN checks (``validate_routes`` and
     the nudge gating helpers) are world-coordinate geometric and do not
     consult the grid, so a single resync at exit is sufficient.
+
+    Issue #4766: the nudge translates segments by up to ``max_displacement``
+    using a purely scalar clearance model, so under a ``--voltage-map`` run it
+    could close an HV creepage gap it never measured.  A board-level pairwise
+    scan therefore brackets the pass and every route named in a net pair that
+    is present *after* but not *before* is restored to the entry snapshot (see
+    :func:`_revert_new_pairwise_violations`); inherited shortfalls are left
+    intact for the #4588 audit to report.  Without a voltage map no scan runs
+    and this wrapper is byte-identical to the pre-#4766 path.
     """
+    # Issue #4766: the HV pairwise (creepage) predicate, derived from the
+    # router.  ``None`` without a ``--voltage-map`` table -- the dormant case,
+    # in which this wrapper behaves exactly as it did before #4766.
+    _pairwise = router_pairwise_context(router)
+
     # Issue #3507: snapshot pre-mutation geometry for the exit resync.
     # Defensive getattr: unit tests drive this pass with stub routers
-    # that carry routes but no grid -- the resync is then a no-op.
+    # that carry routes but no grid -- the resync is then a no-op.  Issue
+    # #4766 reuses the same snapshot as the revert source, so it is also
+    # taken (grid or not) whenever the pairwise gate is armed.
     _grid = getattr(router, "grid", None)
-    _grid_snapshot = [(r.copy_geometry(), r) for r in router.routes] if _grid is not None else []
+    _need_snapshot = _grid is not None or _pairwise is not None
+    _grid_snapshot = [(r.copy_geometry(), r) for r in router.routes] if _need_snapshot else []
+    _before_keys = (
+        violation_pair_keys(_pairwise_scan(router, _pairwise)) if _pairwise is not None else set()
+    )
     try:
-        return _drc_verify_and_nudge_impl(
+        result = _drc_verify_and_nudge_impl(
             router,
             max_displacement=max_displacement,
             max_passes=max_passes,
             skip_nets=skip_nets,
         )
+        if _pairwise is not None:
+            result.pairwise_reverts = _revert_new_pairwise_violations(
+                router, _pairwise, _before_keys, _grid_snapshot
+            )
+            if result.pairwise_reverts:
+                # Reverting restores the entry geometry, which may restore the
+                # scalar violation the nudge had just repaired -- report the
+                # true post-revert count rather than the pre-revert one.
+                remaining = [v for v in validate_routes(router) if not v.component_inherent]
+                if skip_nets:
+                    remaining = [v for v in remaining if v.net not in skip_nets]
+                result.remaining_violations = len(remaining)
+        return result
     finally:
         if _grid is not None:
             _grid.resync_route_occupancy(_grid_snapshot)

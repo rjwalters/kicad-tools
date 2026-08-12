@@ -78,6 +78,20 @@ without touching any of that, and additionally closes the
 "nudge output is never re-consolidated" ordering hole, since it runs
 after the DRC nudge rather than before it.
 
+**No HV pairwise gate here either (issue #4766).**  The two copper-*moving*
+post-passes -- ``TraceOptimizer`` via
+:func:`~kicad_tools.router.optimizer.trace.optimize_routes_grid_synced` and
+:func:`~kicad_tools.router.drc_nudge.drc_verify_and_nudge` -- now consult the
+pairwise (creepage) predicate before accepting a move, because both can put
+copper somewhere it was not.  This pass cannot: the merged segment is the exact
+union of the segments it replaces, on the same line, width and layer, so every
+edge-to-edge gap from this net to *any* foreign copper is bit-for-bit what it
+was before the merge.  A pairwise gate here could therefore only ever return
+"clear" -- and, being route-level, would additionally risk discarding a whole
+route's consolidation over a shortfall the pass did not create.  It is left out
+by construction rather than by omission; the #4588 audit remains the backstop
+for inherited shortfalls.
+
 **Vertex keys are deliberately layer-blind.**  Degree is counted over
 ``(x, y)`` alone, not ``(x, y, layer)``.  That is not an oversight: the
 invariant this pass is judged against --
@@ -495,7 +509,11 @@ def consolidate_routes_grid_synced(
     follow the copper.  The transaction is a formality here -- a
     consolidated route occupies exactly the cells its fragments did --
     but going through it keeps ``grid.routes`` pointing at the live
-    ``Route`` objects instead of stale twins.
+    ``Route`` objects instead of stale twins.  For the same reason no
+    ``accept=`` veto hook is supplied (issue #4766): the transform is
+    copper-preserving, so the HV pairwise predicate the optimizer arms
+    there could only ever return "clear" here -- see this module's
+    docstring.
 
     Pad positions come from ``router.nets`` / ``router.pads`` when
     available so a pad sitting mid-run stays a vertex; a router without
